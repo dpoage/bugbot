@@ -1,0 +1,146 @@
+package funnel
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+
+	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/store"
+)
+
+// Sweep runs the funnel over the entire current snapshot of the repository. It
+// is the manual `bugbot scan` and periodic-sweep entrypoint.
+func (f *Funnel) Sweep(ctx context.Context) (*Result, error) {
+	snap, err := f.snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]string, len(snap.Files))
+	for i, file := range snap.Files {
+		targets[i] = file.Path
+	}
+	return f.run(ctx, store.ScanOneshot, snap, targets)
+}
+
+// Targeted runs the funnel over the blast radius of changedFiles, intersected
+// with the current snapshot. It is the commit-triggered entrypoint: only files
+// that are in scope (tracked, text, not excluded) are scanned, but the blast
+// radius pulls in their direct dependents so a change's ripple is covered.
+func (f *Funnel) Targeted(ctx context.Context, changedFiles []string) (*Result, error) {
+	snap, err := f.snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	radius, err := f.repo.BlastRadius(ctx, snap, changedFiles)
+	if err != nil {
+		return nil, fmt.Errorf("funnel: blast radius: %w", err)
+	}
+
+	// Intersect the radius with the snapshot: BlastRadius may surface paths that
+	// are not in our in-scope file set (e.g. excluded by the scan filter), and we
+	// only audit files we actually have in the snapshot.
+	inScope := make(map[string]bool, len(snap.Files))
+	for _, file := range snap.Files {
+		inScope[file.Path] = true
+	}
+	var targets []string
+	for _, p := range radius {
+		if inScope[p] {
+			targets = append(targets, p)
+		}
+	}
+	sort.Strings(targets)
+
+	return f.run(ctx, store.ScanTargeted, snap, targets)
+}
+
+// snapshot builds the current snapshot using the configured (here: unfiltered)
+// scan view. The CLI passes its config-derived filter via the repo; the funnel
+// itself takes the repo's full snapshot and relies on the target-file list to
+// scope work.
+func (f *Funnel) snapshot(ctx context.Context) (*ingest.Snapshot, error) {
+	snap, err := f.repo.Snapshot(ctx, ingest.ScanFilter{})
+	if err != nil {
+		return nil, fmt.Errorf("funnel: snapshot: %w", err)
+	}
+	return snap, nil
+}
+
+// run is the shared staged core. It opens a scan run, wires per-role spend
+// recording into the clients, executes stages A-D, finalizes the scan run with
+// stats, and returns the ranked Result. targets is the (already scoped) list of
+// repo-relative files to audit.
+func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snapshot, targets []string) (*Result, error) {
+	scanRunID, err := f.store.BeginScanRun(ctx, kind, snap.Commit)
+	if err != nil {
+		return nil, fmt.Errorf("funnel: begin scan run: %w", err)
+	}
+
+	// Per-run spend recorder, wired into both role clients so every completion is
+	// ledgered to this scan run and counted toward the budget.
+	rec := &spendRecorder{ctx: ctx, store: f.store, scanRunID: scanRunID}
+	finder := llm.WithRecorder(f.clients.Finder, rec, "finder", "", "")
+	verifier := llm.WithRecorder(f.clients.Verifier, rec, "verifier", "", "")
+
+	budget := &budgetState{budget: f.opts.TokenBudget, rec: rec}
+
+	result := &Result{ScanRunID: scanRunID, Commit: snap.Commit}
+
+	// Fingerprints anchor every persisted finding to the exact file content it
+	// was found in, so the daemon can later detect when the code changed.
+	fps, err := f.repo.Fingerprints(ctx, snap)
+	if err != nil {
+		return nil, fmt.Errorf("funnel: fingerprints: %w", err)
+	}
+
+	// Stage A — Hypothesize.
+	candidates, err := f.hypothesize(ctx, finder, targets, budget, result)
+	if err != nil {
+		return nil, err
+	}
+	result.Stats.Hypothesized = len(candidates)
+
+	// Stage B — Triage.
+	survivors, err := f.triage(ctx, candidates, snap, &result.Stats)
+	if err != nil {
+		return nil, err
+	}
+	result.Stats.Triaged = len(survivors)
+
+	// Stage C — Verify.
+	verified, killed, err := f.verify(ctx, verifier, survivors, budget, result)
+	if err != nil {
+		return nil, err
+	}
+	result.Stats.Verified = len(verified)
+	result.Stats.Killed = killed
+
+	// Stage D — Persist + rank.
+	findings, err := f.persist(ctx, verified, snap.Commit, fps)
+	if err != nil {
+		return nil, err
+	}
+	sortFindings(findings)
+	result.Findings = findings
+
+	result.Degraded = budget.degraded.Load()
+	result.Stopped = budget.stopped.Load()
+	in, out := rec.totals()
+	result.Stats.InputTokens = in
+	result.Stats.OutputTokens = out
+
+	// Finalize the scan run with the stats blob.
+	statsJSON, err := json.Marshal(result.Stats)
+	if err != nil {
+		return nil, fmt.Errorf("funnel: marshal stats: %w", err)
+	}
+	if err := f.store.FinishScanRun(ctx, scanRunID, string(statsJSON)); err != nil {
+		return nil, fmt.Errorf("funnel: finish scan run: %w", err)
+	}
+
+	return result, nil
+}
