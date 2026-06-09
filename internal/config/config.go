@@ -138,7 +138,7 @@ func Default() Config {
 		},
 		Report: Report{
 			Dir:   ".bugbot/reports",
-			Sinks: []string{"markdown"},
+			Sinks: []string{"fs"},
 		},
 		Daemon: Daemon{
 			PollInterval:  60 * time.Second,

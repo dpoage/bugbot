@@ -83,12 +83,12 @@ sandbox:
 
 # ---------------------------------------------------------------------------
 # report: where findings are emitted and through which sinks.
-# sinks: markdown | sarif (more to come).
+# sinks: fs (writes report.md + report.sarif to dir) | stdout (more to come).
 # ---------------------------------------------------------------------------
 report:
   dir: .bugbot/reports
   sinks:
-    - markdown
+    - fs
 
 # ---------------------------------------------------------------------------
 # daemon: continuous-run scheduler timing (Go duration strings).
