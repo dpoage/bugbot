@@ -1,0 +1,208 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"testing"
+)
+
+func sampleFinding() Finding {
+	fp := Fingerprint("race", "internal/x/y.go", 10, "data race on counter")
+	return Finding{
+		Fingerprint: fp,
+		Title:       "data race on counter",
+		Description: "counter incremented without a lock",
+		Reasoning:   "verifier confirmed concurrent writes",
+		Severity:    "high",
+		Tier:        2,
+		Status:      StatusOpen,
+		Lens:        "race",
+		File:        "internal/x/y.go",
+		Line:        10,
+		CommitSHA:   "abc123",
+		FileHash:    "hash-v1",
+	}
+}
+
+func TestUpsertFinding_InsertThenDedupUpdate(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	f := sampleFinding()
+	got, err := st.UpsertFinding(ctx, f)
+	if err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	if got.ID == "" {
+		t.Fatal("expected generated id")
+	}
+	if got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
+		t.Fatal("timestamps should be set")
+	}
+	firstID := got.ID
+	firstCreated := got.CreatedAt
+
+	// Re-find the same bug (same fingerprint) with new code anchor + tier.
+	f2 := f
+	f2.Tier = 1
+	f2.CommitSHA = "def456"
+	f2.FileHash = "hash-v2"
+	f2.ReproPath = "/tmp/repro_test.go"
+	got2, err := st.UpsertFinding(ctx, f2)
+	if err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+
+	// Must update in place: same id and created_at, no duplicate row.
+	if got2.ID != firstID {
+		t.Fatalf("dedup failed: id changed %s -> %s", firstID, got2.ID)
+	}
+	if !got2.CreatedAt.Equal(firstCreated) {
+		t.Fatalf("created_at should be preserved: %v -> %v", firstCreated, got2.CreatedAt)
+	}
+	if got2.Tier != 1 || got2.CommitSHA != "def456" || got2.FileHash != "hash-v2" {
+		t.Fatalf("mutable fields not updated: %+v", got2)
+	}
+	if got2.ReproPath != "/tmp/repro_test.go" {
+		t.Fatalf("repro_path not stored: %q", got2.ReproPath)
+	}
+
+	all, err := st.ListFindings(ctx, FindingFilter{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected exactly 1 finding (deduped), got %d", len(all))
+	}
+}
+
+func TestUpsertFinding_RequiresFingerprint(t *testing.T) {
+	st := openTemp(t)
+	_, err := st.UpsertFinding(context.Background(), Finding{Title: "x"})
+	if err == nil {
+		t.Fatal("expected error for missing fingerprint")
+	}
+}
+
+func TestGetFinding_NotFound(t *testing.T) {
+	st := openTemp(t)
+	_, err := st.GetFinding(context.Background(), "nope")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestListFindings_Filters(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	mk := func(lens, file string, line, tier int, status Status, commit string) {
+		f := Finding{
+			Fingerprint: Fingerprint(lens, file, line, "t"),
+			Title:       "t",
+			Tier:        tier,
+			Status:      status,
+			Lens:        lens,
+			File:        file,
+			Line:        line,
+			CommitSHA:   commit,
+		}
+		if _, err := st.UpsertFinding(ctx, f); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
+	}
+	mk("a", "f1.go", 1, 1, StatusOpen, "c1")
+	mk("a", "f2.go", 2, 2, StatusOpen, "c1")
+	mk("b", "f3.go", 3, 2, StatusFixed, "c2")
+
+	open, err := st.ListFindings(ctx, FindingFilter{Status: StatusOpen})
+	if err != nil {
+		t.Fatalf("list open: %v", err)
+	}
+	if len(open) != 2 {
+		t.Fatalf("expected 2 open, got %d", len(open))
+	}
+
+	tier2, err := st.ListFindings(ctx, FindingFilter{Tier: 2})
+	if err != nil {
+		t.Fatalf("list tier2: %v", err)
+	}
+	if len(tier2) != 2 {
+		t.Fatalf("expected 2 tier-2, got %d", len(tier2))
+	}
+
+	// Code-version scoping: only findings anchored to commit c1.
+	c1, err := st.ListFindings(ctx, FindingFilter{CommitSHA: "c1"})
+	if err != nil {
+		t.Fatalf("list c1: %v", err)
+	}
+	if len(c1) != 2 {
+		t.Fatalf("expected 2 findings at commit c1, got %d", len(c1))
+	}
+
+	lensB, err := st.ListFindings(ctx, FindingFilter{Lens: "b"})
+	if err != nil {
+		t.Fatalf("list lens b: %v", err)
+	}
+	if len(lensB) != 1 {
+		t.Fatalf("expected 1 finding for lens b, got %d", len(lensB))
+	}
+}
+
+func TestMarkFixed(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	f := sampleFinding()
+	if _, err := st.UpsertFinding(ctx, f); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := st.MarkFixed(ctx, f.Fingerprint); err != nil {
+		t.Fatalf("mark fixed: %v", err)
+	}
+	got, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != StatusFixed {
+		t.Fatalf("expected fixed, got %q", got.Status)
+	}
+}
+
+func TestUpdateStatus_NotFound(t *testing.T) {
+	st := openTemp(t)
+	err := st.UpdateStatus(context.Background(), "missing", StatusFixed, "")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// Document the re-verification flow as an executable example: after a commit
+// changes a file, the daemon finds open findings whose stored file_hash differs
+// from the file's current hash and re-checks only those.
+func TestReVerificationFlow_DetectsChangedFindings(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	f := sampleFinding() // FileHash "hash-v1", File internal/x/y.go
+	if _, err := st.UpsertFinding(ctx, f); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	// Daemon's incremental scan computes current hashes for files on disk.
+	currentHashes := map[string]string{"internal/x/y.go": "hash-v2"}
+
+	open, err := st.ListFindings(ctx, FindingFilter{Status: StatusOpen})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var needsReverify []Finding
+	for _, fnd := range open {
+		if h, ok := currentHashes[fnd.File]; ok && h != fnd.FileHash {
+			needsReverify = append(needsReverify, fnd)
+		}
+	}
+	if len(needsReverify) != 1 {
+		t.Fatalf("expected 1 finding needing re-verification, got %d", len(needsReverify))
+	}
+}
