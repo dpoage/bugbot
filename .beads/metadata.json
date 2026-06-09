@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "bugbot",
+  "project_id": "d2064b21-6cb6-41d4-9762-294e183c6080"
+}
