@@ -1,4 +1,10 @@
 
+# Build output
+/bin/
+
+# Bugbot runtime state
+/.bugbot/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db

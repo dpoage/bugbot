@@ -1,0 +1,18 @@
+# golangci-lint v2 configuration.
+# Sane defaults — not over-linted. The default linters (errcheck, govet,
+# staticcheck, ineffassign, unused) cover most needs; gofmt is enforced as a
+# formatter.
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+
+formatters:
+  enable:
+    - gofmt

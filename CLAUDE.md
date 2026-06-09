@@ -52,13 +52,16 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+make build   # CGO_ENABLED=0 static binary -> bin/bugbot
+make test    # go test ./...
+make vet     # go vet ./...
+make lint    # golangci-lint run
+make fmt     # gofmt -w .
 ```
+
+Quality gates before handoff: `go build ./...`, `go vet ./...`,
+`go test ./...`, and `gofmt -l .` must all be clean.
 
 ## Architecture Overview
 
