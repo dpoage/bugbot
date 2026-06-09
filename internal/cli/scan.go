@@ -12,6 +12,8 @@ import (
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/repro"
+	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -32,6 +34,7 @@ func newScanCmd() *cobra.Command {
 		concurrency int
 		refuters    int
 		lenses      []string
+		doRepro     bool
 	)
 
 	cmd := &cobra.Command{
@@ -104,6 +107,12 @@ func newScanCmd() *cobra.Command {
 
 			_ = includeT3 // reserved: this stage emits T2 only; T3 filtering arrives with the report stage
 			printResult(out, res)
+
+			if doRepro {
+				if err := runRepro(ctx, out, &cfg, st, target, res.Findings); err != nil {
+					return err
+				}
+			}
 			return nil
 		},
 	}
@@ -114,8 +123,72 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().IntVar(&concurrency, "concurrency", funnel.DefaultMaxParallel, "number of parallel agents")
 	cmd.Flags().IntVar(&refuters, "refuters", funnel.DefaultRefuters, "number of adversarial refuter agents per candidate")
 	cmd.Flags().StringSliceVar(&lenses, "lens", nil, "restrict finder lenses (repeatable); default is all built-in lenses")
+	cmd.Flags().BoolVar(&doRepro, "repro", false, "run the Reproduce stage: generate sandboxed failing tests and promote demonstrated findings to Tier-1")
 
 	return cmd
+}
+
+// runRepro runs the Reproduce stage over the run's findings (Tier-2 verified
+// candidates), promoting any whose bug is demonstrated by a sandboxed failing
+// test. It skips gracefully when no container runtime is available, and prints
+// a promotion summary.
+func runRepro(ctx context.Context, out io.Writer, cfg *config.Config, st *store.Store, target string, findings []store.Finding) error {
+	runtime, ok := sandbox.Detect()
+	if !ok {
+		fmt.Fprintln(out, "\nReproduce stage skipped: no container runtime (podman/docker) found on PATH.")
+		return nil
+	}
+
+	t2 := make([]store.Finding, 0, len(findings))
+	for _, f := range findings {
+		if f.Tier == 2 {
+			t2 = append(t2, f)
+		}
+	}
+	if len(t2) == 0 {
+		fmt.Fprintln(out, "\nReproduce stage: no Tier-2 findings to reproduce.")
+		return nil
+	}
+
+	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image)
+	if err != nil {
+		return fmt.Errorf("build sandbox: %w", err)
+	}
+
+	client, err := llm.ResolveRole(ctx, cfg, "reproducer", llm.Options{})
+	if err != nil {
+		return fmt.Errorf("build reproducer client: %w", err)
+	}
+
+	r, err := repro.New(client, sb, target, repro.Options{Image: cfg.Sandbox.Image})
+	if err != nil {
+		return fmt.Errorf("build reproducer: %w", err)
+	}
+
+	fmt.Fprintf(out, "\nReproduce stage: attempting %d Tier-2 finding(s) (runtime=%s)...\n", len(t2), runtime)
+	summary, err := r.PromoteAll(ctx, st, t2)
+	if err != nil {
+		return fmt.Errorf("reproduce: %w", err)
+	}
+	printReproSummary(out, summary)
+	return nil
+}
+
+// printReproSummary renders the promotion outcome.
+func printReproSummary(out io.Writer, s *repro.Summary) {
+	fmt.Fprintf(out, "Reproduced: %d promoted to T1, %d not reproduced (of %d attempted)\n",
+		s.Promoted, s.Failed, s.Attempted)
+	for _, o := range s.PerFinding {
+		if o.Promoted {
+			fmt.Fprintf(out, "  [T1] %s -> %s\n", o.Title, o.ArtifactPath)
+		} else {
+			reason := o.Reason
+			if reason == "" {
+				reason = "not demonstrated"
+			}
+			fmt.Fprintf(out, "  [T2] %s (%s)\n", o.Title, reason)
+		}
+	}
 }
 
 // printResult writes a human-readable summary of a funnel run: a findings table
