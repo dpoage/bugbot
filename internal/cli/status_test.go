@@ -88,7 +88,9 @@ func TestStatus_Fresh(t *testing.T) {
 		"hypothesized=5 triaged=3 verified=1 killed=2",
 		"total=150 tokens",
 		"nil-safety/error-handling",
-		"open findings: 1", // setup() seeds one open finding
+		"World state:",
+		"open: T2=1", // setup() seeds one open T2 finding
+		"blackboard:   empty",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("fresh status missing %q\n---\n%s", want, out)
@@ -137,5 +139,49 @@ func TestStatus_StaleByDeadPID(t *testing.T) {
 	}
 	if !strings.Contains(out, "not running") {
 		t.Errorf("expected dead-pid annotation:\n%s", out)
+	}
+}
+
+// TestStatus_IdleStillShowsWorldState pins the pane-of-glass behavior: with no
+// status.json at all (nothing running), status still renders the accumulated
+// world state from the store.
+func TestStatus_IdleStillShowsWorldState(t *testing.T) {
+	cfgPath, _, _ := setup(t) // seeds one open T2 finding; writes NO status.json
+
+	out, err := run(t, cfgPath, "status")
+	if err != nil {
+		t.Fatalf("status errored: %v", err)
+	}
+	for _, want := range []string{
+		"no bugbot activity recorded",
+		"World state:",
+		"open: T2=1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("idle status missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
+// TestStatus_NoStoreNoSideEffect pins that status against a config whose store
+// has never been created neither errors nor creates the DB as a side effect.
+func TestStatus_NoStoreNoSideEffect(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "nonexistent", "state.db")
+	cfgYAML := strings.NewReplacer("%DBPATH%", dbPath, "%REPORTDIR%", filepath.Join(dir, "r")).Replace(minimalConfig)
+	cfgPath := filepath.Join(dir, "bugbot.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, cfgPath, "status")
+	if err != nil {
+		t.Fatalf("status errored: %v", err)
+	}
+	if strings.Contains(out, "World state:") {
+		t.Errorf("no-store status must not render a world state:\n%s", out)
+	}
+	if _, serr := os.Stat(dbPath); !os.IsNotExist(serr) {
+		t.Error("status must not create the store as a side effect")
 	}
 }

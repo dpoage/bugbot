@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -118,5 +119,32 @@ func TestListPublishedIssues_Empty(t *testing.T) {
 	}
 	if list != nil {
 		t.Errorf("expected nil slice for empty table, got %v", list)
+	}
+}
+
+// TestCountPublishedIssues covers the state tally for the status pane.
+func TestCountPublishedIssues(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	empty, err := st.CountPublishedIssues(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("empty store: %v", empty)
+	}
+
+	for i, state := range []string{"open", "open", "closed", "pending"} {
+		if err := st.UpsertPublishedIssue(ctx, fmt.Sprintf("fp%d", i), i+1, state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := st.CountPublishedIssues(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["open"] != 2 || got["closed"] != 1 || got["pending"] != 1 {
+		t.Errorf("counts = %v", got)
 	}
 }

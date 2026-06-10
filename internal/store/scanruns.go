@@ -91,3 +91,18 @@ func (s *Store) GetScanRun(ctx context.Context, id string) (ScanRun, error) {
 	}
 	return r, nil
 }
+
+// LatestScanRun returns the most recently started scan run, or ErrNotFound
+// when no run has ever been recorded.
+func (s *Store) LatestScanRun(ctx context.Context) (ScanRun, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM scan_runs ORDER BY started_at DESC, id DESC LIMIT 1`).Scan(&id)
+	if err == sql.ErrNoRows {
+		return ScanRun{}, ErrNotFound
+	}
+	if err != nil {
+		return ScanRun{}, err
+	}
+	return s.GetScanRun(ctx, id)
+}
