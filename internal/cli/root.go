@@ -34,6 +34,7 @@ reproduce, report) and tracks findings across confidence tiers:
 		newScanCmd(),
 		newDaemonCmd(),
 		newReportCmd(),
+		newEvalCmd(),
 	)
 
 	return root

@@ -56,6 +56,49 @@ func (s *SuiteResult) CleanFalsePositives() int {
 	return total
 }
 
+// Gate enforces the benchmark's precision invariants on a scored suite. It is
+// the single source of truth shared by the eval CLI command and the
+// TestBenchmarkSuite regression test, so the build gate and the command never
+// drift apart. It returns nil when the suite passes, or a descriptive error
+// naming every violation otherwise.
+//
+// The invariants (see internal/eval/README.md):
+//
+//   - No clean-code case may report a false positive (the precision floor).
+//   - Aggregate precision must be exactly 1.0 (every reported finding is real).
+//
+// These are exact assertions, not flaky thresholds, because scripted mode is
+// fully controlled. Recall is intentionally NOT gated: gating a tuning signal
+// would convert it into a brittle assertion.
+func Gate(s *SuiteResult) error {
+	var problems []string
+
+	if fp := s.CleanFalsePositives(); fp != 0 {
+		problems = append(problems, fmt.Sprintf("clean-code cases produced %d false positive(s); want 0", fp))
+		for _, c := range s.Cases {
+			if c.Clean && c.FalsePositives > 0 {
+				for _, f := range c.UnmatchedFindings {
+					problems = append(problems, fmt.Sprintf("  FP in %q: %s:%d %q (lens=%s)", c.Name, f.File, f.Line, f.Title, f.Lens))
+				}
+			}
+		}
+	}
+
+	if p := s.Precision(); p < 1.0 {
+		problems = append(problems, fmt.Sprintf("aggregate precision = %.3f; want exactly 1.0", p))
+		for _, c := range s.Cases {
+			if c.FalsePositives > 0 {
+				problems = append(problems, fmt.Sprintf("  case %q has %d FP", c.Name, c.FalsePositives))
+			}
+		}
+	}
+
+	if len(problems) == 0 {
+		return nil
+	}
+	return fmt.Errorf("eval gate failed:\n%s", strings.Join(problems, "\n"))
+}
+
 // RunSuite runs every case in mode, scores each, and aggregates. It returns an
 // error only on a harness failure for some case (fixture/store/funnel wiring);
 // detection results — even bad ones — are returned in the SuiteResult, not as

@@ -8,19 +8,28 @@ precision turns on) — offline, deterministically, and with zero API calls.
 
 ## The command
 
+Two equivalent entrypoints run the built-in suite (`BuiltinCases`) in scripted
+mode and enforce the same gate:
+
 ```
-go test ./internal/eval/ -run TestBenchmarkSuite -v
+bugbot eval                 # CLI: prints the table, exits non-zero on gate failure
+bugbot eval --json          # machine-readable SuiteResult dump
+
+go test ./internal/eval/ -run TestBenchmarkSuite -v   # the CI regression test
 ```
 
-Runs the full built-in suite (`BuiltinCases`) in scripted mode and prints a
-table per case plus an aggregate line. It **fails the build** if:
+Both share a single gate, `eval.Gate(SuiteResult)`, so the CLI and the test can
+never disagree on what "passing" means. The suite needs **no config file, no API
+keys, and makes no LLM calls** — scripted finder/verifier behavior is embedded in
+the cases themselves. It prints a table per case plus an aggregate line and
+**fails (non-zero exit / red test)** if:
 
 - any clean-code case reports a false positive, or
 - aggregate precision is below 1.0.
 
 Scripted mode is fully controlled, so these are exact regression assertions, not
 flaky thresholds: a precision regression in the triage/verify/scoring machinery
-turns this test red.
+turns this red.
 
 ## Two modes
 
