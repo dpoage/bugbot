@@ -178,6 +178,24 @@ type RecordedCase struct {
 // "bad" detection score — a missed bug or a false positive is data, not an
 // error.
 func RunCase(ctx context.Context, c Case) (*CaseResult, error) {
+	clients, err := buildClients(c)
+	if err != nil {
+		return nil, fmt.Errorf("eval: build clients for %q: %w", c.Name, err)
+	}
+	return runWithClients(ctx, c, clients)
+}
+
+// runWithClients is the funnel-invocation core shared by RunCase (which builds
+// scripted/recorded clients from the case) and the real-model recorder (which
+// injects live RoleClients). It materializes the fixture, opens a fresh store,
+// applies suppressions, runs the Sweep, and scores the result. Splitting this
+// out is the small seam that lets the recorder drive the EXACT same pipeline
+// path as RunCase with real clients, rather than duplicating the wiring.
+//
+// The caller may pre-set c.Options (e.g. TranscriptDir, FinderLimits); this
+// function only forces serial execution when MaxParallel is left at zero, which
+// is required for deterministic recording/replay ordering.
+func runWithClients(ctx context.Context, c Case, clients funnel.RoleClients) (*CaseResult, error) {
 	dir, err := materialize(c.Repo)
 	if err != nil {
 		return nil, fmt.Errorf("eval: materialize %q: %w", c.Name, err)
@@ -199,11 +217,6 @@ func RunCase(ctx context.Context, c Case) (*CaseResult, error) {
 	repo, err := ingest.Open(ctx, dir)
 	if err != nil {
 		return nil, fmt.Errorf("eval: open repo for %q: %w", c.Name, err)
-	}
-
-	clients, err := buildClients(c)
-	if err != nil {
-		return nil, fmt.Errorf("eval: build clients for %q: %w", c.Name, err)
 	}
 
 	opts := c.Options

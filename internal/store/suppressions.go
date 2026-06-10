@@ -65,7 +65,7 @@ func (s *Store) ListSuppressions(ctx context.Context) ([]Suppression, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []Suppression
 	for rows.Next() {

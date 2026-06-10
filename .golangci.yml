@@ -4,6 +4,15 @@
 # formatter.
 version: "2"
 
+run:
+  # Lint tagged files too (sandbox/repro integration tests, llm live probes,
+  # eval corpus recorder); without these, helpers used only from tagged files
+  # are misreported as unused.
+  build-tags:
+    - integration
+    - live
+    - record
+
 linters:
   default: none
   enable:

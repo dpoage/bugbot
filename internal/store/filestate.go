@@ -59,7 +59,7 @@ func (s *Store) UpsertFileStates(ctx context.Context, states []FileState) error 
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	now := nowUTC().Format(timeLayout)
 	for _, st := range states {
@@ -94,7 +94,7 @@ func (s *Store) ChangedSince(ctx context.Context, current map[string]string) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	stored := make(map[string]string)
 	for rows.Next() {

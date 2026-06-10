@@ -108,7 +108,7 @@ func (t *readFileTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 	if err != nil {
 		return "", fmt.Errorf("cannot open %q: %w", args.Path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Bound the bytes we pull off disk regardless of line count.
 	data, err := io.ReadAll(io.LimitReader(f, maxReadBytes+1))
@@ -148,10 +148,7 @@ func renderNumbered(content string, offset, limit int, byteTruncated bool) strin
 		lineCap = limit
 	}
 	end := start + lineCap
-	lineTruncated := false
-	if end < total {
-		lineTruncated = true
-	}
+	lineTruncated := end < total
 	if end > total {
 		end = total
 	}

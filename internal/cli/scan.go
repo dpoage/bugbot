@@ -96,7 +96,7 @@ func newScanCmd() *cobra.Command {
 					return fmt.Errorf("diff %s..HEAD: %w", since, cerr)
 				}
 				changed := ingest.ChangedPaths(changes)
-				fmt.Fprintf(out, "Targeted scan: %d changed file(s) since %s\n", len(changed), since)
+				_, _ = fmt.Fprintf(out, "Targeted scan: %d changed file(s) since %s\n", len(changed), since)
 				res, err = f.Targeted(ctx, changed)
 			} else {
 				res, err = f.Sweep(ctx)
@@ -135,7 +135,7 @@ func newScanCmd() *cobra.Command {
 func runRepro(ctx context.Context, out io.Writer, cfg *config.Config, st *store.Store, target string, findings []store.Finding) error {
 	runtime, ok := sandbox.Detect()
 	if !ok {
-		fmt.Fprintln(out, "\nReproduce stage skipped: no container runtime (podman/docker) found on PATH.")
+		_, _ = fmt.Fprintln(out, "\nReproduce stage skipped: no container runtime (podman/docker) found on PATH.")
 		return nil
 	}
 
@@ -146,7 +146,7 @@ func runRepro(ctx context.Context, out io.Writer, cfg *config.Config, st *store.
 		}
 	}
 	if len(t2) == 0 {
-		fmt.Fprintln(out, "\nReproduce stage: no Tier-2 findings to reproduce.")
+		_, _ = fmt.Fprintln(out, "\nReproduce stage: no Tier-2 findings to reproduce.")
 		return nil
 	}
 
@@ -165,7 +165,7 @@ func runRepro(ctx context.Context, out io.Writer, cfg *config.Config, st *store.
 		return fmt.Errorf("build reproducer: %w", err)
 	}
 
-	fmt.Fprintf(out, "\nReproduce stage: attempting %d Tier-2 finding(s) (runtime=%s)...\n", len(t2), runtime)
+	_, _ = fmt.Fprintf(out, "\nReproduce stage: attempting %d Tier-2 finding(s) (runtime=%s)...\n", len(t2), runtime)
 	summary, err := r.PromoteAll(ctx, st, t2)
 	if err != nil {
 		return fmt.Errorf("reproduce: %w", err)
@@ -176,17 +176,17 @@ func runRepro(ctx context.Context, out io.Writer, cfg *config.Config, st *store.
 
 // printReproSummary renders the promotion outcome.
 func printReproSummary(out io.Writer, s *repro.Summary) {
-	fmt.Fprintf(out, "Reproduced: %d promoted to T1, %d not reproduced (of %d attempted)\n",
+	_, _ = fmt.Fprintf(out, "Reproduced: %d promoted to T1, %d not reproduced (of %d attempted)\n",
 		s.Promoted, s.Failed, s.Attempted)
 	for _, o := range s.PerFinding {
 		if o.Promoted {
-			fmt.Fprintf(out, "  [T1] %s -> %s\n", o.Title, o.ArtifactPath)
+			_, _ = fmt.Fprintf(out, "  [T1] %s -> %s\n", o.Title, o.ArtifactPath)
 		} else {
 			reason := o.Reason
 			if reason == "" {
 				reason = "not demonstrated"
 			}
-			fmt.Fprintf(out, "  [T2] %s (%s)\n", o.Title, reason)
+			_, _ = fmt.Fprintf(out, "  [T2] %s (%s)\n", o.Title, reason)
 		}
 	}
 }
@@ -195,34 +195,34 @@ func printReproSummary(out io.Writer, s *repro.Summary) {
 // (tier, severity, file:line, title), per-stage counts, token spend, and any
 // degradation/skip notes.
 func printResult(out io.Writer, res *funnel.Result) {
-	fmt.Fprintf(out, "\nScan complete (commit %s)\n", shortSHA(res.Commit))
+	_, _ = fmt.Fprintf(out, "\nScan complete (commit %s)\n", shortSHA(res.Commit))
 
 	if len(res.Findings) == 0 {
-		fmt.Fprintln(out, "\nNo findings.")
+		_, _ = fmt.Fprintln(out, "\nNo findings.")
 	} else {
-		fmt.Fprintf(out, "\n%d finding(s):\n\n", len(res.Findings))
+		_, _ = fmt.Fprintf(out, "\n%d finding(s):\n\n", len(res.Findings))
 		tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "TIER\tSEVERITY\tLOCATION\tTITLE")
+		_, _ = fmt.Fprintln(tw, "TIER\tSEVERITY\tLOCATION\tTITLE")
 		for _, fnd := range res.Findings {
-			fmt.Fprintf(tw, "T%d\t%s\t%s:%d\t%s\n",
+			_, _ = fmt.Fprintf(tw, "T%d\t%s\t%s:%d\t%s\n",
 				fnd.Tier, fnd.Severity, fnd.File, fnd.Line, fnd.Title)
 		}
 		_ = tw.Flush()
 	}
 
 	s := res.Stats
-	fmt.Fprintf(out, "\nStages: hypothesized=%d triaged=%d verified=%d killed=%d\n",
+	_, _ = fmt.Fprintf(out, "\nStages: hypothesized=%d triaged=%d verified=%d killed=%d\n",
 		s.Hypothesized, s.Triaged, s.Verified, s.Killed)
-	fmt.Fprintf(out, "Triage drops: low_confidence=%d duplicate=%d suppressed=%d out_of_scope=%d\n",
+	_, _ = fmt.Fprintf(out, "Triage drops: low_confidence=%d duplicate=%d suppressed=%d out_of_scope=%d\n",
 		s.DroppedLowConfidence, s.DroppedDuplicate, s.DroppedSuppressed, s.DroppedOutOfScope)
-	fmt.Fprintf(out, "Spend: input=%d output=%d total=%d tokens\n",
+	_, _ = fmt.Fprintf(out, "Spend: input=%d output=%d total=%d tokens\n",
 		s.InputTokens, s.OutputTokens, s.InputTokens+s.OutputTokens)
 
 	if res.Degraded || res.Stopped {
-		fmt.Fprintf(out, "Budget: degraded=%v stopped=%v\n", res.Degraded, res.Stopped)
+		_, _ = fmt.Fprintf(out, "Budget: degraded=%v stopped=%v\n", res.Degraded, res.Stopped)
 	}
 	for _, note := range res.Skipped {
-		fmt.Fprintf(out, "  skipped: %s\n", note)
+		_, _ = fmt.Fprintf(out, "  skipped: %s\n", note)
 	}
 }
 

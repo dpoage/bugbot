@@ -29,7 +29,7 @@ func TestCappedBufferTruncates(t *testing.T) {
 
 func TestCappedBufferUnderCap(t *testing.T) {
 	b := newCappedBuffer(100)
-	b.Write([]byte("hello"))
+	_, _ = b.Write([]byte("hello"))
 	got, truncated := b.result()
 	if truncated {
 		t.Error("did not expect truncation")
@@ -41,9 +41,9 @@ func TestCappedBufferUnderCap(t *testing.T) {
 
 func TestCappedBufferMultipleWritesCrossCap(t *testing.T) {
 	b := newCappedBuffer(8)
-	b.Write([]byte("abcd"))
-	b.Write([]byte("efgh"))
-	b.Write([]byte("ijkl")) // pushes over the cap
+	_, _ = b.Write([]byte("abcd"))
+	_, _ = b.Write([]byte("efgh"))
+	_, _ = b.Write([]byte("ijkl")) // pushes over the cap
 	got, truncated := b.result()
 	if !truncated {
 		t.Fatal("expected truncation after crossing cap")
@@ -55,7 +55,7 @@ func TestCappedBufferMultipleWritesCrossCap(t *testing.T) {
 
 func TestCappedBufferZeroCapRetainsAll(t *testing.T) {
 	b := newCappedBuffer(0)
-	b.Write([]byte("anything goes"))
+	_, _ = b.Write([]byte("anything goes"))
 	got, truncated := b.result()
 	if truncated {
 		t.Error("zero cap should not truncate")

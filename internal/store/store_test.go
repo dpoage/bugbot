@@ -60,7 +60,7 @@ func TestOpen_MigratesFromEmptyAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Open: %v", err)
 	}
-	defer st2.Close()
+	defer func() { _ = st2.Close() }()
 
 	var version2 int
 	if err := st2.DB().QueryRowContext(ctx,

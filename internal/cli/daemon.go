@@ -163,23 +163,23 @@ func buildReproducer(ctx context.Context, cfg *config.Config, repoRoot, runtime 
 // sandbox availability, so an operator can confirm the configuration at a glance.
 func printDaemonBanner(cmd *cobra.Command, cfg config.Config, dcfg daemon.DaemonConfig, sinks []report.Sink, runtime string, sandboxOK bool) {
 	out := cmd.OutOrStdout()
-	fmt.Fprintln(out, "bugbot daemon starting")
-	fmt.Fprintf(out, "  poll interval:    %s\n", dcfg.PollInterval)
-	fmt.Fprintf(out, "  sweep interval:   %s\n", dcfg.SweepInterval)
-	fmt.Fprintf(out, "  idle backoff:     %s\n", dcfg.IdleBackoff)
-	fmt.Fprintf(out, "  per-cycle tokens: %d\n", dcfg.PerCycleTokens)
-	fmt.Fprintf(out, "  per-day tokens:   %d\n", dcfg.PerDayTokens)
+	_, _ = fmt.Fprintln(out, "bugbot daemon starting")
+	_, _ = fmt.Fprintf(out, "  poll interval:    %s\n", dcfg.PollInterval)
+	_, _ = fmt.Fprintf(out, "  sweep interval:   %s\n", dcfg.SweepInterval)
+	_, _ = fmt.Fprintf(out, "  idle backoff:     %s\n", dcfg.IdleBackoff)
+	_, _ = fmt.Fprintf(out, "  per-cycle tokens: %d\n", dcfg.PerCycleTokens)
+	_, _ = fmt.Fprintf(out, "  per-day tokens:   %d\n", dcfg.PerDayTokens)
 	sinkNames := make([]string, len(sinks))
 	for i, s := range sinks {
 		sinkNames[i] = s.Name()
 	}
-	fmt.Fprintf(out, "  sinks:            %v\n", sinkNames)
+	_, _ = fmt.Fprintf(out, "  sinks:            %v\n", sinkNames)
 	if sandboxOK {
-		fmt.Fprintf(out, "  sandbox:          %s (repro %s)\n", runtime, enabledLabel(dcfg.EnableRepro))
+		_, _ = fmt.Fprintf(out, "  sandbox:          %s (repro %s)\n", runtime, enabledLabel(dcfg.EnableRepro))
 	} else {
-		fmt.Fprintln(out, "  sandbox:          none (no podman/docker; repro disabled)")
+		_, _ = fmt.Fprintln(out, "  sandbox:          none (no podman/docker; repro disabled)")
 	}
-	fmt.Fprintln(out, "  press Ctrl-C to stop")
+	_, _ = fmt.Fprintln(out, "  press Ctrl-C to stop")
 }
 
 func enabledLabel(on bool) string {

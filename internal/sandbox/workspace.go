@@ -92,23 +92,29 @@ func copyTree(src, dst string) error {
 	})
 }
 
-func copyFile(src, dst string, perm fs.FileMode) error {
+func copyFile(src, dst string, perm fs.FileMode) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		return err
 	}
+	// Close the destination on the way out. A close failure on a written file can
+	// surface a deferred write error, so propagate it unless we already have one.
+	defer func() {
+		if cerr := out.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
 
 	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
 		return err
 	}
-	return out.Close()
+	return nil
 }
 
 // applyWriteFiles writes the supplied files into the workspace. Each key is a
