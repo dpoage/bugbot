@@ -22,6 +22,11 @@ import (
 // the current code (the daemon treats that as "auto-close: fixed"). reasoning is
 // the human-legible refuter trace, suitable for recording on the finding.
 func (f *Funnel) VerifyFinding(ctx context.Context, fnd store.Finding) (refuted bool, reasoning string, err error) {
+	// Deliberately read-only: re-verification never gets the sandbox_exec tool
+	// even when SandboxOpts is enabled. The daemon re-verifies every open
+	// finding on every code change, so sandbox runs here would multiply
+	// container spend per cycle; empirical evidence belongs to the initial
+	// verify (and repro) stages. Pinned by TestVerifyFinding_NoSandboxTool.
 	tools, err := f.readOnlyTools()
 	if err != nil {
 		return false, "", err

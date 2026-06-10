@@ -3,6 +3,7 @@ package funnel
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
@@ -87,6 +88,49 @@ func normalizeSeverity(s string) string {
 	default:
 		return "medium"
 	}
+}
+
+// sandboxMinSeverity returns the effective minimum severity for sandbox
+// gating, defaulting to "high" when empty.
+func sandboxMinSeverity(s string) string {
+	switch s {
+	case "critical", "high", "medium", "low":
+		return s
+	default:
+		return "high"
+	}
+}
+
+// sandboxMaxExecs returns the effective per-candidate execution budget,
+// defaulting to 3 when zero or negative.
+func sandboxMaxExecs(n int) int {
+	if n <= 0 {
+		return 3
+	}
+	return n
+}
+
+// buildSandboxTool builds the sandbox_exec tool for a candidate if the feature
+// is enabled and the candidate's severity meets the minimum threshold. It
+// returns nil when the tool should not be offered. sbExecs and sbMillis are
+// run-spanning atomic counters shared across all candidates; the per-call
+// onExec callback increments them from the tool's goroutine.
+func (f *Funnel) buildSandboxTool(c Candidate, sbExecs *atomic.Int32, sbMillis *atomic.Int64) agent.Tool {
+	opts := f.opts.SandboxOpts
+	if !opts.Enabled || opts.Sandbox == nil {
+		return nil
+	}
+	minSev := sandboxMinSeverity(opts.MinSeverity)
+	if severityRank(c.Severity) > severityRank(minSev) {
+		// Candidate is BELOW the threshold (higher rank number = less severe).
+		return nil
+	}
+	maxExec := sandboxMaxExecs(opts.MaxExecs)
+	onExec := func(d time.Duration) {
+		sbExecs.Add(1)
+		sbMillis.Add(d.Milliseconds())
+	}
+	return agent.NewSandboxExecTool(opts.Sandbox, f.repo.Root(), maxExec, onExec)
 }
 
 // normalizeConfidence coerces a model-supplied confidence to one of the three

@@ -93,6 +93,14 @@ func newDaemonCmd() *cobra.Command {
 				WithDaySpend(daySpendGetter(ctx, st))
 			progressSink := progress.NewMulti(progress.NewSlogRenderer(logger), snap)
 
+			sbOpts, sbDegraded, sbErr := buildSandboxOpts(cfg)
+			if sbErr != nil {
+				return sbErr
+			}
+			if sbDegraded {
+				logger.Warn(sandboxDegradedWarning)
+			}
+
 			deps := daemon.Deps{
 				Repo:    repo,
 				Store:   st,
@@ -100,6 +108,7 @@ func newDaemonCmd() *cobra.Command {
 				FunnelOpts: funnel.Options{
 					Filter:      ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
 					TokenBudget: cfg.Budgets.PerCycleTokens,
+					SandboxOpts: sbOpts,
 				},
 				Sinks:    sinks,
 				Logger:   logger,

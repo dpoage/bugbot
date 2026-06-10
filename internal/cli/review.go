@@ -266,6 +266,14 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 	_, _ = fmt.Fprintf(p.out, "Reviewing PR #%d: %d changed file(s) (%s..%s)\n",
 		p.prNumber, len(changed), shortSHA(pr.BaseSHA), shortSHA(pr.HeadSHA))
 
+	sandboxOpts, sandboxDegraded, sandboxErr := buildSandboxOpts(p.cfg)
+	if sandboxErr != nil {
+		return nil, sandboxErr
+	}
+	if sandboxDegraded {
+		_, _ = fmt.Fprintf(p.out, "Warning: %s\n", sandboxDegradedWarning)
+	}
+
 	opts := funnel.Options{
 		Lenses:      p.lenses,
 		Filter:      ingest.ScanFilter{Include: p.cfg.Scan.Include, Exclude: p.cfg.Scan.Exclude},
@@ -273,6 +281,7 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 		MaxParallel: p.concurrency,
 		TokenBudget: p.cfg.Budgets.PerCycleTokens,
 		Progress:    progress.NewLogRenderer(p.out),
+		SandboxOpts: sandboxOpts,
 	}
 	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
 	if err != nil {

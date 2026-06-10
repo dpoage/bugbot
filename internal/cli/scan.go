@@ -103,6 +103,14 @@ func newScanCmd() *cobra.Command {
 			}
 			defer stopPane()
 
+			sandboxOpts, sandboxDegraded, sandboxErr := buildSandboxOpts(cfg)
+			if sandboxErr != nil {
+				return sandboxErr
+			}
+			if sandboxDegraded {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Warning: %s\n", sandboxDegradedWarning)
+			}
+
 			opts := funnel.Options{
 				Lenses:      lenses,
 				Filter:      ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
@@ -110,6 +118,7 @@ func newScanCmd() *cobra.Command {
 				MaxParallel: concurrency,
 				TokenBudget: cfg.Budgets.PerCycleTokens,
 				Progress:    progressSink,
+				SandboxOpts: sandboxOpts,
 			}
 			f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
 			if err != nil {
@@ -174,6 +183,38 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&doRepro, "repro", false, "run the Reproduce stage: generate sandboxed failing tests and promote demonstrated findings to Tier-1")
 
 	return cmd
+}
+
+// sandboxDegradedWarning is printed when verify.sandbox_exec is enabled but no
+// container runtime exists: the user asked for empirical refutation and must
+// be told it was dropped, mirroring the repro stage's skip notice.
+const sandboxDegradedWarning = "verify.sandbox_exec is enabled but no container runtime (podman/docker) was found on PATH; refuters will argue without sandbox execution"
+
+// buildSandboxOpts constructs a funnel.SandboxOpts from the config. When
+// verify.sandbox_exec is false (the default) it returns a zero-value
+// SandboxOpts (feature disabled). When the flag is enabled but no container
+// runtime is available it also returns the zero value, with degraded=true so
+// the caller can warn the user (the scan still runs, just without the
+// empirical tool). An error is returned only when sandbox_exec is explicitly
+// enabled and the sandbox backend cannot be constructed.
+func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool, err error) {
+	if !cfg.Verify.SandboxExec {
+		return funnel.SandboxOpts{}, false, nil
+	}
+	runtime, ok := sandbox.Detect()
+	if !ok {
+		return funnel.SandboxOpts{}, true, nil
+	}
+	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image)
+	if err != nil {
+		return funnel.SandboxOpts{}, false, fmt.Errorf("build verify sandbox: %w", err)
+	}
+	return funnel.SandboxOpts{
+		Sandbox:     sb,
+		Enabled:     true,
+		MinSeverity: cfg.Verify.SandboxMinSeverity,
+		MaxExecs:    cfg.Verify.SandboxMaxExecs,
+	}, false, nil
 }
 
 // runRepro runs the Reproduce stage over the run's findings (Tier-2 verified
@@ -286,6 +327,9 @@ func printResult(out io.Writer, res *funnel.Result) {
 	if s.FinderFailures > 0 || s.VerifierFailures > 0 {
 		_, _ = fmt.Fprintf(out, "Agent failures: finders=%d/%d verifiers=%d/%d produced no parseable output\n",
 			s.FinderFailures, s.FinderRuns, s.VerifierFailures, s.VerifierRuns)
+	}
+	if s.SandboxExecs > 0 {
+		_, _ = fmt.Fprintf(out, "Sandbox: execs=%d total_ms=%d\n", s.SandboxExecs, s.SandboxExecMillis)
 	}
 
 	if res.Degraded || res.Stopped {

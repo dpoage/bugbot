@@ -85,6 +85,30 @@ type Report struct {
 	Sinks []string `yaml:"sinks"`
 }
 
+// validSeverities is the set of accepted severity values.
+var validSeverities = map[string]bool{
+	"critical": true,
+	"high":     true,
+	"medium":   true,
+	"low":      true,
+}
+
+// Verify configures the empirical sandbox-execution capability offered to
+// refuter agents in the adversarial verification stage.
+type Verify struct {
+	// SandboxExec enables the sandbox_exec tool for refuter agents. Default off.
+	SandboxExec bool `yaml:"sandbox_exec"`
+	// SandboxMinSeverity is the minimum candidate severity that qualifies for
+	// the sandbox_exec tool. Only candidates at or above this severity receive the
+	// tool; others rely on rhetorical reasoning alone. Valid values:
+	// critical|high|medium|low. Default "high".
+	SandboxMinSeverity string `yaml:"sandbox_min_severity"`
+	// SandboxMaxExecs is the per-candidate execution budget: a refuter panel for
+	// one candidate may issue at most this many sandbox_exec calls in total.
+	// Must be >= 1. Default 3.
+	SandboxMaxExecs int `yaml:"sandbox_max_execs"`
+}
+
 // Review configures the `bugbot review --pr N` PR-review mode.
 type Review struct {
 	// FailOn controls the CI exit gate. "verified" (default) makes the command
@@ -115,6 +139,7 @@ type Config struct {
 	Budgets   Budgets             `yaml:"budgets"`
 	Scan      Scan                `yaml:"scan"`
 	Sandbox   Sandbox             `yaml:"sandbox"`
+	Verify    Verify              `yaml:"verify"`
 	Report    Report              `yaml:"report"`
 	Review    Review              `yaml:"review"`
 	Daemon    Daemon              `yaml:"daemon"`
@@ -147,6 +172,11 @@ func Default() Config {
 			MemoryMB:       2048,
 			TimeoutSeconds: 600,
 			Network:        "none",
+		},
+		Verify: Verify{
+			SandboxExec:        false,
+			SandboxMinSeverity: "high",
+			SandboxMaxExecs:    3,
 		},
 		Report: Report{
 			Dir:   ".bugbot/reports",
@@ -211,6 +241,9 @@ func Load(path string) (Config, error) {
 //	BUGBOT_DAEMON_IDLE_BACKOFF
 //	BUGBOT_REVIEW_FAIL_ON
 //	BUGBOT_REVIEW_SUSPECTED
+//	BUGBOT_VERIFY_SANDBOX_EXEC        ("true" or "false")
+//	BUGBOT_VERIFY_SANDBOX_MIN_SEVERITY (critical|high|medium|low)
+//	BUGBOT_VERIFY_SANDBOX_MAX_EXECS   (integer >= 1)
 func applyEnvOverrides(cfg *Config, environ []string) error {
 	env := make(map[string]string, len(environ))
 	for _, kv := range environ {
@@ -224,6 +257,19 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		if v, ok := env[key]; ok {
 			*dst = v
 		}
+	}
+	setBool := func(key string, dst *bool) error {
+		if v, ok := env[key]; ok {
+			switch strings.ToLower(v) {
+			case "true", "1", "yes":
+				*dst = true
+			case "false", "0", "no":
+				*dst = false
+			default:
+				return fmt.Errorf("%s: invalid boolean value %q (want true or false)", key, v)
+			}
+		}
+		return nil
 	}
 	setInt := func(key string, dst *int) error {
 		if v, ok := env[key]; ok {
@@ -263,6 +309,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	setStr("BUGBOT_SANDBOX_NETWORK", &cfg.Sandbox.Network)
 	setStr("BUGBOT_REVIEW_FAIL_ON", &cfg.Review.FailOn)
 	setStr("BUGBOT_REVIEW_SUSPECTED", &cfg.Review.Suspected)
+	setStr("BUGBOT_VERIFY_SANDBOX_MIN_SEVERITY", &cfg.Verify.SandboxMinSeverity)
 
 	for _, err := range []error{
 		setInt64("BUGBOT_BUDGETS_PER_CYCLE_TOKENS", &cfg.Budgets.PerCycleTokens),
@@ -270,9 +317,11 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt("BUGBOT_SANDBOX_CPUS", &cfg.Sandbox.CPUs),
 		setInt("BUGBOT_SANDBOX_MEMORY_MB", &cfg.Sandbox.MemoryMB),
 		setInt("BUGBOT_SANDBOX_TIMEOUT_SECONDS", &cfg.Sandbox.TimeoutSeconds),
+		setInt("BUGBOT_VERIFY_SANDBOX_MAX_EXECS", &cfg.Verify.SandboxMaxExecs),
 		setDur("BUGBOT_DAEMON_POLL_INTERVAL", &cfg.Daemon.PollInterval),
 		setDur("BUGBOT_DAEMON_SWEEP_INTERVAL", &cfg.Daemon.SweepInterval),
 		setDur("BUGBOT_DAEMON_IDLE_BACKOFF", &cfg.Daemon.IdleBackoff),
+		setBool("BUGBOT_VERIFY_SANDBOX_EXEC", &cfg.Verify.SandboxExec),
 	} {
 		if err != nil {
 			return err
@@ -356,6 +405,13 @@ func (c *Config) Validate() error {
 	case "", "summary", "withhold":
 	default:
 		return fmt.Errorf("config: review.suspected %q invalid (want summary or withhold)", c.Review.Suspected)
+	}
+
+	if c.Verify.SandboxMinSeverity != "" && !validSeverities[c.Verify.SandboxMinSeverity] {
+		return fmt.Errorf("config: verify.sandbox_min_severity %q invalid (want critical, high, medium, or low)", c.Verify.SandboxMinSeverity)
+	}
+	if c.Verify.SandboxMaxExecs < 1 {
+		return fmt.Errorf("config: verify.sandbox_max_execs must be >= 1 (got %d)", c.Verify.SandboxMaxExecs)
 	}
 
 	return nil
