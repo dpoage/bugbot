@@ -25,6 +25,11 @@ type verdict struct {
 // Rules:
 //   - Zero exit: the repro did not fail, so it did not demonstrate the bug.
 //   - Timeout: an infrastructure/quality problem, not a demonstration.
+//   - Exit 125/126/127: the container runtime or shell failed before the
+//     repro command ran (runtime error / not executable / not found) — an
+//     environment failure, NOT a demonstration.
+//   - Non-zero exit whose output shows an environment failure (read-only
+//     filesystem, cache init, disk full): NOT a demonstration.
 //   - Non-zero exit that looks like a build/compile failure or missing
 //     dependency: NOT a demonstration (false reproduction guard).
 //   - Otherwise a non-zero exit is treated as a genuine demonstration.
@@ -36,6 +41,10 @@ func interpret(res sandbox.Result) verdict {
 		return verdict{reason: "timeout", summary: trunc(out, 400)}
 	case res.ExitCode == 0:
 		return verdict{reason: "exit_zero", summary: trunc(out, 400)}
+	case res.ExitCode == 125 || res.ExitCode == 126 || res.ExitCode == 127:
+		return verdict{reason: "environment_error", summary: trunc(out, 400)}
+	case looksLikeEnvironmentFailure(out):
+		return verdict{reason: "environment_error", summary: trunc(out, 400)}
 	case looksLikeBuildFailure(out):
 		return verdict{reason: "build_error", summary: trunc(out, 400)}
 	default:
@@ -59,6 +68,12 @@ func (v verdict) feedback(p *Plan) string {
 		b.WriteString("the standard library and packages the repository already imports.")
 	case "timeout":
 		b.WriteString("Your repro timed out. Make it a fast, minimal test that returns quickly.")
+	case "environment_error":
+		b.WriteString("Your repro failed because of the SANDBOX ENVIRONMENT, not the bug ")
+		b.WriteString("(e.g. missing command, read-only filesystem, cache/disk problem). ")
+		b.WriteString("An environment failure is NOT a reproduction. The workspace at the ")
+		b.WriteString("current directory and /tmp are writable; everything else is read-only. ")
+		b.WriteString("Adjust the command (or point tool caches at /tmp) and try again.")
 	default:
 		b.WriteString("Your repro did not demonstrate the bug as expected. Revise it.")
 	}
@@ -91,6 +106,30 @@ var buildFailureMarkers = []string{
 	"go: downloading",
 	": cannot use ",
 	"too many errors",
+}
+
+// environmentFailureMarkers are substrings (lowercased) that indicate the
+// sandbox environment — not the bug — caused the failure. Discovered the hard
+// way: a read-only root with no writable HOME made `go test` exit 1 in 0.13s
+// on "failed to initialize build cache" and the non-zero exit was promoted as
+// a Tier-1 demonstration. An environment failure proves nothing about the bug.
+var environmentFailureMarkers = []string{
+	"failed to initialize build cache",
+	"read-only file system",
+	"no space left on device",
+	"cannot create temporary",
+}
+
+// looksLikeEnvironmentFailure reports whether the combined output indicates a
+// sandbox-environment failure rather than the repro test failing on the bug.
+func looksLikeEnvironmentFailure(out string) bool {
+	low := strings.ToLower(out)
+	for _, m := range environmentFailureMarkers {
+		if strings.Contains(low, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // looksLikeBuildFailure reports whether the combined output indicates a

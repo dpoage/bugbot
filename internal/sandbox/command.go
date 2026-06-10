@@ -37,7 +37,14 @@ const workspaceMount = "/workspace"
 //   - --rm                      : always reap the container on exit.
 //   - --network=<network>       : "none" by default, no egress.
 //   - --read-only               : read-only root filesystem...
-//   - --tmpfs /tmp              : ...with a small writable scratch tmpfs.
+//   - --tmpfs /tmp              : ...with a writable scratch tmpfs sized to
+//     host language toolchain caches (Go's cold build cache alone can run to
+//     hundreds of MB).
+//   - --env HOME=/tmp           : caches that default under $HOME (Go, pip,
+//     npm, ...) land on the writable tmpfs instead of dying on the read-only
+//     root; without this `go test` fails instantly with "failed to initialize
+//     build cache: read-only file system" before it ever compiles. Spec.Env
+//     entries are appended after and may override.
 //   - -v ws:/workspace:rw,Z     : the workspace copy is the only writable mount
 //     (Z relabels for SELinux; harmless elsewhere). The original repo is never
 //     mounted.
@@ -53,7 +60,8 @@ func buildRunArgs(p runParams) []string {
 		"--name", p.containerName,
 		"--network=" + p.network,
 		"--read-only",
-		"--tmpfs", "/tmp:rw,exec,nosuid,size=64m",
+		"--tmpfs", "/tmp:rw,exec,nosuid,size=512m",
+		"--env", "HOME=/tmp",
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--workdir", workspaceMount,

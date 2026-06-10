@@ -305,6 +305,43 @@ func TestPromoteAll_Exhaustion(t *testing.T) {
 
 // --- options defaults -------------------------------------------------------
 
+func TestInterpret_EnvironmentFailuresNeverDemonstrate(t *testing.T) {
+	cases := []struct {
+		name   string
+		res    sandbox.Result
+		reason string
+	}{
+		{"runtime error 125", sandbox.Result{ExitCode: 125, Stderr: "podman: error"}, "environment_error"},
+		{"not executable 126", sandbox.Result{ExitCode: 126, Stderr: "permission denied"}, "environment_error"},
+		{"not found 127", sandbox.Result{ExitCode: 127, Stderr: "sh: gotest: not found"}, "environment_error"},
+		// The real-world case this guard exists for: read-only root broke the
+		// Go build cache, exit 1 in 0.13s, and got promoted to Tier 1.
+		{"go build cache", sandbox.Result{ExitCode: 1, Stderr: "failed to initialize build cache at /root/.cache/go-build: mkdir /root/.cache: read-only file system"}, "environment_error"},
+		{"read-only fs", sandbox.Result{ExitCode: 1, Stderr: "mkdir /data: Read-only file system"}, "environment_error"},
+		{"disk full", sandbox.Result{ExitCode: 1, Stderr: "write /tmp/x: no space left on device"}, "environment_error"},
+		{"timeout", sandbox.Result{ExitCode: -1, TimedOut: true}, "timeout"},
+		{"exit zero", sandbox.Result{ExitCode: 0, Stdout: "ok"}, "exit_zero"},
+		{"compile error", sandbox.Result{ExitCode: 2, Stderr: "./x_test.go:3:1: syntax error"}, "build_error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := interpret(tc.res)
+			if v.demonstrated {
+				t.Fatalf("interpret(%+v) demonstrated=true; must never demonstrate", tc.res)
+			}
+			if v.reason != tc.reason {
+				t.Errorf("reason = %q, want %q", v.reason, tc.reason)
+			}
+		})
+	}
+
+	// A genuine test failure still demonstrates.
+	v := interpret(sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestDivide (0.00s)\n    calc_test.go:6: bug\nFAIL"})
+	if !v.demonstrated {
+		t.Fatalf("genuine test failure must demonstrate; got reason=%q", v.reason)
+	}
+}
+
 func TestOptionsResolve(t *testing.T) {
 	o := Options{}.resolve()
 	if o.MaxAttempts != DefaultMaxAttempts {

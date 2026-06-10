@@ -121,6 +121,12 @@ func TestDivideByZeroReported(t *testing.T) {
 	if !att.Promoted {
 		t.Fatalf("expected real promotion, got reason=%q output=%q", att.Reason, att.Output)
 	}
+	// Promotion alone is not proof the repro ran: an environment failure also
+	// exits non-zero. Require evidence the seeded test itself executed and
+	// failed (this test once passed on "failed to initialize build cache").
+	if !strings.Contains(att.Output, "TestDivideByZeroReported") {
+		t.Fatalf("promotion output does not show the repro test running; output=%q", att.Output)
+	}
 	if att.ArtifactPath == "" {
 		t.Fatal("expected artifact path")
 	}
