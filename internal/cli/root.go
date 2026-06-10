@@ -37,6 +37,7 @@ reproduce, report) and tracks findings across confidence tiers:
 		newStatusCmd(),
 		newReportCmd(),
 		newEvalCmd(),
+		newPublishCmd(),
 	)
 
 	return root

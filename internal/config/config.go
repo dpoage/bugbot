@@ -132,6 +132,34 @@ type Storage struct {
 	Path string `yaml:"path"`
 }
 
+// Publish configures the `bugbot publish` command and daemon post-cycle hook
+// that files open findings as GitHub issues via the gh CLI.
+//
+// enabled gates the daemon hook only — the manual `bugbot publish` command
+// always works regardless of this flag.
+//
+// tier_min is the maximum tier to publish (inclusive): findings with
+// Tier <= tier_min are filed. Default 2 publishes T1 and T2 but not T3.
+// Tier 0 is strongest (reproduced), 3 is weakest (suspected). Valid range 0..3.
+//
+// labels is the set of labels applied to every filed issue. Default ["bugbot"].
+//
+// close_on_fixed controls whether fixed/dismissed findings have their GitHub
+// issue closed by the reconciler. Default true.
+//
+// Env overrides:
+//
+//	BUGBOT_PUBLISH_ENABLED       ("true" or "false")
+//	BUGBOT_PUBLISH_TIER_MIN      (integer 0..3)
+//	BUGBOT_PUBLISH_LABELS        (comma-separated label names)
+//	BUGBOT_PUBLISH_CLOSE_ON_FIXED ("true" or "false")
+type Publish struct {
+	Enabled      bool     `yaml:"enabled"`
+	TierMin      int      `yaml:"tier_min"`
+	Labels       []string `yaml:"labels"`
+	CloseOnFixed bool     `yaml:"close_on_fixed"`
+}
+
 // Config is the root configuration object.
 type Config struct {
 	Providers map[string]Provider `yaml:"providers"`
@@ -142,6 +170,7 @@ type Config struct {
 	Verify    Verify              `yaml:"verify"`
 	Report    Report              `yaml:"report"`
 	Review    Review              `yaml:"review"`
+	Publish   Publish             `yaml:"publish"`
 	Daemon    Daemon              `yaml:"daemon"`
 	Storage   Storage             `yaml:"storage"`
 }
@@ -185,6 +214,12 @@ func Default() Config {
 		Review: Review{
 			FailOn:    "verified",
 			Suspected: "summary",
+		},
+		Publish: Publish{
+			Enabled:      false,
+			TierMin:      2,
+			Labels:       []string{"bugbot"},
+			CloseOnFixed: true,
 		},
 		Daemon: Daemon{
 			PollInterval:  60 * time.Second,
@@ -244,6 +279,10 @@ func Load(path string) (Config, error) {
 //	BUGBOT_VERIFY_SANDBOX_EXEC        ("true" or "false")
 //	BUGBOT_VERIFY_SANDBOX_MIN_SEVERITY (critical|high|medium|low)
 //	BUGBOT_VERIFY_SANDBOX_MAX_EXECS   (integer >= 1)
+//	BUGBOT_PUBLISH_ENABLED            ("true" or "false")
+//	BUGBOT_PUBLISH_TIER_MIN           (integer 0..3)
+//	BUGBOT_PUBLISH_LABELS             (comma-separated label names)
+//	BUGBOT_PUBLISH_CLOSE_ON_FIXED     ("true" or "false")
 func applyEnvOverrides(cfg *Config, environ []string) error {
 	env := make(map[string]string, len(environ))
 	for _, kv := range environ {
@@ -311,6 +350,18 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	setStr("BUGBOT_REVIEW_SUSPECTED", &cfg.Review.Suspected)
 	setStr("BUGBOT_VERIFY_SANDBOX_MIN_SEVERITY", &cfg.Verify.SandboxMinSeverity)
 
+	// BUGBOT_PUBLISH_LABELS is comma-separated; an explicit env var replaces the
+	// whole slice rather than appending, matching the override pattern elsewhere.
+	if v, ok := env["BUGBOT_PUBLISH_LABELS"]; ok {
+		var labels []string
+		for _, l := range strings.Split(v, ",") {
+			if trimmed := strings.TrimSpace(l); trimmed != "" {
+				labels = append(labels, trimmed)
+			}
+		}
+		cfg.Publish.Labels = labels
+	}
+
 	for _, err := range []error{
 		setInt64("BUGBOT_BUDGETS_PER_CYCLE_TOKENS", &cfg.Budgets.PerCycleTokens),
 		setInt64("BUGBOT_BUDGETS_PER_DAY_TOKENS", &cfg.Budgets.PerDayTokens),
@@ -318,10 +369,13 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt("BUGBOT_SANDBOX_MEMORY_MB", &cfg.Sandbox.MemoryMB),
 		setInt("BUGBOT_SANDBOX_TIMEOUT_SECONDS", &cfg.Sandbox.TimeoutSeconds),
 		setInt("BUGBOT_VERIFY_SANDBOX_MAX_EXECS", &cfg.Verify.SandboxMaxExecs),
+		setInt("BUGBOT_PUBLISH_TIER_MIN", &cfg.Publish.TierMin),
 		setDur("BUGBOT_DAEMON_POLL_INTERVAL", &cfg.Daemon.PollInterval),
 		setDur("BUGBOT_DAEMON_SWEEP_INTERVAL", &cfg.Daemon.SweepInterval),
 		setDur("BUGBOT_DAEMON_IDLE_BACKOFF", &cfg.Daemon.IdleBackoff),
 		setBool("BUGBOT_VERIFY_SANDBOX_EXEC", &cfg.Verify.SandboxExec),
+		setBool("BUGBOT_PUBLISH_ENABLED", &cfg.Publish.Enabled),
+		setBool("BUGBOT_PUBLISH_CLOSE_ON_FIXED", &cfg.Publish.CloseOnFixed),
 	} {
 		if err != nil {
 			return err
@@ -412,6 +466,10 @@ func (c *Config) Validate() error {
 	}
 	if c.Verify.SandboxMaxExecs < 1 {
 		return fmt.Errorf("config: verify.sandbox_max_execs must be >= 1 (got %d)", c.Verify.SandboxMaxExecs)
+	}
+
+	if c.Publish.TierMin < 0 || c.Publish.TierMin > 3 {
+		return fmt.Errorf("config: publish.tier_min %d invalid (want 0..3)", c.Publish.TierMin)
 	}
 
 	return nil

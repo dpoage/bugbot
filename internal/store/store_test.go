@@ -29,9 +29,10 @@ func TestOpen_MigratesFromEmptyAndIsIdempotent(t *testing.T) {
 		t.Fatalf("first Open: %v", err)
 	}
 
-	// All five tables plus schema_migrations must exist.
+	// All tables plus schema_migrations must exist.
 	for _, table := range []string{
 		"findings", "suppressions", "file_state", "scan_runs", "spend",
+		"leads", "published_issues",
 		"schema_migrations",
 	} {
 		var name string
