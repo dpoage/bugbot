@@ -98,6 +98,7 @@ func newDaemonCmd() *cobra.Command {
 				Store:   st,
 				Clients: funnel.RoleClients{Finder: finder, Verifier: verifier},
 				FunnelOpts: funnel.Options{
+					Filter:      ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
 					TokenBudget: cfg.Budgets.PerCycleTokens,
 				},
 				Sinks:    sinks,

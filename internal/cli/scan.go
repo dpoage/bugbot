@@ -101,6 +101,7 @@ func newScanCmd() *cobra.Command {
 
 			opts := funnel.Options{
 				Lenses:      lenses,
+				Filter:      ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
 				Refuters:    refuters,
 				MaxParallel: concurrency,
 				TokenBudget: cfg.Budgets.PerCycleTokens,
