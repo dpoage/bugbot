@@ -18,12 +18,13 @@ import (
 // calls, finishes the turn, and RunJSON parses FinalText. Usage is attached so
 // budget/spend accounting has something to count.
 type scriptedClient struct {
-	mu       sync.Mutex
-	routes   []route
-	fallback string // returned when no route matches; "" => empty candidate list
-	calls    int
-	inUsage  int64
-	outUsage int64
+	mu          sync.Mutex
+	routes      []route
+	fallback    string // returned when no route matches; "" => empty candidate list
+	calls       int
+	inUsage     int64
+	outUsage    int64
+	cachedUsage int64 // subset of inUsage reported as cache reads
 }
 
 // route maps a request predicate to a JSON response body.
@@ -33,7 +34,7 @@ type route struct {
 }
 
 func newScriptedClient() *scriptedClient {
-	return &scriptedClient{inUsage: 100, outUsage: 50}
+	return &scriptedClient{inUsage: 100, outUsage: 50, cachedUsage: 60}
 }
 
 // on registers a route: when match returns true for a request, body is served.
@@ -85,7 +86,10 @@ func (c *scriptedClient) Complete(ctx context.Context, req llm.Request) (llm.Res
 	return llm.Response{
 		Text:       body,
 		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: c.inUsage, OutputTokens: c.outUsage},
+		Usage: llm.Usage{
+			InputTokens: c.inUsage, OutputTokens: c.outUsage,
+			CacheReadInputTokens: c.cachedUsage,
+		},
 	}, nil
 }
 

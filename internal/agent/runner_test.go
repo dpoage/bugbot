@@ -239,3 +239,88 @@ func TestLimits_Resolve(t *testing.T) {
 		t.Errorf("negative limits altered: %+v", neg)
 	}
 }
+
+// TestRun_PrefixStability verifies the property prompt caching depends on: the
+// request the loop sends at iteration N+1 must extend iteration N's request
+// without rewriting any of it. Concretely, across consecutive completions the
+// System string and the tool definitions must be byte-identical, and iteration
+// N's Messages must be a strict prefix (element-wise byte-equal under JSON
+// serialization) of iteration N+1's. Any drift here silently turns every
+// provider-side cache lookup into a miss.
+func TestRun_PrefixStability(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "echo", `{"v":"one"}`, 10, 4),
+		toolResp("c2", "grep", `{"v":"two"}`, 12, 4),
+		textResp("answer", 8, 3),
+	)
+	tools := []Tool{echoTool{name: "echo"}, echoTool{name: "grep"}, echoTool{name: "read"}}
+	r := NewRunner(fc, tools, "stable system prompt")
+
+	if _, err := r.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(fc.requests) != 3 {
+		t.Fatalf("requests = %d, want 3", len(fc.requests))
+	}
+
+	marshal := func(v any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return string(b)
+	}
+
+	for i := 1; i < len(fc.requests); i++ {
+		prev, cur := fc.requests[i-1], fc.requests[i]
+		if cur.System != prev.System {
+			t.Errorf("iteration %d: System changed:\n  prev %q\n  cur  %q", i+1, prev.System, cur.System)
+		}
+		if got, want := marshal(cur.Tools), marshal(prev.Tools); got != want {
+			t.Errorf("iteration %d: tool definitions changed (order or content):\n  prev %s\n  cur  %s", i+1, want, got)
+		}
+		if len(cur.Messages) <= len(prev.Messages) {
+			t.Fatalf("iteration %d: messages did not grow (%d -> %d)", i+1, len(prev.Messages), len(cur.Messages))
+		}
+		// Element-wise: the previous conversation must be an untouched prefix.
+		for j := range prev.Messages {
+			if got, want := marshal(cur.Messages[j]), marshal(prev.Messages[j]); got != want {
+				t.Errorf("iteration %d: message %d rewritten:\n  prev %s\n  cur  %s", i+1, j, want, got)
+			}
+		}
+		// The serialized previous request's message list must be a byte prefix of
+		// the current one (the JSON array shares everything but the closing
+		// bracket), which is the strongest cheap statement of prefix stability.
+		prevJSON, curJSON := marshal(prev.Messages), marshal(cur.Messages)
+		if !strings.HasPrefix(curJSON, strings.TrimSuffix(prevJSON, "]")) {
+			t.Errorf("iteration %d: serialized messages are not an append-only extension", i+1)
+		}
+	}
+}
+
+// TestRun_AccumulatesCacheUsage verifies cache-read/creation token counts are
+// summed across iterations alongside input/output.
+func TestRun_AccumulatesCacheUsage(t *testing.T) {
+	step1 := toolResp("c1", "echo", `{}`, 100, 5)
+	step1.resp.Usage.CacheCreationInputTokens = 80
+	step2 := textResp("done", 120, 6)
+	step2.resp.Usage.CacheReadInputTokens = 90
+	step2.resp.Usage.CacheCreationInputTokens = 10
+
+	fc := newFakeClient(step1, step2)
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
+
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.Usage.InputTokens != 220 || out.Usage.OutputTokens != 11 {
+		t.Errorf("Usage in/out = %d/%d, want 220/11", out.Usage.InputTokens, out.Usage.OutputTokens)
+	}
+	if out.Usage.CacheReadInputTokens != 90 {
+		t.Errorf("CacheReadInputTokens = %d, want 90", out.Usage.CacheReadInputTokens)
+	}
+	if out.Usage.CacheCreationInputTokens != 90 {
+		t.Errorf("CacheCreationInputTokens = %d, want 90", out.Usage.CacheCreationInputTokens)
+	}
+}
