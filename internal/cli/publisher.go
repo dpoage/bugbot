@@ -4,8 +4,10 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/daemon"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -19,6 +21,10 @@ type storePublisher struct {
 	cfg     config.Publish
 	tierMin int
 	log     *slog.Logger
+	// disabled latches when gh is missing from PATH: that condition is stable
+	// for the daemon's lifetime, so we warn ONCE and stop attempting publishes
+	// instead of re-warning every cycle.
+	disabled atomic.Bool
 }
 
 // NewStorePublisher constructs a storePublisher. gh is typically realGH; pass
@@ -35,11 +41,22 @@ func NewStorePublisher(gh ghRunner, st *store.Store, cfg config.Publish, log *sl
 
 // Publish implements daemon.Publisher. It discards the human-readable summary
 // lines into the daemon's logger at debug level so the log stream isn't noisy
-// on every cycle.
+// on every cycle. A missing gh binary warns once and latches the publisher
+// off for the daemon's lifetime; other errors are returned to the caller
+// (which logs but never fails the cycle).
 func (p *storePublisher) Publish(ctx context.Context) error {
+	if p.disabled.Load() {
+		return nil
+	}
 	// Route output to a sink that writes each line at debug level.
 	w := &slogWriter{log: p.log}
-	return runPublish(ctx, w, p.gh, p.st, p.cfg, p.tierMin, false /* never dry-run from daemon */)
+	err := runPublish(ctx, w, p.gh, p.st, p.cfg, p.tierMin, false /* never dry-run from daemon */)
+	if err != nil && isGHMissing(err) {
+		p.disabled.Store(true)
+		p.log.Warn("daemon: publish disabled for this run: gh CLI not found on PATH; install gh from https://cli.github.com")
+		return nil
+	}
+	return err
 }
 
 // slogWriter is an io.Writer that writes each newline-terminated line to the
@@ -79,4 +96,7 @@ func indexOf(buf []byte, b byte) int {
 // Ensure storePublisher satisfies the io.Writer interface (used internally via
 // slogWriter) and the daemon.Publisher interface (verified at compile time by
 // the daemon package via the interface type).
-var _ io.Writer = (*slogWriter)(nil)
+var (
+	_ io.Writer        = (*slogWriter)(nil)
+	_ daemon.Publisher = (*storePublisher)(nil)
+)

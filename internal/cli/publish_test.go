@@ -2,6 +2,9 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -496,4 +499,187 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestApplyPublish_CloseOrdering pins comment-before-PATCH: the timeline
+// comment explaining the close must land before the state change.
+func TestApplyPublish_CloseOrdering(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkFixed(ctx, f.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues/77/comments", []byte(`{"id":1}`)).
+		on("issues/77 -X PATCH", []byte(`{"number":77}`))
+
+	var buf strings.Builder
+	cfg := config.Publish{TierMin: 2, CloseOnFixed: true}
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+		t.Fatalf("runPublish: %v", err)
+	}
+
+	commentIdx, patchIdx := -1, -1
+	for i, call := range gh.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "issues/77/comments") {
+			commentIdx = i
+		}
+		if strings.Contains(joined, "issues/77 -X PATCH") {
+			patchIdx = i
+		}
+	}
+	if commentIdx == -1 || patchIdx == -1 || commentIdx > patchIdx {
+		t.Errorf("comment must precede PATCH: commentIdx=%d patchIdx=%d calls=%v", commentIdx, patchIdx, gh.calls)
+	}
+}
+
+// TestApplyPublish_ClosingResume pins the interrupted-close recovery: a row in
+// state "closing" means the auto-close comment already landed, so the resume
+// run must PATCH only — never a second comment.
+func TestApplyPublish_ClosingResume(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "closing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkFixed(ctx, f.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues/77 -X PATCH", []byte(`{"number":77}`))
+	// NOTE: no route for issues/77/comments — a comment POST would error.
+
+	var buf strings.Builder
+	cfg := config.Publish{TierMin: 2, CloseOnFixed: true}
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+		t.Fatalf("runPublish (resume) should not re-comment: %v", err)
+	}
+	if n := len(gh.callsContaining("issues/77/comments")); n != 0 {
+		t.Errorf("resume must not post a second auto-close comment, posted %d", n)
+	}
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pi.State != "closed" {
+		t.Errorf("state after resume = %q, want closed", pi.State)
+	}
+}
+
+// TestApplyPublish_PendingRecovery covers both arms of the interrupted-create
+// recovery: marker found on GitHub -> adopt the issue number without creating;
+// marker absent -> create normally. Either way the row must land in "open".
+func TestApplyPublish_PendingRecovery(t *testing.T) {
+	t.Run("adopts existing issue by marker", func(t *testing.T) {
+		ctx := context.Background()
+		st, f := setupPublishStore(t)
+		if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 0, "pending"); err != nil {
+			t.Fatal(err)
+		}
+
+		existing := `[{"number":99,"body":"<!-- bugbot:fp=` + f.Fingerprint + ` -->\n\nbody"}]`
+		gh := newFakeGH().
+			on("repo view", []byte("https://github.com/owner/repo\n")).
+			on("issues?state=all", []byte(existing))
+		// NOTE: no create route — a create attempt would error.
+
+		var buf strings.Builder
+		cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+		if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+			t.Fatalf("runPublish (recover-adopt): %v", err)
+		}
+		pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pi.IssueNumber != 99 || pi.State != "open" {
+			t.Errorf("recovered row = #%d state=%q, want #99 open", pi.IssueNumber, pi.State)
+		}
+	})
+
+	t.Run("creates when no marker found", func(t *testing.T) {
+		ctx := context.Background()
+		st, f := setupPublishStore(t)
+		if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 0, "pending"); err != nil {
+			t.Fatal(err)
+		}
+
+		gh := newFakeGH().
+			on("repo view", []byte("https://github.com/owner/repo\n")).
+			on("issues?state=all", []byte(`[]`)).
+			on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":43}`))
+
+		var buf strings.Builder
+		cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+		if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+			t.Fatalf("runPublish (recover-create): %v", err)
+		}
+		pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pi.IssueNumber != 43 || pi.State != "open" {
+			t.Errorf("recovered row = #%d state=%q, want #43 open", pi.IssueNumber, pi.State)
+		}
+	})
+}
+
+// TestRenderIssueBody_ReasoningCapped pins the GitHub 65536-char body limit
+// mitigation: an oversized reasoning trace is truncated with a marker.
+func TestRenderIssueBody_ReasoningCapped(t *testing.T) {
+	f := store.Finding{
+		Fingerprint: "fp",
+		Title:       "t",
+		Reasoning:   strings.Repeat("x", 40*1024),
+	}
+	body := renderIssueBody(f, "")
+	if len(body) > 36*1024 {
+		t.Errorf("body length %d exceeds expected cap envelope", len(body))
+	}
+	if !strings.Contains(body, "truncated by bugbot") {
+		t.Error("truncation marker missing from capped body")
+	}
+}
+
+// TestStorePublisher_WarnsOnceOnMissingGH pins the daemon latch: the first
+// missing-gh error warns and disables; subsequent cycles are silent no-ops.
+func TestStorePublisher_WarnsOnceOnMissingGH(t *testing.T) {
+	ctx := context.Background()
+	st, _ := setupPublishStore(t)
+
+	calls := 0
+	ghMissing := func(_ context.Context, _ ...string) ([]byte, error) {
+		calls++
+		return nil, fmt.Errorf("gh api: exec: %w", exec.ErrNotFound)
+	}
+
+	var logBuf strings.Builder
+	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	p := NewStorePublisher(ghMissing, st, config.Publish{TierMin: 2, CloseOnFixed: true}, log)
+
+	if err := p.Publish(ctx); err != nil {
+		t.Fatalf("first cycle: publish must swallow gh-missing, got %v", err)
+	}
+	afterFirst := calls // a single run may make several gh calls before failing
+
+	for i := 1; i < 3; i++ {
+		if err := p.Publish(ctx); err != nil {
+			t.Fatalf("cycle %d: publish must swallow gh-missing, got %v", i, err)
+		}
+	}
+
+	if got := strings.Count(logBuf.String(), "publish disabled"); got != 1 {
+		t.Errorf("warn count = %d, want exactly 1\nlog:\n%s", got, logBuf.String())
+	}
+	if calls != afterFirst {
+		t.Errorf("gh invoked %d more times after the latch; later cycles must be no-ops", calls-afterFirst)
+	}
 }

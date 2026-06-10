@@ -114,8 +114,6 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 	created, updated, closed, skipped := 0, 0, 0, 0
 
 	for _, a := range plan {
-		body := renderIssueBody(a.finding, repoURL)
-
 		switch a.op {
 		case publishOpCreate:
 			if dryRun {
@@ -123,7 +121,15 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 				created++
 				continue
 			}
-			n, err := ghCreateIssue(ctx, gh, a.finding.Title, body, cfg.Labels)
+			// A create spans two systems (GitHub + our store) with no
+			// transaction. Record a "pending" row FIRST so a crash between the
+			// gh create and the store write leaves a tombstone: the next run
+			// plans a recover (marker search) instead of blindly creating a
+			// duplicate issue.
+			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, 0, "pending"); err != nil {
+				return fmt.Errorf("publish: record pending issue: %w", err)
+			}
+			n, err := ghCreateIssue(ctx, gh, a.finding.Title, renderIssueBody(a.finding, repoURL), cfg.Labels)
 			if err != nil {
 				return err
 			}
@@ -133,13 +139,41 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 			_, _ = fmt.Fprintf(w, "created issue #%d for %s (%s)\n", n, a.finding.Fingerprint[:12], a.finding.Title)
 			created++
 
+		case publishOpRecover:
+			if dryRun {
+				_, _ = fmt.Fprintf(w, "dry-run: recover pending publish for %s\n", a.finding.Fingerprint[:12])
+				skipped++
+				continue
+			}
+			// A prior run recorded "pending" but never recorded the issue
+			// number — the gh create may or may not have happened. Search the
+			// repo's bugbot issues for the fingerprint marker; adopt on hit,
+			// create on miss.
+			n, found, err := findIssueByMarker(ctx, gh, cfg.Labels, a.finding.Fingerprint)
+			if err != nil {
+				return fmt.Errorf("publish: recover pending issue: %w", err)
+			}
+			if !found {
+				n, err = ghCreateIssue(ctx, gh, a.finding.Title, renderIssueBody(a.finding, repoURL), cfg.Labels)
+				if err != nil {
+					return err
+				}
+				created++
+				_, _ = fmt.Fprintf(w, "created issue #%d for %s (recovered pending; no existing issue found)\n", n, a.finding.Fingerprint[:12])
+			} else {
+				_, _ = fmt.Fprintf(w, "recovered issue #%d for %s (adopted via fingerprint marker)\n", n, a.finding.Fingerprint[:12])
+			}
+			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, n, "open"); err != nil {
+				return fmt.Errorf("publish: record recovered issue: %w", err)
+			}
+
 		case publishOpUpdate:
 			if dryRun {
 				_, _ = fmt.Fprintf(w, "dry-run: update issue #%d for %s\n", a.issueNumber, a.finding.Fingerprint[:12])
 				updated++
 				continue
 			}
-			if err := ghUpdateIssue(ctx, gh, a.issueNumber, body); err != nil {
+			if err := ghUpdateIssue(ctx, gh, a.issueNumber, renderIssueBody(a.finding, repoURL)); err != nil {
 				return err
 			}
 			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, a.issueNumber, "open"); err != nil {
@@ -154,7 +188,19 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 				closed++
 				continue
 			}
-			if err := ghCloseIssue(ctx, gh, a.issueNumber, string(a.finding.Status)); err != nil {
+			// The close also spans two gh writes (comment, then state PATCH).
+			// Record "closing" once the comment lands so a PATCH failure does
+			// NOT re-post the comment on every subsequent cycle — the resume
+			// path (skipComment) goes straight to the PATCH.
+			if !a.skipComment {
+				if err := ghCommentIssue(ctx, gh, a.issueNumber, autoCloseComment(string(a.finding.Status))); err != nil {
+					return err
+				}
+				if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, a.issueNumber, "closing"); err != nil {
+					return fmt.Errorf("publish: record closing issue: %w", err)
+				}
+			}
+			if err := ghPatchIssueClosed(ctx, gh, a.issueNumber); err != nil {
 				return err
 			}
 			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, a.issueNumber, "closed"); err != nil {
@@ -176,7 +222,8 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 type publishOp int
 
 const (
-	publishOpCreate publishOp = iota
+	publishOpCreate  publishOp = iota
+	publishOpRecover           // pending row from an interrupted create: search-then-adopt-or-create
 	publishOpUpdate
 	publishOpClose
 	publishOpSkip
@@ -187,13 +234,17 @@ type publishAction struct {
 	op          publishOp
 	finding     store.Finding
 	issueNumber int // set for update/close/skip
+	// skipComment resumes an interrupted close (state "closing"): the auto-close
+	// comment already landed, only the state PATCH remains.
+	skipComment bool
 }
 
 // planPublish is the pure reconciler: given open/fixed/dismissed findings and
 // the current published_issues map, it decides what to do with each finding.
 //
 // Inclusion rule: a finding is considered for publication when
-// Tier <= tierMin (tiers: 0=strongest/reproduced, 3=weakest/suspected).
+// Tier <= tierMin (lower = stronger: 0=fix-witnessed, 1=reproduced, 2=verified,
+// 3=suspected). tier_min=0 therefore publishes only fix-witnessed findings.
 //
 // Update heuristic: rather than fetching the current issue body (which would
 // require a gh read per issue), we use finding.UpdatedAt > published.UpdatedAt
@@ -212,21 +263,25 @@ func planPublish(
 ) []publishAction {
 	var actions []publishAction
 
-	// Create/update/skip for open findings within tier.
+	// Create/recover/update/skip for open findings within tier.
 	for _, f := range open {
 		if f.Tier > tierMin {
 			continue // outside publication window
 		}
 		pi, found := published[f.Fingerprint]
-		if !found {
+		switch {
+		case !found:
 			actions = append(actions, publishAction{op: publishOpCreate, finding: f})
-			continue
-		}
-		// Published row exists. If the finding was updated after our last
-		// publish, re-push the body. Otherwise skip.
-		if f.UpdatedAt.After(pi.UpdatedAt) {
+		case pi.State == "pending":
+			// An earlier create was interrupted between the gh call and the
+			// store write; the issue may or may not exist on GitHub.
+			actions = append(actions, publishAction{op: publishOpRecover, finding: f})
+		case f.UpdatedAt.After(pi.UpdatedAt):
+			// Published row exists ("open", or "closing" from a reintroduced
+			// finding — the body re-push is correct either way). If the finding
+			// was updated after our last publish, re-push the body.
 			actions = append(actions, publishAction{op: publishOpUpdate, finding: f, issueNumber: pi.IssueNumber})
-		} else {
+		default:
 			actions = append(actions, publishAction{op: publishOpSkip, finding: f, issueNumber: pi.IssueNumber})
 		}
 	}
@@ -235,16 +290,71 @@ func planPublish(
 		return actions
 	}
 
-	// Close actions for fixed/dismissed findings with open published rows.
+	// Close actions for fixed/dismissed findings with published rows that
+	// haven't completed a close. "closing" rows resume without re-posting the
+	// auto-close comment (it already landed). "pending" rows are skipped: there
+	// is no known issue number to close, and the finding is gone — the rare
+	// interrupted-create-then-fixed overlap is left for a future open cycle.
 	for _, f := range append(fixed, dismissed...) {
 		pi, found := published[f.Fingerprint]
-		if !found || pi.State == "closed" {
+		if !found || pi.State == "closed" || pi.State == "pending" {
 			continue
 		}
-		actions = append(actions, publishAction{op: publishOpClose, finding: f, issueNumber: pi.IssueNumber})
+		actions = append(actions, publishAction{
+			op: publishOpClose, finding: f, issueNumber: pi.IssueNumber,
+			skipComment: pi.State == "closing",
+		})
 	}
 
 	return actions
+}
+
+// findIssueByMarker lists the repo's bugbot issues (filtered by the first
+// configured label when present) and returns the number of the issue whose
+// body carries the fingerprint marker. Used only on the rare recover path.
+func findIssueByMarker(ctx context.Context, gh ghRunner, labels []string, fingerprint string) (int, bool, error) {
+	path := "repos/{owner}/{repo}/issues?state=all&per_page=100"
+	if len(labels) > 0 {
+		path += "&labels=" + labels[0]
+	}
+	raw, err := gh(ctx, "api", "--paginate", path)
+	if err != nil {
+		if isGHMissing(err) {
+			return 0, false, errGHRequired()
+		}
+		return 0, false, fmt.Errorf("list issues: %w", err)
+	}
+	issues, err := parsePublishIssues(raw)
+	if err != nil {
+		return 0, false, fmt.Errorf("parse issues list: %w", err)
+	}
+	marker := "<!-- bugbot:fp=" + fingerprint + " -->"
+	for _, is := range issues {
+		if strings.Contains(is.Body, marker) {
+			return is.Number, true, nil
+		}
+	}
+	return 0, false, nil
+}
+
+// parsePublishIssues decodes the (possibly concatenated, via --paginate) JSON
+// arrays of the issues list endpoint.
+func parsePublishIssues(raw []byte) ([]publishIssue, error) {
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	var out []publishIssue
+	for dec.More() {
+		var page []publishIssue
+		if err := dec.Decode(&page); err != nil {
+			return nil, err
+		}
+		out = append(out, page...)
+	}
+	return out, nil
+}
+
+type publishIssue struct {
+	Number int    `json:"number"`
+	Body   string `json:"body"`
 }
 
 // renderIssueBody renders the deterministic issue body for a finding. The
@@ -275,8 +385,16 @@ func renderIssueBody(f store.Finding, repoURL string) string {
 	}
 
 	if f.Reasoning != "" {
+		// GitHub rejects issue bodies over 65536 chars (HTTP 422). The
+		// reasoning trace is the only unbounded field; cap it well under the
+		// limit so a long trace degrades instead of failing the whole run.
+		reasoning := f.Reasoning
+		const maxReasoning = 30 * 1024
+		if len(reasoning) > maxReasoning {
+			reasoning = reasoning[:maxReasoning] + "\n\n[... truncated by bugbot: full trace exceeds GitHub's body limit ...]"
+		}
 		b.WriteString("<details><summary>Verification trace</summary>\n\n")
-		b.WriteString(f.Reasoning)
+		b.WriteString(reasoning)
 		b.WriteString("\n\n</details>\n\n")
 	}
 
@@ -319,7 +437,7 @@ func ghCreateIssue(ctx context.Context, gh ghRunner, title, body string, labels 
 	if err != nil {
 		// Detect gh-not-found: exec.ErrNotFound semantics surfaced in the error string.
 		if isGHMissing(err) {
-			return 0, fmt.Errorf("publish: gh CLI is required but was not found on PATH; install gh from https://cli.github.com")
+			return 0, errGHRequired()
 		}
 		return 0, fmt.Errorf("publish: create issue: %w", err)
 	}
@@ -345,22 +463,25 @@ func ghUpdateIssue(ctx context.Context, gh ghRunner, number int, body string) er
 	)
 	if err != nil {
 		if isGHMissing(err) {
-			return fmt.Errorf("publish: gh CLI is required but was not found on PATH; install gh from https://cli.github.com")
+			return errGHRequired()
 		}
 		return fmt.Errorf("publish: update issue #%d: %w", number, err)
 	}
 	return nil
 }
 
-// ghCloseIssue posts an auto-close comment on the issue and then patches its
-// state to "closed". This is two calls intentionally: the comment captures
-// the reason for the close in the issue's timeline.
-func ghCloseIssue(ctx context.Context, gh ghRunner, number int, status string) error {
-	comment := fmt.Sprintf(
+// autoCloseComment renders the timeline comment posted before closing.
+func autoCloseComment(status string) string {
+	return fmt.Sprintf(
 		"Auto-closed by bugbot: this finding is no longer reported (status: %s).",
 		status,
 	)
-	// Post the close comment.
+}
+
+// ghCommentIssue posts a comment on the issue. The caller records the
+// "closing" state between this and the state PATCH so an interrupted close
+// never re-posts the comment.
+func ghCommentIssue(ctx context.Context, gh ghRunner, number int, comment string) error {
 	_, err := gh(ctx,
 		"api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d/comments", number),
 		"-X", "POST",
@@ -368,28 +489,44 @@ func ghCloseIssue(ctx context.Context, gh ghRunner, number int, status string) e
 	)
 	if err != nil {
 		if isGHMissing(err) {
-			return fmt.Errorf("publish: gh CLI is required but was not found on PATH; install gh from https://cli.github.com")
+			return errGHRequired()
 		}
 		return fmt.Errorf("publish: post close comment on issue #%d: %w", number, err)
 	}
+	return nil
+}
 
-	// Patch state to closed.
-	_, err = gh(ctx,
+// ghPatchIssueClosed patches the issue state to closed.
+func ghPatchIssueClosed(ctx context.Context, gh ghRunner, number int) error {
+	_, err := gh(ctx,
 		"api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d", number),
 		"-X", "PATCH",
 		"-f", "state=closed",
 	)
 	if err != nil {
+		if isGHMissing(err) {
+			return errGHRequired()
+		}
 		return fmt.Errorf("publish: close issue #%d: %w", number, err)
 	}
 	return nil
+}
+
+// errGHMissing is the sentinel for a missing gh binary, so callers up the
+// stack (the daemon publisher's warn-once latch) can detect the condition with
+// errors.Is even after the message has been made user-friendly.
+var errGHMissing = errors.New("gh CLI not found on PATH")
+
+// errGHRequired is the uniform user-facing error for a missing gh binary.
+func errGHRequired() error {
+	return fmt.Errorf("publish: gh CLI is required but was not found on PATH; install gh from https://cli.github.com: %w", errGHMissing)
 }
 
 // isGHMissing reports whether the error indicates gh was not found on PATH.
 // The realGH runner wraps the exec error via %w so errors.As finds it; we
 // also check the string for fake runners that return a plain error.
 func isGHMissing(err error) bool {
-	if errors.Is(err, exec.ErrNotFound) {
+	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, errGHMissing) {
 		return true
 	}
 	return strings.Contains(err.Error(), "executable file not found")

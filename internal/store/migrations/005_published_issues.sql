@@ -5,12 +5,20 @@
 -- One row per fingerprint; on conflict the state and updated_at are refreshed
 -- while created_at is preserved. issue_number is the GitHub issue number (not
 -- the internal finding id) returned by the GitHub API when the issue was filed.
--- state mirrors the GitHub issue state: 'open' or 'closed'.
+-- state is a small machine, not just a mirror of GitHub:
+--   'pending' — recorded BEFORE the gh create call; a row stuck here means the
+--               create was interrupted and the next run must recover (search
+--               for the fingerprint marker) instead of filing a duplicate.
+--   'open'    — issue filed and number recorded.
+--   'closing' — auto-close comment posted, state PATCH not yet confirmed; the
+--               resume path skips re-posting the comment.
+--   'closed'  — close completed.
 
 CREATE TABLE published_issues (
   fingerprint  TEXT PRIMARY KEY,
   issue_number INTEGER NOT NULL,
-  state        TEXT NOT NULL DEFAULT 'open',
+  state        TEXT NOT NULL DEFAULT 'open'
+               CHECK (state IN ('pending', 'open', 'closing', 'closed')),
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL
 );
