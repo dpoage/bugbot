@@ -183,6 +183,27 @@ func TestRunJSON_MaxTokensContinuation(t *testing.T) {
 		_ = out
 	})
 
+	t.Run("continuation that repeats the prefix is stitched without corruption", func(t *testing.T) {
+		// The model ignores "continue from where you stopped" and restarts, repeating
+		// the head of the first half before emitting the rest. A naive head+cont
+		// concatenation would double `{"file":"a.go","mess` and break the JSON; the
+		// stitch must trim the repeated prefix.
+		fc := newFakeClient(
+			maxTokensResp(`{"file":"a.go","mess`, 5, 5),        // cut off mid-object
+			textResp(`{"file":"a.go","message":"done"}`, 5, 5), // restart: repeats prefix, then finishes
+		)
+		r := NewRunner(fc, nil, "sys")
+
+		var got finding
+		_, err := r.RunJSON(context.Background(), "task", nil, &got)
+		if err != nil {
+			t.Fatalf("RunJSON should stitch a repeated-prefix continuation: %v", err)
+		}
+		if got.File != "a.go" || got.Message != "done" {
+			t.Errorf("parsed = %+v, want stitched JSON with the duplicated prefix trimmed", got)
+		}
+	})
+
 	t.Run("truncation surfaced in error when unrecoverable", func(t *testing.T) {
 		// Both the initial answer and its continuation stop at max_tokens and never
 		// form valid JSON; after the repair round-trip also truncates, the error

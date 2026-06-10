@@ -44,6 +44,15 @@ type RecordedManifest struct {
 	// can be diagnosed against the recorded shape.
 	FinderSessions   int `json:"finder_sessions"`
 	VerifierSessions int `json:"verifier_sessions"`
+
+	// ChunkSize is the effective files-per-finder-invocation the corpus was
+	// recorded at. It is load-bearing for interpreting FinderSessions: changing
+	// the chunk size re-anchors how many finder agents a fixed file set produces,
+	// so a replay against a different chunk size would silently mean something
+	// else. The replay determinism test asserts it matches the current funnel
+	// default when present. It is omitempty so manifests recorded before this
+	// field existed (chunk_size == 0) replay unchanged.
+	ChunkSize int `json:"chunk_size,omitempty"`
 }
 
 // RecordedScores is the manifest's snapshot of a case's scored outcome from the
@@ -159,6 +168,18 @@ func loadRoleStore(caseDir, role string) (*RoleTranscriptStore, error) {
 	// Capabilities default to the zero value: the funnel's finder/verifier agents
 	// do not branch on capability flags, and replay matching is structure-based.
 	return NewRoleTranscriptStore(role, llm.Capabilities{}, sessions...), nil
+}
+
+// effectiveChunkSize resolves the files-per-finder chunk size the funnel will
+// actually use for a given Options.ChunkSize, mirroring funnel.Options
+// resolution (non-positive => funnel.DefaultChunkSize). This is what gets
+// recorded in and asserted against the manifest, so the recorded session counts
+// are interpretable against the chunk size that produced them.
+func effectiveChunkSize(optChunkSize int) int {
+	if optChunkSize <= 0 {
+		return funnel.DefaultChunkSize
+	}
+	return optChunkSize
 }
 
 // writeManifest writes a case directory's manifest.json, pretty-printed for a

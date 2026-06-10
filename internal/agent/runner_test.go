@@ -139,6 +139,38 @@ func TestRun_TokenBudget(t *testing.T) {
 	}
 }
 
+// TestRun_MaxTokens pins the documented behavior that plain Run (not just
+// RunJSON) makes one continuation completion when a turn stops at the output
+// token cap and stitches the two halves into the final answer. This is a public
+// API contract: changing it alters Run's iteration/token cost, so it must not
+// drift silently.
+func TestRun_MaxTokens(t *testing.T) {
+	fc := newFakeClient(
+		maxTokensResp("The answer is fort-", 5, 5), // cut off mid-word at the cap
+		textResp("two.", 5, 5),                     // continuation finishes it
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.FinalText != "The answer is fort-two." {
+		t.Errorf("FinalText = %q, want the two halves stitched", out.FinalText)
+	}
+	// Both the initial truncated completion and its continuation ran this turn.
+	if fc.callCount() != 2 {
+		t.Errorf("calls = %d, want 2 (initial + continuation)", fc.callCount())
+	}
+	if out.Iterations != 2 {
+		t.Errorf("Iterations = %d, want 2 (continuation counts)", out.Iterations)
+	}
+	// A completed continuation is a clean finish, not a truncation.
+	if out.Truncated {
+		t.Errorf("Truncated = true, want false after a successful continuation")
+	}
+}
+
 func TestRun_ToolErrorFedBackToModel(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "boom", `{}`, 1, 1),
