@@ -114,9 +114,31 @@ const (
 
 // Usage reports token consumption for a single completion. Callers ledger this
 // per role/provider/model via a Recorder.
+//
+// Normalization convention: InputTokens is the TOTAL prompt size — it INCLUDES
+// any tokens that were read from or written to the provider's prompt cache.
+// CacheReadInputTokens and CacheCreationInputTokens are informational subsets
+// of InputTokens used to compute cache savings; they never add to it.
+//
+// This matches the native OpenAI (prompt_tokens includes cached_tokens) and
+// Gemini (promptTokenCount includes cachedContentTokenCount) conventions.
+// Anthropic reports input_tokens EXCLUDING cache reads/writes, so its adapter
+// sums input_tokens + cache_read_input_tokens + cache_creation_input_tokens
+// into InputTokens. The payoff: existing ledger math (budgets, context-size
+// estimates, input+output totals) keeps meaning "tokens the model processed"
+// regardless of cache hits, and a caller that ignores the cache fields sees
+// exactly the pre-caching numbers.
 type Usage struct {
 	InputTokens  int64
 	OutputTokens int64
+	// CacheReadInputTokens is the subset of InputTokens served from the
+	// provider's prompt cache (billed at a steep discount: ~0.1x on Anthropic,
+	// 0.25–0.5x on OpenAI). Zero when the provider reports no cache activity.
+	CacheReadInputTokens int64
+	// CacheCreationInputTokens is the subset of InputTokens written to the
+	// prompt cache this call (Anthropic bills these at 1.25x). Only Anthropic
+	// reports this; it is zero elsewhere.
+	CacheCreationInputTokens int64
 }
 
 // Response is a normalized completion response.

@@ -144,7 +144,10 @@ func openAICapabilities(model string) Capabilities {
 // openAICompatibleCapabilities returns a conservative profile for arbitrary
 // OpenAI-compatible endpoints (Ollama/vLLM/Groq/etc.). We can't know the
 // backend's true capabilities, so we assume no parallel tool calls (the
-// degraded path serializes them) and no caching. Callers can override.
+// degraded path serializes them) and no caching. The adapter still parses
+// usage.prompt_tokens_details.cached_tokens opportunistically when the
+// endpoint reports it (e.g. MiniMax), so cache hits are ledgered even with
+// PromptCaching=false. Callers can override.
 func openAICompatibleCapabilities() Capabilities {
 	return Capabilities{
 		ContextWindow:     0, // unknown

@@ -125,9 +125,13 @@ type Event struct {
 	Err      string        `json:"err,omitempty"`
 
 	// InputTokens / OutputTokens carry cumulative spend on spend_tick and the
-	// final summary.
-	InputTokens  int64 `json:"input_tokens,omitempty"`
-	OutputTokens int64 `json:"output_tokens,omitempty"`
+	// final summary. InputTokens includes cached tokens (the llm.Usage
+	// convention); CacheReadTokens / CacheCreationTokens are the subsets served
+	// from / written to the provider's prompt cache.
+	InputTokens         int64 `json:"input_tokens,omitempty"`
+	OutputTokens        int64 `json:"output_tokens,omitempty"`
+	CacheReadTokens     int64 `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens int64 `json:"cache_creation_tokens,omitempty"`
 
 	// File / Line / Title describe a verified finding.
 	File  string `json:"file,omitempty"`

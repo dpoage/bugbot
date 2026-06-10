@@ -197,9 +197,15 @@ type Stats struct {
 	DroppedDuplicate     int `json:"dropped_duplicate"`
 	DroppedSuppressed    int `json:"dropped_suppressed"`
 	DroppedOutOfScope    int `json:"dropped_out_of_scope"`
-	// InputTokens / OutputTokens is the run's total token spend.
+	// InputTokens / OutputTokens is the run's total token spend. InputTokens
+	// includes cached tokens (the llm.Usage convention).
 	InputTokens  int64 `json:"input_tokens"`
 	OutputTokens int64 `json:"output_tokens"`
+	// CacheReadTokens / CacheCreationTokens are the subsets of InputTokens
+	// served from / written to the provider's prompt cache, for reporting
+	// cache savings.
+	CacheReadTokens     int64 `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens int64 `json:"cache_creation_tokens,omitempty"`
 }
 
 // Result summarizes a completed funnel run for the caller.
@@ -231,16 +237,18 @@ type spendRecorder struct {
 	store     *store.Store
 	scanRunID string
 
-	mu          sync.Mutex
-	totalTokens int64
-	inTokens    int64
-	outTokens   int64
+	mu           sync.Mutex
+	totalTokens  int64
+	inTokens     int64
+	outTokens    int64
+	cacheRead    int64
+	cacheCreated int64
 
 	// onRecord, when non-nil, is called after each ledger update with the new
-	// cumulative input/output totals. The funnel uses it to emit progress spend
-	// ticks. It must be cheap and non-blocking (it runs on the agent request
-	// path).
-	onRecord func(in, out int64)
+	// cumulative input/output/cache-read totals. The funnel uses it to emit
+	// progress spend ticks. It must be cheap and non-blocking (it runs on the
+	// agent request path).
+	onRecord func(in, out, cached int64)
 }
 
 func (r *spendRecorder) Record(ev llm.UsageEvent) {
@@ -248,22 +256,26 @@ func (r *spendRecorder) Record(ev llm.UsageEvent) {
 	r.totalTokens += ev.Usage.InputTokens + ev.Usage.OutputTokens
 	r.inTokens += ev.Usage.InputTokens
 	r.outTokens += ev.Usage.OutputTokens
-	in, out := r.inTokens, r.outTokens
+	r.cacheRead += ev.Usage.CacheReadInputTokens
+	r.cacheCreated += ev.Usage.CacheCreationInputTokens
+	in, out, cached := r.inTokens, r.outTokens, r.cacheRead
 	cb := r.onRecord
 	r.mu.Unlock()
 	if cb != nil {
-		cb(in, out)
+		cb(in, out, cached)
 	}
 	// Persist the ledger entry. Spend recording must not abort a scan, so a
 	// failure here is swallowed; the in-memory totals (used for budget) remain
 	// authoritative for this run regardless.
 	_, _ = r.store.RecordSpend(r.ctx, store.Spend{
-		ScanRunID:    r.scanRunID,
-		Role:         ev.Role,
-		Provider:     ev.Provider,
-		Model:        ev.Model,
-		InputTokens:  ev.Usage.InputTokens,
-		OutputTokens: ev.Usage.OutputTokens,
+		ScanRunID:           r.scanRunID,
+		Role:                ev.Role,
+		Provider:            ev.Provider,
+		Model:               ev.Model,
+		InputTokens:         ev.Usage.InputTokens,
+		OutputTokens:        ev.Usage.OutputTokens,
+		CacheReadTokens:     ev.Usage.CacheReadInputTokens,
+		CacheCreationTokens: ev.Usage.CacheCreationInputTokens,
 	})
 }
 
@@ -274,10 +286,10 @@ func (r *spendRecorder) total() int64 {
 	return r.totalTokens
 }
 
-func (r *spendRecorder) totals() (in, out int64) {
+func (r *spendRecorder) totals() (in, out, cacheRead, cacheCreated int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.inTokens, r.outTokens
+	return r.inTokens, r.outTokens, r.cacheRead, r.cacheCreated
 }
 
 // budgetState tracks degradation/stop decisions for one run. Methods are safe
