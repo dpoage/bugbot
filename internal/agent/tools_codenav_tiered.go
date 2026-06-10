@@ -206,8 +206,10 @@ func shouldFallBack(err error) bool {
 		return false
 	}
 	for _, marker := range []string{
+		// "not installed" subsumes the "not found in PATH" phrasing: every
+		// manager.go error that mentions PATH also says "not installed", so a
+		// separate marker is redundant and intentionally omitted.
 		"not installed",
-		"not found in PATH",
 		"no language server is configured",
 		"crashed repeatedly",
 		"does not support",
