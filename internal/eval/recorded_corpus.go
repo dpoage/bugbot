@@ -131,8 +131,10 @@ func loadRecordedCase(caseDir string) (*RecordedCase, error) {
 
 // loadRoleStore loads "<role>-*.jsonl" files from caseDir in filename order
 // (which is record order — see the timestamped naming) into a
-// RoleTranscriptStore. An empty role set is an error: a recorded case must have
-// at least one session per role to drive the funnel.
+// RoleTranscriptStore. A case with no finder sessions is an error (the funnel
+// always hypothesizes), but zero verifier sessions is legitimate: a run whose
+// finders report nothing (e.g. the clean-code canary) never reaches the verify
+// stage, so nothing was recorded for that role.
 func loadRoleStore(caseDir, role string) (*RoleTranscriptStore, error) {
 	pattern := filepath.Join(caseDir, role+"-*.jsonl")
 	names, err := filepath.Glob(pattern)
@@ -142,7 +144,7 @@ func loadRoleStore(caseDir, role string) (*RoleTranscriptStore, error) {
 	// Glob returns lexically sorted paths; the recorder writes them with a
 	// zero-padded ordinal (finder-000.jsonl, finder-001.jsonl, ...) so lexical
 	// order is record order.
-	if len(names) == 0 {
+	if len(names) == 0 && role == "finder" {
 		return nil, fmt.Errorf("recorded corpus has no %s sessions in %q", role, caseDir)
 	}
 
