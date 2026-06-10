@@ -5,10 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/dpoage/bugbot/internal/llm"
 )
+
+// maxLeadNoteLen bounds the note field: it is stored verbatim and rendered
+// into a future finder prompt, so it must stay short.
+const maxLeadNoteLen = 500
 
 // PostLeadTool lets a finder agent record a cross-lens suspicion on the
 // blackboard so the target lens's next finder run can investigate it. It is
@@ -48,6 +53,7 @@ func NewPostLeadTool(posterLens string, validLensNames []string, onPost func(tar
 		valid[n] = true
 		sorted[i] = n
 	}
+	sort.Strings(sorted)
 	return &PostLeadTool{
 		posterLens:  posterLens,
 		validLenses: valid,
@@ -94,7 +100,8 @@ func (t *PostLeadTool) Def() llm.ToolDef {
     },
     "note": {
       "type": "string",
-      "description": "Brief description of the suspicion for the target lens's finder agent."
+      "maxLength": 500,
+      "description": "Brief description of the suspicion for the target lens's finder agent (at most 500 characters)."
     }
   },
   "required": ["target_lens", "file", "line", "note"],
@@ -123,17 +130,25 @@ func (t *PostLeadTool) Run(_ context.Context, raw json.RawMessage) (string, erro
 		return "", fmt.Errorf("line must be >= 1, got %d", args.Line)
 	}
 
-	// Validate note.
+	// Validate note. Length is bounded (mirrored by maxLength in the schema)
+	// because the note is stored verbatim and later interpolated into another
+	// finder's task prompt — unbounded model-authored text there is both a
+	// storage-bloat and a prompt-pollution vector.
 	if strings.TrimSpace(args.Note) == "" {
 		return "", fmt.Errorf("note must be non-empty")
 	}
-
-	// Validate file: must be relative (no absolute path).
-	if filepath.IsAbs(args.File) {
-		return "", fmt.Errorf("file must be a repo-relative path, got absolute path %q", args.File)
+	if len(args.Note) > maxLeadNoteLen {
+		return "", fmt.Errorf("note must be at most %d bytes, got %d", maxLeadNoteLen, len(args.Note))
 	}
+
+	// Validate file: must be a repo-local relative path. IsLocal rejects
+	// absolute paths AND ".." traversal in one check, so a model cannot store
+	// a lead pointing outside the repository.
 	if args.File == "" {
 		return "", fmt.Errorf("file must be non-empty")
+	}
+	if !filepath.IsLocal(args.File) {
+		return "", fmt.Errorf("file must be a repo-relative path inside the repository, got %q", args.File)
 	}
 
 	if err := t.onPost(args.TargetLens, args.File, args.Line, args.Note); err != nil {

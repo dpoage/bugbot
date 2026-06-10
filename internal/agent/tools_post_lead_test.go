@@ -258,3 +258,46 @@ func TestPostLeadTool_InvalidJSON_IsError(t *testing.T) {
 		t.Fatal("invalid JSON must return an error")
 	}
 }
+
+// TestPostLeadTool_DotDotFile_IsError pins that ".." traversal is rejected: a
+// lead must point inside the repository.
+func TestPostLeadTool_DotDotFile_IsError(t *testing.T) {
+	var captured []postLeadCapture
+	tool := newTestPostLeadTool("concurrency", &captured)
+	for _, file := range []string{"../etc/passwd", "a/../../b.go", ".."} {
+		_, err := runPostLeadTool(t, tool, map[string]interface{}{
+			"target_lens": "concurrency",
+			"file":        file,
+			"line":        1,
+			"note":        "n",
+		})
+		if err == nil {
+			t.Errorf("file %q escaping the repo must return an error", file)
+		}
+	}
+	if len(captured) != 0 {
+		t.Errorf("onPost must not fire for rejected paths, fired %d times", len(captured))
+	}
+}
+
+// TestPostLeadTool_OverlongNote_IsError pins the note length cap (the note is
+// rendered into a future finder prompt; see maxLeadNoteLen).
+func TestPostLeadTool_OverlongNote_IsError(t *testing.T) {
+	var captured []postLeadCapture
+	tool := newTestPostLeadTool("concurrency", &captured)
+	_, err := runPostLeadTool(t, tool, map[string]interface{}{
+		"target_lens": "concurrency",
+		"file":        "a.go",
+		"line":        1,
+		"note":        strings.Repeat("x", maxLeadNoteLen+1),
+	})
+	if err == nil {
+		t.Fatal("overlong note must return an error")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error should state the cap, got: %v", err)
+	}
+	if len(captured) != 0 {
+		t.Errorf("onPost must not fire for rejected note, fired %d times", len(captured))
+	}
+}
