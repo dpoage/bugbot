@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -44,7 +45,7 @@ func newLeadsCmd() *cobra.Command {
 }
 
 // renderLeads prints the blackboard newest-first. now is injectable for tests.
-func renderLeads(out interface{ Write([]byte) (int, error) }, leads []store.Lead, pendingOnly bool, now time.Time) {
+func renderLeads(out io.Writer, leads []store.Lead, pendingOnly bool, now time.Time) {
 	if len(leads) == 0 {
 		if pendingOnly {
 			_, _ = fmt.Fprintln(out, "blackboard: no pending leads (nothing queued for the next cycle)")

@@ -373,3 +373,41 @@ func TestReVerificationFlow_DetectsChangedFindings(t *testing.T) {
 		t.Fatalf("expected 1 finding needing re-verification, got %d", len(needsReverify))
 	}
 }
+
+// TestCountFindings covers the status-pane tally aggregation.
+func TestCountFindings(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	seed := func(file string, line, tier int, status Status, needsHuman bool) {
+		t.Helper()
+		f := Finding{
+			Fingerprint: Fingerprint("l", file, line, "t"),
+			Title:       "t", Severity: "high", Tier: tier, Status: status,
+			Lens: "l", File: file, Line: line, NeedsHuman: needsHuman,
+		}
+		if _, err := st.UpsertFinding(ctx, f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("a.go", 1, 0, StatusOpen, false)
+	seed("a.go", 2, 1, StatusOpen, true)
+	seed("a.go", 3, 2, StatusOpen, false)
+	seed("a.go", 4, 2, StatusOpen, false)
+	seed("b.go", 1, 2, StatusFixed, false)
+	seed("b.go", 2, 3, StatusDismissed, false)
+
+	got, err := st.CountFindings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OpenByTier[0] != 1 || got.OpenByTier[1] != 1 || got.OpenByTier[2] != 2 {
+		t.Errorf("OpenByTier = %v", got.OpenByTier)
+	}
+	if got.NeedsHuman != 1 {
+		t.Errorf("NeedsHuman = %d, want 1", got.NeedsHuman)
+	}
+	if got.Fixed != 1 || got.Dismissed != 1 {
+		t.Errorf("fixed=%d dismissed=%d, want 1/1", got.Fixed, got.Dismissed)
+	}
+}

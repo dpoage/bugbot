@@ -36,6 +36,7 @@ reproduce, report) and tracks findings across confidence tiers:
 		newDaemonCmd(),
 		newStatusCmd(),
 		newReportCmd(),
+		newLeadsCmd(),
 		newEvalCmd(),
 		newPublishCmd(),
 	)

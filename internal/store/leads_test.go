@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // makeTestLead is a helper that builds a Lead with required fields set.
@@ -261,5 +262,49 @@ func TestLeads_DeterministicOrdering(t *testing.T) {
 		if !files[want] {
 			t.Errorf("missing file %q in pending leads", want)
 		}
+	}
+}
+
+// TestListLeads covers ordering (newest first) and the pending filter.
+func TestListLeads(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	older := Lead{PosterLens: "a", TargetLens: "concurrency", File: "x.go", Line: 1, Note: "first",
+		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	newer := Lead{PosterLens: "b", TargetLens: "resource-leaks", File: "y.go", Line: 2, Note: "second",
+		CreatedAt: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)}
+	for _, l := range []Lead{older, newer} {
+		if err := st.AddLead(ctx, l); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	all, err := st.ListLeads(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 || all[0].Note != "second" || all[1].Note != "first" {
+		t.Fatalf("ListLeads order wrong: %+v", all)
+	}
+
+	// Consume the newer one; pending filter must return only the older.
+	if err := st.ConsumeLeads(ctx, []string{all[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := st.ListLeads(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].Note != "first" {
+		t.Fatalf("pending filter wrong: %+v", pending)
+	}
+	// Unfiltered still returns both, consumed one carries status+timestamp.
+	all, err = st.ListLeads(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 || all[0].Status != "consumed" || all[0].ConsumedAt.IsZero() {
+		t.Fatalf("consumed lead not round-tripped: %+v", all[0])
 	}
 }

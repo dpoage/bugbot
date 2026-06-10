@@ -13,7 +13,6 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/progress"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // staleAfter is how long without a status update before a running scan/daemon is
@@ -53,7 +52,12 @@ func newStatusCmd() *cobra.Command {
 
 			st, rerr := progress.ReadStatus(path)
 			if os.IsNotExist(rerr) {
+				// No live activity — but the accumulated world state is still
+				// the point of this command. Render it when a store exists.
 				_, _ = fmt.Fprintln(out, "no bugbot activity recorded (no daemon or scan running against this config)")
+				if ws, ok := fetchWorldState(ctx, cfg); ok {
+					renderWorldState(out, ws, time.Now())
+				}
 				return nil
 			}
 			if rerr != nil {
@@ -109,11 +113,11 @@ func renderStatus(ctx context.Context, out io.Writer, cfg config.Config, st prog
 		_, _ = fmt.Fprintf(out, "  last event:   %s\n", st.LastEvent)
 	}
 
-	// Open findings count: open the store read-only-ish (a normal open is fine;
-	// we only read) and count. Best-effort — a count failure is noted, not fatal,
-	// since status is informational.
-	if n, err := openFindingsCount(ctx, cfg); err == nil {
-		_, _ = fmt.Fprintf(out, "  open findings: %d\n", n)
+	// The accumulated world state (findings, blackboard, sync, spend, last
+	// run). Best-effort — fetch failures degrade section by section, since
+	// status is informational.
+	if ws, ok := fetchWorldState(ctx, cfg); ok {
+		renderWorldState(out, ws, now)
 	}
 }
 
@@ -149,20 +153,6 @@ func pidNote(pid int) string {
 		return " (alive)"
 	}
 	return " (not running)"
-}
-
-// openFindingsCount opens the store and returns the number of open findings.
-func openFindingsCount(ctx context.Context, cfg config.Config) (int, error) {
-	st, err := store.Open(ctx, cfg.Storage.Path)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = st.Close() }()
-	open, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
-	if err != nil {
-		return 0, err
-	}
-	return len(open), nil
 }
 
 // cachedNote annotates a spend line with the cache-read token count, or ""
