@@ -239,6 +239,12 @@ func resultForFinding(meta Metadata, f store.Finding) SARIFResult {
 	if len(f.CorroboratingLenses) > 0 {
 		props["corroboratingLenses"] = f.CorroboratingLenses
 	}
+	if f.FixPatch != "" {
+		props["hasFixPatch"] = true
+	}
+	if f.NeedsHuman {
+		props["needsHuman"] = true
+	}
 
 	return SARIFResult{
 		RuleID:    ruleID,

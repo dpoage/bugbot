@@ -196,7 +196,12 @@ func buildReproducer(ctx context.Context, cfg *config.Config, repoRoot, runtime 
 	if err != nil {
 		return nil, fmt.Errorf("build sandbox: %w", err)
 	}
-	r, err := repro.New(client, sb, repoRoot, repro.Options{Image: cfg.Sandbox.Image})
+	r, err := repro.New(client, sb, repoRoot, repro.Options{
+		Image:            cfg.Sandbox.Image,
+		PatchProver:      cfg.Repro.PatchProver,
+		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
+		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer: %w", err)
 	}

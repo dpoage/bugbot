@@ -120,6 +120,24 @@ type Review struct {
 	Suspected string `yaml:"suspected"`
 }
 
+// Repro configures the Reproduce stage and the follow-on Patch-prover stage.
+type Repro struct {
+	// PatchProver enables the patch-prover stage.  When true, a successful
+	// repro triggers a follow-on agent that attempts to produce a minimal fix
+	// and proves it with a sandboxed suite run.  Default false.
+	PatchProver bool `yaml:"patch_prover"`
+	// PatchMaxAttempts is the maximum number of fix plans tried per finding
+	// before giving up and flagging the finding needs-human.  Must be >= 1.
+	// Default 3.
+	PatchMaxAttempts int `yaml:"patch_max_attempts"`
+	// SuiteCmd is the full-suite test command (argv) the patch-prover runs to
+	// prove a fix keeps the whole suite green. Empty (the default) detects the
+	// command from repo marker files (go.mod, Cargo.toml, package.json,
+	// pyproject.toml/setup.py); when neither is available the patch-prover
+	// skips rather than guessing.
+	SuiteCmd []string `yaml:"suite_cmd"`
+}
+
 // Daemon configures the continuous-run scheduler.
 type Daemon struct {
 	PollInterval  time.Duration `yaml:"poll_interval"`
@@ -168,6 +186,7 @@ type Config struct {
 	Scan      Scan                `yaml:"scan"`
 	Sandbox   Sandbox             `yaml:"sandbox"`
 	Verify    Verify              `yaml:"verify"`
+	Repro     Repro               `yaml:"repro"`
 	Report    Report              `yaml:"report"`
 	Review    Review              `yaml:"review"`
 	Publish   Publish             `yaml:"publish"`
@@ -206,6 +225,10 @@ func Default() Config {
 			SandboxExec:        false,
 			SandboxMinSeverity: "high",
 			SandboxMaxExecs:    3,
+		},
+		Repro: Repro{
+			PatchProver:      false,
+			PatchMaxAttempts: 3,
 		},
 		Report: Report{
 			Dir:   ".bugbot/reports",
@@ -283,6 +306,9 @@ func Load(path string) (Config, error) {
 //	BUGBOT_PUBLISH_TIER_MIN           (integer 0..3)
 //	BUGBOT_PUBLISH_LABELS             (comma-separated label names)
 //	BUGBOT_PUBLISH_CLOSE_ON_FIXED     ("true" or "false")
+//	BUGBOT_REPRO_PATCH_PROVER         ("true" or "false")
+//	BUGBOT_REPRO_PATCH_MAX_ATTEMPTS   (integer >= 1)
+//	BUGBOT_REPRO_SUITE_CMD            (comma-separated argv)
 func applyEnvOverrides(cfg *Config, environ []string) error {
 	env := make(map[string]string, len(environ))
 	for _, kv := range environ {
@@ -347,6 +373,15 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	setStr("BUGBOT_SANDBOX_IMAGE", &cfg.Sandbox.Image)
 	setStr("BUGBOT_SANDBOX_NETWORK", &cfg.Sandbox.Network)
 	setStr("BUGBOT_REVIEW_FAIL_ON", &cfg.Review.FailOn)
+	if v, ok := env["BUGBOT_REPRO_SUITE_CMD"]; ok {
+		var cmd []string
+		for _, part := range strings.Split(v, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				cmd = append(cmd, p)
+			}
+		}
+		cfg.Repro.SuiteCmd = cmd
+	}
 	setStr("BUGBOT_REVIEW_SUSPECTED", &cfg.Review.Suspected)
 	setStr("BUGBOT_VERIFY_SANDBOX_MIN_SEVERITY", &cfg.Verify.SandboxMinSeverity)
 
@@ -370,12 +405,14 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt("BUGBOT_SANDBOX_TIMEOUT_SECONDS", &cfg.Sandbox.TimeoutSeconds),
 		setInt("BUGBOT_VERIFY_SANDBOX_MAX_EXECS", &cfg.Verify.SandboxMaxExecs),
 		setInt("BUGBOT_PUBLISH_TIER_MIN", &cfg.Publish.TierMin),
+		setInt("BUGBOT_REPRO_PATCH_MAX_ATTEMPTS", &cfg.Repro.PatchMaxAttempts),
 		setDur("BUGBOT_DAEMON_POLL_INTERVAL", &cfg.Daemon.PollInterval),
 		setDur("BUGBOT_DAEMON_SWEEP_INTERVAL", &cfg.Daemon.SweepInterval),
 		setDur("BUGBOT_DAEMON_IDLE_BACKOFF", &cfg.Daemon.IdleBackoff),
 		setBool("BUGBOT_VERIFY_SANDBOX_EXEC", &cfg.Verify.SandboxExec),
 		setBool("BUGBOT_PUBLISH_ENABLED", &cfg.Publish.Enabled),
 		setBool("BUGBOT_PUBLISH_CLOSE_ON_FIXED", &cfg.Publish.CloseOnFixed),
+		setBool("BUGBOT_REPRO_PATCH_PROVER", &cfg.Repro.PatchProver),
 	} {
 		if err != nil {
 			return err
@@ -470,6 +507,9 @@ func (c *Config) Validate() error {
 
 	if c.Publish.TierMin < 0 || c.Publish.TierMin > 3 {
 		return fmt.Errorf("config: publish.tier_min %d invalid (want 0..3)", c.Publish.TierMin)
+	}
+	if c.Repro.PatchMaxAttempts < 1 {
+		return fmt.Errorf("config: repro.patch_max_attempts must be >= 1 (got %d)", c.Repro.PatchMaxAttempts)
 	}
 
 	return nil

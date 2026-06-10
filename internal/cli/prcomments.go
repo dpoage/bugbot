@@ -94,6 +94,8 @@ func isResolvedBody(body string) bool {
 // deterministic even when a field is blank, so idempotence holds.
 func tierLabel(tier int) string {
 	switch tier {
+	case 0:
+		return "T0 Fix-witnessed"
 	case 1:
 		return "T1 Reproduced"
 	case 2:
