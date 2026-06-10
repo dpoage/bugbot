@@ -215,6 +215,42 @@ func TestDefinitionPathProximity(t *testing.T) {
 	}
 }
 
+// TestTSXJSXResolves is the regression test for the .tsx-parsed-as-typescript
+// bug: a .tsx file contains JSX (`<Panel/>`), which fails to parse under the
+// plain TypeScript grammar, silently dropping every symbol. With a distinct tsx
+// grammar entry, the function definition and its call must both resolve.
+func TestTSXJSXResolves(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"App.tsx": "function Panel(): JSX.Element {\n" + // 1: definition
+			"  return <div className=\"p\">{title()}</div>;\n" + // 2: ref to title
+			"}\n" + // 3
+			"function title(): string { return \"hi\" }\n" + // 4: definition
+			"function App(): JSX.Element {\n" + // 5
+			"  return <Panel />;\n" + // 6: JSX use of Panel (not a call ref)
+			"}\n", // 7
+	})
+	b := New(root)
+	abs := filepath.Join(root, "App.tsx")
+
+	// The definition of Panel must resolve — proving the JSX file parsed at all.
+	defRes, err := b.Definition(abs, "Panel")
+	if err != nil {
+		t.Fatalf("tsx Definition(Panel): %v", err)
+	}
+	if got := locLines(t, root, defRes); !contains(got, "App.tsx:1") {
+		t.Fatalf("tsx Panel def = %v, want App.tsx:1 (JSX file failed to parse?)", got)
+	}
+
+	// The call site title() inside JSX-bearing source resolves as a reference.
+	refRes, err := b.References(abs, "title")
+	if err != nil {
+		t.Fatalf("tsx References(title): %v", err)
+	}
+	if got := locLines(t, root, refRes); !contains(got, "App.tsx:2") {
+		t.Errorf("tsx title ref = %v, want App.tsx:2", got)
+	}
+}
+
 func TestSupportsAndUnsupported(t *testing.T) {
 	b := New(t.TempDir())
 	if !b.Supports("/x/y.go") {
