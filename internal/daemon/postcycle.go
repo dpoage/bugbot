@@ -59,6 +59,11 @@ func (d *Daemon) reverifyOpenFindings(ctx context.Context) int {
 
 	root := d.repo.Root()
 	var f *funnel.Funnel // built lazily; only needed if some file's content changed
+	defer func() {
+		if f != nil {
+			_ = f.Close() // shut down language servers spawned for re-verification
+		}
+	}()
 	closed := 0
 
 	for _, fnd := range open {

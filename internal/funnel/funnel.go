@@ -129,13 +129,21 @@ func (o Options) resolve() Options {
 
 // Funnel runs the staged detection pipeline against a repository. It is
 // constructed once per process (or per daemon) and is safe for sequential reuse
-// across scans; a single scan parallelizes internally.
+// across scans; a single scan parallelizes internally. Call [Funnel.Close] when
+// done to shut down any language servers the code-navigation tools spawned.
 type Funnel struct {
 	clients RoleClients
 	store   *store.Store
 	repo    *ingest.Repo
 	opts    Options
 	lenses  []Lens
+
+	// navOnce lazily builds the shared code-navigation tool bundle (and its
+	// language-server manager) on first use, so funnels that never run agents
+	// spawn nothing.
+	navOnce sync.Once
+	nav     *agent.CodeNav
+	navErr  error
 }
 
 // New constructs a Funnel. clients supplies the finder/verifier LLM clients,
@@ -163,6 +171,28 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 		opts:    resolved,
 		lenses:  selectLenses(resolved.Lenses),
 	}, nil
+}
+
+// codeNav returns the shared code-navigation tool bundle, creating it (and its
+// lazy language-server manager — no processes are spawned until a tool's first
+// query) on first call.
+func (f *Funnel) codeNav() (*agent.CodeNav, error) {
+	f.navOnce.Do(func() {
+		f.nav, f.navErr = agent.NewCodeNav(f.repo.Root())
+	})
+	return f.nav, f.navErr
+}
+
+// Close shuts down any language servers the code-navigation tools spawned.
+// Safe to call multiple times and on a funnel that never ran.
+func (f *Funnel) Close() error {
+	// Synchronize with codeNav() so a Close racing the lazy init still sees
+	// the bundle.
+	f.navOnce.Do(func() {})
+	if f.nav == nil {
+		return nil
+	}
+	return f.nav.Close()
 }
 
 // Candidate is a finder-proposed bug after it has been associated with a lens
