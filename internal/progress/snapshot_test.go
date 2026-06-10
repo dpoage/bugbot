@@ -22,7 +22,7 @@ func TestSnapshot_WritesAndReadsBack(t *testing.T) {
 	s.Handle(Event{Kind: KindScanStarted, ScanKind: "sweep", Commit: "deadbeef", Time: time.Unix(2000, 0)})
 	s.Handle(Event{Kind: KindAgentStarted, Role: RoleFinder, Label: "lensA", Time: time.Unix(2000, 0)})
 	// Terminal event forces a write.
-	s.Handle(Event{Kind: KindScanFinished, ScanKind: "sweep", Counts: &Counts{Verified: 2}, InputTokens: 11, OutputTokens: 7, Time: time.Unix(2000, 0)})
+	s.Handle(Event{Kind: KindScanFinished, ScanKind: "sweep", Counts: &Counts{Verified: 2}, InputTokens: 11, OutputTokens: 7, CacheReadTokens: 4, Time: time.Unix(2000, 0)})
 
 	st, err := ReadStatus(path)
 	if err != nil {
@@ -36,6 +36,9 @@ func TestSnapshot_WritesAndReadsBack(t *testing.T) {
 	}
 	if st.SpendInput != 11 || st.SpendOutput != 7 {
 		t.Errorf("spend = in:%d out:%d, want 11/7", st.SpendInput, st.SpendOutput)
+	}
+	if st.SpendCacheRead != 4 {
+		t.Errorf("spend cache read = %d, want 4", st.SpendCacheRead)
 	}
 	if st.PID <= 0 {
 		t.Errorf("pid not stamped: %d", st.PID)

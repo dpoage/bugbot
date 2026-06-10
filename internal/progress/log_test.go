@@ -15,7 +15,7 @@ func TestLogRenderer_SignificantLines(t *testing.T) {
 	r.Handle(Event{Kind: KindStageFinished, Stage: StageVerify, Counts: &Counts{Hypothesized: 4, Triaged: 3, Verified: 2, Killed: 1}})
 	r.Handle(Event{Kind: KindAgentFinished, Role: RoleFinder, Label: "lensA", Tokens: 900, Duration: 1500 * time.Millisecond})
 	r.Handle(Event{Kind: KindFindingVerified, Title: "real bug", File: "a.go", Line: 7})
-	r.Handle(Event{Kind: KindScanFinished, ScanKind: "sweep", Commit: "abcdef1234567890", Counts: &Counts{Verified: 2}, InputTokens: 100, OutputTokens: 50})
+	r.Handle(Event{Kind: KindScanFinished, ScanKind: "sweep", Commit: "abcdef1234567890", Counts: &Counts{Verified: 2}, InputTokens: 100, OutputTokens: 50, CacheReadTokens: 40})
 
 	out := buf.String()
 	for _, want := range []string{
@@ -24,7 +24,7 @@ func TestLogRenderer_SignificantLines(t *testing.T) {
 		"agent done: finder [lensA] tokens=900 dur=1.5s",
 		"verified: real bug (a.go:7)",
 		"scan finished: kind=sweep",
-		"spend in=100 out=50",
+		"spend in=100 out=50 cached=40",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log output missing %q\n---\n%s", want, out)

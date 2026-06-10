@@ -130,3 +130,37 @@ func mustRecord(t *testing.T, st *Store, sp Spend) {
 		t.Fatalf("record spend: %v", err)
 	}
 }
+
+func TestSpend_CacheTokenRollups(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	run, _ := st.BeginScanRun(ctx, ScanSweep, "c1")
+	base := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+
+	// InputTokens includes the cached subsets (llm.Usage convention).
+	mustRecord(t, st, Spend{TS: base, ScanRunID: run, Role: "finder",
+		InputTokens: 100, OutputTokens: 20, CacheCreationTokens: 80})
+	mustRecord(t, st, Spend{TS: base.Add(time.Minute), ScanRunID: run, Role: "finder",
+		InputTokens: 120, OutputTokens: 10, CacheReadTokens: 90, CacheCreationTokens: 15})
+
+	tot, err := st.TotalsForScanRun(ctx, run)
+	if err != nil {
+		t.Fatalf("totals: %v", err)
+	}
+	if tot.CacheReadTokens != 90 || tot.CacheCreationTokens != 95 {
+		t.Fatalf("cache totals = read %d / created %d, want 90/95", tot.CacheReadTokens, tot.CacheCreationTokens)
+	}
+	// Cached tokens are part of InputTokens, so Total() must NOT double-count.
+	if tot.Total() != 250 {
+		t.Fatalf("Total() = %d, want 250 (cache fields must not add to the total)", tot.Total())
+	}
+
+	since, err := st.TotalsSince(ctx, base)
+	if err != nil {
+		t.Fatalf("totals since: %v", err)
+	}
+	if since.CacheReadTokens != 90 || since.CacheCreationTokens != 95 {
+		t.Fatalf("since cache totals = %+v", since)
+	}
+}

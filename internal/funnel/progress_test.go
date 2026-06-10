@@ -128,6 +128,9 @@ func TestSweep_EmitsProgressInStageOrder(t *testing.T) {
 	if last.InputTokens == 0 || last.OutputTokens == 0 {
 		t.Errorf("final spend tick = in:%d out:%d, want both non-zero", last.InputTokens, last.OutputTokens)
 	}
+	if last.CacheReadTokens == 0 {
+		t.Errorf("final spend tick carries no cache reads; cumulative cache total not threaded through")
+	}
 }
 
 // lastStageFinished returns the last stage_finished event for the named stage.

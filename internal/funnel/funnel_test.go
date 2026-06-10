@@ -189,6 +189,11 @@ func TestSweep_E2E_OneVerifiedFinding(t *testing.T) {
 	if res.Stats.InputTokens == 0 || res.Stats.OutputTokens == 0 {
 		t.Errorf("spend not recorded: in=%d out=%d", res.Stats.InputTokens, res.Stats.OutputTokens)
 	}
+	// The scripted clients report cache reads on every call; the run total must
+	// carry them through (the cached subset of every 100-token input is 60).
+	if want := res.Stats.InputTokens / 100 * 60; res.Stats.CacheReadTokens != want {
+		t.Errorf("cache reads not recorded: got %d, want %d", res.Stats.CacheReadTokens, want)
+	}
 
 	// Persisted: GetFinding round-trips, scan run finished with stats.
 	stored, err := st.GetFinding(ctx, got.ID)

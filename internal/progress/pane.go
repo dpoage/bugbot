@@ -53,23 +53,23 @@ type PaneRenderer struct {
 	out   io.Writer
 	width int
 
-	mu         sync.Mutex
-	started    time.Time
-	scanKind   string
-	commit     string
+	mu           sync.Mutex
+	started      time.Time
+	scanKind     string
+	commit       string
 	counts       Counts
 	inTokens     int64
 	outTokens    int64
 	cachedTokens int64
-	agents     map[string]*activeAgent // keyed by role+label
-	lastEvent  string
-	prevLines  int // lines painted last frame, to know how far to move up
-	lastPaint  time.Time
-	stopped    bool
-	degraded   bool
-	budgetNote string
-	now        func() time.Time // injectable for tests
-	ticking    bool             // false for the test constructor (no ticker goroutine)
+	agents       map[string]*activeAgent // keyed by role+label
+	lastEvent    string
+	prevLines    int // lines painted last frame, to know how far to move up
+	lastPaint    time.Time
+	stopped      bool
+	degraded     bool
+	budgetNote   string
+	now          func() time.Time // injectable for tests
+	ticking      bool             // false for the test constructor (no ticker goroutine)
 
 	done chan struct{}
 }
