@@ -118,6 +118,9 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 					} else {
 						outcome.FixWitnessed = patchResult.FixWitnessed
 						outcome.NeedsHuman = patchResult.NeedsHuman
+						if patchResult.SkippedNoSuiteCmd {
+							outcome.Reason = "patch-prover skipped: toolchain not identified and repro.suite_cmd not configured"
+						}
 					}
 				}
 			} else {
@@ -153,6 +156,10 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 type patchOutcome struct {
 	FixWitnessed bool
 	NeedsHuman   bool
+	// SkippedNoSuiteCmd is set when the repo's toolchain could not be
+	// identified and no repro.suite_cmd is configured: the suite-green half of
+	// the witness cannot be proven, so the prover declines rather than guesses.
+	SkippedNoSuiteCmd bool
 }
 
 // provePatch runs the patch-prover on a finding that was just promoted to T1.
@@ -167,6 +174,7 @@ func (r *Reproducer) provePatch(ctx context.Context, st *store.Store, f store.Fi
 		image:       r.opts.Image,
 		artifactDir: r.opts.ArtifactDir,
 		agentLimits: r.opts.AgentLimits,
+		suiteCmd:    r.opts.PatchSuiteCmd,
 	}
 	return prover.Prove(ctx, st, f, att)
 }

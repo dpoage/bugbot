@@ -200,6 +200,7 @@ func buildReproducer(ctx context.Context, cfg *config.Config, repoRoot, runtime 
 		Image:            cfg.Sandbox.Image,
 		PatchProver:      cfg.Repro.PatchProver,
 		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
+		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer: %w", err)

@@ -115,3 +115,21 @@ func TestPatchProverEnvOverrides_InvalidInt(t *testing.T) {
 		t.Fatal("invalid int env value should return error")
 	}
 }
+
+// TestReproSuiteCmd covers the yaml parsing and env override of the
+// generalized suite command.
+func TestReproSuiteCmd(t *testing.T) {
+	d := Default()
+	if d.Repro.SuiteCmd != nil {
+		t.Errorf("default suite_cmd = %v, want nil (detect)", d.Repro.SuiteCmd)
+	}
+
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_REPRO_SUITE_CMD=cargo, test, --workspace"}); err != nil {
+		t.Fatalf("applyEnvOverrides: %v", err)
+	}
+	want := []string{"cargo", "test", "--workspace"}
+	if len(cfg.Repro.SuiteCmd) != 3 || cfg.Repro.SuiteCmd[0] != want[0] || cfg.Repro.SuiteCmd[1] != want[1] || cfg.Repro.SuiteCmd[2] != want[2] {
+		t.Errorf("env suite_cmd = %v, want %v", cfg.Repro.SuiteCmd, want)
+	}
+}

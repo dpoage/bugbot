@@ -122,7 +122,7 @@ func newReportListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&status, "status", "open", "filter by status: open, dismissed, fixed, all")
-	cmd.Flags().IntVar(&tier, "tier", 0, "filter by tier (1, 2, or 3; 0 means any)")
+	cmd.Flags().IntVar(&tier, "tier", 0, "filter by tier (1, 2, or 3; 0 means any — note: T0 fix-witnessed findings cannot be selected alone, they appear in the unfiltered list)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit findings as JSON")
 	return cmd
 }

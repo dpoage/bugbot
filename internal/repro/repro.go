@@ -85,6 +85,11 @@ type Options struct {
 	// before flagging it needs-human. Zero uses the default (3); negative is
 	// treated as 1.
 	PatchMaxAttempts int
+	// PatchSuiteCmd is the full-suite test command for the suite-green half of
+	// the fix witness. Empty means detect from repo marker files (go.mod,
+	// Cargo.toml, package.json, pyproject.toml/setup.py); if detection also
+	// fails the patch-prover skips for that finding.
+	PatchSuiteCmd []string
 }
 
 // resolve returns a copy of o with defaults applied; it does not mutate the

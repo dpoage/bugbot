@@ -652,3 +652,125 @@ func TestComputeDiff_Truncation(t *testing.T) {
 func lookPath(name string) (string, error) {
 	return exec.LookPath(name)
 }
+
+// TestDetectSuiteCmd pins the marker-file detection table and the nil result
+// for unknown toolchains.
+func TestDetectSuiteCmd(t *testing.T) {
+	cases := []struct {
+		marker string
+		want   string
+	}{
+		{"go.mod", "go test ./..."},
+		{"Cargo.toml", "cargo test"},
+		{"package.json", "npm test"},
+		{"pyproject.toml", "python -m pytest"},
+		{"setup.py", "python -m pytest"},
+	}
+	for _, tc := range cases {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, tc.marker), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := detectSuiteCmd(dir)
+		if strings.Join(got, " ") != tc.want {
+			t.Errorf("marker %s: detected %v, want %q", tc.marker, got, tc.want)
+		}
+	}
+	if got := detectSuiteCmd(t.TempDir()); got != nil {
+		t.Errorf("empty repo: detected %v, want nil", got)
+	}
+}
+
+// TestProve_SkipsWhenSuiteCmdUnknown pins the decline-don't-guess behavior: an
+// unidentifiable toolchain with no configured suite_cmd skips the prover
+// without flagging needs-human and without any sandbox execution.
+func TestProve_SkipsWhenSuiteCmdUnknown(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	f := seedFinding(t, st)
+
+	repoDir := t.TempDir() // no marker files at all
+	if err := os.WriteFile(filepath.Join(repoDir, "code.zig"), []byte("// zig"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sb := sandbox.NewMock(sandbox.MockResponse{})
+	p := &PatchProver{
+		client:      newScriptedClient(),
+		sb:          sb,
+		repoDir:     repoDir,
+		maxAttempts: 3,
+		artifactDir: t.TempDir(),
+	}
+	att := &Attempt{Plan: &Plan{Files: map[string]string{"x_test.zig": "t"}, Cmd: []string{"zig", "test", "x_test.zig"}}}
+
+	out, err := p.Prove(ctx, st, f, att)
+	if err != nil {
+		t.Fatalf("Prove: %v", err)
+	}
+	if !out.SkippedNoSuiteCmd {
+		t.Error("expected SkippedNoSuiteCmd")
+	}
+	if out.NeedsHuman || out.FixWitnessed {
+		t.Errorf("skip must not flag needs-human or fix-witnessed: %+v", out)
+	}
+	if calls := len(sb.Calls()); calls != 0 {
+		t.Errorf("skip must not execute the sandbox, made %d calls", calls)
+	}
+	got, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NeedsHuman {
+		t.Error("store finding must not be flagged needs-human on skip")
+	}
+}
+
+// TestIsTestPath pins the cross-language test-file guard.
+func TestIsTestPath(t *testing.T) {
+	yes := []string{
+		"pkg/foo_test.go", "deep/nested/bar_test.go",
+		"test_util.py", "pkg/test_thing.py", "pkg/thing_test.py",
+		"src/foo.test.ts", "src/foo.spec.jsx", "lib/user_spec.rb",
+		"src/FooTest.java", "src/FooTests.cs",
+		"tests/anything.go", "test/x.c", "__tests__/y.js", "spec/z.rb", "testdata/fixture.go",
+	}
+	for _, p := range yes {
+		if !isTestPath(p) {
+			t.Errorf("isTestPath(%q) = false, want true", p)
+		}
+	}
+	no := []string{
+		"pkg/foo.go", "contest/winner.go", "src/latest.ts", "attest.go",
+		"pkg/protest.py", "respec.rb", "testify.go",
+	}
+	for _, p := range no {
+		if isTestPath(p) {
+			t.Errorf("isTestPath(%q) = true, want false", p)
+		}
+	}
+}
+
+// TestFlagNeedsHuman_Idempotent pins that repeated exhaustion runs do not grow
+// Reasoning with duplicate PATCH-PROVER appends.
+func TestFlagNeedsHuman_Idempotent(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	f := seedFinding(t, st)
+
+	for i := 0; i < 3; i++ {
+		if err := flagNeedsHuman(ctx, st, f, 3, "no fix found"); err != nil {
+			t.Fatalf("flagNeedsHuman run %d: %v", i, err)
+		}
+	}
+	got, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.NeedsHuman {
+		t.Error("NeedsHuman must be set")
+	}
+	if n := strings.Count(got.Reasoning, "PATCH-PROVER:"); n != 1 {
+		t.Errorf("Reasoning contains %d PATCH-PROVER appends, want exactly 1:\n%s", n, got.Reasoning)
+	}
+}

@@ -253,6 +253,7 @@ func runRepro(ctx context.Context, out io.Writer, cfg *config.Config, st *store.
 		Image:            cfg.Sandbox.Image,
 		PatchProver:      cfg.Repro.PatchProver,
 		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
+		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
 	})
 	if err != nil {
 		return fmt.Errorf("build reproducer: %w", err)

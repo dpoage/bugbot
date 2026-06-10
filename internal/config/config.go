@@ -130,6 +130,12 @@ type Repro struct {
 	// before giving up and flagging the finding needs-human.  Must be >= 1.
 	// Default 3.
 	PatchMaxAttempts int `yaml:"patch_max_attempts"`
+	// SuiteCmd is the full-suite test command (argv) the patch-prover runs to
+	// prove a fix keeps the whole suite green. Empty (the default) detects the
+	// command from repo marker files (go.mod, Cargo.toml, package.json,
+	// pyproject.toml/setup.py); when neither is available the patch-prover
+	// skips rather than guessing.
+	SuiteCmd []string `yaml:"suite_cmd"`
 }
 
 // Daemon configures the continuous-run scheduler.
@@ -367,6 +373,15 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	setStr("BUGBOT_SANDBOX_IMAGE", &cfg.Sandbox.Image)
 	setStr("BUGBOT_SANDBOX_NETWORK", &cfg.Sandbox.Network)
 	setStr("BUGBOT_REVIEW_FAIL_ON", &cfg.Review.FailOn)
+	if v, ok := env["BUGBOT_REPRO_SUITE_CMD"]; ok {
+		var cmd []string
+		for _, part := range strings.Split(v, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				cmd = append(cmd, p)
+			}
+		}
+		cfg.Repro.SuiteCmd = cmd
+	}
 	setStr("BUGBOT_REVIEW_SUSPECTED", &cfg.Review.Suspected)
 	setStr("BUGBOT_VERIFY_SANDBOX_MIN_SEVERITY", &cfg.Verify.SandboxMinSeverity)
 

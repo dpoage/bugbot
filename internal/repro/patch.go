@@ -52,6 +52,43 @@ const patchMaxDiffBytes = 32 * 1024 // 32 KB
 // PatchProver.maxAttempts is zero.
 const patchDefaultMaxAttempts = 3
 
+// isTestPath reports whether a cleaned repo-relative path looks like a test
+// file in any mainstream language, or lives under a conventional test
+// directory. This is defense-in-depth: the load-bearing invariant is the
+// repro-file collision guard (language-independent); these patterns stop a
+// proposed "fix" from rewriting the broader test surface.
+func isTestPath(clean string) bool {
+	slashed := filepath.ToSlash(clean)
+	for _, seg := range strings.Split(slashed, "/") {
+		switch seg {
+		case "test", "tests", "__tests__", "spec", "testdata":
+			return true
+		}
+	}
+	base := strings.ToLower(filepath.Base(slashed))
+	switch {
+	case strings.HasSuffix(base, "_test.go"),
+		strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py"),
+		strings.HasSuffix(base, "_test.py"),
+		strings.HasSuffix(base, "_spec.rb"):
+		return true
+	}
+	// foo.test.ts / foo.spec.jsx style (JS/TS ecosystems).
+	if parts := strings.Split(base, "."); len(parts) >= 3 {
+		switch parts[len(parts)-2] {
+		case "test", "spec":
+			return true
+		}
+	}
+	// JVM/.NET conventions: FooTest.java, FooTests.cs.
+	switch {
+	case strings.HasSuffix(base, "test.java"), strings.HasSuffix(base, "tests.java"),
+		strings.HasSuffix(base, "test.cs"), strings.HasSuffix(base, "tests.cs"):
+		return true
+	}
+	return false
+}
+
 // patchSystemPrompt instructs the patch-prover agent.
 const patchSystemPrompt = `You are Bugbot's patch-prover agent. A bug has been demonstrated by a
 failing sandbox test. Your job is to produce a MINIMAL candidate fix that makes
@@ -64,7 +101,7 @@ proposing a fix.
 Hard requirements for the fix:
 - Produce the SMALLEST change that makes the repro test pass.
 - Provide the COMPLETE new contents of each file you change.
-- Do NOT modify or delete any test file (*_test.go).
+- Do NOT modify or delete any test file (in any language or test directory).
 - Do NOT add new files — only edit files that already exist in the repository.
   (New files change the module surface area and are out of scope for automated
   witnessing.)
@@ -112,6 +149,32 @@ type PatchProver struct {
 	image       string
 	artifactDir string
 	agentLimits agent.Limits
+	// suiteCmd runs the full test suite for the suite-green witness. Empty
+	// means "detect from repo markers"; if detection also fails the prover
+	// skips rather than guessing — a wrong suite command would silently
+	// weaken the witness.
+	suiteCmd []string
+}
+
+// detectSuiteCmd infers the full-suite test command from well-known repo
+// marker files. Returns nil when the toolchain cannot be identified.
+func detectSuiteCmd(repoDir string) []string {
+	markers := []struct {
+		file string
+		cmd  []string
+	}{
+		{"go.mod", []string{"go", "test", "./..."}},
+		{"Cargo.toml", []string{"cargo", "test"}},
+		{"package.json", []string{"npm", "test"}},
+		{"pyproject.toml", []string{"python", "-m", "pytest"}},
+		{"setup.py", []string{"python", "-m", "pytest"}},
+	}
+	for _, m := range markers {
+		if _, err := os.Stat(filepath.Join(repoDir, m.file)); err == nil {
+			return m.cmd
+		}
+	}
+	return nil
 }
 
 // Prove runs the patch-prover loop for a finding that was just promoted to T1.
@@ -120,6 +183,17 @@ func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f store.Findin
 	maxAtt := p.maxAttempts
 	if maxAtt <= 0 {
 		maxAtt = patchDefaultMaxAttempts
+	}
+
+	suiteCmd := p.suiteCmd
+	if len(suiteCmd) == 0 {
+		suiteCmd = detectSuiteCmd(p.repoDir)
+	}
+	if len(suiteCmd) == 0 {
+		// Unknown toolchain and no repro.suite_cmd configured: skip rather
+		// than guess. A wrong suite command would silently weaken the
+		// suite-green half of the witness.
+		return patchOutcome{SkippedNoSuiteCmd: true}, nil
 	}
 
 	runner, err := p.newRunner()
@@ -166,8 +240,8 @@ func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f store.Findin
 			continue
 		}
 
-		// Run 2: suite — full go test ./... with the same files.
-		suiteRes, serr := p.execSandbox(ctx, []string{"go", "test", "./..."}, writeFiles)
+		// Run 2: suite — the full suite command with the same files.
+		suiteRes, serr := p.execSandbox(ctx, suiteCmd, writeFiles)
 		if serr != nil {
 			return patchOutcome{}, fmt.Errorf("patch-prover: suite sandbox: %w", serr)
 		}
@@ -190,7 +264,10 @@ func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f store.Findin
 		diffText, derr := computeDiff(p.repoDir, plan.Files)
 		if derr != nil {
 			// Diff is informational; don't abort on failure — store empty.
-			diffText = fmt.Sprintf("(diff computation failed: %v)", derr)
+			// An error string here would be rendered inside a ```diff block in
+			// the report, so it must NOT go into the column. The patched files
+			// in the artifact bundle remain the authoritative witness.
+			diffText = ""
 		}
 
 		// Write patch files into the existing artifact bundle.
@@ -298,8 +375,8 @@ func (p *PatchProver) validatePatchPlan(plan *PatchPlan, reproPlan *Plan) error 
 			return fmt.Errorf("path %q escapes the repository root", rel)
 		}
 
-		// (b) Test-file guard: fix must not touch test files.
-		if strings.HasSuffix(clean, "_test.go") {
+		// (b) Test-file guard: fix must not touch test files (any language).
+		if isTestPath(clean) {
 			return fmt.Errorf("path %q is a test file; the fix must not modify or delete test files", rel)
 		}
 
@@ -498,6 +575,14 @@ func flagNeedsHuman(ctx context.Context, st *store.Store, f store.Finding, attem
 		return err
 	}
 	current.NeedsHuman = true
+	// Idempotence: re-running repro+patch over an already-flagged finding must
+	// not grow Reasoning with duplicate appends.
+	if strings.Contains(current.Reasoning, "PATCH-PROVER:") {
+		if _, err := st.UpsertFinding(ctx, current); err != nil {
+			return err
+		}
+		return nil
+	}
 	suffix := fmt.Sprintf(
 		"\n\nPATCH-PROVER: no plausible minimal fix after %d attempt(s) — possibly misdiagnosed; needs human review. Last failure: %s",
 		attempts, trunc(lastFailure, 300),

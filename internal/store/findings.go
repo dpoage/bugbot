@@ -109,8 +109,12 @@ func Fingerprint(lens, file string, line int, title string) string {
 
 // FindingFilter narrows ListFindings. Zero-valued fields are not applied.
 type FindingFilter struct {
-	Status    Status // exact status match
-	Tier      int    // exact tier match (1..3); 0 means any
+	Status Status // exact status match
+	// Tier is an exact tier match for 1..3. 0 is the "any tier" SENTINEL — it
+	// cannot select T0 (fix-witnessed) rows alone; those appear in unfiltered
+	// queries. Changing the sentinel would break existing callers; revisit if
+	// T0-only queries are ever needed.
+	Tier      int
 	CommitSHA string // findings anchored to a specific commit
 	Lens      string
 }
