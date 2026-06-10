@@ -93,9 +93,12 @@ func newDaemonCmd() *cobra.Command {
 				WithDaySpend(daySpendGetter(ctx, st))
 			progressSink := progress.NewMulti(progress.NewSlogRenderer(logger), snap)
 
-			sbOpts, sbErr := buildSandboxOpts(cfg)
+			sbOpts, sbDegraded, sbErr := buildSandboxOpts(cfg)
 			if sbErr != nil {
 				return sbErr
+			}
+			if sbDegraded {
+				logger.Warn(sandboxDegradedWarning)
 			}
 
 			deps := daemon.Deps{

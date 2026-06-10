@@ -103,9 +103,12 @@ func newScanCmd() *cobra.Command {
 			}
 			defer stopPane()
 
-			sandboxOpts, sandboxErr := buildSandboxOpts(cfg)
+			sandboxOpts, sandboxDegraded, sandboxErr := buildSandboxOpts(cfg)
 			if sandboxErr != nil {
 				return sandboxErr
+			}
+			if sandboxDegraded {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Warning: %s\n", sandboxDegradedWarning)
 			}
 
 			opts := funnel.Options{
@@ -182,31 +185,36 @@ func newScanCmd() *cobra.Command {
 	return cmd
 }
 
+// sandboxDegradedWarning is printed when verify.sandbox_exec is enabled but no
+// container runtime exists: the user asked for empirical refutation and must
+// be told it was dropped, mirroring the repro stage's skip notice.
+const sandboxDegradedWarning = "verify.sandbox_exec is enabled but no container runtime (podman/docker) was found on PATH; refuters will argue without sandbox execution"
+
 // buildSandboxOpts constructs a funnel.SandboxOpts from the config. When
-// verify.sandbox_exec is false (the default), or the container runtime is
-// unavailable, it returns a zero-value SandboxOpts (feature disabled).
-// An error is returned only when sandbox_exec is explicitly enabled but the
-// sandbox backend cannot be constructed.
-func buildSandboxOpts(cfg config.Config) (funnel.SandboxOpts, error) {
+// verify.sandbox_exec is false (the default) it returns a zero-value
+// SandboxOpts (feature disabled). When the flag is enabled but no container
+// runtime is available it also returns the zero value, with degraded=true so
+// the caller can warn the user (the scan still runs, just without the
+// empirical tool). An error is returned only when sandbox_exec is explicitly
+// enabled and the sandbox backend cannot be constructed.
+func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool, err error) {
 	if !cfg.Verify.SandboxExec {
-		return funnel.SandboxOpts{}, nil
+		return funnel.SandboxOpts{}, false, nil
 	}
 	runtime, ok := sandbox.Detect()
 	if !ok {
-		// Runtime unavailable; treat as disabled rather than hard-failing so
-		// the scan still runs without the empirical tool.
-		return funnel.SandboxOpts{}, nil
+		return funnel.SandboxOpts{}, true, nil
 	}
 	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image)
 	if err != nil {
-		return funnel.SandboxOpts{}, fmt.Errorf("build verify sandbox: %w", err)
+		return funnel.SandboxOpts{}, false, fmt.Errorf("build verify sandbox: %w", err)
 	}
 	return funnel.SandboxOpts{
 		Sandbox:     sb,
 		Enabled:     true,
 		MinSeverity: cfg.Verify.SandboxMinSeverity,
 		MaxExecs:    cfg.Verify.SandboxMaxExecs,
-	}, nil
+	}, false, nil
 }
 
 // runRepro runs the Reproduce stage over the run's findings (Tier-2 verified

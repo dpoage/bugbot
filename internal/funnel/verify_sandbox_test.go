@@ -4,25 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/store"
 )
 
 // --- Fake sandbox for funnel tests ----------------------------------------
 
 // funnelFakeSandbox is a concurrency-safe fake sandbox for funnel-level tests.
-// It returns a scripted result and records calls.
+// It returns a scripted result and records calls. The counter is atomic so the
+// fake stays safe under parallel candidates / multiple refuters.
 type funnelFakeSandbox struct {
 	result sandbox.Result
-	calls  int
+	calls  atomic.Int32
 }
 
 func (f *funnelFakeSandbox) Exec(_ context.Context, _ sandbox.Spec) (sandbox.Result, error) {
-	f.calls++
+	f.calls.Add(1)
 	return f.result, nil
 }
 
@@ -33,7 +36,7 @@ var _ sandbox.Sandbox = (*funnelFakeSandbox)(nil)
 // on the first completion (simulating a refuter that issues sandbox_exec),
 // then on the second completion (tool result feed-back) returns the verdict.
 type toolCallClient struct {
-	mu           int // call counter (not actual mutex; tests run serially)
+	callCount    atomic.Int32
 	toolCallBody string
 	verdictBody  string
 	inUsage      int64
@@ -52,7 +55,7 @@ func newToolCallClient(toolCallBody, verdictBody string) *toolCallClient {
 func (c *toolCallClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
 
 func (c *toolCallClient) Complete(_ context.Context, req llm.Request) (llm.Response, error) {
-	c.mu++
+	c.callCount.Add(1)
 	usage := llm.Usage{InputTokens: c.inUsage, OutputTokens: c.outUsage}
 
 	// On first call (no tool-result messages yet), emit a sandbox_exec tool call.
@@ -264,7 +267,7 @@ func TestSweep_SandboxExec_StatsAggregated(t *testing.T) {
 	}
 
 	// The sandbox must have been called.
-	if sb.calls == 0 {
+	if sb.calls.Load() == 0 {
 		t.Error("sandbox was never called; expected at least one sandbox_exec")
 	}
 
@@ -316,8 +319,8 @@ func TestSweep_SandboxExec_AbsentForBelowThreshold(t *testing.T) {
 	}
 
 	// The sandbox must NEVER be called for below-threshold candidates.
-	if sb.calls > 0 {
-		t.Errorf("sandbox was called %d times for a low-severity candidate; want 0", sb.calls)
+	if sb.calls.Load() > 0 {
+		t.Errorf("sandbox was called %d times for a low-severity candidate; want 0", sb.calls.Load())
 	}
 	if res.Stats.SandboxExecs != 0 {
 		t.Errorf("Stats.SandboxExecs = %d, want 0", res.Stats.SandboxExecs)
@@ -373,5 +376,77 @@ func TestVerifierSystemPrompt_WithoutSandbox(t *testing.T) {
 	}
 	if p != verifierSystemBase {
 		t.Error("system prompt without sandbox must equal verifierSystemBase verbatim")
+	}
+}
+
+// toolCaptureClient records the tool names offered on each completion and
+// returns a fixed not-refuted verdict. It lets tests pin which tools a stage
+// exposes without exercising any of them.
+type toolCaptureClient struct {
+	mu        sync.Mutex
+	toolNames [][]string
+}
+
+func (c *toolCaptureClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+
+func (c *toolCaptureClient) Complete(_ context.Context, req llm.Request) (llm.Response, error) {
+	names := make([]string, 0, len(req.Tools))
+	for _, td := range req.Tools {
+		names = append(names, td.Name)
+	}
+	c.mu.Lock()
+	c.toolNames = append(c.toolNames, names)
+	c.mu.Unlock()
+	return llm.Response{Text: notRefutedJSON, StopReason: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}}, nil
+}
+
+// TestVerifyFinding_NoSandboxTool pins the deliberate omission documented in
+// VerifyFinding: daemon re-verification never offers sandbox_exec, even with
+// the feature enabled and a high-severity finding. Re-verify runs on every
+// open finding every code change; sandbox spend belongs to initial verify.
+func TestVerifyFinding_NoSandboxTool(t *testing.T) {
+	ctx := context.Background()
+	_, repo := openFixture(t)
+
+	capture := &toolCaptureClient{}
+	f := &Funnel{
+		repo:    repo,
+		clients: RoleClients{Verifier: capture},
+		opts: Options{
+			Refuters: 1,
+			SandboxOpts: SandboxOpts{
+				Enabled:     true,
+				Sandbox:     &funnelFakeSandbox{},
+				MinSeverity: "high",
+				MaxExecs:    3,
+			},
+		},
+		lenses: selectLenses(nil),
+	}
+
+	fnd := store.Finding{
+		Fingerprint: "fp-test",
+		Title:       "nil deref",
+		Severity:    "critical",
+		File:        "bug.go",
+		Line:        10,
+		Lens:        "nil-safety/error-handling",
+	}
+	refuted, _, err := f.VerifyFinding(ctx, fnd)
+	if err != nil {
+		t.Fatalf("VerifyFinding: %v", err)
+	}
+	if refuted {
+		t.Fatalf("scripted not-refuted verdict should not refute")
+	}
+	if len(capture.toolNames) == 0 {
+		t.Fatal("verifier client was never called")
+	}
+	for i, names := range capture.toolNames {
+		for _, n := range names {
+			if n == "sandbox_exec" {
+				t.Errorf("completion %d offered sandbox_exec to a re-verification refuter: %v", i, names)
+			}
+		}
 	}
 }

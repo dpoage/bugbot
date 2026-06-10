@@ -266,9 +266,12 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 	_, _ = fmt.Fprintf(p.out, "Reviewing PR #%d: %d changed file(s) (%s..%s)\n",
 		p.prNumber, len(changed), shortSHA(pr.BaseSHA), shortSHA(pr.HeadSHA))
 
-	sandboxOpts, sandboxErr := buildSandboxOpts(p.cfg)
+	sandboxOpts, sandboxDegraded, sandboxErr := buildSandboxOpts(p.cfg)
 	if sandboxErr != nil {
 		return nil, sandboxErr
+	}
+	if sandboxDegraded {
+		_, _ = fmt.Fprintf(p.out, "Warning: %s\n", sandboxDegradedWarning)
 	}
 
 	opts := funnel.Options{
