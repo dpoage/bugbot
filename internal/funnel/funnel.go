@@ -53,7 +53,24 @@ const (
 	// DefaultChunkSize is the number of target files handed to a single finder
 	// invocation. Chunking keeps each finder's context focused and lets large
 	// repos parallelize within a lens.
-	DefaultChunkSize = 30
+	//
+	// Sized so a finder can plausibly read every file in a chunk and still emit
+	// JSON within DefaultMaxIterations (20). Calibration found 30 files structurally
+	// impossible inside 20 turns: the agent ran out of iterations mid-read on a
+	// 16-file chunk. With one read per file plus a few cross-reference lookups, a
+	// budget of ~8 files leaves ~12 turns of headroom before forced finalization,
+	// which keeps each finder coherent rather than perpetually truncated. Forced
+	// finalization (see agent.RunJSON) is the safety net; the smaller chunk is the
+	// structural fix so finalization is the exception, not the norm.
+	DefaultChunkSize = 8
+
+	// DefaultMaxOutputTokens caps each finder/verifier completion's VISIBLE output.
+	// Reasoning models (e.g. MiniMax M3) spend most of their completion allowance
+	// inside <think> blocks; without an explicit, generous cap the provider default
+	// can be exhausted before any JSON is emitted, yielding "empty model output".
+	// 8k visible tokens comfortably fits a candidate list or a refutation verdict
+	// with reasoning headroom to spare.
+	DefaultMaxOutputTokens = 8192
 
 	// softBudgetFraction is the fraction of TokenBudget past which the run
 	// degrades to the highest-yield lenses and a single refuter.
@@ -231,6 +248,27 @@ type Stats struct {
 	DroppedDuplicate     int `json:"dropped_duplicate"`
 	DroppedSuppressed    int `json:"dropped_suppressed"`
 	DroppedOutOfScope    int `json:"dropped_out_of_scope"`
+	// FinderRuns is the number of finder (lens, chunk) agents that actually
+	// launched (i.e. were not skipped by budget degradation/stop). FinderFailures
+	// is how many of those produced NO parseable output even after the repair
+	// round-trip — their findings are lost, not absent. A scan with
+	// FinderFailures > 0 must never report a bare "No findings": that result is
+	// untrustworthy. See internal/cli/scan.go and reliabilityWarning.
+	FinderRuns     int `json:"finder_runs"`
+	FinderFailures int `json:"finder_failures"`
+	// FinderBudgetStopped counts finders that ran but were truncated by a budget
+	// limit (their own token budget or the shared budget pool) before producing
+	// parseable output. These are deliberate budget stops, NOT reliability
+	// failures: they are excluded from FinderFailures so a budget-limited scan is
+	// never misreported as having broken finders. Their partial coverage is noted
+	// under Result.Skipped instead.
+	FinderBudgetStopped int `json:"finder_budget_stopped,omitempty"`
+	// VerifierRuns / VerifierFailures mirror the above for refuter agents. A
+	// refuter that fails to parse is conservatively treated as "could not refute"
+	// (it cannot silently kill a candidate), but the failure is still counted so
+	// the verification result's reliability is visible.
+	VerifierRuns     int `json:"verifier_runs"`
+	VerifierFailures int `json:"verifier_failures"`
 	// InputTokens / OutputTokens is the run's total token spend. InputTokens
 	// includes cached tokens (the llm.Usage convention).
 	InputTokens  int64 `json:"input_tokens"`
@@ -240,6 +278,21 @@ type Stats struct {
 	// cache savings.
 	CacheReadTokens     int64 `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int64 `json:"cache_creation_tokens,omitempty"`
+}
+
+// FinderReliable reports whether the finder stage produced trustworthy coverage:
+// at least one finder ran and none of the finders that ran failed to parse. When
+// false, an empty or sparse finding set is suspect — some lens's output was lost,
+// not genuinely clean.
+func (s Stats) FinderReliable() bool {
+	return s.FinderRuns > 0 && s.FinderFailures == 0
+}
+
+// MostFindersFailed reports whether a strict majority of the finders that ran
+// failed to produce parseable output. A scan in this state has effectively no
+// signal and should exit nonzero so automation does not treat it as "clean".
+func (s Stats) MostFindersFailed() bool {
+	return s.FinderRuns > 0 && s.FinderFailures*2 > s.FinderRuns
 }
 
 // Result summarizes a completed funnel run for the caller.

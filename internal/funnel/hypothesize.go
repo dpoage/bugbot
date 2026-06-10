@@ -44,9 +44,12 @@ func (f *Funnel) hypothesize(ctx context.Context, finder llm.Client, targets []s
 	}
 
 	var (
-		mu        sync.Mutex
-		collected []Candidate
-		firstErr  error
+		mu              sync.Mutex
+		collected       []Candidate
+		finderRuns      int
+		finderFailed    int
+		finderBudgetCut int
+		firstErr        error
 	)
 	sem := make(chan struct{}, f.opts.MaxParallel)
 	var wg sync.WaitGroup
@@ -89,13 +92,34 @@ func (f *Funnel) hypothesize(ctx context.Context, finder llm.Client, targets []s
 				}
 			}
 
-			cands, err := f.runFinder(ctx, finder, tools, u.lens, u.files, budget)
+			cands, status, err := f.runFinder(ctx, finder, tools, u.lens, u.files, budget)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
 				if firstErr == nil {
 					firstErr = err
 				}
+				return
+			}
+			finderRuns++
+			switch status {
+			case finderParseFailed:
+				finderFailed++
+				msg := fmt.Sprintf("finder lens %q produced no parseable output on %d file(s) — its findings (if any) are LOST, not absent", u.lens.Name, len(u.files))
+				f.note(result, msg)
+				progress.Emit(f.opts.Progress, progress.Event{
+					Kind: progress.KindLensFailed, Role: progress.RoleFinder, Label: u.lens.Name, Message: msg,
+				})
+				return
+			case finderBudgetStopped:
+				// A run truncated by the shared budget pool (or its own token
+				// budget) whose partial output does not parse is a budget stop, NOT
+				// a reliability problem: the lens did not "fail to parse", it was cut
+				// short on purpose. Count it separately and note it under Skipped so a
+				// budget-limited scan is never misreported as having broken finders.
+				finderBudgetCut++
+				msg := fmt.Sprintf("finder lens %q stopped by budget on %d file(s) before emitting parseable output — partial coverage", u.lens.Name, len(u.files))
+				f.note(result, msg)
 				return
 			}
 			collected = append(collected, cands...)
@@ -106,15 +130,43 @@ func (f *Funnel) hypothesize(ctx context.Context, finder llm.Client, targets []s
 	if firstErr != nil {
 		return nil, firstErr
 	}
+	mu.Lock()
+	result.Stats.FinderRuns = finderRuns
+	result.Stats.FinderFailures = finderFailed
+	result.Stats.FinderBudgetStopped = finderBudgetCut
+	mu.Unlock()
 	return collected, nil
 }
+
+// finderStatus classifies a finder run's parse outcome so the funnel can tell a
+// genuine reliability failure apart from a deliberate budget stop.
+type finderStatus int
+
+const (
+	// finderOK means the finder produced parseable candidates.
+	finderOK finderStatus = iota
+	// finderParseFailed means the finder ran to a non-budget stop but produced no
+	// parseable JSON even after the repair round-trip — its findings are LOST.
+	finderParseFailed
+	// finderBudgetStopped means the finder was truncated by the shared budget
+	// pool or its own token budget; an unparseable partial result here is an
+	// expected budget stop, not a reliability failure.
+	finderBudgetStopped
+)
 
 // runFinder executes a single finder agent for one lens over one chunk and maps
 // its JSON output to Candidates tagged with the lens. The agent's limits are
 // derived from the shared budget pool at launch (remaining-pool allowance plus a
 // pre-turn budget check), so a finder launched late gets only the headroom left
 // and one already in flight stops at its next turn once the pool is exhausted.
-func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, l Lens, files []string, budget *budgetState) ([]Candidate, error) {
+//
+// The finderStatus return distinguishes a parse failure (the finder ran but
+// produced no parseable JSON even after the repair round-trip, so its result is
+// LOST, not a clean "found nothing") from a budget stop (the run was truncated
+// by the budget pool / token budget, so an unparseable partial is expected). The
+// funnel surfaces parse failures so a scan never silently reports "No findings"
+// when a lens actually failed, while budget stops are accounted separately.
+func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, l Lens, files []string, budget *budgetState) ([]Candidate, finderStatus, error) {
 	sink := f.opts.Progress
 	start := time.Now()
 	progress.Emit(sink, progress.Event{
@@ -123,6 +175,7 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 
 	runner := agent.NewRunner(finder, tools, finderSystemPrompt(l),
 		agent.WithLimits(budget.runnerLimits(f.opts.FinderLimits)),
+		agent.WithMaxTokens(DefaultMaxOutputTokens),
 		f.transcriptOption(),
 	)
 
@@ -134,9 +187,18 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 		// rather than aborting the whole scan: one lens/chunk failing must not
 		// sink the others. Context cancellation is the exception — propagate it.
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, finderOK, ctx.Err()
 		}
-		return nil, nil
+		// Distinguish a genuine parse failure from a budget stop. If the run was
+		// truncated by the shared budget pool or its own token budget, an
+		// unparseable partial is the expected consequence of stopping early, not a
+		// reliability problem — classify it as a budget stop so it does not inflate
+		// the finder-failure count. Otherwise its findings are LOST: report a parse
+		// failure so a scan never silently prints "No findings" when a lens broke.
+		if budgetStopped(outcome) {
+			return nil, finderBudgetStopped, nil
+		}
+		return nil, finderParseFailed, nil
 	}
 
 	cands := make([]Candidate, 0, len(out.Candidates))
@@ -152,7 +214,18 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 			Confidence:  normalizeConfidence(rc.Confidence),
 		})
 	}
-	return cands, nil
+	return cands, finderOK, nil
+}
+
+// budgetStopped reports whether outcome was truncated by a budget limit (the
+// run's own token budget or the shared cross-runner budget pool), as opposed to
+// the iteration cap or no truncation at all. An unparseable result from such a
+// run is an expected budget stop, not a finder reliability failure.
+func budgetStopped(o *agent.Outcome) bool {
+	if o == nil || !o.Truncated {
+		return false
+	}
+	return o.TruncationReason == agent.TruncTokenBudget || o.TruncationReason == agent.TruncBudgetPool
 }
 
 // degradedLensNames returns the set of lens names that survive budget

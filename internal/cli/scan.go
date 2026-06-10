@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -24,9 +25,12 @@ import (
 // snapshot Sweep, or a blast-radius-scoped Targeted scan when --since is given),
 // and prints a human summary of the findings, per-stage counts, and spend.
 //
-// Exit code is always 0 for now: findings are surfaced in the output (report
-// sinks come in a later stage). The findings count is printed so callers can
-// detect "found something" by parsing the summary.
+// Exit code is 0 on a reliable run (regardless of whether findings were found),
+// and nonzero only when the scan is untrustworthy — specifically when most
+// finder agents produced no parseable output (Stats.MostFindersFailed). The
+// findings count is printed so callers can detect "found something" by parsing
+// the summary, and a prominent reliability warning is printed whenever any finder
+// failed so an empty result is never mistaken for a clean bill of health.
 func newScanCmd() *cobra.Command {
 	var (
 		target      string
@@ -146,6 +150,17 @@ func newScanCmd() *cobra.Command {
 					return err
 				}
 			}
+
+			// Exit nonzero when most finders failed to parse: automation must not
+			// treat such a run as a clean pass. The summary (with its prominent
+			// reliability warning) is already printed; we suppress cobra's usage and
+			// error re-print so the warning stands as the explanation.
+			if res.Stats.MostFindersFailed() {
+				cmd.SilenceUsage = true
+				cmd.SilenceErrors = true
+				return fmt.Errorf("scan unreliable: %d of %d finder agents produced no parseable output",
+					res.Stats.FinderFailures, res.Stats.FinderRuns)
+			}
 			return nil
 		},
 	}
@@ -230,8 +245,17 @@ func printReproSummary(out io.Writer, s *repro.Summary) {
 func printResult(out io.Writer, res *funnel.Result) {
 	_, _ = fmt.Fprintf(out, "\nScan complete (commit %s)\n", shortSHA(res.Commit))
 
+	// Reliability gate: a scan where any finder produced no parseable output has
+	// an untrustworthy result. "No findings" then means "we don't know", not
+	// "clean" — so we must NEVER print a bare "No findings" in that case.
+	reliable := res.Stats.FinderReliable()
+
 	if len(res.Findings) == 0 {
-		_, _ = fmt.Fprintln(out, "\nNo findings.")
+		if reliable {
+			_, _ = fmt.Fprintln(out, "\nNo findings.")
+		} else {
+			_, _ = fmt.Fprintln(out, "\nNo findings were RECOVERED — but this scan is NOT a clean bill of health (see warning below).")
+		}
 	} else {
 		_, _ = fmt.Fprintf(out, "\n%d finding(s):\n\n", len(res.Findings))
 		tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
@@ -255,12 +279,46 @@ func printResult(out io.Writer, res *funnel.Result) {
 			s.CacheReadTokens, s.CacheCreationTokens)
 	}
 
+	if s.FinderFailures > 0 || s.VerifierFailures > 0 {
+		_, _ = fmt.Fprintf(out, "Agent failures: finders=%d/%d verifiers=%d/%d produced no parseable output\n",
+			s.FinderFailures, s.FinderRuns, s.VerifierFailures, s.VerifierRuns)
+	}
+
 	if res.Degraded || res.Stopped {
 		_, _ = fmt.Fprintf(out, "Budget: degraded=%v stopped=%v\n", res.Degraded, res.Stopped)
 	}
 	for _, note := range res.Skipped {
 		_, _ = fmt.Fprintf(out, "  skipped: %s\n", note)
 	}
+
+	// A prominent, unmissable reliability warning when any finder failed to parse.
+	// This is the trust fix: a silent "No findings" on a broken scan is worse than
+	// a loud "we don't actually know".
+	if !res.Stats.FinderReliable() {
+		_, _ = fmt.Fprintf(out, "\n%s\n", reliabilityWarning(res.Stats))
+	}
+}
+
+// reliabilityWarning renders the prominent banner shown when the finder stage was
+// not fully reliable (no finders ran, or some produced no parseable output). It
+// makes explicit that an empty/sparse finding set is untrustworthy.
+func reliabilityWarning(s funnel.Stats) string {
+	var b strings.Builder
+	b.WriteString("!!! SCAN RELIABILITY WARNING !!!\n")
+	switch {
+	case s.FinderRuns == 0:
+		b.WriteString("  No finder agents ran (the scan covered no files or all were skipped).\n")
+		b.WriteString("  This result says NOTHING about the code's correctness.")
+	case s.MostFindersFailed():
+		fmt.Fprintf(&b, "  %d of %d finder agents produced NO parseable output.\n", s.FinderFailures, s.FinderRuns)
+		b.WriteString("  Most lenses failed: this scan has effectively no signal. Treat any\n")
+		b.WriteString("  'no findings' as UNKNOWN, not clean. Re-run, and check model/output-token settings.")
+	default:
+		fmt.Fprintf(&b, "  %d of %d finder agents produced NO parseable output.\n", s.FinderFailures, s.FinderRuns)
+		b.WriteString("  Those lenses' findings (if any) were LOST. Coverage is incomplete —\n")
+		b.WriteString("  do not read a low finding count as a clean bill of health.")
+	}
+	return b.String()
 }
 
 // shortSHA abbreviates a commit SHA for display, leaving short/empty values

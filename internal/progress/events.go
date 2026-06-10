@@ -56,6 +56,10 @@ const (
 	// KindFindingVerified reports a candidate that survived adversarial
 	// verification (a Tier-2 survivor).
 	KindFindingVerified Kind = "finding_verified"
+	// KindLensFailed reports a finder (or refuter) agent that produced no
+	// parseable output: its findings, if any, are LOST. Renderers should surface
+	// this prominently — it means an empty result is untrustworthy, not clean.
+	KindLensFailed Kind = "lens_failed"
 	// KindScanFinished marks the end of a funnel run and carries the stats
 	// summary.
 	KindScanFinished Kind = "scan_finished"
@@ -93,6 +97,10 @@ type Counts struct {
 	Triaged      int `json:"triaged,omitempty"`
 	Verified     int `json:"verified,omitempty"`
 	Killed       int `json:"killed,omitempty"`
+	// FinderFailures is how many finder agents produced no parseable output this
+	// run. Non-zero means the result is suspect: some lens's findings were lost,
+	// so an empty/sparse finding set is not a clean bill of health.
+	FinderFailures int `json:"finder_failures,omitempty"`
 }
 
 // Event is one progress record. It is deliberately flat and JSON-serializable:

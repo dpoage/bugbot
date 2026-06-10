@@ -40,11 +40,13 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 	}
 
 	var (
-		mu        sync.Mutex
-		survivors []verified
-		orphaned  []Candidate
-		killed    int
-		firstErr  error
+		mu            sync.Mutex
+		survivors     []verified
+		orphaned      []Candidate
+		killed        int
+		refuterRuns   int
+		refuterFailed int
+		firstErr      error
 	)
 	sem := make(chan struct{}, f.opts.MaxParallel)
 	var wg sync.WaitGroup
@@ -94,7 +96,7 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindAgentStarted, Role: progress.RoleVerifier, Label: c.Title,
 			})
-			verdicts, tokens, stopped, err := f.runRefuters(ctx, verifier, tools, c, nRefuters, budget)
+			verdicts, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, tools, c, nRefuters, budget)
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindAgentFinished, Role: progress.RoleVerifier, Label: c.Title,
 				Tokens: tokens, Duration: time.Since(start), Err: errString(err),
@@ -110,7 +112,9 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 			// The pool ran dry while this candidate was being challenged: its
 			// verdicts are incomplete, so we cannot trust a "survived" or "killed"
 			// conclusion. Treat it as budget-orphaned (T3 suspected) rather than
-			// silently passing a half-verified candidate as a T2 survivor.
+			// silently passing a half-verified candidate as a T2 survivor. A budget
+			// stop is not a reliability failure, so the partial vote is NOT folded
+			// into the refuter run/failure stats.
 			if stopped {
 				budget.stopped.Store(true)
 				orphaned = append(orphaned, c)
@@ -118,6 +122,14 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 				f.note(result, msg)
 				progress.Emit(sink, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
 				return
+			}
+			refuterRuns += len(verdicts)
+			refuterFailed += nFailed
+			if nFailed > 0 {
+				progress.Emit(sink, progress.Event{
+					Kind: progress.KindLensFailed, Role: progress.RoleVerifier, Label: c.Title,
+					Message: fmt.Sprintf("%d/%d refuter(s) produced no parseable verdict for %q — treated as 'could not refute'", nFailed, len(verdicts), c.Title),
+				})
 			}
 			if majorityRefuted(verdicts) {
 				killed++
@@ -137,6 +149,10 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 	if firstErr != nil {
 		return nil, 0, nil, firstErr
 	}
+	mu.Lock()
+	result.Stats.VerifierRuns = refuterRuns
+	result.Stats.VerifierFailures = refuterFailed
+	mu.Unlock()
 	return survivors, killed, orphaned, nil
 }
 
@@ -146,23 +162,26 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 // precision-conservative default: a broken refuter must not be able to silently
 // kill a candidate. Context cancellation propagates.
 //
-// The returned stopped flag is true when a refuter run was cut short by the
-// shared budget pool (TruncBudgetPool): once the pool is dry, the remaining
-// votes for this candidate would be untrustworthy, so the caller treats the
-// candidate as budget-orphaned rather than reaching a verdict on a partial vote.
-// Limits are derived from the pool at launch so a refuter launched late gets the
-// remaining headroom and one in flight stops at its next turn.
-func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, c Candidate, n int, budget *budgetState) ([]refutation, int64, bool, error) {
+// The returned int counts refuters that produced no parseable verdict (a
+// reliability signal). The returned stopped flag is true when a refuter run was
+// cut short by the shared budget pool (TruncBudgetPool): once the pool is dry,
+// the remaining votes for this candidate would be untrustworthy, so the caller
+// treats the candidate as budget-orphaned rather than reaching a verdict on a
+// partial vote. Limits are derived from the pool at launch so a refuter launched
+// late gets the remaining headroom and one in flight stops at its next turn.
+func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, c Candidate, n int, budget *budgetState) ([]refutation, int64, int, bool, error) {
 	runner := agent.NewRunner(verifier, tools, verifierSystemBase,
 		agent.WithLimits(budget.runnerLimits(f.opts.VerifierLimits)),
+		agent.WithMaxTokens(DefaultMaxOutputTokens),
 		f.transcriptOption(),
 	)
 
 	var tokens int64
+	var failed int
 	verdicts := make([]refutation, 0, n)
 	for i := 0; i < n; i++ {
 		if err := ctx.Err(); err != nil {
-			return nil, tokens, false, err
+			return nil, tokens, failed, false, err
 		}
 		var v refutation
 		outcome, err := runner.RunJSON(ctx, verifierTask(c), refutationSchema, &v)
@@ -171,19 +190,21 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 			// A budget-pool stop means this refuter never got to complete its
 			// challenge; stop voting and signal the caller to orphan the candidate.
 			if outcome.TruncationReason == agent.TruncBudgetPool {
-				return verdicts, tokens, true, nil
+				return verdicts, tokens, failed, true, nil
 			}
 		}
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, tokens, false, ctx.Err()
+				return nil, tokens, failed, false, ctx.Err()
 			}
-			// Unparseable verdict => could not refute.
+			// Unparseable verdict => could not refute. Counted so the verification's
+			// reliability is visible, but it never silently kills a candidate.
+			failed++
 			v = refutation{Refuted: false, Reasoning: "refuter produced no parseable verdict", Confidence: "low"}
 		}
 		verdicts = append(verdicts, v)
 	}
-	return verdicts, tokens, false, nil
+	return verdicts, tokens, failed, false, nil
 }
 
 // errString returns err.Error() or "" for a nil error, for embedding in a

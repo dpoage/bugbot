@@ -116,6 +116,15 @@ type Outcome struct {
 	Iterations int
 	// Usage is cumulative token consumption across the run.
 	Usage llm.Usage
+	// Finalized reports whether forced finalization fired: the loop reserved its
+	// last turn, injected the finalization prompt, and took one final completion
+	// instead of returning dangling exploration prose. See [WithFinalization].
+	Finalized bool
+	// LastStopReason is the stop reason of the final completion in the run. It is
+	// StopMaxTokens when the model's last output was truncated at the token cap,
+	// which JSON-expecting callers use to distinguish "truncated mid-answer" from
+	// a genuine parse failure.
+	LastStopReason llm.StopReason
 	// Transcript is the full ordered record of the run. Never nil.
 	Transcript *Transcript
 }

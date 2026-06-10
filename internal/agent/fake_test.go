@@ -64,6 +64,16 @@ func textResp(text string, in, out int64) scriptStep {
 	}}
 }
 
+// maxTokensResp builds a text response that stopped at the output token cap
+// (StopMaxTokens), e.g. a JSON answer cut off mid-object.
+func maxTokensResp(text string, in, out int64) scriptStep {
+	return scriptStep{resp: llm.Response{
+		Text:       text,
+		StopReason: llm.StopMaxTokens,
+		Usage:      llm.Usage{InputTokens: in, OutputTokens: out},
+	}}
+}
+
 // toolResp builds a tool-use response requesting a single tool call.
 func toolResp(id, name, args string, in, out int64) scriptStep {
 	return scriptStep{resp: llm.Response{
