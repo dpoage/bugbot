@@ -255,8 +255,8 @@ type Result struct {
 	// Degraded reports whether the run crossed the soft budget and reduced its
 	// lens set / refuter count.
 	Degraded bool
-	// Stopped reports whether the run hit the hard budget and stopped launching
-	// new agents.
+	// Stopped reports whether the run hit the hard budget: it stopped launching
+	// new agents and truncated in-flight ones at their next turn boundary.
 	Stopped bool
 	// Skipped lists human-readable notes about work the run deliberately did not
 	// do (degradation, hard-budget stops). Never silent truncation.
@@ -378,8 +378,10 @@ func (b *budgetState) runnerLimits(base agent.Limits) agent.Limits {
 	out := base
 	out.BudgetCheck = b.pool.Check
 	// Clamp the per-run allowance to the remaining pool. A negative base budget
-	// means "unlimited per run"; we still cap it at the pool's remainder so a
-	// single late runner cannot overshoot the run-spanning ceiling on its own.
+	// means "unlimited per run"; we still cap it at the pool's remainder. Note
+	// this clamp only bounds a SOLO or late-launched runner: N runners launched
+	// concurrently each read the same remainder, so concurrent overshoot is
+	// bounded by the shared BudgetCheck hook above, not by this clamp.
 	rem := b.pool.Remaining()
 	// base.TokenBudget: 0 means "agent default", negative means "unlimited per
 	// run". In both cases, and whenever the pool remainder is the tighter bound,
@@ -402,7 +404,7 @@ func (b *budgetState) runnerLimits(base agent.Limits) agent.Limits {
 // overSoft reports whether cumulative spend has crossed the soft (degradation)
 // threshold. Always false when the budget is unlimited.
 func (b *budgetState) overSoft() bool {
-	if b.budget <= 0 {
+	if b.budget <= 0 || b.rec == nil {
 		return false
 	}
 	return b.rec.total()*softBudgetDenom > b.budget*softBudgetNumer
@@ -411,7 +413,7 @@ func (b *budgetState) overSoft() bool {
 // overHard reports whether cumulative spend has reached or exceeded the budget.
 // Always false when the budget is unlimited.
 func (b *budgetState) overHard() bool {
-	if b.budget <= 0 {
+	if b.budget <= 0 || b.rec == nil {
 		return false
 	}
 	return b.rec.total() >= b.budget

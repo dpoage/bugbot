@@ -382,6 +382,87 @@ func TestDaemonAutoCloseOnFileRemoved(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 4b. T3 promotion: a budget-orphaned tier-3 finding that survives a full
+//     refuter vote on re-verification is promoted to tier 2.
+// ---------------------------------------------------------------------------
+
+func TestDaemonReverifyPromotesSurvivingT3(t *testing.T) {
+	fr := newFixtureRepo(t)
+	fr.write(fixtureFile, "package p\n\nfunc f(x *int) int { return *x }\n")
+	base := fr.commit("init")
+
+	st := openStore(t)
+	if _, err := st.BeginScanRun(context.Background(), store.ScanSweep, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertFileStates(context.Background(), []store.FileState{{
+		Path: lastSeenSentinel, ContentHash: base, LastScannedCommit: base,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed a tier-3 suspected finding (verification skipped at budget stop)
+	// anchored to a stale hash so the next change re-verifies it.
+	fp := store.Fingerprint("nil-deref", fixtureFile, fixtureLine, "possible nil dereference")
+	seeded, err := st.UpsertFinding(context.Background(), store.Finding{
+		Fingerprint: fp,
+		Title:       "possible nil dereference",
+		Severity:    "high",
+		Tier:        3,
+		Status:      store.StatusOpen,
+		Lens:        "nil-deref",
+		File:        fixtureFile,
+		Line:        fixtureLine,
+		CommitSHA:   base,
+		FileHash:    "deadbeef", // mismatched on purpose so re-verify engages
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Touch the implicated file so polling detects a change; the refuters vote
+	// "not refuted", so the finding survives the full verification it never got.
+	fr.write(fixtureFile, "package p\n\nfunc f(x *int) int { return *x } // touched\n")
+	fr.commit("touch bug.go")
+
+	llmc := newFakeLLM(emptyJSON, notRefutedJSON)
+	clk := newFakeClock(mustTime(t, testStart))
+	cfg := DaemonConfig{
+		PollInterval:   10 * time.Millisecond,
+		SweepInterval:  time.Hour,
+		PerCycleTokens: 1_000_000,
+		PerDayTokens:   10_000_000,
+	}
+	d, _ := buildDaemon(t, fr, st, llmc, cfg, clk)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runInBackground(ctx, d)
+
+	if !clk.fire(ctx, t) {
+		t.Fatal("clock fire failed")
+	}
+
+	waitFor(t, func() bool {
+		f, gerr := st.GetFinding(context.Background(), seeded.ID)
+		return gerr == nil && f.Tier == 2
+	})
+
+	f, err := st.GetFinding(context.Background(), seeded.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Tier != 2 || f.Status != store.StatusOpen {
+		t.Fatalf("expected open tier-2 after surviving re-verification, got tier=%d status=%q", f.Tier, f.Status)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 5. Graceful shutdown: cancelling mid-idle returns from Run promptly.
 // ---------------------------------------------------------------------------
 

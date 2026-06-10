@@ -62,8 +62,9 @@ type Limits struct {
 	// call. It lets a shared budget pool (see BudgetPool) stop an in-flight run
 	// at the next turn boundary once a run-spanning ceiling is hit, independent
 	// of this run's own per-run TokenBudget. Returning ErrBudgetExhausted stops
-	// the run cleanly with TruncBudgetPool; any other non-nil error also stops
-	// it cleanly with TruncBudgetPool. The hook MUST be read-only with respect
+	// the run cleanly with TruncBudgetPool; any other non-nil error is treated
+	// as an infrastructure failure and returned from Run rather than being
+	// misreported as a budget stop. The hook MUST be read-only with respect
 	// to the request (it must not mutate system/tools/history), so it cannot
 	// break request prefix stability. It may be invoked concurrently across
 	// parallel runs, so it must be safe for concurrent use.

@@ -119,9 +119,14 @@ func (d *Daemon) reverifyOpenFindings(ctx context.Context) int {
 		}
 
 		// Survived: re-anchor to the new content hash (and refresh the trace) so we
-		// don't re-verify the same change repeatedly.
+		// don't re-verify the same change repeatedly. A tier-3 suspected finding
+		// (verification originally skipped at budget hard-stop) has now passed a
+		// full refuter vote, which is exactly what tier 2 means — promote it.
 		fnd.FileHash = curHash
 		fnd.Reasoning = reasoning
+		if fnd.Tier == 3 {
+			fnd.Tier = 2
+		}
 		if _, uerr := d.store.UpsertFinding(ctx, fnd); uerr != nil {
 			d.log.Error("daemon: reverify: re-anchor failed", "fingerprint", fnd.Fingerprint, "err", uerr)
 		} else {
