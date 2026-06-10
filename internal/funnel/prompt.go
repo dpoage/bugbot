@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/dpoage/bugbot/internal/store"
 )
 
 // finderSystemBase is the shared finder system prompt. Every lens appends its
@@ -79,13 +81,27 @@ func finderSystemPrompt(l Lens) string {
 }
 
 // finderTask builds the per-chunk finder task message naming the target files.
-func finderTask(files []string) string {
+// When leads is non-empty, a CROSS-LENS LEADS section is appended carrying the
+// suspicions posted by other lenses' agents in earlier runs. The leads are
+// ordered deterministically (by created_at,id — guaranteed by PendingLeads) so
+// the task message is stable across retries.
+func finderTask(files []string, leads []store.Lead) string {
 	var b strings.Builder
 	b.WriteString("Audit these target files for bugs in your assigned focus area. ")
 	b.WriteString("Read each one (and any related code you need) before reporting.\n\n")
 	b.WriteString("TARGET FILES:\n")
 	for _, f := range files {
 		fmt.Fprintf(&b, "  - %s\n", f)
+	}
+	if len(leads) > 0 {
+		b.WriteString("\nCROSS-LENS LEADS (suspicions posted by other lenses' agents in earlier runs; investigate ones relevant to your focus, they may be wrong):\n")
+		for _, ld := range leads {
+			// The note is model-authored free text from a previous run; flatten
+			// newlines so a note can never fabricate extra lead lines or break
+			// out of this section's framing.
+			note := strings.Join(strings.Fields(ld.Note), " ")
+			fmt.Fprintf(&b, "  - from %s: %s:%d — %s\n", ld.PosterLens, ld.File, ld.Line, note)
+		}
 	}
 	return b.String()
 }

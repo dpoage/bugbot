@@ -331,6 +331,9 @@ func printResult(out io.Writer, res *funnel.Result) {
 	if s.SandboxExecs > 0 {
 		_, _ = fmt.Fprintf(out, "Sandbox: execs=%d total_ms=%d\n", s.SandboxExecs, s.SandboxExecMillis)
 	}
+	if s.LeadsPosted > 0 || s.LeadsConsumed > 0 {
+		_, _ = fmt.Fprintf(out, "Leads: posted=%d consumed=%d\n", s.LeadsPosted, s.LeadsConsumed)
+	}
 
 	if res.Degraded || res.Stopped {
 		_, _ = fmt.Fprintf(out, "Budget: degraded=%v stopped=%v\n", res.Degraded, res.Stopped)

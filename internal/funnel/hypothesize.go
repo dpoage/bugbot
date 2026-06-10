@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
+	"github.com/dpoage/bugbot/internal/store"
 )
 
 // hypothesize runs the finder stage: for each effective lens, run a finder
@@ -17,17 +19,57 @@ import (
 // applied as the run progresses: once over the soft threshold only the
 // highest-yield lenses keep launching, and once over the hard threshold no new
 // finder agents are launched.
-func (f *Funnel) hypothesize(ctx context.Context, finder llm.Client, targets []string, budget *budgetState, result *Result) ([]Candidate, error) {
+//
+// Cross-lens leads: before launching any finder units, we collect pending leads
+// for each active lens, mark them consumed immediately (at claim time), and
+// inject them into every finder task for that lens. Consuming at claim time
+// means a failed finder run loses the lead — accepted trade-off documented
+// here and in the store package. Leads targeting lenses not active this run
+// stay pending and are consumed when that lens next runs.
+func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, targets []string, budget *budgetState, result *Result) ([]Candidate, error) {
 	if len(targets) == 0 {
 		return nil, nil
 	}
 
-	tools, err := f.readOnlyTools()
+	baseTools, err := f.readOnlyTools()
 	if err != nil {
 		return nil, err
 	}
 
 	chunks := chunk(targets, f.opts.ChunkSize)
+
+	// --- Pre-launch: collect and consume pending leads for each active lens ---
+	//
+	// This is single-threaded (before any goroutines launch) so no locking is
+	// needed for the leads map. We claim all leads for active lenses upfront:
+	// a lead stays "posted" for lenses not in this run and is consumed when
+	// that lens next runs.
+	leadsByLens := make(map[string][]store.Lead, len(f.lenses))
+	var leadsConsumedTotal int
+	for _, l := range f.lenses {
+		pending, err := f.store.PendingLeads(ctx, l.Name)
+		if err != nil {
+			// Non-fatal: we log the error and continue without leads for this lens.
+			f.note(result, fmt.Sprintf("leads: PendingLeads(%q) failed: %v", l.Name, err))
+			continue
+		}
+		if len(pending) == 0 {
+			continue
+		}
+		ids := make([]string, len(pending))
+		for i, ld := range pending {
+			ids[i] = ld.ID
+		}
+		// Consume at claim time — before the finder runs. If the finder fails,
+		// the lead is lost for this run; the poster lens will re-post on its
+		// next run if the suspicion is still relevant.
+		if err := f.store.ConsumeLeads(ctx, ids); err != nil {
+			f.note(result, fmt.Sprintf("leads: ConsumeLeads(%q) failed: %v", l.Name, err))
+			continue
+		}
+		leadsByLens[l.Name] = pending
+		leadsConsumedTotal += len(pending)
+	}
 
 	// Build the unit-of-work list: (lens, chunk) pairs. We launch lenses in
 	// yield order so that if degradation kicks in mid-run, the lower-yield lenses
@@ -35,12 +77,25 @@ func (f *Funnel) hypothesize(ctx context.Context, finder llm.Client, targets []s
 	type unit struct {
 		lens  Lens
 		files []string
+		leads []store.Lead // pre-fetched leads for this lens, already consumed
 	}
 	var units []unit
 	for _, l := range f.lenses {
 		for _, c := range chunks {
-			units = append(units, unit{lens: l, files: c})
+			units = append(units, unit{lens: l, files: c, leads: leadsByLens[l.Name]})
 		}
+	}
+
+	// leadsPosted counts post_lead tool calls that succeeded across all parallel
+	// finder goroutines. Atomic so parallel units can increment it safely.
+	var leadsPostedAtomic atomic.Int32
+
+	// Valid lens names for the post_lead tool, derived from all builtin lenses
+	// (not just the active subset) so a finder can post to any lens including
+	// inactive ones — the lead will be pending until that lens next runs.
+	allLensNames := make([]string, 0, len(BuiltinLenses()))
+	for _, l := range BuiltinLenses() {
+		allLensNames = append(allLensNames, l.Name)
 	}
 
 	var (
@@ -92,7 +147,28 @@ func (f *Funnel) hypothesize(ctx context.Context, finder llm.Client, targets []s
 				}
 			}
 
-			cands, status, err := f.runFinder(ctx, finder, tools, u.lens, u.files, budget)
+			// Build the tool set for this finder: read-only tools plus a per-unit
+			// post_lead instance that carries this lens as the poster. The onPost
+			// callback writes through f.store and increments the shared atomic
+			// counter; f.store is concurrency-safe so multiple parallel units can
+			// post leads simultaneously.
+			postLeadTool := agent.NewPostLeadTool(u.lens.Name, allLensNames, func(targetLens, file string, line int, note string) error {
+				if err := f.store.AddLead(ctx, store.Lead{
+					ScanRunID:  scanRunID,
+					PosterLens: u.lens.Name,
+					TargetLens: targetLens,
+					File:       file,
+					Line:       line,
+					Note:       note,
+				}); err != nil {
+					return err
+				}
+				leadsPostedAtomic.Add(1)
+				return nil
+			})
+			unitTools := append(baseTools, postLeadTool)
+
+			cands, status, err := f.runFinder(ctx, finder, unitTools, u.lens, u.files, u.leads, budget)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -134,6 +210,8 @@ func (f *Funnel) hypothesize(ctx context.Context, finder llm.Client, targets []s
 	result.Stats.FinderRuns = finderRuns
 	result.Stats.FinderFailures = finderFailed
 	result.Stats.FinderBudgetStopped = finderBudgetCut
+	result.Stats.LeadsConsumed = leadsConsumedTotal
+	result.Stats.LeadsPosted = int(leadsPostedAtomic.Load())
 	mu.Unlock()
 	return collected, nil
 }
@@ -166,7 +244,7 @@ const (
 // by the budget pool / token budget, so an unparseable partial is expected). The
 // funnel surfaces parse failures so a scan never silently reports "No findings"
 // when a lens actually failed, while budget stops are accounted separately.
-func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, l Lens, files []string, budget *budgetState) ([]Candidate, finderStatus, error) {
+func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, l Lens, files []string, leads []store.Lead, budget *budgetState) ([]Candidate, finderStatus, error) {
 	sink := f.opts.Progress
 	start := time.Now()
 	progress.Emit(sink, progress.Event{
@@ -180,7 +258,7 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 	)
 
 	var out candidateList
-	outcome, err := runner.RunJSON(ctx, finderTask(files), candidatesSchema, &out)
+	outcome, err := runner.RunJSON(ctx, finderTask(files, leads), candidatesSchema, &out)
 	emitAgentFinished(sink, progress.RoleFinder, l.Name, outcome, start, err)
 	if err != nil {
 		// A finder that fails to produce parseable JSON yields no candidates
