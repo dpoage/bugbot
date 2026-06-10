@@ -326,6 +326,12 @@ type Stats struct {
 	// SandboxExecMillis is the total wall-clock time spent in sandbox
 	// executions, in milliseconds.
 	SandboxExecMillis int64 `json:"sandbox_exec_millis,omitempty"`
+	// LeadsPosted is the number of cross-lens leads successfully posted to the
+	// blackboard by finder agents during this run.
+	LeadsPosted int `json:"leads_posted,omitempty"`
+	// LeadsConsumed is the number of pending cross-lens leads that were claimed
+	// and injected into finder tasks at the start of this run's hypothesize stage.
+	LeadsConsumed int `json:"leads_consumed,omitempty"`
 }
 
 // FinderReliable reports whether the finder stage produced trustworthy coverage:

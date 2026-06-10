@@ -27,6 +27,10 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd store.Finding) (refuted 
 	// finding on every code change, so sandbox runs here would multiply
 	// container spend per cycle; empirical evidence belongs to the initial
 	// verify (and repro) stages. Pinned by TestVerifyFinding_NoSandboxTool.
+	//
+	// post_lead is also absent: refuter independence is the mechanism that kills
+	// false positives, and re-verification is a pure adversarial check (same
+	// principle as the main verify stage). See verify.go for the fuller rationale.
 	tools, err := f.readOnlyTools()
 	if err != nil {
 		return false, "", err

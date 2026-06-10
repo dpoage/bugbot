@@ -450,5 +450,8 @@ func writeStatsFooter(b *strings.Builder, s funnel.Stats) {
 	if s.SandboxExecs > 0 {
 		fmt.Fprintf(b, "- Sandbox: execs=%d total_ms=%d\n", s.SandboxExecs, s.SandboxExecMillis)
 	}
+	if s.LeadsPosted > 0 || s.LeadsConsumed > 0 {
+		fmt.Fprintf(b, "- Leads: posted=%d consumed=%d\n", s.LeadsPosted, s.LeadsConsumed)
+	}
 	b.WriteString("\n</details>")
 }

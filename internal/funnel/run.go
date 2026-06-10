@@ -114,7 +114,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 
 	// Stage A — Hypothesize.
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageHypothesize})
-	candidates, err := f.hypothesize(ctx, finder, targets, budget, result)
+	candidates, err := f.hypothesize(ctx, scanRunID, finder, targets, budget, result)
 	if err != nil {
 		return nil, err
 	}
