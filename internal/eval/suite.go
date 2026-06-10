@@ -213,6 +213,9 @@ func whereKilled(c *CaseResult) string {
 	if st.DroppedDuplicate > 0 {
 		parts = append(parts, fmt.Sprintf("dup=%d", st.DroppedDuplicate))
 	}
+	if st.MergedWithinLens > 0 || st.MergedCrossLens > 0 {
+		parts = append(parts, fmt.Sprintf("merged=%d/%d(within/cross)", st.MergedWithinLens, st.MergedCrossLens))
+	}
 	if st.Killed > 0 {
 		parts = append(parts, fmt.Sprintf("refuted=%d", st.Killed))
 	}

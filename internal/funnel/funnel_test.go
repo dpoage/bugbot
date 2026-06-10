@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -452,6 +453,80 @@ func TestSweep_Dedup_SameBugTwoLenses(t *testing.T) {
 	}
 	if len(res.Findings) != 1 {
 		t.Errorf("want 1 finding after dedup, got %d", len(res.Findings))
+	}
+}
+
+func TestSweep_CrossLensMerge_CorroborationPersisted(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// Two different lenses report the SAME defect at the SAME line with different
+	// titles (so different fingerprints — they survive exact-fingerprint dedup)
+	// and similar descriptions (so the location merge collapses them). Only the
+	// primary should verify and persist, carrying the other lens as corroboration.
+	nilLensCand := `{"file": "bug.go", "line": 10, "title": "nil deref of cfg in Greeting",
+		"description": "cfg may be nil and is dereferenced without a guard in Greeting", "severity": "high",
+		"evidence": "Greeting returns cfg.Name without a nil check", "confidence": "high"}`
+	apiLensCand := `{"file": "bug.go", "line": 10, "title": "unchecked pointer cfg used in Greeting",
+		"description": "the cfg pointer may be nil and is dereferenced without a guard, panicking", "severity": "medium",
+		"evidence": "cfg.Name read with no nil check", "confidence": "high"}`
+
+	finder := newScriptedClient().
+		onSystemContains("nil-safety/error-handling", candJSON(nilLensCand)).
+		onSystemContains("api-contract-misuse", candJSON(apiLensCand))
+	// Refuter never refutes the surviving primary (whichever title it carries —
+	// the primary is the high-severity nil-safety report).
+	verifier := newScriptedClient().onTaskContains("nil deref of cfg in Greeting", notRefutedJSON)
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if res.Stats.Hypothesized != 2 {
+		t.Errorf("hypothesized = %d, want 2", res.Stats.Hypothesized)
+	}
+	if res.Stats.DroppedDuplicate != 0 {
+		t.Errorf("dropped_duplicate = %d, want 0 (different fingerprints, not exact dups)", res.Stats.DroppedDuplicate)
+	}
+	if res.Stats.MergedCrossLens != 1 {
+		t.Errorf("merged_cross_lens = %d, want 1", res.Stats.MergedCrossLens)
+	}
+	if res.Stats.MergedWithinLens != 0 {
+		t.Errorf("merged_within_lens = %d, want 0", res.Stats.MergedWithinLens)
+	}
+	if res.Stats.Triaged != 1 {
+		t.Errorf("triaged = %d, want 1 (merged to primary)", res.Stats.Triaged)
+	}
+	// Exactly one refuter panel (3 refuters) ran — one cluster.
+	if res.Stats.VerifierRuns != DefaultRefuters {
+		t.Errorf("verifier_runs = %d, want %d (one panel for the one cluster)", res.Stats.VerifierRuns, DefaultRefuters)
+	}
+	if len(res.Findings) != 1 {
+		t.Fatalf("want 1 finding, got %d: %+v", len(res.Findings), res.Findings)
+	}
+	got := res.Findings[0]
+	if got.Lens != "nil-safety/error-handling" {
+		t.Errorf("primary lens = %q, want nil-safety/error-handling (higher severity)", got.Lens)
+	}
+	if want := []string{"api-contract-misuse"}; !reflect.DeepEqual(got.CorroboratingLenses, want) {
+		t.Errorf("corroborating lenses = %v, want %v", got.CorroboratingLenses, want)
+	}
+	if !strings.Contains(got.Reasoning, "Corroborated by lenses: api-contract-misuse") {
+		t.Errorf("reasoning missing corroboration note:\n%s", got.Reasoning)
+	}
+
+	// Persistence round-trip: the stored finding carries the corroboration.
+	stored, err := st.GetFindingByFingerprint(ctx, got.Fingerprint)
+	if err != nil {
+		t.Fatalf("get persisted finding: %v", err)
+	}
+	if want := []string{"api-contract-misuse"}; !reflect.DeepEqual(stored.CorroboratingLenses, want) {
+		t.Errorf("persisted corroborating lenses = %v, want %v", stored.CorroboratingLenses, want)
 	}
 }
 

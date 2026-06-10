@@ -48,8 +48,39 @@ type Finding struct {
 	CommitSHA   string
 	FileHash    string
 	ReproPath   string // empty when no reproduction exists
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// CorroboratingLenses are the OTHER lenses that independently reported this
+	// same defect and were collapsed into this finding by triage's location-based
+	// cross-lens dedup. It excludes the finding's own Lens. Persisted as a
+	// comma-separated text column; it is a reporting signal only and does NOT
+	// affect the finding's tier or status.
+	CorroboratingLenses []string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+// encodeLenses joins a lens list into the comma-separated form stored in the
+// corroborating_lenses column. Lens names must not contain commas for the
+// encoding to round-trip; any comma is replaced with a semicolon so a
+// nonconforming lens name degrades visibly instead of splitting into phantom
+// entries on read-back. Nil/empty yields the empty string.
+func encodeLenses(lenses []string) string {
+	if len(lenses) == 0 {
+		return ""
+	}
+	safe := make([]string, len(lenses))
+	for i, l := range lenses {
+		safe[i] = strings.ReplaceAll(l, ",", ";")
+	}
+	return strings.Join(safe, ",")
+}
+
+// decodeLenses parses the comma-separated corroborating_lenses column back into
+// a slice. The empty string yields nil (no corroboration).
+func decodeLenses(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
 }
 
 // Fingerprint computes the stable dedup key for a finding from the fields that
@@ -125,12 +156,12 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			INSERT INTO findings
 			  (id, fingerprint, title, description, reasoning, severity, tier,
 			   status, lens, file, line, commit_sha, file_hash, repro_path,
-			   created_at, updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			   corroborating_lenses, created_at, updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.Severity,
 			f.Tier, string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA,
-			f.FileHash, nullStr(f.ReproPath), f.CreatedAt.Format(timeLayout),
-			f.UpdatedAt.Format(timeLayout),
+			f.FileHash, nullStr(f.ReproPath), encodeLenses(f.CorroboratingLenses),
+			f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout),
 		); err != nil {
 			return Finding{}, err
 		}
@@ -151,11 +182,12 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			UPDATE findings SET
 			  title=?, description=?, reasoning=?, severity=?, tier=?, status=?,
 			  lens=?, file=?, line=?, commit_sha=?, file_hash=?, repro_path=?,
-			  updated_at=?
+			  corroborating_lenses=?, updated_at=?
 			WHERE id=?`,
 			f.Title, f.Description, f.Reasoning, f.Severity, f.Tier,
 			string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA, f.FileHash,
-			nullStr(f.ReproPath), f.UpdatedAt.Format(timeLayout), f.ID,
+			nullStr(f.ReproPath), encodeLenses(f.CorroboratingLenses),
+			f.UpdatedAt.Format(timeLayout), f.ID,
 		); err != nil {
 			return Finding{}, err
 		}
@@ -266,7 +298,7 @@ func (s *Store) MarkFixed(ctx context.Context, fingerprint string) error {
 // findingColumns is the SELECT column list shared by single- and multi-row reads.
 const findingColumns = `SELECT id, fingerprint, title, description, reasoning,
 	severity, tier, status, lens, file, line, commit_sha, file_hash, repro_path,
-	created_at, updated_at`
+	corroborating_lenses, created_at, updated_at`
 
 func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (Finding, error) {
 	row := s.db.QueryRowContext(ctx, findingColumns+" FROM findings "+whereClause, args...)
@@ -287,17 +319,19 @@ func scanFinding(sc rowScanner) (Finding, error) {
 		f                    Finding
 		status               string
 		repro                sql.NullString
+		corrob               string
 		createdAt, updatedAt string
 	)
 	if err := sc.Scan(
 		&f.ID, &f.Fingerprint, &f.Title, &f.Description, &f.Reasoning,
 		&f.Severity, &f.Tier, &status, &f.Lens, &f.File, &f.Line, &f.CommitSHA,
-		&f.FileHash, &repro, &createdAt, &updatedAt,
+		&f.FileHash, &repro, &corrob, &createdAt, &updatedAt,
 	); err != nil {
 		return Finding{}, err
 	}
 	f.Status = Status(status)
 	f.ReproPath = repro.String
+	f.CorroboratingLenses = decodeLenses(corrob)
 	var err error
 	if f.CreatedAt, err = parseTime(createdAt); err != nil {
 		return Finding{}, err

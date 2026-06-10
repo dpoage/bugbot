@@ -236,6 +236,9 @@ func resultForFinding(meta Metadata, f store.Finding) SARIFResult {
 	if f.CommitSHA != "" {
 		props["commitSha"] = f.CommitSHA
 	}
+	if len(f.CorroboratingLenses) > 0 {
+		props["corroboratingLenses"] = f.CorroboratingLenses
+	}
 
 	return SARIFResult{
 		RuleID:    ruleID,
