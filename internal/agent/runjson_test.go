@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/dpoage/bugbot/internal/llm"
 )
 
 type finding struct {
@@ -86,6 +88,123 @@ func TestRunJSON_RepairFails(t *testing.T) {
 	if !strings.Contains(err.Error(), "after one repair") {
 		t.Errorf("error = %v, want 'after one repair'", err)
 	}
+}
+
+// TestRunJSON_ForcedFinalization proves that when a finder exhausts its
+// iteration cap mid-investigation (always calling tools, never finishing),
+// RunJSON's reserved finalization turn still recovers the JSON answer instead of
+// failing on dangling exploration prose. This is the core fix for finders that
+// hit MaxIterations on a large chunk.
+func TestRunJSON_ForcedFinalization(t *testing.T) {
+	const maxIter = 3
+	steps := make([]scriptStep, 0, maxIter+1)
+	// The model investigates every turn up to the cap, never producing an answer.
+	for i := 0; i < maxIter; i++ {
+		steps = append(steps, toolResp("c", "echo", `{"v":"x"}`, 1, 1))
+	}
+	// The reserved finalization turn: tools are dropped, and the model finally
+	// emits the JSON.
+	steps = append(steps, textResp(`{"file":"z.go","message":"found it"}`, 2, 2))
+
+	fc := newFakeClient(steps...)
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{MaxIterations: maxIter}))
+
+	var got finding
+	out, err := r.RunJSON(context.Background(), "audit", json.RawMessage(`{"type":"object"}`), &got)
+	if err != nil {
+		t.Fatalf("RunJSON should recover via finalization: %v", err)
+	}
+	if got.File != "z.go" || got.Message != "found it" {
+		t.Errorf("parsed = %+v, want the finalization JSON", got)
+	}
+	if !out.Finalized {
+		t.Error("Outcome.Finalized = false, want true (finalization turn should have fired)")
+	}
+	// The finalization request must carry NO tools so the model can only answer.
+	finalReq := fc.requests[len(fc.requests)-1]
+	if len(finalReq.Tools) != 0 {
+		t.Errorf("finalization request carried %d tool(s), want 0", len(finalReq.Tools))
+	}
+	// The finalization user message must have been injected.
+	lastMsg := finalReq.Messages[len(finalReq.Messages)-1]
+	if lastMsg.Role != llm.RoleUser || !strings.Contains(lastMsg.Content, "STOP investigating") {
+		t.Errorf("finalization message missing; last message = %+v", lastMsg)
+	}
+}
+
+// TestRunJSON_ForcedFinalizationFiresOnce confirms finalization is attempted at
+// most once: if the finalization turn itself does not produce JSON, RunJSON does
+// not loop, but falls through to its single repair round-trip.
+func TestRunJSON_ForcedFinalizationFiresOnce(t *testing.T) {
+	const maxIter = 2
+	steps := []scriptStep{
+		toolResp("c", "echo", `{"v":"x"}`, 1, 1),
+		toolResp("c", "echo", `{"v":"x"}`, 1, 1),
+		// finalization turn: still not JSON.
+		textResp("still just prose, sorry", 1, 1),
+		// repair round-trip (a fresh run): now valid JSON.
+		textResp(`{"file":"r.go","message":"repaired"}`, 1, 1),
+	}
+	fc := newFakeClient(steps...)
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{MaxIterations: maxIter}))
+
+	var got finding
+	if _, err := r.RunJSON(context.Background(), "audit", nil, &got); err != nil {
+		t.Fatalf("RunJSON: %v", err)
+	}
+	if got.File != "r.go" {
+		t.Errorf("parsed = %+v, want repaired JSON", got)
+	}
+}
+
+// TestRunJSON_MaxTokensContinuation proves the one-shot continuation retry
+// stitches a JSON answer that was cut off at the output token cap back together
+// so it parses, and surfaces the truncation distinctly when it still fails.
+func TestRunJSON_MaxTokensContinuation(t *testing.T) {
+	t.Run("continuation completes truncated JSON", func(t *testing.T) {
+		fc := newFakeClient(
+			maxTokensResp(`{"file":"a.go","mess`, 5, 5), // cut off mid-object
+			textResp(`age":"done"}`, 5, 5),              // continuation finishes it
+		)
+		r := NewRunner(fc, nil, "sys")
+
+		var got finding
+		out, err := r.RunJSON(context.Background(), "task", nil, &got)
+		if err != nil {
+			t.Fatalf("RunJSON should stitch continuation: %v", err)
+		}
+		if got.File != "a.go" || got.Message != "done" {
+			t.Errorf("parsed = %+v, want stitched JSON", got)
+		}
+		// Both completions must have happened within the same run.
+		if len(fc.requests) != 2 {
+			t.Errorf("client calls = %d, want 2 (initial + continuation)", len(fc.requests))
+		}
+		_ = out
+	})
+
+	t.Run("truncation surfaced in error when unrecoverable", func(t *testing.T) {
+		// Both the initial answer and its continuation stop at max_tokens and never
+		// form valid JSON; after the repair round-trip also truncates, the error
+		// must name the truncation.
+		fc := newFakeClient(
+			maxTokensResp(`{"file":"a.go"`, 5, 5),
+			maxTokensResp(` ,"more`, 5, 5),
+			// repair round-trip:
+			maxTokensResp(`{"file":"a.go"`, 5, 5),
+			maxTokensResp(` ,"more`, 5, 5),
+		)
+		r := NewRunner(fc, nil, "sys")
+
+		var got finding
+		_, err := r.RunJSON(context.Background(), "task", nil, &got)
+		if err == nil {
+			t.Fatal("expected error when JSON never completes")
+		}
+		if !strings.Contains(err.Error(), "truncated at the max-tokens cap") {
+			t.Errorf("error = %v, want it to name the max-tokens truncation", err)
+		}
+	})
 }
 
 func TestStripThinkBlocks(t *testing.T) {

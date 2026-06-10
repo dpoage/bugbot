@@ -78,6 +78,15 @@ func NewRunner(client llm.Client, tools []Tool, systemPrompt string, opts ...Opt
 // is always non-nil, even on error, capturing whatever happened before the
 // failure.
 func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
+	return r.run(ctx, task, "")
+}
+
+// run is the shared loop body. finalizePrompt, when non-empty, enables forced
+// finalization: one turn before the iteration cap the loop injects this
+// user-role message and takes a final tool-less completion so the model emits
+// its answer instead of dangling exploration prose. RunJSON passes a
+// JSON-demanding prompt; the public Run passes "".
+func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome, error) {
 	tr := NewTranscript()
 
 	messages := []llm.Message{{Role: llm.RoleUser, Content: task}}
@@ -85,8 +94,24 @@ func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 	outcome := &Outcome{Transcript: tr}
 
 	for {
-		// Stop before the next turn if we've hit the iteration cap.
+		// Stop before the next turn if we've hit the iteration cap. When forced
+		// finalization is enabled, reserve this last turn: inject the finalization
+		// prompt and take one final completion so the model emits its answer
+		// instead of leaving dangling exploration prose. We only do this once.
 		if r.limits.MaxIterations >= 0 && outcome.Iterations >= r.limits.MaxIterations {
+			if finalizePrompt != "" && !outcome.Finalized {
+				messages = append(messages, llm.Message{
+					Role:    llm.RoleUser,
+					Content: finalizePrompt,
+				})
+				outcome.Finalized = true
+				resp, err := r.completeOnce(ctx, tr, &messages, outcome, true)
+				if err != nil {
+					r.autosave(tr, task)
+					return outcome, err
+				}
+				_ = resp
+			}
 			r.finishTruncated(outcome, TruncMaxIterations)
 			break
 		}
@@ -118,38 +143,11 @@ func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 			return outcome, err
 		}
 
-		req := llm.Request{
-			System:    r.systemPrompt,
-			Messages:  messages,
-			Tools:     r.tools.defs,
-			MaxTokens: r.maxTokens,
-		}
-		tr.recordRequest(outcome.Iterations+1, messages)
-
-		resp, err := r.client.Complete(ctx, req)
+		resp, err := r.completeOnce(ctx, tr, &messages, outcome, false)
 		if err != nil {
 			r.autosave(tr, task)
-			return outcome, fmt.Errorf("agent: completion failed at iteration %d: %w", outcome.Iterations+1, err)
+			return outcome, err
 		}
-
-		outcome.Iterations++
-		outcome.Usage.InputTokens += resp.Usage.InputTokens
-		outcome.Usage.OutputTokens += resp.Usage.OutputTokens
-		outcome.Usage.CacheReadInputTokens += resp.Usage.CacheReadInputTokens
-		outcome.Usage.CacheCreationInputTokens += resp.Usage.CacheCreationInputTokens
-		tr.recordAssistant(outcome.Iterations, resp)
-
-		if resp.Text != "" {
-			outcome.FinalText = resp.Text
-		}
-
-		// Append the assistant turn (text + any tool-call requests) to the
-		// conversation so the model sees its own prior turn.
-		messages = append(messages, llm.Message{
-			Role:      llm.RoleAssistant,
-			Content:   resp.Text,
-			ToolCalls: resp.ToolCalls,
-		})
 
 		// No tool calls => the model finished its turn. Clean completion.
 		if len(resp.ToolCalls) == 0 {
@@ -182,6 +180,90 @@ func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 
 	r.autosave(tr, task)
 	return outcome, nil
+}
+
+// completeOnce issues one model completion against the current conversation,
+// records it, folds its usage into the outcome, and appends the assistant turn
+// to *messages. When final is true the request carries no tools (the
+// finalization turn forbids further investigation).
+//
+// If the completion stops at the token cap (StopMaxTokens) it makes ONE
+// continuation completion — appending a short user nudge — so a JSON answer cut
+// off mid-object has a chance to be completed rather than failing to parse. The
+// outcome's LastStopReason reflects the final completion served here.
+func (r *Runner) completeOnce(ctx context.Context, tr *Transcript, messages *[]llm.Message, outcome *Outcome, final bool) (llm.Response, error) {
+	resp, err := r.complete(ctx, tr, *messages, outcome, final)
+	if err != nil {
+		return llm.Response{}, err
+	}
+	*messages = append(*messages, llm.Message{
+		Role:      llm.RoleAssistant,
+		Content:   resp.Text,
+		ToolCalls: resp.ToolCalls,
+	})
+
+	// One continuation retry when output was truncated mid-generation: ask the
+	// model to continue and emit ONLY the remaining answer, then concatenate.
+	// Guarded so it fires at most once per completeOnce call.
+	if resp.StopReason == llm.StopMaxTokens && len(resp.ToolCalls) == 0 {
+		*messages = append(*messages, llm.Message{
+			Role:    llm.RoleUser,
+			Content: "Your previous message was cut off at the output token limit. Continue from exactly where you stopped and output ONLY the remaining text needed to complete the answer — no preamble, no repetition.",
+		})
+		cont, cerr := r.complete(ctx, tr, *messages, outcome, final)
+		if cerr != nil {
+			return llm.Response{}, cerr
+		}
+		*messages = append(*messages, llm.Message{
+			Role:      llm.RoleAssistant,
+			Content:   cont.Text,
+			ToolCalls: cont.ToolCalls,
+		})
+		// Stitch the two halves so the caller (and FinalText) sees one answer.
+		joined := resp.Text + cont.Text
+		outcome.FinalText = joined
+		resp.Text = joined
+		resp.ToolCalls = cont.ToolCalls
+		resp.StopReason = cont.StopReason
+	}
+	return resp, nil
+}
+
+// complete issues a single completion, records it, and accumulates its usage and
+// stop reason onto the outcome. It does NOT mutate the conversation; callers
+// append the assistant turn so they control conversation shape (e.g. the
+// continuation retry).
+func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llm.Message, outcome *Outcome, final bool) (llm.Response, error) {
+	req := llm.Request{
+		System:    r.systemPrompt,
+		Messages:  messages,
+		Tools:     r.tools.defs,
+		MaxTokens: r.maxTokens,
+	}
+	// The finalization turn forbids further investigation: drop the tools so the
+	// model can only answer.
+	if final {
+		req.Tools = nil
+	}
+	tr.recordRequest(outcome.Iterations+1, messages)
+
+	resp, err := r.client.Complete(ctx, req)
+	if err != nil {
+		return llm.Response{}, fmt.Errorf("agent: completion failed at iteration %d: %w", outcome.Iterations+1, err)
+	}
+
+	outcome.Iterations++
+	outcome.Usage.InputTokens += resp.Usage.InputTokens
+	outcome.Usage.OutputTokens += resp.Usage.OutputTokens
+	outcome.Usage.CacheReadInputTokens += resp.Usage.CacheReadInputTokens
+	outcome.Usage.CacheCreationInputTokens += resp.Usage.CacheCreationInputTokens
+	outcome.LastStopReason = resp.StopReason
+	tr.recordAssistant(outcome.Iterations, resp)
+
+	if resp.Text != "" {
+		outcome.FinalText = resp.Text
+	}
+	return resp, nil
 }
 
 // runTool dispatches one tool call. A missing tool or a Run error is returned to

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/dpoage/bugbot/internal/llm"
 )
 
 // RunJSON runs the tool loop for task, instructing the model to return its final
@@ -26,7 +28,11 @@ import (
 func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessage, out any) (*Outcome, error) {
 	prompt := task + "\n\n" + jsonInstruction(schema)
 
-	outcome, err := r.Run(ctx, prompt)
+	// Reserve the last iteration for a forced finalization turn: if the model is
+	// still investigating when the iteration cap is reached, it gets one final
+	// completion that demands the JSON answer now, instead of the loop returning
+	// dangling exploration prose that can never parse.
+	outcome, err := r.run(ctx, prompt, finalizationPrompt(schema))
 	if err != nil {
 		return outcome, err
 	}
@@ -45,16 +51,45 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 			repair += "\nIt must match this JSON schema:\n" + string(schema)
 		}
 
-		repairOutcome, rerr := r.Run(ctx, repair)
+		repairOutcome, rerr := r.run(ctx, repair, finalizationPrompt(schema))
 		if rerr != nil {
 			return repairOutcome, rerr
 		}
 		// Surface the repair attempt's outcome (its transcript reflects the retry).
 		if perr2 := parseInto(repairOutcome.FinalText, out); perr2 != nil {
-			return repairOutcome, fmt.Errorf("agent: model output did not parse as JSON after one repair: %w", perr2)
+			return repairOutcome, fmt.Errorf("agent: model output did not parse as JSON after one repair%s: %w",
+				truncationNote(repairOutcome), perr2)
 		}
 		return repairOutcome, nil
 	}
+}
+
+// truncationNote returns a short parenthetical when the run's final completion
+// stopped at the output token cap, so a max_tokens truncation is distinguishable
+// in the error from a model that simply produced malformed JSON. Empty
+// otherwise.
+func truncationNote(o *Outcome) string {
+	if o != nil && o.LastStopReason == llm.StopMaxTokens {
+		return " (output truncated at the max-tokens cap)"
+	}
+	return ""
+}
+
+// finalizationPrompt is the user-role message injected on the reserved final
+// turn when RunJSON's loop is about to hit the iteration cap. It tells the model
+// to stop investigating and emit only the JSON answer, optionally restating the
+// schema.
+func finalizationPrompt(schema json.RawMessage) string {
+	var b strings.Builder
+	b.WriteString("You have reached the end of your investigation budget. STOP investigating now. ")
+	b.WriteString("Do NOT call any more tools. Output ONLY your final answer as a single JSON value — ")
+	b.WriteString("no prose, no explanation, no markdown fences — based on what you have already found. ")
+	b.WriteString("If you found nothing, return the empty result the schema allows.")
+	if len(schema) > 0 {
+		b.WriteString("\nThe JSON must match this JSON schema:\n")
+		b.Write(schema)
+	}
+	return b.String()
 }
 
 // jsonInstruction builds the appended instruction telling the model to emit only

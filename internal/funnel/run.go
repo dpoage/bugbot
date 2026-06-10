@@ -121,7 +121,10 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	result.Stats.Hypothesized = len(candidates)
 	progress.Emit(sink, progress.Event{
 		Kind: progress.KindStageFinished, Stage: progress.StageHypothesize,
-		Counts: &progress.Counts{Hypothesized: len(candidates)},
+		Counts: &progress.Counts{
+			Hypothesized:   len(candidates),
+			FinderFailures: result.Stats.FinderFailures,
+		},
 	})
 
 	// Stage B — Triage.
@@ -184,6 +187,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		Counts: &progress.Counts{
 			Hypothesized: result.Stats.Hypothesized, Triaged: result.Stats.Triaged,
 			Verified: result.Stats.Verified, Killed: result.Stats.Killed,
+			FinderFailures: result.Stats.FinderFailures,
 		},
 		InputTokens: in, OutputTokens: out,
 		CacheReadTokens: cacheRead, CacheCreationTokens: cacheCreated,

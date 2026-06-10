@@ -290,6 +290,58 @@ func TestSweep_CleanCode_NoFindingsNoVerify(t *testing.T) {
 	}
 }
 
+// TestSweep_FinderParseFailures_HonestStats proves the trust fix: when finder
+// agents produce output that never parses as JSON (even after the repair
+// round-trip), the run counts the failures, marks the result unreliable, notes
+// each failure on Result.Skipped, and never silently reports a clean "found
+// nothing". This is the difference between "lens found nothing" and "lens
+// failed".
+func TestSweep_FinderParseFailures_HonestStats(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// Every finder returns prose, not JSON: RunJSON's parse + repair both fail, so
+	// each (lens, chunk) finder is a parse failure.
+	finder := newScriptedClient()
+	finder.fallback = "Here is my analysis, but I never produced any JSON."
+	verifier := newScriptedClient()
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatalf("sweep should not error on parse failures: %v", err)
+	}
+
+	nLenses := len(BuiltinLenses())
+	if res.Stats.FinderRuns != nLenses {
+		t.Errorf("FinderRuns = %d, want %d (one per lens, single chunk)", res.Stats.FinderRuns, nLenses)
+	}
+	if res.Stats.FinderFailures != nLenses {
+		t.Errorf("FinderFailures = %d, want %d (all lenses failed to parse)", res.Stats.FinderFailures, nLenses)
+	}
+	if res.Stats.FinderReliable() {
+		t.Error("FinderReliable() = true, want false when every finder failed")
+	}
+	if !res.Stats.MostFindersFailed() {
+		t.Error("MostFindersFailed() = false, want true when every finder failed")
+	}
+	// Zero findings, but the run must have recorded WHY they're untrustworthy.
+	if len(res.Findings) != 0 {
+		t.Errorf("want 0 findings, got %d", len(res.Findings))
+	}
+	if len(res.Skipped) == 0 {
+		t.Error("expected per-lens failure notes on Result.Skipped, got none")
+	}
+	for _, note := range res.Skipped {
+		if !strings.Contains(note, "no parseable output") {
+			t.Errorf("skip note missing failure language: %q", note)
+		}
+	}
+}
+
 func TestSweep_Dedup_SameBugTwoLenses(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)
