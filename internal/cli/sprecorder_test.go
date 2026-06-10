@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -91,4 +92,36 @@ type fakeUsageClient struct{ usage llm.Usage }
 func (f fakeUsageClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
 func (f fakeUsageClient) Complete(_ context.Context, _ llm.Request) (llm.Response, error) {
 	return llm.Response{Text: "{}", StopReason: llm.StopEndTurn, Usage: f.usage}, nil
+}
+
+// TestLedgerRecorder_ConcurrentRecords pins concurrency safety: PromoteAll
+// drives the shared client from parallel workers.
+func TestLedgerRecorder_ConcurrentRecords(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	rec := newLedgerRecorder(ctx, st)
+	rec.SetScanRun("run-c")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec.Record(llm.UsageEvent{Role: "reproducer", Usage: llm.Usage{InputTokens: 10, OutputTokens: 1}})
+		}()
+	}
+	wg.Wait()
+
+	got, err := st.TotalsForScanRun(ctx, "run-c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.InputTokens != 80 || got.OutputTokens != 8 {
+		t.Errorf("concurrent totals = %+v, want in=80 out=8", got)
+	}
 }
