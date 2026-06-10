@@ -55,20 +55,36 @@ var grammarTable = func() map[string]*grammar {
 `,
 	}
 
-	tsGrammar := &grammar{
-		name:   "typescript",
-		sample: "x.ts",
-		defQuery: `
+	// TypeScript and TSX are DISTINCT grammars in the registry: the tsx grammar
+	// parses JSX syntax (`<Foo/>`) that fails to parse under plain TypeScript,
+	// silently dropping every definition/reference in a .tsx file. The two share
+	// identical tags queries (TSX is a superset of TS for the nodes we capture),
+	// so we build the query text once and attach it to each grammar via its own
+	// registry sample filename.
+	const tsDefQuery = `
 (function_declaration name: (identifier) @name) @definition.function
 (method_definition name: (property_identifier) @name) @definition.method
 (class_declaration name: (type_identifier) @name) @definition.class
 (interface_declaration name: (type_identifier) @name) @definition.interface
 (type_alias_declaration name: (type_identifier) @name) @definition.type
-`,
-		refQuery: `
+`
+	const tsRefQuery = `
 (call_expression function: (identifier) @name) @reference.call
 (call_expression function: (member_expression property: (property_identifier) @name)) @reference.call
-`,
+`
+
+	tsGrammar := &grammar{
+		name:     "typescript",
+		sample:   "x.ts",
+		defQuery: tsDefQuery,
+		refQuery: tsRefQuery,
+	}
+
+	tsxGrammar := &grammar{
+		name:     "tsx",
+		sample:   "x.tsx",
+		defQuery: tsDefQuery,
+		refQuery: tsRefQuery,
 	}
 
 	m := map[string]*grammar{
@@ -76,7 +92,7 @@ var grammarTable = func() map[string]*grammar {
 		".py":  pyGrammar,
 		".pyi": pyGrammar,
 		".ts":  tsGrammar,
-		".tsx": tsGrammar,
+		".tsx": tsxGrammar,
 	}
 	return m
 }()
