@@ -29,19 +29,20 @@ type verified struct {
 // goroutine — they are independent votes, and serializing them keeps the
 // MaxParallel bound meaningful (it bounds candidates in flight, not the product
 // of candidates and refuters).
-func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []Candidate, budget *budgetState, result *Result) ([]verified, int, error) {
+func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []Candidate, budget *budgetState, result *Result) ([]verified, int, []Candidate, error) {
 	if len(candidates) == 0 {
-		return nil, 0, nil
+		return nil, 0, nil, nil
 	}
 
 	tools, err := f.readOnlyTools()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 
 	var (
 		mu        sync.Mutex
 		survivors []verified
+		orphaned  []Candidate
 		killed    int
 		firstErr  error
 	)
@@ -64,10 +65,15 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 			defer func() { <-sem }()
 
 			// Gate against the live spend total once we hold a worker slot (see the
-			// finder stage for the rationale).
+			// finder stage for the rationale). A candidate whose verification is
+			// skipped here is NOT dropped: it is budget-orphaned and persisted as a
+			// Tier 3 suspected finding so a human can still review it.
 			if budget.overHard() {
 				budget.stopped.Store(true)
-				msg := fmt.Sprintf("hard budget reached: skipped verification of %q (%s:%d)", c.Title, c.File, c.Line)
+				mu.Lock()
+				orphaned = append(orphaned, c)
+				mu.Unlock()
+				msg := fmt.Sprintf("hard budget reached: verification skipped for %q (%s:%d) — kept as T3 suspected", c.Title, c.File, c.Line)
 				f.note(result, msg)
 				progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
 				return
@@ -88,7 +94,7 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindAgentStarted, Role: progress.RoleVerifier, Label: c.Title,
 			})
-			verdicts, tokens, err := f.runRefuters(ctx, verifier, tools, c, nRefuters)
+			verdicts, tokens, stopped, err := f.runRefuters(ctx, verifier, tools, c, nRefuters, budget)
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindAgentFinished, Role: progress.RoleVerifier, Label: c.Title,
 				Tokens: tokens, Duration: time.Since(start), Err: errString(err),
@@ -99,6 +105,18 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 				if firstErr == nil {
 					firstErr = err
 				}
+				return
+			}
+			// The pool ran dry while this candidate was being challenged: its
+			// verdicts are incomplete, so we cannot trust a "survived" or "killed"
+			// conclusion. Treat it as budget-orphaned (T3 suspected) rather than
+			// silently passing a half-verified candidate as a T2 survivor.
+			if stopped {
+				budget.stopped.Store(true)
+				orphaned = append(orphaned, c)
+				msg := fmt.Sprintf("budget stopped mid-verification of %q (%s:%d) — kept as T3 suspected", c.Title, c.File, c.Line)
+				f.note(result, msg)
+				progress.Emit(sink, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
 				return
 			}
 			if majorityRefuted(verdicts) {
@@ -117,9 +135,9 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 
 	wg.Wait()
 	if firstErr != nil {
-		return nil, 0, firstErr
+		return nil, 0, nil, firstErr
 	}
-	return survivors, killed, nil
+	return survivors, killed, orphaned, nil
 }
 
 // runRefuters runs n independent refuter agents on a candidate and returns
@@ -127,9 +145,16 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 // treated as "not refuted" (it could not prove the bug wrong), which is the
 // precision-conservative default: a broken refuter must not be able to silently
 // kill a candidate. Context cancellation propagates.
-func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, c Candidate, n int) ([]refutation, int64, error) {
+//
+// The returned stopped flag is true when a refuter run was cut short by the
+// shared budget pool (TruncBudgetPool): once the pool is dry, the remaining
+// votes for this candidate would be untrustworthy, so the caller treats the
+// candidate as budget-orphaned rather than reaching a verdict on a partial vote.
+// Limits are derived from the pool at launch so a refuter launched late gets the
+// remaining headroom and one in flight stops at its next turn.
+func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, c Candidate, n int, budget *budgetState) ([]refutation, int64, bool, error) {
 	runner := agent.NewRunner(verifier, tools, verifierSystemBase,
-		agent.WithLimits(f.opts.VerifierLimits),
+		agent.WithLimits(budget.runnerLimits(f.opts.VerifierLimits)),
 		f.transcriptOption(),
 	)
 
@@ -137,23 +162,28 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 	verdicts := make([]refutation, 0, n)
 	for i := 0; i < n; i++ {
 		if err := ctx.Err(); err != nil {
-			return nil, tokens, err
+			return nil, tokens, false, err
 		}
 		var v refutation
 		outcome, err := runner.RunJSON(ctx, verifierTask(c), refutationSchema, &v)
 		if outcome != nil {
 			tokens += outcome.Usage.InputTokens + outcome.Usage.OutputTokens
+			// A budget-pool stop means this refuter never got to complete its
+			// challenge; stop voting and signal the caller to orphan the candidate.
+			if outcome.TruncationReason == agent.TruncBudgetPool {
+				return verdicts, tokens, true, nil
+			}
 		}
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, tokens, ctx.Err()
+				return nil, tokens, false, ctx.Err()
 			}
 			// Unparseable verdict => could not refute.
 			v = refutation{Refuted: false, Reasoning: "refuter produced no parseable verdict", Confidence: "low"}
 		}
 		verdicts = append(verdicts, v)
 	}
-	return verdicts, tokens, nil
+	return verdicts, tokens, false, nil
 }
 
 // errString returns err.Error() or "" for a nil error, for embedding in a

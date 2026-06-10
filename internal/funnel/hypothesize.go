@@ -89,7 +89,7 @@ func (f *Funnel) hypothesize(ctx context.Context, finder llm.Client, targets []s
 				}
 			}
 
-			cands, err := f.runFinder(ctx, finder, tools, u.lens, u.files)
+			cands, err := f.runFinder(ctx, finder, tools, u.lens, u.files, budget)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -110,8 +110,11 @@ func (f *Funnel) hypothesize(ctx context.Context, finder llm.Client, targets []s
 }
 
 // runFinder executes a single finder agent for one lens over one chunk and maps
-// its JSON output to Candidates tagged with the lens.
-func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, l Lens, files []string) ([]Candidate, error) {
+// its JSON output to Candidates tagged with the lens. The agent's limits are
+// derived from the shared budget pool at launch (remaining-pool allowance plus a
+// pre-turn budget check), so a finder launched late gets only the headroom left
+// and one already in flight stops at its next turn once the pool is exhausted.
+func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, l Lens, files []string, budget *budgetState) ([]Candidate, error) {
 	sink := f.opts.Progress
 	start := time.Now()
 	progress.Emit(sink, progress.Event{
@@ -119,7 +122,7 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 	})
 
 	runner := agent.NewRunner(finder, tools, finderSystemPrompt(l),
-		agent.WithLimits(f.opts.FinderLimits),
+		agent.WithLimits(budget.runnerLimits(f.opts.FinderLimits)),
 		f.transcriptOption(),
 	)
 

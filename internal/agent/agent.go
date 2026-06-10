@@ -58,6 +58,16 @@ type Limits struct {
 	// across every completion in the run). Zero uses DefaultTokenBudget. A
 	// negative value disables the budget.
 	TokenBudget int64
+	// BudgetCheck, when non-nil, is consulted by the Runner BEFORE each model
+	// call. It lets a shared budget pool (see BudgetPool) stop an in-flight run
+	// at the next turn boundary once a run-spanning ceiling is hit, independent
+	// of this run's own per-run TokenBudget. Returning ErrBudgetExhausted stops
+	// the run cleanly with TruncBudgetPool; any other non-nil error also stops
+	// it cleanly with TruncBudgetPool. The hook MUST be read-only with respect
+	// to the request (it must not mutate system/tools/history), so it cannot
+	// break request prefix stability. It may be invoked concurrently across
+	// parallel runs, so it must be safe for concurrent use.
+	BudgetCheck func() error
 }
 
 // resolve returns the effective limits, substituting defaults for zero values.
@@ -79,6 +89,12 @@ const (
 	TruncMaxIterations = "max_iterations"
 	// TruncTokenBudget means cumulative token usage exceeded the budget.
 	TruncTokenBudget = "token_budget"
+	// TruncBudgetPool means a shared budget pool (via Limits.BudgetCheck) was
+	// exhausted before this run's own per-run budget, so the run stopped
+	// pre-turn. It is distinct from TruncTokenBudget so the funnel can tell a
+	// run that was stopped by the run-spanning ceiling ("budget-stopped") from
+	// one that merely exhausted its own allowance.
+	TruncBudgetPool = "budget_pool"
 )
 
 // Outcome is the result of a [Runner.Run]. A truncated run is still a valid

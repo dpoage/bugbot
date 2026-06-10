@@ -101,7 +101,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	finder := llm.WithRecorder(f.clients.Finder, rec, "finder", "", "")
 	verifier := llm.WithRecorder(f.clients.Verifier, rec, "verifier", "", "")
 
-	budget := &budgetState{budget: f.opts.TokenBudget, rec: rec}
+	budget := newBudgetState(f.opts.TokenBudget, rec)
 
 	result := &Result{ScanRunID: scanRunID, Commit: snap.Commit}
 
@@ -138,7 +138,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 
 	// Stage C — Verify.
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageVerify})
-	verified, killed, err := f.verify(ctx, verifier, survivors, budget, result)
+	verified, killed, orphaned, err := f.verify(ctx, verifier, survivors, budget, result)
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +158,15 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	if err != nil {
 		return nil, err
 	}
+	// Budget-orphaned candidates (verification skipped or cut short at the hard
+	// stop) persist as Tier 3 suspected so they are not silently dropped: a human
+	// can review them and re-run verification with more budget.
+	suspected, err := f.persistSuspected(ctx, orphaned, snap.Commit, fps)
+	if err != nil {
+		return nil, err
+	}
+	findings = append(findings, suspected...)
+	result.Stats.Suspected = len(suspected)
 	sortFindings(findings)
 	result.Findings = findings
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageFinished, Stage: progress.StagePersist})
