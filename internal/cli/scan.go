@@ -111,6 +111,8 @@ func newScanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Shut down any language servers the code-navigation tools spawned.
+			defer func() { _ = f.Close() }()
 
 			var res *funnel.Result
 			if since != "" {

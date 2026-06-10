@@ -95,6 +95,7 @@ func (d *Daemon) runPoll(ctx context.Context) {
 		d.log.Error("daemon: build funnel failed", "err", err)
 		return
 	}
+	defer func() { _ = f.Close() }() // shut down per-cycle language servers
 	fres, err := f.Targeted(ctx, changed)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -127,6 +128,7 @@ func (d *Daemon) runSweep(ctx context.Context) {
 		d.log.Error("daemon: build funnel failed", "err", err)
 		return
 	}
+	defer func() { _ = f.Close() }() // shut down per-cycle language servers
 	fres, err := f.Sweep(ctx)
 	if err != nil {
 		if ctx.Err() != nil {

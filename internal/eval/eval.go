@@ -231,6 +231,8 @@ func runWithClients(ctx context.Context, c Case, clients funnel.RoleClients) (*C
 	if err != nil {
 		return nil, fmt.Errorf("eval: construct funnel for %q: %w", c.Name, err)
 	}
+	// Shut down any language servers the code-navigation tools spawned.
+	defer func() { _ = f.Close() }()
 
 	res, err := f.Sweep(ctx)
 	if err != nil {

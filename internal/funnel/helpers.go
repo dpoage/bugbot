@@ -30,10 +30,12 @@ func emitAgentFinished(sink progress.Sink, role, label string, outcome *agent.Ou
 	progress.Emit(sink, ev)
 }
 
-// readOnlyTools builds the read-only code tool set (read_file, list_dir, grep)
-// rooted at the repository, shared by finder and refuter agents. The tools are
-// stateless and safe for concurrent use across parallel agents, so they are
-// constructed once per call and reused.
+// readOnlyTools builds the read-only code tool set (read_file, list_dir, grep,
+// plus the LSP-backed find_definition / find_references / find_implementations)
+// rooted at the repository, shared by finder and refuter agents. All tools are
+// safe for concurrent use across parallel agents; the code-navigation tools
+// share the funnel's lazily-started language-server manager, which Funnel.Close
+// shuts down.
 func (f *Funnel) readOnlyTools() ([]agent.Tool, error) {
 	root := f.repo.Root()
 	readFile, err := agent.NewReadFile(root)
@@ -48,7 +50,11 @@ func (f *Funnel) readOnlyTools() ([]agent.Tool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("funnel: grep tool: %w", err)
 	}
-	return []agent.Tool{readFile, listDir, grep}, nil
+	nav, err := f.codeNav()
+	if err != nil {
+		return nil, fmt.Errorf("funnel: code navigation tools: %w", err)
+	}
+	return append([]agent.Tool{readFile, listDir, grep}, nav.Tools()...), nil
 }
 
 // transcriptOption returns a Runner option that persists transcripts when a
