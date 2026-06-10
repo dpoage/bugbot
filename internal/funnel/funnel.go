@@ -38,6 +38,7 @@ import (
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -98,6 +99,11 @@ type Options struct {
 	// TranscriptDir, when non-empty, makes every agent auto-save its transcript
 	// there.
 	TranscriptDir string
+	// Progress, when non-nil, receives activity events as the run proceeds
+	// (stage boundaries, agent start/finish, spend ticks, budget degradation).
+	// Emission is best-effort and must never block or fail the run; a nil sink
+	// disables emission. See internal/progress for the contract.
+	Progress progress.Sink
 }
 
 // resolve fills in defaults without mutating the caller's Options.
@@ -225,6 +231,12 @@ type spendRecorder struct {
 	totalTokens int64
 	inTokens    int64
 	outTokens   int64
+
+	// onRecord, when non-nil, is called after each ledger update with the new
+	// cumulative input/output totals. The funnel uses it to emit progress spend
+	// ticks. It must be cheap and non-blocking (it runs on the agent request
+	// path).
+	onRecord func(in, out int64)
 }
 
 func (r *spendRecorder) Record(ev llm.UsageEvent) {
@@ -232,7 +244,12 @@ func (r *spendRecorder) Record(ev llm.UsageEvent) {
 	r.totalTokens += ev.Usage.InputTokens + ev.Usage.OutputTokens
 	r.inTokens += ev.Usage.InputTokens
 	r.outTokens += ev.Usage.OutputTokens
+	in, out := r.inTokens, r.outTokens
+	cb := r.onRecord
 	r.mu.Unlock()
+	if cb != nil {
+		cb(in, out)
+	}
 	// Persist the ledger entry. Spend recording must not abort a scan, so a
 	// failure here is swallowed; the in-memory totals (used for budget) remain
 	// authoritative for this run regardless.

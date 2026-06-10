@@ -34,7 +34,7 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd store.Finding) (refuted 
 		n = DefaultRefuters
 	}
 
-	verdicts, err := f.runRefuters(ctx, f.clients.Verifier, tools, c, n)
+	verdicts, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, c, n)
 	if err != nil {
 		return false, "", err
 	}
