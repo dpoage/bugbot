@@ -22,19 +22,19 @@ type fakeNavigator struct {
 	closed bool
 }
 
-func (f *fakeNavigator) Definition(_ context.Context, path string, pos lsp.Position) ([]lsp.Location, error) {
+func (f *fakeNavigator) Definition(_ context.Context, path string, pos lsp.Position) (navResult, error) {
 	f.gotAbs, f.gotPos = path, pos
-	return f.locs, f.err
+	return navResult{Locations: f.locs}, f.err
 }
 
-func (f *fakeNavigator) References(_ context.Context, path string, pos lsp.Position) ([]lsp.Location, error) {
+func (f *fakeNavigator) References(_ context.Context, path string, pos lsp.Position) (navResult, error) {
 	f.gotAbs, f.gotPos = path, pos
-	return f.locs, f.err
+	return navResult{Locations: f.locs}, f.err
 }
 
-func (f *fakeNavigator) Implementation(_ context.Context, path string, pos lsp.Position) ([]lsp.Location, error) {
+func (f *fakeNavigator) Implementation(_ context.Context, path string, pos lsp.Position) (navResult, error) {
 	f.gotAbs, f.gotPos = path, pos
-	return f.locs, f.err
+	return navResult{Locations: f.locs}, f.err
 }
 
 func (f *fakeNavigator) Close() error {

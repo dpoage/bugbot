@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.50.0
+	github.com/odvcencio/gotreesitter v0.20.2
 	github.com/openai/openai-go/v3 v3.39.0
 	github.com/spf13/cobra v1.10.2
 	google.golang.org/genai v1.59.0
@@ -26,6 +27,7 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
+	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect

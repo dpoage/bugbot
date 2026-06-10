@@ -12,6 +12,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/lsp"
+	"github.com/dpoage/bugbot/internal/treesitter"
 )
 
 // Code-navigation limits.
@@ -26,13 +27,25 @@ const (
 	codeNavMaxLineBytes = 256
 )
 
+// navResult is one navigation query's answer: the located positions plus an
+// optional one-line caveat naming which backend tier answered (empty for the
+// authoritative LSP tier). The tiered navigator sets Caveat when a fallback
+// (syntactic tree-sitter) tier produced the locations so the tool can tell the
+// model the match is approximate.
+type navResult struct {
+	Locations []lsp.Location
+	Caveat    string
+}
+
 // navigator is the slice of the LSP manager the code-nav tools consume. It is
 // an interface so unit tests can script results without a real language
-// server; *lsp.Manager is the production implementation.
+// server, and so a tier-selecting navigator can wrap the LSP manager with a
+// tree-sitter fallback. *lsp.Manager (via lspNavigator) is the production LSP
+// implementation; tieredNavigator is the production wrapper.
 type navigator interface {
-	Definition(ctx context.Context, path string, pos lsp.Position) ([]lsp.Location, error)
-	References(ctx context.Context, path string, pos lsp.Position) ([]lsp.Location, error)
-	Implementation(ctx context.Context, path string, pos lsp.Position) ([]lsp.Location, error)
+	Definition(ctx context.Context, path string, pos lsp.Position) (navResult, error)
+	References(ctx context.Context, path string, pos lsp.Position) (navResult, error)
+	Implementation(ctx context.Context, path string, pos lsp.Position) (navResult, error)
 	Close() error
 }
 
@@ -53,12 +66,18 @@ type CodeNav struct {
 
 // NewCodeNav creates the code-navigation tool bundle rooted at dir. No
 // language-server processes are started until a tool issues its first query.
+//
+// The navigator is tiered: a language server answers when it is healthy, and a
+// pure-Go tree-sitter backend answers syntactically when the server is missing,
+// crashed, or unsupported for the language. The tree-sitter tier never starts a
+// process and only reads files under the root.
 func NewCodeNav(dir string) (*CodeNav, error) {
 	root, err := newFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}
-	return &CodeNav{root: root, nav: lsp.NewManager(root.root)}, nil
+	nav := newTieredNavigator(&lspNavigator{mgr: lsp.NewManager(root.root)}, treesitter.New(root.root), root.root)
+	return &CodeNav{root: root, nav: nav}, nil
 }
 
 // Tools returns the three navigation tools backed by this bundle.
@@ -193,25 +212,27 @@ func (t *codeNavTool) Run(ctx context.Context, raw json.RawMessage) (string, err
 	}
 	pos := lsp.Position{Line: args.Line - 1, Character: lsp.UTF16Col(lineText, byteCol)}
 
-	var locs []lsp.Location
+	var res navResult
 	switch t.kind {
 	case navDefinition:
-		locs, err = t.nav.nav.Definition(ctx, abs, pos)
+		res, err = t.nav.nav.Definition(ctx, abs, pos)
 	case navReferences:
-		locs, err = t.nav.nav.References(ctx, abs, pos)
+		res, err = t.nav.nav.References(ctx, abs, pos)
 	case navImplementations:
-		locs, err = t.nav.nav.Implementation(ctx, abs, pos)
+		res, err = t.nav.nav.Implementation(ctx, abs, pos)
 	}
 	if err != nil {
 		return "", err
 	}
-	return t.render(locs), nil
+	return t.render(res.Locations, res.Caveat), nil
 }
 
 // render formats locations as repo-relative "path:line: source" lines.
 // Locations outside the repository root (stdlib, module cache) are reported
-// but not excerpted — the sandbox does not read files outside the root.
-func (t *codeNavTool) render(locs []lsp.Location) string {
+// but not excerpted — the sandbox does not read files outside the root. When
+// caveat is non-empty it is prepended as a one-line note naming the tier that
+// answered (e.g. a syntactic tree-sitter match).
+func (t *codeNavTool) render(locs []lsp.Location, caveat string) string {
 	if len(locs) == 0 {
 		switch t.kind {
 		case navReferences:
@@ -231,6 +252,9 @@ func (t *codeNavTool) render(locs []lsp.Location) string {
 	}
 
 	var b strings.Builder
+	if caveat != "" {
+		fmt.Fprintf(&b, "%s\n", caveat)
+	}
 	seen := make(map[string]bool, len(shown))
 	lineCache := make(map[string][]string)
 	for _, loc := range shown {
