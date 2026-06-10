@@ -85,6 +85,17 @@ type Report struct {
 	Sinks []string `yaml:"sinks"`
 }
 
+// Review configures the `bugbot review --pr N` PR-review mode.
+type Review struct {
+	// FailOn controls the CI exit gate. "verified" (default) makes the command
+	// exit nonzero when the run surfaces a NEW Tier<=2 finding not already posted
+	// on the PR. "none" never fails the gate on findings.
+	FailOn string `yaml:"fail_on"`
+	// Suspected controls how Tier-3 (suspected) findings are surfaced. "summary"
+	// (default) lists them in the summary comment. "withhold" omits them entirely.
+	Suspected string `yaml:"suspected"`
+}
+
 // Daemon configures the continuous-run scheduler.
 type Daemon struct {
 	PollInterval  time.Duration `yaml:"poll_interval"`
@@ -105,6 +116,7 @@ type Config struct {
 	Scan      Scan                `yaml:"scan"`
 	Sandbox   Sandbox             `yaml:"sandbox"`
 	Report    Report              `yaml:"report"`
+	Review    Review              `yaml:"review"`
 	Daemon    Daemon              `yaml:"daemon"`
 	Storage   Storage             `yaml:"storage"`
 }
@@ -139,6 +151,10 @@ func Default() Config {
 		Report: Report{
 			Dir:   ".bugbot/reports",
 			Sinks: []string{"fs"},
+		},
+		Review: Review{
+			FailOn:    "verified",
+			Suspected: "summary",
 		},
 		Daemon: Daemon{
 			PollInterval:  60 * time.Second,
@@ -193,6 +209,8 @@ func Load(path string) (Config, error) {
 //	BUGBOT_DAEMON_POLL_INTERVAL
 //	BUGBOT_DAEMON_SWEEP_INTERVAL
 //	BUGBOT_DAEMON_IDLE_BACKOFF
+//	BUGBOT_REVIEW_FAIL_ON
+//	BUGBOT_REVIEW_SUSPECTED
 func applyEnvOverrides(cfg *Config, environ []string) error {
 	env := make(map[string]string, len(environ))
 	for _, kv := range environ {
@@ -243,6 +261,8 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	setStr("BUGBOT_SANDBOX_RUNTIME", &cfg.Sandbox.Runtime)
 	setStr("BUGBOT_SANDBOX_IMAGE", &cfg.Sandbox.Image)
 	setStr("BUGBOT_SANDBOX_NETWORK", &cfg.Sandbox.Network)
+	setStr("BUGBOT_REVIEW_FAIL_ON", &cfg.Review.FailOn)
+	setStr("BUGBOT_REVIEW_SUSPECTED", &cfg.Review.Suspected)
 
 	for _, err := range []error{
 		setInt64("BUGBOT_BUDGETS_PER_CYCLE_TOKENS", &cfg.Budgets.PerCycleTokens),
@@ -325,6 +345,17 @@ func (c *Config) Validate() error {
 
 	if c.Storage.Path == "" {
 		return fmt.Errorf("config: storage.path must not be empty")
+	}
+
+	switch c.Review.FailOn {
+	case "", "verified", "none":
+	default:
+		return fmt.Errorf("config: review.fail_on %q invalid (want verified or none)", c.Review.FailOn)
+	}
+	switch c.Review.Suspected {
+	case "", "summary", "withhold":
+	default:
+		return fmt.Errorf("config: review.suspected %q invalid (want summary or withhold)", c.Review.Suspected)
 	}
 
 	return nil
