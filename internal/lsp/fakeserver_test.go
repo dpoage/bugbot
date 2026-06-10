@@ -25,6 +25,9 @@ func TestMain(m *testing.M) {
 //	FAKE_LSP_CAPS            JSON capabilities object for the initialize result
 //	                         (default: definition/references/implementation true).
 //	FAKE_LSP_CRASH_ON        method name: os.Exit(3) upon receiving it.
+//	FAKE_LSP_STALL_ON        method name: swallow the request without ever
+//	                         responding (the loop keeps serving other methods),
+//	                         simulating a server that is stuck indexing.
 //	FAKE_LSP_CRASH_ONCE_FILE path: crash on the first query unless the file
 //	                         exists (it is created before crashing), so a
 //	                         restarted instance behaves normally.
@@ -63,6 +66,9 @@ func runFakeServer() {
 
 		if msg.Method == os.Getenv("FAKE_LSP_CRASH_ON") && msg.Method != "" {
 			os.Exit(3)
+		}
+		if msg.Method == os.Getenv("FAKE_LSP_STALL_ON") && msg.Method != "" {
+			continue
 		}
 
 		switch msg.Method {

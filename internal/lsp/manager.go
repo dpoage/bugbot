@@ -107,6 +107,7 @@ func (m *Manager) query(ctx context.Context, method, path string, pos Position) 
 		return nil, err
 	}
 
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
 
@@ -122,7 +123,9 @@ func (m *Manager) query(ctx context.Context, method, path string, pos Position) 
 			return locs, nil
 		}
 	}
-	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() != nil {
+	// Only blame indexing when it was our own per-query timeout that fired; an
+	// inherited parent deadline says nothing about the server's state.
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() != nil && parent.Err() == nil {
 		return nil, fmt.Errorf("%s timed out after %s — the language server may still be indexing; fall back to grep", method, m.timeout)
 	}
 	return nil, err

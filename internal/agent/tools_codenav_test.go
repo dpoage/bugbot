@@ -180,6 +180,41 @@ func TestCodeNavRendersRepoRelativeResults(t *testing.T) {
 	}
 }
 
+func TestCodeNavSymlinkedResultNotExcerpted(t *testing.T) {
+	// A symlink inside the repo pointing outside it makes a result path that
+	// passes lexical containment; the renderer must still refuse to excerpt the
+	// resolved-external content.
+	files := map[string]string{"main.go": "package main\n\nfunc Hello() {}\n"}
+	c, dir := newTestCodeNav(t, files, nil)
+
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.go")
+	if err := os.WriteFile(secret, []byte("package secret // CANARY-DO-NOT-LEAK\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "vendor-link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	fake := &fakeNavigator{locs: []lsp.Location{{
+		URI:   lsp.URIFromPath(filepath.Join(dir, "vendor-link", "secret.go")),
+		Range: lsp.Range{Start: lsp.Position{Line: 0}},
+	}}}
+	_ = c.nav.Close()
+	c.nav = fake
+
+	out, err := runTool(t, toolByName(t, c, "find_references"), codeNavArgs{File: "main.go", Line: 3, Symbol: "Hello"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(out, "CANARY-DO-NOT-LEAK") {
+		t.Errorf("symlink-escaped file content was excerpted:\n%s", out)
+	}
+	if !strings.Contains(out, "outside repository") {
+		t.Errorf("symlink-escaped location not labeled as outside:\n%s", out)
+	}
+}
+
 func TestCodeNavEmptyResults(t *testing.T) {
 	files := map[string]string{"main.go": "package main\n\nfunc Hello() {}\n"}
 	c, _ := newTestCodeNav(t, files, &fakeNavigator{})
