@@ -1,0 +1,27 @@
+{
+  "case": "resource-leak-seeded",
+  "model": "MiniMax-M3",
+  "base_url_host": "api.minimax.io",
+  "recorded_at": "2026-06-10T01:02:29Z",
+  "scores": {
+    "tp": 1,
+    "fp": 4,
+    "fn": 0,
+    "precision": 0.2,
+    "recall": 1,
+    "stats": {
+      "hypothesized": 5,
+      "triaged": 5,
+      "verified": 5,
+      "killed": 0,
+      "dropped_low_confidence": 0,
+      "dropped_duplicate": 0,
+      "dropped_suppressed": 0,
+      "dropped_out_of_scope": 0,
+      "input_tokens": 125197,
+      "output_tokens": 23382
+    }
+  },
+  "finder_sessions": 7,
+  "verifier_sessions": 15
+}

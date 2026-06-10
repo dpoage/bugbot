@@ -1,0 +1,27 @@
+{
+  "case": "clean-code",
+  "model": "MiniMax-M3",
+  "base_url_host": "api.minimax.io",
+  "recorded_at": "2026-06-10T01:03:27Z",
+  "scores": {
+    "tp": 0,
+    "fp": 0,
+    "fn": 0,
+    "precision": 1,
+    "recall": 1,
+    "stats": {
+      "hypothesized": 0,
+      "triaged": 0,
+      "verified": 0,
+      "killed": 0,
+      "dropped_low_confidence": 0,
+      "dropped_duplicate": 0,
+      "dropped_suppressed": 0,
+      "dropped_out_of_scope": 0,
+      "input_tokens": 32877,
+      "output_tokens": 1382
+    }
+  },
+  "finder_sessions": 6,
+  "verifier_sessions": 0
+}
