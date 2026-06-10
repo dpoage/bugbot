@@ -78,6 +78,13 @@ type Options struct {
 	// TranscriptDir, when non-empty, makes each reproducer agent auto-save its
 	// transcript there.
 	TranscriptDir string
+	// PatchProver enables the patch-prover stage: after a successful repro,
+	// attempt to produce a minimal fix and prove it with a sandboxed suite run.
+	PatchProver bool
+	// PatchMaxAttempts is the maximum number of fix plans tried per finding
+	// before flagging it needs-human. Zero uses the default (3); negative is
+	// treated as 1.
+	PatchMaxAttempts int
 }
 
 // resolve returns a copy of o with defaults applied; it does not mutate the

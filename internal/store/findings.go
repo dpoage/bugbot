@@ -48,6 +48,14 @@ type Finding struct {
 	CommitSHA   string
 	FileHash    string
 	ReproPath   string // empty when no reproduction exists
+	// FixPatch is the unified diff text produced by the patch-prover stage when a
+	// minimal fix candidate was witnessed by the sandbox.  Empty when the prover
+	// was not run or found no plausible fix.
+	FixPatch string
+	// NeedsHuman is set when the patch-prover exhausted its attempt budget without
+	// finding a minimal fix.  A fix-refusing bug is often misdiagnosed; human
+	// review is the appropriate escalation.
+	NeedsHuman bool
 	// CorroboratingLenses are the OTHER lenses that independently reported this
 	// same defect and were collapsed into this finding by triage's location-based
 	// cross-lens dedup. It excludes the finding's own Lens. Persisted as a
@@ -156,11 +164,13 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			INSERT INTO findings
 			  (id, fingerprint, title, description, reasoning, severity, tier,
 			   status, lens, file, line, commit_sha, file_hash, repro_path,
+			   fix_patch, needs_human,
 			   corroborating_lenses, created_at, updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.Severity,
 			f.Tier, string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA,
-			f.FileHash, nullStr(f.ReproPath), encodeLenses(f.CorroboratingLenses),
+			f.FileHash, nullStr(f.ReproPath), f.FixPatch, boolInt(f.NeedsHuman),
+			encodeLenses(f.CorroboratingLenses),
 			f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout),
 		); err != nil {
 			return Finding{}, err
@@ -182,11 +192,13 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			UPDATE findings SET
 			  title=?, description=?, reasoning=?, severity=?, tier=?, status=?,
 			  lens=?, file=?, line=?, commit_sha=?, file_hash=?, repro_path=?,
+			  fix_patch=?, needs_human=?,
 			  corroborating_lenses=?, updated_at=?
 			WHERE id=?`,
 			f.Title, f.Description, f.Reasoning, f.Severity, f.Tier,
 			string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA, f.FileHash,
-			nullStr(f.ReproPath), encodeLenses(f.CorroboratingLenses),
+			nullStr(f.ReproPath), f.FixPatch, boolInt(f.NeedsHuman),
+			encodeLenses(f.CorroboratingLenses),
 			f.UpdatedAt.Format(timeLayout), f.ID,
 		); err != nil {
 			return Finding{}, err
@@ -298,6 +310,7 @@ func (s *Store) MarkFixed(ctx context.Context, fingerprint string) error {
 // findingColumns is the SELECT column list shared by single- and multi-row reads.
 const findingColumns = `SELECT id, fingerprint, title, description, reasoning,
 	severity, tier, status, lens, file, line, commit_sha, file_hash, repro_path,
+	fix_patch, needs_human,
 	corroborating_lenses, created_at, updated_at`
 
 func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (Finding, error) {
@@ -319,18 +332,20 @@ func scanFinding(sc rowScanner) (Finding, error) {
 		f                    Finding
 		status               string
 		repro                sql.NullString
+		needsHuman           int
 		corrob               string
 		createdAt, updatedAt string
 	)
 	if err := sc.Scan(
 		&f.ID, &f.Fingerprint, &f.Title, &f.Description, &f.Reasoning,
 		&f.Severity, &f.Tier, &status, &f.Lens, &f.File, &f.Line, &f.CommitSHA,
-		&f.FileHash, &repro, &corrob, &createdAt, &updatedAt,
+		&f.FileHash, &repro, &f.FixPatch, &needsHuman, &corrob, &createdAt, &updatedAt,
 	); err != nil {
 		return Finding{}, err
 	}
 	f.Status = Status(status)
 	f.ReproPath = repro.String
+	f.NeedsHuman = needsHuman != 0
 	f.CorroboratingLenses = decodeLenses(corrob)
 	var err error
 	if f.CreatedAt, err = parseTime(createdAt); err != nil {
@@ -347,4 +362,12 @@ func nullStr(s string) any {
 		return nil
 	}
 	return s
+}
+
+// boolInt converts a bool to the SQLite convention: 1 for true, 0 for false.
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

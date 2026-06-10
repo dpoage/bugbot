@@ -109,6 +109,8 @@ func SortFindings(fs []store.Finding) {
 // tierName maps the integer tier to its human label (see ARCHITECTURE.md).
 func tierName(tier int) string {
 	switch tier {
+	case 0:
+		return "T0 Fix-witnessed"
 	case 1:
 		return "T1 Reproduced"
 	case 2:

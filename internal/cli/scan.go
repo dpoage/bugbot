@@ -249,7 +249,11 @@ func runRepro(ctx context.Context, out io.Writer, cfg *config.Config, st *store.
 		return fmt.Errorf("build reproducer client: %w", err)
 	}
 
-	r, err := repro.New(client, sb, target, repro.Options{Image: cfg.Sandbox.Image})
+	r, err := repro.New(client, sb, target, repro.Options{
+		Image:            cfg.Sandbox.Image,
+		PatchProver:      cfg.Repro.PatchProver,
+		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
+	})
 	if err != nil {
 		return fmt.Errorf("build reproducer: %w", err)
 	}
@@ -267,8 +271,14 @@ func runRepro(ctx context.Context, out io.Writer, cfg *config.Config, st *store.
 func printReproSummary(out io.Writer, s *repro.Summary) {
 	_, _ = fmt.Fprintf(out, "Reproduced: %d promoted to T1, %d not reproduced (of %d attempted)\n",
 		s.Promoted, s.Failed, s.Attempted)
+	if s.FixWitnessed > 0 || s.NeedsHuman > 0 {
+		_, _ = fmt.Fprintf(out, "Patch-prover: %d fix-witnessed (T0), %d needs-human\n",
+			s.FixWitnessed, s.NeedsHuman)
+	}
 	for _, o := range s.PerFinding {
-		if o.Promoted {
+		if o.FixWitnessed {
+			_, _ = fmt.Fprintf(out, "  [T0] %s -> fix witnessed\n", o.Title)
+		} else if o.Promoted {
 			_, _ = fmt.Fprintf(out, "  [T1] %s -> %s\n", o.Title, o.ArtifactPath)
 		} else {
 			reason := o.Reason
@@ -276,6 +286,9 @@ func printReproSummary(out io.Writer, s *repro.Summary) {
 				reason = "not demonstrated"
 			}
 			_, _ = fmt.Fprintf(out, "  [T2] %s (%s)\n", o.Title, reason)
+		}
+		if o.NeedsHuman {
+			_, _ = fmt.Fprintf(out, "       (patch-prover: needs human review)\n")
 		}
 	}
 }

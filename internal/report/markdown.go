@@ -75,7 +75,7 @@ func writeCounts(b *strings.Builder, fs []store.Finding) {
 	b.WriteString("## Summary\n\n")
 
 	b.WriteString("By tier:\n")
-	for _, t := range []int{1, 2, 3} {
+	for _, t := range []int{0, 1, 2, 3} {
 		if byTier[t] > 0 {
 			fmt.Fprintf(b, "- %s: %d\n", tierName(t), byTier[t])
 		}
@@ -83,7 +83,7 @@ func writeCounts(b *strings.Builder, fs []store.Finding) {
 	// Surface any out-of-range tiers deterministically.
 	var otherTiers []int
 	for t := range byTier {
-		if t < 1 || t > 3 {
+		if t < 0 || t > 3 {
 			otherTiers = append(otherTiers, t)
 		}
 	}
@@ -152,6 +152,17 @@ func writeFinding(b *strings.Builder, n int, f store.Finding) {
 
 	if f.ReproPath != "" {
 		fmt.Fprintf(b, "**Reproduction:** [`%s`](%s)\n\n", f.ReproPath, f.ReproPath)
+	}
+
+	if f.FixPatch != "" {
+		b.WriteString("**Candidate fix (witness — starting point only, NOT reviewed):**\n\n")
+		b.WriteString("```diff\n")
+		b.WriteString(f.FixPatch)
+		b.WriteString("\n```\n\n")
+	}
+
+	if f.NeedsHuman {
+		b.WriteString("**Needs human review:** fix-prover could not find a minimal fix.\n\n")
 	}
 }
 

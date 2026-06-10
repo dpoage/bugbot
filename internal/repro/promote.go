@@ -16,6 +16,10 @@ type Summary struct {
 	Promoted int
 	// Failed is the number that could not be reproduced (stayed Tier-2).
 	Failed int
+	// FixWitnessed is the number promoted to Tier-0 (fix witnessed by patch-prover).
+	FixWitnessed int
+	// NeedsHuman is the number where patch-prover exhausted attempts without a fix.
+	NeedsHuman int
 	// PerFinding holds the per-finding outcome in input order.
 	PerFinding []FindingOutcome
 }
@@ -31,6 +35,12 @@ type FindingOutcome struct {
 	Reason string
 	// Err is the infrastructure error, if the attempt failed to run at all.
 	Err error
+	// FixWitnessed is true when the patch-prover successfully witnessed a fix
+	// (finding promoted to Tier-0).
+	FixWitnessed bool
+	// NeedsHuman is true when the patch-prover exhausted attempts without
+	// finding a minimal fix.
+	NeedsHuman bool
 }
 
 // PromoteAll attempts to reproduce each finding (expected to be Tier-2
@@ -98,6 +108,18 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 				}
 				outcome.Promoted = true
 				outcome.ArtifactPath = att.ArtifactPath
+
+				// Patch-prover: if enabled, attempt to find and witness a minimal fix.
+				if r.opts.PatchProver {
+					patchResult, perr := r.provePatch(ctx, st, f, att)
+					if perr != nil {
+						// Infrastructure failure: record but do not block the T1 promotion.
+						outcome.Reason = "patch-prover error: " + perr.Error()
+					} else {
+						outcome.FixWitnessed = patchResult.FixWitnessed
+						outcome.NeedsHuman = patchResult.NeedsHuman
+					}
+				}
 			} else {
 				outcome.Reason = att.Reason
 			}
@@ -117,8 +139,36 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 		} else {
 			summary.Failed++
 		}
+		if o.FixWitnessed {
+			summary.FixWitnessed++
+		}
+		if o.NeedsHuman {
+			summary.NeedsHuman++
+		}
 	}
 	return summary, nil
+}
+
+// patchOutcome is the result of a patch-prover run on a single finding.
+type patchOutcome struct {
+	FixWitnessed bool
+	NeedsHuman   bool
+}
+
+// provePatch runs the patch-prover on a finding that was just promoted to T1.
+// It either witnesses a fix (T0) or records needs-human on exhaustion.
+func (r *Reproducer) provePatch(ctx context.Context, st *store.Store, f store.Finding, att *Attempt) (patchOutcome, error) {
+	prover := &PatchProver{
+		client:      r.client,
+		sb:          r.sb,
+		repoDir:     r.repoDir,
+		maxAttempts: r.opts.PatchMaxAttempts,
+		timeout:     r.opts.Timeout,
+		image:       r.opts.Image,
+		artifactDir: r.opts.ArtifactDir,
+		agentLimits: r.opts.AgentLimits,
+	}
+	return prover.Prove(ctx, st, f, att)
 }
 
 // promoteFinding updates a finding's store row to Tier-1 with the given

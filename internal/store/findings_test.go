@@ -253,6 +253,97 @@ func TestUpdateStatus_NotFound(t *testing.T) {
 	}
 }
 
+// TestFixPatchNeedsHuman_RoundTrip verifies that FixPatch and NeedsHuman
+// persist through insert, update, and all read paths.
+func TestFixPatchNeedsHuman_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	f := sampleFinding()
+	f.FixPatch = "--- a/calc.go\n+++ b/calc.go\n@@ -1 +1 @@\n-return 0\n+return 1\n"
+	f.NeedsHuman = false
+
+	stored, err := st.UpsertFinding(ctx, f)
+	if err != nil {
+		t.Fatalf("upsert with fix_patch: %v", err)
+	}
+	if stored.FixPatch != f.FixPatch {
+		t.Errorf("upsert returned fix_patch = %q, want %q", stored.FixPatch, f.FixPatch)
+	}
+	if stored.NeedsHuman {
+		t.Errorf("upsert returned needs_human = true, want false")
+	}
+
+	// Read back via GetFinding.
+	got, err := st.GetFinding(ctx, stored.ID)
+	if err != nil {
+		t.Fatalf("GetFinding: %v", err)
+	}
+	if got.FixPatch != f.FixPatch {
+		t.Errorf("GetFinding fix_patch = %q, want %q", got.FixPatch, f.FixPatch)
+	}
+	if got.NeedsHuman {
+		t.Errorf("GetFinding needs_human = true, want false")
+	}
+
+	// Update: set NeedsHuman=true, clear FixPatch.
+	f2 := stored
+	f2.NeedsHuman = true
+	f2.FixPatch = ""
+	updated, err := st.UpsertFinding(ctx, f2)
+	if err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	if !updated.NeedsHuman {
+		t.Errorf("updated needs_human = false, want true")
+	}
+	if updated.FixPatch != "" {
+		t.Errorf("updated fix_patch = %q, want empty", updated.FixPatch)
+	}
+
+	// Read back the updated values via GetFindingByFingerprint.
+	got2, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint: %v", err)
+	}
+	if !got2.NeedsHuman {
+		t.Errorf("GetFindingByFingerprint needs_human = false, want true")
+	}
+	if got2.FixPatch != "" {
+		t.Errorf("GetFindingByFingerprint fix_patch = %q, want empty", got2.FixPatch)
+	}
+
+	// ListFindings must also return the updated values.
+	all, err := st.ListFindings(ctx, FindingFilter{})
+	if err != nil {
+		t.Fatalf("ListFindings: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(all))
+	}
+	if !all[0].NeedsHuman {
+		t.Errorf("ListFindings needs_human = false, want true")
+	}
+
+	// Tier-0 round-trip: the tier column stores 0 correctly.
+	f3 := stored
+	f3.Tier = 0
+	f3.FixPatch = "--- a/x.go\n+++ b/x.go\n@@ -1 +1 @@\n-bad\n+good\n"
+	if _, err := st.UpsertFinding(ctx, f3); err != nil {
+		t.Fatalf("tier-0 upsert: %v", err)
+	}
+	got3, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("tier-0 get: %v", err)
+	}
+	if got3.Tier != 0 {
+		t.Errorf("tier = %d, want 0", got3.Tier)
+	}
+	if got3.FixPatch != f3.FixPatch {
+		t.Errorf("tier-0 fix_patch = %q, want %q", got3.FixPatch, f3.FixPatch)
+	}
+}
+
 // Document the re-verification flow as an executable example: after a commit
 // changes a file, the daemon finds open findings whose stored file_hash differs
 // from the file's current hash and re-checks only those.
