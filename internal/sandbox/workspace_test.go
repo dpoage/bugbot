@@ -22,7 +22,7 @@ func TestPrepareWorkspaceCopiesTreeAndAppliesWriteFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareWorkspace: %v", err)
 	}
-	defer os.RemoveAll(ws)
+	defer func() { _ = os.RemoveAll(ws) }()
 
 	if ws == src {
 		t.Fatal("workspace must be a separate directory from the source repo")

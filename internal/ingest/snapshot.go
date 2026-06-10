@@ -134,7 +134,7 @@ func fileLooksBinary(abs string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	buf := make([]byte, readHeadBytes)
 	n, err := io.ReadFull(f, buf)

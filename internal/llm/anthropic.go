@@ -245,7 +245,7 @@ func (a *anthropicAdapter) normalizeErr(err error) error {
 	var apiErr *anthropic.Error
 	if errors.As(err, &apiErr) {
 		status := apiErr.StatusCode
-		var resp *http.Response = apiErr.Response
+		resp := apiErr.Response
 		kind := classifyStatus(status, apiErr.Error())
 		ra := time.Duration(0)
 		if kind == ErrRateLimited || kind == ErrOverloaded {

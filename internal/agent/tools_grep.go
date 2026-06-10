@@ -182,7 +182,7 @@ func (t *grepTool) searchFile(path, rel string, re *regexp.Regexp, b *strings.Bu
 	if err != nil {
 		return 0, false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Peek the first chunk to detect binary content (NUL byte) before scanning.
 	br := bufio.NewReader(f)

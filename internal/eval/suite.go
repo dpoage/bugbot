@@ -163,20 +163,20 @@ func (s *SuiteResult) String() string {
 	fmt.Fprintf(&sb, "Bugbot eval suite (mode=%s)\n\n", s.Mode)
 
 	tw := tabwriter.NewWriter(&sb, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "CASE\tKIND\tTP\tFP\tFN\tPREC\tRECALL\tWHERE-KILLED")
+	_, _ = fmt.Fprintln(tw, "CASE\tKIND\tTP\tFP\tFN\tPREC\tRECALL\tWHERE-KILLED")
 	for _, c := range s.Cases {
 		kind := "seeded"
 		if c.Clean {
 			kind = "clean"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%.2f\t%.2f\t%s\n",
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%.2f\t%.2f\t%s\n",
 			c.Name, kind,
 			c.TruePositives, c.FalsePositives, c.FalseNegatives,
 			c.Precision(), c.Recall(),
 			whereKilled(c),
 		)
 	}
-	tw.Flush()
+	_ = tw.Flush()
 
 	fmt.Fprintf(&sb, "\nAGGREGATE  tp=%d fp=%d fn=%d  precision=%.3f recall=%.3f  clean-fp=%d\n",
 		s.TruePositives, s.FalsePositives, s.FalseNegatives,

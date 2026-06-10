@@ -64,7 +64,7 @@ func Fingerprint(lens, file string, line int, title string) string {
 	normFile := strings.ToLower(path.Clean(strings.ReplaceAll(file, "\\", "/")))
 	normTitle := strings.ToLower(strings.Join(strings.Fields(title), " "))
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s\x00%d\x00%s", strings.ToLower(lens), normFile, line, normTitle)
+	_, _ = fmt.Fprintf(h, "%s\x00%s\x00%d\x00%s", strings.ToLower(lens), normFile, line, normTitle)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -209,7 +209,7 @@ func (s *Store) ListFindings(ctx context.Context, filter FindingFilter) ([]Findi
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []Finding
 	for rows.Next() {

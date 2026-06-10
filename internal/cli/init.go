@@ -20,7 +20,7 @@ func newInitCmd() *cobra.Command {
 		Long: `init writes a commented starter ` + config.DefaultFileName + ` to the current
 directory. It refuses to overwrite an existing file.`,
 		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) (err error) {
 			path := config.DefaultFileName
 
 			// Refuse to clobber an existing file. Use O_EXCL so the
@@ -32,14 +32,20 @@ directory. It refuses to overwrite an existing file.`,
 				}
 				return fmt.Errorf("create %s: %w", path, err)
 			}
-			defer f.Close()
+			// Closing a written file can surface a deferred write/flush failure, so
+			// propagate it unless an earlier error already took precedence.
+			defer func() {
+				if cerr := f.Close(); cerr != nil && err == nil {
+					err = fmt.Errorf("close %s: %w", path, cerr)
+				}
+			}()
 
 			if _, err := f.WriteString(config.StarterYAML); err != nil {
 				return fmt.Errorf("write %s: %w", path, err)
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", path)
-			fmt.Fprintln(cmd.OutOrStdout(), "Next: set the api_key_env variables, then run `bugbot scan`.")
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", path)
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Next: set the api_key_env variables, then run `bugbot scan`.")
 			return nil
 		},
 	}

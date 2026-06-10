@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/dpoage/bugbot/internal/llm"
 )
@@ -28,8 +27,6 @@ type Runner struct {
 	// maxTokens caps output tokens per completion (passed through to the client).
 	// Zero lets the adapter apply its own default.
 	maxTokens int
-	// clock is injectable for deterministic transcript timestamps in tests.
-	clock func() time.Time
 }
 
 // Option configures a [Runner] at construction.
@@ -52,11 +49,6 @@ func WithTranscriptDir(dir string) Option {
 // default.
 func WithMaxTokens(n int) Option {
 	return func(r *Runner) { r.maxTokens = n }
-}
-
-// withClock injects a clock for deterministic transcript timestamps (tests).
-func withClock(fn func() time.Time) Option {
-	return func(r *Runner) { r.clock = fn }
 }
 
 // NewRunner builds a Runner bound to client, the given tools, and a system
@@ -86,9 +78,6 @@ func NewRunner(client llm.Client, tools []Tool, systemPrompt string, opts ...Opt
 // failure.
 func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 	tr := NewTranscript()
-	if r.clock != nil {
-		tr.clock = r.clock
-	}
 
 	messages := []llm.Message{{Role: llm.RoleUser, Content: task}}
 
@@ -224,7 +213,10 @@ func (r *Runner) autosave(tr *Transcript, task string) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	// autosave is best-effort: persistence failures must not break a run, so we
+	// deliberately discard both the write and close errors. Close still runs to
+	// flush buffered data even on the SaveJSONL error path.
+	defer func() { _ = f.Close() }()
 	_ = tr.SaveJSONL(f)
 }
 

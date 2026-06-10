@@ -153,7 +153,7 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	defer os.RemoveAll(ws)
+	defer func() { _ = os.RemoveAll(ws) }()
 
 	p := s.resolveParams(spec)
 	p.workspace = ws

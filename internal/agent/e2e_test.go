@@ -143,7 +143,7 @@ func TestRun_AutosaveTranscriptDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	tr, err := LoadJSONL(f)
 	if err != nil {
 		t.Fatalf("LoadJSONL: %v", err)

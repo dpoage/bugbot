@@ -58,7 +58,7 @@ func TestMarkdownContainsRequiredElements(t *testing.T) {
 	posCrit := strings.Index(got, "data race on shared counter")
 	posHigh := strings.Index(got, "nil pointer dereference")
 	posLow := strings.Index(got, "ignored error from Close")
-	if !(posCrit < posHigh && posHigh < posLow) {
+	if posCrit >= posHigh || posHigh >= posLow {
 		t.Fatalf("findings not ordered by severity desc: crit=%d high=%d low=%d", posCrit, posHigh, posLow)
 	}
 

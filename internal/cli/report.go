@@ -78,7 +78,7 @@ func newReportListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer st.Close()
+			defer func() { _ = st.Close() }()
 
 			filter := store.FindingFilter{Tier: tier}
 			switch strings.ToLower(strings.TrimSpace(status)) {
@@ -108,14 +108,14 @@ func newReportListCmd() *cobra.Command {
 
 			out := cmd.OutOrStdout()
 			if len(findings) == 0 {
-				fmt.Fprintln(out, "no findings match")
+				_, _ = fmt.Fprintln(out, "no findings match")
 				return nil
 			}
 
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "ID\tTIER\tSEVERITY\tLOCATION\tSTATUS\tTITLE")
+			_, _ = fmt.Fprintln(tw, "ID\tTIER\tSEVERITY\tLOCATION\tSTATUS\tTITLE")
 			for _, f := range findings {
-				fmt.Fprintf(tw, "%s\tT%d\t%s\t%s:%d\t%s\t%s\n",
+				_, _ = fmt.Fprintf(tw, "%s\tT%d\t%s\t%s:%d\t%s\t%s\n",
 					shortID(f.ID), f.Tier, f.Severity, f.File, f.Line, f.Status, f.Title)
 			}
 			return tw.Flush()
@@ -139,7 +139,7 @@ func newReportShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer st.Close()
+			defer func() { _ = st.Close() }()
 
 			f, err := report.ResolveID(ctx, st, args[0])
 			if err != nil {
@@ -147,22 +147,22 @@ func newReportShowCmd() *cobra.Command {
 			}
 
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "ID:          %s\n", f.ID)
-			fmt.Fprintf(out, "Fingerprint: %s\n", f.Fingerprint)
-			fmt.Fprintf(out, "Title:       %s\n", f.Title)
-			fmt.Fprintf(out, "Tier:        %d\n", f.Tier)
-			fmt.Fprintf(out, "Severity:    %s\n", f.Severity)
-			fmt.Fprintf(out, "Status:      %s\n", f.Status)
-			fmt.Fprintf(out, "Lens:        %s\n", f.Lens)
-			fmt.Fprintf(out, "Location:    %s:%d\n", f.File, f.Line)
-			fmt.Fprintf(out, "Commit:      %s\n", f.CommitSHA)
+			_, _ = fmt.Fprintf(out, "ID:          %s\n", f.ID)
+			_, _ = fmt.Fprintf(out, "Fingerprint: %s\n", f.Fingerprint)
+			_, _ = fmt.Fprintf(out, "Title:       %s\n", f.Title)
+			_, _ = fmt.Fprintf(out, "Tier:        %d\n", f.Tier)
+			_, _ = fmt.Fprintf(out, "Severity:    %s\n", f.Severity)
+			_, _ = fmt.Fprintf(out, "Status:      %s\n", f.Status)
+			_, _ = fmt.Fprintf(out, "Lens:        %s\n", f.Lens)
+			_, _ = fmt.Fprintf(out, "Location:    %s:%d\n", f.File, f.Line)
+			_, _ = fmt.Fprintf(out, "Commit:      %s\n", f.CommitSHA)
 			if f.ReproPath != "" {
-				fmt.Fprintf(out, "Repro:       %s\n", f.ReproPath)
+				_, _ = fmt.Fprintf(out, "Repro:       %s\n", f.ReproPath)
 			}
-			fmt.Fprintf(out, "Created:     %s\n", f.CreatedAt.Format("2006-01-02 15:04:05 MST"))
-			fmt.Fprintf(out, "Updated:     %s\n", f.UpdatedAt.Format("2006-01-02 15:04:05 MST"))
-			fmt.Fprintf(out, "\nDescription:\n%s\n", f.Description)
-			fmt.Fprintf(out, "\nReasoning (verification trace):\n%s\n", f.Reasoning)
+			_, _ = fmt.Fprintf(out, "Created:     %s\n", f.CreatedAt.Format("2006-01-02 15:04:05 MST"))
+			_, _ = fmt.Fprintf(out, "Updated:     %s\n", f.UpdatedAt.Format("2006-01-02 15:04:05 MST"))
+			_, _ = fmt.Fprintf(out, "\nDescription:\n%s\n", f.Description)
+			_, _ = fmt.Fprintf(out, "\nReasoning (verification trace):\n%s\n", f.Reasoning)
 			return nil
 		},
 	}
@@ -187,7 +187,7 @@ func newReportDismissCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer st.Close()
+			defer func() { _ = st.Close() }()
 
 			f, err := report.ResolveID(ctx, st, args[0])
 			if err != nil {
@@ -203,7 +203,7 @@ func newReportDismissCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(),
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(),
 				"dismissed %s; fingerprint suppressed — bugbot will not re-report this finding.\n",
 				shortID(f.ID))
 			return nil
@@ -228,7 +228,7 @@ func newReportEmitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer st.Close()
+			defer func() { _ = st.Close() }()
 
 			if len(sinkOverride) > 0 {
 				cfg.Report.Sinks = sinkOverride
@@ -258,7 +258,7 @@ func newReportEmitCmd() *cobra.Command {
 					return fmt.Errorf("sink %s: %w", sink.Name(), err)
 				}
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "emitted %d findings through %d sink(s)\n",
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "emitted %d findings through %d sink(s)\n",
 				len(rep.Findings), len(sinks))
 			return nil
 		},
