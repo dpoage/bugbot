@@ -14,8 +14,11 @@ var ErrBudgetExhausted = errors.New("agent: shared budget pool exhausted")
 // [Runner] runs. Each runner consults it via a [Limits.BudgetCheck] hook BEFORE
 // every model call, so a run already in flight stops at the next turn boundary
 // once the pool is exhausted rather than running to completion under its own
-// per-run allowance. This bounds total overshoot to at most one in-flight
-// model-call per concurrent runner.
+// per-run allowance. This bounds total CHARGED overshoot to at most one
+// in-flight model-call per concurrent runner. Note the charge happens on
+// successful completions only: provider-side retries of failed attempts and a
+// RunJSON repair pass spend real tokens that are gated pre-turn but not
+// charged, so real-dollar overshoot can modestly exceed the charged bound.
 //
 // The pool tracks cumulative spend (input+output tokens, the same quantity the
 // funnel ledgers) against a fixed limit. A non-positive limit means unlimited:

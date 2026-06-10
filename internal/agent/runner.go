@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -101,6 +102,12 @@ func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 		// prefix stability is preserved.
 		if r.limits.BudgetCheck != nil {
 			if err := r.limits.BudgetCheck(); err != nil {
+				if !errors.Is(err, ErrBudgetExhausted) {
+					// A hook failure that isn't a budget stop is an infrastructure
+					// error; surface it rather than misreporting a clean stop.
+					r.autosave(tr, task)
+					return outcome, fmt.Errorf("agent: budget check: %w", err)
+				}
 				r.finishTruncated(outcome, TruncBudgetPool)
 				break
 			}
