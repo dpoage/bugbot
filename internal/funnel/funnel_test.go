@@ -342,6 +342,84 @@ func TestSweep_FinderParseFailures_HonestStats(t *testing.T) {
 	}
 }
 
+// TestRunFinder_BudgetStopNotParseFailure proves the L1 fix: a finder run cut
+// short by the shared budget pool whose partial output does not parse must be
+// classified as a budget stop, NOT a finder parse failure. A budget stop is an
+// expected consequence of running out of headroom, not a reliability problem, so
+// it must not inflate FinderFailures (which drives the "scan unreliable" warning).
+func TestRunFinder_BudgetStopNotParseFailure(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// A finder that, if it ever ran, would produce unparseable prose. With an
+	// exhausted pool it never completes a turn: the pre-turn BudgetCheck stops it
+	// with TruncBudgetPool before any model call, so FinalText is empty and
+	// RunJSON returns a parse error — exactly the case L1 must classify as a budget
+	// stop rather than a parse failure.
+	finder := newScriptedClient()
+	finder.fallback = "prose that never parses as JSON"
+
+	f, err := New(RoleClients{Finder: finder, Verifier: newScriptedClient()}, st, repo, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := f.readOnlyTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a budget pool that is already exhausted, so every runner launched
+	// against it stops on its first pre-turn check.
+	rec := &spendRecorder{ctx: ctx, store: st}
+	budget := newBudgetState(100, rec)
+	budget.pool.Add(100) // spend == limit => Check returns ErrBudgetExhausted
+
+	cands, status, err := f.runFinder(ctx, finder, tools, f.lenses[0], []string{"bug.go"}, budget)
+	if err != nil {
+		t.Fatalf("runFinder should not error on a budget stop: %v", err)
+	}
+	if len(cands) != 0 {
+		t.Errorf("cands = %d, want 0 (no completion happened)", len(cands))
+	}
+	if status != finderBudgetStopped {
+		t.Errorf("status = %d, want finderBudgetStopped (%d) — a budget stop must not count as a parse failure", status, finderBudgetStopped)
+	}
+}
+
+// TestRunFinder_ParseFailureStillCounts is the complement to the budget-stop
+// case: a finder that runs to a NON-budget stop and still produces no parseable
+// JSON remains a genuine parse failure (the L1 change must not mask real
+// reliability problems).
+func TestRunFinder_ParseFailureStillCounts(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	finder := newScriptedClient()
+	finder.fallback = "prose that never parses as JSON"
+
+	f, err := New(RoleClients{Finder: finder, Verifier: newScriptedClient()}, st, repo, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := f.readOnlyTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Unlimited pool: the finder runs, returns prose, RunJSON's parse+repair both
+	// fail, and the run was never budget-truncated.
+	rec := &spendRecorder{ctx: ctx, store: st}
+	budget := newBudgetState(0, rec)
+
+	_, status, err := f.runFinder(ctx, finder, tools, f.lenses[0], []string{"bug.go"}, budget)
+	if err != nil {
+		t.Fatalf("runFinder should not error on a parse failure: %v", err)
+	}
+	if status != finderParseFailed {
+		t.Errorf("status = %d, want finderParseFailed (%d)", status, finderParseFailed)
+	}
+}
+
 func TestSweep_Dedup_SameBugTwoLenses(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)

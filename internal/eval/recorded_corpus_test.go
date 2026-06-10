@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/dpoage/bugbot/internal/funnel"
 )
 
 // TestRecordedCorpusReplay replays the committed real-model corpus through the
@@ -58,6 +60,24 @@ func TestRecordedCorpusReplay(t *testing.T) {
 			t.Errorf("case %q: %v", cr.Name, err)
 			continue
 		}
+		// Chunk size is load-bearing: it re-anchors how many finder agents a fixed
+		// file set produces, so the recorded FinderSessions only mean what they say
+		// at the chunk size that produced them. When the manifest records one (newer
+		// corpora), it must match the chunk size the current replay actually uses;
+		// otherwise the corpus was recorded under a different finder fan-out and a
+		// matching score would be coincidental. Manifests recorded before this field
+		// existed (chunk_size == 0, omitted) are skipped so they replay unchanged.
+		if m.ChunkSize != 0 {
+			// Recorded cases replay with the builtin's default options (chunk size
+			// unset => funnel.DefaultChunkSize), so that is the fan-out this replay
+			// actually uses.
+			replayChunkSize := effectiveChunkSize(0)
+			if m.ChunkSize != replayChunkSize {
+				t.Errorf("case %q: manifest chunk_size = %d, replay uses %d — corpus was recorded at a different finder fan-out; re-record",
+					cr.Name, m.ChunkSize, replayChunkSize)
+			}
+		}
+
 		want := m.Scores
 		if cr.TruePositives != want.TruePositives ||
 			cr.FalsePositives != want.FalsePositives ||
@@ -110,6 +130,55 @@ func TestLoadRecordedCases_EmptyRoleErrors(t *testing.T) {
 	}
 	if _, err := LoadRecordedCases(dir); err == nil {
 		t.Errorf("expected error for case dir with no sessions")
+	}
+}
+
+// TestEffectiveChunkSize pins the chunk-size resolution that the manifest
+// records and the replay asserts: a non-positive option resolves to the funnel
+// default, a positive option is used verbatim.
+func TestEffectiveChunkSize(t *testing.T) {
+	if got := effectiveChunkSize(0); got != funnel.DefaultChunkSize {
+		t.Errorf("effectiveChunkSize(0) = %d, want default %d", got, funnel.DefaultChunkSize)
+	}
+	if got := effectiveChunkSize(-1); got != funnel.DefaultChunkSize {
+		t.Errorf("effectiveChunkSize(-1) = %d, want default %d", got, funnel.DefaultChunkSize)
+	}
+	if got := effectiveChunkSize(30); got != 30 {
+		t.Errorf("effectiveChunkSize(30) = %d, want 30", got)
+	}
+}
+
+// TestManifest_ChunkSizeRoundTrip proves the new chunk_size field survives the
+// write/load round-trip, and that a manifest recorded before the field existed
+// (no chunk_size) loads as zero so the replay assertion treats it as "unknown,
+// skip" rather than failing.
+func TestManifest_ChunkSizeRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	// New manifest carrying a chunk size.
+	if err := writeManifest(dir, RecordedManifest{Case: "x", ChunkSize: 8}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ChunkSize != 8 {
+		t.Errorf("round-tripped ChunkSize = %d, want 8", got.ChunkSize)
+	}
+
+	// Legacy manifest without the field: chunk_size absent => zero on load, which
+	// the replay assertion skips (omitempty also keeps it out of the JSON).
+	legacy := []byte(`{"case":"x","finder_sessions":1}`)
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), legacy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = LoadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ChunkSize != 0 {
+		t.Errorf("legacy manifest ChunkSize = %d, want 0 (field absent)", got.ChunkSize)
 	}
 }
 

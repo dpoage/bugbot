@@ -200,6 +200,7 @@ func TestRecordCorpus(t *testing.T) {
 				},
 				FinderSessions:   len(finderSessions),
 				VerifierSessions: len(verifierSessions),
+				ChunkSize:        effectiveChunkSize(c.Options.ChunkSize),
 			}
 			if err := writeManifest(caseDir, manifest); err != nil {
 				t.Fatalf("write manifest for %q: %v", base.Name, err)

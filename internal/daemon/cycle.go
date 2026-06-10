@@ -155,6 +155,31 @@ func (d *Daemon) recordScanResult(res *cycleResult, fres *funnel.Result) {
 	res.inTokens = fres.Stats.InputTokens
 	res.outTokens = fres.Stats.OutputTokens
 	res.cacheRead = fres.Stats.CacheReadTokens
+	d.warnIfUnreliable(fres)
+}
+
+// warnIfUnreliable logs a prominent warning when the finder stage was not fully
+// reliable, mirroring the CLI scan banner (internal/cli/scan.go). The daemon
+// runs unattended, so a silent "No findings" on a broken sweep is the trust bug
+// this guards against: an empty/sparse finding set when finders failed must be
+// loudly flagged as untrustworthy, not treated as clean. This never aborts the
+// cycle — the daemon must keep running.
+func (d *Daemon) warnIfUnreliable(fres *funnel.Result) {
+	s := fres.Stats
+	if s.FinderReliable() {
+		return
+	}
+	switch {
+	case s.FinderRuns == 0:
+		d.log.Warn("daemon: SCAN RELIABILITY WARNING: no finder agents ran — this result says NOTHING about the code's correctness",
+			"finder_runs", s.FinderRuns)
+	case s.MostFindersFailed():
+		d.log.Warn("daemon: SCAN RELIABILITY WARNING: most finders failed — effectively no signal; treat 'no findings' as UNKNOWN, not clean. Check model/output-token settings",
+			"finder_failures", s.FinderFailures, "finder_runs", s.FinderRuns)
+	default:
+		d.log.Warn("daemon: SCAN RELIABILITY WARNING: some finders produced no parseable output — coverage incomplete; do not read a low finding count as a clean bill of health",
+			"finder_failures", s.FinderFailures, "finder_runs", s.FinderRuns)
+	}
 }
 
 // finishCycle emits the report and logs the cycle summary. Reporting failures

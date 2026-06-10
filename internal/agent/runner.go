@@ -77,6 +77,14 @@ func NewRunner(client llm.Client, tools []Tool, systemPrompt string, opts ...Opt
 // client/IO failures return a non-nil error. The returned Outcome's Transcript
 // is always non-nil, even on error, capturing whatever happened before the
 // failure.
+//
+// Max-tokens continuation: when a turn stops at the output token cap
+// (StopMaxTokens) with no tool calls, Run makes ONE extra continuation
+// completion that turn — nudging the model to emit the rest — and stitches the
+// two halves into a single assistant message (see [Runner.completeOnce]). This
+// applies to plain Run, not only RunJSON: a truncated final answer is completed
+// rather than returned half-written. It costs at most one additional completion
+// per truncated turn and is reflected in the Outcome's Iterations and Usage.
 func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 	return r.run(ctx, task, "")
 }
@@ -220,13 +228,48 @@ func (r *Runner) completeOnce(ctx context.Context, tr *Transcript, messages *[]l
 			ToolCalls: cont.ToolCalls,
 		})
 		// Stitch the two halves so the caller (and FinalText) sees one answer.
-		joined := resp.Text + cont.Text
+		// Models frequently ignore "continue from where you stopped" and instead
+		// restart, repeating some head of the first half. A naive resp.Text+cont.Text
+		// would then double that prefix and corrupt the JSON. Trim the longest
+		// suffix of resp.Text that the continuation re-emits as its prefix before
+		// concatenating, so a clean cut and a repeated-prefix restart both stitch
+		// into one well-formed answer.
+		joined := stitchContinuation(resp.Text, cont.Text)
 		outcome.FinalText = joined
 		resp.Text = joined
 		resp.ToolCalls = cont.ToolCalls
 		resp.StopReason = cont.StopReason
 	}
 	return resp, nil
+}
+
+// maxStitchOverlap bounds how far back stitchContinuation scans for a repeated
+// prefix. The overlap is the chunk a restarting model re-emits; a few KB covers
+// realistic restarts while keeping the scan O(n) and immune to a pathological
+// continuation that happens to share a huge prefix with the head.
+const maxStitchOverlap = 4096
+
+// stitchContinuation joins a truncated first half with its continuation, undoing
+// the common case where the model restarts and repeats some head of head as the
+// prefix of cont. It finds the LONGEST suffix of head (bounded by
+// maxStitchOverlap) that is a prefix of cont and drops that overlap from cont
+// before concatenating. With no overlap it degrades to head+cont (the clean-cut
+// case). The scan is longest-first so a model that repeats more text wins over a
+// coincidental short match.
+func stitchContinuation(head, cont string) string {
+	max := len(head)
+	if max > maxStitchOverlap {
+		max = maxStitchOverlap
+	}
+	if max > len(cont) {
+		max = len(cont)
+	}
+	for n := max; n > 0; n-- {
+		if head[len(head)-n:] == cont[:n] {
+			return head + cont[n:]
+		}
+	}
+	return head + cont
 }
 
 // complete issues a single completion, records it, and accumulates its usage and
