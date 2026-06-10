@@ -59,12 +59,12 @@ func (f *Funnel) Targeted(ctx context.Context, changedFiles []string) (*Result, 
 	return f.run(ctx, store.ScanTargeted, snap, targets)
 }
 
-// snapshot builds the current snapshot using the configured (here: unfiltered)
-// scan view. The CLI passes its config-derived filter via the repo; the funnel
-// itself takes the repo's full snapshot and relies on the target-file list to
-// scope work.
+// snapshot builds the current snapshot through the configured scan filter
+// (Options.Filter, mapped from config.Scan by the CLI/daemon). Found the hard
+// way: this used to pass an empty filter, so include/exclude globs were
+// silently ignored and a "scoped" calibration scan swept the whole repo.
 func (f *Funnel) snapshot(ctx context.Context) (*ingest.Snapshot, error) {
-	snap, err := f.repo.Snapshot(ctx, ingest.ScanFilter{})
+	snap, err := f.repo.Snapshot(ctx, f.opts.Filter)
 	if err != nil {
 		return nil, fmt.Errorf("funnel: snapshot: %w", err)
 	}

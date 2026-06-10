@@ -80,6 +80,10 @@ type Options struct {
 	// Lenses, when non-empty, restricts the finder stage to the named built-in
 	// lenses (see BuiltinLenses). Empty means all lenses.
 	Lenses []string
+	// Filter scopes the snapshot to the configured include/exclude globs
+	// (config.Scan maps directly onto it). The zero value scans every tracked
+	// file.
+	Filter ingest.ScanFilter
 	// Refuters is the number of adversarial refuter agents per candidate. Zero
 	// uses DefaultRefuters.
 	Refuters int
