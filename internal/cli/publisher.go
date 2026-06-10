@@ -1,0 +1,102 @@
+package cli
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"sync/atomic"
+
+	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/daemon"
+	"github.com/dpoage/bugbot/internal/store"
+)
+
+// storePublisher is the concrete daemon.Publisher implementation: it runs the
+// publish reconcile loop against a live store and gh runner. The daemon wires
+// one in when cfg.Publish.Enabled is true; otherwise Deps.Publisher is nil and
+// the hook is skipped.
+type storePublisher struct {
+	gh      ghRunner
+	st      *store.Store
+	cfg     config.Publish
+	tierMin int
+	log     *slog.Logger
+	// disabled latches when gh is missing from PATH: that condition is stable
+	// for the daemon's lifetime, so we warn ONCE and stop attempting publishes
+	// instead of re-warning every cycle.
+	disabled atomic.Bool
+}
+
+// NewStorePublisher constructs a storePublisher. gh is typically realGH; pass
+// a fakeGH in tests.
+func NewStorePublisher(gh ghRunner, st *store.Store, cfg config.Publish, log *slog.Logger) *storePublisher {
+	return &storePublisher{
+		gh:      gh,
+		st:      st,
+		cfg:     cfg,
+		tierMin: cfg.TierMin,
+		log:     log,
+	}
+}
+
+// Publish implements daemon.Publisher. It discards the human-readable summary
+// lines into the daemon's logger at debug level so the log stream isn't noisy
+// on every cycle. A missing gh binary warns once and latches the publisher
+// off for the daemon's lifetime; other errors are returned to the caller
+// (which logs but never fails the cycle).
+func (p *storePublisher) Publish(ctx context.Context) error {
+	if p.disabled.Load() {
+		return nil
+	}
+	// Route output to a sink that writes each line at debug level.
+	w := &slogWriter{log: p.log}
+	err := runPublish(ctx, w, p.gh, p.st, p.cfg, p.tierMin, false /* never dry-run from daemon */)
+	if err != nil && isGHMissing(err) {
+		p.disabled.Store(true)
+		p.log.Warn("daemon: publish disabled for this run: gh CLI not found on PATH; install gh from https://cli.github.com")
+		return nil
+	}
+	return err
+}
+
+// slogWriter is an io.Writer that writes each newline-terminated line to the
+// slog logger at debug level. The daemon uses it to suppress publish summary
+// lines from the operator-visible INFO stream without losing them entirely.
+type slogWriter struct {
+	log *slog.Logger
+	buf []byte
+}
+
+func (w *slogWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		i := indexOf(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		line := string(w.buf[:i])
+		w.buf = w.buf[i+1:]
+		if line != "" {
+			w.log.Debug("daemon: publish", "msg", line)
+		}
+	}
+	return len(p), nil
+}
+
+// indexOf returns the index of b in buf, or -1 if not found.
+func indexOf(buf []byte, b byte) int {
+	for i, c := range buf {
+		if c == b {
+			return i
+		}
+	}
+	return -1
+}
+
+// Ensure storePublisher satisfies the io.Writer interface (used internally via
+// slogWriter) and the daemon.Publisher interface (verified at compile time by
+// the daemon package via the interface type).
+var (
+	_ io.Writer        = (*slogWriter)(nil)
+	_ daemon.Publisher = (*storePublisher)(nil)
+)

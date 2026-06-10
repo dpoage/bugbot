@@ -128,6 +128,13 @@ func newDaemonCmd() *cobra.Command {
 				deps.Reproducer = reproducer.repro
 			}
 
+			// Publish hook: wire in when cfg.Publish.Enabled. We do not
+			// pre-check for gh on PATH here; a missing gh binary will produce a
+			// warning on the first post-cycle run via the Publisher interface.
+			if cfg.Publish.Enabled {
+				deps.Publisher = NewStorePublisher(realGH, st, cfg.Publish, logger)
+			}
+
 			dcfg := daemon.DaemonConfig{
 				PollInterval:   cfg.Daemon.PollInterval,
 				SweepInterval:  cfg.Daemon.SweepInterval,

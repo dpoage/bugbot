@@ -94,6 +94,10 @@ type Deps struct {
 	// cycle's funnel as its progress sink. Emission is best-effort and never
 	// blocks or fails the loop. See internal/progress.
 	Progress progress.Sink
+	// Publisher, when non-nil, is invoked after each post-cycle reverify to
+	// keep GitHub issues in sync with the store. Only wired when
+	// cfg.Publish.Enabled is true and the gh binary is on PATH.
+	Publisher Publisher
 }
 
 // Promoter is the slice of *repro.Reproducer the daemon needs for post-cycle
@@ -101,6 +105,18 @@ type Deps struct {
 // sandbox or container runtime. *repro.Reproducer satisfies it.
 type Promoter interface {
 	PromoteAll(ctx context.Context, st *store.Store, findings []store.Finding) (*repro.Summary, error)
+}
+
+// Publisher is the post-cycle GitHub issue reconciler. The daemon calls it
+// after reverifyOpenFindings to keep GitHub issues in sync with the store.
+// Keeping it an interface lets tests inject a no-op stub without a real gh
+// binary or network. The CLI wires in a real publisher when cfg.Publish.Enabled
+// is set; otherwise Publisher in Deps is left nil and the hook is skipped.
+type Publisher interface {
+	// Publish reconciles open findings against published GitHub issues. It is
+	// expected to be idempotent and to tolerate a missing gh binary by returning
+	// a non-fatal error (the caller logs and continues).
+	Publish(ctx context.Context) error
 }
 
 // DaemonConfig mirrors the relevant config.Daemon + config.Budgets fields plus
@@ -134,15 +150,16 @@ const maxBackoffMultiplier = 10
 // Daemon is the composed scheduler. Construct with New and drive with Run. It is
 // not safe for concurrent Run calls; one Daemon owns one loop.
 type Daemon struct {
-	repo    *ingest.Repo
-	store   *store.Store
-	clients funnel.RoleClients
-	repro   Promoter
-	fopts   funnel.Options
-	sinks   []report.Sink
-	log     *slog.Logger
-	prog    progress.Sink
-	cfg     DaemonConfig
+	repo      *ingest.Repo
+	store     *store.Store
+	clients   funnel.RoleClients
+	repro     Promoter
+	publisher Publisher
+	fopts     funnel.Options
+	sinks     []report.Sink
+	log       *slog.Logger
+	prog      progress.Sink
+	cfg       DaemonConfig
 
 	poller *ingest.Poller
 
@@ -183,17 +200,18 @@ func New(deps Deps, cfg DaemonConfig) (*Daemon, error) {
 	}
 
 	return &Daemon{
-		repo:    deps.Repo,
-		store:   deps.Store,
-		clients: deps.Clients,
-		repro:   deps.Reproducer,
-		fopts:   deps.FunnelOpts,
-		sinks:   deps.Sinks,
-		log:     log,
-		prog:    deps.Progress,
-		cfg:     cfg,
-		poller:  ingest.NewPoller(deps.Repo, ""),
-		clock:   realClock{},
+		repo:      deps.Repo,
+		store:     deps.Store,
+		clients:   deps.Clients,
+		repro:     deps.Reproducer,
+		publisher: deps.Publisher,
+		fopts:     deps.FunnelOpts,
+		sinks:     deps.Sinks,
+		log:       log,
+		prog:      deps.Progress,
+		cfg:       cfg,
+		poller:    ingest.NewPoller(deps.Repo, ""),
+		clock:     realClock{},
 	}, nil
 }
 

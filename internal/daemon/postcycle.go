@@ -25,10 +25,28 @@ func (d *Daemon) postCycle(ctx context.Context, fres *funnel.Result, res *cycleR
 	res.closedF += closed
 	progress.Emit(d.prog, progress.Event{Kind: progress.KindReverify, Count: closed})
 
+	// Publish reconcile: file/close GitHub issues for findings changed this
+	// cycle. Runs AFTER reverify so auto-closed findings are already marked
+	// fixed before the reconciler evaluates them. A missing gh binary logs a
+	// warning but does not abort the daemon loop.
+	d.runPublisher(ctx)
+
 	if fres != nil {
 		promoted := d.promoteNewFindings(ctx, fres)
 		res.promoted += promoted
 		progress.Emit(d.prog, progress.Event{Kind: progress.KindPromote, Count: promoted})
+	}
+}
+
+// runPublisher calls the wired Publisher, if any. gh-not-found and similar
+// transient failures are logged as warnings so the daemon loop continues
+// uninterrupted.
+func (d *Daemon) runPublisher(ctx context.Context) {
+	if d.publisher == nil {
+		return
+	}
+	if err := d.publisher.Publish(ctx); err != nil {
+		d.log.Warn("daemon: publish reconcile failed (will retry next cycle)", "err", err)
 	}
 }
 
