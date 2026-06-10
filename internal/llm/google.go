@@ -196,9 +196,14 @@ func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse) Response
 	}
 	out.Text = text
 	if resp.UsageMetadata != nil {
+		// promptTokenCount already INCLUDES cachedContentTokenCount (Gemini
+		// convention), matching the normalized Usage semantics directly.
+		// Gemini 2.x caches implicitly server-side; we only surface the hit
+		// count — no explicit CachedContent management in this thin layer.
 		out.Usage = Usage{
-			InputTokens:  int64(resp.UsageMetadata.PromptTokenCount),
-			OutputTokens: int64(resp.UsageMetadata.CandidatesTokenCount),
+			InputTokens:          int64(resp.UsageMetadata.PromptTokenCount),
+			OutputTokens:         int64(resp.UsageMetadata.CandidatesTokenCount),
+			CacheReadInputTokens: int64(resp.UsageMetadata.CachedContentTokenCount),
 		}
 	}
 	out.StopReason = mapGoogleStop(stop, len(out.ToolCalls) > 0)
@@ -240,12 +245,14 @@ func (g *googleAdapter) normalizeErr(err error) error {
 }
 
 func googleCapabilities(model string) Capabilities {
-	// Gemini supports parallel function calls and structured output; it has no
-	// prompt-caching parity with Anthropic in this thin layer.
+	// Gemini supports parallel function calls and structured output. Prompt
+	// caching is implicit (server-side, automatic on 2.x models); the adapter
+	// surfaces cache hits via Usage.CacheReadInputTokens but does not manage
+	// explicit CachedContent.
 	return Capabilities{
 		ContextWindow:     1_000_000,
 		ParallelToolCalls: true,
-		PromptCaching:     false,
+		PromptCaching:     true,
 		StructuredOutput:  true,
 	}
 }

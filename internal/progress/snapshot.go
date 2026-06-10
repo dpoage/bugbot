@@ -41,8 +41,11 @@ type Status struct {
 	Counts Counts `json:"counts"`
 
 	// SpendInput / SpendOutput are cumulative tokens for the current run.
-	SpendInput  int64 `json:"spend_input"`
-	SpendOutput int64 `json:"spend_output"`
+	// SpendInput includes cached tokens; SpendCacheRead is the subset served
+	// from the provider's prompt cache (billed at a steep discount).
+	SpendInput     int64 `json:"spend_input"`
+	SpendOutput    int64 `json:"spend_output"`
+	SpendCacheRead int64 `json:"spend_cache_read,omitempty"`
 
 	// SpendTodayInput / SpendTodayOutput are the day's total spend, supplied by
 	// the daemon on cycle boundaries (0 when the caller does not track it).
@@ -165,6 +168,7 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 	case KindSpendTick:
 		s.st.SpendInput = ev.InputTokens
 		s.st.SpendOutput = ev.OutputTokens
+		s.st.SpendCacheRead = ev.CacheReadTokens
 	case KindFindingVerified:
 		s.st.Counts.Verified++
 		s.st.LastEvent = "verified: " + ev.Title
@@ -182,6 +186,7 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 		if ev.InputTokens > 0 || ev.OutputTokens > 0 {
 			s.st.SpendInput = ev.InputTokens
 			s.st.SpendOutput = ev.OutputTokens
+			s.st.SpendCacheRead = ev.CacheReadTokens
 		}
 		s.st.Stage = ""
 		s.st.LastEvent = "finished " + ev.ScanKind

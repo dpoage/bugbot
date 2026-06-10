@@ -248,6 +248,10 @@ func printResult(out io.Writer, res *funnel.Result) {
 		s.DroppedLowConfidence, s.DroppedDuplicate, s.DroppedSuppressed, s.DroppedOutOfScope)
 	_, _ = fmt.Fprintf(out, "Spend: input=%d output=%d total=%d tokens\n",
 		s.InputTokens, s.OutputTokens, s.InputTokens+s.OutputTokens)
+	if s.CacheReadTokens > 0 || s.CacheCreationTokens > 0 {
+		_, _ = fmt.Fprintf(out, "Cache: read=%d created=%d tokens (of input; reads bill at a steep discount)\n",
+			s.CacheReadTokens, s.CacheCreationTokens)
+	}
 
 	if res.Degraded || res.Stopped {
 		_, _ = fmt.Fprintf(out, "Budget: degraded=%v stopped=%v\n", res.Degraded, res.Stopped)

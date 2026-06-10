@@ -171,9 +171,16 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) Response {
 		}
 		resp.StopReason = mapOpenAIStop(choice.FinishReason, len(resp.ToolCalls) > 0)
 	}
+	// prompt_tokens already INCLUDES cached tokens (OpenAI convention), which
+	// matches the normalized Usage semantics directly. Caching is automatic
+	// server-side for OpenAI; prompt_tokens_details.cached_tokens reports the
+	// discounted subset. OpenAI-compatible endpoints (Ollama/vLLM/MiniMax/...)
+	// often omit prompt_tokens_details entirely, in which case the SDK leaves
+	// CachedTokens at zero — exactly the "no cache activity" value.
 	resp.Usage = Usage{
-		InputTokens:  cc.Usage.PromptTokens,
-		OutputTokens: cc.Usage.CompletionTokens,
+		InputTokens:          cc.Usage.PromptTokens,
+		OutputTokens:         cc.Usage.CompletionTokens,
+		CacheReadInputTokens: cc.Usage.PromptTokensDetails.CachedTokens,
 	}
 	return resp
 }

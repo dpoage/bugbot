@@ -95,7 +95,58 @@ func (a *anthropicAdapter) buildParams(req Request) (anthropic.MessageNewParams,
 		}
 		params.Tools = tools
 	}
+
+	applyCacheBreakpoints(&params)
 	return params, nil
+}
+
+// applyCacheBreakpoints marks ephemeral prompt-cache breakpoints on the
+// request. Anthropic caches the prefix up to each breakpoint (max 4 per
+// request), so the agent loop's stable prefix — tool definitions, then the
+// system prompt, then the append-only conversation — is re-read from cache
+// instead of re-billed at full price each iteration.
+//
+// Placement (≤ 4 total):
+//
+//   - the last tool definition (tools serialize before system/messages, so one
+//     breakpoint there caches the whole tool block);
+//   - the last system block (caches tools + system);
+//   - the last content block of the final message AND of the message before it.
+//     The final-message breakpoint writes this iteration's full conversation to
+//     cache; the second-to-last one lands exactly where the previous iteration's
+//     final breakpoint was, anchoring an exact cache hit even when a turn
+//     appends more blocks than the server's automatic ~20-block lookback covers.
+//
+// Moving breakpoints between requests does not invalidate cache entries —
+// lookup is by content prefix, not by marker position.
+func applyCacheBreakpoints(params *anthropic.MessageNewParams) {
+	if n := len(params.Tools); n > 0 {
+		if tp := params.Tools[n-1].OfTool; tp != nil {
+			tp.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		}
+	}
+	if n := len(params.System); n > 0 {
+		params.System[n-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
+	}
+	for i, marked := len(params.Messages)-1, 0; i >= 0 && marked < 2; i-- {
+		if markLastBlock(&params.Messages[i]) {
+			marked++
+		}
+	}
+}
+
+// markLastBlock sets an ephemeral cache_control on the last content block of m,
+// reporting whether a markable block was found. Thinking blocks (and any other
+// variant without a CacheControl field) are skipped by GetCacheControl
+// returning nil; the adapter never produces those today.
+func markLastBlock(m *anthropic.MessageParam) bool {
+	for i := len(m.Content) - 1; i >= 0; i-- {
+		if cc := m.Content[i].GetCacheControl(); cc != nil {
+			*cc = anthropic.NewCacheControlEphemeralParam()
+			return true
+		}
+	}
+	return false
 }
 
 func toAnthropicTool(t ToolDef) (*anthropic.ToolParam, error) {
@@ -218,9 +269,14 @@ func (a *anthropicAdapter) toResponse(msg *anthropic.Message) Response {
 		}
 	}
 	resp.Text = text
+	// Anthropic's input_tokens EXCLUDES cache reads/writes; normalize to the
+	// inclusive convention documented on Usage by summing all three.
 	resp.Usage = Usage{
-		InputTokens:  msg.Usage.InputTokens,
-		OutputTokens: msg.Usage.OutputTokens,
+		InputTokens: msg.Usage.InputTokens +
+			msg.Usage.CacheReadInputTokens + msg.Usage.CacheCreationInputTokens,
+		OutputTokens:             msg.Usage.OutputTokens,
+		CacheReadInputTokens:     msg.Usage.CacheReadInputTokens,
+		CacheCreationInputTokens: msg.Usage.CacheCreationInputTokens,
 	}
 	resp.StopReason = mapAnthropicStop(msg.StopReason)
 	return resp

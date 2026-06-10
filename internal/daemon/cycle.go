@@ -23,6 +23,7 @@ type cycleResult struct {
 	promoted   int // findings promoted to T1 this cycle
 	inTokens   int64
 	outTokens  int64
+	cacheRead  int64
 }
 
 // runPoll executes one poll cycle: detect new commits since the last-seen tip
@@ -151,6 +152,7 @@ func (d *Daemon) recordScanResult(res *cycleResult, fres *funnel.Result) {
 	res.newF = len(fres.Findings)
 	res.inTokens = fres.Stats.InputTokens
 	res.outTokens = fres.Stats.OutputTokens
+	res.cacheRead = fres.Stats.CacheReadTokens
 }
 
 // finishCycle emits the report and logs the cycle summary. Reporting failures
@@ -217,11 +219,12 @@ func (d *Daemon) emitReport(ctx context.Context, kind store.ScanKind) {
 func (d *Daemon) logCycle(res cycleResult, dur time.Duration) {
 	progress.Emit(d.prog, progress.Event{
 		Kind: progress.KindCycleFinished, ScanKind: string(res.kind),
-		Count:        res.newF,
-		InputTokens:  res.inTokens,
-		OutputTokens: res.outTokens,
-		Message:      res.skipReason,
-		Counts:       &progress.Counts{Verified: res.newF},
+		Count:           res.newF,
+		InputTokens:     res.inTokens,
+		OutputTokens:    res.outTokens,
+		CacheReadTokens: res.cacheRead,
+		Message:         res.skipReason,
+		Counts:          &progress.Counts{Verified: res.newF},
 	})
 	if res.skipped {
 		d.log.Info("daemon: cycle skipped",
@@ -239,6 +242,7 @@ func (d *Daemon) logCycle(res cycleResult, dur time.Duration) {
 		"promoted", res.promoted,
 		"tokens_in", res.inTokens,
 		"tokens_out", res.outTokens,
+		"tokens_cached", res.cacheRead,
 		"duration", dur.String(),
 	)
 }

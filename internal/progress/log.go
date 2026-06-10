@@ -80,17 +80,18 @@ func (r *LogRenderer) line(ev Event) string {
 		// carry the totals.
 		return ""
 	case KindScanFinished:
-		return fmt.Sprintf("scan finished: kind=%s commit=%s%s spend in=%d out=%d",
+		return fmt.Sprintf("scan finished: kind=%s commit=%s%s spend in=%d out=%d%s",
 			ev.ScanKind, shortSHA(ev.Commit), countsSuffix(ev.Counts),
-			ev.InputTokens, ev.OutputTokens)
+			ev.InputTokens, ev.OutputTokens, cachedSuffix(ev.CacheReadTokens))
 	case KindCycleScheduled:
 		return fmt.Sprintf("schedule: next_poll=%s next_sweep=%s",
 			ev.NextPoll.Format(timeClock), ev.NextSweep.Format(timeClock))
 	case KindCycleStarted:
 		return fmt.Sprintf("cycle started: kind=%s", ev.ScanKind)
 	case KindCycleFinished:
-		return fmt.Sprintf("cycle finished: kind=%s new=%d%s spend in=%d out=%d",
-			ev.ScanKind, ev.Count, countsSuffix(ev.Counts), ev.InputTokens, ev.OutputTokens)
+		return fmt.Sprintf("cycle finished: kind=%s new=%d%s spend in=%d out=%d%s",
+			ev.ScanKind, ev.Count, countsSuffix(ev.Counts), ev.InputTokens, ev.OutputTokens,
+			cachedSuffix(ev.CacheReadTokens))
 	case KindReverify:
 		if ev.Count == 0 {
 			return ""
@@ -153,4 +154,13 @@ func errSuffix(err string) string {
 		return ""
 	}
 	return " err=" + err
+}
+
+// cachedSuffix renders the cache-read token count, or "" when no cache
+// activity was reported (the common case for endpoints without caching).
+func cachedSuffix(cached int64) string {
+	if cached == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" cached=%d", cached)
 }

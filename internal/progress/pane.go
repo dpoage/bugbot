@@ -57,9 +57,10 @@ type PaneRenderer struct {
 	started    time.Time
 	scanKind   string
 	commit     string
-	counts     Counts
-	inTokens   int64
-	outTokens  int64
+	counts       Counts
+	inTokens     int64
+	outTokens    int64
+	cachedTokens int64
 	agents     map[string]*activeAgent // keyed by role+label
 	lastEvent  string
 	prevLines  int // lines painted last frame, to know how far to move up
@@ -160,6 +161,7 @@ func (p *PaneRenderer) apply(ev Event) {
 	case KindSpendTick:
 		p.inTokens = ev.InputTokens
 		p.outTokens = ev.OutputTokens
+		p.cachedTokens = ev.CacheReadTokens
 	case KindFindingVerified:
 		p.counts.Verified++
 		p.lastEvent = "verified: " + ev.Title
@@ -178,6 +180,7 @@ func (p *PaneRenderer) apply(ev Event) {
 		if ev.InputTokens > 0 || ev.OutputTokens > 0 {
 			p.inTokens = ev.InputTokens
 			p.outTokens = ev.OutputTokens
+			p.cachedTokens = ev.CacheReadTokens
 		}
 		p.lastEvent = "finished"
 	}
@@ -294,8 +297,12 @@ func (p *PaneRenderer) frame() []string {
 
 	lines = append(lines, fmt.Sprintf("  stages: hypothesized=%d triaged=%d verified=%d killed=%d",
 		p.counts.Hypothesized, p.counts.Triaged, p.counts.Verified, p.counts.Killed))
-	lines = append(lines, fmt.Sprintf("  spend:  in=%d out=%d total=%d tokens",
-		p.inTokens, p.outTokens, p.inTokens+p.outTokens))
+	spendLine := fmt.Sprintf("  spend:  in=%d out=%d total=%d tokens",
+		p.inTokens, p.outTokens, p.inTokens+p.outTokens)
+	if p.cachedTokens > 0 {
+		spendLine += fmt.Sprintf(" (cached %d)", p.cachedTokens)
+	}
+	lines = append(lines, spendLine)
 	if p.degraded && p.budgetNote != "" {
 		lines = append(lines, "  budget: "+p.budgetNote)
 	}

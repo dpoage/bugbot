@@ -92,8 +92,9 @@ func renderStatus(ctx context.Context, out io.Writer, cfg config.Config, st prog
 	}
 	_, _ = fmt.Fprintf(out, "  stages:       hypothesized=%d triaged=%d verified=%d killed=%d\n",
 		st.Counts.Hypothesized, st.Counts.Triaged, st.Counts.Verified, st.Counts.Killed)
-	_, _ = fmt.Fprintf(out, "  run spend:    in=%d out=%d total=%d tokens\n",
-		st.SpendInput, st.SpendOutput, st.SpendInput+st.SpendOutput)
+	_, _ = fmt.Fprintf(out, "  run spend:    in=%d out=%d total=%d tokens%s\n",
+		st.SpendInput, st.SpendOutput, st.SpendInput+st.SpendOutput,
+		cachedNote(st.SpendCacheRead))
 	if st.SpendTodayInput > 0 || st.SpendTodayOutput > 0 {
 		_, _ = fmt.Fprintf(out, "  today spend:  in=%d out=%d total=%d tokens\n",
 			st.SpendTodayInput, st.SpendTodayOutput, st.SpendTodayInput+st.SpendTodayOutput)
@@ -162,6 +163,15 @@ func openFindingsCount(ctx context.Context, cfg config.Config) (int, error) {
 		return 0, err
 	}
 	return len(open), nil
+}
+
+// cachedNote annotates a spend line with the cache-read token count, or ""
+// when no cache activity was reported.
+func cachedNote(cached int64) string {
+	if cached == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (cached %d)", cached)
 }
 
 // etaString formats a future deadline relative to now (e.g. "in 42s"), or

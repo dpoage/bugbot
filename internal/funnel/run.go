@@ -91,9 +91,10 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// emits a cumulative spend tick so live renderers can show a running total.
 	rec := &spendRecorder{ctx: ctx, store: f.store, scanRunID: scanRunID}
 	if sink != nil {
-		rec.onRecord = func(in, out int64) {
+		rec.onRecord = func(in, out, cached int64) {
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindSpendTick, InputTokens: in, OutputTokens: out,
+				CacheReadTokens: cached,
 			})
 		}
 	}
@@ -163,9 +164,11 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 
 	result.Degraded = budget.degraded.Load()
 	result.Stopped = budget.stopped.Load()
-	in, out := rec.totals()
+	in, out, cacheRead, cacheCreated := rec.totals()
 	result.Stats.InputTokens = in
 	result.Stats.OutputTokens = out
+	result.Stats.CacheReadTokens = cacheRead
+	result.Stats.CacheCreationTokens = cacheCreated
 
 	progress.Emit(sink, progress.Event{
 		Kind: progress.KindScanFinished, ScanKind: string(kind), Commit: snap.Commit,
@@ -174,6 +177,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			Verified: result.Stats.Verified, Killed: result.Stats.Killed,
 		},
 		InputTokens: in, OutputTokens: out,
+		CacheReadTokens: cacheRead, CacheCreationTokens: cacheCreated,
 	})
 
 	// Finalize the scan run with the stats blob.

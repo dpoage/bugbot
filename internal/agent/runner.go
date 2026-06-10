@@ -117,6 +117,8 @@ func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 		outcome.Iterations++
 		outcome.Usage.InputTokens += resp.Usage.InputTokens
 		outcome.Usage.OutputTokens += resp.Usage.OutputTokens
+		outcome.Usage.CacheReadInputTokens += resp.Usage.CacheReadInputTokens
+		outcome.Usage.CacheCreationInputTokens += resp.Usage.CacheCreationInputTokens
 		tr.recordAssistant(outcome.Iterations, resp)
 
 		if resp.Text != "" {
