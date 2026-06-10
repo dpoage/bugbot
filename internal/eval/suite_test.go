@@ -28,24 +28,10 @@ func TestBenchmarkSuite(t *testing.T) {
 	// Always print the table so a failing run shows the full picture.
 	t.Log("\n" + res.String())
 
-	if fp := res.CleanFalsePositives(); fp != 0 {
-		t.Errorf("clean-code cases produced %d false positive(s); want 0", fp)
-		for _, c := range res.Cases {
-			if c.Clean && c.FalsePositives > 0 {
-				for _, f := range c.UnmatchedFindings {
-					t.Errorf("  FP in %q: %s:%d %q (lens=%s)", c.Name, f.File, f.Line, f.Title, f.Lens)
-				}
-			}
-		}
-	}
-
-	if p := res.Precision(); p < 1.0 {
-		t.Errorf("aggregate precision = %.3f; scripted mode must be exactly 1.0", p)
-		for _, c := range res.Cases {
-			if c.FalsePositives > 0 {
-				t.Errorf("  case %q has %d FP", c.Name, c.FalsePositives)
-			}
-		}
+	// Gate is the shared precision invariant enforced by both this regression
+	// test and the `bugbot eval` CLI command, so the two never drift.
+	if err := Gate(res); err != nil {
+		t.Error(err)
 	}
 
 	// Sanity: the seeded cases must actually find their bugs, or the suite isn't

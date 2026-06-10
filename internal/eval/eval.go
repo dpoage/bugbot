@@ -35,14 +35,16 @@
 //
 // # The command
 //
-// The canonical entrypoint is the Go test:
+// Two equivalent entrypoints run the built-in suite in scripted mode and share
+// a single gate ([Gate]):
 //
-//	go test ./internal/eval/ -run TestBenchmarkSuite -v
+//	bugbot eval                                          # the CLI command
+//	go test ./internal/eval/ -run TestBenchmarkSuite -v  # the CI regression test
 //
-// It runs every built-in [Case] (see [BuiltinCases]) in scripted mode and fails
-// the build if any clean-code case reports a false positive, or if aggregate
-// precision drops below 1.0. A future `bugbot eval` CLI command can wrap
-// [RunSuite]; none is wired in this round.
+// Both run every built-in [Case] (see [BuiltinCases]) in scripted mode and fail
+// (non-zero exit / red test) if any clean-code case reports a false positive, or
+// if aggregate precision drops below 1.0. Because they call the same [Gate], the
+// CLI and the test can never disagree on what "passing" means.
 package eval
 
 import (
