@@ -94,6 +94,17 @@ func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 			r.finishTruncated(outcome, TruncTokenBudget)
 			break
 		}
+		// Consult the shared budget pool (if any) before issuing the next model
+		// call, so a run already in flight stops at this turn boundary once the
+		// run-spanning ceiling is hit rather than running to completion. This is a
+		// read-only check: it does not touch System/Tools/Messages, so request
+		// prefix stability is preserved.
+		if r.limits.BudgetCheck != nil {
+			if err := r.limits.BudgetCheck(); err != nil {
+				r.finishTruncated(outcome, TruncBudgetPool)
+				break
+			}
+		}
 
 		if err := ctx.Err(); err != nil {
 			r.autosave(tr, task)

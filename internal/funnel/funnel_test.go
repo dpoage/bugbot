@@ -448,3 +448,87 @@ func TestSweep_BudgetDegradation(t *testing.T) {
 		t.Errorf("finder ran %d times; degradation should have skipped low-yield lenses", finder.callCount())
 	}
 }
+
+// TestSweep_BudgetOrphanPersistsAsTier3 proves the budget-orphan persistence
+// requirement: when the run hits its hard budget before a triaged candidate can
+// be verified, that candidate is NOT dropped. It persists as an open Tier 3
+// suspected finding, surfaces in Result.Findings and Result.Skipped, and is
+// counted in Stats.Suspected — so a human can still review it.
+func TestSweep_BudgetOrphanPersistsAsTier3(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// One lens, one real candidate. The single finder completion costs 150 tokens
+	// (100 in + 50 out), which already exceeds the tiny hard budget — so by the
+	// time the verify stage runs, the hard-stop gate fires and the candidate is
+	// orphaned rather than verified.
+	finder := newScriptedClient()
+	finder.fallback = candJSON(realCand)
+	verifier := newScriptedClient()
+	verifier.fallback = notRefutedJSON
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
+		Lenses:      []string{"nil-safety/error-handling"},
+		TokenBudget: 100, // < 150, so the pool is exhausted after the finder call
+		MaxParallel: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !res.Stopped {
+		t.Errorf("expected Stopped=true after hitting the hard budget")
+	}
+	if res.Stats.Suspected != 1 {
+		t.Errorf("Stats.Suspected = %d, want 1", res.Stats.Suspected)
+	}
+	if res.Stats.Verified != 0 {
+		t.Errorf("Stats.Verified = %d, want 0 (verification was budget-stopped)", res.Stats.Verified)
+	}
+	// The verifier must never have run: the candidate was orphaned at the gate.
+	if verifier.callCount() != 0 {
+		t.Errorf("verifier ran %d times; expected 0 (budget exhausted before verify)", verifier.callCount())
+	}
+
+	// The orphan must be persisted and returned as an open Tier 3 finding.
+	if len(res.Findings) != 1 {
+		t.Fatalf("want 1 finding (the T3 orphan), got %d: %+v", len(res.Findings), res.Findings)
+	}
+	got := res.Findings[0]
+	if got.Tier != 3 {
+		t.Errorf("tier = %d, want 3 (suspected)", got.Tier)
+	}
+	if got.Status != store.StatusOpen {
+		t.Errorf("status = %q, want open", got.Status)
+	}
+	if got.File != "bug.go" || got.Line != 10 {
+		t.Errorf("anchor = %s:%d, want bug.go:10", got.File, got.Line)
+	}
+	if !strings.Contains(got.Reasoning, "Verification skipped") {
+		t.Errorf("reasoning should explain the budget stop, got %q", got.Reasoning)
+	}
+
+	// And it must be visibly noted as a skip so a human knows it wasn't verified.
+	foundNote := false
+	for _, n := range res.Skipped {
+		if strings.Contains(n, "T3 suspected") {
+			foundNote = true
+		}
+	}
+	if !foundNote {
+		t.Errorf("expected a Skipped note flagging the T3 orphan, got %v", res.Skipped)
+	}
+
+	// It must be durable in the store, queryable as a Tier 3 open finding.
+	stored, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen, Tier: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("store has %d open T3 findings, want 1", len(stored))
+	}
+}

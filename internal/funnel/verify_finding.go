@@ -34,7 +34,11 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd store.Finding) (refuted 
 		n = DefaultRefuters
 	}
 
-	verdicts, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, c, n)
+	// No shared budget pool here: re-verifying a single finding is a standalone,
+	// cheap operation the daemon gates at the cycle level. A pool-less
+	// budgetState makes runnerLimits a pass-through and never triggers a
+	// budget-pool stop.
+	verdicts, _, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, c, n, &budgetState{})
 	if err != nil {
 		return false, "", err
 	}

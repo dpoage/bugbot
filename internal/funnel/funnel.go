@@ -221,6 +221,10 @@ type Stats struct {
 	Verified int `json:"verified"`
 	// Killed is candidates that entered verification but were majority-refuted.
 	Killed int `json:"killed"`
+	// Suspected is the count of budget-orphaned candidates persisted as Tier 3
+	// suspected: they passed triage but the run hit its hard budget before their
+	// verification completed, so they are kept (not dropped) for human review.
+	Suspected int `json:"suspected,omitempty"`
 	// DroppedLowConfidence / DroppedDuplicate / DroppedSuppressed /
 	// DroppedOutOfScope break down the triage losses.
 	DroppedLowConfidence int `json:"dropped_low_confidence"`
@@ -279,6 +283,14 @@ type spendRecorder struct {
 	// progress spend ticks. It must be cheap and non-blocking (it runs on the
 	// agent request path).
 	onRecord func(in, out, cached int64)
+
+	// pool, when non-nil, is the shared budget pool. Every completion's
+	// input+output tokens are added to it as they are ledgered, so concurrent
+	// in-flight runs see the run-spanning spend total via their pre-turn
+	// Limits.BudgetCheck hook. Budget accounting uses total InputTokens (tokens
+	// processed), which is INCLUSIVE of cached tokens per the llm.Usage
+	// convention — cache reads are not subtracted (see funnel doc comment).
+	pool *agent.BudgetPool
 }
 
 func (r *spendRecorder) Record(ev llm.UsageEvent) {
@@ -291,6 +303,10 @@ func (r *spendRecorder) Record(ev llm.UsageEvent) {
 	in, out, cached := r.inTokens, r.outTokens, r.cacheRead
 	cb := r.onRecord
 	r.mu.Unlock()
+	// Charge the shared budget pool with this completion's tokens, so concurrent
+	// in-flight runs observe the new run-spanning total at their next pre-turn
+	// check. Done outside the lock: the pool is independently concurrency-safe.
+	r.pool.Add(ev.Usage.InputTokens + ev.Usage.OutputTokens)
 	if cb != nil {
 		cb(in, out, cached)
 	}
@@ -327,9 +343,60 @@ func (r *spendRecorder) totals() (in, out, cacheRead, cacheCreated int64) {
 type budgetState struct {
 	budget int64 // 0 = unlimited
 	rec    *spendRecorder
+	// pool is the shared, run-spanning token pool that every in-flight runner
+	// consults pre-turn (via agent.Limits.BudgetCheck). It is the same pool the
+	// recorder charges. Nil when TokenBudget is unlimited.
+	pool *agent.BudgetPool
 
 	degraded atomic.Bool
 	stopped  atomic.Bool
+}
+
+// newBudgetState wires a budgetState and its shared pool to the recorder. A
+// non-positive budget is unlimited: the pool is nil and every pool method is a
+// no-op, so there is no per-turn check and no allowance clamping.
+func newBudgetState(budget int64, rec *spendRecorder) *budgetState {
+	var pool *agent.BudgetPool
+	if budget > 0 {
+		pool = agent.NewBudgetPool(budget)
+	}
+	rec.pool = pool
+	return &budgetState{budget: budget, rec: rec, pool: pool}
+}
+
+// runnerLimits derives the per-run agent.Limits for a runner launched now,
+// layering the shared budget pool onto the caller's base limits. The per-run
+// TokenBudget is clamped to what the pool actually has left at launch, so a
+// late-launched agent gets only the remaining headroom rather than a fixed
+// constant. The BudgetCheck hook stops an in-flight run at the next turn once
+// the pool is exhausted by *other* concurrent runs. Both default to the base
+// limits when the budget is unlimited.
+func (b *budgetState) runnerLimits(base agent.Limits) agent.Limits {
+	if b.pool == nil {
+		return base
+	}
+	out := base
+	out.BudgetCheck = b.pool.Check
+	// Clamp the per-run allowance to the remaining pool. A negative base budget
+	// means "unlimited per run"; we still cap it at the pool's remainder so a
+	// single late runner cannot overshoot the run-spanning ceiling on its own.
+	rem := b.pool.Remaining()
+	// base.TokenBudget: 0 means "agent default", negative means "unlimited per
+	// run". In both cases, and whenever the pool remainder is the tighter bound,
+	// clamp to the remainder so the per-run allowance never exceeds what the
+	// run-spanning pool can actually afford. A zero remainder yields a runner
+	// that stops on its first pre-turn check, which is the desired late-launch
+	// behavior. We guard against the zero-means-default resolution turning a
+	// near-exhausted pool back into a full 1M allowance.
+	if base.TokenBudget <= 0 || rem < base.TokenBudget {
+		out.TokenBudget = rem
+		if out.TokenBudget == 0 {
+			// Limits.resolve() treats 0 as "use default"; force a hard stop by
+			// using the smallest negative-free sentinel that still bites pre-turn.
+			out.TokenBudget = 1
+		}
+	}
+	return out
 }
 
 // overSoft reports whether cumulative spend has crossed the soft (degradation)
