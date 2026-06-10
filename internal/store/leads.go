@@ -135,3 +135,31 @@ func scanLead(rows *sql.Rows) (Lead, error) {
 	}
 	return l, nil
 }
+
+// ListLeads returns the blackboard, newest-first (created_at DESC, id DESC for
+// determinism). pendingOnly restricts to status='posted' — the tips waiting for
+// their target lens's next run.
+func (s *Store) ListLeads(ctx context.Context, pendingOnly bool) ([]Lead, error) {
+	q := `SELECT id, scan_run_id, poster_lens, target_lens, file, line, note, status, created_at, consumed_at
+		FROM leads`
+	if pendingOnly {
+		q += ` WHERE status = 'posted'`
+	}
+	q += ` ORDER BY created_at DESC, id DESC`
+
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Lead
+	for rows.Next() {
+		l, err := scanLead(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}

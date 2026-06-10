@@ -375,3 +375,44 @@ func boolInt(b bool) int {
 	}
 	return 0
 }
+
+// FindingTallies is the aggregate finding picture for the status pane.
+type FindingTallies struct {
+	// OpenByTier counts StatusOpen findings keyed by tier (0..3).
+	OpenByTier map[int]int
+	// NeedsHuman counts open findings flagged by the patch-prover for review.
+	NeedsHuman int
+	// Fixed and Dismissed count terminal-state findings.
+	Fixed     int
+	Dismissed int
+}
+
+// CountFindings aggregates findings by status and tier in one query for the
+// status world-state block.
+func (s *Store) CountFindings(ctx context.Context) (FindingTallies, error) {
+	t := FindingTallies{OpenByTier: map[int]int{}}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT status, tier, COUNT(*), COALESCE(SUM(needs_human), 0)
+		FROM findings GROUP BY status, tier`)
+	if err != nil {
+		return FindingTallies{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var status string
+		var tier, n, needs int
+		if err := rows.Scan(&status, &tier, &n, &needs); err != nil {
+			return FindingTallies{}, err
+		}
+		switch Status(status) {
+		case StatusOpen:
+			t.OpenByTier[tier] += n
+			t.NeedsHuman += needs
+		case StatusFixed:
+			t.Fixed += n
+		case StatusDismissed:
+			t.Dismissed += n
+		}
+	}
+	return t, rows.Err()
+}

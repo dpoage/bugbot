@@ -92,3 +92,24 @@ func (s *Store) ListPublishedIssues(ctx context.Context) ([]PublishedIssue, erro
 	}
 	return out, rows.Err()
 }
+
+// CountPublishedIssues tallies published_issues rows by state for the status
+// world-state block. The zero map means nothing has ever been published.
+func (s *Store) CountPublishedIssues(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT state, COUNT(*) FROM published_issues GROUP BY state`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]int{}
+	for rows.Next() {
+		var state string
+		var n int
+		if err := rows.Scan(&state, &n); err != nil {
+			return nil, err
+		}
+		out[state] = n
+	}
+	return out, rows.Err()
+}
