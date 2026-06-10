@@ -129,6 +129,17 @@ func TestUpsertFinding_CorroboratingLensesRoundTrip(t *testing.T) {
 	}
 }
 
+// A lens name containing a comma must not split into phantom entries on
+// read-back; encode sanitizes the comma to a semicolon so the list length is
+// preserved and the corruption is visible rather than silent.
+func TestEncodeLenses_CommaSanitized(t *testing.T) {
+	got := decodeLenses(encodeLenses([]string{"type-safety,bounds", "concurrency"}))
+	want := []string{"type-safety;bounds", "concurrency"}
+	if !equalStrings(got, want) {
+		t.Errorf("round-trip = %v, want %v", got, want)
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

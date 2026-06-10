@@ -59,10 +59,19 @@ type Finding struct {
 }
 
 // encodeLenses joins a lens list into the comma-separated form stored in the
-// corroborating_lenses column. Lens names never contain commas, so the encoding
-// round-trips losslessly. Nil/empty yields the empty string.
+// corroborating_lenses column. Lens names must not contain commas for the
+// encoding to round-trip; any comma is replaced with a semicolon so a
+// nonconforming lens name degrades visibly instead of splitting into phantom
+// entries on read-back. Nil/empty yields the empty string.
 func encodeLenses(lenses []string) string {
-	return strings.Join(lenses, ",")
+	if len(lenses) == 0 {
+		return ""
+	}
+	safe := make([]string, len(lenses))
+	for i, l := range lenses {
+		safe[i] = strings.ReplaceAll(l, ",", ";")
+	}
+	return strings.Join(safe, ",")
 }
 
 // decodeLenses parses the comma-separated corroborating_lenses column back into
