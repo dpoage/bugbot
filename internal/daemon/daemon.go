@@ -46,6 +46,7 @@ import (
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/store"
@@ -88,6 +89,11 @@ type Deps struct {
 	Sinks []report.Sink
 	// Logger receives structured cycle logs. nil uses slog.Default().
 	Logger *slog.Logger
+	// Progress, when non-nil, receives activity events (cycle start/finish,
+	// schedule, re-verify and promotion outcomes) and is threaded into each
+	// cycle's funnel as its progress sink. Emission is best-effort and never
+	// blocks or fails the loop. See internal/progress.
+	Progress progress.Sink
 }
 
 // Promoter is the slice of *repro.Reproducer the daemon needs for post-cycle
@@ -135,6 +141,7 @@ type Daemon struct {
 	fopts   funnel.Options
 	sinks   []report.Sink
 	log     *slog.Logger
+	prog    progress.Sink
 	cfg     DaemonConfig
 
 	poller *ingest.Poller
@@ -183,6 +190,7 @@ func New(deps Deps, cfg DaemonConfig) (*Daemon, error) {
 		fopts:   deps.FunnelOpts,
 		sinks:   deps.Sinks,
 		log:     log,
+		prog:    deps.Progress,
 		cfg:     cfg,
 		poller:  ingest.NewPoller(deps.Repo, ""),
 		clock:   realClock{},
@@ -195,5 +203,6 @@ func New(deps Deps, cfg DaemonConfig) (*Daemon, error) {
 func (d *Daemon) newFunnel() (*funnel.Funnel, error) {
 	opts := d.fopts
 	opts.TokenBudget = d.cfg.PerCycleTokens
+	opts.Progress = d.prog
 	return funnel.New(d.clients, d.store, d.repo, opts)
 }

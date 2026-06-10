@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 )
 
 // verified pairs a surviving candidate with the refuters' reasoning that backs
@@ -65,7 +67,9 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 			// finder stage for the rationale).
 			if budget.overHard() {
 				budget.stopped.Store(true)
-				f.note(result, fmt.Sprintf("hard budget reached: skipped verification of %q (%s:%d)", c.Title, c.File, c.Line))
+				msg := fmt.Sprintf("hard budget reached: skipped verification of %q (%s:%d)", c.Title, c.File, c.Line)
+				f.note(result, msg)
+				progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
 				return
 			}
 			nRefuters := f.opts.Refuters
@@ -73,11 +77,22 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 				budget.degraded.Store(true)
 				if nRefuters > degradedRefuters {
 					nRefuters = degradedRefuters
-					f.note(result, fmt.Sprintf("budget degraded: %q verified with %d refuter(s)", c.Title, degradedRefuters))
+					msg := fmt.Sprintf("budget degraded: %q verified with %d refuter(s)", c.Title, degradedRefuters)
+					f.note(result, msg)
+					progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetDegraded, Message: msg})
 				}
 			}
 
-			verdicts, err := f.runRefuters(ctx, verifier, tools, c, nRefuters)
+			sink := f.opts.Progress
+			start := time.Now()
+			progress.Emit(sink, progress.Event{
+				Kind: progress.KindAgentStarted, Role: progress.RoleVerifier, Label: c.Title,
+			})
+			verdicts, tokens, err := f.runRefuters(ctx, verifier, tools, c, nRefuters)
+			progress.Emit(sink, progress.Event{
+				Kind: progress.KindAgentFinished, Role: progress.RoleVerifier, Label: c.Title,
+				Tokens: tokens, Duration: time.Since(start), Err: errString(err),
+			})
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -90,6 +105,9 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 				killed++
 				return
 			}
+			progress.Emit(sink, progress.Event{
+				Kind: progress.KindFindingVerified, Title: c.Title, File: c.File, Line: c.Line,
+			})
 			survivors = append(survivors, verified{
 				cand:      c,
 				reasoning: buildReasoning(verdicts),
@@ -109,29 +127,42 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 // treated as "not refuted" (it could not prove the bug wrong), which is the
 // precision-conservative default: a broken refuter must not be able to silently
 // kill a candidate. Context cancellation propagates.
-func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, c Candidate, n int) ([]refutation, error) {
+func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, c Candidate, n int) ([]refutation, int64, error) {
 	runner := agent.NewRunner(verifier, tools, verifierSystemBase,
 		agent.WithLimits(f.opts.VerifierLimits),
 		f.transcriptOption(),
 	)
 
+	var tokens int64
 	verdicts := make([]refutation, 0, n)
 	for i := 0; i < n; i++ {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, tokens, err
 		}
 		var v refutation
-		_, err := runner.RunJSON(ctx, verifierTask(c), refutationSchema, &v)
+		outcome, err := runner.RunJSON(ctx, verifierTask(c), refutationSchema, &v)
+		if outcome != nil {
+			tokens += outcome.Usage.InputTokens + outcome.Usage.OutputTokens
+		}
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return nil, tokens, ctx.Err()
 			}
 			// Unparseable verdict => could not refute.
 			v = refutation{Refuted: false, Reasoning: "refuter produced no parseable verdict", Confidence: "low"}
 		}
 		verdicts = append(verdicts, v)
 	}
-	return verdicts, nil
+	return verdicts, tokens, nil
+}
+
+// errString returns err.Error() or "" for a nil error, for embedding in a
+// JSON-serializable progress event.
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // majorityRefuted reports whether a strict majority of verdicts are "refuted".

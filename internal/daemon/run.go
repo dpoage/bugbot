@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -52,6 +53,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	for {
 		now = d.clock.now()
+		progress.Emit(d.prog, progress.Event{
+			Kind: progress.KindCycleScheduled, NextPoll: nextPoll, NextSweep: nextSweep,
+		})
 		// Pick the nearer deadline; wait for it (or cancellation).
 		fireSweep := !nextSweep.After(nextPoll)
 		deadline := nextPoll

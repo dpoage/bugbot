@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/sandbox"
@@ -83,6 +85,14 @@ func newDaemonCmd() *cobra.Command {
 
 			logger := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), &slog.HandlerOptions{Level: slog.LevelInfo}))
 
+			// Activity visibility: bridge progress events onto the daemon's slog
+			// logger, and maintain a status.json snapshot beside the state DB so
+			// `bugbot status` can report the running daemon's activity, today's
+			// spend, and next poll/sweep ETAs from another terminal.
+			snap := progress.NewSnapshotSink(storageDir(cfg)).
+				WithDaySpend(daySpendGetter(ctx, st))
+			progressSink := progress.NewMulti(progress.NewSlogRenderer(logger), snap)
+
 			deps := daemon.Deps{
 				Repo:    repo,
 				Store:   st,
@@ -90,8 +100,9 @@ func newDaemonCmd() *cobra.Command {
 				FunnelOpts: funnel.Options{
 					TokenBudget: cfg.Budgets.PerCycleTokens,
 				},
-				Sinks:  sinks,
-				Logger: logger,
+				Sinks:    sinks,
+				Logger:   logger,
+				Progress: progressSink,
 			}
 
 			// Reproduction is opt-in (--repro) and only wired when a container
@@ -131,6 +142,22 @@ func newDaemonCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&doRepro, "repro", false, "enable the Reproduce stage (promote verified findings to Tier-1 via sandboxed failing tests; requires podman/docker)")
 
 	return cmd
+}
+
+// daySpendGetter returns a function the snapshot sink calls to fill in today's
+// total token spend (input, output) for the status snapshot. It sums spend since
+// midnight UTC, matching the daemon's per-day budget window. Errors yield zeros,
+// keeping the getter non-failing per the snapshot sink's contract.
+func daySpendGetter(ctx context.Context, st *store.Store) func() (int64, int64) {
+	return func() (int64, int64) {
+		now := time.Now().UTC()
+		midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		totals, err := st.TotalsSince(ctx, midnight)
+		if err != nil {
+			return 0, 0
+		}
+		return totals.InputTokens, totals.OutputTokens
+	}
 }
 
 // reproDeps bundles a constructed reproducer with its LLM client so the daemon

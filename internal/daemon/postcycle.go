@@ -8,6 +8,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -20,10 +21,14 @@ import (
 // scan): re-verification still runs over all open findings, but there are no new
 // findings to reproduce.
 func (d *Daemon) postCycle(ctx context.Context, fres *funnel.Result, res *cycleResult) {
-	res.closedF += d.reverifyOpenFindings(ctx)
+	closed := d.reverifyOpenFindings(ctx)
+	res.closedF += closed
+	progress.Emit(d.prog, progress.Event{Kind: progress.KindReverify, Count: closed})
 
 	if fres != nil {
-		res.promoted += d.promoteNewFindings(ctx, fres)
+		promoted := d.promoteNewFindings(ctx, fres)
+		res.promoted += promoted
+		progress.Emit(d.prog, progress.Event{Kind: progress.KindPromote, Count: promoted})
 	}
 }
 

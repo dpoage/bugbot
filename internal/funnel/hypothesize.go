@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 )
 
 // hypothesize runs the finder stage: for each effective lens, run a finder
@@ -72,13 +74,17 @@ func (f *Funnel) hypothesize(ctx context.Context, finder llm.Client, targets []s
 			// the hard stop actually bite as the run progresses.
 			if budget.overHard() {
 				budget.stopped.Store(true)
-				f.note(result, fmt.Sprintf("hard budget reached: skipped finder lens %q on %d file(s)", u.lens.Name, len(u.files)))
+				msg := fmt.Sprintf("hard budget reached: skipped finder lens %q on %d file(s)", u.lens.Name, len(u.files))
+				f.note(result, msg)
+				progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
 				return
 			}
 			if budget.overSoft() {
 				budget.degraded.Store(true)
 				if !degradedLenses[u.lens.Name] {
-					f.note(result, fmt.Sprintf("budget degraded: skipped low-yield finder lens %q on %d file(s)", u.lens.Name, len(u.files)))
+					msg := fmt.Sprintf("budget degraded: skipped low-yield finder lens %q on %d file(s)", u.lens.Name, len(u.files))
+					f.note(result, msg)
+					progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetDegraded, Message: msg})
 					return
 				}
 			}
@@ -106,13 +112,20 @@ func (f *Funnel) hypothesize(ctx context.Context, finder llm.Client, targets []s
 // runFinder executes a single finder agent for one lens over one chunk and maps
 // its JSON output to Candidates tagged with the lens.
 func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, l Lens, files []string) ([]Candidate, error) {
+	sink := f.opts.Progress
+	start := time.Now()
+	progress.Emit(sink, progress.Event{
+		Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: l.Name,
+	})
+
 	runner := agent.NewRunner(finder, tools, finderSystemPrompt(l),
 		agent.WithLimits(f.opts.FinderLimits),
 		f.transcriptOption(),
 	)
 
 	var out candidateList
-	_, err := runner.RunJSON(ctx, finderTask(files), candidatesSchema, &out)
+	outcome, err := runner.RunJSON(ctx, finderTask(files), candidatesSchema, &out)
+	emitAgentFinished(sink, progress.RoleFinder, l.Name, outcome, start, err)
 	if err != nil {
 		// A finder that fails to produce parseable JSON yields no candidates
 		// rather than aborting the whole scan: one lens/chunk failing must not

@@ -8,6 +8,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -80,9 +81,22 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		return nil, fmt.Errorf("funnel: begin scan run: %w", err)
 	}
 
+	sink := f.opts.Progress
+	progress.Emit(sink, progress.Event{
+		Kind: progress.KindScanStarted, ScanKind: string(kind), Commit: snap.Commit,
+	})
+
 	// Per-run spend recorder, wired into both role clients so every completion is
-	// ledgered to this scan run and counted toward the budget.
+	// ledgered to this scan run and counted toward the budget. The onRecord hook
+	// emits a cumulative spend tick so live renderers can show a running total.
 	rec := &spendRecorder{ctx: ctx, store: f.store, scanRunID: scanRunID}
+	if sink != nil {
+		rec.onRecord = func(in, out int64) {
+			progress.Emit(sink, progress.Event{
+				Kind: progress.KindSpendTick, InputTokens: in, OutputTokens: out,
+			})
+		}
+	}
 	finder := llm.WithRecorder(f.clients.Finder, rec, "finder", "", "")
 	verifier := llm.WithRecorder(f.clients.Verifier, rec, "verifier", "", "")
 
@@ -98,40 +112,69 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	}
 
 	// Stage A — Hypothesize.
+	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageHypothesize})
 	candidates, err := f.hypothesize(ctx, finder, targets, budget, result)
 	if err != nil {
 		return nil, err
 	}
 	result.Stats.Hypothesized = len(candidates)
+	progress.Emit(sink, progress.Event{
+		Kind: progress.KindStageFinished, Stage: progress.StageHypothesize,
+		Counts: &progress.Counts{Hypothesized: len(candidates)},
+	})
 
 	// Stage B — Triage.
+	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageTriage})
 	survivors, err := f.triage(ctx, candidates, snap, &result.Stats)
 	if err != nil {
 		return nil, err
 	}
 	result.Stats.Triaged = len(survivors)
+	progress.Emit(sink, progress.Event{
+		Kind: progress.KindStageFinished, Stage: progress.StageTriage,
+		Counts: &progress.Counts{Hypothesized: len(candidates), Triaged: len(survivors)},
+	})
 
 	// Stage C — Verify.
+	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageVerify})
 	verified, killed, err := f.verify(ctx, verifier, survivors, budget, result)
 	if err != nil {
 		return nil, err
 	}
 	result.Stats.Verified = len(verified)
 	result.Stats.Killed = killed
+	progress.Emit(sink, progress.Event{
+		Kind: progress.KindStageFinished, Stage: progress.StageVerify,
+		Counts: &progress.Counts{
+			Hypothesized: len(candidates), Triaged: len(survivors),
+			Verified: len(verified), Killed: killed,
+		},
+	})
 
 	// Stage D — Persist + rank.
+	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StagePersist})
 	findings, err := f.persist(ctx, verified, snap.Commit, fps)
 	if err != nil {
 		return nil, err
 	}
 	sortFindings(findings)
 	result.Findings = findings
+	progress.Emit(sink, progress.Event{Kind: progress.KindStageFinished, Stage: progress.StagePersist})
 
 	result.Degraded = budget.degraded.Load()
 	result.Stopped = budget.stopped.Load()
 	in, out := rec.totals()
 	result.Stats.InputTokens = in
 	result.Stats.OutputTokens = out
+
+	progress.Emit(sink, progress.Event{
+		Kind: progress.KindScanFinished, ScanKind: string(kind), Commit: snap.Commit,
+		Counts: &progress.Counts{
+			Hypothesized: result.Stats.Hypothesized, Triaged: result.Stats.Triaged,
+			Verified: result.Stats.Verified, Killed: result.Stats.Killed,
+		},
+		InputTokens: in, OutputTokens: out,
+	})
 
 	// Finalize the scan run with the stats blob.
 	statsJSON, err := json.Marshal(result.Stats)

@@ -6,6 +6,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -31,6 +32,7 @@ type cycleResult struct {
 // exhaustion; only the funnel work is budget-gated.
 func (d *Daemon) runPoll(ctx context.Context) {
 	start := d.clock.now()
+	progress.Emit(d.prog, progress.Event{Kind: progress.KindCycleStarted, ScanKind: string(store.ScanTargeted)})
 
 	lastSeen, err := d.loadLastSeen(ctx)
 	if err != nil {
@@ -112,6 +114,7 @@ func (d *Daemon) runPoll(ctx context.Context) {
 // has a fresh baseline.
 func (d *Daemon) runSweep(ctx context.Context) {
 	start := d.clock.now()
+	progress.Emit(d.prog, progress.Event{Kind: progress.KindCycleStarted, ScanKind: string(store.ScanSweep)})
 	res := cycleResult{kind: store.ScanSweep}
 
 	if d.dayBudgetExhausted(ctx, &res) {
@@ -212,6 +215,14 @@ func (d *Daemon) emitReport(ctx context.Context, kind store.ScanKind) {
 
 // logCycle writes the one-line structured cycle summary.
 func (d *Daemon) logCycle(res cycleResult, dur time.Duration) {
+	progress.Emit(d.prog, progress.Event{
+		Kind: progress.KindCycleFinished, ScanKind: string(res.kind),
+		Count:        res.newF,
+		InputTokens:  res.inTokens,
+		OutputTokens: res.outTokens,
+		Message:      res.skipReason,
+		Counts:       &progress.Counts{Verified: res.newF},
+	})
 	if res.skipped {
 		d.log.Info("daemon: cycle skipped",
 			"kind", string(res.kind),

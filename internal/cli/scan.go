@@ -12,6 +12,7 @@ import (
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
@@ -72,18 +73,43 @@ func newScanCmd() *cobra.Command {
 				return fmt.Errorf("build verifier client: %w", err)
 			}
 
+			out := cmd.OutOrStdout()
+
+			// Activity visibility: a snapshot sink (so `bugbot status` can read this
+			// run from another terminal) plus a live renderer — an in-place ANSI pane
+			// when stdout is a TTY, or plain log lines when piped. The pane is stopped
+			// before the final summary so it leaves the terminal clean.
+			snap := progress.NewSnapshotSink(storageDir(cfg))
+			var (
+				pane     *progress.PaneRenderer
+				liveSink progress.Sink
+			)
+			if progress.IsTerminal(out) {
+				pane = progress.NewPaneRenderer(out, 0)
+				liveSink = pane
+			} else {
+				liveSink = progress.NewLogRenderer(out)
+			}
+			progressSink := progress.NewMulti(liveSink, snap)
+			stopPane := func() {
+				if pane != nil {
+					pane.Stop()
+					pane = nil
+				}
+			}
+			defer stopPane()
+
 			opts := funnel.Options{
 				Lenses:      lenses,
 				Refuters:    refuters,
 				MaxParallel: concurrency,
 				TokenBudget: cfg.Budgets.PerCycleTokens,
+				Progress:    progressSink,
 			}
 			f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
 			if err != nil {
 				return err
 			}
-
-			out := cmd.OutOrStdout()
 
 			var res *funnel.Result
 			if since != "" {
@@ -104,6 +130,10 @@ func newScanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// Tear down the live pane before printing the final summary so the
+			// summary is not interleaved with in-place repaints.
+			stopPane()
 
 			_ = includeT3 // reserved: this stage emits T2 only; T3 filtering arrives with the report stage
 			printResult(out, res)
