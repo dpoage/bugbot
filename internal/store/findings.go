@@ -412,6 +412,10 @@ func (s *Store) CountFindings(ctx context.Context) (FindingTallies, error) {
 			t.Fixed += n
 		case StatusDismissed:
 			t.Dismissed += n
+		default:
+			// StatusSuperseded (and any future states) intentionally omitted
+			// from the pane: nothing writes superseded today, and the tallies
+			// show actionable lifecycle states only.
 		}
 	}
 	return t, rows.Err()

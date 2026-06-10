@@ -99,10 +99,9 @@ func renderStatus(ctx context.Context, out io.Writer, cfg config.Config, st prog
 	_, _ = fmt.Fprintf(out, "  run spend:    in=%d out=%d total=%d tokens%s\n",
 		st.SpendInput, st.SpendOutput, st.SpendInput+st.SpendOutput,
 		cachedNote(st.SpendCacheRead))
-	if st.SpendTodayInput > 0 || st.SpendTodayOutput > 0 {
-		_, _ = fmt.Fprintf(out, "  today spend:  in=%d out=%d total=%d tokens\n",
-			st.SpendTodayInput, st.SpendTodayOutput, st.SpendTodayInput+st.SpendTodayOutput)
-	}
+	// Today's spend intentionally lives in the world-state block below (same
+	// numbers from the store, plus the day-budget percentage) — printing it
+	// here too produced two near-identical lines.
 	if !st.NextPoll.IsZero() {
 		_, _ = fmt.Fprintf(out, "  next poll:    %s\n", etaString(st.NextPoll, now))
 	}

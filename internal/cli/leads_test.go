@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/store"
@@ -130,5 +131,18 @@ func TestRenderWorldState(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("world state missing %q\n---\n%s", want, out)
 		}
+	}
+}
+
+// TestTruncateNote_UTF8Safe pins rune-aware truncation: multibyte notes must
+// not be split mid-codepoint.
+func TestTruncateNote_UTF8Safe(t *testing.T) {
+	in := strings.Repeat("锁", 50) // 3 bytes per rune
+	got := truncateNote(in, 10)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated note is invalid UTF-8: %q", got)
+	}
+	if r := []rune(got); len(r) != 11 { // 10 + ellipsis
+		t.Errorf("rune length = %d, want 11", len(r))
 	}
 }

@@ -61,7 +61,11 @@ func renderLeads(out io.Writer, leads []store.Lead, pendingOnly bool, now time.T
 			pending++
 		}
 	}
-	_, _ = fmt.Fprintf(out, "blackboard: %d lead(s), %d pending\n\n", len(leads), pending)
+	if pendingOnly {
+		_, _ = fmt.Fprintf(out, "blackboard: %d pending lead(s)\n\n", pending)
+	} else {
+		_, _ = fmt.Fprintf(out, "blackboard: %d lead(s), %d pending\n\n", len(leads), pending)
+	}
 
 	for _, l := range leads {
 		status := "consumed"
@@ -104,8 +108,11 @@ func age(t time.Time, now time.Time) string {
 // truncateNote bounds a note for single-screen rendering.
 func truncateNote(s string, max int) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= max {
+	// Rune-aware: notes are LLM-authored free text, so multibyte UTF-8 is
+	// expected; a byte slice could split a codepoint and garble the terminal.
+	r := []rune(s)
+	if len(r) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	return string(r[:max]) + "…"
 }
