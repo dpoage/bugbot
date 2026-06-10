@@ -17,11 +17,25 @@
 // implementation with no cgo and no C toolchain, so it builds under
 // CGO_ENABLED=0 (the project's static-binary constraint that rules out the
 // mainstream cgo bindings).
+//
+// # Grammar binary cost and subsetting
+//
+// The gotreesitter `grammars` package go:embeds ~206 compressed grammar blobs
+// (~20MB) by default; importing it links them all even though this tier only
+// uses go/python/typescript/tsx. The upstream supports build-tag subsetting:
+// building with `-tags 'grammar_subset grammar_subset_go grammar_subset_python
+// grammar_subset_typescript grammar_subset_tsx'` compiles out the all-grammars
+// registry and embeds ONLY the selected blobs, cutting the project's static
+// binary by ~21MB (86MB -> 65MB). `make build` sets these tags (see Makefile's
+// GRAMMAR_TAGS). A plain `go build ./...` (no tags) still works — it just
+// embeds every grammar. If a new language is added to grammarTable, add its
+// matching grammar_subset_<lang> tag to GRAMMAR_TAGS.
 package treesitter
 
 import (
 	"bytes"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,26 +58,64 @@ const (
 )
 
 // Backend answers code-navigation queries for one repository root by parsing
-// source files with tree-sitter. It is safe for concurrent use; parsed taggers
-// are cached per language for the backend's lifetime.
+// source files with tree-sitter. It is safe for concurrent use across agent
+// runners; parsed taggers are cached per language for the backend's lifetime,
+// and a per-file tag cache avoids re-parsing unchanged files on repeat queries.
 type Backend struct {
 	root string
 
 	mu      sync.Mutex
-	taggers map[string]*langTaggers // keyed by grammar name
+	taggers map[string]*lockedTagger // keyed by "grammar.name/kind"
+
+	cacheMu sync.Mutex
+	cache   map[cacheKey]cacheEntry // keyed by grammar+kind+path
+
+	// tagFn is the seam used to invoke a tagger. Production uses tagWithRecover;
+	// tests inject a panicking function to exercise the recover wrapper. nil
+	// means use the default.
+	tagFn func(tg *gts.Tagger, src []byte) []gts.Tag
 }
 
-// langTaggers holds the compiled definition and reference taggers for one
-// language. Compilation (which loads the grammar) is done once per language.
-type langTaggers struct {
-	def *gts.Tagger
-	ref *gts.Tagger
+// lockedTagger pairs a compiled *gts.Tagger with the mutex that serializes its
+// Tag calls. A gts.Tagger is NOT safe for concurrent use: it reuses an internal
+// matchesBuf and its *Parser carries mutable parse state (reuse cursor and
+// scratch buffers), so two goroutines calling Tag concurrently is a write/write
+// data race (confirmed by the race detector). Tools are shared across
+// concurrent agent runners, so we serialize per (language, kind) with this
+// mutex. A sync.Pool of taggers was the alternative; the mutex is chosen
+// because this is a fallback tier (LSP is the hot path), grammar compilation is
+// non-trivial, and per-language serialization is acceptable here — pooling
+// would add construction churn for little benefit at this tier's call volume.
+type lockedTagger struct {
+	mu sync.Mutex
+	tg *gts.Tagger
+}
+
+// cacheKey identifies a per-file tag set: the same file is tagged differently
+// for the definition vs reference query, so kind is part of the key.
+type cacheKey struct {
+	grammar string
+	kind    queryKind
+	path    string
+}
+
+// cacheEntry is a file's tags plus the stat fields used to revalidate it. If a
+// later stat shows the same mtime and size, the cached tags are reused without
+// re-reading or re-parsing the file.
+type cacheEntry struct {
+	mtimeUnixNano int64
+	size          int64
+	tags          []gts.Tag
 }
 
 // New creates a tree-sitter backend rooted at the absolute path root. No
 // grammars are loaded until the first query for a language.
 func New(root string) *Backend {
-	return &Backend{root: root, taggers: make(map[string]*langTaggers)}
+	return &Backend{
+		root:    root,
+		taggers: make(map[string]*lockedTagger),
+		cache:   make(map[cacheKey]cacheEntry),
+	}
 }
 
 // Close releases any resources. The pure-Go runtime holds no OS handles, so
@@ -159,10 +211,12 @@ const (
 )
 
 // collect parses every file of the grammar's language under the root and
-// returns the tags produced by the selected query. Files that fail to parse
-// are skipped (a syntactic tier degrades per-file, never aborts).
+// returns the tags produced by the selected query. Files that fail to parse —
+// including ones that make the GLR parser panic on pathological input — are
+// skipped (a syntactic tier degrades per-file, never aborts). Unchanged files
+// are served from the per-file tag cache rather than re-parsed.
 func (b *Backend) collect(g *grammar, kind queryKind) ([]tag, error) {
-	tg, err := b.taggerFor(g, kind)
+	lt, err := b.taggerFor(g, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -193,11 +247,8 @@ func (b *Backend) collect(g *grammar, kind queryKind) ([]tag, error) {
 		if !exts[strings.ToLower(filepath.Ext(path))] {
 			return nil
 		}
-		src, ok := readSource(path)
-		if !ok {
-			return nil
-		}
-		for _, t := range tg.Tag(src) {
+		tags := b.tagFile(g, kind, lt, path)
+		for _, t := range tags {
 			out = append(out, tag{path: path, Tag: t})
 		}
 		return nil
@@ -205,37 +256,98 @@ func (b *Backend) collect(g *grammar, kind queryKind) ([]tag, error) {
 	return out, nil
 }
 
-// taggerFor compiles (once) and returns the tagger for the grammar and query
-// kind. Grammar loading happens on first use of a language.
-func (b *Backend) taggerFor(g *grammar, kind queryKind) (*gts.Tagger, error) {
+// tagFile returns the tags for one file, served from the per-file cache when
+// the file's mtime+size are unchanged. On a cache miss it reads, parses, and
+// caches the result. A parse panic (or read failure) yields no tags and is not
+// cached, so the file is retried on the next query.
+func (b *Backend) tagFile(g *grammar, kind queryKind, lt *lockedTagger, path string) []gts.Tag {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() > maxFileBytes {
+		return nil
+	}
+	mtime := info.ModTime().UnixNano()
+	size := info.Size()
+	key := cacheKey{grammar: g.name, kind: kind, path: path}
+
+	b.cacheMu.Lock()
+	if e, ok := b.cache[key]; ok && e.mtimeUnixNano == mtime && e.size == size {
+		tags := e.tags
+		b.cacheMu.Unlock()
+		return tags
+	}
+	b.cacheMu.Unlock()
+
+	src, ok := readSource(path)
+	if !ok {
+		return nil
+	}
+	tags, ok := b.tag(lt, src)
+	if !ok {
+		// Parse panicked; skip the file and do not poison the cache.
+		slog.Debug("treesitter: dropped file after parse panic", "path", path)
+		return nil
+	}
+
+	b.cacheMu.Lock()
+	b.cache[key] = cacheEntry{mtimeUnixNano: mtime, size: size, tags: tags}
+	b.cacheMu.Unlock()
+	return tags
+}
+
+// tag runs the (serialized) tagger over src, recovering any panic from the
+// GLR parser's safety caps so one pathological file cannot crash the agent. It
+// returns ok=false when a panic was recovered.
+func (b *Backend) tag(lt *lockedTagger, src []byte) (tags []gts.Tag, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Debug("treesitter: recovered from parse panic", "panic", r)
+			tags, ok = nil, false
+		}
+	}()
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	fn := b.tagFn
+	if fn == nil {
+		fn = func(tg *gts.Tagger, s []byte) []gts.Tag { return tg.Tag(s) }
+	}
+	return fn(lt.tg, src), true
+}
+
+// taggerFor compiles (once) and returns the locked tagger for the grammar and
+// query kind. Grammar loading happens on first use of a language; construction
+// is wrapped in a recover so a panic while loading a grammar surfaces as an
+// error rather than crashing the agent.
+func (b *Backend) taggerFor(g *grammar, kind queryKind) (lt *lockedTagger, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	lt := b.taggers[g.name]
-	if lt == nil {
-		lt = &langTaggers{}
-		b.taggers[g.name] = lt
-	}
+	var query string
 	switch kind {
 	case queryDef:
-		if lt.def == nil {
-			t, err := newTagger(g, g.defQuery)
-			if err != nil {
-				return nil, err
-			}
-			lt.def = t
-		}
-		return lt.def, nil
+		query = g.defQuery
 	default:
-		if lt.ref == nil {
-			t, err := newTagger(g, g.refQuery)
-			if err != nil {
-				return nil, err
-			}
-			lt.ref = t
-		}
-		return lt.ref, nil
+		query = g.refQuery
 	}
+	cacheK := g.name + "/" + query
+
+	if existing := b.taggers[cacheK]; existing != nil {
+		return existing, nil
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Debug("treesitter: recovered from tagger construction panic", "grammar", g.name, "panic", r)
+			lt, err = nil, &unsupportedError{lang: g.name}
+		}
+	}()
+
+	tg, err := newTagger(g, query)
+	if err != nil {
+		return nil, err
+	}
+	lt = &lockedTagger{tg: tg}
+	b.taggers[cacheK] = lt
+	return lt, nil
 }
 
 // readSource loads a file for parsing, skipping oversized and binary content
