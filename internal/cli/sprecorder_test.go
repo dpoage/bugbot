@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 // are visible to day-budget accounting (TotalsSince).
 func TestLedgerRecorder_RecordsToStore(t *testing.T) {
 	ctx := context.Background()
-	st, err := store.Open(ctx, ":memory:")
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +64,7 @@ func TestLedgerRecorder_RecordsToStore(t *testing.T) {
 // by the llm layer).
 func TestLedgerRecorder_WrapsClient(t *testing.T) {
 	ctx := context.Background()
-	st, err := store.Open(ctx, ":memory:")
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +99,7 @@ func (f fakeUsageClient) Complete(_ context.Context, _ llm.Request) (llm.Respons
 // drives the shared client from parallel workers.
 func TestLedgerRecorder_ConcurrentRecords(t *testing.T) {
 	ctx := context.Background()
-	st, err := store.Open(ctx, ":memory:")
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
