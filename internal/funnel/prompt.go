@@ -127,6 +127,33 @@ type refutation struct {
 	Confidence string `json:"confidence"`
 }
 
+// verifierSandboxParagraph is appended to the verifier system prompt when the
+// sandbox_exec tool is present. It instructs the refuter to prefer empirical
+// demonstration over rhetorical argument and explains what each outcome means.
+const verifierSandboxParagraph = `
+You also have a sandbox_exec tool that runs commands in an isolated container
+against the repository. PREFER EMPIRICAL DEMONSTRATION OVER RHETORICAL ARGUMENT
+when the tool is available:
+
+- Use sandbox_exec to run the guard path, an existing test, or a small probe
+  test you inject (via the files argument) that exercises the claimed bug path.
+- A clean exit (exit_code=0) on a path that SHOULD trigger the bug is strong
+  refutation evidence: the code behaves correctly where the report claims it fails.
+- An exit confirming the defect (non-zero exit, panic output, wrong result) means
+  DO NOT refute — the tool just validated the report.
+- You do NOT need to run the sandbox if a simple read of the code already gives
+  you high-confidence evidence; the tool is for cases where empirical confirmation
+  is more convincing than code inspection alone.`
+
+// verifierSystemPrompt returns the verifier system prompt, optionally appending
+// the sandbox paragraph when the sandbox_exec tool is available to the agent.
+func verifierSystemPrompt(hasSandbox bool) string {
+	if hasSandbox {
+		return verifierSystemBase + verifierSandboxParagraph
+	}
+	return verifierSystemBase
+}
+
 // verifierTask builds the refuter task message embedding the candidate.
 func verifierTask(c Candidate) string {
 	var b strings.Builder

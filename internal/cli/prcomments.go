@@ -447,5 +447,8 @@ func writeStatsFooter(b *strings.Builder, s funnel.Stats) {
 	if s.CacheReadTokens > 0 || s.CacheCreationTokens > 0 {
 		fmt.Fprintf(b, "- Cache: read=%d created=%d\n", s.CacheReadTokens, s.CacheCreationTokens)
 	}
+	if s.SandboxExecs > 0 {
+		fmt.Fprintf(b, "- Sandbox: execs=%d total_ms=%d\n", s.SandboxExecs, s.SandboxExecMillis)
+	}
 	b.WriteString("\n</details>")
 }

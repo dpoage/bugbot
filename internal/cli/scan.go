@@ -103,6 +103,11 @@ func newScanCmd() *cobra.Command {
 			}
 			defer stopPane()
 
+			sandboxOpts, sandboxErr := buildSandboxOpts(cfg)
+			if sandboxErr != nil {
+				return sandboxErr
+			}
+
 			opts := funnel.Options{
 				Lenses:      lenses,
 				Filter:      ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
@@ -110,6 +115,7 @@ func newScanCmd() *cobra.Command {
 				MaxParallel: concurrency,
 				TokenBudget: cfg.Budgets.PerCycleTokens,
 				Progress:    progressSink,
+				SandboxOpts: sandboxOpts,
 			}
 			f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
 			if err != nil {
@@ -174,6 +180,33 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&doRepro, "repro", false, "run the Reproduce stage: generate sandboxed failing tests and promote demonstrated findings to Tier-1")
 
 	return cmd
+}
+
+// buildSandboxOpts constructs a funnel.SandboxOpts from the config. When
+// verify.sandbox_exec is false (the default), or the container runtime is
+// unavailable, it returns a zero-value SandboxOpts (feature disabled).
+// An error is returned only when sandbox_exec is explicitly enabled but the
+// sandbox backend cannot be constructed.
+func buildSandboxOpts(cfg config.Config) (funnel.SandboxOpts, error) {
+	if !cfg.Verify.SandboxExec {
+		return funnel.SandboxOpts{}, nil
+	}
+	runtime, ok := sandbox.Detect()
+	if !ok {
+		// Runtime unavailable; treat as disabled rather than hard-failing so
+		// the scan still runs without the empirical tool.
+		return funnel.SandboxOpts{}, nil
+	}
+	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image)
+	if err != nil {
+		return funnel.SandboxOpts{}, fmt.Errorf("build verify sandbox: %w", err)
+	}
+	return funnel.SandboxOpts{
+		Sandbox:     sb,
+		Enabled:     true,
+		MinSeverity: cfg.Verify.SandboxMinSeverity,
+		MaxExecs:    cfg.Verify.SandboxMaxExecs,
+	}, nil
 }
 
 // runRepro runs the Reproduce stage over the run's findings (Tier-2 verified
@@ -286,6 +319,9 @@ func printResult(out io.Writer, res *funnel.Result) {
 	if s.FinderFailures > 0 || s.VerifierFailures > 0 {
 		_, _ = fmt.Fprintf(out, "Agent failures: finders=%d/%d verifiers=%d/%d produced no parseable output\n",
 			s.FinderFailures, s.FinderRuns, s.VerifierFailures, s.VerifierRuns)
+	}
+	if s.SandboxExecs > 0 {
+		_, _ = fmt.Fprintf(out, "Sandbox: execs=%d total_ms=%d\n", s.SandboxExecs, s.SandboxExecMillis)
 	}
 
 	if res.Degraded || res.Stopped {

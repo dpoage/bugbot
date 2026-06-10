@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
@@ -38,6 +39,12 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 	if err != nil {
 		return nil, 0, nil, err
 	}
+
+	// Aggregate sandbox-exec counters across all candidates. Because distinct
+	// candidates run in parallel goroutines, we use atomics here and fold them
+	// into the result under the existing mu at the end.
+	var sbExecs atomic.Int32
+	var sbMillis atomic.Int64
 
 	var (
 		mu            sync.Mutex
@@ -91,12 +98,19 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 				}
 			}
 
+			// Build the candidate-specific tool set: the shared read-only tools
+			// plus, when gated in, a sandbox_exec tool scoped to this candidate.
+			candTools := tools
+			if sbTool := f.buildSandboxTool(c, &sbExecs, &sbMillis); sbTool != nil {
+				candTools = append(candTools, sbTool)
+			}
+
 			sink := f.opts.Progress
 			start := time.Now()
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindAgentStarted, Role: progress.RoleVerifier, Label: c.Title,
 			})
-			verdicts, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, tools, c, nRefuters, budget)
+			verdicts, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, candTools, c, nRefuters, budget)
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindAgentFinished, Role: progress.RoleVerifier, Label: c.Title,
 				Tokens: tokens, Duration: time.Since(start), Err: errString(err),
@@ -152,6 +166,8 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 	mu.Lock()
 	result.Stats.VerifierRuns = refuterRuns
 	result.Stats.VerifierFailures = refuterFailed
+	result.Stats.SandboxExecs = int(sbExecs.Load())
+	result.Stats.SandboxExecMillis = sbMillis.Load()
 	mu.Unlock()
 	return survivors, killed, orphaned, nil
 }
@@ -170,7 +186,16 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 // partial vote. Limits are derived from the pool at launch so a refuter launched
 // late gets the remaining headroom and one in flight stops at its next turn.
 func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, c Candidate, n int, budget *budgetState) ([]refutation, int64, int, bool, error) {
-	runner := agent.NewRunner(verifier, tools, verifierSystemBase,
+	// Detect whether the sandbox_exec tool is present so we can tailor the
+	// system prompt to mention it.
+	hasSandbox := false
+	for _, t := range tools {
+		if t.Def().Name == "sandbox_exec" {
+			hasSandbox = true
+			break
+		}
+	}
+	runner := agent.NewRunner(verifier, tools, verifierSystemPrompt(hasSandbox),
 		agent.WithLimits(budget.runnerLimits(f.opts.VerifierLimits)),
 		agent.WithMaxTokens(DefaultMaxOutputTokens),
 		f.transcriptOption(),

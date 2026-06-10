@@ -39,6 +39,7 @@ import (
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
+	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -91,6 +92,25 @@ type RoleClients struct {
 	Verifier llm.Client
 }
 
+// SandboxOpts bundles the sandbox-execution knobs that gate and bound the
+// sandbox_exec tool offered to refuter agents. The zero value means the
+// feature is disabled.
+type SandboxOpts struct {
+	// Sandbox is the sandbox backend to use. Nil means the feature is
+	// unconditionally unavailable regardless of other fields.
+	Sandbox sandbox.Sandbox
+	// Enabled gates the feature: if false (default), no refuter receives the
+	// tool.
+	Enabled bool
+	// MinSeverity is the minimum candidate severity that qualifies for the
+	// tool. Candidates below this threshold use only rhetorical reasoning.
+	// Valid values: "critical", "high", "medium", "low". Empty defaults to
+	// "high".
+	MinSeverity string
+	// MaxExecs is the per-candidate execution budget. Zero defaults to 3.
+	MaxExecs int
+}
+
 // Options configures a single funnel run. The zero value is valid: every field
 // resolves to a sensible default.
 type Options struct {
@@ -125,6 +145,9 @@ type Options struct {
 	// Emission is best-effort and must never block or fail the run; a nil sink
 	// disables emission. See internal/progress for the contract.
 	Progress progress.Sink
+	// SandboxOpts configures the sandbox_exec tool offered to refuter agents.
+	// The zero value disables the feature.
+	SandboxOpts SandboxOpts
 }
 
 // resolve fills in defaults without mutating the caller's Options.
@@ -296,6 +319,13 @@ type Stats struct {
 	// cache savings.
 	CacheReadTokens     int64 `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int64 `json:"cache_creation_tokens,omitempty"`
+	// SandboxExecs is the total number of sandbox_exec tool calls made by
+	// refuter agents during the verification stage. Zero when the feature is
+	// disabled or unused.
+	SandboxExecs int `json:"sandbox_execs,omitempty"`
+	// SandboxExecMillis is the total wall-clock time spent in sandbox
+	// executions, in milliseconds.
+	SandboxExecMillis int64 `json:"sandbox_exec_millis,omitempty"`
 }
 
 // FinderReliable reports whether the finder stage produced trustworthy coverage:
