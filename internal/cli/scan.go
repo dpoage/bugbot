@@ -155,7 +155,7 @@ func newScanCmd() *cobra.Command {
 			printResult(out, res)
 
 			if doRepro {
-				if err := runRepro(ctx, out, &cfg, st, target, res.Findings); err != nil {
+				if err := runRepro(ctx, out, &cfg, st, target, res.ScanRunID, res.Findings); err != nil {
 					return err
 				}
 			}
@@ -221,7 +221,7 @@ func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool
 // candidates), promoting any whose bug is demonstrated by a sandboxed failing
 // test. It skips gracefully when no container runtime is available, and prints
 // a promotion summary.
-func runRepro(ctx context.Context, out io.Writer, cfg *config.Config, st *store.Store, target string, findings []store.Finding) error {
+func runRepro(ctx context.Context, out io.Writer, cfg *config.Config, st *store.Store, target, scanRunID string, findings []store.Finding) error {
 	runtime, ok := sandbox.Detect()
 	if !ok {
 		_, _ = fmt.Fprintln(out, "\nReproduce stage skipped: no container runtime (podman/docker) found on PATH.")
@@ -244,7 +244,11 @@ func runRepro(ctx context.Context, out io.Writer, cfg *config.Config, st *store.
 		return fmt.Errorf("build sandbox: %w", err)
 	}
 
-	client, err := llm.ResolveRole(ctx, cfg, "reproducer", llm.Options{})
+	// Ledger repro + patch-prover spend: this client lives outside the funnel
+	// and would otherwise never reach the spend table (bugbot-58c).
+	rec := newLedgerRecorder(ctx, st)
+	rec.SetScanRun(scanRunID)
+	client, err := llm.ResolveRole(ctx, cfg, "reproducer", llm.Options{Recorder: rec})
 	if err != nil {
 		return fmt.Errorf("build reproducer client: %w", err)
 	}

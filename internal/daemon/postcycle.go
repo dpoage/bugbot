@@ -189,6 +189,10 @@ func (d *Daemon) promoteNewFindings(ctx context.Context, fres *funnel.Result) in
 	if len(t2) == 0 {
 		return 0
 	}
+	// Attribute the long-lived reproducer client's spend to this cycle's run.
+	if d.reproTag != nil {
+		d.reproTag.SetScanRun(fres.ScanRunID)
+	}
 	summary, err := d.repro.PromoteAll(ctx, d.store, t2)
 	if err != nil {
 		if ctx.Err() != nil {

@@ -120,12 +120,13 @@ func newDaemonCmd() *cobra.Command {
 			// reproduce stage. Sandbox availability is surfaced in the banner.
 			sandboxRuntime, sandboxOK := sandbox.Detect()
 			if doRepro && sandboxOK {
-				reproducer, rerr := buildReproducer(ctx, &cfg, repo.Root(), sandboxRuntime)
+				reproducer, rerr := buildReproducer(ctx, &cfg, st, repo.Root(), sandboxRuntime)
 				if rerr != nil {
 					return rerr
 				}
 				deps.ReproClient = reproducer.client
 				deps.Reproducer = reproducer.repro
+				deps.ReproTagger = reproducer.spend
 			}
 
 			// Publish hook: wire in when cfg.Publish.Enabled. We do not
@@ -182,13 +183,19 @@ func daySpendGetter(ctx context.Context, st *store.Store) func() (int64, int64) 
 type reproDeps struct {
 	client llm.Client
 	repro  *repro.Reproducer
+	// spend ledgers reproducer/patch-prover usage; the daemon retags it with
+	// each cycle's scan-run id (bugbot-58c).
+	spend *ledgerRecorder
 }
 
 // buildReproducer constructs the reproducer-role LLM client, sandbox, and
 // Reproducer used by the daemon's post-cycle promotion step. It mirrors the
 // wiring in `scan --repro`.
-func buildReproducer(ctx context.Context, cfg *config.Config, repoRoot, runtime string) (*reproDeps, error) {
-	client, err := llm.ResolveRole(ctx, cfg, "reproducer", llm.Options{})
+func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot, runtime string) (*reproDeps, error) {
+	// Ledger repro + patch-prover spend (bugbot-58c). The daemon retags the
+	// recorder with each cycle's scan-run id via Deps.ReproTagger.
+	rec := newLedgerRecorder(ctx, st)
+	client, err := llm.ResolveRole(ctx, cfg, "reproducer", llm.Options{Recorder: rec})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer client: %w", err)
 	}
@@ -205,7 +212,7 @@ func buildReproducer(ctx context.Context, cfg *config.Config, repoRoot, runtime 
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer: %w", err)
 	}
-	return &reproDeps{client: client, repro: r}, nil
+	return &reproDeps{client: client, repro: r, spend: rec}, nil
 }
 
 // printDaemonBanner prints the startup banner: intervals, budgets, sinks, and
