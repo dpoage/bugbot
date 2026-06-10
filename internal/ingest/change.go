@@ -114,6 +114,25 @@ func parseNameStatusZ(b []byte) ([]Change, error) {
 	return changes, nil
 }
 
+// UnifiedDiff returns the raw unified diff between two commits using the
+// symmetric-difference form `git diff from...to`, which compares to against the
+// merge base of from and to. This is the diff GitHub anchors PR review comments
+// against, so callers that need to know which lines are commentable on a PR
+// should parse this output rather than the two-dot `from..to` diff.
+//
+// Rename detection is enabled (-M) so a moved-and-edited file's hunks carry its
+// new path in the "+++ b/<newpath>" header.
+func (r *Repo) UnifiedDiff(ctx context.Context, from, to string) ([]byte, error) {
+	if from == "" || to == "" {
+		return nil, fmt.Errorf("ingest: UnifiedDiff requires both commits (from=%q to=%q)", from, to)
+	}
+	raw, err := runGitRaw(ctx, r.root, "diff", "-M", from+"..."+to)
+	if err != nil {
+		return nil, fmt.Errorf("ingest: unified diff %s...%s: %w", from, to, err)
+	}
+	return raw, nil
+}
+
 // ChangedPaths is a convenience that flattens a Change slice to the set of
 // post-change paths plus any rename sources, which is the natural input to
 // BlastRadius (both the new and old locations of a renamed file are relevant).
