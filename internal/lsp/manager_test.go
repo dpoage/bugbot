@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -199,15 +200,13 @@ func TestManagerKillsUnresponsiveServerOnClose(t *testing.T) {
 
 func TestManagerQueryTimeout(t *testing.T) {
 	root, file := newTestWorkspace(t)
-	// The fake answers initialize but we crash it on references... instead,
-	// use NO_SHUTDOWN fake which simply never answers an unknown method?
-	// Simpler: a server that never responds to references is simulated by
-	// pointing references at a method the fake ignores. The fake answers all
-	// three queries, so instead set an unreasonably small timeout and rely on
-	// process spawn + handshake latency to exceed it.
+	// The server completes the handshake but never answers definition queries,
+	// simulating a server stuck indexing; the manager's own query timeout must
+	// fire and blame indexing.
+	cfg := fakeServerConfig(t, "FAKE_LSP_STALL_ON=textDocument/definition")
 	m := NewManager(root,
-		WithServers([]ServerConfig{fakeServerConfig(t)}),
-		WithQueryTimeout(time.Nanosecond),
+		WithServers([]ServerConfig{cfg}),
+		WithQueryTimeout(300*time.Millisecond),
 	)
 	t.Cleanup(func() { _ = m.Close() })
 
@@ -215,7 +214,71 @@ func TestManagerQueryTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
-	if !strings.Contains(err.Error(), "deadline") && !strings.Contains(err.Error(), "timed out") {
-		t.Errorf("expected a timeout-flavored error, got %v", err)
+	if !strings.Contains(err.Error(), "may still be indexing") {
+		t.Errorf("expected the indexing-timeout message, got %v", err)
+	}
+
+	// An already-expired parent deadline must NOT be blamed on indexing: the
+	// inherited cancellation is reported as is.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	_, err = m.References(ctx, file, Position{})
+	if err == nil {
+		t.Fatal("expected error from expired parent context")
+	}
+	if strings.Contains(err.Error(), "may still be indexing") {
+		t.Errorf("parent-deadline error must not blame indexing: %v", err)
+	}
+}
+
+func TestManagerConcurrentQueries(t *testing.T) {
+	root, file := newTestWorkspace(t)
+	m := newTestManager(t, fakeServerConfig(t), root)
+
+	// Many goroutines race the lazy first spawn and then share one server;
+	// under -race this exercises the spawn/pending-map/restart interleavings
+	// the Tool contract requires to be safe.
+	var wg sync.WaitGroup
+	errs := make(chan error, 16*3)
+	for g := range 16 {
+		wg.Go(func() {
+			pos := Position{Line: 2, Character: g % 7}
+			for range 3 {
+				if _, err := m.Definition(context.Background(), file, pos); err != nil {
+					errs <- err
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent Definition: %v", err)
+	}
+}
+
+func TestManagerConcurrentQueriesAcrossCrash(t *testing.T) {
+	root, file := newTestWorkspace(t)
+	flag := filepath.Join(t.TempDir(), "crashed-once")
+	cfg := fakeServerConfig(t, "FAKE_LSP_CRASH_ONCE_FILE="+flag)
+	m := newTestManager(t, cfg, root)
+
+	// The first instance crashes on its first query while several queries are
+	// in flight; every caller retries once against the restarted instance, so
+	// all must succeed and the restart accounting must not disable the server.
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Go(func() {
+			if _, err := m.Definition(context.Background(), file, Position{Line: 1}); err != nil {
+				errs <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("Definition across crash: %v", err)
 	}
 }

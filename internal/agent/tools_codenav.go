@@ -260,12 +260,21 @@ func (t *codeNavTool) render(locs []lsp.Location) string {
 }
 
 // relPath maps an absolute result path to a repo-relative slash path,
-// reporting whether it lies inside the root.
+// reporting whether it lies inside the root. Containment must also hold after
+// symlink resolution: a symlink inside the repo pointing outside it would
+// otherwise pass the lexical check and leak external file content into the
+// excerpt rendered for the location.
 func (t *codeNavTool) relPath(path string) (string, bool) {
-	if !t.nav.root.contains(filepath.Clean(path)) {
+	cleaned := filepath.Clean(path)
+	if !t.nav.root.contains(cleaned) {
 		return "", false
 	}
-	rel, err := filepath.Rel(t.nav.root.root, path)
+	if resolved, err := t.nav.root.evalExistingPrefix(cleaned); err == nil {
+		if !t.nav.root.contains(resolved) {
+			return "", false
+		}
+	}
+	rel, err := filepath.Rel(t.nav.root.root, cleaned)
 	if err != nil {
 		return "", false
 	}

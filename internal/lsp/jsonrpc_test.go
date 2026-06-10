@@ -63,6 +63,16 @@ func TestReadFrameOversized(t *testing.T) {
 	}
 }
 
+func TestReadFrameHeaderFlood(t *testing.T) {
+	// A server streaming header lines without ever sending the blank
+	// terminator must hit the header budget, not read forever.
+	flood := strings.Repeat("X-Filler: y\r\n", maxHeaderBytes/8)
+	if _, err := readFrame(bufio.NewReader(strings.NewReader(flood))); err == nil ||
+		!strings.Contains(err.Error(), "headers exceed") {
+		t.Fatalf("expected header-budget error, got %v", err)
+	}
+}
+
 func TestDecodeLocations(t *testing.T) {
 	tests := []struct {
 		name string

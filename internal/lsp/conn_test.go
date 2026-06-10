@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -117,6 +119,101 @@ func TestConnAnswersServerRequests(t *testing.T) {
 	resp = srv.read(t)
 	if resp.Error != nil || string(resp.Result) != "null" {
 		t.Fatalf("registerCapability response = %+v", resp)
+	}
+}
+
+func TestConnConcurrentCalls(t *testing.T) {
+	c, srv := newPipeConn(t)
+
+	// The scripted server answers in deliberately shuffled order (pairs
+	// reversed), echoing each request's payload so every caller can verify it
+	// received its own response. Under -race this exercises the pending-map,
+	// ID-allocation, and write-mutex interleavings concurrent runners create.
+	const goroutines, callsEach = 16, 4
+	go func() {
+		total := goroutines * callsEach
+		for served := 0; served < total; served += 2 {
+			a, err := readFrame(srv.r)
+			if err != nil {
+				return
+			}
+			b, err := readFrame(srv.r)
+			if err != nil {
+				return
+			}
+			for _, req := range []*rpcMessage{b, a} {
+				var p struct {
+					X int `json:"x"`
+				}
+				_ = json.Unmarshal(req.Params, &p)
+				result := json.RawMessage(fmt.Sprintf(`{"x":%d}`, p.X))
+				if err := writeFrame(srv.w, &rpcMessage{ID: req.ID, Result: result}); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines*callsEach)
+	for g := range goroutines {
+		wg.Go(func() {
+			for i := range callsEach {
+				x := g*callsEach + i
+				var result struct {
+					X int `json:"x"`
+				}
+				if err := c.call(ctx, "test/echo", map[string]any{"x": x}, &result); err != nil {
+					errs <- err
+					return
+				}
+				if result.X != x {
+					errs <- fmt.Errorf("call %d got response for %d (misrouted)", x, result.X)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+func TestConnDeadFailsConcurrentCalls(t *testing.T) {
+	clientR, serverW := io.Pipe()
+	drainR, clientW := io.Pipe()
+	go func() { _, _ = io.Copy(io.Discard, drainR) }()
+	c := newConn(clientR, clientW)
+	t.Cleanup(func() { _ = clientW.Close() })
+
+	// Many calls in flight against a server that never answers; killing the
+	// transport must fail every one of them with ErrConnDead, racing markDead
+	// against concurrent senders.
+	const callers = 16
+	started := make(chan struct{}, callers)
+	errs := make(chan error, callers)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for range callers {
+		go func() {
+			started <- struct{}{}
+			errs <- c.call(ctx, "test/never", nil, nil)
+		}()
+	}
+	for range callers {
+		<-started
+	}
+	_ = serverW.Close() // transport death
+
+	for range callers {
+		err := <-errs
+		if err == nil || !errors.Is(err, ErrConnDead) {
+			t.Errorf("expected ErrConnDead, got %v", err)
+		}
 	}
 }
 

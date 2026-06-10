@@ -62,15 +62,24 @@ func writeFrame(w io.Writer, msg *rpcMessage) error {
 	return err
 }
 
+// maxHeaderBytes bounds the total header section of one frame. Real frames
+// carry at most two short headers; a server streaming header lines without the
+// blank terminator must not make us read forever.
+const maxHeaderBytes = 16 << 10
+
 // readFrame reads one framed message: headers until a blank line (only
 // Content-Length matters; Content-Type is tolerated and ignored), then exactly
 // Content-Length bytes of JSON.
 func readFrame(r *bufio.Reader) (*rpcMessage, error) {
 	length := -1
+	headerBytes := 0
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
 			return nil, err
+		}
+		if headerBytes += len(line); headerBytes > maxHeaderBytes {
+			return nil, fmt.Errorf("lsp: frame headers exceed %d byte limit", maxHeaderBytes)
 		}
 		line = strings.TrimRight(line, "\r\n")
 		if line == "" {
