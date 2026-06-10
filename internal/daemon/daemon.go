@@ -78,6 +78,11 @@ type Deps struct {
 	// is only attempted when it is non-nil, Cfg.EnableRepro is set, and a sandbox
 	// runtime is available (the CLI wires Reproducer in that case).
 	ReproClient llm.Client
+	// ReproTagger, when non-nil, is retagged with each cycle's scan-run id
+	// before reproduction promotion so the reproducer client's spend ledger
+	// attributes usage to the right run. The CLI wires the reproducer's
+	// ledgerRecorder here; nil is fine (attribution falls back to empty).
+	ReproTagger ScanRunTagger
 	// Reproducer, when non-nil, is used by the post-cycle reproduction promotion
 	// step. The daemon does not construct it (that needs a sandbox the CLI
 	// detects); the CLI injects a ready Reproducer or leaves this nil.
@@ -98,6 +103,12 @@ type Deps struct {
 	// keep GitHub issues in sync with the store. Only wired when
 	// cfg.Publish.Enabled is true and the gh binary is on PATH.
 	Publisher Publisher
+}
+
+// ScanRunTagger lets the daemon attribute a long-lived client's spend ledger
+// to the current cycle's scan run.
+type ScanRunTagger interface {
+	SetScanRun(id string)
 }
 
 // Promoter is the slice of *repro.Reproducer the daemon needs for post-cycle
@@ -154,6 +165,7 @@ type Daemon struct {
 	store     *store.Store
 	clients   funnel.RoleClients
 	repro     Promoter
+	reproTag  ScanRunTagger
 	publisher Publisher
 	fopts     funnel.Options
 	sinks     []report.Sink
@@ -204,6 +216,7 @@ func New(deps Deps, cfg DaemonConfig) (*Daemon, error) {
 		store:     deps.Store,
 		clients:   deps.Clients,
 		repro:     deps.Reproducer,
+		reproTag:  deps.ReproTagger,
 		publisher: deps.Publisher,
 		fopts:     deps.FunnelOpts,
 		sinks:     deps.Sinks,
