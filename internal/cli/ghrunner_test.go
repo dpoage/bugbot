@@ -71,6 +71,17 @@ func argValue(call []string, key string) (string, bool) {
 	return "", false
 }
 
+// flagValue extracts the argument following a literal flag from a recorded
+// call, e.g. flagValue(call, "-X") returns the HTTP method.
+func flagValue(call []string, flag string) (string, bool) {
+	for i := 0; i < len(call)-1; i++ {
+		if call[i] == flag {
+			return call[i+1], true
+		}
+	}
+	return "", false
+}
+
 func prPayload(baseSHA, headSHA, headRef string, number int) []byte {
 	return []byte(fmt.Sprintf(
 		`{"number":%d,"base":{"sha":%q},"head":{"sha":%q,"ref":%q}}`,

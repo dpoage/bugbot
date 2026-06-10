@@ -209,6 +209,8 @@ func Load(path string) (Config, error) {
 //	BUGBOT_DAEMON_POLL_INTERVAL
 //	BUGBOT_DAEMON_SWEEP_INTERVAL
 //	BUGBOT_DAEMON_IDLE_BACKOFF
+//	BUGBOT_REVIEW_FAIL_ON
+//	BUGBOT_REVIEW_SUSPECTED
 func applyEnvOverrides(cfg *Config, environ []string) error {
 	env := make(map[string]string, len(environ))
 	for _, kv := range environ {
@@ -259,6 +261,8 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	setStr("BUGBOT_SANDBOX_RUNTIME", &cfg.Sandbox.Runtime)
 	setStr("BUGBOT_SANDBOX_IMAGE", &cfg.Sandbox.Image)
 	setStr("BUGBOT_SANDBOX_NETWORK", &cfg.Sandbox.Network)
+	setStr("BUGBOT_REVIEW_FAIL_ON", &cfg.Review.FailOn)
+	setStr("BUGBOT_REVIEW_SUSPECTED", &cfg.Review.Suspected)
 
 	for _, err := range []error{
 		setInt64("BUGBOT_BUDGETS_PER_CYCLE_TOKENS", &cfg.Budgets.PerCycleTokens),

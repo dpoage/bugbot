@@ -19,6 +19,12 @@ import (
 // an unchanged finding renders byte-identical and the sync skips it.
 const markerSummary = "<!-- bugbot:summary -->"
 
+// markerResolved tags a per-finding comment whose finding is no longer
+// reported. It is detected structurally (not by prose matching) so the CI gate
+// can treat a resolved fingerprint as absent: if the finding reappears on a
+// later push it counts as NEW again and trips the gate.
+const markerResolved = "<!-- bugbot:resolved -->"
+
 // fpMarkerRE extracts the fingerprint from a per-finding marker line.
 var fpMarkerRE = regexp.MustCompile(`<!-- bugbot:fp=([^ ]+) -->`)
 
@@ -70,11 +76,18 @@ func renderInlineBody(f store.Finding) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// resolvedNotice is the body an inline comment is PATCHed to when its finding is
-// no longer reported. It keeps the marker (so the comment stays matchable) and
-// records the head short-SHA at which it cleared.
-func resolvedNotice(fp, headShort string) string {
-	return fmt.Sprintf("%s\n\n✅ No longer reported as of %s.", markerFor(fp), headShort)
+// resolvedNotice is the body an inline comment is PATCHed to when its finding
+// is no longer reported. It keeps the fingerprint marker (so the comment stays
+// matchable) plus the resolved marker (so the state is detectable). The body is
+// deliberately SHA-free: it must be byte-stable across subsequent pushes or
+// every resolved comment would be re-PATCHed on every new head commit.
+func resolvedNotice(fp string) string {
+	return fmt.Sprintf("%s\n%s\n\n✅ No longer reported.", markerFor(fp), markerResolved)
+}
+
+// isResolvedBody reports whether an existing comment body is a resolved notice.
+func isResolvedBody(body string) bool {
+	return strings.Contains(body, markerResolved)
 }
 
 // tierLabel / severityLabel / titleOrUnknown keep rendered bodies non-empty and
@@ -283,9 +296,13 @@ func planSync(
 		}
 		summaryFindings = append(summaryFindings, f)
 
-		// Gate: a NEW tier<=2 finding (fingerprint not already on the PR) trips CI.
+		// Gate: a NEW tier<=2 finding (fingerprint not already on the PR) trips
+		// CI. A resolved notice does NOT count as "already on the PR": a finding
+		// that cleared on an earlier push and reappears (fix-then-revert) must
+		// trip the gate again, not slide through on its tombstone.
 		if f.Tier <= 2 {
-			if _, seen := existing.byFingerprint[f.Fingerprint]; !seen {
+			prev, seen := existing.byFingerprint[f.Fingerprint]
+			if !seen || isResolvedBody(prev.Body) {
 				plan.newGateFingerprints[f.Fingerprint] = true
 			}
 		}
@@ -321,12 +338,13 @@ func planSync(
 	sort.Strings(staleFPs)
 	for _, fp := range staleFPs {
 		prev := existing.byFingerprint[fp]
-		notice := resolvedNotice(fp, headShort)
-		if prev.Body == notice {
-			plan.actions = append(plan.actions, syncAction{op: opSkip, kind: prev.Kind, id: prev.ID, fp: fp, body: notice})
+		// Already-resolved comments are detected by marker, not exact body, so a
+		// notice from any prior run stays untouched on subsequent pushes.
+		if isResolvedBody(prev.Body) {
+			plan.actions = append(plan.actions, syncAction{op: opSkip, kind: prev.Kind, id: prev.ID, fp: fp, body: prev.Body})
 			continue
 		}
-		plan.actions = append(plan.actions, syncAction{op: opResolve, kind: prev.Kind, id: prev.ID, fp: fp, body: notice})
+		plan.actions = append(plan.actions, syncAction{op: opResolve, kind: prev.Kind, id: prev.ID, fp: fp, body: resolvedNotice(fp)})
 	}
 
 	// Summary comment: always create-or-update (the re-run signal). Mark which

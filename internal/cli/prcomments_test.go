@@ -167,19 +167,57 @@ func TestPlanSync_StaleResolves(t *testing.T) {
 }
 
 // TestPlanSync_StaleAlreadyResolvedSkips: re-running over an already-resolved
-// stale comment is idempotent (skip, no second PATCH).
+// stale comment is idempotent (skip, no second PATCH) — including on a LATER
+// head commit, since the notice body is SHA-free and detected by marker.
 func TestPlanSync_StaleAlreadyResolvedSkips(t *testing.T) {
 	res := result()
-	notice := resolvedNotice("fp_old", "headSHA")
+	notice := resolvedNotice("fp_old")
 	existing := existingState{byFingerprint: map[string]existingComment{
 		"fp_old": {ID: 200, Body: notice, Kind: kindReview},
 	}}
-	plan := planSync(res, commentableLines{}, existing, "headSHA", "summary")
-	if _, ok := actionFor(plan, opResolve, "fp_old"); ok {
-		t.Errorf("already-resolved stale comment must not be resolved again")
+	for _, head := range []string{"headSHA", "laterHeadSHA"} {
+		plan := planSync(res, commentableLines{}, existing, head, "summary")
+		if _, ok := actionFor(plan, opResolve, "fp_old"); ok {
+			t.Errorf("head %s: already-resolved stale comment must not be resolved again", head)
+		}
+		if _, ok := actionFor(plan, opSkip, "fp_old"); !ok {
+			t.Errorf("head %s: already-resolved stale comment should be a skip", head)
+		}
 	}
-	if _, ok := actionFor(plan, opSkip, "fp_old"); !ok {
-		t.Errorf("already-resolved stale comment should be a skip")
+}
+
+// TestPlanSync_ReappearingResolvedTripsGateAndUnresolves: a finding that was
+// resolved on an earlier push and reappears (fix-then-revert) must count as NEW
+// for the CI gate — its tombstone does not vouch for it — and its comment must
+// be un-resolved back to the full inline body.
+func TestPlanSync_ReappearingResolvedTripsGateAndUnresolves(t *testing.T) {
+	f := finding("fp1", "foo.go", 10, 2)
+	res := result(f)
+	commentable := commentableAt(struct {
+		file string
+		line int
+	}{"foo.go", 10})
+
+	existing := existingState{byFingerprint: map[string]existingComment{
+		"fp1": {ID: 100, Body: resolvedNotice("fp1"), Kind: kindReview},
+	}}
+
+	plan := planSync(res, commentable, existing, "headSHA", "summary")
+	if !plan.newGateFingerprints["fp1"] {
+		t.Errorf("reappearing resolved finding must trip the gate as new")
+	}
+	a, ok := actionFor(plan, opUpdate, "fp1")
+	if !ok {
+		t.Fatalf("reappearing finding should update the resolved comment back to the inline body; actions=%+v", plan.actions)
+	}
+	if a.id != 100 {
+		t.Errorf("un-resolve must target the existing comment id, got %d", a.id)
+	}
+	if isResolvedBody(a.body) {
+		t.Errorf("un-resolved body must not carry the resolved marker:\n%s", a.body)
+	}
+	if a.body != renderInlineBody(f) {
+		t.Errorf("un-resolved body should be the full inline body:\n%s", a.body)
 	}
 }
 
@@ -298,6 +336,44 @@ func TestApplyPlan_CreateInlineCall(t *testing.T) {
 	body, _ := argValue(call, "body")
 	if !strings.HasPrefix(body, "<!-- bugbot:fp=fp1 -->") {
 		t.Errorf("posted body must carry the marker:\n%s", body)
+	}
+}
+
+// TestApplyPlan_UpdateAndResolveUsePatch asserts update and resolve actions
+// issue -X PATCH (not POST) against the kind-correct endpoint: review comments
+// via pulls/comments/<id>, issue comments via issues/comments/<id>.
+func TestApplyPlan_UpdateAndResolveUsePatch(t *testing.T) {
+	plan := planResult{actions: []syncAction{
+		{op: opUpdate, kind: kindReview, id: 100, fp: "fp1", body: "updated body"},
+		{op: opResolve, kind: kindIssue, id: 200, fp: "fp2", body: resolvedNotice("fp2")},
+	}}
+
+	gh := newFakeGH().
+		on("pulls/comments/100", []byte(`{}`)).
+		on("issues/comments/200", []byte(`{}`))
+
+	var sink strings.Builder
+	if err := applyPlan(context.Background(), gh.run, 3, "headSHA", plan, false, &sink); err != nil {
+		t.Fatalf("applyPlan: %v", err)
+	}
+
+	updates := gh.callsContaining("pulls/comments/100")
+	if len(updates) != 1 {
+		t.Fatalf("expected one update call, got %d: %v", len(updates), gh.calls)
+	}
+	if v, _ := flagValue(updates[0], "-X"); v != "PATCH" {
+		t.Errorf("update must use -X PATCH, got %q in %v", v, updates[0])
+	}
+
+	resolves := gh.callsContaining("issues/comments/200")
+	if len(resolves) != 1 {
+		t.Fatalf("expected one resolve call, got %d: %v", len(resolves), gh.calls)
+	}
+	if v, _ := flagValue(resolves[0], "-X"); v != "PATCH" {
+		t.Errorf("resolve must use -X PATCH, got %q in %v", v, resolves[0])
+	}
+	if body, _ := argValue(resolves[0], "body"); !isResolvedBody(body) {
+		t.Errorf("resolve body must carry the resolved marker:\n%s", body)
 	}
 }
 

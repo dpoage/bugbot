@@ -75,3 +75,21 @@ review:
 		t.Errorf("parsed review = %+v", cfg.Review)
 	}
 }
+
+// TestReviewEnvOverrides confirms BUGBOT_REVIEW_* env vars override the review
+// section like every other configurable section.
+func TestReviewEnvOverrides(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{
+		"BUGBOT_REVIEW_FAIL_ON=none",
+		"BUGBOT_REVIEW_SUSPECTED=withhold",
+	}); err != nil {
+		t.Fatalf("applyEnvOverrides: %v", err)
+	}
+	if cfg.Review.FailOn != "none" {
+		t.Errorf("env override fail_on = %q, want none", cfg.Review.FailOn)
+	}
+	if cfg.Review.Suspected != "withhold" {
+		t.Errorf("env override suspected = %q, want withhold", cfg.Review.Suspected)
+	}
+}
