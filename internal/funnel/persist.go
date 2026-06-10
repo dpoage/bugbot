@@ -3,6 +3,7 @@ package funnel
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -38,18 +39,19 @@ func (f *Funnel) persist(ctx context.Context, survivors []verified, commit strin
 	for _, s := range survivors {
 		c := s.cand
 		finding := store.Finding{
-			Fingerprint: c.Fingerprint,
-			Title:       c.Title,
-			Description: c.Description,
-			Reasoning:   s.reasoning,
-			Severity:    c.Severity,
-			Tier:        tierVerified,
-			Status:      store.StatusOpen,
-			Lens:        c.Lens,
-			File:        c.File,
-			Line:        c.Line,
-			CommitSHA:   commit,
-			FileHash:    fps[c.File],
+			Fingerprint:         c.Fingerprint,
+			Title:               c.Title,
+			Description:         c.Description,
+			Reasoning:           appendCorroboration(s.reasoning, c.CorroboratingLenses),
+			Severity:            c.Severity,
+			Tier:                tierVerified,
+			Status:              store.StatusOpen,
+			Lens:                c.Lens,
+			File:                c.File,
+			Line:                c.Line,
+			CommitSHA:           commit,
+			FileHash:            fps[c.File],
+			CorroboratingLenses: c.CorroboratingLenses,
 		}
 		stored, err := f.store.UpsertFinding(ctx, finding)
 		if err != nil {
@@ -65,6 +67,23 @@ func (f *Funnel) persist(ctx context.Context, survivors []verified, commit strin
 	return out, nil
 }
 
+// appendCorroboration appends a human-readable corroboration note to a
+// verification reasoning trace when one or more other lenses independently
+// reported the same defect (collapsed in triage's location-based dedup). It
+// returns reasoning unchanged when there is no corroboration, so non-merged
+// findings are unaffected. The note is informational only — corroboration does
+// not raise confidence.
+func appendCorroboration(reasoning string, lenses []string) string {
+	if len(lenses) == 0 {
+		return reasoning
+	}
+	note := "Corroborated by lenses: " + strings.Join(lenses, ", ")
+	if reasoning == "" {
+		return note
+	}
+	return strings.TrimRight(reasoning, "\n") + "\n" + note
+}
+
 // persistSuspected upserts budget-orphaned candidates as open Tier 3 suspected
 // findings. These passed triage but their adversarial verification was skipped
 // or cut short when the run hit its hard token budget, so they are recorded at
@@ -75,18 +94,19 @@ func (f *Funnel) persistSuspected(ctx context.Context, orphans []Candidate, comm
 	out := make([]store.Finding, 0, len(orphans))
 	for _, c := range orphans {
 		finding := store.Finding{
-			Fingerprint: c.Fingerprint,
-			Title:       c.Title,
-			Description: c.Description,
-			Reasoning:   budgetStoppedReasoning,
-			Severity:    c.Severity,
-			Tier:        tierSuspected,
-			Status:      store.StatusOpen,
-			Lens:        c.Lens,
-			File:        c.File,
-			Line:        c.Line,
-			CommitSHA:   commit,
-			FileHash:    fps[c.File],
+			Fingerprint:         c.Fingerprint,
+			Title:               c.Title,
+			Description:         c.Description,
+			Reasoning:           appendCorroboration(budgetStoppedReasoning, c.CorroboratingLenses),
+			Severity:            c.Severity,
+			Tier:                tierSuspected,
+			Status:              store.StatusOpen,
+			Lens:                c.Lens,
+			File:                c.File,
+			Line:                c.Line,
+			CommitSHA:           commit,
+			FileHash:            fps[c.File],
+			CorroboratingLenses: c.CorroboratingLenses,
 		}
 		stored, err := f.store.UpsertFinding(ctx, finding)
 		if err != nil {

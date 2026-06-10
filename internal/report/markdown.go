@@ -131,6 +131,9 @@ func writeFinding(b *strings.Builder, n int, f store.Finding) {
 	writeMetaLine(b, "Tier", tierName(f.Tier))
 	writeMetaLine(b, "Severity", orUnknown(f.Severity))
 	writeMetaLine(b, "Lens", orUnknown(f.Lens))
+	if len(f.CorroboratingLenses) > 0 {
+		writeMetaLine(b, "Corroborated by", strings.Join(f.CorroboratingLenses, ", "))
+	}
 	writeMetaLine(b, "Location", fmt.Sprintf("%s:%d", orUnknown(f.File), f.Line))
 	writeMetaLine(b, "Status", orUnknown(string(f.Status)))
 	b.WriteString("\n")

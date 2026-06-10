@@ -226,6 +226,13 @@ type Candidate struct {
 	Confidence  string
 	// Fingerprint is the store dedup key (lens+file+line+title). Set in triage.
 	Fingerprint string
+	// CorroboratingLenses lists the OTHER lenses that independently reported the
+	// same underlying defect (same file, nearby line) and were collapsed into this
+	// candidate during triage's location-based cross-lens dedup. It excludes this
+	// candidate's own Lens and is deduplicated and sorted. Empty when no other
+	// lens corroborated the finding. It is recorded for reporting only — it does
+	// NOT raise the candidate's confidence.
+	CorroboratingLenses []string
 }
 
 // Stats is the per-stage funnel accounting recorded on the scan run.
@@ -248,6 +255,17 @@ type Stats struct {
 	DroppedDuplicate     int `json:"dropped_duplicate"`
 	DroppedSuppressed    int `json:"dropped_suppressed"`
 	DroppedOutOfScope    int `json:"dropped_out_of_scope"`
+	// MergedWithinLens / MergedCrossLens break down the location-based cross-lens
+	// dedup losses in triage: after exact-fingerprint dedup, surviving candidates
+	// are clustered by location (same file, nearby line) and only the cluster's
+	// primary proceeds to verification. Each collapsed (non-primary) member is
+	// counted here — MergedWithinLens when its lens equals the primary's lens
+	// (the same lens reported the same defect twice with different wording),
+	// MergedCrossLens when it came from a different lens. These are distinct from
+	// DroppedDuplicate (exact fingerprint match): a merged member is a DIFFERENT
+	// fingerprint that nonetheless points at the same underlying bug.
+	MergedWithinLens int `json:"merged_within_lens"`
+	MergedCrossLens  int `json:"merged_cross_lens"`
 	// FinderRuns is the number of finder (lens, chunk) agents that actually
 	// launched (i.e. were not skipped by budget degradation/stop). FinderFailures
 	// is how many of those produced NO parseable output even after the repair

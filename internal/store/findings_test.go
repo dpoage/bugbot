@@ -76,6 +76,71 @@ func TestUpsertFinding_InsertThenDedupUpdate(t *testing.T) {
 	}
 }
 
+func TestUpsertFinding_CorroboratingLensesRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	f := sampleFinding()
+	f.CorroboratingLenses = []string{"concurrency", "resource-leaks"}
+	f.Reasoning = "Survived adversarial verification.\nCorroborated by lenses: concurrency, resource-leaks"
+
+	stored, err := st.UpsertFinding(ctx, f)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if want := []string{"concurrency", "resource-leaks"}; !equalStrings(stored.CorroboratingLenses, want) {
+		t.Fatalf("upsert returned corroborating = %v, want %v", stored.CorroboratingLenses, want)
+	}
+
+	// Read back via GetFinding: the column must round-trip.
+	got, err := st.GetFinding(ctx, stored.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if want := []string{"concurrency", "resource-leaks"}; !equalStrings(got.CorroboratingLenses, want) {
+		t.Errorf("GetFinding corroborating = %v, want %v", got.CorroboratingLenses, want)
+	}
+
+	// And via ListFindings (uses the same scan path).
+	all, err := st.ListFindings(ctx, FindingFilter{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(all))
+	}
+	if want := []string{"concurrency", "resource-leaks"}; !equalStrings(all[0].CorroboratingLenses, want) {
+		t.Errorf("ListFindings corroborating = %v, want %v", all[0].CorroboratingLenses, want)
+	}
+
+	// Updating to no corroboration must clear it (empty -> nil), confirming the
+	// empty-string encode/decode round-trips too.
+	f2 := f
+	f2.CorroboratingLenses = nil
+	if _, err := st.UpsertFinding(ctx, f2); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	got2, err := st.GetFinding(ctx, stored.ID)
+	if err != nil {
+		t.Fatalf("get after clear: %v", err)
+	}
+	if len(got2.CorroboratingLenses) != 0 {
+		t.Errorf("corroborating after clear = %v, want empty", got2.CorroboratingLenses)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestUpsertFinding_RequiresFingerprint(t *testing.T) {
 	st := openTemp(t)
 	_, err := st.UpsertFinding(context.Background(), Finding{Title: "x"})
