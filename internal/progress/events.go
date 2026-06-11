@@ -146,9 +146,12 @@ type Event struct {
 	Line  int    `json:"line,omitempty"`
 	Title string `json:"title,omitempty"`
 
-	// NextPoll / NextSweep carry the daemon schedule (cycle_scheduled).
-	NextPoll  time.Time `json:"next_poll,omitempty"`
-	NextSweep time.Time `json:"next_sweep,omitempty"`
+	// NextPoll / NextSweep / NextBacklog carry the daemon schedule
+	// (cycle_scheduled). NextBacklog is zero when the backlog-repro timer is
+	// disabled (EnableRepro=false) or when its next firing is effectively never.
+	NextPoll    time.Time `json:"next_poll,omitempty"`
+	NextSweep   time.Time `json:"next_sweep,omitempty"`
+	NextBacklog time.Time `json:"next_backlog,omitempty"`
 
 	// Count is a generic integer payload: re-verified-closed count (reverify),
 	// promoted count (promote), or new findings (cycle_finished).

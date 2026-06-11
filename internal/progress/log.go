@@ -86,8 +86,12 @@ func (r *LogRenderer) line(ev Event) string {
 			ev.ScanKind, shortSHA(ev.Commit), countsSuffix(ev.Counts),
 			ev.InputTokens, ev.OutputTokens, cachedSuffix(ev.CacheReadTokens))
 	case KindCycleScheduled:
-		return fmt.Sprintf("schedule: next_poll=%s next_sweep=%s",
+		line := fmt.Sprintf("schedule: next_poll=%s next_sweep=%s",
 			ev.NextPoll.Format(timeClock), ev.NextSweep.Format(timeClock))
+		if !ev.NextBacklog.IsZero() {
+			line += " next_backlog=" + ev.NextBacklog.Format(timeClock)
+		}
+		return line
 	case KindCycleStarted:
 		return fmt.Sprintf("cycle started: kind=%s", ev.ScanKind)
 	case KindCycleFinished:

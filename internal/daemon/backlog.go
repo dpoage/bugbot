@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"sort"
 
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -11,9 +12,18 @@ import (
 // findings from the store (the store filter does not support ReproPath or
 // NeedsHuman predicates) and filters in Go.
 //
-// Findings are returned in store-default order (newest-updated-first). Callers
-// that want a bounded set should slice the result; the caller is responsible for
-// the batch-size cap so this helper stays reusable.
+// Rotation design: findings are returned oldest-updated-first (updated_at ASC).
+// When a repro attempt fails, the caller "touches" the finding via UpsertFinding
+// so its updated_at bumps. On the next firing those touched failures sort to the
+// BACK of the queue, and un-attempted (or long-ago-attempted) findings rotate to
+// the FRONT. This prevents the same unreproducible findings from burning budget
+// on every firing while others are never reached.
+//
+// ListFindings returns DESC; we re-sort here in Go. Backlogs are small (at most
+// a few hundred findings in practice) so the in-process sort is negligible.
+//
+// Callers that want a bounded set should slice the result; the caller is
+// responsible for the batch-size cap so this helper stays reusable.
 func OpenBacklog(ctx context.Context, st *store.Store) ([]store.Finding, error) {
 	all, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
 	if err != nil {
@@ -25,6 +35,11 @@ func OpenBacklog(ctx context.Context, st *store.Store) ([]store.Finding, error) 
 			out = append(out, f)
 		}
 	}
+	// Sort oldest-updated-first so rotation works: callers touch failed findings
+	// (bumping updated_at) and those failures move to the back of the queue.
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].UpdatedAt.Before(out[j].UpdatedAt)
+	})
 	return out, nil
 }
 
@@ -32,6 +47,12 @@ func OpenBacklog(ctx context.Context, st *store.Store) ([]store.Finding, error) 
 // with no repro attempt, caps the batch to cfg.ReproBacklogBatch, and runs
 // them through PromoteAll. It is a no-op unless EnableRepro is true and a
 // Promoter is wired in. The day-budget gate is applied by the caller (Run).
+//
+// After each firing, findings that were attempted but NOT promoted (i.e. repro
+// failed) are "touched" via a no-op UpsertFinding that bumps updated_at. On the
+// next firing, OpenBacklog's oldest-updated-first ordering pushes those failures
+// to the back of the queue, ensuring the batch rotates through the full backlog
+// rather than burning budget on the same unreproducible findings forever.
 func (d *Daemon) runReproBacklog(ctx context.Context) {
 	if !d.cfg.EnableRepro || d.repro == nil {
 		return
@@ -81,4 +102,55 @@ func (d *Daemon) runReproBacklog(ctx context.Context) {
 		"attempted", summary.Attempted,
 		"promoted", summary.Promoted,
 	)
+
+	// Touch findings that were attempted but not promoted so their updated_at
+	// advances. OpenBacklog orders oldest-first, so these failures move to the
+	// back of the queue on the next firing, letting the batch rotate to other
+	// findings instead of retrying the same unreproducible ones forever.
+	//
+	// We determine "attempted but not promoted" by re-reading each batch finding
+	// from the store: a promoted finding now has a non-empty ReproPath (set by
+	// promoteFinding); one that still has an empty ReproPath was not promoted.
+	// This avoids depending on PromoteAll's Summary internals.
+	TouchBacklogFailures(ctx, d.store, d.log, batch)
+}
+
+// TouchBacklogFailures re-reads each finding in batch and, for any whose
+// ReproPath is still empty (not promoted), calls UpsertFinding to bump
+// updated_at. Errors are logged but do not abort the loop — a missed touch
+// means that finding will be re-selected sooner than ideal, not that data is
+// corrupted.
+//
+// This is exported so the CLI `bugbot repro` one-shot drain can apply the same
+// rotation logic as the daemon's periodic backlog step.
+func TouchBacklogFailures(ctx context.Context, st *store.Store, log interface {
+	Info(string, ...any)
+	Error(string, ...any)
+}, batch []store.Finding) {
+	if ctx.Err() != nil {
+		return
+	}
+	for _, f := range batch {
+		current, err := st.GetFinding(ctx, f.ID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Error("daemon: repro backlog touch: get finding failed",
+				"id", f.ID, "err", err)
+			continue
+		}
+		if current.ReproPath != "" {
+			// Promoted: UpsertFinding already bumped updated_at; no touch needed.
+			continue
+		}
+		// Not promoted: upsert unchanged to bump updated_at.
+		if _, err := st.UpsertFinding(ctx, current); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Error("daemon: repro backlog touch: upsert failed",
+				"id", f.ID, "err", err)
+		}
+	}
 }

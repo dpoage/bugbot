@@ -52,10 +52,11 @@ type Status struct {
 	SpendTodayInput  int64 `json:"spend_today_input,omitempty"`
 	SpendTodayOutput int64 `json:"spend_today_output,omitempty"`
 
-	// NextPoll / NextSweep are the daemon's upcoming deadlines (zero for a
-	// one-shot scan).
-	NextPoll  time.Time `json:"next_poll,omitempty"`
-	NextSweep time.Time `json:"next_sweep,omitempty"`
+	// NextPoll / NextSweep / NextBacklog are the daemon's upcoming deadlines
+	// (zero for a one-shot scan or when the backlog timer is disabled).
+	NextPoll    time.Time `json:"next_poll,omitempty"`
+	NextSweep   time.Time `json:"next_sweep,omitempty"`
+	NextBacklog time.Time `json:"next_backlog,omitempty"`
 
 	// LastEvent is a short human description of the most recent activity.
 	LastEvent string `json:"last_event,omitempty"`
@@ -179,6 +180,7 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 	case KindCycleScheduled:
 		s.st.NextPoll = ev.NextPoll
 		s.st.NextSweep = ev.NextSweep
+		s.st.NextBacklog = ev.NextBacklog
 	case KindScanFinished, KindCycleFinished:
 		if ev.Counts != nil {
 			s.st.Counts = mergeMax(s.st.Counts, *ev.Counts)

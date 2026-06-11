@@ -66,9 +66,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	for {
 		now = d.clock.now()
-		progress.Emit(d.prog, progress.Event{
+		// Emit the schedule event. NextBacklog is zero when the backlog timer is
+		// effectively-never (repro disabled), keeping the field absent from JSON
+		// and clean for consumers that only care about poll/sweep.
+		schedEv := progress.Event{
 			Kind: progress.KindCycleScheduled, NextPoll: nextPoll, NextSweep: nextSweep,
-		})
+		}
+		if d.cfg.EnableRepro && d.repro != nil {
+			schedEv.NextBacklog = nextBacklog
+		}
+		progress.Emit(d.prog, schedEv)
 
 		// Pick the nearest deadline; wait for it (or cancellation).
 		// Three-way: poll, sweep, backlog.

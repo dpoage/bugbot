@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/spf13/cobra"
 
@@ -20,6 +21,11 @@ import (
 // availability check with a graceful skip message) but sources its findings
 // from daemon.OpenBacklog rather than from a scan result. The --max flag caps
 // the batch size, defaulting to repro.backlog_batch from config.
+//
+// Note: this command does NOT consult the daemon per-day token budget. It is an
+// operator-initiated one-shot that runs unconditionally, consistent with
+// `scan --repro`. Operators should be aware of token costs when running against
+// a large backlog.
 func newReproCmd() *cobra.Command {
 	var (
 		target string
@@ -104,6 +110,12 @@ the command exits with a graceful message rather than an error.`,
 				return fmt.Errorf("reproduce: %w", err)
 			}
 			printReproSummary(out, summary)
+
+			// Touch attempted-but-not-promoted findings to bump updated_at so that
+			// OpenBacklog's oldest-first ordering rotates them to the back of the
+			// queue on the next run, preventing unbounded retries on the same
+			// unreproducible findings.
+			daemon.TouchBacklogFailures(ctx, st, slog.Default(), batch)
 			return nil
 		},
 	}

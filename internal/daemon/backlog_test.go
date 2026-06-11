@@ -384,6 +384,10 @@ func TestDaemonReproBacklogEmptyBacklog(t *testing.T) {
 // ---------------------------------------------------------------------------
 // TestDaemonReproBacklogDisabled: when EnableRepro is false, no backlog timer
 // churn occurs and PromoteAll is never called.
+//
+// Strengthened: the daemon actually runs for one poll firing (short interval)
+// to confirm the backlog never fires even while the scheduler is actively
+// cycling — not just on an immediate-cancel.
 // ---------------------------------------------------------------------------
 
 func TestDaemonReproBacklogDisabled(t *testing.T) {
@@ -408,7 +412,7 @@ func TestDaemonReproBacklogDisabled(t *testing.T) {
 
 	// Build daemon with repro DISABLED; the backlog timer must never fire.
 	cfg := DaemonConfig{
-		PollInterval:   time.Hour,
+		PollInterval:   10 * time.Millisecond, // short so the poll fires in the test
 		SweepInterval:  time.Hour,
 		PerCycleTokens: 1_000_000,
 		PerDayTokens:   10_000_000,
@@ -429,15 +433,119 @@ func TestDaemonReproBacklogDisabled(t *testing.T) {
 	d.clock = clk
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Cancel immediately: poll and sweep timers are 1h out; the scheduler is
-	// parked. Since the backlog timer is disabled there is nothing that would
-	// fire sooner.
+	defer cancel()
+	done := runInBackground(ctx, d)
+
+	// Fire one poll timer so the scheduler does at least one real cycle.
+	// The backlog timer is effectively-never (1<<62-1 ns out) and must stay so.
+	if !clk.fire(ctx, t) {
+		t.Fatal("clock fire failed")
+	}
+	// Let the poll cycle finish.
+	time.Sleep(20 * time.Millisecond)
+
 	cancel()
-	if err := d.Run(ctx); err != nil {
+	if err := <-done; err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
 	if prom.calls() != 0 {
 		t.Fatalf("expected PromoteAll NOT called when repro disabled, got %d calls", prom.calls())
 	}
+}
+
+// ---------------------------------------------------------------------------
+// TestDaemonReproBacklogRotation: when PromoteAll promotes nothing (all repro
+// attempts fail), the failures are touched so their updated_at advances, and
+// on the SECOND firing a batch smaller than the full backlog picks DIFFERENT
+// findings — not the same ones again.
+// ---------------------------------------------------------------------------
+
+func TestDaemonReproBacklogRotation(t *testing.T) {
+	fr := newFixtureRepo(t)
+	fr.write(fixtureFile, "package p\n")
+	base := fr.commit("init")
+
+	st := openStore(t)
+	if _, err := st.BeginScanRun(context.Background(), store.ScanSweep, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertFileStates(context.Background(), []store.FileState{{
+		Path: lastSeenSentinel, ContentHash: base, LastScannedCommit: base,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed 4 findings; batch size is 2, so only half are attempted per firing.
+	// After the first firing all 4 have the same initial updated_at from seed
+	// time; the batch picks the 2 oldest (arbitrary tie-break). After touching,
+	// those 2 move to the back; the second firing must pick the OTHER 2.
+	var allIDs []string
+	for i := 0; i < 4; i++ {
+		f := seedFinding(t, st, fmt.Sprintf("finding-%d", i), 2, "", false)
+		allIDs = append(allIDs, f.ID)
+	}
+
+	llmc := newFakeLLM(emptyJSON, notRefutedJSON)
+	clk := newFakeClock(mustTime(t, testStart))
+	// fakePromoter promotes nothing: all findings stay with ReproPath="".
+	prom := &fakePromoter{}
+	const batchSize = 2
+	d := buildDaemonWithRepro(t, fr, st, llmc, prom, 10*time.Millisecond, batchSize, clk)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runInBackground(ctx, d)
+
+	// First firing.
+	if !clk.fire(ctx, t) {
+		t.Fatal("first clock fire failed")
+	}
+	waitFor(t, func() bool { return prom.calls() >= 1 })
+
+	// Second firing: after touch, the first batch's findings have a newer
+	// updated_at and must sort to the back. A batch of 2 from 4 findings should
+	// now include at least one ID not in the first batch.
+	if !clk.fire(ctx, t) {
+		t.Fatal("second clock fire failed")
+	}
+	waitFor(t, func() bool { return prom.calls() >= 2 })
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if prom.calls() < 2 {
+		t.Fatalf("expected at least 2 PromoteAll calls, got %d", prom.calls())
+	}
+
+	// Collect IDs from the first batch.
+	firstBatch := make(map[string]bool)
+	for _, f := range prom.attempts[0] {
+		firstBatch[f.ID] = true
+	}
+
+	// The second batch must contain at least one ID that was NOT in the first
+	// batch — rotation is working.
+	var rotated bool
+	for _, f := range prom.attempts[1] {
+		if !firstBatch[f.ID] {
+			rotated = true
+			break
+		}
+	}
+	if !rotated {
+		t.Errorf("second firing picked the same findings as the first — rotation not working\nfirst:  %v\nsecond: %v",
+			idsOf(prom.attempts[0]), idsOf(prom.attempts[1]))
+	}
+}
+
+// idsOf extracts the ID slice from a finding slice for test error messages.
+func idsOf(findings []store.Finding) []string {
+	ids := make([]string, len(findings))
+	for i, f := range findings {
+		ids[i] = f.ID
+	}
+	return ids
 }

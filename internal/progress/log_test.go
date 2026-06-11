@@ -69,3 +69,32 @@ func TestLogRenderer_DaemonEventLines(t *testing.T) {
 		}
 	}
 }
+
+func TestLogRenderer_CycleScheduledWithBacklog(t *testing.T) {
+	t0 := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 6, 10, 16, 0, 0, 0, time.UTC)
+
+	var buf bytes.Buffer
+	r := NewLogRenderer(&buf)
+
+	// With NextBacklog set (repro enabled): all three times appear.
+	r.Handle(Event{Kind: KindCycleScheduled, NextPoll: t0, NextSweep: t1, NextBacklog: t2})
+	out := buf.String()
+	for _, want := range []string{"next_poll=14:00:00", "next_sweep=15:00:00", "next_backlog=16:00:00"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("schedule line with backlog missing %q:\n%s", want, out)
+		}
+	}
+
+	buf.Reset()
+	// Without NextBacklog (repro disabled / zero time): field is omitted.
+	r.Handle(Event{Kind: KindCycleScheduled, NextPoll: t0, NextSweep: t1})
+	out = buf.String()
+	if strings.Contains(out, "next_backlog") {
+		t.Errorf("schedule line without backlog must not include next_backlog:\n%s", out)
+	}
+	if !strings.Contains(out, "next_poll=14:00:00") {
+		t.Errorf("schedule line missing next_poll:\n%s", out)
+	}
+}
