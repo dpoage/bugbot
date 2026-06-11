@@ -15,7 +15,11 @@ import (
 )
 
 // Read-file limits. These bound a single read_file result so a tool call cannot
-// blow the model's context window or the harness's memory.
+// blow the model's context window or the harness's memory. They are the DEFAULTS;
+// a caller can tighten them per tool via [ReadCaps] / [NewReadFileWithCaps] so a
+// role that re-sends a growing history every turn (e.g. the finder) carries
+// smaller per-file results without ever mutating the conversation prefix — the
+// cache-safe way to slow history growth (see bugbot-3nf).
 const (
 	// maxReadLines caps the number of lines returned by read_file.
 	maxReadLines = 2000
@@ -23,9 +27,33 @@ const (
 	maxReadBytes = 256 * 1024
 )
 
+// ReadCaps bounds a single read_file result. The zero value resolves to the
+// package defaults (maxReadLines / maxReadBytes), so an unset field never
+// tightens unexpectedly. A negative value is treated as "default" too; to read
+// effectively-unbounded files, pass an explicitly large cap.
+type ReadCaps struct {
+	// MaxLines caps the numbered lines returned. Zero/negative uses maxReadLines.
+	MaxLines int
+	// MaxBytes caps the bytes pulled off disk before line windowing. Zero/negative
+	// uses maxReadBytes.
+	MaxBytes int
+}
+
+// resolve substitutes package defaults for unset/negative fields.
+func (c ReadCaps) resolve() ReadCaps {
+	if c.MaxLines <= 0 {
+		c.MaxLines = maxReadLines
+	}
+	if c.MaxBytes <= 0 {
+		c.MaxBytes = maxReadBytes
+	}
+	return c
+}
+
 // readFileTool serves numbered file contents rooted at a repository directory.
 type readFileTool struct {
 	root *fsRoot
+	caps ReadCaps
 }
 
 // NewReadFile returns a read_file tool rooted at dir. It reads a UTF-8 text file
@@ -33,11 +61,22 @@ type readFileTool struct {
 // windowing. Results are capped at ~2000 lines / 256KB; truncation is noted in
 // the output. Paths are repo-relative and traversal-protected.
 func NewReadFile(dir string) (Tool, error) {
+	return NewReadFileWithCaps(dir, ReadCaps{})
+}
+
+// NewReadFileWithCaps is like [NewReadFile] but tightens the per-result line and
+// byte caps. Zero-value caps fields fall back to the package defaults, so this is
+// a safe superset of NewReadFile. Tighter caps shrink each read_file result at
+// the source, slowing the growth of a re-sent conversation history WITHOUT
+// mutating any earlier message — so unlike history compaction it never forfeits
+// a prompt-cache prefix, which is why it (not compaction) is the finder's default
+// token-burn lever under a strong prompt cache (see bugbot-3nf).
+func NewReadFileWithCaps(dir string, caps ReadCaps) (Tool, error) {
 	root, err := newFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}
-	return &readFileTool{root: root}, nil
+	return &readFileTool{root: root, caps: caps.resolve()}, nil
 }
 
 type readFileArgs struct {
@@ -111,22 +150,22 @@ func (t *readFileTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 	defer func() { _ = f.Close() }()
 
 	// Bound the bytes we pull off disk regardless of line count.
-	data, err := io.ReadAll(io.LimitReader(f, maxReadBytes+1))
+	data, err := io.ReadAll(io.LimitReader(f, int64(t.caps.MaxBytes)+1))
 	if err != nil {
 		return "", fmt.Errorf("cannot read %q: %w", args.Path, err)
 	}
 	byteTruncated := false
-	if len(data) > maxReadBytes {
-		data = data[:maxReadBytes]
+	if len(data) > t.caps.MaxBytes {
+		data = data[:t.caps.MaxBytes]
 		byteTruncated = true
 	}
 
-	return renderNumbered(string(data), args.Offset, args.Limit, byteTruncated), nil
+	return renderNumbered(string(data), args.Offset, args.Limit, byteTruncated, t.caps), nil
 }
 
 // renderNumbered formats content as numbered lines, applying a 1-based offset
-// and a line limit (capped at maxReadLines), and appends truncation notes.
-func renderNumbered(content string, offset, limit int, byteTruncated bool) string {
+// and a line limit (capped at caps.MaxLines), and appends truncation notes.
+func renderNumbered(content string, offset, limit int, byteTruncated bool, caps ReadCaps) string {
 	lines := strings.Split(content, "\n")
 	// A trailing newline produces a spurious final empty element; drop it so the
 	// line count reflects real lines.
@@ -143,7 +182,7 @@ func renderNumbered(content string, offset, limit int, byteTruncated bool) strin
 		start = total
 	}
 
-	lineCap := maxReadLines
+	lineCap := caps.MaxLines
 	if limit > 0 && limit < lineCap {
 		lineCap = limit
 	}
@@ -166,7 +205,7 @@ func renderNumbered(content string, offset, limit int, byteTruncated bool) strin
 		fmt.Fprintf(&b, "... [truncated: showing lines %d-%d of %d]\n", start+1, end, total)
 	}
 	if byteTruncated {
-		fmt.Fprintf(&b, "... [truncated: file exceeds %d bytes]\n", maxReadBytes)
+		fmt.Fprintf(&b, "... [truncated: file exceeds %d bytes]\n", caps.MaxBytes)
 	}
 	return b.String()
 }

@@ -64,6 +64,24 @@ type Budgets struct {
 	// them at full weight exhausts the budget far faster than real cost. Zero
 	// uses the funnel default (~0.1). Set to 1.0 for raw-token accounting.
 	CacheReadWeight float64 `yaml:"cache_read_weight"`
+	// FinderHistoryTokens opts a finder into threshold-triggered history
+	// compaction: once its growing message history exceeds this many (estimated)
+	// tokens, older tool-result content is pruned to short stubs once per crossing.
+	// It is OFF by default (0 and negative both disable it) because under a strong
+	// prompt cache it raises cache-weighted cost; it is intended for weak-/no-cache
+	// providers where the raw-token reduction is the real-dollar reduction. See
+	// funnel.DefaultFinderHistoryTokens for the full rationale. The cache-safe
+	// default lever is FinderReadLines/FinderReadBytes instead.
+	FinderHistoryTokens int64 `yaml:"finder_history_tokens"`
+	// FinderReadLines / FinderReadBytes tighten the per-read_file caps for finder
+	// agents — the primary, cache-safe lever for finder token burn (bugbot-3nf).
+	// Shrinking each read result at the source slows the growth of the re-sent
+	// conversation history without mutating any earlier message, so the prompt
+	// cache is preserved. Zero uses the funnel finder defaults
+	// (funnel.DefaultFinderReadLines / DefaultFinderReadBytes); a negative value
+	// restores the looser agent-package read defaults for the finder.
+	FinderReadLines int `yaml:"finder_read_lines"`
+	FinderReadBytes int `yaml:"finder_read_bytes"`
 }
 
 // Scan controls which files are considered during ingest/scan.
@@ -432,6 +450,9 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt64("BUGBOT_BUDGETS_PER_CYCLE_TOKENS", &cfg.Budgets.PerCycleTokens),
 		setInt64("BUGBOT_BUDGETS_PER_DAY_TOKENS", &cfg.Budgets.PerDayTokens),
 		setFloat64("BUGBOT_BUDGETS_CACHE_READ_WEIGHT", &cfg.Budgets.CacheReadWeight),
+		setInt64("BUGBOT_BUDGETS_FINDER_HISTORY_TOKENS", &cfg.Budgets.FinderHistoryTokens),
+		setInt("BUGBOT_BUDGETS_FINDER_READ_LINES", &cfg.Budgets.FinderReadLines),
+		setInt("BUGBOT_BUDGETS_FINDER_READ_BYTES", &cfg.Budgets.FinderReadBytes),
 		setInt("BUGBOT_SANDBOX_CPUS", &cfg.Sandbox.CPUs),
 		setInt("BUGBOT_SANDBOX_MEMORY_MB", &cfg.Sandbox.MemoryMB),
 		setInt("BUGBOT_SANDBOX_TIMEOUT_SECONDS", &cfg.Sandbox.TimeoutSeconds),

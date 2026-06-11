@@ -42,7 +42,11 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 	// agent propagate into the verification result, undermining the whole
 	// adversarial design. See also: tools_post_lead.go for the tool definition
 	// and hypothesize.go where it is wired for finders only.
-	tools, err := f.readOnlyTools()
+	// Verifiers use the default (looser) read caps: a refuter panel runs few,
+	// short turns over one candidate, so its history does not accrete the way a
+	// finder's does and the finder-specific tightening would only risk truncating
+	// the very evidence a refuter needs to confirm or kill a candidate.
+	tools, err := f.readOnlyTools(agent.ReadCaps{})
 	if err != nil {
 		return nil, 0, nil, err
 	}

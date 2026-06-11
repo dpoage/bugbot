@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
@@ -365,7 +366,7 @@ func TestRunFinder_BudgetStopNotParseFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools, err := f.readOnlyTools()
+	tools, err := f.readOnlyTools(agent.ReadCaps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +404,7 @@ func TestRunFinder_ParseFailureStillCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools, err := f.readOnlyTools()
+	tools, err := f.readOnlyTools(agent.ReadCaps{})
 	if err != nil {
 		t.Fatal(err)
 	}

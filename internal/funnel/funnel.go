@@ -70,6 +70,47 @@ const (
 	// structural fix so finalization is the exception, not the norm.
 	DefaultChunkSize = 8
 
+	// DefaultFinderHistoryTokens is the per-finder history-compaction threshold
+	// applied when a caller asks for compaction but leaves the exact threshold
+	// unset. Once a finder's estimated message history exceeds this many tokens,
+	// older tool-result content is compacted to stubs once per crossing (see
+	// agent.Limits.HistoryTokenBudget), preserving the task, the reasoning chain,
+	// the most recent results, and tool-call pairing.
+	//
+	// IMPORTANT — compaction is OFF by default. The bugbot-3nf offline measurement
+	// showed that under a strong ~0.1x prompt cache (the cache weight the budget
+	// uses), mutating the message prefix to prune old results forfeits cache hits
+	// worth MORE than the bytes reclaimed over the few remaining turns: raw input
+	// tokens drop ~10-37% but CACHE-WEIGHTED cost rises ~1-43%. So compaction is a
+	// raw-token / context-window-pressure / weak-cache lever, not the cache-cost
+	// win the bead targeted; the cache-safe finder default is instead tighter
+	// per-read caps (DefaultFinderReadLines/Bytes). Compaction stays available for
+	// callers on providers with little or no prompt-cache discount, where the
+	// raw-token reduction IS the real-dollar reduction. This threshold is the
+	// value used when such a caller sets budgets.finder_history_tokens to 0 while
+	// having explicitly opted in via Options; a negative value disables it.
+	DefaultFinderHistoryTokens int64 = 60_000
+
+	// DefaultFinderReadLines / DefaultFinderReadBytes are the per-read_file caps a
+	// finder uses, tighter than the agent package defaults (2000 lines / 256 KB).
+	//
+	// This is the PRIMARY cache-safe lever for the finder token-burn finding
+	// (bugbot-3nf). A finder re-sends its whole growing history every turn, so a
+	// fat read_file result is re-billed on every later turn — quadratic in turns.
+	// Tightening the cap shrinks each result at the SOURCE, before it ever enters
+	// the conversation, so it never mutates an earlier message and never forfeits
+	// a prompt-cache prefix. The offline measurement (internal/eval, the
+	// bugbot-3nf harness) shows this cuts CACHE-WEIGHTED input ~55-77% on a runaway
+	// finder profile, whereas threshold history compaction — which mutates the
+	// prefix — REDUCES raw tokens but INCREASES cache-weighted cost under the same
+	// ~0.1x cache, and is therefore left opt-in/off (see DefaultFinderHistoryTokens).
+	//
+	// 800 lines / 96 KB comfortably covers a focused source file (most files under
+	// analysis are far smaller); larger files are line-windowed with offset/limit,
+	// and the truncation note tells the model to page if it genuinely needs more.
+	DefaultFinderReadLines = 800
+	DefaultFinderReadBytes = 96 * 1024
+
 	// DefaultMaxOutputTokens caps each finder/verifier completion's VISIBLE output.
 	// Reasoning models (e.g. MiniMax M3) spend most of their completion allowance
 	// inside <think> blocks; without an explicit, generous cap the provider default
@@ -148,6 +189,21 @@ type Options struct {
 	// and per-run token budget). Zero-value fields resolve to agent defaults.
 	FinderLimits   agent.Limits
 	VerifierLimits agent.Limits
+	// FinderHistoryTokens controls opt-in finder history compaction (see
+	// agent.Limits.HistoryTokenBudget and DefaultFinderHistoryTokens for why it is
+	// OFF by default). Zero AND negative both leave compaction DISABLED — the
+	// cache-safe finder default is tighter per-read caps, not prefix-mutating
+	// compaction. A POSITIVE value opts in at that token threshold (a common
+	// choice on weak-/no-cache providers, where the raw-token reduction is the
+	// real-dollar reduction). It is folded into FinderLimits.HistoryTokenBudget at
+	// resolve time; set this field, not the nested limit, to control it.
+	FinderHistoryTokens int64
+	// FinderReadLines / FinderReadBytes tighten the finder's per-read_file caps,
+	// the primary cache-safe lever for finder token burn (bugbot-3nf). Zero uses
+	// DefaultFinderReadLines / DefaultFinderReadBytes. A negative value restores
+	// the looser agent-package read defaults (2000 lines / 256 KB) for the finder.
+	FinderReadLines int
+	FinderReadBytes int
 	// TranscriptDir, when non-empty, makes every agent auto-save its transcript
 	// there.
 	TranscriptDir string
@@ -175,7 +231,40 @@ func (o Options) resolve() Options {
 	if o.ChunkSize <= 0 {
 		o.ChunkSize = DefaultChunkSize
 	}
+	// Fold the (opt-in) history-compaction threshold into FinderLimits so the
+	// per-finder runner picks it up. Compaction is OFF by default because the
+	// bugbot-3nf measurement showed it raises cache-weighted cost: only a POSITIVE
+	// request arms it; zero and negative both leave it disabled.
+	if o.FinderHistoryTokens > 0 {
+		o.FinderLimits.HistoryTokenBudget = o.FinderHistoryTokens
+	} else {
+		o.FinderLimits.HistoryTokenBudget = 0
+	}
 	return o
+}
+
+// finderReadCaps resolves the per-read_file caps for finder agents from Options,
+// substituting the funnel finder defaults for unset fields and honoring a
+// negative request as "use the looser agent-package defaults".
+func (o Options) finderReadCaps() agent.ReadCaps {
+	caps := agent.ReadCaps{}
+	switch {
+	case o.FinderReadLines < 0:
+		caps.MaxLines = 0 // 0 -> agent default (looser) at the tool layer
+	case o.FinderReadLines == 0:
+		caps.MaxLines = DefaultFinderReadLines
+	default:
+		caps.MaxLines = o.FinderReadLines
+	}
+	switch {
+	case o.FinderReadBytes < 0:
+		caps.MaxBytes = 0
+	case o.FinderReadBytes == 0:
+		caps.MaxBytes = DefaultFinderReadBytes
+	default:
+		caps.MaxBytes = o.FinderReadBytes
+	}
+	return caps
 }
 
 // Funnel runs the staged detection pipeline against a repository. It is

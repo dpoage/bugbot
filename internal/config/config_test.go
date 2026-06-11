@@ -423,3 +423,56 @@ func TestValidate_ReproBacklogIntervalMustBePositive(t *testing.T) {
 		t.Errorf("repro_backlog_interval=1m should be valid, got %v", err)
 	}
 }
+
+func TestDefault_FinderHistoryTokensIsZero(t *testing.T) {
+	// Config default is zero so the funnel applies its own
+	// DefaultFinderHistoryTokens (compaction ON). A non-zero config default here
+	// would override that funnel default and be harder to reason about.
+	if got := Default().Budgets.FinderHistoryTokens; got != 0 {
+		t.Errorf("default FinderHistoryTokens = %d, want 0 (defer to funnel default)", got)
+	}
+}
+
+func TestEnvOverride_FinderHistoryTokens(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_BUDGETS_FINDER_HISTORY_TOKENS=42000"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Budgets.FinderHistoryTokens != 42000 {
+		t.Errorf("env override = %d, want 42000", cfg.Budgets.FinderHistoryTokens)
+	}
+}
+
+func TestEnvOverride_FinderHistoryTokensDisable(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_BUDGETS_FINDER_HISTORY_TOKENS=-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Budgets.FinderHistoryTokens != -1 {
+		t.Errorf("env override = %d, want -1 (disable sentinel)", cfg.Budgets.FinderHistoryTokens)
+	}
+}
+
+func TestDefault_FinderReadCapsAreZero(t *testing.T) {
+	// Zero config defers to the funnel finder defaults (the cache-safe lever).
+	d := Default().Budgets
+	if d.FinderReadLines != 0 || d.FinderReadBytes != 0 {
+		t.Errorf("default finder read caps = {%d %d}, want {0 0} (defer to funnel)", d.FinderReadLines, d.FinderReadBytes)
+	}
+}
+
+func TestEnvOverride_FinderReadCaps(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{
+		"BUGBOT_BUDGETS_FINDER_READ_LINES=500",
+		"BUGBOT_BUDGETS_FINDER_READ_BYTES=65536",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Budgets.FinderReadLines != 500 {
+		t.Errorf("FinderReadLines = %d, want 500", cfg.Budgets.FinderReadLines)
+	}
+	if cfg.Budgets.FinderReadBytes != 65536 {
+		t.Errorf("FinderReadBytes = %d, want 65536", cfg.Budgets.FinderReadBytes)
+	}
+}

@@ -101,6 +101,12 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 
 	outcome := &Outcome{Transcript: tr}
 
+	// History-compaction state. toolNameByID lets a tool-result stub name the
+	// tool it answered; compactThreshold re-arms upward after each firing so
+	// compaction is bounded and never thrashes the prompt cache turn-over-turn.
+	toolNameByID := map[string]string{}
+	compactThreshold := r.limits.HistoryTokenBudget
+
 	for {
 		// Stop before the next turn if we've hit the iteration cap. When forced
 		// finalization is enabled, reserve this last turn: inject the finalization
@@ -113,6 +119,10 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 					Content: finalizePrompt,
 				})
 				outcome.Finalized = true
+				// Compact before the finalization turn too: it is often the largest
+				// history of the run, and the model needs only its own reasoning chain
+				// (preserved) to emit the answer, not every earlier file dump.
+				messages, compactThreshold = r.maybeCompact(messages, compactThreshold, toolNameByID)
 				resp, err := r.completeOnce(ctx, tr, &messages, outcome, true)
 				if err != nil {
 					r.autosave(tr, task)
@@ -151,6 +161,13 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 			return outcome, err
 		}
 
+		// Threshold-triggered, one-shot-per-crossing history compaction. Done at
+		// the turn boundary BEFORE the completion so the smaller history is what
+		// gets billed this turn. Re-arming the threshold upward after a firing
+		// keeps compaction bounded and avoids re-paying a prefix cache miss every
+		// subsequent turn (see compactRearmFactor).
+		messages, compactThreshold = r.maybeCompact(messages, compactThreshold, toolNameByID)
+
 		resp, err := r.completeOnce(ctx, tr, &messages, outcome, false)
 		if err != nil {
 			r.autosave(tr, task)
@@ -170,6 +187,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 			}
 			result, isErr := r.runTool(ctx, call)
 			tr.recordToolResult(outcome.Iterations, call, result, isErr)
+			toolNameByID[call.ID] = call.Name
 			messages = append(messages, llm.Message{
 				Role:       llm.RoleToolResult,
 				ToolCallID: call.ID,
@@ -188,6 +206,37 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 
 	r.autosave(tr, task)
 	return outcome, nil
+}
+
+// maybeCompact applies threshold-triggered history compaction. When compaction
+// is enabled (threshold > 0) and the estimated history size exceeds threshold,
+// it prunes tool-result content older than the most recent few turns to short
+// stubs and returns the compacted history together with a re-armed (higher)
+// threshold so the next firing only happens once history has grown materially
+// again. When disabled or under threshold — or when there is nothing left to
+// prune — it returns the messages and threshold unchanged, so a normal run pays
+// no allocation and the append-only prefix (and its cache) is preserved.
+func (r *Runner) maybeCompact(messages []llm.Message, threshold int64, toolNameByID map[string]string) ([]llm.Message, int64) {
+	if threshold <= 0 {
+		return messages, threshold
+	}
+	if estimateTokens(messages) <= threshold {
+		return messages, threshold
+	}
+	compacted, pruned := compactHistory(messages, compactRecentToolResults, toolNameByID)
+	if !pruned {
+		// Over threshold but nothing prunable yet: either history is dominated by
+		// assistant reasoning, or every prunable result is already a stub, or there
+		// simply aren't more than recentK tool results so far. Leave the threshold
+		// UNCHANGED so the check fires again next turn once a result ages out of the
+		// recent window — re-arming here would starve real compaction by ratcheting
+		// the threshold above the history before anything was ever reclaimed.
+		return messages, threshold
+	}
+	// Real pruning happened (one prefix cache miss paid). Re-arm upward so the
+	// next firing only comes after history has grown materially again, bounding
+	// total firings and avoiding turn-over-turn cache thrash.
+	return compacted, threshold * compactRearmFactor
 }
 
 // completeOnce issues one model completion against the current conversation,
