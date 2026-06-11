@@ -139,3 +139,133 @@ func TestIntegrationDepsNoStrategyFailsOffline(t *testing.T) {
 		t.Fatalf("network-none build with NO strategy should fail to resolve the external module, but it passed; stdout:\n%s", out.Stdout)
 	}
 }
+
+// ---- Python integration tests -----------------------------------------------
+
+// pythonTestImage is the Python image used for the pip wheelhouse integration test.
+// python:3-slim ships pip and has /bin/sh; it is small (~50 MB compressed).
+const pythonTestImage = "docker.io/library/python:3-slim"
+
+// newPythonTestCLI builds a CLI backed by python:3-slim, skipping when no
+// runtime is available or the image cannot be used.
+func newPythonTestCLI(t *testing.T) *CLI {
+	t.Helper()
+	rt, ok := Detect()
+	if !ok {
+		t.Skip("no container runtime detected; skipping Python deps integration test")
+	}
+	s, err := NewCLI(rt, pythonTestImage,
+		WithCPUs(2),
+		WithMemoryMB(512),
+		WithPidsLimit(256),
+		WithTimeout(120*time.Second),
+	)
+	if err != nil {
+		t.Skipf("NewCLI (python): %v", err)
+	}
+	// Pull the image up front; skip if it cannot be pulled.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if _, err := s.Exec(ctx, Spec{RepoDir: t.TempDir(), Cmd: []string{"true"}, Network: "bridge"}); err != nil {
+		t.Skipf("cannot run Python test image %q (pull failed?): %v", pythonTestImage, err)
+	}
+	return s
+}
+
+// writePythonTestRepo writes a minimal Python repo with requirements.txt
+// (six + pytest) and a pytest test that imports six, into dir.
+func writePythonTestRepo(t *testing.T, dir string) {
+	t.Helper()
+	// requirements.txt: pytest must be in here so it installs from the
+	// wheelhouse; it must NOT be pip-installed online inside the test container.
+	// six is the subject dep — pure-Python, tiny, stable.
+	mustWrite(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\npytest==8.3.5\n", 0o644)
+	// Test file: import six to prove the wheelhouse install worked.
+	src := `import six
+
+def test_six_version():
+    assert six.PY3
+`
+	mustWrite(t, filepath.Join(dir, "test_six.py"), src, 0o644)
+}
+
+// TestIntegrationPythonWheelhouseBuildsOffline proves the full pip FETCH
+// round-trip: prefetch downloads the wheelhouse online, then the network-none
+// run installs from it via SetupCmds and runs pytest. Exit 0 required.
+func TestIntegrationPythonWheelhouseBuildsOffline(t *testing.T) {
+	s := newPythonTestCLI(t)
+
+	repo := t.TempDir()
+	writePythonTestRepo(t, repo)
+	cacheBase := t.TempDir()
+
+	res, err := ResolveDeps(repo, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: s,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps: %v", err)
+	}
+	if res.Prefetch == nil {
+		t.Fatal("expected non-nil Prefetch for Python FETCH strategy")
+	}
+
+	// Step 1: prefetch (network-enabled, populates the wheelhouse on the host).
+	prefetchCtx, prefetchCancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer prefetchCancel()
+	if err := res.Prefetch(prefetchCtx); err != nil {
+		t.Fatalf("Prefetch (pip download): %v", err)
+	}
+
+	// Step 2: run pytest network-none with the wheelhouse mount + SetupCmds.
+	// The SetupCmds install six + pytest from the wheelhouse into /tmp/.local
+	// (HOME=/tmp, set by buildRunArgs) before the test command runs.
+	out, err := s.Exec(context.Background(), Spec{
+		RepoDir:   repo,
+		Cmd:       []string{"python", "-m", "pytest", "test_six.py", "-v"},
+		Network:   "none",
+		ROMounts:  res.ROMounts,
+		Env:       res.Env,
+		SetupCmds: res.SetupCmds,
+		Timeout:   90 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Exec (pytest network-none): %v", err)
+	}
+	if out.ExitCode != 0 {
+		t.Fatalf("pytest with wheelhouse should pass; exit=%d\nstdout:\n%s\nstderr:\n%s",
+			out.ExitCode, out.Stdout, out.Stderr)
+	}
+	t.Logf("pytest stdout:\n%s", out.Stdout)
+}
+
+// TestIntegrationPythonNoWheelhouseFailsOffline is the negative control: the
+// same pytest run WITHOUT the wheelhouse mount fails under --network=none
+// (pip cannot reach PyPI, modules cannot be imported). This proves that
+// --network=none is enforced and that the wheelhouse is load-bearing in the
+// positive test above.
+func TestIntegrationPythonNoWheelhouseFailsOffline(t *testing.T) {
+	s := newPythonTestCLI(t)
+
+	repo := t.TempDir()
+	writePythonTestRepo(t, repo)
+
+	// No mounts, no SetupCmds, no PIP_NO_INDEX — bare network-none run.
+	// pytest is not installed in python:3-slim by default, so `python -m pytest`
+	// should fail with a ModuleNotFoundError / non-zero exit.
+	out, err := s.Exec(context.Background(), Spec{
+		RepoDir: repo,
+		Cmd:     []string{"python", "-m", "pytest", "test_six.py", "-v"},
+		Network: "none",
+		Timeout: 60 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if out.ExitCode == 0 {
+		t.Fatalf("pytest with NO wheelhouse under --network=none should fail, but exited 0;\nstdout:\n%s\nstderr:\n%s",
+			out.Stdout, out.Stderr)
+	}
+	t.Logf("correctly failed (exit=%d); stderr excerpt: %s", out.ExitCode, out.Stderr)
+}
