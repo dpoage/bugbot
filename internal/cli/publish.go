@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -66,7 +69,8 @@ Requires the gh CLI to be installed and authenticated.`,
 				gh = realGH
 			}
 
-			return runPublish(ctx, cmd.OutOrStdout(), gh, st, cfg.Publish, effective, dryRun)
+			prov := provenanceFromConfig(cfg)
+			return runPublish(ctx, cmd.OutOrStdout(), gh, st, cfg.Publish, prov, effective, dryRun)
 		},
 	}
 
@@ -75,11 +79,33 @@ Requires the gh CLI to be installed and authenticated.`,
 	return cmd
 }
 
+// publishProvenance carries the model and provider strings from the active
+// config roles. It is populated at publish time from the full Config (no schema
+// migration required) and threaded through to renderIssueBody for the metadata
+// block. Fields may be empty when no config is available (tests, daemon paths).
+type publishProvenance struct {
+	FinderModel   string
+	VerifierModel string
+	ProviderType  string // type field from the finder's provider, e.g. "anthropic"
+}
+
+// provenanceFromConfig extracts model/provider strings from a loaded Config.
+func provenanceFromConfig(cfg config.Config) publishProvenance {
+	prov := publishProvenance{
+		FinderModel:   cfg.Roles.Finder.Model,
+		VerifierModel: cfg.Roles.Verifier.Model,
+	}
+	if p, ok := cfg.Providers[cfg.Roles.Finder.Provider]; ok {
+		prov.ProviderType = string(p.Type)
+	}
+	return prov
+}
+
 // runPublish is the entry point for both the command and the daemon hook. It
 // loads findings and published_issues, plans the reconcile, and applies it.
 // w receives the human-readable summary; pass cmd.OutOrStdout() from a cobra
 // command or any io.Writer from the daemon hook.
-func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, cfg config.Publish, tierMin int, dryRun bool) error {
+func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, cfg config.Publish, prov publishProvenance, tierMin int, dryRun bool) error {
 
 	// Gather inputs for the pure planner.
 	openFindings, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
@@ -129,7 +155,7 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, 0, "pending"); err != nil {
 				return fmt.Errorf("publish: record pending issue: %w", err)
 			}
-			n, err := ghCreateIssue(ctx, gh, a.finding.Title, renderIssueBody(a.finding, repoURL), cfg.Labels)
+			n, err := ghCreateIssue(ctx, gh, a.finding.Title, renderIssueBody(a.finding, repoURL, prov), cfg.Labels)
 			if err != nil {
 				return err
 			}
@@ -154,7 +180,7 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 				return fmt.Errorf("publish: recover pending issue: %w", err)
 			}
 			if !found {
-				n, err = ghCreateIssue(ctx, gh, a.finding.Title, renderIssueBody(a.finding, repoURL), cfg.Labels)
+				n, err = ghCreateIssue(ctx, gh, a.finding.Title, renderIssueBody(a.finding, repoURL, prov), cfg.Labels)
 				if err != nil {
 					return err
 				}
@@ -173,7 +199,7 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 				updated++
 				continue
 			}
-			if err := ghUpdateIssue(ctx, gh, a.issueNumber, renderIssueBody(a.finding, repoURL)); err != nil {
+			if err := ghUpdateIssue(ctx, gh, a.issueNumber, renderIssueBody(a.finding, repoURL, prov)); err != nil {
 				return err
 			}
 			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, a.issueNumber, "open"); err != nil {
@@ -357,33 +383,87 @@ type publishIssue struct {
 	Body   string `json:"body"`
 }
 
-// renderIssueBody renders the deterministic issue body for a finding. The
-// fingerprint marker is always the first line so the body is recoverable
-// without server-side state. When repoURL and CommitSHA are both non-empty a
-// permalink to the exact location is appended.
-func renderIssueBody(f store.Finding, repoURL string) string {
+// renderIssueBody renders the deterministic issue body for a finding.
+//
+// Section order:
+//  1. Hidden fingerprint marker — MUST remain the first line (findIssueByMarker recovery).
+//  2. ## title
+//  3. Human meta: Severity + Location (file:line) with optional source permalink.
+//  4. Description.
+//  5. Candidate fix diff (when FixPatch != "").
+//  6. Inline reproduction <details> block (when ReproPath is set and readable).
+//  7. Bugbot metadata <details> block: Lens, Tier, Fingerprint, models, commit, scan time.
+//  8. Verification trace <details> block with 30 KB cap.
+//  9. Attribution footer.
+//
+// Body size budget (GitHub hard limit: 65 536 chars):
+//   - Reasoning cap: 30 KB  (~30 720 chars)
+//   - Repro cap:     25 KB  (~25 600 chars)
+//   - Remaining:     ~9 KB for all other sections — comfortably fits even with
+//     long descriptions, patch diffs, and metadata.
+func renderIssueBody(f store.Finding, repoURL string, prov publishProvenance) string {
 	var b strings.Builder
 
-	// First line: hidden fingerprint marker (matches the PR-comment pattern).
+	// 1. Hidden fingerprint marker — load-bearing for recovery; must stay first.
 	fmt.Fprintf(&b, "<!-- bugbot:fp=%s -->\n\n", f.Fingerprint)
 
-	// Title as heading.
+	// 2. Title heading.
 	fmt.Fprintf(&b, "## %s\n\n", titleOrUnknown(f.Title))
 
-	// Meta block.
-	fmt.Fprintf(&b, "**Tier:** %s  \n", tierLabel(f.Tier))
+	// 3. Human-facing meta: only Severity and Location.
 	fmt.Fprintf(&b, "**Severity:** %s  \n", severityLabel(f.Severity))
-	fmt.Fprintf(&b, "**Lens:** %s  \n", f.Lens)
-	if len(f.CorroboratingLenses) > 0 {
-		fmt.Fprintf(&b, "**Also reported by:** %s  \n", strings.Join(f.CorroboratingLenses, ", "))
+	if repoURL != "" && f.CommitSHA != "" && f.File != "" {
+		fmt.Fprintf(&b, "**Location:** [`%s:%d`](%s/blob/%s/%s#L%d)  \n\n",
+			f.File, f.Line, repoURL, f.CommitSHA, f.File, f.Line)
+	} else {
+		fmt.Fprintf(&b, "**Location:** `%s:%d`  \n\n", f.File, f.Line)
 	}
-	fmt.Fprintf(&b, "**Location:** `%s:%d`  \n\n", f.File, f.Line)
 
+	// 4. Description.
 	if f.Description != "" {
 		b.WriteString(f.Description)
 		b.WriteString("\n\n")
 	}
 
+	// 5. Candidate fix diff — same wording as report/markdown.go writeFinding.
+	if f.FixPatch != "" {
+		b.WriteString("**Candidate fix (witness — starting point only, NOT reviewed):**\n\n")
+		b.WriteString("```diff\n")
+		b.WriteString(f.FixPatch)
+		if !strings.HasSuffix(f.FixPatch, "\n") {
+			b.WriteByte('\n')
+		}
+		b.WriteString("```\n\n")
+	}
+
+	// 6. Inline reproduction block.
+	b.WriteString(renderReproSection(f.ReproPath))
+
+	// 7. Bugbot metadata <details> block.
+	b.WriteString("<details><summary>Bugbot metadata</summary>\n\n")
+	b.WriteString("| Field | Value |\n")
+	b.WriteString("|---|---|\n")
+	fmt.Fprintf(&b, "| Lens | %s |\n", f.Lens)
+	if len(f.CorroboratingLenses) > 0 {
+		fmt.Fprintf(&b, "| Corroborating lenses | %s |\n", strings.Join(f.CorroboratingLenses, ", "))
+	}
+	fmt.Fprintf(&b, "| Tier | %s |\n", tierLabel(f.Tier))
+	fmt.Fprintf(&b, "| Fingerprint | `%s` |\n", f.Fingerprint)
+	if prov.FinderModel != "" || prov.VerifierModel != "" {
+		fmt.Fprintf(&b, "| Model(s) | finder: %s · verifier: %s |\n", prov.FinderModel, prov.VerifierModel)
+	}
+	if prov.ProviderType != "" {
+		fmt.Fprintf(&b, "| Provider | %s |\n", prov.ProviderType)
+	}
+	if f.CommitSHA != "" {
+		fmt.Fprintf(&b, "| Commit scanned | `%s` |\n", f.CommitSHA)
+	}
+	if !f.CreatedAt.IsZero() {
+		fmt.Fprintf(&b, "| Scan time | %s |\n", f.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
+	}
+	b.WriteString("\n</details>\n\n")
+
+	// 8. Verification trace with 30 KB cap.
 	if f.Reasoning != "" {
 		// GitHub rejects issue bodies over 65536 chars (HTTP 422). The
 		// reasoning trace is the only unbounded field; cap it well under the
@@ -398,16 +478,144 @@ func renderIssueBody(f store.Finding, repoURL string) string {
 		b.WriteString("\n\n</details>\n\n")
 	}
 
-	if f.ReproPath != "" {
-		fmt.Fprintf(&b, "_Reproduction script: `%s`_\n\n", f.ReproPath)
+	// 9. Attribution footer — always last.
+	b.WriteString("🤖 Filed by Bugbot — automated finding; verify before acting.")
+
+	return b.String()
+}
+
+// renderReproSection inlines the reproduction artifact as a <details> block.
+// It reads run.sh (stripping shebang/comment lines) and each source file found
+// under reproDir, applying a 10 KB per-file cap and a 25 KB total cap.
+// When the artifact dir is missing or unreadable the function falls back to a
+// single-line path mention so publish never errors on a missing artifact.
+// Returns an empty string when reproDir is "".
+func renderReproSection(reproDir string) string {
+	if reproDir == "" {
+		return ""
 	}
 
-	// Permalink: only when both repo URL and commit SHA are available.
-	if repoURL != "" && f.CommitSHA != "" && f.File != "" {
-		fmt.Fprintf(&b, "[View in source](%s/blob/%s/%s#L%d)\n", repoURL, f.CommitSHA, f.File, f.Line)
+	var b strings.Builder
+
+	// Per-file and total byte caps for the repro section.
+	const maxPerFile = 10 * 1024    // 10 KB
+	const maxReproTotal = 25 * 1024 // 25 KB
+
+	// Try to read run.sh.
+	runShPath := filepath.Join(reproDir, "run.sh")
+	runShBytes, err := os.ReadFile(runShPath)
+	if err != nil {
+		// Artifact dir missing or unreadable — fall back to path mention.
+		fmt.Fprintf(&b, "_Reproduction script: `%s`_\n\n", reproDir)
+		return b.String()
 	}
 
-	return strings.TrimRight(b.String(), "\n")
+	// Parse run.sh: skip shebang and comment lines, collect meaningful command lines.
+	runCmd := extractRunCommands(string(runShBytes))
+
+	b.WriteString("<details><summary>Reproduction</summary>\n\n")
+
+	if runCmd != "" {
+		b.WriteString("```sh\n")
+		b.WriteString(runCmd)
+		if !strings.HasSuffix(runCmd, "\n") {
+			b.WriteByte('\n')
+		}
+		b.WriteString("```\n\n")
+	}
+
+	// Walk for source files (skip README.md and run.sh).
+	total := 0
+	truncated := false
+	_ = filepath.WalkDir(reproDir, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil || d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if name == "README.md" || name == "run.sh" {
+			return nil
+		}
+		if truncated {
+			return nil
+		}
+
+		content, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil
+		}
+
+		// Per-file cap.
+		fileTruncated := false
+		if len(content) > maxPerFile {
+			content = content[:maxPerFile]
+			fileTruncated = true
+		}
+
+		// Total cap.
+		remaining := maxReproTotal - total
+		if remaining <= 0 {
+			truncated = true
+			return nil
+		}
+		if len(content) > remaining {
+			content = content[:remaining]
+			fileTruncated = true
+			truncated = true
+		}
+		total += len(content)
+
+		// Determine language hint from extension.
+		ext := strings.TrimPrefix(filepath.Ext(name), ".")
+		if ext == "" {
+			ext = "text"
+		}
+
+		rel, _ := filepath.Rel(reproDir, path)
+		fmt.Fprintf(&b, "**`%s`**\n\n", rel)
+		fmt.Fprintf(&b, "```%s\n", ext)
+		b.Write(content)
+		if len(content) > 0 && content[len(content)-1] != '\n' {
+			b.WriteByte('\n')
+		}
+		if fileTruncated {
+			b.WriteString("// ... truncated by bugbot\n")
+		}
+		b.WriteString("```\n\n")
+		return nil
+	})
+
+	if truncated {
+		b.WriteString("_… truncated by bugbot: reproduction section exceeds inline size limit._\n\n")
+	}
+
+	b.WriteString("</details>\n\n")
+	return b.String()
+}
+
+// extractRunCommands parses the content of run.sh and returns the meaningful
+// command lines (non-shebang, non-comment, non-empty, non-set-option lines).
+func extractRunCommands(content string) string {
+	var lines []string
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Skip shebang.
+		if strings.HasPrefix(trimmed, "#!") {
+			continue
+		}
+		// Skip shell comments.
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// Skip set -e / set -euo pipefail style lines.
+		if strings.HasPrefix(trimmed, "set ") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // resolveRepoURL fetches the GitHub repo URL via `gh repo view --json url -q

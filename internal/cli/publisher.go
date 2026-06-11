@@ -19,6 +19,7 @@ type storePublisher struct {
 	gh      ghRunner
 	st      *store.Store
 	cfg     config.Publish
+	prov    publishProvenance
 	tierMin int
 	log     *slog.Logger
 	// disabled latches when gh is missing from PATH: that condition is stable
@@ -39,6 +40,19 @@ func NewStorePublisher(gh ghRunner, st *store.Store, cfg config.Publish, log *sl
 	}
 }
 
+// NewStorePublisherWithProvenance constructs a storePublisher with model/provider
+// provenance for the issue body metadata block.
+func NewStorePublisherWithProvenance(gh ghRunner, st *store.Store, cfg config.Publish, prov publishProvenance, log *slog.Logger) *storePublisher {
+	return &storePublisher{
+		gh:      gh,
+		st:      st,
+		cfg:     cfg,
+		prov:    prov,
+		tierMin: cfg.TierMin,
+		log:     log,
+	}
+}
+
 // Publish implements daemon.Publisher. It discards the human-readable summary
 // lines into the daemon's logger at debug level so the log stream isn't noisy
 // on every cycle. A missing gh binary warns once and latches the publisher
@@ -50,7 +64,7 @@ func (p *storePublisher) Publish(ctx context.Context) error {
 	}
 	// Route output to a sink that writes each line at debug level.
 	w := &slogWriter{log: p.log}
-	err := runPublish(ctx, w, p.gh, p.st, p.cfg, p.tierMin, false /* never dry-run from daemon */)
+	err := runPublish(ctx, w, p.gh, p.st, p.cfg, p.prov, p.tierMin, false /* never dry-run from daemon */)
 	if err != nil && isGHMissing(err) {
 		p.disabled.Store(true)
 		p.log.Warn("daemon: publish disabled for this run: gh CLI not found on PATH; install gh from https://cli.github.com")

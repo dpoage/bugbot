@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -225,7 +227,7 @@ func TestApplyPublish_Create(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
 		t.Fatalf("runPublish: %v", err)
 	}
 
@@ -290,7 +292,7 @@ func TestApplyPublish_Close(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
 		t.Fatalf("runPublish: %v", err)
 	}
 
@@ -328,7 +330,7 @@ func TestApplyPublish_DryRun(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, true /* dry-run */); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, true /* dry-run */); err != nil {
 		t.Fatalf("runPublish dry-run: %v", err)
 	}
 
@@ -356,7 +358,7 @@ func TestApplyPublish_RepoURLFailureDegrades(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
 		t.Fatalf("runPublish should succeed even without repo URL: %v", err)
 	}
 
@@ -390,7 +392,7 @@ func TestApplyPublish_GHMissing(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	err := runPublish(ctx, &buf, notFoundGH, st, cfg, 2, false)
+	err := runPublish(ctx, &buf, notFoundGH, st, cfg, publishProvenance{}, 2, false)
 	if err == nil {
 		t.Fatal("expected error for missing gh binary")
 	}
@@ -418,7 +420,7 @@ func TestApplyPublish_Idempotence(t *testing.T) {
 
 	// First run: creates the issue.
 	var buf1 strings.Builder
-	if err := runPublish(ctx, &buf1, gh.run, st, cfg, 2, false); err != nil {
+	if err := runPublish(ctx, &buf1, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	for _, c := range gh.calls {
@@ -436,7 +438,7 @@ func TestApplyPublish_Idempotence(t *testing.T) {
 		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":56}`))
 
 	var buf2 strings.Builder
-	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, 2, false); err != nil {
+	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, publishProvenance{}, 2, false); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 
@@ -520,7 +522,7 @@ func TestApplyPublish_CloseOrdering(t *testing.T) {
 
 	var buf strings.Builder
 	cfg := config.Publish{TierMin: 2, CloseOnFixed: true}
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
 		t.Fatalf("runPublish: %v", err)
 	}
 
@@ -559,7 +561,7 @@ func TestApplyPublish_ClosingResume(t *testing.T) {
 
 	var buf strings.Builder
 	cfg := config.Publish{TierMin: 2, CloseOnFixed: true}
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
 		t.Fatalf("runPublish (resume) should not re-comment: %v", err)
 	}
 	if n := len(gh.callsContaining("issues/77/comments")); n != 0 {
@@ -593,7 +595,7 @@ func TestApplyPublish_PendingRecovery(t *testing.T) {
 
 		var buf strings.Builder
 		cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
-		if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+		if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
 			t.Fatalf("runPublish (recover-adopt): %v", err)
 		}
 		pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
@@ -619,7 +621,7 @@ func TestApplyPublish_PendingRecovery(t *testing.T) {
 
 		var buf strings.Builder
 		cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
-		if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+		if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
 			t.Fatalf("runPublish (recover-create): %v", err)
 		}
 		pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
@@ -640,7 +642,7 @@ func TestRenderIssueBody_ReasoningCapped(t *testing.T) {
 		Title:       "t",
 		Reasoning:   strings.Repeat("x", 40*1024),
 	}
-	body := renderIssueBody(f, "")
+	body := renderIssueBody(f, "", publishProvenance{})
 	if len(body) > 36*1024 {
 		t.Errorf("body length %d exceeds expected cap envelope", len(body))
 	}
@@ -681,5 +683,262 @@ func TestStorePublisher_WarnsOnceOnMissingGH(t *testing.T) {
 	}
 	if calls != afterFirst {
 		t.Errorf("gh invoked %d more times after the latch; later cycles must be no-ops", calls-afterFirst)
+	}
+}
+
+// makeReproDir creates a temporary repro artifact directory that mirrors the
+// structure writeArtifacts produces: run.sh + a test source file.
+// Returns the dir path; the directory is cleaned up via t.Cleanup.
+func makeReproDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+
+	runSh := "#!/usr/bin/env bash\n# Generated by Bugbot.\nset -euo pipefail\n\ngo test -run TestRaceCondition ./internal/store/...\n"
+	if err := os.WriteFile(filepath.Join(dir, "run.sh"), []byte(runSh), 0o755); err != nil {
+		t.Fatalf("write run.sh: %v", err)
+	}
+
+	// Mirror a test source file under its repo-relative path.
+	srcDir := filepath.Join(dir, "internal", "store")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	testSrc := `package store_test
+
+import "testing"
+
+func TestRaceCondition(t *testing.T) {
+	t.Error("demonstrates the race condition")
+}
+`
+	if err := os.WriteFile(filepath.Join(srcDir, "race_test.go"), []byte(testSrc), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	return dir
+}
+
+// TestRenderIssueBody_Structure verifies the full body layout: sections appear
+// in the documented order and bookkeeping fields appear only inside the metadata
+// block, not in the human-visible preamble.
+func TestRenderIssueBody_Structure(t *testing.T) {
+	reproDir := makeReproDir(t)
+
+	f := store.Finding{
+		Fingerprint:         "abcdef1234567890",
+		Title:               "race condition in store",
+		Description:         "Two goroutines write to the cache without synchronization.",
+		Reasoning:           "I verified this by inspecting the call chain.",
+		Severity:            "high",
+		Tier:                1,
+		Lens:                "race",
+		CorroboratingLenses: []string{"memory"},
+		File:                "internal/store/cache.go",
+		Line:                42,
+		CommitSHA:           "deadbeef",
+		ReproPath:           reproDir,
+		FixPatch:            "--- a/internal/store/cache.go\n+++ b/internal/store/cache.go\n@@ -40,6 +40,7 @@\n+\tmu.Lock()\n",
+	}
+
+	prov := publishProvenance{
+		FinderModel:   "claude-sonnet-4-6",
+		VerifierModel: "claude-opus-4",
+		ProviderType:  "anthropic",
+	}
+
+	body := renderIssueBody(f, "https://github.com/owner/repo", prov)
+
+	// 1. Fingerprint marker MUST be the first line.
+	wantMarker := "<!-- bugbot:fp=abcdef1234567890 -->"
+	if !strings.HasPrefix(body, wantMarker) {
+		t.Errorf("body does not start with fingerprint marker; first 120 chars: %q", body[:min(len(body), 120)])
+	}
+
+	// 2. Title heading present.
+	if !strings.Contains(body, "## race condition in store") {
+		t.Error("title heading not found")
+	}
+
+	// 3. Severity and Location appear BEFORE the description.
+	severityPos := strings.Index(body, "**Severity:**")
+	locationPos := strings.Index(body, "**Location:**")
+	descPos := strings.Index(body, "Two goroutines write")
+	if severityPos < 0 || locationPos < 0 {
+		t.Error("Severity or Location meta line missing")
+	}
+	if severityPos > descPos || locationPos > descPos {
+		t.Errorf("Severity/Location must appear before description; sev=%d loc=%d desc=%d", severityPos, locationPos, descPos)
+	}
+
+	// 3. Permalink is merged into Location when repoURL is non-empty.
+	if !strings.Contains(body, "blob/deadbeef/internal/store/cache.go#L42") {
+		t.Error("source permalink not found in Location line")
+	}
+
+	// 4. Description present.
+	if !strings.Contains(body, "Two goroutines write to the cache without synchronization.") {
+		t.Error("description missing")
+	}
+
+	// 5. Fix diff present in a ```diff fence.
+	if !strings.Contains(body, "```diff\n") {
+		t.Error("fix patch diff fence not found")
+	}
+	if !strings.Contains(body, "Candidate fix (witness") {
+		t.Error("fix patch caveat heading missing")
+	}
+
+	// 6. Repro <details> contains run command and test source.
+	if !strings.Contains(body, "<details><summary>Reproduction</summary>") {
+		t.Error("Reproduction details block missing")
+	}
+	if !strings.Contains(body, "go test -run TestRaceCondition") {
+		t.Error("run command not inlined in repro block")
+	}
+	if !strings.Contains(body, "TestRaceCondition") {
+		t.Error("test source not inlined in repro block")
+	}
+
+	// 7. Metadata block: Lens, Tier label, and fingerprint-as-standalone-value
+	// appear ONLY inside the "Bugbot metadata" details block. The fingerprint
+	// also appears in the hidden marker comment (first line), so we check that
+	// each field's first non-marker occurrence is after the metadata open tag.
+	metaOpenTag := "<details><summary>Bugbot metadata</summary>"
+	metaPos := strings.Index(body, metaOpenTag)
+	if metaPos < 0 {
+		t.Fatal("Bugbot metadata block missing")
+	}
+
+	// Lens and Tier label must not appear before the metadata block.
+	for _, needle := range []string{"| Lens |", "T1 Reproduced"} {
+		idx := strings.Index(body, needle)
+		if idx < 0 {
+			t.Errorf("expected %q somewhere in body", needle)
+			continue
+		}
+		if idx < metaPos {
+			t.Errorf("%q appears before metadata block (offset %d < metaPos %d)", needle, idx, metaPos)
+		}
+	}
+
+	// Fingerprint is allowed in the hidden marker comment (top of body) but
+	// must also appear inside the metadata block as a table cell.
+	fpInMeta := strings.Index(body[metaPos:], f.Fingerprint)
+	if fpInMeta < 0 {
+		t.Errorf("fingerprint %q not found inside metadata block", f.Fingerprint)
+	}
+
+	// Model and provider strings present inside metadata.
+	if !strings.Contains(body, "claude-sonnet-4-6") {
+		t.Error("finder model not found in body")
+	}
+	if !strings.Contains(body, "anthropic") {
+		t.Error("provider type not found in body")
+	}
+
+	// 8. Verification trace block present.
+	if !strings.Contains(body, "<details><summary>Verification trace</summary>") {
+		t.Error("Verification trace details block missing")
+	}
+
+	// 9. Attribution footer is the last non-empty line.
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			if !strings.Contains(lines[i], "Filed by Bugbot") {
+				t.Errorf("last non-empty line should be attribution footer; got: %q", lines[i])
+			}
+			break
+		}
+	}
+}
+
+// TestRenderIssueBody_ReproMissing confirms that a missing repro dir produces
+// a path-mention fallback and does not error the publish.
+func TestRenderIssueBody_ReproMissing(t *testing.T) {
+	f := store.Finding{
+		Fingerprint: "fp123",
+		Title:       "t",
+		ReproPath:   "/nonexistent/repro/dir",
+	}
+	body := renderIssueBody(f, "", publishProvenance{})
+
+	// Must contain a fallback mention of the path.
+	if !strings.Contains(body, "/nonexistent/repro/dir") {
+		t.Error("missing repro dir should produce a path-mention fallback")
+	}
+	// Must NOT contain the Reproduction details block (which is only for readable dirs).
+	if strings.Contains(body, "<details><summary>Reproduction</summary>") {
+		t.Error("Reproduction details block should NOT appear when repro dir is missing")
+	}
+	// Attribution footer still present.
+	if !strings.Contains(body, "Filed by Bugbot") {
+		t.Error("attribution footer missing when repro dir is absent")
+	}
+
+	// Full publish should not error.
+	ctx := context.Background()
+	st, _ := setupPublishStore(t)
+	// Update the seeded finding to set ReproPath.
+	findings, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	if err != nil || len(findings) == 0 {
+		t.Fatal("could not list findings")
+	}
+	findings[0].ReproPath = "/nonexistent/repro/dir"
+	if _, err := st.UpsertFinding(ctx, findings[0]); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":5}`))
+	cfg := config.Publish{TierMin: 2, CloseOnFixed: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("runPublish must not error on missing repro dir: %v", err)
+	}
+}
+
+// TestRenderIssueBody_ReproTruncation confirms the per-file and total caps are
+// enforced when a repro artifact contains an oversized file.
+func TestRenderIssueBody_ReproTruncation(t *testing.T) {
+	dir := t.TempDir()
+
+	// run.sh — minimal, just to make the dir readable.
+	if err := os.WriteFile(filepath.Join(dir, "run.sh"), []byte("#!/usr/bin/env bash\ngo test ./...\n"), 0o755); err != nil {
+		t.Fatalf("write run.sh: %v", err)
+	}
+
+	// An oversized test file: 15 KB, well above the 10 KB per-file cap.
+	bigContent := strings.Repeat("// padding line\n", 15*1024/16+1)
+	if err := os.WriteFile(filepath.Join(dir, "big_test.go"), []byte(bigContent), 0o644); err != nil {
+		t.Fatalf("write big_test.go: %v", err)
+	}
+
+	f := store.Finding{
+		Fingerprint: "fp",
+		Title:       "t",
+		ReproPath:   dir,
+	}
+	body := renderIssueBody(f, "", publishProvenance{})
+
+	if !strings.Contains(body, "<details><summary>Reproduction</summary>") {
+		t.Error("Reproduction block missing")
+	}
+	if !strings.Contains(body, "truncated by bugbot") {
+		t.Error("truncation marker missing from oversized repro section")
+	}
+}
+
+// TestRenderIssueBody_NoFixPatch confirms fix patch section is absent when FixPatch is empty.
+func TestRenderIssueBody_NoFixPatch(t *testing.T) {
+	f := store.Finding{
+		Fingerprint: "fp",
+		Title:       "t",
+		FixPatch:    "",
+	}
+	body := renderIssueBody(f, "", publishProvenance{})
+	if strings.Contains(body, "Candidate fix") {
+		t.Error("fix patch section should be absent when FixPatch is empty")
 	}
 }
