@@ -99,7 +99,7 @@ func TestIntegrationDepsHostCacheBuildsOffline(t *testing.T) {
 	repo := t.TempDir()
 	writeUUIDModule(t, repo)
 
-	res := modcacheResolution(cache, DepStrategyHost, nil)
+	res := modcacheResolution(cache, DepStrategyHost, true, nil)
 
 	out, err := s.Exec(context.Background(), Spec{
 		RepoDir:  repo,

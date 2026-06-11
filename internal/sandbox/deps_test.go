@@ -82,7 +82,7 @@ func TestResolveDepsOff(t *testing.T) {
 func TestResolveDepsHostMountsCache(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
-	cache := t.TempDir()
+	cache := t.TempDir() // exists on disk
 
 	res, err := ResolveDeps(dir, DepOptions{Strategy: DepStrategyHost, hostModcache: cache})
 	if err != nil {
@@ -91,8 +91,15 @@ func TestResolveDepsHostMountsCache(t *testing.T) {
 	if len(res.ROMounts) != 1 {
 		t.Fatalf("want 1 ROMount, got %d", len(res.ROMounts))
 	}
-	if res.ROMounts[0].HostPath != cache || res.ROMounts[0].ContainerPath != modcacheMount {
-		t.Errorf("mount = %+v, want host=%q ctr=%q", res.ROMounts[0], cache, modcacheMount)
+	m := res.ROMounts[0]
+	if m.HostPath != cache || m.ContainerPath != modcacheMount {
+		t.Errorf("mount = %+v, want host=%q ctr=%q", m, cache, modcacheMount)
+	}
+	// Host strategy: the mount must be Shared=true (no SELinux :Z relabel) to
+	// avoid corrupting the user's shared Go module cache on SELinux-enforcing
+	// hosts (Fedora/RHEL).
+	if !m.Shared {
+		t.Errorf("host strategy ROMount.Shared = false; want true to suppress :Z relabel on shared host cache")
 	}
 	for _, want := range []string{"GOMODCACHE=" + modcacheMount, "GOFLAGS=-mod=mod", "GOPROXY=off"} {
 		if !envHas(res.Env, want) {
@@ -104,6 +111,26 @@ func TestResolveDepsHostMountsCache(t *testing.T) {
 	}
 	if res.Strategy != DepStrategyHost {
 		t.Errorf("Strategy=%q want host", res.Strategy)
+	}
+}
+
+func TestResolveDepsHostMissingCacheErrors(t *testing.T) {
+	// The host cache override points at a directory that does not exist.
+	// ResolveDeps must return a clear error instead of letting podman fail
+	// opaquely at run time.
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+	missing := filepath.Join(t.TempDir(), "does", "not", "exist")
+
+	_, err := ResolveDeps(dir, DepOptions{Strategy: DepStrategyHost, hostModcache: missing})
+	if err == nil {
+		t.Fatal("expected error for missing host module cache, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error %q should mention 'does not exist'", err)
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("error %q should include the missing path %q", err, missing)
 	}
 }
 
@@ -141,6 +168,11 @@ func TestResolveDepsFetchMountsAndPrefetches(t *testing.T) {
 	}
 	if !strings.HasPrefix(res.ROMounts[0].HostPath, cacheBase) {
 		t.Errorf("fetch cache %q should live under user cache base %q", res.ROMounts[0].HostPath, cacheBase)
+	}
+	// Fetch strategy: the mount must be Shared=false (gets :Z) because the
+	// fetch cache is a bugbot-owned directory, not a shared host resource.
+	if res.ROMounts[0].Shared {
+		t.Errorf("fetch strategy ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
 	}
 	for _, want := range []string{"GOMODCACHE=" + modcacheMount, "GOPROXY=off"} {
 		if !envHas(res.Env, want) {

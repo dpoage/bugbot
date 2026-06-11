@@ -55,10 +55,16 @@ const workspaceMount = "/workspace"
 //   - -v ws:/workspace:rw,Z     : the workspace copy is the only writable mount
 //     (Z relabels for SELinux; harmless elsewhere). The original repo is never
 //     mounted.
-//   - -v host:ctr:ro,Z          : any Spec.ROMounts are mounted READ-ONLY (a
+//   - -v host:ctr:ro[,Z]        : any Spec.ROMounts are mounted READ-ONLY (a
 //     dependency cache, for example). These are never writable, but they DO
 //     expose host content to untrusted code, so callers must only mount
 //     public/cache content — never secrets. See the package doc and Spec.ROMounts.
+//     The :Z suffix (SELinux private relabel) is added ONLY when ROMount.Shared
+//     is false (bugbot-owned dirs). Shared host dirs (e.g. the user's Go module
+//     cache) must NOT be relabeled: :Z on a multi-GB shared cache is slow,
+//     breaks the host go toolchain, and breaks other containers sharing the dir.
+//     See ROMount.Shared for the full tradeoff. RWMounts (prefetch only, always
+//     bugbot-owned) always get :rw,Z.
 //   - --workdir /workspace      : run from the workspace.
 //   - --cap-drop ALL            : drop all Linux capabilities.
 //   - --security-opt no-new-privileges : block privilege escalation (setuid).
@@ -80,9 +86,16 @@ func buildRunArgs(p runParams) []string {
 	}
 
 	// Read-only mounts are rendered right after the writable workspace, in the
-	// caller-supplied order, and are always :ro (never writable).
+	// caller-supplied order, and are always :ro (never writable). Bugbot-owned
+	// dirs (Shared=false) additionally get the :Z SELinux relabel suffix for
+	// isolation; shared host dirs (Shared=true) must NOT be relabeled — see
+	// ROMount.Shared for the full rationale.
 	for _, m := range p.roMounts {
-		args = append(args, "-v", fmt.Sprintf("%s:%s:ro,Z", m.HostPath, m.ContainerPath))
+		label := "ro,Z"
+		if m.Shared {
+			label = "ro"
+		}
+		args = append(args, "-v", fmt.Sprintf("%s:%s:%s", m.HostPath, m.ContainerPath, label))
 	}
 	// Writable mounts are used only by the trusted dependency-prefetch step.
 	for _, m := range p.rwMounts {

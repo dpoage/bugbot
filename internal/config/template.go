@@ -96,6 +96,28 @@ sandbox:
   dep_strategy: off            # off | host | fetch
 
 # ---------------------------------------------------------------------------
+# verify: configuration for the LLM-assisted patch-verification stage.
+# The verifier re-runs the sandbox (network=none) against the patched repo and
+# confirms the reproduction test passes. dep_strategy must match the setting
+# above (or be stricter) because the verify run is also network-none.
+# ---------------------------------------------------------------------------
+# verify:
+#   enabled: true
+#   timeout_seconds: 300       # per-run wall-clock cap for the verify sandbox
+
+# ---------------------------------------------------------------------------
+# repro: configuration for the reproduction-test generation stage.
+# The reproducer writes a self-contained test, commits it to a workspace copy,
+# and runs it inside the sandbox (network=none). dep_strategy in the sandbox
+# section above applies here too — set host or fetch if the repo's modules are
+# not vendored and the repro test imports them.
+# ---------------------------------------------------------------------------
+# repro:
+#   enabled: true
+#   max_attempts: 3            # how many patch-and-retry cycles before giving up
+#   timeout_seconds: 600       # per-attempt wall-clock cap
+
+# ---------------------------------------------------------------------------
 # report: where findings are emitted and through which sinks.
 # sinks: fs (writes report.md + report.sarif to dir) | stdout (more to come).
 # ---------------------------------------------------------------------------

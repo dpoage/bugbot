@@ -112,6 +112,29 @@ type ROMount struct {
 	// ContainerPath is the absolute path the mount appears at inside the
 	// container. Required and unique across a Spec's ROMounts.
 	ContainerPath string
+	// Shared, when true, suppresses the SELinux :Z relabel suffix on this
+	// mount. Use Shared=true for host directories that are NOT owned exclusively
+	// by bugbot — in particular, the user's shared Go module cache
+	// (~/go/pkg/mod). On SELinux-enforcing hosts (Fedora, RHEL — rootless
+	// podman's home turf) :Z recursively relabels the target to a
+	// container-PRIVATE MCS label. That is correct for bugbot-owned dirs (it
+	// isolates them), but catastrophic for a shared cache: it is slow on
+	// multi-GB trees, breaks the host go toolchain, and breaks any other
+	// container concurrently sharing the same cache.
+	//
+	// When Shared=true the mount is rendered :ro with NO label suffix. This
+	// means the container accesses the directory under its existing SELinux
+	// context. Under a strict enforcing policy the container may get EACCES if
+	// that policy does not allow the container domain to read the host user's
+	// home content. That is the correct conservative failure — a permission
+	// error is loud and actionable, whereas :Z silently corrupts shared state.
+	// Users who hit EACCES can opt in to :z (lowercase, shared relabel) by
+	// configuring a custom container_opts or by switching to dep_strategy:
+	// fetch, which mounts a bugbot-owned cache (Shared=false, gets :Z).
+	//
+	// Bugbot-owned dirs (the fetch cache, prefetch RW target) leave Shared
+	// false so they receive :Z isolation.
+	Shared bool
 }
 
 // Result is the faithful outcome of a sandboxed execution.

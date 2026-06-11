@@ -39,6 +39,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // DepStrategy selects how external module dependencies are made available to a
@@ -180,7 +181,12 @@ func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
 		if err != nil {
 			return Resolution{}, err
 		}
-		return modcacheResolution(cache, DepStrategyHost, nil), nil
+		// shared=true: the host Go module cache is NOT owned by bugbot. SELinux
+		// :Z would relabel the entire cache to a container-private MCS label,
+		// which is slow on multi-GB caches and can break the host go toolchain
+		// and any other container sharing the same directory. :ro without a label
+		// suffix is the correct choice here; see ROMount.Shared for details.
+		return modcacheResolution(cache, DepStrategyHost, true, nil), nil
 
 	case DepStrategyFetch:
 		if opts.FetchSandbox == nil {
@@ -191,7 +197,9 @@ func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
 			return Resolution{}, err
 		}
 		prefetch := newPrefetch(repoDir, cache, opts)
-		return modcacheResolution(cache, DepStrategyFetch, prefetch), nil
+		// shared=false: the fetch cache is a bugbot-owned directory under the
+		// user cache dir. :Z isolation is appropriate here.
+		return modcacheResolution(cache, DepStrategyFetch, false, prefetch), nil
 
 	default:
 		// Unreachable given ValidDepStrategy above, but keep it explicit.
@@ -202,9 +210,13 @@ func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
 // modcacheResolution builds the Resolution shared by HOST and FETCH: a single
 // read-only modcache mount plus the env that points `go` at it and turns a
 // cache miss into a hard error rather than a network hang.
-func modcacheResolution(hostCache string, strategy DepStrategy, prefetch func(context.Context) error) Resolution {
+//
+// shared controls ROMount.Shared: true for the HOST strategy (user's real Go
+// module cache — must not be SELinux-relabeled), false for the FETCH strategy
+// (bugbot-owned cache dir — :Z isolation is correct). See ROMount.Shared.
+func modcacheResolution(hostCache string, strategy DepStrategy, shared bool, prefetch func(context.Context) error) Resolution {
 	return Resolution{
-		ROMounts: []ROMount{{HostPath: hostCache, ContainerPath: modcacheMount}},
+		ROMounts: []ROMount{{HostPath: hostCache, ContainerPath: modcacheMount, Shared: shared}},
 		Env: []string{
 			"GOMODCACHE=" + modcacheMount,
 			"GOFLAGS=-mod=mod",
@@ -217,25 +229,50 @@ func modcacheResolution(hostCache string, strategy DepStrategy, prefetch func(co
 	}
 }
 
+// goEnvTimeout is the maximum time we will wait for `go env GOMODCACHE` to
+// respond. A wedged or very slow go binary should not block funnel/repro
+// construction indefinitely.
+const goEnvTimeout = 5 * time.Second
+
 // resolveHostModcache resolves the host Go module cache directory. It prefers
 // the override, then `go env GOMODCACHE`, then $HOME/go/pkg/mod. It returns an
-// error only when none of these can be determined (e.g. go not installed AND no
-// HOME), so a misconfigured HOST strategy fails clearly instead of silently
-// mounting nothing.
+// error when no path can be determined (go not installed AND no HOME) or when
+// the resolved path does not exist on the host (catches a misconfigured or
+// unpopulated cache early, before podman emits an opaque bind-mount error).
 func resolveHostModcache(override string) (string, error) {
 	if override != "" {
-		return override, nil
+		return checkModcacheExists(override)
 	}
-	if out, err := exec.Command("go", "env", "GOMODCACHE").Output(); err == nil {
+
+	// Ask `go` for its authoritative cache path. The exec is bounded by a
+	// short timeout so a wedged go binary cannot hang the caller indefinitely.
+	ctx, cancel := context.WithTimeout(context.Background(), goEnvTimeout)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "go", "env", "GOMODCACHE").Output(); err == nil {
 		if dir := strings.TrimSpace(string(out)); dir != "" {
-			return dir, nil
+			return checkModcacheExists(dir)
 		}
 	}
+
 	// go not installed or printed nothing: fall back to the conventional path.
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, "go", "pkg", "mod"), nil
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", fmt.Errorf("sandbox: cannot resolve host Go module cache (go not found and HOME unset); vendor deps or set dep_strategy: off|fetch")
 	}
-	return "", fmt.Errorf("sandbox: cannot resolve host Go module cache (go not found and HOME unset); vendor deps or set the strategy to off")
+	return checkModcacheExists(filepath.Join(home, "go", "pkg", "mod"))
+}
+
+// checkModcacheExists verifies that dir exists on the host and returns it if
+// so. When the directory is missing it returns a clear, actionable error
+// instead of letting podman fail with an opaque bind-mount message at run time.
+func checkModcacheExists(dir string) (string, error) {
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("sandbox: host module cache %q does not exist; run 'go mod download' on the host first, or use dep_strategy: off|fetch", dir)
+		}
+		return "", fmt.Errorf("sandbox: stat host module cache %q: %w", dir, err)
+	}
+	return dir, nil
 }
 
 // fetchCacheDir returns the bugbot-managed module-cache directory for repoDir
