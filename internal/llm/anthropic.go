@@ -19,8 +19,15 @@ type anthropicAdapter struct {
 }
 
 // anthropicOptions configures an Anthropic adapter.
+//
+// Exactly one of apiKey and authToken must be non-empty — they are mutually
+// exclusive. apiKey drives x-api-key authentication (api_key mode). authToken
+// drives OAuth bearer-token authentication (oauth-token mode), which requires
+// the anthropic-beta: oauth-2025-04-20 header and must NOT also set x-api-key
+// (the Anthropic API rejects requests that carry both credentials).
 type anthropicOptions struct {
 	apiKey     string
+	authToken  string       // OAuth bearer token; mutually exclusive with apiKey
 	baseURL    string       // optional; for testing or proxies
 	httpClient *http.Client // optional; for testing (httptest)
 }
@@ -28,10 +35,25 @@ type anthropicOptions struct {
 // newAnthropicAdapter builds an Anthropic-backed Client. The vendor SDK's
 // built-in retries are disabled (WithMaxRetries(0)) so our shared retry wrapper
 // is the single source of retry policy.
+//
+// When opts.authToken is non-empty the adapter uses OAuth bearer-token
+// authentication: the SDK sets Authorization: Bearer <token> via
+// option.WithAuthToken, and option.WithHeaderAdd appends the required
+// "oauth-2025-04-20" value to the anthropic-beta header without clobbering any
+// other beta values the SDK may already have set.
 func newAnthropicAdapter(model string, opts anthropicOptions) *anthropicAdapter {
 	reqOpts := []option.RequestOption{
-		option.WithAPIKey(opts.apiKey),
 		option.WithMaxRetries(0),
+	}
+	if opts.authToken != "" {
+		// OAuth mode: bearer token in Authorization header; x-api-key must be absent.
+		reqOpts = append(reqOpts, option.WithAuthToken(opts.authToken))
+		// Append rather than replace so other anthropic-beta values set by the SDK
+		// are preserved alongside the oauth beta flag.
+		reqOpts = append(reqOpts, option.WithHeaderAdd("anthropic-beta", "oauth-2025-04-20"))
+	} else {
+		// API-key mode: standard x-api-key authentication.
+		reqOpts = append(reqOpts, option.WithAPIKey(opts.apiKey))
 	}
 	if opts.baseURL != "" {
 		reqOpts = append(reqOpts, option.WithBaseURL(opts.baseURL))

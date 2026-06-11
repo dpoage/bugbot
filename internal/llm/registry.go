@@ -44,11 +44,19 @@ func NewClient(ctx context.Context, provider config.Provider, providerName, mode
 	var adapter Client
 	switch provider.Type {
 	case config.ProviderAnthropic:
-		adapter = newAnthropicAdapter(model, anthropicOptions{
-			apiKey:     apiKey,
+		aopts := anthropicOptions{
 			baseURL:    provider.BaseURL,
 			httpClient: opts.HTTPClient,
-		})
+		}
+		// The secret parameter carries either an API key or an OAuth bearer token
+		// depending on the provider's auth mode. Route it to the right field so
+		// newAnthropicAdapter can select the correct authentication path.
+		if provider.Auth == "oauth-token" {
+			aopts.authToken = apiKey
+		} else {
+			aopts.apiKey = apiKey
+		}
+		adapter = newAnthropicAdapter(model, aopts)
 	case config.ProviderOpenAI:
 		adapter = newOpenAIAdapter(model, openaiOptions{
 			apiKey:     apiKey,
@@ -107,7 +115,9 @@ func ResolveRole(ctx context.Context, cfg *config.Config, role string, opts Opti
 		return nil, fmt.Errorf("llm: role %q references unknown provider %q", role, rm.Provider)
 	}
 
-	apiKey, err := cfg.APIKey(rm.Provider)
+	// Credential resolves the active secret for this provider's auth mode:
+	// an API key in api_key mode, or an OAuth bearer token in oauth-token mode.
+	apiKey, err := cfg.Credential(rm.Provider)
 	if err != nil {
 		return nil, err
 	}
