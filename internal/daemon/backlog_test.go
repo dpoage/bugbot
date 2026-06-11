@@ -480,10 +480,8 @@ func TestDaemonReproBacklogRotation(t *testing.T) {
 	// After the first firing all 4 have the same initial updated_at from seed
 	// time; the batch picks the 2 oldest (arbitrary tie-break). After touching,
 	// those 2 move to the back; the second firing must pick the OTHER 2.
-	var allIDs []string
 	for i := 0; i < 4; i++ {
-		f := seedFinding(t, st, fmt.Sprintf("finding-%d", i), 2, "", false)
-		allIDs = append(allIDs, f.ID)
+		seedFinding(t, st, fmt.Sprintf("finding-%d", i), 2, "", false)
 	}
 
 	llmc := newFakeLLM(emptyJSON, notRefutedJSON)
