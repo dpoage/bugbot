@@ -11,6 +11,25 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
+// specificGuidanceLangs is the set of languages for which langGuidance returns
+// language-specific (non-generic) test-framework instructions. HasGuidance
+// consults this set so doctor reads the live table rather than duplicating it.
+var specificGuidanceLangs = map[ingest.Language]bool{
+	ingest.LangGo:         true,
+	ingest.LangPython:     true,
+	ingest.LangJavaScript: true,
+	ingest.LangTypeScript: true,
+	ingest.LangRust:       true,
+}
+
+// HasGuidance reports whether lang has language-specific repro guidance in
+// langGuidance (as opposed to the generic fallback). Doctor and the setup
+// wizard call this to warn when a dominant language lacks specific guidance,
+// so they read the live definition rather than maintaining a parallel list.
+func HasGuidance(lang ingest.Language) bool {
+	return specificGuidanceLangs[lang]
+}
+
 // langGuidance returns the one-line test-framework guidance spliced into the
 // reproducer system prompt for the finding's language. The Go text is verbatim
 // from the original prompt; the others give the idiomatic test file + run

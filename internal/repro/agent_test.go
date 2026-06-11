@@ -34,6 +34,32 @@ func TestSystemPrompt_PythonGuidance(t *testing.T) {
 	}
 }
 
+// TestHasGuidance verifies that HasGuidance agrees with langGuidance: every
+// language for which langGuidance returns specific (non-generic) text is
+// reported true, and unrecognised languages are false. This pins the shared
+// definition: if a language is added to langGuidance without updating
+// specificGuidanceLangs, this test catches the divergence.
+func TestHasGuidance(t *testing.T) {
+	specific := []ingest.Language{
+		ingest.LangGo, ingest.LangPython, ingest.LangJavaScript,
+		ingest.LangTypeScript, ingest.LangRust,
+	}
+	for _, lang := range specific {
+		if !HasGuidance(lang) {
+			t.Errorf("HasGuidance(%s) = false, want true (langGuidance returns specific text)", lang)
+		}
+	}
+	generic := []ingest.Language{
+		ingest.LangJava, ingest.LangC, ingest.LangCPP, ingest.LangRuby,
+		ingest.LangOther,
+	}
+	for _, lang := range generic {
+		if HasGuidance(lang) {
+			t.Errorf("HasGuidance(%s) = true, want false (langGuidance returns generic fallback)", lang)
+		}
+	}
+}
+
 // TestSystemPrompt_PerLanguageGuidance covers the remaining language branches
 // and the generic fallback, asserting each emits its matching framework hint.
 func TestSystemPrompt_PerLanguageGuidance(t *testing.T) {

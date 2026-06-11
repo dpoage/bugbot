@@ -30,6 +30,7 @@ reproduce, report) and tracks findings across confidence tiers:
 		"path to the Bugbot config file")
 
 	root.AddCommand(
+		newDoctorCmd(),
 		newInitCmd(),
 		newScanCmd(),
 		newReproCmd(),

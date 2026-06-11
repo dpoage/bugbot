@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -92,6 +93,21 @@ var binaryExts = map[string]bool{
 // hasBinaryExt reports whether path's extension is a known-binary one.
 func hasBinaryExt(path string) bool {
 	return binaryExts[strings.ToLower(filepath.Ext(path))]
+}
+
+// ExtensionsForLanguage returns the file extensions (with leading dot,
+// lowercase) that map to lang in the extLang table, sorted for determinism.
+// Doctor and the setup wizard call this to match LSP server configs to a
+// language without duplicating the extension→language mapping.
+func ExtensionsForLanguage(lang Language) []string {
+	var out []string
+	for ext, l := range extLang {
+		if l == lang {
+			out = append(out, ext)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // isBinaryContent applies the classic "null byte in the first chunk" heuristic.
