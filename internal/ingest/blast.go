@@ -72,12 +72,17 @@ func (r *Repo) BlastRadius(ctx context.Context, snap *Snapshot, changed []string
 	}
 
 	// --- Bazel-native reverse-dep query ---------------------------------
-	// Attempt when the repo has a Bazel workspace marker. For the default
-	// execQueryRunner a LookPath pre-check is performed to avoid spawning a
-	// process when bazel is not installed; a non-default runner (e.g. a test
-	// stub) bypasses this check and is always called. Any failure (including
-	// tool absent, query error, or timeout) is silently swallowed so we fall
-	// through to the Go+textual path.
+	// Attempt when the repo has a Bazel workspace marker. Two cases:
+	//
+	//   nil queryRunner (production): run exec.LookPath("bazel") first; skip
+	//   the native path entirely when bazel is absent to avoid spawning a
+	//   doomed process. When bazel is present, use execQueryRunner.
+	//
+	//   non-nil queryRunner (test injection): bypass LookPath and call the
+	//   injected runner directly — the runner controls all output and errors.
+	//
+	// Any failure (tool absent, query error, timeout) is silently swallowed;
+	// we fall through to the Go+textual path.
 	systems := DetectBuildSystems(r.root)
 	isBazel := false
 	for _, s := range systems {
@@ -87,20 +92,18 @@ func (r *Repo) BlastRadius(ctx context.Context, snap *Snapshot, changed []string
 		}
 	}
 	if isBazel {
-		qr := r.queryRunner
-		if qr == nil {
-			qr = execQueryRunner
-		}
-		isDefault := r.queryRunner == nil
-		bazelOK := true
-		if isDefault {
-			// Pre-check: skip if bazel is not on PATH to avoid process spawn
-			// overhead on machines without a Bazel installation.
-			if _, lookErr := exec.LookPath("bazel"); lookErr != nil {
-				bazelOK = false
+		var qr queryRunner
+		if r.queryRunner != nil {
+			// Injected test runner: bypass LookPath, always call it.
+			qr = r.queryRunner
+		} else {
+			// Production: pre-check that bazel is on PATH before spawning.
+			if _, lookErr := exec.LookPath("bazel"); lookErr == nil {
+				qr = execQueryRunner
 			}
+			// If bazel is absent, qr stays nil and we skip the native path.
 		}
-		if bazelOK {
+		if qr != nil {
 			bazelDeps, berr := r.bazelDependents(ctx, snap, changedSet, qr)
 			if berr == nil {
 				for _, p := range bazelDeps {
@@ -144,11 +147,15 @@ func (r *Repo) BlastRadius(ctx context.Context, snap *Snapshot, changed []string
 // files. It maps each changed file to a Bazel file-label
 // ("//path/to:file.ext"), then runs:
 //
-//	bazel query "rdeps(//..., set(//a:f.go //b:g.go ...))" --output=package
+//	bazel query "rdeps(//..., set('//a:f.go' '//b:g.go' ...))" --output=package
 //
-// and maps the resulting packages back to snapshot files. The query runs with
-// a bounded timeout (bazelQueryTimeout). Any error causes an immediate return
-// so the caller can fall back to the Go+textual path.
+// Labels are single-quoted inside the set() expression so that spaces, parens,
+// and other Bazel query metacharacters in file paths do not corrupt the query.
+// Labels that themselves contain a single quote are skipped (they would break
+// the quoting and cannot be safely escaped in this context).
+//
+// The query runs with a bounded timeout (bazelQueryTimeout). Any error causes
+// an immediate return so the caller can fall back to the Go+textual path.
 func (r *Repo) bazelDependents(ctx context.Context, snap *Snapshot, changed *stringSet, qr queryRunner) ([]string, error) {
 	// Map changed files to Bazel file labels: //dir:basename
 	var labels []string
@@ -161,13 +168,18 @@ func (r *Repo) bazelDependents(ctx context.Context, snap *Snapshot, changed *str
 		} else {
 			label = "//" + dir + ":" + base
 		}
-		labels = append(labels, label)
+		// Skip labels that contain a single quote: they cannot be safely
+		// single-quoted inside the set() expression.
+		if strings.ContainsRune(label, '\'') {
+			continue
+		}
+		labels = append(labels, "'"+label+"'")
 	}
 	if len(labels) == 0 {
 		return nil, nil
 	}
 
-	// Build the rdeps query expression.
+	// Build the rdeps query expression with single-quoted labels.
 	setExpr := "set(" + strings.Join(labels, " ") + ")"
 	queryExpr := "rdeps(//..., " + setExpr + ")"
 
@@ -201,7 +213,9 @@ func (r *Repo) bazelDependents(ctx context.Context, snap *Snapshot, changed *str
 		if dir == "." {
 			dir = ""
 		}
-		if pkgSet.has(dir) || pkgSet.has(f.Path) {
+		// --output=package emits package directories, not individual file paths,
+		// so we match files by their containing directory only.
+		if pkgSet.has(dir) {
 			deps = append(deps, f.Path)
 		}
 	}

@@ -32,7 +32,7 @@ import (
 )
 
 // queryRunner executes an external command in dir with the supplied args and
-// returns the combined stdout bytes. It is a function type so that tests can
+// returns the command's stdout bytes. It is a function type so that tests can
 // inject fake tool output without needing a real bazel installation.
 type queryRunner func(ctx context.Context, dir string, args ...string) ([]byte, error)
 
@@ -40,11 +40,12 @@ type queryRunner func(ctx context.Context, dir string, args ...string) ([]byte, 
 // it holds only the immutable repository root path and runs git as a child
 // process per call.
 //
-// The queryRunner field is exported to tests via the Open/newTestRepo path only:
-// production code always uses the default execQueryRunner.
+// queryRunner is nil in production (Open leaves it unset). BlastRadius treats
+// nil as "use execQueryRunner with a LookPath pre-check." Tests inject a
+// non-nil runner to bypass both LookPath and the real bazel binary.
 type Repo struct {
 	root        string
-	queryRunner queryRunner // defaults to execQueryRunner
+	queryRunner queryRunner // nil = production (use execQueryRunner + LookPath guard)
 }
 
 // Open validates that path is inside a git working tree and returns a Repo
@@ -66,7 +67,7 @@ func Open(ctx context.Context, path string) (*Repo, error) {
 	if root == "" {
 		return nil, fmt.Errorf("ingest: %q is not a git repository", path)
 	}
-	return &Repo{root: root, queryRunner: execQueryRunner}, nil
+	return &Repo{root: root}, nil
 }
 
 // Root returns the absolute path to the repository's top-level directory.
@@ -111,19 +112,27 @@ func runGitRaw(ctx context.Context, dir string, args ...string) ([]byte, error) 
 }
 
 // execQueryRunner is the production queryRunner implementation. It runs the
-// named tool with the given args in dir and returns its combined stdout+stderr.
-// Callers are responsible for applying a context deadline before invoking.
+// named tool with the given args in dir and returns its stdout bytes only.
+// Stderr is captured separately and included in the error message on failure
+// but never mixed into the returned bytes — callers parse stdout as structured
+// output (e.g. bazel query --output=package) and stderr pollution would corrupt
+// that parse. Callers are responsible for applying a context deadline before
+// invoking.
 func execQueryRunner(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("execQueryRunner: no args")
 	}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = dir
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%s: %w: %s", args[0], err, strings.TrimSpace(out.String()))
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return nil, fmt.Errorf("%s: %w: %s", args[0], err, msg)
+		}
+		return nil, fmt.Errorf("%s: %w", args[0], err)
 	}
-	return out.Bytes(), nil
+	return stdout.Bytes(), nil
 }

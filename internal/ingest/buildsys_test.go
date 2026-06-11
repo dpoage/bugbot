@@ -216,8 +216,15 @@ func TestBlastRadiusBazelNativeErrorFallback(t *testing.T) {
 	r.write("c/c.go", "package c\nfunc C() {}\n")
 	r.commit("init")
 
-	// Control run: no MODULE.bazel → pure Go-graph path.
+	// Control run: MODULE.bazel IS present (same repo), but we stub the query
+	// runner with an error so the Bazel native path is unconditionally skipped
+	// and only the Go import-graph runs. This makes the control hermetic: it
+	// produces the same result regardless of whether bazel is installed on the
+	// host machine.
 	controlRepo := r.open()
+	controlRepo.queryRunner = func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return nil, errors.New("bazel suppressed for control run")
+	}
 	controlSnap, err := controlRepo.Snapshot(context.Background(), ScanFilter{})
 	if err != nil {
 		t.Fatal(err)
@@ -415,5 +422,118 @@ func TestBazelDependentsQueryArgs(t *testing.T) {
 	}
 	if !strings.Contains(queryExpr, "lib") {
 		t.Errorf("query expr should reference 'lib' package: %q", queryExpr)
+	}
+	// Labels must be single-quoted inside the set() expression.
+	if !strings.Contains(queryExpr, "'//lib:lib.go'") {
+		t.Errorf("label must be single-quoted in set() expression: %q", queryExpr)
+	}
+}
+
+// TestOpenQueryRunnerIsNil asserts that Open leaves queryRunner nil (production
+// default) and that a subsequently injected runner is called correctly.
+func TestOpenQueryRunnerIsNil(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.go", "package a\n")
+	r.commit("init")
+
+	repo := r.open()
+	// Production default: queryRunner must be nil after Open.
+	if repo.queryRunner != nil {
+		t.Fatal("Open must leave queryRunner nil; got non-nil")
+	}
+
+	// Injecting a runner must work: a Bazel-marked repo calls it.
+	r.write("MODULE.bazel", `module(name = "test")`)
+	r.write("lib/lib.go", "package lib\n")
+	r.commit("add bazel marker")
+
+	repo2 := r.open()
+	if repo2.queryRunner != nil {
+		t.Fatal("Open must leave queryRunner nil; got non-nil after re-open")
+	}
+
+	called := false
+	repo2.queryRunner = func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		called = true
+		return []byte(""), nil
+	}
+	snap, err := repo2.Snapshot(context.Background(), ScanFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo2.BlastRadius(context.Background(), snap, []string{"lib/lib.go"}); err != nil {
+		t.Fatalf("BlastRadius: %v", err)
+	}
+	if !called {
+		t.Error("injected queryRunner was not called for Bazel-marked repo")
+	}
+}
+
+// TestBazelDependentsLabelQuoting verifies that file paths containing spaces
+// produce well-formed single-quoted labels in the bazel query expression and
+// that paths with single quotes are skipped rather than producing a malformed
+// query.
+func TestBazelDependentsLabelQuoting(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("MODULE.bazel", `module(name = "myrepo")`)
+	// A path with a space in the directory name.
+	r.write("dir with spaces/lib.go", "package lib\n")
+	// A normal path alongside it.
+	r.write("normal/lib.go", "package lib\n")
+	r.commit("init")
+
+	repo := r.open()
+	snap, err := repo.Snapshot(context.Background(), ScanFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var capturedQuery string
+	repo.queryRunner = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		for _, a := range args {
+			if strings.Contains(a, "rdeps") {
+				capturedQuery = a
+				break
+			}
+		}
+		return []byte(""), nil
+	}
+
+	_, err = repo.BlastRadius(context.Background(), snap, []string{
+		"dir with spaces/lib.go",
+		"normal/lib.go",
+	})
+	if err != nil {
+		t.Fatalf("BlastRadius: %v", err)
+	}
+
+	if capturedQuery == "" {
+		t.Fatal("queryRunner was not called or no rdeps expression captured")
+	}
+	// The space-containing label must be single-quoted.
+	if !strings.Contains(capturedQuery, "'//dir with spaces:lib.go'") {
+		t.Errorf("space-containing label must be single-quoted; query: %q", capturedQuery)
+	}
+	// The normal label must also be single-quoted.
+	if !strings.Contains(capturedQuery, "'//normal:lib.go'") {
+		t.Errorf("normal label must be single-quoted; query: %q", capturedQuery)
+	}
+	// Verify that the set() expression uses single-quoted labels. A
+	// well-formed set() looks like: set('//a:b' '//c:d' ...). An unquoted
+	// label inside set() would appear as "set(//..." or "' //" (space then
+	// unquoted label). The simplest invariant: inside set(...) there must be
+	// no occurrence of the substring " //" (space-slash-slash), which would
+	// indicate a space-separated unquoted label start.
+	setIdx := strings.Index(capturedQuery, "set(")
+	if setIdx < 0 {
+		t.Fatalf("no set() in query expression: %q", capturedQuery)
+	}
+	setBody := capturedQuery[setIdx+4:] // everything after "set("
+	if strings.Contains(setBody, " //") {
+		t.Errorf("set() body contains unquoted label (found \" //\"); full query: %q", capturedQuery)
+	}
+	// Also verify it does not start with an unquoted label: "set(//" without a quote.
+	if strings.HasPrefix(setBody, "//") {
+		t.Errorf("set() body starts with unquoted label; full query: %q", capturedQuery)
 	}
 }
