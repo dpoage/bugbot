@@ -154,6 +154,15 @@ type DaemonConfig struct {
 	// EnableRepro turns on the post-cycle reproduction-promotion step (only
 	// effective when Deps.Reproducer is non-nil).
 	EnableRepro bool
+	// ReproBacklogInterval is the cadence of the backlog-repro timer: the
+	// daemon periodically queries for open Tier-2/3 findings with no repro
+	// attempt and runs them through PromoteAll. Must be > 0 when EnableRepro
+	// is set. Default 1h.
+	ReproBacklogInterval time.Duration
+	// ReproBacklogBatch caps the number of backlog findings submitted to
+	// PromoteAll per firing. Findings are taken in store-default order
+	// (newest-updated-first). Must be >= 1. Default 3.
+	ReproBacklogBatch int
 }
 
 // maxBackoffMultiplier caps idle backoff: the next poll is delayed by at most
@@ -207,6 +216,16 @@ func New(deps Deps, cfg DaemonConfig) (*Daemon, error) {
 	}
 	if cfg.SweepInterval <= 0 {
 		return nil, fmt.Errorf("daemon: sweep_interval must be > 0")
+	}
+	if cfg.EnableRepro {
+		// Apply defaults for repro backlog fields when not explicitly set so
+		// callers that enable repro without setting these fields still work.
+		if cfg.ReproBacklogInterval <= 0 {
+			cfg.ReproBacklogInterval = time.Hour
+		}
+		if cfg.ReproBacklogBatch < 1 {
+			cfg.ReproBacklogBatch = 3
+		}
 	}
 
 	log := deps.Logger

@@ -141,6 +141,11 @@ type Repro struct {
 	// pyproject.toml/setup.py); when neither is available the patch-prover
 	// skips rather than guessing.
 	SuiteCmd []string `yaml:"suite_cmd"`
+	// BacklogBatch is the maximum number of backlog findings the daemon submits
+	// to the reproduce stage per backlog-timer firing. Must be >= 1. Default 3.
+	// The batch cap prevents a large backlog from exhausting the per-day budget
+	// in a single firing; the backlog drains gradually across multiple firings.
+	BacklogBatch int `yaml:"backlog_batch"`
 }
 
 // Daemon configures the continuous-run scheduler.
@@ -148,6 +153,11 @@ type Daemon struct {
 	PollInterval  time.Duration `yaml:"poll_interval"`
 	SweepInterval time.Duration `yaml:"sweep_interval"`
 	IdleBackoff   time.Duration `yaml:"idle_backoff"`
+	// ReproBacklogInterval is the cadence at which the daemon drains the
+	// reproduction backlog: open findings with no repro attempt (Tier 2 or 3,
+	// ReproPath empty, NeedsHuman false). Must be > 0 when repro is enabled.
+	// Default 1h. Only consulted when repro is enabled; otherwise ignored.
+	ReproBacklogInterval time.Duration `yaml:"repro_backlog_interval"`
 }
 
 // Storage configures the embedded SQLite state store.
@@ -235,6 +245,7 @@ func Default() Config {
 		Repro: Repro{
 			PatchProver:      false,
 			PatchMaxAttempts: 3,
+			BacklogBatch:     3,
 		},
 		Report: Report{
 			Dir:   ".bugbot/reports",
@@ -251,9 +262,10 @@ func Default() Config {
 			CloseOnFixed: true,
 		},
 		Daemon: Daemon{
-			PollInterval:  60 * time.Second,
-			SweepInterval: 6 * time.Hour,
-			IdleBackoff:   5 * time.Minute,
+			PollInterval:         60 * time.Second,
+			SweepInterval:        6 * time.Hour,
+			IdleBackoff:          5 * time.Minute,
+			ReproBacklogInterval: 1 * time.Hour,
 		},
 		Storage: Storage{
 			Path: ".bugbot/state.db",
@@ -304,6 +316,7 @@ func Load(path string) (Config, error) {
 //	BUGBOT_DAEMON_POLL_INTERVAL
 //	BUGBOT_DAEMON_SWEEP_INTERVAL
 //	BUGBOT_DAEMON_IDLE_BACKOFF
+//	BUGBOT_DAEMON_REPRO_BACKLOG_INTERVAL
 //	BUGBOT_REVIEW_FAIL_ON
 //	BUGBOT_REVIEW_SUSPECTED
 //	BUGBOT_VERIFY_SANDBOX_EXEC        ("true" or "false")
@@ -316,6 +329,7 @@ func Load(path string) (Config, error) {
 //	BUGBOT_REPRO_PATCH_PROVER         ("true" or "false")
 //	BUGBOT_REPRO_PATCH_MAX_ATTEMPTS   (integer >= 1)
 //	BUGBOT_REPRO_SUITE_CMD            (comma-separated argv)
+//	BUGBOT_REPRO_BACKLOG_BATCH        (integer >= 1)
 func applyEnvOverrides(cfg *Config, environ []string) error {
 	env := make(map[string]string, len(environ))
 	for _, kv := range environ {
@@ -424,9 +438,11 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt("BUGBOT_VERIFY_SANDBOX_MAX_EXECS", &cfg.Verify.SandboxMaxExecs),
 		setInt("BUGBOT_PUBLISH_TIER_MIN", &cfg.Publish.TierMin),
 		setInt("BUGBOT_REPRO_PATCH_MAX_ATTEMPTS", &cfg.Repro.PatchMaxAttempts),
+		setInt("BUGBOT_REPRO_BACKLOG_BATCH", &cfg.Repro.BacklogBatch),
 		setDur("BUGBOT_DAEMON_POLL_INTERVAL", &cfg.Daemon.PollInterval),
 		setDur("BUGBOT_DAEMON_SWEEP_INTERVAL", &cfg.Daemon.SweepInterval),
 		setDur("BUGBOT_DAEMON_IDLE_BACKOFF", &cfg.Daemon.IdleBackoff),
+		setDur("BUGBOT_DAEMON_REPRO_BACKLOG_INTERVAL", &cfg.Daemon.ReproBacklogInterval),
 		setBool("BUGBOT_VERIFY_SANDBOX_EXEC", &cfg.Verify.SandboxExec),
 		setBool("BUGBOT_PUBLISH_ENABLED", &cfg.Publish.Enabled),
 		setBool("BUGBOT_PUBLISH_CLOSE_ON_FIXED", &cfg.Publish.CloseOnFixed),
@@ -531,6 +547,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Repro.PatchMaxAttempts < 1 {
 		return fmt.Errorf("config: repro.patch_max_attempts must be >= 1 (got %d)", c.Repro.PatchMaxAttempts)
+	}
+	if c.Repro.BacklogBatch < 1 {
+		return fmt.Errorf("config: repro.backlog_batch must be >= 1 (got %d)", c.Repro.BacklogBatch)
+	}
+	// ReproBacklogInterval is only consulted when repro is enabled, but we
+	// validate it unconditionally so a misconfiguration is caught at startup
+	// rather than silently ignored.
+	if c.Daemon.ReproBacklogInterval <= 0 {
+		return fmt.Errorf("config: daemon.repro_backlog_interval must be > 0")
 	}
 
 	return nil

@@ -14,10 +14,13 @@ import (
 // progress, such as a failure to read the last-seen watermark — is returned so
 // the CLI can surface a nonzero exit.
 //
-// The scheduler maintains two independent deadlines (next poll, next sweep) and
-// at each iteration waits for the nearer one (or ctx). Cancellation is checked
-// only between cycles, so an in-flight cycle finishes its persistence before Run
-// returns — the daemon never kills work mid-write.
+// The scheduler maintains three independent deadlines (next poll, next sweep,
+// next backlog-repro) and at each iteration waits for the nearest one (or ctx).
+// Cancellation is checked only between cycles, so an in-flight cycle finishes
+// its persistence before Run returns — the daemon never kills work mid-write.
+//
+// The backlog-repro timer only fires when EnableRepro is set; otherwise it is
+// pushed infinitely far into the future so it never wins the deadline race.
 func (d *Daemon) Run(ctx context.Context) error {
 	now := d.clock.now()
 
@@ -40,6 +43,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 		nextSweep = now // due immediately
 	}
 
+	// Backlog-repro timer: active only when repro is enabled. When disabled,
+	// push the deadline far into the future so it never wins the race.
+	var nextBacklog time.Time
+	if d.cfg.EnableRepro && d.repro != nil {
+		nextBacklog = now.Add(d.cfg.ReproBacklogInterval)
+	} else {
+		nextBacklog = now.Add(1<<62 - 1) // effectively never
+	}
+
 	d.log.Info("daemon: started",
 		"poll_interval", d.cfg.PollInterval.String(),
 		"sweep_interval", d.cfg.SweepInterval.String(),
@@ -49,6 +61,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		"startup_sweep", !hadSweep,
 		"sinks", len(d.sinks),
 		"repro", d.cfg.EnableRepro && d.repro != nil,
+		"repro_backlog_interval", d.cfg.ReproBacklogInterval.String(),
 	)
 
 	for {
@@ -56,11 +69,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 		progress.Emit(d.prog, progress.Event{
 			Kind: progress.KindCycleScheduled, NextPoll: nextPoll, NextSweep: nextSweep,
 		})
-		// Pick the nearer deadline; wait for it (or cancellation).
-		fireSweep := !nextSweep.After(nextPoll)
-		deadline := nextPoll
-		if fireSweep {
+
+		// Pick the nearest deadline; wait for it (or cancellation).
+		// Three-way: poll, sweep, backlog.
+		fireSweep := !nextSweep.After(nextPoll) && !nextSweep.After(nextBacklog)
+		fireBacklog := !fireSweep && !nextBacklog.After(nextPoll)
+		var deadline time.Time
+		switch {
+		case fireSweep:
 			deadline = nextSweep
+		case fireBacklog:
+			deadline = nextBacklog
+		default:
+			deadline = nextPoll
 		}
 		wait := deadline.Sub(now)
 		if wait < 0 {
@@ -83,10 +104,24 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return nil
 		}
 
-		if fireSweep {
+		switch {
+		case fireSweep:
 			d.runSweep(ctx)
 			nextSweep = d.clock.now().Add(d.cfg.SweepInterval)
-		} else {
+		case fireBacklog:
+			// Gate backlog on day budget: if the budget is exhausted we skip and
+			// reschedule — the backlog will be retried at the next interval.
+			if d.cfg.PerDayTokens > 0 {
+				sentinel := cycleResult{kind: store.ScanTargeted}
+				if d.dayBudgetExhausted(ctx, &sentinel) {
+					d.log.Info("daemon: repro backlog skipped: day budget exhausted")
+					nextBacklog = d.clock.now().Add(d.cfg.ReproBacklogInterval)
+					break
+				}
+			}
+			d.runReproBacklog(ctx)
+			nextBacklog = d.clock.now().Add(d.cfg.ReproBacklogInterval)
+		default:
 			d.runPoll(ctx)
 			nextPoll = d.clock.now().Add(d.nextPollDelay())
 		}

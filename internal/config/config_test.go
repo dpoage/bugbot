@@ -332,3 +332,94 @@ func TestEnvOverride_CacheReadWeight(t *testing.T) {
 		t.Errorf("env override = %v, want 0.25", cfg.Budgets.CacheReadWeight)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// New-field tests: BacklogBatch and ReproBacklogInterval.
+// ---------------------------------------------------------------------------
+
+func TestDefault_BacklogFields(t *testing.T) {
+	cfg := Default()
+	if cfg.Repro.BacklogBatch != 3 {
+		t.Errorf("Repro.BacklogBatch default = %d, want 3", cfg.Repro.BacklogBatch)
+	}
+	if cfg.Daemon.ReproBacklogInterval != time.Hour {
+		t.Errorf("Daemon.ReproBacklogInterval default = %s, want 1h", cfg.Daemon.ReproBacklogInterval)
+	}
+}
+
+func TestLoad_BacklogFieldsFromYAML(t *testing.T) {
+	yaml := validYAML + `
+repro:
+  backlog_batch: 7
+daemon:
+  repro_backlog_interval: 30m
+`
+	cfg, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Repro.BacklogBatch != 7 {
+		t.Errorf("BacklogBatch = %d, want 7", cfg.Repro.BacklogBatch)
+	}
+	if cfg.Daemon.ReproBacklogInterval != 30*time.Minute {
+		t.Errorf("ReproBacklogInterval = %s, want 30m", cfg.Daemon.ReproBacklogInterval)
+	}
+}
+
+func TestEnvOverride_BacklogBatch(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_REPRO_BACKLOG_BATCH=5"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Repro.BacklogBatch != 5 {
+		t.Errorf("BacklogBatch = %d, want 5", cfg.Repro.BacklogBatch)
+	}
+}
+
+func TestEnvOverride_ReproBacklogInterval(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_DAEMON_REPRO_BACKLOG_INTERVAL=2h"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Daemon.ReproBacklogInterval != 2*time.Hour {
+		t.Errorf("ReproBacklogInterval = %s, want 2h", cfg.Daemon.ReproBacklogInterval)
+	}
+}
+
+func TestValidate_BacklogBatchMustBePositive(t *testing.T) {
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+	cfg.Repro.BacklogBatch = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "backlog_batch") {
+		t.Errorf("backlog_batch=0 should be rejected with backlog_batch in message, got %v", err)
+	}
+	cfg.Repro.BacklogBatch = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "backlog_batch") {
+		t.Errorf("backlog_batch=-1 should be rejected, got %v", err)
+	}
+	cfg.Repro.BacklogBatch = 1
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("backlog_batch=1 should be valid, got %v", err)
+	}
+}
+
+func TestValidate_ReproBacklogIntervalMustBePositive(t *testing.T) {
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+	cfg.Daemon.ReproBacklogInterval = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "repro_backlog_interval") {
+		t.Errorf("repro_backlog_interval=0 should be rejected, got %v", err)
+	}
+	cfg.Daemon.ReproBacklogInterval = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "repro_backlog_interval") {
+		t.Errorf("repro_backlog_interval=-1 should be rejected, got %v", err)
+	}
+	cfg.Daemon.ReproBacklogInterval = time.Minute
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("repro_backlog_interval=1m should be valid, got %v", err)
+	}
+}
