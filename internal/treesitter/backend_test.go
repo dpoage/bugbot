@@ -376,6 +376,13 @@ func TestSupportsAndUnsupported(t *testing.T) {
 			t.Errorf("JavaScript extension %s must be supported", ext)
 		}
 	}
+	// C family: .c, .h map to cGrammar; .cc/.cpp/.cxx/.hpp/.hh/.hxx map to
+	// cppGrammar. All eight must be supported.
+	for _, ext := range []string{".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"} {
+		if !b.Supports("/x/y" + ext) {
+			t.Errorf("C/C++ extension %s must be supported", ext)
+		}
+	}
 	if b.Supports("/x/y.rb") {
 		t.Error("Ruby is not registered and must be unsupported")
 	}
@@ -544,5 +551,161 @@ func TestPlainJSFileDefsAndRefs(t *testing.T) {
 	}
 	if got := locLines(t, root, refRes); !contains(got, "util.js:3") {
 		t.Errorf("js add ref = %v, want util.js:3", got)
+	}
+}
+
+// TestCFileDefsAndRefs proves the C grammar (cGrammar) is registered and
+// functional: a .c file with a function definition and a call site must resolve
+// both. A non-compiling query in cGrammar would panic at tagger construction
+// and surface as an error here, so this test also serves as a compile-time
+// check for the query text.
+func TestCFileDefsAndRefs(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		// greet() defined on line 1, called on line 4.
+		"hello.c": "void greet(const char *name) { (void)name; }\n" + // 1: definition
+			"\n" + // 2
+			"int main(void) {\n" + // 3
+			"    greet(\"world\");\n" + // 4: call ref to greet
+			"    return 0;\n" + // 5
+			"}\n", // 6
+	})
+	b := New(root)
+	abs := filepath.Join(root, "hello.c")
+
+	// The definition of greet must resolve.
+	defRes, err := b.Definition(abs, "greet")
+	if err != nil {
+		t.Fatalf("c Definition(greet): %v", err)
+	}
+	if got := locLines(t, root, defRes); !contains(got, "hello.c:1") {
+		t.Fatalf("c greet def = %v, want hello.c:1 (C grammar failed to parse?)", got)
+	}
+
+	// The call site greet("world") must appear as a reference.
+	refRes, err := b.References(abs, "greet")
+	if err != nil {
+		t.Fatalf("c References(greet): %v", err)
+	}
+	if got := locLines(t, root, refRes); !contains(got, "hello.c:4") {
+		t.Errorf("c greet ref = %v, want hello.c:4", got)
+	}
+}
+
+// TestHFileDefsAndRefs proves that .h files resolve via the C grammar.
+// A .h file with an inline function definition must produce a definition.
+func TestHFileDefsAndRefs(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"utils.h": "static inline int square(int x) { return x * x; }\n", // 1: definition
+	})
+	b := New(root)
+	abs := filepath.Join(root, "utils.h")
+
+	defRes, err := b.Definition(abs, "square")
+	if err != nil {
+		t.Fatalf("h Definition(square): %v", err)
+	}
+	if got := locLines(t, root, defRes); !contains(got, "utils.h:1") {
+		t.Fatalf("h square def = %v, want utils.h:1 (.h must use cGrammar)", got)
+	}
+}
+
+// TestCppFileDefsAndRefs is the load-bearing test for cppGrammar. It exercises
+// the node types unique to C++ (class_specifier, in-class method definition,
+// out-of-class Class::method, template function) and verifies that definitions
+// and call references all resolve. If cppGrammar's query text does not compile
+// against the cpp registry grammar, the tagger construction panics and this
+// test fails with an error — proving both grammars' queries compile (the bead's
+// core acceptance criterion).
+func TestCppFileDefsAndRefs(t *testing.T) {
+	// Line map:
+	//  1: class Greeter {
+	//  2: public:
+	//  3:     void greet();               <- forward declaration, not a def
+	//  4:     int value() { return 1; }   <- in-class method definition
+	//  5: };
+	//  6: void Greeter::greet() {         <- out-of-class definition (qualified)
+	//  7:     greet();                    <- self-call reference
+	//  8: }
+	//  9: template <typename T>
+	// 10: T add(T a, T b) { return a+b; } <- template free function
+	// 11: int main() {
+	// 12:     Greeter g;
+	// 13:     g.value();                  <- field_expression call ref
+	// 14:     add(1, 2);                  <- identifier call ref
+	// 15:     return 0;
+	// 16: }
+	root := writeRepo(t, map[string]string{
+		"app.cpp": "class Greeter {\n" + // 1
+			"public:\n" + // 2
+			"    void greet();\n" + // 3
+			"    int value() { return 1; }\n" + // 4
+			"};\n" + // 5
+			"void Greeter::greet() {\n" + // 6
+			"    greet();\n" + // 7
+			"}\n" + // 8
+			"template <typename T>\n" + // 9
+			"T add(T a, T b) { return a+b; }\n" + // 10
+			"int main() {\n" + // 11
+			"    Greeter g;\n" + // 12
+			"    g.value();\n" + // 13
+			"    add(1, 2);\n" + // 14
+			"    return 0;\n" + // 15
+			"}\n", // 16
+	})
+	b := New(root)
+	abs := filepath.Join(root, "app.cpp")
+
+	// class Greeter must be a definition (line 1).
+	defRes, err := b.Definition(abs, "Greeter")
+	if err != nil {
+		t.Fatalf("cpp Definition(Greeter): %v", err)
+	}
+	if got := locLines(t, root, defRes); !contains(got, "app.cpp:1") {
+		t.Fatalf("cpp Greeter def = %v, want app.cpp:1 (C++ grammar failed to parse?)", got)
+	}
+
+	// in-class method definition "value" must resolve (line 4).
+	defRes, err = b.Definition(abs, "value")
+	if err != nil {
+		t.Fatalf("cpp Definition(value): %v", err)
+	}
+	if got := locLines(t, root, defRes); !contains(got, "app.cpp:4") {
+		t.Fatalf("cpp value in-class def = %v, want app.cpp:4", got)
+	}
+
+	// out-of-class Greeter::greet definition must resolve (line 6).
+	defRes, err = b.Definition(abs, "greet")
+	if err != nil {
+		t.Fatalf("cpp Definition(greet): %v", err)
+	}
+	if got := locLines(t, root, defRes); !contains(got, "app.cpp:6") {
+		t.Fatalf("cpp greet out-of-class def = %v, want app.cpp:6", got)
+	}
+
+	// template function add must resolve (line 10).
+	defRes, err = b.Definition(abs, "add")
+	if err != nil {
+		t.Fatalf("cpp Definition(add): %v", err)
+	}
+	if got := locLines(t, root, defRes); !contains(got, "app.cpp:10") {
+		t.Fatalf("cpp add template def = %v, want app.cpp:10", got)
+	}
+
+	// identifier call ref: add(1,2) on line 14.
+	refRes, err := b.References(abs, "add")
+	if err != nil {
+		t.Fatalf("cpp References(add): %v", err)
+	}
+	if got := locLines(t, root, refRes); !contains(got, "app.cpp:14") {
+		t.Errorf("cpp add ref = %v, want app.cpp:14", got)
+	}
+
+	// field_expression call ref: g.value() on line 13.
+	refRes, err = b.References(abs, "value")
+	if err != nil {
+		t.Fatalf("cpp References(value): %v", err)
+	}
+	if got := locLines(t, root, refRes); !contains(got, "app.cpp:13") {
+		t.Errorf("cpp value ref = %v, want app.cpp:13", got)
 	}
 }
