@@ -6,15 +6,15 @@ import (
 )
 
 // aLens is a stable lens fixture for prompt-construction tests. Its name and
-// specialization must survive into the composed system prompt verbatim, since
-// the eval harness routes scripted finders on the lens name.
-var aLens = Lens{Name: "nil-safety/error-handling", Specialization: "Look for nil dereferences."}
+// core must survive into the composed system prompt verbatim, since the eval
+// harness routes scripted finders on the lens name.
+var aLens = Lens{Name: "nil-safety/error-handling", Core: "Look for nil dereferences."}
 
 // TestFinderSystemPrompt_GoPersona pins the Go persona clause so a regression in
 // the wording is caught. The Go profile must reproduce the original "senior Go
 // engineer" phrasing exactly.
 func TestFinderSystemPrompt_GoPersona(t *testing.T) {
-	p := finderSystemPrompt("senior Go engineer", aLens)
+	p := finderSystemPrompt("senior Go engineer", aLens, nil)
 	if !strings.HasPrefix(p, "You are a meticulous senior Go engineer auditing a real codebase") {
 		t.Errorf("Go finder prompt lost its persona clause; got prefix:\n%.80q", p)
 	}
@@ -22,15 +22,15 @@ func TestFinderSystemPrompt_GoPersona(t *testing.T) {
 	if !strings.Contains(p, aLens.Name) {
 		t.Error("finder prompt must contain the lens name (eval routing depends on it)")
 	}
-	if !strings.Contains(p, aLens.Specialization) {
-		t.Error("finder prompt must contain the lens specialization")
+	if !strings.Contains(p, aLens.Core) {
+		t.Error("finder prompt must contain the lens core")
 	}
 }
 
 // TestFinderSystemPrompt_NonGoPersona confirms a non-Go profile adapts the
 // persona and drops the hardcoded "Go engineer" framing entirely.
 func TestFinderSystemPrompt_NonGoPersona(t *testing.T) {
-	p := finderSystemPrompt("senior Python engineer", aLens)
+	p := finderSystemPrompt("senior Python engineer", aLens, nil)
 	if !strings.Contains(p, "You are a meticulous senior Python engineer") {
 		t.Errorf("non-Go finder prompt missing adapted persona; got prefix:\n%.80q", p)
 	}

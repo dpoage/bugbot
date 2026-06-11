@@ -3,12 +3,14 @@ package funnel
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
@@ -40,14 +42,14 @@ const diffIntentMsgCap = 4 * 1024
 // here and in the store package. Leads targeting lenses not active this run
 // stay pending and are consumed when that lens next runs.
 //
-// Diff-intent lens: when kind is a commit-triggered scan kind (ScanTargeted or
-// ScanOneshot with --since) AND cc is non-nil, exactly ONE extra finder task is
-// emitted for the diff-intent lens before the per-chunk units. This task
-// embeds the commit message, the unified diff (capped at diffIntentDiffCap),
-// and the blast-radius caller list. No diff-intent tasks are emitted on sweeps
-// or when cc is nil; the lens selection and degradation code paths tolerate a
-// lens that emits zero chunk tasks.
-func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, persona string, kind store.ScanKind, cc *ChangeContext, targets []string, budget *budgetState, result *Result) ([]Candidate, error) {
+// Diff-intent lens: when the run is commit-scoped (kind == ScanTargeted) AND cc
+// is non-nil, exactly ONE extra finder task is emitted for the diff-intent lens
+// before the per-chunk units. This task embeds the commit message, the unified
+// diff (capped at diffIntentDiffCap), and the blast-radius dependents. No
+// diff-intent tasks are emitted on sweeps or when cc is nil; lens selection and
+// degradation tolerate a lens that emits zero chunk tasks (degradation
+// survivors are computed from lenses that actually emitted units this run).
+func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, persona string, kind store.ScanKind, cc *ChangeContext, langs []ingest.Language, targets []string, budget *budgetState, result *Result) ([]Candidate, error) {
 	if len(targets) == 0 && cc == nil {
 		return nil, nil
 	}
@@ -63,7 +65,13 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 		return nil, err
 	}
 
-	chunks := chunk(targets, f.opts.ChunkSize)
+	chunks := chunkByLanguage(targets, f.opts.ChunkSize)
+
+	// Per-run lens priority: a lens's expected yield is language-dependent
+	// (lensYields), so the launch order — and therefore which lenses survive
+	// budget degradation — is recomputed from the repo's dominant languages
+	// rather than taken from the Go-centric builtin order.
+	lenses := lensesByYield(f.lenses, langs)
 
 	// --- Pre-launch: collect and consume pending leads for each active lens ---
 	//
@@ -71,9 +79,9 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	// needed for the leads map. We claim all leads for active lenses upfront:
 	// a lead stays "posted" for lenses not in this run and is consumed when
 	// that lens next runs.
-	leadsByLens := make(map[string][]store.Lead, len(f.lenses))
+	leadsByLens := make(map[string][]store.Lead, len(lenses))
 	var leadsConsumedTotal int
-	for _, l := range f.lenses {
+	for _, l := range lenses {
 		// diff-intent is a change-scoped lens with no file/line lead semantics:
 		// it receives its input from ChangeContext (commit message, diff, blast
 		// targets), not from the lead blackboard. Including it here would silently
@@ -117,11 +125,12 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	type unit struct {
 		lens       Lens
 		files      []string
-		leads      []store.Lead // pre-fetched leads for this lens, already consumed
-		customTask string       // non-empty for diff-intent: overrides finderTask(files, leads)
+		langs      []ingest.Language // the chunk's language set, for prompt composition
+		leads      []store.Lead      // pre-fetched leads for this lens, already consumed
+		customTask string            // non-empty for diff-intent: overrides finderTask(files, leads)
 	}
 	var units []unit
-	for _, l := range f.lenses {
+	for _, l := range lenses {
 		// diff-intent never gets chunk-based units: it is either absent (sweeps,
 		// nil ChangeContext) or emitted as exactly ONE custom task below. Skipping
 		// it here ensures zero tasks from this lens on sweeps while still allowing
@@ -130,7 +139,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			continue
 		}
 		for _, c := range chunks {
-			units = append(units, unit{lens: l, files: c, leads: leadsByLens[l.Name]})
+			units = append(units, unit{lens: l, files: c.files, langs: c.langs, leads: leadsByLens[l.Name]})
 		}
 	}
 	// Diff-intent: one extra unit at the front (highest yield => first to launch)
@@ -180,15 +189,22 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	var wg sync.WaitGroup
 
 	// Compute degraded survivors from the lenses that actually emitted at least
-	// one unit in this run — not from f.lenses order-position. diff-intent emits
-	// zero units on sweeps, so it must never occupy a degradation slot on a sweep
-	// and starve a taxonomy lens. On commit runs it does emit a unit and legitimately
-	// competes.
+	// one unit in this run, ranked by the per-language yield order — composing
+	// both halves of the design: lensesByYield supplies the language-aware
+	// ranking, and the units filter ensures a zero-unit lens (diff-intent on
+	// sweeps) never occupies a degradation slot and starves a taxonomy lens. On
+	// commit runs diff-intent does emit a unit and legitimately competes.
 	activeLensNames := make(map[string]bool, len(units))
 	for _, u := range units {
 		activeLensNames[u.lens.Name] = true
 	}
-	degradedLenses := f.degradedLensNamesFor(activeLensNames)
+	active := make([]Lens, 0, len(lenses))
+	for _, l := range lenses {
+		if activeLensNames[l.Name] {
+			active = append(active, l)
+		}
+	}
+	degradedLenses := degradedLensNames(active)
 
 	for _, u := range units {
 		mu.Lock()
@@ -258,14 +274,16 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 
 			// Resolve the task content. For the diff-intent lens the task is
 			// pre-built (customTask) and carries the commit message, diff, and
-			// blast list. For all other lenses the task is the standard
-			// file-list+leads format built inside runFinder.
+			// blast-radius dependents. For all other lenses the task is the
+			// standard file-list+leads format. The chunk's language set rides
+			// alongside for manifestation-block prompt composition (nil for the
+			// language-free diff-intent task → Core-only prompt).
 			task := u.customTask
 			if task == "" {
 				task = finderTask(u.files, u.leads)
 			}
 
-			cands, status, err := f.runFinder(ctx, finder, unitTools, persona, u.lens, task, budget)
+			cands, status, err := f.runFinder(ctx, finder, unitTools, persona, u.lens, u.langs, task, budget)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -344,14 +362,14 @@ const (
 // by the budget pool / token budget, so an unparseable partial is expected). The
 // funnel surfaces parse failures so a scan never silently reports "No findings"
 // when a lens actually failed, while budget stops are accounted separately.
-func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, persona string, l Lens, task string, budget *budgetState) ([]Candidate, finderStatus, error) {
+func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, persona string, l Lens, langs []ingest.Language, task string, budget *budgetState) ([]Candidate, finderStatus, error) {
 	sink := f.opts.Progress
 	start := time.Now()
 	progress.Emit(sink, progress.Event{
 		Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: l.Name,
 	})
 
-	runner := agent.NewRunner(finder, tools, finderSystemPrompt(persona, l),
+	runner := agent.NewRunner(finder, tools, finderSystemPrompt(persona, l, langs),
 		agent.WithLimits(budget.runnerLimits(f.opts.FinderLimits)),
 		agent.WithMaxTokens(DefaultMaxOutputTokens),
 		f.transcriptOption(),
@@ -406,29 +424,117 @@ func budgetStopped(o *agent.Outcome) bool {
 	return o.TruncationReason == agent.TruncTokenBudget || o.TruncationReason == agent.TruncBudgetPool
 }
 
-// degradedLensNamesFor returns the set of lens names that survive budget
-// degradation: the top degradedLensCount lenses among those that actually
-// emitted at least one unit in this run, in yield-descending order
-// (f.lenses is already yield-ordered; we preserve that order here).
+// degradedLensNames returns the set of lens names that survive budget
+// degradation: the head degradedLensCount lenses of ordered, which must
+// already be sorted by descending effective yield for this run's language mix
+// (see lensesByYield). On a Python-heavy repo this keeps a different lens set
+// than on a Go repo — degradation sheds the lenses that are low-yield for THIS
+// repo, not for Go.
 //
-// Using the actual unit set — rather than f.lenses position — prevents
-// diff-intent (Yield 95) from occupying a degradation slot on sweeps where
-// it emits zero units. On commit runs it does emit a unit and legitimately
-// competes for a slot.
-func (f *Funnel) degradedLensNamesFor(activeLensNames map[string]bool) map[string]bool {
-	// Walk f.lenses in yield-descending order, collecting up to degradedLensCount
-	// from the active set.
+// Callers must pre-filter ordered to lenses that actually emitted units this
+// run (see hypothesize): a zero-unit lens (diff-intent on sweeps) must never
+// occupy a survivor slot and starve a working lens.
+func degradedLensNames(ordered []Lens) map[string]bool {
 	keep := make(map[string]bool, degradedLensCount)
-	for _, l := range f.lenses {
-		if !activeLensNames[l.Name] {
-			continue
-		}
-		keep[l.Name] = true
-		if len(keep) >= degradedLensCount {
+	for i, l := range ordered {
+		if i >= degradedLensCount {
 			break
 		}
+		keep[l.Name] = true
 	}
 	return keep
+}
+
+// fileChunk is one finder unit's worth of target files plus the language set
+// those files span (deduplicated, sorted). The language set selects the
+// per-language manifestation blocks in the finder prompt; mixed chunks get the
+// union of their languages' blocks.
+type fileChunk struct {
+	files []string
+	langs []ingest.Language
+}
+
+// chunkByLanguage groups files by detected language BEFORE chunking, so chunks
+// are language-homogeneous where possible and most finder prompts carry
+// exactly one manifestation block. Each language's files (kept in input order,
+// which Sweep may have heat-ordered) are cut into full chunks of exactly size;
+// the per-language tails are then concatenated — still grouped by language, in
+// first-seen order — and chunked together, so the only mixed chunks are the
+// unavoidable remainders. Chunk-size semantics match chunk(): at most size
+// files each, and a non-positive size yields a single chunk of everything.
+func chunkByLanguage(files []string, size int) []fileChunk {
+	if len(files) == 0 {
+		return nil
+	}
+	if size <= 0 || len(files) <= size {
+		return []fileChunk{{files: files, langs: chunkLangs(files)}}
+	}
+
+	var order []ingest.Language
+	groups := make(map[ingest.Language][]string)
+	for _, f := range files {
+		l := ingest.DetectLanguage(f)
+		if _, ok := groups[l]; !ok {
+			order = append(order, l)
+		}
+		groups[l] = append(groups[l], f)
+	}
+
+	var out []fileChunk
+	var tails []string
+	for _, l := range order {
+		g := groups[l]
+		for len(g) >= size {
+			// Three-index slice so a later append elsewhere can never write into
+			// this chunk's backing array.
+			out = append(out, fileChunk{files: g[:size:size], langs: []ingest.Language{l}})
+			g = g[size:]
+		}
+		tails = append(tails, g...)
+	}
+	// The tails are language-contiguous, so chunking them keeps remainders
+	// homogeneous whenever they happen to align with a chunk boundary; only the
+	// genuinely unavoidable stragglers mix.
+	for _, c := range chunk(tails, size) {
+		out = append(out, fileChunk{files: c, langs: chunkLangs(c)})
+	}
+
+	// Restore global heat priority at chunk granularity: Sweep heat-orders the
+	// input (churn x recency, bugbot-sro), and grouping by language must not
+	// defer the second-hottest file of another language behind a whole cold
+	// group. Sort chunks by the input rank of their hottest (earliest) member;
+	// homogeneity is preserved because membership is untouched.
+	rank := make(map[string]int, len(files))
+	for i, f := range files {
+		rank[f] = i
+	}
+	hottest := func(c fileChunk) int {
+		best := len(files)
+		for _, f := range c.files {
+			if r := rank[f]; r < best {
+				best = r
+			}
+		}
+		return best
+	}
+	sort.SliceStable(out, func(i, j int) bool { return hottest(out[i]) < hottest(out[j]) })
+	return out
+}
+
+// chunkLangs returns the deduplicated language set of files, sorted for a
+// deterministic prompt (the manifestation blocks render in this order).
+func chunkLangs(files []string) []ingest.Language {
+	seen := make(map[ingest.Language]bool)
+	var out []ingest.Language
+	for _, f := range files {
+		l := ingest.DetectLanguage(f)
+		if !seen[l] {
+			seen[l] = true
+			out = append(out, l)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // chunk splits files into slices of at most size elements. The final chunk may

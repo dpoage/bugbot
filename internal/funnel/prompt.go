@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -12,7 +13,8 @@ import (
 // clause derived from the repository's dominant language(s) (e.g. "senior Go
 // engineer", "senior software engineer with deep Go and Python expertise"). The
 // persona is the ONLY language-dependent text; everything after it is fixed.
-// Every lens appends its Specialization to this. The prompt is precision-first
+// Every lens appends its Core (and per-language manifestation blocks; see
+// finderSystemPrompt) to this. The prompt is precision-first
 // by construction: it repeatedly licenses "find nothing" as the expected
 // outcome and forbids speculation, because the dominant failure mode of an LLM
 // bug-finder is confabulating plausible-sounding bugs that do not exist in the
@@ -81,12 +83,78 @@ type rawCandidate struct {
 	Confidence  string `json:"confidence"`
 }
 
-// finderSystemPrompt composes the persona-seeded base with a lens
-// specialization. persona is the language-derived engineer description (see
-// ingest.Persona); the lens name and specialization are appended verbatim, so
-// the eval harness's lens-name routing is unaffected by the persona.
-func finderSystemPrompt(persona string, l Lens) string {
-	return finderSystemBase(persona) + "\n\nYOUR ASSIGNED FOCUS (" + l.Name + "):\n" + l.Specialization
+// finderSystemPrompt composes the persona-seeded base with a lens: the
+// universal Core, then one "How this manifests in <Language>" block per chunk
+// language that has rows in the manifestations table. persona is the
+// language-derived engineer description (see ingest.Persona); langs is the
+// chunk's language set (union for mixed chunks). The lens name and Core are
+// appended verbatim, so the eval harness's lens-name routing is unaffected by
+// the persona or the language mix.
+//
+// Composition is purely data-driven: languages without manifestation rows are
+// omitted, and a lens with no manifestation entries at all (a language-free
+// lens) composes Core alone — adding a language column or lens row never
+// requires a change here. Languages whose row slices are equal (JavaScript and
+// TypeScript share theirs) merge into a single block so a mixed JS/TS chunk
+// does not carry the same guidance twice.
+func finderSystemPrompt(persona string, l Lens, langs []ingest.Language) string {
+	var b strings.Builder
+	b.WriteString(finderSystemBase(persona))
+	b.WriteString("\n\nYOUR ASSIGNED FOCUS (")
+	b.WriteString(l.Name)
+	b.WriteString("):\n")
+	b.WriteString(l.Core)
+
+	// Group the chunk's languages by identical row content so shared tables
+	// (JS/TS, C/C++ injection) render once under a merged heading.
+	type block struct {
+		names []string
+		rows  []string
+	}
+	var blocks []block
+	rowsByLang := manifestations[l.Name]
+	for _, lang := range langs {
+		rows := rowsByLang[lang]
+		if len(rows) == 0 {
+			continue
+		}
+		merged := false
+		for i := range blocks {
+			if equalRows(blocks[i].rows, rows) {
+				blocks[i].names = append(blocks[i].names, ingest.DisplayName(lang))
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			blocks = append(blocks, block{names: []string{ingest.DisplayName(lang)}, rows: rows})
+		}
+	}
+	for _, blk := range blocks {
+		b.WriteString("\n\nHow this manifests in ")
+		b.WriteString(strings.Join(blk.names, "/"))
+		b.WriteString(":")
+		for _, row := range blk.rows {
+			b.WriteString("\n- ")
+			b.WriteString(row)
+		}
+	}
+	return b.String()
+}
+
+// equalRows reports whether two manifestation row slices carry identical
+// content. Shared tables are usually the same slice, but content equality is
+// the honest criterion: it is what makes a duplicated block redundant.
+func equalRows(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // finderTask builds the per-chunk finder task message naming the target files.
