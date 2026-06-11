@@ -3,6 +3,7 @@ package funnel
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,6 +13,13 @@ import (
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 )
+
+// diffIntentDiffCap is the maximum number of bytes of unified diff embedded in
+// a diff-intent finder task. Beyond this limit the diff is truncated with an
+// explicit marker so the model knows it is reading a partial diff, not the full
+// change. 48 KB is large enough to cover most single-commit diffs while keeping
+// the finder's context window from being dominated by raw diff bytes.
+const diffIntentDiffCap = 48 * 1024
 
 // hypothesize runs the finder stage: for each effective lens, run a finder
 // agent over each chunk of target files, collecting concrete candidates. Lens
@@ -26,8 +34,16 @@ import (
 // means a failed finder run loses the lead — accepted trade-off documented
 // here and in the store package. Leads targeting lenses not active this run
 // stay pending and are consumed when that lens next runs.
-func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, persona string, targets []string, budget *budgetState, result *Result) ([]Candidate, error) {
-	if len(targets) == 0 {
+//
+// Diff-intent lens: when kind is a commit-triggered scan kind (ScanTargeted or
+// ScanOneshot with --since) AND cc is non-nil, exactly ONE extra finder task is
+// emitted for the diff-intent lens before the per-chunk units. This task
+// embeds the commit message, the unified diff (capped at diffIntentDiffCap),
+// and the blast-radius caller list. No diff-intent tasks are emitted on sweeps
+// or when cc is nil; the lens selection and degradation code paths tolerate a
+// lens that emits zero chunk tasks.
+func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, persona string, kind store.ScanKind, cc *ChangeContext, targets []string, budget *budgetState, result *Result) ([]Candidate, error) {
+	if len(targets) == 0 && cc == nil {
 		return nil, nil
 	}
 
@@ -80,16 +96,43 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	// Build the unit-of-work list: (lens, chunk) pairs. We launch lenses in
 	// yield order so that if degradation kicks in mid-run, the lower-yield lenses
 	// are the ones skipped.
+	//
+	// The diff-intent lens is special: it emits exactly ONE task per commit-kind
+	// run (when cc is non-nil), not one task per chunk of files. That task carries
+	// its own pre-built content (diffIntentTask) rather than the standard file
+	// list. The customTask field is non-empty only for that one unit; all other
+	// units leave it empty and have their task built from files+leads as usual.
 	type unit struct {
-		lens  Lens
-		files []string
-		leads []store.Lead // pre-fetched leads for this lens, already consumed
+		lens       Lens
+		files      []string
+		leads      []store.Lead // pre-fetched leads for this lens, already consumed
+		customTask string       // non-empty for diff-intent: overrides finderTask(files, leads)
 	}
 	var units []unit
 	for _, l := range f.lenses {
+		// diff-intent never gets chunk-based units: it is either absent (sweeps,
+		// nil ChangeContext) or emitted as exactly ONE custom task below. Skipping
+		// it here ensures zero tasks from this lens on sweeps while still allowing
+		// the selectLenses / degradation logic to treat it as part of the set.
+		if l.Name == "diff-intent" {
+			continue
+		}
 		for _, c := range chunks {
 			units = append(units, unit{lens: l, files: c, leads: leadsByLens[l.Name]})
 		}
+	}
+	// Diff-intent: one extra unit at the front (highest yield => first to launch)
+	// when the run is commit-scoped AND ChangeContext is populated. The unit uses
+	// an empty file list so degradation/budget checks treat it as a single-unit
+	// lens (which it is), and the task content is self-contained.
+	diLens := diffIntentLens()
+	if cc != nil && isCommitKind(kind) {
+		task := buildDiffIntentTask(cc)
+		units = append([]unit{{
+			lens:       diLens,
+			files:      nil,
+			customTask: task,
+		}}, units...)
 	}
 
 	// leadsPosted counts post_lead tool calls that succeeded across all parallel
@@ -183,7 +226,16 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			// storage.
 			unitTools := append(baseTools[:len(baseTools):len(baseTools)], postLeadTool)
 
-			cands, status, err := f.runFinder(ctx, finder, unitTools, persona, u.lens, u.files, u.leads, budget)
+			// Resolve the task content. For the diff-intent lens the task is
+			// pre-built (customTask) and carries the commit message, diff, and
+			// blast list. For all other lenses the task is the standard
+			// file-list+leads format built inside runFinder.
+			task := u.customTask
+			if task == "" {
+				task = finderTask(u.files, u.leads)
+			}
+
+			cands, status, err := f.runFinder(ctx, finder, unitTools, persona, u.lens, task, budget)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -247,11 +299,14 @@ const (
 	finderBudgetStopped
 )
 
-// runFinder executes a single finder agent for one lens over one chunk and maps
+// runFinder executes a single finder agent for one lens over one task and maps
 // its JSON output to Candidates tagged with the lens. The agent's limits are
 // derived from the shared budget pool at launch (remaining-pool allowance plus a
 // pre-turn budget check), so a finder launched late gets only the headroom left
 // and one already in flight stops at its next turn once the pool is exhausted.
+//
+// task is the pre-built user message for the agent. Standard chunk-based units
+// pass finderTask(files, leads); the diff-intent unit passes buildDiffIntentTask.
 //
 // The finderStatus return distinguishes a parse failure (the finder ran but
 // produced no parseable JSON even after the repair round-trip, so its result is
@@ -259,7 +314,7 @@ const (
 // by the budget pool / token budget, so an unparseable partial is expected). The
 // funnel surfaces parse failures so a scan never silently reports "No findings"
 // when a lens actually failed, while budget stops are accounted separately.
-func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, persona string, l Lens, files []string, leads []store.Lead, budget *budgetState) ([]Candidate, finderStatus, error) {
+func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, persona string, l Lens, task string, budget *budgetState) ([]Candidate, finderStatus, error) {
 	sink := f.opts.Progress
 	start := time.Now()
 	progress.Emit(sink, progress.Event{
@@ -273,7 +328,7 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 	)
 
 	var out candidateList
-	outcome, err := runner.RunJSON(ctx, finderTask(files, leads), candidatesSchema, &out)
+	outcome, err := runner.RunJSON(ctx, task, candidatesSchema, &out)
 	emitAgentFinished(sink, progress.RoleFinder, l.Name, outcome, start, err)
 	if err != nil {
 		// A finder that fails to produce parseable JSON yields no candidates
@@ -353,4 +408,67 @@ func chunk(files []string, size int) [][]string {
 		out = append(out, files[i:end])
 	}
 	return out
+}
+
+// isCommitKind reports whether kind is a commit-triggered scan (targeted or
+// oneshot-with-since). Sweep runs never carry a ChangeContext and never emit
+// diff-intent tasks regardless of what kind says, but this guard is the
+// explicit flag that prevents diff-intent from firing on sweep-kind runs.
+func isCommitKind(kind store.ScanKind) bool {
+	return kind == store.ScanTargeted || kind == store.ScanOneshot
+}
+
+// diffIntentLens returns the Lens descriptor for the diff-intent lens. It is
+// defined in BuiltinLenses (lens.go) but fetched by name here so hypothesize
+// does not hard-code index offsets into the lens slice.
+func diffIntentLens() Lens {
+	for _, l := range BuiltinLenses() {
+		if l.Name == "diff-intent" {
+			return l
+		}
+	}
+	// Unreachable if BuiltinLenses is kept in sync with lens.go; panic loudly
+	// so a deletion is caught immediately rather than silently dropping the lens.
+	panic("funnel: diff-intent lens not found in BuiltinLenses; check lens.go")
+}
+
+// buildDiffIntentTask constructs the finder task message for the diff-intent
+// lens. It embeds the commit message, the unified diff (capped at
+// diffIntentDiffCap bytes with an explicit truncation marker), and the
+// blast-radius caller list so the agent can check call sites without extra
+// tool calls. The task is self-contained: the agent still has read-only tools
+// and can follow up with find_references if needed.
+func buildDiffIntentTask(cc *ChangeContext) string {
+	var b strings.Builder
+	b.WriteString("Audit this commit for intent-vs-implementation mismatches and broken caller assumptions.\n\n")
+
+	b.WriteString("COMMIT MESSAGE:\n")
+	if cc.Message != "" {
+		b.WriteString(cc.Message)
+	} else {
+		b.WriteString("(not available)")
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString("UNIFIED DIFF:\n")
+	if len(cc.Diff) == 0 {
+		b.WriteString("(not available)\n")
+	} else if len(cc.Diff) > diffIntentDiffCap {
+		b.Write(cc.Diff[:diffIntentDiffCap])
+		b.WriteString("\n[diff truncated at 48KB]\n")
+	} else {
+		b.Write(cc.Diff)
+		b.WriteByte('\n')
+	}
+
+	if len(cc.BlastFiles) > 0 {
+		b.WriteString("\nBLAST-RADIUS CALLERS (files in scope that may depend on the changed code):\n")
+		for _, f := range cc.BlastFiles {
+			fmt.Fprintf(&b, "  - %s\n", f)
+		}
+	}
+
+	b.WriteString("\nFor each finding: read the relevant call sites with find_references before reporting.\n")
+	b.WriteString("Finding nothing is the expected outcome for most commits.\n")
+	return b.String()
 }

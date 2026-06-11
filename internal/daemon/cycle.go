@@ -97,7 +97,12 @@ func (d *Daemon) runPoll(ctx context.Context) {
 		d.seedAnalyzers(ctx)
 	}
 
-	f, err := d.newFunnel()
+	// Build ChangeContext for the diff-intent lens. All pieces already exist in
+	// ingest; failures here are non-fatal — the scan still runs, just without
+	// the diff-intent task. The context window is lastSeen→pr.HeadSHA.
+	cc := buildChangeContext(ctx, d.repo, lastSeen, pr.HeadSHA, changed)
+
+	f, err := d.newFunnelWith(cc)
 	if err != nil {
 		d.log.Error("daemon: build funnel failed", "err", err)
 		return
@@ -114,6 +119,36 @@ func (d *Daemon) runPoll(ctx context.Context) {
 	d.recordScanResult(&res, fres)
 	d.postCycle(ctx, fres, &res)
 	d.finishCycle(ctx, res, start)
+}
+
+// buildChangeContext assembles a funnel.ChangeContext from the ingest package
+// helpers. All field lookups are best-effort: a failure populates a zero/nil
+// field but does not abort the cycle. When fromSHA or toSHA is empty the
+// function returns nil (no context to build).
+func buildChangeContext(ctx context.Context, repo *ingest.Repo, fromSHA, toSHA string, changed []string) *funnel.ChangeContext {
+	if fromSHA == "" || toSHA == "" {
+		return nil
+	}
+	cc := &funnel.ChangeContext{
+		FromCommit:   fromSHA,
+		ToCommit:     toSHA,
+		ChangedFiles: changed,
+	}
+	msg, err := repo.CommitMessage(ctx, toSHA)
+	if err == nil {
+		cc.Message = msg
+	}
+	diff, err := repo.UnifiedDiff(ctx, fromSHA, toSHA)
+	if err == nil {
+		cc.Diff = diff
+	}
+	// BlastFiles are populated from the already-computed changed set so we
+	// avoid a second BlastRadius call (the caller has already computed it via
+	// changedPathsSince and the snapshot). Pass changed as blast placeholder;
+	// the Targeted call below recomputes the true radius for scoping, so this
+	// is informational only (for the diff-intent task's caller list).
+	cc.BlastFiles = changed
+	return cc
 }
 
 // runSweep executes one sweep cycle: a whole-snapshot investigation plus the

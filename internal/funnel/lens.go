@@ -49,6 +49,25 @@ func BuiltinLenses() []Lens {
 				"nil error while also returning a zero/invalid value the caller will use.",
 		},
 		{
+			// diff-intent sits above concurrency (90) and below correctness (100):
+			// it is the unique-advantage lens on commit scans, where the commit
+			// message and diff are both available and the change is fresh. Its yield
+			// reflects that it fires ONLY on commit-triggered runs (the funnel emits
+			// zero diff-intent tasks on sweeps or when ChangeContext is nil), so it
+			// never competes with the taxonomy lenses on sweep runs.
+			Name:  "diff-intent",
+			Yield: 95,
+			Specialization: "Hunt for intent-vs-implementation mismatches in a specific commit: " +
+				"the change's implementation contradicts its stated intent (the diff does " +
+				"something the commit message says it does not, or omits something it " +
+				"claims to do); and existing callers whose assumptions the change silently " +
+				"breaks (a function's contract, precondition, or return invariant shifts " +
+				"in the diff, but call sites checked via find_references still rely on the " +
+				"old behavior). Confirm every finding by reading the diff AND the call " +
+				"sites with find_references — do not report a mismatch you have not " +
+				"verified in the actual code. Finding nothing is a valid outcome.",
+		},
+		{
 			Name:  "concurrency",
 			Yield: 90,
 			Specialization: "Hunt for concurrency defects: data races on shared state " +

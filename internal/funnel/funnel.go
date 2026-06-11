@@ -173,6 +173,30 @@ type SandboxOpts struct {
 	DepStrategy sandbox.DepStrategy
 }
 
+// ChangeContext carries commit-scoped context for a targeted (commit-triggered)
+// funnel run. It is optional: nil on sweep runs and targeted runs without a
+// specific commit window. When non-nil, the diff-intent lens uses it to look
+// for gaps between the commit's stated intent and its implementation.
+type ChangeContext struct {
+	// FromCommit and ToCommit are the inclusive range of the change (e.g. the
+	// parent and the new HEAD). Both must be non-empty for the lens to fire.
+	FromCommit string
+	// ToCommit is the tip commit of the change window.
+	ToCommit string
+	// Message is the full commit message of ToCommit (from CommitMessage).
+	Message string
+	// Diff is the raw unified diff between FromCommit and ToCommit
+	// (from UnifiedDiff). May be nil if no diff is available.
+	Diff []byte
+	// ChangedFiles is the list of repo-relative paths modified by the change
+	// (from ChangedFiles + ChangedPaths). Used in the task for context.
+	ChangedFiles []string
+	// BlastFiles is the blast-radius file list (from BlastRadius): the changed
+	// files plus their direct dependents. These are the callers whose
+	// assumptions the change may have broken.
+	BlastFiles []string
+}
+
 // Options configures a single funnel run. The zero value is valid: every field
 // resolves to a sensible default.
 type Options struct {
@@ -239,6 +263,12 @@ type Options struct {
 	// the repository has no git history). Targeted scans are always
 	// alphabetical regardless of this setting.
 	DisableHeatOrdering bool
+	// ChangeContext, when non-nil, provides commit-scoped information for a
+	// targeted (commit-triggered) run. It enables the diff-intent lens, which
+	// hunts for gaps between the commit's stated intent and its implementation
+	// and for existing callers whose assumptions the change breaks. Nil on
+	// sweep runs and targeted runs without a specific commit window.
+	ChangeContext *ChangeContext
 }
 
 // resolve fills in defaults without mutating the caller's Options.

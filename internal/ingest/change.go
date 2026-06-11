@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // ChangeKind classifies how a file changed between two commits.
@@ -131,6 +132,20 @@ func (r *Repo) UnifiedDiff(ctx context.Context, from, to string) ([]byte, error)
 		return nil, fmt.Errorf("ingest: unified diff %s...%s: %w", from, to, err)
 	}
 	return raw, nil
+}
+
+// CommitMessage returns the full commit message for the given revision (any
+// git ref: SHA, HEAD, branch, tag). It shells out to `git log -1 --format=%B`
+// following the same pattern as ChangedFiles and UnifiedDiff.
+func (r *Repo) CommitMessage(ctx context.Context, commit string) (string, error) {
+	if commit == "" {
+		return "", fmt.Errorf("ingest: CommitMessage requires a non-empty commit ref")
+	}
+	out, err := runGit(ctx, r.root, "log", "-1", "--format=%B", commit)
+	if err != nil {
+		return "", fmt.Errorf("ingest: commit message %s: %w", commit, err)
+	}
+	return strings.TrimRight(out, "\n"), nil
 }
 
 // ChangedPaths is a convenience that flattens a Change slice to the set of
