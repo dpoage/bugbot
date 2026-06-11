@@ -681,6 +681,87 @@ func TestDetectSuiteCmd(t *testing.T) {
 	}
 }
 
+// TestDetectSuiteCmdExtended covers the new build-system cases: Bazel,
+// go.work (with and without a root go.mod), and pnpm-workspace / turbo / nx.
+// The original marker table cases are unchanged and still tested above.
+func TestDetectSuiteCmdExtended(t *testing.T) {
+	cases := []struct {
+		name    string
+		markers []string // files to create
+		want    string   // "" means want nil
+	}{
+		// Bazel workspace → bazel test //...
+		{
+			name:    "MODULE.bazel",
+			markers: []string{"MODULE.bazel"},
+			want:    "bazel test //...",
+		},
+		{
+			name:    "WORKSPACE",
+			markers: []string{"WORKSPACE"},
+			want:    "bazel test //...",
+		},
+		{
+			name:    "WORKSPACE.bazel",
+			markers: []string{"WORKSPACE.bazel"},
+			want:    "bazel test //...",
+		},
+		// Bazel beats go.mod in priority.
+		{
+			name:    "Bazel+go.mod",
+			markers: []string{"MODULE.bazel", "go.mod"},
+			want:    "bazel test //...",
+		},
+		// go.work WITH root go.mod → go test ./...
+		{
+			name:    "go.work+go.mod",
+			markers: []string{"go.work", "go.mod"},
+			want:    "go test ./...",
+		},
+		// go.work WITHOUT root go.mod → nil (multi-module, out of scope).
+		{
+			name:    "go.work-only",
+			markers: []string{"go.work"},
+			want:    "",
+		},
+		// pnpm workspace → pnpm test.
+		{
+			name:    "pnpm-workspace.yaml",
+			markers: []string{"pnpm-workspace.yaml"},
+			want:    "pnpm test",
+		},
+		// turbo.json → npm test (closest portable default).
+		{
+			name:    "turbo.json",
+			markers: []string{"turbo.json"},
+			want:    "npm test",
+		},
+		// nx.json → npm test.
+		{
+			name:    "nx.json",
+			markers: []string{"nx.json"},
+			want:    "npm test",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, m := range tc.markers {
+				if err := os.WriteFile(filepath.Join(dir, m), []byte("x"), 0o644); err != nil {
+					t.Fatalf("write %s: %v", m, err)
+				}
+			}
+			got := detectSuiteCmd(dir)
+			gotStr := strings.Join(got, " ")
+			if gotStr != tc.want {
+				t.Errorf("markers %v: got %q, want %q", tc.markers, gotStr, tc.want)
+			}
+		})
+	}
+}
+
 // TestProve_SkipsWhenSuiteCmdUnknown pins the decline-don't-guess behavior: an
 // unidentifiable toolchain with no configured suite_cmd skips the prover
 // without flagging needs-human and without any sandbox execution.

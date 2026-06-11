@@ -23,6 +23,7 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -30,11 +31,21 @@ import (
 	"strings"
 )
 
+// queryRunner executes an external command in dir with the supplied args and
+// returns the command's stdout bytes. It is a function type so that tests can
+// inject fake tool output without needing a real bazel installation.
+type queryRunner func(ctx context.Context, dir string, args ...string) ([]byte, error)
+
 // Repo is a handle to an opened git repository. It is safe for concurrent use:
 // it holds only the immutable repository root path and runs git as a child
 // process per call.
+//
+// queryRunner is nil in production (Open leaves it unset). BlastRadius treats
+// nil as "use execQueryRunner with a LookPath pre-check." Tests inject a
+// non-nil runner to bypass both LookPath and the real bazel binary.
 type Repo struct {
-	root string
+	root        string
+	queryRunner queryRunner // nil = production (use execQueryRunner + LookPath guard)
 }
 
 // Open validates that path is inside a git working tree and returns a Repo
@@ -98,4 +109,30 @@ func runGitRaw(ctx context.Context, dir string, args ...string) ([]byte, error) 
 		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return []byte(stdout.String()), nil
+}
+
+// execQueryRunner is the production queryRunner implementation. It runs the
+// named tool with the given args in dir and returns its stdout bytes only.
+// Stderr is captured separately and included in the error message on failure
+// but never mixed into the returned bytes — callers parse stdout as structured
+// output (e.g. bazel query --output=package) and stderr pollution would corrupt
+// that parse. Callers are responsible for applying a context deadline before
+// invoking.
+func execQueryRunner(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("execQueryRunner: no args")
+	}
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return nil, fmt.Errorf("%s: %w: %s", args[0], err, msg)
+		}
+		return nil, fmt.Errorf("%s: %w", args[0], err)
+	}
+	return stdout.Bytes(), nil
 }
