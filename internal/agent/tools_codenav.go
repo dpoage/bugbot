@@ -62,6 +62,20 @@ type navigator interface {
 type CodeNav struct {
 	root *fsRoot
 	nav  navigator
+	// body is the syntactic backend used by read_symbol to pull a declaration's
+	// full body directly by name when the file's language is tree-sitter
+	// supported. It is the same backend the tiered navigator falls back to, held
+	// here so read_symbol can do an exact-body lookup without an LSP round trip.
+	// An interface so unit tests can script body locations without real grammars.
+	body tsBodyBackend
+}
+
+// tsBodyBackend is the slice of the tree-sitter backend read_symbol consumes: a
+// full-declaration-range lookup plus the language-support predicate. It is an
+// interface so the tool can be unit-tested without compiling real grammars.
+type tsBodyBackend interface {
+	DefinitionBodies(absPath, symbol string) (treesitter.Result, error)
+	Supports(path string) bool
 }
 
 // NewCodeNav creates the code-navigation tool bundle rooted at dir. No
@@ -76,16 +90,20 @@ func NewCodeNav(dir string) (*CodeNav, error) {
 	if err != nil {
 		return nil, err
 	}
-	nav := newTieredNavigator(&lspNavigator{mgr: lsp.NewManager(root.root)}, treesitter.New(root.root), root.root)
-	return &CodeNav{root: root, nav: nav}, nil
+	ts := treesitter.New(root.root)
+	nav := newTieredNavigator(&lspNavigator{mgr: lsp.NewManager(root.root)}, ts, root.root)
+	return &CodeNav{root: root, nav: nav, body: ts}, nil
 }
 
-// Tools returns the three navigation tools backed by this bundle.
+// Tools returns the navigation tools backed by this bundle: the three position
+// queries (find_definition / find_references / find_implementations) plus
+// read_symbol, which returns a located declaration's full body.
 func (c *CodeNav) Tools() []Tool {
 	return []Tool{
 		&codeNavTool{nav: c, kind: navDefinition},
 		&codeNavTool{nav: c, kind: navReferences},
 		&codeNavTool{nav: c, kind: navImplementations},
+		&readSymbolTool{nav: c},
 	}
 }
 
@@ -284,21 +302,29 @@ func (t *codeNavTool) render(locs []lsp.Location, caveat string) string {
 }
 
 // relPath maps an absolute result path to a repo-relative slash path,
-// reporting whether it lies inside the root. Containment must also hold after
-// symlink resolution: a symlink inside the repo pointing outside it would
-// otherwise pass the lexical check and leak external file content into the
-// excerpt rendered for the location.
+// reporting whether it lies inside the root. It delegates to the bundle's
+// containment check so find_definition and read_symbol share one symlink-safe
+// rule.
 func (t *codeNavTool) relPath(path string) (string, bool) {
+	return t.nav.relPath(path)
+}
+
+// relPath maps an absolute result path to a repo-relative slash path, reporting
+// whether it lies inside the root. Containment must also hold after symlink
+// resolution: a symlink inside the repo pointing outside it would otherwise
+// pass the lexical check and leak external file content into the excerpt
+// rendered for the location.
+func (c *CodeNav) relPath(path string) (string, bool) {
 	cleaned := filepath.Clean(path)
-	if !t.nav.root.contains(cleaned) {
+	if !c.root.contains(cleaned) {
 		return "", false
 	}
-	if resolved, err := t.nav.root.evalExistingPrefix(cleaned); err == nil {
-		if !t.nav.root.contains(resolved) {
+	if resolved, err := c.root.evalExistingPrefix(cleaned); err == nil {
+		if !c.root.contains(resolved) {
 			return "", false
 		}
 	}
-	rel, err := filepath.Rel(t.nav.root.root, cleaned)
+	rel, err := filepath.Rel(c.root.root, cleaned)
 	if err != nil {
 		return "", false
 	}
