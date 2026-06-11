@@ -26,7 +26,7 @@ import (
 // means a failed finder run loses the lead — accepted trade-off documented
 // here and in the store package. Leads targeting lenses not active this run
 // stay pending and are consumed when that lens next runs.
-func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, targets []string, budget *budgetState, result *Result) ([]Candidate, error) {
+func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, persona string, targets []string, budget *budgetState, result *Result) ([]Candidate, error) {
 	if len(targets) == 0 {
 		return nil, nil
 	}
@@ -168,7 +168,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			})
 			unitTools := append(baseTools, postLeadTool)
 
-			cands, status, err := f.runFinder(ctx, finder, unitTools, u.lens, u.files, u.leads, budget)
+			cands, status, err := f.runFinder(ctx, finder, unitTools, persona, u.lens, u.files, u.leads, budget)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -244,14 +244,14 @@ const (
 // by the budget pool / token budget, so an unparseable partial is expected). The
 // funnel surfaces parse failures so a scan never silently reports "No findings"
 // when a lens actually failed, while budget stops are accounted separately.
-func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, l Lens, files []string, leads []store.Lead, budget *budgetState) ([]Candidate, finderStatus, error) {
+func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, persona string, l Lens, files []string, leads []store.Lead, budget *budgetState) ([]Candidate, finderStatus, error) {
 	sink := f.opts.Progress
 	start := time.Now()
 	progress.Emit(sink, progress.Event{
 		Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: l.Name,
 	})
 
-	runner := agent.NewRunner(finder, tools, finderSystemPrompt(l),
+	runner := agent.NewRunner(finder, tools, finderSystemPrompt(persona, l),
 		agent.WithLimits(budget.runnerLimits(f.opts.FinderLimits)),
 		agent.WithMaxTokens(DefaultMaxOutputTokens),
 		f.transcriptOption(),

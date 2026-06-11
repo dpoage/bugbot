@@ -109,6 +109,12 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 
 	result := &Result{ScanRunID: scanRunID, Commit: snap.Commit}
 
+	// Derive the finder/verifier persona from the snapshot's dominant language
+	// mix so a non-Go repo is audited by an appropriately-described engineer
+	// rather than a hardcoded "senior Go engineer". Computed once per run and
+	// threaded into the per-unit prompt construction in hypothesize/verify.
+	persona := ingest.Persona(snap)
+
 	// Fingerprints anchor every persisted finding to the exact file content it
 	// was found in, so the daemon can later detect when the code changed.
 	fps, err := f.repo.Fingerprints(ctx, snap)
@@ -118,7 +124,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 
 	// Stage A — Hypothesize.
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageHypothesize})
-	candidates, err := f.hypothesize(ctx, scanRunID, finder, targets, budget, result)
+	candidates, err := f.hypothesize(ctx, scanRunID, finder, persona, targets, budget, result)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +151,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 
 	// Stage C — Verify.
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageVerify})
-	verified, killed, orphaned, err := f.verify(ctx, verifier, survivors, budget, result)
+	verified, killed, orphaned, err := f.verify(ctx, verifier, persona, survivors, budget, result)
 	if err != nil {
 		return nil, err
 	}

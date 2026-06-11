@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
@@ -198,7 +199,7 @@ type Plan struct {
 // promotion (tier + repro_path) and the Summary stay consistent. Callers using
 // Attempt directly are responsible for any store updates.
 func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (*Attempt, error) {
-	runner, err := r.newRunner()
+	runner, err := r.newRunner(ingest.DetectLanguage(finding.File))
 	if err != nil {
 		return nil, fmt.Errorf("repro: build agent runner: %w", err)
 	}
@@ -252,8 +253,9 @@ func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (*Attem
 }
 
 // newRunner builds a read-only agent runner rooted at the repo for the
-// reproducer role.
-func (r *Reproducer) newRunner() (*agent.Runner, error) {
+// reproducer role. lang is the finding's file language, used to seed the
+// language-specific test-framework guidance in the system prompt.
+func (r *Reproducer) newRunner(lang ingest.Language) (*agent.Runner, error) {
 	tools, err := readOnlyTools(r.repoDir)
 	if err != nil {
 		return nil, err
@@ -263,7 +265,7 @@ func (r *Reproducer) newRunner() (*agent.Runner, error) {
 	if r.opts.TranscriptDir != "" {
 		opts = append(opts, agent.WithTranscriptDir(r.opts.TranscriptDir))
 	}
-	return agent.NewRunner(r.client, tools, systemPrompt, opts...), nil
+	return agent.NewRunner(r.client, tools, systemPrompt(lang), opts...), nil
 }
 
 // readOnlyTools builds the read-only investigation tool set rooted at dir.
