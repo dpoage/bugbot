@@ -406,3 +406,71 @@ func TestPythonAndTypeScriptDefinitions(t *testing.T) {
 		t.Errorf("ts method def = %v, want app.ts:2", got)
 	}
 }
+
+// TestDefinitionBodiesDecoratorExtension verifies that DefinitionBodies extends
+// the body range upward to include decorator lines that precede the captured
+// node. The tree-sitter @definition capture for Python def/class starts at the
+// "def"/"class" keyword, excluding any preceding @decorator lines; TypeScript
+// method decorators are likewise excluded from the method_definition capture.
+// Without the decorator extension, @property/@app.route/@staticmethod etc.
+// would silently vanish from the rendered body — a correctness defect.
+//
+// Cases:
+//   - Python function with two decorators: decorator lines must be included
+//   - Python class with one decorator: decorator line must be included
+//   - TypeScript method with two decorators: decorator lines must be included
+//   - Undecorated Go function: range must not change (regression guard)
+func TestDefinitionBodiesDecoratorExtension(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		// Python: two decorators before a function (lines 1-2), function body
+		// on lines 3-4. A decorated class follows (decorator line 6, class 7-8).
+		"app.py": "@property\n" + // 1
+			"@staticmethod\n" + // 2
+			"def foo(self):\n" + // 3
+			"    return 1\n" + // 4
+			"\n" + // 5
+			"@dataclass\n" + // 6
+			"class Bar:\n" + // 7
+			"    x: int = 0\n", // 8
+		// TypeScript: two decorators before a method (lines 2-3), method body
+		// on lines 4-6, inside a class wrapper.
+		"app.ts": "class MyClass {\n" + // 1
+			"  @log\n" + // 2
+			"  @validate\n" + // 3
+			"  greet() {\n" + // 4
+			"    return 1;\n" + // 5
+			"  }\n" + // 6
+			"}\n", // 7
+		// Go: plain undecorated function — range must be unchanged.
+		"plain.go": "package main\n" + // 1
+			"\n" + // 2
+			"func Plain() int {\n" + // 3
+			"\treturn 42\n" + // 4
+			"}\n", // 5
+	})
+	b := New(root)
+
+	// Python decorated function: decorators on lines 1-2 must be included.
+	gotStart, gotEnd := bodyLineSpan(t, b, filepath.Join(root, "app.py"), "foo")
+	if gotStart != 1 || gotEnd != 4 {
+		t.Errorf("Python decorated func foo: span = %d-%d, want 1-4 (decorators included)", gotStart, gotEnd)
+	}
+
+	// Python decorated class: decorator on line 6 must be included.
+	gotStart, gotEnd = bodyLineSpan(t, b, filepath.Join(root, "app.py"), "Bar")
+	if gotStart != 6 || gotEnd != 8 {
+		t.Errorf("Python decorated class Bar: span = %d-%d, want 6-8 (decorator included)", gotStart, gotEnd)
+	}
+
+	// TypeScript decorated method: decorators on lines 2-3 must be included.
+	gotStart, gotEnd = bodyLineSpan(t, b, filepath.Join(root, "app.ts"), "greet")
+	if gotStart != 2 || gotEnd != 6 {
+		t.Errorf("TS decorated method greet: span = %d-%d, want 2-6 (decorators included)", gotStart, gotEnd)
+	}
+
+	// Undecorated Go function: body range must be unchanged (regression guard).
+	gotStart, gotEnd = bodyLineSpan(t, b, filepath.Join(root, "plain.go"), "Plain")
+	if gotStart != 3 || gotEnd != 5 {
+		t.Errorf("Go undecorated func Plain: span = %d-%d, want 3-5 (no change)", gotStart, gotEnd)
+	}
+}

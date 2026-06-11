@@ -437,16 +437,67 @@ func toLocations(tags []tag) []lsp.Location {
 // WHOLE declaration node (gts.Tag.Range, the @definition.X capture), so a caller
 // can render the full body. This is the only difference from toLocations, which
 // uses the name range.
+//
+// It also extends each location's start row upward to include any contiguous
+// decorator lines that precede the captured node. The tree-sitter @definition
+// capture for Python def/class nodes starts at the "def"/"class" keyword —
+// the decorated_definition parent node (which owns the @decorator children) is
+// not captured. TypeScript method decorators are also excluded from the
+// method_definition capture. Since gts.Tag exposes only the byte/row/column
+// Range of the captured node (no parent-node handle), we use a line-based scan:
+// starting from the line immediately above the captured start, we scan backward
+// over contiguous lines whose first non-whitespace character is '@', extending
+// the range to include all of them (bounded to decoratorMaxLookback lines).
 func toBodyLocations(tags []tag) []lsp.Location {
 	out := make([]lsp.Location, 0, len(tags))
 	for _, t := range tags {
+		startRow := decoratorAdjustedStart(t.path, t.Range.StartPoint.Row)
 		out = append(out, lsp.Location{
 			URI: lsp.URIFromPath(t.path),
 			Range: lsp.Range{
-				Start: lsp.Position{Line: int(t.Range.StartPoint.Row), Character: int(t.Range.StartPoint.Column)},
+				Start: lsp.Position{Line: int(startRow), Character: 0},
 				End:   lsp.Position{Line: int(t.Range.EndPoint.Row), Character: int(t.Range.EndPoint.Column)},
 			},
 		})
 	}
 	return out
+}
+
+// decoratorMaxLookback is the maximum number of lines we scan backward from a
+// definition's start looking for decorator lines. 16 covers any realistic
+// decorator stack in Python or TypeScript.
+const decoratorMaxLookback = 16
+
+// decoratorAdjustedStart returns the 0-based row at which the declaration
+// actually begins, extended upward over any contiguous decorator lines that
+// immediately precede bodyStartRow. A decorator line is one whose first
+// non-whitespace character is '@'. If the file cannot be read (already
+// parsed successfully above, so this is an unexpected edge case) or no
+// decorators are found, bodyStartRow is returned unchanged.
+func decoratorAdjustedStart(path string, bodyStartRow uint32) uint32 {
+	if bodyStartRow == 0 {
+		return bodyStartRow
+	}
+	src, ok := readSource(path)
+	if !ok {
+		return bodyStartRow
+	}
+	lines := bytes.Split(src, []byte("\n"))
+	// bodyStartRow is 0-based. Scan from row bodyStartRow-1 upward.
+	firstRow := bodyStartRow
+	for lookback := 1; lookback <= decoratorMaxLookback; lookback++ {
+		if bodyStartRow < uint32(lookback) {
+			break
+		}
+		row := bodyStartRow - uint32(lookback)
+		if row >= uint32(len(lines)) {
+			break
+		}
+		trimmed := bytes.TrimLeft(lines[row], " \t")
+		if len(trimmed) == 0 || trimmed[0] != '@' {
+			break
+		}
+		firstRow = row
+	}
+	return firstRow
 }

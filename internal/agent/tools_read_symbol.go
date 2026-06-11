@@ -96,6 +96,10 @@ func (t *readSymbolTool) Run(ctx context.Context, raw json.RawMessage) (string, 
 // runExact handles tree-sitter-supported files: it pulls the declaration's full
 // node range and renders those lines, then lists any other same-named
 // candidates so the model can re-query an ambiguous name.
+//
+// read_symbol intentionally bypasses LSP for tree-sitter-supported languages
+// (syntactic exactness + no server dependency), unlike find_definition which
+// is LSP-first.
 func (t *readSymbolTool) runExact(abs string, args codeNavArgs) (string, error) {
 	res, err := t.nav.body.DefinitionBodies(abs, strings.TrimSpace(strings.TrimSuffix(args.Symbol, "()")))
 	if err != nil {
@@ -109,12 +113,17 @@ func (t *readSymbolTool) runExact(abs string, args codeNavArgs) (string, error) 
 		return readSymbolNotFound(args), nil
 	}
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s:%d-%d (%s)\n", rel, best.Range.Start.Line+1, best.Range.End.Line+1, args.Symbol)
-	body, err := renderBodyRange(t.repoPath(best), best.Range.Start.Line+1, best.Range.End.Line+1)
+	startLine := best.Range.Start.Line + 1
+	requestedEnd := best.Range.End.Line + 1
+	body, actualEnd, err := renderBodyRange(t.repoPath(best), startLine, requestedEnd)
 	if err != nil {
 		return "", err
 	}
+
+	var b strings.Builder
+	// Use actualEnd (the clamped, possibly truncated end) so the header span
+	// matches the lines that renderBodyRange actually emitted.
+	fmt.Fprintf(&b, "%s:%d-%d (%s)\n", rel, startLine, actualEnd, args.Symbol)
 	b.WriteString(body)
 
 	if len(res.Locations) > 1 {
@@ -157,7 +166,7 @@ func (t *readSymbolTool) runWindow(ctx context.Context, abs string, args codeNav
 		fmt.Fprintf(&b, "%s\n", res.Caveat)
 	}
 	fmt.Fprintf(&b, "%s:%d (definition of %s)\n", rel, startLine, args.Symbol)
-	body, err := renderBodyRange(t.repoPath(best), startLine, endLine)
+	body, _, err := renderBodyRange(t.repoPath(best), startLine, endLine)
 	if err != nil {
 		return "", err
 	}
@@ -226,17 +235,21 @@ func writeOtherCandidates(b *strings.Builder, nav *CodeNav, locs []lsp.Location,
 // [startLine, endLine] as numbered lines, applying the read_symbol line/byte
 // caps. The numbering mirrors read_file (line number, tab, source), so the model
 // sees consistent, absolute line numbers it can hand to read_file.
-func renderBodyRange(abs string, startLine, endLine int) (string, error) {
+//
+// It returns the rendered text, the actual last line number emitted (which may
+// be less than endLine after file-length clamping or line/byte cap truncation),
+// and any error.
+func renderBodyRange(abs string, startLine, endLine int) (string, int, error) {
 	info, err := os.Stat(abs)
 	if err != nil {
-		return "", fmt.Errorf("cannot read file: %w", err)
+		return "", 0, fmt.Errorf("cannot read file: %w", err)
 	}
 	if info.Size() > codeNavMaxFileBytes {
-		return "", fmt.Errorf("file is too large for read_symbol (%d bytes)", info.Size())
+		return "", 0, fmt.Errorf("file is too large for read_symbol (%d bytes)", info.Size())
 	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
-		return "", fmt.Errorf("cannot read file: %w", err)
+		return "", 0, fmt.Errorf("cannot read file: %w", err)
 	}
 	lines := strings.Split(string(data), "\n")
 	if n := len(lines); n > 0 && lines[n-1] == "" {
@@ -251,7 +264,7 @@ func renderBodyRange(abs string, startLine, endLine int) (string, error) {
 		endLine = total
 	}
 	if startLine > total {
-		return "(definition line is past the end of the file)\n", nil
+		return "(definition line is past the end of the file)\n", startLine, nil
 	}
 
 	// Apply the line cap up front so the printed line-number width matches the
@@ -282,7 +295,7 @@ func renderBodyRange(abs string, startLine, endLine int) (string, error) {
 	if lineTruncated || byteTruncated {
 		fmt.Fprintf(&b, "… [truncated at line %d — call read_file with offset=%d to continue]\n", last, last+1)
 	}
-	return b.String(), nil
+	return b.String(), last, nil
 }
 
 // readSymbolNotFound is the ERROR result when no in-root definition was located,
