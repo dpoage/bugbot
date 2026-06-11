@@ -122,7 +122,9 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 				// Compact before the finalization turn too: it is often the largest
 				// history of the run, and the model needs only its own reasoning chain
 				// (preserved) to emit the answer, not every earlier file dump.
-				messages, compactThreshold = r.maybeCompact(messages, compactThreshold, toolNameByID)
+				// The re-armed threshold is discarded: this is the run's final
+				// turn, so no later compaction can fire.
+				messages, _ = r.maybeCompact(messages, compactThreshold, toolNameByID)
 				resp, err := r.completeOnce(ctx, tr, &messages, outcome, true)
 				if err != nil {
 					r.autosave(tr, task)
