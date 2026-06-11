@@ -41,6 +41,21 @@ type SpendTotals struct {
 // included in InputTokens, so they are deliberately not added here.
 func (t SpendTotals) Total() int64 { return t.InputTokens + t.OutputTokens }
 
+// Chargeable returns the cache-discounted token total for budget gating:
+// uncached input + cacheRead*weight + output. weight<=0 falls back to 1.0
+// (raw). Mirrors llm.Usage.ChargeableTokens so per-cycle and per-day budgets
+// use the same accounting.
+func (t SpendTotals) Chargeable(cacheReadWeight float64) int64 {
+	if cacheReadWeight <= 0 {
+		cacheReadWeight = 1.0
+	}
+	uncached := t.InputTokens - t.CacheReadTokens
+	if uncached < 0 {
+		uncached = 0
+	}
+	return uncached + int64(float64(t.CacheReadTokens)*cacheReadWeight) + t.OutputTokens
+}
+
 // RecordSpend appends a ledger entry. If s.TS is zero it is set to now. The
 // generated id is returned. ScanRunID may be empty for spend not tied to a run.
 func (s *Store) RecordSpend(ctx context.Context, sp Spend) (string, error) {

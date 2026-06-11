@@ -112,13 +112,14 @@ func newScanCmd() *cobra.Command {
 			}
 
 			opts := funnel.Options{
-				Lenses:      lenses,
-				Filter:      ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
-				Refuters:    refuters,
-				MaxParallel: concurrency,
-				TokenBudget: cfg.Budgets.PerCycleTokens,
-				Progress:    progressSink,
-				SandboxOpts: sandboxOpts,
+				Lenses:                lenses,
+				Filter:                ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
+				Refuters:              refuters,
+				MaxParallel:           concurrency,
+				TokenBudget:           cfg.Budgets.PerCycleTokens,
+				CacheReadBudgetWeight: cfg.Budgets.CacheReadWeight,
+				Progress:              progressSink,
+				SandboxOpts:           sandboxOpts,
 			}
 			f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
 			if err != nil {

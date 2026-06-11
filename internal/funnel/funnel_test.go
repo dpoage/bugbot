@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -372,7 +373,7 @@ func TestRunFinder_BudgetStopNotParseFailure(t *testing.T) {
 	// Build a budget pool that is already exhausted, so every runner launched
 	// against it stops on its first pre-turn check.
 	rec := &spendRecorder{ctx: ctx, store: st}
-	budget := newBudgetState(100, rec)
+	budget := newBudgetState(100, rec, 1.0)
 	budget.pool.Add(100) // spend == limit => Check returns ErrBudgetExhausted
 
 	cands, status, err := f.runFinder(ctx, finder, tools, f.lenses[0], []string{"bug.go"}, nil, budget)
@@ -410,7 +411,7 @@ func TestRunFinder_ParseFailureStillCounts(t *testing.T) {
 	// Unlimited pool: the finder runs, returns prose, RunJSON's parse+repair both
 	// fail, and the run was never budget-truncated.
 	rec := &spendRecorder{ctx: ctx, store: st}
-	budget := newBudgetState(0, rec)
+	budget := newBudgetState(0, rec, 1.0)
 
 	_, status, err := f.runFinder(ctx, finder, tools, f.lenses[0], []string{"bug.go"}, nil, budget)
 	if err != nil {
@@ -630,8 +631,9 @@ func TestSweep_BudgetDegradation(t *testing.T) {
 	verifier.fallback = notRefutedJSON
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		TokenBudget: 600, // ~4 completions before soft threshold (70% of 600 = 420)
-		MaxParallel: 1,   // serialize so budget accrues deterministically
+		TokenBudget:           600, // ~4 completions before soft threshold (70% of 600 = 420)
+		CacheReadBudgetWeight: 1.0, // raw accounting: this test pins the degradation mechanism, not weighting
+		MaxParallel:           1,   // serialize so budget accrues deterministically
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -673,9 +675,10 @@ func TestSweep_BudgetOrphanPersistsAsTier3(t *testing.T) {
 	verifier.fallback = notRefutedJSON
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses:      []string{"nil-safety/error-handling"},
-		TokenBudget: 100, // < 150, so the pool is exhausted after the finder call
-		MaxParallel: 1,
+		Lenses:                []string{"nil-safety/error-handling"},
+		TokenBudget:           100, // < 150, so the pool is exhausted after the finder call
+		CacheReadBudgetWeight: 1.0, // raw accounting: this test pins hard-stop, not weighting
+		MaxParallel:           1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -735,5 +738,25 @@ func TestSweep_BudgetOrphanPersistsAsTier3(t *testing.T) {
 	}
 	if len(stored) != 1 {
 		t.Fatalf("store has %d open T3 findings, want 1", len(stored))
+	}
+}
+
+// TestBudgetState_CacheReadWeighted pins bugbot-16k: cache-read tokens are
+// discounted when charging the shared budget pool, so a cache-heavy run does
+// not exhaust the budget at a fraction of real cost.
+func TestBudgetState_CacheReadWeighted(t *testing.T) {
+	st, _ := openFixture(t)
+	rec := &spendRecorder{ctx: context.Background(), store: st}
+	// Budget 2000; weight 0.1. A completion of 5000 input (4500 cached) + 100
+	// out charges 500 uncached + 4500*0.1=450 + 100 out = 1050 chargeable, NOT
+	// the raw 5100. So the pool is NOT exhausted; with raw accounting it would
+	// be (5100 > 2000).
+	b := newBudgetState(2000, rec, 0.1)
+	rec.Record(llm.UsageEvent{Usage: llm.Usage{InputTokens: 5000, OutputTokens: 100, CacheReadInputTokens: 4500}})
+	if err := b.pool.Check(); err != nil {
+		t.Fatalf("pool exhausted after a mostly-cached completion: spent=%d (raw would be 5100), err=%v", b.pool.Spent(), err)
+	}
+	if spent := b.pool.Spent(); spent != 1050 {
+		t.Errorf("pool charged %d, want 1050 (500 + 4500*0.1 + 100)", spent)
 	}
 }

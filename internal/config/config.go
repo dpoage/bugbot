@@ -59,6 +59,11 @@ type Roles struct {
 type Budgets struct {
 	PerCycleTokens int64 `yaml:"per_cycle_tokens"`
 	PerDayTokens   int64 `yaml:"per_day_tokens"`
+	// CacheReadWeight discounts cache-read input tokens against the token
+	// budgets (0..1). Cache reads bill at a fraction of full price; counting
+	// them at full weight exhausts the budget far faster than real cost. Zero
+	// uses the funnel default (~0.1). Set to 1.0 for raw-token accounting.
+	CacheReadWeight float64 `yaml:"cache_read_weight"`
 }
 
 // Scan controls which files are considered during ingest/scan.
@@ -200,8 +205,9 @@ func Default() Config {
 	return Config{
 		Providers: map[string]Provider{},
 		Budgets: Budgets{
-			PerCycleTokens: 200_000,
-			PerDayTokens:   5_000_000,
+			PerCycleTokens:  200_000,
+			PerDayTokens:    5_000_000,
+			CacheReadWeight: 0.1,
 		},
 		Scan: Scan{
 			Include: []string{"**/*"},
@@ -287,6 +293,7 @@ func Load(path string) (Config, error) {
 //	BUGBOT_STORAGE_PATH
 //	BUGBOT_REPORT_DIR
 //	BUGBOT_BUDGETS_PER_CYCLE_TOKENS
+//	BUGBOT_BUDGETS_CACHE_READ_WEIGHT
 //	BUGBOT_BUDGETS_PER_DAY_TOKENS
 //	BUGBOT_SANDBOX_RUNTIME
 //	BUGBOT_SANDBOX_IMAGE
@@ -356,6 +363,16 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		}
 		return nil
 	}
+	setFloat64 := func(key string, dst *float64) error {
+		if v, ok := env[key]; ok {
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				return fmt.Errorf("%s: %w", key, err)
+			}
+			*dst = f
+		}
+		return nil
+	}
 	setDur := func(key string, dst *time.Duration) error {
 		if v, ok := env[key]; ok {
 			d, err := time.ParseDuration(v)
@@ -400,6 +417,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	for _, err := range []error{
 		setInt64("BUGBOT_BUDGETS_PER_CYCLE_TOKENS", &cfg.Budgets.PerCycleTokens),
 		setInt64("BUGBOT_BUDGETS_PER_DAY_TOKENS", &cfg.Budgets.PerDayTokens),
+		setFloat64("BUGBOT_BUDGETS_CACHE_READ_WEIGHT", &cfg.Budgets.CacheReadWeight),
 		setInt("BUGBOT_SANDBOX_CPUS", &cfg.Sandbox.CPUs),
 		setInt("BUGBOT_SANDBOX_MEMORY_MB", &cfg.Sandbox.MemoryMB),
 		setInt("BUGBOT_SANDBOX_TIMEOUT_SECONDS", &cfg.Sandbox.TimeoutSeconds),
@@ -505,6 +523,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: verify.sandbox_max_execs must be >= 1 (got %d)", c.Verify.SandboxMaxExecs)
 	}
 
+	if c.Budgets.CacheReadWeight < 0 || c.Budgets.CacheReadWeight > 1 {
+		return fmt.Errorf("config: budgets.cache_read_weight %.3f invalid (want 0..1)", c.Budgets.CacheReadWeight)
+	}
 	if c.Publish.TierMin < 0 || c.Publish.TierMin > 3 {
 		return fmt.Errorf("config: publish.tier_min %d invalid (want 0..3)", c.Publish.TierMin)
 	}

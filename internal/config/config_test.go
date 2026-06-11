@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -297,5 +298,37 @@ func TestStarterYAMLIsValid(t *testing.T) {
 	path := writeTemp(t, StarterYAML)
 	if _, err := Load(path); err != nil {
 		t.Fatalf("StarterYAML failed to load/validate: %v", err)
+	}
+}
+
+func TestValidate_CacheReadWeightBounds(t *testing.T) {
+	load := func(t *testing.T, w float64) *Config {
+		t.Helper()
+		cfg, err := Load(writeTemp(t, validYAML))
+		if err != nil {
+			t.Fatalf("load baseline: %v", err)
+		}
+		cfg.Budgets.CacheReadWeight = w
+		return &cfg
+	}
+	for _, w := range []float64{-0.1, 1.1, 2.0} {
+		if err := load(t, w).Validate(); err == nil || !strings.Contains(err.Error(), "cache_read_weight") {
+			t.Errorf("cache_read_weight=%v should be rejected, got %v", w, err)
+		}
+	}
+	for _, w := range []float64{0, 0.1, 0.5, 1.0} {
+		if err := load(t, w).Validate(); err != nil {
+			t.Errorf("cache_read_weight=%v should be valid, got %v", w, err)
+		}
+	}
+}
+
+func TestEnvOverride_CacheReadWeight(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_BUDGETS_CACHE_READ_WEIGHT=0.25"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Budgets.CacheReadWeight != 0.25 {
+		t.Errorf("env override = %v, want 0.25", cfg.Budgets.CacheReadWeight)
 	}
 }

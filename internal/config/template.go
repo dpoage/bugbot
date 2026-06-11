@@ -53,6 +53,9 @@ roles:
 budgets:
   per_cycle_tokens: 200000
   per_day_tokens: 5000000
+  # cache reads bill at a fraction of full price; weight them ~0.1 against
+  # the token budgets so a cache-heavy run isn't throttled by cheap tokens.
+  cache_read_weight: 0.1
 
 # ---------------------------------------------------------------------------
 # scan: path globs (relative to the target repo root) selecting files to
