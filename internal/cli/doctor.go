@@ -91,6 +91,10 @@ never affect the exit code.`,
 				lookPath:   exec.LookPath,
 				runCommand: func(ctx context.Context, name string, args ...string) (string, error) {
 					c := exec.CommandContext(ctx, name, args...)
+					// A killed child can leave a grandchild holding the output
+					// pipes, blocking CombinedOutput past ctx cancellation;
+					// WaitDelay bounds that wait so probes cannot wedge doctor.
+					c.WaitDelay = 2 * time.Second
 					out, err := c.CombinedOutput()
 					return string(out), err
 				},
@@ -168,7 +172,12 @@ func runChecks(ctx context.Context, env doctorEnv) []checkResult {
 // checkConfig loads and validates the config file. Returns the result, the
 // loaded config (zero on failure), and whether the load succeeded.
 func checkConfig(env doctorEnv) (checkResult, config.Config, bool) {
-	abs, _ := filepath.Abs(env.configPath)
+	// Abs can only fail if the working directory is gone; fall back to the
+	// raw path in the detail line rather than failing the check over it.
+	abs, absErr := filepath.Abs(env.configPath)
+	if absErr != nil {
+		abs = env.configPath
+	}
 	cfg, err := config.Load(env.configPath)
 	if err != nil {
 		return checkResult{
@@ -219,9 +228,16 @@ func checkProviders(env doctorEnv, cfg config.Config) []checkResult {
 	return out
 }
 
-// sandboxProbeTimeout bounds how long we wait for `<runtime> info` to respond.
-// A wedged runtime must not hang doctor.
+// sandboxProbeTimeout bounds how long we wait for each runtime probe
+// (`<runtime> info`, `<runtime> image inspect`). A wedged runtime must not
+// hang doctor.
 const sandboxProbeTimeout = 5 * time.Second
+
+// repoFactsTimeout bounds the informational repo-facts group (git rev-parse
+// plus the ingest snapshot, which walks every tracked file). Generous because
+// snapshotting a large repo legitimately takes time, but finite because an
+// informational check must never wedge doctor.
+const repoFactsTimeout = 30 * time.Second
 
 // checkSandbox checks the sandbox runtime binary, its responsiveness, and
 // whether the configured image is present locally. Binary absent and runtime
@@ -288,8 +304,12 @@ func checkSandbox(ctx context.Context, env doctorEnv, cfg config.Config) []check
 
 	// 3c. Image present locally? Non-zero exit from image inspect means absent.
 	// We discard the output (can be large JSON); only the exit status matters.
+	// Bounded like the info probe: a runtime that answers `info` but wedges on
+	// `image inspect` must not hang doctor either.
 	image := cfg.Sandbox.Image
-	_, imgErr := env.runCommand(ctx, rt, "image", "inspect", image)
+	imgCtx, imgCancel := context.WithTimeout(ctx, sandboxProbeTimeout)
+	defer imgCancel()
+	_, imgErr := env.runCommand(imgCtx, rt, "image", "inspect", image)
 	if imgErr != nil {
 		results = append(results, checkResult{
 			Name:   "sandbox image",
@@ -311,6 +331,12 @@ func checkSandbox(ctx context.Context, env doctorEnv, cfg config.Config) []check
 // (for downstream checks), and the detected build systems.
 func checkRepo(ctx context.Context, env doctorEnv, cfg config.Config, cfgOK bool) ([]checkResult, []ingest.Language, []ingest.BuildSystem) {
 	var results []checkResult
+
+	// The cobra context carries no deadline, and these checks are purely
+	// informational — a hung git or filesystem must not wedge doctor, so the
+	// whole group (rev-parse + snapshot) shares one bounded context.
+	ctx, cancel := context.WithTimeout(ctx, repoFactsTimeout)
+	defer cancel()
 
 	// 4a. Is repoDir a git repo?
 	_, gitErr := env.runCommand(ctx, "git", "-C", env.repoDir, "rev-parse", "--git-dir")

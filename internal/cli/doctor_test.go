@@ -109,12 +109,6 @@ func TestDoctor_AllGreen(t *testing.T) {
 			t.Errorf("all-green: unexpected FAIL on hard check %q: %s", r.Name, r.Detail)
 		}
 	}
-	// The cobra path must also return nil.
-	out, err := run(t, cfgPath, "doctor")
-	_ = out
-	// It is fine if err is non-nil for doctor because the environment may not
-	// have real podman on CI; we only test the check-runner path here.
-	_ = err
 }
 
 // TestDoctor_UnsetAPIKey checks that a missing API key env var causes a FAIL
@@ -352,20 +346,29 @@ func TestDoctor_ImageAbsent(t *testing.T) {
 	}
 }
 
-// TestDoctor_CobraPath exercises the full cobra command path to cover exit-code
-// wiring. Uses the all-green fakes but goes through run(), which calls
-// NewRootCmd().Execute(). We drive it at the check-runner level via runChecks
-// instead of going through cobra's Execute() path, since inject-able fakes are
-// only available on the struct. The cobra path is covered by TestDoctor_AllGreen
-// calling run(); here we test the check->error propagation directly.
+// TestDoctor_CobraPath exercises the full cobra command path (run() goes
+// through NewRootCmd().Execute()) to cover exit-code wiring. The injectable
+// fakes live inside RunE, so the cobra path runs against the real host
+// environment — assertions must therefore be host-independent. An invalid
+// config is the one hard failure we can force deterministically: doctor must
+// print the FAIL config line and return a non-nil error on every host.
 func TestDoctor_CobraPath(t *testing.T) {
-	cfgPath := writeDoctorConfig(t)
+	badPath := filepath.Join(t.TempDir(), "bugbot.yaml")
+	if err := os.WriteFile(badPath, []byte(":::not yaml:::"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, badPath, "doctor")
+	if err == nil {
+		t.Error("cobra doctor with invalid config must return a non-nil error (nonzero exit)")
+	}
+	if !strings.Contains(out, "FAIL") || !strings.Contains(out, "config") {
+		t.Errorf("cobra doctor output missing FAIL config line:\n%s", out)
+	}
 
-	// Drive the cobra path. In CI the environment may not have podman, so we
-	// only assert that the command itself runs (no panic, returns an error or
-	// nil). We don't assert the exit code here since it depends on the real env.
-	out, _ := run(t, cfgPath, "doctor")
-	// The output must at least contain one of our known check names.
+	// A valid config on an arbitrary host may pass or fail (podman, keys, …);
+	// just assert the command runs and prints the checklist.
+	cfgPath := writeDoctorConfig(t)
+	out, _ = run(t, cfgPath, "doctor")
 	if !strings.Contains(out, "config") {
 		t.Errorf("cobra doctor output missing 'config' check line:\n%s", out)
 	}

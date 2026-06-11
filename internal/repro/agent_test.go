@@ -34,28 +34,36 @@ func TestSystemPrompt_PythonGuidance(t *testing.T) {
 	}
 }
 
-// TestHasGuidance verifies that HasGuidance agrees with langGuidance: every
-// language for which langGuidance returns specific (non-generic) text is
-// reported true, and unrecognised languages are false. This pins the shared
-// definition: if a language is added to langGuidance without updating
-// specificGuidanceLangs, this test catches the divergence.
+// TestHasGuidance verifies that HasGuidance agrees with langGuidance for every
+// declared language: HasGuidance(l) must be true exactly when langGuidance(l)
+// returns something other than the generic fallback. Both read the shared
+// specificGuidance map, so divergence is structurally impossible — this test
+// pins that property against a future refactor splitting them apart, and pins
+// the expected membership so an accidental map edit is caught.
 func TestHasGuidance(t *testing.T) {
-	specific := []ingest.Language{
+	generic := langGuidance(ingest.Language("no-such-language"))
+	all := []ingest.Language{
 		ingest.LangGo, ingest.LangPython, ingest.LangJavaScript,
-		ingest.LangTypeScript, ingest.LangRust,
+		ingest.LangTypeScript, ingest.LangRust, ingest.LangJava,
+		ingest.LangC, ingest.LangCPP, ingest.LangRuby, ingest.LangCSharp,
+		ingest.LangPHP, ingest.LangSwift, ingest.LangKotlin,
+		ingest.LangShell, ingest.LangOther,
 	}
-	for _, lang := range specific {
-		if !HasGuidance(lang) {
-			t.Errorf("HasGuidance(%s) = false, want true (langGuidance returns specific text)", lang)
+	for _, lang := range all {
+		want := langGuidance(lang) != generic
+		if got := HasGuidance(lang); got != want {
+			t.Errorf("HasGuidance(%s) = %v, but langGuidance specific-text presence = %v", lang, got, want)
 		}
 	}
-	generic := []ingest.Language{
-		ingest.LangJava, ingest.LangC, ingest.LangCPP, ingest.LangRuby,
-		ingest.LangOther,
+
+	// Pin the expected membership itself, not just internal consistency.
+	wantSpecific := map[ingest.Language]bool{
+		ingest.LangGo: true, ingest.LangPython: true, ingest.LangJavaScript: true,
+		ingest.LangTypeScript: true, ingest.LangRust: true,
 	}
-	for _, lang := range generic {
-		if HasGuidance(lang) {
-			t.Errorf("HasGuidance(%s) = true, want false (langGuidance returns generic fallback)", lang)
+	for _, lang := range all {
+		if got := HasGuidance(lang); got != wantSpecific[lang] {
+			t.Errorf("HasGuidance(%s) = %v, want %v", lang, got, wantSpecific[lang])
 		}
 	}
 }
