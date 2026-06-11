@@ -11,34 +11,53 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
+// jsTSGuidance is shared by JavaScript and TypeScript, which use the same test
+// runners.
+const jsTSGuidance = "For JavaScript/TypeScript, write a\n" +
+	"  *.test.(js|ts) file using the repository's existing test runner and run\n" +
+	"  just it, e.g. " + "`npx vitest run <file>`" + " or " + "`npm test -- -t <name>`" + "."
+
+// genericGuidance is the fallback for languages with no specific entry, so a
+// repro is still attemptable in a language we have no guidance for.
+const genericGuidance = "Use the repository's standard test framework for its language: write the\n" +
+	"  smallest test in the conventional location and run just that test."
+
+// specificGuidance is the per-language test-framework guidance spliced into
+// the reproducer system prompt. It is the single source of truth for which
+// languages have specific guidance: langGuidance reads the text from it and
+// HasGuidance reports membership, so the two cannot drift. The Go text is
+// verbatim from the original prompt; the others give the idiomatic test file +
+// run command for each ecosystem.
+var specificGuidance = map[ingest.Language]string{
+	ingest.LangGo: "For Go, write a\n" +
+		"  *_test.go file in the package that contains the bug and run it with\n" +
+		"  " + "`go test -run <TestName> ./<pkg>`" + " (or the module path that targets it).",
+	ingest.LangPython: "For Python, write a\n" +
+		"  test_*.py file (pytest style) next to or under the package with the bug\n" +
+		"  and run it with " + "`pytest -k <test_name> <path>`" + ".",
+	ingest.LangJavaScript: jsTSGuidance,
+	ingest.LangTypeScript: jsTSGuidance,
+	ingest.LangRust: "For Rust, add a\n" +
+		"  " + "`#[test]`" + " function (in the crate with the bug or a tests/ file) and run it\n" +
+		"  with " + "`cargo test <test_name>`" + ".",
+}
+
+// HasGuidance reports whether lang has language-specific repro guidance in
+// langGuidance (as opposed to the generic fallback). Doctor and the setup
+// wizard call this to warn when a dominant language lacks specific guidance,
+// reading the live table rather than maintaining a parallel list.
+func HasGuidance(lang ingest.Language) bool {
+	_, ok := specificGuidance[lang]
+	return ok
+}
+
 // langGuidance returns the one-line test-framework guidance spliced into the
-// reproducer system prompt for the finding's language. The Go text is verbatim
-// from the original prompt; the others give the idiomatic test file + run
-// command for each ecosystem. Anything unrecognized falls back to a generic
-// "use the repository's standard test framework" instruction so a repro is
-// still attemptable in a language we have no specific guidance for.
+// reproducer system prompt for the finding's language.
 func langGuidance(lang ingest.Language) string {
-	switch lang {
-	case ingest.LangGo:
-		return "For Go, write a\n" +
-			"  *_test.go file in the package that contains the bug and run it with\n" +
-			"  " + "`go test -run <TestName> ./<pkg>`" + " (or the module path that targets it)."
-	case ingest.LangPython:
-		return "For Python, write a\n" +
-			"  test_*.py file (pytest style) next to or under the package with the bug\n" +
-			"  and run it with " + "`pytest -k <test_name> <path>`" + "."
-	case ingest.LangJavaScript, ingest.LangTypeScript:
-		return "For JavaScript/TypeScript, write a\n" +
-			"  *.test.(js|ts) file using the repository's existing test runner and run\n" +
-			"  just it, e.g. " + "`npx vitest run <file>`" + " or " + "`npm test -- -t <name>`" + "."
-	case ingest.LangRust:
-		return "For Rust, add a\n" +
-			"  " + "`#[test]`" + " function (in the crate with the bug or a tests/ file) and run it\n" +
-			"  with " + "`cargo test <test_name>`" + "."
-	default:
-		return "Use the repository's standard test framework for its language: write the\n" +
-			"  smallest test in the conventional location and run just that test."
+	if g, ok := specificGuidance[lang]; ok {
+		return g
 	}
+	return genericGuidance
 }
 
 // systemPrompt instructs the reproducer agent to produce a MINIMAL,

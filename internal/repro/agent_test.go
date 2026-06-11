@@ -34,6 +34,40 @@ func TestSystemPrompt_PythonGuidance(t *testing.T) {
 	}
 }
 
+// TestHasGuidance verifies that HasGuidance agrees with langGuidance for every
+// declared language: HasGuidance(l) must be true exactly when langGuidance(l)
+// returns something other than the generic fallback. Both read the shared
+// specificGuidance map, so divergence is structurally impossible — this test
+// pins that property against a future refactor splitting them apart, and pins
+// the expected membership so an accidental map edit is caught.
+func TestHasGuidance(t *testing.T) {
+	generic := langGuidance(ingest.Language("no-such-language"))
+	all := []ingest.Language{
+		ingest.LangGo, ingest.LangPython, ingest.LangJavaScript,
+		ingest.LangTypeScript, ingest.LangRust, ingest.LangJava,
+		ingest.LangC, ingest.LangCPP, ingest.LangRuby, ingest.LangCSharp,
+		ingest.LangPHP, ingest.LangSwift, ingest.LangKotlin,
+		ingest.LangShell, ingest.LangOther,
+	}
+	for _, lang := range all {
+		want := langGuidance(lang) != generic
+		if got := HasGuidance(lang); got != want {
+			t.Errorf("HasGuidance(%s) = %v, but langGuidance specific-text presence = %v", lang, got, want)
+		}
+	}
+
+	// Pin the expected membership itself, not just internal consistency.
+	wantSpecific := map[ingest.Language]bool{
+		ingest.LangGo: true, ingest.LangPython: true, ingest.LangJavaScript: true,
+		ingest.LangTypeScript: true, ingest.LangRust: true,
+	}
+	for _, lang := range all {
+		if got := HasGuidance(lang); got != wantSpecific[lang] {
+			t.Errorf("HasGuidance(%s) = %v, want %v", lang, got, wantSpecific[lang])
+		}
+	}
+}
+
 // TestSystemPrompt_PerLanguageGuidance covers the remaining language branches
 // and the generic fallback, asserting each emits its matching framework hint.
 func TestSystemPrompt_PerLanguageGuidance(t *testing.T) {
