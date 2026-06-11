@@ -251,6 +251,114 @@ func TestTSXJSXResolves(t *testing.T) {
 	}
 }
 
+// bodyLineSpan returns the 1-based [startLine, endLine] of the single body
+// location for a symbol, failing if there is not exactly one match. It is the
+// assertion helper for DefinitionBodies: a body range must cover the
+// declaration from its first to its last source line.
+func bodyLineSpan(t *testing.T, b *Backend, abs, symbol string) (int, int) {
+	t.Helper()
+	res, err := b.DefinitionBodies(abs, symbol)
+	if err != nil {
+		t.Fatalf("DefinitionBodies(%s): %v", symbol, err)
+	}
+	if len(res.Locations) != 1 {
+		t.Fatalf("DefinitionBodies(%s): got %d locations, want 1", symbol, len(res.Locations))
+	}
+	l := res.Locations[0]
+	return l.Range.Start.Line + 1, l.Range.End.Line + 1
+}
+
+// TestDefinitionBodiesSpansWholeDeclaration is the load-bearing test for the
+// read_symbol tool: a body lookup must return a range covering the declaration
+// from its first to its last line (so the tool can render the full function /
+// method / type / def body), across every supported language. It also confirms
+// DefinitionBodies does NOT collapse to the single name line the way Definition
+// does.
+func TestDefinitionBodiesSpansWholeDeclaration(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		// Go: a multi-line func, a multi-line method, a multi-line type.
+		"greeter.go": "package main\n" + // 1
+			"\n" + // 2
+			"type Greeter struct {\n" + // 3  type start
+			"\tName string\n" + // 4
+			"}\n" + // 5  type end
+			"\n" + // 6
+			"func (g Greeter) Speak() string {\n" + // 7  method start
+			"\treturn g.Name\n" + // 8
+			"}\n" + // 9  method end
+			"\n" + // 10
+			"func Hello() string {\n" + // 11 func start
+			"\tx := \"hi\"\n" + // 12
+			"\treturn x\n" + // 13
+			"}\n", // 14 func end
+		// Python: a multi-line def.
+		"app.py": "def top():\n" + // 1 def start
+			"    x = 1\n" + // 2
+			"    return x\n", // 3 def end
+		// TypeScript: a multi-line function.
+		"app.ts": "function f() {\n" + // 1 func start
+			"  const c = 1\n" + // 2
+			"  return c\n" + // 3
+			"}\n", // 4 func end
+	})
+	b := New(root)
+
+	cases := []struct {
+		file, symbol       string
+		wantStart, wantEnd int
+	}{
+		{"greeter.go", "Hello", 11, 14},
+		{"greeter.go", "Speak", 7, 9},
+		{"greeter.go", "Greeter", 3, 5},
+		{"app.py", "top", 1, 3},
+		{"app.ts", "f", 1, 4},
+	}
+	for _, c := range cases {
+		gotStart, gotEnd := bodyLineSpan(t, b, filepath.Join(root, c.file), c.symbol)
+		if gotStart != c.wantStart || gotEnd != c.wantEnd {
+			t.Errorf("DefinitionBodies(%s, %s) span = %d-%d, want %d-%d",
+				c.file, c.symbol, gotStart, gotEnd, c.wantStart, c.wantEnd)
+		}
+	}
+}
+
+// TestDefinitionBodiesNameVsBodyRange proves DefinitionBodies and Definition
+// agree on WHICH declaration is found but differ in the RANGE they report:
+// Definition returns the name line, DefinitionBodies the full body span. This is
+// the invariant find_definition rendering relies on (it must keep name ranges).
+func TestDefinitionBodiesNameVsBodyRange(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"greeter.go": "package main\n\nfunc Hello() string {\n\treturn \"hi\"\n}\n",
+	})
+	b := New(root)
+	abs := filepath.Join(root, "greeter.go")
+
+	nameRes, err := b.Definition(abs, "Hello")
+	if err != nil {
+		t.Fatalf("Definition: %v", err)
+	}
+	bodyRes, err := b.DefinitionBodies(abs, "Hello")
+	if err != nil {
+		t.Fatalf("DefinitionBodies: %v", err)
+	}
+	if len(nameRes.Locations) != 1 || len(bodyRes.Locations) != 1 {
+		t.Fatalf("want one location each, got name=%d body=%d", len(nameRes.Locations), len(bodyRes.Locations))
+	}
+	nl := nameRes.Locations[0]
+	bl := bodyRes.Locations[0]
+	// Both start on the declaration's first line (line 3).
+	if nl.Range.Start.Line != 2 || bl.Range.Start.Line != 2 {
+		t.Errorf("both should start on line 3 (0-based 2): name=%d body=%d", nl.Range.Start.Line, bl.Range.Start.Line)
+	}
+	// The name range ends on the same line; the body range extends past it.
+	if nl.Range.End.Line != 2 {
+		t.Errorf("name range should be single-line, ended on line %d", nl.Range.End.Line+1)
+	}
+	if bl.Range.End.Line <= nl.Range.End.Line {
+		t.Errorf("body range must extend past the name line: name end=%d body end=%d", nl.Range.End.Line+1, bl.Range.End.Line+1)
+	}
+}
+
 func TestSupportsAndUnsupported(t *testing.T) {
 	b := New(t.TempDir())
 	if !b.Supports("/x/y.go") {

@@ -176,6 +176,41 @@ func (b *Backend) Definition(absPath, symbol string) (Result, error) {
 	}, nil
 }
 
+// DefinitionBodies is like Definition but returns locations whose Range spans
+// the WHOLE declaration node (the full function/method/type/def body), not just
+// the symbol's name identifier. It exists so the read_symbol tool can render the
+// complete declaration text — a 40-line function instead of a capped whole-file
+// read — while Definition keeps returning name ranges, which find_definition's
+// "path:line: source" rendering depends on. Ranking and the ambiguous/candidate
+// accounting are identical to Definition; only the per-location Range differs.
+func (b *Backend) DefinitionBodies(absPath, symbol string) (Result, error) {
+	g := grammarForExt(strings.ToLower(filepath.Ext(absPath)))
+	if g == nil {
+		return Result{}, nil
+	}
+	defs, err := b.collect(g, queryDef)
+	if err != nil {
+		return Result{}, err
+	}
+
+	var matches []tag
+	for _, d := range defs {
+		if d.Name == symbol {
+			matches = append(matches, d)
+		}
+	}
+	rankByProximity(matches, absPath)
+
+	if len(matches) > maxCandidates {
+		matches = matches[:maxCandidates]
+	}
+	return Result{
+		Locations:  toBodyLocations(matches),
+		Candidates: len(matches),
+		Ambiguous:  len(matches) > 1,
+	}, nil
+}
+
 // References returns every call site / member-access reference to symbol across
 // the language's files. Unlike grep, comment and string-literal mentions are
 // never reported, because the query matches AST call nodes.
@@ -392,6 +427,24 @@ func toLocations(tags []tag) []lsp.Location {
 			Range: lsp.Range{
 				Start: lsp.Position{Line: int(t.NameRange.StartPoint.Row), Character: int(t.NameRange.StartPoint.Column)},
 				End:   lsp.Position{Line: int(t.NameRange.EndPoint.Row), Character: int(t.NameRange.EndPoint.Column)},
+			},
+		})
+	}
+	return out
+}
+
+// toBodyLocations converts ranked tags to LSP locations spanning each symbol's
+// WHOLE declaration node (gts.Tag.Range, the @definition.X capture), so a caller
+// can render the full body. This is the only difference from toLocations, which
+// uses the name range.
+func toBodyLocations(tags []tag) []lsp.Location {
+	out := make([]lsp.Location, 0, len(tags))
+	for _, t := range tags {
+		out = append(out, lsp.Location{
+			URI: lsp.URIFromPath(t.path),
+			Range: lsp.Range{
+				Start: lsp.Position{Line: int(t.Range.StartPoint.Row), Character: int(t.Range.StartPoint.Column)},
+				End:   lsp.Position{Line: int(t.Range.EndPoint.Row), Character: int(t.Range.EndPoint.Column)},
 			},
 		})
 	}

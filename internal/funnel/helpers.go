@@ -33,8 +33,9 @@ func emitAgentFinished(sink progress.Sink, role, label string, outcome *agent.Ou
 }
 
 // readOnlyTools builds the read-only code tool set (read_file, list_dir, grep,
-// plus the LSP-backed find_definition / find_references / find_implementations)
-// rooted at the repository, shared by finder and refuter agents. readCaps bounds
+// plus the LSP-backed find_definition / find_references / find_implementations
+// and read_symbol) rooted at the repository, shared by finder and refuter
+// agents. readCaps bounds
 // each read_file result; its zero value uses the package defaults, while finders
 // pass tighter caps (see Options.finderReadCaps) to slow per-turn history growth
 // cache-safely. All tools are safe for concurrent use across parallel agents; the

@@ -98,10 +98,10 @@ func runTool(t *testing.T, tool Tool, args any) (string, error) {
 func TestCodeNavToolDefs(t *testing.T) {
 	c, _ := newTestCodeNav(t, nil, &fakeNavigator{})
 	tools := c.Tools()
-	if len(tools) != 3 {
-		t.Fatalf("got %d tools, want 3", len(tools))
+	if len(tools) != 4 {
+		t.Fatalf("got %d tools, want 4", len(tools))
 	}
-	want := map[string]bool{"find_definition": true, "find_references": true, "find_implementations": true}
+	want := map[string]bool{"find_definition": true, "find_references": true, "find_implementations": true, "read_symbol": true}
 	for _, tool := range tools {
 		def := tool.Def()
 		if !want[def.Name] {
