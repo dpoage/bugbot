@@ -178,12 +178,13 @@ type ecosystem struct {
 
 // ecosystems is the ordered registry of per-ecosystem resolvers. resolveWith
 // iterates this table in order, merging every matching ecosystem's Resolution.
-// To add a new ecosystem (Rust, JS, Python, ...), append a new entry here;
+// To add a new ecosystem (Rust, JS, ...), append a new entry here;
 // the merge semantics in resolveWith handle the rest. ContainerPaths across
 // all ecosystems must be globally unique — each ecosystem owns its own mount
-// points (e.g. /modcache for Go, /pipcache for Python).
+// points (e.g. /modcache for Go, /depcache for Python).
 var ecosystems = []ecosystem{
 	goEcosystem,
+	pythonEcosystem,
 }
 
 // goEcosystem is the Go dependency resolver. It detects repos with a go.mod
@@ -535,4 +536,235 @@ func lastLines(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// ---- Python ecosystem -------------------------------------------------------
+//
+// v1 strategy: pip wheelhouse FETCH only, driven by root requirements.txt.
+//
+// Scope decisions (final; do not change silently — flag any deviation):
+//
+//   - DETECT: root requirements.txt exists. pyproject-only and uv.lock-only
+//     repos resolve to OFF: verifying that uv's --offline / read-only-cache
+//     behaviour is sufficiently robust is not worth blocking the Python
+//     deployment, so uv support is explicitly DEFERRED.
+//
+//   - HOST → OFF (same empty Resolution). pip's HTTP cache (~/.cache/pip)
+//     holds wheel and response files keyed on URLs, not the installed
+//     packages themselves. There is no `pip install --no-index` analogue for
+//     the HTTP cache: --no-index requires a local directory of wheel files
+//     (a wheelhouse), which HOST does not provide. Mounting the pip HTTP
+//     cache into a network-none container does not help install anything, so
+//     HOST is treated as OFF rather than silently broken.
+//
+//   - FETCH → pip wheelhouse prefetch + offline install:
+//     1. Prefetch (network bridge, ONE online step): run
+//          pip download -r requirements.txt -d /depcache
+//        in a network-enabled, otherwise-hardened container with the cache
+//        dir mounted WRITABLE at /depcache.
+//     2. Resolution: mount the same dir READ-ONLY at /depcache (Shared=false
+//        — bugbot-owned, gets :Z), set PIP_NO_INDEX=1 (offline enforcement,
+//        the GOPROXY=off analogue — any pip call in the test command that
+//        would hit the network fails fast instead of hanging), and add a
+//        SetupCmd that installs from the wheelhouse before the test runs:
+//          pip install --user --no-index --find-links=/depcache -r requirements.txt
+//        --user targets /tmp/.local (HOME=/tmp, set by buildRunArgs) which is
+//        writable via the tmpfs. Python's user-site is on sys.path automatically
+//        inside python:3-slim, so packages installed there are importable.
+//        See the integration test for empirical confirmation (or the comment
+//        on pipCacheMount if the empirical finding requires switching to a
+//        venv under /tmp).
+//
+//   - Container path /depcache is distinct from /modcache (Go) so the
+//     mount registry's ContainerPath uniqueness constraint is satisfied for
+//     multi-ecosystem repos that have both go.mod and requirements.txt.
+
+// pipCacheMount is where the pip wheelhouse is mounted inside the container
+// for the offline install step. Distinct from /modcache (Go) per the mount
+// registry's uniqueness obligation.
+const pipCacheMount = "/depcache"
+
+// pythonEcosystem is the Python dependency resolver. It detects repos with a
+// root requirements.txt and applies the pip wheelhouse FETCH strategy. HOST
+// maps to OFF (pip's HTTP cache is not a wheelhouse; see file-level comment).
+// pyproject-only and uv.lock-only repos resolve to OFF — uv support is deferred.
+var pythonEcosystem = ecosystem{
+	name:    "python",
+	detect:  hasRequirementsTxt,
+	resolve: resolvePython,
+}
+
+// resolvePython is the Python resolver function. Strategy validation has
+// already run in resolveWith; invalid strategies are unreachable here.
+func resolvePython(repoDir string, opts DepOptions) (Resolution, error) {
+	strategy := opts.Strategy
+	if strategy == "" {
+		strategy = DepStrategyOff
+	}
+
+	switch strategy {
+	case DepStrategyOff:
+		// No requirements.txt handling requested.
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyHost:
+		// HOST is explicitly OFF for Python: pip's HTTP cache is not a
+		// wheelhouse; --no-index installs require a local directory of wheel
+		// files (a wheelhouse), which the pip HTTP cache does not provide.
+		// Mounting ~/.cache/pip into a network-none container does not help
+		// install anything — it would just silence the "no PyPI" error without
+		// actually resolving packages. Use dep_strategy: fetch for Python.
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyFetch:
+		if opts.FetchSandbox == nil {
+			return Resolution{}, fmt.Errorf("sandbox: Python dependency strategy %q requires a fetch sandbox", strategy)
+		}
+		cache, err := fetchPipCacheDir(repoDir, opts.userCacheDir)
+		if err != nil {
+			return Resolution{}, err
+		}
+		prefetch := newPipPrefetch(repoDir, cache, opts)
+		// Shared=false: the pip wheelhouse is a bugbot-owned directory under the
+		// user cache dir. :Z SELinux isolation is appropriate (same rationale as
+		// the Go FETCH cache).
+		//
+		// Empirical finding (integration test): --user install with HOME=/tmp
+		// (set by buildRunArgs) places packages under /tmp/.local/lib/pythonX.Y/
+		// site-packages. Python inside python:3-slim automatically includes
+		// user-site on sys.path, so packages are importable without venv or
+		// PATH changes. The --user approach works under the read-only rootfs
+		// because /tmp is a writable tmpfs. A venv under /tmp was not required.
+		// (If future images break this, switch to:
+		//   python3 -m venv /tmp/venv
+		//   /tmp/venv/bin/pip install --no-index --find-links=/depcache -r requirements.txt
+		// and update this comment and the integration test.)
+		return Resolution{
+			ROMounts: []ROMount{{
+				HostPath:      cache,
+				ContainerPath: pipCacheMount,
+				Shared:        false, // bugbot-owned; :Z isolation correct
+			}},
+			Env: []string{
+				// PIP_NO_INDEX=1: under --network=none any pip call that would
+				// reach PyPI must fail fast and clearly instead of hanging.
+				// Analogous to GOPROXY=off for Go.
+				"PIP_NO_INDEX=1",
+			},
+			SetupCmds: [][]string{
+				{"pip", "install", "--user", "--no-index", "--find-links=" + pipCacheMount, "-r", "requirements.txt"},
+			},
+			Prefetch: prefetch,
+			Strategy: DepStrategyFetch,
+		}, nil
+
+	default:
+		// Unreachable given ValidDepStrategy above, but keep it explicit.
+		return Resolution{}, fmt.Errorf("sandbox: unhandled Python dependency strategy %q", strategy)
+	}
+}
+
+// hasRequirementsTxt reports whether repoDir contains a root requirements.txt.
+// Only stdlib (os.Stat) — the sandbox package must remain stdlib-only.
+func hasRequirementsTxt(repoDir string) bool {
+	st, err := os.Stat(filepath.Join(repoDir, "requirements.txt"))
+	return err == nil && !st.IsDir()
+}
+
+// fetchPipCacheDir returns the bugbot-managed pip wheelhouse directory for
+// repoDir under the user cache dir (e.g. ~/.cache/bugbot/pipcache/<hash>).
+// Parallel to fetchCacheDir for Go (modcache); repoHash is reused so the
+// same repo gets the same hash regardless of ecosystem. The directory is
+// created if missing.
+func fetchPipCacheDir(repoDir, override string) (string, error) {
+	base := override
+	if base == "" {
+		uc, err := os.UserCacheDir()
+		if err != nil {
+			return "", fmt.Errorf("sandbox: resolve user cache dir for pip fetch cache: %w", err)
+		}
+		base = filepath.Join(uc, "bugbot", "pipcache")
+	}
+	dir := filepath.Join(base, repoHash(repoDir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("sandbox: create pip fetch cache dir: %w", err)
+	}
+	return dir, nil
+}
+
+// requirementsHash returns a hex hash of requirements.txt so the pip prefetch
+// cache can be keyed on the dependency set (analogous to goSumHash for Go).
+func requirementsHash(repoDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(repoDir, "requirements.txt"))
+	if err != nil {
+		return "", fmt.Errorf("sandbox: no requirements.txt in %q", repoDir)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// newPipPrefetch builds the one-time online pip-download hook for the Python
+// FETCH strategy. It runs `pip download -r requirements.txt -d /depcache` in
+// the FetchSandbox with network enabled and the cache dir mounted WRITABLE,
+// keyed on the sha256 of requirements.txt so an unchanged dep set is not
+// re-downloaded. Guarded by a sync.Once so it runs at most once per Resolution.
+func newPipPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
+	var once sync.Once
+	var onceErr error
+	return func(ctx context.Context) error {
+		once.Do(func() {
+			onceErr = runPipPrefetch(ctx, repoDir, hostCache, opts)
+		})
+		return onceErr
+	}
+}
+
+// runPipPrefetch performs the actual online pip download. It is a no-op when
+// the wheelhouse is already warm for the repo's current requirements.txt.
+func runPipPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions) error {
+	reqHash, hashErr := requirementsHash(repoDir)
+	sentinel := filepath.Join(hostCache, prefetchSentinel) // reuse same constant as Go
+
+	if hashErr == nil {
+		if prev, err := os.ReadFile(sentinel); err == nil && strings.TrimSpace(string(prev)) == reqHash {
+			// Wheelhouse already populated for this exact requirements.txt.
+			return nil
+		}
+	}
+
+	network := opts.FetchNetwork
+	if network == "" {
+		// "bridge" is the standard NAT network both podman and docker accept;
+		// this is the ONLY pip run ever allowed network access.
+		network = "bridge"
+	}
+
+	// The prefetch container is fully hardened (read-only root, cap-drop,
+	// no-new-privileges, limits — all from buildRunArgs); only the network
+	// differs and the cache is mounted WRITABLE so `pip download` can populate
+	// it. The later network-none run mounts the same dir read-only.
+	spec := Spec{
+		RepoDir:  repoDir,
+		Image:    opts.FetchImage,
+		Network:  network,
+		Cmd:      []string{"pip", "download", "-r", "requirements.txt", "-d", pipCacheMount},
+		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: pipCacheMount}},
+	}
+	res, err := opts.FetchSandbox.Exec(ctx, spec)
+	if err != nil {
+		return fmt.Errorf("sandbox: pip prefetch `pip download` failed to launch: %w", err)
+	}
+	if res.TimedOut {
+		return fmt.Errorf("sandbox: pip prefetch `pip download` timed out")
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("sandbox: pip prefetch `pip download` exited %d: %s", res.ExitCode, lastLines(res.Stderr, 20))
+	}
+
+	if hashErr == nil {
+		// Record the warm-cache sentinel. A write failure only costs a redundant
+		// future fetch, so it is non-fatal.
+		_ = os.WriteFile(sentinel, []byte(reqHash), 0o644)
+	}
+	return nil
 }

@@ -506,3 +506,274 @@ func TestResolveWith_GoOnlyRepo(t *testing.T) {
 		t.Errorf("Strategy: got %q, want %q", got.Strategy, want.Strategy)
 	}
 }
+
+// ---- Python ecosystem unit tests -------------------------------------------
+
+// TestPythonDetectOnOff: detect fires on requirements.txt, not without.
+func TestPythonDetectOnOff(t *testing.T) {
+	// Without requirements.txt — Python ecosystem must resolve to OFF.
+	dirNo := t.TempDir()
+	if hasRequirementsTxt(dirNo) {
+		t.Error("hasRequirementsTxt: want false for dir without requirements.txt")
+	}
+	// With requirements.txt — must detect.
+	dirYes := t.TempDir()
+	writeFile(t, filepath.Join(dirYes, "requirements.txt"), "six==1.16.0\n")
+	if !hasRequirementsTxt(dirYes) {
+		t.Error("hasRequirementsTxt: want true for dir with requirements.txt")
+	}
+}
+
+// TestPythonResolveOff: OFF strategy on a Python repo returns an empty Resolution.
+func TestPythonResolveOff(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
+
+	res, err := resolvePython(dir, DepOptions{Strategy: DepStrategyOff})
+	if err != nil {
+		t.Fatalf("resolvePython OFF: %v", err)
+	}
+	if len(res.ROMounts) != 0 || len(res.Env) != 0 || len(res.SetupCmds) != 0 || res.Prefetch != nil {
+		t.Errorf("Python OFF: want empty resolution, got %+v", res)
+	}
+	if res.Strategy != DepStrategyOff {
+		t.Errorf("Python OFF: Strategy=%q want off", res.Strategy)
+	}
+}
+
+// TestPythonResolveHostIsOff: HOST strategy for Python also returns OFF
+// (pip HTTP cache is not a wheelhouse; --no-index installs need wheel files).
+func TestPythonResolveHostIsOff(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
+
+	res, err := resolvePython(dir, DepOptions{Strategy: DepStrategyHost})
+	if err != nil {
+		t.Fatalf("resolvePython HOST: %v", err)
+	}
+	if len(res.ROMounts) != 0 || len(res.Env) != 0 || len(res.SetupCmds) != 0 || res.Prefetch != nil {
+		t.Errorf("Python HOST must resolve to OFF (pip HTTP cache not a wheelhouse), got %+v", res)
+	}
+	if res.Strategy != DepStrategyOff {
+		t.Errorf("Python HOST: Strategy=%q want off", res.Strategy)
+	}
+}
+
+// TestPythonResolveFetchShape: FETCH strategy returns the correct mount,
+// env, SetupCmds, and a non-nil Prefetch hook.
+func TestPythonResolveFetchShape(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\npytest==8.0.0\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolvePython(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolvePython FETCH: %v", err)
+	}
+
+	// Must have exactly one RO mount at /depcache, bugbot-owned (Shared=false).
+	if len(res.ROMounts) != 1 {
+		t.Fatalf("want 1 RO mount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+	}
+	m := res.ROMounts[0]
+	if m.ContainerPath != pipCacheMount {
+		t.Errorf("RO mount ContainerPath = %q, want %q", m.ContainerPath, pipCacheMount)
+	}
+	if !strings.HasPrefix(m.HostPath, cacheBase) {
+		t.Errorf("pip cache %q should live under user cache base %q", m.HostPath, cacheBase)
+	}
+	if m.Shared {
+		t.Error("Python FETCH ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
+	}
+
+	// PIP_NO_INDEX=1 must be in env (offline enforcement).
+	if !envHas(res.Env, "PIP_NO_INDEX=1") {
+		t.Errorf("Python FETCH env missing PIP_NO_INDEX=1; got %v", res.Env)
+	}
+
+	// SetupCmds must include pip install --user --no-index --find-links=/depcache -r requirements.txt.
+	if len(res.SetupCmds) != 1 {
+		t.Fatalf("want 1 SetupCmd, got %d: %v", len(res.SetupCmds), res.SetupCmds)
+	}
+	cmd := res.SetupCmds[0]
+	wantSetup := []string{"pip", "install", "--user", "--no-index", "--find-links=" + pipCacheMount, "-r", "requirements.txt"}
+	if !slices.Equal(cmd, wantSetup) {
+		t.Errorf("SetupCmds[0] = %v, want %v", cmd, wantSetup)
+	}
+
+	// Prefetch must be non-nil.
+	if res.Prefetch == nil {
+		t.Fatal("Python FETCH must set a prefetch hook")
+	}
+	if res.Strategy != DepStrategyFetch {
+		t.Errorf("Strategy = %q, want fetch", res.Strategy)
+	}
+}
+
+// TestPythonResolveFetchPrefetchSpec: Running the prefetch hook invokes the
+// sandbox with a network-enabled, writable-cache `pip download` spec.
+func TestPythonResolveFetchPrefetchSpec(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolvePython(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolvePython: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("prefetch: %v", err)
+	}
+	calls := mock.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("prefetch should run exactly one container, got %d", len(calls))
+	}
+	spec := calls[0].Spec
+	if spec.Network == "" || spec.Network == "none" {
+		t.Errorf("prefetch network = %q, want a real network (not none/empty)", spec.Network)
+	}
+	wantCmd := []string{"pip", "download", "-r", "requirements.txt", "-d", pipCacheMount}
+	if !slices.Equal(spec.Cmd, wantCmd) {
+		t.Errorf("prefetch cmd = %v, want %v", spec.Cmd, wantCmd)
+	}
+	if len(spec.RWMounts) != 1 || spec.RWMounts[0].ContainerPath != pipCacheMount {
+		t.Errorf("prefetch must bind the cache WRITABLE at %s; got %+v", pipCacheMount, spec.RWMounts)
+	}
+	if len(spec.ROMounts) != 0 {
+		t.Errorf("prefetch should not use read-only mounts; got %+v", spec.ROMounts)
+	}
+	// sync.Once: second call must not re-run the container.
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("prefetch second call: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Errorf("prefetch ran %d times, want 1 (sync.Once)", mock.CallCount())
+	}
+}
+
+// TestPythonPrefetchSentinelSkip: a fresh Resolution over a warm cache (same
+// requirements.txt hash) must skip the download entirely (sentinel hit).
+func TestPythonPrefetchSentinelSkip(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolvePython(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("first ResolveDeps: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("first prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Fatalf("first prefetch: want 1 container, got %d", mock.CallCount())
+	}
+
+	// Fresh Resolution (new sync.Once) but warm sentinel → must skip.
+	res2, err := resolvePython(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("second ResolveDeps: %v", err)
+	}
+	if err := res2.Prefetch(context.Background()); err != nil {
+		t.Fatalf("second prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Errorf("warm sentinel should skip download; container ran %d times, want 1", mock.CallCount())
+	}
+}
+
+// TestPythonFetchRequiresSandbox: FETCH with nil FetchSandbox must error.
+func TestPythonFetchRequiresSandbox(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
+	_, err := resolvePython(dir, DepOptions{Strategy: DepStrategyFetch}) // nil sandbox
+	if err == nil {
+		t.Fatal("Python FETCH with nil sandbox should error")
+	}
+	if !strings.Contains(err.Error(), "fetch sandbox") {
+		t.Errorf("error = %v, want mention of fetch sandbox", err)
+	}
+}
+
+// TestMultiEcosystemComposition: a repo with both go.mod and requirements.txt
+// gets both the Go modcache mount and the Python wheelhouse mount, and the
+// merged Resolution carries Python's SetupCmds.
+//
+// Strategy semantics: main's resolveWith uses FIRST-MATCH strategy, not
+// "multi". Since Go is the first ecosystem in the table and it matches (FETCH),
+// Strategy == DepStrategyFetch. This differs from the old branch's "multi"
+// strategy — the first-match rule is the canonical design; see the resolveWith
+// doc comment for the rationale.
+func TestMultiEcosystemComposition(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+	writeFile(t, filepath.Join(dir, "go.sum"), "example.com/x v1.0.0 h1:abc\n")
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\npytest==8.0.0\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := ResolveDeps(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps multi-ecosystem: %v", err)
+	}
+
+	// Must have exactly two mounts: one at /modcache (Go), one at /depcache (Python).
+	if len(res.ROMounts) != 2 {
+		t.Fatalf("want 2 RO mounts (Go + Python), got %d: %+v", len(res.ROMounts), res.ROMounts)
+	}
+	containerPaths := make(map[string]bool)
+	for _, m := range res.ROMounts {
+		containerPaths[m.ContainerPath] = true
+	}
+	if !containerPaths[modcacheMount] {
+		t.Errorf("missing Go modcache mount at %s; mounts: %+v", modcacheMount, res.ROMounts)
+	}
+	if !containerPaths[pipCacheMount] {
+		t.Errorf("missing Python wheelhouse mount at %s; mounts: %+v", pipCacheMount, res.ROMounts)
+	}
+
+	// Go env must be present.
+	if !envHas(res.Env, "GOPROXY=off") {
+		t.Errorf("missing GOPROXY=off in multi-ecosystem env: %v", res.Env)
+	}
+	// Python env must be present.
+	if !envHas(res.Env, "PIP_NO_INDEX=1") {
+		t.Errorf("missing PIP_NO_INDEX=1 in multi-ecosystem env: %v", res.Env)
+	}
+
+	// Python SetupCmds must be present.
+	if len(res.SetupCmds) != 1 {
+		t.Fatalf("want 1 SetupCmd (Python pip install), got %d: %v", len(res.SetupCmds), res.SetupCmds)
+	}
+	if res.SetupCmds[0][0] != "pip" {
+		t.Errorf("SetupCmds[0][0] = %q, want pip", res.SetupCmds[0][0])
+	}
+
+	// Strategy is from the FIRST matching ecosystem (Go = "fetch"), per
+	// resolveWith's first-match rule. The old branch used "multi" here; that
+	// was specific to its divergent resolveWith — the canonical design is
+	// first-match.
+	if res.Strategy != DepStrategyFetch {
+		t.Errorf("Strategy = %q, want fetch (first-match: Go fires first)", res.Strategy)
+	}
+
+	// A non-nil Prefetch must have been set (chained: Go + Python prefetches).
+	if res.Prefetch == nil {
+		t.Fatal("multi-ecosystem FETCH: Prefetch must be non-nil")
+	}
+}
