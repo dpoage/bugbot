@@ -34,12 +34,30 @@ var validProviderTypes = map[ProviderType]bool{
 	ProviderOpenAICompatible: true,
 }
 
-// Provider describes a single LLM provider endpoint. The API key itself is
-// never stored here: APIKeyEnv names the environment variable that holds it.
+// Provider describes a single LLM provider endpoint.
+//
+// Secrets are never stored here. In api_key mode (the default), APIKeyEnv names
+// the environment variable that holds the API key. In oauth-token mode,
+// AuthTokenEnv names the environment variable that holds the OAuth bearer token
+// — the credential Claude Code uses. Exactly one of the two credential fields
+// must be set, matching the mode.
 type Provider struct {
 	Type      ProviderType `yaml:"type"`
 	BaseURL   string       `yaml:"base_url,omitempty"`
-	APIKeyEnv string       `yaml:"api_key_env"`
+	APIKeyEnv string       `yaml:"api_key_env,omitempty"`
+
+	// Auth selects the credential mode. The empty string and "api_key" both
+	// select API-key mode. "oauth-token" selects OAuth bearer-token mode, which
+	// is only valid for type=anthropic. The Anthropic API rejects requests that
+	// carry both an x-api-key and a Bearer token, so the two credential fields
+	// are mutually exclusive per mode.
+	Auth string `yaml:"auth,omitempty"`
+
+	// AuthTokenEnv names the environment variable that holds the OAuth bearer
+	// token. Required (and api_key_env must be empty) when auth=oauth-token.
+	// Populate via `claude setup-token` (long-lived) or
+	// `ant auth print-credentials --access-token` (short-lived).
+	AuthTokenEnv string `yaml:"auth_token_env,omitempty"`
 }
 
 // RoleModel binds a pipeline role to a provider and model.
@@ -490,6 +508,43 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	return nil
 }
 
+// validateProviderAuth enforces the credential-field constraints for a single
+// provider. The rules are:
+//
+//   - auth="" or "api_key": api_key_env required; auth_token_env must be empty.
+//   - auth="oauth-token":   type must be anthropic; auth_token_env required;
+//     api_key_env must be empty (the Anthropic API rejects requests that carry
+//     both an x-api-key and a Bearer token simultaneously).
+//   - any other auth value: rejected with the list of valid values.
+func validateProviderAuth(name string, p Provider) error {
+	switch p.Auth {
+	case "", "api_key":
+		// API-key mode: api_key_env required; auth_token_env must be absent to
+		// catch early confusion between the two credential fields.
+		if p.APIKeyEnv == "" {
+			return fmt.Errorf("config: provider %q must set `api_key_env` (the NAME of the env var holding the key)", name)
+		}
+		if p.AuthTokenEnv != "" {
+			return fmt.Errorf("config: provider %q sets `auth_token_env` but auth mode is %q — remove `auth_token_env` or set `auth: oauth-token`", name, p.Auth)
+		}
+	case "oauth-token":
+		// OAuth mode: anthropic only; auth_token_env required; api_key_env must
+		// be empty — the Anthropic API rejects requests carrying both credentials.
+		if p.Type != ProviderAnthropic {
+			return fmt.Errorf("config: provider %q has auth=oauth-token but type=%q; oauth-token is only supported for type=anthropic", name, p.Type)
+		}
+		if p.AuthTokenEnv == "" {
+			return fmt.Errorf("config: provider %q with auth=oauth-token must set `auth_token_env` (the NAME of the env var holding the bearer token)", name)
+		}
+		if p.APIKeyEnv != "" {
+			return fmt.Errorf("config: provider %q sets both `api_key_env` and `auth_token_env`; the Anthropic API rejects requests carrying both credentials — remove `api_key_env` when using auth=oauth-token", name)
+		}
+	default:
+		return fmt.Errorf("config: provider %q has invalid auth %q (valid values: api_key, oauth-token)", name, p.Auth)
+	}
+	return nil
+}
+
 // Validate checks the config for internal consistency and returns a helpful
 // error describing the first problem found.
 func (c *Config) Validate() error {
@@ -501,8 +556,8 @@ func (c *Config) Validate() error {
 		if !validProviderTypes[p.Type] {
 			return fmt.Errorf("config: provider %q has invalid type %q (want one of anthropic, openai, google, openai-compatible)", name, p.Type)
 		}
-		if p.APIKeyEnv == "" {
-			return fmt.Errorf("config: provider %q must set `api_key_env` (the NAME of the env var holding the key)", name)
+		if err := validateProviderAuth(name, p); err != nil {
+			return err
 		}
 		if p.Type == ProviderOpenAICompatible && p.BaseURL == "" {
 			return fmt.Errorf("config: provider %q has type openai-compatible but no `base_url`", name)
@@ -603,6 +658,9 @@ func (c *Config) Validate() error {
 // APIKey resolves the API key for the named provider by reading the environment
 // variable named by its api_key_env field. It returns an error if the provider
 // is unknown or the environment variable is unset/empty.
+//
+// Callers that must work across both api_key and oauth-token providers should
+// use Credential instead.
 func (c *Config) APIKey(provider string) (string, error) {
 	p, ok := c.Providers[provider]
 	if !ok {
@@ -613,4 +671,31 @@ func (c *Config) APIKey(provider string) (string, error) {
 		return "", fmt.Errorf("config: provider %q api key env var %q is not set", provider, p.APIKeyEnv)
 	}
 	return key, nil
+}
+
+// Credential resolves the active credential for the named provider according to
+// its configured auth mode:
+//
+//   - api_key mode (default): reads the env var named by api_key_env and returns
+//     the API key string.
+//   - oauth-token mode: reads the env var named by auth_token_env and returns the
+//     OAuth bearer token. If the env var is unset or empty the error mentions the
+//     env var name and instructs the user to mint a fresh token with
+//     `claude setup-token` (the token may also be expired).
+//
+// The secret value is returned to the caller and must not be logged.
+func (c *Config) Credential(provider string) (string, error) {
+	p, ok := c.Providers[provider]
+	if !ok {
+		return "", fmt.Errorf("config: unknown provider %q", provider)
+	}
+	if p.Auth == "oauth-token" {
+		token := os.Getenv(p.AuthTokenEnv)
+		if token == "" {
+			return "", fmt.Errorf("config: provider %q oauth token env var %q is not set or is empty (token may also be expired — run `claude setup-token` to mint a fresh one)", provider, p.AuthTokenEnv)
+		}
+		return token, nil
+	}
+	// api_key mode (auth="" or "api_key"): delegate to the existing resolver.
+	return c.APIKey(provider)
 }

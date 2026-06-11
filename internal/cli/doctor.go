@@ -194,9 +194,11 @@ func checkConfig(env doctorEnv) (checkResult, config.Config, bool) {
 	}, cfg, true
 }
 
-// checkProviders checks that each provider's API key env var is set and
-// non-empty. Results are returned in sorted provider name order so output is
-// deterministic. Each missing key is a hard failure.
+// checkProviders checks that each provider's credential env var is set and
+// non-empty. The check is mode-aware: api_key providers check api_key_env;
+// oauth-token providers check auth_token_env instead. Results are returned in
+// sorted provider name order so output is deterministic. Each missing credential
+// is a hard failure. Secrets are never printed — only the env var name.
 func checkProviders(env doctorEnv, cfg config.Config) []checkResult {
 	names := make([]string, 0, len(cfg.Providers))
 	for n := range cfg.Providers {
@@ -207,21 +209,30 @@ func checkProviders(env doctorEnv, cfg config.Config) []checkResult {
 	var out []checkResult
 	for _, name := range names {
 		p := cfg.Providers[name]
-		envName := p.APIKeyEnv
+
+		var envName, modeLabel string
+		if p.Auth == "oauth-token" {
+			envName = p.AuthTokenEnv
+			modeLabel = " (oauth-token)"
+		} else {
+			envName = p.APIKeyEnv
+			modeLabel = ""
+		}
+
 		val := env.lookupEnv(envName)
 		if val == "" {
 			out = append(out, checkResult{
 				Name:   "provider " + name,
 				Status: statusFail,
 				// Print only the env var name — NEVER the value (secret).
-				Detail: "$" + envName + " is not set",
+				Detail: "$" + envName + " is not set" + modeLabel,
 				hard:   true,
 			})
 		} else {
 			out = append(out, checkResult{
 				Name:   "provider " + name,
 				Status: statusPass,
-				Detail: "$" + envName + " is set",
+				Detail: "$" + envName + " is set" + modeLabel,
 			})
 		}
 	}

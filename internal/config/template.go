@@ -30,6 +30,16 @@ providers:
   #   type: openai-compatible
   #   base_url: http://localhost:11434/v1
   #   api_key_env: LOCAL_API_KEY
+  #
+  # OAuth bearer-token mode (for Claude Code subscription users without a
+  # pay-per-token ANTHROPIC_API_KEY). Run "claude setup-token" once to populate
+  # the env var, then restart bugbot. The token is long-lived but can be
+  # refreshed at any time with the same command.
+  #
+  # anthropic-oauth:
+  #   type: anthropic
+  #   auth: oauth-token
+  #   auth_token_env: CLAUDE_CODE_OAUTH_TOKEN
 
 # ---------------------------------------------------------------------------
 # roles: map each pipeline role to a provider+model. Tier strong models to
