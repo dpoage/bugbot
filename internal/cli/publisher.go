@@ -28,16 +28,12 @@ type storePublisher struct {
 	disabled atomic.Bool
 }
 
-// NewStorePublisher constructs a storePublisher. gh is typically realGH; pass
-// a fakeGH in tests.
+// NewStorePublisher constructs a storePublisher with no provenance metadata.
+// It is a compatibility shim that delegates to NewStorePublisherWithProvenance
+// with a zero publishProvenance. Callers that have a live config should prefer
+// NewStorePublisherWithProvenance so the issue body metadata block is populated.
 func NewStorePublisher(gh ghRunner, st *store.Store, cfg config.Publish, log *slog.Logger) *storePublisher {
-	return &storePublisher{
-		gh:      gh,
-		st:      st,
-		cfg:     cfg,
-		tierMin: cfg.TierMin,
-		log:     log,
-	}
+	return NewStorePublisherWithProvenance(gh, st, cfg, publishProvenance{}, log)
 }
 
 // NewStorePublisherWithProvenance constructs a storePublisher with model/provider

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -383,29 +384,123 @@ type publishIssue struct {
 	Body   string `json:"body"`
 }
 
+// longestBacktickRun returns the length of the longest run of consecutive
+// backtick characters found in s. Used by fencedBlock to compute a safe fence.
+func longestBacktickRun(s string) int {
+	max, cur := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			cur++
+			if cur > max {
+				max = cur
+			}
+		} else {
+			cur = 0
+		}
+	}
+	return max
+}
+
+// fencedBlock wraps content in a CommonMark fenced code block whose fence is
+// always at least one backtick longer than the longest run inside content.
+// This prevents any ``` sequence inside content (e.g. a raw git diff or a
+// model-authored source file) from breaking out of the fence.
+//
+// The minimum fence length is 3 backticks (CommonMark minimum). When content
+// contains a run of N backticks the fence uses N+1 backticks.
+func fencedBlock(lang, content string) string {
+	fenceLen := longestBacktickRun(content) + 1
+	if fenceLen < 3 {
+		fenceLen = 3
+	}
+	fence := strings.Repeat("`", fenceLen)
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	return fence + lang + "\n" + content + fence + "\n"
+}
+
+// sanitizeDetailsTag replaces the opening bytes of any <details or </details
+// HTML tag (case-insensitive) with their HTML entity equivalents so that
+// model-authored text placed inside a GitHub <details> block cannot close the
+// block early or inject arbitrary HTML. Content already inside a code fence
+// produced by fencedBlock is inert and does not need this treatment.
+//
+// Strategy: replace `<details` (including `</details`) with `&lt;details` so
+// the tag is rendered as literal text by GitHub's Markdown renderer.
+func sanitizeDetailsTag(s string) string {
+	// We need a case-insensitive replace of `</details` and `<details`.
+	// Process rune-by-rune to avoid regexp import overhead. Since the common
+	// case is no match at all, use a simple strings.ContainsFold-equivalent
+	// check first.
+	lower := strings.ToLower(s)
+	if !strings.Contains(lower, "<details") && !strings.Contains(lower, "</details") {
+		return s
+	}
+	// Walk and replace. We look for '<' followed by optional '/' then "details"
+	// (case-insensitive). Replace '<' with '&lt;'.
+	var out strings.Builder
+	out.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] == '<' {
+			rest := lower[i:]
+			if strings.HasPrefix(rest, "</details") || strings.HasPrefix(rest, "<details") {
+				out.WriteString("&lt;")
+				i++ // skip the '<', emit the rest as-is
+				continue
+			}
+		}
+		// Emit one rune.
+		_, size := utf8.DecodeRuneInString(s[i:])
+		out.WriteString(s[i : i+size])
+		i += size
+	}
+	return out.String()
+}
+
 // renderIssueBody renders the deterministic issue body for a finding.
 //
 // Section order:
 //  1. Hidden fingerprint marker — MUST remain the first line (findIssueByMarker recovery).
 //  2. ## title
 //  3. Human meta: Severity + Location (file:line) with optional source permalink.
-//  4. Description.
-//  5. Candidate fix diff (when FixPatch != "").
+//  4. Description (capped at 10 KB).
+//  5. Candidate fix diff (when FixPatch != "", capped at 20 KB).
 //  6. Inline reproduction <details> block (when ReproPath is set and readable).
 //  7. Bugbot metadata <details> block: Lens, Tier, Fingerprint, models, commit, scan time.
 //  8. Verification trace <details> block with 30 KB cap.
 //  9. Attribution footer.
 //
 // Body size budget (GitHub hard limit: 65 536 chars):
-//   - Reasoning cap: 30 KB  (~30 720 chars)
-//   - Repro cap:     25 KB  (~25 600 chars)
-//   - Remaining:     ~9 KB for all other sections — comfortably fits even with
-//     long descriptions, patch diffs, and metadata.
+//   - Description cap:  10 KB  (~10 240 chars)
+//   - FixPatch cap:     20 KB  (~20 480 chars)
+//   - Reasoning cap:    30 KB  (~30 720 chars)
+//   - Repro cap:        25 KB  (~25 600 chars)
+//   - Belt-and-braces:  if assembled body still exceeds ~60 000 chars it is
+//     truncated at a safe point preserving line 1 (fingerprint marker) and the
+//     attribution footer so recovery and attribution always survive.
+//
+// Security invariants:
+//   - All fenced blocks use fencedBlock(), which auto-sizes the fence to be
+//     longer than any backtick run inside the content (CommonMark rule), so
+//     model-authored content cannot break out of the fence.
+//   - Non-fenced model content placed inside <details> blocks (Reasoning) is
+//     passed through sanitizeDetailsTag() so a literal </details> sequence
+//     cannot close the block early.
 func renderIssueBody(f store.Finding, repoURL string, prov publishProvenance) string {
+	const (
+		maxDescription = 10 * 1024 // 10 KB cap on model-authored description
+		maxFixPatch    = 20 * 1024 // 20 KB cap on model-authored patch
+		maxReasoning   = 30 * 1024 // 30 KB cap on verification trace
+		maxBody        = 60_000    // belt-and-braces: stay under GitHub's 65 536 limit
+	)
+
 	var b strings.Builder
 
 	// 1. Hidden fingerprint marker — load-bearing for recovery; must stay first.
-	fmt.Fprintf(&b, "<!-- bugbot:fp=%s -->\n\n", f.Fingerprint)
+	firstLine := "<!-- bugbot:fp=" + f.Fingerprint + " -->"
+	fmt.Fprintf(&b, "%s\n\n", firstLine)
 
 	// 2. Title heading.
 	fmt.Fprintf(&b, "## %s\n\n", titleOrUnknown(f.Title))
@@ -419,27 +514,37 @@ func renderIssueBody(f store.Finding, repoURL string, prov publishProvenance) st
 		fmt.Fprintf(&b, "**Location:** `%s:%d`  \n\n", f.File, f.Line)
 	}
 
-	// 4. Description.
+	// 4. Description — capped to prevent oversized model output from consuming
+	// the whole body budget. A truncated description is still readable.
 	if f.Description != "" {
-		b.WriteString(f.Description)
+		desc := f.Description
+		if len(desc) > maxDescription {
+			desc = desc[:maxDescription] + "\n\n[... truncated by bugbot ...]"
+		}
+		b.WriteString(desc)
 		b.WriteString("\n\n")
 	}
 
-	// 5. Candidate fix diff — same wording as report/markdown.go writeFinding.
+	// 5. Candidate fix diff — fencedBlock auto-sizes the fence so a ``` run
+	// inside the diff cannot break out. Also cap large patches: a truncated
+	// diff is still a useful witness.
 	if f.FixPatch != "" {
-		b.WriteString("**Candidate fix (witness — starting point only, NOT reviewed):**\n\n")
-		b.WriteString("```diff\n")
-		b.WriteString(f.FixPatch)
-		if !strings.HasSuffix(f.FixPatch, "\n") {
-			b.WriteByte('\n')
+		patch := f.FixPatch
+		if len(patch) > maxFixPatch {
+			patch = patch[:maxFixPatch] + "\n[... truncated by bugbot ...]"
 		}
-		b.WriteString("```\n\n")
+		b.WriteString("**Candidate fix (witness — starting point only, NOT reviewed):**\n\n")
+		b.WriteString(fencedBlock("diff", patch))
+		b.WriteString("\n")
 	}
 
 	// 6. Inline reproduction block.
 	b.WriteString(renderReproSection(f.ReproPath))
 
 	// 7. Bugbot metadata <details> block.
+	// Metadata field values (Lens, fingerprint, model names, provider type,
+	// CommitSHA, scan time) are all bugbot-generated — not model-authored text —
+	// so no sanitization is needed here.
 	b.WriteString("<details><summary>Bugbot metadata</summary>\n\n")
 	b.WriteString("| Field | Value |\n")
 	b.WriteString("|---|---|\n")
@@ -464,29 +569,95 @@ func renderIssueBody(f store.Finding, repoURL string, prov publishProvenance) st
 	b.WriteString("\n</details>\n\n")
 
 	// 8. Verification trace with 30 KB cap.
+	// Reasoning is model-authored text placed directly inside a <details> block
+	// (not inside a code fence), so we must sanitize details tags to prevent
+	// a literal </details> from closing the block early.
 	if f.Reasoning != "" {
-		// GitHub rejects issue bodies over 65536 chars (HTTP 422). The
-		// reasoning trace is the only unbounded field; cap it well under the
-		// limit so a long trace degrades instead of failing the whole run.
 		reasoning := f.Reasoning
-		const maxReasoning = 30 * 1024
 		if len(reasoning) > maxReasoning {
 			reasoning = reasoning[:maxReasoning] + "\n\n[... truncated by bugbot: full trace exceeds GitHub's body limit ...]"
 		}
+		reasoning = sanitizeDetailsTag(reasoning)
 		b.WriteString("<details><summary>Verification trace</summary>\n\n")
 		b.WriteString(reasoning)
 		b.WriteString("\n\n</details>\n\n")
 	}
 
 	// 9. Attribution footer — always last.
-	b.WriteString("🤖 Filed by Bugbot — automated finding; verify before acting.")
+	footer := "🤖 Filed by Bugbot — automated finding; verify before acting."
+	b.WriteString(footer)
 
-	return b.String()
+	// Belt-and-braces: if the assembled body still exceeds the safe threshold,
+	// truncate at a safe byte boundary while preserving line 1 (fingerprint
+	// marker — load-bearing for issue recovery) and the attribution footer.
+	body := b.String()
+	if len(body) > maxBody {
+		truncNote := "\n\n[... body truncated by bugbot: content exceeds GitHub's issue size limit ...]\n\n"
+		available := maxBody - len(firstLine) - len("\n\n") - len(truncNote) - len("\n") - len(footer)
+		if available < 0 {
+			available = 0
+		}
+		// Find a safe UTF-8 boundary within available bytes of the body (after the first line).
+		afterFirst := firstLine + "\n\n"
+		mid := body[len(afterFirst):]
+		if len(mid) > available {
+			// Walk back to a valid UTF-8 rune boundary.
+			end := available
+			for end > 0 && !utf8.RuneStart(mid[end]) {
+				end--
+			}
+			mid = mid[:end]
+		}
+		body = afterFirst + mid + truncNote + footer
+	}
+
+	return body
+}
+
+// reproSourceExtensions is the allowlist of file extensions that are inlined
+// as source/test files in the reproduction <details> block. Only recognisable
+// source and script files are included; binary, compiled, and diff artifacts
+// are excluded. patch.diff is also explicitly excluded below regardless of
+// extension because the patch prover writes it and it is not a repro source.
+var reproSourceExtensions = map[string]bool{
+	"go":   true,
+	"py":   true,
+	"js":   true,
+	"ts":   true,
+	"rs":   true,
+	"c":    true,
+	"cc":   true,
+	"cpp":  true,
+	"h":    true,
+	"java": true,
+	"rb":   true,
+	"sh":   true,
+	"bash": true,
+	"zsh":  true,
+	"fish": true,
+	"toml": true,
+	"yaml": true,
+	"yml":  true,
+	"json": true,
+	"txt":  true,
+	"text": true,
+	"mod":  true, // go.mod
+	"sum":  true, // go.sum
 }
 
 // renderReproSection inlines the reproduction artifact as a <details> block.
 // It reads run.sh (stripping shebang/comment lines) and each source file found
 // under reproDir, applying a 10 KB per-file cap and a 25 KB total cap.
+//
+// File selection: only files whose extension appears in reproSourceExtensions
+// are included. patch.diff (written by the patch prover), README.md, and
+// run.sh are always skipped. This prevents accidental inclusion of binary
+// build artifacts or compiled objects.
+//
+// Code-fence safety: all fenced blocks are produced by fencedBlock(), which
+// auto-sizes the fence to be longer than any backtick run inside the content
+// (CommonMark rule), so model-authored source cannot break out of the fence.
+//
 // When the artifact dir is missing or unreadable the function falls back to a
 // single-line path mention so publish never errors on a missing artifact.
 // Returns an empty string when reproDir is "".
@@ -516,15 +687,16 @@ func renderReproSection(reproDir string) string {
 	b.WriteString("<details><summary>Reproduction</summary>\n\n")
 
 	if runCmd != "" {
-		b.WriteString("```sh\n")
-		b.WriteString(runCmd)
-		if !strings.HasSuffix(runCmd, "\n") {
-			b.WriteByte('\n')
-		}
-		b.WriteString("```\n\n")
+		// fencedBlock auto-sizes fence to prevent ``` breakout from run commands.
+		b.WriteString(fencedBlock("sh", runCmd))
+		b.WriteString("\n")
 	}
 
-	// Walk for source files (skip README.md and run.sh).
+	// Walk for source files. Skipped files:
+	//   - README.md   — documentation, not a repro source
+	//   - run.sh      — already rendered above
+	//   - patch.diff  — written by the patch prover; not a repro source
+	//   - any file whose extension is not in reproSourceExtensions
 	total := 0
 	truncated := false
 	_ = filepath.WalkDir(reproDir, func(path string, d fs.DirEntry, werr error) error {
@@ -532,9 +704,16 @@ func renderReproSection(reproDir string) string {
 			return nil
 		}
 		name := d.Name()
-		if name == "README.md" || name == "run.sh" {
+		if name == "README.md" || name == "run.sh" || name == "patch.diff" {
 			return nil
 		}
+
+		// Extension allowlist: skip non-source/test files (binaries, objects, etc.).
+		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
+		if ext == "" || !reproSourceExtensions[ext] {
+			return nil
+		}
+
 		if truncated {
 			return nil
 		}
@@ -564,23 +743,16 @@ func renderReproSection(reproDir string) string {
 		}
 		total += len(content)
 
-		// Determine language hint from extension.
-		ext := strings.TrimPrefix(filepath.Ext(name), ".")
-		if ext == "" {
-			ext = "text"
+		fileContent := string(content)
+		if fileTruncated {
+			fileContent += "\n// ... truncated by bugbot"
 		}
 
 		rel, _ := filepath.Rel(reproDir, path)
 		fmt.Fprintf(&b, "**`%s`**\n\n", rel)
-		fmt.Fprintf(&b, "```%s\n", ext)
-		b.Write(content)
-		if len(content) > 0 && content[len(content)-1] != '\n' {
-			b.WriteByte('\n')
-		}
-		if fileTruncated {
-			b.WriteString("// ... truncated by bugbot\n")
-		}
-		b.WriteString("```\n\n")
+		// fencedBlock auto-sizes fence to prevent ``` breakout from source content.
+		b.WriteString(fencedBlock(ext, fileContent))
+		b.WriteString("\n")
 		return nil
 	})
 
