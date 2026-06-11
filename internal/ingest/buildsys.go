@@ -25,6 +25,20 @@ const (
 	BuildSystemNPM BuildSystem = "npm"
 	// BuildSystemPython is detected from a root-level pyproject.toml or setup.py.
 	BuildSystemPython BuildSystem = "python"
+	// BuildSystemCMake is detected from a root-level CMakeLists.txt.
+	// C/C++ repos commonly coexist with other markers (e.g. Bazel), so cmake
+	// appears after all language-specific systems to avoid displacing a more
+	// specific primary.
+	BuildSystemCMake BuildSystem = "cmake"
+	// BuildSystemMeson is detected from a root-level meson.build.
+	BuildSystemMeson BuildSystem = "meson"
+	// BuildSystemMake is detected from a root-level Makefile or GNUmakefile.
+	// Heterogeneous make targets are not introspectable, so detection is recorded
+	// but repro guidance stays generic for make-only repos.
+	BuildSystemMake BuildSystem = "make"
+	// BuildSystemNinja is detected from a root-level build.ninja.
+	// Like make, ninja targets are not introspectable; detection is informational.
+	BuildSystemNinja BuildSystem = "ninja"
 )
 
 // DetectBuildSystems scans the root-level marker files in repoDir and returns
@@ -39,6 +53,15 @@ const (
 //  5. Cargo (Cargo.toml) — Rust.
 //  6. NPM (package.json) — bare npm / single-package JS.
 //  7. Python (pyproject.toml, setup.py) — Python.
+//  8. CMake (CMakeLists.txt) — C/C++ with cmake+ctest support.
+//  9. Meson (meson.build) — C/C++ with meson test support.
+//  10. Make (Makefile / GNUmakefile) — detected but heterogeneous; no specific
+//     repro guidance is generated (targets are not introspectable).
+//  11. Ninja (build.ninja) — same constraint as make.
+//
+// C/C++ markers (8-11) are placed after all language-specific entries so that
+// a Go repo with a convenience Makefile keeps go_module as primary, and a Bazel
+// C++ repo keeps bazel first — both fall out of the existing priority positions.
 //
 // Multiple entries may be returned when markers coexist (e.g. Bazel + go.mod
 // is common in mixed repos). The slice is always ordered as above; callers that
@@ -86,6 +109,26 @@ func DetectBuildSystems(repoDir string) []BuildSystem {
 	// 7. Python.
 	if has("pyproject.toml") || has("setup.py") {
 		out = append(out, BuildSystemPython)
+	}
+
+	// 8. CMake — C/C++ with cmake+ctest.
+	if has("CMakeLists.txt") {
+		out = append(out, BuildSystemCMake)
+	}
+
+	// 9. Meson — C/C++ with meson test.
+	if has("meson.build") {
+		out = append(out, BuildSystemMeson)
+	}
+
+	// 10. Make — heterogeneous; detect-and-record only.
+	if has("Makefile") || has("GNUmakefile") {
+		out = append(out, BuildSystemMake)
+	}
+
+	// 11. Ninja — heterogeneous; detect-and-record only.
+	if has("build.ninja") {
+		out = append(out, BuildSystemNinja)
 	}
 
 	return out

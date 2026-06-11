@@ -120,6 +120,50 @@ func TestDetectBuildSystems(t *testing.T) {
 				BuildSystemPython,
 			},
 		},
+		// --- C/C++ single-marker cases ---
+		{
+			name:    "CMakeLists.txt",
+			markers: []string{"CMakeLists.txt"},
+			want:    []BuildSystem{BuildSystemCMake},
+		},
+		{
+			name:    "meson.build",
+			markers: []string{"meson.build"},
+			want:    []BuildSystem{BuildSystemMeson},
+		},
+		{
+			name:    "Makefile",
+			markers: []string{"Makefile"},
+			want:    []BuildSystem{BuildSystemMake},
+		},
+		{
+			name:    "GNUmakefile",
+			markers: []string{"GNUmakefile"},
+			want:    []BuildSystem{BuildSystemMake},
+		},
+		{
+			name:    "build.ninja",
+			markers: []string{"build.ninja"},
+			want:    []BuildSystem{BuildSystemNinja},
+		},
+		// --- ordering: go.mod + Makefile keeps go_module as primary ---
+		{
+			name:    "go.mod+Makefile",
+			markers: []string{"go.mod", "Makefile"},
+			want:    []BuildSystem{BuildSystemGoModule, BuildSystemMake},
+		},
+		// --- ordering: MODULE.bazel + CMakeLists.txt keeps bazel first ---
+		{
+			name:    "MODULE.bazel+CMakeLists.txt",
+			markers: []string{"MODULE.bazel", "CMakeLists.txt"},
+			want:    []BuildSystem{BuildSystemBazel, BuildSystemCMake},
+		},
+		// --- all four C/C++ markers coexist in priority order ---
+		{
+			name:    "CMake+Meson+Make+Ninja",
+			markers: []string{"CMakeLists.txt", "meson.build", "Makefile", "build.ninja"},
+			want:    []BuildSystem{BuildSystemCMake, BuildSystemMeson, BuildSystemMake, BuildSystemNinja},
+		},
 	}
 
 	for _, tc := range cases {

@@ -22,10 +22,31 @@ const jsTSGuidance = "For JavaScript/TypeScript, write a\n" +
 const genericGuidance = "Use the repository's standard test framework for its language: write the\n" +
 	"  smallest test in the conventional location and run just that test."
 
+// cmakeGuidance is the C/C++ guidance for repos whose root carries a
+// CMakeLists.txt. CMake+CTest is the only C/C++ toolchain with an unambiguous
+// test entry point (ctest --test-dir), so it is the only tier that earns
+// specific guidance; GoogleTest and Catch2 both register tests through CTest.
+const cmakeGuidance = "For C/C++ with CMake, configure and build first:\n" +
+	"  " + "`cmake -B build -S . && cmake --build build`" + "\n" +
+	"  then run the new or relevant test via CTest:\n" +
+	"  " + "`ctest --test-dir build -R <TestName> --output-on-failure`" + "\n" +
+	"  or execute the test binary directly (e.g. " + "`./build/tests/<TestBinary>`" + ").\n" +
+	"  GoogleTest targets are conventionally under tests/ or test/; Catch2 targets\n" +
+	"  follow the same layout."
+
+// mesonGuidance is the C/C++ guidance for repos whose root carries a
+// meson.build but no CMakeLists.txt. Meson exposes a single test entry point
+// (`meson test`) so repro is unambiguous.
+const mesonGuidance = "For C/C++ with Meson, set up and build first:\n" +
+	"  " + "`meson setup build && meson compile -C build`" + "\n" +
+	"  then run the specific test by name:\n" +
+	"  " + "`meson test -C build <TestName>`" + "."
+
 // specificGuidance is the per-language test-framework guidance spliced into
 // the reproducer system prompt. It is the single source of truth for which
-// languages have specific guidance: langGuidance reads the text from it and
-// HasGuidance reports membership, so the two cannot drift. The Go text is
+// non-C/C++ languages have specific guidance: langGuidance reads the text from
+// it and HasGuidance reports membership (with C/C++ handled separately via
+// cmakeGuidance/mesonGuidance), so the two cannot drift. The Go text is
 // verbatim from the original prompt; the others give the idiomatic test file +
 // run command for each ecosystem.
 var specificGuidance = map[ingest.Language]string{
@@ -46,14 +67,34 @@ var specificGuidance = map[ingest.Language]string{
 // langGuidance (as opposed to the generic fallback). Doctor and the setup
 // wizard call this to warn when a dominant language lacks specific guidance,
 // reading the live table rather than maintaining a parallel list.
-func HasGuidance(lang ingest.Language) bool {
-	_, ok := specificGuidance[lang]
-	return ok
+//
+// systems is variadic so callers that do not yet track build systems (e.g. the
+// existing doctor check) can pass nothing and still compile. When systems are
+// provided, C/C++ repos with CMake or Meson are considered to have guidance.
+func HasGuidance(lang ingest.Language, systems ...ingest.BuildSystem) bool {
+	return langGuidance(lang, systems) != genericGuidance
 }
 
-// langGuidance returns the one-line test-framework guidance spliced into the
-// reproducer system prompt for the finding's language.
-func langGuidance(lang ingest.Language) string {
+// langGuidance returns the test-framework guidance spliced into the reproducer
+// system prompt for the finding's language. For C/C++ the result depends on
+// which build systems were detected: cmake earns specific guidance, then meson,
+// then the generic fallback (raw make/ninja or nothing). For all other languages
+// the specificGuidance map is the sole source of truth; systems is ignored.
+func langGuidance(lang ingest.Language, systems []ingest.BuildSystem) string {
+	switch lang {
+	case ingest.LangC, ingest.LangCPP:
+		for _, s := range systems {
+			if s == ingest.BuildSystemCMake {
+				return cmakeGuidance
+			}
+		}
+		for _, s := range systems {
+			if s == ingest.BuildSystemMeson {
+				return mesonGuidance
+			}
+		}
+		return genericGuidance
+	}
 	if g, ok := specificGuidance[lang]; ok {
 		return g
 	}
@@ -64,9 +105,9 @@ func langGuidance(lang ingest.Language) string {
 // assertion-bearing failing test for the finding. The emphasis is that the
 // repro must fail *because of the bug* and would pass if the bug were fixed —
 // not merely crash, and not fail to compile. The lang argument selects the
-// language-specific test-framework guidance (see langGuidance); everything else
-// is language-independent.
-func systemPrompt(lang ingest.Language) string {
+// language-specific test-framework guidance (see langGuidance); systems
+// refines that selection for C/C++ (cmake > meson > generic fallback).
+func systemPrompt(lang ingest.Language, systems []ingest.BuildSystem) string {
 	return `You are Bugbot's reproducer agent. Your job is to write a MINIMAL test that
 demonstrates a specific, already-verified bug by FAILING because of it.
 
@@ -75,7 +116,7 @@ repository. Investigate the finding's file, line, and reasoning first, then
 produce a repro plan.
 
 Hard requirements for the repro:
-- Prefer a standard test for the repository's language. ` + langGuidance(lang) + `
+- Prefer a standard test for the repository's language. ` + langGuidance(lang, systems) + `
 - The test MUST FAIL (exit non-zero) on the CURRENT, buggy code, and MUST PASS
   once the bug is fixed. Encode the bug as an explicit assertion: call the
   buggy code and assert the CORRECT expected result, so the wrong current
