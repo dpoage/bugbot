@@ -118,6 +118,9 @@ func newScanCmd() *cobra.Command {
 				MaxParallel:           concurrency,
 				TokenBudget:           cfg.Budgets.PerCycleTokens,
 				CacheReadBudgetWeight: cfg.Budgets.CacheReadWeight,
+				FinderHistoryTokens:   cfg.Budgets.FinderHistoryTokens,
+				FinderReadLines:       cfg.Budgets.FinderReadLines,
+				FinderReadBytes:       cfg.Budgets.FinderReadBytes,
 				Progress:              progressSink,
 				SandboxOpts:           sandboxOpts,
 			}

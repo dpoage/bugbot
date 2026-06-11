@@ -65,6 +65,25 @@ type Limits struct {
 	// defensive fallback for direct callers — it is NOT a way to request "cache
 	// reads are free"; that would require an explicit positive epsilon.
 	CacheReadWeight float64
+	// HistoryTokenBudget enables threshold-triggered history compaction. When the
+	// estimated size of the growing message history (bytes/4 over message content
+	// and tool-call arguments) exceeds this many tokens, the Runner compacts ONCE:
+	// it replaces the Content of tool-result messages older than the most recent
+	// few turns with short stubs, preserving the task message, every assistant
+	// turn (the reasoning chain), and tool_call/tool_result ID pairing. The
+	// threshold then re-arms at a higher level so compaction fires at most a few
+	// bounded times per run.
+	//
+	// Compaction trades cost against the provider's prompt cache: each firing
+	// mutates the message prefix and therefore costs one full-price cache miss
+	// that turn, after which cheaper append-only cache hits resume. It is a net
+	// win only once history is large enough that the bytes reclaimed over the
+	// remaining turns exceed that one-time miss — hence a budget sized well above
+	// a typical short run, and the re-arm that stops it thrashing.
+	//
+	// Zero disables compaction (pure append-only history). A negative value also
+	// disables it.
+	HistoryTokenBudget int64
 	// BudgetCheck, when non-nil, is consulted by the Runner BEFORE each model
 	// call. It lets a shared budget pool (see BudgetPool) stop an in-flight run
 	// at the next turn boundary once a run-spanning ceiling is hit, independent

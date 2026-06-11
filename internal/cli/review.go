@@ -275,13 +275,17 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 	}
 
 	opts := funnel.Options{
-		Lenses:      p.lenses,
-		Filter:      ingest.ScanFilter{Include: p.cfg.Scan.Include, Exclude: p.cfg.Scan.Exclude},
-		Refuters:    p.refuters,
-		MaxParallel: p.concurrency,
-		TokenBudget: p.cfg.Budgets.PerCycleTokens,
-		Progress:    progress.NewLogRenderer(p.out),
-		SandboxOpts: sandboxOpts,
+		Lenses:                p.lenses,
+		Filter:                ingest.ScanFilter{Include: p.cfg.Scan.Include, Exclude: p.cfg.Scan.Exclude},
+		Refuters:              p.refuters,
+		MaxParallel:           p.concurrency,
+		TokenBudget:           p.cfg.Budgets.PerCycleTokens,
+		CacheReadBudgetWeight: p.cfg.Budgets.CacheReadWeight,
+		FinderHistoryTokens:   p.cfg.Budgets.FinderHistoryTokens,
+		FinderReadLines:       p.cfg.Budgets.FinderReadLines,
+		FinderReadBytes:       p.cfg.Budgets.FinderReadBytes,
+		Progress:              progress.NewLogRenderer(p.out),
+		SandboxOpts:           sandboxOpts,
 	}
 	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
 	if err != nil {

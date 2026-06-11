@@ -31,7 +31,13 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 		return nil, nil
 	}
 
-	baseTools, err := f.readOnlyTools()
+	// Finders re-send their whole growing history every turn, so a fat read_file
+	// result is paid for on every subsequent turn. Tightening the finder's
+	// per-read caps shrinks each result at the source — slowing history growth
+	// without ever mutating the conversation prefix, which (unlike history
+	// compaction) preserves the prompt-cache prefix and so cuts cache-WEIGHTED
+	// cost, not just raw tokens (see bugbot-3nf and DefaultFinderReadLines/Bytes).
+	baseTools, err := f.readOnlyTools(f.opts.finderReadCaps())
 	if err != nil {
 		return nil, err
 	}
