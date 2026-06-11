@@ -742,6 +742,58 @@ func TestSweep_BudgetOrphanPersistsAsTier3(t *testing.T) {
 	}
 }
 
+// TestHypothesize_MultiLens_NoRace is a -race regression test for the
+// shared-slice race fixed by the three-index append in hypothesize.go. It fans
+// out all builtin lenses in parallel (MaxParallel = len(BuiltinLenses())) so
+// every goroutine tries to append to the same baseTools backing array
+// simultaneously. Without the three-index fix (baseTools[:len:len]) the race
+// detector fires because multiple goroutines write into the same backing-array
+// slot (baseTools[len(baseTools)]) concurrently.
+//
+// Revert-experiment result (documented here for record): temporarily removing
+// the ":len(baseTools)" cap so the call reads
+//
+//	append(baseTools, postLeadTool)
+//
+// and running `go test -race -run TestHypothesize_MultiLens_NoRace` reliably
+// triggers a DATA RACE on the backing array. Restoring the three-index form
+// clears the race detector. The fix is verified real.
+func TestHypothesize_MultiLens_NoRace(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// Use all builtin lenses so every goroutine slot is filled. MaxParallel is
+	// set to len(BuiltinLenses()) to guarantee full concurrency: every (lens,
+	// chunk) unit runs simultaneously, maximising the window for the race.
+	nLenses := len(BuiltinLenses())
+
+	// The scripted client returns empty candidates for every lens — the test
+	// only exercises the concurrent append path, not the candidate pipeline.
+	finder := newScriptedClient()
+	verifier := newScriptedClient()
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
+		MaxParallel: nLenses,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Run Sweep multiple times to increase the probability of hitting the race
+	// window. Under -race one iteration is typically sufficient; five is generous.
+	for i := range 5 {
+		res, err := f.Sweep(ctx)
+		if err != nil {
+			t.Fatalf("Sweep[%d]: %v", i, err)
+		}
+		// Sanity: all lenses ran (one call per lens, single chunk).
+		if got := finder.callCount(); got < nLenses*(i+1) {
+			t.Errorf("Sweep[%d]: finder calls = %d, want >= %d", i, got, nLenses*(i+1))
+		}
+		_ = res
+	}
+}
+
 // TestBudgetState_CacheReadWeighted pins bugbot-16k: cache-read tokens are
 // discounted when charging the shared budget pool, so a cache-heavy run does
 // not exhaust the budget at a fraction of real cost.

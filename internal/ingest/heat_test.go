@@ -128,8 +128,71 @@ func TestParseHeat_TauDecay(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ChurnHeat integration test (real git repo)
+// ChurnHeat integration tests (real git repo)
 // ---------------------------------------------------------------------------
+
+// TestChurnHeat_NonASCIIPaths proves that files with non-ASCII names (accented
+// Latin, CJK, etc.) receive non-zero heat and rank correctly against plain-ASCII
+// files touched at the same time. This exercises the -c core.quotepath=off fix:
+// without it, git log --name-only emits octal-escaped paths ("caf\303\251.go")
+// while the snapshot side uses raw UTF-8, so the paths never match and heat is
+// silently zero for those files.
+func TestChurnHeat_NonASCIIPaths(t *testing.T) {
+	r := newTestRepo(t)
+
+	now := time.Now()
+	recentDate := now.Add(-2 * 24 * time.Hour)
+
+	// Commit a plain-ASCII file and a non-ASCII file at the same time.
+	r.write("ascii.go", "package main\n")
+	r.write("café_ñ.go", "package main\n")
+	r.gitCommitDated(recentDate, "add non-ascii file")
+
+	// Touch only the non-ASCII file a second time (more recent), so it should
+	// outrank the ASCII file by heat.
+	r.write("café_ñ.go", "package main\n// v2\n")
+	r.gitCommitDated(now.Add(-1*24*time.Hour), "update non-ascii file again")
+
+	heat, err := ChurnHeat(context.Background(), r.dir, 0)
+	if err != nil {
+		t.Fatalf("ChurnHeat: %v", err)
+	}
+
+	t.Logf("heat scores: ascii=%.4f café_ñ.go=%.4f", heat["ascii.go"], heat["café_ñ.go"])
+
+	if heat["café_ñ.go"] == 0 {
+		t.Error("café_ñ.go has zero heat; non-ASCII paths not matched (core.quotepath=off missing?)")
+	}
+	if heat["ascii.go"] == 0 {
+		t.Error("ascii.go has zero heat; unexpected")
+	}
+	// The non-ASCII file was touched twice (more recently), so it should be hotter.
+	if heat["café_ñ.go"] <= heat["ascii.go"] {
+		t.Errorf("café_ñ.go (%.4f) should outrank ascii.go (%.4f) — touched more recently and more often",
+			heat["café_ñ.go"], heat["ascii.go"])
+	}
+}
+
+// TestChurnHeat_TimeoutDegrades proves that ChurnHeat degrades gracefully (nil,
+// nil) when the context is already cancelled — simulating a timeout hit. This
+// exercises the heatGitTimeout / context-cancellation degradation path.
+func TestChurnHeat_TimeoutDegrades(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("file.go", "package main\n")
+	r.gitCommitDated(time.Now().Add(-1*24*time.Hour), "seed")
+
+	// Pre-cancel the context to simulate a timeout.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	heat, err := ChurnHeat(ctx, r.dir, 0)
+	if err != nil {
+		t.Fatalf("ChurnHeat should degrade to nil,nil on timeout/cancel, got err: %v", err)
+	}
+	if heat != nil {
+		t.Errorf("ChurnHeat should return nil map on degradation, got %v", heat)
+	}
+}
 
 func TestChurnHeat_ThreeFileFixture(t *testing.T) {
 	r := newTestRepo(t)

@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"sort"
+	"strings"
 
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
@@ -40,10 +40,11 @@ func (f *Funnel) Sweep(ctx context.Context) (*Result, error) {
 			heatFiles = len(heat)
 			heatOrdered = applyHeatOrder(targets, heat)
 			if heatOrdered {
-				slog.Default().Info("funnel: heat ordering applied",
-					"heat_files", heatFiles,
-					"top5", heatTop5(targets, heat),
-				)
+				progress.Emit(f.opts.Progress, progress.Event{
+					Kind:  progress.KindHeatOrdered,
+					Count: heatFiles,
+					Label: heatTop5(targets, heat),
+				})
 			}
 		}
 	}
@@ -82,18 +83,22 @@ func applyHeatOrder(targets []string, heat map[string]float64) bool {
 	return false
 }
 
-// heatTop5 returns the top 5 (path, score) pairs from targets for logging.
-func heatTop5(targets []string, heat map[string]float64) []any {
+// heatTop5 returns a human-readable summary of the top 5 hottest targets,
+// formatted as "path:score" pairs joined by spaces, for use in progress events.
+func heatTop5(targets []string, heat map[string]float64) string {
 	n := 5
 	if len(targets) < n {
 		n = len(targets)
 	}
-	out := make([]any, 0, n*2)
+	var b strings.Builder
 	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
 		p := targets[i]
-		out = append(out, p, heat[p])
+		fmt.Fprintf(&b, "%s:%.3f", p, heat[p])
 	}
-	return out
+	return b.String()
 }
 
 // Targeted runs the funnel over the blast radius of changedFiles, intersected

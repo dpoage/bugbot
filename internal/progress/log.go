@@ -81,6 +81,8 @@ func (r *LogRenderer) line(ev Event) string {
 		// Spend ticks are noisy; suppressed in the plain log. Summary/agent lines
 		// carry the totals.
 		return ""
+	case KindHeatOrdered:
+		return fmt.Sprintf("heat ordering applied: heat_files=%d top5=%s", ev.Count, ev.Label)
 	case KindScanFinished:
 		return fmt.Sprintf("scan finished: kind=%s commit=%s%s spend in=%d out=%d%s",
 			ev.ScanKind, shortSHA(ev.Commit), countsSuffix(ev.Counts),
@@ -129,6 +131,8 @@ func (r *LogRenderer) handleSlog(ev Event) {
 			"tokens", ev.Tokens, "duration", ev.Duration.String(), "err", ev.Err)
 	case KindFindingVerified:
 		r.log.Info("progress: verified", "title", ev.Title, "file", ev.File, "line", ev.Line)
+	case KindHeatOrdered:
+		r.log.Info("progress: heat ordering applied", "heat_files", ev.Count, "top5", ev.Label)
 	case KindBudgetDegraded:
 		r.log.Warn("progress: budget degraded", "detail", ev.Message)
 	case KindBudgetStopped:

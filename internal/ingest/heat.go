@@ -36,6 +36,10 @@ const (
 	// It bounds memory and subprocess runtime while still covering months of
 	// typical repository activity.
 	heatCommitCap = 500
+	// heatGitTimeout is the deadline for the git log subprocess inside ChurnHeat.
+	// An unbounded call on a pathological repo would block every Sweep; 10 s is
+	// generous for any sane history while still bounding the worst case.
+	heatGitTimeout = 10 * time.Second
 )
 
 // ChurnHeat computes a per-file heat score for every file touched in recent
@@ -64,7 +68,19 @@ func ChurnHeat(ctx context.Context, repoDir string, window time.Duration) (map[s
 	sinceArg := "--since=" + strconv.FormatInt(sinceSeconds, 10) + " seconds ago"
 	nArg := "-n" + strconv.Itoa(heatCommitCap)
 
-	out, err := runGitRaw(ctx, repoDir,
+	// Wrap with a hard deadline so a pathological repo cannot block every Sweep.
+	// On timeout the context error causes runGitRaw to return non-nil, which
+	// falls through to the degradation path (nil,nil) below.
+	heatCtx, cancel := context.WithTimeout(ctx, heatGitTimeout)
+	defer cancel()
+
+	// -c core.quotepath=off prevents git from quoting non-ASCII path components
+	// (accented, CJK, etc.) as octal-escaped C-strings. Without this flag,
+	// `git log --name-only` emits `"caf\303\251.txt"` while the snapshot side
+	// (git ls-files -z) yields raw UTF-8 — the paths never match and heat is
+	// silently zero for those files.
+	out, err := runGitRaw(heatCtx, repoDir,
+		"-c", "core.quotepath=off",
 		"log",
 		nArg,
 		sinceArg,
@@ -72,7 +88,7 @@ func ChurnHeat(ctx context.Context, repoDir string, window time.Duration) (map[s
 		"--format=%ct",
 	)
 	if err != nil {
-		// Any git failure (not a repo, shallow clone, no history, etc.)
+		// Any git failure (not a repo, shallow clone, no history, timeout, etc.)
 		// → empty heat, no error. Callers degrade to alphabetical.
 		return nil, nil //nolint:nilerr
 	}

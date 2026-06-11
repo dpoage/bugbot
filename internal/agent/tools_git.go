@@ -206,6 +206,11 @@ type gitLogTool struct {
 // high churn near a suspicious function are strong regression candidates.
 // Output is bounded at 32KB. The max_count is capped at 50.
 //
+// Note: git pathspec magic (:/ and :(glob) forms) is accepted for the path
+// argument and scopes to the full repository, which may exceed the snapshot's
+// scan-filter scope. This is accepted because the call is read-only and all
+// results are repo-contained.
+//
 // runner may be nil to use the real git subprocess.
 func NewGitLog(dir string, runner gitRunner) (Tool, error) {
 	if runner == nil {
