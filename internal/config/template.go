@@ -74,6 +74,16 @@ scan:
 # sandbox: isolated execution environment for verification and reproduction.
 # backend is currently "cli" (shells out to a container runtime).
 # network defaults to "none" — reproduction runs offline.
+#
+# dep_strategy controls how a NON-vendored Go module resolves its external
+# dependencies under network=none. Vendored repos (vendor/modules.txt) always
+# build offline regardless of this setting.
+#   off   (default) no dependency mounts; only vendored repos build offline.
+#   host  mount the host's Go module cache read-only into the sandbox. Exposes
+#         PUBLIC module source (never put secrets in your module cache).
+#   fetch run one online "go mod download" in a hardened container to warm a
+#         bugbot-managed cache, then mount it read-only; the test/build run that
+#         follows is still network=none. The network is touched ONCE.
 # ---------------------------------------------------------------------------
 sandbox:
   backend: cli
@@ -83,6 +93,7 @@ sandbox:
   memory_mb: 2048
   timeout_seconds: 600
   network: none
+  dep_strategy: off            # off | host | fetch
 
 # ---------------------------------------------------------------------------
 # report: where findings are emitted and through which sinks.

@@ -42,7 +42,7 @@ var _ sandbox.Sandbox = (*fakeSandbox)(nil)
 
 func newToolWithFake(results []sandbox.Result) (*SandboxExecTool, *fakeSandbox) {
 	fs := &fakeSandbox{results: results}
-	tool := NewSandboxExecTool(fs, "/repo", 3, nil)
+	tool := NewSandboxExecTool(fs, "/repo", 3, nil, nil, nil)
 	return tool, fs
 }
 
@@ -194,7 +194,7 @@ func TestSandboxExecTool_WithFiles(t *testing.T) {
 
 func TestSandboxExecTool_InfraError_IsToolError(t *testing.T) {
 	fs := &fakeSandbox{err: errors.New("podman not found")}
-	tool := NewSandboxExecTool(fs, "/repo", 3, nil)
+	tool := NewSandboxExecTool(fs, "/repo", 3, nil, nil, nil)
 
 	_, err := runSandboxExecTool(t, tool, map[string]interface{}{
 		"cmd": []string{"go", "test", "./..."},
@@ -210,7 +210,7 @@ func TestSandboxExecTool_InfraError_IsToolError(t *testing.T) {
 func TestSandboxExecTool_BudgetExhausted(t *testing.T) {
 	tool, fs := newToolWithFake(nil)
 	// maxExec = 2
-	tool2 := NewSandboxExecTool(fs, "/repo", 2, nil)
+	tool2 := NewSandboxExecTool(fs, "/repo", 2, nil, nil, nil)
 
 	// First two calls succeed.
 	args := map[string]interface{}{"cmd": []string{"go", "test", "./..."}}
@@ -282,7 +282,7 @@ func TestSandboxExecTool_DurationRecorded(t *testing.T) {
 	}
 	var recorded time.Duration
 	fs := &fakeSandbox{results: []sandbox.Result{result}}
-	tool := NewSandboxExecTool(fs, "/repo", 3, func(d time.Duration) {
+	tool := NewSandboxExecTool(fs, "/repo", 3, nil, nil, func(d time.Duration) {
 		recorded = d
 	})
 

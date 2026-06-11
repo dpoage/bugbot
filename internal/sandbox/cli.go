@@ -125,6 +125,8 @@ func (s *CLI) resolveParams(spec Spec) runParams {
 		pidsLimit: s.pidsLimit,
 		env:       spec.Env,
 		cmd:       spec.Cmd,
+		roMounts:  spec.ROMounts,
+		rwMounts:  spec.RWMounts,
 	}
 	if spec.Image != "" {
 		p.image = spec.Image
@@ -147,6 +149,9 @@ func (s *CLI) resolveParams(spec Spec) runParams {
 func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	if len(spec.Cmd) == 0 {
 		return Result{}, errors.New("sandbox: spec.Cmd must be non-empty")
+	}
+	if err := validateMounts(spec.ROMounts, spec.RWMounts); err != nil {
+		return Result{}, err
 	}
 
 	ws, err := prepareWorkspace(spec.RepoDir, spec.WriteFiles)

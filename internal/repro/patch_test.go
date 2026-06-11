@@ -168,6 +168,55 @@ func TestPatchProver_SuccessPath(t *testing.T) {
 	}
 }
 
+// TestPatchProver_CarriesDepMountsAndEnv verifies the patch-prover's targeted
+// and suite sandbox runs both carry the resolved dependency mounts/env.
+func TestPatchProver_CarriesDepMountsAndEnv(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	repoDir := newRepoDirWithCalc(t)
+	artifactDir := t.TempDir()
+
+	finding, att := buildT1Finding(t, st)
+	if err := os.MkdirAll(filepath.Join(artifactDir, finding.ID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	client := newScriptedClient(patchPlanBody(t, goodPatchPlan()))
+	sb := sandbox.NewMock(sandbox.MockResponse{})
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
+
+	mounts := []sandbox.ROMount{{HostPath: "/host/cache", ContainerPath: "/modcache"}}
+	env := []string{"GOMODCACHE=/modcache", "GOPROXY=off"}
+
+	prover := &PatchProver{
+		client:      client,
+		sb:          sb,
+		repoDir:     repoDir,
+		maxAttempts: 3,
+		artifactDir: artifactDir,
+		depMounts:   mounts,
+		depEnv:      env,
+	}
+
+	if _, err := prover.Prove(ctx, st, finding, att); err != nil {
+		t.Fatalf("Prove: %v", err)
+	}
+
+	calls := sb.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("sandbox calls = %d, want 2", len(calls))
+	}
+	for i, c := range calls {
+		if len(c.Spec.ROMounts) != 1 || c.Spec.ROMounts[0].ContainerPath != "/modcache" {
+			t.Errorf("call %d ROMounts = %+v, want one /modcache mount", i, c.Spec.ROMounts)
+		}
+		if !contains(c.Spec.Env, "GOPROXY=off") {
+			t.Errorf("call %d env = %v, want GOPROXY=off", i, c.Spec.Env)
+		}
+	}
+}
+
 // --- targeted-pass but suite-fail -> feedback -> exhaustion -> NeedsHuman ---
 
 func TestPatchProver_SuiteFailLeadsToNeedsHuman(t *testing.T) {

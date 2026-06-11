@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 )
 
@@ -21,6 +22,12 @@ type runParams struct {
 	pidsLimit int
 	env       []string
 	cmd       []string
+	// roMounts are extra read-only bind mounts (e.g. a dependency cache),
+	// rendered after the writable workspace mount and never writable.
+	roMounts []ROMount
+	// rwMounts are extra writable bind mounts, used only by the trusted
+	// dependency-prefetch step (see Spec.RWMounts).
+	rwMounts []ROMount
 }
 
 // workspaceMount is where the writable workspace copy is mounted inside the
@@ -48,6 +55,10 @@ const workspaceMount = "/workspace"
 //   - -v ws:/workspace:rw,Z     : the workspace copy is the only writable mount
 //     (Z relabels for SELinux; harmless elsewhere). The original repo is never
 //     mounted.
+//   - -v host:ctr:ro,Z          : any Spec.ROMounts are mounted READ-ONLY (a
+//     dependency cache, for example). These are never writable, but they DO
+//     expose host content to untrusted code, so callers must only mount
+//     public/cache content — never secrets. See the package doc and Spec.ROMounts.
 //   - --workdir /workspace      : run from the workspace.
 //   - --cap-drop ALL            : drop all Linux capabilities.
 //   - --security-opt no-new-privileges : block privilege escalation (setuid).
@@ -68,6 +79,16 @@ func buildRunArgs(p runParams) []string {
 		"-v", fmt.Sprintf("%s:%s:rw,Z", p.workspace, workspaceMount),
 	}
 
+	// Read-only mounts are rendered right after the writable workspace, in the
+	// caller-supplied order, and are always :ro (never writable).
+	for _, m := range p.roMounts {
+		args = append(args, "-v", fmt.Sprintf("%s:%s:ro,Z", m.HostPath, m.ContainerPath))
+	}
+	// Writable mounts are used only by the trusted dependency-prefetch step.
+	for _, m := range p.rwMounts {
+		args = append(args, "-v", fmt.Sprintf("%s:%s:rw,Z", m.HostPath, m.ContainerPath))
+	}
+
 	if p.pidsLimit > 0 {
 		args = append(args, "--pids-limit", strconv.Itoa(p.pidsLimit))
 	}
@@ -84,6 +105,38 @@ func buildRunArgs(p runParams) []string {
 	args = append(args, p.image)
 	args = append(args, p.cmd...)
 	return args
+}
+
+// validateMounts checks that every extra bind mount (read-only and writable)
+// is well-formed: both paths absolute and non-empty, and no duplicate
+// ContainerPath across the combined set (two mounts at the same container path
+// is a configuration error and the runtime's behavior would be ambiguous). The
+// workspace mount at /workspace is implicit and not represented here. It
+// returns the first problem found.
+func validateMounts(ro, rw []ROMount) error {
+	seen := make(map[string]bool, len(ro)+len(rw))
+	check := func(mounts []ROMount, kind string) error {
+		for _, m := range mounts {
+			if m.HostPath == "" || m.ContainerPath == "" {
+				return fmt.Errorf("sandbox: %s mount requires non-empty host and container paths", kind)
+			}
+			if !filepath.IsAbs(m.HostPath) {
+				return fmt.Errorf("sandbox: %s mount host path %q must be absolute", kind, m.HostPath)
+			}
+			if !filepath.IsAbs(m.ContainerPath) {
+				return fmt.Errorf("sandbox: %s mount container path %q must be absolute", kind, m.ContainerPath)
+			}
+			if seen[m.ContainerPath] {
+				return fmt.Errorf("sandbox: duplicate mount container path %q", m.ContainerPath)
+			}
+			seen[m.ContainerPath] = true
+		}
+		return nil
+	}
+	if err := check(ro, "read-only"); err != nil {
+		return err
+	}
+	return check(rw, "writable")
 }
 
 // removeArgs constructs the argv for forcibly removing a container by name,

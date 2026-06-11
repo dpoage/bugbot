@@ -32,6 +32,13 @@ type SandboxExecTool struct {
 	maxExec int
 	used    atomic.Int32
 
+	// roMounts / depEnv carry the resolved dependency strategy (a read-only
+	// module-cache mount and/or GOFLAGS) so a refuter's network-none probe can
+	// resolve external modules. Empty for vendored/off repos. The one-time online
+	// prefetch (DepStrategyFetch) is performed by the caller before any tool runs.
+	roMounts []sandbox.ROMount
+	depEnv   []string
+
 	// onExec, when non-nil, is called after each successful Exec with the
 	// duration. Used by the funnel to aggregate Stats.SandboxExecMillis.
 	onExec func(d time.Duration)
@@ -39,9 +46,11 @@ type SandboxExecTool struct {
 
 // NewSandboxExecTool builds a sandbox_exec tool instance for one candidate's
 // refuter panel. sb is the sandbox backend; repoDir is the repository root
-// passed as Spec.RepoDir; maxExec is the per-candidate execution budget.
-func NewSandboxExecTool(sb sandbox.Sandbox, repoDir string, maxExec int, onExec func(time.Duration)) *SandboxExecTool {
-	return &SandboxExecTool{sb: sb, repoDir: repoDir, maxExec: maxExec, onExec: onExec}
+// passed as Spec.RepoDir; maxExec is the per-candidate execution budget;
+// roMounts and depEnv carry the dependency strategy (read-only module-cache
+// mount and env) so module-dependent probes work under --network=none.
+func NewSandboxExecTool(sb sandbox.Sandbox, repoDir string, maxExec int, roMounts []sandbox.ROMount, depEnv []string, onExec func(time.Duration)) *SandboxExecTool {
+	return &SandboxExecTool{sb: sb, repoDir: repoDir, maxExec: maxExec, roMounts: roMounts, depEnv: depEnv, onExec: onExec}
 }
 
 // sandboxExecArgs is the JSON schema for the tool arguments.
@@ -120,6 +129,8 @@ func (t *SandboxExecTool) Run(ctx context.Context, raw json.RawMessage) (string,
 		Cmd:        args.Cmd,
 		Network:    "none",
 		WriteFiles: writeFiles,
+		ROMounts:   t.roMounts,
+		Env:        t.depEnv,
 	}
 
 	res, err := t.sb.Exec(ctx, spec)

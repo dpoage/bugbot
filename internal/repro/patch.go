@@ -155,6 +155,12 @@ type PatchProver struct {
 	// skips rather than guessing — a wrong suite command would silently
 	// weaken the witness.
 	suiteCmd []string
+	// depMounts / depEnv carry the resolved dependency strategy (read-only
+	// module-cache mount and/or GOFLAGS) so the patch-prover's network-none runs
+	// resolve external modules identically to the repro run. The one-time online
+	// prefetch is already done by PromoteAll before the prover runs.
+	depMounts []sandbox.ROMount
+	depEnv    []string
 }
 
 // detectSuiteCmd infers the full-suite test command from well-known repo
@@ -453,6 +459,8 @@ func (p *PatchProver) execSandbox(ctx context.Context, cmd []string, writeFiles 
 		Network:    "none",
 		Timeout:    to,
 		WriteFiles: writeFiles,
+		ROMounts:   p.depMounts,
+		Env:        p.depEnv,
 	}
 	return p.sb.Exec(ctx, spec)
 }

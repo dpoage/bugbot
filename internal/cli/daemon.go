@@ -215,6 +215,7 @@ func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 		PatchProver:      cfg.Repro.PatchProver,
 		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
 		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
+		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer: %w", err)

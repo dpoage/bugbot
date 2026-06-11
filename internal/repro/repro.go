@@ -91,6 +91,13 @@ type Options struct {
 	// Cargo.toml, package.json, pyproject.toml/setup.py); if detection also
 	// fails the patch-prover skips for that finding.
 	PatchSuiteCmd []string
+	// DepStrategy selects how external module dependencies are made available to
+	// the network-none sandbox (see sandbox.DepStrategy). Empty/"off" keeps the
+	// current behavior (only vendored repos build offline). "host" mounts the
+	// host module cache read-only; "fetch" warms a bugbot-managed cache with one
+	// online download then mounts it read-only. Vendored repos are always
+	// detected regardless of this value.
+	DepStrategy sandbox.DepStrategy
 }
 
 // resolve returns a copy of o with defaults applied; it does not mutate the
@@ -127,6 +134,10 @@ type Reproducer struct {
 	sb      sandbox.Sandbox
 	repoDir string
 	opts    Options
+	// deps is the resolved dependency strategy for repoDir: the read-only mounts
+	// and extra env every sandbox run carries, plus an optional one-time
+	// Prefetch hook (run once from PromoteAll). Resolved once in New.
+	deps sandbox.Resolution
 }
 
 // New constructs a Reproducer. client is the reproducer-role LLM client, sb is
@@ -143,11 +154,21 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 	if repoDir == "" {
 		return nil, errors.New("repro: empty repoDir")
 	}
+	resolved := opts.resolve()
+	deps, err := sandbox.ResolveDeps(repoDir, sandbox.DepOptions{
+		Strategy:     resolved.DepStrategy,
+		FetchSandbox: sb,
+		FetchImage:   resolved.Image,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("repro: resolve dependency strategy: %w", err)
+	}
 	return &Reproducer{
 		client:  client,
 		sb:      sb,
 		repoDir: repoDir,
-		opts:    opts.resolve(),
+		opts:    resolved,
+		deps:    deps,
 	}, nil
 }
 
@@ -299,6 +320,10 @@ func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, e
 		Network:    "none",
 		Timeout:    r.opts.Timeout,
 		WriteFiles: files,
+		// Dependency strategy: mount a module cache read-only and/or set GOFLAGS
+		// so the network-none run can resolve external modules.
+		ROMounts: r.deps.ROMounts,
+		Env:      r.deps.Env,
 	}
 	return r.sb.Exec(ctx, spec)
 }

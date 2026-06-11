@@ -158,6 +158,93 @@ func TestPromoteAll_Success(t *testing.T) {
 	}
 }
 
+// --- dependency strategy wiring --------------------------------------------
+
+// TestPromoteAll_VendoredSetsGoflags verifies a vendored repo run carries
+// GOFLAGS=-mod=vendor and no extra mounts, in the default "off" mode.
+func TestPromoteAll_VendoredSetsGoflags(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	finding := seedFinding(t, st)
+	repoDir := newRepoDir(t) // has go.mod
+	// Make it vendored.
+	if err := os.MkdirAll(filepath.Join(repoDir, "vendor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "vendor", "modules.txt"), []byte("# bug\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client := newScriptedClient(planBody(t, goodPlan()))
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "FAIL"}})
+
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir()}) // DepStrategy empty == off
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.PromoteAll(ctx, st, []store.Finding{finding}); err != nil {
+		t.Fatalf("PromoteAll: %v", err)
+	}
+
+	calls := sb.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("calls = %d, want 1", len(calls))
+	}
+	spec := calls[0].Spec
+	if !contains(spec.Env, "GOFLAGS=-mod=vendor") {
+		t.Errorf("vendored run env = %v, want GOFLAGS=-mod=vendor", spec.Env)
+	}
+	if len(spec.ROMounts) != 0 {
+		t.Errorf("vendored run should have no mounts, got %+v", spec.ROMounts)
+	}
+}
+
+// TestPromoteAll_HostStrategyMountsCache verifies the host strategy attaches a
+// read-only modcache mount and GOMODCACHE/GOPROXY env to the repro Spec.
+func TestPromoteAll_HostStrategyMountsCache(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	finding := seedFinding(t, st)
+	repoDir := newRepoDir(t) // has go.mod, not vendored
+	// Point the host modcache at a real temp dir so resolution is deterministic
+	// regardless of the test machine's go env.
+	cache := t.TempDir()
+	t.Setenv("GOMODCACHE", cache)
+
+	client := newScriptedClient(planBody(t, goodPlan()))
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "FAIL"}})
+
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir(), DepStrategy: sandbox.DepStrategyHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.PromoteAll(ctx, st, []store.Finding{finding}); err != nil {
+		t.Fatalf("PromoteAll: %v", err)
+	}
+
+	spec := sb.Calls()[0].Spec
+	if len(spec.ROMounts) != 1 || spec.ROMounts[0].HostPath != cache {
+		t.Fatalf("host strategy mount = %+v, want host=%q", spec.ROMounts, cache)
+	}
+	if spec.ROMounts[0].ContainerPath != "/modcache" {
+		t.Errorf("mount container path = %q, want /modcache", spec.ROMounts[0].ContainerPath)
+	}
+	for _, want := range []string{"GOMODCACHE=/modcache", "GOPROXY=off"} {
+		if !contains(spec.Env, want) {
+			t.Errorf("host run env missing %q; got %v", want, spec.Env)
+		}
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
 // --- zero-exit -> revision -> success --------------------------------------
 
 func TestPromoteAll_ZeroExitThenRevision(t *testing.T) {

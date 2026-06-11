@@ -8,6 +8,12 @@
 // privileges, the root filesystem is read-only where practical, and the
 // network defaults to "none".
 //
+// Read-only bind mounts (Spec.ROMounts) are the one window into host content:
+// they let the container read shared, immutable data such as a Go module cache
+// without granting write access. Because untrusted code can read whatever is
+// mounted, callers MUST only mount public/cache content (e.g. a module cache of
+// public package source) and NEVER secrets, credentials, or private trees.
+//
 // The primary backend (NewCLI) shells out to a container runtime CLI
 // (podman or docker) rather than talking to a daemon API, which keeps the
 // implementation runtime-agnostic and dependency-free (standard library only).
@@ -69,6 +75,43 @@ type Spec struct {
 	// Paths that escape the workspace (absolute, or containing "..") are
 	// rejected as an error.
 	WriteFiles map[string][]byte
+
+	// ROMounts are additional host directories bind-mounted read-only into the
+	// container, in addition to the writable workspace. They exist so a
+	// dependency cache (e.g. a Go module cache) can be made available to an
+	// otherwise network-none run without copying it into the workspace.
+	//
+	// Each mount is rendered as `-v host:ctr:ro,Z` and is NEVER writable. Both
+	// paths must be absolute; empty paths and duplicate ContainerPaths are
+	// rejected as an error by Exec.
+	//
+	// SECURITY: a read-only mount exposes host content to untrusted, model-
+	// driven code. Callers must only mount public/cache content and never
+	// secrets or private trees. See the package doc.
+	ROMounts []ROMount
+
+	// RWMounts are host directories bind-mounted WRITABLE into the container.
+	// They exist ONLY for the dependency-prefetch step (DepStrategyFetch), where
+	// a network-enabled, otherwise-hardened container runs `go mod download` to
+	// populate a bugbot-managed module cache on the host. That same cache is
+	// then exposed to the untrusted network-none run read-only via ROMounts.
+	//
+	// Do NOT use RWMounts for normal model-driven runs: the writable workspace
+	// copy is the only writable surface those runs are meant to have. Rendered
+	// as `-v host:ctr:rw,Z`; same absolute-path/uniqueness validation as
+	// ROMounts. ContainerPaths must be unique across ROMounts and RWMounts
+	// combined.
+	RWMounts []ROMount
+}
+
+// ROMount is a single read-only bind mount of a host directory into the
+// container. It is never writable.
+type ROMount struct {
+	// HostPath is the absolute host path to expose. Required.
+	HostPath string
+	// ContainerPath is the absolute path the mount appears at inside the
+	// container. Required and unique across a Spec's ROMounts.
+	ContainerPath string
 }
 
 // Result is the faithful outcome of a sandboxed execution.

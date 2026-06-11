@@ -41,6 +41,25 @@ Findings carry a confidence tier:
 | **T2 Verified** | Survived adversarial review with a concrete reasoning trace |
 | **T3 Suspected** | Suppressed by default |
 
+## Sandbox dependency strategies
+
+The sandbox runs untrusted, model-generated code with `--network=none`, all
+capabilities dropped, and a read-only root. That isolation means a build or test
+can only resolve external modules if their source is already inside the
+container. For Go repos the `sandbox.dep_strategy` setting selects how that
+happens (other ecosystems can grow their own strategy behind the same seam):
+
+| Strategy | When it applies | What it does | Security tradeoff |
+|---|---|---|---|
+| **vendored** (automatic) | repo has `vendor/modules.txt` | sets `GOFLAGS=-mod=vendor`; `go` ignores the network entirely | none — source is already in the repo |
+| **off** (default) | always | no dependency mounts; only vendored repos build offline | none |
+| **host** | `dep_strategy: host` | mounts the host Go module cache **read-only** at `/modcache`, sets `GOMODCACHE=/modcache` and `GOPROXY=off` (a cache miss fails fast instead of hanging) | exposes **public** module source to the sandbox — never put secrets in your module cache |
+| **fetch** | `dep_strategy: fetch` | runs **one** `go mod download` in a separate, still-hardened container **with network**, into a bugbot-managed cache under `os.UserCacheDir()`, then mounts that cache read-only exactly like `host` | the network is touched exactly once, in a hardened container; every subsequent run is `network=none`. The cache is keyed on `go.sum`, so an unchanged dependency set is never re-fetched |
+
+Vendored detection runs in every mode (it is free and safe). Read-only mounts
+are never writable; the writable workspace copy remains the only writable
+surface for the untrusted run.
+
 ## Quickstart
 
 Requires Go 1.26+ to build, and podman or docker for the repro stage

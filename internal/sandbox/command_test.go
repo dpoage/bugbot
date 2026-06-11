@@ -68,6 +68,86 @@ func TestBuildRunArgsOmitsZeroLimits(t *testing.T) {
 	}
 }
 
+func TestBuildRunArgsRendersReadOnlyMounts(t *testing.T) {
+	args := buildRunArgs(runParams{
+		containerName: "bugbot-ro",
+		workspace:     "/tmp/ws",
+		image:         "img",
+		network:       "none",
+		cmd:           []string{"true"},
+		roMounts: []ROMount{
+			{HostPath: "/host/modcache", ContainerPath: "/modcache"},
+			{HostPath: "/host/other", ContainerPath: "/other"},
+		},
+	})
+
+	// Each RO mount is rendered :ro,Z and never rw.
+	mustContainSeq(t, args, "-v", "/host/modcache:/modcache:ro,Z")
+	mustContainSeq(t, args, "-v", "/host/other:/other:ro,Z")
+
+	// The workspace must still be the only rw mount.
+	mustContainSeq(t, args, "-v", "/tmp/ws:/workspace:rw,Z")
+	for i, a := range args {
+		if a == "-v" && i+1 < len(args) {
+			val := args[i+1]
+			if strings.Contains(val, "modcache") && strings.Contains(val, "rw,") {
+				t.Errorf("modcache mount must be read-only, got %q", val)
+			}
+		}
+	}
+
+	// Ordering: RO mounts render immediately after the workspace mount.
+	wsIdx := slices.Index(args, "/tmp/ws:/workspace:rw,Z")
+	roIdx := slices.Index(args, "/host/modcache:/modcache:ro,Z")
+	if wsIdx < 0 || roIdx < 0 || roIdx < wsIdx {
+		t.Errorf("RO mount must follow workspace mount; ws=%d ro=%d args=%q", wsIdx, roIdx, args)
+	}
+	// And RO mounts must come before the image/command.
+	imgIdx := slices.Index(args, "img")
+	if imgIdx < 0 || roIdx > imgIdx {
+		t.Errorf("RO mount must precede image; ro=%d img=%d", roIdx, imgIdx)
+	}
+}
+
+func TestBuildRunArgsRendersWritableMounts(t *testing.T) {
+	args := buildRunArgs(runParams{
+		containerName: "bugbot-rw",
+		workspace:     "/tmp/ws",
+		image:         "img",
+		network:       "bridge",
+		cmd:           []string{"go", "mod", "download"},
+		rwMounts:      []ROMount{{HostPath: "/host/cache", ContainerPath: "/modcache"}},
+	})
+	mustContainSeq(t, args, "-v", "/host/cache:/modcache:rw,Z")
+	mustContainSeq(t, args, "--network=bridge")
+}
+
+func TestValidateMounts(t *testing.T) {
+	tests := []struct {
+		name    string
+		ro, rw  []ROMount
+		wantErr bool
+	}{
+		{"empty", nil, nil, false},
+		{"valid ro", []ROMount{{"/h", "/c"}}, nil, false},
+		{"valid rw", nil, []ROMount{{"/h", "/c"}}, false},
+		{"empty host", []ROMount{{"", "/c"}}, nil, true},
+		{"empty ctr", []ROMount{{"/h", ""}}, nil, true},
+		{"relative host", []ROMount{{"rel", "/c"}}, nil, true},
+		{"relative ctr", []ROMount{{"/h", "rel"}}, nil, true},
+		{"dup within ro", []ROMount{{"/a", "/c"}, {"/b", "/c"}}, nil, true},
+		{"dup across ro/rw", []ROMount{{"/a", "/c"}}, []ROMount{{"/b", "/c"}}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateMounts(tc.ro, tc.rw)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateMounts(%v,%v) err=%v wantErr=%v", tc.ro, tc.rw, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestRemoveArgs(t *testing.T) {
 	if got := removeArgs("bugbot-x"); !slices.Equal(got, []string{"rm", "-f", "bugbot-x"}) {
 		t.Errorf("removeArgs = %q", got)
