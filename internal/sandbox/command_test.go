@@ -232,6 +232,9 @@ func TestShellQuote(t *testing.T) {
 		{"foo\nbar", "'foo\nbar'"},
 		// Backslash: no special meaning inside single quotes.
 		{`a\b`, `'a\b'`},
+		// Command substitution attempts: inert inside single quotes.
+		{"$(rm -rf /)", "'$(rm -rf /)'"},
+		{"`rm -rf /`", "'`rm -rf /`'"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
@@ -257,6 +260,17 @@ func TestBuildSetupScript(t *testing.T) {
 	}
 	if !strings.HasSuffix(script, `exec "$@"`) {
 		t.Errorf("script does not end with exec \"$@\": %q", script)
+	}
+
+	// An empty argv must be skipped entirely: rendering it would produce a
+	// bare "|| exit 125" line, which sh treats as a successful no-op — a
+	// silently dead guard.
+	withEmpty := buildSetupScript([][]string{{}, {"true"}})
+	if strings.Contains(withEmpty, "\n || exit 125") || strings.HasPrefix(withEmpty, " || exit 125") {
+		t.Errorf("empty argv must be skipped, got %q", withEmpty)
+	}
+	if !strings.Contains(withEmpty, "'true' || exit 125") {
+		t.Errorf("non-empty argv after an empty one must still render, got %q", withEmpty)
 	}
 }
 

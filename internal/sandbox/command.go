@@ -206,6 +206,12 @@ func shellQuote(arg string) string {
 func buildSetupScript(setupCmds [][]string) string {
 	var b strings.Builder
 	for _, argv := range setupCmds {
+		// An empty argv would render as a bare "|| exit 125" line, which sh
+		// treats as a successful no-op — the guard would silently never fire.
+		// Skip such entries rather than emitting a dead guard.
+		if len(argv) == 0 {
+			continue
+		}
 		for i, arg := range argv {
 			if i > 0 {
 				b.WriteByte(' ')

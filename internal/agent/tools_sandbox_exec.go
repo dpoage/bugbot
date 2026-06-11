@@ -168,6 +168,13 @@ func renderSandboxResult(r sandbox.Result) string {
 	} else {
 		b = fmt.Appendf(b, "exit_code=%d timed_out=false duration=%dms\n", r.ExitCode, durationMS)
 	}
+	// Exit 125 is the sandbox's environment-failure convention (failed setup
+	// command or container-runtime error — see Spec.SetupCmds). Annotate it so
+	// the refuter model treats it as an environment problem, not evidence about
+	// the code under test.
+	if !r.TimedOut && r.ExitCode == 125 {
+		b = append(b, "note: exit 125 indicates a sandbox/setup environment failure, not a result about the code under test\n"...)
+	}
 
 	b = append(b, "\nSTDOUT:\n"...)
 	if r.Stdout == "" {
