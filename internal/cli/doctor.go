@@ -483,7 +483,7 @@ func checkLangTier(langs []ingest.Language, buildSystems []ingest.BuildSystem) [
 
 	var out []checkResult
 	for _, lang := range langs {
-		if !repro.HasGuidance(lang) {
+		if !repro.HasGuidance(lang, buildSystems...) {
 			out = append(out, checkResult{
 				Name:   "lang tier " + string(lang),
 				Status: statusWarn,

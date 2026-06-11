@@ -138,6 +138,10 @@ type Reproducer struct {
 	// and extra env every sandbox run carries, plus an optional one-time
 	// Prefetch hook (run once from PromoteAll). Resolved once in New.
 	deps sandbox.Resolution
+	// buildSystems is the set of build systems detected in repoDir, resolved
+	// once in New and threaded into the system prompt so C/C++ findings get
+	// build-system-specific repro guidance without re-detecting per attempt.
+	buildSystems []ingest.BuildSystem
 }
 
 // New constructs a Reproducer. client is the reproducer-role LLM client, sb is
@@ -164,11 +168,12 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 		return nil, fmt.Errorf("repro: resolve dependency strategy: %w", err)
 	}
 	return &Reproducer{
-		client:  client,
-		sb:      sb,
-		repoDir: repoDir,
-		opts:    resolved,
-		deps:    deps,
+		client:       client,
+		sb:           sb,
+		repoDir:      repoDir,
+		opts:         resolved,
+		deps:         deps,
+		buildSystems: ingest.DetectBuildSystems(repoDir),
 	}, nil
 }
 
@@ -220,7 +225,7 @@ type Plan struct {
 // promotion (tier + repro_path) and the Summary stay consistent. Callers using
 // Attempt directly are responsible for any store updates.
 func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (*Attempt, error) {
-	runner, err := r.newRunner(ingest.DetectLanguage(finding.File))
+	runner, err := r.newRunner(ingest.DetectLanguage(finding.File), r.buildSystems)
 	if err != nil {
 		return nil, fmt.Errorf("repro: build agent runner: %w", err)
 	}
@@ -275,8 +280,9 @@ func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (*Attem
 
 // newRunner builds a read-only agent runner rooted at the repo for the
 // reproducer role. lang is the finding's file language, used to seed the
-// language-specific test-framework guidance in the system prompt.
-func (r *Reproducer) newRunner(lang ingest.Language) (*agent.Runner, error) {
+// language-specific test-framework guidance in the system prompt. systems
+// refines that guidance for C/C++ (cmake > meson > generic fallback).
+func (r *Reproducer) newRunner(lang ingest.Language, systems []ingest.BuildSystem) (*agent.Runner, error) {
 	tools, err := readOnlyTools(r.repoDir)
 	if err != nil {
 		return nil, err
@@ -286,7 +292,7 @@ func (r *Reproducer) newRunner(lang ingest.Language) (*agent.Runner, error) {
 	if r.opts.TranscriptDir != "" {
 		opts = append(opts, agent.WithTranscriptDir(r.opts.TranscriptDir))
 	}
-	return agent.NewRunner(r.client, tools, systemPrompt(lang), opts...), nil
+	return agent.NewRunner(r.client, tools, systemPrompt(lang, systems), opts...), nil
 }
 
 // readOnlyTools builds the read-only investigation tool set rooted at dir.
