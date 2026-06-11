@@ -327,9 +327,11 @@ func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, e
 		Timeout:    r.opts.Timeout,
 		WriteFiles: files,
 		// Dependency strategy: mount a module cache read-only and/or set GOFLAGS
-		// so the network-none run can resolve external modules.
-		ROMounts: r.deps.ROMounts,
-		Env:      r.deps.Env,
+		// so the network-none run can resolve external modules. SetupCmds installs
+		// non-Go ecosystem packages from the mounted cache before Cmd runs.
+		ROMounts:  r.deps.ROMounts,
+		Env:       r.deps.Env,
+		SetupCmds: r.deps.SetupCmds,
 	}
 	return r.sb.Exec(ctx, spec)
 }

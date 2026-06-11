@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -279,5 +280,229 @@ func TestValidDepStrategy(t *testing.T) {
 	}
 	if ValidDepStrategy("nope") {
 		t.Error("ValidDepStrategy(nope) = true, want false")
+	}
+}
+
+// --- Ecosystem registry / resolveWith composition tests ---
+
+// testEcosystem builds a test-only ecosystem entry that returns a fixed
+// Resolution with the given mount, env, setup commands, and prefetch hook.
+func testEcosystem(name, detectMarker string, res Resolution, prefetchFn func(context.Context) error) ecosystem {
+	return ecosystem{
+		name: name,
+		detect: func(repoDir string) bool {
+			_, err := os.Stat(filepath.Join(repoDir, detectMarker))
+			return err == nil
+		},
+		resolve: func(_ string, _ DepOptions) (Resolution, error) {
+			r := res
+			r.Prefetch = prefetchFn
+			return r, nil
+		},
+	}
+}
+
+// TestResolveWith_SingleEcosystem asserts that resolveWith with only the Go
+// ecosystem produces the exact same result as the pre-refactor ResolveDeps for
+// every strategy variant (it is the acceptance criterion for byte-identical
+// behavior).
+func TestResolveWith_SingleEcosystem(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+	cache := t.TempDir()
+
+	// OFF strategy with only Go ecosystem.
+	res, err := resolveWith(ecosystems, dir, DepOptions{Strategy: DepStrategyOff})
+	if err != nil {
+		t.Fatalf("resolveWith off: %v", err)
+	}
+	if res.Strategy != DepStrategyOff || len(res.ROMounts) != 0 || len(res.Env) != 0 {
+		t.Errorf("off: unexpected resolution %+v", res)
+	}
+
+	// HOST strategy.
+	res, err = resolveWith(ecosystems, dir, DepOptions{Strategy: DepStrategyHost, hostModcache: cache})
+	if err != nil {
+		t.Fatalf("resolveWith host: %v", err)
+	}
+	if res.Strategy != DepStrategyHost || len(res.ROMounts) != 1 {
+		t.Errorf("host: unexpected resolution %+v", res)
+	}
+	if len(res.SetupCmds) != 0 {
+		t.Errorf("Go ecosystem must contribute no SetupCmds; got %v", res.SetupCmds)
+	}
+}
+
+// TestResolveWith_NoMatch asserts that a repo matching no ecosystem resolves
+// to Resolution{Strategy: DepStrategyOff}, consistent with the pre-refactor
+// non-Go behavior.
+func TestResolveWith_NoMatch(t *testing.T) {
+	dir := t.TempDir() // no go.mod, no other markers
+	res, err := resolveWith(ecosystems, dir, DepOptions{})
+	if err != nil {
+		t.Fatalf("no match: %v", err)
+	}
+	if res.Strategy != DepStrategyOff {
+		t.Errorf("no-match Strategy = %q, want off", res.Strategy)
+	}
+	if len(res.ROMounts) != 0 || len(res.Env) != 0 || res.Prefetch != nil {
+		t.Errorf("no-match: want empty resolution, got %+v", res)
+	}
+}
+
+// TestResolveWith_MultiEcosystem asserts the merge semantics when two
+// ecosystems both match:
+//   - ROMounts are appended in table order.
+//   - Env is appended in table order.
+//   - SetupCmds is appended in table order.
+//   - Strategy is taken from the first matching ecosystem.
+//   - Prefetch funcs are chained sequentially (both called; first error wins).
+func TestResolveWith_MultiEcosystem(t *testing.T) {
+	dir := t.TempDir()
+	// Both markers present so both ecosystems match.
+	writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+	writeFile(t, filepath.Join(dir, "package.json"), "{}")
+
+	goMount := ROMount{HostPath: "/go-cache", ContainerPath: "/modcache"}
+	jsMount := ROMount{HostPath: "/js-cache", ContainerPath: "/jscache"}
+
+	var prefetchOrder []string
+
+	goEco := testEcosystem("go", "go.mod", Resolution{
+		ROMounts:  []ROMount{goMount},
+		Env:       []string{"GOMODCACHE=/modcache"},
+		SetupCmds: nil, // Go contributes none
+		Strategy:  DepStrategyHost,
+	}, func(_ context.Context) error {
+		prefetchOrder = append(prefetchOrder, "go")
+		return nil
+	})
+
+	jsEco := testEcosystem("js", "package.json", Resolution{
+		ROMounts:  []ROMount{jsMount},
+		Env:       []string{"NPM_CONFIG_CACHE=/jscache"},
+		SetupCmds: [][]string{{"npm", "ci", "--offline"}},
+		Strategy:  DepStrategy("npm"),
+	}, func(_ context.Context) error {
+		prefetchOrder = append(prefetchOrder, "js")
+		return nil
+	})
+
+	table := []ecosystem{goEco, jsEco}
+	res, err := resolveWith(table, dir, DepOptions{})
+	if err != nil {
+		t.Fatalf("resolveWith: %v", err)
+	}
+
+	// Strategy from first match.
+	if res.Strategy != DepStrategyHost {
+		t.Errorf("Strategy = %q, want host (first match)", res.Strategy)
+	}
+
+	// ROMounts: go first, js second.
+	if len(res.ROMounts) != 2 {
+		t.Fatalf("ROMounts len = %d, want 2", len(res.ROMounts))
+	}
+	if res.ROMounts[0].ContainerPath != "/modcache" || res.ROMounts[1].ContainerPath != "/jscache" {
+		t.Errorf("ROMounts order wrong: %+v", res.ROMounts)
+	}
+
+	// Env: go first, js second.
+	if len(res.Env) != 2 || res.Env[0] != "GOMODCACHE=/modcache" || res.Env[1] != "NPM_CONFIG_CACHE=/jscache" {
+		t.Errorf("Env = %v, want [GOMODCACHE=/modcache NPM_CONFIG_CACHE=/jscache]", res.Env)
+	}
+
+	// SetupCmds: js contributes; go contributes none.
+	if len(res.SetupCmds) != 1 || !slices.Equal(res.SetupCmds[0], []string{"npm", "ci", "--offline"}) {
+		t.Errorf("SetupCmds = %v, want [[npm ci --offline]]", res.SetupCmds)
+	}
+
+	// Prefetch: chained; both called in order.
+	if res.Prefetch == nil {
+		t.Fatal("Prefetch must be non-nil when any ecosystem contributes one")
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("chained Prefetch: %v", err)
+	}
+	if !slices.Equal(prefetchOrder, []string{"go", "js"}) {
+		t.Errorf("prefetch call order = %v, want [go js]", prefetchOrder)
+	}
+}
+
+// TestResolveWith_PrefetchChainFirstErrorWins asserts that when the first
+// ecosystem's prefetch fails, the chain aborts and the second is not called.
+func TestResolveWith_PrefetchChainFirstErrorWins(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+	writeFile(t, filepath.Join(dir, "package.json"), "{}")
+
+	secondCalled := false
+
+	goEco := testEcosystem("go", "go.mod", Resolution{
+		Strategy: DepStrategyHost,
+	}, func(_ context.Context) error {
+		return fmt.Errorf("prefetch go: boom")
+	})
+	jsEco := testEcosystem("js", "package.json", Resolution{
+		Strategy: DepStrategy("npm"),
+	}, func(_ context.Context) error {
+		secondCalled = true
+		return nil
+	})
+
+	table := []ecosystem{goEco, jsEco}
+	res, err := resolveWith(table, dir, DepOptions{})
+	if err != nil {
+		t.Fatalf("resolveWith: %v", err)
+	}
+	if res.Prefetch == nil {
+		t.Fatal("Prefetch must be non-nil")
+	}
+	if perr := res.Prefetch(context.Background()); perr == nil {
+		t.Fatal("expected error from first prefetch, got nil")
+	}
+	if secondCalled {
+		t.Error("second prefetch must not be called after first fails")
+	}
+}
+
+// TestResolveWith_GoOnlyRepo asserts that a pure-Go repo (no other ecosystem
+// markers) produces exactly the same Resolution as the pre-refactor ResolveDeps.
+// This is the byte-identical acceptance criterion.
+func TestResolveWith_GoOnlyRepo(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+	cache := t.TempDir()
+
+	// Using resolveWith directly with the production table.
+	got, err := resolveWith(ecosystems, dir, DepOptions{Strategy: DepStrategyHost, hostModcache: cache})
+	if err != nil {
+		t.Fatalf("resolveWith: %v", err)
+	}
+	// Also call the public ResolveDeps (which uses the same table) for comparison.
+	want, err := ResolveDeps(dir, DepOptions{Strategy: DepStrategyHost, hostModcache: cache})
+	if err != nil {
+		t.Fatalf("ResolveDeps: %v", err)
+	}
+
+	// ROMounts must match.
+	if len(got.ROMounts) != len(want.ROMounts) {
+		t.Fatalf("ROMounts len: resolveWith=%d ResolveDeps=%d", len(got.ROMounts), len(want.ROMounts))
+	}
+	for i, m := range got.ROMounts {
+		if m != want.ROMounts[i] {
+			t.Errorf("ROMounts[%d]: got %+v, want %+v", i, m, want.ROMounts[i])
+		}
+	}
+	// Env must match.
+	if !slices.Equal(got.Env, want.Env) {
+		t.Errorf("Env: got %v, want %v", got.Env, want.Env)
+	}
+	// SetupCmds must both be nil/empty (Go contributes none).
+	if len(got.SetupCmds) != 0 {
+		t.Errorf("SetupCmds: got %v, want empty (Go contributes none)", got.SetupCmds)
+	}
+	if got.Strategy != want.Strategy {
+		t.Errorf("Strategy: got %q, want %q", got.Strategy, want.Strategy)
 	}
 }

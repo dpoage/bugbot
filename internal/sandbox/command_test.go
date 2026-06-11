@@ -209,3 +209,113 @@ func mustContainSeq(t *testing.T, args []string, seq ...string) {
 	}
 	t.Errorf("expected args to contain sequence %q; got %q", seq, args)
 }
+
+func TestShellQuote(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		// Plain arguments need no escaping beyond the outer quotes.
+		{"hello", "'hello'"},
+		{"hello world", "'hello world'"},
+		// Embedded single quote: close, escape, reopen.
+		{"it's", "'it'\\''s'"},
+		// Dollar sign must not be expanded (stays inside single quotes).
+		{"$HOME", "'$HOME'"},
+		// Semicolon injection attempt: harmless inside single quotes.
+		{"; rm -rf /", "'; rm -rf /'"},
+		// Empty string: two adjacent single quotes.
+		{"", "''"},
+		// Multiple single quotes in a row.
+		{"a'b'c", "'a'\\''b'\\''c'"},
+		// Newline inside arg.
+		{"foo\nbar", "'foo\nbar'"},
+		// Backslash: no special meaning inside single quotes.
+		{`a\b`, `'a\b'`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := shellQuote(tc.in)
+			if got != tc.want {
+				t.Errorf("shellQuote(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildSetupScript(t *testing.T) {
+	cmds := [][]string{
+		{"npm", "ci", "--offline"},
+		{"echo", "hello world"},
+	}
+	script := buildSetupScript(cmds)
+	if !strings.Contains(script, "'npm' 'ci' '--offline' || exit 125") {
+		t.Errorf("script missing npm cmd with exit 125: %q", script)
+	}
+	if !strings.Contains(script, "'echo' 'hello world' || exit 125") {
+		t.Errorf("script missing echo cmd with exit 125: %q", script)
+	}
+	if !strings.HasSuffix(script, `exec "$@"`) {
+		t.Errorf("script does not end with exec \"$@\": %q", script)
+	}
+}
+
+func TestBuildRunArgsSetupCmds(t *testing.T) {
+	// When SetupCmds are present, the argv must use /bin/sh -c <script> sh
+	// followed by the original command (as positional params to exec "$@").
+	args := buildRunArgs(runParams{
+		containerName: "bugbot-setup",
+		workspace:     "/tmp/ws",
+		image:         "node:20-alpine",
+		network:       "none",
+		cmd:           []string{"node", "--version"},
+		setupCmds: [][]string{
+			{"npm", "ci", "--offline"},
+		},
+	})
+
+	// /bin/sh -c <script> sh must appear before the original command.
+	shIdx := slices.Index(args, "/bin/sh")
+	if shIdx < 0 {
+		t.Fatalf("expected /bin/sh in args; got %q", args)
+	}
+	if shIdx+1 >= len(args) || args[shIdx+1] != "-c" {
+		t.Fatalf("expected -c after /bin/sh; got %q", args)
+	}
+	// The script arg follows -c.
+	script := args[shIdx+2]
+	if !strings.Contains(script, "'npm' 'ci' '--offline' || exit 125") {
+		t.Errorf("script missing npm cmd: %q", script)
+	}
+	if !strings.HasSuffix(script, `exec "$@"`) {
+		t.Errorf("script missing exec trailer: %q", script)
+	}
+	// The sh $0 placeholder follows the script.
+	if shIdx+3 >= len(args) || args[shIdx+3] != "sh" {
+		t.Fatalf("expected sh ($0) after script; got %q", args)
+	}
+	// The original command must appear at the tail.
+	tail := args[len(args)-2:]
+	if !slices.Equal(tail, []string{"node", "--version"}) {
+		t.Errorf("original cmd not at tail; got %q", tail)
+	}
+}
+
+func TestBuildRunArgsNoSetupCmds(t *testing.T) {
+	// When SetupCmds is empty, no /bin/sh wrapping occurs and the cmd
+	// appears directly after the image — existing behavior is unchanged.
+	args := buildRunArgs(runParams{
+		containerName: "bugbot-plain",
+		workspace:     "/tmp/ws",
+		image:         "golang:1.23",
+		network:       "none",
+		cmd:           []string{"go", "test", "./..."},
+	})
+	if slices.Contains(args, "/bin/sh") {
+		t.Errorf("/bin/sh must not appear when SetupCmds is empty; got %q", args)
+	}
+	tail := args[len(args)-3:]
+	if !slices.Equal(tail, []string{"go", "test", "./..."}) {
+		t.Errorf("cmd not at tail; got %q", tail)
+	}
+}

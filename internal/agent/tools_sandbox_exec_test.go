@@ -42,7 +42,7 @@ var _ sandbox.Sandbox = (*fakeSandbox)(nil)
 
 func newToolWithFake(results []sandbox.Result) (*SandboxExecTool, *fakeSandbox) {
 	fs := &fakeSandbox{results: results}
-	tool := NewSandboxExecTool(fs, "/repo", 3, nil, nil, nil)
+	tool := NewSandboxExecTool(fs, "/repo", 3, nil, nil, nil, nil)
 	return tool, fs
 }
 
@@ -194,7 +194,7 @@ func TestSandboxExecTool_WithFiles(t *testing.T) {
 
 func TestSandboxExecTool_InfraError_IsToolError(t *testing.T) {
 	fs := &fakeSandbox{err: errors.New("podman not found")}
-	tool := NewSandboxExecTool(fs, "/repo", 3, nil, nil, nil)
+	tool := NewSandboxExecTool(fs, "/repo", 3, nil, nil, nil, nil)
 
 	_, err := runSandboxExecTool(t, tool, map[string]interface{}{
 		"cmd": []string{"go", "test", "./..."},
@@ -210,7 +210,7 @@ func TestSandboxExecTool_InfraError_IsToolError(t *testing.T) {
 func TestSandboxExecTool_BudgetExhausted(t *testing.T) {
 	tool, fs := newToolWithFake(nil)
 	// maxExec = 2
-	tool2 := NewSandboxExecTool(fs, "/repo", 2, nil, nil, nil)
+	tool2 := NewSandboxExecTool(fs, "/repo", 2, nil, nil, nil, nil)
 
 	// First two calls succeed.
 	args := map[string]interface{}{"cmd": []string{"go", "test", "./..."}}
@@ -282,7 +282,7 @@ func TestSandboxExecTool_DurationRecorded(t *testing.T) {
 	}
 	var recorded time.Duration
 	fs := &fakeSandbox{results: []sandbox.Result{result}}
-	tool := NewSandboxExecTool(fs, "/repo", 3, nil, nil, func(d time.Duration) {
+	tool := NewSandboxExecTool(fs, "/repo", 3, nil, nil, nil, func(d time.Duration) {
 		recorded = d
 	})
 
@@ -293,6 +293,28 @@ func TestSandboxExecTool_DurationRecorded(t *testing.T) {
 	}
 	if recorded != 123*time.Millisecond {
 		t.Errorf("recorded duration = %v, want 123ms", recorded)
+	}
+}
+
+func TestSandboxExecTool_SetupCmdsPropagate(t *testing.T) {
+	// Verify that setupCmds configured on the tool are threaded into the
+	// sandbox Spec so the CLI backend can wrap execution in /bin/sh.
+	setupCmds := [][]string{{"npm", "ci", "--offline"}}
+	fs := &fakeSandbox{}
+	tool := NewSandboxExecTool(fs, "/repo", 3, nil, nil, setupCmds, nil)
+
+	_, err := runSandboxExecTool(t, tool, map[string]interface{}{
+		"cmd": []string{"node", "--version"},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(fs.calls) != 1 {
+		t.Fatalf("want 1 sandbox call, got %d", len(fs.calls))
+	}
+	spec := fs.calls[0]
+	if len(spec.SetupCmds) != 1 || spec.SetupCmds[0][0] != "npm" {
+		t.Errorf("SetupCmds = %v, want [[npm ci --offline]]", spec.SetupCmds)
 	}
 }
 

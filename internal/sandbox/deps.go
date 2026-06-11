@@ -24,6 +24,38 @@ package sandbox
 // can grow their own resolver alongside this one (the Resolution return type is
 // ecosystem-agnostic).
 //
+// # Ecosystem registry
+//
+// ResolveDeps iterates the ordered ecosystems table and calls resolve on every
+// ecosystem whose detect returns true for repoDir. The results are merged:
+//
+//   - ROMounts: appended in table order. Each ecosystem must use distinct
+//     ContainerPaths; the existing validateMounts uniqueness check backstops
+//     this at Exec time, but ecosystem authors must design ContainerPaths to be
+//     globally unique across all ecosystems (e.g. /modcache for Go, /pipcache
+//     for Python) to avoid silent shadowing.
+//   - Env: appended in table order.
+//   - SetupCmds: appended in table order.
+//   - Prefetch: chained into a single func that runs them sequentially; the
+//     first error aborts the chain.
+//   - Strategy: set to the FIRST matching ecosystem's strategy.
+//
+// A repo with no matching ecosystem resolves to an empty Resolution{Strategy:
+// DepStrategyOff}, identical to today's non-Go behavior.
+//
+// # Security posture (per-mount Shared semantics)
+//
+// Each ecosystem's resolve func controls the Shared flag on its ROMounts.
+// Shared=false (bugbot-owned dirs, e.g. the fetch cache) receives :Z SELinux
+// relabeling for container-private isolation. Shared=true (host-owned dirs,
+// e.g. the user's Go module cache under ~/go/pkg/mod) MUST NOT be relabeled:
+// :Z on a multi-GB shared tree is slow, breaks the host toolchain, and breaks
+// any other container sharing the same dir. See ROMount.Shared for the full
+// rationale. Ecosystem authors must set Shared=true for any host-owned
+// directory they mount.
+//
+// # Stdlib-only constraint
+//
 // This file deliberately depends only on the standard library (the package as a
 // whole imports nothing else). The go.mod / vendor markers are checked directly
 // rather than via internal/ingest to keep sandbox free of heavier imports and
@@ -113,6 +145,10 @@ type Resolution struct {
 	// appended after the caller's own env, matching the sandbox's "later wins"
 	// ordering, so they take effect for the run.
 	Env []string
+	// SetupCmds are in-container commands to run before Cmd (see Spec.SetupCmds).
+	// Non-Go ecosystems populate this (e.g. ["npm","ci","--offline"]); the Go
+	// ecosystem contributes none.
+	SetupCmds [][]string
 
 	// Prefetch, when non-nil, must be called ONCE before the first network-none
 	// run for this repo (e.g. from the reproducer's PromoteAll setup). It runs
@@ -125,39 +161,46 @@ type Resolution struct {
 	Strategy DepStrategy
 }
 
-// hasGoModule reports whether repoDir contains a root go.mod.
-func hasGoModule(repoDir string) bool {
-	st, err := os.Stat(filepath.Join(repoDir, "go.mod"))
-	return err == nil && !st.IsDir()
+// ecosystem describes how to detect a build ecosystem and resolve its
+// dependency strategy into a Resolution. The ordered ecosystems table is
+// iterated by resolveWith; entries whose detect returns true contribute their
+// Resolution to the merged result.
+type ecosystem struct {
+	// name is a human-readable identifier for logging and diagnostics.
+	name string
+	// detect reports whether repoDir belongs to this ecosystem (e.g. presence
+	// of go.mod for Go). It must be fast and side-effect-free.
+	detect func(repoDir string) bool
+	// resolve returns the Resolution for repoDir under opts. It is only called
+	// when detect returned true.
+	resolve func(repoDir string, opts DepOptions) (Resolution, error)
 }
 
-// isVendored reports whether repoDir has a populated vendor tree
-// (vendor/modules.txt), which `go` uses as the authoritative vendor manifest.
-func isVendored(repoDir string) bool {
-	st, err := os.Stat(filepath.Join(repoDir, "vendor", "modules.txt"))
-	return err == nil && !st.IsDir()
+// ecosystems is the ordered registry of per-ecosystem resolvers. resolveWith
+// iterates this table in order, merging every matching ecosystem's Resolution.
+// To add a new ecosystem (Rust, JS, Python, ...), append a new entry here;
+// the merge semantics in resolveWith handle the rest. ContainerPaths across
+// all ecosystems must be globally unique — each ecosystem owns its own mount
+// points (e.g. /modcache for Go, /pipcache for Python).
+var ecosystems = []ecosystem{
+	goEcosystem,
 }
 
-// ResolveDeps decides the dependency strategy for repoDir and returns the
-// mounts/env/prefetch a run should use. It never errors on a non-Go repo or an
-// unknown-but-empty strategy: such repos resolve to an empty Resolution (OFF).
-//
-// Order of precedence:
-//  1. Non-Go repo (no go.mod) → empty Resolution regardless of strategy.
-//  2. Vendored repo → VENDORED, regardless of the requested strategy (free,
-//     safe, and authoritative).
-//  3. Otherwise the requested strategy (OFF/HOST/FETCH).
-func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
-	if !ValidDepStrategy(opts.Strategy) {
-		return Resolution{}, fmt.Errorf("sandbox: invalid dependency strategy %q (want off, host, or fetch)", opts.Strategy)
-	}
+// goEcosystem is the Go dependency resolver. It detects repos with a go.mod
+// and applies the same VENDORED / HOST / FETCH / OFF strategy as the original
+// monolithic ResolveDeps implementation. Behavior is byte-identical to the
+// pre-registry version; existing unit and integration tests are the acceptance
+// criterion.
+var goEcosystem = ecosystem{
+	name:    "go",
+	detect:  hasGoModule,
+	resolve: resolveGo,
+}
 
-	// Only Go repos are handled today; other ecosystems get the empty (OFF)
-	// resolution until they grow their own branch here.
-	if !hasGoModule(repoDir) {
-		return Resolution{Strategy: DepStrategyOff}, nil
-	}
-
+// resolveGo is the Go resolver function, extracted verbatim from the original
+// ResolveDeps implementation. It handles vendored detection, strategy
+// validation has already run in resolveWith.
+func resolveGo(repoDir string, opts DepOptions) (Resolution, error) {
 	// Vendored detection wins in every mode: it is free, safe, and makes `go`
 	// ignore the network entirely.
 	if isVendored(repoDir) {
@@ -205,6 +248,92 @@ func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
 		// Unreachable given ValidDepStrategy above, but keep it explicit.
 		return Resolution{}, fmt.Errorf("sandbox: unhandled dependency strategy %q", strategy)
 	}
+}
+
+// hasGoModule reports whether repoDir contains a root go.mod.
+func hasGoModule(repoDir string) bool {
+	st, err := os.Stat(filepath.Join(repoDir, "go.mod"))
+	return err == nil && !st.IsDir()
+}
+
+// isVendored reports whether repoDir has a populated vendor tree
+// (vendor/modules.txt), which `go` uses as the authoritative vendor manifest.
+func isVendored(repoDir string) bool {
+	st, err := os.Stat(filepath.Join(repoDir, "vendor", "modules.txt"))
+	return err == nil && !st.IsDir()
+}
+
+// ResolveDeps decides the dependency strategy for repoDir and returns the
+// mounts/env/prefetch a run should use. It never errors on a repo that matches
+// no ecosystem or when the strategy is off: such repos resolve to an empty
+// Resolution (OFF).
+//
+// Strategy validation runs first; an invalid strategy is an immediate error.
+// The function then delegates to resolveWith using the package-level ecosystems
+// table — see its doc comment for the per-ecosystem merge semantics.
+func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
+	if !ValidDepStrategy(opts.Strategy) {
+		return Resolution{}, fmt.Errorf("sandbox: invalid dependency strategy %q (want off, host, or fetch)", opts.Strategy)
+	}
+	return resolveWith(ecosystems, repoDir, opts)
+}
+
+// resolveWith is the internal dispatcher that iterates the provided table and
+// merges matching ecosystems' Resolutions. It is a separate function (rather
+// than inlining into ResolveDeps) so tests can inject an extended table without
+// mutating the global ecosystems var — important for parallel-test safety.
+//
+// Merge rules (see file doc for rationale):
+//   - ROMounts: appended in table order. ContainerPaths must be unique across
+//     all ecosystems; Exec's validateMounts backstops this.
+//   - Env: appended in table order.
+//   - SetupCmds: appended in table order.
+//   - Prefetch: chained sequentially; first error wins.
+//   - Strategy: taken from the FIRST matching ecosystem.
+//
+// No matching ecosystem → Resolution{Strategy: DepStrategyOff}.
+func resolveWith(table []ecosystem, repoDir string, opts DepOptions) (Resolution, error) {
+	var merged Resolution
+	firstMatch := true
+
+	for _, eco := range table {
+		if !eco.detect(repoDir) {
+			continue
+		}
+		r, err := eco.resolve(repoDir, opts)
+		if err != nil {
+			return Resolution{}, err
+		}
+		// Strategy is taken from the first matching ecosystem.
+		if firstMatch {
+			merged.Strategy = r.Strategy
+			firstMatch = false
+		}
+		merged.ROMounts = append(merged.ROMounts, r.ROMounts...)
+		merged.Env = append(merged.Env, r.Env...)
+		merged.SetupCmds = append(merged.SetupCmds, r.SetupCmds...)
+		// Chain Prefetch funcs: run them sequentially; first error aborts.
+		if r.Prefetch != nil {
+			prev := merged.Prefetch
+			next := r.Prefetch
+			if prev == nil {
+				merged.Prefetch = next
+			} else {
+				merged.Prefetch = func(ctx context.Context) error {
+					if err := prev(ctx); err != nil {
+						return err
+					}
+					return next(ctx)
+				}
+			}
+		}
+	}
+
+	if firstMatch {
+		// No ecosystem matched.
+		return Resolution{Strategy: DepStrategyOff}, nil
+	}
+	return merged, nil
 }
 
 // modcacheResolution builds the Resolution shared by HOST and FETCH: a single

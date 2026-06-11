@@ -189,6 +189,7 @@ func (r *Reproducer) provePatch(ctx context.Context, st *store.Store, f store.Fi
 		suiteCmd:    r.opts.PatchSuiteCmd,
 		depMounts:   r.deps.ROMounts,
 		depEnv:      r.deps.Env,
+		setupCmds:   r.deps.SetupCmds,
 	}
 	return prover.Prove(ctx, st, f, att)
 }
