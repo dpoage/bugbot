@@ -63,6 +63,12 @@ const (
 	// KindScanFinished marks the end of a funnel run and carries the stats
 	// summary.
 	KindScanFinished Kind = "scan_finished"
+	// KindHeatOrdered reports that Sweep reordered its targets by churn heat.
+	// HeatFiles carries the number of files with non-zero heat; Label carries a
+	// human-readable top-5 summary (path:score pairs). HeatOrdered is always true
+	// when this event fires (it is not emitted when heat is disabled or the map is
+	// empty).
+	KindHeatOrdered Kind = "heat_ordered"
 	// KindCycleScheduled reports the daemon's next poll/sweep deadlines.
 	KindCycleScheduled Kind = "cycle_scheduled"
 	// KindCycleStarted / KindCycleFinished bracket one daemon cycle.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
@@ -14,6 +15,11 @@ import (
 
 // Sweep runs the funnel over the entire current snapshot of the repository. It
 // is the manual `bugbot scan` and periodic-sweep entrypoint.
+//
+// When heat ordering is enabled (the default, controlled by
+// Options.DisableHeatOrdering), targets are sorted by churn-weighted recency
+// heat before chunking so finder budget flows to recently-churned files first.
+// Targeted scans are always alphabetical; see [Funnel.Targeted].
 func (f *Funnel) Sweep(ctx context.Context) (*Result, error) {
 	snap, err := f.snapshot(ctx)
 	if err != nil {
@@ -23,7 +29,76 @@ func (f *Funnel) Sweep(ctx context.Context) (*Result, error) {
 	for i, file := range snap.Files {
 		targets[i] = file.Path
 	}
-	return f.run(ctx, store.ScanOneshot, snap, targets)
+
+	var (
+		heatOrdered bool
+		heatFiles   int
+	)
+	if !f.opts.DisableHeatOrdering {
+		heat, heatErr := ingest.ChurnHeat(ctx, f.repo.Root(), 0)
+		if heatErr == nil && len(heat) > 0 {
+			heatFiles = len(heat)
+			heatOrdered = applyHeatOrder(targets, heat)
+			if heatOrdered {
+				progress.Emit(f.opts.Progress, progress.Event{
+					Kind:  progress.KindHeatOrdered,
+					Count: heatFiles,
+					Label: heatTop5(targets, heat),
+				})
+			}
+		}
+	}
+
+	result, err := f.run(ctx, store.ScanOneshot, snap, targets)
+	if err != nil {
+		return nil, err
+	}
+	result.Stats.HeatOrdered = heatOrdered
+	result.Stats.HeatFiles = heatFiles
+	return result, nil
+}
+
+// applyHeatOrder sorts targets in-place by heat score descending, with
+// equal-heat (including zero-heat) files sorted alphabetically as a tiebreak.
+// It returns true if the ordering differs from the input (meaning the heat map
+// actually reordered something), so callers can decide whether to log.
+func applyHeatOrder(targets []string, heat map[string]float64) bool {
+	// Snapshot the original order to detect actual reordering.
+	original := make([]string, len(targets))
+	copy(original, targets)
+
+	sort.SliceStable(targets, func(i, j int) bool {
+		hi, hj := heat[targets[i]], heat[targets[j]]
+		if hi != hj {
+			return hi > hj // higher heat first
+		}
+		return targets[i] < targets[j] // alphabetical tiebreak
+	})
+
+	for i := range targets {
+		if targets[i] != original[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// heatTop5 returns a human-readable summary of the top 5 hottest targets,
+// formatted as "path:score" pairs joined by spaces, for use in progress events.
+func heatTop5(targets []string, heat map[string]float64) string {
+	n := 5
+	if len(targets) < n {
+		n = len(targets)
+	}
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		p := targets[i]
+		fmt.Fprintf(&b, "%s:%.3f", p, heat[p])
+	}
+	return b.String()
 }
 
 // Targeted runs the funnel over the blast radius of changedFiles, intersected

@@ -33,14 +33,14 @@ func emitAgentFinished(sink progress.Sink, role, label string, outcome *agent.Ou
 }
 
 // readOnlyTools builds the read-only code tool set (read_file, list_dir, grep,
-// plus the LSP-backed find_definition / find_references / find_implementations
-// and read_symbol) rooted at the repository, shared by finder and refuter
-// agents. readCaps bounds
-// each read_file result; its zero value uses the package defaults, while finders
-// pass tighter caps (see Options.finderReadCaps) to slow per-turn history growth
-// cache-safely. All tools are safe for concurrent use across parallel agents; the
-// code-navigation tools share the funnel's lazily-started language-server
-// manager, which Funnel.Close shuts down.
+// git_blame, git_log, plus the LSP-backed find_definition / find_references /
+// find_implementations and read_symbol) rooted at the repository, shared by
+// finder and refuter agents. readCaps bounds each read_file result; its zero
+// value uses the package defaults, while finders pass tighter caps (see
+// Options.finderReadCaps) to slow per-turn history growth cache-safely. All
+// tools are safe for concurrent use across parallel agents; the code-navigation
+// tools share the funnel's lazily-started language-server manager, which
+// Funnel.Close shuts down.
 func (f *Funnel) readOnlyTools(readCaps agent.ReadCaps) ([]agent.Tool, error) {
 	root := f.repo.Root()
 	readFile, err := agent.NewReadFileWithCaps(root, readCaps)
@@ -55,11 +55,19 @@ func (f *Funnel) readOnlyTools(readCaps agent.ReadCaps) ([]agent.Tool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("funnel: grep tool: %w", err)
 	}
+	gitBlame, err := agent.NewGitBlame(root, nil)
+	if err != nil {
+		return nil, fmt.Errorf("funnel: git_blame tool: %w", err)
+	}
+	gitLog, err := agent.NewGitLog(root, nil)
+	if err != nil {
+		return nil, fmt.Errorf("funnel: git_log tool: %w", err)
+	}
 	nav, err := f.codeNav()
 	if err != nil {
 		return nil, fmt.Errorf("funnel: code navigation tools: %w", err)
 	}
-	return append([]agent.Tool{readFile, listDir, grep}, nav.Tools()...), nil
+	return append([]agent.Tool{readFile, listDir, grep, gitBlame, gitLog}, nav.Tools()...), nil
 }
 
 // transcriptOption returns a Runner option that persists transcripts when a
