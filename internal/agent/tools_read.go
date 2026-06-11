@@ -88,9 +88,11 @@ type readFileArgs struct {
 func (t *readFileTool) Def() llm.ToolDef {
 	return llm.ToolDef{
 		Name: "read_file",
-		Description: "Read a UTF-8 text file from the repository and return it as " +
-			"numbered lines (1-based). Use offset/limit to read a window of a large " +
-			"file. Output is capped at ~2000 lines / 256KB; truncation is noted.",
+		Description: fmt.Sprintf(
+			"Read a UTF-8 text file from the repository and return it as "+
+				"numbered lines (1-based). Use offset/limit to read a window of a large "+
+				"file. Output is capped at ~%d lines / %dKB; truncation is noted.",
+			t.caps.MaxLines, t.caps.MaxBytes/1024),
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -202,10 +204,10 @@ func renderNumbered(content string, offset, limit int, byteTruncated bool, caps 
 		b.WriteString("(no lines in range)\n")
 	}
 	if lineTruncated {
-		fmt.Fprintf(&b, "... [truncated: showing lines %d-%d of %d]\n", start+1, end, total)
+		fmt.Fprintf(&b, "... [truncated: showing lines %d-%d of %d — call read_file again with offset=%d to continue]\n", start+1, end, total, end+1)
 	}
 	if byteTruncated {
-		fmt.Fprintf(&b, "... [truncated: file exceeds %d bytes]\n", caps.MaxBytes)
+		fmt.Fprintf(&b, "... [truncated at %d bytes: this is a window, not the whole file — call read_file again with offset=%d (and optionally limit) to read further]\n", caps.MaxBytes, end+1)
 	}
 	return b.String()
 }

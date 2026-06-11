@@ -100,14 +100,24 @@ const (
 	// Tightening the cap shrinks each result at the SOURCE, before it ever enters
 	// the conversation, so it never mutates an earlier message and never forfeits
 	// a prompt-cache prefix. The offline measurement (internal/eval, the
-	// bugbot-3nf harness) shows this cuts CACHE-WEIGHTED input ~55-77% on a runaway
-	// finder profile, whereas threshold history compaction — which mutates the
-	// prefix — REDUCES raw tokens but INCREASES cache-weighted cost under the same
-	// ~0.1x cache, and is therefore left opt-in/off (see DefaultFinderHistoryTokens).
+	// bugbot-3nf harness) shows this cuts CACHE-WEIGHTED input ~55-77% on a
+	// SYNTHETIC runaway profile (every read assumed cap-saturated; a BEST-CASE UPPER
+	// BOUND, not a corpus measurement — the recorded corpus never exercises this
+	// lever because its files are well below the caps). Threshold history compaction
+	// — which mutates the prefix — REDUCES raw tokens but INCREASES cache-weighted
+	// cost under the same ~0.1x cache, and is therefore left opt-in/off (see
+	// DefaultFinderHistoryTokens).
 	//
 	// 800 lines / 96 KB comfortably covers a focused source file (most files under
 	// analysis are far smaller); larger files are line-windowed with offset/limit,
 	// and the truncation note tells the model to page if it genuinely needs more.
+	//
+	// NOTE — the "~55-77%" figure cited in code comments and the offline harness
+	// (internal/eval/compact_measure_test.go) is a SYNTHETIC BEST-CASE UPPER BOUND,
+	// not a corpus measurement. It assumes every read_file call saturates the cap
+	// (the savings ARE the truncated content), and the recorded eval corpus never
+	// exercises this lever because its files are well below the caps. Real savings
+	// depend on whether files in the target repo actually exceed the cap.
 	DefaultFinderReadLines = 800
 	DefaultFinderReadBytes = 96 * 1024
 

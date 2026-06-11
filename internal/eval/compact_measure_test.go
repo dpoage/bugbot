@@ -221,8 +221,12 @@ func TestMeasureFinderTokenBurn(t *testing.T) {
 		t.Errorf("compaction changed CACHE-WEIGHTED cost on recorded corpus (%.0f -> %.0f); short runs must be untouched", beforeW, afterW)
 	}
 
-	// Now the realistic profile the recorded fixtures do not exercise: a runaway
-	// finder of ~9 turns reading large source files. At the looser AGENT default
+	// Now the SYNTHETIC profile the recorded fixtures do not exercise: a runaway
+	// finder of ~9 turns reading large source files. This is a BEST-CASE UPPER
+	// BOUND — it assumes every read_file call saturates the cap and savings equal
+	// the truncated content. The recorded corpus never exercises the read-cap lever
+	// because its files are well below the caps, so the percentage reductions
+	// reported below are NOT corpus measurements. At the looser AGENT default
 	// (2000 lines) such a file lands around ~24k tokens; the re-sent history grows
 	// toward ~200k by the later turns. This is the shape bugbot-3nf measured in
 	// dogfood. We compare the TWO candidate levers on it. We approximate "tokens

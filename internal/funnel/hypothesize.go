@@ -36,7 +36,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	// per-read caps shrinks each result at the source — slowing history growth
 	// without ever mutating the conversation prefix, which (unlike history
 	// compaction) preserves the prompt-cache prefix and so cuts cache-WEIGHTED
-	// cost, not just raw tokens (see bugbot-3nf and DefaultFinderReadCaps).
+	// cost, not just raw tokens (see bugbot-3nf and DefaultFinderReadLines/Bytes).
 	baseTools, err := f.readOnlyTools(f.opts.finderReadCaps())
 	if err != nil {
 		return nil, err
