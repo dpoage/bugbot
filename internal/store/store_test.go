@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -122,5 +124,92 @@ func TestFingerprint_StableAndNormalized(t *testing.T) {
 	d := Fingerprint("nil-deref", "pkg/foo/bar.go", 43, "Possible nil pointer dereference")
 	if a == d {
 		t.Fatal("different line must produce a different fingerprint")
+	}
+}
+
+// TestOpen_RejectsDSNInjectionViaQuestionMark verifies that a path containing
+// '?' is rejected before MkdirAll runs — no files are created in the temp dir.
+func TestOpen_RejectsDSNInjectionViaQuestionMark(t *testing.T) {
+	dir := t.TempDir()
+	// Mirror the real attack shape: a path whose '?' injects a pragma override.
+	path := filepath.Join(dir, "state.db?_pragma=journal_mode(DELETE)")
+
+	_, err := Open(context.Background(), path)
+	if err == nil {
+		t.Fatal("expected error for path containing '?', got nil")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("error should name the offending path; got: %v", err)
+	}
+
+	// MkdirAll must not have run: the temp dir must still be empty.
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		t.Fatalf("ReadDir: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected empty temp dir after rejection, got %d entries", len(entries))
+	}
+}
+
+// TestOpen_RejectsDSNInjectionViaHash verifies that a path containing '#' is
+// rejected before any filesystem side-effects occur.
+func TestOpen_RejectsDSNInjectionViaHash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db#fragment")
+
+	_, err := Open(context.Background(), path)
+	if err == nil {
+		t.Fatal("expected error for path containing '#', got nil")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("error should name the offending path; got: %v", err)
+	}
+
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		t.Fatalf("ReadDir: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected empty temp dir after rejection, got %d entries", len(entries))
+	}
+}
+
+// TestOpen_AllowsAmpersandInPath verifies that '&' alone (inert outside a query
+// string) does not trigger the rejection — we must not over-restrict.
+func TestOpen_AllowsAmpersandInPath(t *testing.T) {
+	// Construct a path under a temp dir using a directory name with '&'.
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "data&files")
+	path := filepath.Join(subdir, "state.db")
+
+	st, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Open with '&' in path should succeed, got: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+}
+
+// TestOpen_PragmasAreEffective proves that WAL mode and foreign-key enforcement
+// are actually in effect on a normally-opened store. This is the core acceptance
+// criterion: the pragma block cannot be silently overridden.
+func TestOpen_PragmasAreEffective(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	var journalMode string
+	if err := st.DB().QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatalf("query journal_mode: %v", err)
+	}
+	if journalMode != "wal" {
+		t.Fatalf("expected journal_mode=wal, got %q", journalMode)
+	}
+
+	var foreignKeys int
+	if err := st.DB().QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		t.Fatalf("query foreign_keys: %v", err)
+	}
+	if foreignKeys != 1 {
+		t.Fatalf("expected foreign_keys=1, got %d", foreignKeys)
 	}
 }

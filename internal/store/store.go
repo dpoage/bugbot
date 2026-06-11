@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // registers the pure-Go "sqlite" database/sql driver
@@ -62,6 +63,18 @@ type Store struct {
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("store: empty database path")
+	}
+
+	// '?' and '#' in a bare (non-file:-scheme) DSN inject into or truncate the
+	// pragma query string, silently overriding WAL mode, foreign keys, or
+	// synchronous level. Percent-encoding was considered and rejected: the
+	// driver's unescaping behaviour for bare DSNs is not contractual, so encoding
+	// could silently open a differently-named file — worse than refusing. No
+	// legitimate database path contains these characters; this is operator config
+	// where a loud early error is the correct UX. ":memory:" contains neither,
+	// so it is unaffected.
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		return nil, fmt.Errorf("store: database path %q must not contain '?' or '#' (these would corrupt the SQLite connection string and its pragmas)", path)
 	}
 
 	if path != ":memory:" {
