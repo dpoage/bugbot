@@ -1,6 +1,8 @@
 package ingest
 
-import "sort"
+import (
+	"sort"
+)
 
 // displayName maps a Language to its human-readable rendering for persona
 // strings (e.g. "Go", "JavaScript/TypeScript"). Languages absent from this map
@@ -80,11 +82,23 @@ func DominantLanguages(snap *Snapshot) []Language {
 //	two+ languages -> "senior software engineer with deep Go and Python expertise"
 //	empty/unknown  -> "senior software engineer"
 //
+// qualifiers optionally maps a Language to a dialect string that replaces the
+// base display name for that language. For example, qualifiers[LangCPP]="C++20"
+// causes "C++" to render as "C++20" in the output. Passing nil qualifiers
+// produces the base behaviour. This mechanism is general: it can later serve
+// Python 2/3, Java 8/21, etc. without changes to the Language vocabulary.
+//
 // The output is deterministic given a deterministic langs slice (see
-// DominantLanguages). Languages without a display name are skipped.
-func PersonaLanguages(langs []Language) string {
+// DominantLanguages) and a fixed qualifiers map.
+func PersonaLanguages(langs []Language, qualifiers map[Language]string) string {
 	names := make([]string, 0, len(langs))
 	for _, l := range langs {
+		// A qualifier overrides the base display name when present, allowing
+		// "C++" to become "C++20" without adding Language enum variants.
+		if q, ok := qualifiers[l]; ok {
+			names = append(names, q)
+			continue
+		}
 		if n, ok := displayName[l]; ok {
 			names = append(names, n)
 		}
@@ -103,8 +117,38 @@ func PersonaLanguages(langs []Language) string {
 // Persona derives the finder/verifier engineer persona phrase from a snapshot's
 // dominant language mix. It is the one-call helper the funnel uses; see
 // DominantLanguages and PersonaLanguages for the underlying steps.
+//
+// When snap.Root is non-empty and the snapshot's dominant languages include
+// C++, Persona probes the repository for its C++ standard (via
+// DetectCPPStandard) and qualifies the persona accordingly — e.g. "senior
+// C++20 engineer" instead of "senior C++ engineer". The qualifier applies only
+// to LangCPP for now; the underlying map[Language]string mechanism is general
+// and can be extended to other languages (Python 2/3, Java 8/21, etc.) without
+// touching this function.
 func Persona(snap *Snapshot) string {
-	return PersonaLanguages(DominantLanguages(snap))
+	langs := DominantLanguages(snap)
+
+	// Build the qualifier map only when the repo root is known and C++ is among
+	// the dominant languages — DetectCPPStandard is filesystem I/O, so we avoid
+	// calling it on snapshots that have no C++ or no known root.
+	var qualifiers map[Language]string
+	if snap != nil && snap.Root != "" && containsLang(langs, LangCPP) {
+		if std, ok := DetectCPPStandard(snap.Root); ok {
+			qualifiers = map[Language]string{LangCPP: std}
+		}
+	}
+
+	return PersonaLanguages(langs, qualifiers)
+}
+
+// containsLang reports whether langs contains l.
+func containsLang(langs []Language, l Language) bool {
+	for _, lang := range langs {
+		if lang == l {
+			return true
+		}
+	}
+	return false
 }
 
 // joinAnd joins names with commas and a final "and": "Go", "Go and Python",

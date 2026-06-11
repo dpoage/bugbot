@@ -1,6 +1,8 @@
 package ingest
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -139,7 +141,7 @@ func TestPersonaLanguages(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := PersonaLanguages(tt.langs); got != tt.want {
+			if got := PersonaLanguages(tt.langs, nil); got != tt.want {
 				t.Errorf("PersonaLanguages(%v) = %q, want %q", tt.langs, got, tt.want)
 			}
 		})
@@ -171,5 +173,123 @@ func TestPersona(t *testing.T) {
 				t.Errorf("Persona() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestPersonaLanguagesWithQualifiers verifies that the qualifiers map overrides
+// the base display name for the specified language, enabling dialect-qualified
+// personas such as "senior C++20 engineer".
+func TestPersonaLanguagesWithQualifiers(t *testing.T) {
+	tests := []struct {
+		name       string
+		langs      []Language
+		qualifiers map[Language]string
+		want       string
+	}{
+		{
+			name:       "C++ with C++20 qualifier",
+			langs:      []Language{LangCPP},
+			qualifiers: map[Language]string{LangCPP: "C++20"},
+			want:       "senior C++20 engineer",
+		},
+		{
+			name:       "C++ with C++17 qualifier",
+			langs:      []Language{LangCPP},
+			qualifiers: map[Language]string{LangCPP: "C++17"},
+			want:       "senior C++17 engineer",
+		},
+		{
+			name:       "nil qualifiers falls back to base display name",
+			langs:      []Language{LangCPP},
+			qualifiers: nil,
+			want:       "senior C++ engineer",
+		},
+		{
+			name:       "empty qualifiers falls back to base display name",
+			langs:      []Language{LangCPP},
+			qualifiers: map[Language]string{},
+			want:       "senior C++ engineer",
+		},
+		{
+			name:       "qualifier for non-C++ language (mechanism is general)",
+			langs:      []Language{LangJava},
+			qualifiers: map[Language]string{LangJava: "Java 21"},
+			want:       "senior Java 21 engineer",
+		},
+		{
+			name:       "qualifier applies only to matching language in mix",
+			langs:      []Language{LangCPP, LangPython},
+			qualifiers: map[Language]string{LangCPP: "C++20"},
+			want:       "senior software engineer with deep C++20 and Python expertise",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PersonaLanguages(tt.langs, tt.qualifiers); got != tt.want {
+				t.Errorf("PersonaLanguages(%v, %v) = %q, want %q", tt.langs, tt.qualifiers, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPersonaWithCPPStandard verifies end-to-end that a C++-dominant snapshot
+// with a CMake C++ standard declaration produces a qualified persona.
+// This is the primary acceptance criterion from the bead.
+func TestPersonaWithCPPStandard(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write CMakeLists.txt declaring C++20.
+	if err := os.WriteFile(filepath.Join(dir, "CMakeLists.txt"),
+		[]byte("cmake_minimum_required(VERSION 3.20)\nset(CMAKE_CXX_STANDARD 20)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a C++-dominant snapshot using the temp dir as Root.
+	snap := &Snapshot{
+		Root:  dir,
+		Files: snapFromLangs(LangCPP, LangCPP, LangCPP).Files,
+	}
+
+	got := Persona(snap)
+	if got != "senior C++20 engineer" {
+		t.Errorf("Persona() = %q, want %q", got, "senior C++20 engineer")
+	}
+}
+
+// TestPersonaNoStandardNoQualifier verifies that a C++ snapshot without any
+// detectable standard stays plain "senior C++ engineer".
+func TestPersonaNoStandardNoQualifier(t *testing.T) {
+	dir := t.TempDir() // empty — no build files
+
+	snap := &Snapshot{
+		Root:  dir,
+		Files: snapFromLangs(LangCPP, LangCPP).Files,
+	}
+
+	got := Persona(snap)
+	if got != "senior C++ engineer" {
+		t.Errorf("Persona() = %q, want %q", got, "senior C++ engineer")
+	}
+}
+
+// TestPersonaNonCPPUnchanged verifies that non-C++ repos are unaffected by the
+// qualifier mechanism.
+func TestPersonaNonCPPUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	// Write a CMakeLists.txt — it should have no effect on a Go-dominant repo.
+	if err := os.WriteFile(filepath.Join(dir, "CMakeLists.txt"),
+		[]byte("set(CMAKE_CXX_STANDARD 20)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := &Snapshot{
+		Root:  dir,
+		Files: snapFromLangs(LangGo, LangGo, LangGo).Files,
+	}
+
+	got := Persona(snap)
+	if got != "senior Go engineer" {
+		t.Errorf("Persona() = %q, want %q", got, "senior Go engineer")
 	}
 }

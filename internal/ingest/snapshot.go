@@ -32,6 +32,13 @@ type Snapshot struct {
 	Commit string
 	// Files is the in-scope, text, tracked file set, sorted by Path.
 	Files []File
+	// Root is the absolute path to the repository's top-level directory,
+	// populated by (*Repo).Snapshot. It is used by Persona to detect
+	// language-level dialect qualifiers (e.g. C++ standard) without adding a
+	// repoDir parameter to every downstream function. Empty for snapshots
+	// constructed outside of (*Repo).Snapshot (e.g. in tests); Persona handles
+	// that gracefully by skipping qualifier detection.
+	Root string
 }
 
 // ScanFilter selects which tracked files belong in a snapshot. It mirrors the
@@ -113,7 +120,7 @@ func (r *Repo) Snapshot(ctx context.Context, filter ScanFilter) (*Snapshot, erro
 	}
 
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	return &Snapshot{Commit: head, Files: files}, nil
+	return &Snapshot{Commit: head, Files: files, Root: r.root}, nil
 }
 
 // lsFiles returns the tracked file paths at HEAD, repo-relative and
