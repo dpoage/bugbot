@@ -170,3 +170,67 @@ func TestNewClient_AnthropicOAuthMode(t *testing.T) {
 		t.Errorf("oauth mode via NewClient: x-api-key must be absent, got %q", gotXAPIKey)
 	}
 }
+
+// TestAnthropicAuth_OAuthModeIgnoresHostAPIKeyEnv pins the env-poisoning guard:
+// anthropic.NewClient applies env defaults BEFORE explicit options, and a host
+// ANTHROPIC_API_KEY eagerly sets the X-Api-Key header. Without the adapter's
+// WithHeaderDel, an oauth-mode request would carry BOTH credentials and the API
+// would reject it. t.Setenv simulates the poisoned host.
+func TestAnthropicAuth_OAuthModeIgnoresHostAPIKeyEnv(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-host-env-key")
+
+	var gotXAPIKey, gotAuth string
+	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotXAPIKey = r.Header.Get("x-api-key")
+		gotAuth = r.Header.Get("authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(mockAnthropicResponse()))
+	})
+
+	adapter := newAnthropicAdapter("claude-test", anthropicOptions{
+		authToken: "oauth-test-token",
+		baseURL:   base,
+	})
+	if _, err := adapter.Complete(context.Background(), simpleRequest()); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	if gotXAPIKey != "" {
+		t.Errorf("oauth mode with host ANTHROPIC_API_KEY: x-api-key must be stripped, got %q", gotXAPIKey)
+	}
+	if gotAuth != "Bearer oauth-test-token" {
+		t.Errorf("oauth mode: Authorization = %q, want Bearer oauth-test-token", gotAuth)
+	}
+}
+
+// TestAnthropicAuth_APIKeyModeIgnoresHostAuthTokenEnv pins the symmetric guard:
+// a host ANTHROPIC_AUTH_TOKEN (with no ANTHROPIC_API_KEY) makes the env
+// defaults eagerly set Authorization; api_key mode must strip it so only
+// x-api-key is sent.
+func TestAnthropicAuth_APIKeyModeIgnoresHostAuthTokenEnv(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "host-env-bearer")
+
+	var gotXAPIKey, gotAuth string
+	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotXAPIKey = r.Header.Get("x-api-key")
+		gotAuth = r.Header.Get("authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(mockAnthropicResponse()))
+	})
+
+	adapter := newAnthropicAdapter("claude-test", anthropicOptions{
+		apiKey:  "sk-ant-config-key",
+		baseURL: base,
+	})
+	if _, err := adapter.Complete(context.Background(), simpleRequest()); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	if gotAuth != "" {
+		t.Errorf("api_key mode with host ANTHROPIC_AUTH_TOKEN: Authorization must be stripped, got %q", gotAuth)
+	}
+	if gotXAPIKey != "sk-ant-config-key" {
+		t.Errorf("api_key mode: x-api-key = %q, want sk-ant-config-key", gotXAPIKey)
+	}
+}

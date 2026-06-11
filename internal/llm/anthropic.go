@@ -51,9 +51,18 @@ func newAnthropicAdapter(model string, opts anthropicOptions) *anthropicAdapter 
 		// Append rather than replace so other anthropic-beta values set by the SDK
 		// are preserved alongside the oauth beta flag.
 		reqOpts = append(reqOpts, option.WithHeaderAdd("anthropic-beta", "oauth-2025-04-20"))
+		// anthropic.NewClient applies env defaults BEFORE explicit options, and a
+		// host ANTHROPIC_API_KEY eagerly sets the X-Api-Key header (WithAPIKey
+		// applies WithHeader internally). The API rejects requests carrying both
+		// credentials, so strip the env-derived header; the SDK documents this
+		// exact WithHeaderDel pattern for parent-client key suppression.
+		reqOpts = append(reqOpts, option.WithHeaderDel("X-Api-Key"))
 	} else {
 		// API-key mode: standard x-api-key authentication.
 		reqOpts = append(reqOpts, option.WithAPIKey(opts.apiKey))
+		// Symmetric guard: a host ANTHROPIC_AUTH_TOKEN env default would have
+		// eagerly set Authorization; strip it so only x-api-key is sent.
+		reqOpts = append(reqOpts, option.WithHeaderDel("Authorization"))
 	}
 	if opts.baseURL != "" {
 		reqOpts = append(reqOpts, option.WithBaseURL(opts.baseURL))
