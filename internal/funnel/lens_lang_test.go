@@ -14,6 +14,7 @@ import (
 func TestBuiltinLensNames_Stable(t *testing.T) {
 	want := []string{
 		"nil-safety/error-handling",
+		"diff-intent",
 		"concurrency",
 		"resource-leaks",
 		"boundary-conditions",
@@ -36,6 +37,9 @@ func TestBuiltinLensNames_Stable(t *testing.T) {
 func TestFinderSystemPrompt_PythonOnly_NoGoIdioms(t *testing.T) {
 	goIdioms := []string{"goroutine", "comma-ok", "WaitGroup", "How this manifests in Go"}
 	for _, l := range BuiltinLenses() {
+		if l.Name == "diff-intent" {
+			continue // language-free, Core-only: no manifestation blocks by design
+		}
 		p := finderSystemPrompt("senior Python engineer", l, []ingest.Language{ingest.LangPython})
 		if !strings.Contains(p, "How this manifests in Python:") {
 			t.Errorf("lens %q: Python-only prompt missing the Python manifestation block", l.Name)
@@ -46,7 +50,9 @@ func TestFinderSystemPrompt_PythonOnly_NoGoIdioms(t *testing.T) {
 			}
 		}
 		for _, idiom := range goIdioms {
-			if strings.Contains(p, idiom) {
+			// Case-insensitive so a future recased leak still trips the assertion
+			// (mirrors the Go-side test below).
+			if strings.Contains(strings.ToLower(p), strings.ToLower(idiom)) {
 				t.Errorf("lens %q: Python-only prompt leaks Go idiom %q", l.Name, idiom)
 			}
 		}
@@ -59,6 +65,9 @@ func TestFinderSystemPrompt_PythonOnly_NoGoIdioms(t *testing.T) {
 func TestFinderSystemPrompt_GoOnly_FullGoContent(t *testing.T) {
 	pyIdioms := []string{"asyncio", "un-awaited", "How this manifests in Python"}
 	for _, l := range BuiltinLenses() {
+		if l.Name == "diff-intent" {
+			continue // language-free, Core-only: no manifestation blocks by design
+		}
 		p := finderSystemPrompt("senior Go engineer", l, []ingest.Language{ingest.LangGo})
 		if !strings.Contains(p, l.Core) {
 			t.Errorf("lens %q: Go-only prompt missing the universal Core", l.Name)
@@ -89,6 +98,9 @@ func TestFinderSystemPrompt_GoOnly_FullGoContent(t *testing.T) {
 		"injection/input-validation": "actually untrusted and unvalidated",
 	}
 	for _, l := range BuiltinLenses() {
+		if l.Name == "diff-intent" {
+			continue // change-scoped lens: no historical Go Specialization to anchor
+		}
 		p := finderSystemPrompt("senior Go engineer", l, []ingest.Language{ingest.LangGo})
 		if !strings.Contains(p, anchors[l.Name]) {
 			t.Errorf("lens %q: Go-only prompt lost original guidance anchor %q", l.Name, anchors[l.Name])
@@ -99,7 +111,7 @@ func TestFinderSystemPrompt_GoOnly_FullGoContent(t *testing.T) {
 // TestFinderSystemPrompt_MixedChunk_UnionBlocks: a mixed Go+Python chunk gets
 // BOTH manifestation blocks.
 func TestFinderSystemPrompt_MixedChunk_UnionBlocks(t *testing.T) {
-	l := BuiltinLenses()[1] // concurrency: the starkest Go-vs-Python contrast
+	l := lensByName(t, "concurrency") // the starkest Go-vs-Python contrast
 	p := finderSystemPrompt("senior software engineer with deep Go and Python expertise", l,
 		[]ingest.Language{ingest.LangGo, ingest.LangPython})
 	if !strings.Contains(p, "How this manifests in Go:") {
@@ -136,7 +148,7 @@ func TestFinderSystemPrompt_DataDriven_NewLanguageRow(t *testing.T) {
 	manifestations["concurrency"][fakeLang] = []string{fakeRow}
 	t.Cleanup(func() { delete(manifestations["concurrency"], fakeLang) })
 
-	p := finderSystemPrompt("senior software engineer", BuiltinLenses()[1], []ingest.Language{fakeLang})
+	p := finderSystemPrompt("senior software engineer", lensByName(t, "concurrency"), []ingest.Language{fakeLang})
 	if !strings.Contains(p, "How this manifests in fortran:") {
 		t.Error("new language column did not produce a manifestation block (composition is not data-driven)")
 	}
@@ -148,7 +160,7 @@ func TestFinderSystemPrompt_DataDriven_NewLanguageRow(t *testing.T) {
 // TestFinderSystemPrompt_JSAndTSMergeBlocks: JavaScript and TypeScript share
 // row tables, so a mixed JS/TS chunk renders ONE merged block, not two copies.
 func TestFinderSystemPrompt_JSAndTSMergeBlocks(t *testing.T) {
-	l := BuiltinLenses()[0]
+	l := lensByName(t, "nil-safety/error-handling")
 	p := finderSystemPrompt("senior software engineer", l,
 		[]ingest.Language{ingest.LangJavaScript, ingest.LangTypeScript})
 	if got := strings.Count(p, "How this manifests in"); got != 1 {
@@ -211,12 +223,28 @@ func TestEffectiveYield_Resolution(t *testing.T) {
 	}
 }
 
+// sweepActive filters ordered lenses to those that emit units on a sweep —
+// every taxonomy lens, but not the change-scoped diff-intent lens, which is
+// chunk-less and contributes zero units without a ChangeContext. This mirrors
+// the caller contract documented on degradedLensNames: input is pre-filtered
+// to lenses with units this run.
+func sweepActive(ordered []Lens) []Lens {
+	var out []Lens
+	for _, l := range ordered {
+		if l.Name == "diff-intent" {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
 // TestDegradation_LanguageDependentLensSet: under budget pressure a
 // Python-heavy repo keeps a different lens set than a Go repo — degradation
 // sheds the lenses that are low-yield for THIS repo's language mix.
 func TestDegradation_LanguageDependentLensSet(t *testing.T) {
-	goKeep := degradedLensNames(lensesByYield(BuiltinLenses(), []ingest.Language{ingest.LangGo}))
-	pyKeep := degradedLensNames(lensesByYield(BuiltinLenses(), []ingest.Language{ingest.LangPython}))
+	goKeep := degradedLensNames(sweepActive(lensesByYield(BuiltinLenses(), []ingest.Language{ingest.LangGo})))
+	pyKeep := degradedLensNames(sweepActive(lensesByYield(BuiltinLenses(), []ingest.Language{ingest.LangPython})))
 
 	if !goKeep["nil-safety/error-handling"] || !goKeep["concurrency"] {
 		t.Errorf("Go-profile degraded set = %v, want {nil-safety/error-handling, concurrency} (historical behavior)", goKeep)
@@ -319,4 +347,78 @@ func TestChunkByLanguage_EdgeCases(t *testing.T) {
 			t.Errorf("chunk %+v exceeds size cap 2", c)
 		}
 	}
+}
+
+// TestFinderSystemPrompt_JSAndTSSplitWhenUnequal pins the inverse of the merge
+// behavior: if the JS and TS row slices ever diverge in content, the composed
+// prompt must render two separate blocks rather than silently merging them.
+func TestFinderSystemPrompt_JSAndTSSplitWhenUnequal(t *testing.T) {
+	manifestations["split-test-lens"] = map[ingest.Language][]string{
+		ingest.LangJavaScript: {"a JS-only manifestation row"},
+		ingest.LangTypeScript: {"a TS-only manifestation row"},
+	}
+	t.Cleanup(func() { delete(manifestations, "split-test-lens") })
+
+	l := Lens{Name: "split-test-lens", Core: "core text"}
+	p := finderSystemPrompt("senior engineer", l, []ingest.Language{ingest.LangJavaScript, ingest.LangTypeScript})
+	if !strings.Contains(p, "How this manifests in JavaScript:") ||
+		!strings.Contains(p, "How this manifests in TypeScript:") {
+		t.Errorf("unequal JS/TS rows must render two separate blocks, got:\n%s", p)
+	}
+	if strings.Contains(p, "JavaScript/TypeScript") {
+		t.Errorf("unequal JS/TS rows must not render a merged block, got:\n%s", p)
+	}
+}
+
+// TestChunkByLanguage_GlobalHeatOrderAtChunkGranularity pins the heat-ordering
+// repair: with heat-ordered input interleaving two languages, the chunk
+// containing the globally hottest file of the SECOND language must not be
+// deferred behind every chunk of the first language group.
+func TestChunkByLanguage_GlobalHeatOrderAtChunkGranularity(t *testing.T) {
+	// Heat order: hottest first. go1 (rank 0), py1 (rank 1), then cold gos.
+	files := []string{"hot1.go", "hot2.py", "cold3.go", "cold4.go", "cold5.go", "cold6.go"}
+	chunks := chunkByLanguage(files, 2)
+	if len(chunks) == 0 {
+		t.Fatal("no chunks")
+	}
+	// First chunk carries the globally hottest file.
+	first := chunks[0].files
+	foundHot1 := false
+	for _, f := range first {
+		if f == "hot1.go" {
+			foundHot1 = true
+		}
+	}
+	if !foundHot1 {
+		t.Errorf("first chunk %v must contain the globally hottest file hot1.go", first)
+	}
+	// The chunk containing hot2.py (rank 1) must come before the chunk whose
+	// hottest member is cold4.go (rank 3). cold3.go is not a valid probe: it
+	// rides in the same chunk as hot1.go, whose hottest-member rank is 0.
+	pos := func(name string) int {
+		for i, c := range chunks {
+			for _, f := range c.files {
+				if f == name {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+	if pos("hot2.py") > pos("cold4.go") {
+		t.Errorf("chunk order defers hot2.py (rank 1) behind cold4.go's chunk (hottest rank 3): %v", chunks)
+	}
+}
+
+// lensByName fetches a builtin lens by Name; index-based selection broke when
+// diff-intent joined the table.
+func lensByName(t *testing.T, name string) Lens {
+	t.Helper()
+	for _, l := range BuiltinLenses() {
+		if l.Name == name {
+			return l
+		}
+	}
+	t.Fatalf("lens %q not found", name)
+	return Lens{}
 }

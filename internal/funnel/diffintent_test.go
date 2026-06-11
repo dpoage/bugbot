@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/ingest"
+
 	"github.com/dpoage/bugbot/internal/llm"
 )
 
@@ -26,22 +28,38 @@ func TestDiffIntentLens_InBuiltins(t *testing.T) {
 		t.Fatal("diff-intent not found in BuiltinLenses()")
 	}
 	l := lenses[foundIdx]
-	if l.Yield != 95 {
-		t.Errorf("diff-intent yield = %d, want 95", l.Yield)
+	if l.Core == "" {
+		t.Error("diff-intent Core is empty")
 	}
-	if l.Specialization == "" {
-		t.Error("diff-intent Specialization is empty")
+	// Yield now lives in the (lens x language) table: diff-intent is
+	// language-free, so its effective yield must be 95 for any language mix and
+	// it must have no manifestation rows (Core-only composition).
+	if got := effectiveYield("diff-intent", nil); got != 95 {
+		t.Errorf("effectiveYield(diff-intent, nil) = %d, want 95", got)
 	}
-	// Must follow a higher-yield lens.
-	if foundIdx == 0 {
-		t.Error("diff-intent should not be first; nil-safety/error-handling (100) must precede it")
+	if got := effectiveYield("diff-intent", []ingest.Language{ingest.LangPython, ingest.LangCPP}); got != 95 {
+		t.Errorf("effectiveYield(diff-intent, py+cpp) = %d, want 95", got)
 	}
-	if lenses[foundIdx-1].Yield < 95 {
-		t.Errorf("lens before diff-intent has yield %d; diff-intent must follow higher-yield lenses", lenses[foundIdx-1].Yield)
+	if _, ok := manifestations["diff-intent"]; ok {
+		t.Error("diff-intent must have no manifestation rows (language-free lens)")
 	}
-	// Must precede a lower-yield lens (if one exists).
-	if foundIdx+1 < len(lenses) && lenses[foundIdx+1].Yield > 95 {
-		t.Errorf("lens after diff-intent has yield %d; diff-intent must precede lower-yield lenses", lenses[foundIdx+1].Yield)
+	// In the per-run ranking for a Go repo, diff-intent sits between
+	// nil-safety (100) and concurrency (90).
+	ordered := lensesByYield(lenses, []ingest.Language{ingest.LangGo})
+	var names []string
+	for _, ol := range ordered {
+		names = append(names, ol.Name)
+	}
+	for i, n := range names {
+		if n != "diff-intent" {
+			continue
+		}
+		if i == 0 || names[i-1] != "nil-safety/error-handling" {
+			t.Errorf("diff-intent must directly follow nil-safety in Go ranking, got order %v", names)
+		}
+		if i+1 >= len(names) || names[i+1] != "concurrency" {
+			t.Errorf("diff-intent must directly precede concurrency in Go ranking, got order %v", names)
+		}
 	}
 }
 

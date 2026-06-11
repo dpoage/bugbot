@@ -498,6 +498,26 @@ func chunkByLanguage(files []string, size int) []fileChunk {
 	for _, c := range chunk(tails, size) {
 		out = append(out, fileChunk{files: c, langs: chunkLangs(c)})
 	}
+
+	// Restore global heat priority at chunk granularity: Sweep heat-orders the
+	// input (churn x recency, bugbot-sro), and grouping by language must not
+	// defer the second-hottest file of another language behind a whole cold
+	// group. Sort chunks by the input rank of their hottest (earliest) member;
+	// homogeneity is preserved because membership is untouched.
+	rank := make(map[string]int, len(files))
+	for i, f := range files {
+		rank[f] = i
+	}
+	hottest := func(c fileChunk) int {
+		best := len(files)
+		for _, f := range c.files {
+			if r := rank[f]; r < best {
+				best = r
+			}
+		}
+		return best
+	}
+	sort.SliceStable(out, func(i, j int) bool { return hottest(out[i]) < hottest(out[j]) })
 	return out
 }
 

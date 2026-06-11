@@ -290,13 +290,6 @@ var manifestations = map[string]map[ingest.Language][]string{
 		ingest.LangRust:       rustNilSafety,
 		ingest.LangC:          cNilSafety,
 	},
-	// diff-intent is language-free (Core-only, no manifestation rows): its
-	// value comes from the commit context, not the language. 95 under
-	// anyLanguage ranks it above concurrency's Go column and below nil-safety
-	// for every language mix — the unique-advantage lens on commit runs.
-	"diff-intent": {
-		anyLanguage: 95,
-	},
 	"concurrency": {
 		ingest.LangGo:         goConcurrency,
 		ingest.LangPython:     pyConcurrency,
@@ -376,6 +369,13 @@ const anyLanguage = ingest.Language("*")
 //   - anyLanguage: conservative mid-table priors so an unprofiled repo keeps
 //     the historically strongest lenses.
 var lensYields = map[string]map[ingest.Language]int{
+	// diff-intent is language-free (Core-only, no manifestation rows): its
+	// value comes from the commit context, not the language. 95 under
+	// anyLanguage ranks it above concurrency's Go column and below nil-safety
+	// for every language mix — the unique-advantage lens on commit runs.
+	"diff-intent": {
+		anyLanguage: 95,
+	},
 	"nil-safety/error-handling": {
 		ingest.LangGo:         100,
 		ingest.LangPython:     90,
