@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
@@ -157,21 +158,65 @@ type PatchProver struct {
 }
 
 // detectSuiteCmd infers the full-suite test command from well-known repo
-// marker files. Returns nil when the toolchain cannot be identified.
+// marker files. Returns nil when the toolchain cannot be identified — callers
+// must skip rather than guess when nil is returned.
+//
+// Priority order matches ingest.DetectBuildSystems:
+//
+//  1. Bazel → ["bazel", "test", "//..."]
+//  2. GoWorkspace → ["go", "test", "./..."] only when a root go.mod also
+//     exists; without go.mod the workspace spans multiple modules and a single
+//     ./... invocation at the root is wrong (per-module invocations are out of
+//     scope).
+//  3. JSWorkspace (pnpm-workspace.yaml) → ["pnpm", "test"]; turbo/nx →
+//     ["npm", "test"] (closest sensible default; project-specific config can
+//     override via suite_cmd).
+//  4. GoModule → ["go", "test", "./..."]
+//  5. Cargo → ["cargo", "test"]
+//  6. NPM → ["npm", "test"]
+//  7. Python (pyproject.toml / setup.py) → ["python", "-m", "pytest"]
+//
+// The existing single-marker behaviour (go.mod, Cargo.toml, package.json,
+// pyproject.toml, setup.py) is preserved exactly for backward compatibility.
 func detectSuiteCmd(repoDir string) []string {
-	markers := []struct {
-		file string
-		cmd  []string
-	}{
-		{"go.mod", []string{"go", "test", "./..."}},
-		{"Cargo.toml", []string{"cargo", "test"}},
-		{"package.json", []string{"npm", "test"}},
-		{"pyproject.toml", []string{"python", "-m", "pytest"}},
-		{"setup.py", []string{"python", "-m", "pytest"}},
-	}
-	for _, m := range markers {
-		if _, err := os.Stat(filepath.Join(repoDir, m.file)); err == nil {
-			return m.cmd
+	systems := ingest.DetectBuildSystems(repoDir)
+	for _, sys := range systems {
+		switch sys {
+		case ingest.BuildSystemBazel:
+			return []string{"bazel", "test", "//..."}
+
+		case ingest.BuildSystemGoWorkspace:
+			// A go.work-only repo spans multiple modules; `go test ./...` at
+			// the workspace root only works when there is also a root go.mod
+			// (i.e. there is a package in the root module). Without a root
+			// go.mod the correct approach is per-module invocations, which is
+			// out of scope — fall through to let a lower-priority system match.
+			if _, err := os.Stat(filepath.Join(repoDir, "go.mod")); err == nil {
+				return []string{"go", "test", "./..."}
+			}
+			// No root go.mod: skip; lower-priority systems may still match.
+
+		case ingest.BuildSystemJSWorkspace:
+			// pnpm workspaces have a canonical `pnpm test` command.
+			if _, err := os.Stat(filepath.Join(repoDir, "pnpm-workspace.yaml")); err == nil {
+				return []string{"pnpm", "test"}
+			}
+			// turbo.json / nx.json: fall back to npm test as the closest
+			// portable default; projects that need `turbo run test` or
+			// `nx run-many` should configure suite_cmd explicitly.
+			return []string{"npm", "test"}
+
+		case ingest.BuildSystemGoModule:
+			return []string{"go", "test", "./..."}
+
+		case ingest.BuildSystemCargo:
+			return []string{"cargo", "test"}
+
+		case ingest.BuildSystemNPM:
+			return []string{"npm", "test"}
+
+		case ingest.BuildSystemPython:
+			return []string{"python", "-m", "pytest"}
 		}
 	}
 	return nil

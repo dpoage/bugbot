@@ -23,6 +23,7 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -30,11 +31,20 @@ import (
 	"strings"
 )
 
+// queryRunner executes an external command in dir with the supplied args and
+// returns the combined stdout bytes. It is a function type so that tests can
+// inject fake tool output without needing a real bazel installation.
+type queryRunner func(ctx context.Context, dir string, args ...string) ([]byte, error)
+
 // Repo is a handle to an opened git repository. It is safe for concurrent use:
 // it holds only the immutable repository root path and runs git as a child
 // process per call.
+//
+// The queryRunner field is exported to tests via the Open/newTestRepo path only:
+// production code always uses the default execQueryRunner.
 type Repo struct {
-	root string
+	root        string
+	queryRunner queryRunner // defaults to execQueryRunner
 }
 
 // Open validates that path is inside a git working tree and returns a Repo
@@ -56,7 +66,7 @@ func Open(ctx context.Context, path string) (*Repo, error) {
 	if root == "" {
 		return nil, fmt.Errorf("ingest: %q is not a git repository", path)
 	}
-	return &Repo{root: root}, nil
+	return &Repo{root: root, queryRunner: execQueryRunner}, nil
 }
 
 // Root returns the absolute path to the repository's top-level directory.
@@ -98,4 +108,22 @@ func runGitRaw(ctx context.Context, dir string, args ...string) ([]byte, error) 
 		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return []byte(stdout.String()), nil
+}
+
+// execQueryRunner is the production queryRunner implementation. It runs the
+// named tool with the given args in dir and returns its combined stdout+stderr.
+// Callers are responsible for applying a context deadline before invoking.
+func execQueryRunner(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("execQueryRunner: no args")
+	}
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Dir = dir
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%s: %w: %s", args[0], err, strings.TrimSpace(out.String()))
+	}
+	return out.Bytes(), nil
 }

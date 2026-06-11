@@ -5,35 +5,55 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// bazelQueryTimeout is the maximum wall time allowed for a `bazel query`
+// invocation. Bazel startup can be slow on cold caches; 30 s is a generous
+// but bounded ceiling.
+const bazelQueryTimeout = 30 * time.Second
 
 // BlastRadius computes the set of files an investigation should consider given
 // a set of changed files: the changed files themselves plus their direct
 // dependents. The result is the union of the changed set and the dependents,
 // sorted and de-duplicated.
 //
-// "Direct dependents" are resolved with two strategies, layered:
+// "Direct dependents" are resolved with up to three strategies, applied in
+// order, with graceful fallback on any error:
 //
-//   - Go-aware import graph. All .go files in the snapshot are parsed for their
-//     package import paths. A changed .go file is mapped to the local Go
+//  1. Bazel-native reverse-dep query (when the repo is a Bazel workspace AND
+//     `bazel` is on PATH). Changed files are mapped to Bazel labels; then
+//     `bazel query "rdeps(//..., <labels>)" --output=package` enumerates
+//     reverse-dependent packages; packages are mapped back to snapshot files.
+//     A bounded 30 s timeout is enforced. On ANY error (tool absent, query
+//     fails, timeout) the Bazel path is skipped and the Go+textual fallbacks
+//     run instead.
+//
+//  2. Go-aware import graph. All .go files in the snapshot are parsed for
+//     their package import paths. A changed .go file is mapped to the local Go
 //     package it declares; every .go file whose package imports that package is
 //     a dependent. Local packages are keyed by their import-path SUFFIX (the
 //     repo-relative directory), so we match imports without knowing the
-//     module's root import path. This is direct (one hop) by design — it scopes
-//     work, it is not a full transitive closure.
+//     module's root import path. This handles both single-module repos (go.mod)
+//     and go.work multi-module workspaces: the suffix-matching approach already
+//     resolves cross-module imports correctly as long as the directory paths
+//     appear as import-path suffixes, which is the standard Go convention. No
+//     additional exec is needed for go.work.
 //
-//   - Textual fallback for non-Go (and as a backstop). For each changed file we
-//     search the snapshot for word-boundary references to the file's basename
-//     without extension (e.g. a change to `auth/login.py` looks for the token
-//     `login`). Case-sensitive, whole-word matches only. This is necessarily
-//     imprecise: a common basename like `index` or `utils` will over-match, and
-//     dynamic/reflective references are missed entirely. It is a recall aid for
-//     scoping, not a precise dependency analysis.
+//  3. Textual fallback for non-Go (and as a backstop). For each changed file
+//     we search the snapshot for word-boundary references to the file's
+//     basename without extension (e.g. a change to `auth/login.py` looks for
+//     the token `login`). Case-sensitive, whole-word matches only. This is
+//     necessarily imprecise: a common basename like `index` or `utils` will
+//     over-match, and dynamic/reflective references are missed entirely. It is
+//     a recall aid for scoping, not a precise dependency analysis.
 //
-// PRECISION LIMITS: the Go graph is one hop and ignores build tags, cgo, and
+// PRECISION LIMITS: the Bazel path is one query level (rdeps to packages, not
+// individual files); the Go graph is one hop and ignores build tags, cgo, and
 // dot/blank imports' transitive effects; the textual pass trades precision for
 // recall. Downstream stages must treat the radius as "files worth looking at,"
 // not "files definitely affected."
@@ -49,6 +69,46 @@ func (r *Repo) BlastRadius(ctx context.Context, snap *Snapshot, changed []string
 	changedSet := newStringSet()
 	for _, c := range changed {
 		changedSet.add(c)
+	}
+
+	// --- Bazel-native reverse-dep query ---------------------------------
+	// Attempt when the repo has a Bazel workspace marker. For the default
+	// execQueryRunner a LookPath pre-check is performed to avoid spawning a
+	// process when bazel is not installed; a non-default runner (e.g. a test
+	// stub) bypasses this check and is always called. Any failure (including
+	// tool absent, query error, or timeout) is silently swallowed so we fall
+	// through to the Go+textual path.
+	systems := DetectBuildSystems(r.root)
+	isBazel := false
+	for _, s := range systems {
+		if s == BuildSystemBazel {
+			isBazel = true
+			break
+		}
+	}
+	if isBazel {
+		qr := r.queryRunner
+		if qr == nil {
+			qr = execQueryRunner
+		}
+		isDefault := r.queryRunner == nil
+		bazelOK := true
+		if isDefault {
+			// Pre-check: skip if bazel is not on PATH to avoid process spawn
+			// overhead on machines without a Bazel installation.
+			if _, lookErr := exec.LookPath("bazel"); lookErr != nil {
+				bazelOK = false
+			}
+		}
+		if bazelOK {
+			bazelDeps, berr := r.bazelDependents(ctx, snap, changedSet, qr)
+			if berr == nil {
+				for _, p := range bazelDeps {
+					result.add(p)
+				}
+			}
+			// On error: fall through to Go+textual path (no return).
+		}
 	}
 
 	// --- Go import-graph dependents -------------------------------------
@@ -78,6 +138,74 @@ func (r *Repo) BlastRadius(ctx context.Context, snap *Snapshot, changed []string
 	}
 
 	return result.sorted(), nil
+}
+
+// bazelDependents queries Bazel for the reverse dependencies of the changed
+// files. It maps each changed file to a Bazel file-label
+// ("//path/to:file.ext"), then runs:
+//
+//	bazel query "rdeps(//..., set(//a:f.go //b:g.go ...))" --output=package
+//
+// and maps the resulting packages back to snapshot files. The query runs with
+// a bounded timeout (bazelQueryTimeout). Any error causes an immediate return
+// so the caller can fall back to the Go+textual path.
+func (r *Repo) bazelDependents(ctx context.Context, snap *Snapshot, changed *stringSet, qr queryRunner) ([]string, error) {
+	// Map changed files to Bazel file labels: //dir:basename
+	var labels []string
+	for p := range changed.m {
+		dir := path.Dir(p)
+		base := path.Base(p)
+		var label string
+		if dir == "." {
+			label = "//:" + base
+		} else {
+			label = "//" + dir + ":" + base
+		}
+		labels = append(labels, label)
+	}
+	if len(labels) == 0 {
+		return nil, nil
+	}
+
+	// Build the rdeps query expression.
+	setExpr := "set(" + strings.Join(labels, " ") + ")"
+	queryExpr := "rdeps(//..., " + setExpr + ")"
+
+	// Apply a bounded timeout on top of any existing deadline.
+	qctx, cancel := context.WithTimeout(ctx, bazelQueryTimeout)
+	defer cancel()
+
+	out, err := qr(qctx, r.root, "bazel", "query", queryExpr, "--output=package")
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the package list and collect snapshot files whose directory is a
+	// Bazel package returned by the query.
+	//
+	// Bazel --output=package emits "//pkg/path" or just "pkg/path" per line;
+	// we normalise by stripping the leading "//".
+	pkgSet := newStringSet()
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pkg := strings.TrimPrefix(line, "//")
+		pkgSet.add(pkg)
+	}
+
+	var deps []string
+	for _, f := range snap.Files {
+		dir := path.Dir(f.Path)
+		if dir == "." {
+			dir = ""
+		}
+		if pkgSet.has(dir) || pkgSet.has(f.Path) {
+			deps = append(deps, f.Path)
+		}
+	}
+	return deps, nil
 }
 
 // goPackageDir returns the repo-relative directory of a path, which serves as
