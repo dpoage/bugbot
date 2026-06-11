@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -125,12 +126,13 @@ func parseCompileCommands(path string) (string, bool) {
 	defer func() { _ = f.Close() }()
 
 	// Read at most cppMaxCompileCommandsBytes to bound memory use on huge DBs.
-	buf := make([]byte, cppMaxCompileCommandsBytes)
-	n, _ := f.Read(buf)
-	if n == 0 {
+	// io.ReadAll over a LimitReader guarantees a full read up to the cap — a
+	// bare f.Read may legally return short, which would truncate the JSON and
+	// silently demote detection to a lower-confidence source.
+	data, err := io.ReadAll(io.LimitReader(f, cppMaxCompileCommandsBytes))
+	if err != nil || len(data) == 0 {
 		return "", false
 	}
-	data := buf[:n]
 
 	var cmds []compileCommand
 	if err := json.Unmarshal(data, &cmds); err != nil {
