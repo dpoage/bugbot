@@ -231,10 +231,21 @@ type Options struct {
 	// SandboxOpts configures the sandbox_exec tool offered to refuter agents.
 	// The zero value disables the feature.
 	SandboxOpts SandboxOpts
+	// DisableHeatOrdering suppresses churn-heat reordering in Sweep. By
+	// default (false) Sweep sorts targets by churn-weighted recency heat so
+	// finder budget flows to files that have changed recently and frequently —
+	// where bugs statistically cluster. Set to true to restore fully
+	// alphabetical Sweep ordering (e.g. for deterministic testing or when
+	// the repository has no git history). Targeted scans are always
+	// alphabetical regardless of this setting.
+	DisableHeatOrdering bool
 }
 
 // resolve fills in defaults without mutating the caller's Options.
 func (o Options) resolve() Options {
+	// DisableHeatOrdering is intentionally NOT touched here: the zero value
+	// (false) already means "heat ordering enabled", which is the default.
+	// No resolution needed.
 	if o.Refuters <= 0 {
 		o.Refuters = DefaultRefuters
 	}
@@ -472,6 +483,16 @@ type Stats struct {
 	// LeadsConsumed is the number of pending cross-lens leads that were claimed
 	// and injected into finder tasks at the start of this run's hypothesize stage.
 	LeadsConsumed int `json:"leads_consumed,omitempty"`
+	// HeatOrdered reports whether the Sweep targets were reordered by
+	// churn-heat before chunking (i.e. heat ordering ran AND produced a
+	// non-trivial reordering compared to alphabetical). False when heat
+	// ordering was disabled, git history was unavailable, or the heat map
+	// was empty.
+	HeatOrdered bool `json:"heat_ordered,omitempty"`
+	// HeatFiles is the number of files in the heat map that scored above
+	// zero for this Sweep. Zero when heat ordering was disabled or git
+	// history was unavailable.
+	HeatFiles int `json:"heat_files,omitempty"`
 }
 
 // FinderReliable reports whether the finder stage produced trustworthy coverage:

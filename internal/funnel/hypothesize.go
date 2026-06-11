@@ -172,7 +172,12 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				leadsPostedAtomic.Add(1)
 				return nil
 			})
-			unitTools := append(baseTools, postLeadTool)
+			// Use a three-index slice expression to cap baseTools at its length
+			// before appending, forcing a new backing array. Without the cap
+			// expression, multiple goroutines calling append on the same shared
+			// baseTools slice can collide when the slice has spare capacity —
+			// they would all write to baseTools[len(baseTools)] simultaneously.
+			unitTools := append(baseTools[:len(baseTools):len(baseTools)], postLeadTool)
 
 			cands, status, err := f.runFinder(ctx, finder, unitTools, persona, u.lens, u.files, u.leads, budget)
 			mu.Lock()
