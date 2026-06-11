@@ -133,6 +133,16 @@ func newDaemonCmd() *cobra.Command {
 				deps.ReproTagger = reproducer.spend
 			}
 
+			// Analyzer seeding hook: build once and close over it. Like the
+			// repro step, seeding requires a container runtime and degrades
+			// gracefully when none is available.
+			if sandboxOK {
+				repoRoot := repo.Root()
+				deps.SeedAnalyzers = func(seedCtx context.Context) {
+					runAnalyzerSeed(seedCtx, cfg, repoRoot, st, progressSink)
+				}
+			}
+
 			// Publish hook: wire in when cfg.Publish.Enabled. We do not
 			// pre-check for gh on PATH here; a missing gh binary will produce a
 			// warning on the first post-cycle run via the Publisher interface.

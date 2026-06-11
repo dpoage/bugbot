@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dpoage/bugbot/internal/analyzer"
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
@@ -130,6 +131,13 @@ func newScanCmd() *cobra.Command {
 			}
 			// Shut down any language servers the code-navigation tools spawned.
 			defer func() { _ = f.Close() }()
+
+			// Analyzer seeding: run deterministic static analyzers (staticcheck,
+			// ruff) to seed the leads blackboard before the finder stage. Always-on
+			// with graceful-skip: if no container runtime is available, or the
+			// analyzer binary is absent from the image, the seed step is silently
+			// skipped. Analyzer failures never block the scan.
+			runAnalyzerSeed(ctx, cfg, repo.Root(), st, progressSink)
 
 			var res *funnel.Result
 			if since != "" {
@@ -403,4 +411,50 @@ func shortSHA(sha string) string {
 		return sha[:12]
 	}
 	return sha
+}
+
+// runAnalyzerSeed attempts to run the static-analyzer seeding step before the
+// funnel. It detects the container runtime, builds a sandbox, and calls
+// analyzer.Seed. All failure modes degrade to a logged skip — this function
+// never returns an error and never blocks the scan.
+//
+// The seed step is always-on (no config knob in v1) but requires a container
+// runtime: if no runtime is available the step is skipped silently.
+func runAnalyzerSeed(ctx context.Context, cfg config.Config, repoDir string, st *store.Store, sink progress.Sink) {
+	runtime, ok := sandbox.Detect()
+	if !ok {
+		// No container runtime: skip seeding silently. The scan still runs; it
+		// just won't have static-analyzer leads to seed the finder stage with.
+		return
+	}
+	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image)
+	if err != nil {
+		// Sandbox construction failed: emit a note and continue without seeding.
+		progress.Emit(sink, progress.Event{
+			Kind:    progress.KindStageStarted,
+			Stage:   "analyzer_seed",
+			Message: fmt.Sprintf("analyzer seed skipped: build sandbox: %s", err),
+		})
+		return
+	}
+
+	sum, err := analyzer.Seed(ctx, sb, repoDir, st, cfg.Sandbox.Image)
+	if err != nil {
+		// Store infrastructure error: emit a note. Seed already posted whatever
+		// it could before the error; the scan continues normally.
+		progress.Emit(sink, progress.Event{
+			Kind:    progress.KindStageFinished,
+			Stage:   "analyzer_seed",
+			Message: fmt.Sprintf("analyzer seed partial error: %s", err),
+		})
+		return
+	}
+
+	if sum.TotalPosted > 0 {
+		progress.Emit(sink, progress.Event{
+			Kind:  progress.KindStageFinished,
+			Stage: "analyzer_seed",
+			Count: sum.TotalPosted,
+		})
+	}
 }
