@@ -91,6 +91,12 @@ func (d *Daemon) runPoll(ctx context.Context) {
 		return
 	}
 
+	// Seed the leads blackboard with static-analyzer hits before the finder stage.
+	// Best-effort: the hook degrades gracefully on any failure.
+	if d.seedAnalyzers != nil {
+		d.seedAnalyzers(ctx)
+	}
+
 	f, err := d.newFunnel()
 	if err != nil {
 		d.log.Error("daemon: build funnel failed", "err", err)
@@ -122,6 +128,12 @@ func (d *Daemon) runSweep(ctx context.Context) {
 	if d.dayBudgetExhausted(ctx, &res) {
 		d.logCycle(res, d.clock.now().Sub(start))
 		return
+	}
+
+	// Seed the leads blackboard with static-analyzer hits before the finder stage.
+	// Best-effort: the hook degrades gracefully on any failure.
+	if d.seedAnalyzers != nil {
+		d.seedAnalyzers(ctx)
 	}
 
 	f, err := d.newFunnel()
