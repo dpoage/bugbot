@@ -370,6 +370,12 @@ func TestSupportsAndUnsupported(t *testing.T) {
 	if !b.Supports("/x/y.ts") {
 		t.Error("TypeScript must be supported")
 	}
+	// JavaScript family must all be supported via tsxGrammar.
+	for _, ext := range []string{".js", ".jsx", ".mjs", ".cjs"} {
+		if !b.Supports("/x/y" + ext) {
+			t.Errorf("JavaScript extension %s must be supported", ext)
+		}
+	}
 	if b.Supports("/x/y.rb") {
 		t.Error("Ruby is not registered and must be unsupported")
 	}
@@ -472,5 +478,71 @@ func TestDefinitionBodiesDecoratorExtension(t *testing.T) {
 	gotStart, gotEnd = bodyLineSpan(t, b, filepath.Join(root, "plain.go"), "Plain")
 	if gotStart != 3 || gotEnd != 5 {
 		t.Errorf("Go undecorated func Plain: span = %d-%d, want 3-5 (no change)", gotStart, gotEnd)
+	}
+}
+
+// TestJSXFileDefsAndRefs proves that a .jsx file is parsed by the tsx grammar:
+// JSX syntax must not prevent symbol extraction. A function returning JSX must
+// produce a definition, and a call site within JSX-bearing source must produce
+// a reference. This mirrors the tsx regression test (TestTSXJSXResolves) but
+// exercises the .jsx extension path through grammarTable.
+func TestJSXFileDefsAndRefs(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"widget.jsx": "function greet() { return \"hi\" }\n" + // 1: definition
+			"function Widget() {\n" + // 2
+			"  return <div>{greet()}</div>;\n" + // 3: JSX with call ref to greet
+			"}\n", // 4
+	})
+	b := New(root)
+	abs := filepath.Join(root, "widget.jsx")
+
+	// The definition of greet must resolve — proving the .jsx file parsed.
+	defRes, err := b.Definition(abs, "greet")
+	if err != nil {
+		t.Fatalf("jsx Definition(greet): %v", err)
+	}
+	if got := locLines(t, root, defRes); !contains(got, "widget.jsx:1") {
+		t.Fatalf("jsx greet def = %v, want widget.jsx:1 (jsx file failed to parse?)", got)
+	}
+
+	// The call to greet() inside JSX source must appear as a reference.
+	refRes, err := b.References(abs, "greet")
+	if err != nil {
+		t.Fatalf("jsx References(greet): %v", err)
+	}
+	if got := locLines(t, root, refRes); !contains(got, "widget.jsx:3") {
+		t.Errorf("jsx greet ref = %v, want widget.jsx:3", got)
+	}
+}
+
+// TestPlainJSFileDefsAndRefs proves that plain .js files (no JSX, no TypeScript)
+// are parsed correctly via tsxGrammar. Function declarations must produce
+// definitions and call expressions must produce references.
+func TestPlainJSFileDefsAndRefs(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"util.js": "function add(a, b) { return a + b; }\n" + // 1: definition
+			"function main() {\n" + // 2
+			"  return add(1, 2);\n" + // 3: call ref to add
+			"}\n", // 4
+	})
+	b := New(root)
+	abs := filepath.Join(root, "util.js")
+
+	// The definition of add must resolve.
+	defRes, err := b.Definition(abs, "add")
+	if err != nil {
+		t.Fatalf("js Definition(add): %v", err)
+	}
+	if got := locLines(t, root, defRes); !contains(got, "util.js:1") {
+		t.Fatalf("js add def = %v, want util.js:1", got)
+	}
+
+	// The call site add(1, 2) must appear as a reference.
+	refRes, err := b.References(abs, "add")
+	if err != nil {
+		t.Fatalf("js References(add): %v", err)
+	}
+	if got := locLines(t, root, refRes); !contains(got, "util.js:3") {
+		t.Errorf("js add ref = %v, want util.js:3", got)
 	}
 }
