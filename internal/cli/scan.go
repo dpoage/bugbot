@@ -151,6 +151,24 @@ func newScanCmd() *cobra.Command {
 				}
 				changed := ingest.ChangedPaths(changes)
 				_, _ = fmt.Fprintf(out, "Targeted scan: %d changed file(s) since %s\n", len(changed), since)
+				// Populate ChangeContext for the diff-intent lens. Failures are
+				// non-fatal: the scan still runs without diff-intent context.
+				cc := buildScanChangeContext(ctx, repo, since, head, changed)
+				if cc != nil {
+					opts.ChangeContext = cc
+					// Rebuild the funnel with the updated options so ChangeContext is
+					// visible to hypothesize. The old funnel (f) has not run yet so no
+					// language servers have been started. Only swap f after a
+					// successful rebuild so a failure here cannot leave f nil and
+					// cause the deferred f.Close() to panic ((*Funnel).Close has a
+					// nil-receiver guard, but we still prefer not to lose f).
+					f2, buildErr := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
+					if buildErr != nil {
+						return buildErr
+					}
+					_ = f.Close()
+					f = f2
+				}
 				res, err = f.Targeted(ctx, changed)
 			} else {
 				res, err = f.Sweep(ctx)
@@ -402,6 +420,31 @@ func reliabilityWarning(s funnel.Stats) string {
 		b.WriteString("  do not read a low finding count as a clean bill of health.")
 	}
 	return b.String()
+}
+
+// buildScanChangeContext populates a funnel.ChangeContext for a --since targeted
+// scan, enabling the diff-intent lens. Failures are best-effort and return nil
+// so the scan proceeds without the extra context rather than aborting.
+func buildScanChangeContext(ctx context.Context, repo *ingest.Repo, fromSHA, toSHA string, changed []string) *funnel.ChangeContext {
+	if fromSHA == "" || toSHA == "" {
+		return nil
+	}
+	cc := &funnel.ChangeContext{
+		FromCommit:   fromSHA,
+		ToCommit:     toSHA,
+		ChangedFiles: changed,
+		// BlastFiles intentionally omitted: derived inside hypothesize from the
+		// blast-radius targets that Targeted already computed via BlastRadius.
+	}
+	msg, err := repo.CommitMessage(ctx, toSHA)
+	if err == nil {
+		cc.Message = msg
+	}
+	diff, err := repo.UnifiedDiff(ctx, fromSHA, toSHA)
+	if err == nil {
+		cc.Diff = diff
+	}
+	return cc
 }
 
 // shortSHA abbreviates a commit SHA for display, leaving short/empty values

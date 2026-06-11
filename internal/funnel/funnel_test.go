@@ -287,9 +287,12 @@ func TestSweep_CleanCode_NoFindingsNoVerify(t *testing.T) {
 	if verifier.callCount() != 0 {
 		t.Errorf("verifier called %d times on clean code; want 0", verifier.callCount())
 	}
-	// Finder ran once per lens per chunk (one chunk here).
-	if finder.callCount() != len(BuiltinLenses()) {
-		t.Errorf("finder calls = %d, want %d", finder.callCount(), len(BuiltinLenses()))
+	// Finder ran once per taxonomy lens per chunk (one chunk here). diff-intent
+	// emits zero chunk tasks on sweeps (no ChangeContext), so the count is
+	// len(BuiltinLenses())-1.
+	wantFinderCalls := len(BuiltinLenses()) - 1
+	if finder.callCount() != wantFinderCalls {
+		t.Errorf("finder calls = %d, want %d (taxonomy lenses only; diff-intent skipped on sweep)", finder.callCount(), wantFinderCalls)
 	}
 }
 
@@ -318,12 +321,14 @@ func TestSweep_FinderParseFailures_HonestStats(t *testing.T) {
 		t.Fatalf("sweep should not error on parse failures: %v", err)
 	}
 
-	nLenses := len(BuiltinLenses())
+	// diff-intent emits zero chunk tasks on sweeps (no ChangeContext), so only
+	// the taxonomy lenses run; that is len(BuiltinLenses())-1 finders.
+	nLenses := len(BuiltinLenses()) - 1
 	if res.Stats.FinderRuns != nLenses {
-		t.Errorf("FinderRuns = %d, want %d (one per lens, single chunk)", res.Stats.FinderRuns, nLenses)
+		t.Errorf("FinderRuns = %d, want %d (one per taxonomy lens, single chunk; diff-intent skipped)", res.Stats.FinderRuns, nLenses)
 	}
 	if res.Stats.FinderFailures != nLenses {
-		t.Errorf("FinderFailures = %d, want %d (all lenses failed to parse)", res.Stats.FinderFailures, nLenses)
+		t.Errorf("FinderFailures = %d, want %d (all taxonomy lenses failed to parse)", res.Stats.FinderFailures, nLenses)
 	}
 	if res.Stats.FinderReliable() {
 		t.Error("FinderReliable() = true, want false when every finder failed")
@@ -377,7 +382,7 @@ func TestRunFinder_BudgetStopNotParseFailure(t *testing.T) {
 	budget := newBudgetState(100, rec, 1.0)
 	budget.pool.Add(100) // spend == limit => Check returns ErrBudgetExhausted
 
-	cands, status, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0], []string{"bug.go"}, nil, budget)
+	cands, status, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0], finderTask([]string{"bug.go"}, nil), budget)
 	if err != nil {
 		t.Fatalf("runFinder should not error on a budget stop: %v", err)
 	}
@@ -414,7 +419,7 @@ func TestRunFinder_ParseFailureStillCounts(t *testing.T) {
 	rec := &spendRecorder{ctx: ctx, store: st}
 	budget := newBudgetState(0, rec, 1.0)
 
-	_, status, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0], []string{"bug.go"}, nil, budget)
+	_, status, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0], finderTask([]string{"bug.go"}, nil), budget)
 	if err != nil {
 		t.Fatalf("runFinder should not error on a parse failure: %v", err)
 	}
@@ -650,10 +655,12 @@ func TestSweep_BudgetDegradation(t *testing.T) {
 	if len(res.Skipped) == 0 {
 		t.Errorf("expected Skipped notes describing degradation, got none")
 	}
-	// Some lenses must have been skipped: with 6 lenses and degradation to 2,
-	// the finder cannot have run all 6.
-	if finder.callCount() >= len(BuiltinLenses()) {
-		t.Errorf("finder ran %d times; degradation should have skipped low-yield lenses", finder.callCount())
+	// Some lenses must have been skipped: with nBuiltin-1 taxonomy chunk tasks and
+	// degradation to 2, the finder cannot have run all taxonomy lenses.
+	// diff-intent has no chunk tasks on sweeps so it does not count here.
+	nTaxonomy := len(BuiltinLenses()) - 1
+	if finder.callCount() >= nTaxonomy {
+		t.Errorf("finder ran %d times; degradation should have skipped low-yield lenses (nTaxonomy=%d)", finder.callCount(), nTaxonomy)
 	}
 }
 
@@ -765,7 +772,10 @@ func TestHypothesize_MultiLens_NoRace(t *testing.T) {
 	// Use all builtin lenses so every goroutine slot is filled. MaxParallel is
 	// set to len(BuiltinLenses()) to guarantee full concurrency: every (lens,
 	// chunk) unit runs simultaneously, maximising the window for the race.
+	// diff-intent emits zero chunk tasks on sweeps so nTaxonomy is the actual
+	// concurrency count; MaxParallel is set higher to ensure all slots are open.
 	nLenses := len(BuiltinLenses())
+	nTaxonomy := nLenses - 1 // diff-intent has no chunk tasks on sweeps
 
 	// The scripted client returns empty candidates for every lens — the test
 	// only exercises the concurrent append path, not the candidate pipeline.
@@ -786,9 +796,9 @@ func TestHypothesize_MultiLens_NoRace(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Sweep[%d]: %v", i, err)
 		}
-		// Sanity: all lenses ran (one call per lens, single chunk).
-		if got := finder.callCount(); got < nLenses*(i+1) {
-			t.Errorf("Sweep[%d]: finder calls = %d, want >= %d", i, got, nLenses*(i+1))
+		// Sanity: all taxonomy lenses ran (one call per taxonomy lens, single chunk).
+		if got := finder.callCount(); got < nTaxonomy*(i+1) {
+			t.Errorf("Sweep[%d]: finder calls = %d, want >= %d (taxonomy lenses only)", i, got, nTaxonomy*(i+1))
 		}
 		_ = res
 	}

@@ -44,3 +44,80 @@ func TestUnifiedDiff_RequiresBothCommits(t *testing.T) {
 		t.Error("expected error when from is empty")
 	}
 }
+
+// TestCommitMessage_ReturnsFullMessage confirms CommitMessage round-trips the
+// full commit message body (subject and body if any) for a given commit ref.
+func TestCommitMessage_ReturnsFullMessage(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.go", "package a\n")
+	sha := r.commit("validate input before use\n\nThis is the body.")
+
+	repo := r.open()
+	msg, err := repo.CommitMessage(context.Background(), sha)
+	if err != nil {
+		t.Fatalf("CommitMessage: %v", err)
+	}
+	if !strings.Contains(msg, "validate input before use") {
+		t.Errorf("message missing subject: %q", msg)
+	}
+	if !strings.Contains(msg, "This is the body.") {
+		t.Errorf("message missing body: %q", msg)
+	}
+}
+
+// TestCommitMessage_RequiresCommit guards the input contract.
+func TestCommitMessage_RequiresCommit(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.go", "package a\n")
+	r.commit("c")
+	repo := r.open()
+	if _, err := repo.CommitMessage(context.Background(), ""); err == nil {
+		t.Error("expected error when commit ref is empty")
+	}
+}
+
+// TestCommitMessage_HEAD works with symbolic ref HEAD.
+func TestCommitMessage_HEAD(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.go", "package a\n")
+	r.commit("the HEAD commit message")
+
+	repo := r.open()
+	msg, err := repo.CommitMessage(context.Background(), "HEAD")
+	if err != nil {
+		t.Fatalf("CommitMessage HEAD: %v", err)
+	}
+	if !strings.Contains(msg, "the HEAD commit message") {
+		t.Errorf("HEAD message mismatch: %q", msg)
+	}
+}
+
+// TestCommitMessage_DashDashFlagInjectionGuard verifies that the "--" separator
+// is present in the git argv, preventing a ref that starts with "-" from being
+// parsed as a flag. We test this by confirming a normal SHA works correctly
+// (the "--" must not break the normal path). The negative case (a ref starting
+// with "-" returning an error rather than being treated as a flag) is implicitly
+// covered: git treats "-- -badref" as a path, not a flag, and returns an error
+// for an unknown ref. (F8)
+func TestCommitMessage_DashDashFlagInjectionGuard(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.go", "package a\n")
+	sha := r.commit("flag injection guard test")
+
+	repo := r.open()
+	// Normal SHA must still work with "--" present.
+	msg, err := repo.CommitMessage(context.Background(), sha)
+	if err != nil {
+		t.Fatalf("CommitMessage with full SHA: %v", err)
+	}
+	if !strings.Contains(msg, "flag injection guard test") {
+		t.Errorf("message with '--' separator: got %q", msg)
+	}
+
+	// A ref starting with '-' must return an error (git treats it as a path
+	// spec after '--', not a flag, so the ref is not found).
+	_, err = repo.CommitMessage(context.Background(), "-fake-flag")
+	if err == nil {
+		t.Error("CommitMessage with '-fake-flag' should return an error (not parsed as flag)")
+	}
+}

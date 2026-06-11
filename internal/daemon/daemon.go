@@ -264,8 +264,16 @@ func New(deps Deps, cfg DaemonConfig) (*Daemon, error) {
 // from config while preserving the rest of the base FunnelOpts. A fresh funnel
 // per cycle keeps each cycle's budget accounting independent.
 func (d *Daemon) newFunnel() (*funnel.Funnel, error) {
+	return d.newFunnelWith(nil)
+}
+
+// newFunnelWith is like newFunnel but also injects a ChangeContext so the
+// diff-intent lens fires on commit-triggered cycles. cc may be nil (sweep
+// cycles and commit cycles without a resolved context both pass nil).
+func (d *Daemon) newFunnelWith(cc *funnel.ChangeContext) (*funnel.Funnel, error) {
 	opts := d.fopts
 	opts.TokenBudget = d.cfg.PerCycleTokens
 	opts.Progress = d.prog
+	opts.ChangeContext = cc
 	return funnel.New(d.clients, d.store, d.repo, opts)
 }
