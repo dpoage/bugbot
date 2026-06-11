@@ -258,6 +258,34 @@ func TestManagerConcurrentQueries(t *testing.T) {
 	}
 }
 
+// TestDefaultServersRustAnalyzer asserts that the built-in registry contains
+// exactly one entry for ".rs" files, that it is rust-analyzer, and that it
+// carries no extra arguments (rust-analyzer uses stdio by default).
+func TestDefaultServersRustAnalyzer(t *testing.T) {
+	servers := DefaultServers()
+
+	var rsConfigs []ServerConfig
+	for _, cfg := range servers {
+		if _, ok := cfg.LanguageIDs[".rs"]; ok {
+			rsConfigs = append(rsConfigs, cfg)
+		}
+	}
+
+	if len(rsConfigs) != 1 {
+		t.Fatalf("expected exactly one config claiming .rs, got %d: %v", len(rsConfigs), rsConfigs)
+	}
+	cfg := rsConfigs[0]
+	if cfg.Cmd != "rust-analyzer" {
+		t.Errorf("config for .rs has Cmd %q, want %q", cfg.Cmd, "rust-analyzer")
+	}
+	if got := cfg.LanguageIDs[".rs"]; got != "rust" {
+		t.Errorf("languageId for .rs = %q, want %q", got, "rust")
+	}
+	if len(cfg.Args) != 0 {
+		t.Errorf("rust-analyzer config must have no Args, got %v", cfg.Args)
+	}
+}
+
 func TestManagerConcurrentQueriesAcrossCrash(t *testing.T) {
 	root, file := newTestWorkspace(t)
 	flag := filepath.Join(t.TempDir(), "crashed-once")
