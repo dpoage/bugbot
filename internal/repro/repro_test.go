@@ -245,6 +245,49 @@ func contains(ss []string, want string) bool {
 	return false
 }
 
+// TestExecute_SetupCmdsPropagate verifies that Resolution.SetupCmds are
+// threaded from r.deps into the sandbox Spec by execute().
+func TestExecute_SetupCmdsPropagate(t *testing.T) {
+	ctx := context.Background()
+	repoDir := newRepoDir(t)
+	st := openStore(t)
+	finding := seedFinding(t, st)
+
+	setupCmds := [][]string{{"npm", "ci", "--offline"}, {"pip", "install", "--no-index"}}
+	client := newScriptedClient(planBody(t, goodPlan()))
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "FAIL"}})
+
+	// Construct a Reproducer with a pre-populated deps.SetupCmds to bypass the
+	// ecosystem resolver (Go never contributes SetupCmds). Use resolved options
+	// so MaxParallel is non-zero (a zero-capacity semaphore deadlocks).
+	opts := Options{ArtifactDir: t.TempDir(), MaxAttempts: 1}.resolve()
+	r := &Reproducer{
+		client:  client,
+		sb:      sb,
+		repoDir: repoDir,
+		opts:    opts,
+		deps: sandbox.Resolution{
+			SetupCmds: setupCmds,
+			Strategy:  sandbox.DepStrategyOff,
+		},
+	}
+
+	if _, err := r.PromoteAll(ctx, st, []store.Finding{finding}); err != nil {
+		t.Fatalf("PromoteAll: %v", err)
+	}
+	calls := sb.Calls()
+	if len(calls) == 0 {
+		t.Fatal("sandbox was not called")
+	}
+	spec := calls[0].Spec
+	if len(spec.SetupCmds) != 2 {
+		t.Fatalf("SetupCmds len = %d, want 2; got %v", len(spec.SetupCmds), spec.SetupCmds)
+	}
+	if spec.SetupCmds[0][0] != "npm" || spec.SetupCmds[1][0] != "pip" {
+		t.Errorf("SetupCmds content wrong: %v", spec.SetupCmds)
+	}
+}
+
 // --- zero-exit -> revision -> success --------------------------------------
 
 func TestPromoteAll_ZeroExitThenRevision(t *testing.T) {

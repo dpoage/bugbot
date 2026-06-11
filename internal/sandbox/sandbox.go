@@ -102,6 +102,27 @@ type Spec struct {
 	// ROMounts. ContainerPaths must be unique across ROMounts and RWMounts
 	// combined.
 	RWMounts []ROMount
+
+	// SetupCmds are optional ordered commands executed inside the container, in
+	// the same network-none run, in the workspace directory, BEFORE Cmd. They
+	// exist so non-Go ecosystems (npm, pip, cargo, etc.) can perform offline
+	// package installation from a pre-mounted cache without altering the main
+	// command.
+	//
+	// Examples: ["npm","ci","--offline"] or ["pip","install","--no-index","--find-links=/pipcache","."]
+	//
+	// When SetupCmds is non-empty the CLI backend wraps the execution in
+	// /bin/sh: each command is shell-quoted and chained with "|| exit 125" so
+	// any setup failure exits with code 125. Exit 125 is intentional:
+	// internal/repro/interpret.go and patch.go both classify container exit
+	// 125/126/127 as an environment_error, NOT a bug demonstration — a failed
+	// "npm ci --offline" must never be misread as a successful repro. The
+	// original Cmd is exec'd (via sh's exec builtin) so it retains its own
+	// exit code and signal mask.
+	//
+	// Requires /bin/sh in the container image. Images used only for Go (the
+	// default) set no SetupCmds, so existing images and behavior are untouched.
+	SetupCmds [][]string
 }
 
 // ROMount is a single read-only bind mount of a host directory into the

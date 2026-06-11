@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // runParams is the fully-resolved set of inputs to a single container run,
@@ -28,6 +29,11 @@ type runParams struct {
 	// rwMounts are extra writable bind mounts, used only by the trusted
 	// dependency-prefetch step (see Spec.RWMounts).
 	rwMounts []ROMount
+	// setupCmds are optional in-container commands run before cmd. When
+	// non-empty the backend wraps execution in /bin/sh; each command is
+	// shell-quoted and chained with "|| exit 125" so any setup failure aborts
+	// the run with an environment_error exit code (see Spec.SetupCmds).
+	setupCmds [][]string
 }
 
 // workspaceMount is where the writable workspace copy is mounted inside the
@@ -116,6 +122,20 @@ func buildRunArgs(p runParams) []string {
 	}
 
 	args = append(args, p.image)
+
+	// When SetupCmds are present, wrap the execution in /bin/sh: the setup
+	// script runs each setup command with "|| exit 125" and then exec's the
+	// original command so it retains its own exit code and signal disposition.
+	// The argv shape is:
+	//   /bin/sh -c <script> sh <original cmd...>
+	// where "sh" is $0 (the shell's argv[0]) and the original cmd becomes
+	// $1, $2, ... (positional parameters fed to "exec $@").
+	// When SetupCmds is empty, the original cmd is appended directly and
+	// /bin/sh is never involved, preserving existing behavior for Go runs.
+	if len(p.setupCmds) > 0 {
+		script := buildSetupScript(p.setupCmds)
+		args = append(args, "/bin/sh", "-c", script, "sh")
+	}
 	args = append(args, p.cmd...)
 	return args
 }
@@ -150,6 +170,58 @@ func validateMounts(ro, rw []ROMount) error {
 		return err
 	}
 	return check(rw, "writable")
+}
+
+// shellQuote returns a POSIX single-quoted form of arg that is safe to embed in
+// a shell script regardless of the arg's content (spaces, $, ;, newlines, etc.).
+// Embedded single quotes are escaped by closing the current quote, inserting a
+// literal backslash-quoted single quote, then reopening the quote — the only
+// POSIX-portable way to include a literal single quote inside a single-quoted
+// string.
+//
+// Examples:
+//
+//	"hello world"     → 'hello world'
+//	"it's"            → 'it'"'"'s'
+//	"$HOME"           → '$HOME'      (prevents variable expansion)
+//	"; rm -rf /"      → '; rm -rf /' (no injection)
+//	""                → ''           (empty arg preserved)
+func shellQuote(arg string) string {
+	return "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
+}
+
+// buildSetupScript constructs a POSIX sh script fragment that runs each setup
+// command in order, aborting with exit 125 on any failure, then exec's the
+// original command. The result is intended as the -c argument to /bin/sh.
+//
+// Exit 125 is chosen deliberately: internal/repro/interpret.go and patch.go
+// both classify container exit 125/126/127 as environment_error, so a setup
+// failure (e.g. "npm ci --offline" cache miss) never surfaces as a false
+// bug demonstration.
+//
+// The trailing `exec "$@"` passes the original command (from sh's positional
+// parameters $1, $2, ...) with exec so the sh wrapper process is replaced by
+// the actual command — it retains its own exit code and signal disposition
+// rather than going through another sh exit-code forwarding layer.
+func buildSetupScript(setupCmds [][]string) string {
+	var b strings.Builder
+	for _, argv := range setupCmds {
+		// An empty argv would render as a bare "|| exit 125" line, which sh
+		// treats as a successful no-op — the guard would silently never fire.
+		// Skip such entries rather than emitting a dead guard.
+		if len(argv) == 0 {
+			continue
+		}
+		for i, arg := range argv {
+			if i > 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteString(shellQuote(arg))
+		}
+		b.WriteString(" || exit 125\n")
+	}
+	b.WriteString("exec \"$@\"")
+	return b.String()
 }
 
 // removeArgs constructs the argv for forcibly removing a container by name,

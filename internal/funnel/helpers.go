@@ -142,7 +142,7 @@ func (f *Funnel) buildSandboxTool(c Candidate, sbExecs *atomic.Int32, sbMillis *
 		sbExecs.Add(1)
 		sbMillis.Add(d.Milliseconds())
 	}
-	return agent.NewSandboxExecTool(opts.Sandbox, f.repo.Root(), maxExec, f.deps.ROMounts, f.deps.Env, onExec)
+	return agent.NewSandboxExecTool(opts.Sandbox, f.repo.Root(), maxExec, f.deps.ROMounts, f.deps.Env, f.deps.SetupCmds, onExec)
 }
 
 // ensureDepPrefetch runs the one-time online dependency prefetch (only set for

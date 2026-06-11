@@ -168,6 +168,50 @@ func TestPatchProver_SuccessPath(t *testing.T) {
 	}
 }
 
+// TestPatchProver_CarriesSetupCmds verifies that PatchProver.setupCmds are
+// threaded into every sandbox Spec via execSandbox.
+func TestPatchProver_CarriesSetupCmds(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	repoDir := newRepoDirWithCalc(t)
+	artifactDir := t.TempDir()
+
+	finding, att := buildT1Finding(t, st)
+	if err := os.MkdirAll(filepath.Join(artifactDir, finding.ID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	client := newScriptedClient(patchPlanBody(t, goodPatchPlan()))
+	sb := sandbox.NewMock(sandbox.MockResponse{})
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
+
+	setupCmds := [][]string{{"npm", "ci", "--offline"}}
+
+	prover := &PatchProver{
+		client:      client,
+		sb:          sb,
+		repoDir:     repoDir,
+		maxAttempts: 3,
+		artifactDir: artifactDir,
+		setupCmds:   setupCmds,
+	}
+
+	if _, err := prover.Prove(ctx, st, finding, att); err != nil {
+		t.Fatalf("Prove: %v", err)
+	}
+
+	calls := sb.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("sandbox calls = %d, want 2", len(calls))
+	}
+	for i, c := range calls {
+		if len(c.Spec.SetupCmds) != 1 || c.Spec.SetupCmds[0][0] != "npm" {
+			t.Errorf("call %d SetupCmds = %v, want [[npm ci --offline]]", i, c.Spec.SetupCmds)
+		}
+	}
+}
+
 // TestPatchProver_CarriesDepMountsAndEnv verifies the patch-prover's targeted
 // and suite sandbox runs both carry the resolved dependency mounts/env.
 func TestPatchProver_CarriesDepMountsAndEnv(t *testing.T) {

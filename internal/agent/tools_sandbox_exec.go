@@ -32,12 +32,14 @@ type SandboxExecTool struct {
 	maxExec int
 	used    atomic.Int32
 
-	// roMounts / depEnv carry the resolved dependency strategy (a read-only
-	// module-cache mount and/or GOFLAGS) so a refuter's network-none probe can
-	// resolve external modules. Empty for vendored/off repos. The one-time online
-	// prefetch (DepStrategyFetch) is performed by the caller before any tool runs.
-	roMounts []sandbox.ROMount
-	depEnv   []string
+	// roMounts / depEnv / setupCmds carry the resolved dependency strategy (a
+	// read-only module-cache mount and/or GOFLAGS and/or pre-Cmd setup commands)
+	// so a refuter's network-none probe can resolve external modules. Empty for
+	// vendored/off repos. The one-time online prefetch (DepStrategyFetch) is
+	// performed by the caller before any tool runs.
+	roMounts  []sandbox.ROMount
+	depEnv    []string
+	setupCmds [][]string
 
 	// onExec, when non-nil, is called after each successful Exec with the
 	// duration. Used by the funnel to aggregate Stats.SandboxExecMillis.
@@ -47,10 +49,11 @@ type SandboxExecTool struct {
 // NewSandboxExecTool builds a sandbox_exec tool instance for one candidate's
 // refuter panel. sb is the sandbox backend; repoDir is the repository root
 // passed as Spec.RepoDir; maxExec is the per-candidate execution budget;
-// roMounts and depEnv carry the dependency strategy (read-only module-cache
-// mount and env) so module-dependent probes work under --network=none.
-func NewSandboxExecTool(sb sandbox.Sandbox, repoDir string, maxExec int, roMounts []sandbox.ROMount, depEnv []string, onExec func(time.Duration)) *SandboxExecTool {
-	return &SandboxExecTool{sb: sb, repoDir: repoDir, maxExec: maxExec, roMounts: roMounts, depEnv: depEnv, onExec: onExec}
+// roMounts, depEnv, and setupCmds carry the dependency strategy (read-only
+// module-cache mount, env, and pre-Cmd setup commands) so module-dependent
+// probes work under --network=none.
+func NewSandboxExecTool(sb sandbox.Sandbox, repoDir string, maxExec int, roMounts []sandbox.ROMount, depEnv []string, setupCmds [][]string, onExec func(time.Duration)) *SandboxExecTool {
+	return &SandboxExecTool{sb: sb, repoDir: repoDir, maxExec: maxExec, roMounts: roMounts, depEnv: depEnv, setupCmds: setupCmds, onExec: onExec}
 }
 
 // sandboxExecArgs is the JSON schema for the tool arguments.
@@ -131,6 +134,7 @@ func (t *SandboxExecTool) Run(ctx context.Context, raw json.RawMessage) (string,
 		WriteFiles: writeFiles,
 		ROMounts:   t.roMounts,
 		Env:        t.depEnv,
+		SetupCmds:  t.setupCmds,
 	}
 
 	res, err := t.sb.Exec(ctx, spec)
@@ -163,6 +167,13 @@ func renderSandboxResult(r sandbox.Result) string {
 		b = fmt.Appendf(b, "exit_code=-1 timed_out=true duration=%dms\n", durationMS)
 	} else {
 		b = fmt.Appendf(b, "exit_code=%d timed_out=false duration=%dms\n", r.ExitCode, durationMS)
+	}
+	// Exit 125 is the sandbox's environment-failure convention (failed setup
+	// command or container-runtime error — see Spec.SetupCmds). Annotate it so
+	// the refuter model treats it as an environment problem, not evidence about
+	// the code under test.
+	if !r.TimedOut && r.ExitCode == 125 {
+		b = append(b, "note: exit 125 indicates a sandbox/setup environment failure, not a result about the code under test\n"...)
 	}
 
 	b = append(b, "\nSTDOUT:\n"...)

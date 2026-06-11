@@ -127,6 +127,7 @@ func (s *CLI) resolveParams(spec Spec) runParams {
 		cmd:       spec.Cmd,
 		roMounts:  spec.ROMounts,
 		rwMounts:  spec.RWMounts,
+		setupCmds: spec.SetupCmds,
 	}
 	if spec.Image != "" {
 		p.image = spec.Image
