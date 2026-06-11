@@ -9,3 +9,5 @@
 .dolt/
 *.db
 .beads-credential-key
+
+vendor/
