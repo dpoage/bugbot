@@ -1,5 +1,11 @@
 package funnel
 
+import (
+	"sort"
+
+	"github.com/dpoage/bugbot/internal/ingest"
+)
+
 // Lens is a single hypothesis specialization for the finder stage. Each lens
 // narrows the finder agent to one class of defect, with a system-prompt
 // specialization that focuses attention without changing the strict
@@ -11,53 +17,62 @@ package funnel
 // lenses keeps each finder agent's reasoning concentrated on one failure mode,
 // which both raises hit-rate within that mode and makes the candidates easier
 // to triage and verify.
+//
+// A lens is split into a universal Core (here) and per-language manifestation
+// rows (the manifestations table in lens_manifestations.go): the Core states
+// the failure mode in language-free terms, and prompt composition appends a
+// "How this manifests in <Language>" block for each language in the chunk that
+// has manifestation rows. A lens with no manifestation rows at all composes
+// Core alone — that is a first-class shape, not an error (some lenses, e.g. a
+// commit-intent lens, are inherently language-free).
 type Lens struct {
 	// Name is the stable lens identifier. It is recorded on every candidate and
 	// finding (Finding.Lens) and is part of the dedup fingerprint, so it must be
-	// stable across runs.
+	// stable across runs. It also keys the manifestations and lensYields tables.
 	Name string
-	// Specialization is appended to the shared finder system prompt to focus the
-	// agent on this lens's defect class. It must NOT relax the precision rules in
-	// the shared prompt; it only narrows what to look for.
-	Specialization string
-	// Yield ranks lenses for budget degradation: when the run is over its
-	// soft-budget threshold, only the highest-yield lenses keep running. Higher
-	// is kept longer. These rankings encode the empirical reality that
-	// nil/concurrency/resource bugs are both more common and more severe than the
-	// others in typical Go code.
-	Yield int
+	// Core is the universal, language-free statement of this lens's failure
+	// mode, appended to the shared finder system prompt to focus the agent. It
+	// must NOT relax the precision rules in the shared prompt (it only narrows
+	// what to look for), and it must not name language-specific constructs —
+	// those belong in the manifestations table so non-matching repos never see
+	// them.
+	Core string
 }
 
-// BuiltinLenses returns the default lens set, ordered by descending yield. The
-// order is also the default execution priority for budget degradation.
+// BuiltinLenses returns the default lens set, ordered by descending Go-column
+// yield (the historical default priority). The per-run launch/degradation
+// order is NOT this order: it is recomputed from the repo's dominant languages
+// via lensesByYield, because a lens's expected yield is language-dependent
+// (see lensYields).
 //
-// Each Specialization is deliberately concrete: it names the exact patterns to
-// hunt for so the model investigates real code paths rather than speculating.
-// None of them loosen the "concrete bugs only, empty list is fine" contract
-// from the shared finder prompt.
+// Each Core is deliberately concrete: it names the exact failure shape to hunt
+// for so the model investigates real code paths rather than speculating. None
+// of them loosen the "concrete bugs only, empty list is fine" contract from
+// the shared finder prompt.
 func BuiltinLenses() []Lens {
 	return []Lens{
 		{
-			Name:  "nil-safety/error-handling",
-			Yield: 100,
-			Specialization: "Hunt for nil-pointer dereferences and mishandled errors: " +
-				"dereferencing a pointer, map, slice, channel, or interface that a " +
-				"reachable code path can leave nil; using a value returned alongside an " +
-				"error WITHOUT checking that error first; ignored errors that hide a " +
-				"failed operation whose result is then used; type assertions without the " +
-				"comma-ok form on a value that may not hold that type; and returning a " +
-				"nil error while also returning a zero/invalid value the caller will use.",
+			Name: "nil-safety/error-handling",
+			Core: "Hunt for null/absent-value dereferences and mishandled failures: " +
+				"using a value that a reachable code path can leave null, missing, or " +
+				"invalid; using an operation's result WITHOUT first checking the error " +
+				"or failure signal returned alongside it; swallowed or ignored failures " +
+				"whose bogus result is then used as if the operation succeeded; and " +
+				"operations that report success while producing an empty or invalid " +
+				"value the caller will use. Confirm the bad value or missed failure can " +
+				"actually reach the use site on a reachable path.",
 		},
 		{
-			// diff-intent sits above concurrency (90) and below correctness (100):
-			// it is the unique-advantage lens on commit scans, where the commit
-			// message and diff are both available and the change is fresh. Its yield
-			// reflects that it fires ONLY on commit-triggered runs (the funnel emits
-			// zero diff-intent tasks on sweeps or when ChangeContext is nil), so it
-			// never competes with the taxonomy lenses on sweep runs.
-			Name:  "diff-intent",
-			Yield: 95,
-			Specialization: "Hunt for intent-vs-implementation mismatches in a specific commit: " +
+			// diff-intent is the unique-advantage lens on commit scans, where the
+			// commit message and diff are both available and the change is fresh.
+			// It fires ONLY on commit-triggered runs (the funnel emits zero
+			// diff-intent tasks on sweeps or when ChangeContext is nil), so it
+			// never competes with the taxonomy lenses on sweep runs. It is
+			// language-free: Core-only, no manifestation rows; its yield lives in
+			// lensYields under anyLanguage (95 — above concurrency's Go column,
+			// below nil-safety's).
+			Name: "diff-intent",
+			Core: "Hunt for intent-vs-implementation mismatches in a specific commit: " +
 				"the change's implementation contradicts its stated intent (the diff does " +
 				"something the commit message says it does not, or omits something it " +
 				"claims to do); and existing callers whose assumptions the change silently " +
@@ -68,60 +83,55 @@ func BuiltinLenses() []Lens {
 				"verified in the actual code. Finding nothing is a valid outcome.",
 		},
 		{
-			Name:  "concurrency",
-			Yield: 90,
-			Specialization: "Hunt for concurrency defects: data races on shared state " +
-				"accessed from multiple goroutines without synchronization; a mutex that " +
-				"is taken and not released on every return path; deadlocks from lock " +
-				"ordering or from sending/receiving on a channel no one services; " +
-				"closing or writing to a channel from multiple goroutines; loop-variable " +
-				"capture in goroutines; and WaitGroup Add/Done imbalances. Confirm the " +
-				"concurrent access is real by reading the goroutine launch sites.",
+			Name: "concurrency",
+			Core: "Hunt for concurrency defects: shared state read and written from " +
+				"concurrently executing code without synchronization; a lock that is " +
+				"acquired but not released on every path out of the critical section; " +
+				"deadlocks from inconsistent lock ordering or from waiting on an event " +
+				"no other task will ever deliver; and lifecycle races where concurrent " +
+				"work outlives or interleaves with the state it touches. Confirm the " +
+				"concurrent access is real by reading the sites where the concurrent " +
+				"work is launched or scheduled.",
 		},
 		{
-			Name:  "resource-leaks",
-			Yield: 80,
-			Specialization: "Hunt for leaked resources: an opened file, network " +
-				"connection, HTTP response body, database rows/statement, ticker, or " +
-				"context-cancel func that is not closed/stopped on every return path " +
-				"(especially early-return error paths); goroutines that can never exit " +
-				"because their stop signal is unreachable; and defers placed inside loops " +
-				"that accumulate until the function returns. Read the function fully to " +
-				"confirm no later Close exists.",
+			Name: "resource-leaks",
+			Core: "Hunt for leaked resources: acquired resources must be released on " +
+				"every path, including early-return and error paths. Look for " +
+				"acquisitions (files, sockets, connections, handles, timers, background " +
+				"work, memory) whose release is missing or skipped on some reachable " +
+				"path, and cleanup that is registered in a way that never runs or " +
+				"accumulates instead of running promptly. Read the function fully to " +
+				"confirm no later release exists before reporting.",
 		},
 		{
-			Name:  "boundary-conditions",
-			Yield: 60,
-			Specialization: "Hunt for boundary and bounds defects: off-by-one in slice " +
-				"or array indexing; indexing or slicing with an attacker- or " +
-				"caller-controlled length without a bounds check (panic on out-of-range); " +
-				"assuming a slice/map/string is non-empty before indexing [0] or [len-1]; " +
-				"integer overflow/underflow in size or index arithmetic; and incorrect " +
-				"handling of the empty-input case. Confirm the index can actually reach " +
-				"the out-of-range value on a reachable path.",
+			Name: "boundary-conditions",
+			Core: "Hunt for boundary and bounds defects: off-by-one errors in index or " +
+				"length arithmetic; indexing or slicing with an attacker- or " +
+				"caller-controlled value without a bounds check; assuming a collection " +
+				"or string is non-empty before reading its first or last element; " +
+				"integer overflow/underflow or truncation in size and index arithmetic; " +
+				"and incorrect handling of the empty-input case. Confirm the index can " +
+				"actually reach the out-of-range value on a reachable path.",
 		},
 		{
-			Name:  "api-contract-misuse",
-			Yield: 50,
-			Specialization: "Hunt for misuse of an API's documented contract: calling a " +
-				"function with arguments it forbids; ignoring a documented precondition " +
-				"or required ordering (e.g. must call Init before Use, must not reuse " +
-				"after Close); misusing the standard library (e.g. time.After in a hot " +
-				"loop, sql.Rows not iterated to completion, json/encoding round-trip " +
-				"assumptions); and passing a value where the API requires a pointer or " +
-				"vice versa in a way the compiler allows but the contract forbids.",
+			Name: "api-contract-misuse",
+			Core: "Hunt for misuse of an API's documented contract: calling a function " +
+				"with arguments it forbids; ignoring a documented precondition or " +
+				"required ordering (e.g. must initialize before use, must not reuse " +
+				"after close); and usage the compiler or runtime accepts but the " +
+				"documentation forbids. Read the callee's documentation or definition " +
+				"to confirm the contract before reporting.",
 		},
 		{
-			Name:  "injection/input-validation",
-			Yield: 40,
-			Specialization: "Hunt for injection and missing input validation: building a " +
-				"SQL query, shell command, file path, or HTML/template output by " +
-				"concatenating untrusted input instead of parameterizing/escaping it; " +
-				"path traversal from unsanitized user paths; unbounded reads/allocations " +
-				"sized by untrusted input; and trusting external input (headers, request " +
-				"bodies, env, CLI args) without validating it before use in a sensitive " +
-				"sink. Trace the input from its source to the sink to confirm it is " +
-				"actually untrusted and unvalidated.",
+			Name: "injection/input-validation",
+			Core: "Hunt for injection and missing input validation: building a query, " +
+				"command, file path, or markup/template output by concatenating " +
+				"untrusted input instead of parameterizing or escaping it; path " +
+				"traversal from unsanitized user paths; unbounded reads or allocations " +
+				"sized by untrusted input; and trusting external input (headers, " +
+				"request bodies, env, CLI args) without validating it before use in a " +
+				"sensitive sink. Trace the input from its source to the sink to confirm " +
+				"it is actually untrusted and unvalidated.",
 		},
 	}
 }
@@ -149,5 +159,58 @@ func selectLenses(override []string) []Lens {
 	if len(out) == 0 {
 		return all
 	}
+	return out
+}
+
+// unlistedLensYield is the yield assumed for a lens with no row in lensYields
+// at all (or a row missing its anyLanguage default). A mid-table value keeps
+// an unregistered lens running under mild budget pressure without letting it
+// displace the known high-yield lenses.
+const unlistedLensYield = 50
+
+// effectiveYield resolves the budget-degradation yield for the named lens on a
+// repo whose dominant languages are langs: the MAX over the per-language
+// columns in lensYields, with the anyLanguage column standing in for any
+// language that has no explicit column. Max (not mean) because a lens that is
+// high-yield for ANY substantial language in the repo is worth keeping — a
+// mixed Go/Python repo still has Go concurrency bugs. Empty langs (no
+// detectable dominant language) resolves to the anyLanguage column.
+func effectiveYield(name string, langs []ingest.Language) int {
+	cols, ok := lensYields[name]
+	if !ok {
+		return unlistedLensYield
+	}
+	def, ok := cols[anyLanguage]
+	if !ok {
+		def = unlistedLensYield
+	}
+	if len(langs) == 0 {
+		return def
+	}
+	best := 0
+	for _, lang := range langs {
+		y, ok := cols[lang]
+		if !ok {
+			y = def
+		}
+		if y > best {
+			best = y
+		}
+	}
+	return best
+}
+
+// lensesByYield returns lenses reordered by descending effective yield for
+// langs (see effectiveYield). The sort is stable, so equal-yield lenses keep
+// their relative builtin order — the per-run order is deterministic for a
+// given language mix. This order is both the launch order (so budget flows to
+// high-yield lenses first) and the degradation order (degradedLensNames keeps
+// its head).
+func lensesByYield(lenses []Lens, langs []ingest.Language) []Lens {
+	out := make([]Lens, len(lenses))
+	copy(out, lenses)
+	sort.SliceStable(out, func(i, j int) bool {
+		return effectiveYield(out[i].Name, langs) > effectiveYield(out[j].Name, langs)
+	})
 	return out
 }

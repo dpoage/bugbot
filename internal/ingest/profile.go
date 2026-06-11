@@ -24,6 +24,17 @@ var displayName = map[Language]string{
 	LangShell:      "Shell",
 }
 
+// DisplayName returns the human-readable rendering of l ("Go", "C++"), falling
+// back to the raw Language string for languages without a registered rendering
+// (e.g. LangOther). The funnel uses it to head per-language lens-manifestation
+// blocks in finder prompts.
+func DisplayName(l Language) string {
+	if n, ok := displayName[l]; ok {
+		return n
+	}
+	return string(l)
+}
+
 // maxProfileLanguages caps how many languages a persona names. Beyond a couple,
 // listing more dilutes the persona rather than sharpening it.
 const maxProfileLanguages = 3

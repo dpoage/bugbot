@@ -189,6 +189,10 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// rather than a hardcoded "senior Go engineer". Computed once per run and
 	// threaded into the per-unit prompt construction in hypothesize/verify.
 	persona := ingest.Persona(snap)
+	// The dominant-language mix also drives the per-run lens priority (effective
+	// yields are per-language; see lensYields) and therefore which lenses budget
+	// degradation sheds on this repo.
+	langs := ingest.DominantLanguages(snap)
 
 	// Fingerprints anchor every persisted finding to the exact file content it
 	// was found in, so the daemon can later detect when the code changed.
@@ -199,7 +203,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 
 	// Stage A — Hypothesize.
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageHypothesize})
-	candidates, err := f.hypothesize(ctx, scanRunID, finder, persona, kind, f.opts.ChangeContext, targets, budget, result)
+	candidates, err := f.hypothesize(ctx, scanRunID, finder, persona, kind, f.opts.ChangeContext, langs, targets, budget, result)
 	if err != nil {
 		return nil, err
 	}
