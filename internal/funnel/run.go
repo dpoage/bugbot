@@ -101,7 +101,11 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	finder := llm.WithRecorder(f.clients.Finder, rec, "finder", "", "")
 	verifier := llm.WithRecorder(f.clients.Verifier, rec, "verifier", "", "")
 
-	budget := newBudgetState(f.opts.TokenBudget, rec)
+	cacheWeight := f.opts.CacheReadBudgetWeight
+	if cacheWeight == 0 {
+		cacheWeight = DefaultCacheReadBudgetWeight
+	}
+	budget := newBudgetState(f.opts.TokenBudget, rec, cacheWeight)
 
 	result := &Result{ScanRunID: scanRunID, Commit: snap.Commit}
 

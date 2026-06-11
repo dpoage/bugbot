@@ -106,9 +106,10 @@ func newDaemonCmd() *cobra.Command {
 				Store:   st,
 				Clients: funnel.RoleClients{Finder: finder, Verifier: verifier},
 				FunnelOpts: funnel.Options{
-					Filter:      ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
-					TokenBudget: cfg.Budgets.PerCycleTokens,
-					SandboxOpts: sbOpts,
+					Filter:                ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
+					TokenBudget:           cfg.Budgets.PerCycleTokens,
+					CacheReadBudgetWeight: cfg.Budgets.CacheReadWeight,
+					SandboxOpts:           sbOpts,
 				},
 				Sinks:    sinks,
 				Logger:   logger,
@@ -137,12 +138,13 @@ func newDaemonCmd() *cobra.Command {
 			}
 
 			dcfg := daemon.DaemonConfig{
-				PollInterval:   cfg.Daemon.PollInterval,
-				SweepInterval:  cfg.Daemon.SweepInterval,
-				IdleBackoff:    cfg.Daemon.IdleBackoff,
-				PerCycleTokens: cfg.Budgets.PerCycleTokens,
-				PerDayTokens:   cfg.Budgets.PerDayTokens,
-				EnableRepro:    doRepro && sandboxOK && deps.Reproducer != nil,
+				PollInterval:    cfg.Daemon.PollInterval,
+				SweepInterval:   cfg.Daemon.SweepInterval,
+				IdleBackoff:     cfg.Daemon.IdleBackoff,
+				PerCycleTokens:  cfg.Budgets.PerCycleTokens,
+				PerDayTokens:    cfg.Budgets.PerDayTokens,
+				CacheReadWeight: cfg.Budgets.CacheReadWeight,
+				EnableRepro:     doRepro && sandboxOK && deps.Reproducer != nil,
 			}
 
 			d, err := daemon.New(deps, dcfg)

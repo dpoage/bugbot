@@ -49,6 +49,11 @@ const (
 	// candidate. Three gives a meaningful majority vote without tripling cost
 	// versus one.
 	DefaultRefuters = 3
+	// DefaultCacheReadBudgetWeight is the fraction at which cache-read input
+	// tokens count against the token budget when Options leaves it unset. ~0.1
+	// approximates Anthropic's cache-read discount; a conservative, cost-favoring
+	// default that undercounts slightly on milder-discount providers.
+	DefaultCacheReadBudgetWeight = 0.1
 	// DefaultMaxParallel bounds concurrently-running agents across the run.
 	DefaultMaxParallel = 4
 	// DefaultChunkSize is the number of target files handed to a single finder
@@ -133,6 +138,12 @@ type Options struct {
 	// TokenBudget bounds cumulative input+output tokens for the whole run. Zero
 	// means unlimited (the funnel never degrades or stops on budget).
 	TokenBudget int64
+	// CacheReadBudgetWeight discounts cache-read input tokens against
+	// TokenBudget (0..1). Cache reads bill at a fraction of full price, so
+	// counting them at full weight makes a cache-heavy run exhaust the budget
+	// long before its real cost warrants. Zero resolves to
+	// DefaultCacheReadBudgetWeight; set to 1.0 to restore raw-token accounting.
+	CacheReadBudgetWeight float64
 	// FinderLimits / VerifierLimits bound each individual agent run (iterations
 	// and per-run token budget). Zero-value fields resolve to agent defaults.
 	FinderLimits   agent.Limits
@@ -379,7 +390,8 @@ type spendRecorder struct {
 	scanRunID string
 
 	mu           sync.Mutex
-	totalTokens  int64
+	totalTokens  int64 // raw input+output, for honest ledger/status reporting
+	chargeable   int64 // cache-discounted, for budget gating (overSoft/overHard)
 	inTokens     int64
 	outTokens    int64
 	cacheRead    int64
@@ -398,11 +410,21 @@ type spendRecorder struct {
 	// processed), which is INCLUSIVE of cached tokens per the llm.Usage
 	// convention — cache reads are not subtracted (see funnel doc comment).
 	pool *agent.BudgetPool
+
+	// cacheReadWeight discounts cache reads when charging the budget pool, so
+	// run-spanning accounting matches the per-run overBudget check. 1.0 = no
+	// discount.
+	cacheReadWeight float64
 }
 
 func (r *spendRecorder) Record(ev llm.UsageEvent) {
+	w := r.cacheReadWeight
+	if w <= 0 {
+		w = 1.0
+	}
 	r.mu.Lock()
 	r.totalTokens += ev.Usage.InputTokens + ev.Usage.OutputTokens
+	r.chargeable += ev.Usage.ChargeableTokens(w)
 	r.inTokens += ev.Usage.InputTokens
 	r.outTokens += ev.Usage.OutputTokens
 	r.cacheRead += ev.Usage.CacheReadInputTokens
@@ -410,10 +432,11 @@ func (r *spendRecorder) Record(ev llm.UsageEvent) {
 	in, out, cached := r.inTokens, r.outTokens, r.cacheRead
 	cb := r.onRecord
 	r.mu.Unlock()
-	// Charge the shared budget pool with this completion's tokens, so concurrent
-	// in-flight runs observe the new run-spanning total at their next pre-turn
-	// check. Done outside the lock: the pool is independently concurrency-safe.
-	r.pool.Add(ev.Usage.InputTokens + ev.Usage.OutputTokens)
+	// Charge the shared budget pool with this completion's CHARGEABLE tokens
+	// (cache reads discounted), so concurrent in-flight runs observe the new
+	// run-spanning total at their next pre-turn check. Done outside the lock:
+	// the pool is independently concurrency-safe.
+	r.pool.Add(ev.Usage.ChargeableTokens(w))
 	if cb != nil {
 		cb(in, out, cached)
 	}
@@ -432,11 +455,14 @@ func (r *spendRecorder) Record(ev llm.UsageEvent) {
 	})
 }
 
-// total returns the cumulative tokens spent so far this run.
-func (r *spendRecorder) total() int64 {
+// chargeableTotal returns the cumulative cache-discounted tokens spent so far,
+// the basis for every budget decision (soft degrade, hard stop, pool). Keeping
+// this separate from total() means the store ledger and status pane stay
+// honest (raw) while gating reflects real cost.
+func (r *spendRecorder) chargeableTotal() int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.totalTokens
+	return r.chargeable
 }
 
 func (r *spendRecorder) totals() (in, out, cacheRead, cacheCreated int64) {
@@ -448,8 +474,9 @@ func (r *spendRecorder) totals() (in, out, cacheRead, cacheCreated int64) {
 // budgetState tracks degradation/stop decisions for one run. Methods are safe
 // for concurrent use.
 type budgetState struct {
-	budget int64 // 0 = unlimited
-	rec    *spendRecorder
+	budget          int64 // 0 = unlimited
+	rec             *spendRecorder
+	cacheReadWeight float64
 	// pool is the shared, run-spanning token pool that every in-flight runner
 	// consults pre-turn (via agent.Limits.BudgetCheck). It is the same pool the
 	// recorder charges. Nil when TokenBudget is unlimited.
@@ -462,13 +489,14 @@ type budgetState struct {
 // newBudgetState wires a budgetState and its shared pool to the recorder. A
 // non-positive budget is unlimited: the pool is nil and every pool method is a
 // no-op, so there is no per-turn check and no allowance clamping.
-func newBudgetState(budget int64, rec *spendRecorder) *budgetState {
+func newBudgetState(budget int64, rec *spendRecorder, cacheReadWeight float64) *budgetState {
 	var pool *agent.BudgetPool
 	if budget > 0 {
 		pool = agent.NewBudgetPool(budget)
 	}
 	rec.pool = pool
-	return &budgetState{budget: budget, rec: rec, pool: pool}
+	rec.cacheReadWeight = cacheReadWeight
+	return &budgetState{budget: budget, rec: rec, pool: pool, cacheReadWeight: cacheReadWeight}
 }
 
 // runnerLimits derives the per-run agent.Limits for a runner launched now,
@@ -484,6 +512,7 @@ func (b *budgetState) runnerLimits(base agent.Limits) agent.Limits {
 	}
 	out := base
 	out.BudgetCheck = b.pool.Check
+	out.CacheReadWeight = b.cacheReadWeight
 	// Clamp the per-run allowance to the remaining pool. A negative base budget
 	// means "unlimited per run"; we still cap it at the pool's remainder. Note
 	// this clamp only bounds a SOLO or late-launched runner: N runners launched
@@ -514,7 +543,7 @@ func (b *budgetState) overSoft() bool {
 	if b.budget <= 0 || b.rec == nil {
 		return false
 	}
-	return b.rec.total()*softBudgetDenom > b.budget*softBudgetNumer
+	return b.rec.chargeableTotal()*softBudgetDenom > b.budget*softBudgetNumer
 }
 
 // overHard reports whether cumulative spend has reached or exceeded the budget.
@@ -523,7 +552,7 @@ func (b *budgetState) overHard() bool {
 	if b.budget <= 0 || b.rec == nil {
 		return false
 	}
-	return b.rec.total() >= b.budget
+	return b.rec.chargeableTotal() >= b.budget
 }
 
 // sortFindings orders findings critical-first, then by file/line for stable

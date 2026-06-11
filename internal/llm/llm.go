@@ -141,6 +141,24 @@ type Usage struct {
 	CacheCreationInputTokens int64
 }
 
+// ChargeableTokens returns the budget-relevant token count for this usage,
+// discounting cache reads by cacheReadWeight (0..1). Raw InputTokens counts
+// cache reads at full weight, but they bill at a steep discount (~0.1x
+// Anthropic, 0.25–0.5x OpenAI), so a cache-heavy run exhausts a raw-token
+// budget far faster than its real cost warrants. cacheReadWeight of 1.0
+// reproduces the old behavior; the funnel default discounts to ~0.1.
+//
+// Cache CREATION tokens are left at full weight (Anthropic bills them at
+// 1.25x; treating them as cheap would understate cost).
+func (u Usage) ChargeableTokens(cacheReadWeight float64) int64 {
+	uncached := u.InputTokens - u.CacheReadInputTokens
+	if uncached < 0 {
+		uncached = 0
+	}
+	weighted := uncached + int64(float64(u.CacheReadInputTokens)*cacheReadWeight)
+	return weighted + u.OutputTokens
+}
+
 // Response is a normalized completion response.
 type Response struct {
 	// Text is the concatenated assistant text output (may be empty when the model

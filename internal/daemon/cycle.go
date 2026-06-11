@@ -205,14 +205,15 @@ func (d *Daemon) dayBudgetExhausted(ctx context.Context, res *cycleResult) bool 
 		d.log.Error("daemon: read day spend failed; proceeding", "err", err)
 		return false
 	}
-	if totals.Total() < d.cfg.PerDayTokens {
+	if totals.Chargeable(d.cfg.CacheReadWeight) < d.cfg.PerDayTokens {
 		return false
 	}
 	res.skipped = true
 	res.skipReason = "per-day token budget exhausted"
 	d.log.Warn("daemon: DAY BUDGET EXHAUSTED — skipping cycle (no LLM calls)",
 		"kind", string(res.kind),
-		"day_spend", totals.Total(),
+		"day_spend", totals.Chargeable(d.cfg.CacheReadWeight),
+		"day_spend_raw", totals.Total(),
 		"per_day_tokens", d.cfg.PerDayTokens,
 	)
 	return true

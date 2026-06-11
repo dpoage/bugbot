@@ -326,12 +326,18 @@ func (r *Runner) runTool(ctx context.Context, call llm.ToolCall) (result string,
 }
 
 // overBudget reports whether cumulative usage has exceeded the token budget. A
-// negative budget means unlimited.
+// negative budget means unlimited. Cache reads are discounted by
+// CacheReadWeight (defaulting to 1.0, i.e. no discount) so a cache-heavy run
+// is bounded by its real cost, not raw prompt size.
 func (r *Runner) overBudget(u llm.Usage) bool {
 	if r.limits.TokenBudget < 0 {
 		return false
 	}
-	return u.InputTokens+u.OutputTokens > r.limits.TokenBudget
+	w := r.limits.CacheReadWeight
+	if w <= 0 {
+		w = 1.0
+	}
+	return u.ChargeableTokens(w) > r.limits.TokenBudget
 }
 
 // finishTruncated marks the outcome as a clean partial result.

@@ -58,6 +58,13 @@ type Limits struct {
 	// across every completion in the run). Zero uses DefaultTokenBudget. A
 	// negative value disables the budget.
 	TokenBudget int64
+	// CacheReadWeight discounts cache-read input tokens in the per-run budget
+	// check. Valid range is (0,1]; the funnel always passes an already-resolved
+	// non-zero weight (config 0 -> DefaultCacheReadBudgetWeight upstream). A
+	// zero/negative value here is treated as 1.0 (raw, no discount) as a
+	// defensive fallback for direct callers — it is NOT a way to request "cache
+	// reads are free"; that would require an explicit positive epsilon.
+	CacheReadWeight float64
 	// BudgetCheck, when non-nil, is consulted by the Runner BEFORE each model
 	// call. It lets a shared budget pool (see BudgetPool) stop an in-flight run
 	// at the next turn boundary once a run-spanning ceiling is hit, independent

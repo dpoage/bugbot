@@ -145,6 +145,9 @@ type DaemonConfig struct {
 	// PerCycleTokens bounds a single cycle's funnel spend (passed as the funnel's
 	// TokenBudget). Zero means unlimited per cycle.
 	PerCycleTokens int64
+	// CacheReadWeight discounts cache-read tokens in the per-day budget check,
+	// matching the funnel's per-cycle weighting (0..1; <=0 means raw).
+	CacheReadWeight float64
 	// PerDayTokens caps total spend per UTC day. A cycle is skipped entirely once
 	// the day's recorded spend reaches this. Zero means unlimited per day.
 	PerDayTokens int64
