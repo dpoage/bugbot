@@ -165,6 +165,12 @@ type SandboxOpts struct {
 	MinSeverity string
 	// MaxExecs is the per-candidate execution budget. Zero defaults to 3.
 	MaxExecs int
+	// DepStrategy selects how external module dependencies are made available to
+	// a refuter's network-none probe (see sandbox.DepStrategy). Empty/"off"
+	// keeps the current behavior; "host"/"fetch" mount a module cache. Vendored
+	// repos are always detected. The one-time online prefetch for "fetch" runs
+	// once, lazily, the first time a sandbox tool is built.
+	DepStrategy sandbox.DepStrategy
 }
 
 // Options configures a single funnel run. The zero value is valid: every field
@@ -294,6 +300,13 @@ type Funnel struct {
 	navOnce sync.Once
 	nav     *agent.CodeNav
 	navErr  error
+
+	// deps is the resolved dependency strategy for the sandbox_exec tool,
+	// computed in New from SandboxOpts. depPrefetchOnce ensures the one-time
+	// online prefetch (DepStrategyFetch) runs at most once across all candidates.
+	deps            sandbox.Resolution
+	depPrefetchOnce sync.Once
+	depPrefetchErr  error
 }
 
 // New constructs a Funnel. clients supplies the finder/verifier LLM clients,
@@ -314,12 +327,29 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 		return nil, fmt.Errorf("funnel: nil repo")
 	}
 	resolved := opts.resolve()
+
+	// Resolve the dependency strategy for the sandbox_exec tool up front so
+	// every refuter probe carries the same module-cache mount/env. Only relevant
+	// when the sandbox feature is enabled; vendored/off repos resolve to empty.
+	var deps sandbox.Resolution
+	if resolved.SandboxOpts.Enabled && resolved.SandboxOpts.Sandbox != nil {
+		d, err := sandbox.ResolveDeps(repo.Root(), sandbox.DepOptions{
+			Strategy:     resolved.SandboxOpts.DepStrategy,
+			FetchSandbox: resolved.SandboxOpts.Sandbox,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("funnel: resolve dependency strategy: %w", err)
+		}
+		deps = d
+	}
+
 	return &Funnel{
 		clients: clients,
 		store:   st,
 		repo:    repo,
 		opts:    resolved,
 		lenses:  selectLenses(resolved.Lenses),
+		deps:    deps,
 	}, nil
 }
 

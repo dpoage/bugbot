@@ -68,6 +68,131 @@ func TestBuildRunArgsOmitsZeroLimits(t *testing.T) {
 	}
 }
 
+func TestBuildRunArgsRendersReadOnlyMounts(t *testing.T) {
+	args := buildRunArgs(runParams{
+		containerName: "bugbot-ro",
+		workspace:     "/tmp/ws",
+		image:         "img",
+		network:       "none",
+		cmd:           []string{"true"},
+		roMounts: []ROMount{
+			// Shared=false (default): bugbot-owned dir gets :ro,Z for SELinux isolation.
+			{HostPath: "/host/modcache", ContainerPath: "/modcache"},
+			{HostPath: "/host/other", ContainerPath: "/other"},
+		},
+	})
+
+	// Non-shared RO mounts are rendered :ro,Z and never rw.
+	mustContainSeq(t, args, "-v", "/host/modcache:/modcache:ro,Z")
+	mustContainSeq(t, args, "-v", "/host/other:/other:ro,Z")
+
+	// The workspace must still be the only rw mount.
+	mustContainSeq(t, args, "-v", "/tmp/ws:/workspace:rw,Z")
+	for i, a := range args {
+		if a == "-v" && i+1 < len(args) {
+			val := args[i+1]
+			if strings.Contains(val, "modcache") && strings.Contains(val, "rw,") {
+				t.Errorf("modcache mount must be read-only, got %q", val)
+			}
+		}
+	}
+
+	// Ordering: RO mounts render immediately after the workspace mount.
+	wsIdx := slices.Index(args, "/tmp/ws:/workspace:rw,Z")
+	roIdx := slices.Index(args, "/host/modcache:/modcache:ro,Z")
+	if wsIdx < 0 || roIdx < 0 || roIdx < wsIdx {
+		t.Errorf("RO mount must follow workspace mount; ws=%d ro=%d args=%q", wsIdx, roIdx, args)
+	}
+	// And RO mounts must come before the image/command.
+	imgIdx := slices.Index(args, "img")
+	if imgIdx < 0 || roIdx > imgIdx {
+		t.Errorf("RO mount must precede image; ro=%d img=%d", roIdx, imgIdx)
+	}
+}
+
+func TestBuildRunArgsSharedMountNoRelabel(t *testing.T) {
+	// Shared=true (host Go module cache): must render :ro with NO :Z suffix.
+	// :Z on a shared host dir relabels it to a container-private MCS label,
+	// which is slow on large caches and can break the host go toolchain.
+	args := buildRunArgs(runParams{
+		containerName: "bugbot-shared",
+		workspace:     "/tmp/ws",
+		image:         "img",
+		network:       "none",
+		cmd:           []string{"true"},
+		roMounts: []ROMount{
+			{HostPath: "/home/user/go/pkg/mod", ContainerPath: "/modcache", Shared: true},
+		},
+	})
+
+	// Shared mount must render :ro with NO ,Z suffix.
+	mustContainSeq(t, args, "-v", "/home/user/go/pkg/mod:/modcache:ro")
+
+	// Verify :Z is absent from the shared mount entry.
+	for i, a := range args {
+		if a == "-v" && i+1 < len(args) {
+			val := args[i+1]
+			if strings.Contains(val, "/modcache") && strings.Contains(val, ",Z") {
+				t.Errorf("shared mount must not have ,Z relabel suffix, got %q", val)
+			}
+		}
+	}
+}
+
+func TestBuildRunArgsNonSharedMountRelabel(t *testing.T) {
+	// Shared=false (default, bugbot-owned dir): must render :ro,Z.
+	args := buildRunArgs(runParams{
+		containerName: "bugbot-owned",
+		workspace:     "/tmp/ws",
+		image:         "img",
+		network:       "none",
+		cmd:           []string{"true"},
+		roMounts: []ROMount{
+			{HostPath: "/home/user/.cache/bugbot/modcache/abc123", ContainerPath: "/modcache", Shared: false},
+		},
+	})
+	mustContainSeq(t, args, "-v", "/home/user/.cache/bugbot/modcache/abc123:/modcache:ro,Z")
+}
+
+func TestBuildRunArgsRendersWritableMounts(t *testing.T) {
+	args := buildRunArgs(runParams{
+		containerName: "bugbot-rw",
+		workspace:     "/tmp/ws",
+		image:         "img",
+		network:       "bridge",
+		cmd:           []string{"go", "mod", "download"},
+		rwMounts:      []ROMount{{HostPath: "/host/cache", ContainerPath: "/modcache"}},
+	})
+	mustContainSeq(t, args, "-v", "/host/cache:/modcache:rw,Z")
+	mustContainSeq(t, args, "--network=bridge")
+}
+
+func TestValidateMounts(t *testing.T) {
+	tests := []struct {
+		name    string
+		ro, rw  []ROMount
+		wantErr bool
+	}{
+		{"empty", nil, nil, false},
+		{"valid ro", []ROMount{{HostPath: "/h", ContainerPath: "/c"}}, nil, false},
+		{"valid rw", nil, []ROMount{{HostPath: "/h", ContainerPath: "/c"}}, false},
+		{"empty host", []ROMount{{HostPath: "", ContainerPath: "/c"}}, nil, true},
+		{"empty ctr", []ROMount{{HostPath: "/h", ContainerPath: ""}}, nil, true},
+		{"relative host", []ROMount{{HostPath: "rel", ContainerPath: "/c"}}, nil, true},
+		{"relative ctr", []ROMount{{HostPath: "/h", ContainerPath: "rel"}}, nil, true},
+		{"dup within ro", []ROMount{{HostPath: "/a", ContainerPath: "/c"}, {HostPath: "/b", ContainerPath: "/c"}}, nil, true},
+		{"dup across ro/rw", []ROMount{{HostPath: "/a", ContainerPath: "/c"}}, []ROMount{{HostPath: "/b", ContainerPath: "/c"}}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateMounts(tc.ro, tc.rw)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateMounts(%v,%v) err=%v wantErr=%v", tc.ro, tc.rw, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestRemoveArgs(t *testing.T) {
 	if got := removeArgs("bugbot-x"); !slices.Equal(got, []string{"rm", "-f", "bugbot-x"}) {
 		t.Errorf("removeArgs = %q", got)

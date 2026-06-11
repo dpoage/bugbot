@@ -476,3 +476,36 @@ func TestEnvOverride_FinderReadCaps(t *testing.T) {
 		t.Errorf("FinderReadBytes = %d, want 65536", cfg.Budgets.FinderReadBytes)
 	}
 }
+
+func TestDefault_DepStrategyIsOff(t *testing.T) {
+	if got := Default().Sandbox.DepStrategy; got != "off" {
+		t.Errorf("default sandbox.dep_strategy = %q, want off", got)
+	}
+}
+
+func TestEnvOverride_DepStrategy(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_SANDBOX_DEP_STRATEGY=host"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sandbox.DepStrategy != "host" {
+		t.Errorf("dep_strategy override = %q, want host", cfg.Sandbox.DepStrategy)
+	}
+}
+
+func TestValidate_DepStrategyEnum(t *testing.T) {
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+	for _, ok := range []string{"", "off", "host", "fetch"} {
+		cfg.Sandbox.DepStrategy = ok
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("dep_strategy=%q should be valid, got %v", ok, err)
+		}
+	}
+	cfg.Sandbox.DepStrategy = "bogus"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "dep_strategy") {
+		t.Errorf("dep_strategy=bogus should be rejected with dep_strategy in message, got %v", err)
+	}
+}

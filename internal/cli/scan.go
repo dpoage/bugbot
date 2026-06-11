@@ -218,6 +218,7 @@ func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool
 		Enabled:     true,
 		MinSeverity: cfg.Verify.SandboxMinSeverity,
 		MaxExecs:    cfg.Verify.SandboxMaxExecs,
+		DepStrategy: sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 	}, false, nil
 }
 
@@ -262,6 +263,7 @@ func runRepro(ctx context.Context, out io.Writer, cfg *config.Config, st *store.
 		PatchProver:      cfg.Repro.PatchProver,
 		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
 		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
+		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 	})
 	if err != nil {
 		return fmt.Errorf("build reproducer: %w", err)

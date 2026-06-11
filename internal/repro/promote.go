@@ -57,6 +57,18 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 		return nil, fmt.Errorf("repro: nil store")
 	}
 
+	// One-time online dependency prefetch (DepStrategyFetch only). Runs once per
+	// PromoteAll before any network-none run; the hook is itself sync.Once-guarded
+	// so repeated calls across a Reproducer's lifetime do not re-download. A
+	// prefetch failure aborts the run: the network-none attempts that follow
+	// would all fail to resolve modules, so failing fast with a clear error is
+	// better than a wave of confusing per-finding module errors.
+	if r.deps.Prefetch != nil {
+		if err := r.deps.Prefetch(ctx); err != nil {
+			return nil, fmt.Errorf("repro: dependency prefetch: %w", err)
+		}
+	}
+
 	summary := &Summary{
 		Attempted:  len(findings),
 		PerFinding: make([]FindingOutcome, len(findings)),
@@ -175,6 +187,8 @@ func (r *Reproducer) provePatch(ctx context.Context, st *store.Store, f store.Fi
 		artifactDir: r.opts.ArtifactDir,
 		agentLimits: r.opts.AgentLimits,
 		suiteCmd:    r.opts.PatchSuiteCmd,
+		depMounts:   r.deps.ROMounts,
+		depEnv:      r.deps.Env,
 	}
 	return prover.Prove(ctx, st, f, att)
 }

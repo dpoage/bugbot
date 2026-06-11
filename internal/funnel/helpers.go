@@ -1,6 +1,7 @@
 package funnel
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -132,7 +133,22 @@ func (f *Funnel) buildSandboxTool(c Candidate, sbExecs *atomic.Int32, sbMillis *
 		sbExecs.Add(1)
 		sbMillis.Add(d.Milliseconds())
 	}
-	return agent.NewSandboxExecTool(opts.Sandbox, f.repo.Root(), maxExec, onExec)
+	return agent.NewSandboxExecTool(opts.Sandbox, f.repo.Root(), maxExec, f.deps.ROMounts, f.deps.Env, onExec)
+}
+
+// ensureDepPrefetch runs the one-time online dependency prefetch (only set for
+// DepStrategyFetch) at most once across all candidates. It is safe for
+// concurrent callers. A prefetch failure is recorded and returned on every
+// subsequent call so callers can degrade (skip the sandbox tool) rather than
+// hand a refuter a cache that cannot resolve modules.
+func (f *Funnel) ensureDepPrefetch(ctx context.Context) error {
+	if f.deps.Prefetch == nil {
+		return nil
+	}
+	f.depPrefetchOnce.Do(func() {
+		f.depPrefetchErr = f.deps.Prefetch(ctx)
+	})
+	return f.depPrefetchErr
 }
 
 // normalizeConfidence coerces a model-supplied confidence to one of the three

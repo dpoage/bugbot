@@ -100,6 +100,16 @@ type Sandbox struct {
 	MemoryMB       int    `yaml:"memory_mb"`
 	TimeoutSeconds int    `yaml:"timeout_seconds"`
 	Network        string `yaml:"network"`
+	// DepStrategy selects how external module dependencies are made available to
+	// the network-none sandbox for Go repos that are not vendored. Vendored repos
+	// (vendor/modules.txt) are always detected and need no strategy. Values:
+	//   off   (default) no dependency mounts; only vendored repos build offline.
+	//   host  mount the host Go module cache read-only (exposes public module
+	//         source — never put secrets in the module cache).
+	//   fetch run one online `go mod download` in a hardened container to warm a
+	//         bugbot-managed cache, then mount it read-only; everything after is
+	//         network-none.
+	DepStrategy string `yaml:"dep_strategy"`
 }
 
 // Report configures where findings are written and which sinks receive them.
@@ -254,6 +264,7 @@ func Default() Config {
 			MemoryMB:       2048,
 			TimeoutSeconds: 600,
 			Network:        "none",
+			DepStrategy:    "off",
 		},
 		Verify: Verify{
 			SandboxExec:        false,
@@ -328,6 +339,7 @@ func Load(path string) (Config, error) {
 //	BUGBOT_SANDBOX_RUNTIME
 //	BUGBOT_SANDBOX_IMAGE
 //	BUGBOT_SANDBOX_NETWORK
+//	BUGBOT_SANDBOX_DEP_STRATEGY      (off|host|fetch)
 //	BUGBOT_SANDBOX_CPUS
 //	BUGBOT_SANDBOX_MEMORY_MB
 //	BUGBOT_SANDBOX_TIMEOUT_SECONDS
@@ -421,6 +433,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	setStr("BUGBOT_SANDBOX_RUNTIME", &cfg.Sandbox.Runtime)
 	setStr("BUGBOT_SANDBOX_IMAGE", &cfg.Sandbox.Image)
 	setStr("BUGBOT_SANDBOX_NETWORK", &cfg.Sandbox.Network)
+	setStr("BUGBOT_SANDBOX_DEP_STRATEGY", &cfg.Sandbox.DepStrategy)
 	setStr("BUGBOT_REVIEW_FAIL_ON", &cfg.Review.FailOn)
 	if v, ok := env["BUGBOT_REPRO_SUITE_CMD"]; ok {
 		var cmd []string
@@ -536,6 +549,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Sandbox.TimeoutSeconds <= 0 {
 		return fmt.Errorf("config: sandbox.timeout_seconds must be > 0")
+	}
+	switch c.Sandbox.DepStrategy {
+	case "", "off", "host", "fetch":
+	default:
+		return fmt.Errorf("config: sandbox.dep_strategy %q invalid (want off, host, or fetch)", c.Sandbox.DepStrategy)
 	}
 
 	if c.Storage.Path == "" {

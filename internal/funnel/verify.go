@@ -111,8 +111,13 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 
 			// Build the candidate-specific tool set: the shared read-only tools
 			// plus, when gated in, a sandbox_exec tool scoped to this candidate.
+			// Run the one-time online dependency prefetch (DepStrategyFetch) before
+			// the first sandbox tool; if it fails, skip the sandbox tool for this
+			// candidate (and all others) rather than handing it an unusable cache.
 			candTools := tools
-			if sbTool := f.buildSandboxTool(c, &sbExecs, &sbMillis); sbTool != nil {
+			if prefErr := f.ensureDepPrefetch(ctx); prefErr != nil {
+				f.note(result, fmt.Sprintf("sandbox dependency prefetch failed: %v — sandbox_exec disabled", prefErr))
+			} else if sbTool := f.buildSandboxTool(c, &sbExecs, &sbMillis); sbTool != nil {
 				candTools = append(candTools, sbTool)
 			}
 
