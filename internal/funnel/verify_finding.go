@@ -52,7 +52,9 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd store.Finding) (refuted 
 	// Re-verification has no snapshot to derive a repo-wide persona from, so the
 	// persona is keyed off the finding's own file language — the relevant signal
 	// for a single-finding refute (matches the repro stage's per-finding choice).
-	persona := ingest.PersonaLanguages([]ingest.Language{ingest.DetectLanguage(fnd.File)})
+	// No qualifiers here: re-verification operates on a single stored finding
+	// without a repo root, so dialect detection (e.g. C++ standard) is skipped.
+	persona := ingest.PersonaLanguages([]ingest.Language{ingest.DetectLanguage(fnd.File)}, nil)
 
 	verdicts, _, _, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, persona, c, n, &budgetState{})
 	if err != nil {
