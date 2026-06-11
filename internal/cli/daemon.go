@@ -138,13 +138,15 @@ func newDaemonCmd() *cobra.Command {
 			}
 
 			dcfg := daemon.DaemonConfig{
-				PollInterval:    cfg.Daemon.PollInterval,
-				SweepInterval:   cfg.Daemon.SweepInterval,
-				IdleBackoff:     cfg.Daemon.IdleBackoff,
-				PerCycleTokens:  cfg.Budgets.PerCycleTokens,
-				PerDayTokens:    cfg.Budgets.PerDayTokens,
-				CacheReadWeight: cfg.Budgets.CacheReadWeight,
-				EnableRepro:     doRepro && sandboxOK && deps.Reproducer != nil,
+				PollInterval:         cfg.Daemon.PollInterval,
+				SweepInterval:        cfg.Daemon.SweepInterval,
+				IdleBackoff:          cfg.Daemon.IdleBackoff,
+				ReproBacklogInterval: cfg.Daemon.ReproBacklogInterval,
+				ReproBacklogBatch:    cfg.Repro.BacklogBatch,
+				PerCycleTokens:       cfg.Budgets.PerCycleTokens,
+				PerDayTokens:         cfg.Budgets.PerDayTokens,
+				CacheReadWeight:      cfg.Budgets.CacheReadWeight,
+				EnableRepro:          doRepro && sandboxOK && deps.Reproducer != nil,
 			}
 
 			d, err := daemon.New(deps, dcfg)
