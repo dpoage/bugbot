@@ -177,6 +177,9 @@ type SandboxOpts struct {
 // funnel run. It is optional: nil on sweep runs and targeted runs without a
 // specific commit window. When non-nil, the diff-intent lens uses it to look
 // for gaps between the commit's stated intent and its implementation.
+//
+// ChangeContext is only meaningful on ScanTargeted runs; it is ignored on
+// ScanOneshot (Sweep) and ScanSweep runs even if set.
 type ChangeContext struct {
 	// FromCommit and ToCommit are the inclusive range of the change (e.g. the
 	// parent and the new HEAD). Both must be non-empty for the lens to fire.
@@ -184,6 +187,7 @@ type ChangeContext struct {
 	// ToCommit is the tip commit of the change window.
 	ToCommit string
 	// Message is the full commit message of ToCommit (from CommitMessage).
+	// Truncated at 4KB in the task prompt.
 	Message string
 	// Diff is the raw unified diff between FromCommit and ToCommit
 	// (from UnifiedDiff). May be nil if no diff is available.
@@ -191,10 +195,9 @@ type ChangeContext struct {
 	// ChangedFiles is the list of repo-relative paths modified by the change
 	// (from ChangedFiles + ChangedPaths). Used in the task for context.
 	ChangedFiles []string
-	// BlastFiles is the blast-radius file list (from BlastRadius): the changed
-	// files plus their direct dependents. These are the callers whose
-	// assumptions the change may have broken.
-	BlastFiles []string
+	// BlastFiles is intentionally absent: the blast-radius dependent list is
+	// derived inside hypothesize from the targets already expanded by Targeted
+	// (run.go calls BlastRadius before hypothesize). Callers must not set it.
 }
 
 // Options configures a single funnel run. The zero value is valid: every field
@@ -268,6 +271,9 @@ type Options struct {
 	// hunts for gaps between the commit's stated intent and its implementation
 	// and for existing callers whose assumptions the change breaks. Nil on
 	// sweep runs and targeted runs without a specific commit window.
+	//
+	// ChangeContext is only honoured on ScanTargeted runs. It is silently
+	// ignored on ScanOneshot (Sweep) and ScanSweep runs even if set.
 	ChangeContext *ChangeContext
 }
 
@@ -405,8 +411,12 @@ func (f *Funnel) codeNav() (*agent.CodeNav, error) {
 }
 
 // Close shuts down any language servers the code-navigation tools spawned.
-// Safe to call multiple times and on a funnel that never ran.
+// Safe to call multiple times, on a funnel that never ran, and on a nil receiver
+// (so deferred Close calls on a partially-initialised funnel never panic).
 func (f *Funnel) Close() error {
+	if f == nil {
+		return nil
+	}
 	// Synchronize with codeNav() so a Close racing the lazy init still sees
 	// the bundle.
 	f.navOnce.Do(func() {})

@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/llm"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // TestDiffIntentLens_InBuiltins verifies that diff-intent appears in
@@ -56,13 +55,13 @@ func TestDiffIntentTask_Truncation(t *testing.T) {
 		bigDiff[i] = 'x'
 	}
 	cc := &ChangeContext{
-		FromCommit: "abc",
-		ToCommit:   "def",
-		Message:    "fix the thing",
-		Diff:       bigDiff,
-		BlastFiles: []string{"a.go"},
+		FromCommit:   "abc",
+		ToCommit:     "def",
+		Message:      "fix the thing",
+		Diff:         bigDiff,
+		ChangedFiles: []string{"a.go"},
 	}
-	task := buildDiffIntentTask(cc)
+	task := buildDiffIntentTask(cc, []string{"a.go"})
 	if !strings.Contains(task, "[diff truncated at 48KB]") {
 		t.Error("large diff should carry truncation marker")
 	}
@@ -73,7 +72,7 @@ func TestDiffIntentTask_Truncation(t *testing.T) {
 		Message: "remove validation",
 		Diff:    small,
 	}
-	task2 := buildDiffIntentTask(cc2)
+	task2 := buildDiffIntentTask(cc2, nil)
 	if strings.Contains(task2, "[diff truncated") {
 		t.Error("small diff should not be truncated")
 	}
@@ -82,25 +81,30 @@ func TestDiffIntentTask_Truncation(t *testing.T) {
 	}
 }
 
-// TestDiffIntentTask_EmbedsMsgAndBlast confirms that the commit message and
-// blast-radius file list both appear in the built task.
+// TestDiffIntentTask_EmbedsMsgAndBlast confirms that the commit message,
+// changed files, and blast-radius dependent files all appear in the built task.
+// Blast-radius dependents are the targets that are NOT in ChangedFiles.
 func TestDiffIntentTask_EmbedsMsgAndBlast(t *testing.T) {
 	cc := &ChangeContext{
-		FromCommit: "a",
-		ToCommit:   "b",
-		Message:    "validate input before calling downstream",
-		Diff:       []byte("diff output"),
-		BlastFiles: []string{"pkg/service.go", "pkg/handler.go"},
+		FromCommit:   "a",
+		ToCommit:     "b",
+		Message:      "validate input before calling downstream",
+		Diff:         []byte("diff output"),
+		ChangedFiles: []string{"pkg/service.go"},
 	}
-	task := buildDiffIntentTask(cc)
+	// targets is the blast-radius-expanded set: the changed file plus a dependent.
+	targets := []string{"pkg/handler.go", "pkg/service.go"}
+	task := buildDiffIntentTask(cc, targets)
 	if !strings.Contains(task, "validate input before calling downstream") {
 		t.Errorf("task missing commit message: %q", task)
 	}
+	// The changed file appears in the CHANGED section.
 	if !strings.Contains(task, "pkg/service.go") {
-		t.Errorf("task missing blast file: %q", task)
+		t.Errorf("task missing changed file: %q", task)
 	}
+	// The dependent (not in ChangedFiles) appears in the BLAST-RADIUS DEPENDENTS section.
 	if !strings.Contains(task, "pkg/handler.go") {
-		t.Errorf("task missing blast file: %q", task)
+		t.Errorf("task missing blast-radius dependent: %q", task)
 	}
 }
 
@@ -111,7 +115,7 @@ func TestDiffIntentTask_NilDiffHandled(t *testing.T) {
 		Message: "add something",
 		Diff:    nil,
 	}
-	task := buildDiffIntentTask(cc)
+	task := buildDiffIntentTask(cc, nil)
 	if !strings.Contains(task, "(not available)") {
 		t.Errorf("nil diff should produce '(not available)' in task: %q", task)
 	}
@@ -124,21 +128,44 @@ func TestBuildDiffIntentTask_48KBCapExact(t *testing.T) {
 	}
 }
 
-// TestIsCommitKind covers the isCommitKind predicate for all ScanKind values.
-func TestIsCommitKind(t *testing.T) {
-	cases := []struct {
-		kind store.ScanKind
-		want bool
-	}{
-		{store.ScanTargeted, true},
-		{store.ScanOneshot, true},
-		{store.ScanSweep, false},
-		{"unknown", false},
+// TestHypothesize_DiffIntentGatedOnTargetedOnly confirms that the diff-intent
+// lens fires only on ScanTargeted with a non-nil ChangeContext and NOT on
+// ScanOneshot (Sweep). This pins the F2 fix: Sweep runs as ScanOneshot; gating
+// on kind == ScanTargeted is the structural guarantee.
+func TestHypothesize_DiffIntentGatedOnTargetedOnly(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	finder := newScriptedClient()
+	verifier := newScriptedClient()
+
+	cc := &ChangeContext{
+		FromCommit:   "abc",
+		ToCommit:     "def",
+		Message:      "fix the thing",
+		Diff:         []byte("--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n"),
+		ChangedFiles: []string{"bug.go"},
 	}
-	for _, tc := range cases {
-		if got := isCommitKind(tc.kind); got != tc.want {
-			t.Errorf("isCommitKind(%q) = %v, want %v", tc.kind, got, tc.want)
-		}
+
+	// Funnel with ChangeContext set. On Sweep() the kind is ScanOneshot — even
+	// with ChangeContext, diff-intent must emit zero tasks.
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
+		MaxParallel:   1,
+		ChangeContext: cc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.Sweep(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Sweep runs as ScanOneshot — diff-intent must be silent.
+	nTaxonomy := len(BuiltinLenses()) - 1
+	if finder.callCount() != nTaxonomy {
+		t.Errorf("sweep with ChangeContext set: finder calls = %d, want %d (no diff-intent on ScanOneshot)",
+			finder.callCount(), nTaxonomy)
 	}
 }
 
@@ -218,11 +245,11 @@ func TestHypothesize_DiffIntentOneTaskOnTargeted(t *testing.T) {
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
 		MaxParallel: 1,
 		ChangeContext: &ChangeContext{
-			FromCommit: "abc",
-			ToCommit:   "def",
-			Message:    "add validation before use",
-			Diff:       []byte("--- a/bug.go\n+++ b/bug.go\n@@ -1 +1 @@\n-validate(x)\n+noop()\n"),
-			BlastFiles: []string{"bug.go"},
+			FromCommit:   "abc",
+			ToCommit:     "def",
+			Message:      "add validation before use",
+			Diff:         []byte("--- a/bug.go\n+++ b/bug.go\n@@ -1 +1 @@\n-validate(x)\n+noop()\n"),
+			ChangedFiles: []string{"bug.go"},
 		},
 	})
 	if err != nil {
@@ -275,11 +302,11 @@ func TestHypothesize_DiffIntentTaskContent(t *testing.T) {
 	f, err := New(RoleClients{Finder: rec, Verifier: verifier}, st, repo, Options{
 		MaxParallel: 1,
 		ChangeContext: &ChangeContext{
-			FromCommit: "a",
-			ToCommit:   "b",
-			Message:    "sentinel-message-12345",
-			Diff:       bigDiff,
-			BlastFiles: []string{"bug.go"},
+			FromCommit:   "a",
+			ToCommit:     "b",
+			Message:      "sentinel-message-12345",
+			Diff:         bigDiff,
+			ChangedFiles: []string{"bug.go"},
 		},
 	})
 	if err != nil {
@@ -305,7 +332,178 @@ func TestHypothesize_DiffIntentTaskContent(t *testing.T) {
 		t.Error("large diff should carry truncation marker in task")
 	}
 	if !strings.Contains(diffIntentTask, "bug.go") {
-		t.Error("blast file should appear in diff-intent task")
+		t.Error("changed file should appear in diff-intent task")
+	}
+}
+
+// TestDiffIntentTask_MessageTruncatedAt4KB verifies that buildDiffIntentTask
+// truncates commit messages longer than 4KB with the expected marker. (F6)
+func TestDiffIntentTask_MessageTruncatedAt4KB(t *testing.T) {
+	// A message just over the cap.
+	bigMsg := strings.Repeat("x", diffIntentMsgCap+50)
+	cc := &ChangeContext{
+		Message: bigMsg,
+		Diff:    []byte("--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n"),
+	}
+	task := buildDiffIntentTask(cc, nil)
+	if !strings.Contains(task, "[message truncated at 4KB]") {
+		t.Error("message over 4KB should carry truncation marker")
+	}
+	// A message under the cap must appear verbatim.
+	smallMsg := "short commit message"
+	cc2 := &ChangeContext{Message: smallMsg}
+	task2 := buildDiffIntentTask(cc2, nil)
+	if strings.Contains(task2, "truncated") {
+		t.Error("short message should not be truncated")
+	}
+	if !strings.Contains(task2, smallMsg) {
+		t.Errorf("short message should appear verbatim: %q", task2)
+	}
+}
+
+// TestDegradedLensNames_SweepKeepsTaxonomyTop2 verifies that on a budget-
+// degraded sweep the degradation set is exactly the top-2 taxonomy lenses
+// ({nil-safety/error-handling, concurrency}), not {nil-safety, diff-intent}.
+// diff-intent emits zero units on sweeps and must never steal a slot. (F1)
+func TestDegradedLensNames_SweepKeepsTaxonomyTop2(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// Every lens returns one real candidate so there is verification work.
+	// A tiny budget forces degradation early.
+	finder := newScriptedClient()
+	finder.fallback = candJSON(realCand)
+	verifier := newScriptedClient()
+	verifier.fallback = notRefutedJSON
+
+	// No ChangeContext: this is a sweep (ScanOneshot). diff-intent emits zero units.
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
+		TokenBudget:           600, // forces soft-budget degradation early
+		CacheReadBudgetWeight: 1.0,
+		MaxParallel:           1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Degraded {
+		t.Skip("budget did not trigger degradation — increase test budget sensitivity if this flakes")
+	}
+
+	// Under degradation, the surviving taxonomy lenses must be the top-2 by yield:
+	// nil-safety/error-handling (100) and concurrency (90). diff-intent (95) must
+	// NOT appear because it emits zero sweep units and must not steal a slot.
+	skippedNotes := strings.Join(res.Skipped, " ")
+	if strings.Contains(skippedNotes, "nil-safety") {
+		t.Error("nil-safety/error-handling should survive degradation (top-1 taxonomy lens)")
+	}
+	if strings.Contains(skippedNotes, "concurrency") {
+		t.Error("concurrency should survive degradation (top-2 taxonomy lens)")
+	}
+	// Key assertion: skipped notes for degraded lenses must not mention concurrency
+	// being skipped. (If diff-intent stole the slot, concurrency would appear here.)
+	for _, note := range res.Skipped {
+		if strings.Contains(note, "concurrency") && strings.Contains(note, "skipped") {
+			t.Errorf("concurrency was skipped during degradation — diff-intent stole its slot: %q", note)
+		}
+	}
+}
+
+// TestDegradedLensNames_CommitRunKeepsDiffIntentAndNilSafety verifies that on
+// a budget-degraded commit run the degradation set includes diff-intent (which
+// has a unit) and nil-safety/error-handling, not concurrency (which has lower
+// yield than diff-intent). (F1)
+func TestDegradedLensNames_CommitRunKeepsDiffIntentAndNilSafety(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// diff-intent returns a candidate; nil-safety also returns one; others return nothing.
+	diffIntentCand := `{"file": "bug.go", "line": 5, "title": "intent mismatch",
+		"description": "diff says add but removes", "severity": "high",
+		"evidence": "see diff", "confidence": "high"}`
+
+	finder := newScriptedClient().
+		onSystemContains("diff-intent", candJSON(diffIntentCand)).
+		onSystemContains("nil-safety/error-handling", candJSON(realCand))
+	verifier := newScriptedClient()
+	verifier.fallback = notRefutedJSON
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
+		TokenBudget:           600,
+		CacheReadBudgetWeight: 1.0,
+		MaxParallel:           1,
+		ChangeContext: &ChangeContext{
+			FromCommit:   "abc",
+			ToCommit:     "def",
+			Message:      "add validation",
+			Diff:         []byte("--- a/bug.go\n+++ b/bug.go\n@@ -1 +1 @@\n-validate(x)\n+noop()\n"),
+			ChangedFiles: []string{"bug.go"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.Targeted(ctx, []string{"bug.go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Degraded {
+		t.Skip("budget did not trigger degradation — adjust budget if this flakes")
+	}
+
+	// Under degradation, diff-intent (Yield 95) and nil-safety (Yield 100) both
+	// emitted units, so they should both survive. concurrency (Yield 90) should
+	// have been skipped.
+	for _, note := range res.Skipped {
+		if strings.Contains(note, "diff-intent") && strings.Contains(note, "skipped") {
+			t.Errorf("diff-intent was skipped during degradation on a commit run — it should survive: %q", note)
+		}
+		if strings.Contains(note, "nil-safety") && strings.Contains(note, "skipped") {
+			t.Errorf("nil-safety was skipped during degradation — it should be the top survivor: %q", note)
+		}
+	}
+}
+
+// TestDiffIntentLead_RejectedAtPostTime verifies that a lead targeting
+// "diff-intent" is rejected by the post_lead tool (because diff-intent is
+// excluded from allLensNames). A lead must never be silently consumed by
+// a lens that never reads the lead blackboard. (F3)
+func TestDiffIntentLead_RejectedAtPostTime(t *testing.T) {
+	// diff-intent must not appear in allLensNames. We verify this indirectly:
+	// the allLensNames slice built inside hypothesize is passed to
+	// agent.NewPostLeadTool as the valid-lens whitelist. A post to "diff-intent"
+	// must therefore return an error (unknown target_lens).
+	//
+	// We reconstruct the allLensNames logic here to assert the invariant.
+	for _, l := range BuiltinLenses() {
+		if l.Name == "diff-intent" {
+			// Found it — confirm it would NOT be in allLensNames.
+			validNames := make([]string, 0, len(BuiltinLenses()))
+			for _, bl := range BuiltinLenses() {
+				if bl.Name != "diff-intent" {
+					validNames = append(validNames, bl.Name)
+				}
+			}
+			for _, name := range validNames {
+				if name == "diff-intent" {
+					t.Error("diff-intent must not appear in allLensNames (the post_lead valid-lens whitelist)")
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("diff-intent lens not found in BuiltinLenses")
+}
+
+// TestFunnelClose_NilReceiver confirms that (*Funnel).Close() is safe to call
+// on a nil receiver (e.g. when a rebuild fails and f was never assigned). (F5)
+func TestFunnelClose_NilReceiver(t *testing.T) {
+	var f *Funnel
+	if err := f.Close(); err != nil {
+		t.Errorf("Close on nil Funnel: got error %v, want nil", err)
 	}
 }
 

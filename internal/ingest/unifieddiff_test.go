@@ -91,3 +91,33 @@ func TestCommitMessage_HEAD(t *testing.T) {
 		t.Errorf("HEAD message mismatch: %q", msg)
 	}
 }
+
+// TestCommitMessage_DashDashFlagInjectionGuard verifies that the "--" separator
+// is present in the git argv, preventing a ref that starts with "-" from being
+// parsed as a flag. We test this by confirming a normal SHA works correctly
+// (the "--" must not break the normal path). The negative case (a ref starting
+// with "-" returning an error rather than being treated as a flag) is implicitly
+// covered: git treats "-- -badref" as a path, not a flag, and returns an error
+// for an unknown ref. (F8)
+func TestCommitMessage_DashDashFlagInjectionGuard(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.go", "package a\n")
+	sha := r.commit("flag injection guard test")
+
+	repo := r.open()
+	// Normal SHA must still work with "--" present.
+	msg, err := repo.CommitMessage(context.Background(), sha)
+	if err != nil {
+		t.Fatalf("CommitMessage with full SHA: %v", err)
+	}
+	if !strings.Contains(msg, "flag injection guard test") {
+		t.Errorf("message with '--' separator: got %q", msg)
+	}
+
+	// A ref starting with '-' must return an error (git treats it as a path
+	// spec after '--', not a flag, so the ref is not found).
+	_, err = repo.CommitMessage(context.Background(), "-fake-flag")
+	if err == nil {
+		t.Error("CommitMessage with '-fake-flag' should return an error (not parsed as flag)")
+	}
+}

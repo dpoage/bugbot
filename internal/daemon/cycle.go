@@ -142,12 +142,9 @@ func buildChangeContext(ctx context.Context, repo *ingest.Repo, fromSHA, toSHA s
 	if err == nil {
 		cc.Diff = diff
 	}
-	// BlastFiles are populated from the already-computed changed set so we
-	// avoid a second BlastRadius call (the caller has already computed it via
-	// changedPathsSince and the snapshot). Pass changed as blast placeholder;
-	// the Targeted call below recomputes the true radius for scoping, so this
-	// is informational only (for the diff-intent task's caller list).
-	cc.BlastFiles = changed
+	// BlastFiles is intentionally absent: the blast-radius dependent list is
+	// derived inside hypothesize from the targets that Targeted already expanded
+	// via BlastRadius (run.go). No field to set here.
 	return cc
 }
 

@@ -158,12 +158,16 @@ func newScanCmd() *cobra.Command {
 					opts.ChangeContext = cc
 					// Rebuild the funnel with the updated options so ChangeContext is
 					// visible to hypothesize. The old funnel (f) has not run yet so no
-					// language servers have been started.
-					_ = f.Close()
-					f, err = funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
-					if err != nil {
-						return err
+					// language servers have been started. Only swap f after a
+					// successful rebuild so a failure here cannot leave f nil and
+					// cause the deferred f.Close() to panic ((*Funnel).Close has a
+					// nil-receiver guard, but we still prefer not to lose f).
+					f2, buildErr := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
+					if buildErr != nil {
+						return buildErr
 					}
+					_ = f.Close()
+					f = f2
 				}
 				res, err = f.Targeted(ctx, changed)
 			} else {
@@ -429,7 +433,8 @@ func buildScanChangeContext(ctx context.Context, repo *ingest.Repo, fromSHA, toS
 		FromCommit:   fromSHA,
 		ToCommit:     toSHA,
 		ChangedFiles: changed,
-		BlastFiles:   changed, // blast-radius is informational here; Targeted recomputes it for scoping
+		// BlastFiles intentionally omitted: derived inside hypothesize from the
+		// blast-radius targets that Targeted already computed via BlastRadius.
 	}
 	msg, err := repo.CommitMessage(ctx, toSHA)
 	if err == nil {

@@ -129,21 +129,13 @@ func TestDiffIntentFixture_CatchesIntentGap(t *testing.T) {
 		t.Fatalf("ChangedFiles: %v", err)
 	}
 	changed := ingest.ChangedPaths(changes)
-	snap, err := repo.Snapshot(ctx, ingest.ScanFilter{})
-	if err != nil {
-		t.Fatalf("Snapshot: %v", err)
-	}
-	blast, err := repo.BlastRadius(ctx, snap, changed)
-	if err != nil {
-		t.Fatalf("BlastRadius: %v", err)
-	}
 	cc := &funnel.ChangeContext{
 		FromCommit:   fromSHA,
 		ToCommit:     toSHA,
 		Message:      msg,
 		Diff:         diff,
 		ChangedFiles: changed,
-		BlastFiles:   blast,
+		// BlastFiles intentionally absent: derived from targets inside hypothesize.
 	}
 
 	// Scripted finder: diff-intent returns a candidate for the validation

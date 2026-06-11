@@ -137,11 +137,17 @@ func (r *Repo) UnifiedDiff(ctx context.Context, from, to string) ([]byte, error)
 // CommitMessage returns the full commit message for the given revision (any
 // git ref: SHA, HEAD, branch, tag). It shells out to `git log -1 --format=%B`
 // following the same pattern as ChangedFiles and UnifiedDiff.
+//
+// "--end-of-options" is inserted before commit so a ref that starts with "-"
+// cannot be parsed as a flag by git. This follows the same defence-in-depth
+// pattern used throughout the ingest package (git ≥ 2.24 supports the marker;
+// older git without it falls back to treating a dash-ref as an unknown option
+// and errors rather than silently misinterpreting it).
 func (r *Repo) CommitMessage(ctx context.Context, commit string) (string, error) {
 	if commit == "" {
 		return "", fmt.Errorf("ingest: CommitMessage requires a non-empty commit ref")
 	}
-	out, err := runGit(ctx, r.root, "log", "-1", "--format=%B", commit)
+	out, err := runGit(ctx, r.root, "log", "-1", "--format=%B", "--end-of-options", commit)
 	if err != nil {
 		return "", fmt.Errorf("ingest: commit message %s: %w", commit, err)
 	}

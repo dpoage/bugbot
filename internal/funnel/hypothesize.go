@@ -21,6 +21,11 @@ import (
 // the finder's context window from being dominated by raw diff bytes.
 const diffIntentDiffCap = 48 * 1024
 
+// diffIntentMsgCap is the maximum number of bytes of commit message embedded in
+// a diff-intent finder task. Beyond this limit the message is truncated with an
+// explicit marker. 4 KB comfortably covers any reasonable commit message body.
+const diffIntentMsgCap = 4 * 1024
+
 // hypothesize runs the finder stage: for each effective lens, run a finder
 // agent over each chunk of target files, collecting concrete candidates. Lens
 // chunks run in parallel bounded by Options.MaxParallel. Budget degradation is
@@ -69,6 +74,13 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	leadsByLens := make(map[string][]store.Lead, len(f.lenses))
 	var leadsConsumedTotal int
 	for _, l := range f.lenses {
+		// diff-intent is a change-scoped lens with no file/line lead semantics:
+		// it receives its input from ChangeContext (commit message, diff, blast
+		// targets), not from the lead blackboard. Including it here would silently
+		// consume leads that should remain pending for the next taxonomy run.
+		if l.Name == "diff-intent" {
+			continue
+		}
 		pending, err := f.store.PendingLeads(ctx, l.Name)
 		if err != nil {
 			// Non-fatal: we log the error and continue without leads for this lens.
@@ -122,12 +134,15 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 		}
 	}
 	// Diff-intent: one extra unit at the front (highest yield => first to launch)
-	// when the run is commit-scoped AND ChangeContext is populated. The unit uses
-	// an empty file list so degradation/budget checks treat it as a single-unit
-	// lens (which it is), and the task content is self-contained.
-	diLens := diffIntentLens()
-	if cc != nil && isCommitKind(kind) {
-		task := buildDiffIntentTask(cc)
+	// when the run is commit-scoped AND ChangeContext is populated. Only
+	// ScanTargeted runs carry a ChangeContext; Sweep runs as ScanOneshot (run.go)
+	// and must never fire diff-intent even if ChangeContext were somehow set.
+	// Gating on kind == ScanTargeted && cc != nil captures both current
+	// commit-triggered callers (daemon poll and cli --since) while leaving the
+	// ScanOneshot sweep path permanently excluded.
+	if kind == store.ScanTargeted && cc != nil {
+		diLens := diffIntentLens()
+		task := buildDiffIntentTask(cc, targets)
 		units = append([]unit{{
 			lens:       diLens,
 			files:      nil,
@@ -142,8 +157,14 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	// Valid lens names for the post_lead tool, derived from all builtin lenses
 	// (not just the active subset) so a finder can post to any lens including
 	// inactive ones — the lead will be pending until that lens next runs.
+	// diff-intent is excluded: it is a change-scoped lens with no file/line lead
+	// semantics and does not consume from the lead blackboard, so a lead posted to
+	// it would never be consumed (it would grow the blackboard unboundedly).
 	allLensNames := make([]string, 0, len(BuiltinLenses()))
 	for _, l := range BuiltinLenses() {
+		if l.Name == "diff-intent" {
+			continue
+		}
 		allLensNames = append(allLensNames, l.Name)
 	}
 
@@ -158,7 +179,16 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	sem := make(chan struct{}, f.opts.MaxParallel)
 	var wg sync.WaitGroup
 
-	degradedLenses := f.degradedLensNames()
+	// Compute degraded survivors from the lenses that actually emitted at least
+	// one unit in this run — not from f.lenses order-position. diff-intent emits
+	// zero units on sweeps, so it must never occupy a degradation slot on a sweep
+	// and starve a taxonomy lens. On commit runs it does emit a unit and legitimately
+	// competes.
+	activeLensNames := make(map[string]bool, len(units))
+	for _, u := range units {
+		activeLensNames[u.lens.Name] = true
+	}
+	degradedLenses := f.degradedLensNamesFor(activeLensNames)
 
 	for _, u := range units {
 		mu.Lock()
@@ -376,16 +406,27 @@ func budgetStopped(o *agent.Outcome) bool {
 	return o.TruncationReason == agent.TruncTokenBudget || o.TruncationReason == agent.TruncBudgetPool
 }
 
-// degradedLensNames returns the set of lens names that survive budget
-// degradation: the top degradedLensCount lenses by yield within the effective
-// lens set (which is already yield-ordered).
-func (f *Funnel) degradedLensNames() map[string]bool {
+// degradedLensNamesFor returns the set of lens names that survive budget
+// degradation: the top degradedLensCount lenses among those that actually
+// emitted at least one unit in this run, in yield-descending order
+// (f.lenses is already yield-ordered; we preserve that order here).
+//
+// Using the actual unit set — rather than f.lenses position — prevents
+// diff-intent (Yield 95) from occupying a degradation slot on sweeps where
+// it emits zero units. On commit runs it does emit a unit and legitimately
+// competes for a slot.
+func (f *Funnel) degradedLensNamesFor(activeLensNames map[string]bool) map[string]bool {
+	// Walk f.lenses in yield-descending order, collecting up to degradedLensCount
+	// from the active set.
 	keep := make(map[string]bool, degradedLensCount)
-	for i, l := range f.lenses {
-		if i >= degradedLensCount {
-			break
+	for _, l := range f.lenses {
+		if !activeLensNames[l.Name] {
+			continue
 		}
 		keep[l.Name] = true
+		if len(keep) >= degradedLensCount {
+			break
+		}
 	}
 	return keep
 }
@@ -410,14 +451,6 @@ func chunk(files []string, size int) [][]string {
 	return out
 }
 
-// isCommitKind reports whether kind is a commit-triggered scan (targeted or
-// oneshot-with-since). Sweep runs never carry a ChangeContext and never emit
-// diff-intent tasks regardless of what kind says, but this guard is the
-// explicit flag that prevents diff-intent from firing on sweep-kind runs.
-func isCommitKind(kind store.ScanKind) bool {
-	return kind == store.ScanTargeted || kind == store.ScanOneshot
-}
-
 // diffIntentLens returns the Lens descriptor for the diff-intent lens. It is
 // defined in BuiltinLenses (lens.go) but fetched by name here so hypothesize
 // does not hard-code index offsets into the lens slice.
@@ -433,18 +466,29 @@ func diffIntentLens() Lens {
 }
 
 // buildDiffIntentTask constructs the finder task message for the diff-intent
-// lens. It embeds the commit message, the unified diff (capped at
-// diffIntentDiffCap bytes with an explicit truncation marker), and the
-// blast-radius caller list so the agent can check call sites without extra
-// tool calls. The task is self-contained: the agent still has read-only tools
-// and can follow up with find_references if needed.
-func buildDiffIntentTask(cc *ChangeContext) string {
+// lens. It embeds the commit message (capped at diffIntentMsgCap), the unified
+// diff (capped at diffIntentDiffCap bytes with an explicit truncation marker),
+// the files changed in the commit, and the blast-radius dependents (targets
+// beyond the changed set) so the agent can check call sites without extra tool
+// calls. The task is self-contained: the agent still has read-only tools and
+// can follow up with find_references if needed.
+//
+// targets is the full blast-radius file list as seen by hypothesize (already
+// expanded and snapshot-intersected). The blast-radius dependent section is
+// built by subtracting cc.ChangedFiles from targets, so the prompt correctly
+// identifies "files that MAY DEPEND ON the changed code" rather than the changed
+// files themselves.
+func buildDiffIntentTask(cc *ChangeContext, targets []string) string {
 	var b strings.Builder
 	b.WriteString("Audit this commit for intent-vs-implementation mismatches and broken caller assumptions.\n\n")
 
 	b.WriteString("COMMIT MESSAGE:\n")
 	if cc.Message != "" {
-		b.WriteString(cc.Message)
+		msg := cc.Message
+		if len(msg) > diffIntentMsgCap {
+			msg = msg[:diffIntentMsgCap] + "\n[message truncated at 4KB]"
+		}
+		b.WriteString(msg)
 	} else {
 		b.WriteString("(not available)")
 	}
@@ -461,9 +505,30 @@ func buildDiffIntentTask(cc *ChangeContext) string {
 		b.WriteByte('\n')
 	}
 
-	if len(cc.BlastFiles) > 0 {
-		b.WriteString("\nBLAST-RADIUS CALLERS (files in scope that may depend on the changed code):\n")
-		for _, f := range cc.BlastFiles {
+	// Files changed directly in this commit.
+	if len(cc.ChangedFiles) > 0 {
+		b.WriteString("\nFILES CHANGED IN THIS COMMIT:\n")
+		for _, f := range cc.ChangedFiles {
+			fmt.Fprintf(&b, "  - %s\n", f)
+		}
+	}
+
+	// Blast-radius dependents: targets that are NOT in the changed set. These are
+	// files in scope that may depend on the changed code and whose caller
+	// assumptions the change might break.
+	changedSet := make(map[string]bool, len(cc.ChangedFiles))
+	for _, f := range cc.ChangedFiles {
+		changedSet[f] = true
+	}
+	var dependents []string
+	for _, t := range targets {
+		if !changedSet[t] {
+			dependents = append(dependents, t)
+		}
+	}
+	if len(dependents) > 0 {
+		b.WriteString("\nBLAST-RADIUS DEPENDENTS (files in scope that may depend on the changed code):\n")
+		for _, f := range dependents {
 			fmt.Fprintf(&b, "  - %s\n", f)
 		}
 	}
