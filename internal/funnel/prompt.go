@@ -8,12 +8,17 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
-// finderSystemBase is the shared finder system prompt. Every lens appends its
-// Specialization to this. The prompt is precision-first by construction: it
-// repeatedly licenses "find nothing" as the expected outcome and forbids
-// speculation, because the dominant failure mode of an LLM bug-finder is
-// confabulating plausible-sounding bugs that do not exist in the actual code.
-const finderSystemBase = `You are a meticulous senior Go engineer auditing a real codebase for genuine, concrete bugs.
+// finderSystemBase composes the shared finder system prompt around a persona
+// clause derived from the repository's dominant language(s) (e.g. "senior Go
+// engineer", "senior software engineer with deep Go and Python expertise"). The
+// persona is the ONLY language-dependent text; everything after it is fixed.
+// Every lens appends its Specialization to this. The prompt is precision-first
+// by construction: it repeatedly licenses "find nothing" as the expected
+// outcome and forbids speculation, because the dominant failure mode of an LLM
+// bug-finder is confabulating plausible-sounding bugs that do not exist in the
+// actual code.
+func finderSystemBase(persona string) string {
+	return `You are a meticulous ` + persona + ` auditing a real codebase for genuine, concrete bugs.
 
 You have read-only tools (read_file, list_dir, grep) plus language-server code navigation (find_definition, find_references, find_implementations) rooted at the repository. USE THEM. Never report a bug you have not confirmed by reading the actual code with these tools. Read the target file in full, and read the callers, callees, and definitions you need to confirm a defect is real and reachable. Prefer find_references over grep to enumerate a function's actual callers, and find_definition to see what a call actually invokes; if a code-navigation tool returns an ERROR (server unavailable or still indexing), fall back to grep.
 
@@ -29,6 +34,7 @@ For each real bug, report: the repo-relative file path, the 1-based line number 
 
 Severity: critical = data loss / crash in normal use / security hole; high = crash or wrong result on a common path; medium = wrong result on an edge path; low = minor or hard-to-hit.
 Confidence: high = you traced it and it is clearly a bug; medium = strong evidence but one assumption remains; low = plausible but unconfirmed (these will be dropped, so prefer to confirm or omit).`
+}
 
 // candidatesSchema is the JSON schema the finder must satisfy. A top-level
 // object with a "candidates" array keeps the contract unambiguous (a bare array
@@ -75,9 +81,12 @@ type rawCandidate struct {
 	Confidence  string `json:"confidence"`
 }
 
-// finderSystemPrompt composes the shared base with a lens specialization.
-func finderSystemPrompt(l Lens) string {
-	return finderSystemBase + "\n\nYOUR ASSIGNED FOCUS (" + l.Name + "):\n" + l.Specialization
+// finderSystemPrompt composes the persona-seeded base with a lens
+// specialization. persona is the language-derived engineer description (see
+// ingest.Persona); the lens name and specialization are appended verbatim, so
+// the eval harness's lens-name routing is unaffected by the persona.
+func finderSystemPrompt(persona string, l Lens) string {
+	return finderSystemBase(persona) + "\n\nYOUR ASSIGNED FOCUS (" + l.Name + "):\n" + l.Specialization
 }
 
 // finderTask builds the per-chunk finder task message naming the target files.
@@ -106,11 +115,14 @@ func finderTask(files []string, leads []store.Lead) string {
 	return b.String()
 }
 
-// verifierSystemBase is the shared refuter system prompt. The refuter's only
+// verifierSystemBase composes the shared refuter system prompt around a persona
+// clause derived from the repository's dominant language(s). The persona is the
+// ONLY language-dependent text; everything after it is fixed. The refuter's only
 // goal is to PROVE the report wrong; this adversarial framing is the core of
 // the precision-over-recall design. A refuter that cannot disprove a real bug
 // is the signal that the bug survives.
-const verifierSystemBase = `You are a skeptical, exacting senior Go engineer. Your ONLY job is to PROVE that the bug report below is WRONG. You are not here to agree; you are here to refute.
+func verifierSystemBase(persona string) string {
+	return `You are a skeptical, exacting ` + persona + `. Your ONLY job is to PROVE that the bug report below is WRONG. You are not here to agree; you are here to refute.
 
 You have read-only tools (read_file, list_dir, grep) plus language-server code navigation (find_definition, find_references, find_implementations) rooted at the repository. USE THEM to read the actual code the report points at, plus its callers and callees. When checking whether callers already guard against the claimed bug (nil checks, bounds checks, prior validation), prefer find_references on the implicated function or symbol: it enumerates the real call sites exactly, where grep misses qualified or aliased calls and matches unrelated identifiers. Use find_definition to confirm what a call resolves to, and find_implementations to find what concretely runs behind an interface. If a code-navigation tool returns an ERROR (server unavailable or still indexing), fall back to grep.
 
@@ -123,6 +135,7 @@ A report is REFUTED if any of these is true, and you can show it with concrete e
 A report is NOT refuted if, after genuinely trying, you cannot disprove it: the path is reachable, the value really can be bad, and nothing guards it. In that case say so honestly — do not invent a refutation. Being unable to refute a real bug is the correct outcome.
 
 Base your verdict ONLY on the actual code you read, not on assumptions about what "should" be there.`
+}
 
 // refutationSchema constrains the refuter's verdict.
 var refutationSchema = json.RawMessage(`{
@@ -161,13 +174,15 @@ when the tool is available:
   you high-confidence evidence; the tool is for cases where empirical confirmation
   is more convincing than code inspection alone.`
 
-// verifierSystemPrompt returns the verifier system prompt, optionally appending
-// the sandbox paragraph when the sandbox_exec tool is available to the agent.
-func verifierSystemPrompt(hasSandbox bool) string {
+// verifierSystemPrompt returns the verifier system prompt seeded with persona
+// (the language-derived engineer description; see ingest.Persona), optionally
+// appending the sandbox paragraph when the sandbox_exec tool is available to the
+// agent. The sandbox paragraph and all other wording are language-independent.
+func verifierSystemPrompt(persona string, hasSandbox bool) string {
 	if hasSandbox {
-		return verifierSystemBase + verifierSandboxParagraph
+		return verifierSystemBase(persona) + verifierSandboxParagraph
 	}
-	return verifierSystemBase
+	return verifierSystemBase(persona)
 }
 
 // verifierTask builds the refuter task message embedding the candidate.

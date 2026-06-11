@@ -30,7 +30,7 @@ type verified struct {
 // goroutine — they are independent votes, and serializing them keeps the
 // MaxParallel bound meaningful (it bounds candidates in flight, not the product
 // of candidates and refuters).
-func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []Candidate, budget *budgetState, result *Result) ([]verified, int, []Candidate, error) {
+func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string, candidates []Candidate, budget *budgetState, result *Result) ([]verified, int, []Candidate, error) {
 	if len(candidates) == 0 {
 		return nil, 0, nil, nil
 	}
@@ -117,7 +117,7 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindAgentStarted, Role: progress.RoleVerifier, Label: c.Title,
 			})
-			verdicts, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, candTools, c, nRefuters, budget)
+			verdicts, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, candTools, persona, c, nRefuters, budget)
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindAgentFinished, Role: progress.RoleVerifier, Label: c.Title,
 				Tokens: tokens, Duration: time.Since(start), Err: errString(err),
@@ -192,7 +192,7 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, candidates []C
 // treats the candidate as budget-orphaned rather than reaching a verdict on a
 // partial vote. Limits are derived from the pool at launch so a refuter launched
 // late gets the remaining headroom and one in flight stops at its next turn.
-func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, c Candidate, n int, budget *budgetState) ([]refutation, int64, int, bool, error) {
+func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, persona string, c Candidate, n int, budget *budgetState) ([]refutation, int64, int, bool, error) {
 	// Detect whether the sandbox_exec tool is present so we can tailor the
 	// system prompt to mention it.
 	hasSandbox := false
@@ -202,7 +202,7 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 			break
 		}
 	}
-	runner := agent.NewRunner(verifier, tools, verifierSystemPrompt(hasSandbox),
+	runner := agent.NewRunner(verifier, tools, verifierSystemPrompt(persona, hasSandbox),
 		agent.WithLimits(budget.runnerLimits(f.opts.VerifierLimits)),
 		agent.WithMaxTokens(DefaultMaxOutputTokens),
 		f.transcriptOption(),

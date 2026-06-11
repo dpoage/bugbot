@@ -3,6 +3,7 @@ package funnel
 import (
 	"context"
 
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -47,7 +48,12 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd store.Finding) (refuted 
 	// cheap operation the daemon gates at the cycle level. A pool-less
 	// budgetState makes runnerLimits a pass-through and never triggers a
 	// budget-pool stop.
-	verdicts, _, _, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, c, n, &budgetState{})
+	// Re-verification has no snapshot to derive a repo-wide persona from, so the
+	// persona is keyed off the finding's own file language — the relevant signal
+	// for a single-finding refute (matches the repro stage's per-finding choice).
+	persona := ingest.PersonaLanguages([]ingest.Language{ingest.DetectLanguage(fnd.File)})
+
+	verdicts, _, _, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, persona, c, n, &budgetState{})
 	if err != nil {
 		return false, "", err
 	}
