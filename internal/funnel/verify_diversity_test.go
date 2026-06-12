@@ -41,25 +41,17 @@ func TestSeatAssignment_N3_ThreeDistinctPrompts(t *testing.T) {
 	}
 }
 
-// TestSeatAssignment_N1_ByteIdentical proves that a single-refuter panel
-// produces the exact same prompt as verifierSystemPrompt (no seat clause).
-func TestSeatAssignment_N1_ByteIdentical(t *testing.T) {
+// TestSeatAssignment_N1_EmptySeat proves a single-refuter panel gets the
+// generalist (empty) seat. The end-to-end byte-identity of the n=1 prompt is
+// covered by TestRunRefuters_N1_NoSeatClause, which captures the prompt the
+// production path actually sends.
+func TestSeatAssignment_N1_EmptySeat(t *testing.T) {
 	seat := seatForIndex(0, 1)
 	if seat.clause != "" {
 		t.Errorf("n=1 seat must have empty clause, got %q", seat.clause)
 	}
 	if seat.name != "" {
 		t.Errorf("n=1 seat must have empty name, got %q", seat.name)
-	}
-	// When no clause is appended, the prompt is exactly verifierSystemPrompt.
-	persona := "senior Go engineer"
-	want := verifierSystemPrompt(persona, false)
-	got := verifierSystemPrompt(persona, false) // clause is empty, nothing appended
-	if seat.clause != "" {
-		got += "\n\n" + seat.clause
-	}
-	if got != want {
-		t.Error("n=1 prompt is not byte-identical to verifierSystemPrompt")
 	}
 }
 
@@ -193,7 +185,10 @@ func TestArbiterTask_Sanitization(t *testing.T) {
 	// v2's second line must appear on the same output line as the first
 	// (newlines collapsed). Both fragments must be on the same line.
 	idx := strings.Index(task, "Line two of reasoning.")
-	if idx >= 0 {
+	if idx < 0 {
+		t.Fatalf("expected reasoning fragment %q not found in arbiter task — flattening assertion never ran:\n%s", "Line two of reasoning.", task)
+	}
+	{
 		// Find the output line containing this text.
 		start := strings.LastIndex(task[:idx], "\n") + 1
 		end := strings.Index(task[idx:], "\n")

@@ -181,8 +181,11 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 			// verdicts are incomplete, so we cannot trust a "survived" or "killed"
 			// conclusion. Treat it as budget-orphaned (T3 suspected) rather than
 			// silently passing a half-verified candidate as a T2 survivor. A budget
-			// stop is not a reliability failure, so the partial vote is NOT folded
-			// into the refuter run/failure stats.
+			// stop is not a reliability failure, so the vote is NOT folded into the
+			// refuter run/failure stats — for a mid-panel stop because it is
+			// partial, and for a mid-ARBITER stop (where the panel did complete)
+			// because an orphaned candidate contributes no verdict and folding its
+			// panel would skew per-verdict reliability ratios.
 			if stopped || arbiterBudgetStopped {
 				budget.stopped.Store(true)
 				orphaned = append(orphaned, c)
