@@ -315,7 +315,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			// On context cancellation, acquire returns ctx.Err(); we exit without
 			// recording a row — same as today's behavior where cancelled runs abandon
 			// queued work. The budget-gate and agent launch happen AFTER acquisition.
-			if err := f.slots.acquire(ctx, false); err != nil {
+			if err := f.slots.acquire(ctx, slotLow); err != nil {
 				return
 			}
 			defer f.slots.release()

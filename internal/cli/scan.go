@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 
@@ -123,6 +124,71 @@ func newScanCmd() *cobra.Command {
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Warning: %s\n", sandboxDegradedWarning)
 			}
 
+			// Build the reproducer and wire it as an in-run hook when --repro is
+			// set. The hook closure captures the reproducer and the spend recorder
+			// so repro LLM spend flows through the same ledger as the funnel.
+			// The funnel does NOT import internal/repro; the CLI owns this wiring.
+			//
+			// Spend attribution: the funnel passes the scan run id into the hook
+			// (it is minted inside the funnel), and the closure pins it on the
+			// recorder once before the first PromoteOne — so in-run repro spend is
+			// attributed to the scan run like finder/verifier spend.
+			//
+			// reproAttempted records every fingerprint the in-run hook attempted —
+			// INCLUDING exhausted attempts, which leave no store-visible marker —
+			// so the catch-up drain never re-burns sandbox time on a finding this
+			// run already tried (the daemon's next-cycle rotation is separate,
+			// pre-existing behavior).
+			var reproHook func(ctx context.Context, scanRunID string, finding store.Finding) error
+			var reproAttempted sync.Map
+			var reproRunOnce sync.Once
+			var r *repro.Reproducer
+			var reproRec *ledgerRecorder
+			if doRepro {
+				runtime, rtOK := sandbox.Detect()
+				if !rtOK {
+					_, _ = fmt.Fprintln(out, "Reproduce stage skipped: no container runtime (podman/docker) found on PATH.")
+					// doRepro stays true so the catch-up drain prints a note; hook stays nil.
+				} else {
+					sb, sbErr := sandbox.NewCLI(runtime, cfg.Sandbox.Image)
+					if sbErr != nil {
+						return fmt.Errorf("build sandbox: %w", sbErr)
+					}
+					// Ledger repro + patch-prover spend; the scan run id is pinned by
+					// the hook on first use (the funnel supplies it), and again after
+					// the sweep for the catch-up drain.
+					reproRec = newLedgerRecorder(ctx, st)
+					reproClient, rErr := llm.ResolveRole(ctx, &cfg, "reproducer", llm.Options{Recorder: reproRec})
+					if rErr != nil {
+						return fmt.Errorf("build reproducer client: %w", rErr)
+					}
+					var rNewErr error
+					r, rNewErr = repro.New(reproClient, sb, target, repro.Options{
+						Image:            cfg.Sandbox.Image,
+						PatchProver:      cfg.Repro.PatchProver,
+						PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
+						PatchSuiteCmd:    cfg.Repro.SuiteCmd,
+						DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+					})
+					if rNewErr != nil {
+						return fmt.Errorf("build reproducer: %w", rNewErr)
+					}
+					if r != nil {
+						// Hook: called in-run for each Tier-2 finding. Uses PromoteOne
+						// (one finding = one hook call = one idle slot; the funnel's
+						// consumer goroutine is the parallelism bound). The hook calls
+						// PromoteOne which calls Attempt internally — no internal semaphore
+						// is added here. Hook errors are surfaced but do not abort the scan.
+						reproHook = func(hCtx context.Context, scanRunID string, finding store.Finding) error {
+							reproRunOnce.Do(func() { reproRec.SetScanRun(scanRunID) })
+							reproAttempted.Store(finding.Fingerprint, true)
+							_, hErr := r.PromoteOne(hCtx, st, finding)
+							return hErr
+						}
+					}
+				}
+			}
+
 			opts := funnel.Options{
 				Lenses:                lenses,
 				Filter:                ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
@@ -135,6 +201,7 @@ func newScanCmd() *cobra.Command {
 				FinderReadBytes:       cfg.Budgets.FinderReadBytes,
 				Progress:              progressSink,
 				SandboxOpts:           sandboxOpts,
+				Repro:                 reproHook,
 			}
 			f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
 			if err != nil {
@@ -195,8 +262,21 @@ func newScanCmd() *cobra.Command {
 			_ = includeT3 // reserved: this stage emits T2 only; T3 filtering arrives with the report stage
 			printResult(out, res)
 
-			if doRepro {
-				if err := runRepro(ctx, out, &cfg, st, target, res.ScanRunID, res.Findings); err != nil {
+			if doRepro && r != nil {
+				// Wire spend to this scan run now that we have the ID. In-run hook
+				// calls already used this recorder; setting the run ID here ensures
+				// any catch-up drain spend is also attributed correctly.
+				if reproRec != nil {
+					reproRec.SetScanRun(res.ScanRunID)
+				}
+				// Catch-up drain: run a backlog-style drain over open T2 findings
+				// from this scan that have no prior repro attempt. This is a cheap
+				// no-op when the in-run hook covered everything; it ensures coverage
+				// for findings that overflowed the reproCh buffer or were produced
+				// by a very fast scan with a slow sandbox. Using the same
+				// PromoteAll path here means the daemon drain's rotation logic (touch
+				// failed findings) also runs for any catch-up attempts.
+				if err := runReproCatchUp(ctx, out, r, st, res.Findings, &reproAttempted); err != nil {
 					return err
 				}
 			}
@@ -259,57 +339,44 @@ func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool
 	}, false, nil
 }
 
-// runRepro runs the Reproduce stage over the run's findings (Tier-2 verified
-// candidates), promoting any whose bug is demonstrated by a sandboxed failing
-// test. It skips gracefully when no container runtime is available, and prints
-// a promotion summary.
-func runRepro(ctx context.Context, out io.Writer, cfg *config.Config, st *store.Store, target, scanRunID string, findings []store.Finding) error {
-	runtime, ok := sandbox.Detect()
-	if !ok {
-		_, _ = fmt.Fprintln(out, "\nReproduce stage skipped: no container runtime (podman/docker) found on PATH.")
-		return nil
-	}
-
-	t2 := make([]store.Finding, 0, len(findings))
+// runReproCatchUp runs a backlog-style drain over the run's Tier-2 findings
+// that have no prior repro attempt (ReproPath empty, NeedsHuman false). This
+// is a cheap no-op when the in-run hook covered everything; it acts as a safety
+// net for findings that overflowed the reproCh buffer. It uses PromoteAll (the
+// daemon's batch path) so the rotation logic (touch failed findings) also runs.
+func runReproCatchUp(ctx context.Context, out io.Writer, r *repro.Reproducer, st *store.Store, findings []store.Finding, attempted *sync.Map) error {
+	// Filter to T2 findings with no prior attempt. "Prior attempt" includes
+	// in-run attempts that EXHAUSTED: a failed repro leaves no store-visible
+	// marker (ReproPath stays empty, NeedsHuman stays false), so without the
+	// attempted set this drain would re-burn sandbox time on exactly the
+	// findings the in-run hook just failed on.
+	var pending []store.Finding
 	for _, f := range findings {
-		if f.Tier == 2 {
-			t2 = append(t2, f)
+		if f.Tier != 2 || f.ReproPath != "" || f.NeedsHuman {
+			continue
+		}
+		if attempted != nil {
+			if _, ok := attempted.Load(f.Fingerprint); ok {
+				continue
+			}
+		}
+		// Re-read from store to get the latest state (in-run hook may have promoted it).
+		current, err := st.GetFinding(ctx, f.ID)
+		if err != nil {
+			continue // best-effort
+		}
+		if current.ReproPath == "" && !current.NeedsHuman {
+			pending = append(pending, current)
 		}
 	}
-	if len(t2) == 0 {
-		_, _ = fmt.Fprintln(out, "\nReproduce stage: no Tier-2 findings to reproduce.")
-		return nil
+	if len(pending) == 0 {
+		return nil // no-op when in-run hook covered all findings
 	}
 
-	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image)
+	_, _ = fmt.Fprintf(out, "\nReproduce catch-up: %d finding(s) not yet attempted...\n", len(pending))
+	summary, err := r.PromoteAll(ctx, st, pending)
 	if err != nil {
-		return fmt.Errorf("build sandbox: %w", err)
-	}
-
-	// Ledger repro + patch-prover spend: this client lives outside the funnel
-	// and would otherwise never reach the spend table (bugbot-58c).
-	rec := newLedgerRecorder(ctx, st)
-	rec.SetScanRun(scanRunID)
-	client, err := llm.ResolveRole(ctx, cfg, "reproducer", llm.Options{Recorder: rec})
-	if err != nil {
-		return fmt.Errorf("build reproducer client: %w", err)
-	}
-
-	r, err := repro.New(client, sb, target, repro.Options{
-		Image:            cfg.Sandbox.Image,
-		PatchProver:      cfg.Repro.PatchProver,
-		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
-		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
-		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
-	})
-	if err != nil {
-		return fmt.Errorf("build reproducer: %w", err)
-	}
-
-	_, _ = fmt.Fprintf(out, "\nReproduce stage: attempting %d Tier-2 finding(s) (runtime=%s)...\n", len(t2), runtime)
-	summary, err := r.PromoteAll(ctx, st, t2)
-	if err != nil {
-		return fmt.Errorf("reproduce: %w", err)
+		return fmt.Errorf("reproduce catch-up: %w", err)
 	}
 	printReproSummary(out, summary)
 	return nil

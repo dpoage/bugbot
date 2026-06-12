@@ -33,6 +33,9 @@ import (
 // at persist time.
 //
 // sbExecs/sbMillis are shared atomic counters across all candidates.
+//
+// reproQ, when non-nil, receives each survived Tier-2 finding for in-run
+// reproduction; see reproQueue for the never-block contract.
 func (f *Funnel) runVerifyAndPersist(
 	ctx context.Context,
 	verifier llm.Client,
@@ -50,11 +53,12 @@ func (f *Funnel) runVerifyAndPersist(
 	sbExecs *atomic.Int32,
 	sbMillis *atomic.Int64,
 	setErr func(error),
+	reproQ *reproQueue,
 ) {
 	// Acquire a global slot (HIGH priority: verifier is cheap, latency-sensitive,
 	// and gates everything downstream). One slot covers the whole sequential
 	// refuter panel + arbiter for this candidate.
-	if err := f.slots.acquire(ctx, true); err != nil {
+	if err := f.slots.acquire(ctx, slotHigh); err != nil {
 		return
 	}
 	defer f.slots.release()
@@ -283,6 +287,12 @@ func (f *Funnel) runVerifyAndPersist(
 		if err := f.store.AddCorroboratingLenses(ctx, c.Fingerprint, late); err != nil {
 			f.note(result, fmt.Sprintf("corroboration: late attach to %q failed: %v", c.Title, err))
 		}
+	}
+
+	// Enqueue for in-run reproduction. Never blocks (see reproQueue); only
+	// Tier-2 (survived, not orphaned/suspected) findings are enqueued.
+	if reproQ != nil {
+		reproQ.enqueue(stored)
 	}
 }
 
