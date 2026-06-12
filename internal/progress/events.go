@@ -61,6 +61,10 @@ const (
 	// the verdict is reached (not deferred to stage-finish), so live status
 	// counters tick as the verify stage progresses.
 	KindFindingKilled Kind = "finding_killed"
+	// KindCandidateTriaged reports one candidate forwarded by the streaming
+	// triage consumer to verification (a cluster primary). Live-counter tick;
+	// the authoritative total still arrives with StageFinished(triage).
+	KindCandidateTriaged Kind = "candidate_triaged"
 	// KindLensFailed reports a finder (or refuter) agent that produced no
 	// parseable output: its findings, if any, are LOST. Renderers should surface
 	// this prominently — it means an empty result is untrustworthy, not clean.

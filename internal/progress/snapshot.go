@@ -53,6 +53,7 @@ type Status struct {
 	// After stage-finish the live fields are zero and the Counts fields carry the
 	// authoritative final values, so a reader always has a consistent picture.
 	LiveCandidates int `json:"live_candidates,omitempty"`
+	LiveTriaged    int `json:"live_triaged,omitempty"`
 	LiveVerified   int `json:"live_verified,omitempty"`
 	LiveKilled     int `json:"live_killed,omitempty"`
 
@@ -172,6 +173,7 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 		// cycle's status would show the dead run's "candidates so far" until
 		// its own stage completes.
 		s.st.LiveCandidates = 0
+		s.st.LiveTriaged = 0
 		s.st.LiveVerified = 0
 		s.st.LiveKilled = 0
 		s.st.LastEvent = "started " + ev.ScanKind
@@ -186,6 +188,8 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 		switch ev.Stage {
 		case StageHypothesize:
 			s.st.LiveCandidates = 0
+		case StageTriage:
+			s.st.LiveTriaged = 0
 		case StageVerify:
 			s.st.LiveVerified = 0
 			s.st.LiveKilled = 0
@@ -209,6 +213,9 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 		s.st.Counts.Verified++
 		s.st.LiveVerified++
 		s.st.LastEvent = "verified: " + ev.Title
+	case KindCandidateTriaged:
+		s.st.LiveTriaged++
+		s.st.LastEvent = "triaged: " + ev.Title
 	case KindFindingKilled:
 		s.st.LiveKilled++
 		s.st.LastEvent = "killed: " + ev.Title
@@ -234,6 +241,7 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 		// start; clearing on finish too means an idle daemon never shows live
 		// remnants between runs.
 		s.st.LiveCandidates = 0
+		s.st.LiveTriaged = 0
 		s.st.LiveVerified = 0
 		s.st.LiveKilled = 0
 		s.st.LastEvent = "finished " + ev.ScanKind
