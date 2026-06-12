@@ -94,8 +94,7 @@ func renderStatus(ctx context.Context, out io.Writer, cfg config.Config, st prog
 	for _, a := range st.ActiveAgents {
 		_, _ = fmt.Fprintf(out, "  agent:        %-8s %s\n", a.Role, a.Label)
 	}
-	_, _ = fmt.Fprintf(out, "  stages:       hypothesized=%d triaged=%d verified=%d killed=%d\n",
-		st.Counts.Hypothesized, st.Counts.Triaged, st.Counts.Verified, st.Counts.Killed)
+	_, _ = fmt.Fprintln(out, "  stages:       "+fmtStageCounts(st))
 	_, _ = fmt.Fprintf(out, "  run spend:    in=%d out=%d total=%d tokens%s\n",
 		st.SpendInput, st.SpendOutput, st.SpendInput+st.SpendOutput,
 		cachedNote(st.SpendCacheRead))
@@ -171,6 +170,38 @@ func etaString(t, now time.Time) string {
 		return "due now"
 	}
 	return fmt.Sprintf("in %s (%s)", d.Round(time.Second), t.Format("15:04:05"))
+}
+
+// fmtStageCounts formats the stages line for renderStatus. When live counters
+// are non-zero the line appends parenthetical in-progress notes so operators
+// see accumulating candidates, verified, and killed counts before the stage
+// finishes and the authoritative Counts fields take over.
+//
+// Presentation contract:
+//   - During hypothesize (LiveCandidates > 0): appends "(candidates so far: N)"
+//     after hypothesized=0 so it is obvious the final count is not yet settled.
+//   - During verify (LiveVerified > 0 or LiveKilled > 0): appends per-field
+//     live notes so operators see verdicts accumulating.
+//   - After stage-finish: live fields are zero; the line is the unadorned
+//     "hypothesized=H triaged=T verified=V killed=K" format, preserving the
+//     exact output that existed before this feature.
+func fmtStageCounts(st progress.Status) string {
+	hyp := fmt.Sprintf("hypothesized=%d", st.Counts.Hypothesized)
+	if st.LiveCandidates > 0 {
+		hyp += fmt.Sprintf(" (candidates so far: %d)", st.LiveCandidates)
+	}
+
+	ver := fmt.Sprintf("verified=%d", st.Counts.Verified)
+	if st.LiveVerified > 0 {
+		ver += fmt.Sprintf(" (so far: %d)", st.LiveVerified)
+	}
+
+	kil := fmt.Sprintf("killed=%d", st.Counts.Killed)
+	if st.LiveKilled > 0 {
+		kil += fmt.Sprintf(" (so far: %d)", st.LiveKilled)
+	}
+
+	return fmt.Sprintf("%s triaged=%d %s %s", hyp, st.Counts.Triaged, ver, kil)
 }
 
 // fmtTime renders a timestamp, or "-" when zero.

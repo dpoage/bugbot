@@ -163,6 +163,108 @@ func TestStatus_IdleStillShowsWorldState(t *testing.T) {
 	}
 }
 
+// TestStatus_LiveCandidatesRendering asserts that a mid-hypothesize snapshot
+// (LiveCandidates > 0, Counts.Hypothesized == 0) renders the live note and
+// that a post-stage snapshot (LiveCandidates == 0) renders the plain final
+// format without any live annotation.
+func TestStatus_LiveCandidatesRendering(t *testing.T) {
+	cfgPath, _, _ := setup(t)
+
+	// Mid-hypothesize: live candidates accumulating.
+	writeStatus(t, cfgPath, progress.Status{
+		PID:            os.Getpid(),
+		StartedAt:      time.Now().Add(-time.Minute),
+		LastUpdated:    time.Now(),
+		ScanKind:       "sweep",
+		Stage:          "hypothesize",
+		LiveCandidates: 8,
+		Counts:         progress.Counts{}, // zeros — stage not yet finished
+	})
+	out, err := run(t, cfgPath, "status")
+	if err != nil {
+		t.Fatalf("status errored: %v", err)
+	}
+	if !strings.Contains(out, "candidates so far: 8") {
+		t.Errorf("mid-hypothesize status should show live candidate note:\n%s", out)
+	}
+	// hypothesized= should still show 0 (stage not finished).
+	if !strings.Contains(out, "hypothesized=0") {
+		t.Errorf("mid-hypothesize status should show hypothesized=0:\n%s", out)
+	}
+
+	// Post-stage: live counters zero, final counts populated.
+	writeStatus(t, cfgPath, progress.Status{
+		PID:            os.Getpid(),
+		StartedAt:      time.Now().Add(-time.Minute),
+		LastUpdated:    time.Now(),
+		ScanKind:       "sweep",
+		Stage:          "triage",
+		LiveCandidates: 0, // reset after stage-finish
+		Counts:         progress.Counts{Hypothesized: 8},
+	})
+	out2, err := run(t, cfgPath, "status")
+	if err != nil {
+		t.Fatalf("status errored: %v", err)
+	}
+	if strings.Contains(out2, "candidates so far") {
+		t.Errorf("post-stage status must not show live candidate note:\n%s", out2)
+	}
+	if !strings.Contains(out2, "hypothesized=8") {
+		t.Errorf("post-stage status should show final hypothesized=8:\n%s", out2)
+	}
+}
+
+// TestStatus_LiveVerifyKillRendering asserts that a mid-verify snapshot renders
+// the live verified/killed notes, and that a post-verify snapshot shows the
+// plain final format.
+func TestStatus_LiveVerifyKillRendering(t *testing.T) {
+	cfgPath, _, _ := setup(t)
+
+	// Mid-verify: live counters accumulating.
+	writeStatus(t, cfgPath, progress.Status{
+		PID:          os.Getpid(),
+		StartedAt:    time.Now().Add(-2 * time.Minute),
+		LastUpdated:  time.Now(),
+		ScanKind:     "sweep",
+		Stage:        "verify",
+		LiveVerified: 2,
+		LiveKilled:   1,
+		Counts:       progress.Counts{Hypothesized: 5, Triaged: 3}, // verify not done
+	})
+	out, err := run(t, cfgPath, "status")
+	if err != nil {
+		t.Fatalf("status errored: %v", err)
+	}
+	if !strings.Contains(out, "so far: 2") {
+		t.Errorf("mid-verify status should show live verified note:\n%s", out)
+	}
+	if !strings.Contains(out, "so far: 1") {
+		t.Errorf("mid-verify status should show live killed note:\n%s", out)
+	}
+
+	// Post-verify: live counters zeroed, final Counts populated.
+	writeStatus(t, cfgPath, progress.Status{
+		PID:          os.Getpid(),
+		StartedAt:    time.Now().Add(-2 * time.Minute),
+		LastUpdated:  time.Now(),
+		ScanKind:     "sweep",
+		Stage:        "persist",
+		LiveVerified: 0,
+		LiveKilled:   0,
+		Counts:       progress.Counts{Hypothesized: 5, Triaged: 3, Verified: 2, Killed: 1},
+	})
+	out2, err := run(t, cfgPath, "status")
+	if err != nil {
+		t.Fatalf("status errored: %v", err)
+	}
+	if strings.Contains(out2, "so far:") {
+		t.Errorf("post-verify status must not show any live notes:\n%s", out2)
+	}
+	if !strings.Contains(out2, "hypothesized=5 triaged=3 verified=2 killed=1") {
+		t.Errorf("post-verify status should show final counts:\n%s", out2)
+	}
+}
+
 // TestStatus_NoStoreNoSideEffect pins that status against a config whose store
 // has never been created neither errors nor creates the DB as a side effect.
 func TestStatus_NoStoreNoSideEffect(t *testing.T) {

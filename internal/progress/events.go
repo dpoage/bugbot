@@ -56,6 +56,11 @@ const (
 	// KindFindingVerified reports a candidate that survived adversarial
 	// verification (a Tier-2 survivor).
 	KindFindingVerified Kind = "finding_verified"
+	// KindFindingKilled reports a candidate that was definitively refuted by the
+	// adversarial verification panel. One event per killed candidate, emitted as
+	// the verdict is reached (not deferred to stage-finish), so live status
+	// counters tick as the verify stage progresses.
+	KindFindingKilled Kind = "finding_killed"
 	// KindLensFailed reports a finder (or refuter) agent that produced no
 	// parseable output: its findings, if any, are LOST. Renderers should surface
 	// this prominently — it means an empty result is untrustworthy, not clean.
@@ -153,10 +158,18 @@ type Event struct {
 	CacheReadTokens     int64 `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int64 `json:"cache_creation_tokens,omitempty"`
 
-	// File / Line / Title describe a verified finding.
+	// File / Line / Title describe a verified or killed finding.
 	File  string `json:"file,omitempty"`
 	Line  int    `json:"line,omitempty"`
 	Title string `json:"title,omitempty"`
+
+	// Candidates is set on KindAgentFinished for finder (RoleFinder) agents: it
+	// carries the number of candidates emitted by that finder unit. This lets live
+	// status counters tick as each finder completes rather than waiting for the
+	// stage-finished event. Zero for verifier agents and when no candidates were
+	// found (not omitted so a zero count is distinguishable from an unset field
+	// in typed consumers; JSON omitempty keeps wire size small).
+	Candidates int `json:"candidates,omitempty"`
 
 	// NextPoll / NextSweep / NextBacklog carry the daemon schedule
 	// (cycle_scheduled). NextBacklog is zero when the backlog-repro timer is

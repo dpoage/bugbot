@@ -373,8 +373,21 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 
 			label := unitLabel(u.lens.Name, u.strategy.Name)
 			startedAt := time.Now()
-			cands, status, outcome, err := f.runFinderWithPrompt(ctx, finder, unitTools, sysprompt, label, u.lens, task, budget)
+			cands, status, outcome, err := f.runFinderWithPrompt(ctx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt)
 			finishedAt := time.Now()
+
+			// Emit KindAgentFinished here (not inside runFinderWithPrompt) so we
+			// can carry the candidate count on the event — live status counters tick
+			// as each finder unit completes rather than waiting for stage-finished.
+			// Candidates is set only on finderOK; for error/parse-fail/budget-stop
+			// paths the count is meaningless or unknown, so it stays zero.
+			{
+				var candidateCount int
+				if err == nil && status == finderOK {
+					candidateCount = len(cands)
+				}
+				emitFinderAgentFinished(f.opts.Progress, label, outcome, startedAt, err, candidateCount)
+			}
 
 			// Extract per-unit token counts directly from the Outcome's Usage
 			// (not from the spend ledger — trap 1 in bugbot-mi5.10).
@@ -499,7 +512,9 @@ const (
 // the strategy-aware system prompt.
 func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, persona string, l Lens, langs []ingest.Language, task string, budget *budgetState) ([]Candidate, finderStatus, error) {
 	sysprompt := finderSystemPrompt(persona, l, langs)
-	cands, status, _, err := f.runFinderWithPrompt(ctx, finder, tools, sysprompt, l.Name, l, task, budget)
+	start := time.Now()
+	cands, status, outcome, err := f.runFinderWithPrompt(ctx, finder, tools, sysprompt, l.Name, l, task, budget, start)
+	emitAgentFinished(f.opts.Progress, progress.RoleFinder, l.Name, outcome, start, err)
 	return cands, status, err
 }
 
@@ -508,13 +523,17 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 // strategy clauses and use strategy-qualified labels (lens@strategy) without
 // rebuilding the prompt inside this function.
 //
+// startedAt is the wall-clock time the caller captured before invoking this
+// function; the caller is responsible for emitting KindAgentFinished (with the
+// Candidates count it derives from the returned candidates slice) after this
+// function returns. runFinderWithPrompt only emits KindAgentStarted.
+//
 // The returned *agent.Outcome carries the agent's Usage (InputTokens /
 // OutputTokens / CacheReadInputTokens) that the caller uses to populate the
 // per-unit observability row. The Outcome is non-nil as long as the agent ran
 // at least one turn; callers must handle nil (budget-pool pre-turn stop).
-func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState) ([]Candidate, finderStatus, *agent.Outcome, error) {
+func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState, startedAt time.Time) ([]Candidate, finderStatus, *agent.Outcome, error) {
 	sink := f.opts.Progress
-	start := time.Now()
 	progress.Emit(sink, progress.Event{
 		Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: label,
 	})
@@ -527,7 +546,6 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 
 	var out candidateList
 	outcome, err := runner.RunJSON(ctx, task, candidatesSchema, &out)
-	emitAgentFinished(sink, progress.RoleFinder, label, outcome, start, err)
 	if err != nil {
 		// A finder that fails to produce parseable JSON yields no candidates
 		// rather than aborting the whole scan: one lens/chunk failing must not

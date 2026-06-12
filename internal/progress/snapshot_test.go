@@ -135,3 +135,164 @@ func TestReadStatus_MissingFile(t *testing.T) {
 		t.Fatal("expected error reading missing status file")
 	}
 }
+
+// TestSnapshot_LiveCandidateCounter feeds a synthetic finder-AgentFinished
+// sequence and asserts the live candidate counter accumulates correctly.
+//
+// Sequence: 3 finder KindAgentFinished with Candidates 2/0/1 → LiveCandidates=3.
+// Then KindStageFinished for hypothesize → LiveCandidates resets to 0.
+//
+// VACUITY: if the accumulation in apply() is disabled, LiveCandidates stays 0
+// and the mid-sequence assertion fails.
+func TestSnapshot_LiveCandidateCounter(t *testing.T) {
+	clock := time.Unix(10000, 0)
+	advance := func(d time.Duration) { clock = clock.Add(d) }
+	now := func() time.Time { return clock }
+	s, path := newTestSnapshot(t, now)
+
+	// First event also writes (lastWrite zero).
+	s.Handle(Event{Kind: KindAgentFinished, Role: RoleFinder, Label: "lens-a", Candidates: 2, Time: clock})
+	advance(2 * time.Second) // past rate limit
+	s.Handle(Event{Kind: KindAgentFinished, Role: RoleFinder, Label: "lens-b", Candidates: 0, Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindAgentFinished, Role: RoleFinder, Label: "lens-c", Candidates: 1, Time: clock})
+
+	// Force a write by advancing past the rate limit and sending a non-terminal event.
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindStageStarted, Stage: StageHypothesize, Time: clock})
+
+	st, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if st.LiveCandidates != 3 {
+		t.Errorf("LiveCandidates = %d after 3 finder finishes (2+0+1), want 3", st.LiveCandidates)
+	}
+
+	// After KindStageFinished for hypothesize, LiveCandidates resets.
+	advance(2 * time.Second)
+	s.Handle(Event{
+		Kind: KindStageFinished, Stage: StageHypothesize,
+		Counts: &Counts{Hypothesized: 3},
+		Time:   clock,
+	})
+	st2, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status after stage-finish: %v", err)
+	}
+	if st2.LiveCandidates != 0 {
+		t.Errorf("LiveCandidates = %d after hypothesize stage-finish, want 0 (final count in Counts)", st2.LiveCandidates)
+	}
+	if st2.Counts.Hypothesized != 3 {
+		t.Errorf("Counts.Hypothesized = %d, want 3", st2.Counts.Hypothesized)
+	}
+}
+
+// TestSnapshot_LiveVerifyKillCounters feeds a synthetic verify sequence and
+// asserts the live verified/killed counters accumulate and reset correctly.
+//
+// Sequence: 2 KindFindingVerified + 1 KindFindingKilled → LiveVerified=2 LiveKilled=1.
+// Then KindStageFinished for verify → both reset to 0.
+func TestSnapshot_LiveVerifyKillCounters(t *testing.T) {
+	clock := time.Unix(20000, 0)
+	advance := func(d time.Duration) { clock = clock.Add(d) }
+	now := func() time.Time { return clock }
+	s, path := newTestSnapshot(t, now)
+
+	// Force an initial write so lastWrite is set.
+	s.Handle(Event{Kind: KindStageStarted, Stage: StageVerify, Time: clock})
+
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindFindingVerified, Title: "bug-a", File: "a.go", Line: 1, Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindFindingKilled, Title: "bug-b", File: "b.go", Line: 2, Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindFindingVerified, Title: "bug-c", File: "c.go", Line: 3, Time: clock})
+
+	// Force write.
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindStageStarted, Stage: StagePersist, Time: clock})
+
+	st, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if st.LiveVerified != 2 {
+		t.Errorf("LiveVerified = %d, want 2", st.LiveVerified)
+	}
+	if st.LiveKilled != 1 {
+		t.Errorf("LiveKilled = %d, want 1", st.LiveKilled)
+	}
+	// Counts.Verified should also have accumulated (existing behavior).
+	if st.Counts.Verified != 2 {
+		t.Errorf("Counts.Verified = %d, want 2", st.Counts.Verified)
+	}
+
+	// After KindStageFinished for verify, live fields reset.
+	advance(2 * time.Second)
+	s.Handle(Event{
+		Kind: KindStageFinished, Stage: StageVerify,
+		Counts: &Counts{Hypothesized: 3, Triaged: 3, Verified: 2, Killed: 1},
+		Time:   clock,
+	})
+	st2, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read after verify stage-finish: %v", err)
+	}
+	if st2.LiveVerified != 0 || st2.LiveKilled != 0 {
+		t.Errorf("live counters = verified:%d killed:%d after stage-finish, want both 0",
+			st2.LiveVerified, st2.LiveKilled)
+	}
+	if st2.Counts.Verified != 2 || st2.Counts.Killed != 1 {
+		t.Errorf("Counts = verified:%d killed:%d, want verified:2 killed:1",
+			st2.Counts.Verified, st2.Counts.Killed)
+	}
+}
+
+// TestSnapshot_FullLiveSequence feeds the three-finder + verify sequence from
+// the spec and asserts the combined live counter state.
+//
+// Input: 3 finder KindAgentFinished with Candidates 2/0/1,
+//
+//	then 2 KindFindingVerified, 1 KindFindingKilled.
+//
+// Mid-sequence: LiveCandidates=3, LiveVerified=2, LiveKilled=1.
+func TestSnapshot_FullLiveSequence(t *testing.T) {
+	clock := time.Unix(30000, 0)
+	advance := func(d time.Duration) { clock = clock.Add(d) }
+	now := func() time.Time { return clock }
+	s, path := newTestSnapshot(t, now)
+
+	// Finder phase.
+	s.Handle(Event{Kind: KindAgentFinished, Role: RoleFinder, Label: "lens-1", Candidates: 2, Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindAgentFinished, Role: RoleFinder, Label: "lens-2", Candidates: 0, Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindAgentFinished, Role: RoleFinder, Label: "lens-3", Candidates: 1, Time: clock})
+
+	// Verify phase.
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindFindingVerified, Title: "t1", File: "f.go", Line: 1, Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindFindingVerified, Title: "t2", File: "f.go", Line: 2, Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindFindingKilled, Title: "t3", File: "f.go", Line: 3, Time: clock})
+
+	// Force a write.
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindStageStarted, Stage: StagePersist, Time: clock})
+
+	st, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if st.LiveCandidates != 3 {
+		t.Errorf("LiveCandidates = %d, want 3 (2+0+1)", st.LiveCandidates)
+	}
+	if st.LiveVerified != 2 {
+		t.Errorf("LiveVerified = %d, want 2", st.LiveVerified)
+	}
+	if st.LiveKilled != 1 {
+		t.Errorf("LiveKilled = %d, want 1", st.LiveKilled)
+	}
+}
