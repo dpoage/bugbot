@@ -67,8 +67,17 @@ func TestSweep_EmitsProgressInStageOrder(t *testing.T) {
 	if len(kinds) == 0 {
 		t.Fatal("no progress events emitted")
 	}
-	if kinds[0] != progress.KindScanStarted {
-		t.Errorf("first event = %q, want scan_started", kinds[0])
+	// KindSweepSummary and KindHeatOrdered may precede KindScanStarted;
+	// find the first event that is neither of those and assert it is scan_started.
+	firstSignificant := kinds[0]
+	for _, k := range kinds {
+		if k != progress.KindSweepSummary && k != progress.KindHeatOrdered {
+			firstSignificant = k
+			break
+		}
+	}
+	if firstSignificant != progress.KindScanStarted {
+		t.Errorf("first significant event = %q, want scan_started", firstSignificant)
 	}
 	if last := kinds[len(kinds)-1]; last != progress.KindScanFinished {
 		t.Errorf("last event = %q, want scan_finished", last)

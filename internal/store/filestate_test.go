@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 	"testing"
+	"time"
 )
 
 func TestFileState_UpsertGetAndChangedSince(t *testing.T) {
@@ -87,5 +88,200 @@ func TestChangedSince_EmptyInput(t *testing.T) {
 	}
 	if changed != nil {
 		t.Fatalf("expected nil for empty input, got %v", changed)
+	}
+}
+
+// epochSentinelTime returns the parsed epoch sentinel for assertions.
+func epochSentinelTimeParsed() time.Time {
+	t, err := time.Parse(time.RFC3339, epochSentinel)
+	if err != nil {
+		panic("test: failed to parse epoch sentinel: " + err.Error())
+	}
+	return t
+}
+
+// TestRefreshContentHashes_PreservesLastScannedAt verifies that
+// RefreshContentHashes does NOT overwrite an existing last_scanned_at set by
+// TouchScanCoverage.
+func TestRefreshContentHashes_PreservesLastScannedAt(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	// First: TouchScanCoverage sets a truthful scan time.
+	if err := st.TouchScanCoverage(ctx, []string{"a.go"}, "c1"); err != nil {
+		t.Fatalf("TouchScanCoverage: %v", err)
+	}
+	before, err := st.GetFileState(ctx, "a.go")
+	if err != nil {
+		t.Fatalf("GetFileState before refresh: %v", err)
+	}
+
+	// RefreshContentHashes should NOT overwrite last_scanned_at.
+	if err := st.RefreshContentHashes(ctx, []FileState{
+		{Path: "a.go", ContentHash: "newhash", LastScannedCommit: "c2"},
+	}); err != nil {
+		t.Fatalf("RefreshContentHashes: %v", err)
+	}
+
+	after, err := st.GetFileState(ctx, "a.go")
+	if err != nil {
+		t.Fatalf("GetFileState after refresh: %v", err)
+	}
+
+	if !after.LastScannedAt.Equal(before.LastScannedAt) {
+		t.Errorf("last_scanned_at clobbered: before=%v after=%v", before.LastScannedAt, after.LastScannedAt)
+	}
+	if after.ContentHash != "newhash" {
+		t.Errorf("ContentHash not updated: got %q, want newhash", after.ContentHash)
+	}
+}
+
+// TestRefreshContentHashes_NewRowGetsEpoch verifies that a new row inserted by
+// RefreshContentHashes gets the epoch sentinel for last_scanned_at.
+func TestRefreshContentHashes_NewRowGetsEpoch(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	if err := st.RefreshContentHashes(ctx, []FileState{
+		{Path: "new.go", ContentHash: "h1", LastScannedCommit: "c1"},
+	}); err != nil {
+		t.Fatalf("RefreshContentHashes: %v", err)
+	}
+
+	fs, err := st.GetFileState(ctx, "new.go")
+	if err != nil {
+		t.Fatalf("GetFileState: %v", err)
+	}
+
+	epoch := epochSentinelTimeParsed()
+	if !fs.LastScannedAt.Equal(epoch) {
+		t.Errorf("new row LastScannedAt = %v, want epoch sentinel %v", fs.LastScannedAt, epoch)
+	}
+}
+
+// TestTouchScanCoverage_UpdatesOnlyNamedRows verifies that TouchScanCoverage
+// only updates the explicitly named rows and leaves others unchanged.
+func TestTouchScanCoverage_UpdatesOnlyNamedRows(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	// Insert two rows via RefreshContentHashes (epoch sentinel).
+	if err := st.RefreshContentHashes(ctx, []FileState{
+		{Path: "a.go", ContentHash: "ha", LastScannedCommit: "c1"},
+		{Path: "b.go", ContentHash: "hb", LastScannedCommit: "c1"},
+	}); err != nil {
+		t.Fatalf("RefreshContentHashes: %v", err)
+	}
+
+	epoch := epochSentinelTimeParsed()
+
+	// Touch only a.go.
+	if err := st.TouchScanCoverage(ctx, []string{"a.go"}, "c1"); err != nil {
+		t.Fatalf("TouchScanCoverage: %v", err)
+	}
+
+	a, err := st.GetFileState(ctx, "a.go")
+	if err != nil {
+		t.Fatalf("GetFileState a.go: %v", err)
+	}
+	if a.LastScannedAt.Equal(epoch) {
+		t.Errorf("a.go last_scanned_at still at epoch; expected it to be updated")
+	}
+
+	b, err := st.GetFileState(ctx, "b.go")
+	if err != nil {
+		t.Fatalf("GetFileState b.go: %v", err)
+	}
+	if !b.LastScannedAt.Equal(epoch) {
+		t.Errorf("b.go last_scanned_at = %v, want epoch (not covered)", b.LastScannedAt)
+	}
+}
+
+// TestTouchScanCoverage_InsertsAbsentRow verifies that TouchScanCoverage
+// inserts a new row when the path does not exist yet.
+func TestTouchScanCoverage_InsertsAbsentRow(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	if err := st.TouchScanCoverage(ctx, []string{"brand-new.go"}, "c1"); err != nil {
+		t.Fatalf("TouchScanCoverage on absent row: %v", err)
+	}
+
+	fs, err := st.GetFileState(ctx, "brand-new.go")
+	if err != nil {
+		t.Fatalf("GetFileState: %v", err)
+	}
+
+	epoch := epochSentinelTimeParsed()
+	if fs.LastScannedAt.Equal(epoch) {
+		t.Errorf("inserted row LastScannedAt still at epoch; expected a real timestamp")
+	}
+	if fs.LastScannedCommit != "c1" {
+		t.Errorf("LastScannedCommit = %q, want c1", fs.LastScannedCommit)
+	}
+}
+
+// TestLastScannedAt_BatchRead verifies that LastScannedAt returns timestamps
+// for known rows and omits absent ones.
+func TestLastScannedAt_BatchRead(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	if err := st.RefreshContentHashes(ctx, []FileState{
+		{Path: "x.go", ContentHash: "hx", LastScannedCommit: "c1"},
+	}); err != nil {
+		t.Fatalf("RefreshContentHashes: %v", err)
+	}
+	if err := st.TouchScanCoverage(ctx, []string{"y.go"}, "c1"); err != nil {
+		t.Fatalf("TouchScanCoverage: %v", err)
+	}
+
+	got, err := st.LastScannedAt(ctx, []string{"x.go", "y.go", "absent.go"})
+	if err != nil {
+		t.Fatalf("LastScannedAt: %v", err)
+	}
+
+	if _, ok := got["x.go"]; !ok {
+		t.Error("x.go missing from LastScannedAt result")
+	}
+	if _, ok := got["y.go"]; !ok {
+		t.Error("y.go missing from LastScannedAt result")
+	}
+	if _, ok := got["absent.go"]; ok {
+		t.Error("absent.go should not be in LastScannedAt result")
+	}
+}
+
+// TestLastScannedAt_EmptyInput verifies that LastScannedAt with empty input
+// returns nil (no error).
+func TestLastScannedAt_EmptyInput(t *testing.T) {
+	st := openTemp(t)
+	got, err := st.LastScannedAt(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("LastScannedAt nil: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil for empty input, got %v", got)
+	}
+}
+
+// TestChunkStrings_LargeInput verifies that chunkStrings stays under
+// sqliteMaxVars and produces no overlapping or missing elements.
+func TestChunkStrings_LargeInput(t *testing.T) {
+	n := sqliteMaxVars*3 + 7
+	s := make([]string, n)
+	for i := range s {
+		s[i] = "file"
+	}
+	chunks := chunkStrings(s, sqliteMaxVars)
+	total := 0
+	for _, c := range chunks {
+		if len(c) > sqliteMaxVars {
+			t.Errorf("chunk size %d exceeds sqliteMaxVars %d", len(c), sqliteMaxVars)
+		}
+		total += len(c)
+	}
+	if total != n {
+		t.Errorf("chunkStrings total = %d, want %d", total, n)
 	}
 }

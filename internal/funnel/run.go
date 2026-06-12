@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
@@ -13,12 +14,25 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
+// epochSentinelParsed is the parsed form of the epoch sentinel written by
+// RefreshContentHashes for never-scanned rows. It is package-level so
+// applySweepOrder (and tests in coverage_test.go) can reference it without
+// importing the store package's internal epoch constant.
+var epochSentinelParsed = store.EpochSentinelTime()
+
 // Sweep runs the funnel over the entire current snapshot of the repository. It
 // is the manual `bugbot scan` and periodic-sweep entrypoint.
 //
-// When heat ordering is enabled (the default, controlled by
-// Options.DisableHeatOrdering), targets are sorted by churn-weighted recency
-// heat before chunking so finder budget flows to recently-churned files first.
+// Ordering: when heat ordering is enabled (the default), Sweep uses a
+// two-group anti-starvation scheme via applySweepOrder:
+//
+//   - Group 1 (never-scanned or epoch-sentinel): heat-ordered within the group.
+//   - Group 2 (previously scanned): stalest-first (ascending last_scanned_at).
+//
+// This prevents cold-tail starvation when the per-cycle token budget truncates
+// the run: files not covered in sweep N land in group 2 (or stay in group 1
+// on the next sweep), and recently-scanned files move to the back of group 2.
+//
 // Targeted scans are always alphabetical; see [Funnel.Targeted].
 func (f *Funnel) Sweep(ctx context.Context) (*Result, error) {
 	snap, err := f.snapshot(ctx)
@@ -31,13 +45,48 @@ func (f *Funnel) Sweep(ctx context.Context) (*Result, error) {
 	}
 
 	var (
-		heatOrdered bool
-		heatFiles   int
+		heatOrdered      bool
+		heatFiles        int
+		neverScanned     int
+		changedSinceScan int
 	)
+
 	if !f.opts.DisableHeatOrdering {
+		// Fingerprints are needed for ordering (hash-changed detection) AND for
+		// finding anchoring in run(). We call Fingerprints here for ordering;
+		// run() calls it again for anchoring. The duplication is an accepted
+		// trade-off: Fingerprints is content-hashing (cheap relative to LLM
+		// calls) and the two call sites serve different purposes.
+		fps, fpsErr := f.repo.Fingerprints(ctx, snap)
 		heat, heatErr := ingest.ChurnHeat(ctx, f.repo.Root(), 0)
+
+		// lastScanned is a best-effort read; fall back to pure heat if it fails.
+		var lastScanned map[string]time.Time
+		if fpsErr == nil {
+			paths := make([]string, 0, len(fps))
+			for p := range fps {
+				paths = append(paths, p)
+			}
+			lastScanned, _ = f.store.LastScannedAt(ctx, paths)
+		}
+
 		if heatErr == nil && len(heat) > 0 {
 			heatFiles = len(heat)
+		}
+
+		if fpsErr == nil && lastScanned != nil {
+			var heatReordered bool
+			neverScanned, changedSinceScan, heatReordered = applySweepOrder(targets, heat, fps, lastScanned)
+			heatOrdered = heatReordered
+			if heatReordered {
+				progress.Emit(f.opts.Progress, progress.Event{
+					Kind:  progress.KindHeatOrdered,
+					Count: heatFiles,
+					Label: heatTop5(targets, heat),
+				})
+			}
+		} else if heatErr == nil && len(heat) > 0 {
+			// Fall back: no store data, use pure heat ordering.
 			heatOrdered = applyHeatOrder(targets, heat)
 			if heatOrdered {
 				progress.Emit(f.opts.Progress, progress.Event{
@@ -49,13 +98,94 @@ func (f *Funnel) Sweep(ctx context.Context) (*Result, error) {
 		}
 	}
 
+	// Emit the sweep summary BEFORE the scan starts so renderers can show
+	// context about the upcoming run (how many files are new vs stale).
+	progress.Emit(f.opts.Progress, progress.Event{
+		Kind:    progress.KindSweepSummary,
+		Count:   len(targets),
+		Message: fmt.Sprintf("sweep: %d targets, %d never-scanned, %d changed-since-scan", len(targets), neverScanned, changedSinceScan),
+	})
+
 	result, err := f.run(ctx, store.ScanOneshot, snap, targets)
 	if err != nil {
 		return nil, err
 	}
 	result.Stats.HeatOrdered = heatOrdered
 	result.Stats.HeatFiles = heatFiles
+	result.Stats.SweepNeverScanned = neverScanned
+	result.Stats.SweepChangedSinceScan = changedSinceScan
+
+	// Record truthful scan coverage: only files actually covered (finderOK) get
+	// a fresh last_scanned_at. Best-effort: failure is logged but does not abort.
+	if len(result.CoveredFiles) > 0 {
+		if err := f.store.TouchScanCoverage(ctx, result.CoveredFiles, snap.Commit); err != nil {
+			f.note(result, fmt.Sprintf("sweep: TouchScanCoverage failed: %v", err))
+		}
+	}
+
 	return result, nil
+}
+
+// applySweepOrder reorders targets in-place using the anti-starvation two-group
+// scheme:
+//
+//   - Group 1: files absent from lastScanned OR whose lastScanned timestamp
+//     equals epochSentinelParsed (i.e. never actually scanned). Group 1 is
+//     heat-ordered within the group.
+//   - Group 2: all other files (previously scanned). Group 2 is sorted by
+//     last_scanned_at ascending (stalest first) so the run always picks up the
+//     files that were scanned longest ago.
+//
+// Group 1 precedes Group 2 in the output so new files are always prioritised.
+//
+// Returns (neverScanned, changedSinceScan, heatActuallyReordered):
+//   - neverScanned: count of files in group 1.
+//   - changedSinceScan: reserved (always 0 in this implementation).
+//   - heatActuallyReordered: true if the heat map produced a non-trivial
+//     reordering within group 1.
+func applySweepOrder(targets []string, heat map[string]float64, fps map[string]string, lastScanned map[string]time.Time) (neverScanned, changedSinceScan int, heatActuallyReordered bool) {
+	var group1, group2 []string
+	for _, t := range targets {
+		ts, ok := lastScanned[t]
+		if !ok || ts.Equal(epochSentinelParsed) {
+			group1 = append(group1, t)
+		} else {
+			group2 = append(group2, t)
+		}
+	}
+
+	// Group 1: heat-ordered (highest heat first; alphabetical tiebreak).
+	g1Before := make([]string, len(group1))
+	copy(g1Before, group1)
+	sort.SliceStable(group1, func(i, j int) bool {
+		hi, hj := heat[group1[i]], heat[group1[j]]
+		if hi != hj {
+			return hi > hj
+		}
+		return group1[i] < group1[j]
+	})
+	for i := range group1 {
+		if group1[i] != g1Before[i] {
+			heatActuallyReordered = true
+			break
+		}
+	}
+
+	// Group 2: stalest first (ascending last_scanned_at).
+	sort.SliceStable(group2, func(i, j int) bool {
+		ti, tj := lastScanned[group2[i]], lastScanned[group2[j]]
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		return group2[i] < group2[j]
+	})
+
+	// Write the two groups back into targets in-place.
+	copy(targets, group1)
+	copy(targets[len(group1):], group2)
+
+	neverScanned = len(group1)
+	return neverScanned, 0, heatActuallyReordered
 }
 
 // applyHeatOrder sorts targets in-place by heat score descending, with

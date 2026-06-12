@@ -78,6 +78,12 @@ const (
 	// reproduction-promotion outcomes.
 	KindReverify Kind = "reverify"
 	KindPromote  Kind = "promote"
+	// KindSweepSummary is emitted once per Sweep call, before the scan starts,
+	// with a summary of the sweep's target set: total file count, never-scanned
+	// count, and changed-since-scan count. Count carries the total targets;
+	// Message carries the human-readable summary. Renderers can use this to show
+	// context about the upcoming sweep without waiting for it to finish.
+	KindSweepSummary Kind = "sweep_summary"
 )
 
 // Stage names the pipeline stage an event belongs to. Kept as plain strings so
