@@ -108,7 +108,7 @@ func TestRefreshContentHashes_PreservesLastScannedAt(t *testing.T) {
 	st := openTemp(t)
 
 	// First: TouchScanCoverage sets a truthful scan time.
-	if err := st.TouchScanCoverage(ctx, []string{"a.go"}, "c1"); err != nil {
+	if err := st.TouchScanCoverage(ctx, []string{"a.go"}, "c1", nil); err != nil {
 		t.Fatalf("TouchScanCoverage: %v", err)
 	}
 	before, err := st.GetFileState(ctx, "a.go")
@@ -176,7 +176,7 @@ func TestTouchScanCoverage_UpdatesOnlyNamedRows(t *testing.T) {
 	epoch := epochSentinelTimeParsed()
 
 	// Touch only a.go.
-	if err := st.TouchScanCoverage(ctx, []string{"a.go"}, "c1"); err != nil {
+	if err := st.TouchScanCoverage(ctx, []string{"a.go"}, "c1", nil); err != nil {
 		t.Fatalf("TouchScanCoverage: %v", err)
 	}
 
@@ -197,13 +197,65 @@ func TestTouchScanCoverage_UpdatesOnlyNamedRows(t *testing.T) {
 	}
 }
 
+// TestTouchScanCoverage_RecordsAndPreservesHashes verifies the content-hash
+// semantics: a supplied hash is written (insert and update), and a missing /
+// empty hash never clobbers an existing stored hash — so a failed fingerprint
+// computation degrades to "treated as changed next sweep" rather than
+// corrupting good state.
+func TestTouchScanCoverage_RecordsAndPreservesHashes(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	// Insert with a hash: written.
+	if err := st.TouchScanCoverage(ctx, []string{"a.go"}, "c1", map[string]string{"a.go": "h1"}); err != nil {
+		t.Fatalf("TouchScanCoverage insert: %v", err)
+	}
+	a, err := st.GetFileState(ctx, "a.go")
+	if err != nil {
+		t.Fatalf("GetFileState: %v", err)
+	}
+	if a.ContentHash != "h1" {
+		t.Errorf("ContentHash after insert = %q, want h1", a.ContentHash)
+	}
+
+	// Update with nil hashes: timestamp advances, hash preserved.
+	if err := st.TouchScanCoverage(ctx, []string{"a.go"}, "c2", nil); err != nil {
+		t.Fatalf("TouchScanCoverage nil-hash update: %v", err)
+	}
+	a2, err := st.GetFileState(ctx, "a.go")
+	if err != nil {
+		t.Fatalf("GetFileState: %v", err)
+	}
+	if a2.ContentHash != "h1" {
+		t.Errorf("ContentHash after nil-hash touch = %q, want h1 (must not clobber)", a2.ContentHash)
+	}
+	if !a2.LastScannedAt.After(a.LastScannedAt) && !a2.LastScannedAt.Equal(a.LastScannedAt) {
+		t.Errorf("last_scanned_at went backwards: %v -> %v", a.LastScannedAt, a2.LastScannedAt)
+	}
+	if a2.LastScannedCommit != "c2" {
+		t.Errorf("LastScannedCommit = %q, want c2", a2.LastScannedCommit)
+	}
+
+	// Update with a new hash: overwritten.
+	if err := st.TouchScanCoverage(ctx, []string{"a.go"}, "c3", map[string]string{"a.go": "h2"}); err != nil {
+		t.Fatalf("TouchScanCoverage new-hash update: %v", err)
+	}
+	a3, err := st.GetFileState(ctx, "a.go")
+	if err != nil {
+		t.Fatalf("GetFileState: %v", err)
+	}
+	if a3.ContentHash != "h2" {
+		t.Errorf("ContentHash after new-hash touch = %q, want h2", a3.ContentHash)
+	}
+}
+
 // TestTouchScanCoverage_InsertsAbsentRow verifies that TouchScanCoverage
 // inserts a new row when the path does not exist yet.
 func TestTouchScanCoverage_InsertsAbsentRow(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
-	if err := st.TouchScanCoverage(ctx, []string{"brand-new.go"}, "c1"); err != nil {
+	if err := st.TouchScanCoverage(ctx, []string{"brand-new.go"}, "c1", nil); err != nil {
 		t.Fatalf("TouchScanCoverage on absent row: %v", err)
 	}
 
@@ -221,9 +273,9 @@ func TestTouchScanCoverage_InsertsAbsentRow(t *testing.T) {
 	}
 }
 
-// TestLastScannedAt_BatchRead verifies that LastScannedAt returns timestamps
+// TestScanWatermarks_BatchRead verifies that LastScannedAt returns timestamps
 // for known rows and omits absent ones.
-func TestLastScannedAt_BatchRead(t *testing.T) {
+func TestScanWatermarks_BatchRead(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
@@ -232,33 +284,33 @@ func TestLastScannedAt_BatchRead(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RefreshContentHashes: %v", err)
 	}
-	if err := st.TouchScanCoverage(ctx, []string{"y.go"}, "c1"); err != nil {
+	if err := st.TouchScanCoverage(ctx, []string{"y.go"}, "c1", nil); err != nil {
 		t.Fatalf("TouchScanCoverage: %v", err)
 	}
 
-	got, err := st.LastScannedAt(ctx, []string{"x.go", "y.go", "absent.go"})
+	got, err := st.ScanWatermarks(ctx, []string{"x.go", "y.go", "absent.go"})
 	if err != nil {
-		t.Fatalf("LastScannedAt: %v", err)
+		t.Fatalf("ScanWatermarks: %v", err)
 	}
 
 	if _, ok := got["x.go"]; !ok {
-		t.Error("x.go missing from LastScannedAt result")
+		t.Error("x.go missing from ScanWatermarks result")
 	}
 	if _, ok := got["y.go"]; !ok {
-		t.Error("y.go missing from LastScannedAt result")
+		t.Error("y.go missing from ScanWatermarks result")
 	}
 	if _, ok := got["absent.go"]; ok {
-		t.Error("absent.go should not be in LastScannedAt result")
+		t.Error("absent.go should not be in ScanWatermarks result")
 	}
 }
 
-// TestLastScannedAt_EmptyInput verifies that LastScannedAt with empty input
+// TestScanWatermarks_EmptyInput verifies that ScanWatermarks with empty input
 // returns nil (no error).
-func TestLastScannedAt_EmptyInput(t *testing.T) {
+func TestScanWatermarks_EmptyInput(t *testing.T) {
 	st := openTemp(t)
-	got, err := st.LastScannedAt(context.Background(), nil)
+	got, err := st.ScanWatermarks(context.Background(), nil)
 	if err != nil {
-		t.Fatalf("LastScannedAt nil: %v", err)
+		t.Fatalf("ScanWatermarks nil: %v", err)
 	}
 	if got != nil {
 		t.Fatalf("expected nil for empty input, got %v", got)

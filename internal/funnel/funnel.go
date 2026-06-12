@@ -545,9 +545,9 @@ type Stats struct {
 	// SweepNeverScanned is the number of files in the sweep's group 1 (never
 	// scanned or at epoch sentinel). Zero when heat ordering is disabled.
 	SweepNeverScanned int `json:"sweep_never_scanned,omitempty"`
-	// SweepChangedSinceScan is the number of files whose content hash differs
-	// from what was recorded at their last scan. Reserved for future use;
-	// currently always 0.
+	// SweepChangedSinceScan is the number of files admitted to the sweep's
+	// group 1 because their current fingerprint differs from the content hash
+	// recorded at their last scan. Zero when heat ordering is disabled.
 	SweepChangedSinceScan int `json:"sweep_changed_since_scan,omitempty"`
 	// CoveredFiles is the count of files that were actually covered (i.e. at
 	// least one finderOK unit ran against them) in this run.

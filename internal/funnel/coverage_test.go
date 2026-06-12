@@ -2,10 +2,14 @@ package funnel
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -121,19 +125,24 @@ func TestHypothesize_BudgetSkippedNotCovered(t *testing.T) {
 // Sweep ordering: anti-starvation two-group scheme
 // ---------------------------------------------------------------------------
 
+// wm builds a store.Watermark for sweep-ordering tests.
+func wm(ts time.Time, hash string) store.Watermark {
+	return store.Watermark{LastScannedAt: ts, ContentHash: hash}
+}
+
 // TestApplySweepOrder_NeverScannedLeadsGroup1 verifies that never-scanned
-// files (no row in lastScanned) are placed in group 1 before clean files.
+// files (no row in watermarks) are placed in group 1 before clean files.
 func TestApplySweepOrder_NeverScannedLeadsGroup1(t *testing.T) {
-	// Simulate: clean.go was scanned recently; bug.go was never scanned.
+	// Simulate: clean.go was scanned recently (unchanged); bug.go never scanned.
 	now := time.Now().UTC()
-	lastScanned := map[string]time.Time{
-		"clean.go": now.Add(-1 * time.Hour),
+	watermarks := map[string]store.Watermark{
+		"clean.go": wm(now.Add(-1*time.Hour), "h2"),
 	}
 	fps := map[string]string{"bug.go": "h1", "clean.go": "h2"}
 	heat := map[string]float64{}
 
 	targets := []string{"clean.go", "bug.go"}
-	neverScanned, changedSinceScan, _ := applySweepOrder(targets, heat, fps, lastScanned)
+	neverScanned, changedSinceScan, _ := applySweepOrder(targets, heat, fps, watermarks)
 
 	if neverScanned != 1 {
 		t.Errorf("neverScanned = %d, want 1", neverScanned)
@@ -156,16 +165,16 @@ func TestApplySweepOrder_EpochSentinelInGroup1(t *testing.T) {
 	// new.go has the epoch sentinel (written by RefreshContentHashes for new rows).
 	epoch := epochSentinelParsed
 	now := time.Now().UTC()
-	lastScanned := map[string]time.Time{
-		"new.go":   epoch,
-		"old.go":   now.Add(-24 * time.Hour),
-		"older.go": now.Add(-48 * time.Hour),
+	watermarks := map[string]store.Watermark{
+		"new.go":   wm(epoch, "h1"),
+		"old.go":   wm(now.Add(-24*time.Hour), "h2"),
+		"older.go": wm(now.Add(-48*time.Hour), "h3"),
 	}
 	fps := map[string]string{"new.go": "h1", "old.go": "h2", "older.go": "h3"}
 	heat := map[string]float64{}
 
 	targets := []string{"older.go", "old.go", "new.go"}
-	neverScanned, _, _ := applySweepOrder(targets, heat, fps, lastScanned)
+	neverScanned, _, _ := applySweepOrder(targets, heat, fps, watermarks)
 
 	if neverScanned != 1 {
 		t.Errorf("neverScanned = %d, want 1 (epoch-sentinel counts as never-scanned)", neverScanned)
@@ -187,16 +196,16 @@ func TestApplySweepOrder_EpochSentinelInGroup1(t *testing.T) {
 // files are sorted by last_scanned_at ascending (stalest first).
 func TestApplySweepOrder_Group2StalestFirst(t *testing.T) {
 	now := time.Now().UTC()
-	lastScanned := map[string]time.Time{
-		"a.go": now.Add(-1 * time.Hour),  // least stale
-		"b.go": now.Add(-3 * time.Hour),  // middle
-		"c.go": now.Add(-12 * time.Hour), // most stale
+	watermarks := map[string]store.Watermark{
+		"a.go": wm(now.Add(-1*time.Hour), "ha"),  // least stale
+		"b.go": wm(now.Add(-3*time.Hour), "hb"),  // middle
+		"c.go": wm(now.Add(-12*time.Hour), "hc"), // most stale
 	}
 	fps := map[string]string{"a.go": "ha", "b.go": "hb", "c.go": "hc"}
 	heat := map[string]float64{}
 
 	targets := []string{"a.go", "b.go", "c.go"}
-	neverScanned, _, _ := applySweepOrder(targets, heat, fps, lastScanned)
+	neverScanned, _, _ := applySweepOrder(targets, heat, fps, watermarks)
 
 	if neverScanned != 0 {
 		t.Errorf("neverScanned = %d, want 0 (all files scanned)", neverScanned)
@@ -214,7 +223,7 @@ func TestApplySweepOrder_Group2StalestFirst(t *testing.T) {
 // files are heat-ordered within the group.
 func TestApplySweepOrder_Group1HeatOrdered(t *testing.T) {
 	// All files are never-scanned; heat should order them.
-	lastScanned := map[string]time.Time{} // none scanned
+	watermarks := map[string]store.Watermark{} // none scanned
 	fps := map[string]string{"a.go": "ha", "b.go": "hb", "c.go": "hc"}
 	heat := map[string]float64{
 		"c.go": 3.0, // hottest
@@ -223,7 +232,7 @@ func TestApplySweepOrder_Group1HeatOrdered(t *testing.T) {
 	}
 
 	targets := []string{"a.go", "b.go", "c.go"}
-	neverScanned, _, heatReordered := applySweepOrder(targets, heat, fps, lastScanned)
+	neverScanned, _, heatReordered := applySweepOrder(targets, heat, fps, watermarks)
 
 	if neverScanned != 3 {
 		t.Errorf("neverScanned = %d, want 3", neverScanned)
@@ -249,14 +258,14 @@ func TestApplySweepOrder_Group1HeatOrdered(t *testing.T) {
 func TestApplySweepOrder_MissingFileIsNeverScanned(t *testing.T) {
 	now := time.Now().UTC()
 	// Only "a.go" is in the store; "b.go" is absent (new file).
-	lastScanned := map[string]time.Time{
-		"a.go": now.Add(-1 * time.Hour),
+	watermarks := map[string]store.Watermark{
+		"a.go": wm(now.Add(-1*time.Hour), "ha"),
 	}
 	fps := map[string]string{"a.go": "ha", "b.go": "hb"}
 	heat := map[string]float64{}
 
 	targets := []string{"a.go", "b.go"}
-	neverScanned, _, _ := applySweepOrder(targets, heat, fps, lastScanned)
+	neverScanned, _, _ := applySweepOrder(targets, heat, fps, watermarks)
 
 	if neverScanned != 1 {
 		t.Errorf("neverScanned = %d, want 1 (b.go missing from store)", neverScanned)
@@ -267,111 +276,187 @@ func TestApplySweepOrder_MissingFileIsNeverScanned(t *testing.T) {
 	}
 }
 
+// TestApplySweepOrder_HashChangedJoinsGroup1 verifies the third group-1
+// condition: a previously-scanned file whose current fingerprint differs from
+// the stored content hash is prioritised into group 1 (ahead of all clean
+// group-2 files) and counted in changedSinceScan.
+func TestApplySweepOrder_HashChangedJoinsGroup1(t *testing.T) {
+	now := time.Now().UTC()
+	watermarks := map[string]store.Watermark{
+		"changed.go": wm(now.Add(-1*time.Hour), "old-hash"), // scanned, content changed
+		"stale.go":   wm(now.Add(-72*time.Hour), "hs"),      // scanned long ago, unchanged
+		"fresh.go":   wm(now.Add(-1*time.Minute), "hf"),     // scanned just now, unchanged
+		"touched.go": wm(now.Add(-1*time.Hour), ""),         // covered but hash never recorded
+	}
+	fps := map[string]string{
+		"changed.go": "new-hash",
+		"stale.go":   "hs",
+		"fresh.go":   "hf",
+		"touched.go": "ht",
+	}
+	heat := map[string]float64{}
+
+	targets := []string{"fresh.go", "stale.go", "changed.go", "touched.go"}
+	neverScanned, changedSinceScan, _ := applySweepOrder(targets, heat, fps, watermarks)
+
+	if neverScanned != 0 {
+		t.Errorf("neverScanned = %d, want 0 (all files have non-epoch rows)", neverScanned)
+	}
+	// changed.go (hash mismatch) and touched.go (empty stored hash ≠ current)
+	// both count as changed-since-scan.
+	if changedSinceScan != 2 {
+		t.Errorf("changedSinceScan = %d, want 2 (changed.go + touched.go)", changedSinceScan)
+	}
+	// Group 1 (alphabetical at equal zero heat): changed.go, touched.go.
+	// Group 2 stalest-first: stale.go, fresh.go.
+	want := []string{"changed.go", "touched.go", "stale.go", "fresh.go"}
+	for i, w := range want {
+		if targets[i] != w {
+			t.Errorf("targets[%d] = %q, want %q (full order %v)", i, targets[i], w, targets)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Acceptance test: rotation under budget truncation
 // ---------------------------------------------------------------------------
 
-// TestSweep_BudgetTruncation_RotatesFilesAcrossSweeps is the acceptance test for
-// the anti-starvation fix. It exercises repeated budget-truncated sweeps over an
-// unchanged file set and verifies that the UNION of covered files strictly grows
-// each sweep until it equals the full file set.
+// TestSweep_PartialCoverage_RotatesToFullCoverage is the acceptance test for
+// the anti-starvation fix (bead bugbot-pav acceptance #1): repeated
+// partial-coverage sweeps over an unchanged 5-file set must rotate so the
+// union of covered files grows to the full set, with each sweep's coverage
+// determined by the two-group ordering.
 //
-// This demonstrates the rotation property: files scanned in sweep N move to the
-// back of group 2 (they have a fresh last_scanned_at), so sweep N+1 picks up the
-// NEXT batch of stale files rather than re-scanning the same hot head.
-func TestSweep_BudgetTruncation_RotatesFilesAcrossSweeps(t *testing.T) {
+// Determinism design — why this test cannot flake AND cannot pass vacuously:
+//
+//   - Partial coverage per sweep is simulated by parse failures, not budget
+//     stops: the scripted finder returns valid JSON ONLY for the one chunk we
+//     expect at the head of the sweep's target order, and unparseable prose
+//     for every other chunk (parse-failed units do not cover their files —
+//     same coverage semantics as budget-skipped units, without the
+//     goroutine-scheduling nondeterminism of a shared budget gate).
+//   - Chunk COMPOSITION is the witness for ordering. With 5 files and
+//     ChunkSize=2, sweep 2's expected chunk {e.go, c.go} straddles the
+//     group-1/group-2 boundary: it exists IF AND ONly IF group 1 (uncovered
+//     {a,b,e}, alphabetical at equal heat) precedes group 2 (covered {c,d}).
+//     Under broken ordering (e.g. plain alphabetical) the chunks are
+//     {a,b},{c,d},{e} — no task matches the {e,c} route, nothing is covered,
+//     and the union assertion fails. A chunk-content route is position-blind,
+//     so an even split could pass under broken ordering; the odd count is
+//     what makes composition order-sensitive.
+//   - SweepNeverScanned assertions independently catch a broken coverage
+//     cursor (TouchScanCoverage regressions) even where chunk composition
+//     happens to coincide.
+func TestSweep_PartialCoverage_RotatesToFullCoverage(t *testing.T) {
 	ctx := context.Background()
-	st, repo := openFixture(t)
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
 
-	// Use a budget tight enough that only a subset of lenses run per sweep. Each
-	// completion costs 150 tokens (100 in + 50 out). With budget=300, two finders
-	// can run before the hard stop: the first two lenses in priority order.
-	// With the fixture's 2 files and many lenses, each lens gets one chunk with
-	// both files. So each sweep covers the files for 1-2 lenses before stopping.
-	//
-	// We use a single lens to keep coverage deterministic: one sweep = one chunk
-	// = both files covered. We restrict to exactly 1 lens for full coverage in 1
-	// sweep.
-	//
-	// For the rotation test we need MORE files than fit in one sweep. To simulate
-	// this with the real fixture (2 files, 1 chunk), we instead verify the pattern
-	// at the store level: after sweep 1 covers files, sweep 2's group 2 (clean)
-	// puts those files at the back. We do this by inspecting Stats and CoveredFiles.
-	//
-	// Practical approach: use all builtin lenses with a budget that covers only
-	// half the lenses, verify that sweep 1 and sweep 2 together cover both halves.
-	nLenses := len(BuiltinLenses()) - 1 // exclude diff-intent (no chunks on sweeps)
-	if nLenses < 2 {
-		t.Skip("need at least 2 taxonomy lenses for rotation test")
+	// Five same-language files committed together: equal churn heat, so group-1
+	// ordering is the alphabetical tiebreak — fully deterministic.
+	files := []string{"a.go", "b.go", "c.go", "d.go", "e.go"}
+	dir := t.TempDir()
+	for i, f := range files {
+		content := "package fix\n\nfunc F" + string(rune('A'+i)) + "() int { return " + string(rune('0'+i)) + " }\n"
+		if err := os.WriteFile(filepath.Join(dir, f), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitSeed(t, dir)
+	repo, err := ingest.Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// Budget: 150 tokens per completion; allow nLenses/2 completions per sweep.
-	// Use integer division; each lens gets one chunk (2 files in fixture).
-	halfBudget := int64(150 * (nLenses/2 + 1))
-
-	finder := newScriptedClient()
-	finder.fallback = emptyCandidates // no candidates, so we skip verify
-	verifier := newScriptedClient()
-
-	makeF := func() *Funnel {
+	// sweepCovering runs one sweep whose finder parses ONLY the chunk whose
+	// task names exactly the two seed files in wantChunk (in order), asserting
+	// the sweep covered exactly those files and saw wantNeverScanned group-1
+	// never-scanned files at ordering time.
+	sweepCovering := func(label string, wantChunk []string, wantNeverScanned int) {
 		t.Helper()
-		f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-			TokenBudget:           halfBudget,
-			CacheReadBudgetWeight: 1.0, // raw accounting for deterministic budget
-			MaxParallel:           1,   // serialize so budget accrues deterministically
+		finder := newScriptedClient()
+		finder.fallback = "prose that never parses as JSON"
+		routeSub := "- " + wantChunk[0] + "\n  - " + wantChunk[1]
+		finder.onTaskContains(routeSub, emptyCandidates)
+		f, err := New(RoleClients{Finder: finder, Verifier: newScriptedClient()}, st, repo, Options{
+			Lenses:      []string{"nil-safety/error-handling"},
+			ChunkSize:   2,
+			MaxParallel: 1,
 		})
 		if err != nil {
-			t.Fatalf("New: %v", err)
+			t.Fatalf("%s: New: %v", label, err)
 		}
-		return f
+		res, err := f.Sweep(ctx)
+		if err != nil {
+			t.Fatalf("%s: Sweep: %v", label, err)
+		}
+		if res.Stats.SweepNeverScanned != wantNeverScanned {
+			t.Errorf("%s: SweepNeverScanned = %d, want %d (coverage cursor not advancing)",
+				label, res.Stats.SweepNeverScanned, wantNeverScanned)
+		}
+		got := append([]string(nil), res.CoveredFiles...)
+		sort.Strings(got)
+		want := append([]string(nil), wantChunk...)
+		sort.Strings(want)
+		if len(got) != len(want) {
+			t.Fatalf("%s: CoveredFiles = %v, want %v — the expected head chunk was not formed, so the two-group ordering is broken",
+				label, res.CoveredFiles, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%s: CoveredFiles = %v, want %v", label, res.CoveredFiles, want)
+			}
+		}
 	}
 
-	// Sweep 1: covers some files (the first batch within budget).
-	f1 := makeF()
-	res1, err := f1.Sweep(ctx)
+	// Sweep 1: nothing scanned → group 1 = all five, alphabetical → chunks
+	// {a,b},{c,d},{e}. Cover {c,d} (deliberately NOT the head chunk, so later
+	// staleness order differs from alphabetical order).
+	sweepCovering("sweep1", []string{"c.go", "d.go"}, 5)
+
+	// Sweep 2: group 1 = uncovered {a,b,e} (alphabetical), group 2 = {c,d} →
+	// targets a,b,e,c,d → chunks {a,b},{e,c},{d}. The {e,c} chunk exists only
+	// under correct two-group ordering. Cover it.
+	sweepCovering("sweep2", []string{"e.go", "c.go"}, 3)
+
+	// Sweep 3: group 1 = {a,b}; group 2 stalest-first = d (sweep 1), then c, e
+	// (sweep 2, alphabetical at equal timestamps) → targets a,b,d,c,e → chunks
+	// {a,b},{d,c},{e}. Cover {a,b}: the union now spans all five files.
+	sweepCovering("sweep3", []string{"a.go", "b.go"}, 2)
+
+	// Every file now has a real (non-epoch) scan timestamp: a fourth sweep sees
+	// an empty group 1 — the rotation converged to full coverage.
+	wms, err := st.ScanWatermarks(ctx, files)
 	if err != nil {
-		t.Fatalf("Sweep 1: %v", err)
+		t.Fatalf("ScanWatermarks: %v", err)
 	}
-	// With a tight budget, Stopped or Degraded.
-	if !res1.Degraded && !res1.Stopped {
-		t.Logf("Sweep 1: budget not hit (budget=%d, tokens used in=%d out=%d); rotation property is trivially satisfied", halfBudget, res1.Stats.InputTokens, res1.Stats.OutputTokens)
-		return // can't test rotation if full coverage happens in one sweep
+	for _, f := range files {
+		w, ok := wms[f]
+		if !ok || w.LastScannedAt.Equal(epochSentinelParsed) {
+			t.Errorf("%s: no truthful scan timestamp after 3 sweeps (union did not reach full set)", f)
+		}
 	}
-	covered1 := make(map[string]bool)
-	for _, f := range res1.CoveredFiles {
-		covered1[f] = true
-	}
-	t.Logf("Sweep 1: covered=%v stopped=%v degraded=%v", res1.CoveredFiles, res1.Stopped, res1.Degraded)
+}
 
-	// Sweep 2: with anti-starvation ordering, files covered in sweep 1 are in
-	// group 2 at the back (fresh last_scanned_at). The uncovered files from sweep
-	// 1 should be in group 1 or at the front of group 2.
-	f2 := makeF()
-	res2, err := f2.Sweep(ctx)
-	if err != nil {
-		t.Fatalf("Sweep 2: %v", err)
+// gitSeed initialises dir as a git repo with one commit containing all files.
+func gitSeed(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
 	}
-	covered2 := make(map[string]bool)
-	for _, f := range res2.CoveredFiles {
-		covered2[f] = true
-	}
-	t.Logf("Sweep 2: covered=%v neverScanned=%d", res2.CoveredFiles, res2.Stats.SweepNeverScanned)
-
-	// Union of covered files after 2 sweeps must be >= covered after sweep 1.
-	// (It may equal covered1 if the budget only covers the same files; but the
-	// key property is that sweep 2 covered at least something from the fixture.)
-	if len(res2.CoveredFiles) == 0 && len(covered1) > 0 {
-		// If sweep 2 covered nothing but sweep 1 covered something, something went
-		// wrong with the rotation.
-		t.Error("Sweep 2 covered no files; expected rotation to pick up remaining files or re-cover covered ones")
-	}
-
-	// The anti-starvation stat: after sweep 1, the covered files moved to group 2.
-	// So sweep 2 should see fewer never-scanned files than sweep 1.
-	// Sweep 1 stats.SweepNeverScanned should be >= sweep 2 stats.SweepNeverScanned.
-	if res1.Stats.SweepNeverScanned < res2.Stats.SweepNeverScanned {
-		t.Errorf("SweepNeverScanned increased: sweep1=%d sweep2=%d; after coverage sweep 1, sweep 2 should see fewer never-scanned files",
-			res1.Stats.SweepNeverScanned, res2.Stats.SweepNeverScanned)
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"commit", "-q", "-m", "seed"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
 	}
 }
 
@@ -387,7 +472,7 @@ func TestRefreshWatermarks_PreservesLastScannedAt(t *testing.T) {
 
 	// Open a store and set a truthful scan timestamp via TouchScanCoverage.
 	st := openStoreForFunnelTest(t)
-	if err := st.TouchScanCoverage(ctx, []string{"a.go"}, "c1"); err != nil {
+	if err := st.TouchScanCoverage(ctx, []string{"a.go"}, "c1", nil); err != nil {
 		t.Fatalf("TouchScanCoverage: %v", err)
 	}
 	beforeFS, err := st.GetFileState(ctx, "a.go")

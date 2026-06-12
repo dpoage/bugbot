@@ -11,7 +11,15 @@ import (
 // RefreshContentHashes for rows that have never been scanned. It is
 // intentionally at the Unix epoch (1970-01-01T00:00:00Z) so it sorts before
 // any real scan timestamp and applySweepOrder can identify "never scanned"
-// rows as group 1 without a separate NULL check.
+// rows as group 1 without a separate NULL check. This literal happens to be
+// exactly what nowUTC().Format(timeLayout) would produce for the epoch
+// (RFC3339Nano drops a zero fractional part), so the column holds a single
+// consistent format.
+//
+// CAUTION for future queries: RFC3339Nano values do NOT sort consistently as
+// raw strings across the second boundary ("...:17Z" > "...:17.123Z" because
+// 'Z' > '.'). All ordering on last_scanned_at must parse and compare
+// time.Time (as applySweepOrder does) — never SQL ORDER BY on the raw column.
 const epochSentinel = "1970-01-01T00:00:00Z"
 
 // epochSentinelTime is the parsed form of epochSentinel.
@@ -150,14 +158,22 @@ func (s *Store) RefreshContentHashes(ctx context.Context, states []FileState) er
 }
 
 // TouchScanCoverage records that the given files were actually covered by a
-// completed scan run. It upserts file_state rows with last_scanned_at = now
-// and last_scanned_commit = commit, inserting new rows (with a zero content
-// hash) if the path does not yet exist. Only call this for files whose finder
-// unit completed with finderOK status.
+// completed scan run. It upserts file_state rows with last_scanned_at = now,
+// last_scanned_commit = commit, and the file's content hash at coverage time
+// (from hashes; missing entries write/keep an empty hash). Only call this for
+// files whose finder unit completed with finderOK status.
 //
-// paths must not be empty. Content hash is intentionally left empty for
-// insert-only rows — RefreshContentHashes will fill it in on the next sweep.
-func (s *Store) TouchScanCoverage(ctx context.Context, paths []string, commit string) error {
+// Recording the hash here — not just in the daemon's RefreshContentHashes —
+// matters: CLI-only sweeps (`bugbot scan`) never run the daemon's watermark
+// refresh, and the sweep ordering treats a stored-hash mismatch as "changed,
+// re-scan first" (group 1). If coverage left the hash empty, every CLI sweep
+// would classify previously-covered files as changed forever and the
+// anti-starvation rotation would never form a group 2.
+//
+// An empty hash for a path never clobbers an existing stored hash (the CASE
+// below), so a failed fingerprint computation degrades to "treated as
+// changed next sweep" rather than corrupting good state.
+func (s *Store) TouchScanCoverage(ctx context.Context, paths []string, commit string, hashes map[string]string) error {
 	if len(paths) == 0 {
 		return nil
 	}
@@ -169,8 +185,9 @@ func (s *Store) TouchScanCoverage(ctx context.Context, paths []string, commit st
 
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO file_state (path, content_hash, last_scanned_commit, last_scanned_at)
-		VALUES (?, '', ?, ?)
+		VALUES (?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
+		  content_hash = CASE WHEN excluded.content_hash != '' THEN excluded.content_hash ELSE file_state.content_hash END,
 		  last_scanned_commit = excluded.last_scanned_commit,
 		  last_scanned_at = excluded.last_scanned_at`)
 	if err != nil {
@@ -180,34 +197,44 @@ func (s *Store) TouchScanCoverage(ctx context.Context, paths []string, commit st
 
 	now := nowUTC().Format(timeLayout)
 	for _, p := range paths {
-		if _, err := stmt.ExecContext(ctx, p, commit, now); err != nil {
+		if _, err := stmt.ExecContext(ctx, p, hashes[p], commit, now); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-// LastScannedAt returns a map of path → last_scanned_at for every path in
-// paths that has a row in file_state. Paths not in the store are absent from
-// the result (callers treat absence as "never scanned"). The query is chunked
-// to stay under SQLite's sqliteMaxVars host-parameter limit.
-func (s *Store) LastScannedAt(ctx context.Context, paths []string) (map[string]time.Time, error) {
+// Watermark is the sweep-ordering view of a file_state row: when the file was
+// last actually scanned and the content hash recorded at that time. The sweep
+// ordering uses the pair to classify files: absent row or epoch timestamp =
+// never scanned; stored hash differing from the current fingerprint = changed
+// since last scan (both group 1).
+type Watermark struct {
+	LastScannedAt time.Time
+	ContentHash   string
+}
+
+// ScanWatermarks returns a map of path → Watermark for every path in paths
+// that has a row in file_state. Paths not in the store are absent from the
+// result (callers treat absence as "never scanned"). The query is chunked to
+// stay under SQLite's sqliteMaxVars host-parameter limit.
+func (s *Store) ScanWatermarks(ctx context.Context, paths []string) (map[string]Watermark, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
-	result := make(map[string]time.Time, len(paths))
+	result := make(map[string]Watermark, len(paths))
 	for _, chunk := range chunkStrings(paths, sqliteMaxVars) {
-		if err := s.lastScannedAtChunk(ctx, chunk, result); err != nil {
+		if err := s.scanWatermarksChunk(ctx, chunk, result); err != nil {
 			return nil, err
 		}
 	}
 	return result, nil
 }
 
-func (s *Store) lastScannedAtChunk(ctx context.Context, paths []string, out map[string]time.Time) error {
+func (s *Store) scanWatermarksChunk(ctx context.Context, paths []string, out map[string]Watermark) error {
 	placeholders := strings.Repeat("?,", len(paths))
 	placeholders = placeholders[:len(placeholders)-1] // trim trailing comma
-	q := `SELECT path, last_scanned_at FROM file_state WHERE path IN (` + placeholders + `)`
+	q := `SELECT path, content_hash, last_scanned_at FROM file_state WHERE path IN (` + placeholders + `)`
 	args := make([]interface{}, len(paths))
 	for i, p := range paths {
 		args[i] = p
@@ -218,15 +245,15 @@ func (s *Store) lastScannedAtChunk(ctx context.Context, paths []string, out map[
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
-		var p, ts string
-		if err := rows.Scan(&p, &ts); err != nil {
+		var p, hash, ts string
+		if err := rows.Scan(&p, &hash, &ts); err != nil {
 			return err
 		}
 		t, err := parseTime(ts)
 		if err != nil {
 			return err
 		}
-		out[p] = t
+		out[p] = Watermark{LastScannedAt: t, ContentHash: hash}
 	}
 	return rows.Err()
 }
