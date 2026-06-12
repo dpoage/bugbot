@@ -75,7 +75,7 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 	sem := make(chan struct{}, f.opts.MaxParallel)
 	var wg sync.WaitGroup
 
-	for _, c := range candidates {
+	for candIdx, c := range candidates {
 		mu.Lock()
 		stop := firstErr != nil
 		mu.Unlock()
@@ -85,6 +85,7 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 
 		wg.Add(1)
 		c := c
+		candIdx := candIdx
 		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
@@ -102,6 +103,9 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 				msg := fmt.Sprintf("hard budget reached: verification skipped for %q (%s:%d) — kept as T3 suspected", c.Title, c.File, c.Line)
 				f.note(result, msg)
 				progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
+				// Record orphaned_budget row (zero tokens, empty started/finished). Best-effort.
+				f.recordVerifierUnit(ctx, result.ScanRunID, c.Lens, c.File, candIdx,
+					time.Time{}, time.Time{}, 0, "orphaned_budget", nil, nil, false, false, result)
 				return
 			}
 			nRefuters := f.opts.Refuters
@@ -128,7 +132,7 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 			}
 
 			sink := f.opts.Progress
-			start := time.Now()
+			startedAt := time.Now()
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindAgentStarted, Role: progress.RoleVerifier, Label: c.Title,
 			})
@@ -165,9 +169,10 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 				}
 			}
 
+			finishedAt := time.Now()
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindAgentFinished, Role: progress.RoleVerifier, Label: c.Title,
-				Tokens: tokens, Duration: time.Since(start), Err: errString(err),
+				Tokens: tokens, Duration: finishedAt.Sub(startedAt), Err: errString(err),
 			})
 			mu.Lock()
 			defer mu.Unlock()
@@ -192,6 +197,11 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 				msg := fmt.Sprintf("budget stopped mid-verification of %q (%s:%d) — kept as T3 suspected", c.Title, c.File, c.Line)
 				f.note(result, msg)
 				progress.Emit(sink, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
+				// Record orphaned_budget row with whatever tokens accumulated. Best-effort.
+				seatRefuted := seatRefutedSlice(verdicts)
+				f.recordVerifierUnit(ctx, result.ScanRunID, c.Lens, c.File, candIdx,
+					startedAt, finishedAt, tokens, "orphaned_budget", seatNames, seatRefuted,
+					localArbiterRuns > 0 && !arbiterBudgetStopped, arbiterRefuted(arbiterVerdict), result)
 				return
 			}
 			refuterRuns += len(verdicts)
@@ -225,13 +235,20 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 				candKilled = majorityRefuted(verdicts)
 			}
 
+			seatRefuted := seatRefutedSlice(verdicts)
+			arbiterRan := localArbiterRuns > 0 && localArbiterFailed == 0
+			arbRefuted := arbiterRefuted(arbiterVerdict)
 			if candKilled {
 				killed++
+				f.recordVerifierUnit(ctx, result.ScanRunID, c.Lens, c.File, candIdx,
+					startedAt, finishedAt, tokens, "killed", seatNames, seatRefuted, arbiterRan, arbRefuted, result)
 				return
 			}
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindFindingVerified, Title: c.Title, File: c.File, Line: c.Line,
 			})
+			f.recordVerifierUnit(ctx, result.ScanRunID, c.Lens, c.File, candIdx,
+				startedAt, finishedAt, tokens, "survived", seatNames, seatRefuted, arbiterRan, arbRefuted, result)
 			survivors = append(survivors, verified{
 				cand:      c,
 				reasoning: buildReasoning(verdicts, seatNames, arbiterReasoning, localArbiterRuns > 0 && localArbiterFailed == 0),
@@ -416,6 +433,26 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// seatRefutedSlice returns a parallel bool slice indicating which verdicts were
+// "refuted", for use in the per-unit observability row. Returns nil when the
+// slice is empty.
+func seatRefutedSlice(verdicts []refutation) []bool {
+	if len(verdicts) == 0 {
+		return nil
+	}
+	out := make([]bool, len(verdicts))
+	for i, v := range verdicts {
+		out[i] = v.Refuted
+	}
+	return out
+}
+
+// arbiterRefuted returns whether the arbiter's verdict was "refuted". Returns
+// false for a nil arbiter (no arbiter ran or it failed to parse).
+func arbiterRefuted(v *refutation) bool {
+	return v != nil && v.Refuted
 }
 
 // majorityRefuted reports whether a strict majority of verdicts are "refuted".

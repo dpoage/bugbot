@@ -34,7 +34,7 @@ func TestOpen_MigratesFromEmptyAndIsIdempotent(t *testing.T) {
 	// All tables plus schema_migrations must exist.
 	for _, table := range []string{
 		"findings", "suppressions", "file_state", "scan_runs", "spend",
-		"leads", "published_issues",
+		"leads", "published_issues", "agent_units",
 		"schema_migrations",
 	} {
 		var name string
