@@ -180,10 +180,13 @@ func TestHypothesize_DiffIntentGatedOnTargetedOnly(t *testing.T) {
 	}
 
 	// Sweep runs as ScanOneshot — diff-intent must be silent.
+	// Sweep units = nTaxonomy taxonomy lenses × sweep-wide + 1 deep unit for
+	// api-contract-misuse@contract-trace-deep.
 	nTaxonomy := len(BuiltinLenses()) - 1
-	if finder.callCount() != nTaxonomy {
-		t.Errorf("sweep with ChangeContext set: finder calls = %d, want %d (no diff-intent on ScanOneshot)",
-			finder.callCount(), nTaxonomy)
+	wantSweepCalls := nTaxonomy + 1 // +1 for contract-trace-deep on api-contract-misuse
+	if finder.callCount() != wantSweepCalls {
+		t.Errorf("sweep with ChangeContext set: finder calls = %d, want %d (no diff-intent on ScanOneshot, nTaxonomy=%d wide + 1 deep)",
+			finder.callCount(), wantSweepCalls, nTaxonomy)
 	}
 }
 
@@ -210,11 +213,13 @@ func TestHypothesize_DiffIntentZeroOnSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// diff-intent emits zero chunk tasks, so total finder calls == nLenses-1.
+	// diff-intent emits zero chunk tasks. Sweep units = nTaxonomy wide + 1 deep
+	// unit for api-contract-misuse@contract-trace-deep.
 	nTaxonomy := len(BuiltinLenses()) - 1
-	if finder.callCount() != nTaxonomy {
-		t.Errorf("sweep finder calls = %d, want %d (no diff-intent task on sweep)",
-			finder.callCount(), nTaxonomy)
+	wantCalls := nTaxonomy + 1 // +1 for contract-trace-deep on api-contract-misuse
+	if finder.callCount() != wantCalls {
+		t.Errorf("sweep finder calls = %d, want %d (no diff-intent; nTaxonomy=%d wide + 1 deep)",
+			finder.callCount(), wantCalls, nTaxonomy)
 	}
 }
 
@@ -239,10 +244,12 @@ func TestHypothesize_DiffIntentNilCC(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Targeted with nil CC: no diff-intent. Sweep units = nTaxonomy wide + 1 deep.
 	nTaxonomy := len(BuiltinLenses()) - 1
-	if finder.callCount() != nTaxonomy {
-		t.Errorf("targeted (nil CC) finder calls = %d, want %d (no diff-intent)",
-			finder.callCount(), nTaxonomy)
+	wantCalls := nTaxonomy + 1 // +1 for contract-trace-deep on api-contract-misuse
+	if finder.callCount() != wantCalls {
+		t.Errorf("targeted (nil CC) finder calls = %d, want %d (no diff-intent; nTaxonomy=%d wide + 1 deep)",
+			finder.callCount(), wantCalls, nTaxonomy)
 	}
 }
 
@@ -294,11 +301,11 @@ func TestHypothesize_DiffIntentOneTaskOnTargeted(t *testing.T) {
 		t.Errorf("diff-intent finding not in results; findings=%+v stats=%+v", res.Findings, res.Stats)
 	}
 
-	// Total finder calls: nTaxonomy + 1 diff-intent task.
+	// Total finder calls: nTaxonomy wide units + 1 deep unit + 1 diff-intent.
 	nTaxonomy := len(BuiltinLenses()) - 1
-	wantCalls := nTaxonomy + 1
+	wantCalls := nTaxonomy + 1 + 1 // nTaxonomy wide + 1 deep (api-contract-misuse) + 1 diff-intent
 	if finder.callCount() != wantCalls {
-		t.Errorf("finder calls = %d, want %d (nTaxonomy=%d + 1 diff-intent)",
+		t.Errorf("finder calls = %d, want %d (nTaxonomy=%d wide + 1 deep + 1 diff-intent)",
 			finder.callCount(), wantCalls, nTaxonomy)
 	}
 }
@@ -395,8 +402,13 @@ func TestDegradedLensNames_SweepKeepsTaxonomyTop2(t *testing.T) {
 	verifier.fallback = notRefutedJSON
 
 	// No ChangeContext: this is a sweep (ScanOneshot). diff-intent emits zero units.
+	// Budget tuned for the strategy-axis era: 7 sweep units (6 taxonomy@sweep-wide
+	// + 1 api-contract-misuse@contract-trace-deep) × 150 tokens each = 1050 max.
+	// budget=1200 ensures hard (1200) > 1050, so hard NEVER fires regardless of
+	// goroutine scheduling order. Soft (70% of 1200 = 840) fires after 6 runs
+	// (900 > 840), leaving injection skipped — res.Degraded = true.
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		TokenBudget:           600, // forces soft-budget degradation early
+		TokenBudget:           1200,
 		CacheReadBudgetWeight: 1.0,
 		MaxParallel:           1,
 	})
@@ -450,7 +462,14 @@ func TestDegradedLensNames_CommitRunKeepsDiffIntentAndNilSafety(t *testing.T) {
 	verifier.fallback = notRefutedJSON
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		TokenBudget:           600,
+		// Budget tuned for the strategy-axis era: a commit run now has 8 units
+		// (1 diff-intent + 6 taxonomy@sweep-wide + 1 api-contract-misuse@contract-
+		// trace-deep). Each completion costs 150 tokens. Budget 1300 ensures:
+		//   - hard threshold (1300) > 8×150 = 1200 → hard NEVER fires regardless of
+		//     goroutine scheduling order, so diff-intent cannot be hard-stopped.
+		//   - soft threshold (70% of 1300 = 910) fires after 7 completions (1050 >
+		//     910), making res.Degraded=true so the test's assertions are exercised.
+		TokenBudget:           1300,
 		CacheReadBudgetWeight: 1.0,
 		MaxParallel:           1,
 		ChangeContext: &ChangeContext{

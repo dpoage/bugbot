@@ -287,12 +287,13 @@ func TestSweep_CleanCode_NoFindingsNoVerify(t *testing.T) {
 	if verifier.callCount() != 0 {
 		t.Errorf("verifier called %d times on clean code; want 0", verifier.callCount())
 	}
-	// Finder ran once per taxonomy lens per chunk (one chunk here). diff-intent
-	// emits zero chunk tasks on sweeps (no ChangeContext), so the count is
-	// len(BuiltinLenses())-1.
-	wantFinderCalls := len(BuiltinLenses()) - 1
+	// Finder ran once per unit in this sweep. Sweep units = (nTaxonomy taxonomy
+	// lenses × sweep-wide) + 1 api-contract-misuse@contract-trace-deep. diff-intent
+	// emits zero chunk tasks on sweeps (no ChangeContext) so it contributes zero.
+	nTaxonomy := len(BuiltinLenses()) - 1 // all builtins except diff-intent
+	wantFinderCalls := nTaxonomy + 1      // +1 for the deep strategy on api-contract-misuse
 	if finder.callCount() != wantFinderCalls {
-		t.Errorf("finder calls = %d, want %d (taxonomy lenses only; diff-intent skipped on sweep)", finder.callCount(), wantFinderCalls)
+		t.Errorf("finder calls = %d, want %d (nTaxonomy=%d wide + 1 contract-trace-deep)", finder.callCount(), wantFinderCalls, nTaxonomy)
 	}
 }
 
@@ -322,13 +323,15 @@ func TestSweep_FinderParseFailures_HonestStats(t *testing.T) {
 	}
 
 	// diff-intent emits zero chunk tasks on sweeps (no ChangeContext), so only
-	// the taxonomy lenses run; that is len(BuiltinLenses())-1 finders.
-	nLenses := len(BuiltinLenses()) - 1
-	if res.Stats.FinderRuns != nLenses {
-		t.Errorf("FinderRuns = %d, want %d (one per taxonomy lens, single chunk; diff-intent skipped)", res.Stats.FinderRuns, nLenses)
+	// the taxonomy units run: nTaxonomy taxonomy lenses × sweep-wide +1 for
+	// api-contract-misuse@contract-trace-deep = nTaxonomy+1 finders total.
+	nTaxonomy := len(BuiltinLenses()) - 1
+	nSweepUnits := nTaxonomy + 1 // +1 for api-contract-misuse@contract-trace-deep
+	if res.Stats.FinderRuns != nSweepUnits {
+		t.Errorf("FinderRuns = %d, want %d (taxonomy lenses wide + 1 deep; diff-intent skipped)", res.Stats.FinderRuns, nSweepUnits)
 	}
-	if res.Stats.FinderFailures != nLenses {
-		t.Errorf("FinderFailures = %d, want %d (all taxonomy lenses failed to parse)", res.Stats.FinderFailures, nLenses)
+	if res.Stats.FinderFailures != nSweepUnits {
+		t.Errorf("FinderFailures = %d, want %d (all sweep units failed to parse)", res.Stats.FinderFailures, nSweepUnits)
 	}
 	if res.Stats.FinderReliable() {
 		t.Error("FinderReliable() = true, want false when every finder failed")
@@ -494,11 +497,19 @@ func TestSweep_CrossLensMerge_CorroborationPersisted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if res.Stats.Hypothesized != 2 {
-		t.Errorf("hypothesized = %d, want 2", res.Stats.Hypothesized)
+	// With the strategy axis, api-contract-misuse now has two units:
+	// @sweep-wide and @contract-trace-deep. Both routes match the system prompt
+	// that contains "api-contract-misuse", so both return apiLensCand — same
+	// fingerprint (same lens, file, line, title) — one is deduped. That gives:
+	//   hypothesized = nilLensCand + apiLensCand×2 = 3
+	//   DroppedDuplicate = 1 (identical fingerprint from the two api units)
+	// After dedup: 2 survivors (nil-safety + api-contract), which cross-lens merge
+	// collapses to 1 cluster.
+	if res.Stats.Hypothesized != 3 {
+		t.Errorf("hypothesized = %d, want 3 (nil-safety + api-contract-misuse wide + api-contract-misuse deep)", res.Stats.Hypothesized)
 	}
-	if res.Stats.DroppedDuplicate != 0 {
-		t.Errorf("dropped_duplicate = %d, want 0 (different fingerprints, not exact dups)", res.Stats.DroppedDuplicate)
+	if res.Stats.DroppedDuplicate != 1 {
+		t.Errorf("dropped_duplicate = %d, want 1 (api-contract-misuse wide and deep return identical candidates)", res.Stats.DroppedDuplicate)
 	}
 	if res.Stats.MergedCrossLens != 1 {
 		t.Errorf("merged_cross_lens = %d, want 1", res.Stats.MergedCrossLens)
@@ -507,7 +518,7 @@ func TestSweep_CrossLensMerge_CorroborationPersisted(t *testing.T) {
 		t.Errorf("merged_within_lens = %d, want 0", res.Stats.MergedWithinLens)
 	}
 	if res.Stats.Triaged != 1 {
-		t.Errorf("triaged = %d, want 1 (merged to primary)", res.Stats.Triaged)
+		t.Errorf("triaged = %d, want 1 (merged to primary after dedup)", res.Stats.Triaged)
 	}
 	// Exactly one refuter panel (3 refuters) ran — one cluster.
 	if res.Stats.VerifierRuns != DefaultRefuters {
@@ -655,12 +666,14 @@ func TestSweep_BudgetDegradation(t *testing.T) {
 	if len(res.Skipped) == 0 {
 		t.Errorf("expected Skipped notes describing degradation, got none")
 	}
-	// Some lenses must have been skipped: with nBuiltin-1 taxonomy chunk tasks and
-	// degradation to 2, the finder cannot have run all taxonomy lenses.
-	// diff-intent has no chunk tasks on sweeps so it does not count here.
-	nTaxonomy := len(BuiltinLenses()) - 1
-	if finder.callCount() >= nTaxonomy {
-		t.Errorf("finder ran %d times; degradation should have skipped low-yield lenses (nTaxonomy=%d)", finder.callCount(), nTaxonomy)
+	// Some units must have been skipped: on a sweep, total units = (nTaxonomy
+	// taxonomy lenses × sweep-wide) + 1 api-contract-misuse@contract-trace-deep.
+	// diff-intent has no chunk tasks on sweeps. Under degradation only the top-2
+	// unit-classes by yield survive, so the finder cannot have run all units.
+	nTaxonomy := len(BuiltinLenses()) - 1 // taxonomy lenses (no diff-intent)
+	nSweepUnits := nTaxonomy + 1          // +1 for api-contract-misuse@contract-trace-deep
+	if finder.callCount() >= nSweepUnits {
+		t.Errorf("finder ran %d times; degradation should have skipped low-yield lenses (nSweepUnits=%d)", finder.callCount(), nSweepUnits)
 	}
 }
 
@@ -770,12 +783,14 @@ func TestHypothesize_MultiLens_NoRace(t *testing.T) {
 	st, repo := openFixture(t)
 
 	// Use all builtin lenses so every goroutine slot is filled. MaxParallel is
-	// set to len(BuiltinLenses()) to guarantee full concurrency: every (lens,
-	// chunk) unit runs simultaneously, maximising the window for the race.
-	// diff-intent emits zero chunk tasks on sweeps so nTaxonomy is the actual
-	// concurrency count; MaxParallel is set higher to ensure all slots are open.
+	// set to len(BuiltinLenses())+1 to guarantee full concurrency: every
+	// (lens×strategy, chunk) unit runs simultaneously, maximising the window for
+	// the race. diff-intent emits zero chunk tasks on sweeps; the actual sweep
+	// unit count is nTaxonomy wide-strategy units + 1 deep unit for
+	// api-contract-misuse.
 	nLenses := len(BuiltinLenses())
-	nTaxonomy := nLenses - 1 // diff-intent has no chunk tasks on sweeps
+	nTaxonomy := nLenses - 1     // all builtins except diff-intent
+	nSweepUnits := nTaxonomy + 1 // +1 for api-contract-misuse@contract-trace-deep
 
 	// The scripted client returns empty candidates for every lens — the test
 	// only exercises the concurrent append path, not the candidate pipeline.
@@ -783,7 +798,7 @@ func TestHypothesize_MultiLens_NoRace(t *testing.T) {
 	verifier := newScriptedClient()
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		MaxParallel: nLenses,
+		MaxParallel: nLenses + 1, // +1 ensures a slot for the extra deep unit
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -796,9 +811,9 @@ func TestHypothesize_MultiLens_NoRace(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Sweep[%d]: %v", i, err)
 		}
-		// Sanity: all taxonomy lenses ran (one call per taxonomy lens, single chunk).
-		if got := finder.callCount(); got < nTaxonomy*(i+1) {
-			t.Errorf("Sweep[%d]: finder calls = %d, want >= %d (taxonomy lenses only)", i, got, nTaxonomy*(i+1))
+		// Sanity: all sweep units ran (nSweepUnits units per sweep, single chunk).
+		if got := finder.callCount(); got < nSweepUnits*(i+1) {
+			t.Errorf("Sweep[%d]: finder calls = %d, want >= %d (nSweepUnits=%d per sweep)", i, got, nSweepUnits*(i+1), nSweepUnits)
 		}
 		_ = res
 	}

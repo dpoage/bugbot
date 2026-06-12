@@ -170,16 +170,7 @@ func finderTask(files []string, leads []store.Lead) string {
 	for _, f := range files {
 		fmt.Fprintf(&b, "  - %s\n", f)
 	}
-	if len(leads) > 0 {
-		b.WriteString("\nCROSS-LENS LEADS (suspicions posted by other lenses' agents in earlier runs; investigate ones relevant to your focus, they may be wrong):\n")
-		for _, ld := range leads {
-			// The note is model-authored free text from a previous run; flatten
-			// newlines so a note can never fabricate extra lead lines or break
-			// out of this section's framing.
-			note := strings.Join(strings.Fields(ld.Note), " ")
-			fmt.Fprintf(&b, "  - from %s: %s:%d — %s\n", ld.PosterLens, ld.File, ld.Line, note)
-		}
-	}
+	appendLeadsSection(&b, leads)
 	return b.String()
 }
 
