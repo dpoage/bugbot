@@ -131,15 +131,15 @@ func TestSystemPrompt_SweepWide_ByteIdentical(t *testing.T) {
 	langs := []ingest.Language{ingest.LangGo}
 	persona := "senior Go engineer"
 
-	// What hypothesize would compose for a sweep-wide unit.
-	widePrompt := finderSystemPrompt(persona, l, langs)
 	if sweepWide.SystemClause != "" {
 		t.Fatal("sweepWide.SystemClause must be empty for byte-identical test to be valid")
 	}
-	// No clause appended → must be byte-identical to finderSystemPrompt.
-	got := finderSystemPrompt(persona, l, langs)
-	if got != widePrompt {
-		t.Errorf("sweep-wide prompt differs from finderSystemPrompt output (byte identity broken)")
+	// Drive the PRODUCTION composition path (what the hypothesize launch loop
+	// calls), not a re-derivation: a fork in the production logic must fail here.
+	got := composeFinderSystemPrompt(persona, l, langs, sweepWide)
+	want := finderSystemPrompt(persona, l, langs)
+	if got != want {
+		t.Errorf("sweep-wide composed prompt differs from finderSystemPrompt output (byte identity broken):\ngot:  %q\nwant: %q", got, want)
 	}
 }
 
@@ -152,21 +152,19 @@ func TestSystemPrompt_ContractTraceDeep_ClauseAppended(t *testing.T) {
 	persona := "senior Go engineer"
 
 	basePrompt := finderSystemPrompt(persona, l, langs)
-	deepPrompt := basePrompt + "\n\nYOUR SEARCH STRATEGY (" + contractTraceDeep.Name + "):\n" + contractTraceDeep.SystemClause
+	// Drive the PRODUCTION composition path, not a re-derivation.
+	deepPrompt := composeFinderSystemPrompt(persona, l, langs, contractTraceDeep)
 
-	// The base prompt must be a prefix of the deep prompt (clause is appended, not injected).
+	// The base prompt must be an exact prefix (clause appended, not injected).
 	if !strings.HasPrefix(deepPrompt, basePrompt) {
-		t.Error("deep prompt must have the base prompt as an exact prefix")
+		t.Fatal("deep prompt must have the base prompt as an exact prefix")
 	}
 
-	// Strategy heading must be present.
-	if !strings.Contains(deepPrompt, "YOUR SEARCH STRATEGY (contract-trace-deep):") {
-		t.Error("deep prompt missing strategy heading")
-	}
-
-	// The SystemClause must appear verbatim.
-	if !strings.Contains(deepPrompt, contractTraceDeep.SystemClause) {
-		t.Error("deep prompt missing SystemClause content")
+	// Everything after the base prompt must be exactly the heading + clause.
+	suffix := deepPrompt[len(basePrompt):]
+	wantSuffix := "\n\nYOUR SEARCH STRATEGY (contract-trace-deep):\n" + contractTraceDeep.SystemClause
+	if suffix != wantSuffix {
+		t.Errorf("deep prompt suffix mismatch:\ngot:  %q\nwant: %q", suffix, wantSuffix)
 	}
 
 	// The clause must NOT appear in the sweep-wide (base) prompt.

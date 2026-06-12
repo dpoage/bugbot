@@ -331,13 +331,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				}
 			}
 
-			// Compose the system prompt. For sweep-wide (empty SystemClause) the
-			// prompt is byte-identical to pre-strategy output. For deep strategies
-			// the clause is appended under a labeled heading.
-			sysprompt := finderSystemPrompt(persona, u.lens, u.langs)
-			if u.strategy.SystemClause != "" {
-				sysprompt += "\n\nYOUR SEARCH STRATEGY (" + u.strategy.Name + "):\n" + u.strategy.SystemClause
-			}
+			sysprompt := composeFinderSystemPrompt(persona, u.lens, u.langs, u.strategy)
 
 			label := unitLabel(u.lens.Name, u.strategy.Name)
 			cands, status, err := f.runFinderWithPrompt(ctx, finder, unitTools, sysprompt, label, u.lens, task, budget)
@@ -509,10 +503,14 @@ type lensStrategyClass struct {
 // yield = per-language lens yield × strategy.Weight, descending, and keeps the
 // head degradedLensCount classes.
 //
-// The sort is stable with a deterministic tiebreak (lens name then strategy
-// name) so equal-yield classes never reorder between runs. A deep unit-class
-// (weight 0.9) ranks just below its lens's sweep-wide class and is therefore
-// shed first under pressure — intended behavior.
+// The sort is stable and compares ONLY the score: equal-score classes keep
+// their input order, which callers supply in lensesByYield order (wide before
+// deep within a lens). That makes the equal-yield tiebreak identical to the
+// pre-strategy degradedLensNames semantics — head-of-lensesByYield — rather
+// than introducing a new (e.g. alphabetical) tiebreak that would silently
+// change survivors the next time the yield tables are retuned. A deep
+// unit-class (weight 0.9) ranks just below its lens's sweep-wide class and is
+// therefore shed first under pressure — intended behavior.
 //
 // CRITICAL INVARIANT: with only sweep-wide in play (weight 1.0), the survivors
 // must be exactly the top degradedLensCount lenses by yield — identical to the
@@ -522,29 +520,18 @@ type lensStrategyClass struct {
 // hypothesize): a zero-unit lens must never occupy a survivor slot.
 func degradedUnitClasses(classes []lensStrategyClass, langs []ingest.Language) map[string]bool {
 	type ranked struct {
-		key          string
-		score        float64
-		lensName     string
-		strategyName string
+		key   string
+		score float64
 	}
 	r := make([]ranked, len(classes))
 	for i, c := range classes {
-		score := float64(effectiveYield(c.lensName, langs)) * c.weight
 		r[i] = ranked{
-			key:          c.lensName + "@" + c.strategyName,
-			score:        score,
-			lensName:     c.lensName,
-			strategyName: c.strategyName,
+			key:   c.lensName + "@" + c.strategyName,
+			score: float64(effectiveYield(c.lensName, langs)) * c.weight,
 		}
 	}
 	sort.SliceStable(r, func(i, j int) bool {
-		if r[i].score != r[j].score {
-			return r[i].score > r[j].score
-		}
-		if r[i].lensName != r[j].lensName {
-			return r[i].lensName < r[j].lensName
-		}
-		return r[i].strategyName < r[j].strategyName
+		return r[i].score > r[j].score
 	})
 	keep := make(map[string]bool, degradedLensCount)
 	for i, rc := range r {

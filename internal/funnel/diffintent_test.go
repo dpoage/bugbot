@@ -443,9 +443,12 @@ func TestDegradedLensNames_SweepKeepsTaxonomyTop2(t *testing.T) {
 }
 
 // TestDegradedLensNames_CommitRunKeepsDiffIntentAndNilSafety verifies that on
-// a budget-degraded commit run the degradation set includes diff-intent (which
-// has a unit) and nil-safety/error-handling, not concurrency (which has lower
-// yield than diff-intent). (F1)
+// a budget-degraded commit run the two degradation survivors are nil-safety
+// (yield 100) and diff-intent (yield 95): neither may ever be skipped. With
+// the budget tuned so soft fires only after 7 of 8 completions, which unit
+// reaches the gate 8th is scheduler-dependent (goroutines race for the
+// semaphore), so this test asserts only the scheduling-robust property: the
+// two survivors are never skipped. (F1)
 func TestDegradedLensNames_CommitRunKeepsDiffIntentAndNilSafety(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)
@@ -492,8 +495,12 @@ func TestDegradedLensNames_CommitRunKeepsDiffIntentAndNilSafety(t *testing.T) {
 	}
 
 	// Under degradation, diff-intent (Yield 95) and nil-safety (Yield 100) both
-	// emitted units, so they should both survive. concurrency (Yield 90) should
-	// have been skipped.
+	// emitted units, so they must both survive. Deliberately one-sided: which
+	// non-survivor unit reaches the soft gate 8th is scheduler-dependent (all
+	// unit goroutines race for the MaxParallel semaphore), and if a survivor
+	// lands there it passes the gate and nothing is skipped at all — so
+	// asserting that any particular class WAS skipped would reintroduce the
+	// scheduling flake this budget tuning eliminated.
 	for _, note := range res.Skipped {
 		if strings.Contains(note, "diff-intent") && strings.Contains(note, "skipped") {
 			t.Errorf("diff-intent was skipped during degradation on a commit run — it should survive: %q", note)

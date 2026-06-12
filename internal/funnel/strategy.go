@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -93,4 +94,17 @@ func appendLeadsSection(b *strings.Builder, leads []store.Lead) {
 // first entry is always sweepWide (the default).
 func builtinStrategies() []Strategy {
 	return []Strategy{sweepWide, contractTraceDeep}
+}
+
+// composeFinderSystemPrompt composes the full system prompt for one finder
+// unit: the persona+lens+manifestations prompt, then the strategy's clause
+// under a labeled heading. For the default strategy (empty SystemClause)
+// nothing is appended, so the output is byte-identical to the pre-strategy
+// finderSystemPrompt — the invariant the strategy axis must preserve.
+func composeFinderSystemPrompt(persona string, l Lens, langs []ingest.Language, st Strategy) string {
+	sysprompt := finderSystemPrompt(persona, l, langs)
+	if st.SystemClause != "" {
+		sysprompt += "\n\nYOUR SEARCH STRATEGY (" + st.Name + "):\n" + st.SystemClause
+	}
+	return sysprompt
 }
