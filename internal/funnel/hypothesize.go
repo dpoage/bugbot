@@ -42,6 +42,59 @@ type unit struct {
 	customTask string            // non-empty for diff-intent: overrides task(files, leads)
 }
 
+// buildUnits builds the unit-of-work list as (lens × strategy × chunk)
+// triples in CHUNK-MAJOR order: every active lens (and applicable strategy)
+// visits chunk 0 before any lens visits chunk 1. Within a chunk, lenses
+// iterate in the caller-supplied yield order and strategies in builtin order
+// (sweep-wide before deep).
+//
+// Chunk-major interleaving is a latency policy, not a budget policy: it gives
+// every defect class — including low-yield lenses, whose units previously
+// launched only after every higher-yield lens had covered the whole repo —
+// running coverage within the first chunks of the sweep, so time-to-first-
+// finding no longer scales with a lens's position in the yield ranking.
+// Budget degradation is unaffected: the launch-loop gate checks each unit's
+// (lens, strategy) class against the yield-ranked survivor set at launch
+// time (degradedUnitClasses), which never depended on launch order. Under
+// pressure the spend now distributes across all classes up to the soft
+// threshold instead of exhausting the top lenses first; past the threshold
+// only survivor-class units launch, exactly as before. Chunks arrive in the
+// sweep's anti-starvation order (run.go), so the hottest/stalest files get
+// full multi-lens coverage first.
+//
+// For each lens × chunk pair the default strategy (sweep-wide) is emitted
+// exactly as before the strategy axis; additionally, each non-default builtin
+// strategy that AppliesTo the lens emits one extra unit per chunk.
+//
+// diff-intent never gets chunk-based units here: it is either absent (sweeps,
+// nil ChangeContext) or emitted by the caller as exactly ONE custom task
+// prepended to the list. Skipping it ensures zero tasks from this lens on
+// sweeps while still allowing the degradation logic to treat it as part of
+// the set.
+func buildUnits(lenses []Lens, strategies []Strategy, chunks []fileChunk, leadsByLens map[string][]store.Lead) []unit {
+	var units []unit
+	for _, c := range chunks {
+		for _, l := range lenses {
+			if l.Name == "diff-intent" {
+				continue
+			}
+			for _, s := range strategies {
+				if !s.AppliesTo(l.Name) {
+					continue
+				}
+				units = append(units, unit{
+					lens:     l,
+					strategy: s,
+					files:    c.files,
+					langs:    c.langs,
+					leads:    leadsByLens[l.Name],
+				})
+			}
+		}
+	}
+	return units
+}
+
 // hypothesize runs the finder stage: for each effective lens, run a finder
 // agent over each chunk of target files, collecting concrete candidates. Lens
 // chunks run in parallel bounded by Options.MaxParallel. Budget degradation is
@@ -127,48 +180,9 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 		leadsConsumedTotal += len(pending)
 	}
 
-	// Build the unit-of-work list: (lens, strategy, chunk) triples. We launch
-	// lenses in yield order so that if degradation kicks in mid-run, the
-	// lower-yield units are the ones skipped.
-	//
-	// For each lens × chunk pair the default strategy (sweep-wide) is emitted
-	// exactly as today; additionally, each non-default builtin strategy that
-	// AppliesTo the lens emits one extra unit per chunk. This is the strategy
-	// axis: unit = (lens × strategy × chunk).
-	//
-	// The diff-intent lens is special: it emits exactly ONE task per commit-kind
-	// run (when cc is non-nil), not one task per chunk of files. That task carries
-	// its own pre-built content (diffIntentTask) rather than the standard file
-	// list. The customTask field is non-empty only for that one unit; all other
-	// units leave it empty and have their task built from files+leads as usual.
-	// diff-intent always uses sweep-wide (no deep units); AppliesTo for the
-	// non-default strategies does not match "diff-intent" in v1, so this falls
-	// out naturally from the loop below.
+	// Build the unit-of-work list: (lens, strategy, chunk) triples.
 	strategies := builtinStrategies()
-	var units []unit
-	for _, l := range lenses {
-		// diff-intent never gets chunk-based units: it is either absent (sweeps,
-		// nil ChangeContext) or emitted as exactly ONE custom task below. Skipping
-		// it here ensures zero tasks from this lens on sweeps while still allowing
-		// the selectLenses / degradation logic to treat it as part of the set.
-		if l.Name == "diff-intent" {
-			continue
-		}
-		for _, c := range chunks {
-			for _, s := range strategies {
-				if !s.AppliesTo(l.Name) {
-					continue
-				}
-				units = append(units, unit{
-					lens:     l,
-					strategy: s,
-					files:    c.files,
-					langs:    c.langs,
-					leads:    leadsByLens[l.Name],
-				})
-			}
-		}
-	}
+	units := buildUnits(lenses, strategies, chunks, leadsByLens)
 	// Diff-intent: one extra unit at the front (highest yield => first to launch)
 	// when the run is commit-scoped AND ChangeContext is populated. Only
 	// ScanTargeted runs carry a ChangeContext; Sweep runs as ScanOneshot (run.go)
