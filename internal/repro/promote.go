@@ -43,6 +43,61 @@ type FindingOutcome struct {
 	NeedsHuman bool
 }
 
+// PromoteOne attempts to reproduce a single finding and updates the store row
+// on success (Tier-1 + repro_path). It is the single-finding entry point used
+// by the funnel's in-run hook (the funnel's consumer goroutine is the
+// parallelism bound; calling PromoteAll per finding would multiply slots).
+// PromoteAll's internal semaphore is intentionally NOT used here.
+//
+// Infrastructure errors (agent/LLM failure, sandbox launch failure) are
+// returned; a finding that simply could not be reproduced is reported via a
+// nil error with the outcome recorded in the store (tier stays 2).
+//
+// scanRunID may be empty when called from the daemon backlog drain (cross-run
+// context); the agent_units row will carry an empty scan_run_id in that case.
+func (r *Reproducer) PromoteOne(ctx context.Context, st *store.Store, finding store.Finding) (*FindingOutcome, error) {
+	if st == nil {
+		return nil, fmt.Errorf("repro: nil store")
+	}
+
+	outcome := &FindingOutcome{FindingID: finding.ID, Title: finding.Title}
+
+	att, err := r.Attempt(ctx, finding)
+	if err != nil {
+		outcome.Reason = "error: " + err.Error()
+		outcome.Err = err
+		return outcome, err
+	}
+
+	outcome.Attempts = att.Attempts
+	if att.Promoted {
+		if perr := promoteFinding(ctx, st, finding, att.ArtifactPath); perr != nil {
+			outcome.Reason = "promotion persist failed: " + perr.Error()
+			outcome.Err = perr
+			return outcome, perr
+		}
+		outcome.Promoted = true
+		outcome.ArtifactPath = att.ArtifactPath
+
+		if r.opts.PatchProver {
+			patchResult, perr := r.provePatch(ctx, st, finding, att)
+			if perr != nil {
+				outcome.Reason = "patch-prover error: " + perr.Error()
+			} else {
+				outcome.FixWitnessed = patchResult.FixWitnessed
+				outcome.NeedsHuman = patchResult.NeedsHuman
+				if patchResult.SkippedNoSuiteCmd {
+					outcome.Reason = "patch-prover skipped: toolchain not identified and repro.suite_cmd not configured"
+				}
+			}
+		}
+	} else {
+		outcome.Reason = att.Reason
+	}
+
+	return outcome, nil
+}
+
 // PromoteAll attempts to reproduce each finding (expected to be Tier-2
 // "verified" findings) with bounded parallelism, and on success updates the
 // finding's store row to Tier-1 with its repro_path. Findings that cannot be

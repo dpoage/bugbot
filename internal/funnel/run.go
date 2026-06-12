@@ -406,6 +406,32 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// verCh is the channel from triage → verify dispatcher.
 	verCh := make(chan Candidate, 64)
 
+	// reproCh is the channel from verify goroutines → repro consumer goroutines.
+	// Buffered to 16 so a single slow repro attempt does not stall verification.
+	// Non-blocking enqueue: verify goroutines MUST NOT block on reproCh (that
+	// would let a slow repro backlog stall verification). When the buffer is full,
+	// the finding is appended to overflowFindings (under overflowMu) for a
+	// catch-up pass after reproCh is drained. The claim mechanism (ReproPath /
+	// NeedsHuman check before invoking the hook) ensures no finding is attempted
+	// twice even if it appears in both the channel and the catch-up slice.
+	//
+	// The repro consumer goroutine (launched below) reads from reproCh and
+	// spawns one worker per finding. It runs CONCURRENTLY with verify (and
+	// hypothesize): a finding verified early in a long scan gets its repro
+	// attempt while discovery continues. The consumer exits when reproCh is
+	// closed (after verifyWg.Wait()); reproWg tracks all spawned workers.
+	var reproCh chan store.Finding
+	var overflowMu sync.Mutex
+	var overflowFindings []store.Finding
+	var reproWg sync.WaitGroup
+	// reproConsumerDone is closed when the consumer goroutine (not the workers)
+	// finishes spawning all goroutines, so we can join the workers via reproWg.
+	var reproConsumerDone chan struct{}
+	if f.opts.Repro != nil {
+		reproCh = make(chan store.Finding, 16)
+		reproConsumerDone = make(chan struct{})
+	}
+
 	// clusterReg is shared between triage (which registers primaries and stages
 	// corroborating lenses) and verify goroutines (which drain staged lenses and
 	// signal persistence).
@@ -528,6 +554,31 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		triagedCount = ts.survivorCount
 	}()
 
+	// ---- Stage E: In-run repro consumer (concurrent with verify + discovery) ----
+	// The consumer goroutine reads from reproCh and spawns one worker per
+	// finding. It runs concurrently with the verify dispatcher (and hypothesize),
+	// so a finding verified early in a long scan gets its repro attempt while
+	// discovery continues — the streaming-repro guarantee.
+	//
+	// The consumer exits when reproCh is closed (after verifyWg.Wait()). The
+	// workers are tracked by reproWg; we wait on reproWg after close to ensure
+	// all attempts complete before finalize.
+	if reproCh != nil {
+		go func() {
+			defer close(reproConsumerDone)
+			for fi := range reproCh {
+				fi := fi
+				// Add before spawning: Wait() called after consumer finishes
+				// must not return before all workers are added.
+				reproWg.Add(1)
+				go func() {
+					defer reproWg.Done()
+					f.runReproAttempt(ctx, fi, scanRunID)
+				}()
+			}
+		}()
+	}
+
 	// ---- Stage C + D: Verify + immediate persist (dispatcher) ----
 	// Spawn a goroutine per forwarded primary. HIGH-priority slot acquisition
 	// means a candidate arriving mid-discovery can start verifying immediately.
@@ -550,12 +601,39 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			f.runVerifyAndPersist(ctx, verifierClient, persona, c, idx,
 				snap.Commit, fps, budget, result, clusterReg,
 				&findingsMu, &allFindings, &verifyKilled,
-				&sbExecs, &sbMillis, setVerifyErr)
+				&sbExecs, &sbMillis, setVerifyErr,
+				reproCh, &overflowMu, &overflowFindings)
 		}()
 	}
 
 	// Wait for all verify goroutines to finish.
 	verifyWg.Wait()
+
+	// Close reproCh after all verify goroutines finish. The consumer goroutine
+	// exits its range loop and closes reproConsumerDone.
+	if reproCh != nil {
+		close(reproCh)
+		// Wait for the consumer to finish spawning all worker goroutines.
+		<-reproConsumerDone
+		// Wait for all worker goroutines to complete. Drain the overflow slice
+		// next so the overflow pass only starts after all channel-path attempts
+		// are done — avoiding confusion if the same finding appears in both.
+		reproWg.Wait()
+
+		// Drain the overflow slice: findings that couldn't fit into reproCh
+		// during the verify phase (non-blocking enqueue fell back to overflow).
+		// runReproAttempt's claim check prevents double-attempts: if a finding
+		// was already attempted via the channel path, the overflow drain is a
+		// cheap no-op for that finding.
+		overflowMu.Lock()
+		overflow := overflowFindings
+		overflowFindings = nil
+		overflowMu.Unlock()
+		for _, fi := range overflow {
+			// Sequential: overflow is typically empty; no goroutine overhead needed.
+			f.runReproAttempt(ctx, fi, scanRunID)
+		}
+	}
 
 	// Wait for triage goroutine to finish (it closed verCh which unblocked us).
 	triageWg.Wait()

@@ -277,6 +277,17 @@ type Options struct {
 	// ChangeContext is only honoured on ScanTargeted runs. It is silently
 	// ignored on ScanOneshot (Sweep) and ScanSweep runs even if set.
 	ChangeContext *ChangeContext
+
+	// Repro, when non-nil, is invoked in-run for each Tier-2 finding that
+	// survives verification. It is called from an IDLE-priority goroutine (one
+	// slot per finding) so reproduction runs concurrently with discovery. The
+	// funnel does NOT import internal/repro; callers (e.g. the CLI) build a
+	// Reproducer and pass a closure here.
+	//
+	// The hook must be safe for concurrent use (it may be called by multiple
+	// goroutines simultaneously). Errors are logged best-effort and never abort
+	// the scan. Nil disables in-run reproduction (default).
+	Repro func(ctx context.Context, finding store.Finding) error
 }
 
 // resolve fills in defaults without mutating the caller's Options.

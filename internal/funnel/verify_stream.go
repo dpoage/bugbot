@@ -33,6 +33,12 @@ import (
 // at persist time.
 //
 // sbExecs/sbMillis are shared atomic counters across all candidates.
+//
+// reproCh, when non-nil, receives each Tier-2 finding for in-run reproduction.
+// The enqueue is NON-BLOCKING: if the channel buffer is full, the finding is
+// appended to overflowFindings (under overflowMu) for a post-verify catch-up
+// pass. This ensures the verify goroutine is NEVER blocked by a slow repro
+// backlog. overflowMu/overflowFindings may be nil when reproCh is nil.
 func (f *Funnel) runVerifyAndPersist(
 	ctx context.Context,
 	verifier llm.Client,
@@ -50,11 +56,14 @@ func (f *Funnel) runVerifyAndPersist(
 	sbExecs *atomic.Int32,
 	sbMillis *atomic.Int64,
 	setErr func(error),
+	reproCh chan store.Finding,
+	overflowMu *sync.Mutex,
+	overflowFindings *[]store.Finding,
 ) {
 	// Acquire a global slot (HIGH priority: verifier is cheap, latency-sensitive,
 	// and gates everything downstream). One slot covers the whole sequential
 	// refuter panel + arbiter for this candidate.
-	if err := f.slots.acquire(ctx, true); err != nil {
+	if err := f.slots.acquire(ctx, slotHigh); err != nil {
 		return
 	}
 	defer f.slots.release()
@@ -282,6 +291,23 @@ func (f *Funnel) runVerifyAndPersist(
 	if late := reg.SignalPersisted(c.Fingerprint, true); len(late) > 0 {
 		if err := f.store.AddCorroboratingLenses(ctx, c.Fingerprint, late); err != nil {
 			f.note(result, fmt.Sprintf("corroboration: late attach to %q failed: %v", c.Title, err))
+		}
+	}
+
+	// Enqueue for in-run reproduction (non-blocking). The verify goroutine must
+	// NEVER block here: if the reproCh buffer is full, fall back to the overflow
+	// slice so a slow repro backlog cannot stall verification. The claim check
+	// inside runReproAttempt prevents double-attempts when both paths are active.
+	// Only enqueue Tier-2 (survived, not orphaned/suspected) findings.
+	if reproCh != nil {
+		select {
+		case reproCh <- stored:
+			// fast path: slot available
+		default:
+			// buffer full: stage in overflow for the post-verify catch-up pass
+			overflowMu.Lock()
+			*overflowFindings = append(*overflowFindings, stored)
+			overflowMu.Unlock()
 		}
 	}
 }
