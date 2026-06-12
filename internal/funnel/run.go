@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
@@ -107,7 +108,11 @@ func (f *Funnel) Sweep(ctx context.Context) (*Result, error) {
 		Message: fmt.Sprintf("sweep: %d targets, %d never-scanned, %d changed-since-scan", len(targets), neverScanned, changedSinceScan),
 	})
 
-	result, err := f.run(ctx, store.ScanOneshot, snap, targets)
+	// touchCoverage=true: sweeps stamp per-unit coverage as each finderOK unit
+	// completes (incremental durability). Targeted scans do NOT touch coverage —
+	// sweeps are the coverage source of truth. See the Deliberate Asymmetry note
+	// in the hypothesize docstring and the design comment in run().
+	result, err := f.run(ctx, store.ScanOneshot, snap, targets, fps, true)
 	if err != nil {
 		return nil, err
 	}
@@ -115,22 +120,6 @@ func (f *Funnel) Sweep(ctx context.Context) (*Result, error) {
 	result.Stats.HeatFiles = heatFiles
 	result.Stats.SweepNeverScanned = neverScanned
 	result.Stats.SweepChangedSinceScan = changedSinceScan
-
-	// Record truthful scan coverage: only files actually covered (finderOK) get
-	// a fresh last_scanned_at, along with their content hash at coverage time
-	// (fps may be nil on fingerprint error; TouchScanCoverage degrades safely).
-	// Best-effort: failure is logged but does not abort.
-	//
-	// Deliberate asymmetry: Targeted (commit-triggered) scans do NOT touch
-	// coverage — sweeps are the coverage source of truth. A file scanned by a
-	// targeted poll still counts as due on the next sweep; that costs an
-	// occasional redundant re-scan but keeps group classification simple and
-	// conservative.
-	if len(result.CoveredFiles) > 0 {
-		if err := f.store.TouchScanCoverage(ctx, result.CoveredFiles, snap.Commit, fps); err != nil {
-			f.note(result, fmt.Sprintf("sweep: TouchScanCoverage failed: %v", err))
-		}
-	}
 
 	return result, nil
 }
@@ -281,7 +270,8 @@ func (f *Funnel) Targeted(ctx context.Context, changedFiles []string) (*Result, 
 	}
 	sort.Strings(targets)
 
-	return f.run(ctx, store.ScanTargeted, snap, targets)
+	// touchCoverage=false: targeted scans do not stamp coverage. See Sweep.
+	return f.run(ctx, store.ScanTargeted, snap, targets, nil, false)
 }
 
 // snapshot builds the current snapshot through the configured scan filter
@@ -300,7 +290,26 @@ func (f *Funnel) snapshot(ctx context.Context) (*ingest.Snapshot, error) {
 // recording into the clients, executes stages A-D, finalizes the scan run with
 // stats, and returns the ranked Result. targets is the (already scoped) list of
 // repo-relative files to audit.
-func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snapshot, targets []string) (*Result, error) {
+//
+// fps is the per-file fingerprint map computed by the caller (Sweep already
+// has it; Targeted may pass nil since Targeted does not touch coverage).
+// touchCoverage enables per-unit coverage stamping (true for sweeps, false for
+// targeted). When true, the hypothesize goroutines call TouchScanCoverage for
+// each finderOK unit immediately on completion so coverage is durable across
+// interruptions. The old run-end batch call is gone: coverage is now incremental.
+//
+// # Interrupt-safe finalization
+//
+// run() seals the scan_runs row (FinishScanRun) on EVERY exit path — normal
+// completion, internal error, or context cancellation — using a deferred
+// finalize step. This prevents dangling never-finalized rows when a scan is
+// killed or cancelled.
+//
+// The finalize write uses a short detached context (context.WithTimeout over
+// context.Background()) rather than the run's ctx, because the run ctx is
+// already cancelled on the interruption path. The run ctx must not be used for
+// the finalize write, or the DB call would fail immediately.
+func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snapshot, targets []string, fps map[string]string, touchCoverage bool) (*Result, error) {
 	scanRunID, err := f.store.BeginScanRun(ctx, kind, snap.Commit)
 	if err != nil {
 		return nil, fmt.Errorf("funnel: begin scan run: %w", err)
@@ -334,6 +343,38 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 
 	result := &Result{ScanRunID: scanRunID, Commit: snap.Commit}
 
+	// Interrupt-safe finalization: seal the scan_runs row on every exit path.
+	// finalizeOnce ensures we finalize exactly once even if the deferred call
+	// races a normal-path finalize (there is only one finalize site now, but
+	// the once guard is cheap insurance).
+	//
+	// The detached context (5 s timeout over context.Background()) is critical:
+	// on the cancellation path the run ctx is already dead, so any DB write on
+	// it would fail immediately and leave the row dangling. We need a fresh
+	// context that is still alive to write the seal. 5 s is generous for a
+	// single SQLite UPDATE.
+	var finalizeOnce = func(s *Stats) {
+		statsJSON, merr := json.Marshal(s)
+		if merr != nil {
+			// JSON marshal of our own struct should never fail; log-and-continue.
+			statsJSON = []byte(`{"aborted":true}`)
+		}
+		fCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if ferr := f.store.FinishScanRun(fCtx, scanRunID, string(statsJSON)); ferr != nil {
+			// Best-effort: a finalize failure is logged via note on the result (if
+			// available) but must not mask the original error or panic.
+			f.note(result, fmt.Sprintf("funnel: FinishScanRun failed on finalize: %v", ferr))
+		}
+	}
+	finalized := false
+	defer func() {
+		if !finalized {
+			// Abnormal exit (panic recovery is not our job; this handles error/cancel).
+			finalizeOnce(&result.Stats)
+		}
+	}()
+
 	// Derive the finder/verifier persona from the snapshot's dominant language
 	// mix so a non-Go repo is audited by an appropriately-described engineer
 	// rather than a hardcoded "senior Go engineer". Computed once per run and
@@ -346,15 +387,28 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 
 	// Fingerprints anchor every persisted finding to the exact file content it
 	// was found in, so the daemon can later detect when the code changed.
-	fps, err := f.repo.Fingerprints(ctx, snap)
-	if err != nil {
-		return nil, fmt.Errorf("funnel: fingerprints: %w", err)
+	// NOTE: run() no longer calls Fingerprints here; the caller (Sweep) already
+	// computed fps and passes it in. Targeted passes nil (it does not need
+	// fingerprints for coverage). persist/persistSuspected still need fps for
+	// finding anchoring, so we compute them from snap here when nil (targeted path).
+	if fps == nil {
+		var fpsErr error
+		fps, fpsErr = f.repo.Fingerprints(ctx, snap)
+		if fpsErr != nil {
+			result.Stats.Aborted = true
+			return nil, fmt.Errorf("funnel: fingerprints: %w", fpsErr)
+		}
 	}
 
 	// Stage A — Hypothesize.
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageHypothesize})
-	candidates, err := f.hypothesize(ctx, scanRunID, finder, persona, kind, f.opts.ChangeContext, langs, targets, budget, result)
+	candidates, err := f.hypothesize(ctx, scanRunID, finder, persona, kind, f.opts.ChangeContext, langs, targets, budget, result, fps, touchCoverage)
 	if err != nil {
+		if ctx.Err() != nil {
+			result.Stats.Interrupted = true
+			return nil, ctx.Err()
+		}
+		result.Stats.Aborted = true
 		return nil, err
 	}
 	result.Stats.Hypothesized = len(candidates)
@@ -370,6 +424,11 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageTriage})
 	survivors, err := f.triage(ctx, candidates, snap, &result.Stats)
 	if err != nil {
+		if ctx.Err() != nil {
+			result.Stats.Interrupted = true
+			return nil, ctx.Err()
+		}
+		result.Stats.Aborted = true
 		return nil, err
 	}
 	result.Stats.Triaged = len(survivors)
@@ -382,6 +441,11 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageVerify})
 	verified, killed, orphaned, err := f.verify(ctx, verifier, persona, survivors, budget, result)
 	if err != nil {
+		if ctx.Err() != nil {
+			result.Stats.Interrupted = true
+			return nil, ctx.Err()
+		}
+		result.Stats.Aborted = true
 		return nil, err
 	}
 	result.Stats.Verified = len(verified)
@@ -398,6 +462,11 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StagePersist})
 	findings, err := f.persist(ctx, verified, snap.Commit, fps)
 	if err != nil {
+		if ctx.Err() != nil {
+			result.Stats.Interrupted = true
+			return nil, ctx.Err()
+		}
+		result.Stats.Aborted = true
 		return nil, err
 	}
 	// Budget-orphaned candidates (verification skipped or cut short at the hard
@@ -405,6 +474,11 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// can review them and re-run verification with more budget.
 	suspected, err := f.persistSuspected(ctx, orphaned, snap.Commit, fps)
 	if err != nil {
+		if ctx.Err() != nil {
+			result.Stats.Interrupted = true
+			return nil, ctx.Err()
+		}
+		result.Stats.Aborted = true
 		return nil, err
 	}
 	findings = append(findings, suspected...)
@@ -432,17 +506,16 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		CacheReadTokens: cacheRead, CacheCreationTokens: cacheCreated,
 	})
 
-	// Finalize the scan run with the stats blob.
-	statsJSON, err := json.Marshal(result.Stats)
-	if err != nil {
-		return nil, fmt.Errorf("funnel: marshal stats: %w", err)
-	}
-	if err := f.store.FinishScanRun(ctx, scanRunID, string(statsJSON)); err != nil {
-		return nil, fmt.Errorf("funnel: finish scan run: %w", err)
-	}
+	// Normal-path finalize: seal the scan run row. Mark finalized so the deferred
+	// finalize step does not double-call (which would be harmless but wasteful).
+	finalized = true
+	finalizeOnce(&result.Stats)
 
 	// Prune agent_unit rows for old scan runs. Best-effort: a prune failure is
 	// never fatal to the scan result. keepRuns is defined in observability.go.
+	// Skipped on the interrupted/aborted paths (handled above via early return)
+	// because those paths use a dead ctx and PruneAgentUnits would fail
+	// immediately; the prune is cosmetic and will succeed on the next clean run.
 	if _, err := f.store.PruneAgentUnits(ctx, keepRuns); err != nil {
 		f.note(result, fmt.Sprintf("observability: PruneAgentUnits failed: %v", err))
 	}

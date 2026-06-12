@@ -116,7 +116,25 @@ func buildUnits(lenses []Lens, strategies []Strategy, chunks []fileChunk, leadsB
 // diff-intent tasks are emitted on sweeps or when cc is nil; lens selection and
 // degradation tolerate a lens that emits zero chunk tasks (degradation
 // survivors are computed from lenses that actually emitted units this run).
-func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, persona string, kind store.ScanKind, cc *ChangeContext, langs []ingest.Language, targets []string, budget *budgetState, result *Result) ([]Candidate, error) {
+//
+// fps is the per-file fingerprint map for coverage stamping. When touchCoverage
+// is true (sweep path only), each finderOK unit's files are stamped via
+// TouchScanCoverage immediately on completion — providing durable partial
+// progress even if the run is cancelled before all units finish.
+//
+// Deliberate asymmetry: targeted scans pass touchCoverage=false and fps=nil so
+// they never stamp coverage. Sweeps are the coverage source of truth; a file
+// targeted by a commit-triggered scan still counts as due on the next sweep.
+// This matches the documented asymmetry that was previously in run.go's
+// run-end batch call (now replaced by this incremental approach).
+//
+// Files appearing in multiple finderOK units (multiple lenses × chunks) get
+// stamped multiple times — TouchScanCoverage is an idempotent upsert, so this
+// is safe. No cross-unit dedup state is added; the extra writes are acceptable.
+// TouchScanCoverage calls happen outside mu alongside the agent_units row write,
+// so the hot mutex never waits on the DB (sqlite serializes writers, but the
+// mu-free write keeps sibling unit completions from serializing through mu).
+func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, persona string, kind store.ScanKind, cc *ChangeContext, langs []ingest.Language, targets []string, budget *budgetState, result *Result, fps map[string]string, touchCoverage bool) ([]Candidate, error) {
 	if len(targets) == 0 && cc == nil {
 		return nil, nil
 	}
@@ -449,6 +467,20 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			}
 			mu.Unlock()
 			f.recordFinderUnitWithTime(ctx, scanRunID, u, unitIdx, recordStatus, startedAt, finishedAt, inTokens, outTokens, cacheRead, candCount, unitLeadsPosted, result)
+
+			// Per-unit coverage: stamp this unit's files immediately when finderOK
+			// on a sweep run (touchCoverage=true). This replaces the old run-end
+			// batch TouchScanCoverage call in Sweep, providing durable partial
+			// progress: if the run is cancelled after this point, the files' coverage
+			// is already persisted. The call is outside mu so the hot mutex never
+			// waits on the DB write (same discipline as recordFinderUnitWithTime).
+			// fps may be nil on fingerprint error; TouchScanCoverage degrades safely
+			// (empty hash ≠ clobbering existing hash — see the CASE in filestate.go).
+			if touchCoverage && recordStatus == "ok" && len(u.files) > 0 {
+				if tcErr := f.store.TouchScanCoverage(ctx, u.files, result.Commit, fps); tcErr != nil {
+					f.note(result, fmt.Sprintf("sweep: per-unit TouchScanCoverage failed (unit %d, %s): %v", unitIdx, u.lens.Name, tcErr))
+				}
+			}
 		}()
 	}
 
