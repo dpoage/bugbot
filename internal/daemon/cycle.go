@@ -319,8 +319,13 @@ func (d *Daemon) logCycle(res cycleResult, dur time.Duration) {
 	)
 }
 
-// refreshWatermarks recomputes the snapshot fingerprints and upserts them into
-// file_state, anchoring each to commit. Best-effort: errors are logged only.
+// refreshWatermarks recomputes the snapshot fingerprints and refreshes the
+// content_hash and last_scanned_commit columns in file_state, anchored to
+// commit. It deliberately uses RefreshContentHashes (not UpsertFileStates) so
+// that truthful last_scanned_at timestamps written by TouchScanCoverage are
+// never clobbered: a file scanned in this sweep has its scan time recorded by
+// the funnel; refreshWatermarks only needs to update the content hashes for
+// incremental change detection. Best-effort: errors are logged only.
 func (d *Daemon) refreshWatermarks(ctx context.Context, commit string) {
 	snap, err := d.repo.Snapshot(ctx, ingest.ScanFilter{})
 	if err != nil {
@@ -340,8 +345,8 @@ func (d *Daemon) refreshWatermarks(ctx context.Context, commit string) {
 			LastScannedCommit: commit,
 		})
 	}
-	if err := d.store.UpsertFileStates(ctx, states); err != nil {
-		d.log.Error("daemon: sweep watermark upsert failed", "err", err)
+	if err := d.store.RefreshContentHashes(ctx, states); err != nil {
+		d.log.Error("daemon: sweep watermark refresh failed", "err", err)
 	}
 }
 

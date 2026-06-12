@@ -542,6 +542,16 @@ type Stats struct {
 	// zero for this Sweep. Zero when heat ordering was disabled or git
 	// history was unavailable.
 	HeatFiles int `json:"heat_files,omitempty"`
+	// SweepNeverScanned is the number of files in the sweep's group 1 (never
+	// scanned or at epoch sentinel). Zero when heat ordering is disabled.
+	SweepNeverScanned int `json:"sweep_never_scanned,omitempty"`
+	// SweepChangedSinceScan is the number of files admitted to the sweep's
+	// group 1 because their current fingerprint differs from the content hash
+	// recorded at their last scan. Zero when heat ordering is disabled.
+	SweepChangedSinceScan int `json:"sweep_changed_since_scan,omitempty"`
+	// CoveredFiles is the count of files that were actually covered (i.e. at
+	// least one finderOK unit ran against them) in this run.
+	CoveredFiles int `json:"covered_files,omitempty"`
 }
 
 // FinderReliable reports whether the finder stage produced trustworthy coverage:
@@ -578,6 +588,11 @@ type Result struct {
 	// Skipped lists human-readable notes about work the run deliberately did not
 	// do (degradation, hard-budget stops). Never silent truncation.
 	Skipped []string
+	// CoveredFiles is the deduplicated, sorted list of files that were actually
+	// covered by at least one finderOK unit in this run. Files from parse-failed,
+	// budget-stopped, or budget-skipped units are NOT included. The diff-intent
+	// custom unit (files == nil) contributes nothing here.
+	CoveredFiles []string
 }
 
 // spendRecorder implements llm.Recorder, writing each completion's usage to the

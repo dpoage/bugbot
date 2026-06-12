@@ -202,6 +202,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	var (
 		mu              sync.Mutex
 		collected       []Candidate
+		coveredSet      = make(map[string]bool) // files from finderOK units only
 		finderRuns      int
 		finderFailed    int
 		finderBudgetCut int
@@ -365,6 +366,14 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				return
 			}
 			collected = append(collected, cands...)
+			// Record coverage under the existing mu so covered set stays
+			// consistent with finderRuns/finderFailed collected in this same lock.
+			// The diff-intent custom unit has files == nil and contributes nothing;
+			// a file appearing in multiple units (multiple lenses × chunks) is
+			// deduplicated by the map.
+			for _, file := range u.files {
+				coveredSet[file] = true
+			}
 		}()
 	}
 
@@ -378,6 +387,14 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	result.Stats.FinderBudgetStopped = finderBudgetCut
 	result.Stats.LeadsConsumed = leadsConsumedTotal
 	result.Stats.LeadsPosted = int(leadsPostedAtomic.Load())
+	// Build the sorted covered-files slice from the set collected above.
+	covered := make([]string, 0, len(coveredSet))
+	for file := range coveredSet {
+		covered = append(covered, file)
+	}
+	sort.Strings(covered)
+	result.CoveredFiles = covered
+	result.Stats.CoveredFiles = len(covered)
 	mu.Unlock()
 	return collected, nil
 }
