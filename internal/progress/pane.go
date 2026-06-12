@@ -168,6 +168,8 @@ func (p *PaneRenderer) apply(ev Event) {
 	case KindFindingVerified:
 		p.counts.Verified++
 		p.lastEvent = "verified: " + ev.Title
+	case KindCandidateTriaged:
+		p.counts.Triaged++
 	case KindFindingKilled:
 		p.counts.Killed++
 		p.lastEvent = "killed: " + ev.Title

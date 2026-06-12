@@ -333,3 +333,60 @@ func TestSnapshot_LiveCountersResetOnNewScan(t *testing.T) {
 			st.LiveCandidates, st.LiveVerified, st.LiveKilled)
 	}
 }
+
+// TestSnapshot_LiveTriagedCounter verifies the per-candidate triage tick and
+// its reset on StageFinished(triage) — and that an aborted run's value resets
+// on the next scan start (same lifecycle rule as the other live counters).
+func TestSnapshot_LiveTriagedCounter(t *testing.T) {
+	clock := time.Unix(30000, 0)
+	advance := func(d time.Duration) { clock = clock.Add(d) }
+	now := func() time.Time { return clock }
+	s, path := newTestSnapshot(t, now)
+
+	s.Handle(Event{Kind: KindCandidateTriaged, Title: "a", Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindCandidateTriaged, Title: "b", Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindStageStarted, Stage: StageVerify, Time: clock})
+
+	st, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if st.LiveTriaged != 2 {
+		t.Errorf("LiveTriaged = %d after 2 triage ticks, want 2", st.LiveTriaged)
+	}
+
+	advance(2 * time.Second)
+	s.Handle(Event{
+		Kind: KindStageFinished, Stage: StageTriage,
+		Counts: &Counts{Triaged: 2}, Time: clock,
+	})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindStageStarted, Stage: StageVerify, Time: clock})
+	st, err = ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if st.LiveTriaged != 0 {
+		t.Errorf("LiveTriaged = %d after StageFinished(triage), want 0", st.LiveTriaged)
+	}
+	if st.Counts.Triaged != 2 {
+		t.Errorf("Counts.Triaged = %d, want 2 (authoritative stage-finish value)", st.Counts.Triaged)
+	}
+
+	// Aborted-run lifecycle: tick without a stage finish, then a new scan.
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindCandidateTriaged, Title: "stale", Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindScanStarted, ScanKind: "oneshot", Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindStageStarted, Stage: StageHypothesize, Time: clock})
+	st, err = ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if st.LiveTriaged != 0 {
+		t.Errorf("LiveTriaged = %d after new scan start, want 0 (stale value from aborted run)", st.LiveTriaged)
+	}
+}

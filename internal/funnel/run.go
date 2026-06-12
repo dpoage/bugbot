@@ -508,6 +508,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			for _, primary := range ts.popReady() {
 				select {
 				case verCh <- primary:
+					progress.Emit(sink, progress.Event{Kind: progress.KindCandidateTriaged, Title: primary.Title})
 				case <-ctx.Done():
 					for range candCh {
 					}
@@ -520,6 +521,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		for _, primary := range ts.popReady() {
 			select {
 			case verCh <- primary:
+				progress.Emit(sink, progress.Event{Kind: progress.KindCandidateTriaged, Title: primary.Title})
 			case <-ctx.Done():
 			}
 		}

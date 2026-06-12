@@ -201,7 +201,12 @@ func fmtStageCounts(st progress.Status) string {
 		kil += fmt.Sprintf(" (so far: %d)", st.LiveKilled)
 	}
 
-	return fmt.Sprintf("%s triaged=%d %s %s", hyp, st.Counts.Triaged, ver, kil)
+	tri := fmt.Sprintf("triaged=%d", st.Counts.Triaged)
+	if st.LiveTriaged > 0 {
+		tri += fmt.Sprintf(" (so far: %d)", st.LiveTriaged)
+	}
+
+	return fmt.Sprintf("%s %s %s %s", hyp, tri, ver, kil)
 }
 
 // fmtTime renders a timestamp, or "-" when zero.
