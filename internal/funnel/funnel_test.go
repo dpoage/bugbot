@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/agent"
@@ -837,4 +838,84 @@ func TestBudgetState_CacheReadWeighted(t *testing.T) {
 	if spent := b.pool.Spent(); spent != 1050 {
 		t.Errorf("pool charged %d, want 1050 (500 + 4500*0.1 + 100)", spent)
 	}
+}
+
+// TestSweep_GlobalSlotPool_MaxParallelEnforced verifies that the global slot
+// pool correctly enforces MaxParallel=2 across finder agents: at no point do
+// more than 2 agent completions execute concurrently. The test instruments the
+// LLM client with an atomic high-water mark that it increments on entry and
+// decrements on exit; after the sweep the mark must be <= 2.
+func TestSweep_GlobalSlotPool_MaxParallelEnforced(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// hwmClient wraps a scriptedClient and records the concurrent call high-
+	// water mark using atomic operations. Each Complete call increments the
+	// in-flight counter, records the peak, then decrements on return.
+	type hwmClient struct {
+		inner    *scriptedClient
+		inFlight atomic.Int32
+		peak     atomic.Int32
+	}
+	hw := &hwmClient{inner: newScriptedClient()}
+
+	hw.inner.fallback = emptyCandidates
+
+	// Wrap Complete to track concurrency.
+	wrapped := &concurrencyTrackingClient{
+		inner: hw.inner,
+		onEntry: func() {
+			cur := hw.inFlight.Add(1)
+			for {
+				old := hw.peak.Load()
+				if cur <= old || hw.peak.CompareAndSwap(old, cur) {
+					break
+				}
+			}
+		},
+		onExit: func() { hw.inFlight.Add(-1) },
+	}
+
+	verifier := newScriptedClient()
+	verifier.fallback = notRefutedJSON
+
+	const maxP = 2
+	f, err := New(RoleClients{Finder: wrapped, Verifier: verifier}, st, repo, Options{
+		MaxParallel:         maxP,
+		DisableHeatOrdering: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res
+
+	peak := hw.peak.Load()
+	if peak > maxP {
+		t.Errorf("concurrent finder agents peak = %d, want <= %d (MaxParallel)", peak, maxP)
+	}
+	if peak == 0 {
+		t.Error("peak = 0 — no finder agents ran (test is vacuous)")
+	}
+	t.Logf("finder concurrency peak = %d (MaxParallel = %d)", peak, maxP)
+}
+
+// concurrencyTrackingClient is a fake llm.Client that calls onEntry/onExit
+// hooks around each Complete call to let callers measure concurrent invocations.
+type concurrencyTrackingClient struct {
+	inner   *scriptedClient
+	onEntry func()
+	onExit  func()
+}
+
+func (c *concurrencyTrackingClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+
+func (c *concurrencyTrackingClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+	c.onEntry()
+	defer c.onExit()
+	return c.inner.Complete(ctx, req)
 }
