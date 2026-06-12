@@ -213,8 +213,10 @@ type Options struct {
 	// Refuters is the number of adversarial refuter agents per candidate. Zero
 	// uses DefaultRefuters.
 	Refuters int
-	// MaxParallel bounds concurrently-running agents. Zero uses
-	// DefaultMaxParallel; negative is treated as 1.
+	// MaxParallel bounds concurrently-running agents across all roles (finder
+	// breadth, verifier candidate panels). Zero uses DefaultMaxParallel;
+	// negative is treated as 1. The global slot pool (slotPool) enforces this
+	// bound; per-stage local semaphores have been removed.
 	MaxParallel int
 	// ChunkSize is the number of files per finder invocation. Zero uses
 	// DefaultChunkSize.
@@ -340,6 +342,11 @@ type Funnel struct {
 	repo    *ingest.Repo
 	opts    Options
 	lenses  []Lens
+	// slots is the funnel-wide agent concurrency pool. Every LLM agent —
+	// finder unit (low priority) or verifier candidate panel (high priority)
+	// — holds one slot for its entire duration. Options.MaxParallel means
+	// "concurrent agents across all roles".
+	slots *slotPool
 
 	// navOnce lazily builds the shared code-navigation tool bundle (and its
 	// language-server manager) on first use, so funnels that never run agents
@@ -397,6 +404,7 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 		opts:    resolved,
 		lenses:  selectLenses(resolved.Lenses),
 		deps:    deps,
+		slots:   newSlotPool(resolved.MaxParallel),
 	}, nil
 }
 

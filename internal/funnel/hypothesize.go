@@ -246,7 +246,6 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 		finderBudgetCut int
 		firstErr        error
 	)
-	sem := make(chan struct{}, f.opts.MaxParallel)
 	var wg sync.WaitGroup
 
 	// Compute degraded survivors from the (lens × strategy) unit-classes that
@@ -306,8 +305,14 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 		unitIdx := unitIdx
 		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			// Acquire a global slot (low priority: finder breadth defers to verifier).
+			// On context cancellation, acquire returns ctx.Err(); we exit without
+			// recording a row — same as today's behavior where cancelled runs abandon
+			// queued work. The budget-gate and agent launch happen AFTER acquisition.
+			if err := f.slots.acquire(ctx, false); err != nil {
+				return
+			}
+			defer f.slots.release()
 
 			// Gate against the LIVE spend total only once we hold a worker slot, so
 			// the decision reflects spend already recorded by earlier units rather

@@ -72,7 +72,6 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 		arbiterFailed int
 		firstErr      error
 	)
-	sem := make(chan struct{}, f.opts.MaxParallel)
 	var wg sync.WaitGroup
 
 	for candIdx, c := range candidates {
@@ -88,8 +87,15 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 		candIdx := candIdx
 		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			// Acquire a global slot (high priority: verifier is cheap, latency-
+			// sensitive, and gates everything downstream). One slot covers the whole
+			// sequential refuter panel + arbiter for this candidate. On context
+			// cancellation, return without recording — context error handling below
+			// covers this on firstErr / ctx.Err() paths.
+			if err := f.slots.acquire(ctx, true); err != nil {
+				return
+			}
+			defer f.slots.release()
 
 			// Gate against the live spend total once we hold a worker slot (see the
 			// finder stage for the rationale). A candidate whose verification is

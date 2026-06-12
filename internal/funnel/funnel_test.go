@@ -7,7 +7,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/ingest"
@@ -837,4 +840,92 @@ func TestBudgetState_CacheReadWeighted(t *testing.T) {
 	if spent := b.pool.Spent(); spent != 1050 {
 		t.Errorf("pool charged %d, want 1050 (500 + 4500*0.1 + 100)", spent)
 	}
+}
+
+// TestSweep_GlobalSlotPool_MaxParallelEnforced verifies that the global slot
+// pool enforces MaxParallel=2 across finder agents IN BOTH DIRECTIONS: the
+// bound is reached (peak == MaxParallel) and never exceeded. The fake client
+// blocks every call on a barrier that opens only once MaxParallel callers are
+// in flight, so the pool's bound is genuinely contended — an instant-return
+// client never overlaps calls and would let a broken (or absent) pool pass a
+// peak<=max assertion with peak==1.
+func TestSweep_GlobalSlotPool_MaxParallelEnforced(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	const maxP = 2
+
+	inner := newScriptedClient()
+	inner.fallback = emptyCandidates
+
+	var (
+		inFlight    atomic.Int32
+		peak        atomic.Int32
+		barrierOnce sync.Once
+		barrier     = make(chan struct{})
+		timedOut    atomic.Bool
+	)
+	wrapped := &concurrencyTrackingClient{
+		inner: inner,
+		onEntry: func() {
+			cur := inFlight.Add(1)
+			for {
+				old := peak.Load()
+				if cur <= old || peak.CompareAndSwap(old, cur) {
+					break
+				}
+			}
+			if cur >= maxP {
+				barrierOnce.Do(func() { close(barrier) })
+			}
+			// Hold this call until MaxParallel callers are in flight, forcing
+			// the pool's bound to be contended. If the pool over-restricts
+			// (effective bound < maxP) the barrier can never fill; the timeout
+			// converts that hang into a test failure instead of a deadlock.
+			select {
+			case <-barrier:
+			case <-time.After(10 * time.Second):
+				timedOut.Store(true)
+			}
+		},
+		onExit: func() { inFlight.Add(-1) },
+	}
+
+	verifier := newScriptedClient()
+	verifier.fallback = notRefutedJSON
+
+	f, err := New(RoleClients{Finder: wrapped, Verifier: verifier}, st, repo, Options{
+		MaxParallel:         maxP,
+		DisableHeatOrdering: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.Sweep(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if timedOut.Load() {
+		t.Fatalf("barrier never filled: fewer than %d finder agents ran concurrently — pool over-restricts below MaxParallel", maxP)
+	}
+	if got := peak.Load(); got != maxP {
+		t.Errorf("concurrent finder agents peak = %d, want exactly %d (MaxParallel must be reached and never exceeded)", got, maxP)
+	}
+}
+
+// concurrencyTrackingClient is a fake llm.Client that calls onEntry/onExit
+// hooks around each Complete call to let callers measure concurrent invocations.
+type concurrencyTrackingClient struct {
+	inner   *scriptedClient
+	onEntry func()
+	onExit  func()
+}
+
+func (c *concurrencyTrackingClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+
+func (c *concurrencyTrackingClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+	c.onEntry()
+	defer c.onExit()
+	return c.inner.Complete(ctx, req)
 }
