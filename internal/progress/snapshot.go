@@ -166,6 +166,14 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 	case KindScanStarted, KindCycleStarted:
 		s.st.ScanKind = ev.ScanKind
 		s.st.Commit = ev.Commit
+		// Reset live counters at scan start, not only at stage finish: an
+		// aborted scan returns without emitting StageFinished, and the daemon
+		// reuses one SnapshotSink across cycles — without this reset the next
+		// cycle's status would show the dead run's "candidates so far" until
+		// its own stage completes.
+		s.st.LiveCandidates = 0
+		s.st.LiveVerified = 0
+		s.st.LiveKilled = 0
 		s.st.LastEvent = "started " + ev.ScanKind
 	case KindStageStarted:
 		s.st.Stage = ev.Stage
@@ -222,6 +230,12 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 			s.st.SpendCacheRead = ev.CacheReadTokens
 		}
 		s.st.Stage = ""
+		// Belt-and-suspenders: live counters are reset per stage and on scan
+		// start; clearing on finish too means an idle daemon never shows live
+		// remnants between runs.
+		s.st.LiveCandidates = 0
+		s.st.LiveVerified = 0
+		s.st.LiveKilled = 0
 		s.st.LastEvent = "finished " + ev.ScanKind
 		return true
 	}

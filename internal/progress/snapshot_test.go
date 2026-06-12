@@ -296,3 +296,40 @@ func TestSnapshot_FullLiveSequence(t *testing.T) {
 		t.Errorf("LiveKilled = %d, want 1", st.LiveKilled)
 	}
 }
+
+// TestSnapshot_LiveCountersResetOnNewScan covers the aborted-run lifecycle
+// edge: an aborted scan never emits StageFinished, and the daemon reuses one
+// SnapshotSink across cycles — so live counters must reset on the NEXT scan's
+// start event, or status shows the dead run's "candidates so far" until the
+// new run's own stage completes.
+func TestSnapshot_LiveCountersResetOnNewScan(t *testing.T) {
+	clock := time.Unix(20000, 0)
+	advance := func(d time.Duration) { clock = clock.Add(d) }
+	now := func() time.Time { return clock }
+	s, path := newTestSnapshot(t, now)
+
+	// Run 1 accumulates live counters, then aborts: no StageFinished, no
+	// ScanFinished.
+	s.Handle(Event{Kind: KindScanStarted, ScanKind: "oneshot", Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindAgentFinished, Role: RoleFinder, Label: "lens-a", Candidates: 4, Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindFindingVerified, Title: "t", Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindFindingKilled, Title: "k", Time: clock})
+
+	// Run 2 starts (daemon's next cycle through the same sink).
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindCycleStarted, ScanKind: "targeted", Time: clock})
+	advance(2 * time.Second)
+	s.Handle(Event{Kind: KindStageStarted, Stage: StageHypothesize, Time: clock})
+
+	st, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if st.LiveCandidates != 0 || st.LiveVerified != 0 || st.LiveKilled != 0 {
+		t.Errorf("live counters not reset on new scan: candidates=%d verified=%d killed=%d, want all 0 (stale values from the aborted run)",
+			st.LiveCandidates, st.LiveVerified, st.LiveKilled)
+	}
+}
