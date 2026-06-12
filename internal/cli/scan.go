@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 
@@ -125,17 +126,22 @@ func newScanCmd() *cobra.Command {
 
 			// Build the reproducer and wire it as an in-run hook when --repro is
 			// set. The hook closure captures the reproducer and the spend recorder
-			// (rec) so repro LLM spend flows through the same ledger as the funnel.
+			// so repro LLM spend flows through the same ledger as the funnel.
 			// The funnel does NOT import internal/repro; the CLI owns this wiring.
 			//
-			// Spend attribution (trap-4): the hook closure's rec.SetScanRun(scanRunID)
-			// is called from within runRepro using the scan run's ID, which is only
-			// known after the funnel opens the scan run. The hook receives the
-			// finding (including the scan's context) and the CLI's rec is already
-			// wired to the reproducer client. Spend flows to the same scan run as
-			// the finder/verifier spend: rec.SetScanRun is called once before the
-			// hook fires, inside buildReproHook.
-			var reproHook func(ctx context.Context, finding store.Finding) error
+			// Spend attribution: the funnel passes the scan run id into the hook
+			// (it is minted inside the funnel), and the closure pins it on the
+			// recorder once before the first PromoteOne — so in-run repro spend is
+			// attributed to the scan run like finder/verifier spend.
+			//
+			// reproAttempted records every fingerprint the in-run hook attempted —
+			// INCLUDING exhausted attempts, which leave no store-visible marker —
+			// so the catch-up drain never re-burns sandbox time on a finding this
+			// run already tried (the daemon's next-cycle rotation is separate,
+			// pre-existing behavior).
+			var reproHook func(ctx context.Context, scanRunID string, finding store.Finding) error
+			var reproAttempted sync.Map
+			var reproRunOnce sync.Once
 			var r *repro.Reproducer
 			var reproRec *ledgerRecorder
 			if doRepro {
@@ -148,10 +154,9 @@ func newScanCmd() *cobra.Command {
 					if sbErr != nil {
 						return fmt.Errorf("build sandbox: %w", sbErr)
 					}
-					// Ledger repro + patch-prover spend to the scan run. The scan run ID
-					// is not known yet (the funnel opens it); we set it inside buildReproHook
-					// after the funnel returns the result. For in-run calls, the hook
-					// closure captures reproRec and calls SetScanRun on first use.
+					// Ledger repro + patch-prover spend; the scan run id is pinned by
+					// the hook on first use (the funnel supplies it), and again after
+					// the sweep for the catch-up drain.
 					reproRec = newLedgerRecorder(ctx, st)
 					reproClient, rErr := llm.ResolveRole(ctx, &cfg, "reproducer", llm.Options{Recorder: reproRec})
 					if rErr != nil {
@@ -174,7 +179,9 @@ func newScanCmd() *cobra.Command {
 						// consumer goroutine is the parallelism bound). The hook calls
 						// PromoteOne which calls Attempt internally — no internal semaphore
 						// is added here. Hook errors are surfaced but do not abort the scan.
-						reproHook = func(hCtx context.Context, finding store.Finding) error {
+						reproHook = func(hCtx context.Context, scanRunID string, finding store.Finding) error {
+							reproRunOnce.Do(func() { reproRec.SetScanRun(scanRunID) })
+							reproAttempted.Store(finding.Fingerprint, true)
 							_, hErr := r.PromoteOne(hCtx, st, finding)
 							return hErr
 						}
@@ -269,7 +276,7 @@ func newScanCmd() *cobra.Command {
 				// by a very fast scan with a slow sandbox. Using the same
 				// PromoteAll path here means the daemon drain's rotation logic (touch
 				// failed findings) also runs for any catch-up attempts.
-				if err := runReproCatchUp(ctx, out, r, st, res.Findings); err != nil {
+				if err := runReproCatchUp(ctx, out, r, st, res.Findings, &reproAttempted); err != nil {
 					return err
 				}
 			}
@@ -337,12 +344,21 @@ func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool
 // is a cheap no-op when the in-run hook covered everything; it acts as a safety
 // net for findings that overflowed the reproCh buffer. It uses PromoteAll (the
 // daemon's batch path) so the rotation logic (touch failed findings) also runs.
-func runReproCatchUp(ctx context.Context, out io.Writer, r *repro.Reproducer, st *store.Store, findings []store.Finding) error {
-	// Filter to T2 findings with no prior attempt.
+func runReproCatchUp(ctx context.Context, out io.Writer, r *repro.Reproducer, st *store.Store, findings []store.Finding, attempted *sync.Map) error {
+	// Filter to T2 findings with no prior attempt. "Prior attempt" includes
+	// in-run attempts that EXHAUSTED: a failed repro leaves no store-visible
+	// marker (ReproPath stays empty, NeedsHuman stays false), so without the
+	// attempted set this drain would re-burn sandbox time on exactly the
+	// findings the in-run hook just failed on.
 	var pending []store.Finding
 	for _, f := range findings {
 		if f.Tier != 2 || f.ReproPath != "" || f.NeedsHuman {
 			continue
+		}
+		if attempted != nil {
+			if _, ok := attempted.Load(f.Fingerprint); ok {
+				continue
+			}
 		}
 		// Re-read from store to get the latest state (in-run hook may have promoted it).
 		current, err := st.GetFinding(ctx, f.ID)

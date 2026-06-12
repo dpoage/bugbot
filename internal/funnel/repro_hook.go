@@ -3,6 +3,7 @@ package funnel
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/store"
@@ -61,7 +62,7 @@ func (f *Funnel) runReproAttempt(ctx context.Context, finding store.Finding, sca
 	}
 
 	startedAt := time.Now()
-	hookErr := f.opts.Repro(ctx, finding)
+	hookErr := f.opts.Repro(ctx, scanRunID, finding)
 	finishedAt := time.Now()
 
 	// Record agent_units row: role='reproducer'. The hook owns the actual
@@ -71,7 +72,7 @@ func (f *Funnel) runReproAttempt(ctx context.Context, finding store.Finding, sca
 	// Status vocabulary (reproducer role, documented in store/agentunits.go):
 	//   reproduced    — finding promoted to Tier-1 (ReproPath now set)
 	//   exhausted     — all attempts failed; finding stays Tier-2
-	//   invalid_plan  — hook returned an error before any sandbox run
+	//  — hook returned an error before any sandbox run
 	//   infra_error   — hook returned a non-nil error (infrastructure failure)
 	//
 	// Tokens: the hook closure (built by the CLI) wires its own llm.Recorder
@@ -129,4 +130,47 @@ func reproSucceededInt(status string) int {
 		return 1
 	}
 	return 0
+}
+
+// reproQueue carries survived Tier-2 findings from verify goroutines to the
+// in-run repro consumer. enqueue NEVER blocks (the spec's hard requirement:
+// a slow repro backlog must not stall verification): a full channel falls
+// back to the overflow slice, which run() drains sequentially after all
+// channel-path attempts complete. A finding lands in exactly ONE of the two
+// paths (the select is mutually exclusive), so exactly-once delivery holds by
+// construction; the claim check in runReproAttempt is the backstop. In
+// practice the consumer is a spawn-only loop that drains the channel faster
+// than verify can fill it, so the overflow path fires only under scheduler
+// starvation — it is defensive machinery, tested directly below rather than
+// through contrived integration timing.
+type reproQueue struct {
+	ch       chan store.Finding
+	mu       sync.Mutex
+	overflow []store.Finding
+}
+
+func newReproQueue(buffer int) *reproQueue {
+	return &reproQueue{ch: make(chan store.Finding, buffer)}
+}
+
+// enqueue delivers f to the channel when there is room, else stages it in the
+// overflow slice. Never blocks.
+func (q *reproQueue) enqueue(f store.Finding) {
+	select {
+	case q.ch <- f:
+	default:
+		q.mu.Lock()
+		q.overflow = append(q.overflow, f)
+		q.mu.Unlock()
+	}
+}
+
+// drainOverflow returns the staged overflow findings exactly once: a second
+// call returns nil unless new findings were staged in between.
+func (q *reproQueue) drainOverflow() []store.Finding {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := q.overflow
+	q.overflow = nil
+	return out
 }

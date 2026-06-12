@@ -16,7 +16,7 @@ import (
 //
 //	finder:     ok, parse_failed, budget_stopped, skipped_hard_budget, skipped_degraded
 //	verifier:   survived, killed, orphaned_budget
-//	reproducer: reproduced, exhausted, invalid_plan, infra_error
+//	reproducer: reproduced, exhausted, infra_error
 type AgentUnit struct {
 	ID              string
 	ScanRunID       string

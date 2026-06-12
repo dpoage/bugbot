@@ -2,6 +2,7 @@ package funnel
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,7 +23,7 @@ func newFakeReproHook() *fakeReproHook {
 	return &fakeReproHook{}
 }
 
-func (h *fakeReproHook) hook(_ context.Context, finding store.Finding) error {
+func (h *fakeReproHook) hook(_ context.Context, _ string, finding store.Finding) error {
 	h.mu.Lock()
 	h.invoked = append(h.invoked, finding)
 	h.mu.Unlock()
@@ -101,7 +102,7 @@ func TestRepro_InRun_Streaming(t *testing.T) {
 	hookFiredCh := make(chan struct{})
 	var hookFiredOnce sync.Once
 
-	hook := func(hCtx context.Context, finding store.Finding) error {
+	hook := func(hCtx context.Context, _ string, finding store.Finding) error {
 		hookFiredOnce.Do(func() { close(hookFiredCh) })
 		return nil
 	}
@@ -255,7 +256,7 @@ func TestRepro_NoDoubleAttempt(t *testing.T) {
 	var invCount atomic.Int32
 	// Hook that simulates promotion by setting ReproPath.
 	var capturedFinding store.Finding
-	hook := func(hCtx context.Context, finding store.Finding) error {
+	hook := func(hCtx context.Context, _ string, finding store.Finding) error {
 		invCount.Add(1)
 		capturedFinding = finding
 		// Promote the finding.
@@ -303,65 +304,6 @@ func TestRepro_NoDoubleAttempt(t *testing.T) {
 	}
 }
 
-// TestRepro_Overflow verifies that when reproCh is full, findings fall back to
-// the overflow slice and are still attempted exactly once.
-//
-// Strategy: use a hook that blocks until explicitly released, allowing the
-// reproCh buffer to fill. Then release and verify all findings were attempted.
-func TestRepro_Overflow(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// We need a repo with multiple finding candidates. Use openFixture + multiple
-	// lenses that each return the same real candidate (they'll be deduped in
-	// triage, so let's use different files/lines to avoid dedup).
-	st, repo := openFixture(t)
-
-	var hookMu sync.Mutex
-	var hookInvoked []store.Finding
-	// The hook completes immediately to let the overflow drain work.
-	hook := func(hCtx context.Context, finding store.Finding) error {
-		hookMu.Lock()
-		hookInvoked = append(hookInvoked, finding)
-		hookMu.Unlock()
-		return nil
-	}
-
-	// We use the standard fixture: 1 finding survives. Test the overflow
-	// path by making reproCh buffer size artificially small via the
-	// verify path filling it. With buffer=16 and 1 finding, the buffer
-	// won't fill — instead we test the normal path works correctly with the hook.
-	// (True overflow test would require >16 concurrent verifiers; we test the
-	// claim mechanism instead by asserting exactly 1 invocation per finding.)
-	finder := finderOnNilLens(newScriptedClient())
-	verifier := verifierRouting(newScriptedClient())
-
-	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Repro: hook,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	res, err := f.Sweep(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(res.Findings) != 1 {
-		t.Fatalf("want 1 finding, got %d", len(res.Findings))
-	}
-
-	hookMu.Lock()
-	count := len(hookInvoked)
-	hookMu.Unlock()
-
-	// Exactly one invocation per finding (no double-attempts, no drops).
-	if count != 1 {
-		t.Errorf("hook invoked %d times, want 1 (one per finding)", count)
-	}
-}
-
 // TestRepro_AgentUnits verifies that a repro attempt produces one
 // role='reproducer' agent_units row with correct fields.
 func TestRepro_AgentUnits(t *testing.T) {
@@ -369,7 +311,7 @@ func TestRepro_AgentUnits(t *testing.T) {
 	st, repo := openFixture(t)
 
 	// Hook that simulates a successful promotion.
-	hook := func(hCtx context.Context, finding store.Finding) error {
+	hook := func(hCtx context.Context, _ string, finding store.Finding) error {
 		// Simulate promotion: set ReproPath.
 		current, err := st.GetFindingByFingerprint(hCtx, finding.Fingerprint)
 		if err != nil {
@@ -419,7 +361,7 @@ func TestRepro_AgentUnits(t *testing.T) {
 
 	// Status must be a known vocabulary word.
 	switch row.Status {
-	case "reproduced", "exhausted", "infra_error", "invalid_plan":
+	case "reproduced", "exhausted", "infra_error":
 		// valid
 	default:
 		t.Errorf("reproducer row: unexpected status %q", row.Status)
@@ -505,7 +447,7 @@ func TestRepro_HookErrorBestEffort(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)
 
-	hook := func(ctx context.Context, finding store.Finding) error {
+	hook := func(ctx context.Context, _ string, finding store.Finding) error {
 		return context.DeadlineExceeded // simulate an infra error
 	}
 
@@ -546,5 +488,87 @@ func TestRepro_HookErrorBestEffort(t *testing.T) {
 	}
 	if reproRows[0].Status != "infra_error" {
 		t.Errorf("status = %q, want infra_error", reproRows[0].Status)
+	}
+}
+
+// TestReproQueue_OverflowExactlyOnce tests the defensive overflow machinery
+// DIRECTLY (the spawn-only consumer drains the channel faster than verify can
+// fill it in practice, so integration timing cannot reach this path honestly):
+// with no consumer attached, enqueues beyond the buffer land in the overflow
+// slice; the union of channel + overflow holds every finding exactly once; a
+// second drain returns nothing.
+func TestReproQueue_OverflowExactlyOnce(t *testing.T) {
+	q := newReproQueue(2)
+	for i := 0; i < 5; i++ {
+		q.enqueue(store.Finding{Fingerprint: itoa(i)})
+	}
+	got := make(map[string]int)
+	for len(q.ch) > 0 {
+		got[(<-q.ch).Fingerprint]++
+	}
+	chCount := len(got)
+	for _, f := range q.drainOverflow() {
+		got[f.Fingerprint]++
+	}
+	if chCount != 2 {
+		t.Errorf("channel held %d findings, want 2 (buffer size)", chCount)
+	}
+	if len(got) != 5 {
+		t.Fatalf("delivered %d distinct findings, want 5: %v", len(got), got)
+	}
+	for fp, n := range got {
+		if n != 1 {
+			t.Errorf("finding %s delivered %d times, want exactly once", fp, n)
+		}
+	}
+	if extra := q.drainOverflow(); len(extra) != 0 {
+		t.Errorf("second drain returned %d findings, want 0 (exactly-once drain)", len(extra))
+	}
+}
+
+// TestRepro_Burst_ExactlyOncePerFinding drives 12 distinct survived findings
+// through the full streaming pipeline and asserts the in-run hook fires
+// exactly once per finding, whichever delivery path each took.
+func TestRepro_Burst_ExactlyOncePerFinding(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	const n = 12
+	cands := make([]string, n)
+	for i := 0; i < n; i++ {
+		// Distinct lines far beyond the merge window and distinct descriptions
+		// so triage clustering forwards every candidate as its own primary.
+		cands[i] = fmt.Sprintf(`{"file": "bug.go", "line": %d, "title": "burst bug %d",
+			"description": "unique defect token%d alpha%d beta%d", "severity": "high",
+			"evidence": "line", "confidence": "high"}`, 100+i*(DefaultMergeWindow*3), i, i, i, i)
+	}
+	finder := newScriptedClient().onSystemContains("nil-safety/error-handling", candJSON(cands...))
+	verifier := newScriptedClient()
+	verifier.fallback = notRefutedJSON
+
+	hook := newFakeReproHook()
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
+		Lenses:      []string{"nil-safety/error-handling"},
+		MaxParallel: 4,
+		Repro:       hook.hook,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Sweep(ctx); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	seen := make(map[string]int)
+	for _, fi := range hook.findings() {
+		seen[fi.Fingerprint]++
+	}
+	if len(seen) != n {
+		t.Fatalf("hook saw %d distinct findings, want %d", len(seen), n)
+	}
+	for fp, c := range seen {
+		if c != 1 {
+			t.Errorf("finding %s attempted %d times, want exactly once", fp, c)
+		}
 	}
 }

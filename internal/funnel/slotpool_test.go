@@ -80,10 +80,16 @@ func TestSlotPool_CapacityUnderLoad(t *testing.T) {
 // a "token-pass" pattern: each goroutine waits on a start channel that the
 // test sequentially closes, ensuring queue entries are appended in known order.
 func TestSlotPool_Priority(t *testing.T) {
+	// Bounded waiter context: a class-starvation regression must FAIL fast
+	// here, not hang until the go test global timeout (a prior version of the
+	// vacuity check deadlocked instead of failing).
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer waitCancel()
+
 	p := newSlotPool(1)
 
 	// Drain the one free slot so the pool has 0 free.
-	if err := p.acquire(context.Background(), slotLow); err != nil {
+	if err := p.acquire(waitCtx, slotLow); err != nil {
 		t.Fatal(err)
 	}
 
@@ -123,7 +129,7 @@ func TestSlotPool_Priority(t *testing.T) {
 			<-startChs[i]
 			// Signal that we're about to block (call acquire).
 			close(queuedChs[i])
-			if err := p.acquire(context.Background(), e.class); err != nil {
+			if err := p.acquire(waitCtx, e.class); err != nil {
 				t.Errorf("waiter %q: acquire failed: %v", e.name, err)
 				acquired.Done()
 				return
@@ -353,10 +359,16 @@ func TestSlotPool_CancelAlreadyCancelled(t *testing.T) {
 // is served first (idle is lowest priority). This test MUST FAIL if idle is
 // served before low (vacuity check (a)).
 func TestSlotPool_IdleServedLast(t *testing.T) {
+	// Bounded waiter context: a class-starvation regression must FAIL fast
+	// here, not hang until the go test global timeout (a prior version of the
+	// vacuity check deadlocked instead of failing).
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer waitCancel()
+
 	p := newSlotPool(1)
 
 	// Drain the one free slot.
-	if err := p.acquire(context.Background(), slotLow); err != nil {
+	if err := p.acquire(waitCtx, slotLow); err != nil {
 		t.Fatal(err)
 	}
 
@@ -388,7 +400,7 @@ func TestSlotPool_IdleServedLast(t *testing.T) {
 			defer wg.Done()
 			<-startChs[i]
 			close(queuedChs[i])
-			if err := p.acquire(context.Background(), e.class); err != nil {
+			if err := p.acquire(waitCtx, e.class); err != nil {
 				t.Errorf("waiter %q: acquire failed: %v", e.name, err)
 				return
 			}

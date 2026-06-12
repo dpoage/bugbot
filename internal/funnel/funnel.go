@@ -287,7 +287,7 @@ type Options struct {
 	// The hook must be safe for concurrent use (it may be called by multiple
 	// goroutines simultaneously). Errors are logged best-effort and never abort
 	// the scan. Nil disables in-run reproduction (default).
-	Repro func(ctx context.Context, finding store.Finding) error
+	Repro func(ctx context.Context, scanRunID string, finding store.Finding) error
 }
 
 // resolve fills in defaults without mutating the caller's Options.

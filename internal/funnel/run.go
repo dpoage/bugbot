@@ -406,29 +406,27 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// verCh is the channel from triage → verify dispatcher.
 	verCh := make(chan Candidate, 64)
 
-	// reproCh is the channel from verify goroutines → repro consumer goroutines.
+	// reproQ.ch is the channel from verify goroutines → repro consumer goroutines.
 	// Buffered to 16 so a single slow repro attempt does not stall verification.
-	// Non-blocking enqueue: verify goroutines MUST NOT block on reproCh (that
+	// Non-blocking enqueue: verify goroutines MUST NOT block on the repro queue (that
 	// would let a slow repro backlog stall verification). When the buffer is full,
 	// the finding is appended to overflowFindings (under overflowMu) for a
-	// catch-up pass after reproCh is drained. The claim mechanism (ReproPath /
+	// catch-up pass after the queue is drained. The claim mechanism (ReproPath /
 	// NeedsHuman check before invoking the hook) ensures no finding is attempted
 	// twice even if it appears in both the channel and the catch-up slice.
 	//
-	// The repro consumer goroutine (launched below) reads from reproCh and
+	// The repro consumer goroutine (launched below) reads from reproQ.ch and
 	// spawns one worker per finding. It runs CONCURRENTLY with verify (and
 	// hypothesize): a finding verified early in a long scan gets its repro
-	// attempt while discovery continues. The consumer exits when reproCh is
+	// attempt while discovery continues. The consumer exits when reproQ.ch is
 	// closed (after verifyWg.Wait()); reproWg tracks all spawned workers.
-	var reproCh chan store.Finding
-	var overflowMu sync.Mutex
-	var overflowFindings []store.Finding
+	var reproQ *reproQueue
 	var reproWg sync.WaitGroup
 	// reproConsumerDone is closed when the consumer goroutine (not the workers)
 	// finishes spawning all goroutines, so we can join the workers via reproWg.
 	var reproConsumerDone chan struct{}
 	if f.opts.Repro != nil {
-		reproCh = make(chan store.Finding, 16)
+		reproQ = newReproQueue(16)
 		reproConsumerDone = make(chan struct{})
 	}
 
@@ -555,18 +553,22 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	}()
 
 	// ---- Stage E: In-run repro consumer (concurrent with verify + discovery) ----
-	// The consumer goroutine reads from reproCh and spawns one worker per
+	// The consumer goroutine reads from reproQ.ch and spawns one worker per
+	// finding. Parked workers are O(findings), bounded by the idle slot pool
+	// for EXECUTION but not for goroutine count — acceptable for a
+	// precision-first funnel (small finding counts), revisit if finding
+	// volumes grow by orders of magnitude.
 	// finding. It runs concurrently with the verify dispatcher (and hypothesize),
 	// so a finding verified early in a long scan gets its repro attempt while
 	// discovery continues — the streaming-repro guarantee.
 	//
-	// The consumer exits when reproCh is closed (after verifyWg.Wait()). The
+	// The consumer exits when reproQ.ch is closed (after verifyWg.Wait()). The
 	// workers are tracked by reproWg; we wait on reproWg after close to ensure
 	// all attempts complete before finalize.
-	if reproCh != nil {
+	if reproQ != nil {
 		go func() {
 			defer close(reproConsumerDone)
-			for fi := range reproCh {
+			for fi := range reproQ.ch {
 				fi := fi
 				// Add before spawning: Wait() called after consumer finishes
 				// must not return before all workers are added.
@@ -602,17 +604,17 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 				snap.Commit, fps, budget, result, clusterReg,
 				&findingsMu, &allFindings, &verifyKilled,
 				&sbExecs, &sbMillis, setVerifyErr,
-				reproCh, &overflowMu, &overflowFindings)
+				reproQ)
 		}()
 	}
 
 	// Wait for all verify goroutines to finish.
 	verifyWg.Wait()
 
-	// Close reproCh after all verify goroutines finish. The consumer goroutine
+	// Close reproQ.ch after all verify goroutines finish. The consumer goroutine
 	// exits its range loop and closes reproConsumerDone.
-	if reproCh != nil {
-		close(reproCh)
+	if reproQ != nil {
+		close(reproQ.ch)
 		// Wait for the consumer to finish spawning all worker goroutines.
 		<-reproConsumerDone
 		// Wait for all worker goroutines to complete. Drain the overflow slice
@@ -620,16 +622,12 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		// are done — avoiding confusion if the same finding appears in both.
 		reproWg.Wait()
 
-		// Drain the overflow slice: findings that couldn't fit into reproCh
+		// Drain the overflow slice: findings that couldn't fit into reproQ.ch
 		// during the verify phase (non-blocking enqueue fell back to overflow).
 		// runReproAttempt's claim check prevents double-attempts: if a finding
 		// was already attempted via the channel path, the overflow drain is a
 		// cheap no-op for that finding.
-		overflowMu.Lock()
-		overflow := overflowFindings
-		overflowFindings = nil
-		overflowMu.Unlock()
-		for _, fi := range overflow {
+		for _, fi := range reproQ.drainOverflow() {
 			// Sequential: overflow is typically empty; no goroutine overhead needed.
 			f.runReproAttempt(ctx, fi, scanRunID)
 		}
