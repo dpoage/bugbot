@@ -56,11 +56,16 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd store.Finding) (refuted 
 	// without a repo root, so dialect detection (e.g. C++ standard) is skipped.
 	persona := ingest.PersonaLanguages([]ingest.Language{ingest.DetectLanguage(fnd.File)}, nil)
 
-	verdicts, _, _, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, persona, c, n, &budgetState{})
+	verdicts, seatNames, _, _, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, persona, c, n, &budgetState{})
 	if err != nil {
 		return false, "", err
 	}
-	return majorityRefuted(verdicts), buildReasoning(verdicts), nil
+	// VerifyFinding uses majority rule only — no arbiter on re-verification.
+	// Re-verifying a single stored finding is a cheap daemon cycle operation;
+	// adding an arbiter here would double the cost on every re-check. The
+	// majority rule is the conservative default that already existed before the
+	// split-panel arbiter was introduced for initial verification.
+	return majorityRefuted(verdicts), buildReasoning(verdicts, seatNames, "", false), nil
 }
 
 // candidateFromFinding reconstructs the verification Candidate from a stored

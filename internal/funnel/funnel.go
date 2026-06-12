@@ -501,6 +501,15 @@ type Stats struct {
 	// the verification result's reliability is visible.
 	VerifierRuns     int `json:"verifier_runs"`
 	VerifierFailures int `json:"verifier_failures"`
+	// ArbiterRuns is the number of arbiter agents launched to decide split
+	// (mixed refuted/not-refuted) panel verdicts.
+	ArbiterRuns int `json:"arbiter_runs,omitempty"`
+	// ArbiterKills is the number of candidates the arbiter decided to kill
+	// (arbiter returned refuted=true).
+	ArbiterKills int `json:"arbiter_kills,omitempty"`
+	// ArbiterFailures is the number of arbiter agents that produced no parseable
+	// verdict; on failure the run falls back to majorityRefuted.
+	ArbiterFailures int `json:"arbiter_failures,omitempty"`
 	// InputTokens / OutputTokens is the run's total token spend. InputTokens
 	// includes cached tokens (the llm.Usage convention).
 	InputTokens  int64 `json:"input_tokens"`
