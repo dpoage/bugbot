@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/ingest"
@@ -841,45 +843,57 @@ func TestBudgetState_CacheReadWeighted(t *testing.T) {
 }
 
 // TestSweep_GlobalSlotPool_MaxParallelEnforced verifies that the global slot
-// pool correctly enforces MaxParallel=2 across finder agents: at no point do
-// more than 2 agent completions execute concurrently. The test instruments the
-// LLM client with an atomic high-water mark that it increments on entry and
-// decrements on exit; after the sweep the mark must be <= 2.
+// pool enforces MaxParallel=2 across finder agents IN BOTH DIRECTIONS: the
+// bound is reached (peak == MaxParallel) and never exceeded. The fake client
+// blocks every call on a barrier that opens only once MaxParallel callers are
+// in flight, so the pool's bound is genuinely contended — an instant-return
+// client never overlaps calls and would let a broken (or absent) pool pass a
+// peak<=max assertion with peak==1.
 func TestSweep_GlobalSlotPool_MaxParallelEnforced(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)
 
-	// hwmClient wraps a scriptedClient and records the concurrent call high-
-	// water mark using atomic operations. Each Complete call increments the
-	// in-flight counter, records the peak, then decrements on return.
-	type hwmClient struct {
-		inner    *scriptedClient
-		inFlight atomic.Int32
-		peak     atomic.Int32
-	}
-	hw := &hwmClient{inner: newScriptedClient()}
+	const maxP = 2
 
-	hw.inner.fallback = emptyCandidates
+	inner := newScriptedClient()
+	inner.fallback = emptyCandidates
 
-	// Wrap Complete to track concurrency.
+	var (
+		inFlight    atomic.Int32
+		peak        atomic.Int32
+		barrierOnce sync.Once
+		barrier     = make(chan struct{})
+		timedOut    atomic.Bool
+	)
 	wrapped := &concurrencyTrackingClient{
-		inner: hw.inner,
+		inner: inner,
 		onEntry: func() {
-			cur := hw.inFlight.Add(1)
+			cur := inFlight.Add(1)
 			for {
-				old := hw.peak.Load()
-				if cur <= old || hw.peak.CompareAndSwap(old, cur) {
+				old := peak.Load()
+				if cur <= old || peak.CompareAndSwap(old, cur) {
 					break
 				}
 			}
+			if cur >= maxP {
+				barrierOnce.Do(func() { close(barrier) })
+			}
+			// Hold this call until MaxParallel callers are in flight, forcing
+			// the pool's bound to be contended. If the pool over-restricts
+			// (effective bound < maxP) the barrier can never fill; the timeout
+			// converts that hang into a test failure instead of a deadlock.
+			select {
+			case <-barrier:
+			case <-time.After(10 * time.Second):
+				timedOut.Store(true)
+			}
 		},
-		onExit: func() { hw.inFlight.Add(-1) },
+		onExit: func() { inFlight.Add(-1) },
 	}
 
 	verifier := newScriptedClient()
 	verifier.fallback = notRefutedJSON
 
-	const maxP = 2
 	f, err := New(RoleClients{Finder: wrapped, Verifier: verifier}, st, repo, Options{
 		MaxParallel:         maxP,
 		DisableHeatOrdering: true,
@@ -888,20 +902,16 @@ func TestSweep_GlobalSlotPool_MaxParallelEnforced(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := f.Sweep(ctx)
-	if err != nil {
+	if _, err := f.Sweep(ctx); err != nil {
 		t.Fatal(err)
 	}
-	_ = res
 
-	peak := hw.peak.Load()
-	if peak > maxP {
-		t.Errorf("concurrent finder agents peak = %d, want <= %d (MaxParallel)", peak, maxP)
+	if timedOut.Load() {
+		t.Fatalf("barrier never filled: fewer than %d finder agents ran concurrently — pool over-restricts below MaxParallel", maxP)
 	}
-	if peak == 0 {
-		t.Error("peak = 0 — no finder agents ran (test is vacuous)")
+	if got := peak.Load(); got != maxP {
+		t.Errorf("concurrent finder agents peak = %d, want exactly %d (MaxParallel must be reached and never exceeded)", got, maxP)
 	}
-	t.Logf("finder concurrency peak = %d (MaxParallel = %d)", peak, maxP)
 }
 
 // concurrencyTrackingClient is a fake llm.Client that calls onEntry/onExit

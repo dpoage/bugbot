@@ -46,7 +46,14 @@ func newSlotPool(size int) *slotPool {
 // acquire blocks until a slot is free or ctx is done. high selects the
 // priority class. Returns ctx.Err() on cancellation while waiting.
 func (p *slotPool) acquire(ctx context.Context, high bool) error {
-	// Fast path: grab a free slot without waiting.
+	// Fast path: grab a free slot without waiting. DELIBERATELY no ctx check
+	// here — this is load-bearing for the funnel's interrupted-run semantics:
+	// with free >= 1 at stage start, the first goroutine always proceeds into
+	// the agent runner even on a dead ctx, and the runner's ctx.Err() return
+	// sets the stage's firstErr, classifying the run as Interrupted. If the
+	// fast path rejected on a dead ctx, a cancellation landing before any unit
+	// ran could let a stage return cleanly with no error and no Interrupted
+	// flag.
 	p.mu.Lock()
 	if p.free > 0 {
 		p.free--

@@ -2,6 +2,7 @@ package funnel
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -131,15 +132,22 @@ func TestSlotPool_Priority(t *testing.T) {
 		}()
 	}
 
-	// Sequence the goroutines: close startCh[i] then wait for queuedCh[i]
-	// before proceeding, ensuring entries arrive in pool order. A brief sleep
-	// after queuedCh closes gives the goroutine time to reach the select inside
-	// acquire (past the mutex acquire) before we release its slot.
+	// Sequence the goroutines: close startCh[i], wait for queuedCh[i] (the
+	// goroutine is about to call acquire), then spin until the pool's queue
+	// length actually reflects the new waiter. Reading the queue lengths under
+	// the pool mutex makes the ordering deterministic — a wall-clock sleep
+	// here would be a scheduler assumption that can flake on a loaded host.
+	queuedLen := func() int {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(p.waitHigh) + len(p.waitLow)
+	}
 	for i := range seq {
 		close(startChs[i])
 		<-queuedChs[i]
-		// Allow the goroutine to block in the select inside acquire.
-		time.Sleep(5 * time.Millisecond)
+		for queuedLen() < i+1 {
+			runtime.Gosched()
+		}
 	}
 
 	// All waiters are now queued in order. Release the drained slot.
@@ -281,215 +289,4 @@ func TestSlotPool_CancelAlreadyCancelled(t *testing.T) {
 		t.Errorf("acquire took %v; expected near-instant return on cancelled ctx", elapsed)
 	}
 	p.release()
-}
-
-// TestSlotPool_Priority_VacuityCheck (vacuity a): a deliberately broken pool
-// that serves LOW before HIGH must produce a different acquisition order than
-// our correct pool, confirming that TestSlotPool_Priority is sensitive to the
-// invariant. We run the broken pool through the same two-waiter scenario and
-// verify it produces the wrong order.
-func TestSlotPool_Priority_VacuityCheck(t *testing.T) {
-	// brokenPool flips priority: release hands to low before high.
-	type brokenPool struct {
-		mu       sync.Mutex
-		free     int
-		waitHigh []chan struct{}
-		waitLow  []chan struct{}
-	}
-	broken := &brokenPool{free: 1}
-
-	brokenRelease := func() {
-		broken.mu.Lock()
-		// BROKEN: serve low before high.
-		if len(broken.waitLow) > 0 {
-			ch := broken.waitLow[0]
-			broken.waitLow = broken.waitLow[1:]
-			broken.mu.Unlock()
-			ch <- struct{}{}
-			return
-		}
-		if len(broken.waitHigh) > 0 {
-			ch := broken.waitHigh[0]
-			broken.waitHigh = broken.waitHigh[1:]
-			broken.mu.Unlock()
-			ch <- struct{}{}
-			return
-		}
-		broken.free++
-		broken.mu.Unlock()
-	}
-	brokenAcquire := func(ctx context.Context, high bool) error {
-		broken.mu.Lock()
-		if broken.free > 0 {
-			broken.free--
-			broken.mu.Unlock()
-			return nil
-		}
-		ch := make(chan struct{}, 1)
-		if high {
-			broken.waitHigh = append(broken.waitHigh, ch)
-		} else {
-			broken.waitLow = append(broken.waitLow, ch)
-		}
-		broken.mu.Unlock()
-		select {
-		case <-ch:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-
-	// Drain the slot so waiters must queue.
-	if err := brokenAcquire(context.Background(), false); err != nil {
-		t.Fatal(err)
-	}
-
-	var orderMu sync.Mutex
-	var order []string
-
-	// Use the same token-pass pattern to guarantee queue order: low0 first,
-	// then high0.
-	type w struct {
-		name string
-		high bool
-	}
-	ws := []w{{"low0", false}, {"high0", true}}
-	startChs := make([]chan struct{}, len(ws))
-	queuedChs := make([]chan struct{}, len(ws))
-	for i := range ws {
-		startChs[i] = make(chan struct{})
-		queuedChs[i] = make(chan struct{})
-	}
-
-	var acquired sync.WaitGroup
-	for i, ww := range ws {
-		acquired.Add(1)
-		i, ww := i, ww
-		go func() {
-			<-startChs[i]
-			close(queuedChs[i])
-			if err := brokenAcquire(context.Background(), ww.high); err != nil {
-				acquired.Done()
-				return
-			}
-			orderMu.Lock()
-			order = append(order, ww.name)
-			orderMu.Unlock()
-			brokenRelease()
-			acquired.Done()
-		}()
-	}
-	for i := range ws {
-		close(startChs[i])
-		<-queuedChs[i]
-		time.Sleep(5 * time.Millisecond)
-	}
-	brokenRelease() // release the drained slot
-	acquired.Wait()
-
-	orderMu.Lock()
-	got := make([]string, len(order))
-	copy(got, order)
-	orderMu.Unlock()
-
-	// Broken pool serves low0 first (wrong); correct pool would serve high0 first.
-	if len(got) < 1 || got[0] != "low0" {
-		t.Logf("vacuity check: broken pool did not serve low0 first (got %v) — vacuity assertion needs review", got)
-	} else {
-		t.Logf("vacuity confirmed: broken pool serves low0 before high0 (got %v) — TestSlotPool_Priority detects this violation", got)
-	}
-}
-
-// TestSlotPool_CancelRerelease_VacuityCheck (vacuity b): a broken pool that
-// does NOT re-release on cancellation-vs-handoff loses slots. We demonstrate
-// this by constructing such a pool, triggering the race, and observing the
-// drain count. The correct slotPool always recovers all slots; the broken one
-// may not. This confirms TestSlotPool_CancelHammer is sensitive to the fix.
-func TestSlotPool_CancelRerelease_VacuityCheck(t *testing.T) {
-	const size = 2
-	type leakyPool struct {
-		mu      sync.Mutex
-		free    int
-		waiters []chan struct{}
-	}
-	lp := &leakyPool{free: size}
-
-	leakyAcquire := func(ctx context.Context) error {
-		lp.mu.Lock()
-		if lp.free > 0 {
-			lp.free--
-			lp.mu.Unlock()
-			return nil
-		}
-		ch := make(chan struct{}, 1)
-		lp.waiters = append(lp.waiters, ch)
-		lp.mu.Unlock()
-		select {
-		case <-ch:
-			return nil
-		case <-ctx.Done():
-			// BROKEN: remove from queue but do NOT drain ch or re-release if
-			// the slot was already handed to us.
-			lp.mu.Lock()
-			for i, c := range lp.waiters {
-				if c == ch {
-					lp.waiters = append(lp.waiters[:i], lp.waiters[i+1:]...)
-					break
-				}
-			}
-			lp.mu.Unlock()
-			return ctx.Err()
-		}
-	}
-	leakyRelease := func() {
-		lp.mu.Lock()
-		if len(lp.waiters) > 0 {
-			ch := lp.waiters[0]
-			lp.waiters = lp.waiters[1:]
-			lp.mu.Unlock()
-			ch <- struct{}{}
-			return
-		}
-		lp.free++
-		lp.mu.Unlock()
-	}
-
-	// Drain all slots so all acquirers must queue.
-	for range size {
-		if err := leakyAcquire(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Queue a waiter, then cancel it while a release races to hand it a slot.
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_ = leakyAcquire(cancelCtx)
-	}()
-	time.Sleep(10 * time.Millisecond) // let the waiter queue up
-
-	// Release and cancel race: leakyRelease dequeues the waiter and sends to
-	// ch; cancel fires the ctx.Done branch. The broken acquire may discard the
-	// slot.
-	go leakyRelease()
-	cancel()
-	wg.Wait()
-
-	// Release the other drained slot.
-	leakyRelease()
-
-	// Try to recover size slots. A broken pool may only return size-1.
-	gotSlots := 0
-	for range size {
-		drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-		if err := leakyAcquire(drainCtx); err == nil {
-			gotSlots++
-		}
-		drainCancel()
-	}
-	t.Logf("vacuity check: leaky pool recovered %d/%d slots — correct pool always recovers %d; confirms re-release matters", gotSlots, size, size)
 }
