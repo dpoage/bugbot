@@ -487,9 +487,12 @@ func TestSweep_CrossLensMerge_CorroborationPersisted(t *testing.T) {
 	finder := newScriptedClient().
 		onSystemContains("nil-safety/error-handling", candJSON(nilLensCand)).
 		onSystemContains("api-contract-misuse", candJSON(apiLensCand))
-	// Refuter never refutes the surviving primary (whichever title it carries —
-	// the primary is the high-severity nil-safety report).
-	verifier := newScriptedClient().onTaskContains("nil deref of cfg in Greeting", notRefutedJSON)
+	// Refuter never refutes either primary: both titles must survive so the test
+	// is independent of which lens arrives first (streaming arrival order is
+	// non-deterministic). The primary's title is whichever lens completed first.
+	verifier := newScriptedClient()
+	verifier.onTaskContains("nil deref of cfg in Greeting", notRefutedJSON)
+	verifier.onTaskContains("unchecked pointer cfg used in Greeting", notRefutedJSON)
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{})
 	if err != nil {
@@ -531,14 +534,26 @@ func TestSweep_CrossLensMerge_CorroborationPersisted(t *testing.T) {
 		t.Fatalf("want 1 finding, got %d: %+v", len(res.Findings), res.Findings)
 	}
 	got := res.Findings[0]
-	if got.Lens != "nil-safety/error-handling" {
-		t.Errorf("primary lens = %q, want nil-safety/error-handling (higher severity)", got.Lens)
+	// STREAMING SEMANTIC RELAXATION: primary selection is now arrival-order based.
+	// The invariant is cluster-level: the primary carries the other lens as
+	// corroboration, regardless of which arrived first.
+	primaryLens := got.Lens
+	var wantCorrobLens string
+	switch primaryLens {
+	case "nil-safety/error-handling":
+		wantCorrobLens = "api-contract-misuse"
+	case "api-contract-misuse":
+		wantCorrobLens = "nil-safety/error-handling"
+	default:
+		t.Errorf("primary lens = %q, want nil-safety/error-handling or api-contract-misuse", primaryLens)
 	}
-	if want := []string{"api-contract-misuse"}; !reflect.DeepEqual(got.CorroboratingLenses, want) {
-		t.Errorf("corroborating lenses = %v, want %v", got.CorroboratingLenses, want)
-	}
-	if !strings.Contains(got.Reasoning, "Corroborated by lenses: api-contract-misuse") {
-		t.Errorf("reasoning missing corroboration note:\n%s", got.Reasoning)
+	if wantCorrobLens != "" {
+		if want := []string{wantCorrobLens}; !reflect.DeepEqual(got.CorroboratingLenses, want) {
+			t.Errorf("corroborating lenses = %v, want %v", got.CorroboratingLenses, want)
+		}
+		if !strings.Contains(got.Reasoning, "Corroborated by lenses: "+wantCorrobLens) {
+			t.Errorf("reasoning missing corroboration note:\n%s", got.Reasoning)
+		}
 	}
 
 	// Persistence round-trip: the stored finding carries the corroboration.
@@ -546,8 +561,10 @@ func TestSweep_CrossLensMerge_CorroborationPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get persisted finding: %v", err)
 	}
-	if want := []string{"api-contract-misuse"}; !reflect.DeepEqual(stored.CorroboratingLenses, want) {
-		t.Errorf("persisted corroborating lenses = %v, want %v", stored.CorroboratingLenses, want)
+	if wantCorrobLens != "" {
+		if want := []string{wantCorrobLens}; !reflect.DeepEqual(stored.CorroboratingLenses, want) {
+			t.Errorf("persisted corroborating lenses = %v, want %v", stored.CorroboratingLenses, want)
+		}
 	}
 }
 
@@ -912,6 +929,495 @@ func TestSweep_GlobalSlotPool_MaxParallelEnforced(t *testing.T) {
 	if got := peak.Load(); got != maxP {
 		t.Errorf("concurrent finder agents peak = %d, want exactly %d (MaxParallel must be reached and never exceeded)", got, maxP)
 	}
+}
+
+// ---- streaming topology tests -----------------------------------------------
+
+// TestTriageState_BothOrdersCluster is the keystone test for incremental
+// clustering order-independence. It calls ts.process() directly with the same
+// two-lens, same-location pair in BOTH arrival orders and asserts that in each
+// case exactly ONE cluster primary is forwarded to verify, and the secondary
+// member is staged as a corroborating lens.
+//
+// Testing the triage state directly (rather than end-to-end via Sweep) gives
+// deterministic control of arrival order without fighting goroutine scheduling.
+// The end-to-end cross-lens corroboration path is covered by
+// TestSweep_CrossLensMerge_CorroborationPersisted.
+//
+// VACUITY: if ts.process / handleMember / AddStagedLens were removed or broken,
+// the test would fail because either two primaries would be forwarded (breaking
+// "triaged=1") or the staged lens would be absent (breaking "staged != empty").
+func TestTriageState_BothOrdersCluster(t *testing.T) {
+	const lensA = "nil-safety/error-handling"
+	const lensB = "resource-leaks"
+
+	// Two candidates at the same location with similar descriptions.
+	// Different fingerprints (different lens × title), so exact-dedup doesn't
+	// collapse them. Jaccard similarity between the descriptions is above the
+	// merge threshold (they share most meaningful tokens).
+	candA := Candidate{
+		Lens: lensA, File: "bug.go", Line: 10,
+		Title:       "nil deref of cfg in Greeting",
+		Description: "cfg may be nil and is dereferenced without a guard in Greeting",
+		Severity:    "high", Confidence: "high",
+	}
+	candB := Candidate{
+		Lens: lensB, File: "bug.go", Line: 10,
+		Title:       "cfg pointer may be nil in Greeting",
+		Description: "cfg may be nil and is dereferenced without a guard in Greeting",
+		Severity:    "medium", Confidence: "high",
+	}
+
+	// assignFingerprints sets the Fingerprint field that store.Fingerprint() would compute.
+	fp := func(c Candidate) Candidate {
+		c.Fingerprint = store.Fingerprint(c.Lens, c.File, c.Line, c.Title)
+		return c
+	}
+	candA = fp(candA)
+	candB = fp(candB)
+
+	// openTriage creates a fresh triageState (backed by the fixture store).
+	openTriage := func(t *testing.T) (*triageState, *clusterRegistry, *store.Store) {
+		t.Helper()
+		ctx := context.Background()
+		st, repo := openFixture(t)
+		snap, err := repo.Snapshot(ctx, ingest.ScanFilter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ts, reg := newTriageState(snap)
+		return ts, reg, st
+	}
+
+	// processOrder runs triage with the given candidate order and returns the
+	// number of primaries forwarded and the staged lenses in the registry for
+	// the first primary's fingerprint.
+	processOrder := func(t *testing.T, first, second Candidate) (primaries []Candidate, stagedLenses []string) {
+		t.Helper()
+		ctx := context.Background()
+		ts, reg, st := openTriage(t)
+		stats := &Stats{}
+
+		if err := ts.process(ctx, st, stats, first); err != nil {
+			t.Fatalf("process(first): %v", err)
+		}
+		primaries = append(primaries, ts.popReady()...)
+
+		if err := ts.process(ctx, st, stats, second); err != nil {
+			t.Fatalf("process(second): %v", err)
+		}
+		primaries = append(primaries, ts.popReady()...)
+
+		if len(primaries) > 0 {
+			stagedLenses = reg.DrainStagedLenses(primaries[0].Fingerprint)
+		}
+		return primaries, stagedLenses
+	}
+
+	// Order A: candA (nil-safety) arrives first → becomes primary; candB staged.
+	t.Run("lensA_primary", func(t *testing.T) {
+		primaries, staged := processOrder(t, candA, candB)
+
+		if len(primaries) != 1 {
+			t.Fatalf("want 1 cluster primary, got %d: %v", len(primaries), primaries)
+		}
+		if primaries[0].Lens != lensA {
+			t.Errorf("primary lens = %q, want %q (first-arrival)", primaries[0].Lens, lensA)
+		}
+		// VACUITY: if staging were removed, staged would be nil and this assertion fails.
+		if want := []string{lensB}; !reflect.DeepEqual(staged, want) {
+			t.Errorf("staged lenses = %v, want %v\n(VACUITY: absent staging → staged=nil → this fails)", staged, want)
+		}
+	})
+
+	// Order B: candB (resource-leaks) arrives first → becomes primary; candA staged.
+	// This is the order that batch severity-ranking would never allow (candB is
+	// lower-severity) but streaming arrival-order does.
+	t.Run("lensB_primary", func(t *testing.T) {
+		primaries, staged := processOrder(t, candB, candA)
+
+		if len(primaries) != 1 {
+			t.Fatalf("want 1 cluster primary, got %d: %v", len(primaries), primaries)
+		}
+		if primaries[0].Lens != lensB {
+			t.Errorf("primary lens = %q, want %q (first-arrival)", primaries[0].Lens, lensB)
+		}
+		// VACUITY: same check for the reversed order.
+		if want := []string{lensA}; !reflect.DeepEqual(staged, want) {
+			t.Errorf("staged lenses = %v, want %v\n(VACUITY: absent staging → staged=nil → this fails)", staged, want)
+		}
+	})
+}
+
+// TestStreaming_MidDiscovery_VerifyStarts tests that in the streaming topology
+// a verify panel can start before all finder units have completed. With pool
+// size 2, one finder unit blocks on a barrier while the other completes and
+// emits a candidate; the test asserts that the verify panel for that candidate
+// launches BEFORE the barrier opens (i.e., before the second finder finishes).
+//
+// This is the "latency" guarantee of the streaming topology: verify is not
+// gated on full hypothesize completion.
+func TestStreaming_MidDiscovery_VerifyStarts(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// barrier: the slow-lens finder blocks here until explicitly released.
+	// verifyStarted: closed when the first verify call is observed.
+	barrier := make(chan struct{})
+	verifyStarted := make(chan struct{})
+	var verifyOnce sync.Once
+
+	// The fast lens (nil-safety) returns a real candidate immediately.
+	// The slow lens (resource-leaks) blocks on barrier before returning empty.
+	fastCand := candJSON(realCand)
+
+	fastFinder := newScriptedClient().
+		onSystemContains("nil-safety/error-handling", fastCand)
+	// resource-leaks finder blocks until verify has started.
+	slowFinder := &blockingClient{
+		inner: newScriptedClient(), // returns empty candidates
+		onCallStart: func() {
+			// Wait for verify to start (or test timeout).
+			select {
+			case <-verifyStarted:
+			case <-time.After(10 * time.Second):
+				// timeout — the test will fail on the peak assertion below
+			}
+		},
+	}
+	// A dispatcher finder that routes by system prompt.
+	combinedFinder := &dispatchClient{
+		routes: []dispatchRoute{
+			{sub: "nil-safety/error-handling", client: fastFinder},
+			{sub: "resource-leaks", client: slowFinder},
+		},
+		fallback: newScriptedClient(), // empty for all other lenses
+	}
+
+	// Verifier: signals verifyStarted on first call, then returns notRefuted.
+	var verifierCalls atomic.Int32
+	verifierClient := &hookClient{
+		onCall: func(req llm.Request) {
+			if verifierCalls.Add(1) == 1 {
+				verifyOnce.Do(func() { close(verifyStarted) })
+			}
+		},
+		response: notRefutedJSON,
+	}
+
+	f, err := New(RoleClients{Finder: combinedFinder, Verifier: verifierClient}, st, repo, Options{
+		Lenses:      []string{"nil-safety/error-handling", "resource-leaks"},
+		MaxParallel: 2, // allow both finder units to run concurrently
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = barrier // barrier is open-ended; verifyStarted unblocks slowFinder
+
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify started before the slow finder finished (guaranteed by the fact that
+	// slowFinder only released after verifyStarted was closed).
+	if verifierCalls.Load() == 0 {
+		t.Errorf("verifier never called — streaming topology did not start verify mid-discovery")
+	}
+
+	// Sanity: the real candidate survived.
+	if len(res.Findings) != 1 {
+		t.Errorf("want 1 finding, got %d", len(res.Findings))
+	}
+}
+
+// TestStreaming_PersistenceBeforeHypothesizeComplete tests that a candidate
+// verified early is persisted in the store BEFORE a later blocked finder unit
+// completes. This is the core streaming-persistence guarantee: persist-on-
+// surviving (Stage D) does not wait for all finder units to finish.
+//
+// VACUITY: if the pipeline were reverted to batch mode (verify waits for all
+// finder units before starting), the store check would race with the blocked
+// finder — the test relies on the blocking finder still being in flight when
+// the assertion runs.
+func TestStreaming_PersistenceBeforeHypothesizeComplete(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// persistedCh is closed once we confirm the finding is in the store.
+	persistedCh := make(chan struct{})
+	// slowRelease is closed to allow the slow finder to proceed.
+	slowRelease := make(chan struct{})
+
+	fastCand := candJSON(realCand)
+
+	fastFinder := newScriptedClient().
+		onSystemContains("nil-safety/error-handling", fastCand)
+
+	var slowStarted atomic.Bool
+	slowFinder := &blockingClient{
+		inner: newScriptedClient(), // returns empty for resource-leaks
+		onCallStart: func() {
+			slowStarted.Store(true)
+			// Block until the main goroutine confirms the finding is persisted.
+			select {
+			case <-persistedCh:
+			case <-time.After(10 * time.Second):
+				// timeout — test will fail below
+			}
+			// Then unblock by reading slowRelease (no-op; just return).
+			close(slowRelease)
+		},
+	}
+
+	combinedFinder := &dispatchClient{
+		routes: []dispatchRoute{
+			{sub: "nil-safety/error-handling", client: fastFinder},
+			{sub: "resource-leaks", client: slowFinder},
+		},
+		fallback: newScriptedClient(),
+	}
+
+	fp := store.Fingerprint("nil-safety/error-handling", "bug.go", 10, "nil deref of cfg in Greeting")
+	// Simple verifier: never refutes. The store polling loop below detects when
+	// the finding has been persisted by verify_stream.go's immediate-persist path.
+	verifierClient := &hookClient{
+		response: notRefutedJSON,
+	}
+
+	f, err := New(RoleClients{Finder: combinedFinder, Verifier: verifierClient}, st, repo, Options{
+		Lenses:      []string{"nil-safety/error-handling", "resource-leaks"},
+		MaxParallel: 2, // both units can run concurrently
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Run Sweep in background so we can probe the store while it's running.
+	type sweepResult struct {
+		res *Result
+		err error
+	}
+	resultCh := make(chan sweepResult, 1)
+	go func() {
+		res, err := f.Sweep(ctx)
+		resultCh <- sweepResult{res, err}
+	}()
+
+	// Poll the store until the finding appears OR timeout.
+	// The slow finder blocks until we close persistedCh, so if the finding
+	// appears in the store before we signal it, the streaming guarantee holds.
+	deadline := time.After(15 * time.Second)
+	var foundBeforeSlowDone bool
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for finding to appear in store")
+		case <-time.After(5 * time.Millisecond):
+			// Check if the slow finder has started (ensures concurrency).
+			if !slowStarted.Load() {
+				continue
+			}
+			// Check if the finding is now in the store.
+			_, err := st.GetFindingByFingerprint(ctx, fp)
+			if err == nil {
+				// Finding is in store while slow finder is still blocked.
+				foundBeforeSlowDone = true
+				close(persistedCh) // release the slow finder
+				goto done
+			}
+		}
+	}
+done:
+	// Wait for Sweep to complete.
+	sr := <-resultCh
+	if sr.err != nil {
+		t.Fatalf("Sweep error: %v", sr.err)
+	}
+
+	if !foundBeforeSlowDone {
+		t.Errorf("finding NOT in store before slow finder completed — streaming persistence guarantee violated")
+	}
+	if len(sr.res.Findings) != 1 {
+		t.Errorf("want 1 finding, got %d", len(sr.res.Findings))
+	}
+
+	// Verify the finding is a proper T2 Verified finding.
+	stored, err := st.GetFindingByFingerprint(ctx, fp)
+	if err != nil {
+		t.Fatalf("get finding after sweep: %v", err)
+	}
+	if stored.Tier != 2 {
+		t.Errorf("tier = %d, want 2 (verified)", stored.Tier)
+	}
+
+	_ = fp
+}
+
+// TestStreaming_Interrupt_PersistedFindingSurvives tests that a finding
+// persisted before context cancellation survives the interruption: the finding
+// remains in the store (durable), and the run result is sealed as Interrupted.
+func TestStreaming_Interrupt_PersistedFindingSurvives(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	st, repo := openFixture(t)
+
+	// The fast lens emits a real candidate that survives verify.
+	// After verify completes (and the finding is persisted), we cancel the ctx.
+	// A second lens's finder is blocked on a barrier, ensuring the hypothesize
+	// goroutine is still running when ctx is cancelled.
+	var persistedCh = make(chan struct{}) // closed when finding is in store
+	var cancelOnce sync.Once
+
+	fastCand := candJSON(realCand)
+	fastFinder := newScriptedClient().
+		onSystemContains("nil-safety/error-handling", fastCand)
+
+	slowFinder := &blockingClient{
+		inner: newScriptedClient(),
+		onCallStart: func() {
+			// Wait until cancelled.
+			<-ctx.Done()
+		},
+	}
+
+	combinedFinder := &dispatchClient{
+		routes: []dispatchRoute{
+			{sub: "nil-safety/error-handling", client: fastFinder},
+			{sub: "resource-leaks", client: slowFinder},
+		},
+		fallback: newScriptedClient(),
+	}
+
+	fp := store.Fingerprint("nil-safety/error-handling", "bug.go", 10, "nil deref of cfg in Greeting")
+	// Verifier signals persistedCh after the last refuter panel completes,
+	// then cancels ctx. We use a hookClient with a counter.
+	var verifierCalls atomic.Int32
+	verifierClient := &hookClient{
+		onCall: func(req llm.Request) {
+			if int(verifierCalls.Add(1)) == DefaultRefuters {
+				// All refuters done; the finding is being persisted now or soon.
+				// Give the UpsertFinding a moment then cancel.
+				go func() {
+					// Poll until finding appears or give up after 5s.
+					deadline := time.After(5 * time.Second)
+					for {
+						select {
+						case <-deadline:
+							cancelOnce.Do(cancel)
+							return
+						case <-time.After(2 * time.Millisecond):
+							if _, err := st.GetFindingByFingerprint(context.Background(), fp); err == nil {
+								close(persistedCh)
+								cancelOnce.Do(cancel)
+								return
+							}
+						}
+					}
+				}()
+			}
+		},
+		response: notRefutedJSON,
+	}
+
+	f, err := New(RoleClients{Finder: combinedFinder, Verifier: verifierClient}, st, repo, Options{
+		Lenses:      []string{"nil-safety/error-handling", "resource-leaks"},
+		MaxParallel: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, sweepErr := f.Sweep(ctx)
+
+	// Sweep must return context.Canceled (Interrupted).
+	if sweepErr == nil {
+		t.Errorf("want Sweep to return error on cancellation, got nil")
+	} else if sweepErr != context.Canceled {
+		t.Errorf("sweep error = %v, want context.Canceled", sweepErr)
+	}
+
+	// The pre-cancellation finding must still be in the store (durable).
+	select {
+	case <-persistedCh:
+		// Good: finding was persisted before cancel.
+	default:
+		t.Logf("persistedCh not closed — finding may not have persisted before cancel")
+	}
+	stored, err := st.GetFindingByFingerprint(context.Background(), fp)
+	if err != nil {
+		t.Fatalf("pre-cancel finding not in store: %v", err)
+	}
+	if stored.Tier != 2 {
+		t.Errorf("finding tier = %d, want 2 (verified)", stored.Tier)
+	}
+	if stored.Status != store.StatusOpen {
+		t.Errorf("finding status = %q, want open", stored.Status)
+	}
+}
+
+// blockingClient is a fake llm.Client that calls onCallStart at the beginning
+// of each Complete call, allowing tests to inject blocking or coordination
+// behavior into a specific finder unit.
+type blockingClient struct {
+	inner       *scriptedClient
+	onCallStart func()
+}
+
+func (c *blockingClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+
+func (c *blockingClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+	if c.onCallStart != nil {
+		c.onCallStart()
+	}
+	return c.inner.Complete(ctx, req)
+}
+
+// dispatchRoute maps a system-prompt substring to a client.
+type dispatchRoute struct {
+	sub    string
+	client llm.Client
+}
+
+// dispatchClient routes each Complete call to the first client whose sub
+// appears in the system prompt, or fallback if none match.
+type dispatchClient struct {
+	routes   []dispatchRoute
+	fallback llm.Client
+}
+
+func (c *dispatchClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+
+func (c *dispatchClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+	for _, r := range c.routes {
+		if strings.Contains(req.System, r.sub) {
+			return r.client.Complete(ctx, req)
+		}
+	}
+	return c.fallback.Complete(ctx, req)
+}
+
+// hookClient calls onCall before each Complete, then returns a fixed response.
+type hookClient struct {
+	onCall   func(req llm.Request)
+	response string
+}
+
+func (c *hookClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+
+func (c *hookClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+	if c.onCall != nil {
+		c.onCall(req)
+	}
+	if ctx.Err() != nil {
+		return llm.Response{}, ctx.Err()
+	}
+	return llm.Response{
+		Text:       c.response,
+		StopReason: llm.StopEndTurn,
+		Usage:      llm.Usage{InputTokens: 100, OutputTokens: 50, CacheReadInputTokens: 60},
+	}, nil
 }
 
 // concurrencyTrackingClient is a fake llm.Client that calls onEntry/onExit

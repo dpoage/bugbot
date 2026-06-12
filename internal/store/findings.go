@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"time"
 )
@@ -309,6 +310,60 @@ func (s *Store) UpdateStatus(ctx context.Context, fingerprint string, status Sta
 // MarkFixed sets the finding's status to StatusFixed.
 func (s *Store) MarkFixed(ctx context.Context, fingerprint string) error {
 	return s.UpdateStatus(ctx, fingerprint, StatusFixed, "")
+}
+
+// AddCorroboratingLenses appends lenses to the corroborating_lenses column of
+// the finding identified by fingerprint, deduplicating and sorting the result.
+// It is used by the streaming triage consumer when a later-arriving cluster
+// member's primary has already been persisted (verified + upserted) before the
+// member arrived — the primary's row needs the new corroborating lens attached.
+// Returns ErrNotFound when no finding with that fingerprint exists (callers
+// treat this as a no-op: the primary may have been killed, not just not yet
+// persisted). No-op when lenses is empty.
+func (s *Store) AddCorroboratingLenses(ctx context.Context, fingerprint string, lenses []string) error {
+	if len(lenses) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var corrob string
+	err = tx.QueryRowContext(ctx,
+		`SELECT corroborating_lenses FROM findings WHERE fingerprint = ?`, fingerprint,
+	).Scan(&corrob)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	// Merge existing + new, deduplicate, sort.
+	existing := decodeLenses(corrob)
+	seen := make(map[string]bool, len(existing)+len(lenses))
+	for _, l := range existing {
+		seen[l] = true
+	}
+	for _, l := range lenses {
+		seen[l] = true
+	}
+	merged := make([]string, 0, len(seen))
+	for l := range seen {
+		merged = append(merged, l)
+	}
+	sort.Strings(merged)
+
+	now := nowUTC()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE findings SET corroborating_lenses = ?, updated_at = ? WHERE fingerprint = ?`,
+		encodeLenses(merged), now.Format(timeLayout), fingerprint,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // findingColumns is the SELECT column list shared by single- and multi-row reads.

@@ -96,11 +96,11 @@ func buildUnits(lenses []Lens, strategies []Strategy, chunks []fileChunk, leadsB
 }
 
 // hypothesize runs the finder stage: for each effective lens, run a finder
-// agent over each chunk of target files, collecting concrete candidates. Lens
-// chunks run in parallel bounded by Options.MaxParallel. Budget degradation is
-// applied as the run progresses: once over the soft threshold only the
-// highest-yield lenses keep launching, and once over the hard threshold no new
-// finder agents are launched.
+// agent over each chunk of target files, emitting concrete candidates via the
+// emit callback as each unit completes. Lens chunks run in parallel bounded by
+// Options.MaxParallel. Budget degradation is applied as the run progresses:
+// once over the soft threshold only the highest-yield lenses keep launching,
+// and once over the hard threshold no new finder agents are launched.
 //
 // Cross-lens leads: before launching any finder units, we collect pending leads
 // for each active lens, mark them consumed immediately (at claim time), and
@@ -134,9 +134,15 @@ func buildUnits(lenses []Lens, strategies []Strategy, chunks []fileChunk, leadsB
 // TouchScanCoverage calls happen outside mu alongside the agent_units row write,
 // so the hot mutex never waits on the DB (sqlite serializes writers, but the
 // mu-free write keeps sibling unit completions from serializing through mu).
-func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, persona string, kind store.ScanKind, cc *ChangeContext, langs []ingest.Language, targets []string, budget *budgetState, result *Result, fps map[string]string, touchCoverage bool) ([]Candidate, error) {
+//
+// STREAMING TOPOLOGY: emit is called OUTSIDE mu for each candidate as the unit
+// completes. This allows triage to start immediately on per-unit output rather
+// than waiting for all units to finish. hypothesize blocks until all units
+// finish (so the caller can close candCh after return) and returns the total
+// candidate count (for stats) plus any fatal error.
+func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, persona string, kind store.ScanKind, cc *ChangeContext, langs []ingest.Language, targets []string, budget *budgetState, result *Result, fps map[string]string, touchCoverage bool, emit func(Candidate)) (int, error) {
 	if len(targets) == 0 && cc == nil {
-		return nil, nil
+		return 0, nil
 	}
 
 	// Finders re-send their whole growing history every turn, so a fat read_file
@@ -147,7 +153,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	// cost, not just raw tokens (see bugbot-3nf and DefaultFinderReadLines/Bytes).
 	baseTools, err := f.readOnlyTools(f.opts.finderReadCaps())
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	chunks := chunkByLanguage(targets, f.opts.ChunkSize)
@@ -239,11 +245,11 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 
 	var (
 		mu              sync.Mutex
-		collected       []Candidate
 		coveredSet      = make(map[string]bool) // files from finderOK units only
 		finderRuns      int
 		finderFailed    int
 		finderBudgetCut int
+		totalCandidates int // total candidates emitted (for stats)
 		firstErr        error
 	)
 	var wg sync.WaitGroup
@@ -460,7 +466,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			default: // finderOK
 				recordStatus = "ok"
 				candCount = int64(len(cands))
-				collected = append(collected, cands...)
+				totalCandidates += len(cands)
 				// Record coverage under the existing mu so covered set stays
 				// consistent with finderRuns/finderFailed collected in this same
 				// lock. The diff-intent custom unit has files == nil and
@@ -471,6 +477,17 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				}
 			}
 			mu.Unlock()
+			// STREAMING TOPOLOGY: emit each candidate OUTSIDE mu so the triage
+			// consumer can start processing immediately without blocking sibling
+			// unit completions through the hot mutex. emit may block if candCh is
+			// full; that backpressure is acceptable and intentional (bounded buffer).
+			// Only emit on finderOK — error/parse-fail/budget-stop paths have no
+			// candidates to forward.
+			if recordStatus == "ok" {
+				for _, c := range cands {
+					emit(c)
+				}
+			}
 			f.recordFinderUnitWithTime(ctx, scanRunID, u, unitIdx, recordStatus, startedAt, finishedAt, inTokens, outTokens, cacheRead, candCount, unitLeadsPosted, result)
 
 			// Per-unit coverage: stamp this unit's files immediately when finderOK
@@ -496,7 +513,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 
 	wg.Wait()
 	if firstErr != nil {
-		return nil, firstErr
+		return 0, firstErr
 	}
 	mu.Lock()
 	result.Stats.FinderRuns = finderRuns
@@ -512,8 +529,9 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	sort.Strings(covered)
 	result.CoveredFiles = covered
 	result.Stats.CoveredFiles = len(covered)
+	n := totalCandidates
 	mu.Unlock()
-	return collected, nil
+	return n, nil
 }
 
 // finderStatus classifies a finder run's parse outcome so the funnel can tell a
