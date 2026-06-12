@@ -174,6 +174,24 @@ func finderTask(files []string, leads []store.Lead) string {
 	return b.String()
 }
 
+// verifierToolParagraph is the shared tool-usage paragraph for all verifier-side
+// agents (refuters and the arbiter). Keeping it in one place ensures they never
+// drift: any change here applies to both.
+const verifierToolParagraph = `You have read-only tools (read_file, list_dir, grep) plus language-server code navigation (find_definition, find_references, find_implementations, read_symbol) rooted at the repository. USE THEM to read the actual code the report points at, plus its callers and callees. When checking whether callers already guard against the claimed bug (nil checks, bounds checks, prior validation), prefer find_references on the implicated function or symbol: it enumerates the real call sites exactly, where grep misses qualified or aliased calls and matches unrelated identifiers. Use find_definition to confirm what a call resolves to, find_implementations to find what concretely runs behind an interface, and read_symbol to pull a single function/method/type body without reading the whole file. If a code-navigation tool returns an ERROR (server unavailable or still indexing), fall back to grep.`
+
+// verifierRefutationCriteria is the shared REFUTED/NOT REFUTED criteria block
+// used by both refuters and the arbiter. Extracting it prevents the criteria
+// from drifting between the two agents.
+const verifierRefutationCriteria = `A report is REFUTED if any of these is true, and you can show it with concrete evidence from the code:
+- The claimed code path is unreachable (dead code, a guard returns first, the condition can never hold).
+- A caller, the type system, or a prior check already prevents the bad value or state.
+- The claimed behavior is actually correct — the reporter misread the code or the language/library semantics.
+- The cited file/line does not contain what the report claims.
+
+A report is NOT refuted if, after genuinely trying, you cannot disprove it: the path is reachable, the value really can be bad, and nothing guards it. In that case say so honestly — do not invent a refutation. Being unable to refute a real bug is the correct outcome.
+
+Base your verdict ONLY on the actual code you read, not on assumptions about what "should" be there.`
+
 // verifierSystemBase composes the shared refuter system prompt around a persona
 // clause derived from the repository's dominant language(s). The persona is the
 // ONLY language-dependent text; everything after it is fixed. The refuter's only
@@ -183,17 +201,9 @@ func finderTask(files []string, leads []store.Lead) string {
 func verifierSystemBase(persona string) string {
 	return `You are a skeptical, exacting ` + persona + `. Your ONLY job is to PROVE that the bug report below is WRONG. You are not here to agree; you are here to refute.
 
-You have read-only tools (read_file, list_dir, grep) plus language-server code navigation (find_definition, find_references, find_implementations, read_symbol) rooted at the repository. USE THEM to read the actual code the report points at, plus its callers and callees. When checking whether callers already guard against the claimed bug (nil checks, bounds checks, prior validation), prefer find_references on the implicated function or symbol: it enumerates the real call sites exactly, where grep misses qualified or aliased calls and matches unrelated identifiers. Use find_definition to confirm what a call resolves to, find_implementations to find what concretely runs behind an interface, and read_symbol to pull a single function/method/type body without reading the whole file. If a code-navigation tool returns an ERROR (server unavailable or still indexing), fall back to grep.
+` + verifierToolParagraph + `
 
-A report is REFUTED if any of these is true, and you can show it with concrete evidence from the code:
-- The claimed code path is unreachable (dead code, a guard returns first, the condition can never hold).
-- A caller, the type system, or a prior check already prevents the bad value or state.
-- The claimed behavior is actually correct — the reporter misread the code or the language/library semantics.
-- The cited file/line does not contain what the report claims.
-
-A report is NOT refuted if, after genuinely trying, you cannot disprove it: the path is reachable, the value really can be bad, and nothing guards it. In that case say so honestly — do not invent a refutation. Being unable to refute a real bug is the correct outcome.
-
-Base your verdict ONLY on the actual code you read, not on assumptions about what "should" be there.`
+` + verifierRefutationCriteria
 }
 
 // refutationSchema constrains the refuter's verdict.
@@ -256,5 +266,54 @@ func verifierTask(c Candidate) string {
 	fmt.Fprintf(&b, "  title: %s\n", c.Title)
 	fmt.Fprintf(&b, "  description: %s\n", c.Description)
 	fmt.Fprintf(&b, "  reporter's evidence: %s\n", c.Evidence)
+	return b.String()
+}
+
+// arbiterSystemPrompt builds the system prompt for the deciding arbiter agent.
+// The arbiter is invoked on a SPLIT panel verdict and must adjudicate between
+// the two sides by reading the actual code — not by averaging opinions.
+// It reuses verifierToolParagraph and verifierRefutationCriteria verbatim so
+// the arbiter's refutation standard never drifts from the panel's.
+func arbiterSystemPrompt(persona string, hasSandbox bool) string {
+	p := `You are a senior ` + persona + ` serving as the deciding arbiter on a disputed bug report. A panel of adversarial reviewers split on whether the report below is a real bug. You will be given the report and each reviewer's verdict and reasoning. Your ONLY job is to decide who is right, by reading the actual code with your tools — do not average the opinions, adjudicate them. Weigh a concrete code-backed demonstration over a plausible-sounding argument, whichever side it comes from.
+
+` + verifierToolParagraph + `
+
+` + verifierRefutationCriteria
+	if hasSandbox {
+		p += verifierSandboxParagraph
+	}
+	return p
+}
+
+// arbiterTask builds the task message for the arbiter agent. It embeds the
+// candidate (identical to verifierTask) followed by each panel seat's verdict.
+// SANITIZATION: refuter reasoning is model-authored free text crossing a prompt
+// boundary. Each reasoning field is flattened (newlines collapsed to spaces, per
+// finderTask's lead-note handling at prompt.go:178-180) so a refuter's output
+// cannot fabricate additional "PANEL VERDICTS" blocks or break section framing.
+func arbiterTask(c Candidate, verdicts []refutation, seatNames []string) string {
+	var b strings.Builder
+	b.WriteString(verifierTask(c))
+	b.WriteString("\nPANEL VERDICTS (split):\n")
+	for i, v := range verdicts {
+		seatName := ""
+		if i < len(seatNames) {
+			seatName = seatNames[i]
+		}
+		verdict := "could not refute"
+		if v.Refuted {
+			verdict = "refuted"
+		}
+		// Flatten model-authored reasoning: collapse whitespace so embedded
+		// newlines cannot fabricate new section headers or panel blocks.
+		reasoning := strings.Join(strings.Fields(v.Reasoning), " ")
+		if seatName != "" {
+			fmt.Fprintf(&b, "  seat %d [%s, %s, confidence=%s]: %s\n", i+1, seatName, verdict, v.Confidence, reasoning)
+		} else {
+			fmt.Fprintf(&b, "  seat %d [%s, confidence=%s]: %s\n", i+1, verdict, v.Confidence, reasoning)
+		}
+	}
+	b.WriteString("\nRead the code yourself and issue your deciding verdict.\n")
 	return b.String()
 }
