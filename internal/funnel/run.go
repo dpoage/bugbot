@@ -441,5 +441,11 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		return nil, fmt.Errorf("funnel: finish scan run: %w", err)
 	}
 
+	// Prune agent_unit rows for old scan runs. Best-effort: a prune failure is
+	// never fatal to the scan result. keepRuns is defined in observability.go.
+	if _, err := f.store.PruneAgentUnits(ctx, keepRuns); err != nil {
+		f.note(result, fmt.Sprintf("observability: PruneAgentUnits failed: %v", err))
+	}
+
 	return result, nil
 }

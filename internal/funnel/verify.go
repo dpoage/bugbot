@@ -75,7 +75,7 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 	sem := make(chan struct{}, f.opts.MaxParallel)
 	var wg sync.WaitGroup
 
-	for _, c := range candidates {
+	for candIdx, c := range candidates {
 		mu.Lock()
 		stop := firstErr != nil
 		mu.Unlock()
@@ -85,6 +85,7 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 
 		wg.Add(1)
 		c := c
+		candIdx := candIdx
 		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
@@ -102,6 +103,9 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 				msg := fmt.Sprintf("hard budget reached: verification skipped for %q (%s:%d) — kept as T3 suspected", c.Title, c.File, c.Line)
 				f.note(result, msg)
 				progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
+				// Record orphaned_budget row (zero tokens, empty started/finished). Best-effort.
+				f.recordVerifierUnit(ctx, result.ScanRunID, c.Lens, c.File, candIdx,
+					time.Time{}, time.Time{}, 0, "orphaned_budget", nil, nil, false, false, result)
 				return
 			}
 			nRefuters := f.opts.Refuters
@@ -128,7 +132,7 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 			}
 
 			sink := f.opts.Progress
-			start := time.Now()
+			startedAt := time.Now()
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindAgentStarted, Role: progress.RoleVerifier, Label: c.Title,
 			})
@@ -165,16 +169,23 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 				}
 			}
 
+			finishedAt := time.Now()
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindAgentFinished, Role: progress.RoleVerifier, Label: c.Title,
-				Tokens: tokens, Duration: time.Since(start), Err: errString(err),
+				Tokens: tokens, Duration: finishedAt.Sub(startedAt), Err: errString(err),
 			})
+			// Fold stats and decide the verdict under the lock; the agent_units
+			// row write happens AFTER unlock so a sqlite insert never serializes
+			// sibling candidates (the pre-launch orphan path already records
+			// outside the lock — same discipline). The runner-error path records
+			// no row: the whole scan aborts on firstErr.
+			recordStatus := ""
 			mu.Lock()
-			defer mu.Unlock()
 			if err != nil {
 				if firstErr == nil {
 					firstErr = err
 				}
+				mu.Unlock()
 				return
 			}
 			// The pool ran dry while this candidate was being challenged: its
@@ -192,50 +203,61 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 				msg := fmt.Sprintf("budget stopped mid-verification of %q (%s:%d) — kept as T3 suspected", c.Title, c.File, c.Line)
 				f.note(result, msg)
 				progress.Emit(sink, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
-				return
-			}
-			refuterRuns += len(verdicts)
-			refuterFailed += nFailed
-			arbiterRuns += localArbiterRuns
-			arbiterKills += localArbiterKills
-			arbiterFailed += localArbiterFailed
-			if nFailed > 0 {
-				progress.Emit(sink, progress.Event{
-					Kind: progress.KindLensFailed, Role: progress.RoleVerifier, Label: c.Title,
-					Message: fmt.Sprintf("%d/%d refuter(s) produced no parseable verdict for %q — treated as 'could not refute'", nFailed, len(verdicts), c.Title),
-				})
-			}
-
-			// Decide verdict:
-			//   - Unanimous: use existing majorityRefuted logic (all-refuted kills,
-			//     all-not-refuted survives). This path is byte-identical to today for
-			//     unanimous panels and for n==1.
-			//   - Split + arbiter succeeded: arbiter's verdict decides.
-			//   - Split + arbiter failed: fall back to majorityRefuted (conservative
-			//     tie-survives preserved).
-			var candKilled bool
-			if isSplitVerdict(verdicts) {
-				if localArbiterFailed > 0 || arbiterVerdict == nil {
-					// Arbiter failed: fall back to majority rule.
-					candKilled = majorityRefuted(verdicts)
-				} else {
-					candKilled = arbiterVerdict.Refuted
-				}
+				recordStatus = "orphaned_budget"
 			} else {
-				candKilled = majorityRefuted(verdicts)
-			}
+				refuterRuns += len(verdicts)
+				refuterFailed += nFailed
+				arbiterRuns += localArbiterRuns
+				arbiterKills += localArbiterKills
+				arbiterFailed += localArbiterFailed
+				if nFailed > 0 {
+					progress.Emit(sink, progress.Event{
+						Kind: progress.KindLensFailed, Role: progress.RoleVerifier, Label: c.Title,
+						Message: fmt.Sprintf("%d/%d refuter(s) produced no parseable verdict for %q — treated as 'could not refute'", nFailed, len(verdicts), c.Title),
+					})
+				}
 
-			if candKilled {
-				killed++
-				return
+				// Decide verdict:
+				//   - Unanimous: use existing majorityRefuted logic (all-refuted kills,
+				//     all-not-refuted survives). This path is byte-identical to today for
+				//     unanimous panels and for n==1.
+				//   - Split + arbiter succeeded: arbiter's verdict decides.
+				//   - Split + arbiter failed: fall back to majorityRefuted (conservative
+				//     tie-survives preserved).
+				var candKilled bool
+				if isSplitVerdict(verdicts) {
+					if localArbiterFailed > 0 || arbiterVerdict == nil {
+						// Arbiter failed: fall back to majority rule.
+						candKilled = majorityRefuted(verdicts)
+					} else {
+						candKilled = arbiterVerdict.Refuted
+					}
+				} else {
+					candKilled = majorityRefuted(verdicts)
+				}
+
+				if candKilled {
+					killed++
+					recordStatus = "killed"
+				} else {
+					progress.Emit(sink, progress.Event{
+						Kind: progress.KindFindingVerified, Title: c.Title, File: c.File, Line: c.Line,
+					})
+					recordStatus = "survived"
+					survivors = append(survivors, verified{
+						cand:      c,
+						reasoning: buildReasoning(verdicts, seatNames, arbiterReasoning, localArbiterRuns > 0 && localArbiterFailed == 0),
+					})
+				}
 			}
-			progress.Emit(sink, progress.Event{
-				Kind: progress.KindFindingVerified, Title: c.Title, File: c.File, Line: c.Line,
-			})
-			survivors = append(survivors, verified{
-				cand:      c,
-				reasoning: buildReasoning(verdicts, seatNames, arbiterReasoning, localArbiterRuns > 0 && localArbiterFailed == 0),
-			})
+			mu.Unlock()
+
+			// arbiterRan is false for the orphaned mid-arbiter stop: an arbiter
+			// cut by the pool produced no verdict worth reporting in detail.
+			arbiterRan := localArbiterRuns > 0 && localArbiterFailed == 0 && !arbiterBudgetStopped
+			f.recordVerifierUnit(ctx, result.ScanRunID, c.Lens, c.File, candIdx,
+				startedAt, finishedAt, tokens, recordStatus, seatNames, seatRefutedSlice(verdicts),
+				arbiterRan, arbiterRefuted(arbiterVerdict), result)
 		}()
 	}
 
@@ -416,6 +438,26 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// seatRefutedSlice returns a parallel bool slice indicating which verdicts were
+// "refuted", for use in the per-unit observability row. Returns nil when the
+// slice is empty.
+func seatRefutedSlice(verdicts []refutation) []bool {
+	if len(verdicts) == 0 {
+		return nil
+	}
+	out := make([]bool, len(verdicts))
+	for i, v := range verdicts {
+		out[i] = v.Refuted
+	}
+	return out
+}
+
+// arbiterRefuted returns whether the arbiter's verdict was "refuted". Returns
+// false for a nil arbiter (no arbiter ran or it failed to parse).
+func arbiterRefuted(v *refutation) bool {
+	return v != nil && v.Refuted
 }
 
 // majorityRefuted reports whether a strict majority of verdicts are "refuted".

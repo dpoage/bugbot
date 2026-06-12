@@ -31,6 +31,7 @@ func newReportCmd() *cobra.Command {
 		newReportShowCmd(),
 		newReportDismissCmd(),
 		newReportEmitCmd(),
+		newReportUnitsCmd(),
 	)
 
 	return cmd
@@ -269,3 +270,101 @@ func newReportEmitCmd() *cobra.Command {
 
 // timeNowUTC is the time source for emit, indirected so tests can pin it.
 var timeNowUTC = func() time.Time { return time.Now().UTC() }
+
+// newReportUnitsCmd renders the per-unit agent observability table for a given
+// scan run. Each row represents one finder, verifier, or reproducer unit
+// (including units skipped by the budget gate). The footer summarises totals,
+// skipped-unit counts, and the cumulative coverage fraction.
+func newReportUnitsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "units <scan-run-id>",
+		Short: "Show per-unit agent observability for a scan run",
+		Long: `Render a table of every agent unit launched (or skipped) in a scan run.
+
+Each row is one finder, verifier, or reproducer execution. Skipped units
+(budget gate fired before launch) have zero tokens and appear with a
+skipped_* status. The footer shows coverage stats.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			_, st, err := openStore(ctx)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = st.Close() }()
+
+			scanRunID := args[0]
+			// Allow a short prefix of the LATEST run id only (a convenience for "the
+			// run that just finished"); prefixes of older runs are not resolved —
+			// pass the full id for those.
+			if len(scanRunID) < 32 {
+				run, err := st.LatestScanRun(ctx)
+				if err == nil && strings.HasPrefix(run.ID, scanRunID) {
+					scanRunID = run.ID
+				}
+			}
+
+			units, err := st.ListAgentUnits(ctx, scanRunID)
+			if err != nil {
+				return fmt.Errorf("list agent units: %w", err)
+			}
+
+			out := cmd.OutOrStdout()
+			if len(units) == 0 {
+				_, _ = fmt.Fprintln(out, "no agent unit rows found for this scan run (run may predate mi5.10 recording)")
+				return nil
+			}
+
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			_, _ = fmt.Fprintln(tw, "ORDER\tROLE\tLENS@STRATEGY\tFILES\tSTATUS\tTOKENS\tCACHED\tCANDS\tDURATION")
+			for _, u := range units {
+				lensStrat := u.Lens
+				if u.Strategy != "" && u.Strategy != "sweep-wide" {
+					lensStrat = u.Lens + "@" + u.Strategy
+				}
+				dur := "-"
+				if !u.StartedAt.IsZero() && !u.FinishedAt.IsZero() {
+					dur = u.FinishedAt.Sub(u.StartedAt).Round(time.Millisecond).String()
+				}
+				_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%d\t%s\t%d\t%d\t%d\t%s\n",
+					u.LaunchOrder, u.Role, lensStrat, len(u.Files),
+					u.Status, u.InputTokens+u.OutputTokens, u.CacheReadTokens,
+					u.Candidates, dur)
+			}
+			_ = tw.Flush()
+
+			// Footer: totals, skip counts, coverage fraction. Coverage is a
+			// FINDER metric: the denominator is files targeted by finder units
+			// only (verifier/reproducer rows carry the candidate's file, which
+			// would inflate the denominator and make the fraction conflate two
+			// different populations); the numerator is files some finderOK unit
+			// actually covered.
+			var totalUnits, skippedHard, skippedDeg, totalTokens int64
+			coveredFiles := make(map[string]bool)
+			finderFiles := make(map[string]bool)
+			for _, u := range units {
+				totalUnits++
+				totalTokens += u.InputTokens + u.OutputTokens
+				switch u.Status {
+				case "skipped_hard_budget":
+					skippedHard++
+				case "skipped_degraded":
+					skippedDeg++
+				}
+				if u.Role != "finder" {
+					continue
+				}
+				for _, f := range u.Files {
+					finderFiles[f] = true
+					if u.Status == "ok" {
+						coveredFiles[f] = true
+					}
+				}
+			}
+			_, _ = fmt.Fprintf(out, "\ntotal=%d skipped_hard=%d skipped_degraded=%d tokens=%d covered=%d/%d\n",
+				totalUnits, skippedHard, skippedDeg, totalTokens, len(coveredFiles), len(finderFiles))
+			return nil
+		},
+	}
+	return cmd
+}

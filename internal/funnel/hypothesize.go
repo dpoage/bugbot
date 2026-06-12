@@ -28,6 +28,20 @@ const diffIntentDiffCap = 48 * 1024
 // explicit marker. 4 KB comfortably covers any reasonable commit message body.
 const diffIntentMsgCap = 4 * 1024
 
+// unit is one finder work item: a (lens × strategy × chunk) triple. The
+// customTask field is non-empty only for the diff-intent lens, which uses a
+// pre-built task string rather than the standard file-list format. The struct
+// is package-level so observability.go can reference it in the recording
+// helpers without duplicating the definition.
+type unit struct {
+	lens       Lens
+	strategy   Strategy
+	files      []string
+	langs      []ingest.Language // the chunk's language set, for prompt composition
+	leads      []store.Lead      // pre-fetched leads for this lens, already consumed
+	customTask string            // non-empty for diff-intent: overrides task(files, leads)
+}
+
 // hypothesize runs the finder stage: for each effective lens, run a finder
 // agent over each chunk of target files, collecting concrete candidates. Lens
 // chunks run in parallel bounded by Options.MaxParallel. Budget degradation is
@@ -130,14 +144,6 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	// diff-intent always uses sweep-wide (no deep units); AppliesTo for the
 	// non-default strategies does not match "diff-intent" in v1, so this falls
 	// out naturally from the loop below.
-	type unit struct {
-		lens       Lens
-		strategy   Strategy
-		files      []string
-		langs      []ingest.Language // the chunk's language set, for prompt composition
-		leads      []store.Lead      // pre-fetched leads for this lens, already consumed
-		customTask string            // non-empty for diff-intent: overrides task(files, leads)
-	}
 	strategies := builtinStrategies()
 	var units []unit
 	for _, l := range lenses {
@@ -251,16 +257,21 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	}
 	degradedUnits := degradedUnitClasses(activeClasses, langs)
 
-	for _, u := range units {
+	for unitIdx, u := range units {
 		mu.Lock()
 		stop := firstErr != nil
 		mu.Unlock()
 		if stop {
+			// Units not launched because a prior unit errored: we do not record rows
+			// for these, as the error exit aborts the scan itself. See trap 2 in
+			// bugbot-mi5.10: the firstErr early-break path records nothing — acceptable,
+			// documented here.
 			break
 		}
 
 		wg.Add(1)
 		u := u
+		unitIdx := unitIdx
 		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
@@ -275,6 +286,8 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				msg := fmt.Sprintf("hard budget reached: skipped finder lens %q on %d file(s)", u.lens.Name, len(u.files))
 				f.note(result, msg)
 				progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
+				// Record the skipped unit row (zero tokens, empty started_at). Best-effort.
+				f.recordFinderUnit(ctx, scanRunID, u, unitIdx, "skipped_hard_budget", 0, 0, 0, 0, 0, result)
 				return
 			}
 			if budget.overSoft() {
@@ -285,9 +298,18 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 					msg := fmt.Sprintf("budget degraded: skipped low-yield finder lens %q on %d file(s)", label, len(u.files))
 					f.note(result, msg)
 					progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetDegraded, Message: msg})
+					// Record the skipped unit row (zero tokens, empty started_at). Best-effort.
+					f.recordFinderUnit(ctx, scanRunID, u, unitIdx, "skipped_degraded", 0, 0, 0, 0, 0, result)
 					return
 				}
 			}
+
+			// per-unit leads counter: folded into leadsPostedAtomic (so Stats.LeadsPosted
+			// stays unchanged) and also written into the unit row. This avoids relying on
+			// the global atomic for per-unit attribution (trap 4 in bugbot-mi5.10).
+			// unitLeadsPosted is mutated only inside this unit's own goroutine (the
+			// runner executes tool calls sequentially), so a plain int is safe.
+			var unitLeadsPosted int
 
 			// Build the tool set for this finder: read-only tools plus a per-unit
 			// post_lead instance that carries this lens as the poster. The onPost
@@ -306,6 +328,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 					return err
 				}
 				leadsPostedAtomic.Add(1)
+				unitLeadsPosted++
 				return nil
 			})
 			// Use a three-index slice expression to cap baseTools at its length
@@ -335,13 +358,33 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			sysprompt := composeFinderSystemPrompt(persona, u.lens, u.langs, u.strategy)
 
 			label := unitLabel(u.lens.Name, u.strategy.Name)
-			cands, status, err := f.runFinderWithPrompt(ctx, finder, unitTools, sysprompt, label, u.lens, task, budget)
+			startedAt := time.Now()
+			cands, status, outcome, err := f.runFinderWithPrompt(ctx, finder, unitTools, sysprompt, label, u.lens, task, budget)
+			finishedAt := time.Now()
+
+			// Extract per-unit token counts directly from the Outcome's Usage
+			// (not from the spend ledger — trap 1 in bugbot-mi5.10).
+			var inTokens, outTokens, cacheRead int64
+			if outcome != nil {
+				inTokens = outcome.Usage.InputTokens
+				outTokens = outcome.Usage.OutputTokens
+				cacheRead = outcome.Usage.CacheReadInputTokens
+			}
+
+			// Fold stats under the lock; the agent_units row write happens AFTER
+			// unlock so a sqlite insert never serializes sibling completions —
+			// the skipped paths already record outside the lock, and this keeps
+			// the discipline uniform. The runner-error path records no row: the
+			// whole scan aborts on firstErr, so a partial unit table for an
+			// aborted run would suggest precision it does not have.
+			recordStatus := ""
+			var candCount int64
 			mu.Lock()
-			defer mu.Unlock()
 			if err != nil {
 				if firstErr == nil {
 					firstErr = err
 				}
+				mu.Unlock()
 				return
 			}
 			finderRuns++
@@ -353,7 +396,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				progress.Emit(f.opts.Progress, progress.Event{
 					Kind: progress.KindLensFailed, Role: progress.RoleFinder, Label: label, Message: msg,
 				})
-				return
+				recordStatus = "parse_failed"
 			case finderBudgetStopped:
 				// A run truncated by the shared budget pool (or its own token
 				// budget) whose partial output does not parse is a budget stop, NOT
@@ -363,17 +406,22 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				finderBudgetCut++
 				msg := fmt.Sprintf("finder lens %q stopped by budget on %d file(s) before emitting parseable output — partial coverage", label, len(u.files))
 				f.note(result, msg)
-				return
+				recordStatus = "budget_stopped"
+			default: // finderOK
+				recordStatus = "ok"
+				candCount = int64(len(cands))
+				collected = append(collected, cands...)
+				// Record coverage under the existing mu so covered set stays
+				// consistent with finderRuns/finderFailed collected in this same
+				// lock. The diff-intent custom unit has files == nil and
+				// contributes nothing; a file appearing in multiple units
+				// (multiple lenses × chunks) is deduplicated by the map.
+				for _, file := range u.files {
+					coveredSet[file] = true
+				}
 			}
-			collected = append(collected, cands...)
-			// Record coverage under the existing mu so covered set stays
-			// consistent with finderRuns/finderFailed collected in this same lock.
-			// The diff-intent custom unit has files == nil and contributes nothing;
-			// a file appearing in multiple units (multiple lenses × chunks) is
-			// deduplicated by the map.
-			for _, file := range u.files {
-				coveredSet[file] = true
-			}
+			mu.Unlock()
+			f.recordFinderUnitWithTime(ctx, scanRunID, u, unitIdx, recordStatus, startedAt, finishedAt, inTokens, outTokens, cacheRead, candCount, unitLeadsPosted, result)
 		}()
 	}
 
@@ -437,14 +485,20 @@ const (
 // the strategy-aware system prompt.
 func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, persona string, l Lens, langs []ingest.Language, task string, budget *budgetState) ([]Candidate, finderStatus, error) {
 	sysprompt := finderSystemPrompt(persona, l, langs)
-	return f.runFinderWithPrompt(ctx, finder, tools, sysprompt, l.Name, l, task, budget)
+	cands, status, _, err := f.runFinderWithPrompt(ctx, finder, tools, sysprompt, l.Name, l, task, budget)
+	return cands, status, err
 }
 
 // runFinderWithPrompt is the core finder executor. It accepts a pre-composed
 // system prompt and a progress label so callers (hypothesize) can inject
 // strategy clauses and use strategy-qualified labels (lens@strategy) without
 // rebuilding the prompt inside this function.
-func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState) ([]Candidate, finderStatus, error) {
+//
+// The returned *agent.Outcome carries the agent's Usage (InputTokens /
+// OutputTokens / CacheReadInputTokens) that the caller uses to populate the
+// per-unit observability row. The Outcome is non-nil as long as the agent ran
+// at least one turn; callers must handle nil (budget-pool pre-turn stop).
+func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState) ([]Candidate, finderStatus, *agent.Outcome, error) {
 	sink := f.opts.Progress
 	start := time.Now()
 	progress.Emit(sink, progress.Event{
@@ -465,7 +519,7 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 		// rather than aborting the whole scan: one lens/chunk failing must not
 		// sink the others. Context cancellation is the exception — propagate it.
 		if ctx.Err() != nil {
-			return nil, finderOK, ctx.Err()
+			return nil, finderOK, outcome, ctx.Err()
 		}
 		// Distinguish a genuine parse failure from a budget stop. If the run was
 		// truncated by the shared budget pool or its own token budget, an
@@ -474,9 +528,9 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 		// the finder-failure count. Otherwise its findings are LOST: report a parse
 		// failure so a scan never silently prints "No findings" when a lens broke.
 		if budgetStopped(outcome) {
-			return nil, finderBudgetStopped, nil
+			return nil, finderBudgetStopped, outcome, nil
 		}
-		return nil, finderParseFailed, nil
+		return nil, finderParseFailed, outcome, nil
 	}
 
 	cands := make([]Candidate, 0, len(out.Candidates))
@@ -492,7 +546,7 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 			Confidence:  normalizeConfidence(rc.Confidence),
 		})
 	}
-	return cands, finderOK, nil
+	return cands, finderOK, outcome, nil
 }
 
 // budgetStopped reports whether outcome was truncated by a budget limit (the
