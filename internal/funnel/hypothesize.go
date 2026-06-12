@@ -113,22 +113,32 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 		leadsConsumedTotal += len(pending)
 	}
 
-	// Build the unit-of-work list: (lens, chunk) pairs. We launch lenses in
-	// yield order so that if degradation kicks in mid-run, the lower-yield lenses
-	// are the ones skipped.
+	// Build the unit-of-work list: (lens, strategy, chunk) triples. We launch
+	// lenses in yield order so that if degradation kicks in mid-run, the
+	// lower-yield units are the ones skipped.
+	//
+	// For each lens × chunk pair the default strategy (sweep-wide) is emitted
+	// exactly as today; additionally, each non-default builtin strategy that
+	// AppliesTo the lens emits one extra unit per chunk. This is the strategy
+	// axis: unit = (lens × strategy × chunk).
 	//
 	// The diff-intent lens is special: it emits exactly ONE task per commit-kind
 	// run (when cc is non-nil), not one task per chunk of files. That task carries
 	// its own pre-built content (diffIntentTask) rather than the standard file
 	// list. The customTask field is non-empty only for that one unit; all other
 	// units leave it empty and have their task built from files+leads as usual.
+	// diff-intent always uses sweep-wide (no deep units); AppliesTo for the
+	// non-default strategies does not match "diff-intent" in v1, so this falls
+	// out naturally from the loop below.
 	type unit struct {
 		lens       Lens
+		strategy   Strategy
 		files      []string
 		langs      []ingest.Language // the chunk's language set, for prompt composition
 		leads      []store.Lead      // pre-fetched leads for this lens, already consumed
-		customTask string            // non-empty for diff-intent: overrides finderTask(files, leads)
+		customTask string            // non-empty for diff-intent: overrides task(files, leads)
 	}
+	strategies := builtinStrategies()
 	var units []unit
 	for _, l := range lenses {
 		// diff-intent never gets chunk-based units: it is either absent (sweeps,
@@ -139,7 +149,18 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			continue
 		}
 		for _, c := range chunks {
-			units = append(units, unit{lens: l, files: c.files, langs: c.langs, leads: leadsByLens[l.Name]})
+			for _, s := range strategies {
+				if !s.AppliesTo(l.Name) {
+					continue
+				}
+				units = append(units, unit{
+					lens:     l,
+					strategy: s,
+					files:    c.files,
+					langs:    c.langs,
+					leads:    leadsByLens[l.Name],
+				})
+			}
 		}
 	}
 	// Diff-intent: one extra unit at the front (highest yield => first to launch)
@@ -154,6 +175,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 		task := buildDiffIntentTask(cc, targets)
 		units = append([]unit{{
 			lens:       diLens,
+			strategy:   sweepWide,
 			files:      nil,
 			customTask: task,
 		}}, units...)
@@ -188,23 +210,45 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	sem := make(chan struct{}, f.opts.MaxParallel)
 	var wg sync.WaitGroup
 
-	// Compute degraded survivors from the lenses that actually emitted at least
-	// one unit in this run, ranked by the per-language yield order — composing
-	// both halves of the design: lensesByYield supplies the language-aware
-	// ranking, and the units filter ensures a zero-unit lens (diff-intent on
-	// sweeps) never occupies a degradation slot and starves a taxonomy lens. On
-	// commit runs diff-intent does emit a unit and legitimately competes.
-	activeLensNames := make(map[string]bool, len(units))
-	for _, u := range units {
-		activeLensNames[u.lens.Name] = true
-	}
-	active := make([]Lens, 0, len(lenses))
+	// Compute degraded survivors from the (lens × strategy) unit-classes that
+	// actually emitted at least one unit in this run. A unit-class is the pair
+	// (lens.Name, strategy.Name); a lens that emitted zero units (diff-intent on
+	// sweeps) must never occupy a survivor slot and starve a working lens.
+	//
+	// Unit-classes are ranked by effective yield = per-language lens yield ×
+	// strategy.Weight, descending. The top degradedLensCount classes survive.
+	// With only sweep-wide in play the result is identical to today's lens-only
+	// degradation (weight 1.0 scales nothing). A deep unit-class with weight 0.9
+	// ranks just below its own lens's wide class and is shed first under pressure.
+	//
+	// Collect active unit-classes preserving the lensesByYield order (for equal
+	// effective-yield tiebreaking via stable sort inside degradedUnitClasses).
+	seenClass := make(map[string]bool) // key = lensName+"@"+strategyName
+	activeClasses := make([]lensStrategyClass, 0, len(units))
+	// Iterate in lensesByYield order: lenses is already sorted by yield.
+	// For each lens, emit its unit-classes in strategies order (sweep-wide first).
 	for _, l := range lenses {
-		if activeLensNames[l.Name] {
-			active = append(active, l)
+		for _, s := range strategies {
+			key := l.Name + "@" + s.Name
+			// Only include classes that actually emitted a unit.
+			hasUnit := false
+			for _, u := range units {
+				if u.lens.Name == l.Name && u.strategy.Name == s.Name {
+					hasUnit = true
+					break
+				}
+			}
+			if hasUnit && !seenClass[key] {
+				seenClass[key] = true
+				activeClasses = append(activeClasses, lensStrategyClass{
+					lensName:     l.Name,
+					strategyName: s.Name,
+					weight:       s.Weight,
+				})
+			}
 		}
 	}
-	degradedLenses := degradedLensNames(active)
+	degradedUnits := degradedUnitClasses(activeClasses, langs)
 
 	for _, u := range units {
 		mu.Lock()
@@ -234,8 +278,10 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			}
 			if budget.overSoft() {
 				budget.degraded.Store(true)
-				if !degradedLenses[u.lens.Name] {
-					msg := fmt.Sprintf("budget degraded: skipped low-yield finder lens %q on %d file(s)", u.lens.Name, len(u.files))
+				classKey := u.lens.Name + "@" + u.strategy.Name
+				if !degradedUnits[classKey] {
+					label := unitLabel(u.lens.Name, u.strategy.Name)
+					msg := fmt.Sprintf("budget degraded: skipped low-yield finder lens %q on %d file(s)", label, len(u.files))
 					f.note(result, msg)
 					progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetDegraded, Message: msg})
 					return
@@ -272,18 +318,23 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			// storage.
 			unitTools := append(baseTools[:len(baseTools):len(baseTools)], postLeadTool)
 
-			// Resolve the task content. For the diff-intent lens the task is
-			// pre-built (customTask) and carries the commit message, diff, and
-			// blast-radius dependents. For all other lenses the task is the
-			// standard file-list+leads format. The chunk's language set rides
-			// alongside for manifestation-block prompt composition (nil for the
-			// language-free diff-intent task → Core-only prompt).
+			// Resolve the task content. customTask takes highest priority
+			// (diff-intent pre-built task). Then the strategy's BuildTask if
+			// non-nil (deep strategies supply their own framing). Finally the
+			// default finderTask file-list format.
 			task := u.customTask
 			if task == "" {
-				task = finderTask(u.files, u.leads)
+				if u.strategy.BuildTask != nil {
+					task = u.strategy.BuildTask(u.files, u.leads)
+				} else {
+					task = finderTask(u.files, u.leads)
+				}
 			}
 
-			cands, status, err := f.runFinder(ctx, finder, unitTools, persona, u.lens, u.langs, task, budget)
+			sysprompt := composeFinderSystemPrompt(persona, u.lens, u.langs, u.strategy)
+
+			label := unitLabel(u.lens.Name, u.strategy.Name)
+			cands, status, err := f.runFinderWithPrompt(ctx, finder, unitTools, sysprompt, label, u.lens, task, budget)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -296,10 +347,10 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			switch status {
 			case finderParseFailed:
 				finderFailed++
-				msg := fmt.Sprintf("finder lens %q produced no parseable output on %d file(s) — its findings (if any) are LOST, not absent", u.lens.Name, len(u.files))
+				msg := fmt.Sprintf("finder lens %q produced no parseable output on %d file(s) — its findings (if any) are LOST, not absent", label, len(u.files))
 				f.note(result, msg)
 				progress.Emit(f.opts.Progress, progress.Event{
-					Kind: progress.KindLensFailed, Role: progress.RoleFinder, Label: u.lens.Name, Message: msg,
+					Kind: progress.KindLensFailed, Role: progress.RoleFinder, Label: label, Message: msg,
 				})
 				return
 			case finderBudgetStopped:
@@ -309,7 +360,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				// short on purpose. Count it separately and note it under Skipped so a
 				// budget-limited scan is never misreported as having broken finders.
 				finderBudgetCut++
-				msg := fmt.Sprintf("finder lens %q stopped by budget on %d file(s) before emitting parseable output — partial coverage", u.lens.Name, len(u.files))
+				msg := fmt.Sprintf("finder lens %q stopped by budget on %d file(s) before emitting parseable output — partial coverage", label, len(u.files))
 				f.note(result, msg)
 				return
 			}
@@ -362,14 +413,28 @@ const (
 // by the budget pool / token budget, so an unparseable partial is expected). The
 // funnel surfaces parse failures so a scan never silently reports "No findings"
 // when a lens actually failed, while budget stops are accounted separately.
+//
+// This is a thin wrapper around runFinderWithPrompt that builds the system prompt
+// from persona+lens+langs and uses the lens name as the progress label. Test code
+// calls this directly; production code calls runFinderWithPrompt after composing
+// the strategy-aware system prompt.
 func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, persona string, l Lens, langs []ingest.Language, task string, budget *budgetState) ([]Candidate, finderStatus, error) {
+	sysprompt := finderSystemPrompt(persona, l, langs)
+	return f.runFinderWithPrompt(ctx, finder, tools, sysprompt, l.Name, l, task, budget)
+}
+
+// runFinderWithPrompt is the core finder executor. It accepts a pre-composed
+// system prompt and a progress label so callers (hypothesize) can inject
+// strategy clauses and use strategy-qualified labels (lens@strategy) without
+// rebuilding the prompt inside this function.
+func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState) ([]Candidate, finderStatus, error) {
 	sink := f.opts.Progress
 	start := time.Now()
 	progress.Emit(sink, progress.Event{
-		Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: l.Name,
+		Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: label,
 	})
 
-	runner := agent.NewRunner(finder, tools, finderSystemPrompt(persona, l, langs),
+	runner := agent.NewRunner(finder, tools, sysprompt,
 		agent.WithLimits(budget.runnerLimits(f.opts.FinderLimits)),
 		agent.WithMaxTokens(DefaultMaxOutputTokens),
 		f.transcriptOption(),
@@ -377,7 +442,7 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 
 	var out candidateList
 	outcome, err := runner.RunJSON(ctx, task, candidatesSchema, &out)
-	emitAgentFinished(sink, progress.RoleFinder, l.Name, outcome, start, err)
+	emitAgentFinished(sink, progress.RoleFinder, label, outcome, start, err)
 	if err != nil {
 		// A finder that fails to produce parseable JSON yields no candidates
 		// rather than aborting the whole scan: one lens/chunk failing must not
@@ -424,25 +489,68 @@ func budgetStopped(o *agent.Outcome) bool {
 	return o.TruncationReason == agent.TruncTokenBudget || o.TruncationReason == agent.TruncBudgetPool
 }
 
-// degradedLensNames returns the set of lens names that survive budget
-// degradation: the head degradedLensCount lenses of ordered, which must
-// already be sorted by descending effective yield for this run's language mix
-// (see lensesByYield). On a Python-heavy repo this keeps a different lens set
-// than on a Go repo — degradation sheds the lenses that are low-yield for THIS
-// repo, not for Go.
+// lensStrategyClass identifies a (lens × strategy) unit-class for degradation
+// ranking. It carries the weight so the ranking can be computed without
+// re-fetching the strategy.
+type lensStrategyClass struct {
+	lensName     string
+	strategyName string
+	weight       float64
+}
+
+// degradedUnitClasses returns the set of unit-class keys (lens@strategy) that
+// survive budget degradation. It ranks each (lens, strategy) class by effective
+// yield = per-language lens yield × strategy.Weight, descending, and keeps the
+// head degradedLensCount classes.
 //
-// Callers must pre-filter ordered to lenses that actually emitted units this
-// run (see hypothesize): a zero-unit lens (diff-intent on sweeps) must never
-// occupy a survivor slot and starve a working lens.
-func degradedLensNames(ordered []Lens) map[string]bool {
+// The sort is stable and compares ONLY the score: equal-score classes keep
+// their input order, which callers supply in lensesByYield order (wide before
+// deep within a lens). That makes the equal-yield tiebreak identical to the
+// pre-strategy degradedLensNames semantics — head-of-lensesByYield — rather
+// than introducing a new (e.g. alphabetical) tiebreak that would silently
+// change survivors the next time the yield tables are retuned. A deep
+// unit-class (weight 0.9) ranks just below its lens's sweep-wide class and is
+// therefore shed first under pressure — intended behavior.
+//
+// CRITICAL INVARIANT: with only sweep-wide in play (weight 1.0), the survivors
+// must be exactly the top degradedLensCount lenses by yield — identical to the
+// pre-strategy degradedLensNames behavior.
+//
+// Callers must pass only classes that actually emitted units this run (see
+// hypothesize): a zero-unit lens must never occupy a survivor slot.
+func degradedUnitClasses(classes []lensStrategyClass, langs []ingest.Language) map[string]bool {
+	type ranked struct {
+		key   string
+		score float64
+	}
+	r := make([]ranked, len(classes))
+	for i, c := range classes {
+		r[i] = ranked{
+			key:   c.lensName + "@" + c.strategyName,
+			score: float64(effectiveYield(c.lensName, langs)) * c.weight,
+		}
+	}
+	sort.SliceStable(r, func(i, j int) bool {
+		return r[i].score > r[j].score
+	})
 	keep := make(map[string]bool, degradedLensCount)
-	for i, l := range ordered {
+	for i, rc := range r {
 		if i >= degradedLensCount {
 			break
 		}
-		keep[l.Name] = true
+		keep[rc.key] = true
 	}
 	return keep
+}
+
+// unitLabel returns the progress label for a finder unit. Default strategy
+// (sweep-wide) units use the bare lens name to preserve existing output.
+// Non-default strategy units use "lens@strategy" so they are distinguishable.
+func unitLabel(lensName, strategyName string) string {
+	if strategyName == sweepWide.Name {
+		return lensName
+	}
+	return lensName + "@" + strategyName
 }
 
 // fileChunk is one finder unit's worth of target files plus the language set

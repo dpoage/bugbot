@@ -223,18 +223,21 @@ func TestEffectiveYield_Resolution(t *testing.T) {
 	}
 }
 
-// sweepActive filters ordered lenses to those that emit units on a sweep —
-// every taxonomy lens, but not the change-scoped diff-intent lens, which is
-// chunk-less and contributes zero units without a ChangeContext. This mirrors
-// the caller contract documented on degradedLensNames: input is pre-filtered
-// to lenses with units this run.
-func sweepActive(ordered []Lens) []Lens {
-	var out []Lens
+// sweepActiveClasses converts a yield-ordered lens slice (pre-filtered to
+// lenses that emitted units on this sweep) to lensStrategyClass values for
+// degradedUnitClasses, using sweep-wide (weight 1.0) as the strategy. This
+// mirrors what hypothesize builds when only the default strategy is in play.
+func sweepActiveClasses(ordered []Lens) []lensStrategyClass {
+	var out []lensStrategyClass
 	for _, l := range ordered {
 		if l.Name == "diff-intent" {
-			continue
+			continue // change-scoped lens: zero chunk units on sweeps
 		}
-		out = append(out, l)
+		out = append(out, lensStrategyClass{
+			lensName:     l.Name,
+			strategyName: sweepWide.Name,
+			weight:       sweepWide.Weight,
+		})
 	}
 	return out
 }
@@ -242,15 +245,18 @@ func sweepActive(ordered []Lens) []Lens {
 // TestDegradation_LanguageDependentLensSet: under budget pressure a
 // Python-heavy repo keeps a different lens set than a Go repo — degradation
 // sheds the lenses that are low-yield for THIS repo's language mix.
+// The surviving keys are "lens@sweep-wide" (the unit-class key format).
 func TestDegradation_LanguageDependentLensSet(t *testing.T) {
-	goKeep := degradedLensNames(sweepActive(lensesByYield(BuiltinLenses(), []ingest.Language{ingest.LangGo})))
-	pyKeep := degradedLensNames(sweepActive(lensesByYield(BuiltinLenses(), []ingest.Language{ingest.LangPython})))
+	goLangs := []ingest.Language{ingest.LangGo}
+	pyLangs := []ingest.Language{ingest.LangPython}
+	goKeep := degradedUnitClasses(sweepActiveClasses(lensesByYield(BuiltinLenses(), goLangs)), goLangs)
+	pyKeep := degradedUnitClasses(sweepActiveClasses(lensesByYield(BuiltinLenses(), pyLangs)), pyLangs)
 
-	if !goKeep["nil-safety/error-handling"] || !goKeep["concurrency"] {
-		t.Errorf("Go-profile degraded set = %v, want {nil-safety/error-handling, concurrency} (historical behavior)", goKeep)
+	if !goKeep["nil-safety/error-handling@sweep-wide"] || !goKeep["concurrency@sweep-wide"] {
+		t.Errorf("Go-profile degraded set = %v, want {nil-safety/error-handling@sweep-wide, concurrency@sweep-wide} (historical behavior)", goKeep)
 	}
-	if !pyKeep["nil-safety/error-handling"] || !pyKeep["injection/input-validation"] {
-		t.Errorf("Python-profile degraded set = %v, want {nil-safety/error-handling, injection/input-validation}", pyKeep)
+	if !pyKeep["nil-safety/error-handling@sweep-wide"] || !pyKeep["injection/input-validation@sweep-wide"] {
+		t.Errorf("Python-profile degraded set = %v, want {nil-safety/error-handling@sweep-wide, injection/input-validation@sweep-wide}", pyKeep)
 	}
 	if reflect.DeepEqual(goKeep, pyKeep) {
 		t.Error("Go and Python profiles degrade to the same lens set; yields are not language-dependent")
