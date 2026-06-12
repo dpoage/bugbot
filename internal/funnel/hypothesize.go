@@ -476,6 +476,11 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			// waits on the DB write (same discipline as recordFinderUnitWithTime).
 			// fps may be nil on fingerprint error; TouchScanCoverage degrades safely
 			// (empty hash ≠ clobbering existing hash — see the CASE in filestate.go).
+			// Best-effort on the run ctx: a unit whose coverage write loses the
+			// race to cancellation (or a busy-timeout under high MaxParallel)
+			// leaves an "ok" agent_units row with no coverage stamp. That fails
+			// in the conservative direction — the file is simply re-scanned next
+			// sweep — so no detached context here.
 			if touchCoverage && recordStatus == "ok" && len(u.files) > 0 {
 				if tcErr := f.store.TouchScanCoverage(ctx, u.files, result.Commit, fps); tcErr != nil {
 					f.note(result, fmt.Sprintf("sweep: per-unit TouchScanCoverage failed (unit %d, %s): %v", unitIdx, u.lens.Name, tcErr))

@@ -132,6 +132,12 @@ func TestSweep_Interrupt_DurablePartialProgress(t *testing.T) {
 	if okUnits == 0 {
 		t.Fatal("agent_units: no ok units — at least 1 unit should have completed before cancel")
 	}
+	// The interrupt must also have PREVENTED work: if every unit completed,
+	// nothing was interrupted and assertions (2b) and the interrupted flag
+	// would be testing a vacuous scenario.
+	if okUnits >= len(files) {
+		t.Fatalf("all %d units completed ok — cancellation landed too late, test scenario is vacuous", okUnits)
+	}
 	t.Logf("ok units: %d of %d total; covered: %v", okUnits, len(units), coveredByOK)
 
 	// --- (2) per-unit coverage durability ---

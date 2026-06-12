@@ -344,16 +344,23 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	result := &Result{ScanRunID: scanRunID, Commit: snap.Commit}
 
 	// Interrupt-safe finalization: seal the scan_runs row on every exit path.
-	// finalizeOnce ensures we finalize exactly once even if the deferred call
-	// races a normal-path finalize (there is only one finalize site now, but
-	// the once guard is cheap insurance).
+	// Exactly-once comes from the finalized boolean plus the fact that every
+	// exit path runs sequentially in this one goroutine (the success path sets
+	// finalized before calling; the deferred path checks it) — there is no
+	// concurrent re-entry to guard against.
 	//
 	// The detached context (5 s timeout over context.Background()) is critical:
 	// on the cancellation path the run ctx is already dead, so any DB write on
 	// it would fail immediately and leave the row dangling. We need a fresh
 	// context that is still alive to write the seal. 5 s is generous for a
 	// single SQLite UPDATE.
-	var finalizeOnce = func(s *Stats) {
+	//
+	// The error return matters on the SUCCESS path only: a clean run whose
+	// seal-write fails must surface that failure (pre-existing behavior — a
+	// dangling unfinalized row is the disease this code exists to cure). The
+	// deferred abnormal-path caller ignores it instead: a finalize failure
+	// there must not mask the original error or panic.
+	var finalize = func(s *Stats) error {
 		statsJSON, merr := json.Marshal(s)
 		if merr != nil {
 			// JSON marshal of our own struct should never fail; log-and-continue.
@@ -362,16 +369,16 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		fCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if ferr := f.store.FinishScanRun(fCtx, scanRunID, string(statsJSON)); ferr != nil {
-			// Best-effort: a finalize failure is logged via note on the result (if
-			// available) but must not mask the original error or panic.
 			f.note(result, fmt.Sprintf("funnel: FinishScanRun failed on finalize: %v", ferr))
+			return ferr
 		}
+		return nil
 	}
 	finalized := false
 	defer func() {
 		if !finalized {
 			// Abnormal exit (panic recovery is not our job; this handles error/cancel).
-			finalizeOnce(&result.Stats)
+			_ = finalize(&result.Stats) // best-effort: must not mask the original error/panic
 		}
 	}()
 
@@ -508,8 +515,12 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 
 	// Normal-path finalize: seal the scan run row. Mark finalized so the deferred
 	// finalize step does not double-call (which would be harmless but wasteful).
+	// A success-path seal failure is a real error: returning success with a
+	// dangling unfinalized row is exactly the state this seal exists to prevent.
 	finalized = true
-	finalizeOnce(&result.Stats)
+	if err := finalize(&result.Stats); err != nil {
+		return nil, fmt.Errorf("funnel: finish scan run: %w", err)
+	}
 
 	// Prune agent_unit rows for old scan runs. Best-effort: a prune failure is
 	// never fatal to the scan result. keepRuns is defined in observability.go.
