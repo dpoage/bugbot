@@ -462,6 +462,21 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		hypothesizedCount = n
 		hypothesizeErr = err
 		close(candCh)
+		// Emit StageFinished(hypothesize) at FINDER DRAIN time, not after the
+		// whole pipeline settles: the status snapshot resets LiveCandidates on
+		// this event, and with verify running concurrently the live finder
+		// counter would otherwise never reset until end-of-run. FinderFailures
+		// was folded into result.Stats under the stage's own mutex before
+		// hypothesize returned, so the read here is ordered.
+		if err == nil {
+			progress.Emit(sink, progress.Event{
+				Kind: progress.KindStageFinished, Stage: progress.StageHypothesize,
+				Counts: &progress.Counts{
+					Hypothesized:   n,
+					FinderFailures: result.Stats.FinderFailures,
+				},
+			})
+		}
 	}()
 
 	// ---- Stage B: Triage (streaming consumer) ----
@@ -591,13 +606,6 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	}
 	result.Stats.Triaged = triagedCount
 	progress.Emit(sink, progress.Event{
-		Kind: progress.KindStageFinished, Stage: progress.StageHypothesize,
-		Counts: &progress.Counts{
-			Hypothesized:   hypothesizedCount,
-			FinderFailures: result.Stats.FinderFailures,
-		},
-	})
-	progress.Emit(sink, progress.Event{
 		Kind: progress.KindStageFinished, Stage: progress.StageTriage,
 		Counts: &progress.Counts{Hypothesized: hypothesizedCount, Triaged: triagedCount},
 	})
@@ -611,6 +619,36 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// result.Stats.VerifierRuns / Failures / ArbiterRuns / Kills / Failures were
 	// folded under findingsMu by each verify goroutine.
 	findingsMu.Unlock()
+
+	// Fold late corroboration into the IN-MEMORY findings. A corroborating
+	// lens that arrived after its primary persisted was written to the store
+	// row at attach time (by triage or the verify goroutine's late path), but
+	// the copy captured in allFindings predates it. All consumers have drained
+	// here, so the registry read cannot race. This keeps Result.Findings
+	// equal to the store regardless of arrival timing — the cluster-level
+	// equivalence invariant.
+	for i := range findings {
+		late := clusterReg.AttachedLenses(findings[i].Fingerprint)
+		if len(late) == 0 {
+			continue
+		}
+		merged := dedupLenses(append(findings[i].CorroboratingLenses, late...))
+		added := merged[:0:0]
+		for _, l := range merged {
+			already := false
+			for _, have := range findings[i].CorroboratingLenses {
+				if have == l {
+					already = true
+					break
+				}
+			}
+			if !already {
+				added = append(added, l)
+			}
+		}
+		findings[i].CorroboratingLenses = merged
+		findings[i].Reasoning = appendCorroboration(findings[i].Reasoning, added)
+	}
 
 	result.Stats.SandboxExecs = int(sbExecs.Load())
 	result.Stats.SandboxExecMillis = sbMillis.Load()

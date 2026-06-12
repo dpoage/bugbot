@@ -666,6 +666,12 @@ func TestSweep_BudgetDegradation(t *testing.T) {
 	finder.fallback = candJSON(realCand)
 	verifier := newScriptedClient()
 	verifier.fallback = notRefutedJSON
+	// Zero-cost verifier: under the streaming topology verify panels run
+	// CONCURRENTLY with finder units (HIGH-priority slots), so verifier spend
+	// would make the soft-threshold crossing interleaving-dependent and this
+	// test flaky. Zeroing verifier usage pins degradation to finder spend
+	// alone, which MaxParallel=1 serializes deterministically.
+	verifier.inUsage, verifier.outUsage, verifier.cachedUsage = 0, 0, 0
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
 		TokenBudget:           600, // ~4 completions before soft threshold (70% of 600 = 420)
@@ -1434,4 +1440,142 @@ func (c *concurrencyTrackingClient) Complete(ctx context.Context, req llm.Reques
 	c.onEntry()
 	defer c.onExit()
 	return c.inner.Complete(ctx, req)
+}
+
+// TestTriageState_TransitiveChain_AllOrders is the membership keystone: a
+// chain A~B, B~C, A≁C (pairwise-similar neighbors, dissimilar endpoints, all
+// window-near through the chain) must form ONE cluster in EVERY arrival order
+// that batch clustering's transitive closure would have collapsed. Primary-only
+// membership — checking arrivals against the first member alone — passes a
+// 2-member test (the degenerate case) but fails this one: C never matches A.
+func TestTriageState_TransitiveChain_AllOrders(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openFixture(t)
+
+	mk := func(lens, title, desc string, line int) Candidate {
+		return Candidate{
+			Lens: lens, File: "bug.go", Line: line, Title: title,
+			Description: desc, Severity: "high", Confidence: "high",
+		}
+	}
+	// Token sets (descTokens keeps only [a-z0-9]+ words longer than 2 chars):
+	// A={alpha,beta,gamma,delta}, B={alpha,beta,echo,foxtrot},
+	// C={echo,foxtrot,golf,hotel}.
+	// jaccard(A,B)=2/6≈0.33, jaccard(B,C)=2/6≈0.33, jaccard(A,C)=0.
+	a := mk("nil-safety/error-handling", "chain a", "alpha beta gamma delta", 10)
+	b := mk("resource-leaks", "chain b", "alpha beta echo foxtrot", 18)
+	c := mk("concurrency", "chain c", "echo foxtrot golf hotel", 26)
+
+	// Fixture preconditions: the chain must hold under the production
+	// similarity rule, or the test silently stops testing transitivity.
+	tokA, tokB, tokC := descTokens(a.Description), descTokens(b.Description), descTokens(c.Description)
+	if jaccard(tokA, tokB) < mergeSimilarityThreshold || jaccard(tokB, tokC) < mergeSimilarityThreshold {
+		t.Fatal("fixture broken: chain neighbors must be pairwise similar")
+	}
+	if jaccard(tokA, tokC) >= mergeSimilarityThreshold {
+		t.Fatal("fixture broken: chain endpoints must be dissimilar")
+	}
+
+	snap := &ingest.Snapshot{Files: []ingest.File{{Path: "bug.go"}}}
+	orders := [][]Candidate{
+		{a, b, c}, {c, b, a}, {b, a, c}, {b, c, a}, {a, c, b}, {c, a, b},
+	}
+	for i, order := range orders {
+		ts, _ := newTriageState(snap)
+		var stats Stats
+		for _, cand := range order {
+			if err := ts.process(ctx, st, &stats, cand); err != nil {
+				t.Fatalf("order %d: process: %v", i, err)
+			}
+		}
+		primaries := ts.popReady()
+		merged := stats.MergedCrossLens + stats.MergedWithinLens
+		// Orders where the bridge (B) arrives LAST form two clusters before B
+		// can connect them — the documented irreversible-forwarding relaxation.
+		// In every other order the chain must collapse to ONE cluster.
+		bridgeLast := order[2].Title == "chain b"
+		wantPrimaries, wantMerged := 1, 2
+		if bridgeLast {
+			wantPrimaries, wantMerged = 2, 1
+		}
+		if len(primaries) != wantPrimaries || merged != wantMerged {
+			t.Errorf("order %d (%s,%s,%s): primaries=%d merged=%d, want %d/%d",
+				i, order[0].Title, order[1].Title, order[2].Title,
+				len(primaries), merged, wantPrimaries, wantMerged)
+		}
+	}
+}
+
+// TestTriageState_SameBucketDissimilarClusters reproduces the eval-corpus
+// regression shape: two token-DISSIMILAR defect groups sharing one location
+// bucket must form two INDEPENDENT clusters, each absorbing its own later
+// members. A single-cluster-per-bucket map lets the second group's primary
+// overwrite the first group's bucket pointer, orphaning it so its later
+// members become spurious primaries (extra panels, extra false positives).
+func TestTriageState_SameBucketDissimilarClusters(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openFixture(t)
+
+	mk := func(lens, title, desc string, line int) Candidate {
+		return Candidate{
+			Lens: lens, File: "bug.go", Line: line, Title: title,
+			Description: desc, Severity: "high", Confidence: "high",
+		}
+	}
+	// Group P (make-panic shaped) and group L (fd-leak shaped) interleaved,
+	// lines 15/17 — same bucket, mirroring the recorded corpus geometry.
+	p1 := mk("injection/input-validation", "panic p1", "caller controlled size make byte slice panic", 15)
+	l1 := mk("resource-leaks", "leak l1", "file descriptor leaked close missing error path", 17)
+	p2 := mk("boundary-conditions", "panic p2", "caller controlled size make byte allocation panic", 15)
+	l2 := mk("nil-safety/error-handling", "leak l2", "file descriptor leaked close missing on failure", 17)
+
+	snap := &ingest.Snapshot{Files: []ingest.File{{Path: "bug.go"}}}
+	ts, _ := newTriageState(snap)
+	var stats Stats
+	for _, cand := range []Candidate{p1, l1, p2, l2} {
+		if err := ts.process(ctx, st, &stats, cand); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+	}
+	primaries := ts.popReady()
+	if len(primaries) != 2 {
+		t.Fatalf("primaries = %d, want 2 (one per dissimilar group): %+v", len(primaries), primaries)
+	}
+	if stats.MergedCrossLens != 2 {
+		t.Errorf("MergedCrossLens = %d, want 2 (p2 into p1's cluster, l2 into l1's)", stats.MergedCrossLens)
+	}
+}
+
+// TestTriageState_NoMergeAcrossFilesOrBeyondWindow ports the batch
+// clustering's negative guarantees to the streaming layer: identical
+// descriptions must NOT merge across different files, nor beyond the line
+// window within one file.
+func TestTriageState_NoMergeAcrossFilesOrBeyondWindow(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openFixture(t)
+
+	mk := func(lens, file string, line int) Candidate {
+		return Candidate{
+			Lens: lens, File: file, Line: line, Title: "same bug " + file + " " + lens,
+			Description: "identical description tokens everywhere always", Severity: "high", Confidence: "high",
+		}
+	}
+	snap := &ingest.Snapshot{Files: []ingest.File{{Path: "bug.go"}, {Path: "clean.go"}}}
+	ts, _ := newTriageState(snap)
+	var stats Stats
+	for _, cand := range []Candidate{
+		mk("nil-safety/error-handling", "bug.go", 10),
+		mk("resource-leaks", "clean.go", 10),                   // other file: no merge
+		mk("concurrency", "bug.go", 10+DefaultMergeWindow*3+1), // same file, far: no merge
+	} {
+		if err := ts.process(ctx, st, &stats, cand); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+	}
+	if got := len(ts.popReady()); got != 3 {
+		t.Errorf("primaries = %d, want 3 (no cross-file or beyond-window merging)", got)
+	}
+	if stats.MergedCrossLens+stats.MergedWithinLens != 0 {
+		t.Errorf("merges = %d/%d, want none", stats.MergedWithinLens, stats.MergedCrossLens)
+	}
 }

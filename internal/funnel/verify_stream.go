@@ -74,7 +74,13 @@ func (f *Funnel) runVerifyAndPersist(
 			*allFindings = append(*allFindings, *suspected)
 			findingsMu.Unlock()
 		}
-		reg.SignalPersisted(c.Fingerprint, suspected != nil)
+		if late := reg.SignalPersisted(c.Fingerprint, suspected != nil); len(late) > 0 {
+			// Lenses staged between drain and persist (TOCTOU window): attach
+			// best-effort via the store path.
+			if err := f.store.AddCorroboratingLenses(ctx, c.Fingerprint, late); err != nil {
+				f.note(result, fmt.Sprintf("corroboration: late attach to suspected %q failed: %v", c.Title, err))
+			}
+		}
 		return
 	}
 
@@ -217,7 +223,13 @@ func (f *Funnel) runVerifyAndPersist(
 			*allFindings = append(*allFindings, *suspected)
 			findingsMu.Unlock()
 		}
-		reg.SignalPersisted(c.Fingerprint, suspected != nil)
+		if late := reg.SignalPersisted(c.Fingerprint, suspected != nil); len(late) > 0 {
+			// Lenses staged between drain and persist (TOCTOU window): attach
+			// best-effort via the store path.
+			if err := f.store.AddCorroboratingLenses(ctx, c.Fingerprint, late); err != nil {
+				f.note(result, fmt.Sprintf("corroboration: late attach to suspected %q failed: %v", c.Title, err))
+			}
+		}
 		return
 	}
 	if candKilled {
@@ -263,7 +275,15 @@ func (f *Funnel) runVerifyAndPersist(
 	findingsMu.Lock()
 	*allFindings = append(*allFindings, stored)
 	findingsMu.Unlock()
-	reg.SignalPersisted(c.Fingerprint, true)
+	// Atomically mark persisted and collect any lenses staged since the drain
+	// above — the TOCTOU window where a triage member arrived after
+	// DrainStagedLenses but before this signal. Without this, such a lens is
+	// stranded: staged (so triage skipped the store path) but never attached.
+	if late := reg.SignalPersisted(c.Fingerprint, true); len(late) > 0 {
+		if err := f.store.AddCorroboratingLenses(ctx, c.Fingerprint, late); err != nil {
+			f.note(result, fmt.Sprintf("corroboration: late attach to %q failed: %v", c.Title, err))
+		}
+	}
 }
 
 // persistOrphan persists a budget-orphaned candidate as a Tier 3 suspected

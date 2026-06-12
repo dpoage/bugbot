@@ -28,6 +28,12 @@ type registryEntry struct {
 	// BEFORE the primary's verification completed. The verify goroutine reads
 	// these at persist time to attach them to the finding.
 	stagedLenses []string
+	// attachedLate are lenses attached AFTER the finding persisted (the
+	// late-stage TOCTOU window or a triage member arriving post-persist). The
+	// store row is updated at attach time by whichever side attached; run()
+	// folds these into the IN-MEMORY finding after all consumers drain, so
+	// Result.Findings matches the store regardless of arrival timing.
+	attachedLate []string
 	// persisted is true once the verify goroutine calls SignalPersisted.
 	// Subsequent triage corroborating members use AddCorroboratingLenses instead
 	// of staging.
@@ -64,6 +70,9 @@ func (r *clusterRegistry) AddStagedLens(fingerprint, lens string) (staged bool, 
 		return false, true
 	}
 	if e.persisted {
+		// Post-persist arrival: the caller updates the store row; record the
+		// lens here too so run() can fold it into the in-memory finding.
+		e.attachedLate = append(e.attachedLate, lens)
 		return false, false
 	}
 	e.stagedLenses = append(e.stagedLenses, lens)
@@ -85,20 +94,51 @@ func (r *clusterRegistry) DrainStagedLenses(fingerprint string) []string {
 	return dedupLenses(lenses)
 }
 
-// SignalPersisted records that the primary's finding has been persisted (or that
-// the primary was killed/orphaned). Called from the verify goroutine.
-func (r *clusterRegistry) SignalPersisted(fingerprint string, persisted bool) {
+// SignalPersisted records that the primary's finding has been persisted (or
+// that the primary was killed/orphaned). Called from the verify goroutine.
+//
+// It returns any lenses staged AFTER the goroutine's DrainStagedLenses call —
+// closing the TOCTOU window where a triage member arrives between drain and
+// persist: AddStagedLens accepted the lens (state was not yet persisted), the
+// drain had already happened, and without this return the lens would be
+// stranded (never attached at persist, never store-updated by triage). The
+// caller must AddCorroboratingLenses any returned lenses. Returns nil on the
+// killed path: corroboration of a dead primary is moot.
+func (r *clusterRegistry) SignalPersisted(fingerprint string, persisted bool) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, ok := r.entries[fingerprint]
 	if !ok {
-		return
+		return nil
 	}
-	if persisted {
-		e.persisted = true
-	} else {
+	if !persisted {
 		e.killed = true
+		e.stagedLenses = nil
+		return nil
 	}
+	e.persisted = true
+	late := e.stagedLenses
+	e.stagedLenses = nil
+	if len(late) == 0 {
+		return nil
+	}
+	// These are store-updated by the caller AND folded into the in-memory
+	// finding by run() at drain time.
+	e.attachedLate = append(e.attachedLate, late...)
+	return dedupLenses(late)
+}
+
+// AttachedLenses returns the lenses attached to a primary's finding after it
+// persisted (deduplicated, sorted). Called by run() after all consumers have
+// drained, so no further attachments can race the read.
+func (r *clusterRegistry) AttachedLenses(fingerprint string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[fingerprint]
+	if !ok || len(e.attachedLate) == 0 {
+		return nil
+	}
+	return dedupLenses(e.attachedLate)
 }
 
 // IsPersistedOrKilled reports the current state of a primary. Called from the
@@ -126,10 +166,14 @@ type triageState struct {
 	inScope map[string]bool
 	seen    map[string]bool // fingerprints seen (deduped or suppressed)
 
-	// Incremental cluster state: maps clusterKey → cluster entry.
-	// Each entry holds the first primary (as indexedCand for similarity checking)
-	// and the fingerprint to look up in the shared registry.
-	clusters map[string]*internalCluster
+	// Incremental cluster state: maps clusterKey (location bucket) → the
+	// clusters anchored in that bucket. A SLICE per bucket is load-bearing:
+	// token-DISSIMILAR defects can share a location bucket (batch mergeClusters
+	// splits them by jaccard into separate clusters), and a single-cluster-per-
+	// bucket map lets each dissimilar arrival overwrite the bucket's pointer,
+	// orphaning the previous group so its later members become spurious
+	// primaries — reproduced by the recorded eval corpus.
+	clusters map[string][]*internalCluster
 
 	// registry is shared with verify goroutines for staged-lens coordination.
 	registry *clusterRegistry
@@ -141,10 +185,14 @@ type triageState struct {
 	survivorCount int
 }
 
-// internalCluster tracks one location-bucket cluster in the triage goroutine.
+// internalCluster tracks one location cluster in the triage goroutine.
+// members holds EVERY member (primary first): membership checks must run
+// against the full member list (any-member, matching batch clusterAccepts
+// semantics), not the primary alone — primary-only membership is strictly
+// weaker and breaks transitive chains (A~B, B~C, A≁C must form ONE cluster).
 type internalCluster struct {
-	primary     indexedCand // precomputed tokens for similarity guard
-	fingerprint string      // primary's fingerprint (cluster registry key)
+	members     []indexedCand // all members, primary first
+	fingerprint string        // primary's fingerprint (cluster registry key)
 }
 
 // newTriageState creates a triageState for one run.
@@ -157,7 +205,7 @@ func newTriageState(snap *ingest.Snapshot) (*triageState, *clusterRegistry) {
 	return &triageState{
 		inScope:  inScope,
 		seen:     make(map[string]bool),
-		clusters: make(map[string]*internalCluster),
+		clusters: make(map[string][]*internalCluster),
 		registry: reg,
 	}, reg
 }
@@ -198,31 +246,61 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 	ts.seen[fp] = true
 	c.Fingerprint = fp
 
-	// Step 5: incremental clustering.
+	// Step 5: incremental clustering. Membership is ANY-MEMBER: the candidate
+	// joins a cluster if it is window-near AND token-similar to any existing
+	// member (clusterAccepts — the same rule the batch algorithm used), which
+	// preserves transitive chains. Checking the primary alone would be strictly
+	// weaker and let chain members escape as extra primaries (extra verify
+	// panels, extra false positives — reproduced by the eval corpus).
 	ic := indexedCand{c: c, pos: ts.survivorCount, tok: descTokens(c.Description)}
+	seenClusters := make(map[*internalCluster]bool, 4)
 	for _, key := range clusterKeysForCandidate(c) {
-		if cluster, ok := ts.clusters[key]; ok {
-			if abs(cluster.primary.c.Line-c.Line) <= DefaultMergeWindow &&
-				jaccard(cluster.primary.tok, ic.tok) >= mergeSimilarityThreshold {
-				// This candidate is a member of an existing cluster.
+		for _, cluster := range ts.clusters[key] {
+			if seenClusters[cluster] {
+				continue
+			}
+			seenClusters[cluster] = true
+			if clusterAccepts(cluster.members, ic, DefaultMergeWindow) {
+				// Member of an existing cluster: record corroboration, extend
+				// the member list so later chain links can bridge through this
+				// member, and alias this member's bucket to the cluster so the
+				// chain stays discoverable as it spans buckets.
 				ts.handleMember(ctx, st, cluster, c, stats)
+				cluster.members = append(cluster.members, ic)
+				ts.addClusterToBucket(canonicalClusterKey(c), cluster)
 				return nil
 			}
 		}
 	}
 
-	// New cluster: this candidate is the primary.
-	key := canonicalClusterKey(c)
-	ts.clusters[key] = &internalCluster{primary: ic, fingerprint: fp}
+	// New cluster: this candidate is the primary. A candidate bridging two
+	// existing clusters joins the first match above; full cluster MERGING is
+	// not attempted — both primaries were already forwarded, and forwarding is
+	// irreversible (documented relaxation; the batch algorithm's closure would
+	// have produced one cluster only if the bridge arrived before forwarding).
+	nc := &internalCluster{members: []indexedCand{ic}, fingerprint: fp}
+	ts.addClusterToBucket(canonicalClusterKey(c), nc)
 	ts.registry.Register(fp)
 	ts.ready = append(ts.ready, c)
 	ts.survivorCount++
 	return nil
 }
 
+// addClusterToBucket registers cluster under the bucket key unless already
+// present (a cluster may be aliased into several buckets as its members span
+// windows; buckets may hold several token-dissimilar clusters).
+func (ts *triageState) addClusterToBucket(key string, cluster *internalCluster) {
+	for _, existing := range ts.clusters[key] {
+		if existing == cluster {
+			return
+		}
+	}
+	ts.clusters[key] = append(ts.clusters[key], cluster)
+}
+
 // handleMember handles a corroborating member of an existing cluster.
 func (ts *triageState) handleMember(ctx context.Context, st *store.Store, cluster *internalCluster, c Candidate, stats *Stats) {
-	if strings.EqualFold(c.Lens, cluster.primary.c.Lens) {
+	if strings.EqualFold(c.Lens, cluster.members[0].c.Lens) {
 		// Same-lens merge: within-lens, no new corroborating lens.
 		stats.MergedWithinLens++
 		return
