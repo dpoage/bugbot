@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/ingest"
@@ -287,28 +289,49 @@ func (f *Funnel) snapshot(ctx context.Context) (*ingest.Snapshot, error) {
 }
 
 // run is the shared staged core. It opens a scan run, wires per-role spend
-// recording into the clients, executes stages A-D, finalizes the scan run with
-// stats, and returns the ranked Result. targets is the (already scoped) list of
-// repo-relative files to audit.
+// recording into the clients, runs the streaming pipeline, finalizes the scan
+// run with stats, and returns the ranked Result. targets is the (already
+// scoped) list of repo-relative files to audit.
 //
 // fps is the per-file fingerprint map computed by the caller (Sweep already
 // has it; Targeted may pass nil since Targeted does not touch coverage).
 // touchCoverage enables per-unit coverage stamping (true for sweeps, false for
 // targeted). When true, the hypothesize goroutines call TouchScanCoverage for
 // each finderOK unit immediately on completion so coverage is durable across
-// interruptions. The old run-end batch call is gone: coverage is now incremental.
+// interruptions.
+//
+// # Streaming Topology
+//
+// Rather than hard barriers (every finder → batch triage → batch verify →
+// batch persist), candidates now flow through a live pipeline:
+//
+//  1. hypothesize emits candidates one at a time via candCh as each unit
+//     completes. Hypothesize blocks until all units finish; run() closes
+//     candCh after hypothesize returns.
+//  2. A single triage consumer goroutine receives from candCh, applies
+//     steps 1-4 (confidence/scope/fingerprint/suppression) per candidate,
+//     and performs INCREMENTAL CLUSTERING: the first member of a cluster
+//     becomes the primary and is forwarded to verify immediately; later
+//     members are staged as corroboration. Triage drains candCh and closes
+//     verCh when done.
+//  3. A verify dispatcher spawns one goroutine per forwarded primary. Each
+//     goroutine acquires a HIGH-priority slot, runs the refuter panel +
+//     arbiter (extracted into verifyCandidateBody), and immediately persists
+//     survivors (and orphans). Results are collected in a findings slice.
+//  4. persist happens immediately on panel completion inside the verify goroutine.
+//
+// Staged corroboration: when a later cluster member arrives AFTER its primary
+// has already been persisted, AddCorroboratingLenses updates the stored finding.
 //
 // # Interrupt-safe finalization
 //
 // run() seals the scan_runs row (FinishScanRun) on EVERY exit path — normal
 // completion, internal error, or context cancellation — using a deferred
-// finalize step. This prevents dangling never-finalized rows when a scan is
-// killed or cancelled.
+// finalize step. ALREADY-PERSISTED findings survive interruption (durable).
 //
 // The finalize write uses a short detached context (context.WithTimeout over
 // context.Background()) rather than the run's ctx, because the run ctx is
-// already cancelled on the interruption path. The run ctx must not be used for
-// the finalize write, or the DB call would fail immediately.
+// already cancelled on the interruption path.
 func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snapshot, targets []string, fps map[string]string, touchCoverage bool) (*Result, error) {
 	scanRunID, err := f.store.BeginScanRun(ctx, kind, snap.Commit)
 	if err != nil {
@@ -321,8 +344,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	})
 
 	// Per-run spend recorder, wired into both role clients so every completion is
-	// ledgered to this scan run and counted toward the budget. The onRecord hook
-	// emits a cumulative spend tick so live renderers can show a running total.
+	// ledgered to this scan run and counted toward the budget.
 	rec := &spendRecorder{ctx: ctx, store: f.store, scanRunID: scanRunID}
 	if sink != nil {
 		rec.onRecord = func(in, out, cached int64) {
@@ -332,8 +354,8 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			})
 		}
 	}
-	finder := llm.WithRecorder(f.clients.Finder, rec, "finder", "", "")
-	verifier := llm.WithRecorder(f.clients.Verifier, rec, "verifier", "", "")
+	finderClient := llm.WithRecorder(f.clients.Finder, rec, "finder", "", "")
+	verifierClient := llm.WithRecorder(f.clients.Verifier, rec, "verifier", "", "")
 
 	cacheWeight := f.opts.CacheReadBudgetWeight
 	if cacheWeight == 0 {
@@ -344,26 +366,9 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	result := &Result{ScanRunID: scanRunID, Commit: snap.Commit}
 
 	// Interrupt-safe finalization: seal the scan_runs row on every exit path.
-	// Exactly-once comes from the finalized boolean plus the fact that every
-	// exit path runs sequentially in this one goroutine (the success path sets
-	// finalized before calling; the deferred path checks it) — there is no
-	// concurrent re-entry to guard against.
-	//
-	// The detached context (5 s timeout over context.Background()) is critical:
-	// on the cancellation path the run ctx is already dead, so any DB write on
-	// it would fail immediately and leave the row dangling. We need a fresh
-	// context that is still alive to write the seal. 5 s is generous for a
-	// single SQLite UPDATE.
-	//
-	// The error return matters on the SUCCESS path only: a clean run whose
-	// seal-write fails must surface that failure (pre-existing behavior — a
-	// dangling unfinalized row is the disease this code exists to cure). The
-	// deferred abnormal-path caller ignores it instead: a finalize failure
-	// there must not mask the original error or panic.
 	var finalize = func(s *Stats) error {
 		statsJSON, merr := json.Marshal(s)
 		if merr != nil {
-			// JSON marshal of our own struct should never fail; log-and-continue.
 			statsJSON = []byte(`{"aborted":true}`)
 		}
 		fCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -377,27 +382,13 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	finalized := false
 	defer func() {
 		if !finalized {
-			// Abnormal exit (panic recovery is not our job; this handles error/cancel).
-			_ = finalize(&result.Stats) // best-effort: must not mask the original error/panic
+			_ = finalize(&result.Stats)
 		}
 	}()
 
-	// Derive the finder/verifier persona from the snapshot's dominant language
-	// mix so a non-Go repo is audited by an appropriately-described engineer
-	// rather than a hardcoded "senior Go engineer". Computed once per run and
-	// threaded into the per-unit prompt construction in hypothesize/verify.
 	persona := ingest.Persona(snap)
-	// The dominant-language mix also drives the per-run lens priority (effective
-	// yields are per-language; see lensYields) and therefore which lenses budget
-	// degradation sheds on this repo.
 	langs := ingest.DominantLanguages(snap)
 
-	// Fingerprints anchor every persisted finding to the exact file content it
-	// was found in, so the daemon can later detect when the code changed.
-	// NOTE: run() no longer calls Fingerprints here; the caller (Sweep) already
-	// computed fps and passes it in. Targeted passes nil (it does not need
-	// fingerprints for coverage). persist/persistSuspected still need fps for
-	// finding anchoring, so we compute them from snap here when nil (targeted path).
 	if fps == nil {
 		var fpsErr error
 		fps, fpsErr = f.repo.Fingerprints(ctx, snap)
@@ -407,92 +398,287 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		}
 	}
 
-	// Stage A — Hypothesize.
-	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageHypothesize})
-	candidates, err := f.hypothesize(ctx, scanRunID, finder, persona, kind, f.opts.ChangeContext, langs, targets, budget, result, fps, touchCoverage)
-	if err != nil {
-		if ctx.Err() != nil {
-			result.Stats.Interrupted = true
-			return nil, ctx.Err()
-		}
-		result.Stats.Aborted = true
-		return nil, err
-	}
-	result.Stats.Hypothesized = len(candidates)
-	progress.Emit(sink, progress.Event{
-		Kind: progress.KindStageFinished, Stage: progress.StageHypothesize,
-		Counts: &progress.Counts{
-			Hypothesized:   len(candidates),
-			FinderFailures: result.Stats.FinderFailures,
-		},
-	})
+	// candCh is the channel from hypothesize → triage. A buffer of 64 lets
+	// finder units emit without blocking on a slow triage consumer, while
+	// bounding memory to ~64 Candidates.
+	candCh := make(chan Candidate, 64)
 
-	// Stage B — Triage.
-	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageTriage})
-	survivors, err := f.triage(ctx, candidates, snap, &result.Stats)
-	if err != nil {
+	// verCh is the channel from triage → verify dispatcher.
+	verCh := make(chan Candidate, 64)
+
+	// clusterReg is shared between triage (which registers primaries and stages
+	// corroborating lenses) and verify goroutines (which drain staged lenses and
+	// signal persistence).
+	ts, clusterReg := newTriageState(snap)
+
+	// findingsMu protects allFindings, verifyKilled, and the verifier stats
+	// fields on result.Stats that the concurrent verify goroutines update.
+	var (
+		findingsMu   sync.Mutex
+		allFindings  []store.Finding
+		verifyWg     sync.WaitGroup
+		verifyKilled int
+		verifyErr    error
+		verifyErrMu  sync.Mutex
+	)
+	setVerifyErr := func(e error) {
+		verifyErrMu.Lock()
+		if verifyErr == nil {
+			verifyErr = e
+		}
+		verifyErrMu.Unlock()
+	}
+
+	// Shared sandbox counters across all verify goroutines.
+	var sbExecs atomic.Int32
+	var sbMillis atomic.Int64
+
+	// triageErr captures a fatal triage-consumer error (store I/O / ctx cancel).
+	var triageErr error
+
+	// hypothesizeErr captures a fatal hypothesize error.
+	var hypothesizeErr error
+
+	// ---- Stage A: Hypothesize ----
+	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageHypothesize})
+
+	// Launch hypothesize in a goroutine so the triage consumer can run
+	// concurrently. The emit callback sends to candCh.
+	// candCh is closed exactly once from this goroutine's exit path.
+	var hypothesizeWg sync.WaitGroup
+	hypothesizeWg.Add(1)
+	var hypothesizedCount int
+	go func() {
+		defer hypothesizeWg.Done()
+		emit := func(c Candidate) {
+			select {
+			case candCh <- c:
+			case <-ctx.Done():
+				// Drop candidate on cancellation; triage will also exit.
+			}
+		}
+		n, err := f.hypothesize(ctx, scanRunID, finderClient, persona, kind,
+			f.opts.ChangeContext, langs, targets, budget, result, fps, touchCoverage, emit)
+		hypothesizedCount = n
+		hypothesizeErr = err
+		close(candCh)
+		// Emit StageFinished(hypothesize) at FINDER DRAIN time, not after the
+		// whole pipeline settles: the status snapshot resets LiveCandidates on
+		// this event, and with verify running concurrently the live finder
+		// counter would otherwise never reset until end-of-run. FinderFailures
+		// was folded into result.Stats under the stage's own mutex before
+		// hypothesize returned, so the read here is ordered.
+		if err == nil {
+			progress.Emit(sink, progress.Event{
+				Kind: progress.KindStageFinished, Stage: progress.StageHypothesize,
+				Counts: &progress.Counts{
+					Hypothesized:   n,
+					FinderFailures: result.Stats.FinderFailures,
+				},
+			})
+		}
+	}()
+
+	// ---- Stage B: Triage (streaming consumer) ----
+	triageStarted := false
+	var triageStartOnce sync.Once
+	emitTriageStart := func() {
+		triageStartOnce.Do(func() {
+			progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageTriage})
+			triageStarted = true
+		})
+	}
+
+	var triageWg sync.WaitGroup
+	triageWg.Add(1)
+	var triagedCount int
+
+	go func() {
+		defer triageWg.Done()
+		defer close(verCh)
+
+		for c := range candCh {
+			emitTriageStart()
+			if err := ts.process(ctx, f.store, &result.Stats, c); err != nil {
+				triageErr = err
+				for range candCh { // drain so hypothesize emit doesn't block
+				}
+				return
+			}
+			for _, primary := range ts.popReady() {
+				select {
+				case verCh <- primary:
+				case <-ctx.Done():
+					for range candCh {
+					}
+					return
+				}
+			}
+		}
+		// candCh closed: hypothesize done. flush() is a no-op in streaming model.
+		ts.flush()
+		for _, primary := range ts.popReady() {
+			select {
+			case verCh <- primary:
+			case <-ctx.Done():
+			}
+		}
+		triagedCount = ts.survivorCount
+	}()
+
+	// ---- Stage C + D: Verify + immediate persist (dispatcher) ----
+	// Spawn a goroutine per forwarded primary. HIGH-priority slot acquisition
+	// means a candidate arriving mid-discovery can start verifying immediately.
+	var verifyStarted atomic.Bool
+	var verifyStartOnce sync.Once
+
+	var candIdx int
+	for primary := range verCh {
+		verifyStartOnce.Do(func() {
+			progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageVerify})
+			verifyStarted.Store(true)
+		})
+
+		c := primary
+		idx := candIdx
+		candIdx++
+		verifyWg.Add(1)
+		go func() {
+			defer verifyWg.Done()
+			f.runVerifyAndPersist(ctx, verifierClient, persona, c, idx,
+				snap.Commit, fps, budget, result, clusterReg,
+				&findingsMu, &allFindings, &verifyKilled,
+				&sbExecs, &sbMillis, setVerifyErr)
+		}()
+	}
+
+	// Wait for all verify goroutines to finish.
+	verifyWg.Wait()
+
+	// Wait for triage goroutine to finish (it closed verCh which unblocked us).
+	triageWg.Wait()
+
+	// Wait for hypothesize goroutine to finish.
+	hypothesizeWg.Wait()
+
+	// --- Error classification ---
+	// Check errors in pipeline order: hypothesize → triage → verify.
+	// ctx cancellation takes precedence (Interrupted); other errors are Aborted.
+	if hypothesizeErr != nil {
 		if ctx.Err() != nil {
 			result.Stats.Interrupted = true
 			return nil, ctx.Err()
 		}
 		result.Stats.Aborted = true
-		return nil, err
+		return nil, hypothesizeErr
 	}
-	result.Stats.Triaged = len(survivors)
+	if triageErr != nil {
+		if ctx.Err() != nil {
+			result.Stats.Interrupted = true
+			return nil, ctx.Err()
+		}
+		result.Stats.Aborted = true
+		return nil, triageErr
+	}
+	verifyErrMu.Lock()
+	capturedVerifyErr := verifyErr
+	verifyErrMu.Unlock()
+	if capturedVerifyErr != nil {
+		if ctx.Err() != nil {
+			result.Stats.Interrupted = true
+			return nil, ctx.Err()
+		}
+		result.Stats.Aborted = true
+		return nil, capturedVerifyErr
+	}
+	// ctx cancelled but no stage error: we completed all stages despite cancellation
+	// (all goroutines drained), but must still classify as Interrupted.
+	if ctx.Err() != nil {
+		result.Stats.Interrupted = true
+		return nil, ctx.Err()
+	}
+
+	// --- Stats fold ---
+	result.Stats.Hypothesized = hypothesizedCount
+	if !triageStarted {
+		// Emit triage start/finish even if no candidates arrived (zero-candidate run).
+		progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageTriage})
+	}
+	result.Stats.Triaged = triagedCount
 	progress.Emit(sink, progress.Event{
 		Kind: progress.KindStageFinished, Stage: progress.StageTriage,
-		Counts: &progress.Counts{Hypothesized: len(candidates), Triaged: len(survivors)},
+		Counts: &progress.Counts{Hypothesized: hypothesizedCount, Triaged: triagedCount},
 	})
-
-	// Stage C — Verify.
-	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageVerify})
-	verified, killed, orphaned, err := f.verify(ctx, verifier, persona, survivors, budget, result)
-	if err != nil {
-		if ctx.Err() != nil {
-			result.Stats.Interrupted = true
-			return nil, ctx.Err()
-		}
-		result.Stats.Aborted = true
-		return nil, err
+	if !verifyStarted.Load() {
+		progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageVerify})
 	}
-	result.Stats.Verified = len(verified)
+
+	findingsMu.Lock()
+	findings := allFindings
+	killed := verifyKilled
+	// result.Stats.VerifierRuns / Failures / ArbiterRuns / Kills / Failures were
+	// folded under findingsMu by each verify goroutine.
+	findingsMu.Unlock()
+
+	// Fold late corroboration into the IN-MEMORY findings. A corroborating
+	// lens that arrived after its primary persisted was written to the store
+	// row at attach time (by triage or the verify goroutine's late path), but
+	// the copy captured in allFindings predates it. All consumers have drained
+	// here, so the registry read cannot race. This keeps Result.Findings
+	// equal to the store regardless of arrival timing — the cluster-level
+	// equivalence invariant.
+	for i := range findings {
+		late := clusterReg.AttachedLenses(findings[i].Fingerprint)
+		if len(late) == 0 {
+			continue
+		}
+		merged := dedupLenses(append(findings[i].CorroboratingLenses, late...))
+		added := merged[:0:0]
+		for _, l := range merged {
+			already := false
+			for _, have := range findings[i].CorroboratingLenses {
+				if have == l {
+					already = true
+					break
+				}
+			}
+			if !already {
+				added = append(added, l)
+			}
+		}
+		findings[i].CorroboratingLenses = merged
+		findings[i].Reasoning = appendCorroboration(findings[i].Reasoning, added)
+	}
+
+	result.Stats.SandboxExecs = int(sbExecs.Load())
+	result.Stats.SandboxExecMillis = sbMillis.Load()
+
+	result.Stats.Verified = 0
+	for _, fi := range findings {
+		if fi.Tier == tierVerified {
+			result.Stats.Verified++
+		}
+	}
 	result.Stats.Killed = killed
+	result.Stats.Suspected = 0
+	for _, fi := range findings {
+		if fi.Tier == tierSuspected {
+			result.Stats.Suspected++
+		}
+	}
+
 	progress.Emit(sink, progress.Event{
 		Kind: progress.KindStageFinished, Stage: progress.StageVerify,
 		Counts: &progress.Counts{
-			Hypothesized: len(candidates), Triaged: len(survivors),
-			Verified: len(verified), Killed: killed,
+			Hypothesized: hypothesizedCount, Triaged: triagedCount,
+			Verified: result.Stats.Verified, Killed: killed,
 		},
 	})
-
-	// Stage D — Persist + rank.
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StagePersist})
-	findings, err := f.persist(ctx, verified, snap.Commit, fps)
-	if err != nil {
-		if ctx.Err() != nil {
-			result.Stats.Interrupted = true
-			return nil, ctx.Err()
-		}
-		result.Stats.Aborted = true
-		return nil, err
-	}
-	// Budget-orphaned candidates (verification skipped or cut short at the hard
-	// stop) persist as Tier 3 suspected so they are not silently dropped: a human
-	// can review them and re-run verification with more budget.
-	suspected, err := f.persistSuspected(ctx, orphaned, snap.Commit, fps)
-	if err != nil {
-		if ctx.Err() != nil {
-			result.Stats.Interrupted = true
-			return nil, ctx.Err()
-		}
-		result.Stats.Aborted = true
-		return nil, err
-	}
-	findings = append(findings, suspected...)
-	result.Stats.Suspected = len(suspected)
+	progress.Emit(sink, progress.Event{Kind: progress.KindStageFinished, Stage: progress.StagePersist})
+
 	sortFindings(findings)
 	result.Findings = findings
-	progress.Emit(sink, progress.Event{Kind: progress.KindStageFinished, Stage: progress.StagePersist})
 
 	result.Degraded = budget.degraded.Load()
 	result.Stopped = budget.stopped.Load()
@@ -513,20 +699,11 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		CacheReadTokens: cacheRead, CacheCreationTokens: cacheCreated,
 	})
 
-	// Normal-path finalize: seal the scan run row. Mark finalized so the deferred
-	// finalize step does not double-call (which would be harmless but wasteful).
-	// A success-path seal failure is a real error: returning success with a
-	// dangling unfinalized row is exactly the state this seal exists to prevent.
 	finalized = true
 	if err := finalize(&result.Stats); err != nil {
 		return nil, fmt.Errorf("funnel: finish scan run: %w", err)
 	}
 
-	// Prune agent_unit rows for old scan runs. Best-effort: a prune failure is
-	// never fatal to the scan result. keepRuns is defined in observability.go.
-	// Skipped on the interrupted/aborted paths (handled above via early return)
-	// because those paths use a dead ctx and PruneAgentUnits would fail
-	// immediately; the prune is cosmetic and will succeed on the next clean run.
 	if _, err := f.store.PruneAgentUnits(ctx, keepRuns); err != nil {
 		f.note(result, fmt.Sprintf("observability: PruneAgentUnits failed: %v", err))
 	}
