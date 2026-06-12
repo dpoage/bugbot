@@ -108,22 +108,25 @@ func (s *Store) ListAgentUnits(ctx context.Context, scanRunID string) ([]AgentUn
 }
 
 // PruneAgentUnits deletes agent_unit rows whose scan_run_id is NOT among the
-// keepRuns most recent scan_runs (ordered by started_at then id). It returns
-// the number of rows deleted. Callers should treat a non-nil error as
-// best-effort: log it and continue rather than aborting the scan.
+// keepRuns most recent scan_runs. It returns the number of rows deleted.
+// Callers should treat a non-nil error as best-effort: log it and continue
+// rather than aborting the scan.
 func (s *Store) PruneAgentUnits(ctx context.Context, keepRuns int) (int64, error) {
 	if keepRuns <= 0 {
 		keepRuns = 1
 	}
 	// Identify the set of scan_run_ids to KEEP (the keepRuns most recent runs).
-	// We keep by started_at DESC, id DESC so the ordering is stable when two
-	// runs share the same started_at. Do NOT order by rowid (not guaranteed to
-	// align with started_at for backfilled rows).
+	// Recency is computed from the ULID-style id (id.go: later IDs sort after
+	// earlier ones), NOT from started_at: RFC3339Nano TEXT does not sort
+	// lexicographically across the second boundary ("...:17Z" > "...:17.5Z"
+	// because 'Z' > '.'), so ORDER BY started_at silently keeps a wrong run
+	// whenever timestamps straddle a whole second — see the caution on
+	// filestate.go's epochSentinel.
 	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM agent_units
 		WHERE scan_run_id NOT IN (
 			SELECT id FROM scan_runs
-			ORDER BY started_at DESC, id DESC
+			ORDER BY id DESC
 			LIMIT ?
 		)`, keepRuns,
 	)

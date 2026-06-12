@@ -307,7 +307,9 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			// per-unit leads counter: folded into leadsPostedAtomic (so Stats.LeadsPosted
 			// stays unchanged) and also written into the unit row. This avoids relying on
 			// the global atomic for per-unit attribution (trap 4 in bugbot-mi5.10).
-			var unitLeadsPosted int32
+			// unitLeadsPosted is mutated only inside this unit's own goroutine (the
+			// runner executes tool calls sequentially), so a plain int is safe.
+			var unitLeadsPosted int
 
 			// Build the tool set for this finder: read-only tools plus a per-unit
 			// post_lead instance that carries this lens as the poster. The onPost
@@ -369,12 +371,20 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				cacheRead = outcome.Usage.CacheReadInputTokens
 			}
 
+			// Fold stats under the lock; the agent_units row write happens AFTER
+			// unlock so a sqlite insert never serializes sibling completions —
+			// the skipped paths already record outside the lock, and this keeps
+			// the discipline uniform. The runner-error path records no row: the
+			// whole scan aborts on firstErr, so a partial unit table for an
+			// aborted run would suggest precision it does not have.
+			recordStatus := ""
+			var candCount int64
 			mu.Lock()
-			defer mu.Unlock()
 			if err != nil {
 				if firstErr == nil {
 					firstErr = err
 				}
+				mu.Unlock()
 				return
 			}
 			finderRuns++
@@ -386,8 +396,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				progress.Emit(f.opts.Progress, progress.Event{
 					Kind: progress.KindLensFailed, Role: progress.RoleFinder, Label: label, Message: msg,
 				})
-				f.recordFinderUnitWithTime(ctx, scanRunID, u, unitIdx, "parse_failed", startedAt, finishedAt, inTokens, outTokens, cacheRead, 0, int(unitLeadsPosted), result)
-				return
+				recordStatus = "parse_failed"
 			case finderBudgetStopped:
 				// A run truncated by the shared budget pool (or its own token
 				// budget) whose partial output does not parse is a budget stop, NOT
@@ -397,20 +406,22 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				finderBudgetCut++
 				msg := fmt.Sprintf("finder lens %q stopped by budget on %d file(s) before emitting parseable output — partial coverage", label, len(u.files))
 				f.note(result, msg)
-				f.recordFinderUnitWithTime(ctx, scanRunID, u, unitIdx, "budget_stopped", startedAt, finishedAt, inTokens, outTokens, cacheRead, 0, int(unitLeadsPosted), result)
-				return
+				recordStatus = "budget_stopped"
+			default: // finderOK
+				recordStatus = "ok"
+				candCount = int64(len(cands))
+				collected = append(collected, cands...)
+				// Record coverage under the existing mu so covered set stays
+				// consistent with finderRuns/finderFailed collected in this same
+				// lock. The diff-intent custom unit has files == nil and
+				// contributes nothing; a file appearing in multiple units
+				// (multiple lenses × chunks) is deduplicated by the map.
+				for _, file := range u.files {
+					coveredSet[file] = true
+				}
 			}
-			// finderOK: record the row with candidates count.
-			f.recordFinderUnitWithTime(ctx, scanRunID, u, unitIdx, "ok", startedAt, finishedAt, inTokens, outTokens, cacheRead, int64(len(cands)), int(unitLeadsPosted), result)
-			collected = append(collected, cands...)
-			// Record coverage under the existing mu so covered set stays
-			// consistent with finderRuns/finderFailed collected in this same lock.
-			// The diff-intent custom unit has files == nil and contributes nothing;
-			// a file appearing in multiple units (multiple lenses × chunks) is
-			// deduplicated by the map.
-			for _, file := range u.files {
-				coveredSet[file] = true
-			}
+			mu.Unlock()
+			f.recordFinderUnitWithTime(ctx, scanRunID, u, unitIdx, recordStatus, startedAt, finishedAt, inTokens, outTokens, cacheRead, candCount, unitLeadsPosted, result)
 		}()
 	}
 

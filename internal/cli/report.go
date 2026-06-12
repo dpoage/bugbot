@@ -294,7 +294,9 @@ skipped_* status. The footer shows coverage stats.`,
 			defer func() { _ = st.Close() }()
 
 			scanRunID := args[0]
-			// Allow unambiguous short prefixes (same UX as report show).
+			// Allow a short prefix of the LATEST run id only (a convenience for "the
+			// run that just finished"); prefixes of older runs are not resolved —
+			// pass the full id for those.
 			if len(scanRunID) < 32 {
 				run, err := st.LatestScanRun(ctx)
 				if err == nil && strings.HasPrefix(run.ID, scanRunID) {
@@ -331,10 +333,15 @@ skipped_* status. The footer shows coverage stats.`,
 			}
 			_ = tw.Flush()
 
-			// Footer: totals, skip counts, coverage fraction.
+			// Footer: totals, skip counts, coverage fraction. Coverage is a
+			// FINDER metric: the denominator is files targeted by finder units
+			// only (verifier/reproducer rows carry the candidate's file, which
+			// would inflate the denominator and make the fraction conflate two
+			// different populations); the numerator is files some finderOK unit
+			// actually covered.
 			var totalUnits, skippedHard, skippedDeg, totalTokens int64
-			distinctFiles := make(map[string]bool)
-			allFiles := make(map[string]bool)
+			coveredFiles := make(map[string]bool)
+			finderFiles := make(map[string]bool)
 			for _, u := range units {
 				totalUnits++
 				totalTokens += u.InputTokens + u.OutputTokens
@@ -344,15 +351,18 @@ skipped_* status. The footer shows coverage stats.`,
 				case "skipped_degraded":
 					skippedDeg++
 				}
+				if u.Role != "finder" {
+					continue
+				}
 				for _, f := range u.Files {
-					allFiles[f] = true
+					finderFiles[f] = true
 					if u.Status == "ok" {
-						distinctFiles[f] = true
+						coveredFiles[f] = true
 					}
 				}
 			}
 			_, _ = fmt.Fprintf(out, "\ntotal=%d skipped_hard=%d skipped_degraded=%d tokens=%d covered=%d/%d\n",
-				totalUnits, skippedHard, skippedDeg, totalTokens, len(distinctFiles), len(allFiles))
+				totalUnits, skippedHard, skippedDeg, totalTokens, len(coveredFiles), len(finderFiles))
 			return nil
 		},
 	}

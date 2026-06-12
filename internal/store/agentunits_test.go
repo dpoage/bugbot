@@ -263,3 +263,57 @@ func TestAgentUnits_Prune(t *testing.T) {
 		}
 	}
 }
+
+// TestAgentUnits_Prune_SubSecondBoundary is the regression test for the
+// RFC3339Nano lexicographic-ordering trap: a run started at a fractional
+// second ("...17.5Z") sorts lexicographically BEFORE a strictly older run at
+// the whole second ("...17Z", because 'Z' > '.'), so a prune that computes
+// recency via ORDER BY started_at silently keeps the wrong run. Recency must
+// come from the ULID-style id instead.
+func TestAgentUnits_Prune_SubSecondBoundary(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	// Pin nowUTC to a settable clock so each run's id AND started_at derive
+	// from the same instant.
+	current := time.Date(2025, 1, 1, 0, 0, 17, 0, time.UTC)
+	orig := nowUTC
+	nowUTC = func() time.Time { return current }
+	defer func() { nowUTC = orig }()
+
+	begin := func(sha string) string {
+		t.Helper()
+		id, err := st.BeginScanRun(ctx, ScanOneshot, sha)
+		if err != nil {
+			t.Fatalf("BeginScanRun %s: %v", sha, err)
+		}
+		if err := st.AddAgentUnit(ctx, makeUnit(id, "finder", "nil-safety/error-handling", "sweep-wide", "ok", 0)); err != nil {
+			t.Fatalf("AddAgentUnit %s: %v", sha, err)
+		}
+		return id
+	}
+
+	// Creation order: A at :17.0 ("...17Z"), B at :17.5 ("...17.5Z"),
+	// C at :18.0. Lexicographically "...17Z" > "...17.5Z", so a
+	// started_at-ordered prune with keep=2 would keep {C, A} and wrongly
+	// delete B — the truly 2nd-most-recent run.
+	runA := begin("shaA")
+	current = current.Add(500 * time.Millisecond)
+	runB := begin("shaB")
+	current = current.Add(500 * time.Millisecond)
+	runC := begin("shaC")
+
+	if _, err := st.PruneAgentUnits(ctx, 2); err != nil {
+		t.Fatalf("PruneAgentUnits: %v", err)
+	}
+
+	for id, wantRows := range map[string]int{runA: 0, runB: 1, runC: 1} {
+		units, err := st.ListAgentUnits(ctx, id)
+		if err != nil {
+			t.Fatalf("ListAgentUnits %s: %v", id, err)
+		}
+		if len(units) != wantRows {
+			t.Errorf("run %s: %d rows after prune, want %d (sub-second boundary mis-sort)", id, len(units), wantRows)
+		}
+	}
+}
