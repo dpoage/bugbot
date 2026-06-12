@@ -239,6 +239,9 @@ func (f *Funnel) verify(ctx context.Context, verifier llm.Client, persona string
 				if candKilled {
 					killed++
 					recordStatus = "killed"
+					progress.Emit(sink, progress.Event{
+						Kind: progress.KindFindingKilled, Title: c.Title, File: c.File, Line: c.Line,
+					})
 				} else {
 					progress.Emit(sink, progress.Event{
 						Kind: progress.KindFindingVerified, Title: c.Title, File: c.File, Line: c.Line,

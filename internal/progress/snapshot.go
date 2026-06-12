@@ -40,6 +40,22 @@ type Status struct {
 	// Counts is the running per-stage accounting.
 	Counts Counts `json:"counts"`
 
+	// Live counters tick per-event during an active stage so status shows
+	// progress before the stage-finished event settles the final values.
+	//
+	//   LiveCandidates — incremented by each finder KindAgentFinished.Candidates
+	//     during the hypothesize stage; reset to zero on KindStageFinished for
+	//     hypothesize (the final Counts.Hypothesized takes over).
+	//   LiveVerified / LiveKilled — incremented by KindFindingVerified /
+	//     KindFindingKilled during the verify stage; reset to zero on
+	//     KindStageFinished for verify.
+	//
+	// After stage-finish the live fields are zero and the Counts fields carry the
+	// authoritative final values, so a reader always has a consistent picture.
+	LiveCandidates int `json:"live_candidates,omitempty"`
+	LiveVerified   int `json:"live_verified,omitempty"`
+	LiveKilled     int `json:"live_killed,omitempty"`
+
 	// SpendInput / SpendOutput are cumulative tokens for the current run.
 	// SpendInput includes cached tokens; SpendCacheRead is the subset served
 	// from the provider's prompt cache (billed at a steep discount).
@@ -150,6 +166,14 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 	case KindScanStarted, KindCycleStarted:
 		s.st.ScanKind = ev.ScanKind
 		s.st.Commit = ev.Commit
+		// Reset live counters at scan start, not only at stage finish: an
+		// aborted scan returns without emitting StageFinished, and the daemon
+		// reuses one SnapshotSink across cycles — without this reset the next
+		// cycle's status would show the dead run's "candidates so far" until
+		// its own stage completes.
+		s.st.LiveCandidates = 0
+		s.st.LiveVerified = 0
+		s.st.LiveKilled = 0
 		s.st.LastEvent = "started " + ev.ScanKind
 	case KindStageStarted:
 		s.st.Stage = ev.Stage
@@ -158,6 +182,14 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 		if ev.Counts != nil {
 			s.st.Counts = mergeMax(s.st.Counts, *ev.Counts)
 		}
+		// Reset live counters now that the stage-finished values are authoritative.
+		switch ev.Stage {
+		case StageHypothesize:
+			s.st.LiveCandidates = 0
+		case StageVerify:
+			s.st.LiveVerified = 0
+			s.st.LiveKilled = 0
+		}
 		s.st.LastEvent = "stage done: " + ev.Stage
 	case KindAgentStarted:
 		s.agents[agentKey(ev.Role, ev.Label)] = AgentStatus{
@@ -165,6 +197,9 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 		}
 	case KindAgentFinished:
 		delete(s.agents, agentKey(ev.Role, ev.Label))
+		if ev.Role == RoleFinder && ev.Candidates > 0 {
+			s.st.LiveCandidates += ev.Candidates
+		}
 		s.st.LastEvent = ev.Role + " done: " + ev.Label
 	case KindSpendTick:
 		s.st.SpendInput = ev.InputTokens
@@ -172,7 +207,11 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 		s.st.SpendCacheRead = ev.CacheReadTokens
 	case KindFindingVerified:
 		s.st.Counts.Verified++
+		s.st.LiveVerified++
 		s.st.LastEvent = "verified: " + ev.Title
+	case KindFindingKilled:
+		s.st.LiveKilled++
+		s.st.LastEvent = "killed: " + ev.Title
 	case KindBudgetDegraded:
 		s.st.LastEvent = "budget degraded"
 	case KindBudgetStopped:
@@ -191,6 +230,12 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 			s.st.SpendCacheRead = ev.CacheReadTokens
 		}
 		s.st.Stage = ""
+		// Belt-and-suspenders: live counters are reset per stage and on scan
+		// start; clearing on finish too means an idle daemon never shows live
+		// remnants between runs.
+		s.st.LiveCandidates = 0
+		s.st.LiveVerified = 0
+		s.st.LiveKilled = 0
 		s.st.LastEvent = "finished " + ev.ScanKind
 		return true
 	}

@@ -71,6 +71,8 @@ func (r *LogRenderer) line(ev Event) string {
 			ev.Role, ev.Label, ev.Tokens, ev.Duration.Round(timeRound), errSuffix(ev.Err))
 	case KindFindingVerified:
 		return fmt.Sprintf("verified: %s (%s:%d)", ev.Title, ev.File, ev.Line)
+	case KindFindingKilled:
+		return fmt.Sprintf("killed: %s (%s:%d)", ev.Title, ev.File, ev.Line)
 	case KindBudgetDegraded:
 		return "budget degraded: " + ev.Message
 	case KindBudgetStopped:

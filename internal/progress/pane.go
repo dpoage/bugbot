@@ -157,6 +157,9 @@ func (p *PaneRenderer) apply(ev Event) {
 		}
 	case KindAgentFinished:
 		delete(p.agents, agentKey(ev.Role, ev.Label))
+		if ev.Role == RoleFinder && ev.Candidates > 0 {
+			p.counts.Hypothesized += ev.Candidates
+		}
 		p.lastEvent = fmt.Sprintf("%s done: %s", ev.Role, ev.Label)
 	case KindSpendTick:
 		p.inTokens = ev.InputTokens
@@ -165,6 +168,9 @@ func (p *PaneRenderer) apply(ev Event) {
 	case KindFindingVerified:
 		p.counts.Verified++
 		p.lastEvent = "verified: " + ev.Title
+	case KindFindingKilled:
+		p.counts.Killed++
+		p.lastEvent = "killed: " + ev.Title
 	case KindBudgetDegraded:
 		p.degraded = true
 		p.budgetNote = ev.Message

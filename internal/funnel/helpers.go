@@ -32,6 +32,32 @@ func emitAgentFinished(sink progress.Sink, role, label string, outcome *agent.Ou
 	progress.Emit(sink, ev)
 }
 
+// emitFinderAgentFinished emits a KindAgentFinished event for a finder unit,
+// carrying the candidate count so live status counters can tick per-unit during
+// the hypothesize stage. candidates is non-zero only on a successful (finderOK)
+// run; callers pass zero for error/parse-fail/budget-stop paths.
+func emitFinderAgentFinished(sink progress.Sink, label string, outcome *agent.Outcome, start time.Time, err error, candidates int) {
+	if sink == nil {
+		return
+	}
+	var tokens int64
+	if outcome != nil {
+		tokens = outcome.Usage.InputTokens + outcome.Usage.OutputTokens
+	}
+	ev := progress.Event{
+		Kind:       progress.KindAgentFinished,
+		Role:       progress.RoleFinder,
+		Label:      label,
+		Tokens:     tokens,
+		Duration:   time.Since(start),
+		Candidates: candidates,
+	}
+	if err != nil {
+		ev.Err = err.Error()
+	}
+	progress.Emit(sink, ev)
+}
+
 // readOnlyTools builds the read-only code tool set (read_file, list_dir, grep,
 // git_blame, git_log, plus the LSP-backed find_definition / find_references /
 // find_implementations and read_symbol) rooted at the repository, shared by
