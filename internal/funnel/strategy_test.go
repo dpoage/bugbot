@@ -401,3 +401,57 @@ func TestUnitLabel_NonDefaultStrategy(t *testing.T) {
 		t.Errorf("unitLabel(lens, contract-trace-deep) = %q, want %q", got, want)
 	}
 }
+
+// TestBuildUnits_ChunkMajorInterleave verifies the launch-order policy: every
+// active lens (and applicable strategy) visits chunk 0 before any lens visits
+// chunk 1, so low-yield lenses get running coverage within the first chunks
+// instead of after every higher-yield lens has covered the whole repo.
+func TestBuildUnits_ChunkMajorInterleave(t *testing.T) {
+	lensA := lensByName(t, "nil-safety/error-handling") // no deep strategy
+	lensB := lensByName(t, "api-contract-misuse")       // admits contract-trace-deep
+	chunks := []fileChunk{
+		{files: []string{"a1.go", "a2.go"}, langs: []ingest.Language{ingest.LangGo}},
+		{files: []string{"b1.go"}, langs: []ingest.Language{ingest.LangGo}},
+	}
+
+	units := buildUnits([]Lens{lensA, lensB}, builtinStrategies(), chunks, nil)
+
+	type key struct{ lens, strategy, firstFile string }
+	got := make([]key, len(units))
+	for i, u := range units {
+		got[i] = key{u.lens.Name, u.strategy.Name, u.files[0]}
+	}
+	want := []key{
+		// chunk 0: all lenses × applicable strategies
+		{"nil-safety/error-handling", "sweep-wide", "a1.go"},
+		{"api-contract-misuse", "sweep-wide", "a1.go"},
+		{"api-contract-misuse", "contract-trace-deep", "a1.go"},
+		// chunk 1: same lens sequence again
+		{"nil-safety/error-handling", "sweep-wide", "b1.go"},
+		{"api-contract-misuse", "sweep-wide", "b1.go"},
+		{"api-contract-misuse", "contract-trace-deep", "b1.go"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("unit count = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("units[%d] = %v, want %v (chunk-major interleave broken)", i, got[i], want[i])
+		}
+	}
+}
+
+// TestBuildUnits_DiffIntentExcluded verifies diff-intent never receives
+// chunk-based units regardless of position in the lens slice.
+func TestBuildUnits_DiffIntentExcluded(t *testing.T) {
+	chunks := []fileChunk{{files: []string{"x.go"}, langs: []ingest.Language{ingest.LangGo}}}
+	units := buildUnits([]Lens{diffIntentLens(), lensByName(t, "concurrency")}, builtinStrategies(), chunks, nil)
+	for _, u := range units {
+		if u.lens.Name == "diff-intent" {
+			t.Fatalf("diff-intent received a chunk unit: %+v", u)
+		}
+	}
+	if len(units) != 1 {
+		t.Fatalf("unit count = %d, want 1 (concurrency sweep-wide only)", len(units))
+	}
+}
