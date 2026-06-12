@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -52,6 +55,14 @@ func newScanCmd() *cobra.Command {
 			if ctx == nil {
 				ctx = context.Background()
 			}
+			// Wire SIGINT/SIGTERM → context cancellation so Ctrl-C produces an
+			// interrupted finalization (scan_runs row sealed with interrupted=true)
+			// rather than a hard kill that leaves the row dangling. The daemon
+			// registers its own NotifyContext; this is the scan-command registration.
+			// Using signal.NotifyContext (not signal.Notify) avoids double-registration
+			// risk: each call returns a new channel and a distinct stop function.
+			ctx, stopSignal := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+			defer stopSignal()
 
 			cfg, err := config.Load(configPath)
 			if err != nil {

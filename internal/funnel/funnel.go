@@ -552,6 +552,15 @@ type Stats struct {
 	// CoveredFiles is the count of files that were actually covered (i.e. at
 	// least one finderOK unit ran against them) in this run.
 	CoveredFiles int `json:"covered_files,omitempty"`
+	// Interrupted is set when the scan run was cancelled (context deadline
+	// exceeded or context cancellation, e.g. SIGINT). The stats reflect whatever
+	// stages completed before the interruption. The scan_runs row is sealed with
+	// finished_at set so no row is left dangling.
+	Interrupted bool `json:"interrupted,omitempty"`
+	// Aborted is set when the scan run exited due to an unexpected internal
+	// error (not a context cancellation). Partial stats are recorded and the
+	// scan_runs row is sealed so no row is left dangling.
+	Aborted bool `json:"aborted,omitempty"`
 }
 
 // FinderReliable reports whether the finder stage produced trustworthy coverage:
