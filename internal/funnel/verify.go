@@ -67,7 +67,7 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 		}
 		runner := agent.NewRunner(verifier, tools, sysPrompt,
 			agent.WithLimits(budget.runnerLimits(f.opts.VerifierLimits)),
-			agent.WithMaxTokens(f.opts.maxOutputTokens()),
+			agent.WithMaxTokens(DefaultMaxOutputTokens),
 			f.transcriptOption(),
 		)
 		var v refutation
@@ -115,7 +115,7 @@ func (f *Funnel) runArbiter(ctx context.Context, verifier llm.Client, candTools 
 	}
 	runner := agent.NewRunner(verifier, candTools, arbiterSystemPrompt(persona, hasSandbox),
 		agent.WithLimits(budget.runnerLimits(f.opts.VerifierLimits)),
-		agent.WithMaxTokens(f.opts.maxOutputTokens()),
+		agent.WithMaxTokens(DefaultMaxOutputTokens),
 		f.transcriptOption(),
 	)
 	var av refutation

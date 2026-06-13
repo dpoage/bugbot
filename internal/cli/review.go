@@ -284,7 +284,6 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 		FinderHistoryTokens:   p.cfg.Budgets.FinderHistoryTokens,
 		FinderReadLines:       p.cfg.Budgets.FinderReadLines,
 		FinderReadBytes:       p.cfg.Budgets.FinderReadBytes,
-		MaxOutputTokens:       p.cfg.Budgets.MaxOutputTokens,
 		Progress:              progress.NewLogRenderer(p.out),
 		SandboxOpts:           sandboxOpts,
 	}

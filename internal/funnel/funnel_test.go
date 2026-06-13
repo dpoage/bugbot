@@ -224,67 +224,6 @@ func TestSweep_E2E_OneVerifiedFinding(t *testing.T) {
 	}
 }
 
-// TestMaxOutputTokens_FlowsToRequests proves Options.MaxOutputTokens reaches the
-// runner's per-completion max_tokens cap (req.MaxTokens) for both finder and
-// verifier agents, and that the zero value falls back to DefaultMaxOutputTokens.
-func TestMaxOutputTokens_FlowsToRequests(t *testing.T) {
-	t.Run("explicit value flows through", func(t *testing.T) {
-		ctx := context.Background()
-		st, repo := openFixture(t)
-		finder := finderOnNilLens(newScriptedClient())
-		verifier := verifierRouting(newScriptedClient())
-
-		const want = 49152
-		f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{MaxOutputTokens: want})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.Sweep(ctx); err != nil {
-			t.Fatal(err)
-		}
-
-		finderSeen := finder.maxTokensSeen()
-		if len(finderSeen) == 0 {
-			t.Fatal("finder made no completions")
-		}
-		for i, mt := range finderSeen {
-			if mt != want {
-				t.Errorf("finder request[%d] MaxTokens = %d, want %d", i, mt, want)
-			}
-		}
-		verifierSeen := verifier.maxTokensSeen()
-		if len(verifierSeen) == 0 {
-			t.Fatal("verifier made no completions")
-		}
-		for i, mt := range verifierSeen {
-			if mt != want {
-				t.Errorf("verifier request[%d] MaxTokens = %d, want %d", i, mt, want)
-			}
-		}
-	})
-
-	t.Run("zero falls back to DefaultMaxOutputTokens", func(t *testing.T) {
-		ctx := context.Background()
-		st, repo := openFixture(t)
-		finder := finderOnNilLens(newScriptedClient())
-		verifier := verifierRouting(newScriptedClient())
-
-		f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.Sweep(ctx); err != nil {
-			t.Fatal(err)
-		}
-
-		for i, mt := range finder.maxTokensSeen() {
-			if mt != DefaultMaxOutputTokens {
-				t.Errorf("finder request[%d] MaxTokens = %d, want default %d", i, mt, DefaultMaxOutputTokens)
-			}
-		}
-	})
-}
-
 func TestSweep_Suppression_NoFindings(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)

@@ -40,16 +40,6 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 	if perr := parseInto(outcome.FinalText, out); perr == nil {
 		return outcome, nil
 	} else {
-		// Self-diagnosing case: the model emitted no parseable answer AND its final
-		// completion stopped at the output token cap. For a reasoning model this is
-		// the signature of exhausting the visible-output budget inside its <think>
-		// block before reaching the JSON — the chain-of-thought counts against the
-		// same max_tokens cap as the answer. We still run the repair round-trip (a
-		// larger or differently-prompted model might recover), but if it ALSO fails
-		// the user sees an actionable budget message instead of the generic "empty
-		// model output". See funnel.DefaultMaxOutputTokens / budgets.max_output_tokens.
-		exhaustedInReasoning := exhaustedReasoningBudget(outcome, perr)
-
 		// One repair round-trip: tell the model exactly what failed and demand
 		// JSON only. We continue the same conceptual task; a fresh Run keeps the
 		// loop simple and bounded by the same limits.
@@ -67,33 +57,11 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 		}
 		// Surface the repair attempt's outcome (its transcript reflects the retry).
 		if perr2 := parseInto(repairOutcome.FinalText, out); perr2 != nil {
-			// Prefer the actionable budget diagnosis when EITHER the initial attempt
-			// or the repair attempt exhausted its output budget inside a reasoning
-			// block: that is the real, fixable cause, where the bare parse error is a
-			// dead end for the user.
-			if exhaustedInReasoning || exhaustedReasoningBudget(repairOutcome, perr2) {
-				return repairOutcome, fmt.Errorf("agent: model exhausted its output token budget before emitting a parseable answer (common with reasoning models, whose chain-of-thought consumes the output budget); raise budgets.max_output_tokens%s: %w",
-					truncationNote(repairOutcome), perr2)
-			}
 			return repairOutcome, fmt.Errorf("agent: model output did not parse as JSON after one repair%s: %w",
 				truncationNote(repairOutcome), perr2)
 		}
 		return repairOutcome, nil
 	}
-}
-
-// exhaustedReasoningBudget reports whether a parse failure is the signature of a
-// reasoning model running out of visible-output budget inside its <think> block:
-// the stripped body was empty ("empty model output") AND the completion stopped
-// at the max-tokens cap. Reasoning models route chain-of-thought through visible
-// output tokens, so a too-small max_tokens truncates mid-thought with no closing
-// </think> tag and no JSON, leaving nothing after think-stripping. This is
-// distinct from a model that emitted malformed-but-present JSON.
-func exhaustedReasoningBudget(o *Outcome, perr error) bool {
-	if o == nil || perr == nil {
-		return false
-	}
-	return o.LastStopReason == llm.StopMaxTokens && strings.Contains(perr.Error(), "empty model output")
 }
 
 // truncationNote returns a short parenthetical when the run's final completion

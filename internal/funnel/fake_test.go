@@ -25,7 +25,6 @@ type scriptedClient struct {
 	inUsage     int64
 	outUsage    int64
 	cachedUsage int64 // subset of inUsage reported as cache reads
-	maxTokens   []int // req.MaxTokens captured per completion, in call order
 }
 
 // route maps a request predicate to a JSON response body.
@@ -73,7 +72,6 @@ func (c *scriptedClient) Complete(ctx context.Context, req llm.Request) (llm.Res
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls++
-	c.maxTokens = append(c.maxTokens, req.MaxTokens)
 
 	body := c.fallback
 	for _, r := range c.routes {
@@ -99,15 +97,6 @@ func (c *scriptedClient) callCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.calls
-}
-
-// maxTokensSeen returns a copy of the req.MaxTokens captured for each completion,
-// in call order. Used to assert Options.MaxOutputTokens flows through to the
-// runner's request cap.
-func (c *scriptedClient) maxTokensSeen() []int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return append([]int(nil), c.maxTokens...)
 }
 
 // emptyCandidates is the finder JSON for "found nothing".

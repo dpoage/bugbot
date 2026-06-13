@@ -600,7 +600,7 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 
 	runner := agent.NewRunner(finder, tools, sysprompt,
 		agent.WithLimits(budget.runnerLimits(f.opts.FinderLimits)),
-		agent.WithMaxTokens(f.opts.maxOutputTokens()),
+		agent.WithMaxTokens(DefaultMaxOutputTokens),
 		f.transcriptOption(),
 	)
 

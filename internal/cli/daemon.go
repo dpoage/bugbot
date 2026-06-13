@@ -112,7 +112,6 @@ func newDaemonCmd() *cobra.Command {
 					FinderHistoryTokens:   cfg.Budgets.FinderHistoryTokens,
 					FinderReadLines:       cfg.Budgets.FinderReadLines,
 					FinderReadBytes:       cfg.Budgets.FinderReadBytes,
-					MaxOutputTokens:       cfg.Budgets.MaxOutputTokens,
 					SandboxOpts:           sbOpts,
 				},
 				Sinks:    sinks,

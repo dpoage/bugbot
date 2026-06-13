@@ -100,15 +100,6 @@ type Budgets struct {
 	// restores the looser agent-package read defaults for the finder.
 	FinderReadLines int `yaml:"finder_read_lines"`
 	FinderReadBytes int `yaml:"finder_read_bytes"`
-	// MaxOutputTokens caps each finder/verifier completion's VISIBLE output
-	// (max_tokens). Zero uses the funnel default (funnel.DefaultMaxOutputTokens).
-	// Reasoning-model finders/verifiers route their chain-of-thought through
-	// visible output tokens, so the cap must cover the thinking PLUS the JSON
-	// answer; too low a value truncates inside the <think> block before any JSON is
-	// emitted, yielding "empty model output". It is an upper cap, not a fixed
-	// allocation, so raising it carries no cost penalty and smaller-window models
-	// are unaffected (their own model-side cap takes precedence).
-	MaxOutputTokens int `yaml:"max_output_tokens"`
 }
 
 // Scan controls which files are considered during ingest/scan.
@@ -363,7 +354,6 @@ func Load(path string) (Config, error) {
 //	BUGBOT_BUDGETS_PER_CYCLE_TOKENS
 //	BUGBOT_BUDGETS_CACHE_READ_WEIGHT
 //	BUGBOT_BUDGETS_PER_DAY_TOKENS
-//	BUGBOT_BUDGETS_MAX_OUTPUT_TOKENS
 //	BUGBOT_SANDBOX_RUNTIME
 //	BUGBOT_SANDBOX_IMAGE
 //	BUGBOT_SANDBOX_NETWORK
@@ -494,7 +484,6 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt64("BUGBOT_BUDGETS_FINDER_HISTORY_TOKENS", &cfg.Budgets.FinderHistoryTokens),
 		setInt("BUGBOT_BUDGETS_FINDER_READ_LINES", &cfg.Budgets.FinderReadLines),
 		setInt("BUGBOT_BUDGETS_FINDER_READ_BYTES", &cfg.Budgets.FinderReadBytes),
-		setInt("BUGBOT_BUDGETS_MAX_OUTPUT_TOKENS", &cfg.Budgets.MaxOutputTokens),
 		setInt("BUGBOT_SANDBOX_CPUS", &cfg.Sandbox.CPUs),
 		setInt("BUGBOT_SANDBOX_MEMORY_MB", &cfg.Sandbox.MemoryMB),
 		setInt("BUGBOT_SANDBOX_TIMEOUT_SECONDS", &cfg.Sandbox.TimeoutSeconds),

@@ -199,7 +199,6 @@ func newScanCmd() *cobra.Command {
 				FinderHistoryTokens:   cfg.Budgets.FinderHistoryTokens,
 				FinderReadLines:       cfg.Budgets.FinderReadLines,
 				FinderReadBytes:       cfg.Budgets.FinderReadBytes,
-				MaxOutputTokens:       cfg.Budgets.MaxOutputTokens,
 				Progress:              progressSink,
 				SandboxOpts:           sandboxOpts,
 				Repro:                 reproHook,
