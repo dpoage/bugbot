@@ -2,6 +2,7 @@ package funnel
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -840,6 +841,90 @@ func TestHypothesize_MultiLens_NoRace(t *testing.T) {
 		// Sanity: all sweep units ran (nSweepUnits units per sweep, single chunk).
 		if got := finder.callCount(); got < nSweepUnits*(i+1) {
 			t.Errorf("Sweep[%d]: finder calls = %d, want >= %d (nSweepUnits=%d per sweep)", i, got, nSweepUnits*(i+1), nSweepUnits)
+		}
+		_ = res
+	}
+}
+
+// TestVerify_MultiCandidate_NoRace is a -race regression test for the
+// per-candidate tools slice in runVerifyAndPersist. It guards against a
+// reintroduction of the shared-slice race that existed in the old batch verify
+// path (before the streaming refactor in run.go/verify_stream.go).
+//
+// The race scenario: if readOnlyTools were called ONCE outside the goroutine
+// loop and the resulting slice passed into each goroutine, parallel goroutines
+// would call append(sharedSlice, sbTool) simultaneously. When sharedSlice has
+// spare capacity — which it does, because readOnlyTools returns
+//
+//	append([]agent.Tool{...5 elems...}, nav.Tools()...) // 4 elems
+//
+// yielding len=9 with cap≥10 — all goroutines would write into
+// sharedSlice[9] concurrently: a verified data race on the backing array.
+//
+// The CURRENT code is safe: readOnlyTools is called INSIDE runVerifyAndPersist
+// (verify_stream.go:103), so every goroutine gets its own freshly-allocated
+// backing array and the append at verify_stream.go:114 is private. This test
+// locks that invariant in: if a future edit moves readOnlyTools back outside
+// the goroutine, -race fires here.
+//
+// Sandbox is enabled (MinSeverity="high", all candidates are severity="high")
+// so buildSandboxTool returns a non-nil tool and the append path is exercised.
+// Without sandbox the sbTool branch is skipped (no append, no race window) and
+// the test would be a no-op for this class of regression.
+//
+// Revert-experiment (documented here): removing the per-goroutine readOnlyTools
+// call and hoisting it above the go-func loop would cause this test to reliably
+// trigger DATA RACE on the backing array under `go test -race`.
+func TestVerify_MultiCandidate_NoRace(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// Build N distinct high-severity candidates on lines spaced DefaultMergeWindow*3
+	// apart so triage treats each as a separate cluster primary (no dedup, no merge).
+	// Each gets a unique title so fingerprints are distinct too.
+	const nCands = 6
+	candParts := make([]string, nCands)
+	for i := range nCands {
+		line := 10 + i*DefaultMergeWindow*3
+		candParts[i] = fmt.Sprintf(
+			`{"file":"bug.go","line":%d,"title":"race-guard candidate %d","description":"verify race guard %d","severity":"high","evidence":"evidence %d","confidence":"high"}`,
+			line, i, i, i,
+		)
+	}
+	finder := newScriptedClient().onSystemContains("nil-safety/error-handling", candJSON(candParts...))
+
+	// Verifier returns not-refuted immediately (no tool calls needed). The sandbox
+	// tool is offered to each refuter but never invoked — the test only exercises
+	// the concurrent append of sbTool into each goroutine's private candTools slice.
+	verifier := newScriptedClient()
+	verifier.fallback = notRefutedJSON
+
+	sb := &funnelFakeSandbox{}
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
+		Lenses:      []string{"nil-safety/error-handling"},
+		Refuters:    1,          // one refuter: fast, still exercises the append path
+		MaxParallel: nCands + 1, // enough slots to run all candidates concurrently
+		SandboxOpts: SandboxOpts{
+			Sandbox:     sb,
+			Enabled:     true,
+			MinSeverity: "high", // all candidates qualify: sbTool != nil path is taken
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Run multiple times to widen the race window. Under -race one iteration is
+	// typically sufficient to detect a shared-slice append; five is generous.
+	for i := range 5 {
+		res, err := f.Sweep(ctx)
+		if err != nil {
+			t.Fatalf("Sweep[%d]: %v", i, err)
+		}
+		// All candidates survive (notRefutedJSON). On subsequent sweeps the store
+		// returns existing open findings so Sweep still counts them.
+		if len(res.Findings) == 0 && i == 0 {
+			t.Errorf("Sweep[0]: want %d findings (all not-refuted), got 0", nCands)
 		}
 		_ = res
 	}
