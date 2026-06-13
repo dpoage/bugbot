@@ -374,6 +374,201 @@ func TestReVerificationFlow_DetectsChangedFindings(t *testing.T) {
 	}
 }
 
+// TestUpsertFinding_PreservesPromotionOnRescan verifies that an implicit re-scan
+// upsert (tier=2, repro_path="") never regresses a finding that was already
+// promoted to tier=1 with a repro artifact. The freshness fields (reasoning,
+// severity, updated_at) must still update.
+func TestUpsertFinding_PreservesPromotionOnRescan(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	// 1. Initial upsert: tier=2 (verified), no repro.
+	f := sampleFinding()
+	stored, err := st.UpsertFinding(ctx, f)
+	if err != nil {
+		t.Fatalf("initial upsert: %v", err)
+	}
+
+	// 2. Promote: simulate what promoteFinding does — read current row, set tier=1
+	// and repro_path, then upsert.
+	promoted := stored
+	promoted.Tier = 1
+	promoted.ReproPath = "/artifacts/repro_test.go"
+	promoted.NeedsHuman = false
+	after, err := st.UpsertFinding(ctx, promoted)
+	if err != nil {
+		t.Fatalf("promotion upsert: %v", err)
+	}
+	if after.Tier != 1 {
+		t.Fatalf("after promotion: tier=%d, want 1", after.Tier)
+	}
+	if after.ReproPath != "/artifacts/repro_test.go" {
+		t.Fatalf("after promotion: repro_path=%q, want /artifacts/repro_test.go", after.ReproPath)
+	}
+
+	// 3. Re-scan: a fresh T2 finding with empty ReproPath and updated freshness
+	// fields arrives for the same fingerprint.
+	rescan := Finding{
+		Fingerprint: f.Fingerprint,
+		Title:       f.Title,
+		Description: f.Description,
+		Reasoning:   "updated reasoning from re-scan",
+		Severity:    "critical", // changed
+		Tier:        2,
+		Status:      StatusOpen,
+		Lens:        f.Lens,
+		File:        f.File,
+		Line:        f.Line,
+		CommitSHA:   "newcommit",
+		FileHash:    "hash-v3",
+		ReproPath:   "", // empty — must NOT clobber stored /artifacts/repro_test.go
+	}
+	rescanned, err := st.UpsertFinding(ctx, rescan)
+	if err != nil {
+		t.Fatalf("rescan upsert: %v", err)
+	}
+
+	// Promotion state must be preserved.
+	if rescanned.Tier != 1 {
+		t.Errorf("rescan DEMOTED tier: got %d, want 1 (promotion must be preserved)", rescanned.Tier)
+	}
+	if rescanned.ReproPath != "/artifacts/repro_test.go" {
+		t.Errorf("rescan CLEARED repro_path: got %q, want /artifacts/repro_test.go", rescanned.ReproPath)
+	}
+
+	// Freshness fields must have updated.
+	if rescanned.Reasoning != "updated reasoning from re-scan" {
+		t.Errorf("reasoning not updated: %q", rescanned.Reasoning)
+	}
+	if rescanned.Severity != "critical" {
+		t.Errorf("severity not updated: %q", rescanned.Severity)
+	}
+
+	// Read back from DB to confirm it matches the returned struct.
+	dbRow, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint: %v", err)
+	}
+	if dbRow.Tier != 1 {
+		t.Errorf("DB tier=%d after rescan, want 1", dbRow.Tier)
+	}
+	if dbRow.ReproPath != "/artifacts/repro_test.go" {
+		t.Errorf("DB repro_path=%q after rescan, want /artifacts/repro_test.go", dbRow.ReproPath)
+	}
+	if dbRow.Reasoning != "updated reasoning from re-scan" {
+		t.Errorf("DB reasoning not updated: %q", dbRow.Reasoning)
+	}
+}
+
+// TestUpsertFinding_ExplicitDemotionStillWorks verifies that MarkFixed and
+// UpdateStatus (the explicit mutation paths) still work correctly — they do NOT
+// route through UpsertFinding's promotion-preserving UPDATE, so they are
+// unaffected by the guard.
+func TestUpsertFinding_ExplicitDemotionStillWorks(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	f := sampleFinding()
+	if _, err := st.UpsertFinding(ctx, f); err != nil {
+		t.Fatalf("initial upsert: %v", err)
+	}
+
+	// MarkFixed changes status without touching tier.
+	if err := st.MarkFixed(ctx, f.Fingerprint); err != nil {
+		t.Fatalf("MarkFixed: %v", err)
+	}
+	got, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint: %v", err)
+	}
+	if got.Status != StatusFixed {
+		t.Errorf("after MarkFixed: status=%q, want %q", got.Status, StatusFixed)
+	}
+	// Tier is unchanged by MarkFixed — it operates only on status.
+	if got.Tier != f.Tier {
+		t.Errorf("MarkFixed must not change tier: got %d, want %d", got.Tier, f.Tier)
+	}
+
+	// UpdateStatus to dismissed also works.
+	if err := st.UpdateStatus(ctx, f.Fingerprint, StatusDismissed, "test dismissal"); err != nil {
+		t.Fatalf("UpdateStatus dismissed: %v", err)
+	}
+	got2, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint after dismiss: %v", err)
+	}
+	if got2.Status != StatusDismissed {
+		t.Errorf("after UpdateStatus dismissed: status=%q, want %q", got2.Status, StatusDismissed)
+	}
+}
+
+// TestUpsertFinding_TierEdgeCases covers the tier-direction edge cases:
+//   - incoming T1 on stored T2 → promotes to T1 (MIN in correct direction)
+//   - incoming non-empty repro_path on stored non-empty → replaces (genuine re-repro)
+//   - needs_human set then cleared by re-scan → preserved
+func TestUpsertFinding_TierEdgeCases(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	// Seed a T2 verified finding.
+	f := sampleFinding()
+	if _, err := st.UpsertFinding(ctx, f); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Edge 1: incoming T1 on stored T2 → should promote to T1.
+	promote := f
+	promote.Tier = 1
+	promote.ReproPath = "/artifacts/first.go"
+	got, err := st.UpsertFinding(ctx, promote)
+	if err != nil {
+		t.Fatalf("T1 upsert: %v", err)
+	}
+	if got.Tier != 1 {
+		t.Errorf("T1 promote: tier=%d, want 1", got.Tier)
+	}
+
+	// Edge 2: incoming non-empty repro_path replaces stored non-empty (re-repro).
+	rerepro := f
+	rerepro.Tier = 1
+	rerepro.ReproPath = "/artifacts/second.go"
+	got2, err := st.UpsertFinding(ctx, rerepro)
+	if err != nil {
+		t.Fatalf("re-repro upsert: %v", err)
+	}
+	if got2.ReproPath != "/artifacts/second.go" {
+		t.Errorf("re-repro: repro_path=%q, want /artifacts/second.go", got2.ReproPath)
+	}
+
+	// Edge 3: needs_human set, then re-scan with needs_human=false → must stay true.
+	setNH := f
+	setNH.Tier = 1
+	setNH.ReproPath = "/artifacts/second.go"
+	setNH.NeedsHuman = true
+	if _, err := st.UpsertFinding(ctx, setNH); err != nil {
+		t.Fatalf("set needs_human: %v", err)
+	}
+	clearNH := f
+	clearNH.Tier = 2
+	clearNH.ReproPath = ""
+	clearNH.NeedsHuman = false // re-scan would produce false
+	got3, err := st.UpsertFinding(ctx, clearNH)
+	if err != nil {
+		t.Fatalf("rescan clear needs_human: %v", err)
+	}
+	if !got3.NeedsHuman {
+		t.Errorf("needs_human cleared by re-scan; must be preserved once set")
+	}
+	// Verify DB also reflects preserved needs_human.
+	dbRow, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint: %v", err)
+	}
+	if !dbRow.NeedsHuman {
+		t.Errorf("DB needs_human cleared; must be preserved")
+	}
+}
+
 // TestCountFindings covers the status-pane tally aggregation.
 func TestCountFindings(t *testing.T) {
 	ctx := context.Background()
