@@ -28,19 +28,23 @@ func (f *Funnel) recordFinderUnit(
 	leadsPosted int,
 	result *Result,
 ) {
-	f.recordFinderUnitWithTime(ctx, scanRunID, u, launchOrder, status,
+	f.recordFinderUnitWithTimeDetail(ctx, scanRunID, u, launchOrder, status, "",
 		time.Time{}, time.Time{}, inTokens, outTokens, cacheRead, candidates, leadsPosted, result)
 }
 
-// recordFinderUnitWithTime records an agent_units row for a finder unit that
-// was launched (started_at / finished_at are non-zero). Best-effort: a failed
-// insert is logged on result.Skipped and never aborts the scan.
-func (f *Funnel) recordFinderUnitWithTime(
+// recordFinderUnitWithTimeDetail records an agent_units row for a launched
+// finder unit, optionally including a postmortem detail string (for
+// parse_failed and budget_stopped rows). The detail is the encoded
+// finderPostmortem from the failure path; it is empty for ok/skipped rows.
+// Best-effort: a failed insert is logged on result.Skipped and never aborts
+// the scan.
+func (f *Funnel) recordFinderUnitWithTimeDetail(
 	ctx context.Context,
 	scanRunID string,
 	u unit,
 	launchOrder int,
 	status string,
+	detail string,
 	startedAt, finishedAt time.Time,
 	inTokens, outTokens, cacheRead, candidates int64,
 	leadsPosted int,
@@ -61,6 +65,7 @@ func (f *Funnel) recordFinderUnitWithTime(
 		CacheReadTokens: cacheRead,
 		Candidates:      int(candidates),
 		LeadsPosted:     leadsPosted,
+		Detail:          detail,
 	}
 	if err := f.store.AddAgentUnit(ctx, row); err != nil {
 		f.note(result, fmt.Sprintf("observability: AddAgentUnit (finder %s@%s status=%s): %v", u.lens.Name, u.strategy.Name, status, err))

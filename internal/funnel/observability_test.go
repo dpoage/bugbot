@@ -207,6 +207,63 @@ func TestAgentUnits_BudgetSkipRecording(t *testing.T) {
 	}
 }
 
+// TestAgentUnits_ParseFailedDetailRecorded verifies that when a finder produces
+// no parseable output (finderParseFailed), the stored agent_units row has a
+// non-empty Detail field containing the postmortem classification. This is the
+// integration test for the full pipeline from runFinderWithPrompt → Detail column.
+func TestAgentUnits_ParseFailedDetailRecorded(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// Every finder returns unparseable prose so every unit is parse_failed.
+	finder := newScriptedClient()
+	finder.fallback = "prose that never parses as JSON"
+	verifier := newScriptedClient()
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
+		MaxParallel: 1,
+		Lenses:      []string{"nil-safety/error-handling"}, // one lens to keep test fast
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	allUnits, err := st.ListAgentUnits(ctx, res.ScanRunID)
+	if err != nil {
+		t.Fatalf("ListAgentUnits: %v", err)
+	}
+
+	var parseFailedUnit *store.AgentUnit
+	for i := range allUnits {
+		u := &allUnits[i]
+		if u.Role == "finder" && u.Status == "parse_failed" {
+			parseFailedUnit = u
+			break
+		}
+	}
+	if parseFailedUnit == nil {
+		t.Fatal("expected at least one parse_failed finder unit row")
+	}
+
+	// The Detail field must be populated with a postmortem.
+	if parseFailedUnit.Detail == "" {
+		t.Error("parse_failed unit Detail is empty; want postmortem string")
+	}
+	// Must contain the class= prefix from finderPostmortemDetail.
+	if !strings.Contains(parseFailedUnit.Detail, "class=") {
+		t.Errorf("parse_failed unit Detail missing class= field: %q", parseFailedUnit.Detail)
+	}
+	// The unparseable case (prose, not a rate-limit) should be class=unparseable.
+	if !strings.Contains(parseFailedUnit.Detail, "class=unparseable") {
+		t.Errorf("parse_failed unit Detail = %q, want class=unparseable (prose fallback)", parseFailedUnit.Detail)
+	}
+}
+
 // TestAgentUnits_VerifierRows verifies that verifier unit rows are recorded
 // for two scenarios: a candidate that is killed by a unanimous panel (status=killed)
 // and one that survives (status=survived). Also exercises the detail string

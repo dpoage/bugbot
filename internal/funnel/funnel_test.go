@@ -388,7 +388,7 @@ func TestRunFinder_BudgetStopNotParseFailure(t *testing.T) {
 	budget := newBudgetState(100, rec, 1.0)
 	budget.pool.Add(100) // spend == limit => Check returns ErrBudgetExhausted
 
-	cands, status, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0], []ingest.Language{ingest.LangGo}, finderTask([]string{"bug.go"}, nil), budget)
+	cands, status, _, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0], []ingest.Language{ingest.LangGo}, finderTask([]string{"bug.go"}, nil), budget)
 	if err != nil {
 		t.Fatalf("runFinder should not error on a budget stop: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestRunFinder_ParseFailureStillCounts(t *testing.T) {
 	rec := &spendRecorder{ctx: ctx, store: st}
 	budget := newBudgetState(0, rec, 1.0)
 
-	_, status, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0], []ingest.Language{ingest.LangGo}, finderTask([]string{"bug.go"}, nil), budget)
+	_, status, _, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0], []ingest.Language{ingest.LangGo}, finderTask([]string{"bug.go"}, nil), budget)
 	if err != nil {
 		t.Fatalf("runFinder should not error on a parse failure: %v", err)
 	}
