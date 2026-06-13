@@ -228,6 +228,88 @@ func TestRunJSON_MaxTokensContinuation(t *testing.T) {
 	})
 }
 
+// TestRunJSON_ReasoningBudgetExhaustion proves the self-diagnosing error path:
+// when a reasoning model burns its visible-output budget inside an UNCLOSED
+// <think> block (StopMaxTokens, no JSON), the FINAL error a user sees names the
+// token budget and reasoning-model exhaustion — not the opaque "empty model
+// output" — and the repair round-trip still fired.
+//
+// NOTE: the request count is 4, not 2. A StopMaxTokens completion with no tool
+// calls always triggers ONE in-run continuation completion (see
+// Runner.completeOnce), so each run() makes two requests: the initial attempt is
+// 2 (initial + continuation) and the repair round-trip is another 2. "Repair
+// fired" is therefore asserted by the repair prompt's presence (a request that
+// names the parse failure), which is the meaningful signal, rather than by a
+// raw count of 2 that the continuation mechanism makes impossible.
+func TestRunJSON_ReasoningBudgetExhaustion(t *testing.T) {
+	fc := newFakeClient(
+		// Initial attempt: model opens a <think> block and runs out of visible
+		// output budget mid-thought — no closing tag, no JSON.
+		maxTokensResp("<think>let me reason about whether cfg can be nil here", 5, 5),
+		// In-run continuation (auto-fired): still thinking, still truncated.
+		maxTokensResp(" and whether the caller guards it, considering all paths", 5, 5),
+		// Repair round-trip: the model STILL exhausts its budget inside thinking.
+		maxTokensResp("<think>retrying, but I keep reasoning at length", 5, 5),
+		maxTokensResp(" without ever reaching the JSON answer", 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	var got finding
+	_, err := r.RunJSON(context.Background(), "audit for bugs", json.RawMessage(`{"type":"object"}`), &got)
+	if err == nil {
+		t.Fatal("expected error when the model never emits JSON")
+	}
+	// The final error must be ACTIONABLE: name the token budget and point at
+	// reasoning-model exhaustion, not the bare "empty model output".
+	msg := err.Error()
+	if !strings.Contains(msg, "max_output_tokens") {
+		t.Errorf("error = %v, want it to name budgets.max_output_tokens", err)
+	}
+	if !strings.Contains(msg, "reasoning models") {
+		t.Errorf("error = %v, want it to point at reasoning-model budget exhaustion", err)
+	}
+	// The repair round-trip must have fired: one request carries the repair prompt
+	// that quotes the parse failure.
+	repairFired := false
+	for _, req := range fc.requests {
+		if len(req.Messages) > 0 && strings.Contains(req.Messages[0].Content, "failed to parse") {
+			repairFired = true
+			break
+		}
+	}
+	if !repairFired {
+		t.Error("repair round-trip did not fire: no request carried the repair prompt")
+	}
+}
+
+// TestRunJSON_ClosedThinkTruncatedJSONContinuation proves the distinct case where
+// the reasoning block is CLOSED but the JSON answer that follows is cut off at the
+// token cap mid-object; the in-run continuation completes the JSON and RunJSON
+// stitches and parses it without a repair round-trip.
+func TestRunJSON_ClosedThinkTruncatedJSONContinuation(t *testing.T) {
+	fc := newFakeClient(
+		// Closed think block, then JSON that truncates mid-object at the cap.
+		maxTokensResp("<think>cfg is dereferenced before the nil check</think>\n{\"file\":\"a.go\",\"mess", 5, 5),
+		// Continuation finishes the JSON.
+		textResp(`age":"nil deref"}`, 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	var got finding
+	_, err := r.RunJSON(context.Background(), "task", nil, &got)
+	if err != nil {
+		t.Fatalf("RunJSON should stitch the continuation and parse: %v", err)
+	}
+	if got.File != "a.go" || got.Message != "nil deref" {
+		t.Errorf("parsed = %+v, want stitched JSON {a.go, nil deref}", got)
+	}
+	// Only the initial attempt ran (initial + its continuation = 2 requests); no
+	// repair round-trip was needed.
+	if len(fc.requests) != 2 {
+		t.Errorf("client calls = %d, want 2 (initial + continuation, no repair)", len(fc.requests))
+	}
+}
+
 func TestStripThinkBlocks(t *testing.T) {
 	cases := []struct {
 		name string

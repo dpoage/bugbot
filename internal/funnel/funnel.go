@@ -122,12 +122,21 @@ const (
 	DefaultFinderReadBytes = 96 * 1024
 
 	// DefaultMaxOutputTokens caps each finder/verifier completion's VISIBLE output.
-	// Reasoning models (e.g. MiniMax M3) spend most of their completion allowance
-	// inside <think> blocks; without an explicit, generous cap the provider default
-	// can be exhausted before any JSON is emitted, yielding "empty model output".
-	// 8k visible tokens comfortably fits a candidate list or a refutation verdict
-	// with reasoning headroom to spare.
-	DefaultMaxOutputTokens = 8192
+	// Reasoning models (e.g. MiniMax M2.7/M3) route their chain-of-thought through
+	// VISIBLE output tokens — the <think> block counts against this same cap, not a
+	// separate hidden allowance — so the cap must cover the thinking PLUS the JSON
+	// answer that follows it. Set too low, a heavy reasoner exhausts the budget
+	// inside its <think> block and truncates with no closing tag and no JSON,
+	// leaving empty output after think-stripping ("empty model output"). 32k visible
+	// tokens leaves generous reasoning headroom in front of a candidate list or a
+	// refutation verdict.
+	//
+	// This is an UPPER cap (max_tokens), not a fixed allocation: a model that emits
+	// little thinking still stops at end-of-turn, so raising it carries no per-call
+	// cost penalty. Smaller-window models (e.g. claude-haiku-4-5) are unaffected —
+	// their own model-side output cap takes precedence over this larger value.
+	// Configurable per run via Options.MaxOutputTokens / budgets.max_output_tokens.
+	DefaultMaxOutputTokens = 32768
 
 	// softBudgetFraction is the fraction of TokenBudget past which the run
 	// degrades to the highest-yield lenses and a single refuter.
@@ -249,6 +258,14 @@ type Options struct {
 	// the looser agent-package read defaults (2000 lines / 256 KB) for the finder.
 	FinderReadLines int
 	FinderReadBytes int
+	// MaxOutputTokens caps each finder/verifier completion's VISIBLE output
+	// (max_tokens). Zero (and negative) use DefaultMaxOutputTokens. Raise it for
+	// reasoning-model finders/verifiers that route their chain-of-thought through
+	// visible output tokens, so the cap must cover the thinking PLUS the JSON
+	// answer; too low a cap truncates inside the <think> block before any JSON is
+	// emitted. It is an upper cap, not a fixed allocation, so raising it carries no
+	// cost penalty and smaller-window models are unaffected (their own cap wins).
+	MaxOutputTokens int
 	// TranscriptDir, when non-empty, makes every agent auto-save its transcript
 	// there.
 	TranscriptDir string
@@ -341,6 +358,16 @@ func (o Options) finderReadCaps() agent.ReadCaps {
 		caps.MaxBytes = o.FinderReadBytes
 	}
 	return caps
+}
+
+// maxOutputTokens resolves the per-completion visible-output cap (max_tokens) for
+// finder/verifier agents, substituting DefaultMaxOutputTokens when the field is
+// unset (<= 0).
+func (o Options) maxOutputTokens() int {
+	if o.MaxOutputTokens <= 0 {
+		return DefaultMaxOutputTokens
+	}
+	return o.MaxOutputTokens
 }
 
 // Funnel runs the staged detection pipeline against a repository. It is

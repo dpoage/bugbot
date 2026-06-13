@@ -477,6 +477,18 @@ func TestEnvOverride_FinderReadCaps(t *testing.T) {
 	}
 }
 
+func TestEnvOverride_MaxOutputTokens(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{
+		"BUGBOT_BUDGETS_MAX_OUTPUT_TOKENS=49152",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Budgets.MaxOutputTokens != 49152 {
+		t.Errorf("MaxOutputTokens = %d, want 49152", cfg.Budgets.MaxOutputTokens)
+	}
+}
+
 func TestDefault_DepStrategyIsOff(t *testing.T) {
 	if got := Default().Sandbox.DepStrategy; got != "off" {
 		t.Errorf("default sandbox.dep_strategy = %q, want off", got)

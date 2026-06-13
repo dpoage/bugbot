@@ -66,6 +66,14 @@ budgets:
   # cache reads bill at a fraction of full price; weight them ~0.1 against
   # the token budgets so a cache-heavy run isn't throttled by cheap tokens.
   cache_read_weight: 0.1
+  # max_output_tokens caps each finder/verifier completion's VISIBLE output
+  # (max_tokens). Reasoning models route their chain-of-thought through visible
+  # output tokens, so the cap must cover the thinking PLUS the JSON answer; set
+  # too low, a heavy reasoner exhausts its budget inside the <think> block and
+  # emits no JSON ("empty model output"). It is an upper cap (no cost penalty for
+  # raising it; smaller-window models are bounded by their own cap). Omit to use
+  # the built-in default.
+  # max_output_tokens: 32768
 
 # ---------------------------------------------------------------------------
 # scan: path globs (relative to the target repo root) selecting files to
