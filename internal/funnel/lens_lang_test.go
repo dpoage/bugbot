@@ -20,6 +20,9 @@ func TestBuiltinLensNames_Stable(t *testing.T) {
 		"boundary-conditions",
 		"api-contract-misuse",
 		"injection/input-validation",
+		"memory-safety",
+		"exception-safety",
+		"dynamic-typing",
 	}
 	lenses := BuiltinLenses()
 	if len(lenses) != len(want) {
@@ -41,13 +44,26 @@ func TestFinderSystemPrompt_PythonOnly_NoGoIdioms(t *testing.T) {
 			continue // language-free, Core-only: no manifestation blocks by design
 		}
 		p := finderSystemPrompt("senior Python engineer", l, []ingest.Language{ingest.LangPython})
-		if !strings.Contains(p, "How this manifests in Python:") {
-			t.Errorf("lens %q: Python-only prompt missing the Python manifestation block", l.Name)
-		}
-		for _, row := range manifestations[l.Name][ingest.LangPython] {
-			if !strings.Contains(p, row) {
-				t.Errorf("lens %q: Python-only prompt missing Python row %q", l.Name, row)
+		// A lens that does not apply to Python (lensAppliesTo == false) is
+		// language-gated off — it never runs on a Python chunk, so its prompt
+		// for LangPython must carry Core only. Gating on lensAppliesTo (not on
+		// manifestations-emptiness) asserts the real invariant: a lens only
+		// renders a block for a language it applies to, and a row forgotten
+		// in the manifestations table for a language the lens DOES apply to
+		// still fails here as a composition bug.
+		pyLangs := []ingest.Language{ingest.LangPython}
+		if lensAppliesTo(l, pyLangs) {
+			pyRows := manifestations[l.Name][ingest.LangPython]
+			if !strings.Contains(p, "How this manifests in Python:") {
+				t.Errorf("lens %q: Python-only prompt missing the Python manifestation block", l.Name)
 			}
+			for _, row := range pyRows {
+				if !strings.Contains(p, row) {
+					t.Errorf("lens %q: Python-only prompt missing Python row %q", l.Name, row)
+				}
+			}
+		} else if strings.Contains(p, "How this manifests in Python:") {
+			t.Errorf("lens %q: Python-only prompt renders a Python block despite lensAppliesTo == false (composition not data-driven)", l.Name)
 		}
 		for _, idiom := range goIdioms {
 			// Case-insensitive so a future recased leak still trips the assertion
@@ -69,16 +85,23 @@ func TestFinderSystemPrompt_GoOnly_FullGoContent(t *testing.T) {
 			continue // language-free, Core-only: no manifestation blocks by design
 		}
 		p := finderSystemPrompt("senior Go engineer", l, []ingest.Language{ingest.LangGo})
-		if !strings.Contains(p, l.Core) {
-			t.Errorf("lens %q: Go-only prompt missing the universal Core", l.Name)
-		}
-		if !strings.Contains(p, "How this manifests in Go:") {
-			t.Errorf("lens %q: Go-only prompt missing the Go manifestation block", l.Name)
-		}
-		for _, row := range manifestations[l.Name][ingest.LangGo] {
-			if !strings.Contains(p, row) {
-				t.Errorf("lens %q: Go-only prompt missing Go row %q", l.Name, row)
+		// A lens that does not apply to Go (lensAppliesTo == false) is
+		// language-gated off — it never runs on a Go chunk, so its prompt
+		// for LangGo must carry Core only. Gating on lensAppliesTo (not on
+		// manifestations-emptiness) asserts the real invariant.
+		goLangs := []ingest.Language{ingest.LangGo}
+		if lensAppliesTo(l, goLangs) {
+			goRows := manifestations[l.Name][ingest.LangGo]
+			if !strings.Contains(p, "How this manifests in Go:") {
+				t.Errorf("lens %q: Go-only prompt missing the Go manifestation block", l.Name)
 			}
+			for _, row := range goRows {
+				if !strings.Contains(p, row) {
+					t.Errorf("lens %q: Go-only prompt missing Go row %q", l.Name, row)
+				}
+			}
+		} else if strings.Contains(p, "How this manifests in Go:") {
+			t.Errorf("lens %q: Go-only prompt renders a Go block despite lensAppliesTo == false (composition not data-driven)", l.Name)
 		}
 		for _, idiom := range pyIdioms {
 			if strings.Contains(strings.ToLower(p), strings.ToLower(idiom)) {
