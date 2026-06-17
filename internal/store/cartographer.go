@@ -133,3 +133,29 @@ func (s *Store) UpsertPackageSummaries(ctx context.Context, sums []PackageSummar
 	}
 	return tx.Commit()
 }
+
+// ListPackageSummaries returns every persisted package summary, ordered by
+// package path. Used by `bugbot cartography` to surface the cartographer's
+// cached output; the scan pipeline reads by key via GetPackageSummaries.
+func (s *Store) ListPackageSummaries(ctx context.Context) ([]PackageSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT pkg, fingerprint, summary, model, updated_at
+		FROM package_summaries ORDER BY pkg`)
+	if err != nil {
+		return nil, annotateErr(s.path, "list_package_summaries", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []PackageSummary
+	for rows.Next() {
+		var ps PackageSummary
+		var updatedAt string
+		if err := rows.Scan(&ps.Pkg, &ps.Fingerprint, &ps.Summary, &ps.Model, &updatedAt); err != nil {
+			return nil, annotateErr(s.path, "list_package_summaries", err)
+		}
+		if ps.UpdatedAt, err = parseTime(updatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, ps)
+	}
+	return out, rows.Err()
+}

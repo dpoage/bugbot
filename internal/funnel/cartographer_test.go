@@ -130,7 +130,7 @@ func TestCartography_InjectIntoFinderTask(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	cart := f.cartograph(ctx, finder, snap, targets, fps, nil)
+	cart := f.cartograph(ctx, &Result{}, finder, snap, targets, fps, nil)
 	if cart == nil {
 		t.Fatal("cartograph returned nil; expected non-nil with Cartographer=true")
 	}
@@ -182,7 +182,7 @@ func TestCartography_DisabledByDefault(t *testing.T) {
 	}
 	targets := []string{"sub/sub.go"}
 
-	cart := f.cartograph(ctx, finder, snap, targets, fps, nil)
+	cart := f.cartograph(ctx, &Result{}, finder, snap, targets, fps, nil)
 	if cart != nil {
 		t.Errorf("cartograph with Cartographer=false returned %+v, want nil", cart)
 	}
@@ -221,13 +221,13 @@ func TestCartography_FingerprintCache(t *testing.T) {
 	}
 	targets := []string{"sub/sub.go"}
 
-	_ = f.cartograph(ctx, finder, snap, targets, fps, nil)
+	_ = f.cartograph(ctx, &Result{}, finder, snap, targets, fps, nil)
 	afterFirst := summaryCallCount(finder)
 	if afterFirst == 0 {
 		t.Fatalf("expected at least one summary completion on first pass, got 0")
 	}
 
-	_ = f.cartograph(ctx, finder, snap, targets, fps, nil)
+	_ = f.cartograph(ctx, &Result{}, finder, snap, targets, fps, nil)
 	afterSecond := summaryCallCount(finder)
 	if afterSecond != afterFirst {
 		t.Errorf("summary completion count rose from %d to %d on second pass; expected no regeneration", afterFirst, afterSecond)
@@ -262,7 +262,7 @@ func TestCartography_DegradesOnLLMError(t *testing.T) {
 	targets := []string{"sub/sub.go"}
 
 	errClient := &errClient{err: errFakeLLM}
-	cart := f.cartograph(ctx, errClient, snap, targets, fps, nil)
+	cart := f.cartograph(ctx, &Result{}, errClient, snap, targets, fps, nil)
 	if cart == nil {
 		t.Fatal("cartograph returned nil on LLM error; expected non-nil empty cartography for graceful degrade")
 	}
@@ -348,4 +348,54 @@ func (c *errClient) Complete(ctx context.Context, req llm.Request) (llm.Response
 		return llm.Response{}, err
 	}
 	return llm.Response{}, c.err
+}
+
+// TestCartography_StripsThinkBlock pins the fix for the reasoning-model
+// pollution bug: MiniMax-M3 emits an inline <think>...</think> preamble in the
+// content, and the cartographer must store/return only the summary after it —
+// not the raw reasoning.
+func TestCartography_StripsThinkBlock(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openCartographyFixture(t)
+
+	finder := newScriptedClient()
+	finder.fallback = "<think>\nThe user wants a summary. Let me reason about the package...\n</think>\n\nPurpose: a helper package."
+	verifier := newScriptedClient()
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{Cartographer: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := repo.Snapshot(ctx, ingest.ScanFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fps, err := repo.Fingerprints(ctx, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cart := f.cartograph(ctx, &Result{}, finder, snap, []string{"sub/sub.go"}, fps, nil)
+	if cart == nil {
+		t.Fatal("nil cartography")
+	}
+	if got := cart.summaries["sub"]; got != "Purpose: a helper package." {
+		t.Errorf("returned summary = %q, want the text after </think> with the think block stripped", got)
+	}
+	// The persisted row must be clean too.
+	rows, err := st.ListPackageSummaries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, r := range rows {
+		if r.Pkg == "sub" {
+			found = true
+			if strings.Contains(r.Summary, "<think>") || strings.Contains(r.Summary, "Let me reason") {
+				t.Errorf("persisted summary still carries reasoning: %q", r.Summary)
+			}
+		}
+	}
+	if !found {
+		t.Error("sub package summary was not persisted")
+	}
 }

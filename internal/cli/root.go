@@ -39,6 +39,7 @@ reproduce, report) and tracks findings across confidence tiers:
 		newStatusCmd(),
 		newReportCmd(),
 		newMetricsCmd(),
+		newCartographyCmd(),
 		newLeadsCmd(),
 		newEvalCmd(),
 		newPublishCmd(),

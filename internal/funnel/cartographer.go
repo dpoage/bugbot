@@ -3,6 +3,7 @@ package funnel
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -166,7 +167,7 @@ func collapseNewlines(s string) string {
 // concurrent fan-out would compete with the finders for slots. The cost
 // bound (DefaultCartographerMaxFiles member files, head-capped, total bytes
 // capped) keeps each completion cheap and predictable.
-func (f *Funnel) cartograph(ctx context.Context, client llm.Client, snap *ingest.Snapshot, targets []string, fps map[string]string, budget *budgetState) *cartography {
+func (f *Funnel) cartograph(ctx context.Context, result *Result, client llm.Client, snap *ingest.Snapshot, targets []string, fps map[string]string, budget *budgetState) *cartography {
 	if !f.opts.Cartographer {
 		return nil
 	}
@@ -249,10 +250,12 @@ func (f *Funnel) cartograph(ctx context.Context, client llm.Client, snap *ingest
 		})
 	}
 	if len(regenBatch) > 0 {
-		// Best-effort persist. A failure here just means next run
-		// regenerates — the current run still has the in-memory summaries
-		// and proceeds to inject them.
-		_ = f.store.UpsertPackageSummaries(ctx, regenBatch)
+		// Persist. A failure here is also the silent-loss case that hides a
+		// broken pass (tokens spent, nothing stored), so surface it as a run
+		// note rather than swallowing it.
+		if err := f.store.UpsertPackageSummaries(ctx, regenBatch); err != nil {
+			f.note(result, fmt.Sprintf("cartographer: persisting %d package summaries failed: %v", len(regenBatch), err))
+		}
 	}
 
 	// Build the importer graph. This is independent of the LLM pass and
@@ -335,7 +338,7 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, pkg st
 	if err != nil {
 		return "", err
 	}
-	summary := strings.TrimSpace(resp.Text)
+	summary := strings.TrimSpace(llm.StripThinkBlocks(resp.Text))
 	if summary == "" {
 		return "", errors.New("cartograph: empty summary from LLM")
 	}
@@ -422,4 +425,97 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// CartographyReport summarizes an out-of-band cartographer refresh.
+type CartographyReport struct {
+	ScanRunID    string // the scan_run (kind "cartography") this refresh ledgered to
+	Packages     int    // packages spanned by the repo snapshot
+	Summarized   int    // packages (re)generated and persisted this run
+	Reused       int    // packages whose cached summary fingerprint still matched
+	Failed       int    // packages whose summary generation returned empty/error
+	InputTokens  int64  // total input tokens billed by the refresh
+	OutputTokens int64  // total output tokens billed by the refresh
+}
+
+// RefreshCartography runs the cartographer pass out-of-band — no finder or
+// verify stages — over the whole repo snapshot: it (re)summarizes every package
+// whose content fingerprint changed and persists the results, exactly the
+// fingerprint-cached summaries a scan's cartographer pass produces. Spend is
+// ledgered to a fresh scan_run of kind "cartography" (so it shows in the
+// metrics series, classified as a cartographer run). client is the unwrapped
+// cartographer LLM client; it is recorder-wrapped internally. Unlike the
+// in-scan pass this does NOT gate on a finder budget — a manual refresh runs to
+// completion — and it returns counts so the caller can report what happened.
+func (f *Funnel) RefreshCartography(ctx context.Context, client llm.Client) (CartographyReport, error) {
+	var rep CartographyReport
+	if client == nil {
+		return rep, errors.New("cartographer: nil client")
+	}
+	snap, err := f.repo.Snapshot(ctx, f.opts.Filter)
+	if err != nil {
+		return rep, fmt.Errorf("cartographer: snapshot: %w", err)
+	}
+	fps, err := f.repo.Fingerprints(ctx, snap)
+	if err != nil {
+		return rep, fmt.Errorf("cartographer: fingerprints: %w", err)
+	}
+	targets := make([]string, len(snap.Files))
+	for i, file := range snap.Files {
+		targets[i] = file.Path
+	}
+	packages := packagesSpanned(targets)
+	rep.Packages = len(packages)
+	if len(packages) == 0 {
+		return rep, nil
+	}
+
+	runID, err := f.store.BeginScanRun(ctx, store.ScanCartography, snap.Commit)
+	if err != nil {
+		return rep, fmt.Errorf("cartographer: begin run: %w", err)
+	}
+	rep.ScanRunID = runID
+	rec := &spendRecorder{ctx: ctx, store: f.store, scanRunID: runID}
+	cc := llm.WithRecorder(client, rec, roleCartographer, "", "")
+
+	pkgFingerprints := make(map[string]string, len(packages))
+	for pkg, members := range packages {
+		pkgFingerprints[pkg] = packageFingerprint(pkg, members, fps)
+	}
+	keys := sortedKeys(pkgFingerprints)
+	cached, cErr := f.store.GetPackageSummaries(ctx, keys)
+	if cErr != nil {
+		cached = nil // degrade: regenerate everything
+	}
+	var batch []store.PackageSummary
+	for _, pkg := range keys {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		fp := pkgFingerprints[pkg]
+		if row, ok := cached[pkg]; ok && row.Fingerprint == fp && row.Summary != "" {
+			rep.Reused++
+			continue
+		}
+		summary, sErr := f.summarizePackage(ctx, cc, pkg, packages[pkg], fps)
+		if sErr != nil || summary == "" {
+			rep.Failed++
+			continue
+		}
+		batch = append(batch, store.PackageSummary{Pkg: pkg, Fingerprint: fp, Summary: summary})
+		rep.Summarized++
+	}
+	persistErr := f.store.UpsertPackageSummaries(ctx, batch)
+
+	rep.InputTokens, rep.OutputTokens, _, _ = rec.totals()
+	statsBlob, _ := json.Marshal(Stats{
+		CartographerEnabled: true,
+		InputTokens:         rep.InputTokens,
+		OutputTokens:        rep.OutputTokens,
+	})
+	_ = f.store.FinishScanRun(ctx, runID, string(statsBlob))
+	if persistErr != nil {
+		return rep, fmt.Errorf("cartographer: persist: %w", persistErr)
+	}
+	return rep, nil
 }
