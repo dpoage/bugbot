@@ -394,6 +394,10 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	budget.reserveForDownstream(f.opts.FinderBudgetShare)
 
 	result := &Result{ScanRunID: scanRunID, Commit: snap.Commit}
+	// Persist whether the cartographer pass was active, on every exit path
+	// (set before the finalize defer below), so the valid-findings-per-token
+	// time series can be sliced by on/off.
+	result.Stats.CartographerEnabled = f.opts.Cartographer
 
 	// Interrupt-safe finalization: seal the scan_runs row on every exit path.
 	var finalize = func(s *Stats) error {

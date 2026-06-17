@@ -676,6 +676,14 @@ type Stats struct {
 	// cache savings.
 	CacheReadTokens     int64 `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int64 `json:"cache_creation_tokens,omitempty"`
+	// CartographerEnabled records whether the package-summary pass
+	// (scan.cartographer) was active for this run. Persisted so the
+	// valid-findings-per-token series — Verified / (InputTokens+OutputTokens),
+	// one point per scan run over started_at — can be sliced by cartographer
+	// on/off. That ratio, not raw token count, is how the feature earns its
+	// keep: a new agent adds tokens by construction, so the question is whether
+	// the injected context buys more verified findings per token spent.
+	CartographerEnabled bool `json:"cartographer_enabled"`
 	// SandboxExecs is the total number of sandbox_exec tool calls made by
 	// refuter agents during the verification stage. Zero when the feature is
 	// disabled or unused.
