@@ -47,9 +47,12 @@ const timeLayout = time.RFC3339Nano
 var nowUTC = func() time.Time { return time.Now().UTC() }
 
 // Store is a handle to the embedded state database. It is safe for concurrent
-// use by multiple goroutines.
+// use by multiple goroutines, but the underlying *sql.DB is configured with
+// MaxOpenConns(1) by Open, so callers never observe multiple in-flight
+// statements — see Open for the rationale.
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 // Open opens (creating if necessary) the SQLite database at path, creates any
@@ -96,20 +99,99 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("store: open %q: %w", path, err)
+		return nil, annotateErr(path, "open", fmt.Errorf("sql.Open: %w", err))
 	}
+
+	// Bound the writer pool to 1. Bugbot's state DB is a low-throughput
+	// control-plane store (spend ledger, findings, scan-run history) and the
+	// driver is pure-Go, which historically has surfaced WAL checkpoint-vs-
+	// read races as SQLITE_IOERR_SHORT_READ (522) under concurrent writers
+	// (see bugbot-dj7). Serializing the single connection removes the
+	// concurrency variable entirely: every read and write goes through the
+	// same connection, so a checkpoint cannot be in flight while a read is
+	// observing the post-checkpoint file. Read latency is dominated by
+	// total token spend, not by row count, so a 1-connection pool does not
+	// regress interactive scan wall time.
+	db.SetMaxOpenConns(1)
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("store: ping %q: %w", path, err)
+		return nil, annotateErr(path, "ping", err)
 	}
 
 	if err := migrate(ctx, db); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("store: migrate: %w", err)
+		return nil, annotateErr(path, "migrate", err)
 	}
 
-	return &Store{db: db}, nil
+	return &Store{db: db, path: path}, nil
+}
+
+// MaxOpenConnections returns the configured ceiling on the writer pool. It
+// is exposed primarily for tests that assert the bound; production callers
+// should treat the pool as opaque.
+func (s *Store) MaxOpenConnections() int {
+	return s.db.Stats().MaxOpenConnections
+}
+
+// Path returns the on-disk path of the underlying database. Used by error
+// annotations and by tests; production code rarely needs it.
+func (s *Store) Path() string { return s.path }
+
+// Diagnose runs a best-effort triage of an IOERR-class error so the next
+// operator log makes the failure mode self-explaining. It returns nil when
+// the database passes PRAGMA quick_check AND a separately-opened
+// short-lived connection also passes quick_check; otherwise it returns the
+// first error encountered with the operation labelled. The caller is
+// expected to log every step (a tiny helper in this package formats the
+// lines), so an operator can tell at a glance whether the IOERR was a
+// transient checkpoint-vs-read race (both quick_checks pass) or a sign
+// of on-disk corruption (one or both fail).
+//
+// Diagnose does NOT mutate the receiver's *sql.DB. It runs quick_check
+// on the existing handle (which goes through the same connection the
+// caller has been using — its result reflects the in-flight state), and
+// then opens a SEPARATE short-lived *sql.DB to the same path. The
+// second quick_check catches damage that affects only the original
+// connection's view (e.g. a checkpoint wrote bad pages). Neither step
+// closes or rebinds s.db, so concurrent callers holding this *Store
+// pointer continue to work without interruption.
+func (s *Store) Diagnose(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return annotateErr(s.path, "diagnose", fmt.Errorf("store not open"))
+	}
+	// Step 1: quick_check on the existing connection. Goes through
+	// the same *sql.DB the caller is using; if the page cache holds
+	// a stale view this is what we see, which is exactly the case
+	// we want to surface.
+	var firstCheck string
+	if err := s.db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&firstCheck); err != nil {
+		return annotateErr(s.path, "diagnose.quick_check", err)
+	}
+	if firstCheck != "ok" {
+		return annotateErr(s.path, "diagnose.quick_check",
+			fmt.Errorf("quick_check on existing connection returned %q — db is likely corrupted", firstCheck))
+	}
+	// Step 2: open a SEPARATE short-lived connection to the same
+	// path and quick_check it. This catches damage that affects a
+	// fresh open (permissions, vanished file, on-disk corruption
+	// observed by the OS but not yet by the live connection). The
+	// handle is closed before returning so we do not leak
+	// connections.
+	second, err := Open(ctx, s.path)
+	if err != nil {
+		return annotateErr(s.path, "diagnose.reopen", err)
+	}
+	defer func() { _ = second.Close() }()
+	var secondCheck string
+	if err := second.db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&secondCheck); err != nil {
+		return annotateErr(s.path, "diagnose.reopen_quick_check", err)
+	}
+	if secondCheck != "ok" {
+		return annotateErr(s.path, "diagnose.reopen_quick_check",
+			fmt.Errorf("reopen quick_check returned %q — db is likely corrupted on disk", secondCheck))
+	}
+	return nil
 }
 
 // DB exposes the underlying *sql.DB for callers that need direct access (e.g.

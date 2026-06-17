@@ -76,7 +76,7 @@ func (s *Store) RecordSpend(ctx context.Context, sp Spend) (string, error) {
 		sp.CacheReadTokens, sp.CacheCreationTokens,
 	)
 	if err != nil {
-		return "", err
+		return "", annotateErr(s.path, "record_spend", err)
 	}
 	return sp.ID, nil
 }
@@ -91,7 +91,7 @@ func (s *Store) TotalsSince(ctx context.Context, t time.Time) (SpendTotals, erro
 		FROM spend WHERE ts >= ?`, t.UTC().Format(timeLayout),
 	).Scan(&tot.InputTokens, &tot.OutputTokens, &tot.CacheReadTokens, &tot.CacheCreationTokens)
 	if err != nil {
-		return SpendTotals{}, err
+		return SpendTotals{}, annotateErr(s.path, "totals_since", err)
 	}
 	return tot, nil
 }
@@ -106,7 +106,7 @@ func (s *Store) TotalsForScanRun(ctx context.Context, scanRunID string) (SpendTo
 		FROM spend WHERE scan_run_id = ?`, scanRunID,
 	).Scan(&tot.InputTokens, &tot.OutputTokens, &tot.CacheReadTokens, &tot.CacheCreationTokens)
 	if err != nil {
-		return SpendTotals{}, err
+		return SpendTotals{}, annotateErr(s.path, "totals_for_scan_run", err)
 	}
 	return tot, nil
 }

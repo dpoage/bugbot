@@ -10,6 +10,7 @@ import (
 	"sync"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -259,6 +260,15 @@ func newScanCmd() *cobra.Command {
 				res, err = f.Sweep(ctx)
 			}
 			if err != nil {
+				// If the funnel failed with a SQLite IOERR, run the
+				// store's quick_check + reopen Diagnose so the
+				// operator log makes the failure mode
+				// self-explaining (transient VFS race vs on-disk
+				// corruption). The original err is returned
+				// unchanged; the diagnostic lines go to stderr.
+				if store.IsIOErr(err) {
+					logStoreDiagnose(ctx, st, err)
+				}
 				return err
 			}
 
@@ -624,4 +634,31 @@ func runContradictionSeed(ctx context.Context, cfg config.Config, repo *ingest.R
 			Count: sum.LeadsPosted,
 		})
 	}
+}
+
+// logStoreDiagnose is the IOERR-triage sink for scan errors. When the
+// scan aborts with a SQLITE_IOERR-class error, we run the store's
+// quick_check + reopen Diagnose and log the outcome to stderr so an
+// operator can tell at a glance whether the failure was a transient
+// VFS race (Diagnose clean) or a sign of on-disk corruption
+// (Diagnose fails). The original scan error is the caller's
+// responsibility to return — this function only emits diagnostics.
+func logStoreDiagnose(ctx context.Context, st *store.Store, triggerErr error) {
+	if st == nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"bugbot: store IOERR triage: trigger=%s\n",
+		triggerErr.Error())
+	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	diagErr := st.Diagnose(dctx)
+	if diagErr == nil {
+		fmt.Fprintf(os.Stderr,
+			"bugbot: store IOERR triage: quick_check=ok reopen=ok (transient VFS race is the most likely cause; the next process start can usually proceed)\n")
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"bugbot: store IOERR triage: %s (db may be corrupted; inspect quick_check output above before next run)\n",
+		diagErr.Error())
 }
