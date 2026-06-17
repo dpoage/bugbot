@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -86,7 +87,7 @@ func NewRunner(client llm.Client, tools []Tool, systemPrompt string, opts ...Opt
 // rather than returned half-written. It costs at most one additional completion
 // per truncated turn and is reflected in the Outcome's Iterations and Usage.
 func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
-	return r.run(ctx, task, "")
+	return r.run(ctx, task, "", nil)
 }
 
 // run is the shared loop body. finalizePrompt, when non-empty, enables forced
@@ -96,7 +97,12 @@ func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 // instead of dangling exploration prose or a silently empty output. RunJSON
 // passes a JSON-demanding prompt; the public Run passes "" and therefore never
 // pays the extra turn.
-func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome, error) {
+//
+// responseSchema, when non-nil, is the JSON Schema for the final answer. It is
+// attached to every completion in the run (capability-gated; see [complete]),
+// so adapters that support structured output can apply grammar-constrained
+// decoding. The public Run passes nil; RunJSON passes its schema.
+func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
 	tr := NewTranscript()
 
 	messages := []llm.Message{{Role: llm.RoleUser, Content: task}}
@@ -116,7 +122,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 		// public Run (finalizePrompt == "") is a no-op and proceeds straight
 		// to the truncation mark.
 		if r.limits.MaxIterations >= 0 && outcome.Iterations >= r.limits.MaxIterations {
-			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, compactThreshold, toolNameByID, task); err != nil {
+			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, task); err != nil {
 				return outcome, err
 			}
 			r.finishTruncated(outcome, TruncMaxIterations)
@@ -127,7 +133,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 		// gets (RunJSON only), so a near-budget finder can emit its answer
 		// instead of returning a silently empty result to the funnel.
 		if r.overBudget(outcome.Usage) {
-			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, compactThreshold, toolNameByID, task); err != nil {
+			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, task); err != nil {
 				return outcome, err
 			}
 			r.finishTruncated(outcome, TruncTokenBudget)
@@ -149,7 +155,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 				// Shared pool exhausted: give the model one reserved finalization
 				// turn (RunJSON only) so a near-budget finder can still emit its
 				// answer before we classify the stop as TruncBudgetPool.
-				if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, compactThreshold, toolNameByID, task); err != nil {
+				if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, task); err != nil {
 					return outcome, err
 				}
 				r.finishTruncated(outcome, TruncBudgetPool)
@@ -169,7 +175,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 		// subsequent turn (see compactRearmFactor).
 		messages, compactThreshold = r.maybeCompact(messages, compactThreshold, toolNameByID)
 
-		resp, err := r.completeOnce(ctx, tr, &messages, outcome, false)
+		resp, err := r.completeOnce(ctx, tr, &messages, outcome, responseSchema, false)
 		if err != nil {
 			r.autosave(tr, task)
 			return outcome, err
@@ -202,7 +208,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 		// A budget hit post-tool still gets the one reserved finalization turn
 		// (RunJSON only) so a near-budget finder can emit its answer.
 		if r.overBudget(outcome.Usage) {
-			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, compactThreshold, toolNameByID, task); err != nil {
+			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, task); err != nil {
 				return outcome, err
 			}
 			r.finishTruncated(outcome, TruncTokenBudget)
@@ -228,6 +234,10 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 //     shot at emitting its answer instead of leaving the funnel with a
 //     silently empty output.
 //
+// responseSchema, when non-nil, is attached to the finalization completion so a
+// schema-aware adapter applies grammar-constrained decoding on the final turn
+// too. The public Run path passes nil so no schema is attached.
+//
 // Returns done=true when a finalization turn was actually taken (so the caller
 // knows Finalized is now true), and a non-nil err only when the underlying
 // completion failed — in which case the caller should return early with the
@@ -239,6 +249,7 @@ func (r *Runner) finalizeAndTruncate(
 	messages *[]llm.Message,
 	outcome *Outcome,
 	finalizePrompt string,
+	responseSchema json.RawMessage,
 	compactThreshold int64,
 	toolNameByID map[string]string,
 	task string,
@@ -256,7 +267,7 @@ func (r *Runner) finalizeAndTruncate(
 	// emit the answer, not every earlier file dump. The re-armed threshold is
 	// discarded: this is the run's final turn, so no later compaction can fire.
 	*messages, _ = r.maybeCompact(*messages, compactThreshold, toolNameByID)
-	if _, cerr := r.completeOnce(ctx, tr, messages, outcome, true); cerr != nil {
+	if _, cerr := r.completeOnce(ctx, tr, messages, outcome, responseSchema, true); cerr != nil {
 		r.autosave(tr, task)
 		return cerr
 	}
@@ -282,9 +293,9 @@ func (r *Runner) maybeCompact(messages []llm.Message, threshold int64, toolNameB
 	if !pruned {
 		// Over threshold but nothing prunable yet: either history is dominated by
 		// assistant reasoning, or every prunable result is already a stub, or there
-		// simply aren't more than recentK tool results so far. Leave the threshold
-		// UNCHANGED so the check fires again next turn once a result ages out of the
-		// recent window — re-arming here would starve real compaction by ratcheting
+		// simply aren't more than compactRecentToolResults tool results so far. Leave the
+		// threshold UNCHANGED so the check fires again next turn once a result ages out of
+		// the recent window — re-arming here would starve real compaction by ratcheting
 		// the threshold above the history before anything was ever reclaimed.
 		return messages, threshold
 	}
@@ -294,17 +305,49 @@ func (r *Runner) maybeCompact(messages []llm.Message, threshold int64, toolNameB
 	return compacted, threshold * compactRearmFactor
 }
 
+// repair issues a SINGLE tools-less, schema-bearing completion against the
+// repair prompt. It replaces the previous "fresh tool loop" repair path with
+// the constrained shape: a single completion where adapters that support
+// structured output apply grammar-constrained decoding natively, so the
+// answer is shape-correct on the wire. Tools are dropped so Google and
+// Anthropic (which refuse to combine tool use with native structured output)
+// also get the schema honored.
+//
+// responseSchema, when non-nil, is attached capability-gated; when the
+// adapter's StructuredOutput capability is off, the schema is dropped
+// silently (per llm.Request docs) and the prompt-embedded schema instruction
+// is the only enforcement — same contract as the main run path.
+//
+// The repair uses a fresh outcome but shares the caller's transcript so the
+// assistant turn is recorded there for parity with the main run path. Only
+// ONE completion is issued: no max-tokens continuation, no tool loop. This
+// bounds the repair to exactly the one model call the spec mandates.
+func (r *Runner) repair(ctx context.Context, tr *Transcript, prompt string, responseSchema json.RawMessage) (*Outcome, error) {
+	outcome := &Outcome{Transcript: tr}
+	messages := []llm.Message{{Role: llm.RoleUser, Content: prompt}}
+	if _, err := r.completeOnce(ctx, tr, &messages, outcome, responseSchema, true); err != nil {
+		return outcome, err
+	}
+	return outcome, nil
+}
+
 // completeOnce issues one model completion against the current conversation,
 // records it, folds its usage into the outcome, and appends the assistant turn
 // to *messages. When final is true the request carries no tools (the
 // finalization turn forbids further investigation).
 //
+// responseSchema, when non-nil and the client's StructuredOutput capability is
+// on, is attached to the request so adapters can apply native
+// schema-constrained output. When the capability is off, the schema is
+// dropped silently — the prompt-embedded schema instruction is the only
+// enforcement, matching the no-cap passthrough path's contract.
+//
 // If the completion stops at the token cap (StopMaxTokens) it makes ONE
 // continuation completion — appending a short user nudge — so a JSON answer cut
 // off mid-object has a chance to be completed rather than failing to parse. The
 // outcome's LastStopReason reflects the final completion served here.
-func (r *Runner) completeOnce(ctx context.Context, tr *Transcript, messages *[]llm.Message, outcome *Outcome, final bool) (llm.Response, error) {
-	resp, err := r.complete(ctx, tr, *messages, outcome, final)
+func (r *Runner) completeOnce(ctx context.Context, tr *Transcript, messages *[]llm.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llm.Response, error) {
+	resp, err := r.complete(ctx, tr, *messages, outcome, responseSchema, final)
 	if err != nil {
 		return llm.Response{}, err
 	}
@@ -322,7 +365,7 @@ func (r *Runner) completeOnce(ctx context.Context, tr *Transcript, messages *[]l
 			Role:    llm.RoleUser,
 			Content: "Your previous message was cut off at the output token limit. Continue from exactly where you stopped and output ONLY the remaining text needed to complete the answer — no preamble, no repetition.",
 		})
-		cont, cerr := r.complete(ctx, tr, *messages, outcome, final)
+		cont, cerr := r.complete(ctx, tr, *messages, outcome, responseSchema, final)
 		if cerr != nil {
 			return llm.Response{}, cerr
 		}
@@ -380,7 +423,16 @@ func stitchContinuation(head, cont string) string {
 // stop reason onto the outcome. It does NOT mutate the conversation; callers
 // append the assistant turn so they control conversation shape (e.g. the
 // continuation retry).
-func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llm.Message, outcome *Outcome, final bool) (llm.Response, error) {
+//
+// responseSchema, when non-nil AND the client's StructuredOutput capability is
+// on, is attached to the request so adapters that support native structured
+// output can apply grammar-constrained decoding. When the capability is off
+// (a conservative openai-compatible endpoint, etc.), the schema is silently
+// dropped on the wire (per [llm.Request.ResponseSchema] docs) and only the
+// prompt-embedded schema instruction is in effect. This is the agent-layer
+// gate: the no-cap passthrough path sends NO schema, matching today's
+// behavior, while the with-cap path gets a hard native shape guarantee.
+func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llm.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llm.Response, error) {
 	req := llm.Request{
 		System:    r.systemPrompt,
 		Messages:  messages,
@@ -391,6 +443,13 @@ func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llm.Me
 	// model can only answer.
 	if final {
 		req.Tools = nil
+	}
+	// Native schema-constrained output is capability-gated at the agent layer:
+	// when the client cannot honor a schema, do not put one on the wire. The
+	// schema name is left empty so each adapter picks its own default
+	// ("response" on OpenAI, "emit_answer" on Anthropic).
+	if len(responseSchema) > 0 && r.client.Capabilities().StructuredOutput {
+		req.ResponseSchema = responseSchema
 	}
 	tr.recordRequest(outcome.Iterations+1, messages)
 

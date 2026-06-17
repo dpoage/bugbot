@@ -12,13 +12,18 @@ import (
 
 // RunJSON runs the tool loop for task, instructing the model to return its final
 // answer as a single JSON value matching schema, then unmarshals that answer
-// into out (a pointer). If the model's output fails to parse, RunJSON makes one
-// repair round-trip — sending the parse error back and asking for valid JSON
-// only — before failing.
+// into out (a pointer). If the model's output fails to parse OR fails the
+// shallow root-level shape check, RunJSON makes one repair round-trip — sending
+// the error back and asking for valid JSON only — before failing.
 //
-// schema is a JSON Schema (raw JSON) describing the expected shape; it is
-// embedded verbatim in the instruction appended to the task. Pass nil to omit
-// the schema and only require "JSON matching out".
+// schema is a JSON Schema (raw JSON) describing the expected shape. It is
+// threaded natively as llm.Request.ResponseSchema (capability-gated: when the
+// client reports StructuredOutput==true the schema is sent on the wire, so
+// adapters that support native structured output can apply grammar-constrained
+// decoding). The same schema is also embedded verbatim in the prompt as a
+// fallback for adapters without that capability and for weak/older models. Pass
+// nil to skip the schema entirely; in that case only "JSON matching out" is
+// required and no native schema is sent.
 //
 // The returned [Outcome] is the underlying loop outcome (including the full
 // transcript and any truncation). On a successful parse, out is populated and
@@ -31,37 +36,74 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 	// Reserve the last iteration for a forced finalization turn: if the model is
 	// still investigating when the iteration cap is reached, it gets one final
 	// completion that demands the JSON answer now, instead of the loop returning
-	// dangling exploration prose that can never parse.
-	outcome, err := r.run(ctx, prompt, finalizationPrompt(schema))
+	// dangling exploration prose that can never parse. The schema is threaded
+	// natively so the finalization turn also benefits from grammar-constrained
+	// output on capable adapters.
+	outcome, err := r.run(ctx, prompt, finalizationPrompt(schema), schema)
 	if err != nil {
 		return outcome, err
 	}
 
-	if perr := parseInto(outcome.FinalText, out); perr == nil {
-		return outcome, nil
+	// Strip + shape check first (cheap, schema-aware) — this is the check that
+	// catches wrong-shape-but-valid-JSON (a bare array when the schema requires
+	// an object, a missing required field, etc.). Only after the body passes
+	// the root-shape check do we attempt the typed unmarshal: a typed unmarshal
+	// of an array into a struct fails with "cannot unmarshal array into Go
+	// value", which is misleading to a caller that wants to know the body was
+	// the wrong shape. The shape check's error message is the actionable one.
+	var perr error
+	body, berr := stripBody(outcome.FinalText)
+	if berr != nil {
+		perr = berr
+	} else if v := validateRootShape(schema, []byte(body)); v != nil {
+		perr = v
+	} else if p := json.Unmarshal([]byte(body), out); p != nil {
+		perr = p
 	} else {
-		// One repair round-trip: tell the model exactly what failed and demand
-		// JSON only. We continue the same conceptual task; a fresh Run keeps the
-		// loop simple and bounded by the same limits.
-		repair := fmt.Sprintf(
-			"%s\n\nYour previous output failed to parse as JSON: %s\nReturn ONLY valid JSON, with no prose, no explanation, and no markdown fences.",
-			task, perr.Error(),
-		)
-		if schema != nil {
-			repair += "\nIt must match this JSON schema:\n" + string(schema)
-		}
-
-		repairOutcome, rerr := r.run(ctx, repair, finalizationPrompt(schema))
-		if rerr != nil {
-			return repairOutcome, rerr
-		}
-		// Surface the repair attempt's outcome (its transcript reflects the retry).
-		if perr2 := parseInto(repairOutcome.FinalText, out); perr2 != nil {
-			return repairOutcome, fmt.Errorf("agent: model output did not parse as JSON after one repair%s: %w",
-				truncationNote(repairOutcome), perr2)
-		}
-		return repairOutcome, nil
+		return outcome, nil
 	}
+
+	// A run cut short by the budget pool or its own per-run token budget has no
+	// headroom for a repair completion, and a budget-stopped empty/unparseable
+	// output must keep its budget TruncationReason so the funnel classifies it as
+	// a budget stop, not a parse failure (bugbot-1q0). Skipping the repair here
+	// also preserves the budget overshoot bound (no extra post-exhaustion call).
+	if outcome.Truncated &&
+		(outcome.TruncationReason == TruncTokenBudget || outcome.TruncationReason == TruncBudgetPool) {
+		return outcome, fmt.Errorf("agent: model output did not parse as JSON%s: %w",
+			truncationNote(outcome), perr)
+	}
+
+	// One repair round-trip: tell the model exactly what failed and demand JSON
+	// only. The repair is now a single tools-less, schema-bearing completion
+	// (see [Runner.repair]) so adapters that support native structured output
+	// apply grammar-constrained decoding and the shape is guaranteed on the wire.
+	repair := fmt.Sprintf(
+		"%s\n\nYour previous output failed to parse as JSON: %s\nReturn ONLY valid JSON, with no prose, no explanation, and no markdown fences.",
+		task, perr.Error(),
+	)
+	if len(schema) > 0 {
+		repair += "\nIt must match this JSON schema:\n" + string(schema)
+	}
+
+	repairOutcome, rerr := r.repair(ctx, outcome.Transcript, repair, schema)
+	if rerr != nil {
+		return repairOutcome, rerr
+	}
+	repairBody, berr2 := stripBody(repairOutcome.FinalText)
+	if berr2 != nil {
+		return repairOutcome, fmt.Errorf("agent: model output did not parse as JSON after one repair%s: %w",
+			truncationNote(repairOutcome), berr2)
+	}
+	if verr := validateRootShape(schema, []byte(repairBody)); verr != nil {
+		return repairOutcome, fmt.Errorf("agent: model output did not parse as JSON after one repair%s: %w",
+			truncationNote(repairOutcome), verr)
+	}
+	if perr2 := json.Unmarshal([]byte(repairBody), out); perr2 != nil {
+		return repairOutcome, fmt.Errorf("agent: model output did not parse as JSON after one repair%s: %w",
+			truncationNote(repairOutcome), perr2)
+	}
+	return repairOutcome, nil
 }
 
 // truncationNote returns a short parenthetical when the run's final completion
@@ -105,18 +147,96 @@ func jsonInstruction(schema json.RawMessage) string {
 	return b.String()
 }
 
-// parseInto strips reasoning-model think blocks and any markdown fences from
-// text, then unmarshals the result into out. It returns a descriptive error on
-// failure.
-func parseInto(text string, out any) error {
+// stripBody returns the cleaned JSON body the model produced (think blocks and
+// markdown fences removed), exactly the bytes the typed unmarshal and
+// [validateRootShape] both inspect. An all-whitespace or empty body is
+// reported as an explicit "empty model output" error so the caller can treat
+// it as a parse failure and surface a clear message.
+func stripBody(text string) (string, error) {
 	body := stripFences(stripThinkBlocks(text))
 	if strings.TrimSpace(body) == "" {
-		return fmt.Errorf("empty model output")
+		return "", fmt.Errorf("empty model output")
 	}
-	if err := json.Unmarshal([]byte(body), out); err != nil {
-		return err
+	return body, nil
+}
+
+// validateRootShape checks the SHALLOW root-level shape of body against
+// schema. It is deliberately lenient — it does NOT recurse into items or
+// properties and ignores additionalProperties. The two checks it performs are:
+//
+//  1. The root JSON type matches the schema's top-level "type" when set
+//     (e.g. body is an object when schema requires an object, not a bare
+//     array).
+//  2. When the body is an object, every name in the schema's top-level
+//     "required" array is present as a key.
+//
+// Empty/nil schema is a no-op. The function returns a descriptive error on
+// mismatch (catching a bare-array-where-an-object-was-required or a missing
+// required field) so the RunJSON caller can route it through the repair path
+// — the whole point of this check is to catch wrong-shape-but-valid-JSON that
+// a typed unmarshal of `out` cannot detect (the typed unmarshal succeeds, the
+// caller gets a struct with default values, and downstream code silently
+// misbehaves).
+func validateRootShape(schema json.RawMessage, body []byte) error {
+	if len(schema) == 0 {
+		return nil
+	}
+	var root map[string]any
+	if err := json.Unmarshal(schema, &root); err != nil {
+		return fmt.Errorf("schema is not valid JSON: %w", err)
+	}
+	var parsed any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return fmt.Errorf("body is not valid JSON: %w", err)
+	}
+	actualType := jsonTypeOf(parsed)
+	if wantType, _ := root["type"].(string); wantType != "" && wantType != actualType {
+		return fmt.Errorf("root JSON type %q does not match schema type %q", actualType, wantType)
+	}
+	// Required-keys check: only meaningful when the body is an object. If the
+	// schema requires fields but the body is not an object, the type check
+	// above already caught it.
+	req, _ := root["required"].([]any)
+	if len(req) == 0 {
+		return nil
+	}
+	m, ok := parsed.(map[string]any)
+	if !ok {
+		return nil
+	}
+	for _, name := range req {
+		key, _ := name.(string)
+		if key == "" {
+			continue
+		}
+		if _, present := m[key]; !present {
+			return fmt.Errorf("root object missing required field %q", key)
+		}
 	}
 	return nil
+}
+
+// jsonTypeOf returns the JSON Schema name for the JSON value v: one of
+// "null", "boolean", "number", "string", "array", "object". It returns "" for
+// values it does not recognize — the caller treats that as "no usable type"
+// and skips the type-mismatch check.
+func jsonTypeOf(v any) string {
+	switch v.(type) {
+	case nil:
+		return "null"
+	case bool:
+		return "boolean"
+	case float64, float32, int, int32, int64, uint, uint32, uint64:
+		return "number"
+	case string:
+		return "string"
+	case []any:
+		return "array"
+	case map[string]any:
+		return "object"
+	default:
+		return ""
+	}
 }
 
 // leadingThinkRE matches a single <think>...</think> or <thinking>...</thinking>
@@ -146,8 +266,8 @@ var unclosedThinkRE = regexp.MustCompile(`(?is)^\s*<think(?:ing)?>.*$`)
 //
 // It strips repeatedly from the leading edge: multiple consecutive closed
 // blocks are all removed, then a single unclosed trailing <think> (a truncated
-// thought) is dropped. It deliberately does NOT strip blocks embedded inside the
-// JSON body, so a JSON string value that legitimately contains the literal
+// thought) is dropped. It deliberately does NOT strip blocks embedded inside
+// the JSON body, so a JSON string value that legitimately contains the literal
 // "<think>" survives intact.
 func stripThinkBlocks(s string) string {
 	out := s
@@ -166,9 +286,9 @@ func stripThinkBlocks(s string) string {
 }
 
 // stripFences removes a single surrounding markdown code fence (```...``` or
-// ```json...```) from s if present, returning the inner content. If no fence is
-// found, s is returned trimmed. This makes RunJSON tolerant of models that wrap
-// JSON in fences despite instructions not to.
+// ```json...```) from s if present, returning the inner content. If no fence
+// is found, s is returned trimmed. This makes RunJSON tolerant of models that
+// wrap JSON in fences despite instructions not to.
 func stripFences(s string) string {
 	t := strings.TrimSpace(s)
 	if !strings.HasPrefix(t, "```") {

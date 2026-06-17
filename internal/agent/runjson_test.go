@@ -15,6 +15,17 @@ type finding struct {
 	Message string `json:"message"`
 }
 
+// findingWithRefuted is the production finding shape — it has a boolean
+// "refuted" field that the historical finding struct omits. The native
+// schema tests use this struct so the schema's required=["file","message",
+// "refuted"] check actually exercises the missing-required-field branch
+// of validateRootShape.
+type findingWithRefuted struct {
+	File    string `json:"file"`
+	Message string `json:"message"`
+	Refuted bool   `json:"refuted"`
+}
+
 func TestRunJSON_DirectParse(t *testing.T) {
 	fc := newFakeClient(textResp(`{"file":"a.go","message":"bug"}`, 5, 5))
 	r := NewRunner(fc, nil, "sys")
@@ -577,7 +588,7 @@ func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
 		TokenBudget:   -1,
 		BudgetCheck:   pool.Check,
 	}))
-	out, _ := r2.run(context.Background(), "audit", finalizationPrompt(json.RawMessage(`{"type":"object"}`)))
+	out, _ := r2.run(context.Background(), "audit", finalizationPrompt(json.RawMessage(`{"type":"object"}`)), nil)
 	if !out.Truncated {
 		t.Error("Outcome.Truncated = false, want true (budget stop should still mark truncated)")
 	}
@@ -619,5 +630,252 @@ func TestRunJSON_RunPathNoExtraCall(t *testing.T) {
 	// calls — the precise count depends on charge order, but it MUST be < 3.
 	if c.callCount.Load() > 2 {
 		t.Errorf("Run (no finalize) made %d calls; the fix must NOT add an extra model call on the no-finalize path (want <= 2)", c.callCount.Load())
+	}
+}
+
+// findWithCandidatesSchema is the JSON schema the bugbot finder/verifier
+// historically uses for the "find a bug" answer shape. It exercises the
+// "object root + required top-level fields" branch of validateRootShape.
+const findWithCandidatesSchema = `{
+  "type": "object",
+  "required": ["file", "message", "refuted"],
+  "properties": {
+    "file": {"type": "string"},
+    "message": {"type": "string"},
+    "refuted": {"type": "boolean"}
+  }
+}`
+
+// validFindingJSON is one well-shaped answer to the schema above. Reused by
+// the cap-on and validation-triggered-repair tests.
+const validFindingJSON = `{"file":"a.go","message":"bug","refuted":false}`
+
+// TestRunJSON_NoCapPassthrough asserts the agent-layer gate: when the client
+// reports StructuredOutput==false, the wire request carries NO
+// ResponseSchema, and behavior matches today's no-native-schema path (parse +
+// parse-error → repair → after-one-repair error) exactly. This is the
+// acceptance criterion: "RunJSON sends ResponseSchema only when
+// StructuredOutput cap set".
+func TestRunJSON_NoCapPassthrough(t *testing.T) {
+	fc := newFakeClient(textResp(validFindingJSON, 5, 5))
+	// caps is the zero value: StructuredOutput is false.
+	r := NewRunner(fc, nil, "sys")
+
+	var got findingWithRefuted
+	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got)
+	if err != nil {
+		t.Fatalf("RunJSON: %v", err)
+	}
+	if got.File != "a.go" {
+		t.Errorf("parsed = %+v", got)
+	}
+	if len(fc.requests) != 1 {
+		t.Errorf("client calls = %d, want 1 (no cap, no repair)", len(fc.requests))
+	}
+	// The single wire request MUST NOT carry a ResponseSchema. The agent gate
+	// is supposed to drop the schema when the client can't honor it.
+	if len(fc.requests[0].ResponseSchema) != 0 {
+		t.Errorf("ResponseSchema on wire = %s, want empty (no-cap passthrough)", string(fc.requests[0].ResponseSchema))
+	}
+	_ = out
+}
+
+// TestRunJSON_CapOnCarriesSchema asserts that when the client reports
+// StructuredOutput==true, every completion in a RunJSON run carries the
+// ResponseSchema on the wire, so the adapter can apply grammar-constrained
+// decoding. This is the "CAP ON" half of the acceptance criterion.
+func TestRunJSON_CapOnCarriesSchema(t *testing.T) {
+	fc := newFakeClient(textResp(validFindingJSON, 5, 5))
+	fc.caps = llm.Capabilities{StructuredOutput: true}
+	r := NewRunner(fc, nil, "sys")
+
+	var got findingWithRefuted
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+		t.Fatalf("RunJSON: %v", err)
+	}
+	if got.File != "a.go" {
+		t.Errorf("parsed = %+v", got)
+	}
+	if len(fc.requests) != 1 {
+		t.Errorf("client calls = %d, want 1", len(fc.requests))
+	}
+	if got := string(fc.requests[0].ResponseSchema); got != findWithCandidatesSchema {
+		t.Errorf("ResponseSchema on wire = %s, want the schema verbatim", got)
+	}
+}
+
+// TestRunJSON_ValidationTriggersRepair asserts the core shape-validation
+// contract: when the model's first answer is valid JSON but the WRONG SHAPE
+// (here, a bare array where the schema requires an object), RunJSON detects
+// the shape violation and routes the call through the repair path. The
+// repair is a SINGLE tools-less, schema-bearing completion — not a fresh
+// tool loop — so adapters that support native structured output apply
+// grammar-constrained decoding on the retry and the answer is shape-correct
+// on the wire. This is the "VALIDATION-TRIGGERED REPAIR" acceptance case.
+func TestRunJSON_ValidationTriggersRepair(t *testing.T) {
+	// First answer is a bare JSON array — parses, but validateRootShape
+	// detects the root-type mismatch against the schema's "object" type.
+	// Repair returns a correct-shape object.
+	fc := newFakeClient(
+		textResp(`[{"file":"a.go","message":"bug","refuted":false}]`, 5, 5),
+		textResp(validFindingJSON, 5, 5),
+	)
+	fc.caps = llm.Capabilities{StructuredOutput: true}
+	r := NewRunner(fc, nil, "sys")
+
+	var got findingWithRefuted
+	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got)
+	if err != nil {
+		t.Fatalf("RunJSON should succeed after shape-repair: %v", err)
+	}
+	if got.File != "a.go" || got.Message != "bug" || got.Refuted != false {
+		t.Errorf("parsed = %+v, want the valid finding", got)
+	}
+	// First call ran the main loop with schema; second call is the
+	// single-completion repair. Total: 2 requests.
+	if len(fc.requests) != 2 {
+		t.Fatalf("client calls = %d, want 2 (main + repair)", len(fc.requests))
+	}
+	// The repair request MUST be tools-less so Google/Anthropic also honor
+	// the native schema on the retry.
+	repairReq := fc.requests[1]
+	if len(repairReq.Tools) != 0 {
+		t.Errorf("repair request carried %d tool(s), want 0 (tools-less constrained completion)", len(repairReq.Tools))
+	}
+	// The repair request MUST carry the schema (capability on) so the
+	// adapter applies grammar-constrained decoding.
+	if string(repairReq.ResponseSchema) != findWithCandidatesSchema {
+		t.Errorf("repair ResponseSchema = %s, want the schema verbatim", string(repairReq.ResponseSchema))
+	}
+	// The repair prompt must mention the parse/shape failure so the model
+	// knows why its previous output was rejected.
+	if !strings.Contains(repairReq.Messages[0].Content, "failed to parse") {
+		t.Errorf("repair prompt missing parse-failure note:\n%s", repairReq.Messages[0].Content)
+	}
+	_ = out
+}
+
+// TestRunJSON_ValidationTriggersRepair_MissingRequired is the same
+// shape-violation routing but exercises the "missing required field" branch
+// of validateRootShape (object root, type matches, but a required key is
+// absent). The repair should still fire and ultimately succeed.
+func TestRunJSON_ValidationTriggersRepair_MissingRequired(t *testing.T) {
+	// First answer is an object missing the schema-required "refuted" key.
+	// Repair returns a correct-shape object.
+	fc := newFakeClient(
+		textResp(`{"file":"a.go","message":"bug"}`, 5, 5),
+		textResp(validFindingJSON, 5, 5),
+	)
+	fc.caps = llm.Capabilities{StructuredOutput: true}
+	r := NewRunner(fc, nil, "sys")
+
+	var got findingWithRefuted
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+		t.Fatalf("RunJSON should succeed after missing-required repair: %v", err)
+	}
+	if got.File != "a.go" {
+		t.Errorf("parsed = %+v", got)
+	}
+	if len(fc.requests) != 2 {
+		t.Errorf("client calls = %d, want 2 (main + repair)", len(fc.requests))
+	}
+}
+
+// TestRunJSON_RepairStillWrongShape asserts that when the repair's reply is
+// STILL the wrong shape, RunJSON returns the canonical "did not parse as JSON
+// after one repair" error (with a wrapping shape error so callers can
+// distinguish a shape violation from a parse failure via errors.Is/Wraps).
+func TestRunJSON_RepairStillWrongShape(t *testing.T) {
+	// First answer is a bare array (wrong shape). Repair also returns a
+	// bare array. Both calls have the same shape violation.
+	fc := newFakeClient(
+		textResp(`[{"file":"a.go"}]`, 5, 5),
+		textResp(`[{"file":"a.go"}]`, 5, 5),
+	)
+	fc.caps = llm.Capabilities{StructuredOutput: true}
+	r := NewRunner(fc, nil, "sys")
+
+	var got findingWithRefuted
+	_, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got)
+	if err == nil {
+		t.Fatal("expected error after still-wrong repair")
+	}
+	if !strings.Contains(err.Error(), "after one repair") {
+		t.Errorf("error = %v, want 'after one repair'", err)
+	}
+	// The wrapped error must be the shape violation, not a parse failure —
+	// callers can errors.Unwrap to classify the failure mode.
+	if !strings.Contains(err.Error(), "root JSON type") {
+		t.Errorf("error = %v, want the wrapped shape-violation message", err)
+	}
+}
+
+// TestValidateRootShape pins down the helper's contract on its own, separate
+// from the RunJSON routing above. It covers the four cases the helper is
+// documented to handle: nil/empty schema (no-op), matching type with all
+// required fields (pass), type mismatch (fail), missing required field
+// (fail).
+func TestValidateRootShape(t *testing.T) {
+	schema := json.RawMessage(findWithCandidatesSchema)
+	cases := []struct {
+		name    string
+		schema  json.RawMessage
+		body    string
+		wantErr bool
+		wantMsg string
+	}{
+		{
+			name:    "nil schema is a no-op",
+			schema:  nil,
+			body:    `not even json`,
+			wantErr: false,
+		},
+		{
+			name:    "matching object with all required fields passes",
+			schema:  schema,
+			body:    validFindingJSON,
+			wantErr: false,
+		},
+		{
+			name:    "type mismatch: bare array when object required",
+			schema:  schema,
+			body:    `[{"file":"a.go"}]`,
+			wantErr: true,
+			wantMsg: "root JSON type",
+		},
+		{
+			name:    "object missing required field fails",
+			schema:  schema,
+			body:    `{"file":"a.go","message":"bug"}`,
+			wantErr: true,
+			wantMsg: `missing required field "refuted"`,
+		},
+		{
+			name:    "schema requires nothing: any object passes",
+			schema:  json.RawMessage(`{"type":"object"}`),
+			body:    `{}`,
+			wantErr: false,
+		},
+		{
+			name:    "schema with no type: any value passes",
+			schema:  json.RawMessage(`{}`),
+			body:    `42`,
+			wantErr: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateRootShape(tc.schema, []byte(tc.body))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("validateRootShape(%q, %q) = nil, want error containing %q", tc.schema, tc.body, tc.wantMsg)
+				}
+				if tc.wantMsg != "" && !strings.Contains(err.Error(), tc.wantMsg) {
+					t.Errorf("error = %q, want substring %q", err.Error(), tc.wantMsg)
+				}
+			} else if err != nil {
+				t.Errorf("validateRootShape(%q, %q) = %v, want nil", tc.schema, tc.body, err)
+			}
+		})
 	}
 }
