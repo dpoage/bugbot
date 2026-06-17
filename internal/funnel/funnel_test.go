@@ -789,29 +789,43 @@ func TestSweep_BudgetDegradation(t *testing.T) {
 	}
 }
 
-// TestSweep_BudgetOrphanPersistsAsTier3 proves the budget-orphan persistence
-// requirement: when the run hits its hard budget before a triaged candidate can
-// be verified, that candidate is NOT dropped. It persists as an open Tier 3
-// suspected finding, surfaces in Result.Findings and Result.Skipped, and is
-// counted in Stats.Suspected — so a human can still review it.
+// TestSweep_BudgetOrphanPersistsAsTier3 proves budget-orphan persistence UNDER
+// the downstream reservation: when the VERIFY sub-pool is exhausted (by an
+// earlier candidate's panel) before a later candidate can be verified, that
+// later candidate is NOT dropped. It persists as an open Tier 3 suspected
+// finding, surfaces in Result.Findings and Result.Skipped, and is counted in
+// Stats.Suspected — so a human can still review it.
+//
+// It also pins the bugbot-3lt prioritization fix in the SAME run: the finder
+// stage spends its entire reserved share, yet the verify reserve still carries
+// one candidate all the way to a Tier-2 survivor. The orphan is driven by
+// verify-sub-pool exhaustion (verifyOverHard at the gate), never by finder
+// spend — the property the old single-pool premise could not express once the
+// reservation existed.
 func TestSweep_BudgetOrphanPersistsAsTier3(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)
 
-	// One lens, one real candidate. The single finder completion costs 150 tokens
-	// (100 in + 50 out), which already exceeds the tiny hard budget — so by the
-	// time the verify stage runs, the hard-stop gate fires and the candidate is
-	// orphaned rather than verified.
+	// One lens emits TWO distinct candidates (bug.go:10 and clean.go:5). With
+	// FinderBudgetShare=0.5 and TokenBudget=300 the pool splits into a 150-token
+	// finder reserve and a 150-token verify reserve; each completion costs 150
+	// (100 in + 50 out) at raw accounting. MaxParallel=1 + a single-refuter panel
+	// serialize the two verifications through the one slot: the first candidate's
+	// refuter spends the whole 150-token verify reserve and SURVIVES as T2; the
+	// second candidate then hits verifyOverHard at the gate and is orphaned T3
+	// WITHOUT its verifier ever running.
 	finder := newScriptedClient()
-	finder.fallback = candJSON(realCand)
+	finderOnNilLens(finder)
 	verifier := newScriptedClient()
 	verifier.fallback = notRefutedJSON
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
 		Lenses:                []string{"nil-safety/error-handling"},
-		TokenBudget:           100, // < 150, so the pool is exhausted after the finder call
-		CacheReadBudgetWeight: 1.0, // raw accounting: this test pins hard-stop, not weighting
-		MaxParallel:           1,
+		TokenBudget:           300, // finder reserve 150, verify reserve 150
+		FinderBudgetShare:     0.5,
+		Refuters:              1, // one refuter (150 tokens) fills the verify reserve
+		CacheReadBudgetWeight: 1.0,
+		MaxParallel:           1, // serialize so the two verifications race deterministically
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -822,38 +836,48 @@ func TestSweep_BudgetOrphanPersistsAsTier3(t *testing.T) {
 	}
 
 	if !res.Stopped {
-		t.Errorf("expected Stopped=true after hitting the hard budget")
+		t.Errorf("expected Stopped=true after the verify reserve was exhausted")
+	}
+	// Exactly one candidate verified to T2 (the verify reserve carried it through
+	// even though the finder spent its whole share) and exactly one was orphaned.
+	if res.Stats.Verified != 1 {
+		t.Errorf("Stats.Verified = %d, want 1 (one candidate survived within the verify reserve)", res.Stats.Verified)
 	}
 	if res.Stats.Suspected != 1 {
-		t.Errorf("Stats.Suspected = %d, want 1", res.Stats.Suspected)
+		t.Errorf("Stats.Suspected = %d, want 1 (the budget-orphaned candidate)", res.Stats.Suspected)
 	}
-	if res.Stats.Verified != 0 {
-		t.Errorf("Stats.Verified = %d, want 0 (verification was budget-stopped)", res.Stats.Verified)
-	}
-	// The verifier must never have run: the candidate was orphaned at the gate.
-	if verifier.callCount() != 0 {
-		t.Errorf("verifier ran %d times; expected 0 (budget exhausted before verify)", verifier.callCount())
+	// The verifier ran for exactly the one survivor; the orphan was gated out
+	// before any refuter launched for it.
+	if verifier.callCount() != 1 {
+		t.Errorf("verifier ran %d times; want 1 (only the survivor's single refuter)", verifier.callCount())
 	}
 
-	// The orphan must be persisted and returned as an open Tier 3 finding.
-	if len(res.Findings) != 1 {
-		t.Fatalf("want 1 finding (the T3 orphan), got %d: %+v", len(res.Findings), res.Findings)
+	// Result.Findings holds both the T2 survivor and the T3 orphan. Which of the
+	// two candidates wins the single slot is not asserted (scheduler-dependent);
+	// the tier split is.
+	if len(res.Findings) != 2 {
+		t.Fatalf("want 2 findings (one T2 survivor, one T3 orphan), got %d: %+v", len(res.Findings), res.Findings)
 	}
-	got := res.Findings[0]
-	if got.Tier != 3 {
-		t.Errorf("tier = %d, want 3 (suspected)", got.Tier)
+	var t2, t3 int
+	for _, fnd := range res.Findings {
+		switch fnd.Tier {
+		case 2:
+			t2++
+		case 3:
+			t3++
+			if fnd.Status != store.StatusOpen {
+				t.Errorf("orphan status = %q, want open", fnd.Status)
+			}
+			if !strings.Contains(fnd.Reasoning, "Verification skipped") {
+				t.Errorf("orphan reasoning should explain the budget stop, got %q", fnd.Reasoning)
+			}
+		}
 	}
-	if got.Status != store.StatusOpen {
-		t.Errorf("status = %q, want open", got.Status)
-	}
-	if got.File != "bug.go" || got.Line != 10 {
-		t.Errorf("anchor = %s:%d, want bug.go:10", got.File, got.Line)
-	}
-	if !strings.Contains(got.Reasoning, "Verification skipped") {
-		t.Errorf("reasoning should explain the budget stop, got %q", got.Reasoning)
+	if t2 != 1 || t3 != 1 {
+		t.Errorf("tiers = {T2:%d, T3:%d}, want {T2:1, T3:1}", t2, t3)
 	}
 
-	// And it must be visibly noted as a skip so a human knows it wasn't verified.
+	// The orphan must be visibly noted as a skip so a human knows it wasn't verified.
 	foundNote := false
 	for _, n := range res.Skipped {
 		if strings.Contains(n, "T3 suspected") {
@@ -1031,6 +1055,97 @@ func TestBudgetState_CacheReadWeighted(t *testing.T) {
 	}
 	if spent := b.pool.Spent(); spent != 1050 {
 		t.Errorf("pool charged %d, want 1050 (500 + 4500*0.1 + 100)", spent)
+	}
+}
+
+// TestBudgetReserve_VerifyGateIndependentOfFinderSpend pins the bugbot-3lt
+// prioritization fix at the gate level: under a downstream reservation the
+// verify stage gates on its OWN reserve, never on finder spend. Exhausting the
+// finder share (and beyond) must hard-stop finders WITHOUT degrading or stopping
+// verify, and verify must stop only once its own reserve is spent. This is the
+// deterministic core of "finders can't starve downstream".
+func TestBudgetReserve_VerifyGateIndependentOfFinderSpend(t *testing.T) {
+	st, _ := openFixture(t)
+	rec := &spendRecorder{ctx: context.Background(), store: st}
+	b := newBudgetState(1000, rec, 1.0)
+	b.reserveForDownstream(0.7) // finder reserve 700, verify reserve 300
+
+	// Spend the entire finder share (the "finders blow through the limit" case).
+	b.finderPool.Add(700)
+	if !b.finderOverHard() {
+		t.Errorf("finderOverHard = false after finders spent their full 700 share, want true")
+	}
+	if b.verifyOverHard() {
+		t.Errorf("verifyOverHard = true purely from finder exhaustion; verify must keep its reserve (prioritization)")
+	}
+	if b.verifyOverSoft() {
+		t.Errorf("verifyOverSoft = true purely from finder exhaustion; finder spend must not degrade verify")
+	}
+
+	// Verify stops only when its OWN reserve is exhausted.
+	b.verifyPool.Add(300)
+	if !b.verifyOverHard() {
+		t.Errorf("verifyOverHard = false after the verify reserve was fully spent, want true")
+	}
+}
+
+// TestRunnerLimits_ClaimCap pins the per-task claim: a finder/verifier run is
+// granted at most its role's claim (default-or-configured), clamped down to the
+// sub-pool remainder when that is tighter, and uncapped (full remainder) when
+// the claim is negative.
+func TestRunnerLimits_ClaimCap(t *testing.T) {
+	st, _ := openFixture(t)
+	rec := &spendRecorder{ctx: context.Background(), store: st}
+	b := newBudgetState(10_000_000, rec, 1.0)
+	b.finderClaim = 1_000_000
+	b.verifyClaim = 1_000_000
+	b.reserveForDownstream(0.7) // finder reserve 7M, verify reserve 3M
+
+	// claim (1M) < pool remainder (7M / 3M) => per-run budget == claim.
+	if got := b.finderRunnerLimits(agent.Limits{}).TokenBudget; got != 1_000_000 {
+		t.Errorf("finder per-run budget = %d, want 1_000_000 (claim cap below remainder)", got)
+	}
+	if got := b.verifyRunnerLimits(agent.Limits{}).TokenBudget; got != 1_000_000 {
+		t.Errorf("verify per-run budget = %d, want 1_000_000 (claim cap below remainder)", got)
+	}
+
+	// Drive the finder sub-pool down so its remainder (500k) is below the claim.
+	b.finderPool.Add(6_500_000)
+	if got := b.finderRunnerLimits(agent.Limits{}).TokenBudget; got != 500_000 {
+		t.Errorf("finder per-run budget = %d, want 500_000 (remainder below claim)", got)
+	}
+
+	// A negative claim disables the per-task cap: the run may use the full remainder.
+	b.finderClaim = -1
+	if got := b.finderRunnerLimits(agent.Limits{}).TokenBudget; got != 500_000 {
+		t.Errorf("finder per-run budget = %d, want 500_000 (full remainder, claim disabled)", got)
+	}
+}
+
+// TestSpendRecorder_ClaimRefundIsAutomatic proves the "return to the pool on
+// closure" property: because the recorder charges the sub-pool only for tokens
+// ACTUALLY spent, a run granted a 1M claim that spends 200k leaves the other
+// 800k available to siblings — the claim is never reserved away in the first
+// place.
+func TestSpendRecorder_ClaimRefundIsAutomatic(t *testing.T) {
+	st, _ := openFixture(t)
+	rec := &spendRecorder{ctx: context.Background(), store: st}
+	b := newBudgetState(2_000_000, rec, 1.0)
+	b.finderClaim = 1_000_000
+	b.reserveForDownstream(0.5) // finder reserve 1M, verify reserve 1M
+
+	// A finder run granted a 1M claim spends only 200k.
+	rec.Record(llm.UsageEvent{Role: roleFinder, Usage: llm.Usage{InputTokens: 150_000, OutputTokens: 50_000}})
+
+	if got := b.finderPool.Spent(); got != 200_000 {
+		t.Errorf("finder pool charged %d, want 200_000 (actual spend only, not the claim)", got)
+	}
+	if got := b.finderPool.Remaining(); got != 800_000 {
+		t.Errorf("finder pool remaining = %d, want 800_000 (unspent claim stays available, NOT reserved away)", got)
+	}
+	// The sibling role is untouched: a finder run never debits the verify reserve.
+	if got := b.verifyPool.Spent(); got != 0 {
+		t.Errorf("verify pool charged %d by a finder run, want 0 (hard reserve)", got)
 	}
 }
 

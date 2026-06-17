@@ -64,7 +64,7 @@ func (f *Funnel) runVerifyAndPersist(
 	defer f.slots.release()
 
 	// Hard budget gate: orphan without verifying.
-	if budget.overHard() {
+	if budget.verifyOverHard() {
 		budget.stopped.Store(true)
 		msg := fmt.Sprintf("hard budget reached: verification skipped for %q (%s:%d) — kept as T3 suspected", c.Title, c.File, c.Line)
 		f.note(result, msg)
@@ -89,7 +89,7 @@ func (f *Funnel) runVerifyAndPersist(
 	}
 
 	nRefuters := f.opts.Refuters
-	if budget.overSoft() {
+	if budget.verifyOverSoft() {
 		budget.degraded.Store(true)
 		if nRefuters > degradedRefuters {
 			nRefuters = degradedRefuters

@@ -354,8 +354,8 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			})
 		}
 	}
-	finderClient := llm.WithRecorder(f.clients.Finder, rec, "finder", "", "")
-	verifierClient := llm.WithRecorder(f.clients.Verifier, rec, "verifier", "", "")
+	finderClient := llm.WithRecorder(f.clients.Finder, rec, roleFinder, "", "")
+	verifierClient := llm.WithRecorder(f.clients.Verifier, rec, roleVerifier, "", "")
 
 	// Capability-driven scaling: a small-context model (e.g. 8k local LLM
 	// behind an openai-compatible endpoint) silently overflows with one-size
@@ -372,6 +372,17 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		cacheWeight = DefaultCacheReadBudgetWeight
 	}
 	budget := newBudgetState(f.opts.TokenBudget, rec, cacheWeight)
+	// Per-task token claims: each finder / verifier agent run is capped at its
+	// role's claim so one breadth-heavy run cannot be granted a whole stage's
+	// reserve at launch; the unspent remainder of a claim stays in the pool for
+	// sibling runs (the claimant system, bugbot-8mj).
+	budget.finderClaim = f.opts.FinderTokenClaim
+	budget.verifyClaim = f.opts.VerifierTokenClaim
+	// Reserve a slice of the per-run budget for downstream verification so the
+	// breadth-heavy finder stage cannot drain the whole pool and orphan every
+	// candidate before it is verified (bugbot-8mj / bugbot-3lt). A no-op when the
+	// budget is unlimited or the share disables the reservation.
+	budget.reserveForDownstream(f.opts.FinderBudgetShare)
 
 	result := &Result{ScanRunID: scanRunID, Commit: snap.Commit}
 

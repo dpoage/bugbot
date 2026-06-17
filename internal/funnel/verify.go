@@ -66,7 +66,7 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 			sysPrompt += "\n\n" + seat.clause
 		}
 		runner := agent.NewRunner(verifier, tools, sysPrompt,
-			agent.WithLimits(budget.runnerLimits(f.opts.VerifierLimits)),
+			agent.WithLimits(budget.verifyRunnerLimits(f.opts.VerifierLimits)),
 			agent.WithMaxTokens(DefaultMaxOutputTokens),
 			f.transcriptOption(),
 		)
@@ -114,7 +114,7 @@ func (f *Funnel) runArbiter(ctx context.Context, verifier llm.Client, candTools 
 		}
 	}
 	runner := agent.NewRunner(verifier, candTools, arbiterSystemPrompt(persona, hasSandbox),
-		agent.WithLimits(budget.runnerLimits(f.opts.VerifierLimits)),
+		agent.WithLimits(budget.verifyRunnerLimits(f.opts.VerifierLimits)),
 		agent.WithMaxTokens(DefaultMaxOutputTokens),
 		f.transcriptOption(),
 	)

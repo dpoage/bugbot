@@ -357,7 +357,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			// the decision reflects spend already recorded by earlier units rather
 			// than a stale pre-launch snapshot. This is what makes degradation and
 			// the hard stop actually bite as the run progresses.
-			if budget.overHard() {
+			if budget.finderOverHard() {
 				budget.stopped.Store(true)
 				msg := fmt.Sprintf("hard budget reached: skipped finder lens %q on %d file(s)", u.lens.Name, len(u.files))
 				f.note(result, msg)
@@ -366,7 +366,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				f.recordFinderUnit(ctx, scanRunID, u, unitIdx, "skipped_hard_budget", 0, 0, 0, 0, 0, result)
 				return
 			}
-			if budget.overSoft() {
+			if budget.finderOverSoft() {
 				budget.degraded.Store(true)
 				classKey := u.lens.Name + "@" + u.strategy.Name
 				if !degradedUnits[classKey] {
@@ -689,7 +689,7 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 	})
 
 	runner := agent.NewRunner(finder, tools, sysprompt,
-		agent.WithLimits(budget.runnerLimits(f.opts.FinderLimits)),
+		agent.WithLimits(budget.finderRunnerLimits(f.opts.FinderLimits)),
 		agent.WithMaxTokens(DefaultMaxOutputTokens),
 		f.transcriptOption(),
 	)
