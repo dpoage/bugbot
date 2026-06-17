@@ -36,6 +36,7 @@ var thinkBlockPattern = regexp.MustCompile(`(?is)<think(?:ing)?>.*?</think(?:ing
 // provider (e.g. MiniMax M2.7) inline their chain-of-thought into
 // message.content prefixed to the real answer; the finder JSON parser
 // cannot handle the CoT prefix, so removing the block before the parser
+// sees it lets reasoning-model output parse as cleanly as a plain model's.
 func stripThinkBlocks(s string) string {
 	// No prefilter: thinkBlockPattern is the authoritative match (case-insensitive,
 	// non-greedy, multi-line). When no block is present, ReplaceAllString returns
