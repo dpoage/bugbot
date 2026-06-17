@@ -30,6 +30,11 @@ providers:
   #   type: openai-compatible
   #   base_url: http://localhost:11434/v1
   #   api_key_env: LOCAL_API_KEY
+  #   # Opt in to native grammar-constrained JSON output (provider response_format
+  #   # / forced-tool schema) for endpoints that support it (e.g. MiniMax-M3).
+  #   # Defaults to off for openai-compatible since arbitrary endpoints vary;
+  #   # first-party anthropic/openai/google enable it automatically.
+  #   structured_output: true
   #
   # OAuth bearer-token mode (for Claude Code subscription users without a
   # pay-per-token ANTHROPIC_API_KEY). Run "claude setup-token" once to populate

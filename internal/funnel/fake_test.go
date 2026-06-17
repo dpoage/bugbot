@@ -17,6 +17,13 @@ import (
 // exactly what RunJSON needs: the agent loop makes one completion, sees no tool
 // calls, finishes the turn, and RunJSON parses FinalText. Usage is attached so
 // budget/spend accounting has something to count.
+//
+// Tests that need to verify the agent-layer gate for native schema-constrained
+// output flip caps (via newScriptedClientWithCaps) so the client reports
+// StructuredOutput=true; otherwise the zero value is the historical default
+// (no caps, all behavior unchanged). The requests field records every
+// llm.Request the client sees so tests can assert on wire-level fields like
+// ResponseSchema and Tools without standing up a recorder.
 type scriptedClient struct {
 	mu          sync.Mutex
 	routes      []route
@@ -25,6 +32,17 @@ type scriptedClient struct {
 	inUsage     int64
 	outUsage    int64
 	cachedUsage int64 // subset of inUsage reported as cache reads
+	// caps is the static capability profile this client reports. The zero
+	// value (StructuredOutput=false) is the historical default; tests that
+	// need to verify the agent-layer gate for native schema-constrained
+	// output flip this on via newScriptedClientWithCaps. Add (or set) only
+	// — never change a field's meaning — so existing tests keep their
+	// behavior.
+	caps llm.Capabilities
+	// requests records every llm.Request Complete sees, in arrival order.
+	// Lock-protected; tests inspect it via allRequests. The recording is
+	// purely additive: it does not change the response the client returns.
+	requests []llm.Request
 }
 
 // route maps a request predicate to a JSON response body.
@@ -35,6 +53,16 @@ type route struct {
 
 func newScriptedClient() *scriptedClient {
 	return &scriptedClient{inUsage: 100, outUsage: 50, cachedUsage: 60}
+}
+
+// newScriptedClientWithCaps returns a fresh scriptedClient that reports
+// the given capability profile. It does NOT copy an existing client's
+// mutex (which would violate sync.Mutex's "must not be copied after
+// first use" rule and produce a client that deadlocks on its first
+// Lock). Use this for structured-output tests that need
+// StructuredOutput=true on a single client.
+func newScriptedClientWithCaps(caps llm.Capabilities) *scriptedClient {
+	return &scriptedClient{inUsage: 100, outUsage: 50, cachedUsage: 60, caps: caps}
 }
 
 // on registers a route: when match returns true for a request, body is served.
@@ -63,7 +91,7 @@ func (c *scriptedClient) onTaskContains(sub, body string) *scriptedClient {
 	}, body)
 }
 
-func (c *scriptedClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *scriptedClient) Capabilities() llm.Capabilities { return c.caps }
 
 func (c *scriptedClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
 	if err := ctx.Err(); err != nil {
@@ -72,6 +100,7 @@ func (c *scriptedClient) Complete(ctx context.Context, req llm.Request) (llm.Res
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls++
+	c.requests = append(c.requests, req)
 
 	body := c.fallback
 	for _, r := range c.routes {
@@ -97,6 +126,17 @@ func (c *scriptedClient) callCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.calls
+}
+
+// allRequests returns a copy of the recorded requests, in arrival order.
+// Returned slice is detached from the client's internal state so the caller
+// can inspect it without holding the lock.
+func (c *scriptedClient) allRequests() []llm.Request {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]llm.Request, len(c.requests))
+	copy(out, c.requests)
+	return out
 }
 
 // emptyCandidates is the finder JSON for "found nothing".

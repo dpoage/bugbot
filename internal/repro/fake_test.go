@@ -12,10 +12,24 @@ import (
 // with no tool calls), which is exactly what RunJSON consumes: one completion,
 // no tool calls, parse FinalText. Every request is recorded so tests can assert
 // that revision feedback reached the model.
+//
+// Tests that need to verify the agent-layer gate for native schema-constrained
+// output set caps.StructuredOutput=true before passing the client to the
+// reproducer/patch-prover; otherwise the zero value is the historical default
+// (no caps, all behavior unchanged).
 type scriptedClient struct {
-	mu       sync.Mutex
-	bodies   []string
-	idx      int
+	mu     sync.Mutex
+	bodies []string
+	idx    int
+	// caps is the static capability profile this client reports. The zero
+	// value (StructuredOutput=false) is the historical default; tests that
+	// need to verify the agent-layer gate for native schema-constrained
+	// output set this field directly before passing the client to the
+	// reproducer/patch-prover. The recording of requests is unchanged.
+	caps llm.Capabilities
+	// requests records every llm.Request Complete sees, in arrival order.
+	// Tests inspect it via allRequests to assert that revision feedback or
+	// wire-level fields (ResponseSchema, Tools) reached the model.
 	requests []llm.Request
 }
 
@@ -23,7 +37,7 @@ func newScriptedClient(bodies ...string) *scriptedClient {
 	return &scriptedClient{bodies: bodies}
 }
 
-func (c *scriptedClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *scriptedClient) Capabilities() llm.Capabilities { return c.caps }
 
 func (c *scriptedClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
 	if err := ctx.Err(); err != nil {
