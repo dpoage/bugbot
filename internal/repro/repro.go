@@ -256,7 +256,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (*Attem
 			return nil, fmt.Errorf("repro: execute finding %s: %w", finding.ID, serr)
 		}
 
-		verdict := interpret(res)
+		verdict := interpret(res, plan.Cmd)
 		att.Output = verdict.summary
 
 		if verdict.demonstrated {

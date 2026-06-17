@@ -479,8 +479,14 @@ func TestPatchProver_EnvironmentFailureStops(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for environment failure, got nil")
 	}
-	if !strings.Contains(err.Error(), "environment failure") {
-		t.Errorf("error = %q, want environment failure message", err)
+	// bugbot-vig: the prover now distinguishes "environment cannot run
+	// repro" (env failure — sandbox refused to run the test) from
+	// "fix rejected" (the test ran and still failed). The
+	// distinctive substring here proves we are in the env-failure
+	// branch, not a fix-rejection that happens to be a non-zero
+	// exit.
+	if !strings.Contains(err.Error(), "environment cannot run repro") {
+		t.Errorf("error = %q, want distinctive 'environment cannot run repro' message", err)
 	}
 
 	// Finding must NOT be flagged NeedsHuman (env failure, not a fix-refusal).
@@ -496,7 +502,7 @@ func TestPatchProver_EnvironmentFailureStops(t *testing.T) {
 // --- patchVerdict inversion tests -------------------------------------------
 
 func TestPatchVerdict_ExitZeroIsPass(t *testing.T) {
-	v := patchVerdict(sandbox.Result{ExitCode: 0, Stdout: "ok"})
+	v := patchVerdict(sandbox.Result{ExitCode: 0, Stdout: "ok"}, []string{"go", "test", "./..."})
 	if !v.passed {
 		t.Errorf("exit 0 should be a PASS in patch context; got passed=%v", v.passed)
 	}
@@ -506,12 +512,23 @@ func TestPatchVerdict_ExitZeroIsPass(t *testing.T) {
 }
 
 func TestPatchVerdict_NonZeroIsFail(t *testing.T) {
-	v := patchVerdict(sandbox.Result{ExitCode: 1, Stdout: "FAIL"})
+	// The repro test that previously demonstrated the bug is
+	// re-run with the patch applied. If the test still fails
+	// (non-zero exit, no env / toolchain / build markers), the
+	// fix is rejected — passed=false, envFailure=false. The
+	// "FAIL" stdout is a degenerate case that the legacy test
+	// relied on; under the new classification it falls through
+	// to the default "non-zero, no env markers" branch, which
+	// is fixRejected (mutually exclusive with envFailure).
+	v := patchVerdict(sandbox.Result{ExitCode: 1, Stdout: "FAIL"}, []string{"go", "test", "./..."})
 	if v.passed {
 		t.Errorf("exit 1 should be a FAIL in patch context")
 	}
 	if v.envFailure {
 		t.Errorf("exit 1 test failure should not be env failure")
+	}
+	if !v.fixRejected {
+		t.Errorf("exit 1 test failure should be classified as fixRejected; got %+v", v)
 	}
 }
 
@@ -528,7 +545,7 @@ func TestPatchVerdict_EnvironmentErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			v := patchVerdict(tc.res)
+			v := patchVerdict(tc.res, []string{"go", "test", "./..."})
 			if !v.envFailure {
 				t.Errorf("patchVerdict(%+v).envFailure = false, want true", tc.res)
 			}
@@ -536,6 +553,71 @@ func TestPatchVerdict_EnvironmentErrors(t *testing.T) {
 				t.Errorf("patchVerdict(%+v).passed = true, want false", tc.res)
 			}
 		})
+	}
+}
+
+// TestPatchVerdict_EnvFailureTranscript_NotFixRejected is the
+// acceptance-criterion-3 regression test: a transcript that is
+// unambiguously an environment failure (cgo refusal — the same Go
+// toolchain marker as the repro-stage regression test) must be
+// reported as envFailure=true, NOT as fixRejected. The two
+// categories must remain mutually exclusive so the prover can
+// distinguish "the sandbox could not run the repro" from "the fix
+// is wrong".
+func TestPatchVerdict_EnvFailureTranscript_NotFixRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		res  sandbox.Result
+		cmd  []string
+	}{
+		{
+			"cgo refusal (Go toolchain marker)",
+			sandbox.Result{ExitCode: 2, Stderr: "go: -race requires cgo; enable cgo by setting CGO_ENABLED=1"},
+			[]string{"go", "test", "-race", "./..."},
+		},
+		{
+			"read-only filesystem (cross-ecosystem env marker)",
+			sandbox.Result{ExitCode: 1, Stderr: "mkdir /data: Read-only file system"},
+			[]string{"go", "test", "./..."},
+		},
+		{
+			"pytest collection error (Python toolchain marker)",
+			sandbox.Result{ExitCode: 2, Stderr: "ImportError: cannot import name 'foo'"},
+			[]string{"pytest", "tests/"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := patchVerdict(tc.res, tc.cmd)
+			if !v.envFailure {
+				t.Errorf("env-failure transcript must set envFailure=true; got %+v", v)
+			}
+			if v.fixRejected {
+				t.Errorf("env-failure transcript must NOT set fixRejected; got %+v", v)
+			}
+			if v.passed {
+				t.Errorf("env-failure transcript must not pass; got %+v", v)
+			}
+		})
+	}
+}
+
+// TestPatchVerdict_FixRejectedTranscript asserts the complementary case:
+// a non-zero exit with no env / toolchain / build markers IS classified
+// as fixRejected. This is the default that keeps the legacy
+// "non-zero means the test still failed" semantics for the case where
+// the run issued a non-zero exit and we have no positive evidence of
+// env failure.
+func TestPatchVerdict_FixRejectedTranscript(t *testing.T) {
+	v := patchVerdict(sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestDivide (0.00s)\nFAIL"}, []string{"go", "test", "./..."})
+	if v.envFailure {
+		t.Errorf("fix-rejected transcript must not set envFailure; got %+v", v)
+	}
+	if !v.fixRejected {
+		t.Errorf("fix-rejected transcript must set fixRejected; got %+v", v)
+	}
+	if v.passed {
+		t.Errorf("fix-rejected transcript must not pass; got %+v", v)
 	}
 }
 

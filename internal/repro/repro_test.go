@@ -436,26 +436,35 @@ func TestPromoteAll_Exhaustion(t *testing.T) {
 // --- options defaults -------------------------------------------------------
 
 func TestInterpret_EnvironmentFailuresNeverDemonstrate(t *testing.T) {
+	// The default command used by these cases: a generic `go test`
+	// invocation. Most of the cases below produce Go-style output
+	// (build cache refusal, syntax error, --- FAIL), so the
+	// detected ecosystem is Go. Cases that should fail regardless
+	// of ecosystem (exit 125/126/127, timeout, exit_zero) use the
+	// same command because the exit-code short-circuits run before
+	// the ecosystem table is consulted.
+	goCmd := []string{"go", "test", "./..."}
 	cases := []struct {
 		name   string
 		res    sandbox.Result
+		cmd    []string
 		reason string
 	}{
-		{"runtime error 125", sandbox.Result{ExitCode: 125, Stderr: "podman: error"}, "environment_error"},
-		{"not executable 126", sandbox.Result{ExitCode: 126, Stderr: "permission denied"}, "environment_error"},
-		{"not found 127", sandbox.Result{ExitCode: 127, Stderr: "sh: gotest: not found"}, "environment_error"},
+		{"runtime error 125", sandbox.Result{ExitCode: 125, Stderr: "podman: error"}, goCmd, "environment_error"},
+		{"not executable 126", sandbox.Result{ExitCode: 126, Stderr: "permission denied"}, goCmd, "environment_error"},
+		{"not found 127", sandbox.Result{ExitCode: 127, Stderr: "sh: gotest: not found"}, goCmd, "environment_error"},
 		// The real-world case this guard exists for: read-only root broke the
 		// Go build cache, exit 1 in 0.13s, and got promoted to Tier 1.
-		{"go build cache", sandbox.Result{ExitCode: 1, Stderr: "failed to initialize build cache at /root/.cache/go-build: mkdir /root/.cache: read-only file system"}, "environment_error"},
-		{"read-only fs", sandbox.Result{ExitCode: 1, Stderr: "mkdir /data: Read-only file system"}, "environment_error"},
-		{"disk full", sandbox.Result{ExitCode: 1, Stderr: "write /tmp/x: no space left on device"}, "environment_error"},
-		{"timeout", sandbox.Result{ExitCode: -1, TimedOut: true}, "timeout"},
-		{"exit zero", sandbox.Result{ExitCode: 0, Stdout: "ok"}, "exit_zero"},
-		{"compile error", sandbox.Result{ExitCode: 2, Stderr: "./x_test.go:3:1: syntax error"}, "build_error"},
+		{"go build cache", sandbox.Result{ExitCode: 1, Stderr: "failed to initialize build cache at /root/.cache/go-build: mkdir /root/.cache: read-only file system"}, goCmd, "environment_error"},
+		{"read-only fs", sandbox.Result{ExitCode: 1, Stderr: "mkdir /data: Read-only file system"}, goCmd, "environment_error"},
+		{"disk full", sandbox.Result{ExitCode: 1, Stderr: "write /tmp/x: no space left on device"}, goCmd, "environment_error"},
+		{"timeout", sandbox.Result{ExitCode: -1, TimedOut: true}, goCmd, "timeout"},
+		{"exit zero", sandbox.Result{ExitCode: 0, Stdout: "ok"}, goCmd, "exit_zero"},
+		{"compile error", sandbox.Result{ExitCode: 2, Stderr: "./x_test.go:3:1: syntax error"}, goCmd, "build_error"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			v := interpret(tc.res)
+			v := interpret(tc.res, tc.cmd)
 			if v.demonstrated {
 				t.Fatalf("interpret(%+v) demonstrated=true; must never demonstrate", tc.res)
 			}
@@ -465,10 +474,234 @@ func TestInterpret_EnvironmentFailuresNeverDemonstrate(t *testing.T) {
 		})
 	}
 
-	// A genuine test failure still demonstrates.
-	v := interpret(sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestDivide (0.00s)\n    calc_test.go:6: bug\nFAIL"})
+	// A genuine test failure still demonstrates. The Go ecosystem
+	// is selected by the command so the --- FAIL marker is matched
+	// against the Go ran-evidence list — preserving the legacy
+	// "Go verdicts UNCHANGED" guarantee (bugbot-vig acceptance #5).
+	v := interpret(sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestDivide (0.00s)\n    calc_test.go:6: bug\nFAIL"}, []string{"go", "test", "-run", "TestDivide"})
 	if !v.demonstrated {
 		t.Fatalf("genuine test failure must demonstrate; got reason=%q", v.reason)
+	}
+}
+
+// --- bugbot-vig: per-ecosystem positive ran-evidence gate ------------------
+
+// TestInterpret_GoCgoRefusal_NotDemonstrated is the regression test for the
+// motivating instance in bugbot-vig: `go test -race` exits 2 with the
+// single-line "go: -race requires cgo" toolchain refusal BEFORE compiling
+// any tests.  The output contains the Go toolchain marker ("go: ") but
+// NONE of the positive ran-evidence markers ("--- FAIL", "FAIL\t",
+// "panic:", "WARNING: DATA RACE").  Under the old rule, the bare non-zero
+// exit was promoted to a Tier-1 demonstration.  Under the new rule, the
+// toolchain refusal is classified toolchain_error and the repro is not
+// demonstrated.
+func TestInterpret_GoCgoRefusal_NotDemonstrated(t *testing.T) {
+	cases := []struct {
+		name string
+		res  sandbox.Result
+	}{
+		{
+			"cgo refusal (race)",
+			sandbox.Result{ExitCode: 2, Stderr: "go: -race requires cgo; enable cgo by setting CGO_ENABLED=1"},
+		},
+		{
+			"go command not found",
+			sandbox.Result{ExitCode: 2, Stderr: "go: command not found"},
+		},
+		{
+			"go cannot find main module",
+			sandbox.Result{ExitCode: 2, Stderr: "go: cannot find main module; see 'go help modules'"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := interpret(tc.res, []string{"go", "test", "-race", "./..."})
+			if v.demonstrated {
+				t.Fatalf("toolchain refusal must not demonstrate; got demonstrated=true, reason=%q", v.reason)
+			}
+			if v.reason != "toolchain_error" {
+				t.Errorf("reason = %q, want %q", v.reason, "toolchain_error")
+			}
+			if v.ecosystem != "go" {
+				t.Errorf("ecosystem = %q, want %q", v.ecosystem, "go")
+			}
+		})
+	}
+}
+
+// TestInterpret_GoGenuineFailure_Demonstrated confirms acceptance #5:
+// existing Go verdicts are UNCHANGED for genuine test failures. The
+// classic "--- FAIL: TestX" / "FAIL" line shapes are still positive
+// ran-evidence and the test is still demonstrated.
+func TestInterpret_GoGenuineFailure_Demonstrated(t *testing.T) {
+	cases := []struct {
+		name string
+		res  sandbox.Result
+	}{
+		{
+			"--- FAIL shape",
+			sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestDivide (0.00s)\n    calc_test.go:6: bug\nFAIL\nFAIL\tgithub.com/example/bug\t0.123s"},
+		},
+		{
+			"panic shape",
+			sandbox.Result{ExitCode: 2, Stderr: "panic: runtime error: integer divide by zero"},
+		},
+		{
+			"data race shape",
+			sandbox.Result{ExitCode: 1, Stderr: "WARNING: DATA RACE\nRead at 0x00c0000160a0 by goroutine 7:"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := interpret(tc.res, []string{"go", "test", "-race", "./..."})
+			if !v.demonstrated {
+				t.Fatalf("genuine Go failure must demonstrate; got reason=%q", v.reason)
+			}
+		})
+	}
+}
+
+// TestInterpret_PytestGenuineFailure_Demonstrated confirms acceptance #4:
+// adding a second ecosystem (pytest) requires only a table entry plus
+// fixture transcripts. Pytest's "FAILED tests/...::test_x" line plus
+// "AssertionError" are positive ran-evidence; a non-zero exit is
+// demonstrated.
+func TestInterpret_PytestGenuineFailure_Demonstrated(t *testing.T) {
+	cases := []struct {
+		name string
+		res  sandbox.Result
+		cmd  []string
+	}{
+		{
+			"FAILED + AssertionError",
+			sandbox.Result{
+				ExitCode: 1,
+				Stdout:   "============================= test session starts ==============================\nplatform linux -- Python 3.11.4, pytest-7.4.0\ncollected 1 item\n\ntests/test_calc.py F                                                         [100%]\n\n=================================== FAILURES ===================================\n_______________________________ test_divide_by_zero ______________________________\n\n    def test_divide_by_zero():\n        assert divide(1, 0) is None\n>       assert divide(1, 0) is None\nE       AssertionError: assert 0 is None\nE       assert 0 == None\n\ntests/test_calc.py:5: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_calc.py::test_divide_by_zero - AssertionError\n",
+			},
+			[]string{"pytest", "tests/"},
+		},
+		{
+			"FAILED with python -m pytest launcher",
+			sandbox.Result{
+				ExitCode: 1,
+				Stderr:   "FAILED tests/test_x.py::TestX - AssertionError",
+				Stdout:   "= 1 failed in 0.12s =",
+			},
+			[]string{"python", "-m", "pytest", "tests/"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := interpret(tc.res, tc.cmd)
+			if !v.demonstrated {
+				t.Fatalf("genuine pytest failure must demonstrate; got reason=%q, ecosystem=%q", v.reason, v.ecosystem)
+			}
+			if v.ecosystem != "python" {
+				t.Errorf("ecosystem = %q, want %q", v.ecosystem, "python")
+			}
+		})
+	}
+}
+
+// TestInterpret_PytestCollectionError_NotDemonstrated confirms the
+// inverse: a non-zero exit WITHOUT pytest's positive ran-evidence is NOT a
+// demonstration. ModuleNotFoundError / ImportError at collection time
+// never run the test, so they are classified as a build error (collection
+// failure) and the repro is not demonstrated.
+func TestInterpret_PytestCollectionError_NotDemonstrated(t *testing.T) {
+	cases := []struct {
+		name   string
+		res    sandbox.Result
+		reason string
+	}{
+		{
+			"ModuleNotFoundError",
+			sandbox.Result{
+				ExitCode: 4,
+				Stderr:   "ERROR tests/test_x.py - ModuleNotFoundError: No module named 'totally_missing_pkg'",
+			},
+			"build_error",
+		},
+		{
+			"ImportError collection failure",
+			sandbox.Result{
+				ExitCode: 2,
+				Stderr:   "ImportError: cannot import name 'foo' from 'bug' (unknown location)",
+			},
+			"build_error",
+		},
+		{
+			"pytest no tests ran",
+			sandbox.Result{
+				ExitCode: 5,
+				Stderr:   "pytest: error: no tests ran",
+			},
+			"toolchain_error",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := interpret(tc.res, []string{"pytest", "tests/"})
+			if v.demonstrated {
+				t.Fatalf("collection/import error must not demonstrate; got demonstrated=true, reason=%q", v.reason)
+			}
+			if v.reason != tc.reason {
+				t.Errorf("reason = %q, want %q", v.reason, tc.reason)
+			}
+		})
+	}
+}
+
+// TestInterpret_UnknownEcosystem_NotDemonstrated confirms the central
+// invariant: an unknown launcher (no Go / pytest / cargo / npm / jest /
+// ctest prefix) NEVER demonstrates on a bare non-zero exit. The unknown
+// ecosystem still has a small generic ran-marker set (FAIL / FAILED /
+// panic), so a transcript that contains those will demonstrate, but a
+// bare non-zero exit will not.
+func TestInterpret_UnknownEcosystem_NotDemonstrated(t *testing.T) {
+	v := interpret(sandbox.Result{ExitCode: 1, Stderr: "make: *** [Makefile:7: test] Error 1"}, []string{"make", "test"})
+	if v.demonstrated {
+		t.Fatalf("unknown ecosystem bare non-zero must not demonstrate; got reason=%q, ecosystem=%q", v.reason, v.ecosystem)
+	}
+	if v.ecosystem != "unknown" {
+		t.Errorf("ecosystem = %q, want %q", v.ecosystem, "unknown")
+	}
+}
+
+// TestDetectEcosystem is a focused unit test for the argv-to-ecosystem
+// mapping table.
+func TestDetectEcosystem(t *testing.T) {
+	cases := []struct {
+		cmd  []string
+		want string
+	}{
+		{[]string{"go", "test", "./..."}, "go"},
+		{[]string{"go", "test", "-race", "./..."}, "go"},
+		{[]string{"go", "build", "./..."}, "go"},
+		{[]string{"pytest", "tests/"}, "python"},
+		{[]string{"py.test", "tests/"}, "python"},
+		{[]string{"python", "-m", "pytest", "tests/"}, "python"},
+		{[]string{"python3", "-m", "py.test", "tests/"}, "python"},
+		{[]string{"cargo", "test"}, "rust"},
+		{[]string{"cargo", "build"}, "rust"},
+		{[]string{"npm", "test"}, "js"},
+		{[]string{"yarn", "test"}, "js"},
+		{[]string{"pnpm", "test"}, "js"},
+		{[]string{"npx", "jest"}, "js"},
+		{[]string{"jest", "src/"}, "js"},
+		{[]string{"vitest", "run"}, "js"},
+		{[]string{"ctest", "--output-on-failure"}, "cpp"},
+		{[]string{"bash", "-c", "go test ./..."}, "go"},
+		{[]string{"make", "test"}, "unknown"},
+		{[]string{}, "unknown"},
+	}
+	for _, tc := range cases {
+		t.Run(strings.Join(tc.cmd, " "), func(t *testing.T) {
+			eco := detectEcosystem(tc.cmd)
+			if eco.name != tc.want {
+				t.Errorf("detectEcosystem(%v) = %q, want %q", tc.cmd, eco.name, tc.want)
+			}
+		})
 	}
 }
 

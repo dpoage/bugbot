@@ -279,12 +279,18 @@ func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f store.Findin
 		}
 
 		// Patch verdict: exit 0 = SUCCESS (inverted from repro).
-		tv := patchVerdict(targetedRes)
+		// Thread the targeted command so the ecosystem classification
+		// can be applied to the output (see bugbot-vig).
+		tv := patchVerdict(targetedRes, att.Plan.Cmd)
 		if tv.envFailure {
-			// Infrastructure: stop attempts but do not flag needs-human.
-			return patchOutcome{}, fmt.Errorf("patch-prover: environment failure in targeted run: %s", tv.summary)
+			// Infrastructure: stop attempts but do not flag
+			// needs-human. We keep the error message distinctive
+			// ("environment cannot run repro") so the prover's
+			// failure reporting — and the human reviewer — can tell
+			// this apart from a genuine fix-rejection.
+			return patchOutcome{}, fmt.Errorf("patch-prover: environment cannot run repro in targeted run (ecosystem=%s): %s", tv.ecosystem, tv.summary)
 		}
-		if !tv.passed {
+		if tv.fixRejected {
 			out := trunc(combinedOutput(targetedRes), 600)
 			feedback = fmt.Sprintf(
 				"The fix was applied but the repro test still FAILS (exit %d).\n\nOutput:\n%s\n\nRevise the fix.",
@@ -299,12 +305,19 @@ func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f store.Findin
 			return patchOutcome{}, fmt.Errorf("patch-prover: suite sandbox: %w", serr)
 		}
 
-		sv := patchVerdict(suiteRes)
+		// Suite run: same per-ecosystem classification, but the
+		// command is the suite command (not the targeted repro
+		// command). Both argv shapes are classified by
+		// detectEcosystem; the env / toolchain / build marker
+		// vocabulary is shared across both.
+		sv := patchVerdict(suiteRes, suiteCmd)
 		if sv.envFailure {
-			// Infrastructure: stop attempts but do not flag needs-human.
-			return patchOutcome{}, fmt.Errorf("patch-prover: environment failure in suite run: %s", sv.summary)
+			// Infrastructure: stop attempts but do not flag
+			// needs-human. Distinctive message — see the
+			// targeted-run branch above.
+			return patchOutcome{}, fmt.Errorf("patch-prover: environment cannot run repro in suite run (ecosystem=%s): %s", sv.ecosystem, sv.summary)
 		}
-		if !sv.passed {
+		if sv.fixRejected {
 			out := trunc(combinedOutput(suiteRes), 600)
 			feedback = fmt.Sprintf(
 				"The fix makes the repro test pass, but the FULL SUITE fails (exit %d).\n\nOutput:\n%s\n\nRevise the fix so the suite stays green.",
@@ -468,36 +481,93 @@ func (p *PatchProver) execSandbox(ctx context.Context, cmd []string, writeFiles 
 	return p.sb.Exec(ctx, spec)
 }
 
-// patchVerdictResult is the interpretation of a sandbox run in the patch-prover
-// context.  Exit-code semantics are inverted relative to the repro stage:
-// exit 0 means the test passed (fix proved); non-zero means it failed.
+// patchVerdictResult is the interpretation of a sandbox run in the
+// patch-prover context.  Exit-code semantics are inverted relative to
+// the repro stage: exit 0 means the test passed (fix proved); non-zero
+// means it failed.
 type patchVerdictResult struct {
-	passed     bool
+	// passed is true ONLY when exit == 0 (and the run was not
+	// stopped by a timeout). Anything else leaves passed == false.
+	passed bool
+	// envFailure reports that the run never produced a real
+	// pass/fail signal — the environment, toolchain, or a build
+	// step broke before the test could run.  The prover must
+	// distinguish this from "fix rejected" (the test ran and still
+	// failed) so the human reviewer is not told a fix is
+	// misdiagnosed when the sandbox itself could not run it.
 	envFailure bool
-	summary    string
+	// summary is a short human-readable digest of the run's output.
+	summary string
+	// ecosystem is the detected ecosystem name (e.g. "go",
+	// "python", "unknown"). Mirrors verdict.ecosystem so
+	// patch.go's prover loop can disambiguate env-failure from
+	// fix-rejected without re-running detection.
+	ecosystem string
+	// fixRejected is true when the test ran and FAILED with the
+	// patch applied — i.e. the test still does not pass, so the
+	// proposed fix is rejected.  Mutually exclusive with passed
+	// and with envFailure.
+	fixRejected bool
 }
 
-// patchVerdict interprets a sandbox result in the patch-prover context.
+// patchVerdict interprets a sandbox result in the patch-prover
+// context.
+//
+// The cmd argument is the argv that produced res (typically
+// att.Plan.Cmd for the targeted run, or suiteCmd for the suite
+// run).  It feeds the same detectEcosystem table the repro stage
+// uses, so the env-failure / toolchain / build classification
+// stays in lockstep across both stages — that is the seam that
+// makes "the sandbox could not run the repro" reportable as a
+// separate category from "the fix is wrong".
 //
 // Rules (note the exit-code inversion vs interpret()):
 //   - Exit 0 and not timed-out: PASS — the fix works.
-//   - TimedOut, exit 125/126/127, or looks like environment failure: env failure.
-//   - Everything else (non-zero exit): the test still fails.
-func patchVerdict(res sandbox.Result) patchVerdictResult {
+//   - TimedOut / exit 125/126/127 / env markers / toolchain
+//     markers / build markers: envFailure — the test never ran,
+//     so we cannot say the fix works or not.
+//   - Non-zero exit with positive ran-evidence (the test ran and
+//     FAILED): fixRejected — the proposed fix did not fix it.
+//   - Non-zero exit without markers: fixRejected — the run
+//     issued a non-zero exit, and since we cannot rule out
+//     env/toolchain/build failure from a non-zero by itself, the
+//     default is the more conservative "fix rejected" classification
+//     so the agent is told to revise the fix.
+func patchVerdict(res sandbox.Result, cmd []string) patchVerdictResult {
 	out := combinedOutput(res)
+	eco := detectEcosystem(cmd)
 
-	switch {
-	case res.TimedOut:
-		return patchVerdictResult{envFailure: true, summary: trunc(out, 400)}
-	case res.ExitCode == 125 || res.ExitCode == 126 || res.ExitCode == 127:
-		return patchVerdictResult{envFailure: true, summary: trunc(out, 400)}
-	case looksLikeEnvironmentFailure(out):
-		return patchVerdictResult{envFailure: true, summary: trunc(out, 400)}
-	case res.ExitCode == 0:
-		return patchVerdictResult{passed: true, summary: trunc(out, 400)}
-	default:
-		return patchVerdictResult{passed: false, summary: trunc(out, 400)}
+	if res.TimedOut {
+		return patchVerdictResult{envFailure: true, summary: trunc(out, 400), ecosystem: eco.name}
 	}
+	if res.ExitCode == 125 || res.ExitCode == 126 || res.ExitCode == 127 {
+		return patchVerdictResult{envFailure: true, summary: trunc(out, 400), ecosystem: eco.name}
+	}
+	if res.ExitCode == 0 {
+		return patchVerdictResult{passed: true, summary: trunc(out, 400), ecosystem: eco.name}
+	}
+
+	// Non-zero exit: classify against the detected ecosystem's
+	// blacklists. Order matches interpret() in the repro stage so
+	// the two stages agree on what counts as "env failure".
+	lowOut := strings.ToLower(out)
+	switch {
+	case hasAnyMarker(lowOut, defaultEnvMarkers):
+		return patchVerdictResult{envFailure: true, summary: trunc(out, 400), ecosystem: eco.name}
+	case hasAnyMarker(lowOut, eco.toolchainMarkers):
+		return patchVerdictResult{envFailure: true, summary: trunc(out, 400), ecosystem: eco.name}
+	case hasAnyMarker(lowOut, eco.buildMarkers):
+		return patchVerdictResult{envFailure: true, summary: trunc(out, 400), ecosystem: eco.name}
+	}
+
+	// Non-zero exit, no env / toolchain / build markers. The test
+	// ran and failed (or we have no positive evidence either way,
+	// in which case the conservative default is "fix rejected" so
+	// the agent gets a chance to revise the fix). This is the
+	// acceptance-criterion-3 distinction: env-failure must NOT be
+	// conflated with fix-rejected, so we only set fixRejected here
+	// and leave envFailure false.
+	return patchVerdictResult{fixRejected: true, summary: trunc(out, 400), ecosystem: eco.name}
 }
 
 // mergedWriteFiles merges repro test files and patch files into a single
