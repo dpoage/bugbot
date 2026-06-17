@@ -682,3 +682,36 @@ func TestValidate_DepStrategyEnum(t *testing.T) {
 		t.Errorf("dep_strategy=bogus should be rejected with dep_strategy in message, got %v", err)
 	}
 }
+
+// TestValidate_CartographerRoleOptional pins the optional cartographer role:
+// unset is valid (falls back to finder); a partially-specified or
+// unknown-provider mapping is rejected; a complete one is accepted.
+func TestValidate_CartographerRoleOptional(t *testing.T) {
+	base := func(t *testing.T) Config {
+		t.Helper()
+		cfg, err := Load(writeTemp(t, validYAML))
+		if err != nil {
+			t.Fatalf("load baseline: %v", err)
+		}
+		return cfg
+	}
+	cfg := base(t)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("baseline (no cartographer) should be valid: %v", err)
+	}
+	cfg = base(t)
+	cfg.Roles.Cartographer = cfg.Roles.Finder
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("complete cartographer role should be valid: %v", err)
+	}
+	cfg = base(t)
+	cfg.Roles.Cartographer = RoleModel{Provider: cfg.Roles.Finder.Provider}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "cartographer") {
+		t.Errorf("partial cartographer role should be rejected, got %v", err)
+	}
+	cfg = base(t)
+	cfg.Roles.Cartographer = RoleModel{Provider: "does-not-exist", Model: "m"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "unknown provider") {
+		t.Errorf("cartographer with unknown provider should be rejected, got %v", err)
+	}
+}

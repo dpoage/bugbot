@@ -70,6 +70,13 @@ func newDaemonCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("build verifier client: %w", err)
 			}
+			var cartographer llm.Client
+			if cfg.Scan.Cartographer {
+				cartographer, err = llm.ResolveRole(ctx, &cfg, "cartographer", llm.Options{})
+				if err != nil {
+					return fmt.Errorf("build cartographer client: %w", err)
+				}
+			}
 
 			sinks, err := report.SinksFromConfig(cfg)
 			if err != nil {
@@ -104,7 +111,7 @@ func newDaemonCmd() *cobra.Command {
 			deps := daemon.Deps{
 				Repo:    repo,
 				Store:   st,
-				Clients: funnel.RoleClients{Finder: finder, Verifier: verifier},
+				Clients: funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer},
 				FunnelOpts: funnel.Options{
 					Filter:                ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
 					TokenBudget:           cfg.Budgets.PerCycleTokens,

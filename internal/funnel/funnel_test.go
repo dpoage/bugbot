@@ -1864,3 +1864,20 @@ func TestTriageState_NoMergeAcrossFilesOrBeyondWindow(t *testing.T) {
 		t.Errorf("merges = %d/%d, want none", stats.MergedWithinLens, stats.MergedCrossLens)
 	}
 }
+
+// TestSpendRecorder_CartographerChargesFinderPool pins the budget routing for
+// the cartographer role: its spend supports finding, so under a downstream
+// reservation it charges the FINDER sub-pool, never the verify reserve.
+func TestSpendRecorder_CartographerChargesFinderPool(t *testing.T) {
+	st, _ := openFixture(t)
+	rec := &spendRecorder{ctx: context.Background(), store: st}
+	b := newBudgetState(1000, rec, 1.0)
+	b.reserveForDownstream(0.7) // finder reserve 700, verify reserve 300
+	rec.Record(llm.UsageEvent{Role: roleCartographer, Usage: llm.Usage{InputTokens: 200}})
+	if got := b.finderPool.Spent(); got != 200 {
+		t.Errorf("finderPool charged %d, want 200 from cartographer spend", got)
+	}
+	if got := b.verifyPool.Spent(); got != 0 {
+		t.Errorf("verifyPool charged %d, want 0 (cartographer must not touch the verify reserve)", got)
+	}
+}

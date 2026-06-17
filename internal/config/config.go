@@ -75,11 +75,18 @@ type RoleModel struct {
 	Model    string `yaml:"model"`
 }
 
-// Roles maps the three pipeline roles to their provider/model selection.
+// Roles maps the pipeline roles to their provider/model selection. Finder,
+// Verifier, and Reproducer are required; Cartographer is optional and falls
+// back to the finder's mapping when unset.
 type Roles struct {
 	Finder     RoleModel `yaml:"finder"`
 	Verifier   RoleModel `yaml:"verifier"`
 	Reproducer RoleModel `yaml:"reproducer"`
+	// Cartographer optionally selects the model for the package-summary pass
+	// (scan.cartographer). Unset = reuse the finder's provider/model. Point it
+	// at a cheaper/faster model to summarize packages off the finder's model
+	// without changing what finds bugs.
+	Cartographer RoleModel `yaml:"cartographer"`
 }
 
 // Budgets caps token spend per investigation cycle and per day. Each cap is
@@ -620,6 +627,19 @@ func (c *Config) Validate() error {
 		}
 		if _, ok := c.Providers[rm.Provider]; !ok {
 			return fmt.Errorf("config: role %q references unknown provider %q", role, rm.Provider)
+		}
+	}
+
+	// The cartographer role is OPTIONAL: when [roles.cartographer] is omitted,
+	// the package-summary pass (scan.cartographer) reuses the finder's
+	// provider/model (llm.roleModel falls back). Validate it only when the user
+	// set one — but then require it to be complete and resolvable.
+	if c.Roles.Cartographer.Provider != "" || c.Roles.Cartographer.Model != "" {
+		if c.Roles.Cartographer.Provider == "" || c.Roles.Cartographer.Model == "" {
+			return fmt.Errorf("config: role \"cartographer\" must set both `provider` and `model` when configured")
+		}
+		if _, ok := c.Providers[c.Roles.Cartographer.Provider]; !ok {
+			return fmt.Errorf("config: role \"cartographer\" references unknown provider %q", c.Roles.Cartographer.Provider)
 		}
 	}
 

@@ -155,3 +155,25 @@ func TestNewClient_OpenAICompatibleSerializesToolCalls(t *testing.T) {
 		t.Errorf("kept tool call ID = %q, want first (call_1)", resp.ToolCalls[0].ID)
 	}
 }
+
+// TestRoleModel_CartographerFallback pins the optional cartographer role: an
+// unset [roles.cartographer] resolves to the finder's mapping, while an
+// explicit mapping wins. This is what lets the summary pass point at a cheaper
+// model without forcing every config to declare one.
+func TestRoleModel_CartographerFallback(t *testing.T) {
+	cfg := &config.Config{Roles: config.Roles{
+		Finder: config.RoleModel{Provider: "p", Model: "finder-model"},
+	}}
+	rm, ok := roleModel(cfg, "cartographer")
+	if !ok {
+		t.Fatal("roleModel(cartographer) not ok")
+	}
+	if rm.Provider != "p" || rm.Model != "finder-model" {
+		t.Errorf("unset cartographer = %+v, want finder fallback {p finder-model}", rm)
+	}
+	cfg.Roles.Cartographer = config.RoleModel{Provider: "p2", Model: "carto-model"}
+	rm, ok = roleModel(cfg, "cartographer")
+	if !ok || rm.Provider != "p2" || rm.Model != "carto-model" {
+		t.Errorf("explicit cartographer = %+v, want {p2 carto-model}", rm)
+	}
+}
