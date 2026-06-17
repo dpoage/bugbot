@@ -16,6 +16,9 @@ const (
 	ScanTargeted ScanKind = "targeted"
 	// ScanOneshot is a single manual `bugbot scan` invocation.
 	ScanOneshot ScanKind = "oneshot"
+	// ScanCartography is an out-of-band cartographer refresh (bugbot cartography
+	// --run): the package-summary pass without any finder/verify stages.
+	ScanCartography ScanKind = "cartography"
 )
 
 // ScanRun records a single scan invocation. StatsJSON holds an opaque,

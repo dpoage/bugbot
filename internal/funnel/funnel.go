@@ -163,32 +163,31 @@ const (
 	DefaultTokenClaim int64 = 1_000_000
 
 	// DefaultCartographerMaxFiles bounds the number of member files in a
-	// package fed to the cartographer's per-package summary completion. A
-	// large package with hundreds of files would otherwise blow up the
-	// completion's input; 12 keeps each call well within the typical 8k-32k
-	// context while still letting the LLM see the package's "shape" (entry
-	// points, types, conventions) so the summary is concrete rather than
-	// generic.
-	DefaultCartographerMaxFiles = 12
-	// DefaultCartographerHeadLines caps the number of lines read from each
-	// member file when building a package's summary input. The cartographer
-	// intentionally reads only the head of each file because the
-	// summary-relevant signal is concentrated at the top (package doc,
-	// imports, exported type/function declarations) and tail-reading
-	// implementation details wastes the tight token budget. 120 covers most
-	// Go files' exported surface in full.
-	DefaultCartographerHeadLines = 120
+	// package fed to the cartographer's per-package summary completion. The
+	// summary is cached by content fingerprint and regenerated only when the
+	// package changes, so it is worth feeding a generous view of a large
+	// package once; 64 covers all but the largest packages in full.
+	DefaultCartographerMaxFiles = 64
+	// DefaultCartographerHeadLines caps the lines read from each member file
+	// when building a package's summary input. The head carries the
+	// highest-signal material (package doc, imports, exported declarations),
+	// but a good summary often needs the bodies too, so the cap is generous;
+	// 400 covers most Go files in full.
+	DefaultCartographerHeadLines = 400
 	// DefaultCartographerInputBytes caps the total bytes of member-file
-	// content fed to a single summary completion. The cap protects the
-	// completion from the tail of a large file or a directory of large files
-	// pushing input past the model's window. 24 KB comfortably fits the
-	// truncated per-file content plus a brief framing preamble.
-	DefaultCartographerInputBytes = 24 * 1024
-	// DefaultCartographerMaxTokens caps the visible output of one summary
-	// completion. Summaries are short (the system prompt asks for <=120
-	// words); 400 leaves ample headroom for the model's reasoning before the
-	// visible text while keeping runaway generations bounded.
-	DefaultCartographerMaxTokens = 400
+	// content fed to a single summary completion — the hard ceiling that
+	// binds first for a large package. Reasoning models have large context
+	// windows and the summary is cached, so a generous 128 KB buys a
+	// well-grounded summary at a one-time-per-change cost.
+	DefaultCartographerInputBytes = 128 * 1024
+	// DefaultCartographerMaxTokens caps the OUTPUT of one summary completion.
+	// It must cover BOTH the model's reasoning AND the visible summary:
+	// reasoning models (e.g. MiniMax-M3) emit a <think> block inline before
+	// the answer, so a cap that is too low is spent entirely on reasoning and
+	// returns empty/truncated visible text — the summary is then dropped and
+	// the input tokens wasted. 8192 leaves ample room for reasoning plus a
+	// full summary; the summary itself stays short by the system prompt.
+	DefaultCartographerMaxTokens = 8192
 )
 
 // cartographyInjectMaxPkgs and cartographyInjectMaxBytes bound the size of

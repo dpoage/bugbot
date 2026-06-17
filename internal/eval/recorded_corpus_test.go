@@ -27,7 +27,7 @@ import (
 //
 // Note on <think> blocks: MiniMax M3 emits reasoning <think>...</think> spans
 // before its JSON answer. RunJSON strips leading/trailing wrapping think blocks
-// at parse time (agent.stripThinkBlocks), and agent.ReplayClient matches only
+// at parse time (llm.StripThinkBlocks), and agent.ReplayClient matches only
 // the TOOL-CALL STRUCTURE of each request — it is intentionally lenient on exact
 // message text (see agent/replay.go: "Matching is intentionally lenient on exact
 // message text — only the tool-call structure must line up"). So recorded replies

@@ -527,7 +527,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		// returns nil and the injection below yields "". A nil cart
 		// is the documented off-state; the finder's task message is
 		// byte-identical to the pre-cartographer build.
-		cart := f.cartograph(ctx, cartographerClient, snap, targets, fps, budget)
+		cart := f.cartograph(ctx, result, cartographerClient, snap, targets, fps, budget)
 		n, err := f.hypothesize(ctx, scanRunID, finderClient, persona, kind,
 			f.opts.ChangeContext, langs, targets, seams, budget, result, fps, touchCoverage, cart, emit)
 		hypothesizedCount = n
