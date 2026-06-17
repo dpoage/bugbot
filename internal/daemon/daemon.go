@@ -111,6 +111,14 @@ type Deps struct {
 	// small and avoiding cycles). The hook must never return an error to the
 	// daemon; it should degrade gracefully on any failure. nil is silently skipped.
 	SeedAnalyzers func(ctx context.Context)
+
+	// SeedContradictions, when non-nil, is called before each funnel run to seed
+	// the leads blackboard with documented-sentinel-vs-validator contradictions
+	// mined deterministically from the repo snapshot. Unlike SeedAnalyzers it
+	// needs no container runtime (pure-Go, in-process), so the CLI wires it
+	// unconditionally. The hook must never return an error; it degrades
+	// gracefully on any failure. nil is silently skipped.
+	SeedContradictions func(ctx context.Context)
 }
 
 // ScanRunTagger lets the daemon attribute a long-lived client's spend ledger
@@ -193,8 +201,9 @@ type Daemon struct {
 	prog      progress.Sink
 	cfg       DaemonConfig
 
-	poller        *ingest.Poller
-	seedAnalyzers func(ctx context.Context)
+	poller             *ingest.Poller
+	seedAnalyzers      func(ctx context.Context)
+	seedContradictions func(ctx context.Context)
 
 	// idleMultiplier is the current backoff multiplier (0 = no backoff). It grows
 	// by one each idle poll up to maxBackoffMultiplier and resets to 0 on any
@@ -243,20 +252,21 @@ func New(deps Deps, cfg DaemonConfig) (*Daemon, error) {
 	}
 
 	return &Daemon{
-		repo:          deps.Repo,
-		store:         deps.Store,
-		clients:       deps.Clients,
-		repro:         deps.Reproducer,
-		reproTag:      deps.ReproTagger,
-		publisher:     deps.Publisher,
-		seedAnalyzers: deps.SeedAnalyzers,
-		fopts:         deps.FunnelOpts,
-		sinks:         deps.Sinks,
-		log:           log,
-		prog:          deps.Progress,
-		cfg:           cfg,
-		poller:        ingest.NewPoller(deps.Repo, ""),
-		clock:         realClock{},
+		repo:               deps.Repo,
+		store:              deps.Store,
+		clients:            deps.Clients,
+		repro:              deps.Reproducer,
+		reproTag:           deps.ReproTagger,
+		publisher:          deps.Publisher,
+		seedAnalyzers:      deps.SeedAnalyzers,
+		seedContradictions: deps.SeedContradictions,
+		fopts:              deps.FunnelOpts,
+		sinks:              deps.Sinks,
+		log:                log,
+		prog:               deps.Progress,
+		cfg:                cfg,
+		poller:             ingest.NewPoller(deps.Repo, ""),
+		clock:              realClock{},
 	}, nil
 }
 
