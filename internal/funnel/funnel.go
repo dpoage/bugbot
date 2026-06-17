@@ -21,7 +21,7 @@
 //
 // # Budget degradation
 //
-// Options.TokenBudget (0 = unlimited) bounds the whole run. The funnel tracks
+// Options.TokenBudget (0, or any value <= 0, = UNLIMITED) bounds the whole run. The funnel tracks
 // cumulative spend and degrades gracefully rather than truncating silently:
 // past 70% it runs only the two highest-yield lenses and a single refuter; past
 // 100% it launches no new agents and finishes with what is already verified.

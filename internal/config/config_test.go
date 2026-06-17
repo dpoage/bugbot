@@ -41,10 +41,11 @@ func writeTemp(t *testing.T, contents string) string {
 
 func TestLoad(t *testing.T) {
 	tests := []struct {
-		name    string
-		yaml    string
-		wantErr bool
-		check   func(t *testing.T, c Config)
+		name     string
+		yaml     string
+		wantErr  bool
+		checkErr string // substring required in err.Error() when wantErr
+		check    func(t *testing.T, c Config)
 	}{
 		{
 			name: "valid minimal config fills defaults",
@@ -153,6 +154,148 @@ budgets:
 			wantErr: true,
 		},
 		{
+			// budgets contract: 0 (or any negative) on either cap means
+			// UNLIMITED for that axis. The validator must accept it instead
+			// of erroring out — otherwise the docs and the validator disagree
+			// and the user cannot express "unlimited day" or "unlimited
+			// cycle" via the YAML. (Inline config; not validYAML+override,
+			// because YAML forbids duplicate top-level keys.)
+			name: "budgets both zero (unlimited) validates",
+			yaml: `
+providers:
+  anthropic:
+    type: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+roles:
+  finder:
+    provider: anthropic
+    model: claude-haiku-4-5
+  verifier:
+    provider: anthropic
+    model: claude-opus-4-8
+  reproducer:
+    provider: anthropic
+    model: claude-sonnet-4-5
+budgets:
+  per_cycle_tokens: 0
+  per_day_tokens: 0
+`,
+			wantErr: false,
+			check: func(t *testing.T, c Config) {
+				if c.Budgets.PerCycleTokens != 0 {
+					t.Errorf("per_cycle_tokens = %d, want 0", c.Budgets.PerCycleTokens)
+				}
+				if c.Budgets.PerDayTokens != 0 {
+					t.Errorf("per_day_tokens = %d, want 0", c.Budgets.PerDayTokens)
+				}
+			},
+		},
+		{
+			// Negative is also unlimited (matches consumer treat-<=0-as-
+			// unlimited). Cover the boundary at -1 to make the policy
+			// explicit and resist accidental flip to a strict > 0 check.
+			name: "budgets negative values validate as unlimited",
+			yaml: `
+providers:
+  anthropic:
+    type: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+roles:
+  finder:
+    provider: anthropic
+    model: claude-haiku-4-5
+  verifier:
+    provider: anthropic
+    model: claude-opus-4-8
+  reproducer:
+    provider: anthropic
+    model: claude-sonnet-4-5
+budgets:
+  per_cycle_tokens: -1
+  per_day_tokens: -100
+`,
+			wantErr: false,
+		},
+		{
+			// Cross-check interaction: with per_day=0 (unlimited day), a
+			// positive per_cycle must NOT be rejected as cycle>day. The
+			// cross-check is meaningless when one side is unlimited.
+			name: "per_cycle positive with per_day zero (unlimited day) validates",
+			yaml: `
+providers:
+  anthropic:
+    type: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+roles:
+  finder:
+    provider: anthropic
+    model: claude-haiku-4-5
+  verifier:
+    provider: anthropic
+    model: claude-opus-4-8
+  reproducer:
+    provider: anthropic
+    model: claude-sonnet-4-5
+budgets:
+  per_cycle_tokens: 1000000
+  per_day_tokens: 0
+`,
+			wantErr: false,
+		},
+		{
+			// Symmetric case: per_day positive with per_cycle=0 (unlimited
+			// cycle) is also fine.
+			name: "per_day positive with per_cycle zero (unlimited cycle) validates",
+			yaml: `
+providers:
+  anthropic:
+    type: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+roles:
+  finder:
+    provider: anthropic
+    model: claude-haiku-4-5
+  verifier:
+    provider: anthropic
+    model: claude-opus-4-8
+  reproducer:
+    provider: anthropic
+    model: claude-sonnet-4-5
+budgets:
+  per_cycle_tokens: 0
+  per_day_tokens: 1000000
+`,
+			wantErr: false,
+		},
+		{
+			// The pre-existing "per_cycle > per_day" guard must still fire
+			// when BOTH caps are finite positive. Inline config (not
+			// validYAML+override) so the YAML parse succeeds and the
+			// validator is the source of the error.
+			name: "per_cycle exceeding per_day still rejected (positive/positive)",
+			yaml: `
+providers:
+  anthropic:
+    type: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+roles:
+  finder:
+    provider: anthropic
+    model: claude-haiku-4-5
+  verifier:
+    provider: anthropic
+    model: claude-opus-4-8
+  reproducer:
+    provider: anthropic
+    model: claude-sonnet-4-5
+budgets:
+  per_cycle_tokens: 2000000
+  per_day_tokens: 1000000
+`,
+			wantErr:  true,
+			checkErr: "must not exceed budgets.per_day_tokens",
+		},
+		{
 			name:    "malformed yaml fails",
 			yaml:    "providers: [this is: not valid",
 			wantErr: true,
@@ -166,6 +309,9 @@ budgets:
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("Load() = nil error, want error")
+				}
+				if tt.checkErr != "" && !strings.Contains(err.Error(), tt.checkErr) {
+					t.Errorf("Load() error = %q, want substring %q", err.Error(), tt.checkErr)
 				}
 				return
 			}

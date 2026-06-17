@@ -22,11 +22,13 @@
 //
 // # Budgets
 //
-// Before any cycle the daemon compares the day's spend (TotalsSince midnight
-// UTC) against PerDayTokens. If the day budget is exhausted it skips the cycle
-// entirely — no LLM calls — and logs loudly; it rechecks cheaply next tick.
-// PerCycleTokens is passed into the funnel as its TokenBudget so a single cycle
-// degrades and then stops within its own allowance.
+// Both knobs treat 0 (or any negative value) as UNLIMITED, matching the
+// config validator and the funnel/CLI contracts. Before any cycle the daemon
+// compares the day's spend (TotalsSince midnight UTC) against PerDayTokens.
+// If the day budget is exhausted it skips the cycle entirely — no LLM calls —
+// and logs loudly; it rechecks cheaply next tick. PerCycleTokens is passed
+// into the funnel as its TokenBudget so a single cycle degrades and then
+// stops within its own allowance.
 //
 // # Shutdown
 //
@@ -159,13 +161,14 @@ type DaemonConfig struct {
 	// at maxBackoffMultiplier * PollInterval.
 	IdleBackoff time.Duration
 	// PerCycleTokens bounds a single cycle's funnel spend (passed as the funnel's
-	// TokenBudget). Zero means unlimited per cycle.
+	// TokenBudget). 0 (or any negative value) means UNLIMITED per cycle.
 	PerCycleTokens int64
 	// CacheReadWeight discounts cache-read tokens in the per-day budget check,
 	// matching the funnel's per-cycle weighting (0..1; <=0 means raw).
 	CacheReadWeight float64
 	// PerDayTokens caps total spend per UTC day. A cycle is skipped entirely once
-	// the day's recorded spend reaches this. Zero means unlimited per day.
+	// the day's recorded spend reaches this. 0 (or any negative value) means
+	// UNLIMITED per day.
 	PerDayTokens int64
 	// EnableRepro turns on the post-cycle reproduction-promotion step (only
 	// effective when Deps.Reproducer is non-nil).

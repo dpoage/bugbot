@@ -245,17 +245,12 @@ func TestSeed_RealBugbotRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PendingLeads: %v", err)
 	}
-	hitIg7 := false
+	// NOTE: the live config.go bugbot-ig7 contradiction was fixed in the
+	// real repo, so this run no longer posts that lead. Positive
+	// regression coverage for the contradiction miner lives in
+	// TestSeed_PostsIg7Contradiction (testdata/ig7_contradiction).
 	for _, l := range leads {
 		t.Logf("lead: file=%s line=%d note=%q", l.File, l.Line, l.Note)
-		if strings.Contains(l.File, "config.go") &&
-			(strings.Contains(l.Note, "per_day_tokens") ||
-				strings.Contains(l.Note, "PerDayTokens")) {
-			hitIg7 = true
-		}
-	}
-	if !hitIg7 {
-		t.Error("real-repo run did not post the bugbot-ig7 contradiction (config.go + per_day_tokens)")
 	}
 	const maxLeadsAllowed = 10
 	if len(leads) > maxLeadsAllowed {

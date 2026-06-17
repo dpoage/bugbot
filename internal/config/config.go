@@ -73,7 +73,11 @@ type Roles struct {
 	Reproducer RoleModel `yaml:"reproducer"`
 }
 
-// Budgets caps token spend per investigation cycle and per day.
+// Budgets caps token spend per investigation cycle and per day. Each cap is
+// independent: a value of 0 (or any negative) means UNLIMITED for that knob,
+// matching the consuming layers (funnel Options.TokenBudget, daemon day-spend
+// tracking). When both caps are positive, per_cycle_tokens must not exceed
+// per_day_tokens.
 type Budgets struct {
 	PerCycleTokens int64 `yaml:"per_cycle_tokens"`
 	PerDayTokens   int64 `yaml:"per_day_tokens"`
@@ -581,13 +585,15 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.Budgets.PerCycleTokens <= 0 {
-		return fmt.Errorf("config: budgets.per_cycle_tokens must be > 0")
-	}
-	if c.Budgets.PerDayTokens <= 0 {
-		return fmt.Errorf("config: budgets.per_day_tokens must be > 0")
-	}
-	if c.Budgets.PerCycleTokens > c.Budgets.PerDayTokens {
+	// budgets.per_cycle_tokens and budgets.per_day_tokens are independent caps.
+	// Each treats 0 (or any negative value) as UNLIMITED, matching the
+	// consuming layers (funnel Options.TokenBudget, daemon.DaemonConfig.
+	// {PerCycleTokens, PerDayTokens}, store day-spend tracking) — the user who
+	// reads any consumer doc and sets 0 must not be told their config is
+	// invalid. The cross-check below only applies when BOTH values are finite
+	// positive; a zero on either side makes the comparison meaningless (the
+	// unlimited side cannot be exceeded by construction).
+	if c.Budgets.PerCycleTokens > 0 && c.Budgets.PerDayTokens > 0 && c.Budgets.PerCycleTokens > c.Budgets.PerDayTokens {
 		return fmt.Errorf("config: budgets.per_cycle_tokens (%d) must not exceed budgets.per_day_tokens (%d)", c.Budgets.PerCycleTokens, c.Budgets.PerDayTokens)
 	}
 

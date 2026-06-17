@@ -58,7 +58,10 @@ roles:
 
 # ---------------------------------------------------------------------------
 # budgets: token spend caps. per_cycle bounds a single investigation;
-# per_day bounds total daemon spend across a 24h window.
+# per_day bounds total daemon spend across a 24h window. Set either to 0
+# (or any negative value) for UNLIMITED spend on that axis — matching the
+# consumer contract (funnel Options.TokenBudget, daemon day-spend check).
+# When both are positive, per_cycle_tokens must not exceed per_day_tokens.
 # ---------------------------------------------------------------------------
 budgets:
   per_cycle_tokens: 200000

@@ -247,7 +247,7 @@ func (d *Daemon) finishCycle(ctx context.Context, res cycleResult, start time.Ti
 
 // dayBudgetExhausted reports whether the day's recorded spend has reached the
 // per-day cap. When it has, it marks res skipped (with a reason) and logs
-// loudly. A zero PerDayTokens means unlimited and never skips.
+// loudly. A zero (or negative) PerDayTokens means UNLIMITED and never skips.
 func (d *Daemon) dayBudgetExhausted(ctx context.Context, res *cycleResult) bool {
 	if d.cfg.PerDayTokens <= 0 {
 		return false
