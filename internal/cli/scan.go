@@ -456,6 +456,10 @@ func printResult(out io.Writer, res *funnel.Result) {
 		_, _ = fmt.Fprintf(out, "Agent failures: finders=%d/%d verifiers=%d/%d produced no parseable output\n",
 			s.FinderFailures, s.FinderRuns, s.VerifierFailures, s.VerifierRuns)
 	}
+	if s.FinderRateLimited > 0 {
+		_, _ = fmt.Fprintf(out, "Rate-limited finders: %d/%d (coverage incomplete; re-run at lower --concurrency)\n",
+			s.FinderRateLimited, s.FinderRuns)
+	}
 	if s.SandboxExecs > 0 {
 		_, _ = fmt.Fprintf(out, "Sandbox: execs=%d total_ms=%d\n", s.SandboxExecs, s.SandboxExecMillis)
 	}

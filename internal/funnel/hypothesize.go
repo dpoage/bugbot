@@ -245,13 +245,14 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	}
 
 	var (
-		mu              sync.Mutex
-		coveredSet      = make(map[string]bool) // files from finderOK units only
-		finderRuns      int
-		finderFailed    int
-		finderBudgetCut int
-		totalCandidates int // total candidates emitted (for stats)
-		firstErr        error
+		mu                  sync.Mutex
+		coveredSet          = make(map[string]bool) // files from finderOK units only
+		finderRuns          int
+		finderFailed        int
+		finderBudgetCut     int
+		finderRateLimitedCt int
+		totalCandidates     int // total candidates emitted (for stats)
+		firstErr            error
 	)
 	var wg sync.WaitGroup
 
@@ -476,6 +477,22 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				msg := fmt.Sprintf("finder lens %q stopped by budget on %d file(s) before emitting parseable output — partial coverage", label, len(u.files))
 				f.note(result, msg)
 				recordStatus = "budget_stopped"
+			case finderRateLimited:
+				// Provider rate-limit exhausted the retry budget. Coverage is
+				// incomplete but recoverable (lower --concurrency / re-run) — NOT a
+				// lost-finding failure, so we count it on its own axis instead of
+				// finderFailed. Excluded from FinderReliable()/MostFindersFailed()
+				// and the SCAN RELIABILITY WARNING by design (see funnel.go).
+				finderRateLimitedCt++
+				if pm != nil {
+					unitDetail = finderPostmortemDetail(*pm)
+				}
+				msg := fmt.Sprintf("finder lens %q hit provider rate limit after retries on %d file(s) — coverage incomplete, re-run at lower --concurrency", label, len(u.files))
+				f.note(result, msg)
+				progress.Emit(f.opts.Progress, progress.Event{
+					Kind: progress.KindLensFailed, Role: progress.RoleFinder, Label: label, Message: msg,
+				})
+				recordStatus = "rate_limited"
 			default: // finderOK
 				recordStatus = "ok"
 				candCount = int64(len(cands))
@@ -532,6 +549,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	result.Stats.FinderRuns = finderRuns
 	result.Stats.FinderFailures = finderFailed
 	result.Stats.FinderBudgetStopped = finderBudgetCut
+	result.Stats.FinderRateLimited = finderRateLimitedCt
 	result.Stats.LeadsConsumed = leadsConsumedTotal
 	result.Stats.LeadsPosted = int(leadsPostedAtomic.Load())
 	// Build the sorted covered-files slice from the set collected above.
@@ -561,6 +579,12 @@ const (
 	// pool or its own token budget; an unparseable partial result here is an
 	// expected budget stop, not a reliability failure.
 	finderBudgetStopped
+	// finderRateLimited means the finder exhausted retries against a
+	// rate-limiting provider (llm.ErrRateLimited). Coverage is incomplete but
+	// recoverable by lowering --concurrency or re-running — NOT lost like a
+	// genuine parse failure, so this status is excluded from FinderFailures
+	// and from the reliability gate.
+	finderRateLimited
 )
 
 // runFinder executes a single finder agent for one lens over one task and maps
@@ -654,6 +678,16 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 		pm := buildFinderPostmortem(outcome, err)
 		if budgetStopped(outcome) {
 			return nil, finderBudgetStopped, outcome, &pm, nil
+		}
+		// Rate-limit exhaustion is not a lost-finding failure: the provider
+		// throttled us after the retry budget was spent. Coverage is incomplete
+		// but recoverable (lower --concurrency / re-run) and the retry client
+		// already honored Retry-After. Classify distinctly so it never
+		// inflates FinderFailures or trips the SCAN RELIABILITY WARNING; the
+		// postmortem already carries Class=finderClassRateLimited via
+		// classifyFinderErr.
+		if errors.Is(err, llm.ErrRateLimited) {
+			return nil, finderRateLimited, outcome, &pm, nil
 		}
 		return nil, finderParseFailed, outcome, &pm, nil
 	}

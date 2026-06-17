@@ -514,6 +514,16 @@ type Stats struct {
 	// never misreported as having broken finders. Their partial coverage is noted
 	// under Result.Skipped instead.
 	FinderBudgetStopped int `json:"finder_budget_stopped,omitempty"`
+	// FinderRateLimited counts finders that exhausted the retry budget against
+	// a rate-limiting provider (llm.ErrRateLimited). Distinct from
+	// FinderFailures: the provider throttled us, the findings are NOT lost in
+	// the model-output sense — they were never produced because the run
+	// never completed. Coverage is incomplete but recoverable by lowering
+	// --concurrency or re-running, so this is excluded from FinderReliable()
+	// and MostFindersFailed(). A rate-limited-only run is "reliable but
+	// coverage-incomplete", which is the intended distinction from a genuine
+	// parse failure.
+	FinderRateLimited int `json:"finder_rate_limited,omitempty"`
 	// VerifierRuns / VerifierFailures mirror the above for refuter agents. A
 	// refuter that fails to parse is conservatively treated as "could not refute"
 	// (it cannot silently kill a candidate), but the failure is still counted so
