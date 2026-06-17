@@ -24,12 +24,6 @@ type ecosystemRules struct {
 	// one of these (or the legacy patterns below) must match for a non-zero
 	// exit to be classified as a demonstration.
 	ranMarkers []string
-	// ranLineAnchors are additional line-anchored patterns required for
-	// "ran" classification. A substring match against any ranMarker is
-	// sufficient; ranLineAnchors let us require line-shaped evidence (a
-	// hard guarantee that the test runner actually emitted a per-test
-	// result line). An empty list means substring evidence is enough.
-	ranLineAnchors []string
 	// buildMarkers are lowercase substrings that, when present, classify
 	// the failure as a build/compile/import error. This is the
 	// false-reproduction guard: a repro that never compiled has not
@@ -41,12 +35,6 @@ type ecosystemRules struct {
 	// buildMarkers when both could match, since toolchain refusals are
 	// a subclass of "did not run".
 	toolchainMarkers []string
-	// envFailureMarkers are lowercase substrings that indicate the
-	// sandbox environment — not the bug — caused the failure (read-only
-	// filesystem, cache init, disk full). The cross-ecosystem ones
-	// (read-only fs, no space) live in defaultEnvMarkers and are merged
-	// into every entry.
-	envFailureMarkers []string
 }
 
 // defaultEnvMarkers are environment markers common to every ecosystem —
