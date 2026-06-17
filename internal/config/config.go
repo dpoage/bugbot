@@ -58,6 +58,15 @@ type Provider struct {
 	// Populate via `claude setup-token` (long-lived) or
 	// `ant auth print-credentials --access-token` (short-lived).
 	AuthTokenEnv string `yaml:"auth_token_env,omitempty"`
+
+	// StructuredOutput overrides the provider's default StructuredOutput
+	// capability. A pointer is used so unset (nil) is distinguishable from
+	// explicit false: unset = use the adapter's built-in default (true for
+	// first-party OpenAI / Anthropic / Google; false for arbitrary
+	// openai-compatible endpoints). Set to true to opt an openai-compatible
+	// endpoint (e.g. MiniMax) into schema-constrained output; set to false
+	// to force-disable it on a provider that would otherwise default on.
+	StructuredOutput *bool `yaml:"structured_output,omitempty"`
 }
 
 // RoleModel binds a pipeline role to a provider and model.

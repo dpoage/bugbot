@@ -65,20 +65,34 @@ func NewClient(ctx context.Context, provider config.Provider, providerName, mode
 		}
 		adapter = newAnthropicAdapter(model, aopts)
 	case config.ProviderOpenAI:
+		caps := openAICapabilities(model)
+		if provider.StructuredOutput != nil {
+			caps.StructuredOutput = *provider.StructuredOutput
+		}
 		adapter = newOpenAIAdapter(model, openaiOptions{
 			apiKey:     apiKey,
 			baseURL:    provider.BaseURL,
 			httpClient: opts.HTTPClient,
 			provider:   string(config.ProviderOpenAI),
-			caps:       openAICapabilities(model),
+			caps:       caps,
 		})
 	case config.ProviderOpenAICompatible:
+		caps := openAICompatibleCapabilities()
+		// The conservative default for openai-compatible endpoints is
+		// StructuredOutput=false; let the config flip it on (e.g. for a
+		// MiniMax-style endpoint that supports it). The override is also
+		// applied to other providers for symmetry — first-party defaults
+		// are already true, so flipping them off is the only meaningful
+		// change, and that flows through the same code path.
+		if provider.StructuredOutput != nil {
+			caps.StructuredOutput = *provider.StructuredOutput
+		}
 		adapter = newOpenAIAdapter(model, openaiOptions{
 			apiKey:     apiKey,
 			baseURL:    provider.BaseURL,
 			httpClient: opts.HTTPClient,
 			provider:   string(config.ProviderOpenAICompatible),
-			caps:       openAICompatibleCapabilities(),
+			caps:       caps,
 		})
 	case config.ProviderGoogle:
 		ga, err := newGoogleAdapter(ctx, model, googleOptions{

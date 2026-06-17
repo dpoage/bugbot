@@ -94,6 +94,17 @@ type Request struct {
 	// default" (some models reject an explicit temperature). Use a pointer so
 	// callers can distinguish "0.0" from "unset".
 	Temperature *float64
+	// ResponseSchema is an optional JSON Schema (encoded as raw JSON) requesting
+	// schema-constrained output. Adapters honor it only when their
+	// Capabilities().StructuredOutput is true; otherwise the schema is
+	// silently dropped (callers should check the capability before relying
+	// on structured output). Zero value (nil) means no schema request.
+	ResponseSchema json.RawMessage
+	// ResponseSchemaName names the schema on the wire. It is used as the
+	// response_format name on OpenAI-style backends and as the synthetic
+	// forced-output tool name on Anthropic. Adapters default it to
+	// "response" / "emit_answer" when empty.
+	ResponseSchemaName string
 }
 
 // StopReason is the normalized reason a completion ended.

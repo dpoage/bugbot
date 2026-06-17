@@ -92,6 +92,24 @@ func (g *googleAdapter) Complete(ctx context.Context, req Request) (Response, er
 		cfg.Tools = []*genai.Tool{{FunctionDeclarations: decls}}
 	}
 
+	// Schema-constrained output. Gemini cannot combine structured output
+	// with function-calling, so we only attach the schema when the caller
+	// didn't ask for tools — when they did, we silently fall back to the
+	// prompt-embedded schema, which is the same behavior the caller would
+	// have gotten before this field existed.
+	if len(req.ResponseSchema) > 0 && g.caps.StructuredOutput && len(req.Tools) == 0 {
+		var schema any
+		if err := json.Unmarshal(req.ResponseSchema, &schema); err != nil {
+			return Response{}, newAPIError("google", 0, 0, ErrInvalidRequest,
+				"ResponseSchema: invalid JSON", err)
+		}
+		// ResponseJsonSchema accepts a raw JSON Schema object, mirroring
+		// ParametersJsonSchema at ~88 — no lossy conversion to genai's
+		// typed *Schema.
+		cfg.ResponseMIMEType = "application/json"
+		cfg.ResponseJsonSchema = schema
+	}
+
 	resp, err := g.client.Models.GenerateContent(ctx, g.model, contents, cfg)
 	if err != nil {
 		return Response{}, g.normalizeErr(err)

@@ -112,6 +112,36 @@ func (o *openaiAdapter) buildParams(req Request) (openai.ChatCompletionNewParams
 		}
 		params.Tools = tools
 	}
+
+	// Schema-constrained output. Honored even when tools are present
+	// (OpenAI permits response_format alongside tools; compatible backends
+	// that don't will surface a 4xx, which is the correct failure mode
+	// rather than silent loss). Skipped when the capability is off so a
+	// provider with StructuredOutput=false (e.g. conservative
+	// openai-compatible endpoint without opt-in) does not get a schema it
+	// can't honor.
+	if len(req.ResponseSchema) > 0 && o.caps.StructuredOutput {
+		var schema any
+		if err := json.Unmarshal(req.ResponseSchema, &schema); err != nil {
+			return openai.ChatCompletionNewParams{}, newAPIError(o.provider, 0, 0,
+				ErrInvalidRequest, "ResponseSchema: invalid JSON", err)
+		}
+		name := req.ResponseSchemaName
+		if name == "" {
+			name = "response"
+		}
+		// strict=false: our schemas are not strict-mode-clean (extra fields,
+		// union types) and lenient mode still drives grammar-constrained
+		// decoding on OpenAI and on compatible backends that implement it.
+		params.ResponseFormat = openai.ChatCompletionNewParamsResponseFormatUnion{
+			OfJSONSchema: &shared.ResponseFormatJSONSchemaParam{
+				JSONSchema: shared.ResponseFormatJSONSchemaJSONSchemaParam{
+					Name:   name,
+					Schema: schema,
+				},
+			},
+		}
+	}
 	return params, nil
 }
 

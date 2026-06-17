@@ -89,7 +89,22 @@ func (a *anthropicAdapter) Complete(ctx context.Context, req Request) (Response,
 	if err != nil {
 		return Response{}, a.normalizeErr(err)
 	}
-	return a.toResponse(msg), nil
+	resp := a.toResponse(msg)
+	// When we forced a synthetic structured-output tool, the model replies
+	// with a tool_use block carrying the schema-conformant JSON. Convert
+	// that single tool call into Response.Text so downstream layers (RunJSON,
+	// funnel) see JSON text instead of a tool call they have no handler for.
+	if toolName, ok := structuredOutputToolName(req, a.caps); ok &&
+		len(resp.ToolCalls) == 1 && resp.ToolCalls[0].Name == toolName {
+		resp.Text = string(resp.ToolCalls[0].Arguments)
+		resp.ToolCalls = nil
+		// Anthropic's stop_reason for a forced tool call is "tool_use",
+		// which would mis-classify the response downstream; coerce to
+		// StopEndTurn ("end_turn") so the run loop treats it as a normal
+		// completion.
+		resp.StopReason = StopEndTurn
+	}
+	return resp, nil
 }
 
 func (a *anthropicAdapter) buildParams(req Request) (anthropic.MessageNewParams, error) {
@@ -125,6 +140,46 @@ func (a *anthropicAdapter) buildParams(req Request) (anthropic.MessageNewParams,
 			tools = append(tools, anthropic.ToolUnionParam{OfTool: tp})
 		}
 		params.Tools = tools
+	}
+
+	// Schema-constrained output. Anthropic has no native response_format, so
+	// we inject a single synthetic tool and force tool_choice to it — the
+	// model returns a tool_use block whose `input` is the schema-conformant
+	// JSON, which Complete surfaces as Response.Text. Only valid when the
+	// caller didn't supply user tools (structuredOutputToolName gates this).
+	if toolName, ok := structuredOutputToolName(req, a.caps); ok {
+		var props map[string]any
+		if err := json.Unmarshal(req.ResponseSchema, &props); err != nil {
+			return anthropic.MessageNewParams{}, newAPIError("anthropic", 0, 0,
+				ErrInvalidRequest, "ResponseSchema: invalid JSON", err)
+		}
+		// Mirror toAnthropicTool's schema unwrapping so the SDK receives the
+		// same ToolInputSchemaParam shape it would for a user tool.
+		var schema anthropic.ToolInputSchemaParam
+		if p, ok := props["properties"]; ok {
+			if pm, ok := p.(map[string]any); ok {
+				schema.Properties = pm
+			}
+		} else {
+			schema.Properties = props
+		}
+		if r, ok := props["required"]; ok {
+			if rs, ok := r.([]any); ok {
+				required := make([]string, 0, len(rs))
+				for _, v := range rs {
+					if s, ok := v.(string); ok {
+						required = append(required, s)
+					}
+				}
+				schema.Required = required
+			}
+		}
+		params.Tools = append(params.Tools, anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{
+			Name:        toolName,
+			InputSchema: schema,
+			Description: anthropic.String("Emit the final answer that conforms to the response schema."),
+		}})
+		params.ToolChoice = anthropic.ToolChoiceParamOfTool(toolName)
 	}
 
 	applyCacheBreakpoints(&params)
@@ -220,6 +275,23 @@ func toAnthropicTool(t ToolDef) (*anthropic.ToolParam, error) {
 		tp.Description = anthropic.String(t.Description)
 	}
 	return tp, nil
+}
+
+// structuredOutputToolName returns the synthetic tool name this adapter
+// injects to coerce schema-constrained output from Anthropic, and reports
+// whether injection is active for the given request. The bool is false when
+// the cap is off, the caller didn't ask for a schema, or the caller also
+// asked for user tools (Anthropic can combine tool_choice with user tools
+// but injecting a synthetic tool on top is ambiguous — better to fall back
+// to the prompt-embedded schema, matching the Google adapter's behavior).
+func structuredOutputToolName(req Request, caps Capabilities) (string, bool) {
+	if len(req.ResponseSchema) == 0 || !caps.StructuredOutput || len(req.Tools) > 0 {
+		return "", false
+	}
+	if req.ResponseSchemaName != "" {
+		return req.ResponseSchemaName, true
+	}
+	return "emit_answer", true
 }
 
 // toAnthropicMessages converts normalized messages into Anthropic message
