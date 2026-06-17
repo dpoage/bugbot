@@ -2,6 +2,7 @@ package funnel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -432,6 +433,92 @@ func TestRunFinder_ParseFailureStillCounts(t *testing.T) {
 	}
 	if status != finderParseFailed {
 		t.Errorf("status = %d, want finderParseFailed (%d)", status, finderParseFailed)
+	}
+}
+
+// rateLimitFinderClient is a one-shot llm.Client that returns an
+// *llm.APIError{Kind: ErrRateLimited} on the first Complete call, matching the
+// shape produced by the openai adapter when the provider returns a 429 after the
+// retry budget is spent. Used by TestRunFinder_RateLimitNotParseFailure to
+// exercise the rate-limit classification branch in runFinderWithPrompt without
+// standing up the real llm retry wrapper.
+type rateLimitFinderClient struct {
+	mu    sync.Mutex
+	calls int
+	err   error
+}
+
+func (c *rateLimitFinderClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+
+func (c *rateLimitFinderClient) Complete(_ context.Context, _ llm.Request) (llm.Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	return llm.Response{}, c.err
+}
+
+// TestRunFinder_RateLimitNotParseFailure proves the L2 (bugbot-8xp) fix: a
+// finder whose provider exhausted the retry budget on a 429 (errors.Is(err,
+// llm.ErrRateLimited) is true) must be classified as finderRateLimited, NOT as
+// finderParseFailed. Rate-limit exhaustion is recoverable by lowering
+// --concurrency or re-running, so it must not inflate FinderFailures or trip
+// the SCAN RELIABILITY WARNING. The postmortem's Class is
+// finderClassRateLimited (validated via the postmortem artifact).
+func TestRunFinder_RateLimitNotParseFailure(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// Fake client whose Complete returns a rate-limit error identical to what
+	// the openai adapter surfaces after the retry wrapper gives up.
+	rateLimitErr := &llm.APIError{
+		Kind:       llm.ErrRateLimited,
+		StatusCode: 429,
+		Provider:   "openai",
+		Message:    "429 too many requests",
+	}
+	if !errors.Is(rateLimitErr, llm.ErrRateLimited) {
+		t.Fatal("test setup: APIError must satisfy errors.Is(err, llm.ErrRateLimited)")
+	}
+	finder := &rateLimitFinderClient{err: rateLimitErr}
+
+	f, err := New(RoleClients{Finder: finder, Verifier: newScriptedClient()}, st, repo, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Unlimited budget so the rate-limit branch (not the budget-stop branch)
+	// is what classifies the run.
+	rec := &spendRecorder{ctx: ctx, store: st}
+	budget := newBudgetState(0, rec, 1.0)
+
+	cands, status, pm, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0], []ingest.Language{ingest.LangGo}, finderTask([]string{"bug.go"}, nil), budget)
+	if err != nil {
+		t.Fatalf("runFinder should not error on a rate-limit classification: %v", err)
+	}
+	if len(cands) != 0 {
+		t.Errorf("cands = %d, want 0 (no completion happened)", len(cands))
+	}
+	if status != finderRateLimited {
+		t.Errorf("status = %d, want finderRateLimited (%d) — a rate-limit exhaustion must NOT be classified as a parse failure", status, finderRateLimited)
+	}
+	if status == finderParseFailed {
+		t.Errorf("rate-limit run must not be reported as finderParseFailed (regression)")
+	}
+	if pm == nil {
+		t.Fatal("postmortem is required on the rate-limit path")
+	}
+	if pm.Class != finderClassRateLimited {
+		t.Errorf("pm.Class = %q, want %q", pm.Class, finderClassRateLimited)
+	}
+	// The client must have been called exactly once: runFinderWithPrompt must
+	// not silently retry the finder itself (the retry client already exhausted
+	// its budget before handing the error up).
+	if finder.calls != 1 {
+		t.Errorf("finder.calls = %d, want 1 (runFinderWithPrompt must not retry)", finder.calls)
 	}
 }
 
