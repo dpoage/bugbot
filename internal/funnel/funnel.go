@@ -949,13 +949,6 @@ func (b *budgetState) runnerLimitsForPool(base agent.Limits, pool *agent.BudgetP
 	return out
 }
 
-// runnerLimits layers the run's total pool onto base. It is the limits a runner
-// gets in the default (non-reserved) single-pool mode and the pass-through used
-// by standalone callers with a zero-value budgetState.
-func (b *budgetState) runnerLimits(base agent.Limits) agent.Limits {
-	return b.runnerLimitsForPool(base, b.pool, 0)
-}
-
 // finderRunnerLimits / verifyRunnerLimits select the role-scoped pool under a
 // downstream reservation, falling back to the shared total pool when no
 // reservation is in effect for that role. Either way the role's per-task claim
