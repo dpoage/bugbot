@@ -137,6 +137,13 @@ type Budgets struct {
 type Scan struct {
 	Include []string `yaml:"include"`
 	Exclude []string `yaml:"exclude"`
+	// Cartographer enables the per-package summary pass: a cheap one-shot LLM
+	// summary per package, cached by content fingerprint and injected into
+	// finder task messages so agents start with repo context instead of
+	// rediscovering it via tool calls every turn (bugbot-mi5.7). Off by
+	// default; the injection is append-only to the finder task and never
+	// mutates the cached system-prompt prefix.
+	Cartographer bool `yaml:"cartographer"`
 }
 
 // Sandbox configures the isolated execution environment used for verification
@@ -533,6 +540,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setBool("BUGBOT_PUBLISH_ENABLED", &cfg.Publish.Enabled),
 		setBool("BUGBOT_PUBLISH_CLOSE_ON_FIXED", &cfg.Publish.CloseOnFixed),
 		setBool("BUGBOT_REPRO_PATCH_PROVER", &cfg.Repro.PatchProver),
+		setBool("BUGBOT_SCAN_CARTOGRAPHER", &cfg.Scan.Cartographer),
 	} {
 		if err != nil {
 			return err

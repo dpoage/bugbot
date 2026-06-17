@@ -38,7 +38,7 @@ func runFinderUnlimited(t *testing.T, finder llm.Client, tools []agent.Tool, f *
 	budget := &budgetState{}
 	cands, status, _, err := f.runFinder(
 		ctx, finder, tools, "senior Go engineer", f.lenses[0],
-		[]ingest.Language{ingest.LangGo}, finderTask([]string{"bug.go"}, nil), budget,
+		[]ingest.Language{ingest.LangGo}, finderTask([]string{"bug.go"}, nil, ""), budget,
 	)
 	if err != nil {
 		t.Fatalf("runFinder: %v", err)

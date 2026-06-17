@@ -161,6 +161,45 @@ const (
 	// default when the sub-pool has at least one claim's worth of headroom. Tune
 	// via budgets.finder_token_claim / budgets.verifier_token_claim.
 	DefaultTokenClaim int64 = 1_000_000
+
+	// DefaultCartographerMaxFiles bounds the number of member files in a
+	// package fed to the cartographer's per-package summary completion. A
+	// large package with hundreds of files would otherwise blow up the
+	// completion's input; 12 keeps each call well within the typical 8k-32k
+	// context while still letting the LLM see the package's "shape" (entry
+	// points, types, conventions) so the summary is concrete rather than
+	// generic.
+	DefaultCartographerMaxFiles = 12
+	// DefaultCartographerHeadLines caps the number of lines read from each
+	// member file when building a package's summary input. The cartographer
+	// intentionally reads only the head of each file because the
+	// summary-relevant signal is concentrated at the top (package doc,
+	// imports, exported type/function declarations) and tail-reading
+	// implementation details wastes the tight token budget. 120 covers most
+	// Go files' exported surface in full.
+	DefaultCartographerHeadLines = 120
+	// DefaultCartographerInputBytes caps the total bytes of member-file
+	// content fed to a single summary completion. The cap protects the
+	// completion from the tail of a large file or a directory of large files
+	// pushing input past the model's window. 24 KB comfortably fits the
+	// truncated per-file content plus a brief framing preamble.
+	DefaultCartographerInputBytes = 24 * 1024
+	// DefaultCartographerMaxTokens caps the visible output of one summary
+	// completion. Summaries are short (the system prompt asks for <=120
+	// words); 400 leaves ample headroom for the model's reasoning before the
+	// visible text while keeping runaway generations bounded.
+	DefaultCartographerMaxTokens = 400
+)
+
+// cartographyInjectMaxPkgs and cartographyInjectMaxBytes bound the size of
+// the REPO CONTEXT block injected into a finder task. The bound is per-unit
+// (not per-run) so a single chunk with many distinct packages cannot bloat
+// one finder's task. 12 packages × ~500 bytes per summary line fits inside
+// the byte cap; overflow drops the tail and notes the truncation so the
+// agent knows the context is partial.
+const (
+	cartographyInjectMaxPkgs  = 12
+	cartographyInjectMaxBytes = 6 * 1024
 )
 
 // RoleClients holds the per-role LLM clients the funnel drives. Tests inject
@@ -342,6 +381,21 @@ type Options struct {
 	// goroutines simultaneously). Errors are logged best-effort and never abort
 	// the scan. Nil disables in-run reproduction (default).
 	Repro func(ctx context.Context, scanRunID string, finding store.Finding) error
+
+	// Cartographer enables the per-package summary pass (bugbot-mi5.7).
+	// When true, the funnel runs a one-shot LLM pass per uncached package
+	// before the finder stage, persists the results keyed by the package's
+	// content fingerprint, and injects the relevant summaries (the chunk's
+	// own packages plus their direct dependents) into every finder task
+	// message. When false (the default) the feature is OFF and behavior is
+	// BYTE-IDENTICAL to the pre-cartographer funnel: no summary-table
+	// reads, no summary-generation completions, no task-string changes.
+	//
+	// Any failure in the pass — store read/write error, LLM error, or hard
+	// budget exhaustion — degrades gracefully: the scan proceeds with the
+	// summaries it has (possibly none), and finder tasks receive no
+	// injection when nothing is available.
+	Cartographer bool
 }
 
 // resolve fills in defaults without mutating the caller's Options.

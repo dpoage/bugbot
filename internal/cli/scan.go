@@ -207,6 +207,7 @@ func newScanCmd() *cobra.Command {
 				Progress:              progressSink,
 				SandboxOpts:           sandboxOpts,
 				Repro:                 reproHook,
+				Cartographer:          cfg.Scan.Cartographer,
 			}
 			f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
 			if err != nil {

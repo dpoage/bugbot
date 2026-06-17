@@ -168,7 +168,7 @@ func TestStrategyTask_LeadsFlatteningShared(t *testing.T) {
 		Note:       "line one\nline two\ttab here",
 	}}
 
-	wideTask := finderTask(files, leads)
+	wideTask := finderTask(files, leads, "")
 	deepTask := buildContractTraceDeepTask(files, leads)
 	stateTask := buildStateTraceDeepTask(files, leads)
 

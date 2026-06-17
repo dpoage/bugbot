@@ -388,7 +388,8 @@ func TestRunFinder_BudgetStopNotParseFailure(t *testing.T) {
 	budget := newBudgetState(100, rec, 1.0)
 	budget.pool.Add(100) // spend == limit => Check returns ErrBudgetExhausted
 
-	cands, status, _, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0], []ingest.Language{ingest.LangGo}, finderTask([]string{"bug.go"}, nil), budget)
+	cands, status, _, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0],
+		[]ingest.Language{ingest.LangGo}, finderTask([]string{"bug.go"}, nil, ""), budget)
 	if err != nil {
 		t.Fatalf("runFinder should not error on a budget stop: %v", err)
 	}
@@ -424,8 +425,8 @@ func TestRunFinder_ParseFailureStillCounts(t *testing.T) {
 	// fail, and the run was never budget-truncated.
 	rec := &spendRecorder{ctx: ctx, store: st}
 	budget := newBudgetState(0, rec, 1.0)
-
-	_, status, _, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0], []ingest.Language{ingest.LangGo}, finderTask([]string{"bug.go"}, nil), budget)
+	_, status, _, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0],
+		[]ingest.Language{ingest.LangGo}, finderTask([]string{"bug.go"}, nil, ""), budget)
 	if err != nil {
 		t.Fatalf("runFinder should not error on a parse failure: %v", err)
 	}
@@ -492,8 +493,8 @@ func TestRunFinder_RateLimitNotParseFailure(t *testing.T) {
 	// is what classifies the run.
 	rec := &spendRecorder{ctx: ctx, store: st}
 	budget := newBudgetState(0, rec, 1.0)
-
-	cands, status, pm, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0], []ingest.Language{ingest.LangGo}, finderTask([]string{"bug.go"}, nil), budget)
+	cands, status, pm, err := f.runFinder(ctx, finder, tools, "senior Go engineer", f.lenses[0],
+		[]ingest.Language{ingest.LangGo}, finderTask([]string{"bug.go"}, nil, ""), budget)
 	if err != nil {
 		t.Fatalf("runFinder should not error on a rate-limit classification: %v", err)
 	}

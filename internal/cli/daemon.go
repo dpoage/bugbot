@@ -116,6 +116,7 @@ func newDaemonCmd() *cobra.Command {
 					FinderReadLines:       cfg.Budgets.FinderReadLines,
 					FinderReadBytes:       cfg.Budgets.FinderReadBytes,
 					SandboxOpts:           sbOpts,
+					Cartographer:          cfg.Scan.Cartographer,
 				},
 				Sinks:    sinks,
 				Logger:   logger,

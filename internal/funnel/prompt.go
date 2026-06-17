@@ -162,13 +162,26 @@ func equalRows(a, b []string) bool {
 // suspicions posted by other lenses' agents in earlier runs. The leads are
 // ordered deterministically (by created_at,id — guaranteed by PendingLeads) so
 // the task message is stable across retries.
-func finderTask(files []string, leads []store.Lead) string {
+//
+// When repoContext is non-empty (the cartographer pass has summaries to
+// inject for the chunk's packages), it is appended AFTER the TARGET FILES
+// list and BEFORE the leads section. The injection block is strictly
+// additive: it never replaces, mutates, or wraps any other section. This
+// placement matters for prompt-cache stability: the prefix up through the
+// leads section is the cacheable warm path, and injection sits at the end
+// of the user message so the cached prefix bytes do not shift between
+// runs that share the same targets and leads.
+func finderTask(files []string, leads []store.Lead, repoContext string) string {
 	var b strings.Builder
 	b.WriteString("Audit these target files for bugs in your assigned focus area. ")
 	b.WriteString("Read each one (and any related code you need) before reporting.\n\n")
 	b.WriteString("TARGET FILES:\n")
 	for _, f := range files {
 		fmt.Fprintf(&b, "  - %s\n", f)
+	}
+	if repoContext != "" {
+		b.WriteString("\n")
+		b.WriteString(repoContext)
 	}
 	appendLeadsSection(&b, leads)
 	return b.String()

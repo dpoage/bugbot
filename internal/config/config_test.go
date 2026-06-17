@@ -374,6 +374,17 @@ func TestApplyEnvOverrides(t *testing.T) {
 			},
 		},
 		{
+			name: "bool override (cartographer)",
+			environ: []string{
+				"BUGBOT_SCAN_CARTOGRAPHER=true",
+			},
+			check: func(t *testing.T, c Config) {
+				if !c.Scan.Cartographer {
+					t.Error("scan.cartographer = false, want true from env override")
+				}
+			},
+		},
+		{
 			name:    "invalid int override fails",
 			environ: []string{"BUGBOT_SANDBOX_CPUS=notanumber"},
 			wantErr: true,

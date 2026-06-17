@@ -289,6 +289,7 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 		FinderReadBytes:       p.cfg.Budgets.FinderReadBytes,
 		Progress:              progress.NewLogRenderer(p.out),
 		SandboxOpts:           sandboxOpts,
+		Cartographer:          p.cfg.Scan.Cartographer,
 	}
 	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
 	if err != nil {

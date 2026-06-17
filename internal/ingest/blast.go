@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -408,4 +409,112 @@ func isIdentByte(b byte) bool {
 	default:
 		return false
 	}
+}
+
+// PackageImporters returns, per local Go package directory, the set of OTHER
+// local package directories that directly import it (its direct dependents).
+// One pass over the snapshot's Go files; non-Go files contribute no edges;
+// unparseable Go files are skipped. Keys and values are repo-relative
+// directory paths (goPackageDir). Values are sorted and de-duplicated;
+// self-edges (a package importing itself) are omitted.
+//
+// The function intentionally reuses parseGoImports, goPackageDir, and the
+// importMatchesLocalDir suffix logic from goDependents rather than
+// reimplementing the graph. The relationship is the same in reverse: the
+// forward pass that powers goDependents already builds the per-file
+// (dir, imports) pairs, so PackageImporters applies the same scan and
+// inverts the edge direction.
+//
+// ctx is honored at every file boundary so a cancellation between parse
+// calls aborts the pass promptly rather than scanning the full snapshot.
+func (r *Repo) PackageImporters(ctx context.Context, snap *Snapshot) (map[string][]string, error) {
+	if snap == nil {
+		return nil, nil
+	}
+	// Pass 1: collect local package directories and per-file (dir, imports)
+	// pairs. localDirs is the "universe" of possible keys in the result map
+	// and the set suffix-matching tests imports against.
+	localDirs := newStringSet()
+	type goFile struct {
+		dir     string
+		imports []string
+	}
+	var files []goFile
+	for _, f := range snap.Files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if f.Language != LangGo {
+			continue
+		}
+		imports, err := parseGoImports(filepath.Join(r.root, filepath.FromSlash(f.Path)))
+		if err != nil {
+			// Unparseable Go (syntax error, generated stub): skip its
+			// imports rather than fail the whole computation. Mirrors
+			// goDependents' posture — the graph is best-effort, not strict.
+			imports = nil
+		}
+		dir := goPackageDir(f.Path)
+		localDirs.add(dir)
+		files = append(files, goFile{dir: dir, imports: imports})
+	}
+	if localDirs.len() == 0 {
+		return map[string][]string{}, nil
+	}
+
+	// Pass 2: invert the edges. For each file's import, ask
+	// importMatchesLocalDir whether it suffix-matches any local dir. If so,
+	// identify the specific dir it matches and record the file's own dir as
+	// an importer of that dir. Self-edges (file's dir == matched dir) are
+	// omitted — a package is not a dependent of itself.
+	importers := make(map[string]map[string]struct{})
+	for _, gf := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		for _, imp := range gf.imports {
+			matchedDir := matchLocalDir(imp, localDirs)
+			if matchedDir == "" || matchedDir == gf.dir {
+				continue
+			}
+			if importers[matchedDir] == nil {
+				importers[matchedDir] = make(map[string]struct{})
+			}
+			importers[matchedDir][gf.dir] = struct{}{}
+		}
+	}
+
+	// Flatten to sorted slices for deterministic output.
+	result := make(map[string][]string, len(importers))
+	for d, set := range importers {
+		out := make([]string, 0, len(set))
+		for im := range set {
+			out = append(out, im)
+		}
+		sort.Strings(out)
+		result[d] = out
+	}
+	return result, nil
+}
+
+// matchLocalDir returns the specific local directory d in dirs that
+// import path imp suffix-matches, or "" if none (or the match is the
+// empty dir — an import equal to the module path cannot be uniquely
+// attributed). It is the per-import version of importMatchesLocalDir that
+// PackageImporters uses to invert the edge.
+//
+// Like importMatchesLocalDir, the empty dir is excluded: root-package
+// dependents are not identifiable by suffix alone and would otherwise be
+// silently misattributed to whichever dir's suffix happened to match.
+func matchLocalDir(imp string, dirs *stringSet) string {
+	imp = strings.Trim(imp, "/")
+	for d := range dirs.m {
+		if d == "" {
+			continue
+		}
+		if imp == d || strings.HasSuffix(imp, "/"+d) {
+			return d
+		}
+	}
+	return ""
 }

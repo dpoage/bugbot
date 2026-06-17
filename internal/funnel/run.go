@@ -509,8 +509,14 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		// reports (which are emitted before this call) are unaffected.
 		seams := ingest.EnumerateSeams(snap)
 		result.Stats.SeamsFound = len(seams)
+		// Cartographer pass: one-shot, runs once per scan BEFORE the
+		// finder stage. When Options.Cartographer is false (default) it
+		// returns nil and the injection below yields "". A nil cart
+		// is the documented off-state; the finder's task message is
+		// byte-identical to the pre-cartographer build.
+		cart := f.cartograph(ctx, finderClient, snap, targets, fps, budget)
 		n, err := f.hypothesize(ctx, scanRunID, finderClient, persona, kind,
-			f.opts.ChangeContext, langs, targets, seams, budget, result, fps, touchCoverage, emit)
+			f.opts.ChangeContext, langs, targets, seams, budget, result, fps, touchCoverage, cart, emit)
 		hypothesizedCount = n
 		hypothesizeErr = err
 		close(candCh)
