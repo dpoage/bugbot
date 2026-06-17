@@ -298,7 +298,7 @@ func TestStress_UnboundedPool_ReproducesIOERR(t *testing.T) {
 		t.Skip("stress test skipped in -short")
 	}
 	db, _ := openUnboundedStore(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	res := runHarnessRaw(t, db, 3*time.Second)
 	if res.otherErr == nil {
@@ -364,7 +364,7 @@ func TestStress_TruncatedDB_SurfacesIOERRClass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := db.Ping(); err != nil {
 		t.Fatalf("ping: %v", err)
 	}
