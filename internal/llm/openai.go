@@ -5,45 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/shared"
 )
-
-// thinkBlockPattern matches reasoning-model chain-of-thought blocks emitted
-// inline in message.content by some openai-compatible providers (notably
-// "thinking" models such as MiniMax M2.7 that inline CoT into the assistant
-// message instead of exposing a separate reasoning channel).
-//
-//	(?is)            — case-insensitive, dot matches newline
-//	<think(?:ing)?>  — accept both <think> and <thinking> opening tags
-//	.*?              — non-greedy body, so multiple blocks match independently
-//	</think(?:ing)?> — accept both closing-tag spellings
-//
-// Well-formed blocks (open + close) are removed. An opening tag with no
-// matching close is left intact, because the match would otherwise swallow
-// from the tag to end-of-string and could destroy a legitimate answer that
-// merely mentions the tag literally.
-var thinkBlockPattern = regexp.MustCompile(`(?is)<think(?:ing)?>.*?</think(?:ing)?>`)
-
-// stripThinkBlocks removes all well-formed <think>...</think> (or
-// <thinking>...</thinking>) reasoning blocks from s and trims surrounding
-// whitespace. Reasoning/thinking models served via the openai-compatible
-// provider (e.g. MiniMax M2.7) inline their chain-of-thought into
-// message.content prefixed to the real answer; the finder JSON parser
-// cannot handle the CoT prefix, so removing the block before the parser
-// sees it lets reasoning-model output parse as cleanly as a plain model's.
-func stripThinkBlocks(s string) string {
-	// No prefilter: thinkBlockPattern is the authoritative match (case-insensitive,
-	// non-greedy, multi-line). When no block is present, ReplaceAllString returns
-	// the input unchanged in value, and TrimSpace is a no-op on already-clean text.
-	out := thinkBlockPattern.ReplaceAllString(s, "")
-	return strings.TrimSpace(out)
-}
 
 // openaiAdapter maps the normalized types onto the OpenAI Go SDK's Chat
 // Completions API. It backs both the "openai" provider and the
@@ -193,11 +160,7 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) Response {
 	var resp Response
 	if len(cc.Choices) > 0 {
 		choice := cc.Choices[0]
-		// Reasoning/thinking models served via the openai-compatible provider
-		// (e.g. MiniMax M2.7) inline their chain-of-thought into
-		// message.content. Strip those blocks so the parser downstream sees
-		// only the real answer. Tool-call arguments and usage are untouched.
-		resp.Text = stripThinkBlocks(choice.Message.Content)
+		resp.Text = choice.Message.Content
 		for _, tc := range choice.Message.ToolCalls {
 			// Only function tool calls carry an arguments payload we surface.
 			resp.ToolCalls = append(resp.ToolCalls, ToolCall{
