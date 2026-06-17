@@ -57,7 +57,7 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 		if err := ctx.Err(); err != nil {
 			return nil, nil, tokens, failed, false, err
 		}
-		seat := seatForIndex(i, n)
+		seat := seatForCandidate(i, n, c, hasSandbox)
 		// Build the per-seat system prompt: base + optional sandbox paragraph +
 		// optional seat clause. When n==1 the seat is empty (no clause appended)
 		// so the single-refuter path is byte-identical to the pre-diversity code.

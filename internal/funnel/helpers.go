@@ -158,8 +158,16 @@ func (f *Funnel) buildSandboxTool(c Candidate, sbExecs *atomic.Int32, sbMillis *
 	if !opts.Enabled || opts.Sandbox == nil {
 		return nil
 	}
+	// The severity floor is bypassed for executable claims: a claim about a
+	// deterministic / pure function's input->output behavior is most cleanly
+	// falsified by running it, and suppressing the sandbox below "high" is
+	// what allowed the parseSARIF-cap false positive (bugbot-aud, GH #64) to
+	// slip through. Environmental / I/O claims still pay the threshold cost;
+	// only isExecutableClaim(c) candidates opt in. The default min severity
+	// is unchanged — the bypass is per-claim, not per-config.
+	executable := isExecutableClaim(c)
 	minSev := sandboxMinSeverity(opts.MinSeverity)
-	if severityRank(c.Severity) > severityRank(minSev) {
+	if !executable && severityRank(c.Severity) > severityRank(minSev) {
 		// Candidate is BELOW the threshold (higher rank number = less severe).
 		return nil
 	}
