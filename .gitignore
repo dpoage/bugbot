@@ -5,6 +5,9 @@
 # Bugbot runtime state
 /.bugbot/
 
+# Host-specific dogfood config (secrets stay in ~/.config/bugbot/env)
+/bugbot.yaml
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
