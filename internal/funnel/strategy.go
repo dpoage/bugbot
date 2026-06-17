@@ -90,10 +90,52 @@ func appendLeadsSection(b *strings.Builder, leads []store.Lead) {
 	}
 }
 
+// stateTraceDeepSystemClause is the verbatim system-prompt addition for the
+// state-trace-deep strategy. It reframes the chunk as a starting point for
+// tracing shared mutable state and lifecycle-managed resources to every
+// access site, so the agent hunts for defects that live only in the
+// cross-file join.
+const stateTraceDeepSystemClause = `The target files in your task are your STARTING SEED, not your audit boundary. Do not audit them line-by-line. Instead: (1) enumerate the SHARED MUTABLE STATE and lifecycle-managed resources the seed declares — fields guarded by a mutex/lock, package-level/global vars, shared maps/slices/channels, reference-counted or pooled objects, anything with acquire/release, lock/unlock, open/close, or start/stop pairing; (2) pick the most load-bearing of these (at most 8) and use find_references (fall back to grep) to visit EVERY site that reads, writes, locks, unlocks, acquires, releases, or closes each one — ACROSS FILES; (3) at each site, check that the discipline holds: every mutation under the lock that other sites hold, every acquire paired with a release on ALL paths including early-return and error/panic paths, no site assuming an invariant another site can violate. Report a bug when sites DISAGREE: a write missing the lock its siblings hold, a path that skips release, a lifecycle ordering two sites disagree on. Emphasize: the defect lives only in the cross-file JOIN — any single site viewed in isolation looks correct. Budget your turns for traversal: prefer read_symbol and narrow read_file ranges at many sites over whole-file reads.`
+
+// stateTraceDeep is the second non-default strategy. It treats the task chunk
+// as a seed and traces shared mutable state and lifecycle-managed resources
+// outward via find_references to hunt discipline asymmetries between access
+// sites — the canonical cross-file join that produces data races and leaks.
+//
+// Weight 0.85 is a reasoned prior: live per-unit yield data on the deep axis
+// is still thin (mi5.12's dogfood produced traversal-born hypotheses but zero
+// verified findings on that run), so 0.85 places this strategy just below
+// contract-trace-deep's 0.9. Under budget pressure it is shed just after
+// contract-trace-deep. Correct from mi5.10 data when available.
+var stateTraceDeep = Strategy{
+	Name:         "state-trace-deep",
+	SystemClause: stateTraceDeepSystemClause,
+	BuildTask:    buildStateTraceDeepTask,
+	AppliesTo:    func(lensName string) bool { return lensName == "concurrency" || lensName == "resource-leaks" },
+	Weight:       0.85,
+}
+
+// buildStateTraceDeepTask builds the finder task for the state-trace-deep
+// strategy. The chunk files are framed as SEED FILES (a starting point for
+// shared-state and resource-lifecycle tracing) rather than an audit boundary.
+// The CROSS-LENS LEADS section is rendered via the same shared helper as
+// finderTask and buildContractTraceDeepTask so the newline-flattening
+// prompt-injection guard is never forked.
+func buildStateTraceDeepTask(files []string, leads []store.Lead) string {
+	var b strings.Builder
+	b.WriteString("Trace the shared mutable state and resource lifecycles declared in these SEED files to every access site across the repository, following your search strategy.\n\n")
+	b.WriteString("SEED FILES (a starting point for shared-state and resource-lifecycle tracing):\n")
+	for _, f := range files {
+		fmt.Fprintf(&b, "  - %s\n", f)
+	}
+	appendLeadsSection(&b, leads)
+	return b.String()
+}
+
 // builtinStrategies returns all builtin strategies in definition order. The
 // first entry is always sweepWide (the default).
 func builtinStrategies() []Strategy {
-	return []Strategy{sweepWide, contractTraceDeep}
+	return []Strategy{sweepWide, contractTraceDeep, stateTraceDeep}
 }
 
 // composeFinderSystemPrompt composes the full system prompt for one finder

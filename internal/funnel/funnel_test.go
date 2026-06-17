@@ -293,12 +293,12 @@ func TestSweep_CleanCode_NoFindingsNoVerify(t *testing.T) {
 		t.Errorf("verifier called %d times on clean code; want 0", verifier.callCount())
 	}
 	// Finder ran once per unit in this sweep. Sweep units = (nTaxonomy taxonomy
-	// lenses × sweep-wide) + 1 api-contract-misuse@contract-trace-deep. diff-intent
+	// lenses × sweep-wide) + 1 api-contract-misuse@contract-trace-deep + 2 state-trace-deep. diff-intent
 	// emits zero chunk tasks on sweeps (no ChangeContext) so it contributes zero.
 	nTaxonomy := len(BuiltinLenses()) - 1 // all builtins except diff-intent
-	wantFinderCalls := nTaxonomy + 1      // +1 for the deep strategy on api-contract-misuse
+	wantFinderCalls := nTaxonomy + 3      // +1 contract-trace-deep + 2 state-trace-deep
 	if finder.callCount() != wantFinderCalls {
-		t.Errorf("finder calls = %d, want %d (nTaxonomy=%d wide + 1 contract-trace-deep)", finder.callCount(), wantFinderCalls, nTaxonomy)
+		t.Errorf("finder calls = %d, want %d (nTaxonomy=%d wide + 1 contract-trace-deep + 2 state-trace-deep)", finder.callCount(), wantFinderCalls, nTaxonomy)
 	}
 }
 
@@ -329,11 +329,11 @@ func TestSweep_FinderParseFailures_HonestStats(t *testing.T) {
 
 	// diff-intent emits zero chunk tasks on sweeps (no ChangeContext), so only
 	// the taxonomy units run: nTaxonomy taxonomy lenses × sweep-wide +1 for
-	// api-contract-misuse@contract-trace-deep = nTaxonomy+1 finders total.
+	// api-contract-misuse@contract-trace-deep + 2 state-trace-deep = nTaxonomy+3 finders total.
 	nTaxonomy := len(BuiltinLenses()) - 1
-	nSweepUnits := nTaxonomy + 1 // +1 for api-contract-misuse@contract-trace-deep
+	nSweepUnits := nTaxonomy + 3 // +1 contract-trace-deep + 2 state-trace-deep
 	if res.Stats.FinderRuns != nSweepUnits {
-		t.Errorf("FinderRuns = %d, want %d (taxonomy lenses wide + 1 deep; diff-intent skipped)", res.Stats.FinderRuns, nSweepUnits)
+		t.Errorf("FinderRuns = %d, want %d (taxonomy lenses wide + 1 contract-trace-deep + 2 state-trace-deep; diff-intent skipped)", res.Stats.FinderRuns, nSweepUnits)
 	}
 	if res.Stats.FinderFailures != nSweepUnits {
 		t.Errorf("FinderFailures = %d, want %d (all sweep units failed to parse)", res.Stats.FinderFailures, nSweepUnits)
@@ -781,11 +781,11 @@ func TestSweep_BudgetDegradation(t *testing.T) {
 		t.Errorf("expected Skipped notes describing degradation, got none")
 	}
 	// Some units must have been skipped: on a sweep, total units = (nTaxonomy
-	// taxonomy lenses × sweep-wide) + 1 api-contract-misuse@contract-trace-deep.
+	// taxonomy lenses × sweep-wide) + 1 api-contract-misuse@contract-trace-deep + 2 state-trace-deep.
 	// diff-intent has no chunk tasks on sweeps. Under degradation only the top-2
 	// unit-classes by yield survive, so the finder cannot have run all units.
 	nTaxonomy := len(BuiltinLenses()) - 1 // taxonomy lenses (no diff-intent)
-	nSweepUnits := nTaxonomy + 1          // +1 for api-contract-misuse@contract-trace-deep
+	nSweepUnits := nTaxonomy + 3          // +1 contract-trace-deep + 2 state-trace-deep
 	if finder.callCount() >= nSweepUnits {
 		t.Errorf("finder ran %d times; degradation should have skipped low-yield lenses (nSweepUnits=%d)", finder.callCount(), nSweepUnits)
 	}
@@ -900,11 +900,11 @@ func TestHypothesize_MultiLens_NoRace(t *testing.T) {
 	// set to len(BuiltinLenses())+1 to guarantee full concurrency: every
 	// (lens×strategy, chunk) unit runs simultaneously, maximising the window for
 	// the race. diff-intent emits zero chunk tasks on sweeps; the actual sweep
-	// unit count is nTaxonomy wide-strategy units + 1 deep unit for
-	// api-contract-misuse.
+	// unit count is nTaxonomy wide-strategy units + 1 contract-trace-deep + 2 state-trace-deep
+	// (api-contract-misuse, concurrency, resource-leaks).
 	nLenses := len(BuiltinLenses())
 	nTaxonomy := nLenses - 1     // all builtins except diff-intent
-	nSweepUnits := nTaxonomy + 1 // +1 for api-contract-misuse@contract-trace-deep
+	nSweepUnits := nTaxonomy + 3 // +1 contract-trace-deep + 2 state-trace-deep
 
 	// The scripted client returns empty candidates for every lens — the test
 	// only exercises the concurrent append path, not the candidate pipeline.
@@ -1267,7 +1267,7 @@ func TestStreaming_MidDiscovery_VerifyStarts(t *testing.T) {
 	combinedFinder := &dispatchClient{
 		routes: []dispatchRoute{
 			{sub: "nil-safety/error-handling", client: fastFinder},
-			{sub: "resource-leaks", client: slowFinder},
+			{sub: "state-trace-deep", client: newScriptedClient()}, {sub: "resource-leaks", client: slowFinder},
 		},
 		fallback: newScriptedClient(), // empty for all other lenses
 	}
@@ -1351,7 +1351,7 @@ func TestStreaming_PersistenceBeforeHypothesizeComplete(t *testing.T) {
 	combinedFinder := &dispatchClient{
 		routes: []dispatchRoute{
 			{sub: "nil-safety/error-handling", client: fastFinder},
-			{sub: "resource-leaks", client: slowFinder},
+			{sub: "state-trace-deep", client: newScriptedClient()}, {sub: "resource-leaks", client: slowFinder},
 		},
 		fallback: newScriptedClient(),
 	}
@@ -1463,7 +1463,7 @@ func TestStreaming_Interrupt_PersistedFindingSurvives(t *testing.T) {
 	combinedFinder := &dispatchClient{
 		routes: []dispatchRoute{
 			{sub: "nil-safety/error-handling", client: fastFinder},
-			{sub: "resource-leaks", client: slowFinder},
+			{sub: "state-trace-deep", client: newScriptedClient()}, {sub: "resource-leaks", client: slowFinder},
 		},
 		fallback: newScriptedClient(),
 	}

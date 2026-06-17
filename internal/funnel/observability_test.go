@@ -57,13 +57,13 @@ func TestAgentUnits_FinderIntegration(t *testing.T) {
 	// Compute expected finder unit count: on a sweep,
 	//   nTaxonomy wide-strategy units + 1 api-contract-misuse@contract-trace-deep
 	nTaxonomy := len(BuiltinLenses()) - 1 // all builtins except diff-intent
-	wantUnits := nTaxonomy + 1            // +1 for contract-trace-deep
+	wantUnits := nTaxonomy + 3            // +1 contract-trace-deep + 2 state-trace-deep
 	if len(units) != wantUnits {
 		t.Logf("all units:")
 		for _, u := range allUnits {
 			t.Logf("  order=%d role=%s lens=%s strategy=%s status=%s", u.LaunchOrder, u.Role, u.Lens, u.Strategy, u.Status)
 		}
-		t.Fatalf("got %d finder agent_unit rows, want %d (nTaxonomy=%d wide + 1 deep + no diff-intent on sweep)",
+		t.Fatalf("got %d finder agent_unit rows, want %d (nTaxonomy=%d wide + 3 deep + no diff-intent on sweep)",
 			len(units), wantUnits, nTaxonomy)
 	}
 
