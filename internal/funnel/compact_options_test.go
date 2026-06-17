@@ -58,3 +58,24 @@ func TestFinderReadCaps_NegativeRestoresAgentDefaults(t *testing.T) {
 	resolved := agent.ReadCaps{MaxLines: caps.MaxLines, MaxBytes: caps.MaxBytes}
 	_ = resolved
 }
+
+func TestResolve_TokenClaimDefaults(t *testing.T) {
+	// Unset (zero) resolves to DefaultTokenClaim for both roles.
+	got := Options{}.resolve()
+	if got.FinderTokenClaim != DefaultTokenClaim {
+		t.Errorf("FinderTokenClaim = %d, want %d (default)", got.FinderTokenClaim, DefaultTokenClaim)
+	}
+	if got.VerifierTokenClaim != DefaultTokenClaim {
+		t.Errorf("VerifierTokenClaim = %d, want %d (default)", got.VerifierTokenClaim, DefaultTokenClaim)
+	}
+
+	// An explicit positive value is preserved; a negative value (disable the
+	// per-task cap) is preserved as-is, NOT replaced by the default.
+	custom := Options{FinderTokenClaim: 2_000_000, VerifierTokenClaim: -1}.resolve()
+	if custom.FinderTokenClaim != 2_000_000 {
+		t.Errorf("FinderTokenClaim = %d, want 2000000 (explicit preserved)", custom.FinderTokenClaim)
+	}
+	if custom.VerifierTokenClaim != -1 {
+		t.Errorf("VerifierTokenClaim = %d, want -1 (negative preserved = cap disabled)", custom.VerifierTokenClaim)
+	}
+}

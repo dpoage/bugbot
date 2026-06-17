@@ -74,6 +74,17 @@ budgets:
   # cache reads bill at a fraction of full price; weight them ~0.1 against
   # the token budgets so a cache-heavy run isn't throttled by cheap tokens.
   cache_read_weight: 0.1
+  # fraction of per_cycle_tokens the finder stage may spend; the rest is
+  # RESERVED for verification so finders can't drain the pool and leave every
+  # candidate unverified. 0 uses the built-in default (0.7); 1.0 disables it.
+  finder_budget_share: 0.7
+  # per-task token claims for the claimant budget system: each finder/verifier
+  # run is capped at this many tokens, so one breadth-heavy run can't be granted
+  # a whole stage's reserve. Only tokens actually spent are charged, so a run
+  # that finishes under its claim leaves the remainder for its siblings. 0 uses
+  # the built-in default (1000000); a negative value removes the per-task cap.
+  finder_token_claim: 1000000
+  verifier_token_claim: 1000000
 
 # ---------------------------------------------------------------------------
 # scan: path globs (relative to the target repo root) selecting files to

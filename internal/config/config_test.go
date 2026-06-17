@@ -623,6 +623,22 @@ func TestEnvOverride_FinderReadCaps(t *testing.T) {
 	}
 }
 
+func TestEnvOverride_TokenClaims(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{
+		"BUGBOT_BUDGETS_FINDER_TOKEN_CLAIM=2000000",
+		"BUGBOT_BUDGETS_VERIFIER_TOKEN_CLAIM=500000",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Budgets.FinderTokenClaim != 2_000_000 {
+		t.Errorf("FinderTokenClaim = %d, want 2000000", cfg.Budgets.FinderTokenClaim)
+	}
+	if cfg.Budgets.VerifierTokenClaim != 500_000 {
+		t.Errorf("VerifierTokenClaim = %d, want 500000", cfg.Budgets.VerifierTokenClaim)
+	}
+}
+
 func TestDefault_DepStrategyIsOff(t *testing.T) {
 	if got := Default().Sandbox.DepStrategy; got != "off" {
 		t.Errorf("default sandbox.dep_strategy = %q, want off", got)

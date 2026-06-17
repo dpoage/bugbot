@@ -137,6 +137,30 @@ const (
 	degradedLensCount = 2
 	// degradedRefuters is the refuter count under degradation.
 	degradedRefuters = 1
+
+	// DefaultFinderBudgetShare is the fraction of a run's TokenBudget the finder
+	// stage may consume when Options leaves FinderBudgetShare unset. The
+	// remainder is RESERVED for downstream verification (and, transitively,
+	// reproduction, which can only run on verified Tier-2 survivors). Without a
+	// reservation the finder stage — which launches first and in bulk — routinely
+	// drains the entire shared budget pool before any candidate reaches the
+	// verifier, orphaning every finding as Tier-3 and starving reproduction of
+	// input (bugbot-3lt live evidence: 769 finder units hard-skipped, 0 Tier-1
+	// promotions across 15 runs). 0.7 keeps the breadth-heavy finder stage the
+	// majority shareholder while guaranteeing the verifier a meaningful slice it
+	// cannot be starved out of. Tune via budgets.finder_budget_share.
+	DefaultFinderBudgetShare = 0.7
+
+	// DefaultTokenClaim is the per-task token claim a finder or verifier run is
+	// capped at when Options leaves the role's claim size unset. It bounds any
+	// single agent run's per-run TokenBudget (see budgetState.runnerLimitsForPool)
+	// so one breadth-heavy run cannot be granted a whole stage's reserve at
+	// launch. The shared pool is charged only for tokens actually spent, so the
+	// unspent part of a claim stays available to sibling runs. 1M matches
+	// agent.DefaultTokenBudget so a claimed run's cap equals the historical
+	// default when the sub-pool has at least one claim's worth of headroom. Tune
+	// via budgets.finder_token_claim / budgets.verifier_token_claim.
+	DefaultTokenClaim int64 = 1_000_000
 )
 
 // RoleClients holds the per-role LLM clients the funnel drives. Tests inject
@@ -147,6 +171,16 @@ type RoleClients struct {
 	Finder   llm.Client
 	Verifier llm.Client
 }
+
+// roleFinder / roleVerifier are the spend-ledger role tags wired into the
+// per-role recorder clients (see run.go). The recorder routes finder spend to
+// the finder sub-pool and everything else to the verify sub-pool under a
+// downstream-budget reservation, so these MUST match the strings passed to
+// llm.WithRecorder.
+const (
+	roleFinder   = "finder"
+	roleVerifier = "verifier"
+)
 
 // SandboxOpts bundles the sandbox-execution knobs that gate and bound the
 // sandbox_exec tool offered to refuter agents. The zero value means the
@@ -230,6 +264,26 @@ type Options struct {
 	// long before its real cost warrants. Zero resolves to
 	// DefaultCacheReadBudgetWeight; set to 1.0 to restore raw-token accounting.
 	CacheReadBudgetWeight float64
+	// FinderBudgetShare is the fraction of TokenBudget (0..1) the finder stage
+	// may consume; the remainder is RESERVED for downstream verification so the
+	// breadth-heavy finder stage cannot drain the whole pool and orphan every
+	// candidate before it is verified (see DefaultFinderBudgetShare). Zero (or
+	// negative) resolves to DefaultFinderBudgetShare. A value >= 1 disables the
+	// reservation (finders may use the whole budget — the legacy single-pool
+	// behavior). Ignored when TokenBudget is unlimited.
+	FinderBudgetShare float64
+	// FinderTokenClaim / VerifierTokenClaim are the per-task token claims for the
+	// claimant budget system. Each finder/refuter/arbiter run is capped at its
+	// role's claim (bounding the run's per-run TokenBudget) so a single
+	// breadth-heavy run cannot be granted a whole stage's reserve at launch. The
+	// shared per-cycle pool is charged only for tokens actually spent, so a run
+	// that finishes under its claim leaves the remainder in the pool for its
+	// siblings — the claim is "returned to the pool" by never being removed.
+	// Zero resolves to DefaultTokenClaim (1M); a negative value removes the
+	// per-task cap (a run may use its sub-pool's full remainder, the pre-claimant
+	// behavior). Ignored when TokenBudget is unlimited (no pool to cap against).
+	FinderTokenClaim   int64
+	VerifierTokenClaim int64
 	// FinderLimits / VerifierLimits bound each individual agent run (iterations
 	// and per-run token budget). Zero-value fields resolve to agent defaults.
 	FinderLimits   agent.Limits
@@ -306,6 +360,21 @@ func (o Options) resolve() Options {
 	}
 	if o.ChunkSize <= 0 {
 		o.ChunkSize = DefaultChunkSize
+	}
+	// A non-positive share means "unset": apply the default downstream
+	// reservation. A value >= 1 is preserved as an explicit "no reservation"
+	// (legacy single-pool) request and handled by reserveForDownstream.
+	if o.FinderBudgetShare <= 0 {
+		o.FinderBudgetShare = DefaultFinderBudgetShare
+	}
+	// Per-task token claims: zero means "unset" → DefaultTokenClaim. A NEGATIVE
+	// value is preserved as an explicit "no per-task cap" request and honored by
+	// runnerLimitsForPool (the run may use its sub-pool's full remainder).
+	if o.FinderTokenClaim == 0 {
+		o.FinderTokenClaim = DefaultTokenClaim
+	}
+	if o.VerifierTokenClaim == 0 {
+		o.VerifierTokenClaim = DefaultTokenClaim
 	}
 	// Fold the (opt-in) history-compaction threshold into FinderLimits so the
 	// per-finder runner picks it up. Compaction is OFF by default because the
@@ -674,6 +743,15 @@ type spendRecorder struct {
 	// convention — cache reads are not subtracted (see funnel doc comment).
 	pool *agent.BudgetPool
 
+	// finderPool / verifyPool are the role-scoped sub-pools that back the
+	// downstream-budget reservation (see budgetState.reserveForDownstream). When
+	// non-nil, each completion's chargeable tokens are ALSO added to the pool
+	// matching its role (finder -> finderPool, anything else -> verifyPool), in
+	// addition to the total pool above. They are nil unless a reservation is in
+	// effect, so the default single-pool accounting is byte-for-byte unchanged.
+	finderPool *agent.BudgetPool
+	verifyPool *agent.BudgetPool
+
 	// cacheReadWeight discounts cache reads when charging the budget pool, so
 	// run-spanning accounting matches the per-run overBudget check. 1.0 = no
 	// discount.
@@ -699,7 +777,16 @@ func (r *spendRecorder) Record(ev llm.UsageEvent) {
 	// (cache reads discounted), so concurrent in-flight runs observe the new
 	// run-spanning total at their next pre-turn check. Done outside the lock:
 	// the pool is independently concurrency-safe.
-	r.pool.Add(ev.Usage.ChargeableTokens(w))
+	charge := ev.Usage.ChargeableTokens(w)
+	r.pool.Add(charge)
+	// Under a downstream-budget reservation, also charge the role-scoped sub-pool
+	// so each stage gates on its own allowance. Both Add calls are nil-safe, so
+	// this is a no-op when no reservation is active.
+	if ev.Role == roleFinder {
+		r.finderPool.Add(charge)
+	} else {
+		r.verifyPool.Add(charge)
+	}
 	if cb != nil {
 		cb(in, out, cached)
 	}
@@ -745,8 +832,66 @@ type budgetState struct {
 	// recorder charges. Nil when TokenBudget is unlimited.
 	pool *agent.BudgetPool
 
+	// Downstream-budget reservation (see reserveForDownstream). When active,
+	// the total budget is partitioned so the finder stage may consume at most
+	// finderBudget and the verifier is guaranteed verifyBudget. finderPool /
+	// verifyPool are the role-scoped pools the recorder charges and each stage
+	// gates on independently. All four are zero/nil unless a reservation is in
+	// effect, in which case the funnel runs in the default single-pool mode and
+	// both stages share `pool` exactly as before.
+	finderBudget int64
+	verifyBudget int64
+	finderPool   *agent.BudgetPool
+	verifyPool   *agent.BudgetPool
+
+	// finderClaim / verifyClaim are the per-task token claims (Options.
+	// FinderTokenClaim / VerifierTokenClaim, default DefaultTokenClaim). They cap
+	// the per-run TokenBudget of a single finder / verifier agent run so one
+	// breadth-heavy run cannot be granted a whole stage's reserve at launch. The
+	// shared pool is charged only for tokens ACTUALLY spent (the recorder), so a
+	// run that finishes under its claim leaves the remainder in the pool for its
+	// siblings — the claim is "returned to the pool" by never being removed.
+	// Zero means no per-task cap (the run may use the pool's full remainder).
+	finderClaim int64
+	verifyClaim int64
+
 	degraded atomic.Bool
 	stopped  atomic.Bool
+}
+
+// reserveForDownstream partitions the run's total token budget so the finder
+// stage may consume at most finderShare of it, RESERVING the remainder for
+// downstream verification (and, transitively, reproduction — which can only run
+// on verified Tier-2 survivors). Without this, the finder stage launches first
+// and in bulk and drains the whole shared pool before any candidate reaches the
+// verifier, so every finding is orphaned as Tier-3 and reproduction starves
+// (bugbot-3lt). The two sub-pools are charged by role via the recorder and gate
+// each stage on its own allowance, so the verifier keeps full refuter strength
+// within its reserve instead of degrading the instant finders fill their share.
+//
+// It is a no-op (leaving the default single-pool mode intact) when the budget is
+// unlimited or finderShare is outside (0,1): a share >= 1 is an explicit "no
+// reservation" request, and a degenerate split that would leave the verifier
+// zero reserve falls back to the shared pool rather than an unlimited verifier.
+// Must be called before any spend is recorded.
+func (b *budgetState) reserveForDownstream(finderShare float64) {
+	if b.pool == nil || b.budget <= 0 {
+		return // unlimited: nothing to partition
+	}
+	if finderShare <= 0 || finderShare >= 1 {
+		return // no reservation: both stages share the total pool
+	}
+	finderBudget := int64(float64(b.budget) * finderShare)
+	verifyBudget := b.budget - finderBudget
+	if finderBudget <= 0 || verifyBudget <= 0 {
+		return // degenerate rounding: keep the single shared pool
+	}
+	b.finderBudget = finderBudget
+	b.verifyBudget = verifyBudget
+	b.finderPool = agent.NewBudgetPool(finderBudget)
+	b.verifyPool = agent.NewBudgetPool(verifyBudget)
+	b.rec.finderPool = b.finderPool
+	b.rec.verifyPool = b.verifyPool
 }
 
 // newBudgetState wires a budgetState and its shared pool to the recorder. A
@@ -762,42 +907,65 @@ func newBudgetState(budget int64, rec *spendRecorder, cacheReadWeight float64) *
 	return &budgetState{budget: budget, rec: rec, pool: pool, cacheReadWeight: cacheReadWeight}
 }
 
-// runnerLimits derives the per-run agent.Limits for a runner launched now,
-// layering the shared budget pool onto the caller's base limits. The per-run
-// TokenBudget is clamped to what the pool actually has left at launch, so a
-// late-launched agent gets only the remaining headroom rather than a fixed
-// constant. The BudgetCheck hook stops an in-flight run at the next turn once
-// the pool is exhausted by *other* concurrent runs. Both default to the base
-// limits when the budget is unlimited.
-func (b *budgetState) runnerLimits(base agent.Limits) agent.Limits {
-	if b.pool == nil {
+// runnerLimitsForPool derives the per-run agent.Limits for a runner launched
+// now against the given pool, layering it onto the caller's base limits. The
+// per-run TokenBudget is the tightest of three bounds: the role's per-task
+// CLAIM (the claimant cap, default DefaultTokenClaim), this run's own base
+// budget if it set one, and the pool's remaining headroom at launch. The
+// BudgetCheck hook stops an in-flight run at the next turn once the pool is
+// exhausted by *other* concurrent runs. Returns base unchanged when pool is
+// nil (unlimited budget, or no reservation for this role).
+//
+// The claim is a CAP, not a held reservation: the shared pool is charged only
+// for tokens actually spent (via the recorder), so a run that finishes under
+// its claim leaves the unspent remainder in the pool for sibling runs. This is
+// the claimant system's "return to the pool on closure" — realised by never
+// removing the unspent budget in the first place, which avoids the utilisation
+// loss and concurrency hazard of holding a reservation for the whole run.
+func (b *budgetState) runnerLimitsForPool(base agent.Limits, pool *agent.BudgetPool, claim int64) agent.Limits {
+	if pool == nil {
 		return base
 	}
 	out := base
-	out.BudgetCheck = b.pool.Check
+	out.BudgetCheck = pool.Check
 	out.CacheReadWeight = b.cacheReadWeight
-	// Clamp the per-run allowance to the remaining pool. A negative base budget
-	// means "unlimited per run"; we still cap it at the pool's remainder. Note
-	// this clamp only bounds a SOLO or late-launched runner: N runners launched
-	// concurrently each read the same remainder, so concurrent overshoot is
-	// bounded by the shared BudgetCheck hook above, not by this clamp.
-	rem := b.pool.Remaining()
-	// base.TokenBudget: 0 means "agent default", negative means "unlimited per
-	// run". In both cases, and whenever the pool remainder is the tighter bound,
-	// clamp to the remainder so the per-run allowance never exceeds what the
-	// run-spanning pool can actually afford. A zero remainder yields a runner
-	// that stops on its first pre-turn check, which is the desired late-launch
-	// behavior. We guard against the zero-means-default resolution turning a
-	// near-exhausted pool back into a full 1M allowance.
-	if base.TokenBudget <= 0 || rem < base.TokenBudget {
-		out.TokenBudget = rem
-		if out.TokenBudget == 0 {
-			// Limits.resolve() treats 0 as "use default"; force a hard stop by
-			// using the smallest negative-free sentinel that still bites pre-turn.
-			out.TokenBudget = 1
-		}
+	// The per-run allowance starts at the pool's remaining headroom and is
+	// tightened by the per-task claim and an explicit base budget. base.TokenBudget
+	// 0 means "agent default" and negative means "unlimited per run"; both are
+	// superseded here by the claim/remaining bounds. A zero result is forced to a
+	// 1-token sentinel so Limits.resolve() does not reinterpret it as "use the
+	// full default", giving a near-exhausted pool a runner that stops pre-turn.
+	allow := pool.Remaining()
+	if claim > 0 && claim < allow {
+		allow = claim
+	}
+	if base.TokenBudget > 0 && base.TokenBudget < allow {
+		allow = base.TokenBudget
+	}
+	out.TokenBudget = allow
+	if out.TokenBudget == 0 {
+		out.TokenBudget = 1
 	}
 	return out
+}
+
+// finderRunnerLimits / verifyRunnerLimits select the role-scoped pool under a
+// downstream reservation, falling back to the shared total pool when no
+// reservation is in effect for that role. Either way the role's per-task claim
+// (finderClaim / verifyClaim) caps the per-run allowance so a single run cannot
+// be granted the whole sub-pool at launch.
+func (b *budgetState) finderRunnerLimits(base agent.Limits) agent.Limits {
+	if b.finderPool != nil {
+		return b.runnerLimitsForPool(base, b.finderPool, b.finderClaim)
+	}
+	return b.runnerLimitsForPool(base, b.pool, b.finderClaim)
+}
+
+func (b *budgetState) verifyRunnerLimits(base agent.Limits) agent.Limits {
+	if b.verifyPool != nil {
+		return b.runnerLimitsForPool(base, b.verifyPool, b.verifyClaim)
+	}
+	return b.runnerLimitsForPool(base, b.pool, b.verifyClaim)
 }
 
 // overSoft reports whether cumulative spend has crossed the soft (degradation)
@@ -816,6 +984,42 @@ func (b *budgetState) overHard() bool {
 		return false
 	}
 	return b.rec.chargeableTotal() >= b.budget
+}
+
+// finderOverSoft / finderOverHard gate the finder stage. Under a downstream
+// reservation they measure finder-role spend against the finder sub-budget;
+// otherwise they fall back to the total-budget gates (default single-pool mode).
+func (b *budgetState) finderOverSoft() bool {
+	if b.finderPool != nil {
+		return b.finderPool.Spent()*softBudgetDenom > b.finderBudget*softBudgetNumer
+	}
+	return b.overSoft()
+}
+
+func (b *budgetState) finderOverHard() bool {
+	if b.finderPool != nil {
+		return b.finderPool.Spent() >= b.finderBudget
+	}
+	return b.overHard()
+}
+
+// verifyOverSoft / verifyOverHard gate the verify stage. Under a downstream
+// reservation they measure verify-role spend against the RESERVED verify
+// sub-budget — so the verifier degrades/stops only when it has consumed its own
+// reserve, never merely because finders filled theirs. Without a reservation
+// they fall back to the total-budget gates.
+func (b *budgetState) verifyOverSoft() bool {
+	if b.verifyPool != nil {
+		return b.verifyPool.Spent()*softBudgetDenom > b.verifyBudget*softBudgetNumer
+	}
+	return b.overSoft()
+}
+
+func (b *budgetState) verifyOverHard() bool {
+	if b.verifyPool != nil {
+		return b.verifyPool.Spent() >= b.verifyBudget
+	}
+	return b.overHard()
 }
 
 // sortFindings orders findings critical-first, then by file/line for stable

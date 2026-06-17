@@ -113,6 +113,24 @@ type Budgets struct {
 	// restores the looser agent-package read defaults for the finder.
 	FinderReadLines int `yaml:"finder_read_lines"`
 	FinderReadBytes int `yaml:"finder_read_bytes"`
+	// FinderBudgetShare is the fraction of per_cycle_tokens (0..1) the finder
+	// stage may consume; the remainder is RESERVED for downstream verification
+	// so the breadth-heavy finder stage cannot drain the whole per-cycle pool and
+	// orphan every candidate before it is verified (bugbot-8mj). Zero defers to
+	// the funnel default (funnel.DefaultFinderBudgetShare); 1.0 disables the
+	// reservation (legacy: finders may use the whole budget).
+	FinderBudgetShare float64 `yaml:"finder_budget_share"`
+	// FinderTokenClaim / VerifierTokenClaim are the per-task token claims for the
+	// claimant budget system: each finder or verifier agent run is capped at this
+	// many tokens (its per-run budget), so a single breadth-heavy finder cannot
+	// be granted the whole finder reserve in one run (bugbot-8mj). The reserved
+	// sub-pool is charged only for tokens ACTUALLY spent, so a run that finishes
+	// under its claim leaves the remainder available to its siblings — the claim
+	// is "returned to the pool" by never being removed. Zero defers to the funnel
+	// default (funnel.DefaultTokenClaim = 1_000_000). A negative value disables
+	// the per-task cap for that role (each run may use its sub-pool remainder).
+	FinderTokenClaim   int64 `yaml:"finder_token_claim"`
+	VerifierTokenClaim int64 `yaml:"verifier_token_claim"`
 }
 
 // Scan controls which files are considered during ingest/scan.
@@ -494,6 +512,9 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt64("BUGBOT_BUDGETS_PER_CYCLE_TOKENS", &cfg.Budgets.PerCycleTokens),
 		setInt64("BUGBOT_BUDGETS_PER_DAY_TOKENS", &cfg.Budgets.PerDayTokens),
 		setFloat64("BUGBOT_BUDGETS_CACHE_READ_WEIGHT", &cfg.Budgets.CacheReadWeight),
+		setFloat64("BUGBOT_BUDGETS_FINDER_BUDGET_SHARE", &cfg.Budgets.FinderBudgetShare),
+		setInt64("BUGBOT_BUDGETS_FINDER_TOKEN_CLAIM", &cfg.Budgets.FinderTokenClaim),
+		setInt64("BUGBOT_BUDGETS_VERIFIER_TOKEN_CLAIM", &cfg.Budgets.VerifierTokenClaim),
 		setInt64("BUGBOT_BUDGETS_FINDER_HISTORY_TOKENS", &cfg.Budgets.FinderHistoryTokens),
 		setInt("BUGBOT_BUDGETS_FINDER_READ_LINES", &cfg.Budgets.FinderReadLines),
 		setInt("BUGBOT_BUDGETS_FINDER_READ_BYTES", &cfg.Budgets.FinderReadBytes),
@@ -650,6 +671,12 @@ func (c *Config) Validate() error {
 
 	if c.Budgets.CacheReadWeight < 0 || c.Budgets.CacheReadWeight > 1 {
 		return fmt.Errorf("config: budgets.cache_read_weight %.3f invalid (want 0..1)", c.Budgets.CacheReadWeight)
+	}
+	// finder_budget_share is a fraction: 0 defers to the funnel default, 1.0
+	// disables the reservation, and any value in between partitions the budget.
+	// Negative or >1 is meaningless.
+	if c.Budgets.FinderBudgetShare < 0 || c.Budgets.FinderBudgetShare > 1 {
+		return fmt.Errorf("config: budgets.finder_budget_share %.3f invalid (want 0..1)", c.Budgets.FinderBudgetShare)
 	}
 	if c.Publish.TierMin < 0 || c.Publish.TierMin > 3 {
 		return fmt.Errorf("config: publish.tier_min %d invalid (want 0..3)", c.Publish.TierMin)
