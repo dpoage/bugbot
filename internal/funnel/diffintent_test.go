@@ -180,13 +180,12 @@ func TestHypothesize_DiffIntentGatedOnTargetedOnly(t *testing.T) {
 	}
 
 	// Sweep runs as ScanOneshot — diff-intent must be silent.
-	// Sweep units = nTaxonomy taxonomy lenses × sweep-wide + 1 deep unit for
-	// api-contract-misuse@contract-trace-deep.
-	nTaxonomy := len(BuiltinLenses()) - 1
-	wantSweepCalls := nTaxonomy + 1 // +1 for contract-trace-deep on api-contract-misuse
+	// Sweep units = nTaxonomy taxonomy lenses × sweep-wide + 1 contract-trace-deep + 2 state-trace-deep.
+	// (api-contract-misuse@contract-trace-deep, concurrency@state-trace-deep, resource-leaks@state-trace-deep).
+	wantSweepCalls := goSweepUnits()
 	if finder.callCount() != wantSweepCalls {
-		t.Errorf("sweep with ChangeContext set: finder calls = %d, want %d (no diff-intent on ScanOneshot, nTaxonomy=%d wide + 1 deep)",
-			finder.callCount(), wantSweepCalls, nTaxonomy)
+		t.Errorf("sweep with ChangeContext set: finder calls = %d, want %d (no diff-intent on ScanOneshot)",
+			finder.callCount(), wantSweepCalls)
 	}
 }
 
@@ -213,13 +212,12 @@ func TestHypothesize_DiffIntentZeroOnSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// diff-intent emits zero chunk tasks. Sweep units = nTaxonomy wide + 1 deep
+	// diff-intent emits zero chunk tasks. Sweep units = nTaxonomy wide + 1 contract-trace-deep + 2 state-trace-deep
 	// unit for api-contract-misuse@contract-trace-deep.
-	nTaxonomy := len(BuiltinLenses()) - 1
-	wantCalls := nTaxonomy + 1 // +1 for contract-trace-deep on api-contract-misuse
+	wantCalls := goSweepUnits()
 	if finder.callCount() != wantCalls {
-		t.Errorf("sweep finder calls = %d, want %d (no diff-intent; nTaxonomy=%d wide + 1 deep)",
-			finder.callCount(), wantCalls, nTaxonomy)
+		t.Errorf("sweep finder calls = %d, want %d (no diff-intent)",
+			finder.callCount(), wantCalls)
 	}
 }
 
@@ -244,12 +242,11 @@ func TestHypothesize_DiffIntentNilCC(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Targeted with nil CC: no diff-intent. Sweep units = nTaxonomy wide + 1 deep.
-	nTaxonomy := len(BuiltinLenses()) - 1
-	wantCalls := nTaxonomy + 1 // +1 for contract-trace-deep on api-contract-misuse
+	// Targeted with nil CC: no diff-intent. Sweep units = nTaxonomy wide + 1 contract-trace-deep + 2 state-trace-deep.
+	wantCalls := goSweepUnits()
 	if finder.callCount() != wantCalls {
-		t.Errorf("targeted (nil CC) finder calls = %d, want %d (no diff-intent; nTaxonomy=%d wide + 1 deep)",
-			finder.callCount(), wantCalls, nTaxonomy)
+		t.Errorf("targeted (nil CC) finder calls = %d, want %d (no diff-intent)",
+			finder.callCount(), wantCalls)
 	}
 }
 
@@ -302,11 +299,10 @@ func TestHypothesize_DiffIntentOneTaskOnTargeted(t *testing.T) {
 	}
 
 	// Total finder calls: nTaxonomy wide units + 1 deep unit + 1 diff-intent.
-	nTaxonomy := len(BuiltinLenses()) - 1
-	wantCalls := nTaxonomy + 1 + 1 // nTaxonomy wide + 1 deep (api-contract-misuse) + 1 diff-intent
+	wantCalls := goSweepUnits() + 1 // + 1 diff-intent custom unit
 	if finder.callCount() != wantCalls {
-		t.Errorf("finder calls = %d, want %d (nTaxonomy=%d wide + 1 deep + 1 diff-intent)",
-			finder.callCount(), wantCalls, nTaxonomy)
+		t.Errorf("finder calls = %d, want %d (sweep units + 1 diff-intent)",
+			finder.callCount(), wantCalls)
 	}
 }
 
@@ -430,14 +426,14 @@ func TestDegradedLensNames_SweepKeepsTaxonomyTop2(t *testing.T) {
 	if strings.Contains(skippedNotes, "nil-safety") {
 		t.Error("nil-safety/error-handling should survive degradation (top-1 taxonomy lens)")
 	}
-	if strings.Contains(skippedNotes, "concurrency") {
-		t.Error("concurrency should survive degradation (top-2 taxonomy lens)")
+	if strings.Contains(skippedNotes, "concurrency@sweep-wide") {
+		t.Error("concurrency@sweep-wide should survive degradation (top-2 taxonomy lens)")
 	}
-	// Key assertion: skipped notes for degraded lenses must not mention concurrency
-	// being skipped. (If diff-intent stole the slot, concurrency would appear here.)
+	// Key assertion: skipped notes for degraded lenses must not mention concurrency@sweep-wide
+	// being skipped. (If diff-intent stole the slot, concurrency@sweep-wide would appear here.)
 	for _, note := range res.Skipped {
-		if strings.Contains(note, "concurrency") && strings.Contains(note, "skipped") {
-			t.Errorf("concurrency was skipped during degradation — diff-intent stole its slot: %q", note)
+		if strings.Contains(note, "concurrency@sweep-wide") && strings.Contains(note, "skipped") {
+			t.Errorf("concurrency@sweep-wide was skipped during degradation — diff-intent stole its slot: %q", note)
 		}
 	}
 }

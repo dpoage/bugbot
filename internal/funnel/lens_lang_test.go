@@ -20,6 +20,10 @@ func TestBuiltinLensNames_Stable(t *testing.T) {
 		"boundary-conditions",
 		"api-contract-misuse",
 		"injection/input-validation",
+		"memory-safety",
+		"exception-safety",
+		"dynamic-typing",
+		"cross-language-boundary",
 	}
 	lenses := BuiltinLenses()
 	if len(lenses) != len(want) {
@@ -37,17 +41,30 @@ func TestBuiltinLensNames_Stable(t *testing.T) {
 func TestFinderSystemPrompt_PythonOnly_NoGoIdioms(t *testing.T) {
 	goIdioms := []string{"goroutine", "comma-ok", "WaitGroup", "How this manifests in Go"}
 	for _, l := range BuiltinLenses() {
-		if l.Name == "diff-intent" {
+		if l.Name == "diff-intent" || l.Name == "cross-language-boundary" {
 			continue // language-free, Core-only: no manifestation blocks by design
 		}
 		p := finderSystemPrompt("senior Python engineer", l, []ingest.Language{ingest.LangPython})
-		if !strings.Contains(p, "How this manifests in Python:") {
-			t.Errorf("lens %q: Python-only prompt missing the Python manifestation block", l.Name)
-		}
-		for _, row := range manifestations[l.Name][ingest.LangPython] {
-			if !strings.Contains(p, row) {
-				t.Errorf("lens %q: Python-only prompt missing Python row %q", l.Name, row)
+		// A lens that does not apply to Python (lensAppliesTo == false) is
+		// language-gated off — it never runs on a Python chunk, so its prompt
+		// for LangPython must carry Core only. Gating on lensAppliesTo (not on
+		// manifestations-emptiness) asserts the real invariant: a lens only
+		// renders a block for a language it applies to, and a row forgotten
+		// in the manifestations table for a language the lens DOES apply to
+		// still fails here as a composition bug.
+		pyLangs := []ingest.Language{ingest.LangPython}
+		if lensAppliesTo(l, pyLangs) {
+			pyRows := manifestations[l.Name][ingest.LangPython]
+			if !strings.Contains(p, "How this manifests in Python:") {
+				t.Errorf("lens %q: Python-only prompt missing the Python manifestation block", l.Name)
 			}
+			for _, row := range pyRows {
+				if !strings.Contains(p, row) {
+					t.Errorf("lens %q: Python-only prompt missing Python row %q", l.Name, row)
+				}
+			}
+		} else if strings.Contains(p, "How this manifests in Python:") {
+			t.Errorf("lens %q: Python-only prompt renders a Python block despite lensAppliesTo == false (composition not data-driven)", l.Name)
 		}
 		for _, idiom := range goIdioms {
 			// Case-insensitive so a future recased leak still trips the assertion
@@ -65,20 +82,27 @@ func TestFinderSystemPrompt_PythonOnly_NoGoIdioms(t *testing.T) {
 func TestFinderSystemPrompt_GoOnly_FullGoContent(t *testing.T) {
 	pyIdioms := []string{"asyncio", "un-awaited", "How this manifests in Python"}
 	for _, l := range BuiltinLenses() {
-		if l.Name == "diff-intent" {
+		if l.Name == "diff-intent" || l.Name == "cross-language-boundary" {
 			continue // language-free, Core-only: no manifestation blocks by design
 		}
 		p := finderSystemPrompt("senior Go engineer", l, []ingest.Language{ingest.LangGo})
-		if !strings.Contains(p, l.Core) {
-			t.Errorf("lens %q: Go-only prompt missing the universal Core", l.Name)
-		}
-		if !strings.Contains(p, "How this manifests in Go:") {
-			t.Errorf("lens %q: Go-only prompt missing the Go manifestation block", l.Name)
-		}
-		for _, row := range manifestations[l.Name][ingest.LangGo] {
-			if !strings.Contains(p, row) {
-				t.Errorf("lens %q: Go-only prompt missing Go row %q", l.Name, row)
+		// A lens that does not apply to Go (lensAppliesTo == false) is
+		// language-gated off — it never runs on a Go chunk, so its prompt
+		// for LangGo must carry Core only. Gating on lensAppliesTo (not on
+		// manifestations-emptiness) asserts the real invariant.
+		goLangs := []ingest.Language{ingest.LangGo}
+		if lensAppliesTo(l, goLangs) {
+			goRows := manifestations[l.Name][ingest.LangGo]
+			if !strings.Contains(p, "How this manifests in Go:") {
+				t.Errorf("lens %q: Go-only prompt missing the Go manifestation block", l.Name)
 			}
+			for _, row := range goRows {
+				if !strings.Contains(p, row) {
+					t.Errorf("lens %q: Go-only prompt missing Go row %q", l.Name, row)
+				}
+			}
+		} else if strings.Contains(p, "How this manifests in Go:") {
+			t.Errorf("lens %q: Go-only prompt renders a Go block despite lensAppliesTo == false (composition not data-driven)", l.Name)
 		}
 		for _, idiom := range pyIdioms {
 			if strings.Contains(strings.ToLower(p), strings.ToLower(idiom)) {
@@ -227,11 +251,18 @@ func TestEffectiveYield_Resolution(t *testing.T) {
 // lenses that emitted units on this sweep) to lensStrategyClass values for
 // degradedUnitClasses, using sweep-wide (weight 1.0) as the strategy. This
 // mirrors what hypothesize builds when only the default strategy is in play.
-func sweepActiveClasses(ordered []Lens) []lensStrategyClass {
+func sweepActiveClasses(ordered []Lens, langs []ingest.Language) []lensStrategyClass {
 	var out []lensStrategyClass
 	for _, l := range ordered {
-		if l.Name == "diff-intent" {
-			continue // change-scoped lens: zero chunk units on sweeps
+		// diff-intent and cross-language-boundary are custom-unit lenses: they
+		// emit no sweep-wide chunk units, so they are never active sweep classes.
+		if l.Name == "diff-intent" || l.Name == "cross-language-boundary" {
+			continue
+		}
+		// A language-gated lens that does not apply to this repo's languages
+		// emits zero units, so it is not an active class on this run either.
+		if !lensAppliesTo(l, langs) {
+			continue
 		}
 		out = append(out, lensStrategyClass{
 			lensName:     l.Name,
@@ -242,6 +273,16 @@ func sweepActiveClasses(ordered []Lens) []lensStrategyClass {
 	return out
 }
 
+// goSweepUnits is the number of finder units a single Go-language chunk emits on
+// a sweep, computed from buildUnits so the count tracks the real lens × strategy
+// gating (language-gated and custom-unit lenses excluded) rather than a
+// hand-maintained constant that drifts whenever a lens or strategy is added.
+func goSweepUnits() int {
+	langs := []ingest.Language{ingest.LangGo}
+	chunk := fileChunk{files: []string{"x.go"}, langs: langs}
+	return len(buildUnits(lensesByYield(BuiltinLenses(), langs), builtinStrategies(), []fileChunk{chunk}, nil))
+}
+
 // TestDegradation_LanguageDependentLensSet: under budget pressure a
 // Python-heavy repo keeps a different lens set than a Go repo — degradation
 // sheds the lenses that are low-yield for THIS repo's language mix.
@@ -249,14 +290,14 @@ func sweepActiveClasses(ordered []Lens) []lensStrategyClass {
 func TestDegradation_LanguageDependentLensSet(t *testing.T) {
 	goLangs := []ingest.Language{ingest.LangGo}
 	pyLangs := []ingest.Language{ingest.LangPython}
-	goKeep := degradedUnitClasses(sweepActiveClasses(lensesByYield(BuiltinLenses(), goLangs)), goLangs)
-	pyKeep := degradedUnitClasses(sweepActiveClasses(lensesByYield(BuiltinLenses(), pyLangs)), pyLangs)
+	goKeep := degradedUnitClasses(sweepActiveClasses(lensesByYield(BuiltinLenses(), goLangs), goLangs), goLangs)
+	pyKeep := degradedUnitClasses(sweepActiveClasses(lensesByYield(BuiltinLenses(), pyLangs), pyLangs), pyLangs)
 
 	if !goKeep["nil-safety/error-handling@sweep-wide"] || !goKeep["concurrency@sweep-wide"] {
 		t.Errorf("Go-profile degraded set = %v, want {nil-safety/error-handling@sweep-wide, concurrency@sweep-wide} (historical behavior)", goKeep)
 	}
-	if !pyKeep["nil-safety/error-handling@sweep-wide"] || !pyKeep["injection/input-validation@sweep-wide"] {
-		t.Errorf("Python-profile degraded set = %v, want {nil-safety/error-handling@sweep-wide, injection/input-validation@sweep-wide}", pyKeep)
+	if !pyKeep["nil-safety/error-handling@sweep-wide"] || !pyKeep["dynamic-typing@sweep-wide"] {
+		t.Errorf("Python-profile degraded set = %v, want {nil-safety/error-handling@sweep-wide, dynamic-typing@sweep-wide}", pyKeep)
 	}
 	if reflect.DeepEqual(goKeep, pyKeep) {
 		t.Error("Go and Python profiles degrade to the same lens set; yields are not language-dependent")

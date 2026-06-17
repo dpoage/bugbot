@@ -86,10 +86,78 @@ func TestStrategyTask_ContractTraceDeep_NoLeads(t *testing.T) {
 	}
 }
 
-// TestStrategyTask_LeadsFlatteningShared verifies that finderTask and
-// buildContractTraceDeepTask both flatten note newlines identically — they must
-// share the same helper (appendLeadsSection) so the prompt-injection guard
-// cannot fork between the two strategies.
+// TestStrategyTask_StateTraceDeep_SeedFraming verifies that
+// buildStateTraceDeepTask frames the files as SEED FILES (with the
+// shared-state and resource-lifecycle phrasing) and includes the standard
+// CROSS-LENS LEADS section when leads are non-empty — using the same
+// newline-flattening logic as finderTask and buildContractTraceDeepTask.
+func TestStrategyTask_StateTraceDeep_SeedFraming(t *testing.T) {
+	files := []string{"pkg/server/conn.go", "pkg/server/pool.go"}
+	leads := []store.Lead{
+		{
+			PosterLens: "nil-safety/error-handling",
+			TargetLens: "concurrency",
+			File:       "pkg/server/conn.go",
+			Line:       17,
+			Note:       "mutex held\nacross defer",
+		},
+	}
+
+	task := buildStateTraceDeepTask(files, leads)
+
+	// Must include the SEED FILES framing line.
+	if !strings.Contains(task, "SEED FILES (a starting point for shared-state and resource-lifecycle tracing):") {
+		t.Error("state-trace-deep task must contain the SEED FILES framing with the shared-state/lifecycle qualifier")
+	}
+	if strings.Contains(task, "Audit these target files") {
+		t.Error("state-trace-deep task must NOT contain sweep-wide audit framing")
+	}
+
+	// All seed files must appear.
+	for _, f := range files {
+		if !strings.Contains(task, f) {
+			t.Errorf("state-trace-deep task missing seed file %q", f)
+		}
+	}
+
+	// CROSS-LENS LEADS section must appear.
+	if !strings.Contains(task, "CROSS-LENS LEADS") {
+		t.Error("state-trace-deep task missing CROSS-LENS LEADS section")
+	}
+	if !strings.Contains(task, "pkg/server/conn.go:17") {
+		t.Error("state-trace-deep task missing lead location")
+	}
+
+	// Prompt-injection guard: note newlines must be flattened to spaces.
+	if strings.Contains(task, "mutex held\nacross defer") {
+		t.Error("state-trace-deep task must flatten newlines in lead notes (prompt-injection guard)")
+	}
+	if !strings.Contains(task, "mutex held across defer") {
+		t.Error("state-trace-deep task must flatten note to single line")
+	}
+}
+
+// TestStrategyTask_StateTraceDeep_NoLeads verifies the task is correct when
+// the leads slice is empty — no CROSS-LENS LEADS section.
+func TestStrategyTask_StateTraceDeep_NoLeads(t *testing.T) {
+	files := []string{"internal/server/conn.go"}
+	task := buildStateTraceDeepTask(files, nil)
+
+	if !strings.Contains(task, "SEED FILES") {
+		t.Error("state-trace-deep task must contain SEED FILES framing")
+	}
+	if !strings.Contains(task, "internal/server/conn.go") {
+		t.Error("state-trace-deep task missing seed file")
+	}
+	if strings.Contains(task, "CROSS-LENS LEADS") {
+		t.Error("state-trace-deep task must not contain CROSS-LENS LEADS section when no leads")
+	}
+}
+
+// TestStrategyTask_LeadsFlatteningShared verifies that finderTask,
+// buildContractTraceDeepTask, and buildStateTraceDeepTask all flatten note
+// newlines identically — they must share the same helper (appendLeadsSection)
+// so the prompt-injection guard cannot fork across strategies.
 func TestStrategyTask_LeadsFlatteningShared(t *testing.T) {
 	files := []string{"a.go"}
 	leads := []store.Lead{{
@@ -102,8 +170,9 @@ func TestStrategyTask_LeadsFlatteningShared(t *testing.T) {
 
 	wideTask := finderTask(files, leads)
 	deepTask := buildContractTraceDeepTask(files, leads)
+	stateTask := buildStateTraceDeepTask(files, leads)
 
-	// Both must contain the flattened note.
+	// All three must contain the flattened note.
 	wantNote := "line one line two tab here"
 	if !strings.Contains(wideTask, wantNote) {
 		t.Errorf("finderTask did not flatten lead note: %q", wideTask)
@@ -111,9 +180,12 @@ func TestStrategyTask_LeadsFlatteningShared(t *testing.T) {
 	if !strings.Contains(deepTask, wantNote) {
 		t.Errorf("buildContractTraceDeepTask did not flatten lead note: %q", deepTask)
 	}
+	if !strings.Contains(stateTask, wantNote) {
+		t.Errorf("buildStateTraceDeepTask did not flatten lead note: %q", stateTask)
+	}
 
-	// Neither must contain raw newlines or tabs in the note.
-	for _, task := range []string{wideTask, deepTask} {
+	// None may contain raw newlines or tabs in the note.
+	for _, task := range []string{wideTask, deepTask, stateTask} {
 		if strings.Contains(task, "line one\nline two") {
 			t.Error("task contains unflattened newline in lead note (prompt-injection risk)")
 		}
@@ -125,21 +197,25 @@ func TestStrategyTask_LeadsFlatteningShared(t *testing.T) {
 // TestSystemPrompt_SweepWide_ByteIdentical verifies that sweep-wide (empty
 // SystemClause) produces a system prompt that is BYTE-IDENTICAL to the output
 // of finderSystemPrompt — the strategy axis introduces zero bytes for default
-// strategy units.
+// strategy units. It also exercises an unaffected lens (concurrency) to make
+// sure adding state-trace-deep does not change the sweep-wide prompt for any
+// lens.
 func TestSystemPrompt_SweepWide_ByteIdentical(t *testing.T) {
-	l := lensByName(t, "api-contract-misuse")
-	langs := []ingest.Language{ingest.LangGo}
-	persona := "senior Go engineer"
+	for _, name := range []string{"api-contract-misuse", "concurrency", "resource-leaks"} {
+		l := lensByName(t, name)
+		langs := []ingest.Language{ingest.LangGo}
+		persona := "senior Go engineer"
 
-	if sweepWide.SystemClause != "" {
-		t.Fatal("sweepWide.SystemClause must be empty for byte-identical test to be valid")
-	}
-	// Drive the PRODUCTION composition path (what the hypothesize launch loop
-	// calls), not a re-derivation: a fork in the production logic must fail here.
-	got := composeFinderSystemPrompt(persona, l, langs, sweepWide)
-	want := finderSystemPrompt(persona, l, langs)
-	if got != want {
-		t.Errorf("sweep-wide composed prompt differs from finderSystemPrompt output (byte identity broken):\ngot:  %q\nwant: %q", got, want)
+		if sweepWide.SystemClause != "" {
+			t.Fatalf("sweepWide.SystemClause must be empty for byte-identical test to be valid (lens %q)", name)
+		}
+		// Drive the PRODUCTION composition path (what the hypothesize launch loop
+		// calls), not a re-derivation: a fork in the production logic must fail here.
+		got := composeFinderSystemPrompt(persona, l, langs, sweepWide)
+		want := finderSystemPrompt(persona, l, langs)
+		if got != want {
+			t.Errorf("sweep-wide composed prompt differs from finderSystemPrompt output for lens %q (byte identity broken):\ngot:  %q\nwant: %q", name, got, want)
+		}
 	}
 }
 
@@ -195,16 +271,65 @@ func TestSystemPrompt_ContractTraceDeep_ClauseContent(t *testing.T) {
 	}
 }
 
+// TestSystemPrompt_StateTraceDeep_ClauseAppended verifies that the
+// state-trace-deep strategy appends its SystemClause after the lens
+// manifestation blocks, under the expected heading — for the lens it applies
+// to (concurrency).
+func TestSystemPrompt_StateTraceDeep_ClauseAppended(t *testing.T) {
+	l := lensByName(t, "concurrency")
+	langs := []ingest.Language{ingest.LangGo}
+	persona := "senior Go engineer"
+
+	basePrompt := finderSystemPrompt(persona, l, langs)
+	// Drive the PRODUCTION composition path, not a re-derivation.
+	statePrompt := composeFinderSystemPrompt(persona, l, langs, stateTraceDeep)
+
+	// The base prompt must be an exact prefix (clause appended, not injected).
+	if !strings.HasPrefix(statePrompt, basePrompt) {
+		t.Fatal("state-trace-deep prompt must have the base prompt as an exact prefix")
+	}
+
+	// Everything after the base prompt must be exactly the heading + clause.
+	suffix := statePrompt[len(basePrompt):]
+	wantSuffix := "\n\nYOUR SEARCH STRATEGY (state-trace-deep):\n" + stateTraceDeep.SystemClause
+	if suffix != wantSuffix {
+		t.Errorf("state-trace-deep prompt suffix mismatch:\ngot:  %q\nwant: %q", suffix, wantSuffix)
+	}
+
+	// The clause must NOT appear in the sweep-wide (base) prompt.
+	if strings.Contains(basePrompt, "YOUR SEARCH STRATEGY") {
+		t.Error("base (sweep-wide) prompt must NOT contain strategy heading")
+	}
+}
+
+// TestSystemPrompt_StateTraceDeep_ClauseContent spot-checks key phrases
+// in the SystemClause to ensure spec text was not accidentally truncated.
+func TestSystemPrompt_StateTraceDeep_ClauseContent(t *testing.T) {
+	clause := stateTraceDeep.SystemClause
+	required := []string{
+		"STARTING SEED",
+		"SHARED MUTABLE STATE",
+		"ACROSS FILES",
+		"sites DISAGREE",
+		"Budget your turns for traversal",
+	}
+	for _, phrase := range required {
+		if !strings.Contains(clause, phrase) {
+			t.Errorf("state-trace-deep SystemClause missing required phrase %q", phrase)
+		}
+	}
+}
+
 // --- Unit construction -------------------------------------------------------
 
 // TestUnitConstruction_StrategyAxis verifies the (lens × strategy × chunk) unit
 // count for a sweep with L lenses and C chunks:
 //
-//	total = L×C (sweep-wide for all lenses) + C (deep for api-contract-misuse only)
+//	total = L×C (sweep-wide for all lenses) + C (contract-trace-deep for api-contract-misuse) + 2C (state-trace-deep for concurrency + resource-leaks)
 //
 // Specifically with C=1 chunk and L=nTaxonomy lenses:
 //
-//	total = nTaxonomy + 1 (the single deep unit for api-contract-misuse)
+//	total = nTaxonomy + 3 (1 contract-trace-deep + 2 state-trace-deep)
 func TestUnitConstruction_StrategyAxis(t *testing.T) {
 	lenses := BuiltinLenses()
 	var taxonomyLenses []Lens
@@ -228,10 +353,10 @@ func TestUnitConstruction_StrategyAxis(t *testing.T) {
 	}
 	_ = files
 
-	// Expect L wide units + 1 deep unit (only api-contract-misuse admits deep).
-	wantUnits := L + 1
+	// Expect L wide units + 1 contract-trace-deep + 2 state-trace-deep.
+	wantUnits := L + 3
 	if units != wantUnits {
-		t.Errorf("unit count = %d, want %d (L=%d wide + 1 deep for api-contract-misuse)", units, wantUnits, L)
+		t.Errorf("unit count = %d, want %d (L=%d wide + 1 contract-trace-deep + 2 state-trace-deep)", units, wantUnits, L)
 	}
 }
 
@@ -252,14 +377,37 @@ func TestUnitConstruction_DeepOnlyForApiContract(t *testing.T) {
 	}
 }
 
+// TestUnitConstruction_StateTraceDeep_TargetLenses verifies that
+// state-trace-deep applies ONLY to concurrency and resource-leaks, and NOT
+// to any other lens (including api-contract-misuse, which is contract-trace-deep
+// territory).
+func TestUnitConstruction_StateTraceDeep_TargetLenses(t *testing.T) {
+	stateTraceDeepTargets := map[string]bool{
+		"concurrency":    true,
+		"resource-leaks": true,
+	}
+	for _, l := range BuiltinLenses() {
+		applies := stateTraceDeep.AppliesTo(l.Name)
+		want := stateTraceDeepTargets[l.Name]
+		if applies != want {
+			t.Errorf("stateTraceDeep.AppliesTo(%q) = %v, want %v (state-trace-deep targets concurrency and resource-leaks only)", l.Name, applies, want)
+		}
+	}
+}
+
 // TestUnitConstruction_DiffIntentNoDeep verifies that diff-intent receives no
 // deep strategy units. diff-intent is special: it never enters the per-lens
 // chunk loop (handled separately in hypothesize), so AppliesTo is never called
-// for it in the normal path. This test makes the invariant explicit.
+// for it in the normal path. This test makes the invariant explicit for BOTH
+// non-default strategies.
 func TestUnitConstruction_DiffIntentNoDeep(t *testing.T) {
 	// contractTraceDeep.AppliesTo("diff-intent") must return false.
 	if contractTraceDeep.AppliesTo("diff-intent") {
 		t.Error("contractTraceDeep.AppliesTo(diff-intent) = true; diff-intent must never get deep units")
+	}
+	// stateTraceDeep.AppliesTo("diff-intent") must return false.
+	if stateTraceDeep.AppliesTo("diff-intent") {
+		t.Error("stateTraceDeep.AppliesTo(diff-intent) = true; diff-intent must never get deep units")
 	}
 	// sweepWide.AppliesTo("diff-intent") must return true (it always returns true),
 	// which is correct: diff-intent's single custom-task unit uses sweep-wide.
@@ -286,7 +434,7 @@ func TestDegradation_DeepShedBeforeWide(t *testing.T) {
 	// Both api-contract-misuse classes rank below them and are both shed.
 	// But the deep class (45) ranks BELOW the wide class (50).
 	langs := []ingest.Language{ingest.LangGo}
-	classes := sweepActiveClasses(lensesByYield(BuiltinLenses(), langs))
+	classes := sweepActiveClasses(lensesByYield(BuiltinLenses(), langs), langs)
 	// Add the deep unit for api-contract-misuse.
 	classes = append(classes, lensStrategyClass{
 		lensName:     "api-contract-misuse",
@@ -341,7 +489,7 @@ func TestDegradation_SweepWideSameAsPreStrategy(t *testing.T) {
 		}
 	}
 
-	classes := sweepActiveClasses(onlyWideLenses)
+	classes := sweepActiveClasses(onlyWideLenses, langs)
 	survivors := degradedUnitClasses(classes, langs)
 
 	// Must keep the top-2 by yield (on Go: nil-safety and concurrency).
@@ -395,10 +543,17 @@ func TestUnitLabel_DefaultStrategy(t *testing.T) {
 // TestUnitLabel_NonDefaultStrategy verifies that a non-default strategy uses
 // "lens@strategy" format so the deep unit is distinguishable in progress events.
 func TestUnitLabel_NonDefaultStrategy(t *testing.T) {
-	got := unitLabel("api-contract-misuse", contractTraceDeep.Name)
-	want := "api-contract-misuse@contract-trace-deep"
-	if got != want {
-		t.Errorf("unitLabel(lens, contract-trace-deep) = %q, want %q", got, want)
+	for _, c := range []struct {
+		lens, strategy, want string
+	}{
+		{"api-contract-misuse", contractTraceDeep.Name, "api-contract-misuse@contract-trace-deep"},
+		{"concurrency", stateTraceDeep.Name, "concurrency@state-trace-deep"},
+		{"resource-leaks", stateTraceDeep.Name, "resource-leaks@state-trace-deep"},
+	} {
+		got := unitLabel(c.lens, c.strategy)
+		if got != c.want {
+			t.Errorf("unitLabel(%q, %q) = %q, want %q", c.lens, c.strategy, got, c.want)
+		}
 	}
 }
 
@@ -451,7 +606,8 @@ func TestBuildUnits_DiffIntentExcluded(t *testing.T) {
 			t.Fatalf("diff-intent received a chunk unit: %+v", u)
 		}
 	}
-	if len(units) != 1 {
-		t.Fatalf("unit count = %d, want 1 (concurrency sweep-wide only)", len(units))
+	// concurrency now admits BOTH sweep-wide and state-trace-deep — 2 units.
+	if len(units) != 2 {
+		t.Fatalf("unit count = %d, want 2 (concurrency sweep-wide + concurrency state-trace-deep)", len(units))
 	}
 }

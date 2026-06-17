@@ -97,6 +97,12 @@ func (d *Daemon) runPoll(ctx context.Context) {
 		d.seedAnalyzers(ctx)
 	}
 
+	// Seed the leads blackboard with doc-contradiction leads. Pure-Go, no
+	// runtime requirement; best-effort, degrades on any failure.
+	if d.seedContradictions != nil {
+		d.seedContradictions(ctx)
+	}
+
 	// Build ChangeContext for the diff-intent lens. All pieces already exist in
 	// ingest; failures here are non-fatal — the scan still runs, just without
 	// the diff-intent task. The context window is lastSeen→pr.HeadSHA.
@@ -166,6 +172,12 @@ func (d *Daemon) runSweep(ctx context.Context) {
 	// Best-effort: the hook degrades gracefully on any failure.
 	if d.seedAnalyzers != nil {
 		d.seedAnalyzers(ctx)
+	}
+
+	// Seed the leads blackboard with doc-contradiction leads. Pure-Go, no
+	// runtime requirement; best-effort, degrades on any failure.
+	if d.seedContradictions != nil {
+		d.seedContradictions(ctx)
 	}
 
 	f, err := d.newFunnel()

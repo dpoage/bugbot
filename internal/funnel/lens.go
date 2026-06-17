@@ -37,6 +37,36 @@ type Lens struct {
 	// those belong in the manifestations table so non-matching repos never see
 	// them.
 	Core string
+	// Languages gates which chunk language sets the lens emits units for: nil
+	// or empty means the lens applies to ALL languages (preserves every
+	// language-free builtin byte-for-byte), and a non-empty set means the lens
+	// emits units ONLY for chunks whose language set intersects it (see
+	// lensAppliesTo). This is the mechanism that lets memory-safety,
+	// exception-safety, and dynamic-typing be present in BuiltinLenses without
+	// running on Go repos where their failure modes do not apply.
+	Languages []ingest.Language
+}
+
+// lensAppliesTo reports whether the lens should emit units for a chunk whose
+// language set is langs. A lens with no Languages entry (nil/empty) applies
+// to every language — that is the default and the byte-identical behavior for
+// every language-free lens in BuiltinLenses. A lens with a non-empty
+// Languages list applies only if at least one of its declared languages
+// appears in the chunk's language set, so e.g. memory-safety (CPP/C/Rust)
+// emits nothing on a pure Go chunk and dynamic-typing does not run on a
+// Go-only repo.
+func lensAppliesTo(l Lens, langs []ingest.Language) bool {
+	if len(l.Languages) == 0 {
+		return true
+	}
+	for _, want := range l.Languages {
+		for _, have := range langs {
+			if want == have {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // BuiltinLenses returns the default lens set, ordered by descending Go-column
@@ -132,6 +162,116 @@ func BuiltinLenses() []Lens {
 				"request bodies, env, CLI args) without validating it before use in a " +
 				"sensitive sink. Trace the input from its source to the sink to confirm " +
 				"it is actually untrusted and unvalidated.",
+		},
+		{
+			// Memory-safety is a defect class Go's runtime and borrow checker
+			// (had it one) would eliminate: use-after-free, double-free, buffer
+			// overflow, uninitialized reads, dangling iterators/references/
+			// pointers. Go's GC owns freeing and bounds-checks slice access, so
+			// this lens would produce nothing but noise on a Go repo and is
+			// gated to C, C++, and Rust (where the borrow checker catches
+			// borrow-rule violations but NOT raw-pointer or unsafe-block
+			// lifetimes).
+			Name: "memory-safety",
+			Core: "Hunt for memory-safety defects: a use-after-free or use-after-" +
+				"realloc (reading through a pointer the allocator or owner has " +
+				"already freed or moved); a double-free or mismatched free (delete " +
+				"vs delete[], free on a pointer that was not malloc'd, a smart " +
+				"pointer's destructor racing with a manual release); a buffer " +
+				"overflow or out-of-bounds write through pointer arithmetic or an " +
+				"unchecked index; reading from a buffer or scalar that a reachable " +
+				"path leaves uninitialized; and dangling iterators, references, or " +
+				"pointers held past the end of the owning container's lifetime " +
+				"(iterators into a vector across a push_back, string_view kept past " +
+				"the string's modification, raw pointers outliving the object). " +
+				"Confirm the bad access is reachable — read the allocation, the " +
+				"free/move/resize, and the use site. Finding nothing is a valid " +
+				"outcome.",
+			Languages: []ingest.Language{ingest.LangCPP, ingest.LangC, ingest.LangRust},
+		},
+		{
+			// Exception-safety is the family of bugs where a thrown exception
+			// (or an error that Python/JS handle like one) skips cleanup,
+			// leaves an object half-mutated, or gets swallowed by an over-broad
+			// catch. Go's `error` return channel sidesteps the throwing control
+			// flow, so this lens is gated to languages with throwing control
+			// flow: Python (raise), C++ (throw), JavaScript/TypeScript (throw).
+			Name: "exception-safety",
+			Core: "Hunt for exception-safety defects: cleanup (locks, transactions, " +
+				"file/network handles, partially-constructed objects, file " +
+				"renames, temporary directories) skipped because an exception " +
+				"thrown mid-function bypasses the cleanup section; an object left " +
+				"half-mutated across a throw so the caller sees invariants broken " +
+				"but no error (Python generators paused mid-update, C++ objects " +
+				"with one-of-N members set before the throwing operation, JS " +
+				"objects with one field updated and a sibling not); a catch / " +
+				"except that swallows the failure (bare except, except Exception: " +
+				"pass, catch (e) {}) and lets the caller proceed with a missing or " +
+				"stale result; and a new exception thrown FROM a cleanup block " +
+				"(a __exit__ that raises, a C++ destructor that throws, a finally " +
+				"that throws) masking the original error. Read the function and " +
+				"every throw / raise site to confirm the cleanup is actually " +
+				"skipped. Finding nothing is a valid outcome.",
+			Languages: []ingest.Language{ingest.LangPython, ingest.LangCPP, ingest.LangJavaScript, ingest.LangTypeScript},
+		},
+		{
+			// Dynamic-typing is the family of bugs the type system would have
+			// caught at compile time if it had been told: None/undefined
+			// propagating far from its origin, implicit coercion (== vs ===,
+			// str/bytes, numeric/string), attribute/key errors from duck-typing
+			// on a value whose actual type disagrees with the call site, and
+			// wrong-type arguments that fail only at the runtime call boundary.
+			// Go's static type system rules this class out almost entirely, so
+			// the lens is gated to Python, JavaScript, and TypeScript (where the
+			// TS type system is erased at runtime and `any` / untyped JSX / union
+			// narrowing holes reintroduce the same failures at the JS boundary).
+			Name: "dynamic-typing",
+			Core: "Hunt for dynamic-typing defects: None / undefined / null " +
+				"propagating far from its origin (a default-dict.get, an " +
+				"optional-chaining yield, a JSON.parse on a missing field) into " +
+				"arithmetic, indexing, or a template that then breaks downstream; " +
+				"implicit coercion bugs — == vs === (null == undefined, '' == 0), " +
+				"str vs bytes concatenation that raises, numeric / string " +
+				"concatenation that silently produces the wrong type, truthy " +
+				"checks on values that conflate None with 0 / '' / []; attribute " +
+				"or key errors from duck-typing on a value whose actual type " +
+				"disagrees with the call site (e.g. expecting a dict and getting " +
+				"a list, expecting str and getting bytes, accessing a key on a " +
+				"None or array); and wrong-type arguments to a function that the " +
+				"runtime only rejects at the call boundary, leaving the caller " +
+				"with a TypeError / AttributeError far from the call site. Trace " +
+				"the value from its origin to the use. Finding nothing is a valid " +
+				"outcome.",
+			Languages: []ingest.Language{ingest.LangPython, ingest.LangJavaScript, ingest.LangTypeScript},
+		},
+		{
+			// cross-language-boundary is the cross-language differentiator: in a
+			// polyglot repo the densest bug habitat is the seam BETWEEN
+			// languages (a producer in one language, a consumer in another).
+			// Single-language tools are blind there because they only see one
+			// side of the contract. The lens is Core-only/language-free (no
+			// manifestation rows): the failure mode is the contract gap, which
+			// is language-free by definition — what matters is that two
+			// different languages touch the same surface. Like diff-intent, it
+			// is a custom-unit lens: hypothesize skips it in the per-chunk loop
+			// (see buildUnits) and emits exactly one custom task per cross-
+			// language seam discovered by EnumerateSeams (see buildSeamTask).
+			// Yield lives in lensYields under anyLanguage only, since the lens
+			// applies to every language mix (the precondition is "the repo is
+			// polyglot", which the seam discovery enforces upstream).
+			Name: "cross-language-boundary",
+			Core: "Hunt for producer/consumer contract mismatches across a language " +
+				"boundary where one side WRITES a shared data format or env var and " +
+				"another side READS it: a field that one side emits and the other " +
+				"side does not expect (or expects under a different name); a type, " +
+				"unit, encoding, or nullability disagreement (string vs int, " +
+				"seconds vs milliseconds, base64 vs raw, empty-string vs null); a " +
+				"value one side can emit that the other side cannot parse; and a " +
+				"required-vs-optional disagreement (a producer that sometimes omits " +
+				"a key the consumer requires, or vice versa). Confirm every finding " +
+				"by reading BOTH named sides end-to-end — do not report a mismatch " +
+				"you have not verified in the actual code on each side. Finding " +
+				"nothing is a valid outcome: many seams are perfectly aligned.",
 		},
 	}
 }

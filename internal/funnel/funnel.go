@@ -590,6 +590,17 @@ type Stats struct {
 	// error (not a context cancellation). Partial stats are recorded and the
 	// scan_runs row is sealed so no row is left dangling.
 	Aborted bool `json:"aborted,omitempty"`
+	// SeamsFound is the number of cross-language contract surfaces
+	// (shared data files + shared env vars) discovered by
+	// ingest.EnumerateSeams on this run's snapshot. The boundary lens
+	// emits one custom finder unit per seam, so SeamsFound is also the
+	// upper bound on SeamsCovered.
+	SeamsFound int `json:"seams_found,omitempty"`
+	// SeamsCovered is the count of seams that produced a finished (ok or
+	// budget-truncated) finder unit. Equal to SeamsFound minus the seams
+	// whose units were budget-skipped or never launched because the run
+	// stopped early. SeamsCovered <= SeamsFound always.
+	SeamsCovered int `json:"seams_covered,omitempty"`
 }
 
 // FinderReliable reports whether the finder stage produced trustworthy coverage:

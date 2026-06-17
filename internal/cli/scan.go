@@ -18,6 +18,7 @@ import (
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/miner"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/sandbox"
@@ -216,6 +217,12 @@ func newScanCmd() *cobra.Command {
 			// analyzer binary is absent from the image, the seed step is silently
 			// skipped. Analyzer failures never block the scan.
 			runAnalyzerSeed(ctx, cfg, repo.Root(), st, progressSink)
+
+			// Doc-contradiction seeding: a pure-Go, in-process pass that mines
+			// documented-sentinel-vs-validator contradictions (the bugbot-ig7
+			// class) and posts them as leads. Unlike analyzer seeding it needs no
+			// container runtime, so it always runs.
+			runContradictionSeed(ctx, cfg, repo, st, progressSink)
 
 			var res *funnel.Result
 			if since != "" {
@@ -580,6 +587,41 @@ func runAnalyzerSeed(ctx context.Context, cfg config.Config, repoDir string, st 
 			Kind:  progress.KindStageFinished,
 			Stage: "analyzer_seed",
 			Count: sum.TotalPosted,
+		})
+	}
+}
+
+// runContradictionSeed runs the deterministic doc-contradiction miner before
+// the funnel. Unlike runAnalyzerSeed it needs no container runtime: the miner
+// is a pure-Go, in-process pass over the repository snapshot, so it always
+// runs. All failure modes degrade to a logged skip — it never returns an error
+// and never blocks the scan.
+func runContradictionSeed(ctx context.Context, cfg config.Config, repo *ingest.Repo, st *store.Store, sink progress.Sink) {
+	snap, err := repo.Snapshot(ctx, ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude})
+	if err != nil {
+		progress.Emit(sink, progress.Event{
+			Kind:    progress.KindStageStarted,
+			Stage:   "contradiction_seed",
+			Message: fmt.Sprintf("contradiction seed skipped: snapshot: %s", err),
+		})
+		return
+	}
+	sum, err := miner.Seed(ctx, snap, st)
+	if err != nil {
+		// Store infrastructure error: the miner posted whatever it could before
+		// the error; the scan continues normally.
+		progress.Emit(sink, progress.Event{
+			Kind:    progress.KindStageFinished,
+			Stage:   "contradiction_seed",
+			Message: fmt.Sprintf("contradiction seed partial error: %s", err),
+		})
+		return
+	}
+	if sum.LeadsPosted > 0 {
+		progress.Emit(sink, progress.Event{
+			Kind:  progress.KindStageFinished,
+			Stage: "contradiction_seed",
+			Count: sum.LeadsPosted,
 		})
 	}
 }

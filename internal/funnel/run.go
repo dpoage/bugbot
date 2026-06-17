@@ -481,8 +481,15 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 				// Drop candidate on cancellation; triage will also exit.
 			}
 		}
+		// Enumerate cross-language seams once per run: the boundary lens's
+		// unit of work is one seam, and the count populates Stats.SeamsFound
+		// for observability. Computation is O(files) over the snapshot and
+		// runs in the hypothesize goroutine so the per-stage progression
+		// reports (which are emitted before this call) are unaffected.
+		seams := ingest.EnumerateSeams(snap)
+		result.Stats.SeamsFound = len(seams)
 		n, err := f.hypothesize(ctx, scanRunID, finderClient, persona, kind,
-			f.opts.ChangeContext, langs, targets, budget, result, fps, touchCoverage, emit)
+			f.opts.ChangeContext, langs, targets, seams, budget, result, fps, touchCoverage, emit)
 		hypothesizedCount = n
 		hypothesizeErr = err
 		close(candCh)
