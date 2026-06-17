@@ -98,6 +98,12 @@ scan:
     - "vendor/**"
     - "node_modules/**"
     - "**/*_test.go"
+  # cartographer: summarize each package once (cached by content fingerprint)
+  # and inject the relevant summaries into finder tasks so agents begin with
+  # repo context instead of rediscovering it per turn. On by default; set to
+  # false to disable. Optionally add a [roles.cartographer] block above to run
+  # the summary pass on a cheaper model than the finder.
+  cartographer: true
 
 # ---------------------------------------------------------------------------
 # sandbox: isolated execution environment for verification and reproduction.

@@ -318,6 +318,7 @@ func Default() Config {
 				"node_modules/**",
 				"**/*_test.go",
 			},
+			Cartographer: true,
 		},
 		Sandbox: Sandbox{
 			Backend:        "cli",
