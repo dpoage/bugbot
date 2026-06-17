@@ -356,6 +356,15 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	}
 	finderClient := llm.WithRecorder(f.clients.Finder, rec, roleFinder, "", "")
 	verifierClient := llm.WithRecorder(f.clients.Verifier, rec, roleVerifier, "", "")
+	// Cartographer client: configurable via the optional [roles.cartographer]
+	// mapping (falls back to the finder's model when unset; see llm.roleModel).
+	// Tagged roleCartographer so its spend is a distinct ledger line yet still
+	// charged to the finder pool (see spendRecorder.Record).
+	cartographerBase := f.clients.Cartographer
+	if cartographerBase == nil {
+		cartographerBase = f.clients.Finder
+	}
+	cartographerClient := llm.WithRecorder(cartographerBase, rec, roleCartographer, "", "")
 
 	// Capability-driven scaling: a small-context model (e.g. 8k local LLM
 	// behind an openai-compatible endpoint) silently overflows with one-size
@@ -385,6 +394,10 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	budget.reserveForDownstream(f.opts.FinderBudgetShare)
 
 	result := &Result{ScanRunID: scanRunID, Commit: snap.Commit}
+	// Persist whether the cartographer pass was active, on every exit path
+	// (set before the finalize defer below), so the valid-findings-per-token
+	// time series can be sliced by on/off.
+	result.Stats.CartographerEnabled = f.opts.Cartographer
 
 	// Interrupt-safe finalization: seal the scan_runs row on every exit path.
 	var finalize = func(s *Stats) error {
@@ -514,7 +527,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		// returns nil and the injection below yields "". A nil cart
 		// is the documented off-state; the finder's task message is
 		// byte-identical to the pre-cartographer build.
-		cart := f.cartograph(ctx, finderClient, snap, targets, fps, budget)
+		cart := f.cartograph(ctx, cartographerClient, snap, targets, fps, budget)
 		n, err := f.hypothesize(ctx, scanRunID, finderClient, persona, kind,
 			f.opts.ChangeContext, langs, targets, seams, budget, result, fps, touchCoverage, cart, emit)
 		hypothesizedCount = n

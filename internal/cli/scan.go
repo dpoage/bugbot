@@ -91,6 +91,15 @@ func newScanCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("build verifier client: %w", err)
 			}
+			// Cartographer client is built only when the package-summary pass is
+			// enabled; otherwise it stays nil and the funnel reuses the finder.
+			var cartographer llm.Client
+			if cfg.Scan.Cartographer {
+				cartographer, err = llm.ResolveRole(ctx, &cfg, "cartographer", llm.Options{})
+				if err != nil {
+					return fmt.Errorf("build cartographer client: %w", err)
+				}
+			}
 
 			out := cmd.OutOrStdout()
 
@@ -209,7 +218,7 @@ func newScanCmd() *cobra.Command {
 				Repro:                 reproHook,
 				Cartographer:          cfg.Scan.Cartographer,
 			}
-			f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
+			f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer}, st, repo, opts)
 			if err != nil {
 				return err
 			}
@@ -252,7 +261,7 @@ func newScanCmd() *cobra.Command {
 					// successful rebuild so a failure here cannot leave f nil and
 					// cause the deferred f.Close() to panic ((*Funnel).Close has a
 					// nil-receiver guard, but we still prefer not to lose f).
-					f2, buildErr := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
+					f2, buildErr := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer}, st, repo, opts)
 					if buildErr != nil {
 						return buildErr
 					}

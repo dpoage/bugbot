@@ -255,6 +255,13 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 	if err != nil {
 		return nil, fmt.Errorf("build verifier client: %w", err)
 	}
+	var cartographer llm.Client
+	if p.cfg.Scan.Cartographer {
+		cartographer, err = llm.ResolveRole(ctx, &p.cfg, "cartographer", llm.Options{})
+		if err != nil {
+			return nil, fmt.Errorf("build cartographer client: %w", err)
+		}
+	}
 
 	// PR base..head changed files drive the targeted scan; the funnel expands the
 	// blast radius and intersects with scan scope internally.
@@ -291,7 +298,7 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 		SandboxOpts:           sandboxOpts,
 		Cartographer:          p.cfg.Scan.Cartographer,
 	}
-	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo, opts)
+	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer}, st, repo, opts)
 	if err != nil {
 		return nil, err
 	}

@@ -203,22 +203,27 @@ const (
 )
 
 // RoleClients holds the per-role LLM clients the funnel drives. Tests inject
-// fakes; the CLI builds these via llm.ResolveRole. Reproducer is not used by
-// this stage (Tier 1 reproduction is a later stage) and is intentionally
-// absent.
+// fakes; the CLI builds these via llm.ResolveRole. Finder and Verifier are
+// required (New rejects nil). Cartographer is optional: when nil, the
+// package-summary pass reuses Finder. Reproducer is not used by this stage
+// (Tier 1 reproduction is a later stage) and is intentionally absent.
 type RoleClients struct {
 	Finder   llm.Client
 	Verifier llm.Client
+	// Cartographer is the client for the package-summary pass (optional; nil
+	// reuses Finder). Configured via the [roles.cartographer] mapping.
+	Cartographer llm.Client
 }
 
-// roleFinder / roleVerifier are the spend-ledger role tags wired into the
-// per-role recorder clients (see run.go). The recorder routes finder spend to
-// the finder sub-pool and everything else to the verify sub-pool under a
-// downstream-budget reservation, so these MUST match the strings passed to
-// llm.WithRecorder.
+// roleFinder / roleVerifier / roleCartographer are the spend-ledger role tags
+// wired into the per-role recorder clients (see run.go). The recorder routes
+// finder AND cartographer spend to the finder sub-pool and everything else to
+// the verify sub-pool under a downstream-budget reservation, so these MUST
+// match the strings passed to llm.WithRecorder.
 const (
-	roleFinder   = "finder"
-	roleVerifier = "verifier"
+	roleFinder       = "finder"
+	roleVerifier     = "verifier"
+	roleCartographer = "cartographer"
 )
 
 // SandboxOpts bundles the sandbox-execution knobs that gate and bound the
@@ -671,6 +676,14 @@ type Stats struct {
 	// cache savings.
 	CacheReadTokens     int64 `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int64 `json:"cache_creation_tokens,omitempty"`
+	// CartographerEnabled records whether the package-summary pass
+	// (scan.cartographer) was active for this run. Persisted so the
+	// valid-findings-per-token series — Verified / (InputTokens+OutputTokens),
+	// one point per scan run over started_at — can be sliced by cartographer
+	// on/off. That ratio, not raw token count, is how the feature earns its
+	// keep: a new agent adds tokens by construction, so the question is whether
+	// the injected context buys more verified findings per token spent.
+	CartographerEnabled bool `json:"cartographer_enabled"`
 	// SandboxExecs is the total number of sandbox_exec tool calls made by
 	// refuter agents during the verification stage. Zero when the feature is
 	// disabled or unused.
@@ -836,7 +849,7 @@ func (r *spendRecorder) Record(ev llm.UsageEvent) {
 	// Under a downstream-budget reservation, also charge the role-scoped sub-pool
 	// so each stage gates on its own allowance. Both Add calls are nil-safe, so
 	// this is a no-op when no reservation is active.
-	if ev.Role == roleFinder {
+	if ev.Role == roleFinder || ev.Role == roleCartographer {
 		r.finderPool.Add(charge)
 	} else {
 		r.verifyPool.Add(charge)

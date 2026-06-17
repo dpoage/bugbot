@@ -131,7 +131,7 @@ func NewClient(ctx context.Context, provider config.Provider, providerName, mode
 func ResolveRole(ctx context.Context, cfg *config.Config, role string, opts Options) (Client, error) {
 	rm, ok := roleModel(cfg, role)
 	if !ok {
-		return nil, fmt.Errorf("llm: unknown role %q (want finder, verifier, or reproducer)", role)
+		return nil, fmt.Errorf("llm: unknown role %q (want finder, verifier, reproducer, or cartographer)", role)
 	}
 
 	provider, ok := cfg.Providers[rm.Provider]
@@ -159,6 +159,14 @@ func roleModel(cfg *config.Config, role string) (config.RoleModel, bool) {
 		return cfg.Roles.Verifier, true
 	case "reproducer":
 		return cfg.Roles.Reproducer, true
+	case "cartographer":
+		// Optional role: fall back to the finder's mapping when no
+		// [roles.cartographer] block is configured, so the summary pass
+		// resolves a client without forcing every config to declare one.
+		if cfg.Roles.Cartographer.Provider != "" {
+			return cfg.Roles.Cartographer, true
+		}
+		return cfg.Roles.Finder, true
 	default:
 		return config.RoleModel{}, false
 	}
