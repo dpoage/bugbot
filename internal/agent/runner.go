@@ -90,10 +90,12 @@ func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 }
 
 // run is the shared loop body. finalizePrompt, when non-empty, enables forced
-// finalization: one turn before the iteration cap the loop injects this
-// user-role message and takes a final tool-less completion so the model emits
-// its answer instead of dangling exploration prose. RunJSON passes a
-// JSON-demanding prompt; the public Run passes "".
+// finalization: when a stop condition fires (iteration cap, per-run token
+// budget, or shared budget pool) the loop injects this user-role message and
+// takes a single final tool-less completion so the model can emit its answer
+// instead of dangling exploration prose or a silently empty output. RunJSON
+// passes a JSON-demanding prompt; the public Run passes "" and therefore never
+// pays the extra turn.
 func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome, error) {
 	tr := NewTranscript()
 
@@ -108,35 +110,26 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 	compactThreshold := r.limits.HistoryTokenBudget
 
 	for {
-		// Stop before the next turn if we've hit the iteration cap. When forced
-		// finalization is enabled, reserve this last turn: inject the finalization
-		// prompt and take one final completion so the model emits its answer
-		// instead of leaving dangling exploration prose. We only do this once.
+		// Stop before the next turn if we've hit the iteration cap. The
+		// finalizeAndTruncate helper below gives RunJSON its one reserved
+		// finalization turn so a near-cap model can still emit its answer; the
+		// public Run (finalizePrompt == "") is a no-op and proceeds straight
+		// to the truncation mark.
 		if r.limits.MaxIterations >= 0 && outcome.Iterations >= r.limits.MaxIterations {
-			if finalizePrompt != "" && !outcome.Finalized {
-				messages = append(messages, llm.Message{
-					Role:    llm.RoleUser,
-					Content: finalizePrompt,
-				})
-				outcome.Finalized = true
-				// Compact before the finalization turn too: it is often the largest
-				// history of the run, and the model needs only its own reasoning chain
-				// (preserved) to emit the answer, not every earlier file dump.
-				// The re-armed threshold is discarded: this is the run's final
-				// turn, so no later compaction can fire.
-				messages, _ = r.maybeCompact(messages, compactThreshold, toolNameByID)
-				resp, err := r.completeOnce(ctx, tr, &messages, outcome, true)
-				if err != nil {
-					r.autosave(tr, task)
-					return outcome, err
-				}
-				_ = resp
+			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, compactThreshold, toolNameByID, task); err != nil {
+				return outcome, err
 			}
 			r.finishTruncated(outcome, TruncMaxIterations)
 			break
 		}
-		// Stop before the next turn if we're already over budget.
+		// Stop before the next turn if we're already over budget. The budget
+		// stop gets the same one reserved finalization turn the iteration cap
+		// gets (RunJSON only), so a near-budget finder can emit its answer
+		// instead of returning a silently empty result to the funnel.
 		if r.overBudget(outcome.Usage) {
+			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, compactThreshold, toolNameByID, task); err != nil {
+				return outcome, err
+			}
 			r.finishTruncated(outcome, TruncTokenBudget)
 			break
 		}
@@ -152,6 +145,12 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 					// error; surface it rather than misreporting a clean stop.
 					r.autosave(tr, task)
 					return outcome, fmt.Errorf("agent: budget check: %w", err)
+				}
+				// Shared pool exhausted: give the model one reserved finalization
+				// turn (RunJSON only) so a near-budget finder can still emit its
+				// answer before we classify the stop as TruncBudgetPool.
+				if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, compactThreshold, toolNameByID, task); err != nil {
+					return outcome, err
 				}
 				r.finishTruncated(outcome, TruncBudgetPool)
 				break
@@ -200,7 +199,12 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 
 		// After executing tools, check the budget again before looping so we
 		// truncate promptly rather than issuing one more expensive completion.
+		// A budget hit post-tool still gets the one reserved finalization turn
+		// (RunJSON only) so a near-budget finder can emit its answer.
 		if r.overBudget(outcome.Usage) {
+			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, compactThreshold, toolNameByID, task); err != nil {
+				return outcome, err
+			}
 			r.finishTruncated(outcome, TruncTokenBudget)
 			break
 		}
@@ -208,6 +212,55 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string) (*Outcome
 
 	r.autosave(tr, task)
 	return outcome, nil
+}
+
+// finalizeAndTruncate is the single reserved finalization turn used by EVERY
+// stop condition the loop can hit (iteration cap, per-run token budget, shared
+// budget pool). It is a no-op unless finalizePrompt is non-empty AND the run
+// has not already taken a finalization turn this run, so the public Run path
+// (finalizePrompt == "") never pays an extra model call. When it does fire it:
+//
+//   - appends finalizePrompt as a user-role message;
+//   - sets outcome.Finalized = true;
+//   - compacts once so the prompt that is sent is the smallest it can be;
+//   - takes ONE tool-less completion via completeOnce (which itself handles
+//     the StopMaxTokens continuation retry), giving the model a cheap final
+//     shot at emitting its answer instead of leaving the funnel with a
+//     silently empty output.
+//
+// Returns done=true when a finalization turn was actually taken (so the caller
+// knows Finalized is now true), and a non-nil err only when the underlying
+// completion failed — in which case the caller should return early with the
+// error. The caller is responsible for finishTruncated(reason) + break: the
+// reason is the STOP condition (budget/iteration), not "finalized".
+func (r *Runner) finalizeAndTruncate(
+	ctx context.Context,
+	tr *Transcript,
+	messages *[]llm.Message,
+	outcome *Outcome,
+	finalizePrompt string,
+	compactThreshold int64,
+	toolNameByID map[string]string,
+	task string,
+) error {
+	if finalizePrompt == "" || outcome.Finalized {
+		return nil
+	}
+	*messages = append(*messages, llm.Message{
+		Role:    llm.RoleUser,
+		Content: finalizePrompt,
+	})
+	outcome.Finalized = true
+	// Compact before the finalization turn: it is often the largest history of
+	// the run, and the model needs only its own reasoning chain (preserved) to
+	// emit the answer, not every earlier file dump. The re-armed threshold is
+	// discarded: this is the run's final turn, so no later compaction can fire.
+	*messages, _ = r.maybeCompact(*messages, compactThreshold, toolNameByID)
+	if _, cerr := r.completeOnce(ctx, tr, messages, outcome, true); cerr != nil {
+		r.autosave(tr, task)
+		return cerr
+	}
+	return nil
 }
 
 // maybeCompact applies threshold-triggered history compaction. When compaction

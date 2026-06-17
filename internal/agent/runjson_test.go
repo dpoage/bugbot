@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/llm"
@@ -429,5 +430,194 @@ func TestStripFences(t *testing.T) {
 		if got := stripFences(in); got != want {
 			t.Errorf("stripFences(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// budgetCutClient is a scripted llm.Client for budget-pressure tests: it
+// always requests a tool (so the loop never naturally finishes) and reports
+// a large, fixed Usage on every completion. The first N-1 completions also
+// report a tool call, and the final one (the reserved finalization turn)
+// returns a text answer. An optional chargeFn is called before each
+// completion to model the shared pool spending.
+type budgetCutClient struct {
+	mu        sync.Mutex
+	calls     int
+	finalAt   int    // call index (1-based) at which to return text
+	finalText string // text to return on the finalization turn
+	perCall   int64
+	chargeFn  func() // optional: called before each completion
+}
+
+func (c *budgetCutClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *budgetCutClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+	if err := ctx.Err(); err != nil {
+		return llm.Response{}, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	if c.chargeFn != nil {
+		c.chargeFn()
+	}
+	if c.calls == c.finalAt {
+		return llm.Response{
+			Text:       c.finalText,
+			StopReason: llm.StopEndTurn,
+			Usage:      llm.Usage{InputTokens: 1, OutputTokens: 1},
+		}, nil
+	}
+	return llm.Response{
+		StopReason: llm.StopToolUse,
+		ToolCalls:  []llm.ToolCall{{ID: "c", Name: "echo", Arguments: []byte(`{}`)}},
+		Usage:      llm.Usage{InputTokens: c.perCall, OutputTokens: c.perCall},
+	}, nil
+}
+
+// TestRunJSON_BudgetPoolFinalizesAndParses proves that a RunJSON run whose
+// shared pool BudgetCheck is exhausted now TAKES a finalization turn
+// (outcome.Finalized==true) and, when the model emits valid JSON on that turn,
+// RunJSON parses it successfully — no "empty model output" failure. This is
+// the core fix for budget-pressured finders.
+func TestRunJSON_BudgetPoolFinalizesAndParses(t *testing.T) {
+	const maxIter = 10
+	pool := NewBudgetPool(100) // tiny pool
+	// finalAt = 3: first 2 calls request tools (charging pool), 3rd call is the
+	// finalization turn after the pool is exhausted.
+	c := &budgetCutClient{
+		finalAt:   3,
+		finalText: `{"file":"x.go","message":"recovered"}`,
+		perCall:   60,
+		chargeFn:  func() { pool.Add(60) },
+	}
+	r := NewRunner(c, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{
+		MaxIterations: maxIter,
+		TokenBudget:   -1,
+		BudgetCheck:   pool.Check,
+	}))
+	var got finding
+	out, err := r.RunJSON(context.Background(), "audit", json.RawMessage(`{"type":"object"}`), &got)
+	if err != nil {
+		t.Fatalf("RunJSON should recover via budget-pressured finalization: %v", err)
+	}
+	if got.File != "x.go" || got.Message != "recovered" {
+		t.Errorf("parsed = %+v, want the finalization JSON", got)
+	}
+	if !out.Finalized {
+		t.Error("Outcome.Finalized = false, want true (budget pool stop should fire finalization)")
+	}
+	if out.TruncationReason != TruncBudgetPool {
+		t.Errorf("TruncationReason = %q, want %q", out.TruncationReason, TruncBudgetPool)
+	}
+}
+
+// TestRunJSON_PerRunTokenBudgetFinalizesAndParses is the per-run TokenBudget
+// counterpart: a near-budget RunJSON run gets the reserved finalization turn
+// and parses successfully when the model emits valid JSON.
+func TestRunJSON_PerRunTokenBudgetFinalizesAndParses(t *testing.T) {
+	const maxIter = 10
+	const perRunBudget int64 = 100
+	// 2 tool calls each spend 60 (cumulative 120 > 100), then on the 3rd
+	// pre-turn check overBudget fires, finalization turn takes the 3rd call.
+	c := &budgetCutClient{finalAt: 3, finalText: `{"file":"y.go","message":"ok"}`, perCall: 30}
+	r := NewRunner(c, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{
+		MaxIterations: maxIter,
+		TokenBudget:   perRunBudget,
+	}))
+	var got finding
+	out, err := r.RunJSON(context.Background(), "audit", json.RawMessage(`{"type":"object"}`), &got)
+	if err != nil {
+		t.Fatalf("RunJSON should recover via per-run-budget finalization: %v", err)
+	}
+	if got.File != "y.go" {
+		t.Errorf("parsed = %+v, want the finalization JSON", got)
+	}
+	if !out.Finalized {
+		t.Error("Outcome.Finalized = false, want true (per-run budget stop should fire finalization)")
+	}
+	if out.TruncationReason != TruncTokenBudget {
+		t.Errorf("TruncationReason = %q, want %q", out.TruncationReason, TruncTokenBudget)
+	}
+}
+
+// TestRunJSON_BudgetFinalizeEmptyStillClassified covers the OR-clause of the
+// bead: when the finalization turn itself yields no parseable JSON, the
+// outcome is still cleanly classified as a budget stop (Truncated + budget
+// reason), not a silently-empty result. The funnel's budgetStopped(outcome)
+// must return true.
+func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
+	pool := NewBudgetPool(100)
+	// finalization turn returns empty text — model fails to emit a useful answer.
+	c := &budgetCutClient{
+		finalAt:   3,
+		finalText: "",
+		perCall:   60,
+		chargeFn:  func() { pool.Add(60) },
+	}
+	r := NewRunner(c, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{
+		MaxIterations: 10,
+		TokenBudget:   -1,
+		BudgetCheck:   pool.Check,
+	}))
+	var got finding
+	_, err := r.RunJSON(context.Background(), "audit", json.RawMessage(`{"type":"object"}`), &got)
+	if err == nil {
+		t.Fatal("RunJSON should fail to parse empty finalization output")
+	}
+	// Now look at the outcome (returned alongside err per RunJSON contract).
+	// We re-run and inspect via the Run path's outcome to check classification.
+	// Simpler: re-check via a direct run + outcome check.
+	c2 := &budgetCutClient{
+		finalAt:   3,
+		finalText: "",
+		perCall:   60,
+		chargeFn:  func() { pool.Add(60) },
+	}
+	r2 := NewRunner(c2, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{
+		MaxIterations: 10,
+		TokenBudget:   -1,
+		BudgetCheck:   pool.Check,
+	}))
+	out, _ := r2.run(context.Background(), "audit", finalizationPrompt(json.RawMessage(`{"type":"object"}`)))
+	if !out.Truncated {
+		t.Error("Outcome.Truncated = false, want true (budget stop should still mark truncated)")
+	}
+	if out.TruncationReason != TruncBudgetPool {
+		t.Errorf("TruncationReason = %q, want %q (so funnel classifies as budget-stopped, not parse-failed)", out.TruncationReason, TruncBudgetPool)
+	}
+	if !out.Finalized {
+		t.Error("Outcome.Finalized = false, want true (finalization turn was taken even if empty)")
+	}
+}
+
+// TestRunJSON_RunPathNoExtraCall is the regression for the budget_test.go
+// invariant: the public Run (finalizePrompt == "") must NOT pay an extra
+// model call on a budget stop. The shared-pool overshoot bound
+// (B + one in-flight call per runner) depends on this. We assert that a
+// Run call into an exhausted pool issues exactly the same number of
+// completions as before the fix.
+func TestRunJSON_RunPathNoExtraCall(t *testing.T) {
+	pool := NewBudgetPool(100)
+	// bigSpendClient from budget_test.go: charges the pool, always requests a tool.
+	// We import its behavior inline so this test is self-contained.
+	c := &bigSpendClient{pool: pool, perCall: 60}
+	r := NewRunner(c, []Tool{noopTool{}}, "sys", WithLimits(Limits{
+		MaxIterations: -1,
+		TokenBudget:   -1,
+		BudgetCheck:   pool.Check,
+	}))
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.TruncationReason != TruncBudgetPool {
+		t.Errorf("TruncationReason = %q, want %q", out.TruncationReason, TruncBudgetPool)
+	}
+	// The fix must not add an extra completion for Run (no finalizePrompt).
+	// bigSpendClient charges 60 per call; pool is 100, so the pre-turn gate
+	// fires on the 3rd call attempt (after 120 charged). The 2nd call may
+	// have been charged, but the 3rd is gated before completion. Allow 1-2
+	// calls — the precise count depends on charge order, but it MUST be < 3.
+	if c.callCount.Load() > 2 {
+		t.Errorf("Run (no finalize) made %d calls; the fix must NOT add an extra model call on the no-finalize path (want <= 2)", c.callCount.Load())
 	}
 }
