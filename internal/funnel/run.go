@@ -357,6 +357,16 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	finderClient := llm.WithRecorder(f.clients.Finder, rec, "finder", "", "")
 	verifierClient := llm.WithRecorder(f.clients.Verifier, rec, "verifier", "", "")
 
+	// Capability-driven scaling: a small-context model (e.g. 8k local LLM
+	// behind an openai-compatible endpoint) silently overflows with one-size
+	// finder defaults. Scale chunk size, per-read caps, and the (opt-in)
+	// history-compaction threshold from the finder's declared context
+	// window. f.opts holds the resolved copy built in New(); the helper
+	// preserves explicit non-default Options values and is a strict no-op
+	// for unknown or large windows, so all existing behavior is stable.
+	if window := f.clients.Finder.Capabilities().ContextWindow; window > 0 {
+		f.opts = scaleFinderForContext(f.opts, window)
+	}
 	cacheWeight := f.opts.CacheReadBudgetWeight
 	if cacheWeight == 0 {
 		cacheWeight = DefaultCacheReadBudgetWeight

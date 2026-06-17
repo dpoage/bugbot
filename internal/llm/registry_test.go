@@ -104,11 +104,36 @@ func TestResolveRole_MissingAPIKey(t *testing.T) {
 }
 
 func TestNewClient_OpenAICompatibleSerializesToolCalls(t *testing.T) {
-	// An openai-compatible endpoint defaults to ParallelToolCalls=false, so the
-	// degraded path applies when wrapped.
+	// An openai-compatible endpoint defaults to ParallelToolCalls=false, and
+	// NewClient wires WithSerializedToolCalls as the outermost decorator for
+	// that capability profile. The test asserts the property end-to-end:
+	// (1) the returned client advertises ParallelToolCalls=false; and
+	// (2) a multi-tool-call HTTP response is truncated to one tool call by
+	//     the time Complete returns, with no caller-side wrapping needed.
+	multiBody := `{
+		"id": "chatcmpl-multi",
+		"object": "chat.completion",
+		"created": 1,
+		"model": "llama3",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{"id": "call_1", "type": "function",
+					 "function": {"name": "read_file", "arguments": "{}"}},
+					{"id": "call_2", "type": "function",
+					 "function": {"name": "list_dir", "arguments": "{}"}}
+				]
+			},
+			"finish_reason": "tool_calls"
+		}],
+		"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+	}`
 	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(mockTextBody("openai-compatible", "hi", 1, 1)))
+		_, _ = w.Write([]byte(multiBody))
 	})
 	provider := config.Provider{Type: config.ProviderOpenAICompatible, BaseURL: base, APIKeyEnv: "X"}
 	client, err := NewClient(context.Background(), provider, "ollama", "llama3", "key", Options{})
@@ -116,11 +141,17 @@ func TestNewClient_OpenAICompatibleSerializesToolCalls(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	if client.Capabilities().ParallelToolCalls {
-		t.Error("openai-compatible should default to ParallelToolCalls=false")
+		t.Error("openai-compatible client should report ParallelToolCalls=false (wrapper applied)")
 	}
-	// Wrapping with the degraded path must be a usable client.
-	serial := WithSerializedToolCalls(client)
-	if _, err := serial.Complete(context.Background(), simpleRequest()); err != nil {
-		t.Fatalf("serialized Complete: %v", err)
+	// The wrapper must truncate the parallel tool calls down to one.
+	resp, err := client.Complete(context.Background(), simpleRequest())
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls = %d, want 1 (truncated by WithSerializedToolCalls)", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].ID != "call_1" {
+		t.Errorf("kept tool call ID = %q, want first (call_1)", resp.ToolCalls[0].ID)
 	}
 }

@@ -27,11 +27,18 @@ type Options struct {
 // NewClient builds a fully-wrapped Client for the given provider config and
 // model. The returned client is decorated, outer-to-inner, with:
 //
-//	recorder -> retry -> adapter
+//	serialize -> recorder -> retry -> adapter
 //
-// so usage is recorded only for the final successful attempt, and retries see
-// the raw adapter errors. The API key is resolved from the environment via
-// cfg-style resolution and handed to the SDK; it is never logged.
+// so usage is recorded only for the final successful attempt, retries see
+// the raw adapter errors, and non-parallel-capable providers (e.g. arbitrary
+// openai-compatible endpoints) have their multi-tool-call responses
+// truncated to one before the agent loop sees them. The API key is resolved
+// from the environment via cfg-style resolution and handed to the SDK; it is
+// never logged.
+//
+// WithSerializedToolCalls is a no-op for providers whose Capabilities report
+// ParallelToolCalls=true (Anthropic, Google, first-party OpenAI), so
+// decorating unconditionally is safe and capability-driven.
 //
 // apiKey is the resolved secret (caller obtains it via config.Config.APIKey).
 // Passing it explicitly keeps this constructor free of environment lookups and
@@ -91,10 +98,13 @@ func NewClient(ctx context.Context, provider config.Provider, providerName, mode
 	if retryCfg.MaxAttempts == 0 {
 		retryCfg = DefaultRetryConfig()
 	}
-
 	client := WithRetry(adapter, retryCfg)
 	client = WithRecorder(client, opts.Recorder, opts.Role, providerName, model)
-	return client, nil
+	// Outermost: force at-most-one tool call per response when the backend
+	// does not support parallel tool calls (see serialize.go). Capable
+	// providers short-circuit inside the wrapper, so this is a free check
+	// for anthropic/google/openai and the safety net for openai-compatible.
+	return WithSerializedToolCalls(client), nil
 }
 
 // ResolveRole builds a Client for a pipeline role (finder/verifier/reproducer)
