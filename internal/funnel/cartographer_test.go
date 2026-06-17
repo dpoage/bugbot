@@ -399,3 +399,21 @@ func TestCartography_StripsThinkBlock(t *testing.T) {
 		t.Error("sub package summary was not persisted")
 	}
 }
+
+// TestPackagesSpanned_SkipsRoot guards the batch-poisoning fix: repo-root files
+// (path.Dir ".") must NOT produce an empty-keyed package. UpsertPackageSummaries
+// rejects an empty Pkg, and as one transaction a single such row drops the whole
+// batch — so a full-repo run (which always includes go.mod/README/etc.) would
+// persist nothing.
+func TestPackagesSpanned_SkipsRoot(t *testing.T) {
+	got := packagesSpanned([]string{"go.mod", "README.md", "sub/sub.go", "a/b/c.go"})
+	if _, ok := got[""]; ok {
+		t.Errorf(`root package "" must be skipped (empty key is unstorable); got %v`, got)
+	}
+	if _, ok := got["sub"]; !ok {
+		t.Errorf("expected package %q in %v", "sub", got)
+	}
+	if _, ok := got["a/b"]; !ok {
+		t.Errorf("expected package %q in %v", "a/b", got)
+	}
+}

@@ -379,16 +379,19 @@ func readFileHead(abs string, maxLines, maxBytes int) (string, error) {
 }
 
 // packagesSpanned groups targets by their parent package directory. The
-// returned map is keyed by package (repo-relative dir, "" for the root
-// package) and its value is the sorted list of member files in that
-// package. Sort is by path so the resulting fingerprint and
+// returned map is keyed by package (repo-relative dir) and its value is the
+// sorted list of member files. Repo-root files (path.Dir == ".") are SKIPPED:
+// the root holds build/config/doc files rather than a coherent code package,
+// its empty key cannot be persisted (UpsertPackageSummaries rejects an empty
+// Pkg, and as one transaction a single such row would poison the whole batch),
+// and contextFor never injects it. Sort is by path so the fingerprint and the
 // DefaultCartographerMaxFiles subset are deterministic.
 func packagesSpanned(targets []string) map[string][]string {
 	pkgs := make(map[string][]string)
 	for _, t := range targets {
 		d := path.Dir(t)
 		if d == "." {
-			d = ""
+			continue // repo-root file: not a storable package (see doc)
 		}
 		pkgs[d] = append(pkgs[d], t)
 	}
