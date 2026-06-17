@@ -79,6 +79,9 @@ func buildUnits(lenses []Lens, strategies []Strategy, chunks []fileChunk, leadsB
 			if l.Name == "diff-intent" {
 				continue
 			}
+			if !lensAppliesTo(l, c.langs) {
+				continue
+			}
 			for _, s := range strategies {
 				if !s.AppliesTo(l.Name) {
 					continue

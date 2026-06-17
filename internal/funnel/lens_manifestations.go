@@ -273,6 +273,78 @@ var rustInjection = []string{
 	"Path::join with an untrusted path — an absolute user path REPLACES the base, escaping the intended root.",
 }
 
+// --- memory-safety (C, C++, Rust) -----------------------------------------
+
+// cFamilyMemorySafety is shared verbatim between C and C++: the raw-pointer,
+// malloc/free, and array-indexing sinks are libc in both languages, and the
+// -fno-sanitize and -O2/-O3 release-build settings hide the same failures
+// in both.
+var cFamilyMemorySafety = []string{
+	"free()/delete on a pointer that has already been freed (double free), or freeing a pointer that was not malloc'd / new'd, or mixing allocators (delete on malloc'd memory, free on new'd memory).",
+	"Reading through a pointer after the backing buffer has been freed or reallocated (use-after-free): a pointer kept past a realloc, a raw pointer kept after the owning container resizes, a std::string::c_str() result held past the string's modification.",
+	"Buffer overflow via pointer arithmetic, unchecked index into a fixed-size array, strcpy/sprintf/memcpy with a size derived from untrusted or wrong source — memory corruption, not an exception.",
+	"Reading from a local, struct field, or buffer that a reachable path leaves uninitialized (uninitialized auto / stack variable used before assignment, malloc'd buffer used before memset).",
+	"Dangling iterators / references / pointers held past the end of the owning container's lifetime: iterator into a std::vector invalidated by a push_back/insert, string_view kept past the string, raw pointer kept past the object's destruction.",
+}
+
+var rustMemorySafety = []string{
+	"raw pointer dereference inside an unsafe block where the pointer can be null or dangling (a *const T / *mut T built from a Box::into_raw without a matching from_raw on every path, or a pointer into a Vec's buffer kept past a push).",
+	"Vec or String capacity arithmetic: reserve_exact vs resize confusion (writing through set_len without initializing), or a usize length built from a cast that wraps.",
+	"std::mem::forget on a type whose Drop has side effects (a file handle, a Mutex guard) — the destructor is never called and the resource leaks; or mem::ManuallyDrop with no explicit drop on every path.",
+	"unsafe impl Send / Sync on a type that contains raw pointers or non-Send fields — reintroduces the data races the compiler would otherwise prevent.",
+}
+
+// --- exception-safety (Python, C++, JS/TS) ---------------------------------
+
+var pyExceptionSafety = []string{
+	"Cleanup skipped because a raise fires mid-function: an open file or DB connection without a with-block, a threading.Lock acquired without `with` or try/finally, a tempfile or shutil.copy operation whose renaming step is skipped on the error branch.",
+	"An object left half-mutated across a raise: a generator paused mid-update, a list/dict half-rewritten, an instance attribute set but a sibling attribute still holding the old value when the caller sees the exception.",
+	"Swallowed exceptions: bare `except:`, `except Exception: pass`, except clauses that log and continue, or returning a default value from the except branch when the operation actually failed.",
+	"New exception raised from a cleanup block: __exit__ that raises, finally that raises, or an atexit handler that raises, masking the original error and turning a recoverable failure into a traceback that points at the wrong line.",
+}
+
+var cppExceptionSafety = []string{
+	"Manual new/delete or malloc/free pairs where an early return or thrown exception skips the release — anything not owned by a RAII type (unique_ptr, lock_guard, fstream) leaks on the throw path.",
+	"An object left half-constructed across a throw: a constructor that sets one member, then throws, leaving the caller with an object that fails its own invariants; base-class ctor throwing before derived-class ctor runs.",
+	"catch (...) or catch (std::exception&) blocks that swallow the failure and let the caller proceed as if the operation succeeded (returning a default, falling through to a retry without re-throwing).",
+	"std::thread::join / detach never called: a std::thread destroyed without join or detach terminates the process. Destructors that throw — any throw out of a destructor during stack unwind calls std::terminate.",
+	"Exception thrown from a callback (a transaction commit hook, a scope guard) while the outer operation is already in its throw path: the new throw masks the original and aborts the program.",
+}
+
+// jstsExceptionSafety is shared verbatim between JavaScript and TypeScript:
+// the throw control flow and the failure mode surface (un-awaited rejections,
+// swallowed catches, finally that re-throws) are the same. TypeScript's types
+// do not change runtime exception behavior.
+var jstsExceptionSafety = []string{
+	"Cleanup skipped because a throw fires mid-function: a try block that opens a resource (a file handle, a DB connection, a subscription) but does not close it on the throw path; a Promise chain that rejects before a finally-style cleanup runs.",
+	"An object left half-mutated across a throw: a state machine advanced partway then thrown out of, leaving the next observer to see an inconsistent state; an in-flight transaction whose commit is half-applied.",
+	"Swallowed errors: `catch (e) {}`, `catch { /* ignore */ }`, an unhandled async function whose rejection is never attached (.catch() or await in try/catch) — the floating rejection vanishes or becomes an unhandledRejection.",
+	"Re-throw that masks the original: a finally block that throws, a cleanup callback that throws, or a rethrow in catch that wraps the original in a less informative error.",
+	"Async cleanup ordering: a .finally() that awaits a promise whose rejection has no handler, leaving the outer call to await a promise that will never resolve.",
+}
+
+// --- dynamic-typing (Python, JS/TS) ----------------------------------------
+
+var pyDynamicTyping = []string{
+	"None propagating far from its origin: a dict.get without a default, an attribute access on a value that may be None, a re.match / re.search result used without a None check, a JSON-parse of a field that is missing or null flowing into arithmetic, indexing, or a template that then breaks downstream.",
+	"Implicit type coercion: str + bytes that raises, str(int) vs int(str), True/False vs 1/0 used as a dict key colliding with the numeric form, '+' on a list that extends instead of adding.",
+	"AttributeError / KeyError / TypeError from duck-typing on a value whose actual type disagrees with the call site: treating a list as a dict, a str as a Path, a None as a Container, accessing .keys() on a value that turned out to be a list.",
+	"Truthiness conflation: `if not x` (or `if x is None`) treating the empty string, 0, [], or {} the same as None and taking the error branch on valid input.",
+	"Wrong-type arguments to a function the runtime only rejects at the call boundary: passing bytes where str is expected, passing a list where a dict is expected, leaving the caller with a TypeError far from the call site.",
+}
+
+// jstsDynamicTyping is shared verbatim between JavaScript and TypeScript:
+// TypeScript's types are erased at runtime and `any` / untyped JSX / union
+// narrowing holes reintroduce the same failure modes in TS code that the
+// type checker can't see.
+var jstsDynamicTyping = []string{
+	"undefined / null propagating far from its origin: optional chaining (?.) that quietly yields undefined, an optional field on a parsed JSON object, an Array.prototype.find that returns undefined used as if it were the resolved value, an API response property accessed before the response is loaded.",
+	"Implicit coercion: == vs === (null == undefined, '' == 0, '0' == 0), numeric + string concatenation that silently produces the wrong type, a falsy check that confuses 0, '', null, undefined, and NaN.",
+	"AttributeError / TypeError from duck-typing: a value treated as an Array when it's null, a property accessed on undefined, a function call on a value that turned out to be a string, a Map.get returning undefined used as a key.",
+	"NaN propagation: parseInt / parseFloat / Number on unvalidated input flowing into arithmetic or comparisons — every comparison with NaN is false, so a guard based on `x === NaN` never fires.",
+	"Wrong-type arguments a function only rejects at the call boundary: passing null where an Array is expected, passing a string where a number is expected, a JSON.parse result with a missing field flowing into arithmetic.",
+}
+
 // manifestations maps lens name -> language -> manifestation rows. It is the
 // per-language half of every lens (the universal half is Lens.Core): prompt
 // composition appends one "How this manifests in <Language>" block per chunk
@@ -335,6 +407,22 @@ var manifestations = map[string]map[ingest.Language][]string{
 		ingest.LangRust:       rustInjection,
 		ingest.LangC:          cFamilyInjection,
 	},
+	"memory-safety": {
+		ingest.LangCPP:  cFamilyMemorySafety,
+		ingest.LangC:    cFamilyMemorySafety,
+		ingest.LangRust: rustMemorySafety,
+	},
+	"exception-safety": {
+		ingest.LangPython:     pyExceptionSafety,
+		ingest.LangCPP:        cppExceptionSafety,
+		ingest.LangJavaScript: jstsExceptionSafety,
+		ingest.LangTypeScript: jstsExceptionSafety,
+	},
+	"dynamic-typing": {
+		ingest.LangPython:     pyDynamicTyping,
+		ingest.LangJavaScript: jstsDynamicTyping,
+		ingest.LangTypeScript: jstsDynamicTyping,
+	},
 }
 
 // anyLanguage is the default column in lensYields: it stands in for any
@@ -375,6 +463,40 @@ var lensYields = map[string]map[ingest.Language]int{
 	// for every language mix — the unique-advantage lens on commit runs.
 	"diff-intent": {
 		anyLanguage: 95,
+	},
+
+	// memory-safety is the dominant defect class on C/C++ (no GC, manual
+	//lifetime, unchecked pointer arithmetic) and a real but narrower class on
+	//Rust (only raw pointers and unsafe blocks). LangGo 0 reflects that Go's
+	//GC eliminates the class entirely.
+	"memory-safety": {
+		ingest.LangCPP:  100,
+		ingest.LangC:    100,
+		ingest.LangRust: 75,
+		ingest.LangGo:   0,
+		anyLanguage:     0,
+	},
+	// exception-safety: Python's raise and C++'s throw both bypass cleanup;
+	//JS/TS have try/catch but most JS code relies on Promises whose unhandled
+	//rejection is the same defect. LangGo 0 reflects that Go's `error`
+	//channel sidesteps the throwing control flow.
+	"exception-safety": {
+		ingest.LangPython:     80,
+		ingest.LangCPP:        75,
+		ingest.LangJavaScript: 65,
+		ingest.LangTypeScript: 65,
+		ingest.LangGo:         0,
+		anyLanguage:           50,
+	},
+	// dynamic-typing: dominant in Python and JS/TS where None / undefined
+	//propagate; Rust catches it at compile time and Go's type system rules
+	//it out. LangGo 0 reflects the static typing.
+	"dynamic-typing": {
+		ingest.LangPython:     90,
+		ingest.LangJavaScript: 85,
+		ingest.LangTypeScript: 70,
+		ingest.LangGo:         0,
+		anyLanguage:           40,
 	},
 	"nil-safety/error-handling": {
 		ingest.LangGo:         100,
