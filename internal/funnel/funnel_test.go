@@ -295,10 +295,9 @@ func TestSweep_CleanCode_NoFindingsNoVerify(t *testing.T) {
 	// Finder ran once per unit in this sweep. Sweep units = (nTaxonomy taxonomy
 	// lenses × sweep-wide) + 1 api-contract-misuse@contract-trace-deep + 2 state-trace-deep. diff-intent
 	// emits zero chunk tasks on sweeps (no ChangeContext) so it contributes zero.
-	nTaxonomy := len(BuiltinLenses()) - 1 // all builtins except diff-intent
-	wantFinderCalls := nTaxonomy + 3      // +1 contract-trace-deep + 2 state-trace-deep
+	wantFinderCalls := goSweepUnits()
 	if finder.callCount() != wantFinderCalls {
-		t.Errorf("finder calls = %d, want %d (nTaxonomy=%d wide + 1 contract-trace-deep + 2 state-trace-deep)", finder.callCount(), wantFinderCalls, nTaxonomy)
+		t.Errorf("finder calls = %d, want %d (taxonomy wide + contract-trace-deep + state-trace-deep)", finder.callCount(), wantFinderCalls)
 	}
 }
 
@@ -330,10 +329,9 @@ func TestSweep_FinderParseFailures_HonestStats(t *testing.T) {
 	// diff-intent emits zero chunk tasks on sweeps (no ChangeContext), so only
 	// the taxonomy units run: nTaxonomy taxonomy lenses × sweep-wide +1 for
 	// api-contract-misuse@contract-trace-deep + 2 state-trace-deep = nTaxonomy+3 finders total.
-	nTaxonomy := len(BuiltinLenses()) - 1
-	nSweepUnits := nTaxonomy + 3 // +1 contract-trace-deep + 2 state-trace-deep
+	nSweepUnits := goSweepUnits()
 	if res.Stats.FinderRuns != nSweepUnits {
-		t.Errorf("FinderRuns = %d, want %d (taxonomy lenses wide + 1 contract-trace-deep + 2 state-trace-deep; diff-intent skipped)", res.Stats.FinderRuns, nSweepUnits)
+		t.Errorf("FinderRuns = %d, want %d (taxonomy wide + deep strategies; diff-intent skipped)", res.Stats.FinderRuns, nSweepUnits)
 	}
 	if res.Stats.FinderFailures != nSweepUnits {
 		t.Errorf("FinderFailures = %d, want %d (all sweep units failed to parse)", res.Stats.FinderFailures, nSweepUnits)
@@ -903,8 +901,7 @@ func TestHypothesize_MultiLens_NoRace(t *testing.T) {
 	// unit count is nTaxonomy wide-strategy units + 1 contract-trace-deep + 2 state-trace-deep
 	// (api-contract-misuse, concurrency, resource-leaks).
 	nLenses := len(BuiltinLenses())
-	nTaxonomy := nLenses - 1     // all builtins except diff-intent
-	nSweepUnits := nTaxonomy + 3 // +1 contract-trace-deep + 2 state-trace-deep
+	nSweepUnits := goSweepUnits()
 
 	// The scripted client returns empty candidates for every lens — the test
 	// only exercises the concurrent append path, not the candidate pipeline.

@@ -76,7 +76,15 @@ func buildUnits(lenses []Lens, strategies []Strategy, chunks []fileChunk, leadsB
 	var units []unit
 	for _, c := range chunks {
 		for _, l := range lenses {
-			if l.Name == "diff-intent" {
+			// Custom-unit lenses (per-chunk work would be the wrong
+			// shape): diff-intent fires one task per commit-scoped run
+			// and cross-language-boundary fires one task per seam.
+			// Both are emitted by the caller as custom units adjacent
+			// to this list, NEVER as chunk units, so skipping here
+			// guarantees no per-chunk contamination and zero tasks on
+			// runs where the caller chose not to emit them (e.g.
+			// sweep with no seams).
+			if l.Name == "diff-intent" || l.Name == "cross-language-boundary" {
 				continue
 			}
 			if !lensAppliesTo(l, c.langs) {
@@ -144,7 +152,7 @@ func buildUnits(lenses []Lens, strategies []Strategy, chunks []fileChunk, leadsB
 // than waiting for all units to finish. hypothesize blocks until all units
 // finish (so the caller can close candCh after return) and returns the total
 // candidate count (for stats) plus any fatal error.
-func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, persona string, kind store.ScanKind, cc *ChangeContext, langs []ingest.Language, targets []string, budget *budgetState, result *Result, fps map[string]string, touchCoverage bool, emit func(Candidate)) (int, error) {
+func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, persona string, kind store.ScanKind, cc *ChangeContext, langs []ingest.Language, targets []string, seams []ingest.Seam, budget *budgetState, result *Result, fps map[string]string, touchCoverage bool, emit func(Candidate)) (int, error) {
 	if len(targets) == 0 && cc == nil {
 		return 0, nil
 	}
@@ -228,6 +236,25 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			customTask: task,
 		}}, units...)
 	}
+	// cross-language-boundary: one custom unit per discovered seam, appended
+	// to the chunk list. Seams are an EnumerateSeams(Snapshot) result; a nil
+	// or empty slice produces zero units (the lens is naturally a no-op on
+	// monoglots and on commits before any seam was discovered). The strategy
+	// is sweepWide — the lens is custom-unit only and the strategy axis is
+	// immaterial, but the launch loop expects a real strategy.
+	if len(seams) > 0 {
+		blLens := crossLanguageBoundaryLens()
+		seamUnits := make([]unit, 0, len(seams))
+		for _, s := range seams {
+			seamUnits = append(seamUnits, unit{
+				lens:       blLens,
+				strategy:   sweepWide,
+				files:      nil,
+				customTask: buildSeamTask(s),
+			})
+		}
+		units = append(units, seamUnits...)
+	}
 
 	// leadsPosted counts post_lead tool calls that succeeded across all parallel
 	// finder goroutines. Atomic so parallel units can increment it safely.
@@ -255,6 +282,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 		finderBudgetCut     int
 		finderRateLimitedCt int
 		totalCandidates     int // total candidates emitted (for stats)
+		seamCovered         int // boundary-lens custom units that ran to a terminal state (incl. budget-stopped)
 		firstErr            error
 	)
 	var wg sync.WaitGroup
@@ -509,6 +537,14 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 					coveredSet[file] = true
 				}
 			}
+			// Boundary-lens custom units are "covered" when the unit
+			// reaches any terminal status (ok / parse_failed / budget
+			// / rate_limited). A seam that never reached the launch
+			// loop is NOT covered — Stats.SeamsFound - SeamsCovered
+			// is the unrun tail.
+			if u.lens.Name == "cross-language-boundary" {
+				seamCovered++
+			}
 			mu.Unlock()
 			// STREAMING TOPOLOGY: emit each candidate OUTSIDE mu so the triage
 			// consumer can start processing immediately without blocking sibling
@@ -554,6 +590,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	result.Stats.FinderBudgetStopped = finderBudgetCut
 	result.Stats.FinderRateLimited = finderRateLimitedCt
 	result.Stats.LeadsConsumed = leadsConsumedTotal
+	result.Stats.SeamsCovered = seamCovered
 	result.Stats.LeadsPosted = int(leadsPostedAtomic.Load())
 	// Build the sorted covered-files slice from the set collected above.
 	covered := make([]string, 0, len(coveredSet))
@@ -1106,5 +1143,57 @@ func buildDiffIntentTask(cc *ChangeContext, targets []string) string {
 
 	b.WriteString("\nFor each finding: read the relevant call sites with find_references before reporting.\n")
 	b.WriteString("Finding nothing is the expected outcome for most commits.\n")
+	return b.String()
+}
+
+// crossLanguageBoundaryLens returns the Lens descriptor for the
+// cross-language-boundary lens. Fetched by name from BuiltinLenses so the
+// helper does not hard-code an index offset (mirrors diffIntentLens above).
+// Panics if the lens is missing, since a deletion would silently drop the
+// entire seam-emission path.
+func crossLanguageBoundaryLens() Lens {
+	for _, l := range BuiltinLenses() {
+		if l.Name == "cross-language-boundary" {
+			return l
+		}
+	}
+	panic("funnel: cross-language-boundary lens not found in BuiltinLenses; check lens.go")
+}
+
+// buildSeamTask constructs the finder task message for the cross-language-
+// boundary lens. It names the seam kind/key and every side file with its
+// language and line, so the agent can read both sides end-to-end and report
+// contract mismatches. The task is self-contained: the agent has read-only
+// tools and can follow up with find_references on either side.
+//
+// The seam is a contract surface, not a commit, so there is no diff, no
+// message, and no leads: the input is the two-sides contract. "Finding
+// nothing" is the expected outcome on the vast majority of seams; only
+// genuine cross-language drift surfaces a candidate.
+func buildSeamTask(s ingest.Seam) string {
+	var b strings.Builder
+	switch s.Kind {
+	case ingest.SeamDataFile:
+		fmt.Fprintf(&b, "Audit this shared data file for cross-language contract mismatches.\n\n")
+		fmt.Fprintf(&b, "SHARED DATA FILE: %s\n\n", s.Key)
+	case ingest.SeamEnvVar:
+		fmt.Fprintf(&b, "Audit this shared environment variable for cross-language contract mismatches.\n\n")
+		fmt.Fprintf(&b, "SHARED ENVIRONMENT VARIABLE: %s\n\n", s.Key)
+	default:
+		fmt.Fprintf(&b, "Audit this cross-language seam.\n\nKIND: %s\nKEY: %s\n\n", s.Kind, s.Key)
+	}
+	b.WriteString("SIDES (every participating file; both sides must be read end-to-end):\n")
+	for _, side := range s.Sides {
+		if side.Line > 0 {
+			fmt.Fprintf(&b, "  - %s [%s] (first reference at line %d)\n", side.File, side.Language, side.Line)
+		} else {
+			fmt.Fprintf(&b, "  - %s [%s]\n", side.File, side.Language)
+		}
+	}
+	b.WriteString("\nFor each finding: confirm the mismatch by reading BOTH sides end-to-end " +
+		"(use read_file on each named file) before reporting. A mismatch you have " +
+		"not verified on both sides is not a finding.\n")
+	b.WriteString("Finding nothing is the expected outcome for the vast majority of seams: " +
+		"report an empty list when the two sides agree on the contract.\n")
 	return b.String()
 }

@@ -182,11 +182,10 @@ func TestHypothesize_DiffIntentGatedOnTargetedOnly(t *testing.T) {
 	// Sweep runs as ScanOneshot — diff-intent must be silent.
 	// Sweep units = nTaxonomy taxonomy lenses × sweep-wide + 1 contract-trace-deep + 2 state-trace-deep.
 	// (api-contract-misuse@contract-trace-deep, concurrency@state-trace-deep, resource-leaks@state-trace-deep).
-	nTaxonomy := len(BuiltinLenses()) - 1
-	wantSweepCalls := nTaxonomy + 3 // +1 contract-trace-deep + 2 state-trace-deep
+	wantSweepCalls := goSweepUnits()
 	if finder.callCount() != wantSweepCalls {
-		t.Errorf("sweep with ChangeContext set: finder calls = %d, want %d (no diff-intent on ScanOneshot, nTaxonomy=%d wide + 3 deep)",
-			finder.callCount(), wantSweepCalls, nTaxonomy)
+		t.Errorf("sweep with ChangeContext set: finder calls = %d, want %d (no diff-intent on ScanOneshot)",
+			finder.callCount(), wantSweepCalls)
 	}
 }
 
@@ -215,11 +214,10 @@ func TestHypothesize_DiffIntentZeroOnSweep(t *testing.T) {
 
 	// diff-intent emits zero chunk tasks. Sweep units = nTaxonomy wide + 1 contract-trace-deep + 2 state-trace-deep
 	// unit for api-contract-misuse@contract-trace-deep.
-	nTaxonomy := len(BuiltinLenses()) - 1
-	wantCalls := nTaxonomy + 3 // +1 contract-trace-deep + 2 state-trace-deep
+	wantCalls := goSweepUnits()
 	if finder.callCount() != wantCalls {
-		t.Errorf("sweep finder calls = %d, want %d (no diff-intent; nTaxonomy=%d wide + 3 deep)",
-			finder.callCount(), wantCalls, nTaxonomy)
+		t.Errorf("sweep finder calls = %d, want %d (no diff-intent)",
+			finder.callCount(), wantCalls)
 	}
 }
 
@@ -245,11 +243,10 @@ func TestHypothesize_DiffIntentNilCC(t *testing.T) {
 	}
 
 	// Targeted with nil CC: no diff-intent. Sweep units = nTaxonomy wide + 1 contract-trace-deep + 2 state-trace-deep.
-	nTaxonomy := len(BuiltinLenses()) - 1
-	wantCalls := nTaxonomy + 3 // +1 contract-trace-deep + 2 state-trace-deep
+	wantCalls := goSweepUnits()
 	if finder.callCount() != wantCalls {
-		t.Errorf("targeted (nil CC) finder calls = %d, want %d (no diff-intent; nTaxonomy=%d wide + 3 deep)",
-			finder.callCount(), wantCalls, nTaxonomy)
+		t.Errorf("targeted (nil CC) finder calls = %d, want %d (no diff-intent)",
+			finder.callCount(), wantCalls)
 	}
 }
 
@@ -302,11 +299,10 @@ func TestHypothesize_DiffIntentOneTaskOnTargeted(t *testing.T) {
 	}
 
 	// Total finder calls: nTaxonomy wide units + 1 deep unit + 1 diff-intent.
-	nTaxonomy := len(BuiltinLenses()) - 1
-	wantCalls := nTaxonomy + 3 + 1 // nTaxonomy wide + 1 contract-trace-deep + 2 state-trace-deep + 1 diff-intent
+	wantCalls := goSweepUnits() + 1 // + 1 diff-intent custom unit
 	if finder.callCount() != wantCalls {
-		t.Errorf("finder calls = %d, want %d (nTaxonomy=%d wide + 3 deep + 1 diff-intent)",
-			finder.callCount(), wantCalls, nTaxonomy)
+		t.Errorf("finder calls = %d, want %d (sweep units + 1 diff-intent)",
+			finder.callCount(), wantCalls)
 	}
 }
 

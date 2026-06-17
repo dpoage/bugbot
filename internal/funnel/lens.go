@@ -244,6 +244,35 @@ func BuiltinLenses() []Lens {
 				"outcome.",
 			Languages: []ingest.Language{ingest.LangPython, ingest.LangJavaScript, ingest.LangTypeScript},
 		},
+		{
+			// cross-language-boundary is the cross-language differentiator: in a
+			// polyglot repo the densest bug habitat is the seam BETWEEN
+			// languages (a producer in one language, a consumer in another).
+			// Single-language tools are blind there because they only see one
+			// side of the contract. The lens is Core-only/language-free (no
+			// manifestation rows): the failure mode is the contract gap, which
+			// is language-free by definition — what matters is that two
+			// different languages touch the same surface. Like diff-intent, it
+			// is a custom-unit lens: hypothesize skips it in the per-chunk loop
+			// (see buildUnits) and emits exactly one custom task per cross-
+			// language seam discovered by EnumerateSeams (see buildSeamTask).
+			// Yield lives in lensYields under anyLanguage only, since the lens
+			// applies to every language mix (the precondition is "the repo is
+			// polyglot", which the seam discovery enforces upstream).
+			Name: "cross-language-boundary",
+			Core: "Hunt for producer/consumer contract mismatches across a language " +
+				"boundary where one side WRITES a shared data format or env var and " +
+				"another side READS it: a field that one side emits and the other " +
+				"side does not expect (or expects under a different name); a type, " +
+				"unit, encoding, or nullability disagreement (string vs int, " +
+				"seconds vs milliseconds, base64 vs raw, empty-string vs null); a " +
+				"value one side can emit that the other side cannot parse; and a " +
+				"required-vs-optional disagreement (a producer that sometimes omits " +
+				"a key the consumer requires, or vice versa). Confirm every finding " +
+				"by reading BOTH named sides end-to-end — do not report a mismatch " +
+				"you have not verified in the actual code on each side. Finding " +
+				"nothing is a valid outcome: many seams are perfectly aligned.",
+		},
 	}
 }
 

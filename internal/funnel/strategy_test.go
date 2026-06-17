@@ -434,7 +434,7 @@ func TestDegradation_DeepShedBeforeWide(t *testing.T) {
 	// Both api-contract-misuse classes rank below them and are both shed.
 	// But the deep class (45) ranks BELOW the wide class (50).
 	langs := []ingest.Language{ingest.LangGo}
-	classes := sweepActiveClasses(lensesByYield(BuiltinLenses(), langs))
+	classes := sweepActiveClasses(lensesByYield(BuiltinLenses(), langs), langs)
 	// Add the deep unit for api-contract-misuse.
 	classes = append(classes, lensStrategyClass{
 		lensName:     "api-contract-misuse",
@@ -489,7 +489,7 @@ func TestDegradation_SweepWideSameAsPreStrategy(t *testing.T) {
 		}
 	}
 
-	classes := sweepActiveClasses(onlyWideLenses)
+	classes := sweepActiveClasses(onlyWideLenses, langs)
 	survivors := degradedUnitClasses(classes, langs)
 
 	// Must keep the top-2 by yield (on Go: nil-safety and concurrency).

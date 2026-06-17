@@ -558,4 +558,17 @@ var lensYields = map[string]map[ingest.Language]int{
 		ingest.LangC:          55,
 		anyLanguage:           50,
 	},
+	// cross-language-boundary: the cross-language differentiator. Its value
+	// comes from polyglot repos, so the yield is per-language-independent:
+	// the precondition is "the repo is polyglot", which the seam discovery
+	// upstream enforces. Ranked below the dominant single-language lenses
+	// (nil/concurrency/resource) so budget pressure on a polyglot repo
+	// still runs the high-yield per-language lenses first; the boundary
+	// lens keeps running when there is room. 70 (mid-table) is a reasoned
+	// prior — no empirical corpus exists yet for cross-language contract
+	// bugs, so the bar matches the empirically-grounded "language has
+	// bugs" baseline rather than the strongest per-language column.
+	"cross-language-boundary": {
+		anyLanguage: 70,
+	},
 }
