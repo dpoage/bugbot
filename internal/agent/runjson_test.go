@@ -375,6 +375,37 @@ func TestRunJSON_StripsThinkBlocks(t *testing.T) {
 	})
 }
 
+// TestRunJSON_MiniMaxM27Reasoning replays the real MiniMax-M2.7 response shape,
+// confirmed live against https://api.minimax.io/v1 on 2026-06-17 (bugbot-ci0):
+// reasoning is an inline <think>...</think> block at the START of
+// message.content (there is NO separate reasoning_content field on the message),
+// and crucially the think block itself can contain a ```go fence, with the real
+// answer following in a ```json fence. parseInto (stripThinkBlocks then
+// stripFences) must recover the JSON in one shot — no repair round-trip — even
+// with a code fence nested inside the discarded reasoning.
+func TestRunJSON_MiniMaxM27Reasoning(t *testing.T) {
+	raw := "<think>\nThe function is named `add` but uses `-`:\n" +
+		"```go\nfunc add(a, b int) int { return a - b }\n```\n" +
+		"That is a logic error: the wrong operator is used.\n</think>\n\n" +
+		"```json\n{\"file\":\"add.go\",\"message\":\"add() subtracts instead of adding\"}\n```"
+	fc := newFakeClient(textResp(raw, 5, 5))
+	r := NewRunner(fc, nil, "sys")
+
+	var got finding
+	out, err := r.RunJSON(context.Background(), "task", nil, &got)
+	if err != nil {
+		t.Fatalf("RunJSON on real MiniMax-M2.7 shape: %v", err)
+	}
+	if got.File != "add.go" || got.Message != "add() subtracts instead of adding" {
+		t.Errorf("parsed = %+v, want the add.go finding", got)
+	}
+	// The whole point of agent-layer tolerance: a reasoning model's think block +
+	// fenced answer must parse without burning the repair round-trip.
+	if out.Iterations != 1 || len(fc.requests) != 1 {
+		t.Errorf("M2.7 shape must parse without repair: iterations=%d calls=%d", out.Iterations, len(fc.requests))
+	}
+}
+
 // assistantText returns the first EventAssistant text from the outcome's
 // transcript, used to assert the raw model text is preserved unmodified.
 func assistantText(out *Outcome) string {
