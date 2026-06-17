@@ -13,12 +13,10 @@ import (
 
 // newLeadsCmd implements `bugbot leads`: the drill-down view of the cross-lens
 // blackboard. Finders post out-of-lens suspicions here (post_lead tool); the
-// target lens consumes them at the start of its next run. This command is the
-// only way to watch that conversation: pending rows are the tip queue for the
-// next cycle, consumed rows are the history.
+// target lens consumes them at the start of its next run. Consumed leads are
+// deleted from the blackboard, so every row this command shows is still
+// waiting for its target lens's next run.
 func newLeadsCmd() *cobra.Command {
-	var pendingOnly bool
-
 	cmd := &cobra.Command{
 		Use:   "leads",
 		Short: "Show the cross-lens blackboard (tips finders posted for other lenses)",
@@ -31,60 +29,33 @@ func newLeadsCmd() *cobra.Command {
 			}
 			defer func() { _ = st.Close() }()
 
-			leads, err := st.ListLeads(ctx, pendingOnly)
+			leads, err := st.ListLeads(ctx)
 			if err != nil {
 				return fmt.Errorf("leads: %w", err)
 			}
-			renderLeads(cmd.OutOrStdout(), leads, pendingOnly, time.Now())
+			renderLeads(cmd.OutOrStdout(), leads, time.Now())
 			return nil
 		},
 	}
-
-	cmd.Flags().BoolVar(&pendingOnly, "pending", false, "show only unconsumed leads (the next cycle's tip queue)")
 	return cmd
 }
 
 // renderLeads prints the blackboard newest-first. now is injectable for tests.
-func renderLeads(out io.Writer, leads []store.Lead, pendingOnly bool, now time.Time) {
+// Every lead in the slice is pending — consumed leads are deleted at claim
+// time, so there is no consumed row to render.
+func renderLeads(out io.Writer, leads []store.Lead, now time.Time) {
 	if len(leads) == 0 {
-		if pendingOnly {
-			_, _ = fmt.Fprintln(out, "blackboard: no pending leads (nothing queued for the next cycle)")
-		} else {
-			_, _ = fmt.Fprintln(out, "blackboard: empty (no finder has posted a cross-lens lead yet)")
-		}
+		_, _ = fmt.Fprintln(out, "blackboard: empty (no pending cross-lens leads)")
 		return
 	}
 
-	pending := 0
-	for _, l := range leads {
-		if l.Status == "posted" {
-			pending++
-		}
-	}
-	if pendingOnly {
-		_, _ = fmt.Fprintf(out, "blackboard: %d pending lead(s)\n\n", pending)
-	} else {
-		_, _ = fmt.Fprintf(out, "blackboard: %d lead(s), %d pending\n\n", len(leads), pending)
-	}
+	_, _ = fmt.Fprintf(out, "blackboard: %d pending lead(s)\n\n", len(leads))
 
 	for _, l := range leads {
-		status := "consumed"
-		when := l.ConsumedAt
-		if l.Status == "posted" {
-			status = "PENDING"
-			when = l.CreatedAt
-		}
-		_, _ = fmt.Fprintf(out, "  [%s] %s -> %s\n", status, l.PosterLens, l.TargetLens)
+		_, _ = fmt.Fprintf(out, "  [PENDING] %s -> %s\n", l.PosterLens, l.TargetLens)
 		_, _ = fmt.Fprintf(out, "    %s:%d — %s\n", l.File, l.Line, truncateNote(l.Note, 100))
-		_, _ = fmt.Fprintf(out, "    posted %s%s\n", age(l.CreatedAt, now), consumedNote(l.Status, when, now))
+		_, _ = fmt.Fprintf(out, "    posted %s\n", age(l.CreatedAt, now))
 	}
-}
-
-func consumedNote(status string, consumedAt, now time.Time) string {
-	if status == "posted" || consumedAt.IsZero() {
-		return ""
-	}
-	return ", consumed " + age(consumedAt, now)
 }
 
 // age renders a compact "Xm ago" / "Xh ago" / date for older entries.

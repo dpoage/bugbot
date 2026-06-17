@@ -11,31 +11,21 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
-// seedLead writes a lead directly into the store backing cfgPath's config.
-func seedLead(t *testing.T, st *store.Store, target, file string, line int, note string, consume bool) {
+// seedLead writes a pending lead directly into the store. It is a test
+// helper, not a fixture for a particular run.
+func seedLead(t *testing.T, st *store.Store, target, file string, line int, note string) {
 	t.Helper()
 	ctx := context.Background()
 	l := store.Lead{PosterLens: "nil-safety/error-handling", TargetLens: target, File: file, Line: line, Note: note}
 	if err := st.AddLead(ctx, l); err != nil {
 		t.Fatal(err)
 	}
-	if consume {
-		got, err := st.ListLeads(ctx, true)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, g := range got {
-			if g.File == file && g.Line == line {
-				if err := st.ConsumeLeads(ctx, []string{g.ID}); err != nil {
-					t.Fatal(err)
-				}
-			}
-		}
-	}
 }
 
-// TestLeadsCommand covers the full listing, the --pending filter, and the
-// friendly empty output, through the real root command.
+// TestLeadsCommand covers the empty-output path, the pending-only listing
+// (every row is pending now — consumed leads are deleted at claim time), and
+// the consume-then-vanish path that is the user-visible behavior of
+// delete-on-consume.
 func TestLeadsCommand(t *testing.T) {
 	cfgPath, _, _ := setup(t)
 
@@ -48,8 +38,7 @@ func TestLeadsCommand(t *testing.T) {
 		t.Errorf("empty board output wrong:\n%s", out)
 	}
 
-	// Seed one pending + one consumed lead. setup() closed its store handle, so
-	// reopen the same path.
+	// Reopen the store to seed rows. setup() closed its handle.
 	ctx := context.Background()
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -59,35 +48,67 @@ func TestLeadsCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedLead(t, st, "concurrency", "ingest.go", 31, "unsynchronized map write under concurrent ingest", false)
-	seedLead(t, st, "resource-leaks", "ingest.go", 26, "scanner error path skips Close", true)
-	_ = st.Close()
+
+	// Two pending leads. Both must show up.
+	seedLead(t, st, "concurrency", "ingest.go", 31, "unsynchronized map write under concurrent ingest")
+	seedLead(t, st, "resource-leaks", "ingest.go", 26, "scanner error path skips Close")
 
 	out, err = run(t, cfgPath, "leads")
 	if err != nil {
 		t.Fatalf("leads errored: %v", err)
 	}
 	for _, want := range []string{
-		"2 lead(s), 1 pending",
+		"2 pending lead(s)",
 		"[PENDING] nil-safety/error-handling -> concurrency",
 		"ingest.go:31",
-		"[consumed] nil-safety/error-handling -> resource-leaks",
-		", consumed ",
+		"[PENDING] nil-safety/error-handling -> resource-leaks",
+		"ingest.go:26",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("leads output missing %q\n---\n%s", want, out)
 		}
 	}
+	// RenderLeads no longer produces a 'consumed' history section.
+	if strings.Contains(out, "[consumed]") {
+		t.Errorf("leads output should not render a consumed history:\n%s", out)
+	}
+	if strings.Contains(out, ", consumed ") {
+		t.Errorf("leads output should not print a 'consumed …' timestamp:\n%s", out)
+	}
 
-	out, err = run(t, cfgPath, "leads", "--pending")
+	// Claim the concurrency lead (delete-on-consume): the listing must no
+	// longer surface it, and the resource-leaks lead must still be there.
+	all, err := st.ListLeads(ctx)
 	if err != nil {
-		t.Fatalf("leads --pending errored: %v", err)
+		t.Fatal(err)
 	}
-	if strings.Contains(out, "resource-leaks") {
-		t.Errorf("--pending must hide consumed leads:\n%s", out)
+	var concurrencyID string
+	for _, l := range all {
+		if l.TargetLens == "concurrency" {
+			concurrencyID = l.ID
+			break
+		}
 	}
-	if !strings.Contains(out, "concurrency") {
-		t.Errorf("--pending must keep pending leads:\n%s", out)
+	if concurrencyID == "" {
+		t.Fatal("seeded concurrency lead missing before consume")
+	}
+	if err := st.ConsumeLeads(ctx, []string{concurrencyID}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	out, err = run(t, cfgPath, "leads")
+	if err != nil {
+		t.Fatalf("leads errored: %v", err)
+	}
+	if strings.Contains(out, "-> concurrency") {
+		t.Errorf("consumed lead must be gone from `bugbot leads`:\n%s", out)
+	}
+	if !strings.Contains(out, "-> resource-leaks") {
+		t.Errorf("resource-leaks lead (different lens) must still be listed:\n%s", out)
+	}
+	if !strings.Contains(out, "1 pending lead(s)") {
+		t.Errorf("leads output should report 1 surviving pending lead:\n%s", out)
 	}
 }
 

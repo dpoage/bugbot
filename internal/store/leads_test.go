@@ -55,9 +55,6 @@ func TestLeads_AddAndPending(t *testing.T) {
 	if got.Note != "locking around cache map looks inconsistent" {
 		t.Errorf("note = %q", got.Note)
 	}
-	if got.Status != "posted" {
-		t.Errorf("status = %q, want posted", got.Status)
-	}
 	if got.CreatedAt.IsZero() {
 		t.Error("created_at is zero")
 	}
@@ -125,22 +122,27 @@ func TestLeads_UpsertRefreshesNoteAndPreservesCreatedAt(t *testing.T) {
 	if !got.CreatedAt.Equal(originalCreatedAt) {
 		t.Errorf("created_at changed: got %v, want %v", got.CreatedAt, originalCreatedAt)
 	}
-	if got.Status != "posted" {
-		t.Errorf("status = %q, want posted", got.Status)
-	}
 }
 
+// TestLeads_ConsumeLeads asserts the delete-on-consume contract: a claimed lead
+// is removed from the blackboard (gone from BOTH PendingLeads and ListLeads),
+// a pending lead for an unrelated/inactive lens is untouched, and a fresh
+// re-post of the same (target_lens, file, line) after consumption is a clean
+// INSERT (the old row is gone, so the conflict path is exercised only by
+// still-pending rows).
 func TestLeads_ConsumeLeads(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
+	// Two pending leads for the active lens.
 	l1 := makeTestLead("nil-safety/error-handling", "concurrency", "a.go", 1, "note1")
 	l2 := makeTestLead("nil-safety/error-handling", "concurrency", "b.go", 2, "note2")
-	if err := st.AddLead(ctx, l1); err != nil {
-		t.Fatalf("AddLead l1: %v", err)
-	}
-	if err := st.AddLead(ctx, l2); err != nil {
-		t.Fatalf("AddLead l2: %v", err)
+	// One pending lead for an UNRELATED / inactive lens that must survive.
+	lInactive := makeTestLead("nil-safety/error-handling", "resource-leaks", "c.go", 3, "note3")
+	for _, l := range []Lead{l1, l2, lInactive} {
+		if err := st.AddLead(ctx, l); err != nil {
+			t.Fatalf("AddLead: %v", err)
+		}
 	}
 
 	leads, err := st.PendingLeads(ctx, "concurrency")
@@ -148,24 +150,86 @@ func TestLeads_ConsumeLeads(t *testing.T) {
 		t.Fatalf("PendingLeads: %v", err)
 	}
 	if len(leads) != 2 {
-		t.Fatalf("want 2 leads, got %d", len(leads))
+		t.Fatalf("want 2 leads for concurrency, got %d", len(leads))
 	}
+
+	// Snapshot the inactive-lens lead's ID so we can prove it survives.
+	inactiveBefore, err := st.PendingLeads(ctx, "resource-leaks")
+	if err != nil {
+		t.Fatalf("PendingLeads resource-leaks: %v", err)
+	}
+	if len(inactiveBefore) != 1 {
+		t.Fatalf("want 1 inactive-lens lead, got %d", len(inactiveBefore))
+	}
+	inactiveID := inactiveBefore[0].ID
 
 	ids := []string{leads[0].ID, leads[1].ID}
 	if err := st.ConsumeLeads(ctx, ids); err != nil {
 		t.Fatalf("ConsumeLeads: %v", err)
 	}
 
-	// No pending leads left.
-	after, err := st.PendingLeads(ctx, "concurrency")
+	// Consumed rows are GONE — neither PendingLeads nor ListLeads returns them.
+	afterPending, err := st.PendingLeads(ctx, "concurrency")
 	if err != nil {
 		t.Fatalf("PendingLeads after consume: %v", err)
 	}
-	if len(after) != 0 {
-		t.Errorf("want 0 after consume, got %d", len(after))
+	if len(afterPending) != 0 {
+		t.Errorf("PendingLeads: want 0 after consume, got %d", len(afterPending))
+	}
+	allAfter, err := st.ListLeads(ctx)
+	if err != nil {
+		t.Fatalf("ListLeads after consume: %v", err)
+	}
+	if len(allAfter) != 1 {
+		t.Errorf("ListLeads: want 1 (only the inactive-lens lead), got %d", len(allAfter))
+	}
+	for _, l := range allAfter {
+		if l.ID == leads[0].ID || l.ID == leads[1].ID {
+			t.Errorf("ListLeads still surfaces a consumed lead %q (zombie row)", l.ID)
+		}
+	}
+
+	// The pending lead for the inactive lens SURVIVES.
+	inactiveAfter, err := st.PendingLeads(ctx, "resource-leaks")
+	if err != nil {
+		t.Fatalf("PendingLeads resource-leaks after consume: %v", err)
+	}
+	if len(inactiveAfter) != 1 {
+		t.Fatalf("inactive-lens lead lost: want 1, got %d", len(inactiveAfter))
+	}
+	if inactiveAfter[0].ID != inactiveID {
+		t.Errorf("inactive-lens lead ID changed: got %q, want %q", inactiveAfter[0].ID, inactiveID)
+	}
+
+	// Re-post one of the consumed (target_lens, file, line) triples: because the
+	// old row was deleted, this is a clean INSERT (no conflict) and the new
+	// row is fresh pending.
+	l3 := makeTestLead("resource-leaks", "concurrency", "a.go", 1, "re-raised")
+	if err := st.AddLead(ctx, l3); err != nil {
+		t.Fatalf("AddLead re-post: %v", err)
+	}
+	reposted, err := st.PendingLeads(ctx, "concurrency")
+	if err != nil {
+		t.Fatalf("PendingLeads after repost: %v", err)
+	}
+	if len(reposted) != 1 {
+		t.Fatalf("want 1 after repost, got %d", len(reposted))
+	}
+	if reposted[0].Note != "re-raised" {
+		t.Errorf("reposted note = %q, want %q", reposted[0].Note, "re-raised")
+	}
+	if reposted[0].PosterLens != "resource-leaks" {
+		t.Errorf("reposted poster = %q, want resource-leaks", reposted[0].PosterLens)
+	}
+	if reposted[0].ID == leads[0].ID {
+		t.Errorf("reposted lead reused the deleted row's id %q; should be a fresh id", reposted[0].ID)
 	}
 }
 
+// TestLeads_ConsumedThenReposted is the new equivalent of the old "flip
+// consumed->posted" test: once a lead is consumed and deleted, a re-post of
+// the same triple is a fresh insert (the conflict path is not exercised by
+// the consume path; ON CONFLICT only fires while a still-pending row exists).
 func TestLeads_ConsumedThenReposted(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
@@ -183,7 +247,7 @@ func TestLeads_ConsumedThenReposted(t *testing.T) {
 		t.Fatalf("ConsumeLeads: %v", err)
 	}
 
-	// Verify it's consumed.
+	// Verify it's gone.
 	after, err := st.PendingLeads(ctx, "concurrency")
 	if err != nil {
 		t.Fatalf("PendingLeads after consume: %v", err)
@@ -192,13 +256,13 @@ func TestLeads_ConsumedThenReposted(t *testing.T) {
 		t.Fatalf("want 0 after consume, got %d", len(after))
 	}
 
-	// Re-post the same (target_lens, file, line): should flip back to 'posted'.
+	// Re-post the same (target_lens, file, line): the old row was deleted, so
+	// this is a clean INSERT — not a conflict update.
 	l2 := makeTestLead("resource-leaks", "concurrency", "x.go", 5, "re-raised suspicion")
 	if err := st.AddLead(ctx, l2); err != nil {
 		t.Fatalf("AddLead re-post: %v", err)
 	}
 
-	// Should be pending again with the new note.
 	reposted, err := st.PendingLeads(ctx, "concurrency")
 	if err != nil {
 		t.Fatalf("PendingLeads after repost: %v", err)
@@ -207,14 +271,11 @@ func TestLeads_ConsumedThenReposted(t *testing.T) {
 		t.Fatalf("want 1 after repost, got %d", len(reposted))
 	}
 	got := reposted[0]
-	if got.Status != "posted" {
-		t.Errorf("status = %q, want posted after repost", got.Status)
-	}
 	if got.Note != "re-raised suspicion" {
 		t.Errorf("note = %q after repost", got.Note)
 	}
-	if !got.ConsumedAt.IsZero() {
-		t.Errorf("consumed_at should be zero after repost, got %v", got.ConsumedAt)
+	if got.PosterLens != "resource-leaks" {
+		t.Errorf("poster = %q after repost, want resource-leaks", got.PosterLens)
 	}
 }
 
@@ -265,7 +326,8 @@ func TestLeads_DeterministicOrdering(t *testing.T) {
 	}
 }
 
-// TestListLeads covers ordering (newest first) and the pending filter.
+// TestListLeads covers newest-first ordering and the deletion contract: a
+// consumed lead is gone from ListLeads too, not just PendingLeads.
 func TestListLeads(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
@@ -280,7 +342,7 @@ func TestListLeads(t *testing.T) {
 		}
 	}
 
-	all, err := st.ListLeads(ctx, false)
+	all, err := st.ListLeads(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,23 +350,18 @@ func TestListLeads(t *testing.T) {
 		t.Fatalf("ListLeads order wrong: %+v", all)
 	}
 
-	// Consume the newer one; pending filter must return only the older.
+	// Consume the newer one; it must be removed entirely from ListLeads.
 	if err := st.ConsumeLeads(ctx, []string{all[0].ID}); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := st.ListLeads(ctx, true)
+	all, err = st.ListLeads(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 1 || pending[0].Note != "first" {
-		t.Fatalf("pending filter wrong: %+v", pending)
+	if len(all) != 1 {
+		t.Fatalf("ListLeads: want 1 surviving lead after consume, got %d (%+v)", len(all), all)
 	}
-	// Unfiltered still returns both, consumed one carries status+timestamp.
-	all, err = st.ListLeads(ctx, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(all) != 2 || all[0].Status != "consumed" || all[0].ConsumedAt.IsZero() {
-		t.Fatalf("consumed lead not round-tripped: %+v", all[0])
+	if all[0].Note != "first" {
+		t.Errorf("surviving lead: got %q, want first", all[0].Note)
 	}
 }

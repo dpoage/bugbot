@@ -58,7 +58,7 @@ func fetchWorldState(ctx context.Context, cfg config.Config) (worldState, bool) 
 		ws.Tallies = t
 		ws.HasTallies = true
 	}
-	if leads, err := st.ListLeads(ctx, true); err == nil {
+	if leads, err := st.ListLeads(ctx); err == nil {
 		ws.PendingLeadsTotal = len(leads)
 		if len(leads) > leadPreviewMax {
 			leads = leads[:leadPreviewMax]
