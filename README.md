@@ -69,6 +69,7 @@ Requires Go 1.26+ to build, and podman or docker for the repro stage
 make build                     # static binary at bin/bugbot
 
 cd /path/to/target/repo
+bugbot prime                   # repo-aware guidance for filling in bugbot.yaml
 bugbot init                    # writes a commented bugbot.yaml
 export ANTHROPIC_API_KEY=...   # or whichever provider(s) you configure
 bugbot scan                    # one-shot funnel run
