@@ -16,6 +16,7 @@ type cappedBuffer struct {
 	mu        sync.Mutex
 	buf       bytes.Buffer
 	truncated bool
+	total     int64 // total bytes ever written, including those discarded over cap
 }
 
 func newCappedBuffer(max int) *cappedBuffer {
@@ -26,6 +27,7 @@ func newCappedBuffer(max int) *cappedBuffer {
 func (c *cappedBuffer) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.total += int64(len(p))
 
 	if c.max <= 0 {
 		// No cap configured: retain everything.
@@ -59,4 +61,13 @@ func (c *cappedBuffer) result() (string, bool) {
 		return c.buf.String() + truncationMarker, true
 	}
 	return c.buf.String(), false
+}
+
+// written returns the total number of bytes ever handed to Write, including
+// bytes discarded after the cap was reached. It is the idle watchdog's
+// output-activity signal, so it must keep growing even once the buffer is full.
+func (c *cappedBuffer) written() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total
 }

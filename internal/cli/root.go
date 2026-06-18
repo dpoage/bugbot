@@ -32,6 +32,7 @@ reproduce, report) and tracks findings across confidence tiers:
 	root.AddCommand(
 		newDoctorCmd(),
 		newInitCmd(),
+		newPrimeCmd(),
 		newScanCmd(),
 		newReproCmd(),
 		newReviewCmd(),

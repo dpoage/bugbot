@@ -162,7 +162,11 @@ type Sandbox struct {
 	CPUs           int    `yaml:"cpus"`
 	MemoryMB       int    `yaml:"memory_mb"`
 	TimeoutSeconds int    `yaml:"timeout_seconds"`
-	Network        string `yaml:"network"`
+	// IdleTimeoutSeconds bounds time with NO sandbox progress (output or
+	// workspace filesystem activity). A run making progress continues up to
+	// TimeoutSeconds; one stalled this long is killed. 0 disables the watchdog.
+	IdleTimeoutSeconds int    `yaml:"idle_timeout_seconds"`
+	Network            string `yaml:"network"`
 	// DepStrategy selects how external module dependencies are made available to
 	// the network-none sandbox for Go repos that are not vendored. Vendored repos
 	// (vendor/modules.txt) are always detected and need no strategy. Values:
@@ -321,14 +325,15 @@ func Default() Config {
 			Cartographer: true,
 		},
 		Sandbox: Sandbox{
-			Backend:        "cli",
-			Runtime:        "podman",
-			Image:          "docker.io/library/debian:stable-slim",
-			CPUs:           2,
-			MemoryMB:       2048,
-			TimeoutSeconds: 600,
-			Network:        "none",
-			DepStrategy:    "off",
+			Backend:            "cli",
+			Runtime:            "podman",
+			Image:              "docker.io/library/debian:stable-slim",
+			CPUs:               2,
+			MemoryMB:           2048,
+			TimeoutSeconds:     600,
+			IdleTimeoutSeconds: 120,
+			Network:            "none",
+			DepStrategy:        "off",
 		},
 		Verify: Verify{
 			SandboxExec:        false,
@@ -536,6 +541,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt("BUGBOT_SANDBOX_CPUS", &cfg.Sandbox.CPUs),
 		setInt("BUGBOT_SANDBOX_MEMORY_MB", &cfg.Sandbox.MemoryMB),
 		setInt("BUGBOT_SANDBOX_TIMEOUT_SECONDS", &cfg.Sandbox.TimeoutSeconds),
+		setInt("BUGBOT_SANDBOX_IDLE_TIMEOUT_SECONDS", &cfg.Sandbox.IdleTimeoutSeconds),
 		setInt("BUGBOT_VERIFY_SANDBOX_MAX_EXECS", &cfg.Verify.SandboxMaxExecs),
 		setInt("BUGBOT_PUBLISH_TIER_MIN", &cfg.Publish.TierMin),
 		setInt("BUGBOT_REPRO_PATCH_MAX_ATTEMPTS", &cfg.Repro.PatchMaxAttempts),
@@ -669,6 +675,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Sandbox.TimeoutSeconds <= 0 {
 		return fmt.Errorf("config: sandbox.timeout_seconds must be > 0")
+	}
+	if c.Sandbox.IdleTimeoutSeconds < 0 {
+		return fmt.Errorf("config: sandbox.idle_timeout_seconds must be >= 0 (0 disables)")
 	}
 	switch c.Sandbox.DepStrategy {
 	case "", "off", "host", "fetch":

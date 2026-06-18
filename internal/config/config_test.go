@@ -715,3 +715,40 @@ func TestValidate_CartographerRoleOptional(t *testing.T) {
 		t.Errorf("cartographer with unknown provider should be rejected, got %v", err)
 	}
 }
+
+func TestValidate_SandboxIdleTimeout(t *testing.T) {
+	load := func(t *testing.T) Config {
+		t.Helper()
+		cfg, err := Load(writeTemp(t, validYAML))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		return cfg
+	}
+
+	// On by default.
+	if got := Default().Sandbox.IdleTimeoutSeconds; got != 120 {
+		t.Errorf("Default idle_timeout_seconds = %d, want 120", got)
+	}
+
+	// 0 disables the watchdog — valid.
+	cfg := load(t)
+	cfg.Sandbox.IdleTimeoutSeconds = 0
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("idle_timeout_seconds=0 should be valid (disabled), got %v", err)
+	}
+
+	// Positive — valid.
+	cfg = load(t)
+	cfg.Sandbox.IdleTimeoutSeconds = 60
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("idle_timeout_seconds=60 should be valid, got %v", err)
+	}
+
+	// Negative — rejected with a clear message.
+	cfg = load(t)
+	cfg.Sandbox.IdleTimeoutSeconds = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "idle_timeout_seconds") {
+		t.Errorf("idle_timeout_seconds=-1 should be rejected with idle_timeout_seconds in message, got %v", err)
+	}
+}
