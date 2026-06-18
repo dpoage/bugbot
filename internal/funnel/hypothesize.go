@@ -285,6 +285,50 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 		seamCovered         int // boundary-lens custom units that ran to a terminal state (incl. budget-stopped)
 		firstErr            error
 	)
+
+	// --- finder-stage circuit breaker (bugbot-2uz) -------------------------
+	//
+	// Against an unreachable provider, each finder unit exhausts the retry
+	// policy (DefaultRetryConfig: 4 attempts, ~4s of backoff) and the funnel
+	// dispatches MANY finder seats for a large repo, so a fully-broken provider
+	// takes (seats x ~4s) to surface MostFindersFailed instead of failing fast
+	// (observed ~45s+ even with a single lens). The breaker detects
+	// transport-level failures (llm.APIError with StatusCode==0 — the shape
+	// produced by openai/google/anthropic adapters for timeouts, connection
+	// resets, DNS failures) and aborts further launches once a threshold of
+	// concurrent transport failures is observed with zero finderOK successes.
+	//
+	// Threshold = max(3, MaxParallel): at least 3 (a single transient blip
+	// never trips it), and at least the configured concurrency (a parallel
+	// batch of transport failures trips within one generation).
+	//
+	// anySucceeded disarms the breaker permanently for this stage: as soon as
+	// ONE finder returns parseable output the provider is provably reachable
+	// from this process, and any further transport failures are isolated to
+	// individual flaky units rather than a systemic outage. Disarm is one-way
+	// — the breaker never re-arms after a success.
+	//
+	// Rate-limit (ErrRateLimited) is NOT counted: a rate-limited provider is
+	// still reachable and the failure is recoverable by lowering
+	// --concurrency, so it must keep the existing classification (its own
+	// counter) and the existing scan-exit semantics.
+	//
+	// runCtx is the breaker-cancellable child of ctx. All runFinderWithPrompt
+	// calls and slot acquisitions go through it; on trip we call runCancel to
+	// unblock any goroutine currently inside a retry loop or waiting on the
+	// slot pool. The caller's ctx is never cancelled by us — only the
+	// derived child.
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+	breakerThreshold := f.opts.MaxParallel
+	if breakerThreshold < 3 {
+		breakerThreshold = 3
+	}
+	var (
+		transportFailures atomic.Int32 // transport-class parse failures while !anySucceeded
+		anySucceeded      atomic.Bool  // true once any unit returns finderOK
+		breakerTripped    atomic.Bool  // true after runCancel was called by this stage
+	)
 	var wg sync.WaitGroup
 
 	// Compute degraded survivors from the (lens × strategy) unit-classes that
@@ -329,13 +373,17 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 
 	for unitIdx, u := range units {
 		mu.Lock()
-		stop := firstErr != nil
+		stop := firstErr != nil || breakerTripped.Load()
 		mu.Unlock()
 		if stop {
-			// Units not launched because a prior unit errored: we do not record rows
-			// for these, as the error exit aborts the scan itself. See trap 2 in
-			// bugbot-mi5.10: the firstErr early-break path records nothing — acceptable,
-			// documented here.
+			// Units not launched because a prior unit errored OR because the
+			// finder-stage circuit breaker tripped: we do not record rows for
+			// these, as both early-break paths abort further work without
+			// partial precision. The breakerTripped path keeps the
+			// already-recorded FinderFailures intact (MostFindersFailed()
+			// remains true) and Stats.FinderAborted is set at the end of
+			// hypothesize so downstream consumers see the abort reason
+			// explicitly.
 			break
 		}
 
@@ -344,11 +392,12 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 		unitIdx := unitIdx
 		go func() {
 			defer wg.Done()
-			// Acquire a global slot (low priority: finder breadth defers to verifier).
 			// On context cancellation, acquire returns ctx.Err(); we exit without
 			// recording a row — same as today's behavior where cancelled runs abandon
 			// queued work. The budget-gate and agent launch happen AFTER acquisition.
-			if err := f.slots.acquire(ctx, slotLow); err != nil {
+			// runCtx (not ctx) so the breaker can unblock a queued unit by
+			// cancelling the derived child without disturbing the caller's ctx.
+			if err := f.slots.acquire(runCtx, slotLow); err != nil {
 				return
 			}
 			defer f.slots.release()
@@ -435,7 +484,9 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 
 			label := unitLabel(u.lens.Name, u.strategy.Name)
 			startedAt := time.Now()
-			cands, status, outcome, pm, err := f.runFinderWithPrompt(ctx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt)
+			// runCtx (not ctx) so a breaker trip unblocks the in-flight runner
+			// without disturbing the caller's context.
+			cands, status, outcome, pm, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt)
 			finishedAt := time.Now()
 
 			// Emit KindAgentFinished here (not inside runFinderWithPrompt) so we
@@ -471,6 +522,16 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			var unitDetail string // postmortem detail for parse_failed / budget_stopped rows
 			mu.Lock()
 			if err != nil {
+				// If the breaker tripped, the ctx.Err() surfaced by
+				// runFinderWithPrompt is a self-cancellation, not a caller
+				// cancellation — swallow it so hypothesize returns nil and
+				// Stats (with the already-recorded FinderFailures) report the
+				// run as unreliable through MostFindersFailed() and
+				// FinderAborted.
+				if breakerTripped.Load() {
+					mu.Unlock()
+					return
+				}
 				if firstErr == nil {
 					firstErr = err
 				}
@@ -495,6 +556,34 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 					Kind: progress.KindLensFailed, Role: progress.RoleFinder, Label: label, Message: msg,
 				})
 				recordStatus = "parse_failed"
+				// Circuit-breaker accounting. Only count transport-class
+				// failures while the breaker is still armed (no finderOK
+				// yet). The first finderOK — regardless of which lens or
+				// strategy it came from — disarms the breaker permanently,
+				// because the provider is provably reachable from this
+				// process and any further transport failures are isolated
+				// to flaky units rather than a systemic outage. The check
+				// sits under the same mu as finderRuns/finderFailed so the
+				// transport counter, the disarming flag, and the
+				// already-recorded stats stay mutually consistent — without
+				// the lock a concurrent finderParseFailed could observe a
+				// stale anySucceeded and double-count.
+				if pm != nil && pm.Class == finderClassTransportError && !anySucceeded.Load() {
+					if n := transportFailures.Add(1); n >= int32(breakerThreshold) && breakerTripped.CompareAndSwap(false, true) {
+						// Threshold reached and the breaker was not
+						// already tripped by a sibling unit. Cancel the
+						// run context so any in-flight runFinderWithPrompt
+						// / slot-pool waiter returns early; the outer
+						// loop check (breakerTripped.Load() at the top of
+						// each iteration) prevents further launches.
+						// CompareAndSwap makes the runCancel call
+						// exactly-once across all sibling goroutines
+						// regardless of how many reach the threshold
+						// concurrently.
+						runCancel()
+						f.note(result, fmt.Sprintf("finder circuit breaker tripped: %d transport failures with zero successes (threshold %d) — aborting further finder launches", n, breakerThreshold))
+					}
+				}
 			case finderBudgetStopped:
 				// A run truncated by the shared budget pool (or its own token
 				// budget) whose partial output does not parse is a budget stop, NOT
@@ -525,6 +614,18 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				})
 				recordStatus = "rate_limited"
 			default: // finderOK
+				// Disarm the circuit breaker permanently: the provider
+				// answered with parseable output, so it is reachable from
+				// this process and any further transport failures are
+				// isolated to flaky units rather than a systemic outage.
+				// CompareAndSwap is a no-op once anySucceeded is true, so
+				// every subsequent finderOK goroutine pays only a single
+				// atomic op. Placed inside the existing mu so the disarm
+				// is observed by a concurrent transport-class
+				// finderParseFailed on the same lock acquisition order
+				// (transport-failure goroutine takes mu first, observes
+				// anySucceeded, and skips the breaker counter).
+				anySucceeded.Store(true)
 				recordStatus = "ok"
 				candCount = int64(len(cands))
 				totalCandidates += len(cands)
@@ -589,6 +690,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	result.Stats.FinderFailures = finderFailed
 	result.Stats.FinderBudgetStopped = finderBudgetCut
 	result.Stats.FinderRateLimited = finderRateLimitedCt
+	result.Stats.FinderAborted = breakerTripped.Load()
 	result.Stats.LeadsConsumed = leadsConsumedTotal
 	result.Stats.SeamsCovered = seamCovered
 	result.Stats.LeadsPosted = int(leadsPostedAtomic.Load())
@@ -778,6 +880,17 @@ const (
 	// finderClassBudgetStop means the run was cut short by the shared token
 	// budget pool or the run's own token budget before producing parseable JSON.
 	finderClassBudgetStop finderFailureClass = "budget-stop"
+	// finderClassTransportError means the provider was unreachable: a
+	// transport / connection failure surfaced as an *llm.APIError with
+	// StatusCode==0 (the shape produced by the openai / google / anthropic
+	// adapters for non-HTTP errors — timeout, connection reset, DNS failure).
+	// Distinct from rate-limit (the provider is reachable but throttling) and
+	// from parse failures (the provider answered; the model output is the
+	// problem). This class drives the finder-stage circuit breaker
+	// (bugbot-2uz): N concurrent transport errors with zero successes is a
+	// strong signal the provider is down, and the funnel aborts further
+	// launches instead of waiting for every retry to time out.
+	finderClassTransportError finderFailureClass = "transport-error"
 )
 
 // finderPostmortem is captured on every no-parse finder failure (both
@@ -829,6 +942,14 @@ func classifyFinderErr(outcome *agent.Outcome, err error) finderFailureClass {
 	if err != nil && errors.Is(err, llm.ErrRateLimited) {
 		return finderClassRateLimited
 	}
+	if isTransportError(err) {
+		// Provider unreachable (timeout / connection reset / DNS failure).
+		// Distinct from rate-limit (provider reachable, throttling) and from
+		// parse failures (the runner did not return an error at all). This
+		// branch also handles the bare APIError{Kind: ErrServer, StatusCode: 0}
+		// shape that the adapters return for non-HTTP transport failures.
+		return finderClassTransportError
+	}
 	finalText := ""
 	if outcome != nil {
 		finalText = outcome.FinalText
@@ -837,6 +958,27 @@ func classifyFinderErr(outcome *agent.Outcome, err error) finderFailureClass {
 		return finderClassEmptyOutput
 	}
 	return finderClassUnparseable
+}
+
+// isTransportError reports whether err represents a transport / connection
+// failure: an *llm.APIError with StatusCode==0 (the shape produced by the
+// openai / google / anthropic adapters for non-HTTP errors — timeouts,
+// connection resets, DNS failures). Both the bare
+// "APIError{Kind: ErrServer, StatusCode: 0}" shape and any other
+// APIError{StatusCode: 0} variant match (Kind may be ErrServer, ErrOverloaded,
+// or any unrecognized transport-level failure surfaced through the adapter).
+// Distinct from rate-limit (errors.Is(err, llm.ErrRateLimited) — provider
+// reachable, throttling) and from parse failures (no error from the runner at
+// all). nil-safe.
+func isTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *llm.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == 0
+	}
+	return false
 }
 
 // buildFinderPostmortem constructs a finderPostmortem from a failed run. Both

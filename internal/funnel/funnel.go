@@ -725,6 +725,16 @@ type Stats struct {
 	// error (not a context cancellation). Partial stats are recorded and the
 	// scan_runs row is sealed so no row is left dangling.
 	Aborted bool `json:"aborted,omitempty"`
+	// FinderAborted is set when the finder-stage circuit breaker tripped
+	// (bugbot-2uz): a transport-error threshold was reached with zero
+	// finderOK successes, so the funnel stopped launching further finder
+	// units and cancelled in-flight ones. The already-recorded
+	// FinderFailures are kept — MostFindersFailed() still reports the run as
+	// unreliable — but this flag surfaces the abort reason distinctly from a
+	// normal "all units ran and failed" run. A downstream consumer can tell
+	// "we ran every unit and they all failed" from "we aborted after the
+	// first wave of transport failures and never launched the rest".
+	FinderAborted bool `json:"finder_aborted,omitempty"`
 	// SeamsFound is the number of cross-language contract surfaces
 	// (shared data files + shared env vars) discovered by
 	// ingest.EnumerateSeams on this run's snapshot. The boundary lens
