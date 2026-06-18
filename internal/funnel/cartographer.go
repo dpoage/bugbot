@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
@@ -162,11 +164,12 @@ func collapseNewlines(s string) string {
 // whatever summaries it has, possibly nil) on store/LLM errors or when
 // budget.finderOverHard() flips to true mid-pass.
 //
-// The pass is one-shot and serial: the prompt-cache benefit we want to
-// preserve (the finder's history) is unaffected by parallelism, and a
-// concurrent fan-out would compete with the finders for slots. The cost
-// bound (DefaultCartographerMaxFiles member files, head-capped, total bytes
-// capped) keeps each completion cheap and predictable.
+// The pass runs CONCURRENTLY: each uncached package is summarized in its own
+// goroutine bounded by the funnel slot pool (the same bound finders use), and
+// each summary is persisted the moment it is produced (see regenSummaries). The
+// cartographer runs before the finder stage, so the pool is free and the fan-out
+// does not compete with finders. The cost bound (DefaultCartographerMaxFiles
+// member files, head-capped, total bytes capped) keeps each completion cheap.
 func (f *Funnel) cartograph(ctx context.Context, result *Result, client llm.Client, snap *ingest.Snapshot, targets []string, fps map[string]string, budget *budgetState) *cartography {
 	if !f.opts.Cartographer {
 		return nil
@@ -211,8 +214,9 @@ func (f *Funnel) cartograph(ctx context.Context, result *Result, client llm.Clie
 		}
 	}
 
-	// Build the regen list. Order packages alphabetically so a partial
-	// pass (budget cutoff) is reproducible.
+	// Build the regen list (sorted so the launch order — and therefore the
+	// prefix that survives a budget cutoff — is reproducible). Generation and
+	// persistence happen concurrently below; completion order is unspecified.
 	var toRegen []string
 	for pkg, fp := range pkgFingerprints {
 		if _, ok := summaries[pkg]; ok {
@@ -226,48 +230,152 @@ func (f *Funnel) cartograph(ctx context.Context, result *Result, client llm.Clie
 	}
 	sort.Strings(toRegen)
 
-	// Regenerate, one bounded client.Complete per package, stopping the
-	// moment the hard budget trips. Persist whatever we collected at the
-	// end so a partial pass is still a cache win on the next run.
-	var regenBatch []store.PackageSummary
-	for _, pkg := range toRegen {
-		if err := ctx.Err(); err != nil {
-			break
-		}
-		if budget != nil && budget.finderOverHard() {
-			break
-		}
-		summary, sErr := f.summarizePackage(ctx, client, pkg, packages[pkg], fps)
-		if sErr != nil || summary == "" {
-			continue
-		}
-		summaries[pkg] = summary
-		regenBatch = append(regenBatch, store.PackageSummary{
-			Pkg:         pkg,
-			Fingerprint: pkgFingerprints[pkg],
-			Summary:     summary,
-			Model:       "", // Capabilities has no Model field; leave blank
+	// Regenerate uncached summaries CONCURRENTLY (bounded by the funnel slot
+	// pool, the same bound finders use) and persist EACH summary the instant it
+	// is produced — never batched — so an interrupted or budget-stopped pass
+	// keeps every summary already written instead of discarding the run's work.
+	f.regenSummaries(ctx, client, packages, pkgFingerprints, fps, toRegen, budget,
+		func(r regenResult) {
+			switch {
+			case r.err == nil:
+				summaries[r.pkg] = r.summary
+			case r.stage == "persist":
+				// The silent-loss case (tokens spent, nothing stored): surface it
+				// as a run note rather than swallowing it.
+				f.note(result, fmt.Sprintf("cartographer: persisting summary for %q failed: %v", r.pkg, r.err))
+			}
+			// summarize failures stay silent, matching the pre-parallel behavior.
 		})
+
+	// Build the importer graph scoped to the SPANNED PACKAGES (every file of any
+	// package that has a target), not just the target files. contextFor only
+	// injects a dependent's summary when that summary exists, and summaries
+	// exist exactly for the spanned packages (packagesSpanned). The import that
+	// makes package D a dependent of package O may live in a file of D that is
+	// not itself a target, so scoping to target files alone would drop that edge
+	// and silently omit D's summary. Scoping to every file of the spanned
+	// packages captures exactly the edges among summarized packages
+	// (byte-identical injection) while staying O(spanned packages) — far below
+	// O(snapshot) on a large repo. A failure returns an empty importers map
+	// (dependency injection degrades to "own package only", not a failed scan).
+	spannedDirs := make(map[string]bool, len(packages))
+	for pkg := range packages {
+		spannedDirs[pkg] = true
 	}
-	if len(regenBatch) > 0 {
-		// Persist. A failure here is also the silent-loss case that hides a
-		// broken pass (tokens spent, nothing stored), so surface it as a run
-		// note rather than swallowing it.
-		if err := f.store.UpsertPackageSummaries(ctx, regenBatch); err != nil {
-			f.note(result, fmt.Sprintf("cartographer: persisting %d package summaries failed: %v", len(regenBatch), err))
+	inScope := make(map[string]bool)
+	for _, file := range snap.Files {
+		if spannedDirs[path.Dir(file.Path)] {
+			inScope[file.Path] = true
 		}
 	}
-
-	// Build the importer graph. This is independent of the LLM pass and
-	// cheap; reuse the snapshot we already have. A failure returns an
-	// empty importers map (dependency injection degrades to "own
-	// package only" rather than failing the scan).
-	importers, impErr := f.repo.PackageImporters(ctx, snap)
+	importers, impErr := f.repo.PackageImportersScoped(ctx, snap, inScope)
 	if impErr != nil || importers == nil {
 		importers = map[string][]string{}
 	}
 
 	return &cartography{summaries: summaries, importers: importers}
+}
+
+// regenResult is one package's outcome from regenSummaries. err == nil means the
+// summary was produced AND persisted; otherwise stage names the failed step
+// ("summarize" or "persist").
+type regenResult struct {
+	pkg     string
+	summary string
+	err     error
+	stage   string
+}
+
+// regenSummaries summarizes each package in toRegen CONCURRENTLY — bounded by the
+// funnel-wide slot pool (slotLow, the same class and bound as finder agents; the
+// cartographer runs before the finder stage so the pool is free) — and persists
+// EACH summary the instant it is produced, one row per package, never batched.
+// An interrupted or budget-stopped pass therefore keeps every summary already
+// written instead of discarding the whole run's work.
+//
+// budget may be nil (no gating); when non-nil the loop stops launching and each
+// in-flight goroutine bails the moment the finder hard budget trips, mirroring
+// the finder stage. Launch order follows toRegen (callers sort it for a
+// reproducible prefix under a budget cutoff); completion order is unspecified.
+//
+// onResult is invoked once per package, SERIALIZED, so callers need no extra
+// locking. Persistence uses a cancel-detached, time-bounded context so a summary
+// produced just before ctx cancellation is still saved.
+func (f *Funnel) regenSummaries(
+	ctx context.Context,
+	client llm.Client,
+	packages map[string][]string,
+	pkgFingerprints map[string]string,
+	fps map[string]string,
+	toRegen []string,
+	budget *budgetState,
+	onResult func(regenResult),
+) {
+	persistParent := context.WithoutCancel(ctx)
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+	// A cancellable child so a goroutine blocked waiting for a slot unblocks on
+	// cancellation; the caller's ctx is never cancelled by us.
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	report := func(r regenResult) {
+		if onResult == nil {
+			return
+		}
+		mu.Lock()
+		onResult(r)
+		mu.Unlock()
+	}
+
+	for _, pkg := range toRegen {
+		if runCtx.Err() != nil {
+			break
+		}
+		if budget != nil && budget.finderOverHard() {
+			break
+		}
+		// Acquire before launching so in-flight summaries never exceed the
+		// funnel-wide agent bound (the cartographer shares the pool with finders).
+		if err := f.slots.acquire(runCtx, slotLow); err != nil {
+			break // ctx cancelled while waiting for a slot
+		}
+		wg.Add(1)
+		go func(pkg string) {
+			defer wg.Done()
+			defer f.slots.release()
+			// Re-check now that we hold a slot: earlier units may have tripped the
+			// budget, or the run may have been cancelled, while we waited.
+			if runCtx.Err() != nil {
+				return
+			}
+			if budget != nil && budget.finderOverHard() {
+				return
+			}
+			summary, sErr := f.summarizePackage(runCtx, client, pkg, packages[pkg], fps)
+			if sErr != nil || summary == "" {
+				if sErr == nil {
+					sErr = errors.New("cartograph: empty summary")
+				}
+				report(regenResult{pkg: pkg, err: sErr, stage: "summarize"})
+				return
+			}
+			row := store.PackageSummary{Pkg: pkg, Fingerprint: pkgFingerprints[pkg], Summary: summary}
+			// Persist on the fly with a cancel-detached, time-bounded context so an
+			// interruption cannot discard a summary that was already produced.
+			pCtx, pCancel := context.WithTimeout(persistParent, 30*time.Second)
+			pErr := f.store.UpsertPackageSummaries(pCtx, []store.PackageSummary{row})
+			pCancel()
+			if pErr != nil {
+				report(regenResult{pkg: pkg, summary: summary, err: pErr, stage: "persist"})
+				return
+			}
+			report(regenResult{pkg: pkg, summary: summary})
+		}(pkg)
+	}
+	wg.Wait()
 }
 
 // summarizePackage builds the bounded input for one package's summary
@@ -490,25 +598,34 @@ func (f *Funnel) RefreshCartography(ctx context.Context, client llm.Client) (Car
 	if cErr != nil {
 		cached = nil // degrade: regenerate everything
 	}
-	var batch []store.PackageSummary
+	// Reused = cache hits; everything else goes on the regen list. keys is
+	// already sorted (sortedKeys), so the launch order is reproducible.
+	var toRegen []string
 	for _, pkg := range keys {
-		if err := ctx.Err(); err != nil {
-			break
-		}
 		fp := pkgFingerprints[pkg]
 		if row, ok := cached[pkg]; ok && row.Fingerprint == fp && row.Summary != "" {
 			rep.Reused++
 			continue
 		}
-		summary, sErr := f.summarizePackage(ctx, cc, pkg, packages[pkg], fps)
-		if sErr != nil || summary == "" {
-			rep.Failed++
-			continue
-		}
-		batch = append(batch, store.PackageSummary{Pkg: pkg, Fingerprint: fp, Summary: summary})
-		rep.Summarized++
+		toRegen = append(toRegen, pkg)
 	}
-	persistErr := f.store.UpsertPackageSummaries(ctx, batch)
+
+	// Summarize and persist each uncached package concurrently and on the fly,
+	// so a manual refresh interrupted partway keeps every summary already
+	// written. No finder-budget gating: a manual refresh runs to completion.
+	var persistErr error
+	f.regenSummaries(ctx, cc, packages, pkgFingerprints, fps, toRegen, nil,
+		func(r regenResult) {
+			switch {
+			case r.err == nil:
+				rep.Summarized++
+			case r.stage == "persist":
+				rep.Failed++
+				persistErr = r.err
+			default: // summarize failure
+				rep.Failed++
+			}
+		})
 
 	rep.InputTokens, rep.OutputTokens, _, _ = rec.totals()
 	statsBlob, _ := json.Marshal(Stats{

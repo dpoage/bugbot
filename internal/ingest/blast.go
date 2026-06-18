@@ -412,22 +412,37 @@ func isIdentByte(b byte) bool {
 }
 
 // PackageImporters returns, per local Go package directory, the set of OTHER
-// local package directories that directly import it (its direct dependents).
-// One pass over the snapshot's Go files; non-Go files contribute no edges;
-// unparseable Go files are skipped. Keys and values are repo-relative
-// directory paths (goPackageDir). Values are sorted and de-duplicated;
-// self-edges (a package importing itself) are omitted.
-//
-// The function intentionally reuses parseGoImports, goPackageDir, and the
-// importMatchesLocalDir suffix logic from goDependents rather than
-// reimplementing the graph. The relationship is the same in reverse: the
-// forward pass that powers goDependents already builds the per-file
-// (dir, imports) pairs, so PackageImporters applies the same scan and
-// inverts the edge direction.
-//
-// ctx is honored at every file boundary so a cancellation between parse
-// calls aborts the pass promptly rather than scanning the full snapshot.
+// local package directories that directly import it (its direct dependents),
+// computed over the WHOLE snapshot. It is the unscoped convenience wrapper
+// around PackageImportersScoped; see that method for the algorithm and the
+// reuse rationale.
 func (r *Repo) PackageImporters(ctx context.Context, snap *Snapshot) (map[string][]string, error) {
+	return r.PackageImportersScoped(ctx, snap, nil)
+}
+
+// PackageImportersScoped is PackageImporters restricted to a set of in-scope
+// files. When inScope is non-nil, only files whose repo-relative path is a key
+// in inScope are parsed, and only those files' package directories form the
+// "universe" of keys and suffix-match candidates — so every recorded edge has
+// BOTH endpoints inside inScope. When inScope is nil the whole snapshot is used
+// (the wrapper's behaviour).
+//
+// This is the large-repo lever for the cartographer: on a blast-radius scan the
+// only importer edges contextFor can ever inject are those between packages that
+// have summaries (i.e. inside the blast radius), so parsing the whole repo's
+// imports is wasted work. Scoping the parse to the blast set drops the cost from
+// O(snapshot) to O(in-scope) while producing byte-identical injection.
+//
+// Non-Go files contribute no edges; unparseable Go files are skipped. Keys and
+// values are repo-relative directory paths (goPackageDir). Values are sorted and
+// de-duplicated; self-edges (a package importing itself) are omitted. It reuses
+// parseGoImports, goPackageDir, and the importMatchesLocalDir suffix logic from
+// goDependents rather than reimplementing the graph (the same forward scan, with
+// edges inverted).
+//
+// ctx is honored at every file boundary so a cancellation between parse calls
+// aborts the pass promptly rather than scanning the full set.
+func (r *Repo) PackageImportersScoped(ctx context.Context, snap *Snapshot, inScope map[string]bool) (map[string][]string, error) {
 	if snap == nil {
 		return nil, nil
 	}
@@ -445,6 +460,9 @@ func (r *Repo) PackageImporters(ctx context.Context, snap *Snapshot) (map[string
 			return nil, err
 		}
 		if f.Language != LangGo {
+			continue
+		}
+		if inScope != nil && !inScope[f.Path] {
 			continue
 		}
 		imports, err := parseGoImports(filepath.Join(r.root, filepath.FromSlash(f.Path)))
