@@ -22,7 +22,7 @@ func TestRunMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.FinishScanRun(ctx, id2, `{"hypothesized":4,"verified":3,"input_tokens":1900,"output_tokens":100,"cartographer_enabled":true}`); err != nil {
+	if err := st.FinishScanRun(ctx, id2, `{"hypothesized":4,"verified":3,"finder_runs":8,"input_tokens":1900,"output_tokens":100,"cartographer_enabled":true}`); err != nil {
 		t.Fatal(err)
 	}
 	// An unfinished run must be excluded (no finished_at).
@@ -46,8 +46,8 @@ func TestRunMetrics(t *testing.T) {
 	}
 
 	on := got[0]
-	if !on.CartographerEnabled || on.Verified != 3 || on.TotalTokens() != 2000 {
-		t.Errorf("ON run = %+v, want carto=true verified=3 total=2000", on)
+	if !on.CartographerEnabled || on.Verified != 3 || on.FinderRuns != 8 || on.TotalTokens() != 2000 {
+		t.Errorf("ON run = %+v, want carto=true verified=3 finder_runs=8 total=2000", on)
 	}
 	if got := on.VerifiedPer1K(); got != 1.5 {
 		t.Errorf("ON VerifiedPer1K = %v, want 1.5", got)

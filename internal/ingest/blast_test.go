@@ -95,3 +95,53 @@ func TestPackageImporters_NilSnapshotDoesNotPanic(t *testing.T) {
 		t.Errorf("importers = %v, want empty", importers)
 	}
 }
+
+// TestPackageImportersScoped_RestrictsToInScope pins the large-repo scoping
+// contract: with a non-nil inScope set, only in-scope files are parsed and
+// only edges whose BOTH endpoints are in scope are recorded, while a nil
+// inScope reproduces the whole-snapshot wrapper exactly. Fixture: packages a
+// and c both import b.
+func TestPackageImportersScoped_RestrictsToInScope(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a/a.go", "package a\n\nimport \"github.com/dpoage/bugbot/b\"\n\nfunc Use() { b.B() }\n")
+	r.write("b/b.go", "package b\n\nfunc B() {}\n")
+	r.write("c/c.go", "package c\n\nimport \"github.com/dpoage/bugbot/b\"\n\nfunc Use() { b.B() }\n")
+	r.commit("init")
+
+	repo := r.open()
+	ctx := context.Background()
+	snap, err := repo.Snapshot(ctx, ScanFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// nil inScope == whole-snapshot wrapper: both a and c import b.
+	full, err := repo.PackageImportersScoped(ctx, snap, nil)
+	if err != nil {
+		t.Fatalf("PackageImportersScoped(nil): %v", err)
+	}
+	if !contains(full["b"], "a") || !contains(full["b"], "c") {
+		t.Errorf("nil inScope: importers[\"b\"] = %v, want both \"a\" and \"c\"", full["b"])
+	}
+	wrapper, err := repo.PackageImporters(ctx, snap)
+	if err != nil {
+		t.Fatalf("PackageImporters: %v", err)
+	}
+	if len(wrapper["b"]) != len(full["b"]) {
+		t.Errorf("wrapper importers[\"b\"] = %v, want identical to nil-scope %v", wrapper["b"], full["b"])
+	}
+
+	// Scope to a's file + b's file only: c is out of scope, so the c→b edge
+	// is never parsed and must not appear.
+	inScope := map[string]bool{"a/a.go": true, "b/b.go": true}
+	scoped, err := repo.PackageImportersScoped(ctx, snap, inScope)
+	if err != nil {
+		t.Fatalf("PackageImportersScoped(inScope): %v", err)
+	}
+	if !contains(scoped["b"], "a") {
+		t.Errorf("scoped importers[\"b\"] = %v, want it to contain in-scope \"a\"", scoped["b"])
+	}
+	if contains(scoped["b"], "c") {
+		t.Errorf("scoped importers[\"b\"] = %v, want out-of-scope \"c\" omitted", scoped["b"])
+	}
+}

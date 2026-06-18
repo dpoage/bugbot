@@ -87,6 +87,7 @@ cd /path/to/target/repo
 bugbot prime                   # repo-aware guidance for filling in bugbot.yaml
 bugbot init                    # writes a commented bugbot.yaml
 export ANTHROPIC_API_KEY=...   # or whichever provider(s) you configure
+bugbot scan --estimate         # project token spend + wall time before running (no LLM calls)
 bugbot scan                    # one-shot funnel run
 bugbot scan --repro            # also attempt sandboxed reproductions
 bugbot report list             # inspect findings

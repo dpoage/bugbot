@@ -22,8 +22,12 @@ type RunMetric struct {
 	Hypothesized        int
 	Verified            int
 	Killed              int
-	InputTokens         int64
-	OutputTokens        int64
+	// FinderRuns is the number of finder (lens, chunk) agents that actually
+	// launched this run — the unit count the scan-estimate calibrates token
+	// and wall-time cost against (tokens/unit, tokens/sec).
+	FinderRuns   int
+	InputTokens  int64
+	OutputTokens int64
 }
 
 // TotalTokens is the run's input+output spend — the denominator of the
@@ -51,6 +55,7 @@ type runStatsProjection struct {
 	Hypothesized        int   `json:"hypothesized"`
 	Verified            int   `json:"verified"`
 	Killed              int   `json:"killed"`
+	FinderRuns          int   `json:"finder_runs"`
 	InputTokens         int64 `json:"input_tokens"`
 	OutputTokens        int64 `json:"output_tokens"`
 	CartographerEnabled bool  `json:"cartographer_enabled"`
@@ -105,6 +110,7 @@ func (s *Store) RunMetrics(ctx context.Context, limit int) ([]RunMetric, error) 
 				m.Hypothesized = p.Hypothesized
 				m.Verified = p.Verified
 				m.Killed = p.Killed
+				m.FinderRuns = p.FinderRuns
 				m.InputTokens = p.InputTokens
 				m.OutputTokens = p.OutputTokens
 				m.CartographerEnabled = p.CartographerEnabled

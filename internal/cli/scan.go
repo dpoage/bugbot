@@ -47,6 +47,7 @@ func newScanCmd() *cobra.Command {
 		refuters    int
 		lenses      []string
 		doRepro     bool
+		doEstimate  bool
 	)
 
 	cmd := &cobra.Command{
@@ -155,7 +156,7 @@ func newScanCmd() *cobra.Command {
 			var reproRunOnce sync.Once
 			var r *repro.Reproducer
 			var reproRec *ledgerRecorder
-			if doRepro {
+			if doRepro && !doEstimate {
 				runtime, rtOK := sandbox.Detect()
 				if !rtOK {
 					_, _ = fmt.Fprintln(out, "Reproduce stage skipped: no container runtime (podman/docker) found on PATH.")
@@ -225,20 +226,13 @@ func newScanCmd() *cobra.Command {
 			// Shut down any language servers the code-navigation tools spawned.
 			defer func() { _ = f.Close() }()
 
-			// Analyzer seeding: run deterministic static analyzers (staticcheck,
-			// ruff) to seed the leads blackboard before the finder stage. Always-on
-			// with graceful-skip: if no container runtime is available, or the
-			// analyzer binary is absent from the image, the seed step is silently
-			// skipped. Analyzer failures never block the scan.
-			runAnalyzerSeed(ctx, cfg, repo.Root(), st, progressSink)
-
-			// Doc-contradiction seeding: a pure-Go, in-process pass that mines
-			// documented-sentinel-vs-validator contradictions (the bugbot-ig7
-			// class) and posts them as leads. Unlike analyzer seeding it needs no
-			// container runtime, so it always runs.
-			runContradictionSeed(ctx, cfg, repo, st, progressSink)
-
-			var res *funnel.Result
+			// Resolve the scan scope: a Targeted blast-radius run when --since is
+			// given, otherwise a whole-snapshot Sweep. Targeted runs populate
+			// ChangeContext (for the diff-intent lens) and rebuild the funnel so
+			// hypothesize sees it. Computed before seeding and the estimate
+			// short-circuit so every path agrees on scope.
+			var changed []string
+			kind := store.ScanOneshot
 			if since != "" {
 				head, herr := repo.HeadCommit(ctx)
 				if herr != nil {
@@ -248,7 +242,7 @@ func newScanCmd() *cobra.Command {
 				if cerr != nil {
 					return fmt.Errorf("diff %s..HEAD: %w", since, cerr)
 				}
-				changed := ingest.ChangedPaths(changes)
+				changed = ingest.ChangedPaths(changes)
 				_, _ = fmt.Fprintf(out, "Targeted scan: %d changed file(s) since %s\n", len(changed), since)
 				// Populate ChangeContext for the diff-intent lens. Failures are
 				// non-fatal: the scan still runs without diff-intent context.
@@ -268,6 +262,38 @@ func newScanCmd() *cobra.Command {
 					_ = f.Close()
 					f = f2
 				}
+				kind = store.ScanTargeted
+			}
+
+			// --estimate: project this run's token spend and wall time WITHOUT any
+			// LLM call (and without the analyzer/repro container work below), then
+			// stop. The work breakdown is exact; the token/time figures are
+			// calibrated from recorded history when available, else labeled priors.
+			if doEstimate {
+				est, eerr := f.EstimateScan(ctx, kind, changed)
+				if eerr != nil {
+					return eerr
+				}
+				stopPane()
+				printEstimate(out, est)
+				return nil
+			}
+
+			// Analyzer seeding: run deterministic static analyzers (staticcheck,
+			// ruff) to seed the leads blackboard before the finder stage. Always-on
+			// with graceful-skip: if no container runtime is available, or the
+			// analyzer binary is absent from the image, the seed step is silently
+			// skipped. Analyzer failures never block the scan.
+			runAnalyzerSeed(ctx, cfg, repo.Root(), st, progressSink)
+
+			// Doc-contradiction seeding: a pure-Go, in-process pass that mines
+			// documented-sentinel-vs-validator contradictions (the bugbot-ig7
+			// class) and posts them as leads. Unlike analyzer seeding it needs no
+			// container runtime, so it always runs.
+			runContradictionSeed(ctx, cfg, repo, st, progressSink)
+
+			var res *funnel.Result
+			if kind == store.ScanTargeted {
 				res, err = f.Targeted(ctx, changed)
 			} else {
 				res, err = f.Sweep(ctx)
@@ -332,6 +358,7 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().IntVar(&refuters, "refuters", funnel.DefaultRefuters, "number of adversarial refuter agents per candidate")
 	cmd.Flags().StringSliceVar(&lenses, "lens", nil, "restrict finder lenses (repeatable); default is all built-in lenses")
 	cmd.Flags().BoolVar(&doRepro, "repro", false, "run the Reproduce stage: generate sandboxed failing tests and promote demonstrated findings to Tier-1")
+	cmd.Flags().BoolVar(&doEstimate, "estimate", false, "estimate token spend and wall time for this scan without running it (no LLM calls)")
 
 	return cmd
 }
@@ -522,6 +549,89 @@ func printResult(out io.Writer, res *funnel.Result) {
 	if !res.Stats.FinderReliable() {
 		_, _ = fmt.Fprintf(out, "\n%s\n", reliabilityWarning(res.Stats))
 	}
+}
+
+// printEstimate renders a pre-scan Estimate: the exact deterministic work
+// breakdown followed by the projected token spend and wall time and the
+// provenance of that projection. No LLM call was made to produce it.
+func printEstimate(out io.Writer, e *funnel.Estimate) {
+	_, _ = fmt.Fprintf(out, "\nScan estimate (%s, commit %s) — no LLM calls made\n", e.Kind, shortSHA(e.Commit))
+
+	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintf(tw, "  in-scope files\t%d\n", e.Files)
+	_, _ = fmt.Fprintf(tw, "  packages\t%d\n", e.Packages)
+	_, _ = fmt.Fprintf(tw, "  finder chunks\t%d\n", e.Chunks)
+	_, _ = fmt.Fprintf(tw, "  active lenses\t%d\n", e.Lenses)
+	chunkUnits := e.FinderUnits - e.Seams
+	if e.DiffIntent {
+		chunkUnits--
+	}
+	extras := ""
+	if e.DiffIntent || e.Seams > 0 {
+		parts := []string{fmt.Sprintf("%d chunk", chunkUnits)}
+		if e.DiffIntent {
+			parts = append(parts, "1 diff-intent")
+		}
+		if e.Seams > 0 {
+			parts = append(parts, fmt.Sprintf("%d seam", e.Seams))
+		}
+		extras = " (" + strings.Join(parts, " + ") + ")"
+	}
+	_, _ = fmt.Fprintf(tw, "  finder units\t%d%s\n", e.FinderUnits, extras)
+	if e.CartographerEnabled {
+		_, _ = fmt.Fprintf(tw, "  cartographer\t%d packages, %d need fresh summaries\n",
+			e.CartographerPackages, e.CartographerUncached)
+	}
+	_ = tw.Flush()
+
+	_, _ = fmt.Fprintf(out, "\nProjected spend: ~%s tokens (range %s–%s)\n",
+		humanCount(e.EstTokens), humanCount(e.EstTokensLow), humanCount(e.EstTokensHigh))
+	if e.ThroughputTokPerSec > 0 {
+		_, _ = fmt.Fprintf(out, "Projected time:  ~%s (range %s–%s)\n",
+			roundDuration(e.EstDuration), roundDuration(e.EstDurationLow), roundDuration(e.EstDurationHigh))
+	} else {
+		_, _ = fmt.Fprintln(out, "Projected time:  unknown (no throughput history yet — run one scan to calibrate)")
+	}
+
+	if e.Calibrated {
+		scope := "all recent runs"
+		if e.SampleMatched {
+			scope = "matching-kind runs"
+		}
+		_, _ = fmt.Fprintf(out, "Basis: calibrated from %d %s (~%s tokens/finder-unit).\n",
+			e.SampleRuns, scope, humanCount(int64(e.TokensPerUnit)))
+	} else {
+		_, _ = fmt.Fprintf(out, "Basis: built-in priors (~%s tokens/finder-unit) — no finished runs to calibrate from yet; the first real run will sharpen this.\n",
+			humanCount(int64(e.TokensPerUnit)))
+	}
+	_, _ = fmt.Fprintln(out, "Note: finder-unit counts are exact; token/time figures are projections that also depend on findings volume (verification) and caching.")
+}
+
+// humanCount renders a token/count figure compactly: 1234567 -> "1.2M",
+// 12345 -> "12k", small values verbatim.
+func humanCount(n int64) string {
+	switch {
+	case n < 0:
+		return "0"
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.0fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// roundDuration renders a duration at a human-friendly granularity for the
+// estimate output. Sub-second values collapse to "<1s".
+func roundDuration(d time.Duration) string {
+	if d < time.Second {
+		return "<1s"
+	}
+	if d >= time.Hour {
+		return d.Round(time.Minute).String()
+	}
+	return d.Round(time.Second).String()
 }
 
 // reliabilityWarning renders the prominent banner shown when the finder stage was
