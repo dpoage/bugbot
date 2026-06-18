@@ -164,11 +164,12 @@ func collapseNewlines(s string) string {
 // whatever summaries it has, possibly nil) on store/LLM errors or when
 // budget.finderOverHard() flips to true mid-pass.
 //
-// The pass is one-shot and serial: the prompt-cache benefit we want to
-// preserve (the finder's history) is unaffected by parallelism, and a
-// concurrent fan-out would compete with the finders for slots. The cost
-// bound (DefaultCartographerMaxFiles member files, head-capped, total bytes
-// capped) keeps each completion cheap and predictable.
+// The pass runs CONCURRENTLY: each uncached package is summarized in its own
+// goroutine bounded by the funnel slot pool (the same bound finders use), and
+// each summary is persisted the moment it is produced (see regenSummaries). The
+// cartographer runs before the finder stage, so the pool is free and the fan-out
+// does not compete with finders. The cost bound (DefaultCartographerMaxFiles
+// member files, head-capped, total bytes capped) keeps each completion cheap.
 func (f *Funnel) cartograph(ctx context.Context, result *Result, client llm.Client, snap *ingest.Snapshot, targets []string, fps map[string]string, budget *budgetState) *cartography {
 	if !f.opts.Cartographer {
 		return nil
@@ -246,19 +247,26 @@ func (f *Funnel) cartograph(ctx context.Context, result *Result, client llm.Clie
 			// summarize failures stay silent, matching the pre-parallel behavior.
 		})
 
-	// Build the importer graph SCOPED to the targets. contextFor only ever
+	// Build the importer graph scoped to the SPANNED PACKAGES (every file of any
+	// package that has a target), not just the target files. contextFor only
 	// injects a dependent's summary when that summary exists, and summaries
-	// exist only for packages spanned by targets (the blast radius on a
-	// Targeted scan; the whole repo on a Sweep). An importer edge whose
-	// endpoints are not both in targets can never be injected, so parsing the
-	// whole snapshot's imports is wasted work on a large repo. Scoping to the
-	// target file set keeps the injection byte-identical while dropping the
-	// import-parse cost from O(snapshot) to O(targets). A failure returns an
-	// empty importers map (dependency injection degrades to "own package
-	// only" rather than failing the scan).
-	inScope := make(map[string]bool, len(targets))
-	for _, t := range targets {
-		inScope[t] = true
+	// exist exactly for the spanned packages (packagesSpanned). The import that
+	// makes package D a dependent of package O may live in a file of D that is
+	// not itself a target, so scoping to target files alone would drop that edge
+	// and silently omit D's summary. Scoping to every file of the spanned
+	// packages captures exactly the edges among summarized packages
+	// (byte-identical injection) while staying O(spanned packages) — far below
+	// O(snapshot) on a large repo. A failure returns an empty importers map
+	// (dependency injection degrades to "own package only", not a failed scan).
+	spannedDirs := make(map[string]bool, len(packages))
+	for pkg := range packages {
+		spannedDirs[pkg] = true
+	}
+	inScope := make(map[string]bool)
+	for _, file := range snap.Files {
+		if spannedDirs[path.Dir(file.Path)] {
+			inScope[file.Path] = true
+		}
 	}
 	importers, impErr := f.repo.PackageImportersScoped(ctx, snap, inScope)
 	if impErr != nil || importers == nil {

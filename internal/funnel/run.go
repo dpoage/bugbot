@@ -46,60 +46,23 @@ func (f *Funnel) Sweep(ctx context.Context) (*Result, error) {
 		targets[i] = file.Path
 	}
 
-	var (
-		heatOrdered      bool
-		heatFiles        int
-		neverScanned     int
-		changedSinceScan int
-	)
-
-	// Fingerprints are needed for ordering (hash-changed detection), for
-	// recording truthful coverage hashes after the run, AND for finding
-	// anchoring in run(). We call Fingerprints here; run() calls it again for
-	// anchoring. The duplication is an accepted trade-off: Fingerprints is
-	// content-hashing (cheap relative to LLM calls) and the call sites serve
-	// different purposes.
+	// Order the targets exactly as Funnel.EstimateScan does, via the shared
+	// orderSweepTargets helper. The finder-unit count depends on the
+	// post-ordering chunk packing (chunkByLanguage packs per-language tails into
+	// mixed chunks in input order), so the real run and `scan --estimate` MUST
+	// order identically or the estimate would drift on polyglot repos.
+	//
+	// Fingerprints feed both the ordering (hash-changed detection) and run()'s
+	// finding anchoring; run() calls Fingerprints again. The duplication is an
+	// accepted trade-off (content hashing is cheap relative to LLM calls).
 	fps, fpsErr := f.repo.Fingerprints(ctx, snap)
-
-	if !f.opts.DisableHeatOrdering {
-		heat, heatErr := ingest.ChurnHeat(ctx, f.repo.Root(), 0)
-
-		// watermarks is a best-effort read; fall back to pure heat if it fails.
-		var watermarks map[string]store.Watermark
-		if fpsErr == nil {
-			paths := make([]string, 0, len(fps))
-			for p := range fps {
-				paths = append(paths, p)
-			}
-			watermarks, _ = f.store.ScanWatermarks(ctx, paths)
-		}
-
-		if heatErr == nil && len(heat) > 0 {
-			heatFiles = len(heat)
-		}
-
-		if fpsErr == nil && watermarks != nil {
-			var heatReordered bool
-			neverScanned, changedSinceScan, heatReordered = applySweepOrder(targets, heat, fps, watermarks)
-			heatOrdered = heatReordered
-			if heatReordered {
-				progress.Emit(f.opts.Progress, progress.Event{
-					Kind:  progress.KindHeatOrdered,
-					Count: heatFiles,
-					Label: heatTop5(targets, heat),
-				})
-			}
-		} else if heatErr == nil && len(heat) > 0 {
-			// Fall back: no store data, use pure heat ordering.
-			heatOrdered = applyHeatOrder(targets, heat)
-			if heatOrdered {
-				progress.Emit(f.opts.Progress, progress.Event{
-					Kind:  progress.KindHeatOrdered,
-					Count: heatFiles,
-					Label: heatTop5(targets, heat),
-				})
-			}
-		}
+	heat, heatFiles, neverScanned, changedSinceScan, heatOrdered := f.orderSweepTargets(ctx, targets, fps, fpsErr)
+	if heatOrdered {
+		progress.Emit(f.opts.Progress, progress.Event{
+			Kind:  progress.KindHeatOrdered,
+			Count: heatFiles,
+			Label: heatTop5(targets, heat),
+		})
 	}
 
 	// Emit the sweep summary BEFORE the scan starts so renderers can show
@@ -197,6 +160,38 @@ func applySweepOrder(targets []string, heat map[string]float64, fps map[string]s
 	copy(targets[len(group1):], group2)
 
 	return neverScanned, changedSinceScan, heatActuallyReordered
+}
+
+// orderSweepTargets applies the Sweep anti-starvation ordering to targets IN
+// PLACE (heat-ordered when enabled and data is available; unchanged otherwise)
+// and returns the bookkeeping the caller needs for its progress summary. It is
+// shared by Funnel.Sweep and Funnel.EstimateScan so both order identically: the
+// finder-unit count depends on the post-ordering chunk packing, so any
+// divergence would make the estimate drift from the real run on polyglot repos.
+func (f *Funnel) orderSweepTargets(ctx context.Context, targets []string, fps map[string]string, fpsErr error) (heat map[string]float64, heatFiles, neverScanned, changedSinceScan int, heatOrdered bool) {
+	if f.opts.DisableHeatOrdering {
+		return nil, 0, 0, 0, false
+	}
+	heat, heatErr := ingest.ChurnHeat(ctx, f.repo.Root(), 0)
+
+	// watermarks is a best-effort read; fall back to pure heat if it fails.
+	var watermarks map[string]store.Watermark
+	if fpsErr == nil {
+		paths := make([]string, 0, len(fps))
+		for p := range fps {
+			paths = append(paths, p)
+		}
+		watermarks, _ = f.store.ScanWatermarks(ctx, paths)
+	}
+	if heatErr == nil && len(heat) > 0 {
+		heatFiles = len(heat)
+	}
+	if fpsErr == nil && watermarks != nil {
+		neverScanned, changedSinceScan, heatOrdered = applySweepOrder(targets, heat, fps, watermarks)
+	} else if heatErr == nil && len(heat) > 0 {
+		heatOrdered = applyHeatOrder(targets, heat)
+	}
+	return heat, heatFiles, neverScanned, changedSinceScan, heatOrdered
 }
 
 // applyHeatOrder sorts targets in-place by heat score descending, with

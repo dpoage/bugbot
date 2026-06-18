@@ -3,10 +3,16 @@ package funnel
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -149,5 +155,83 @@ func TestEstimateScan_DiffIntentOnlyWhenTargetedWithContext(t *testing.T) {
 	}
 	if sweep.DiffIntent {
 		t.Errorf("sweep run: DiffIntent = true, want false")
+	}
+}
+
+// TestEstimateScan_PolyglotMatchesSweep is the polyglot anti-drift guard: on a
+// multi-language repo whose per-language file counts exceed ChunkSize (so
+// chunkByLanguage produces mixed tail chunks whose composition depends on the
+// target ORDER), the estimate's finder-unit count must still equal what a real
+// Sweep launches. Both order via the shared orderSweepTargets, so they cannot
+// diverge — this test exercises that shared path on polyglot input.
+func TestEstimateScan_PolyglotMatchesSweep(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	repoDir := t.TempDir()
+	write := func(rel, content string) {
+		p := filepath.Join(repoDir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 10 Go + 10 Python files (> DefaultChunkSize=8) so each language yields a
+	// full homogeneous chunk plus a tail; the tails pack into a mixed chunk
+	// whose language set depends on ordering.
+	for i := 0; i < 10; i++ {
+		write(fmt.Sprintf("g/g%d.go", i), fmt.Sprintf("package g\n\nfunc F%d() int { return %d }\n", i, i))
+		write(fmt.Sprintf("p/p%d.py", i), fmt.Sprintf("def f%d():\n    return %d\n", i, i))
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	runGit("init", "-q")
+	runGit("add", ".")
+	runGit("commit", "-q", "-m", "seed")
+
+	repo, err := ingest.Open(ctx, repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := New(RoleClients{Finder: newScriptedClient(), Verifier: newScriptedClient()}, st, repo, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	est, err := f.EstimateScan(ctx, store.ScanOneshot, nil)
+	if err != nil {
+		t.Fatalf("EstimateScan: %v", err)
+	}
+	if est.Chunks < 2 {
+		t.Fatalf("expected polyglot multi-chunk packing, got Chunks=%d", est.Chunks)
+	}
+
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if est.FinderUnits != res.Stats.FinderRuns {
+		t.Errorf("polyglot drift: estimate FinderUnits=%d but Sweep launched FinderRuns=%d",
+			est.FinderUnits, res.Stats.FinderRuns)
 	}
 }

@@ -613,7 +613,7 @@ func humanCount(n int64) string {
 	switch {
 	case n < 0:
 		return "0"
-	case n >= 1_000_000:
+	case n >= 999_500: // 999_500..999_999 would render "1000k"; promote to "1.0M"
 		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
 	case n >= 1_000:
 		return fmt.Sprintf("%.0fk", float64(n)/1_000)

@@ -108,6 +108,8 @@ func TestHumanCount(t *testing.T) {
 		{850, "850"},
 		{12_345, "12k"},
 		{1_500_000, "1.5M"},
+		{999_999, "1.0M"}, // boundary: must not render "1000k"
+		{999_499, "999k"},
 		{-5, "0"},
 	}
 	for _, c := range cases {

@@ -120,7 +120,13 @@ func (f *Funnel) EstimateScan(ctx context.Context, kind store.ScanKind, changedF
 		return nil, err
 	}
 
-	targets, err := f.estimateTargets(ctx, snap, kind, changedFiles)
+	// Fingerprints feed both Sweep ordering (so the estimate's chunk packing
+	// matches the real run) and the cartographer cache check. Best-effort: a
+	// failure degrades ordering to snapshot order and the cartographer to "all
+	// uncached", never fails the estimate.
+	fps, fpsErr := f.repo.Fingerprints(ctx, snap)
+
+	targets, err := f.estimateTargets(ctx, snap, kind, changedFiles, fps, fpsErr)
 	if err != nil {
 		return nil, err
 	}
@@ -144,32 +150,30 @@ func (f *Funnel) EstimateScan(ctx context.Context, kind store.ScanKind, changedF
 	lenses := lensesByYield(f.lenses, langs)
 	est.Lenses = len(lenses)
 
-	chunks := chunkByLanguage(targets, opts.ChunkSize)
-	est.Chunks = len(chunks)
-
-	// Exact finder-unit count, computed with the production builders so the
-	// estimate cannot drift from what hypothesize launches.
-	chunkUnits := buildUnits(lenses, builtinStrategies(), chunks, nil)
-	finderUnits := len(chunkUnits)
-
-	if kind == store.ScanTargeted && f.opts.ChangeContext != nil {
-		est.DiffIntent = true
-		finderUnits++
+	// Finder units, computed with the production builders so the estimate cannot
+	// drift from what hypothesize launches. Mirror hypothesize's early return:
+	// with no targets AND no change context the finder stage launches nothing —
+	// including no per-seam units.
+	if len(targets) > 0 || f.opts.ChangeContext != nil {
+		chunks := chunkByLanguage(targets, opts.ChunkSize)
+		est.Chunks = len(chunks)
+		finderUnits := len(buildUnits(lenses, builtinStrategies(), chunks, nil))
+		if kind == store.ScanTargeted && f.opts.ChangeContext != nil {
+			est.DiffIntent = true
+			finderUnits++
+		}
+		seams := ingest.EnumerateSeams(snap)
+		est.Seams = len(seams)
+		finderUnits += len(seams)
+		est.FinderUnits = finderUnits
 	}
-
-	seams := ingest.EnumerateSeams(snap)
-	est.Seams = len(seams)
-	finderUnits += len(seams)
-	est.FinderUnits = finderUnits
 
 	// Cartographer: count the packages spanned by targets and how many need a
 	// fresh summary (cache miss/stale), mirroring cartograph's cache check.
 	pkgMembers := packagesSpanned(targets)
 	est.Packages = len(pkgMembers)
 	if f.opts.Cartographer && len(pkgMembers) > 0 {
-		if err := f.estimateCartographer(ctx, snap, targets, pkgMembers, est); err != nil {
-			return nil, err
-		}
+		f.estimateCartographer(ctx, pkgMembers, fps, est)
 	}
 
 	// Project tokens and duration from recorded history (or priors).
@@ -179,12 +183,15 @@ func (f *Funnel) EstimateScan(ctx context.Context, kind store.ScanKind, changedF
 
 // estimateTargets reproduces the target-selection of Sweep / Targeted so the
 // estimate scopes over exactly the files the real run would audit.
-func (f *Funnel) estimateTargets(ctx context.Context, snap *ingest.Snapshot, kind store.ScanKind, changedFiles []string) ([]string, error) {
+func (f *Funnel) estimateTargets(ctx context.Context, snap *ingest.Snapshot, kind store.ScanKind, changedFiles []string, fps map[string]string, fpsErr error) ([]string, error) {
 	if kind != store.ScanTargeted {
 		targets := make([]string, len(snap.Files))
 		for i, file := range snap.Files {
 			targets[i] = file.Path
 		}
+		// Order exactly as Funnel.Sweep (shared helper) so the chunk packing —
+		// and thus the finder-unit count — matches the real run.
+		f.orderSweepTargets(ctx, targets, fps, fpsErr)
 		return targets, nil
 	}
 	radius, err := f.repo.BlastRadius(ctx, snap, changedFiles)
@@ -206,12 +213,10 @@ func (f *Funnel) estimateTargets(ctx context.Context, snap *ingest.Snapshot, kin
 }
 
 // estimateCartographer fills the cartographer fields by replaying cartograph's
-// fingerprint + cache lookup without generating any summaries.
-func (f *Funnel) estimateCartographer(ctx context.Context, snap *ingest.Snapshot, targets []string, pkgMembers map[string][]string, est *Estimate) error {
-	fps, err := f.repo.Fingerprints(ctx, snap)
-	if err != nil {
-		return fmt.Errorf("funnel: fingerprints: %w", err)
-	}
+// fingerprint + cache lookup without generating any summaries. fps is the
+// snapshot's fingerprint map (nil when fingerprinting failed, which makes every
+// package look uncached — the conservative estimate).
+func (f *Funnel) estimateCartographer(ctx context.Context, pkgMembers map[string][]string, fps map[string]string, est *Estimate) {
 	pkgFingerprints := make(map[string]string, len(pkgMembers))
 	for pkg, members := range pkgMembers {
 		pkgFingerprints[pkg] = packageFingerprint(pkg, members, fps)
@@ -222,7 +227,7 @@ func (f *Funnel) estimateCartographer(ctx context.Context, snap *ingest.Snapshot
 	cached, err := f.store.GetPackageSummaries(ctx, sortedKeys(pkgFingerprints))
 	if err != nil {
 		est.CartographerUncached = len(pkgFingerprints)
-		return nil
+		return
 	}
 	uncached := 0
 	for pkg, fp := range pkgFingerprints {
@@ -232,7 +237,6 @@ func (f *Funnel) estimateCartographer(ctx context.Context, snap *ingest.Snapshot
 		uncached++
 	}
 	est.CartographerUncached = uncached
-	return nil
 }
 
 // projectEstimate fills the projection fields of est from recorded scan history,
