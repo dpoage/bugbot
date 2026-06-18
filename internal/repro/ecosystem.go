@@ -175,6 +175,31 @@ var ecosystemTable = []ecosystemRules{
 			"ctest: not found",
 		},
 	},
+	{
+		name: "bazel",
+		// PRECISION-FIRST: ranMarkers is intentionally empty. A bazel
+		// non-zero exit on its own is NEVER enough to demonstrate a
+		// bug — bugbot does not support offline bazel repro (external
+		// repository fetching under network=none, sandboxes without
+		// bazel, etc.), so we refuse to guess from bazel output. A
+		// bazel non-zero exit with no recognized build/toolchain
+		// marker therefore falls through to not_demonstrated. The
+		// environment is surfaced via a bazel-specific summary in
+		// interpret.go's 125/126/127 and defaultEnvMarkers branches
+		// (distinctness comes from verdict.ecosystem=="bazel", not
+		// from a new reason category).
+		ranMarkers: []string{},
+		buildMarkers: []string{
+			"no such target",
+			"no such package",
+			"build did not complete",
+			"error: ",
+		},
+		toolchainMarkers: []string{
+			"command not found",
+			"bazel: not found",
+		},
+	},
 	// Fallback: any non-zero exit lacking environment-failure markers is
 	// treated as a build/toolchain failure, NEVER as a demonstration. We
 	// still require explicit positive evidence (FAIL/FAILED/failed) so an
@@ -266,6 +291,16 @@ func detectEcosystem(argv []string) ecosystemRules {
 		return ecosystemTable[ecosystemIndex("js")]
 	case "ctest":
 		return ecosystemTable[ecosystemIndex("cpp")]
+	case "bazel", "bazelisk":
+		// Bazel is a build/test launcher. Bugbot runs `bazel test //...`
+		// directly (see repro.patch.detectSuiteCmd) and classifies any
+		// `bazel` / `bazelisk` invocation as the bazel ecosystem so
+		// non-zero exits surface the bazel-specific environment_error
+		// summary instead of falling through to the generic unknown
+		// branch. unwrapShell in the caller already walks through
+		// `bash -c 'bazel test //...'` wrappers, so this case also
+		// matches that form.
+		return ecosystemTable[ecosystemIndex("bazel")]
 	}
 	// Fall through: unrecognized launcher. Pick the conservative
 	// "unknown" entry — it still requires positive ran-evidence.

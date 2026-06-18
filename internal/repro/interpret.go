@@ -71,7 +71,7 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	case res.ExitCode == 0:
 		return verdict{reason: "exit_zero", summary: trunc(out, 400), ecosystem: eco.name}
 	case res.ExitCode == 125 || res.ExitCode == 126 || res.ExitCode == 127:
-		return verdict{reason: "environment_error", summary: trunc(out, 400), ecosystem: eco.name}
+		return verdict{reason: "environment_error", summary: envSummary(eco.name, out), ecosystem: eco.name}
 	}
 
 	// From here on we are dealing with a non-zero, non-timeout,
@@ -81,7 +81,7 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 
 	// 1. Environment failure — same markers across every ecosystem.
 	if hasAnyMarker(lowOut, defaultEnvMarkers) {
-		return verdict{reason: "environment_error", summary: trunc(out, 400), ecosystem: eco.name}
+		return verdict{reason: "environment_error", summary: envSummary(eco.name, out), ecosystem: eco.name}
 	}
 	// 2. Toolchain refusal — ecosystem-specific. Checked before the
 	//    generic build markers so e.g. "go: -race requires cgo" lands
@@ -112,6 +112,24 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 // must fix.
 func (v verdict) feedback(p *Plan) string {
 	var b strings.Builder
+	// Bazel repros that fail because the image lacks bazel or
+	// cannot fetch external repos under network=none need their
+	// own corrective message — the generic "SANDBOX ENVIRONMENT"
+	// wording is correct but indistinguishable from a missing
+	// Go/pytest interpreter, so the operator can't tell why the
+	// repro is unsupported. Override only when both the reason and
+	// the detected ecosystem line up; the reason category stays
+	// "environment_error" (other code switches on it).
+	if v.reason == "environment_error" && v.ecosystem == "bazel" {
+		b.WriteString(bazelEnvFeedback)
+		if len(p.Cmd) > 0 {
+			fmt.Fprintf(&b, "\n\nCommand run: %s", strings.Join(p.Cmd, " "))
+		}
+		if v.summary != "" {
+			fmt.Fprintf(&b, "\n\nOutput was:\n%s", v.summary)
+		}
+		return b.String()
+	}
 	switch v.reason {
 	case "exit_zero":
 		b.WriteString("Your repro ran but exited 0, so it did NOT demonstrate the bug. ")
@@ -167,6 +185,33 @@ func combinedOutput(res sandbox.Result) string {
 		b.WriteString(res.Stdout)
 	}
 	return b.String()
+}
+
+// bazelEnvSummary is the summary text used when a bazel repro
+// fails for an environment reason. The reason category itself
+// stays "environment_error" (other code switches on it) — the
+// distinctness comes from verdict.ecosystem=="bazel" plus this
+// targeted remediation. bugbot does not support offline bazel
+// repro: the image must carry bazel AND a prefetched repository
+// cache, otherwise `bazel test //...` exits non-zero before any
+// test runs.
+const bazelEnvSummary = "bazel reproduction is unsupported in this sandbox: the image lacks bazel or external repositories cannot be fetched under network=none. Use a custom image carrying bazel plus a prefetched repository cache, or disable repro for bazel repos."
+
+// bazelEnvFeedback is the agent-facing feedback for the same
+// scenario. Slightly more directive than the operator-facing
+// summary: it tells the agent what to do.
+const bazelEnvFeedback = "Your repro cannot run in this sandbox: the image lacks bazel or external repositories cannot be fetched under network=none. A bazel reproduction is unsupported here. Use a custom image carrying bazel plus a prefetched repository cache, or disable repro for bazel repos. An environment failure is NOT a reproduction."
+
+// envSummary returns the summary text to attach to a
+// non-demonstration verdict whose reason is environment_error.
+// Bazel gets its own message (see bazelEnvSummary); every other
+// ecosystem gets the truncated raw output, matching the prior
+// behavior bit-for-bit.
+func envSummary(ecosystem, out string) string {
+	if ecosystem == "bazel" {
+		return bazelEnvSummary
+	}
+	return trunc(out, 400)
 }
 
 // trunc shortens s to at most n bytes, appending an ellipsis marker when cut.
