@@ -63,7 +63,7 @@ surface for the untrusted run.
 ## Install
 
 ```sh
-go install github.com/dpoage/bugbot/cmd/bugbot@latest
+go install github.com/dpoage/bugbot@latest
 ```
 
 That installs the latest `bugbot` into `$(go env GOPATH)/bin`. It needs only a

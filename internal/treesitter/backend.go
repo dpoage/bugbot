@@ -29,7 +29,7 @@
 // binary by ~21MB (86MB -> 65MB). `make build` sets these tags (see Makefile's
 // GRAMMAR_TAGS). A plain `go build`/`go install` (no tags) still works — it
 // just embeds every grammar. That is exactly what
-// `go install github.com/dpoage/bugbot/cmd/bugbot@latest` produces: the full
+// `go install github.com/dpoage/bugbot@latest` produces: the full
 // all-grammars binary is the supported install path. The subset is only a
 // build-time size optimization and CANNOT be selected through `go install`,
 // which passes no build tags — so do not "fix" go-install by trying to force

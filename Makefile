@@ -1,5 +1,5 @@
 BINARY := bin/bugbot
-PKG    := ./cmd/bugbot
+PKG    := .
 
 # GRAMMAR_TAGS subsets the embedded tree-sitter grammars. The gotreesitter
 # grammars package go:embeds ~206 compressed blobs (~20MB) by default, but the
@@ -13,7 +13,7 @@ GRAMMAR_TAGS := grammar_subset grammar_subset_go grammar_subset_python grammar_s
 
 # build a single statically-linked binary (CGO disabled so modernc.org/sqlite
 # stays pure-Go and the binary is portable). This is the size-optimized build:
-# it embeds only the GRAMMAR_TAGS grammars. `go install .../cmd/bugbot@latest`
+# it embeds only the GRAMMAR_TAGS grammars. `go install github.com/dpoage/bugbot@latest`
 # passes no tags and so produces the larger full binary (every grammar embedded).
 build:
 	CGO_ENABLED=0 go build -trimpath -tags '$(GRAMMAR_TAGS)' -o $(BINARY) $(PKG)
