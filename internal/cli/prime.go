@@ -112,10 +112,22 @@ func toolchainImage(bs ingest.BuildSystem, goVersion string) (image string, ok b
 }
 
 // recommendImage picks a sandbox image that carries the toolchain for the
-// repo's primary language. It prefers the first language-specific build system
-// in DetectBuildSystems' priority order, then falls back to meta build systems,
-// then to a clearly-flagged toolchain-less default.
+// repo's primary language. Bazel is checked FIRST: bugbot's repro pipeline
+// actually runs `bazel test //...` for Bazel repos, so a non-bazel image
+// (e.g. golang:*-alpine) would silently fail every reproduce under
+// network=none — repro would exit 127 / `environment_error` and the
+// finding would stay unverified. Other language-specific tools are
+// preferred over bazel when no Bazel marker is present.
 func recommendImage(bs []ingest.BuildSystem, goVersion string) (image, note string) {
+	// Bazel detected: the image MUST be bazel-capable (we run `bazel test`),
+	// AND it must still carry the language toolchains the targets build, AND
+	// a prefetched bazel repository cache so offline (network=none) repro
+	// works. A plain `gcr.io/bazel-public/bazel:latest` may not be enough on
+	// its own — point users at a custom image in that case.
+	if containsBuildSystem(bs, ingest.BuildSystemBazel) {
+		return "gcr.io/bazel-public/bazel:latest",
+			"Bazel detected: bugbot runs `bazel test //...` for Bazel repos, so the image MUST be bazel-capable. The image must ALSO carry the target language toolchains (Go/Java/C++/...) your targets build, and for offline (network=none) repro it must include a prefetched bazel repository cache — a plain bazel image is usually not enough; consider a custom image, or disable repro for Bazel repos."
+	}
 	for _, b := range bs {
 		if img, ok := toolchainImage(b, goVersion); ok {
 			return img, imageNoteFor(b)
@@ -123,9 +135,6 @@ func recommendImage(bs []ingest.BuildSystem, goVersion string) (image, note stri
 	}
 	for _, b := range bs {
 		switch b {
-		case ingest.BuildSystemBazel:
-			return "gcr.io/bazel-public/bazel:latest",
-				"Bazel detected: the image must ALSO contain the language toolchains your targets build (Go/Java/C++/...). One bazel image may not suffice — consider a custom image."
 		case ingest.BuildSystemMake, ingest.BuildSystemNinja:
 			return "docker.io/library/gcc:14",
 				"Only a generic build system (make/ninja) was detected; gcc:14 covers C/C++ + make. If the repo is another language, use that language's toolchain image instead."
@@ -154,12 +163,18 @@ func imageNoteFor(bs ingest.BuildSystem) string {
 }
 
 // recommendDepStrategy picks the network=none dependency strategy for the repo.
-// Only Go and Python have wired strategies today; other ecosystems get "off"
-// with a note to vendor/commit deps.
+// Go and Python have wired strategies; Bazel intentionally does NOT — bugbot
+// has no bazel dependency strategy today, and offline (network=none) bazel
+// repro requires a custom image with a prefetched bazel repository cache, or
+// disabling repro for bazel repos. Other ecosystems get "off" with a generic
+// note to vendor/commit deps.
 func recommendDepStrategy(bs []ingest.BuildSystem, vendored, hasReqs bool) (strategy, note string) {
 	isGo := containsBuildSystem(bs, ingest.BuildSystemGoModule) || containsBuildSystem(bs, ingest.BuildSystemGoWorkspace)
 	isPy := containsBuildSystem(bs, ingest.BuildSystemPython) || hasReqs
+	isBazel := containsBuildSystem(bs, ingest.BuildSystemBazel)
 	switch {
+	case isBazel:
+		return "off", "Bazel detected: Bugbot has NO bazel dependency strategy. Offline (network=none) bazel repro requires a custom sandbox image with a prefetched bazel repository cache (the default bazel image does not bundle one), or disable repro for this repo. 'off' is correct only if every bazel target you care about builds from sources already in the repo."
 	case isGo && vendored:
 		return "off", "Go modules are vendored (vendor/modules.txt) → the build resolves entirely from vendor/ under network=none. No mounts needed."
 	case isGo:
@@ -271,13 +286,20 @@ func renderPrime(f primeFacts) string {
 	b.WriteString("    Node/TS  docker.io/library/node:22-slim\n")
 	b.WriteString("    Rust     docker.io/library/rust:1-slim\n")
 	b.WriteString("    C/C++    docker.io/library/gcc:14  (add cmake/meson if your build needs them)\n")
+	b.WriteString("    Bazel    gcr.io/bazel-public/bazel:latest + language toolchains; offline\n")
+	b.WriteString("             (network=none) repro requires a custom image with a prefetched\n")
+	b.WriteString("             bazel repository cache (or disable repro for Bazel repos)\n")
 	b.WriteString("    mixed    a custom image carrying every toolchain you need\n\n")
 
 	// --- dep_strategy -----------------------------------------------------
 	b.WriteString("## dep_strategy (network=none dependency resolution)\n\n")
+
 	b.WriteString("    vendored Go (vendor/)      off    builds offline from vendor/\n")
 	b.WriteString("    non-vendored Go            host   mount host module cache RO, or 'fetch'\n")
 	b.WriteString("    Python + requirements.txt  fetch  offline wheelhouse (one online step)\n")
+	b.WriteString("    Bazel                     off    NO bazel dep strategy; offline repro needs\n")
+	b.WriteString("                                   a custom image with a prefetched cache\n")
+	b.WriteString("                                   (or disable repro for Bazel repos)\n")
 	b.WriteString("    other ecosystems           off    vendor/commit deps or bake a custom image\n\n")
 
 	// --- Secrets ----------------------------------------------------------

@@ -166,6 +166,14 @@ func runChecks(ctx context.Context, env doctorEnv) []checkResult {
 	// appended after the LSP block so they appear near the language info item.
 	results = append(results, checkLangTier(langs, buildSystems)...)
 
+	// Image-vs-language advisories (4e): cross-check the configured sandbox
+	// image against the repo's detected languages, and warn if offline bazel
+	// repro is configured against a non-custom image. Advisory only — never
+	// affects the exit code (mirrors checkLangTier above).
+	if cfgOK {
+		results = append(results, checkImageToolchain(langs, buildSystems, cfg)...)
+	}
+
 	return results
 }
 
@@ -523,6 +531,82 @@ func checkLangTier(langs []ingest.Language, buildSystems []ingest.BuildSystem) [
 		}
 	}
 	return out
+}
+
+// langImageHints maps each language that requires a real toolchain to the
+// substrings expected to appear in a sandbox image name. A language is
+// considered "covered" when cfg.Sandbox.Image contains ANY one of its hints
+// (case-insensitive). Languages absent from this map (LangShell, LangOther,
+// LangCSS, LangHTML, LangMarkdown, etc.) need no toolchain in the image and
+// never trigger a warning.
+var langImageHints = map[ingest.Language][]string{
+	ingest.LangGo:         {"golang"},
+	ingest.LangPython:     {"python"},
+	ingest.LangTypeScript: {"node"},
+	ingest.LangJavaScript: {"node"},
+	ingest.LangRust:       {"rust"},
+	ingest.LangJava:       {"openjdk", "eclipse-temurin", "gradle", "maven"},
+	ingest.LangC:          {"gcc", "clang"},
+	ingest.LangCPP:        {"gcc", "clang"},
+}
+
+// checkImageToolchain cross-checks the configured sandbox image against the
+// repo's detected dominant languages and emits one WARN per language whose
+// expected toolchain hint is absent from the image. It also emits a WARN
+// when a Bazel build is detected under network=none (offline bazel repro is
+// unsupported without a custom image carrying a prefetched repository
+// cache). These are advisory items only — they never affect the exit code
+// (mirrors checkLangTier above). An empty image string or empty langs slice
+// produces no warnings.
+func checkImageToolchain(langs []ingest.Language, buildSystems []ingest.BuildSystem, cfg config.Config) []checkResult {
+	image := strings.ToLower(cfg.Sandbox.Image)
+	if image == "" {
+		return nil
+	}
+	var out []checkResult
+	for _, lang := range langs {
+		hints, ok := langImageHints[lang]
+		if !ok {
+			continue
+		}
+		covered := false
+		for _, h := range hints {
+			if strings.Contains(image, h) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, checkResult{
+				Name:   "image toolchain " + string(lang),
+				Status: statusWarn,
+				Detail: string(lang) + " detected but sandbox image " + cfg.Sandbox.Image + " carries no expected toolchain (expected one of: " + strings.Join(hints, ", ") + ") — repro/verify of its findings will fail in this image",
+			})
+		}
+	}
+	// Offline bazel repro is unsupported without a custom image bundling a
+	// prefetched repository cache. Warn so the user knows the pipeline will
+	// produce environment_error for every Bazel finding under network=none.
+	if containsBuildSystemBazel(buildSystems) && strings.EqualFold(cfg.Sandbox.Network, "none") {
+		out = append(out, checkResult{
+			Name:   "image bazel offline",
+			Status: statusWarn,
+			Detail: "Bazel detected with sandbox.network=none: offline bazel repro is unsupported without a custom image carrying a prefetched bazel repository cache (the default bazel image does not bundle one), or disable repro for Bazel repos",
+		})
+	}
+	return out
+}
+
+// containsBuildSystemBazel reports whether buildSystems contains Bazel. It
+// is a local helper for checkImageToolchain so this file does not have to
+// depend on the prime file's containsBuildSystem.
+func containsBuildSystemBazel(buildSystems []ingest.BuildSystem) bool {
+	for _, b := range buildSystems {
+		if b == ingest.BuildSystemBazel {
+			return true
+		}
+	}
+	return false
 }
 
 // checkLSP checks whether an LSP server is installed for each dominant

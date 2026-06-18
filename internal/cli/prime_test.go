@@ -25,9 +25,11 @@ func TestRecommendImage(t *testing.T) {
 		{"cmake", []ingest.BuildSystem{ingest.BuildSystemCMake}, "", "docker.io/library/gcc:14", "cmake"},
 		// Language-specific system is preferred over the bazel/make meta entries
 		// even though DetectBuildSystems lists those first.
-		{"bazel wrapping go", []ingest.BuildSystem{ingest.BuildSystemBazel, ingest.BuildSystemGoModule}, "1.26", "docker.io/library/golang:1.26-alpine", "cgo"},
+		{"bazel wrapping go", []ingest.BuildSystem{ingest.BuildSystemBazel, ingest.BuildSystemGoModule}, "1.26", "gcr.io/bazel-public/bazel:latest", "toolchains"},
 		{"go with convenience make", []ingest.BuildSystem{ingest.BuildSystemGoModule, ingest.BuildSystemMake}, "1.26", "docker.io/library/golang:1.26-alpine", "cgo"},
-		{"bazel only", []ingest.BuildSystem{ingest.BuildSystemBazel}, "", "gcr.io/bazel-public/bazel:latest", "Bazel"},
+		// Bazel with no other language toolchain: still pick the bazel image
+		// (we run `bazel test //...` for Bazel repos).
+		{"bazel only", []ingest.BuildSystem{ingest.BuildSystemBazel}, "", "gcr.io/bazel-public/bazel:latest", "prefetched"},
 		{"make only", []ingest.BuildSystem{ingest.BuildSystemMake}, "", "docker.io/library/gcc:14", "make"},
 		{"nothing", nil, "", "docker.io/library/debian:stable-slim", "NO compiler"},
 	}
@@ -51,15 +53,21 @@ func TestRecommendDepStrategy(t *testing.T) {
 		vendored bool
 		hasReqs  bool
 		want     string
+		noteHas  string // optional substring the note must contain
 	}{
-		{"go vendored", []ingest.BuildSystem{ingest.BuildSystemGoModule}, true, false, "off"},
-		{"go not vendored", []ingest.BuildSystem{ingest.BuildSystemGoModule}, false, false, "host"},
-		{"go workspace not vendored", []ingest.BuildSystem{ingest.BuildSystemGoWorkspace}, false, false, "host"},
-		{"python with reqs", []ingest.BuildSystem{ingest.BuildSystemPython}, false, true, "fetch"},
-		{"python no reqs", []ingest.BuildSystem{ingest.BuildSystemPython}, false, false, "off"},
-		{"reqs only no pyproject", nil, false, true, "fetch"},
-		{"rust", []ingest.BuildSystem{ingest.BuildSystemCargo}, false, false, "off"},
-		{"none", nil, false, false, "off"},
+		{"go vendored", []ingest.BuildSystem{ingest.BuildSystemGoModule}, true, false, "off", ""},
+		{"go not vendored", []ingest.BuildSystem{ingest.BuildSystemGoModule}, false, false, "host", ""},
+		{"go workspace not vendored", []ingest.BuildSystem{ingest.BuildSystemGoWorkspace}, false, false, "host", ""},
+		{"python with reqs", []ingest.BuildSystem{ingest.BuildSystemPython}, false, true, "fetch", ""},
+		{"python no reqs", []ingest.BuildSystem{ingest.BuildSystemPython}, false, false, "off", ""},
+		{"reqs only no pyproject", nil, false, true, "fetch", ""},
+		{"rust", []ingest.BuildSystem{ingest.BuildSystemCargo}, false, false, "off", ""},
+		{"none", nil, false, false, "off", ""},
+		// Bazel: NO bazel dep strategy; the note must explicitly say so and
+		// point at a custom image with a prefetched bazel repository cache
+		// for offline repro.
+		{"bazel only", []ingest.BuildSystem{ingest.BuildSystemBazel}, false, false, "off", "NO bazel dep"},
+		{"bazel with go", []ingest.BuildSystem{ingest.BuildSystemBazel, ingest.BuildSystemGoModule}, false, false, "off", "prefetched bazel"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,6 +77,9 @@ func TestRecommendDepStrategy(t *testing.T) {
 			}
 			if note == "" {
 				t.Error("strategy note must not be empty")
+			}
+			if tc.noteHas != "" && !strings.Contains(note, tc.noteHas) {
+				t.Errorf("note %q should contain %q", note, tc.noteHas)
 			}
 		})
 	}
@@ -157,6 +168,32 @@ func TestRenderPrimeNoRuntimeWarns(t *testing.T) {
 	out := renderPrime(primeFacts{Target: "/r", RuntimeFound: false, Image: "x", DepStrategy: "off"})
 	if !strings.Contains(out, "NONE FOUND") {
 		t.Error("missing-runtime warning should appear when RuntimeFound is false")
+	}
+}
+
+// TestRenderPrimeBazelCaveat confirms the bazel caveats (image AND
+// dep_strategy) are visible in the rendered output for a Bazel repo.
+func TestRenderPrimeBazelCaveat(t *testing.T) {
+	f := primeFacts{
+		Target:       "/repo",
+		Runtime:      "podman",
+		RuntimeFound: true,
+		BuildSystems: []ingest.BuildSystem{ingest.BuildSystemBazel, ingest.BuildSystemGoModule},
+		Image:        "gcr.io/bazel-public/bazel:latest",
+		ImageNote:    "Bazel detected: bugbot runs `bazel test //...`...",
+		DepStrategy:  "off",
+		StrategyNote: "Bazel detected: Bugbot has NO bazel dependency strategy...",
+	}
+	out := renderPrime(f)
+	for _, want := range []string{
+		"gcr.io/bazel-public/bazel:latest", // recommended image surfaces
+		"Bazel",                            // image note surfaces
+		"NO bazel dep",                     // dep_strategy caveat surfaces
+		"prefetched",                       // offline caveat surfaces
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered prime missing %q", want)
+		}
 	}
 }
 
