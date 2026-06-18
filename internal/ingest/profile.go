@@ -21,6 +21,7 @@ var displayName = map[Language]string{
 	LangPHP:        "PHP",
 	LangSwift:      "Swift",
 	LangKotlin:     "Kotlin",
+	LangElixir:     "Elixir",
 	LangShell:      "Shell",
 }
 

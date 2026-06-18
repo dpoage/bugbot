@@ -117,6 +117,7 @@ func TestPersonaLanguages(t *testing.T) {
 		{"empty", nil, "senior software engineer"},
 		{"single Go", []Language{LangGo}, "senior Go engineer"},
 		{"single Python", []Language{LangPython}, "senior Python engineer"},
+		{"single Elixir", []Language{LangElixir}, "senior Elixir engineer"},
 		{
 			name:  "two languages",
 			langs: []Language{LangGo, LangPython},
@@ -157,6 +158,7 @@ func TestPersona(t *testing.T) {
 	}{
 		{"pure Go", snapFromLangs(LangGo, LangGo), "senior Go engineer"},
 		{"pure Python", snapFromLangs(LangPython), "senior Python engineer"},
+		{"pure Elixir", snapFromLangs(LangElixir, LangElixir, LangElixir), "senior Elixir engineer"},
 		{
 			name: "Go+Python mix",
 			snap: snapFromLangs(LangGo, LangGo, LangPython),
@@ -291,5 +293,38 @@ func TestPersonaNonCPPUnchanged(t *testing.T) {
 	got := Persona(snap)
 	if got != "senior Go engineer" {
 		t.Errorf("Persona() = %q, want %q", got, "senior Go engineer")
+	}
+}
+
+// TestDisplayName pins the human-readable rendering for each known language,
+// and confirms the LangOther fallback returns the raw Language string.
+func TestDisplayName(t *testing.T) {
+	cases := []struct {
+		lang Language
+		want string
+	}{
+		{LangGo, "Go"},
+		{LangPython, "Python"},
+		{LangCPP, "C++"},
+		{LangCSharp, "C#"},
+		{LangElixir, "Elixir"},
+		{LangOther, string(LangOther)}, // fallback: raw Language string
+	}
+	for _, tc := range cases {
+		if got := DisplayName(tc.lang); got != tc.want {
+			t.Errorf("DisplayName(%s) = %q, want %q", tc.lang, got, tc.want)
+		}
+	}
+}
+
+// TestPersonaElixirDominant verifies end-to-end that a snapshot dominated by
+// Elixir files yields a persona mentioning Elixir — closing the cross-pkg
+// contract with HeatFilter, which excludes only LangOther files from heat.
+func TestPersonaElixirDominant(t *testing.T) {
+	snap := snapFromLangs(LangElixir, LangElixir, LangElixir, LangElixir)
+	got := Persona(snap)
+	want := "senior Elixir engineer"
+	if got != want {
+		t.Errorf("Persona(Elixir-dominant) = %q, want %q", got, want)
 	}
 }

@@ -26,6 +26,7 @@ const (
 	LangPHP        Language = "php"
 	LangSwift      Language = "swift"
 	LangKotlin     Language = "kotlin"
+	LangElixir     Language = "elixir"
 	LangShell      Language = "shell"
 	LangOther      Language = "other"
 )
@@ -60,6 +61,8 @@ var extLang = map[string]Language{
 	".swift": LangSwift,
 	".kt":    LangKotlin,
 	".kts":   LangKotlin,
+	".ex":    LangElixir,
+	".exs":   LangElixir,
 	".sh":    LangShell,
 	".bash":  LangShell,
 }

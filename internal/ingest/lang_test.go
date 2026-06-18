@@ -21,6 +21,7 @@ func TestExtensionsForLanguage(t *testing.T) {
 		{LangRust, []string{".rs"}, false},
 		{LangC, []string{".c", ".h"}, false},
 		{LangCPP, []string{".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}, false},
+		{LangElixir, []string{".ex", ".exs"}, false},
 		{LangOther, nil, true},
 	}
 
@@ -60,6 +61,31 @@ func TestExtensionsForLanguage(t *testing.T) {
 			if got := extLang[ext]; got != tc.lang {
 				t.Errorf("ExtensionsForLanguage(%s): ext %q maps to %s, not %s", tc.lang, ext, got, tc.lang)
 			}
+		}
+	}
+}
+
+// TestDetectLanguage pins the extension→Language mapping for a sample of paths
+// per language, including extensionless/upper-case/relative variants. New
+// languages get a row here so a missing entry fails loudly.
+func TestDetectLanguage(t *testing.T) {
+	cases := []struct {
+		path string
+		want Language
+	}{
+		{"foo.go", LangGo},
+		{"foo.py", LangPython},
+		{"foo.PY", LangPython}, // case-insensitive
+		{"a/b/c.ts", LangTypeScript},
+		{"x.ex", LangElixir},
+		{"a/b/c.exs", LangElixir},
+		{"foo.rs", LangRust},
+		{"foo", LangOther},         // extensionless
+		{"foo.unknown", LangOther}, // unknown extension
+	}
+	for _, tc := range cases {
+		if got := DetectLanguage(tc.path); got != tc.want {
+			t.Errorf("DetectLanguage(%q) = %s, want %s", tc.path, got, tc.want)
 		}
 	}
 }
