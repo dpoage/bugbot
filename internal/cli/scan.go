@@ -161,7 +161,7 @@ func newScanCmd() *cobra.Command {
 					_, _ = fmt.Fprintln(out, "Reproduce stage skipped: no container runtime (podman/docker) found on PATH.")
 					// doRepro stays true so the catch-up drain prints a note; hook stays nil.
 				} else {
-					sb, sbErr := sandbox.NewCLI(runtime, cfg.Sandbox.Image)
+					sb, sbErr := sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(cfg)...)
 					if sbErr != nil {
 						return fmt.Errorf("build sandbox: %w", sbErr)
 					}
@@ -356,7 +356,7 @@ func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool
 	if !ok {
 		return funnel.SandboxOpts{}, true, nil
 	}
-	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image)
+	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(cfg)...)
 	if err != nil {
 		return funnel.SandboxOpts{}, false, fmt.Errorf("build verify sandbox: %w", err)
 	}
@@ -367,6 +367,18 @@ func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool
 		MaxExecs:    cfg.Verify.SandboxMaxExecs,
 		DepStrategy: sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 	}, false, nil
+}
+
+// sandboxRunOpts returns the sandbox.Option list every CLI sandbox in the app
+// shares, derived from config. It enables the idle-timeout watchdog (dynamic,
+// progress-based cancellation) when sandbox.idle_timeout_seconds > 0. Built once
+// here so scan, verify, the analyzer seed, and the daemon stay consistent.
+func sandboxRunOpts(cfg config.Config) []sandbox.Option {
+	var opts []sandbox.Option
+	if cfg.Sandbox.IdleTimeoutSeconds > 0 {
+		opts = append(opts, sandbox.WithIdleTimeout(time.Duration(cfg.Sandbox.IdleTimeoutSeconds)*time.Second))
+	}
+	return opts
 }
 
 // runReproCatchUp runs a backlog-style drain over the run's Tier-2 findings
@@ -582,7 +594,7 @@ func runAnalyzerSeed(ctx context.Context, cfg config.Config, repoDir string, st 
 		// just won't have static-analyzer leads to seed the finder stage with.
 		return
 	}
-	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image)
+	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(cfg)...)
 	if err != nil {
 		// Sandbox construction failed: emit a note and continue without seeding.
 		progress.Emit(sink, progress.Event{

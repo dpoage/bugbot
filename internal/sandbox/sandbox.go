@@ -60,10 +60,17 @@ type Spec struct {
 	// default is used.
 	MemoryMB int
 
-	// Timeout bounds the execution wall-clock time. When <= 0 the backend's
-	// default timeout is used. On expiry the container is forcibly removed and
-	// Result.TimedOut is set.
+	// Timeout bounds the execution wall-clock time as a HARD ceiling. When <= 0
+	// the backend's default timeout is used. On expiry the container is forcibly
+	// removed and Result.TimedOut is set.
 	Timeout time.Duration
+
+	// IdleTimeout bounds wall-clock time with NO observable progress (output
+	// bytes or workspace filesystem activity). A run that keeps making progress
+	// is allowed to continue up to Timeout; one that stalls for IdleTimeout is
+	// cancelled and Result.TimedOut is set. When <= 0 the backend default is
+	// used, and a zero backend default disables the watchdog (Timeout only).
+	IdleTimeout time.Duration
 
 	// Network selects the container network mode. The default (empty) resolves
 	// to "none", disabling all network egress.

@@ -104,6 +104,22 @@ func ValidDepStrategy(s DepStrategy) bool {
 // the container (HOST and FETCH strategies).
 const modcacheMount = "/modcache"
 
+// goCacheDir and goTmpDir are disk-backed build-scratch directories created
+// inside the writable /workspace mount for Go runs. Go's build cache (GOCACHE,
+// default $HOME/.cache/go-build) and transient work dir ($WORK, default under
+// $TMPDIR) otherwise land on the small tmpfs the sandbox mounts at /tmp
+// (buildRunArgs: --tmpfs /tmp:size=512m). A cold build of a dependency-heavy
+// package overruns that tmpfs ("no space left on device"), which the reproducer
+// reads as an environment_error and never promotes — and a refuter's
+// sandbox_exec check fails the same way. /workspace is a per-run, disk-backed
+// copy with real space, so the caches go there instead. Both names are
+// dot-prefixed so `go test ./...` skips them (go ignores directories beginning
+// with "." or "_").
+const (
+	goCacheDir = workspaceMount + "/.bugbot-gocache"
+	goTmpDir   = workspaceMount + "/.bugbot-gotmp"
+)
+
 // DepOptions configures the dependency resolver.
 type DepOptions struct {
 	// Strategy selects the dependency strategy. Empty is treated as
@@ -147,7 +163,7 @@ type Resolution struct {
 	Env []string
 	// SetupCmds are in-container commands to run before Cmd (see Spec.SetupCmds).
 	// Non-Go ecosystems populate this (e.g. ["npm","ci","--offline"]); the Go
-	// ecosystem contributes none.
+	// ecosystem contributes a single mkdir for its build-scratch dirs (goCacheDir).
 	SetupCmds [][]string
 
 	// Prefetch, when non-nil, must be called ONCE before the first network-none
@@ -188,20 +204,42 @@ var ecosystems = []ecosystem{
 }
 
 // goEcosystem is the Go dependency resolver. It detects repos with a go.mod
-// and applies the same VENDORED / HOST / FETCH / OFF strategy as the original
-// monolithic ResolveDeps implementation. Behavior is byte-identical to the
-// pre-registry version; existing unit and integration tests are the acceptance
-// criterion.
+// and applies the VENDORED / HOST / FETCH / OFF dependency strategy, and in
+// every mode relocates Go's build scratch onto the disk-backed workspace
+// (see goCacheDir / resolveGo).
 var goEcosystem = ecosystem{
 	name:    "go",
 	detect:  hasGoModule,
 	resolve: resolveGo,
 }
 
-// resolveGo is the Go resolver function, extracted verbatim from the original
-// ResolveDeps implementation. It handles vendored detection, strategy
-// validation has already run in resolveWith.
+// resolveGo resolves the Go ecosystem for repoDir: the dependency strategy
+// (resolveGoDeps) plus the build-scratch relocation common to every strategy
+// (applyGoBuildScratch). Strategy validation has already run in resolveWith.
 func resolveGo(repoDir string, opts DepOptions) (Resolution, error) {
+	res, err := resolveGoDeps(repoDir, opts)
+	if err != nil {
+		return Resolution{}, err
+	}
+	return applyGoBuildScratch(res), nil
+}
+
+// applyGoBuildScratch appends the env and setup command that move Go's build
+// cache (GOCACHE) and transient work dir ($WORK, via GOTMPDIR) off the small
+// /tmp tmpfs onto the disk-backed workspace. GOCACHE is auto-created by go, but
+// GOTMPDIR must already exist, so the mkdir setup command precedes the run.
+// This routes the Go command through the /bin/sh setup wrapper in buildRunArgs,
+// which the image's shell + mkdir satisfy — both are present wherever the Go
+// toolchain is. See goCacheDir for the failure this prevents.
+func applyGoBuildScratch(res Resolution) Resolution {
+	res.Env = append(res.Env, "GOCACHE="+goCacheDir, "GOTMPDIR="+goTmpDir)
+	res.SetupCmds = append(res.SetupCmds, []string{"mkdir", "-p", goCacheDir, goTmpDir})
+	return res
+}
+
+// resolveGoDeps resolves only the dependency strategy (vendored / off / host /
+// fetch) for repoDir. The build-scratch relocation is layered on by resolveGo.
+func resolveGoDeps(repoDir string, opts DepOptions) (Resolution, error) {
 	// Vendored detection wins in every mode: it is free, safe, and makes `go`
 	// ignore the network entirely.
 	if isVendored(repoDir) {

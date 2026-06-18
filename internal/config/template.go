@@ -110,6 +110,14 @@ scan:
 # backend is currently "cli" (shells out to a container runtime).
 # network defaults to "none" — reproduction runs offline.
 #
+# IMPORTANT: the reproduce/verify stages run the target repo's OWN test/build
+# toolchain INSIDE this image under network=none. A toolchain-less image (such
+# as the debian:stable-slim default below) makes every repro/verify exit with
+# environment_error, so findings silently stay unreproduced. Set image to one
+# that carries the target language's toolchain (Go -> golang:<ver>-alpine,
+# Python -> python:3-slim, Node -> node:22-slim, Rust -> rust:1-slim,
+# C/C++ -> gcc:14). Run "bugbot prime" in the target repo for a tailored pick.
+#
 # dep_strategy controls how a NON-vendored Go module resolves its external
 # dependencies under network=none. Vendored repos (vendor/modules.txt) always
 # build offline regardless of this setting.
@@ -123,10 +131,14 @@ scan:
 sandbox:
   backend: cli
   runtime: podman              # podman | docker
-  image: docker.io/library/debian:stable-slim
+  image: docker.io/library/debian:stable-slim   # see IMPORTANT note above; set a toolchain image for repro/verify
   cpus: 2
   memory_mb: 2048
-  timeout_seconds: 600
+  timeout_seconds: 600         # HARD ceiling for one sandbox run
+  idle_timeout_seconds: 120    # kill a run only after this long with NO progress
+                               # (output or workspace writes); 0 disables. The
+                               # ceiling above still applies. Lets a slow-but-
+                               # progressing build finish while killing hangs fast.
   network: none
   dep_strategy: off            # off | host | fetch
 

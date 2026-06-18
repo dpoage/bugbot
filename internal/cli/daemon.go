@@ -234,7 +234,7 @@ func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer client: %w", err)
 	}
-	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image)
+	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(*cfg)...)
 	if err != nil {
 		return nil, fmt.Errorf("build sandbox: %w", err)
 	}

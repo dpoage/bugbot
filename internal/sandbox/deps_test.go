@@ -23,6 +23,29 @@ func writeFile(t *testing.T, path, content string) {
 
 func envHas(env []string, kv string) bool { return slices.Contains(env, kv) }
 
+// assertGoBuildScratch verifies a Go resolution relocates the build cache and
+// transient work dir onto the disk-backed workspace (off the size-capped /tmp
+// tmpfs) via env + a mkdir setup command. See deps.go goCacheDir.
+func assertGoBuildScratch(t *testing.T, res Resolution) {
+	t.Helper()
+	if !envHas(res.Env, "GOCACHE="+goCacheDir) {
+		t.Errorf("missing GOCACHE=%s; env=%v", goCacheDir, res.Env)
+	}
+	if !envHas(res.Env, "GOTMPDIR="+goTmpDir) {
+		t.Errorf("missing GOTMPDIR=%s; env=%v", goTmpDir, res.Env)
+	}
+	found := false
+	for _, c := range res.SetupCmds {
+		if len(c) >= 1 && c[0] == "mkdir" && slices.Contains(c, goCacheDir) && slices.Contains(c, goTmpDir) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("missing mkdir setup cmd creating %s and %s; setupCmds=%v", goCacheDir, goTmpDir, res.SetupCmds)
+	}
+}
+
 func TestResolveDepsNoGoModule(t *testing.T) {
 	dir := t.TempDir() // no go.mod
 	for _, strat := range []DepStrategy{DepStrategyOff, DepStrategyHost, DepStrategyFetch} {
@@ -72,12 +95,70 @@ func TestResolveDepsOff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveDeps: %v", err)
 	}
-	if len(res.ROMounts) != 0 || len(res.Env) != 0 || res.Prefetch != nil {
-		t.Errorf("off on non-vendored Go repo: want empty resolution, got %+v", res)
+	// OFF carries no module mounts or prefetch, but a Go repo still gets the
+	// build-scratch relocation (GOCACHE/GOTMPDIR off the tmpfs) in every mode.
+	if len(res.ROMounts) != 0 || res.Prefetch != nil {
+		t.Errorf("off on non-vendored Go repo: want no mounts/prefetch, got %+v", res)
 	}
+	if envHas(res.Env, "GOFLAGS=-mod=vendor") {
+		t.Errorf("off (non-vendored) must not set GOFLAGS, got %v", res.Env)
+	}
+	assertGoBuildScratch(t, res)
 	if res.Strategy != DepStrategyOff {
 		t.Errorf("Strategy=%q want off", res.Strategy)
 	}
+}
+
+// TestResolveDepsGoBuildScratchAllStrategies locks in that EVERY Go strategy
+// (off/host/fetch/vendored) relocates the build cache off the /tmp tmpfs, and
+// that a non-Go repo gets none of it. This is the regression guard for the
+// "no space left on device" environment_error a cold Go build hits when GOCACHE
+// and $WORK share the small sandbox tmpfs.
+func TestResolveDepsGoBuildScratchAllStrategies(t *testing.T) {
+	cache := t.TempDir()
+	cacheBase := t.TempDir()
+	cases := []struct {
+		name string
+		opts DepOptions
+	}{
+		{"off", DepOptions{Strategy: DepStrategyOff}},
+		{"host", DepOptions{Strategy: DepStrategyHost, hostModcache: cache}},
+		{"fetch", DepOptions{Strategy: DepStrategyFetch, FetchSandbox: NewMock(MockResponse{Result: Result{ExitCode: 0}}), userCacheDir: cacheBase}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+			writeFile(t, filepath.Join(dir, "go.sum"), "example.com/x v1.0.0 h1:abc\n")
+			res, err := ResolveDeps(dir, tc.opts)
+			if err != nil {
+				t.Fatalf("ResolveDeps: %v", err)
+			}
+			assertGoBuildScratch(t, res)
+		})
+	}
+
+	t.Run("vendored", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+		writeFile(t, filepath.Join(dir, "vendor", "modules.txt"), "# x\n")
+		res, err := ResolveDeps(dir, DepOptions{Strategy: DepStrategyOff})
+		if err != nil {
+			t.Fatalf("ResolveDeps: %v", err)
+		}
+		assertGoBuildScratch(t, res)
+	})
+
+	t.Run("non-go", func(t *testing.T) {
+		dir := t.TempDir()
+		res, err := ResolveDeps(dir, DepOptions{Strategy: DepStrategyOff})
+		if err != nil {
+			t.Fatalf("ResolveDeps: %v", err)
+		}
+		if envHas(res.Env, "GOCACHE="+goCacheDir) || len(res.SetupCmds) != 0 {
+			t.Errorf("non-Go repo must not get Go build scratch; got env=%v setup=%v", res.Env, res.SetupCmds)
+		}
+	})
 }
 
 func TestResolveDepsHostMountsCache(t *testing.T) {
@@ -316,9 +397,10 @@ func TestResolveWith_SingleEcosystem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveWith off: %v", err)
 	}
-	if res.Strategy != DepStrategyOff || len(res.ROMounts) != 0 || len(res.Env) != 0 {
+	if res.Strategy != DepStrategyOff || len(res.ROMounts) != 0 {
 		t.Errorf("off: unexpected resolution %+v", res)
 	}
+	assertGoBuildScratch(t, res) // Go always relocates build scratch, even OFF
 
 	// HOST strategy.
 	res, err = resolveWith(ecosystems, dir, DepOptions{Strategy: DepStrategyHost, hostModcache: cache})
@@ -328,9 +410,11 @@ func TestResolveWith_SingleEcosystem(t *testing.T) {
 	if res.Strategy != DepStrategyHost || len(res.ROMounts) != 1 {
 		t.Errorf("host: unexpected resolution %+v", res)
 	}
-	if len(res.SetupCmds) != 0 {
-		t.Errorf("Go ecosystem must contribute no SetupCmds; got %v", res.SetupCmds)
+	// Go contributes exactly the build-scratch mkdir as its only setup cmd.
+	if len(res.SetupCmds) != 1 {
+		t.Errorf("Go ecosystem should contribute exactly the build-scratch mkdir; got %v", res.SetupCmds)
 	}
+	assertGoBuildScratch(t, res)
 }
 
 // TestResolveWith_NoMatch asserts that a repo matching no ecosystem resolves
@@ -498,10 +582,12 @@ func TestResolveWith_GoOnlyRepo(t *testing.T) {
 	if !slices.Equal(got.Env, want.Env) {
 		t.Errorf("Env: got %v, want %v", got.Env, want.Env)
 	}
-	// SetupCmds must both be nil/empty (Go contributes none).
-	if len(got.SetupCmds) != 0 {
-		t.Errorf("SetupCmds: got %v, want empty (Go contributes none)", got.SetupCmds)
+	// SetupCmds must match between resolveWith and ResolveDeps, and contain the
+	// Go build-scratch mkdir.
+	if len(got.SetupCmds) != len(want.SetupCmds) {
+		t.Errorf("SetupCmds len: resolveWith=%d ResolveDeps=%d", len(got.SetupCmds), len(want.SetupCmds))
 	}
+	assertGoBuildScratch(t, got)
 	if got.Strategy != want.Strategy {
 		t.Errorf("Strategy: got %q, want %q", got.Strategy, want.Strategy)
 	}
@@ -756,12 +842,20 @@ func TestMultiEcosystemComposition(t *testing.T) {
 		t.Errorf("missing PIP_NO_INDEX=1 in multi-ecosystem env: %v", res.Env)
 	}
 
-	// Python SetupCmds must be present.
-	if len(res.SetupCmds) != 1 {
-		t.Fatalf("want 1 SetupCmd (Python pip install), got %d: %v", len(res.SetupCmds), res.SetupCmds)
+	// SetupCmds = Go build-scratch mkdir (table order: go before python) then
+	// the Python pip install.
+	if len(res.SetupCmds) != 2 {
+		t.Fatalf("want 2 SetupCmds (Go mkdir + Python pip install), got %d: %v", len(res.SetupCmds), res.SetupCmds)
 	}
-	if res.SetupCmds[0][0] != "pip" {
-		t.Errorf("SetupCmds[0][0] = %q, want pip", res.SetupCmds[0][0])
+	assertGoBuildScratch(t, res)
+	foundPip := false
+	for _, c := range res.SetupCmds {
+		if len(c) > 0 && c[0] == "pip" {
+			foundPip = true
+		}
+	}
+	if !foundPip {
+		t.Errorf("missing Python pip install SetupCmd; got %v", res.SetupCmds)
 	}
 
 	// Strategy is from the FIRST matching ecosystem (Go = "fetch"), per

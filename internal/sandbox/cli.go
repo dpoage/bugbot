@@ -6,8 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,9 +41,12 @@ type CLI struct {
 	defaultCPUs    float64
 	defaultMemory  int
 	defaultTimeout time.Duration
-	defaultNetwork string
-	pidsLimit      int
-	maxOutputBytes int
+	// defaultIdleTimeout is the inactivity window applied when a Spec leaves
+	// IdleTimeout unset. Zero disables the idle watchdog (absolute timeout only).
+	defaultIdleTimeout time.Duration
+	defaultNetwork     string
+	pidsLimit          int
+	maxOutputBytes     int
 }
 
 // Option configures a CLI sandbox.
@@ -54,6 +62,12 @@ func WithMemoryMB(m int) Option { return func(s *CLI) { s.defaultMemory = m } }
 // WithTimeout sets the default execution timeout applied when a Spec leaves
 // Timeout unset.
 func WithTimeout(d time.Duration) Option { return func(s *CLI) { s.defaultTimeout = d } }
+
+// WithIdleTimeout sets the default idle (no-progress) window applied when a Spec
+// leaves IdleTimeout unset. A run is cancelled only after this long with no
+// observable progress; the absolute WithTimeout remains a hard ceiling. Zero
+// disables the watchdog.
+func WithIdleTimeout(d time.Duration) Option { return func(s *CLI) { s.defaultIdleTimeout = d } }
 
 // WithNetwork sets the default network mode applied when a Spec leaves Network
 // unset. The package default is "none".
@@ -169,9 +183,14 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	if timeout <= 0 {
 		timeout = s.defaultTimeout
 	}
+	idleTimeout := spec.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = s.defaultIdleTimeout
+	}
 
-	// runCtx bounds the run by the timeout, but is also cancelled if the
-	// caller's ctx is cancelled first.
+	// runCtx bounds the run by the absolute timeout (a hard ceiling) and is
+	// cancelled if the caller's ctx is cancelled first or the idle watchdog
+	// fires.
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -183,22 +202,49 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
+	// Idle watchdog: instead of killing a healthy-but-slow run at a fixed
+	// deadline, cancel only after idleTimeout elapses with NO observable
+	// progress. Progress is language-agnostic and layered cheapest-first:
+	//   1. bytes written to stdout/stderr, and any change to the writable
+	//      workspace tree (build caches, compiled artifacts, generated files —
+	//      every ecosystem writes one or the other while it works);
+	//   2. only when (1) is flat, a container-CPU probe, so a compiler churning
+	//      silently on one large translation unit (no output, no fs writes yet)
+	//      still counts as progress.
+	// The absolute timeout above stays a hard ceiling.
+	var idleKilled atomic.Bool
+	done := make(chan struct{})
+	if idleTimeout > 0 {
+		fingerprint := func() progressSnapshot {
+			ps := progressSnapshot{outputBytes: stdout.written() + stderr.written()}
+			ps.fsSize, ps.fsCount, ps.fsMaxModNano = workspaceProgress(ws)
+			return ps
+		}
+		active := func() bool { return s.containerCPUBusy(p.containerName) }
+		go watchIdle(done, fingerprint, active, idleTimeout, idlePollInterval(idleTimeout), &idleKilled, cancel)
+	}
+
 	start := time.Now()
 	runErr := cmd.Run()
+	close(done)
 	duration := time.Since(start)
 
 	res := Result{Duration: duration}
 	res.Stdout, res.StdoutTruncated = stdout.result()
 	res.Stderr, res.StderrTruncated = stderr.result()
 
-	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
-	if timedOut {
-		res.TimedOut = true
-		res.ExitCode = -1
-		// The runtime may not have torn the container down in time; reap it by
-		// name to honor the always-clean-up guarantee. Best-effort with its own
-		// short timeout so cleanup cannot itself hang.
-		s.forceRemove(p.containerName)
+	// Outcome precedence. A process that returned its OWN status — a clean exit
+	// or a real non-zero code — was not killed by us, so those win first: a
+	// watchdog (or deadline) firing in the same instant can never mask a genuine
+	// repro verdict. Our kills surface as a signal (ExitCode -1) and fall through
+	// to the timeout/cancel branches below.
+	if runErr == nil {
+		res.ExitCode = 0
+		return res, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) && exitErr.ExitCode() >= 0 {
+		res.ExitCode = exitErr.ExitCode()
 		return res, nil
 	}
 
@@ -208,19 +254,17 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 		return res, fmt.Errorf("sandbox: execution cancelled: %w", ctxErr)
 	}
 
-	if runErr == nil {
-		res.ExitCode = 0
+	// Idle watchdog or absolute deadline: a timeout, not a demonstration. The
+	// runtime may not have torn the container down in time; reap it by name to
+	// honor the always-clean-up guarantee.
+	if idleKilled.Load() || errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		res.TimedOut = true
+		res.ExitCode = -1
+		s.forceRemove(p.containerName)
 		return res, nil
 	}
 
-	// A non-zero exit is reported via ExitCode, not as an error.
-	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) {
-		res.ExitCode = exitErr.ExitCode()
-		return res, nil
-	}
-
-	// Anything else (binary missing, failed to start) is infrastructure error.
+	// Anything else (binary missing, failed to start, unexpected signal).
 	return res, fmt.Errorf("sandbox: run %s: %w", s.runtime, runErr)
 }
 
@@ -231,6 +275,128 @@ func (s *CLI) forceRemove(name string) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, s.runtime, removeArgs(name)...)
 	_ = cmd.Run()
+}
+
+// progressSnapshot is a language-agnostic activity fingerprint of a running
+// sandbox execution. It is comparable; ANY field change between successive
+// samples counts as progress and resets the idle watchdog's clock.
+type progressSnapshot struct {
+	outputBytes  int64 // total bytes written to stdout+stderr (incl. discarded over cap)
+	fsSize       int64 // sum of regular-file sizes under the workspace
+	fsCount      int64 // number of entries under the workspace
+	fsMaxModNano int64 // newest mtime under the workspace, unix nanoseconds
+}
+
+// idlePollInterval derives how often the watchdog samples progress from the
+// idle window: frequent enough to notice a stall promptly, but bounded so the
+// workspace walk stays cheap. Clamped to [1s, 30s].
+func idlePollInterval(idleTimeout time.Duration) time.Duration {
+	d := idleTimeout / 4
+	if d < time.Second {
+		d = time.Second
+	}
+	if d > 30*time.Second {
+		d = 30 * time.Second
+	}
+	return d
+}
+
+// watchIdle samples progress every pollEvery and cancels the run once no
+// progress has occurred for idleTimeout. fingerprint is the cheap signal
+// (output bytes + workspace filesystem state); activeFallback is consulted ONLY
+// when the fingerprint is unchanged, so its cost (a container-CPU probe) is paid
+// just on otherwise-idle ticks. It sets killed BEFORE calling cancel so the flag
+// is visible (through the atomic barrier) by the time the cancelled command
+// returns. It returns when the run finishes (done closed) or after it fires;
+// idleTimeout <= 0 disables it. activeFallback may be nil.
+func watchIdle(done <-chan struct{}, fingerprint func() progressSnapshot, activeFallback func() bool, idleTimeout, pollEvery time.Duration, killed *atomic.Bool, cancel func()) {
+	if idleTimeout <= 0 {
+		return
+	}
+	last := fingerprint()
+	lastChange := time.Now()
+	t := time.NewTicker(pollEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case now := <-t.C:
+			cur := fingerprint()
+			if cur != last {
+				last = cur
+				lastChange = now
+				continue
+			}
+			// Cheap signals flat: consult the costlier fallback before deciding.
+			if activeFallback != nil && activeFallback() {
+				lastChange = now
+				continue
+			}
+			if now.Sub(lastChange) >= idleTimeout {
+				killed.Store(true)
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+// cpuBusyThreshold is the container CPU percentage above which a run counts as
+// making progress even when it writes nothing — e.g. a compiler working on one
+// large generated source file. Below it, CPU is treated as idle.
+const cpuBusyThreshold = 1.0
+
+// cpuProbeTimeout bounds a single CPU probe; `stats --no-stream` samples for
+// about a second, so this stays generous but finite.
+const cpuProbeTimeout = 5 * time.Second
+
+// containerCPUBusy reports whether the named container is currently consuming
+// CPU above cpuBusyThreshold. It is a BEST-EFFORT progress signal: any failure
+// (runtime quirk, container already gone, unparsable output) returns false so
+// the watchdog falls back to the output/filesystem signals. It can only PREVENT
+// a false idle-kill, never cause one. `--format {{.CPUPerc}}` (e.g. "12.34%")
+// is supported by both podman and docker.
+func (s *CLI) containerCPUBusy(name string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), cpuProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, s.runtime, "stats", "--no-stream", "--format", "{{.CPUPerc}}", name).Output()
+	if err != nil {
+		return false
+	}
+	field := strings.TrimSuffix(strings.TrimSpace(string(out)), "%")
+	pct, err := strconv.ParseFloat(field, 64)
+	if err != nil {
+		return false
+	}
+	return pct > cpuBusyThreshold
+}
+
+// workspaceProgress returns an aggregate fingerprint of dir: total regular-file
+// byte count, entry count, and newest mtime (unix nanos). It is best-effort
+// (unreadable entries are skipped) and walks the whole tree so it captures
+// activity anywhere a build/test writes — caches, compiled artifacts, generated
+// files — independent of language. Cost is bounded by the poll interval; the
+// workspace is a single repo copy.
+func workspaceProgress(dir string) (size, count, maxModNano int64) {
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		count++
+		if d.Type().IsRegular() {
+			size += info.Size()
+		}
+		if m := info.ModTime().UnixNano(); m > maxModNano {
+			maxModNano = m
+		}
+		return nil
+	})
+	return
 }
 
 var _ Sandbox = (*CLI)(nil)
