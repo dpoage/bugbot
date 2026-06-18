@@ -105,6 +105,16 @@ func ChurnHeat(ctx context.Context, repoDir string, window time.Duration) (map[s
 // Unix epoch timestamp (%ct) on its own line, followed by zero or more
 // repo-relative file paths (one per line). Blank lines between stanzas are
 // skipped.
+//
+// Non-code paths (DetectLanguage == LangOther — configs, manifests, data,
+// docs, vendored files with unknown extensions) are dropped from the map.
+// They are usually edited in lockstep with code changes but do not
+// themselves carry bug surface, so allowing them to dominate the heat
+// ranking wastes the top finder seats on inputs the lens cannot act on.
+// Callers already treat an absent key as score 0 / ranked last, so the
+// skip is transparent. Shell scripts (LangShell) and all real code
+// languages pass through unchanged; languages newly added to the
+// extension map (e.g. Elixir) compose automatically.
 func parseHeat(data []byte, now time.Time) map[string]float64 {
 	heat := make(map[string]float64)
 	nowUnix := float64(now.Unix())
@@ -125,6 +135,11 @@ func parseHeat(data []byte, now time.Time) map[string]float64 {
 		if currentTS < 0 {
 			// No timestamp seen yet; skip orphaned lines (shouldn't happen in
 			// practice, but be defensive).
+			continue
+		}
+		// Drop non-code paths (configs, manifests, data, docs, unknown
+		// extensions) so they cannot dominate the heat ranking.
+		if DetectLanguage(line) == LangOther {
 			continue
 		}
 		// age in days: (now - commit_time) / 86400.

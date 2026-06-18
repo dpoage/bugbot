@@ -127,9 +127,84 @@ func TestParseHeat_TauDecay(t *testing.T) {
 	}
 }
 
+func TestParseHeat_DropsLangOtherPaths(t *testing.T) {
+	// A single stanza lists a code file alongside the kinds of non-code
+	// files that historically dominated the top of the heat ranking:
+	// Bazel manifest fragments, Helm values, JSON schemas, Markdown docs,
+	// go.mod, and extensionless dotfiles. All have no registered language
+	// and classify as LangOther. Only the code file should survive.
+	now := time.Unix(1_700_000_000, 0)
+	ts := strconv.FormatInt(now.Add(-5*24*time.Hour).Unix(), 10)
+
+	files := []string{
+		"svc/main.go",
+		"svc/values.yaml",
+		"deps.MODULE.bazel",
+		"svc/values.schema.json",
+		"README.md",
+		"go.mod",
+		"notes.txt",
+		".envrc",
+	}
+
+	var sb strings.Builder
+	sb.WriteString(ts)
+	sb.WriteByte('\n')
+	for _, f := range files {
+		sb.WriteString(f)
+		sb.WriteByte('\n')
+	}
+	sb.WriteByte('\n')
+
+	heat := parseHeat([]byte(sb.String()), now)
+
+	if got := heat["svc/main.go"]; got <= 0 {
+		t.Errorf("svc/main.go should have a positive heat score, got %.6f", got)
+	}
+	dropped := []string{
+		"svc/values.yaml",
+		"deps.MODULE.bazel",
+		"svc/values.schema.json",
+		"README.md",
+		"go.mod",
+		"notes.txt",
+		".envrc",
+	}
+	for _, f := range dropped {
+		if _, ok := heat[f]; ok {
+			t.Errorf("%s is LangOther and must be dropped from the heat map, got score %.6f", f, heat[f])
+		}
+	}
+	// Sanity: nothing else leaked through.
+	if len(heat) != 1 {
+		t.Errorf("expected exactly 1 entry in heat map (the code file), got %d: %v", len(heat), heat)
+	}
+}
+
+func TestParseHeat_KeepsLangShellPaths(t *testing.T) {
+	// Shell scripts are LangShell — they are real code (build/release
+	// glue, ops scripts) and must not be lumped with the LangOther noise
+	// that this filter is designed to drop. A shell script touched at
+	// the same time as a Go file should score identically.
+	now := time.Unix(1_700_000_000, 0)
+	ts := strconv.FormatInt(now.Add(-10*24*time.Hour).Unix(), 10)
+	data := ts + "\nsvc/main.go\nscripts/deploy.sh\n"
+
+	heat := parseHeat([]byte(data), now)
+	if got := heat["svc/main.go"]; got <= 0 {
+		t.Errorf("svc/main.go should be in the heat map, got %.6f", got)
+	}
+	if got := heat["scripts/deploy.sh"]; got <= 0 {
+		t.Errorf("scripts/deploy.sh (LangShell) should be in the heat map, got %.6f", got)
+	}
+	if math.Abs(heat["svc/main.go"]-heat["scripts/deploy.sh"]) > 1e-9 {
+		t.Errorf("same-age code paths should score equally: go=%.6f sh=%.6f",
+			heat["svc/main.go"], heat["scripts/deploy.sh"])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ChurnHeat integration tests (real git repo)
-// ---------------------------------------------------------------------------
 
 // TestChurnHeat_NonASCIIPaths proves that files with non-ASCII names (accented
 // Latin, CJK, etc.) receive non-zero heat and rank correctly against plain-ASCII
