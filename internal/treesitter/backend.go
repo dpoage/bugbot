@@ -27,9 +27,14 @@
 // grammar_subset_typescript grammar_subset_tsx'` compiles out the all-grammars
 // registry and embeds ONLY the selected blobs, cutting the project's static
 // binary by ~21MB (86MB -> 65MB). `make build` sets these tags (see Makefile's
-// GRAMMAR_TAGS). A plain `go build ./...` (no tags) still works — it just
-// embeds every grammar. If a new language is added to grammarTable, add its
-// matching grammar_subset_<lang> tag to GRAMMAR_TAGS.
+// GRAMMAR_TAGS). A plain `go build`/`go install` (no tags) still works — it
+// just embeds every grammar. That is exactly what
+// `go install github.com/dpoage/bugbot/cmd/bugbot@latest` produces: the full
+// all-grammars binary is the supported install path. The subset is only a
+// build-time size optimization and CANNOT be selected through `go install`,
+// which passes no build tags — so do not "fix" go-install by trying to force
+// it on. If a new language is added to grammarTable, add its matching
+// grammar_subset_<lang> tag to GRAMMAR_TAGS.
 package treesitter
 
 import (

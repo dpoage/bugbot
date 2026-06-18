@@ -60,14 +60,29 @@ Vendored detection runs in every mode (it is free and safe). Read-only mounts
 are never writable; the writable workspace copy remains the only writable
 surface for the untrusted run.
 
-## Quickstart
-
-Requires Go 1.26+ to build, and podman or docker for the repro stage
-(optional — everything else works without a container runtime).
+## Install
 
 ```sh
-make build                     # static binary at bin/bugbot
+go install github.com/dpoage/bugbot/cmd/bugbot@latest
+```
 
+That installs the latest `bugbot` into `$(go env GOPATH)/bin`. It needs only a
+Go 1.25+ toolchain — `modernc.org/sqlite` is pure Go, so there is no C compiler
+or CGO requirement, and the tree-sitter code-nav grammars are embedded in the
+binary. `go install` builds the **full** binary: every grammar embedded, no
+build tags required. podman or docker is needed only for the repro stage
+(optional — everything else works without a container runtime).
+
+For a ~21MB-smaller binary that embeds only the grammars the code-nav fallback
+actually uses, build from a checkout instead (see [Development](#development)):
+
+```sh
+make build                     # static, CGO-free binary at bin/bugbot
+```
+
+## Quickstart
+
+```sh
 cd /path/to/target/repo
 bugbot prime                   # repo-aware guidance for filling in bugbot.yaml
 bugbot init                    # writes a commented bugbot.yaml

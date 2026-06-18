@@ -12,7 +12,9 @@ GRAMMAR_TAGS := grammar_subset grammar_subset_go grammar_subset_python grammar_s
 .PHONY: build test vet lint fmt clean
 
 # build a single statically-linked binary (CGO disabled so modernc.org/sqlite
-# stays pure-Go and the binary is portable).
+# stays pure-Go and the binary is portable). This is the size-optimized build:
+# it embeds only the GRAMMAR_TAGS grammars. `go install .../cmd/bugbot@latest`
+# passes no tags and so produces the larger full binary (every grammar embedded).
 build:
 	CGO_ENABLED=0 go build -trimpath -tags '$(GRAMMAR_TAGS)' -o $(BINARY) $(PKG)
 

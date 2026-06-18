@@ -1,6 +1,6 @@
 module github.com/dpoage/bugbot
 
-go 1.26.4
+go 1.25.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.50.0
