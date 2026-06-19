@@ -238,7 +238,7 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 	if image == "" {
 		return SmokeVerdict{
 			OK:       false,
-			Category: "env_error",
+			Category: SmokeCategoryEnvError,
 			Detail:   "sandbox.image is not configured",
 		}, nil
 	}
@@ -247,7 +247,7 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 	if err != nil {
 		return SmokeVerdict{
 			OK:       false,
-			Category: "env_error",
+			Category: SmokeCategoryEnvError,
 			Detail:   "could not create sandbox CLI: " + err.Error(),
 		}, err
 	}
@@ -259,7 +259,7 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 	if err != nil {
 		return SmokeVerdict{
 			OK:       false,
-			Category: "env_error",
+			Category: SmokeCategoryEnvError,
 			Detail:   "could not resolve dependencies: " + err.Error(),
 		}, err
 	}

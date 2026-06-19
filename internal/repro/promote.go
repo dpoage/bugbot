@@ -224,9 +224,13 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 type patchOutcomeKind int
 
 const (
+	// iota 0 is reserved as a neutral/invalid zero value so a zero patchOutcome{}
+	// (e.g. returned alongside an error) is never mistaken for FixWitnessed and
+	// cannot drive a spurious Tier-0 promotion. Callers read kind only when err==nil.
+	_ patchOutcomeKind = iota
 	// patchOutcomeFixWitnessed: both targeted and suite runs passed with the
 	// fix applied — the finding is promoted to Tier-0.
-	patchOutcomeFixWitnessed patchOutcomeKind = iota
+	patchOutcomeFixWitnessed
 	// patchOutcomeNeedsHuman: all fix-plan attempts were exhausted without a
 	// passing run — a human reviewer is required.
 	patchOutcomeNeedsHuman
