@@ -9,6 +9,29 @@ import (
 	"github.com/dpoage/bugbot/internal/sandbox"
 )
 
+// SmokeCategory is the classification of a toolchain smoke-test result.
+// Typed so callers switch on it exhaustively instead of comparing bare strings.
+type SmokeCategory string
+
+const (
+	// SmokeCategoryOK: the toolchain responded — either a clean exit or a
+	// genuine test/compile failure. A genuine failure still means "the
+	// toolchain ran", which is what we probe for.
+	SmokeCategoryOK SmokeCategory = "ok"
+	// SmokeCategoryTimeout: the smoke command exceeded its deadline.
+	SmokeCategoryTimeout SmokeCategory = "timeout"
+	// SmokeCategoryEnvError: the sandbox environment failed (read-only
+	// filesystem, disk full, cache init error, sandbox exec failure, etc.).
+	SmokeCategoryEnvError SmokeCategory = "env_error"
+	// SmokeCategoryToolchainMissing: the toolchain binary is absent or the
+	// container image lacks the required runtime (exit 125/126/127, or
+	// "command not found" / "no such file" in output).
+	SmokeCategoryToolchainMissing SmokeCategory = "toolchain_missing"
+	// SmokeCategoryDepMissing: the toolchain is present but required
+	// dependencies are missing (missing module, missing package, etc.).
+	SmokeCategoryDepMissing SmokeCategory = "dep_missing"
+)
+
 // SmokeVerdict is the result of a toolchain smoke-test inside a sandbox.
 // It uses a vocabulary that mirrors interpret.go's verdict categories so that
 // the designer, the sandbox verifier, and doctor all speak the same language.
@@ -17,9 +40,8 @@ type SmokeVerdict struct {
 	// genuine test/compile failure.  A genuine failure still means "the
 	// toolchain ran", which is what we are probing for.
 	OK bool
-	// Category is one of: "ok", "env_error", "toolchain_missing",
-	// "dep_missing", "timeout".
-	Category string
+	// Category classifies the outcome.
+	Category SmokeCategory
 	// Detail is a short human-readable explanation (truncated output).
 	Detail string
 }
@@ -51,7 +73,7 @@ func VerifySandbox(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec
 	if len(cmd) == 0 {
 		return SmokeVerdict{
 			OK:       false,
-			Category: "env_error",
+			Category: SmokeCategoryEnvError,
 			Detail:   "could not derive a toolchain smoke command for this repo",
 		}, nil
 	}
@@ -76,7 +98,7 @@ func VerifySandbox(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec
 	if err != nil {
 		return SmokeVerdict{
 			OK:       false,
-			Category: "env_error",
+			Category: SmokeCategoryEnvError,
 			Detail:   "sandbox exec failed: " + err.Error(),
 		}, err
 	}
@@ -135,13 +157,13 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	if res.TimedOut {
 		return SmokeVerdict{
 			OK:       false,
-			Category: "timeout",
+			Category: SmokeCategoryTimeout,
 			Detail:   "smoke command timed out: " + trunc(out, 300),
 		}
 	}
 
 	if res.ExitCode == 0 {
-		return SmokeVerdict{OK: true, Category: "ok", Detail: trunc(out, 300)}
+		return SmokeVerdict{OK: true, Category: SmokeCategoryOK, Detail: trunc(out, 300)}
 	}
 
 	// Exit 125/126/127 mean the container runtime or shell failed before
@@ -149,7 +171,7 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	if res.ExitCode == 125 || res.ExitCode == 126 || res.ExitCode == 127 {
 		return SmokeVerdict{
 			OK:       false,
-			Category: "toolchain_missing",
+			Category: SmokeCategoryToolchainMissing,
 			Detail:   trunc(out, 300),
 		}
 	}
@@ -161,7 +183,7 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	if hasAnyMarker(lowOut, defaultEnvMarkers) {
 		return SmokeVerdict{
 			OK:       false,
-			Category: "env_error",
+			Category: SmokeCategoryEnvError,
 			Detail:   trunc(out, 300),
 		}
 	}
@@ -176,7 +198,7 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	if hasAnyMarker(lowOut, toolchainAbsentMarkers) {
 		return SmokeVerdict{
 			OK:       false,
-			Category: "toolchain_missing",
+			Category: SmokeCategoryToolchainMissing,
 			Detail:   trunc(out, 300),
 		}
 	}
@@ -195,7 +217,7 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	if hasAnyMarker(lowOut, depMarkers) {
 		return SmokeVerdict{
 			OK:       false,
-			Category: "dep_missing",
+			Category: SmokeCategoryDepMissing,
 			Detail:   trunc(out, 300),
 		}
 	}
@@ -203,7 +225,7 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	// Any other non-zero exit means the toolchain RAN but something went
 	// wrong (compile error, test failure, etc.).  That is "ok" for our
 	// purposes: we only care that the toolchain is present and functional.
-	return SmokeVerdict{OK: true, Category: "ok", Detail: trunc(out, 300)}
+	return SmokeVerdict{OK: true, Category: SmokeCategoryOK, Detail: trunc(out, 300)}
 }
 
 // RunSandboxVerify is the convenience entry-point called by doctor.

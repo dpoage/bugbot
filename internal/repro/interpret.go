@@ -7,6 +7,26 @@ import (
 	"github.com/dpoage/bugbot/internal/sandbox"
 )
 
+// VerdictReason is the classification of a non-demonstrating sandbox run.
+// Typed so callers switch on it exhaustively instead of comparing bare strings.
+type VerdictReason string
+
+const (
+	// VerdictReasonExitZero: the repro did not fail, so it did not demonstrate.
+	VerdictReasonExitZero VerdictReason = "exit_zero"
+	// VerdictReasonTimeout: the run exceeded its deadline.
+	VerdictReasonTimeout VerdictReason = "timeout"
+	// VerdictReasonEnvironmentError: the sandbox environment failed before the
+	// test could run (exit 125/126/127, read-only filesystem, disk full, etc.).
+	VerdictReasonEnvironmentError VerdictReason = "environment_error"
+	// VerdictReasonBuildError: the repro failed to compile or import.
+	VerdictReasonBuildError VerdictReason = "build_error"
+	// VerdictReasonToolchainError: the toolchain refused the request.
+	VerdictReasonToolchainError VerdictReason = "toolchain_error"
+	// VerdictReasonNotDemonstrated: non-zero exit without positive ran-evidence.
+	VerdictReasonNotDemonstrated VerdictReason = "not_demonstrated"
+)
+
 // verdict is the interpretation of a single sandbox run against the
 // reproduction contract.
 type verdict struct {
@@ -20,18 +40,14 @@ type verdict struct {
 	// toolchain refusals that happened to exit non-zero
 	// (e.g. "go: -race requires cgo").
 	demonstrated bool
-	// reason is a short category for a non-demonstration (for Summary / display).
-	//
-	// Possible values: "exit_zero", "timeout", "environment_error",
-	// "build_error", "toolchain_error", "not_demonstrated".
-	reason string
+	// reason is the non-demonstration category (zero value when demonstrated).
+	reason VerdictReason
 	// summary is a short human-readable digest of the run's output.
 	summary string
-	// ecosystem is the detected ecosystem name (e.g. "go", "python",
-	// "unknown"). Stored on the verdict so the prover's failure
-	// reporting can disambiguate env-failure from fix-rejected without
-	// re-running detection.
-	ecosystem string
+	// ecosystem is the detected ecosystem. Stored on the verdict so the
+	// prover's failure reporting can disambiguate env-failure from
+	// fix-rejected without re-running detection.
+	ecosystem sandbox.Ecosystem
 }
 
 // interpret applies the Tier-1 promotion rules to a sandbox result.
@@ -67,11 +83,11 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 
 	switch {
 	case res.TimedOut:
-		return verdict{reason: "timeout", summary: trunc(out, 400), ecosystem: eco.name}
+		return verdict{reason: VerdictReasonTimeout, summary: trunc(out, 400), ecosystem: eco.name}
 	case res.ExitCode == 0:
-		return verdict{reason: "exit_zero", summary: trunc(out, 400), ecosystem: eco.name}
+		return verdict{reason: VerdictReasonExitZero, summary: trunc(out, 400), ecosystem: eco.name}
 	case res.ExitCode == 125 || res.ExitCode == 126 || res.ExitCode == 127:
-		return verdict{reason: "environment_error", summary: envSummary(eco.name, out), ecosystem: eco.name}
+		return verdict{reason: VerdictReasonEnvironmentError, summary: envSummary(eco.name, out), ecosystem: eco.name}
 	}
 
 	// 0. Runtime instrumentation report — dispositive across ALL ecosystems.
@@ -92,18 +108,18 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 
 	// 1. Environment failure — same markers across every ecosystem.
 	if hasAnyMarker(lowOut, defaultEnvMarkers) {
-		return verdict{reason: "environment_error", summary: envSummary(eco.name, out), ecosystem: eco.name}
+		return verdict{reason: VerdictReasonEnvironmentError, summary: envSummary(eco.name, out), ecosystem: eco.name}
 	}
 	// 2. Toolchain refusal — ecosystem-specific. Checked before the
 	//    generic build markers so e.g. "go: -race requires cgo" lands
 	//    on toolchain_error (the more accurate category) instead of
 	//    build_error.
 	if hasAnyMarker(lowOut, eco.toolchainMarkers) {
-		return verdict{reason: "toolchain_error", summary: trunc(out, 400), ecosystem: eco.name}
+		return verdict{reason: VerdictReasonToolchainError, summary: trunc(out, 400), ecosystem: eco.name}
 	}
 	// 3. Build / compile / import failure — ecosystem-specific.
 	if hasAnyMarker(lowOut, eco.buildMarkers) {
-		return verdict{reason: "build_error", summary: trunc(out, 400), ecosystem: eco.name}
+		return verdict{reason: VerdictReasonBuildError, summary: trunc(out, 400), ecosystem: eco.name}
 	}
 	// 4. Positive ran-evidence — the bug demonstrated. This is the GATE.
 	if eco.hasRanEvidence(lowOut) {
@@ -114,7 +130,7 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	//    ecosystem's ran-marker set is intentionally conservative; in
 	//    practice this branch catches ad-hoc shell commands whose
 	//    output we don't trust.
-	return verdict{reason: "not_demonstrated", summary: trunc(out, 400), ecosystem: eco.name}
+	return verdict{reason: VerdictReasonNotDemonstrated, summary: trunc(out, 400), ecosystem: eco.name}
 }
 
 // feedback builds the corrective message sent back to the agent after a
@@ -143,7 +159,7 @@ func (v verdict) feedback(p *Plan) string {
 	// repro is unsupported. Override only when both the reason and
 	// the detected ecosystem line up; the reason category stays
 	// "environment_error" (other code switches on it).
-	if v.reason == "environment_error" && v.ecosystem == "bazel" {
+	if v.reason == VerdictReasonEnvironmentError && v.ecosystem == sandbox.EcosystemBazel {
 		b.WriteString(bazelEnvFeedback)
 		if len(p.Cmd) > 0 {
 			fmt.Fprintf(&b, "\n\nCommand run: %s", strings.Join(p.Cmd, " "))
@@ -162,28 +178,28 @@ func (v verdict) feedback(p *Plan) string {
 		return b.String()
 	}
 	switch v.reason {
-	case "exit_zero":
+	case VerdictReasonExitZero:
 		b.WriteString("Your repro ran but exited 0, so it did NOT demonstrate the bug. ")
 		b.WriteString("The test must FAIL on the current buggy code. ")
 		b.WriteString("Make the assertion check the CORRECT expected behavior so the bug makes it fail.")
-	case "build_error":
+	case VerdictReasonBuildError:
 		b.WriteString("Your repro failed to BUILD (compile error or missing dependency). ")
 		b.WriteString("A build failure is NOT a reproduction. Fix the test so it compiles using only ")
 		b.WriteString("the standard library and packages the repository already imports.")
-	case "toolchain_error":
+	case VerdictReasonToolchainError:
 		b.WriteString("Your repro was REJECTED by the toolchain (e.g. missing cgo, missing ")
 		b.WriteString("module, missing interpreter). A toolchain refusal is NOT a reproduction ")
 		b.WriteString("because the test never ran. Check the toolchain version and required ")
 		b.WriteString("dependencies, or pick a different repro command that the environment can run.")
-	case "timeout":
+	case VerdictReasonTimeout:
 		b.WriteString("Your repro timed out. Make it a fast, minimal test that returns quickly.")
-	case "environment_error":
+	case VerdictReasonEnvironmentError:
 		b.WriteString("Your repro failed because of the SANDBOX ENVIRONMENT, not the bug ")
 		b.WriteString("(e.g. missing command, read-only filesystem, cache/disk problem). ")
 		b.WriteString("An environment failure is NOT a reproduction. The workspace at the ")
 		b.WriteString("current directory and /tmp are writable; everything else is read-only. ")
 		b.WriteString("Adjust the command (or point tool caches at /tmp) and try again.")
-	case "not_demonstrated":
+	case VerdictReasonNotDemonstrated:
 		b.WriteString("Your repro exited non-zero but the output does not show that a test RAN ")
 		b.WriteString("and FAILED on the bug. A bare non-zero exit is never a demonstration — ")
 		b.WriteString("the test runner must actually execute the assertion and report a failure ")
@@ -241,8 +257,8 @@ const bazelEnvFeedback = "Your repro cannot run in this sandbox: the image lacks
 // Bazel gets its own message (see bazelEnvSummary); every other
 // ecosystem gets the truncated raw output, matching the prior
 // behavior bit-for-bit.
-func envSummary(ecosystem, out string) string {
-	if ecosystem == "bazel" {
+func envSummary(ecosystem sandbox.Ecosystem, out string) string {
+	if ecosystem == sandbox.EcosystemBazel {
 		return bazelEnvSummary
 	}
 	return trunc(out, 400)

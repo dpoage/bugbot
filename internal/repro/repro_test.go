@@ -449,19 +449,19 @@ func TestInterpret_EnvironmentFailuresNeverDemonstrate(t *testing.T) {
 		name   string
 		res    sandbox.Result
 		cmd    []string
-		reason string
+		reason VerdictReason
 	}{
-		{"runtime error 125", sandbox.Result{ExitCode: 125, Stderr: "podman: error"}, goCmd, "environment_error"},
-		{"not executable 126", sandbox.Result{ExitCode: 126, Stderr: "permission denied"}, goCmd, "environment_error"},
-		{"not found 127", sandbox.Result{ExitCode: 127, Stderr: "sh: gotest: not found"}, goCmd, "environment_error"},
+		{"runtime error 125", sandbox.Result{ExitCode: 125, Stderr: "podman: error"}, goCmd, VerdictReasonEnvironmentError},
+		{"not executable 126", sandbox.Result{ExitCode: 126, Stderr: "permission denied"}, goCmd, VerdictReasonEnvironmentError},
+		{"not found 127", sandbox.Result{ExitCode: 127, Stderr: "sh: gotest: not found"}, goCmd, VerdictReasonEnvironmentError},
 		// The real-world case this guard exists for: read-only root broke the
 		// Go build cache, exit 1 in 0.13s, and got promoted to Tier 1.
-		{"go build cache", sandbox.Result{ExitCode: 1, Stderr: "failed to initialize build cache at /root/.cache/go-build: mkdir /root/.cache: read-only file system"}, goCmd, "environment_error"},
-		{"read-only fs", sandbox.Result{ExitCode: 1, Stderr: "mkdir /data: Read-only file system"}, goCmd, "environment_error"},
-		{"disk full", sandbox.Result{ExitCode: 1, Stderr: "write /tmp/x: no space left on device"}, goCmd, "environment_error"},
-		{"timeout", sandbox.Result{ExitCode: -1, TimedOut: true}, goCmd, "timeout"},
-		{"exit zero", sandbox.Result{ExitCode: 0, Stdout: "ok"}, goCmd, "exit_zero"},
-		{"compile error", sandbox.Result{ExitCode: 2, Stderr: "./x_test.go:3:1: syntax error"}, goCmd, "build_error"},
+		{"go build cache", sandbox.Result{ExitCode: 1, Stderr: "failed to initialize build cache at /root/.cache/go-build: mkdir /root/.cache: read-only file system"}, goCmd, VerdictReasonEnvironmentError},
+		{"read-only fs", sandbox.Result{ExitCode: 1, Stderr: "mkdir /data: Read-only file system"}, goCmd, VerdictReasonEnvironmentError},
+		{"disk full", sandbox.Result{ExitCode: 1, Stderr: "write /tmp/x: no space left on device"}, goCmd, VerdictReasonEnvironmentError},
+		{"timeout", sandbox.Result{ExitCode: -1, TimedOut: true}, goCmd, VerdictReasonTimeout},
+		{"exit zero", sandbox.Result{ExitCode: 0, Stdout: "ok"}, goCmd, VerdictReasonExitZero},
+		{"compile error", sandbox.Result{ExitCode: 2, Stderr: "./x_test.go:3:1: syntax error"}, goCmd, VerdictReasonBuildError},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -613,7 +613,7 @@ func TestInterpret_PytestCollectionError_NotDemonstrated(t *testing.T) {
 	cases := []struct {
 		name   string
 		res    sandbox.Result
-		reason string
+		reason VerdictReason
 	}{
 		{
 			"ModuleNotFoundError",
@@ -621,7 +621,7 @@ func TestInterpret_PytestCollectionError_NotDemonstrated(t *testing.T) {
 				ExitCode: 4,
 				Stderr:   "ERROR tests/test_x.py - ModuleNotFoundError: No module named 'totally_missing_pkg'",
 			},
-			"build_error",
+			VerdictReasonBuildError,
 		},
 		{
 			"ImportError collection failure",
@@ -629,7 +629,7 @@ func TestInterpret_PytestCollectionError_NotDemonstrated(t *testing.T) {
 				ExitCode: 2,
 				Stderr:   "ImportError: cannot import name 'foo' from 'bug' (unknown location)",
 			},
-			"build_error",
+			VerdictReasonBuildError,
 		},
 		{
 			"pytest no tests ran",
@@ -637,7 +637,7 @@ func TestInterpret_PytestCollectionError_NotDemonstrated(t *testing.T) {
 				ExitCode: 5,
 				Stderr:   "pytest: error: no tests ran",
 			},
-			"toolchain_error",
+			VerdictReasonToolchainError,
 		},
 	}
 	for _, tc := range cases {
@@ -674,27 +674,27 @@ func TestInterpret_UnknownEcosystem_NotDemonstrated(t *testing.T) {
 func TestDetectEcosystem(t *testing.T) {
 	cases := []struct {
 		cmd  []string
-		want string
+		want sandbox.Ecosystem
 	}{
-		{[]string{"go", "test", "./..."}, "go"},
-		{[]string{"go", "test", "-race", "./..."}, "go"},
-		{[]string{"go", "build", "./..."}, "go"},
-		{[]string{"pytest", "tests/"}, "python"},
-		{[]string{"py.test", "tests/"}, "python"},
-		{[]string{"python", "-m", "pytest", "tests/"}, "python"},
-		{[]string{"python3", "-m", "py.test", "tests/"}, "python"},
-		{[]string{"cargo", "test"}, "rust"},
-		{[]string{"cargo", "build"}, "rust"},
-		{[]string{"npm", "test"}, "js"},
-		{[]string{"yarn", "test"}, "js"},
-		{[]string{"pnpm", "test"}, "js"},
-		{[]string{"npx", "jest"}, "js"},
-		{[]string{"jest", "src/"}, "js"},
-		{[]string{"vitest", "run"}, "js"},
-		{[]string{"ctest", "--output-on-failure"}, "cpp"},
-		{[]string{"bash", "-c", "go test ./..."}, "go"},
-		{[]string{"make", "test"}, "unknown"},
-		{[]string{}, "unknown"},
+		{[]string{"go", "test", "./..."}, sandbox.EcosystemGo},
+		{[]string{"go", "test", "-race", "./..."}, sandbox.EcosystemGo},
+		{[]string{"go", "build", "./..."}, sandbox.EcosystemGo},
+		{[]string{"pytest", "tests/"}, sandbox.EcosystemPython},
+		{[]string{"py.test", "tests/"}, sandbox.EcosystemPython},
+		{[]string{"python", "-m", "pytest", "tests/"}, sandbox.EcosystemPython},
+		{[]string{"python3", "-m", "py.test", "tests/"}, sandbox.EcosystemPython},
+		{[]string{"cargo", "test"}, sandbox.EcosystemRust},
+		{[]string{"cargo", "build"}, sandbox.EcosystemRust},
+		{[]string{"npm", "test"}, sandbox.EcosystemJS},
+		{[]string{"yarn", "test"}, sandbox.EcosystemJS},
+		{[]string{"pnpm", "test"}, sandbox.EcosystemJS},
+		{[]string{"npx", "jest"}, sandbox.EcosystemJS},
+		{[]string{"jest", "src/"}, sandbox.EcosystemJS},
+		{[]string{"vitest", "run"}, sandbox.EcosystemJS},
+		{[]string{"ctest", "--output-on-failure"}, sandbox.EcosystemCpp},
+		{[]string{"bash", "-c", "go test ./..."}, sandbox.EcosystemGo},
+		{[]string{"make", "test"}, sandbox.EcosystemUnknown},
+		{[]string{}, sandbox.EcosystemUnknown},
 	}
 	for _, tc := range cases {
 		t.Run(strings.Join(tc.cmd, " "), func(t *testing.T) {

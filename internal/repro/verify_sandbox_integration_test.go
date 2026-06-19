@@ -64,7 +64,7 @@ func TestVerifySandbox_Integration_ToolchainlessImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VerifySandbox error: %v", err)
 	}
-	if verdict.OK || verdict.Category != "toolchain_missing" {
+	if verdict.OK || verdict.Category != SmokeCategoryToolchainMissing {
 		t.Errorf("debian:bookworm-slim: expected toolchain_missing, got ok=%v category=%q detail=%q",
 			verdict.OK, verdict.Category, verdict.Detail)
 	}
