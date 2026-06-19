@@ -44,8 +44,12 @@ const (
 	// DefaultMaxIterations bounds the number of model turns in a single run.
 	DefaultMaxIterations = 20
 	// DefaultTokenBudget bounds cumulative input+output tokens across a run.
-	// Zero in Limits means "use this default"; a negative value means unlimited.
+	// Zero in Limits means "use this default"; Unlimited (-1) means no limit.
 	DefaultTokenBudget int64 = 1_000_000
+	// Unlimited signals that a Limits field has no cap. Distinct from zero,
+	// which means "use the package default". Applies to MaxIterations
+	// (use int(Unlimited)) and TokenBudget.
+	Unlimited int64 = -1
 )
 
 // Limits bounds a single [Runner.Run]. The zero value is valid and resolves to
@@ -61,9 +65,7 @@ type Limits struct {
 	// CacheReadWeight discounts cache-read input tokens in the per-run budget
 	// check. Valid range is (0,1]; the funnel always passes an already-resolved
 	// non-zero weight (config 0 -> DefaultCacheReadBudgetWeight upstream). A
-	// zero/negative value here is treated as 1.0 (raw, no discount) as a
-	// defensive fallback for direct callers — it is NOT a way to request "cache
-	// reads are free"; that would require an explicit positive epsilon.
+	// zero/negative value is resolved to 1.0 (no discount) by resolve().
 	CacheReadWeight float64
 	// HistoryTokenBudget enables threshold-triggered history compaction. When the
 	// estimated size of the growing message history (bytes/4 over message content
@@ -105,6 +107,9 @@ func (l Limits) resolve() Limits {
 	}
 	if out.TokenBudget == 0 {
 		out.TokenBudget = DefaultTokenBudget
+	}
+	if out.CacheReadWeight <= 0 {
+		out.CacheReadWeight = 1.0
 	}
 	return out
 }
