@@ -136,136 +136,132 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 		f.Status = StatusOpen
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		suppressed, err := isSuppressedTx(ctx, tx, f.Fingerprint)
+		if err != nil {
+			return err
+		}
+		if suppressed {
+			f.Status = StatusDismissed
+		}
+
+		now := nowUTC()
+
+		// Does a row already exist for this fingerprint?
+		var existingID, existingCreated string
+		var existingTier int
+		var existingRepro sql.NullString
+		var existingNeedsHuman int
+		err = tx.QueryRowContext(ctx,
+			`SELECT id, created_at, tier, repro_path, needs_human FROM findings WHERE fingerprint = ?`, f.Fingerprint,
+		).Scan(&existingID, &existingCreated, &existingTier, &existingRepro, &existingNeedsHuman)
+
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			if f.ID == "" {
+				f.ID = newID()
+			}
+			f.CreatedAt = now
+			f.UpdatedAt = now
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO findings
+				  (id, fingerprint, title, description, reasoning, severity, tier,
+				   status, lens, file, line, commit_sha, file_hash, repro_path,
+				   fix_patch, needs_human,
+				   corroborating_lenses, created_at, updated_at)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.Severity,
+				f.Tier, string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA,
+				f.FileHash, nullStr(f.ReproPath), f.FixPatch, boolInt(f.NeedsHuman),
+				encodeLenses(f.CorroboratingLenses),
+				f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout),
+			); err != nil {
+				return err
+			}
+
+		case err != nil:
+			return err
+
+		default:
+			// Update in place: keep id and created_at, refresh everything else.
+			// Promotion-preserving rules (implicit re-scan must never regress
+			// promotion state earned by a prior sandboxed reproduce attempt):
+			//
+			//   tier       — never increase the tier number via implicit upsert; lower
+			//                number is stronger (1=reproduced, 2=verified, 3=suspected).
+			//                MIN(stored, incoming) is enforced with a CASE expression so
+			//                an incoming T2 re-scan never demotes a stored T1.  An
+			//                explicit promotion (incoming T1 on a stored T2) still
+			//                promotes correctly because MIN(2,1)=1.
+			//
+			//   repro_path — never clear a non-empty stored repro_path with an empty
+			//                incoming value.  A genuine re-repro (non-empty incoming)
+			//                updates it normally.  nullStr converts "" to NULL so the
+			//                IS NULL check is sufficient; no separate ''='' check needed.
+			//
+			//   needs_human — once the patch-prover exhausts its budget and sets this
+			//                 flag, implicit re-scans (which do not run the patch-prover)
+			//                 must not clear it.  A re-scan always produces
+			//                 NeedsHuman=false; without preservation the flag would be
+			//                 cleared on every sweep.  Explicit mutation paths (promoteFinding,
+			//                 patch.go) read-then-upsert with the current row, so they carry
+			//                 the stored value and are unaffected by this guard.
+			f.ID = existingID
+			created, perr := parseTime(existingCreated)
+			if perr != nil {
+				return perr
+			}
+			f.CreatedAt = created
+			f.UpdatedAt = now
+
+			// Resolve the promotion-guarded values before executing the UPDATE so that
+			// the returned Finding struct accurately reflects what was actually written.
+			if f.Tier > existingTier {
+				// Incoming tier is weaker (higher number); keep the stored stronger tier.
+				f.Tier = existingTier
+			}
+			if f.ReproPath == "" && existingRepro.Valid && existingRepro.String != "" {
+				// Incoming has no repro; preserve the stored artifact path.
+				f.ReproPath = existingRepro.String
+			}
+			if existingNeedsHuman != 0 {
+				// Stored needs_human=true; do not let a re-scan clear it.
+				f.NeedsHuman = true
+			}
+
+			// The CASE expressions mirror the Go logic above to guarantee atomicity —
+			// a concurrent writer cannot slip in between the SELECT and this UPDATE.
+			// Arg order matches the positional ? placeholders exactly:
+			//   tier        : ?, ?  → f.Tier (compare), f.Tier (THEN value)
+			//   repro_path  : ?, ?  → nullStr(f.ReproPath) × 2
+			//   needs_human : ?     → boolInt(f.NeedsHuman)
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE findings SET
+				  title=?, description=?, reasoning=?, severity=?,
+				  tier       = CASE WHEN ? < tier THEN ? ELSE tier END,
+				  status=?,
+				  lens=?, file=?, line=?, commit_sha=?, file_hash=?,
+				  repro_path = CASE WHEN ? IS NULL THEN repro_path ELSE ? END,
+				  fix_patch=?,
+				  needs_human = CASE WHEN needs_human = 1 THEN 1 ELSE ? END,
+				  corroborating_lenses=?, updated_at=?
+				WHERE id=?`,
+				f.Title, f.Description, f.Reasoning, f.Severity,
+				f.Tier, f.Tier,
+				string(f.Status),
+				f.Lens, f.File, f.Line, f.CommitSHA, f.FileHash,
+				nullStr(f.ReproPath), nullStr(f.ReproPath),
+				f.FixPatch,
+				boolInt(f.NeedsHuman),
+				encodeLenses(f.CorroboratingLenses),
+				f.UpdatedAt.Format(timeLayout), f.ID,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return Finding{}, err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	suppressed, err := isSuppressedTx(ctx, tx, f.Fingerprint)
-	if err != nil {
-		return Finding{}, err
-	}
-	if suppressed {
-		f.Status = StatusDismissed
-	}
-
-	now := nowUTC()
-
-	// Does a row already exist for this fingerprint?
-	var existingID, existingCreated string
-	var existingTier int
-	var existingRepro sql.NullString
-	var existingNeedsHuman int
-	err = tx.QueryRowContext(ctx,
-		`SELECT id, created_at, tier, repro_path, needs_human FROM findings WHERE fingerprint = ?`, f.Fingerprint,
-	).Scan(&existingID, &existingCreated, &existingTier, &existingRepro, &existingNeedsHuman)
-
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		if f.ID == "" {
-			f.ID = newID()
-		}
-		f.CreatedAt = now
-		f.UpdatedAt = now
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO findings
-			  (id, fingerprint, title, description, reasoning, severity, tier,
-			   status, lens, file, line, commit_sha, file_hash, repro_path,
-			   fix_patch, needs_human,
-			   corroborating_lenses, created_at, updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.Severity,
-			f.Tier, string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA,
-			f.FileHash, nullStr(f.ReproPath), f.FixPatch, boolInt(f.NeedsHuman),
-			encodeLenses(f.CorroboratingLenses),
-			f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout),
-		); err != nil {
-			return Finding{}, err
-		}
-
-	case err != nil:
-		return Finding{}, err
-
-	default:
-		// Update in place: keep id and created_at, refresh everything else.
-		// Promotion-preserving rules (implicit re-scan must never regress
-		// promotion state earned by a prior sandboxed reproduce attempt):
-		//
-		//   tier       — never increase the tier number via implicit upsert; lower
-		//                number is stronger (1=reproduced, 2=verified, 3=suspected).
-		//                MIN(stored, incoming) is enforced with a CASE expression so
-		//                an incoming T2 re-scan never demotes a stored T1.  An
-		//                explicit promotion (incoming T1 on a stored T2) still
-		//                promotes correctly because MIN(2,1)=1.
-		//
-		//   repro_path — never clear a non-empty stored repro_path with an empty
-		//                incoming value.  A genuine re-repro (non-empty incoming)
-		//                updates it normally.  nullStr converts "" to NULL so the
-		//                IS NULL check is sufficient; no separate ''='' check needed.
-		//
-		//   needs_human — once the patch-prover exhausts its budget and sets this
-		//                 flag, implicit re-scans (which do not run the patch-prover)
-		//                 must not clear it.  A re-scan always produces
-		//                 NeedsHuman=false; without preservation the flag would be
-		//                 cleared on every sweep.  Explicit mutation paths (promoteFinding,
-		//                 patch.go) read-then-upsert with the current row, so they carry
-		//                 the stored value and are unaffected by this guard.
-		f.ID = existingID
-		created, perr := parseTime(existingCreated)
-		if perr != nil {
-			return Finding{}, perr
-		}
-		f.CreatedAt = created
-		f.UpdatedAt = now
-
-		// Resolve the promotion-guarded values before executing the UPDATE so that
-		// the returned Finding struct accurately reflects what was actually written.
-		if f.Tier > existingTier {
-			// Incoming tier is weaker (higher number); keep the stored stronger tier.
-			f.Tier = existingTier
-		}
-		if f.ReproPath == "" && existingRepro.Valid && existingRepro.String != "" {
-			// Incoming has no repro; preserve the stored artifact path.
-			f.ReproPath = existingRepro.String
-		}
-		if existingNeedsHuman != 0 {
-			// Stored needs_human=true; do not let a re-scan clear it.
-			f.NeedsHuman = true
-		}
-
-		// The CASE expressions mirror the Go logic above to guarantee atomicity —
-		// a concurrent writer cannot slip in between the SELECT and this UPDATE.
-		// Arg order matches the positional ? placeholders exactly:
-		//   tier        : ?, ?  → f.Tier (compare), f.Tier (THEN value)
-		//   repro_path  : ?, ?  → nullStr(f.ReproPath) × 2
-		//   needs_human : ?     → boolInt(f.NeedsHuman)
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE findings SET
-			  title=?, description=?, reasoning=?, severity=?,
-			  tier       = CASE WHEN ? < tier THEN ? ELSE tier END,
-			  status=?,
-			  lens=?, file=?, line=?, commit_sha=?, file_hash=?,
-			  repro_path = CASE WHEN ? IS NULL THEN repro_path ELSE ? END,
-			  fix_patch=?,
-			  needs_human = CASE WHEN needs_human = 1 THEN 1 ELSE ? END,
-			  corroborating_lenses=?, updated_at=?
-			WHERE id=?`,
-			f.Title, f.Description, f.Reasoning, f.Severity,
-			f.Tier, f.Tier,
-			string(f.Status),
-			f.Lens, f.File, f.Line, f.CommitSHA, f.FileHash,
-			nullStr(f.ReproPath), nullStr(f.ReproPath),
-			f.FixPatch,
-			boolInt(f.NeedsHuman),
-			encodeLenses(f.CorroboratingLenses),
-			f.UpdatedAt.Format(timeLayout), f.ID,
-		); err != nil {
-			return Finding{}, err
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
 		return Finding{}, err
 	}
 	return f, nil
@@ -333,33 +329,29 @@ func (s *Store) ListFindings(ctx context.Context, filter FindingFilter) ([]Findi
 //
 // reason is only consulted for dismissals; pass "" otherwise.
 func (s *Store) UpdateStatus(ctx context.Context, fingerprint string, status Status, reason string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	res, err := tx.ExecContext(ctx,
-		`UPDATE findings SET status = ?, updated_at = ? WHERE fingerprint = ?`,
-		string(status), nowUTC().Format(timeLayout), fingerprint,
-	)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-
-	if status == StatusDismissed {
-		if err := addSuppressionTx(ctx, tx, fingerprint, reason); err != nil {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE findings SET status = ?, updated_at = ? WHERE fingerprint = ?`,
+			string(status), nowUTC().Format(timeLayout), fingerprint,
+		)
+		if err != nil {
 			return err
 		}
-	}
-	return tx.Commit()
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+
+		if status == StatusDismissed {
+			if err := addSuppressionTx(ctx, tx, fingerprint, reason); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // MarkFixed sets the finding's status to StatusFixed.
@@ -379,46 +371,42 @@ func (s *Store) AddCorroboratingLenses(ctx context.Context, fingerprint string, 
 	if len(lenses) == 0 {
 		return nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		var corrob string
+		err := tx.QueryRowContext(ctx,
+			`SELECT corroborating_lenses FROM findings WHERE fingerprint = ?`, fingerprint,
+		).Scan(&corrob)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
 
-	var corrob string
-	err = tx.QueryRowContext(ctx,
-		`SELECT corroborating_lenses FROM findings WHERE fingerprint = ?`, fingerprint,
-	).Scan(&corrob)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
+		// Merge existing + new, deduplicate, sort.
+		existing := decodeLenses(corrob)
+		seen := make(map[string]bool, len(existing)+len(lenses))
+		for _, l := range existing {
+			seen[l] = true
+		}
+		for _, l := range lenses {
+			seen[l] = true
+		}
+		merged := make([]string, 0, len(seen))
+		for l := range seen {
+			merged = append(merged, l)
+		}
+		sort.Strings(merged)
 
-	// Merge existing + new, deduplicate, sort.
-	existing := decodeLenses(corrob)
-	seen := make(map[string]bool, len(existing)+len(lenses))
-	for _, l := range existing {
-		seen[l] = true
-	}
-	for _, l := range lenses {
-		seen[l] = true
-	}
-	merged := make([]string, 0, len(seen))
-	for l := range seen {
-		merged = append(merged, l)
-	}
-	sort.Strings(merged)
-
-	now := nowUTC()
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE findings SET corroborating_lenses = ?, updated_at = ? WHERE fingerprint = ?`,
-		encodeLenses(merged), now.Format(timeLayout), fingerprint,
-	); err != nil {
-		return err
-	}
-	return tx.Commit()
+		now := nowUTC()
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE findings SET corroborating_lenses = ?, updated_at = ? WHERE fingerprint = ?`,
+			encodeLenses(merged), now.Format(timeLayout), fingerprint,
+		); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 // findingColumns is the SELECT column list shared by single- and multi-row reads.

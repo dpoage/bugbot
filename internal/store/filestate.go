@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"strings"
 	"time"
 )
 
@@ -80,37 +79,33 @@ func (s *Store) UpsertFileStates(ctx context.Context, states []FileState) error 
 	if len(states) == 0 {
 		return nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO file_state (path, content_hash, last_scanned_commit, last_scanned_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(path) DO UPDATE SET
-		  content_hash = excluded.content_hash,
-		  last_scanned_commit = excluded.last_scanned_commit,
-		  last_scanned_at = excluded.last_scanned_at`)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = stmt.Close() }()
-
-	now := nowUTC().Format(timeLayout)
-	for _, st := range states {
-		scannedAt := now
-		if !st.LastScannedAt.IsZero() {
-			scannedAt = st.LastScannedAt.UTC().Format(timeLayout)
-		}
-		if _, err := stmt.ExecContext(ctx,
-			st.Path, st.ContentHash, st.LastScannedCommit, scannedAt,
-		); err != nil {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT INTO file_state (path, content_hash, last_scanned_commit, last_scanned_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(path) DO UPDATE SET
+			  content_hash = excluded.content_hash,
+			  last_scanned_commit = excluded.last_scanned_commit,
+			  last_scanned_at = excluded.last_scanned_at`)
+		if err != nil {
 			return err
 		}
-	}
-	return tx.Commit()
+		defer func() { _ = stmt.Close() }()
+
+		now := nowUTC().Format(timeLayout)
+		for _, st := range states {
+			scannedAt := now
+			if !st.LastScannedAt.IsZero() {
+				scannedAt = st.LastScannedAt.UTC().Format(timeLayout)
+			}
+			if _, err := stmt.ExecContext(ctx,
+				st.Path, st.ContentHash, st.LastScannedCommit, scannedAt,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // RefreshContentHashes upserts a batch of watermarks, updating content_hash and
@@ -128,33 +123,29 @@ func (s *Store) RefreshContentHashes(ctx context.Context, states []FileState) er
 	if len(states) == 0 {
 		return nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO file_state (path, content_hash, last_scanned_commit, last_scanned_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(path) DO UPDATE SET
-		  content_hash = excluded.content_hash,
-		  last_scanned_commit = excluded.last_scanned_commit`)
-	// Note: last_scanned_at is intentionally absent from the conflict UPDATE so
-	// existing rows keep their truthful scan timestamp.
-	if err != nil {
-		return err
-	}
-	defer func() { _ = stmt.Close() }()
-
-	for _, st := range states {
-		if _, err := stmt.ExecContext(ctx,
-			st.Path, st.ContentHash, st.LastScannedCommit, epochSentinel,
-		); err != nil {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT INTO file_state (path, content_hash, last_scanned_commit, last_scanned_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(path) DO UPDATE SET
+			  content_hash = excluded.content_hash,
+			  last_scanned_commit = excluded.last_scanned_commit`)
+		// Note: last_scanned_at is intentionally absent from the conflict UPDATE so
+		// existing rows keep their truthful scan timestamp.
+		if err != nil {
 			return err
 		}
-	}
-	return tx.Commit()
+		defer func() { _ = stmt.Close() }()
+
+		for _, st := range states {
+			if _, err := stmt.ExecContext(ctx,
+				st.Path, st.ContentHash, st.LastScannedCommit, epochSentinel,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // TouchScanCoverage records that the given files were actually covered by a
@@ -177,31 +168,27 @@ func (s *Store) TouchScanCoverage(ctx context.Context, paths []string, commit st
 	if len(paths) == 0 {
 		return nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO file_state (path, content_hash, last_scanned_commit, last_scanned_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(path) DO UPDATE SET
-		  content_hash = CASE WHEN excluded.content_hash != '' THEN excluded.content_hash ELSE file_state.content_hash END,
-		  last_scanned_commit = excluded.last_scanned_commit,
-		  last_scanned_at = excluded.last_scanned_at`)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = stmt.Close() }()
-
-	now := nowUTC().Format(timeLayout)
-	for _, p := range paths {
-		if _, err := stmt.ExecContext(ctx, p, hashes[p], commit, now); err != nil {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT INTO file_state (path, content_hash, last_scanned_commit, last_scanned_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(path) DO UPDATE SET
+			  content_hash = CASE WHEN excluded.content_hash != '' THEN excluded.content_hash ELSE file_state.content_hash END,
+			  last_scanned_commit = excluded.last_scanned_commit,
+			  last_scanned_at = excluded.last_scanned_at`)
+		if err != nil {
 			return err
 		}
-	}
-	return tx.Commit()
+		defer func() { _ = stmt.Close() }()
+
+		now := nowUTC().Format(timeLayout)
+		for _, p := range paths {
+			if _, err := stmt.ExecContext(ctx, p, hashes[p], commit, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // Watermark is the sweep-ordering view of a file_state row: when the file was
@@ -232,9 +219,7 @@ func (s *Store) ScanWatermarks(ctx context.Context, paths []string) (map[string]
 }
 
 func (s *Store) scanWatermarksChunk(ctx context.Context, paths []string, out map[string]Watermark) error {
-	placeholders := strings.Repeat("?,", len(paths))
-	placeholders = placeholders[:len(placeholders)-1] // trim trailing comma
-	q := `SELECT path, content_hash, last_scanned_at FROM file_state WHERE path IN (` + placeholders + `)`
+	q := `SELECT path, content_hash, last_scanned_at FROM file_state WHERE path IN (` + buildPlaceholders(len(paths)) + `)`
 	args := make([]interface{}, len(paths))
 	for i, p := range paths {
 		args[i] = p

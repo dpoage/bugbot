@@ -24,23 +24,19 @@ type Suppression struct {
 // fingerprint pre-emptively still prevents a future UpsertFinding from opening
 // it.
 func (s *Store) AddSuppression(ctx context.Context, fingerprint, reason string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if err := addSuppressionTx(ctx, tx, fingerprint, reason); err != nil {
-		return err
-	}
-	// Flip any existing finding to dismissed so it stops being reported.
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE findings SET status = ?, updated_at = ? WHERE fingerprint = ?`,
-		string(StatusDismissed), nowUTC().Format(timeLayout), fingerprint,
-	); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := addSuppressionTx(ctx, tx, fingerprint, reason); err != nil {
+			return err
+		}
+		// Flip any existing finding to dismissed so it stops being reported.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE findings SET status = ?, updated_at = ? WHERE fingerprint = ?`,
+			string(StatusDismissed), nowUTC().Format(timeLayout), fingerprint,
+		); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 // IsSuppressed reports whether the fingerprint has been dismissed. Triage calls

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -82,32 +81,31 @@ func (s *Store) PendingLeads(ctx context.Context, targetLens string) ([]Lead, er
 	return out, rows.Err()
 }
 
-// ConsumeLeads deletes the given lead IDs in a single transaction. Once a
-// finder has claimed a lead at the start of its run, the row is removed from
-// the blackboard; a re-post of the same (target_lens, file, line) later is a
-// fresh INSERT rather than a flip back to 'posted'.
+// ConsumeLeads deletes the given lead IDs in a single transaction. The
+// DELETE's IN-list is chunked to sqliteMaxVars so a finder that drained the
+// blackboard (e.g. 5000+ leads) does not trip the host-parameter ceiling
+// (SQLITE_MAX_VARIABLE_NUMBER=999 by default) and silently leave later ids
+// undeleted. Every chunk runs inside the same transaction so the whole claim
+// is atomic: either all ids are deleted or none.
 func (s *Store) ConsumeLeads(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	placeholders := strings.Repeat(",?", len(ids))[1:] // "?,?,?" for len=3
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
-	if _, err := tx.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM leads WHERE id IN (%s)`, placeholders),
-		args...,
-	); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		for _, chunk := range chunkStrings(ids, sqliteMaxVars) {
+			args := make([]any, len(chunk))
+			for i, id := range chunk {
+				args[i] = id
+			}
+			if _, err := tx.ExecContext(ctx,
+				fmt.Sprintf(`DELETE FROM leads WHERE id IN (%s)`, buildPlaceholders(len(chunk))),
+				args...,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // scanLead reads one lead row from a *sql.Rows cursor.

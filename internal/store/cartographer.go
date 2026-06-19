@@ -2,8 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
-	"strings"
 	"time"
 )
 
@@ -52,10 +52,8 @@ func (s *Store) GetPackageSummaries(ctx context.Context, pkgs []string) (map[str
 }
 
 func (s *Store) getPackageSummariesChunk(ctx context.Context, pkgs []string, out map[string]PackageSummary) error {
-	placeholders := strings.Repeat("?,", len(pkgs))
-	placeholders = placeholders[:len(placeholders)-1] // trim trailing comma
 	q := `SELECT pkg, fingerprint, summary, model, updated_at
-	      FROM package_summaries WHERE pkg IN (` + placeholders + `)`
+	      FROM package_summaries WHERE pkg IN (` + buildPlaceholders(len(pkgs)) + `)`
 	args := make([]interface{}, len(pkgs))
 	for i, p := range pkgs {
 		args[i] = p
@@ -100,38 +98,34 @@ func (s *Store) UpsertPackageSummaries(ctx context.Context, sums []PackageSummar
 			return ErrInvalidPackageSummary
 		}
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO package_summaries (pkg, fingerprint, summary, model, updated_at)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(pkg) DO UPDATE SET
-		  fingerprint = excluded.fingerprint,
-		  summary     = excluded.summary,
-		  model       = excluded.model,
-		  updated_at  = excluded.updated_at`)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = stmt.Close() }()
-
-	now := nowUTC().Format(timeLayout)
-	for _, ps := range sums {
-		updatedAt := now
-		if !ps.UpdatedAt.IsZero() {
-			updatedAt = ps.UpdatedAt.UTC().Format(timeLayout)
-		}
-		if _, err := stmt.ExecContext(ctx,
-			ps.Pkg, ps.Fingerprint, ps.Summary, ps.Model, updatedAt,
-		); err != nil {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT INTO package_summaries (pkg, fingerprint, summary, model, updated_at)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(pkg) DO UPDATE SET
+			  fingerprint = excluded.fingerprint,
+			  summary     = excluded.summary,
+			  model       = excluded.model,
+			  updated_at  = excluded.updated_at`)
+		if err != nil {
 			return err
 		}
-	}
-	return tx.Commit()
+		defer func() { _ = stmt.Close() }()
+
+		now := nowUTC().Format(timeLayout)
+		for _, ps := range sums {
+			updatedAt := now
+			if !ps.UpdatedAt.IsZero() {
+				updatedAt = ps.UpdatedAt.UTC().Format(timeLayout)
+			}
+			if _, err := stmt.ExecContext(ctx,
+				ps.Pkg, ps.Fingerprint, ps.Summary, ps.Model, updatedAt,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // ListPackageSummaries returns every persisted package summary, ordered by
