@@ -13,6 +13,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/progress"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // staleAfter is how long without a status update before a running scan/daemon is
@@ -86,7 +87,7 @@ func renderStatus(ctx context.Context, out io.Writer, cfg config.Config, st prog
 	_, _ = fmt.Fprintf(out, "  started:      %s\n", fmtTime(st.StartedAt))
 	_, _ = fmt.Fprintf(out, "  last update:  %s (%s ago)\n", fmtTime(st.LastUpdated), now.Sub(st.LastUpdated).Round(time.Second))
 	if st.ScanKind != "" {
-		_, _ = fmt.Fprintf(out, "  scan:         kind=%s commit=%s\n", st.ScanKind, shortSHA(st.Commit))
+		_, _ = fmt.Fprintf(out, "  scan:         kind=%s commit=%s\n", st.ScanKind, util.ShortSHA(st.Commit))
 	}
 	if st.Stage != "" {
 		_, _ = fmt.Fprintf(out, "  stage:        %s\n", st.Stage)

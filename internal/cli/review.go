@@ -12,6 +12,7 @@ import (
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // newReviewCmd runs the detection funnel over a pull request's changed code and
@@ -188,7 +189,7 @@ func executeReview(ctx context.Context, p reviewParams) (reviewRun, error) {
 	if head != pr.HeadSHA {
 		return reviewRun{}, fmt.Errorf(
 			"local HEAD %s does not match PR #%d head %s; check out the PR head first:\n  git fetch origin pull/%d/head && git checkout %s",
-			shortSHA(head), p.prNumber, shortSHA(pr.HeadSHA), p.prNumber, pr.HeadSHA)
+			util.ShortSHA(head), p.prNumber, util.ShortSHA(pr.HeadSHA), p.prNumber, pr.HeadSHA)
 	}
 
 	res, err := runReviewScan(ctx, repo, p, pr)
@@ -255,11 +256,11 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 	// blast radius and intersects with scan scope internally.
 	changes, err := repo.ChangedFiles(ctx, pr.BaseSHA, pr.HeadSHA)
 	if err != nil {
-		return nil, fmt.Errorf("diff %s..%s: %w", shortSHA(pr.BaseSHA), shortSHA(pr.HeadSHA), err)
+		return nil, fmt.Errorf("diff %s..%s: %w", util.ShortSHA(pr.BaseSHA), util.ShortSHA(pr.HeadSHA), err)
 	}
 	changed := ingest.ChangedPaths(changes)
 	_, _ = fmt.Fprintf(p.out, "Reviewing PR #%d: %d changed file(s) (%s..%s)\n",
-		p.prNumber, len(changed), shortSHA(pr.BaseSHA), shortSHA(pr.HeadSHA))
+		p.prNumber, len(changed), util.ShortSHA(pr.BaseSHA), util.ShortSHA(pr.HeadSHA))
 
 	opts, sbDegraded, sbErr := buildFunnelOptions(p.cfg, FunnelOptionOverrides{
 		Lenses:      p.lenses,
@@ -364,7 +365,7 @@ func printReviewSummary(out io.Writer, res *funnel.Result, plan planResult, pr p
 		}
 	}
 
-	_, _ = fmt.Fprintf(out, "\nReview complete for PR #%d (head %s)\n", pr.Number, shortSHA(pr.HeadSHA))
+	_, _ = fmt.Fprintf(out, "\nReview complete for PR #%d (head %s)\n", pr.Number, util.ShortSHA(pr.HeadSHA))
 	_, _ = fmt.Fprintf(out, "Findings surfaced: %d (new verified: %d)\n", len(res.Findings), len(plan.newGateFingerprints))
 	verb := "Comments"
 	if dryRun {

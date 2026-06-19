@@ -24,6 +24,7 @@ import (
 	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // newScanCmd runs a single pass of the detection funnel over a target repo. It
@@ -448,7 +449,7 @@ func printReproSummary(out io.Writer, s *repro.Summary) {
 // (tier, severity, file:line, title), per-stage counts, token spend, and any
 // degradation/skip notes.
 func printResult(out io.Writer, res *funnel.Result) {
-	_, _ = fmt.Fprintf(out, "\nScan complete (commit %s)\n", shortSHA(res.Commit))
+	_, _ = fmt.Fprintf(out, "\nScan complete (commit %s)\n", util.ShortSHA(res.Commit))
 
 	// Reliability gate: a scan where any finder produced no parseable output has
 	// an untrustworthy result. "No findings" then means "we don't know", not
@@ -522,7 +523,7 @@ func printResult(out io.Writer, res *funnel.Result) {
 // breakdown followed by the projected token spend and wall time and the
 // provenance of that projection. No LLM call was made to produce it.
 func printEstimate(out io.Writer, e *funnel.Estimate) {
-	_, _ = fmt.Fprintf(out, "\nScan estimate (%s, commit %s) — no LLM calls made\n", e.Kind, shortSHA(e.Commit))
+	_, _ = fmt.Fprintf(out, "\nScan estimate (%s, commit %s) — no LLM calls made\n", e.Kind, util.ShortSHA(e.Commit))
 
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintf(tw, "  in-scope files\t%d\n", e.Files)
@@ -646,15 +647,6 @@ func buildScanChangeContext(ctx context.Context, repo *ingest.Repo, fromSHA, toS
 		cc.Diff = diff
 	}
 	return cc
-}
-
-// shortSHA abbreviates a commit SHA for display, leaving short/empty values
-// untouched.
-func shortSHA(sha string) string {
-	if len(sha) > 12 {
-		return sha[:12]
-	}
-	return sha
 }
 
 // runAnalyzerSeed attempts to run the static-analyzer seeding step before the

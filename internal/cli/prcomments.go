@@ -10,6 +10,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // markerFP is the hidden HTML-comment marker that keys a per-finding bugbot
@@ -277,7 +278,7 @@ func planSync(
 	suspectedMode string,
 ) planResult {
 	plan := planResult{newGateFingerprints: map[string]bool{}}
-	headShort := shortSHA(headSHA)
+	headShort := util.ShortSHA(headSHA)
 
 	// Partition findings: inline-eligible (tier<=2, commentable line) vs
 	// summary-only (everything else surfaced).

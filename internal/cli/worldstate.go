@@ -10,6 +10,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // worldState is the accumulated picture of a bugbot installation, as opposed
@@ -127,7 +128,7 @@ func renderWorldState(out io.Writer, ws worldState, now time.Time) {
 			when = "finished " + age(ws.LastRun.FinishedAt, now)
 		}
 		_, _ = fmt.Fprintf(out, "  last run:     %s commit=%s %s\n",
-			ws.LastRun.Kind, shortSHA(ws.LastRun.CommitSHA), when)
+			ws.LastRun.Kind, util.ShortSHA(ws.LastRun.CommitSHA), when)
 	}
 }
 
