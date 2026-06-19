@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -12,6 +13,16 @@ import (
 
 	"github.com/dpoage/bugbot/internal/llm"
 )
+
+// ErrUnparseableOutput marks a RunJSON failure whose cause is the model's final
+// answer itself: it could not be parsed as JSON, or it parsed but violated the
+// declared schema. This is distinct from an infrastructure failure (LLM
+// transport, context cancellation) in the underlying tool loop, which RunJSON
+// returns unwrapped from r.run / r.repair. Callers that drive their own
+// revision loop can test errors.Is(err, ErrUnparseableOutput) to treat a
+// malformed model answer as a recoverable, retry-able outcome instead of a hard
+// abort.
+var ErrUnparseableOutput = errors.New("model output did not parse as JSON")
 
 // RunJSON runs the tool loop for task, instructing the model to return its final
 // answer as a single JSON value matching schema, then unmarshals that answer
@@ -75,8 +86,8 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 	// also preserves the budget overshoot bound (no extra post-exhaustion call).
 	if outcome.Truncated &&
 		(outcome.TruncationReason == TruncTokenBudget || outcome.TruncationReason == TruncBudgetPool) {
-		return outcome, fmt.Errorf("agent: model output did not parse as JSON%s: %w",
-			truncationNote(outcome), perr)
+		return outcome, fmt.Errorf("agent: %w%s: %w",
+			ErrUnparseableOutput, truncationNote(outcome), perr)
 	}
 
 	// One repair round-trip: tell the model exactly what failed and demand JSON
@@ -97,16 +108,16 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 	}
 	repairBody, berr2 := stripBody(repairOutcome.FinalText)
 	if berr2 != nil {
-		return repairOutcome, fmt.Errorf("agent: model output did not parse as JSON after one repair%s: %w",
-			truncationNote(repairOutcome), berr2)
+		return repairOutcome, fmt.Errorf("agent: %w after one repair%s: %w",
+			ErrUnparseableOutput, truncationNote(repairOutcome), berr2)
 	}
 	if verr := validateSchema(schema, []byte(repairBody)); verr != nil {
-		return repairOutcome, fmt.Errorf("agent: model output did not parse as JSON after one repair%s: %w",
-			truncationNote(repairOutcome), verr)
+		return repairOutcome, fmt.Errorf("agent: %w after one repair%s: %w",
+			ErrUnparseableOutput, truncationNote(repairOutcome), verr)
 	}
 	if perr2 := json.Unmarshal([]byte(repairBody), out); perr2 != nil {
-		return repairOutcome, fmt.Errorf("agent: model output did not parse as JSON after one repair%s: %w",
-			truncationNote(repairOutcome), perr2)
+		return repairOutcome, fmt.Errorf("agent: %w after one repair%s: %w",
+			ErrUnparseableOutput, truncationNote(repairOutcome), perr2)
 	}
 	return repairOutcome, nil
 }

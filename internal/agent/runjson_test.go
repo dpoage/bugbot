@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -733,10 +734,76 @@ func TestRunJSON_RepairStillWrongShape(t *testing.T) {
 		t.Errorf("error = %v, want 'after one repair'", err)
 	}
 	// The wrapped error must be the shape violation, not a parse failure —
-	// callers can errors.Unwrap to classify the failure mode.
+	// callers can errors.As/errors.Is to classify the failure mode.
 	if !strings.Contains(err.Error(), "root JSON type") {
 		t.Errorf("error = %v, want the wrapped shape-violation message", err)
 	}
+}
+
+// TestRunJSON_ParseFailureWrapsSentinel locks the contract the reproducer's
+// revision loop depends on: a RunJSON failure caused by the model's OWN output
+// (unparseable JSON or a schema violation, even after the repair round) wraps
+// [ErrUnparseableOutput], while an infrastructure failure in the underlying
+// tool loop is returned unwrapped and must NOT match the sentinel. The
+// distinction is what lets a caller treat a bad answer as recoverable (revise)
+// without swallowing a real transport failure.
+func TestRunJSON_ParseFailureWrapsSentinel(t *testing.T) {
+	t.Run("unparseable after repair", func(t *testing.T) {
+		fc := newFakeClient(
+			textResp("garbage", 5, 5),
+			textResp("still garbage", 5, 5),
+		)
+		r := NewRunner(fc, nil, "sys")
+		var got finding
+		_, err := r.RunJSON(context.Background(), "task", nil, &got)
+		if err == nil {
+			t.Fatal("expected error after failed repair")
+		}
+		if !errors.Is(err, ErrUnparseableOutput) {
+			t.Errorf("errors.Is(err, ErrUnparseableOutput) = false; err = %v", err)
+		}
+		if !strings.Contains(err.Error(), "after one repair") {
+			t.Errorf("message regressed; err = %v", err)
+		}
+	})
+
+	t.Run("schema violation after repair", func(t *testing.T) {
+		// A bare array where the schema requires an object: valid JSON, wrong
+		// shape — exercises the validateSchema wrap site, not the unmarshal one.
+		fc := newFakeClient(
+			textResp(`[{"file":"a.go"}]`, 5, 5),
+			textResp(`[{"file":"a.go"}]`, 5, 5),
+		)
+		fc.caps = llm.Capabilities{StructuredOutput: true}
+		r := NewRunner(fc, nil, "sys")
+		var got findingWithRefuted
+		_, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got)
+		if err == nil {
+			t.Fatal("expected schema-violation error")
+		}
+		if !errors.Is(err, ErrUnparseableOutput) {
+			t.Errorf("errors.Is(err, ErrUnparseableOutput) = false; err = %v", err)
+		}
+	})
+
+	t.Run("infra error is not wrapped", func(t *testing.T) {
+		// The underlying loop fails (transport): RunJSON returns it unwrapped,
+		// so it carries the transport cause but NOT the parse sentinel.
+		boom := errors.New("connection reset")
+		fc := newFakeClient(scriptStep{err: boom})
+		r := NewRunner(fc, nil, "sys")
+		var got finding
+		_, err := r.RunJSON(context.Background(), "task", nil, &got)
+		if err == nil {
+			t.Fatal("expected infra error")
+		}
+		if errors.Is(err, ErrUnparseableOutput) {
+			t.Errorf("infra error must not match ErrUnparseableOutput; err = %v", err)
+		}
+		if !errors.Is(err, boom) {
+			t.Errorf("infra error should preserve the transport cause; err = %v", err)
+		}
+	})
 }
 
 // deepCandidatesSchema mirrors the production finder schema's nested shape: an

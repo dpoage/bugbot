@@ -260,6 +260,78 @@ func TestPromoteAll_AbsolutePathPlanRetries(t *testing.T) {
 	}
 }
 
+// TestPromoteAll_UnparseablePlanDoesNotAbort proves the live 2026-06-19 C++
+// regression is fixed: when a REVISION round's plan is unparseable / schema-
+// violating (observed: a weak model degenerating into a broken tool-call blob
+// as its final answer, so the plan omits the required "cmd"), the whole finding
+// must NOT be hard-aborted as an `error:` outcome. RunJSON's parse failure is
+// recoverable (errors.Is ErrUnparseableOutput), so Attempt feeds it back and
+// the finding settles as an honest non-reproduction at Tier-2 — never an
+// infrastructure error that discards round 1's already-executed verdict.
+func TestPromoteAll_UnparseablePlanDoesNotAbort(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	finding := seedFinding(t, st)
+	repoDir := newRepoDir(t)
+
+	// Round 1: a valid, runnable plan that does NOT demonstrate (sandbox exits
+	// 0). Round 2 (revision): the model emits garbage for both the run and the
+	// repair completion, so RunJSON returns ErrUnparseableOutput.
+	client := newScriptedClient(
+		planBody(t, goodPlan()),
+		"]<]minimax[>[ broken tool call, not json",
+		"still not json",
+	)
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
+		ExitCode: 0,
+		Stdout:   "ok\nPASS",
+	}})
+
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	if err != nil {
+		t.Fatalf("PromoteAll: %v", err)
+	}
+	if summary.Promoted != 0 || summary.Failed != 1 {
+		t.Fatalf("summary = %+v, want 0 promoted / 1 failed (could not reproduce)", summary)
+	}
+
+	o := summary.PerFinding[0]
+	// The regression: a bad revision round must settle as a recoverable
+	// non-reproduction, NOT a hard infrastructure error.
+	if o.Err != nil {
+		t.Fatalf("PerFinding.Err = %v, want nil (unparseable plan is recoverable, not infra error)", o.Err)
+	}
+	if !strings.HasPrefix(o.Reason, "unparseable plan:") {
+		t.Errorf("Reason = %q, want an 'unparseable plan:' verdict (not 'error: ...')", o.Reason)
+	}
+	if o.Attempts != DefaultMaxAttempts {
+		t.Errorf("Attempts = %d, want %d (both rounds tried; not aborted on round 2)", o.Attempts, DefaultMaxAttempts)
+	}
+
+	// Round 1 executed once; the unparseable round 2 never reached the sandbox.
+	if n := len(sb.Calls()); n != 1 {
+		t.Errorf("sandbox calls = %d, want 1 (only the valid round-1 plan executes)", n)
+	}
+	// 3 completions: round-1 plan, round-2 run, round-2 repair.
+	if n := len(client.allRequests()); n != 3 {
+		t.Errorf("llm completions = %d, want 3 (r1 plan + r2 run + r2 repair)", n)
+	}
+
+	// Failure demotes nothing: the finding stays at Tier-2.
+	got, err := st.GetFindingByFingerprint(ctx, finding.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Tier != 2 {
+		t.Errorf("tier = %d, want 2 (unreproduced finding untouched)", got.Tier)
+	}
+}
+
 // --- dependency strategy wiring --------------------------------------------
 
 // TestPromoteAll_VendoredSetsGoflags verifies a vendored repo run carries

@@ -309,6 +309,19 @@ func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (_ *Att
 		usage.InputTokens += u.InputTokens
 		usage.OutputTokens += u.OutputTokens
 		if perr != nil {
+			// An unparseable or schema-violating plan from the agent is a
+			// recoverable model hiccup, not an infrastructure failure: treat it
+			// like a structurally invalid plan (feed the error back and revise)
+			// so a bad revision round never discards a prior round's honest
+			// verdict by aborting the whole finding. Genuine infra failures (LLM
+			// transport, context cancellation, sandbox launch) are returned
+			// unwrapped by RunJSON and still abort here.
+			if errors.Is(perr, agent.ErrUnparseableOutput) {
+				feedback = fmt.Sprintf("Your previous response was not a usable repro plan: %s. "+
+					"Return ONLY a JSON object with the repro files and the cmd to run them.", perr)
+				att.Reason = "unparseable plan: " + perr.Error()
+				continue
+			}
 			return nil, fmt.Errorf("repro: plan finding %s: %w", finding.ID, perr)
 		}
 		if verr := validatePlan(plan); verr != nil {
