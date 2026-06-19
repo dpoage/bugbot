@@ -75,5 +75,3 @@ func age(t time.Time, now time.Time) string {
 		return t.Format("2006-01-02")
 	}
 }
-
-

@@ -132,8 +132,6 @@ func (c *cartography) contextFor(files []string) string {
 	return b.String()
 }
 
-
-
 // cartograph runs the cartographer pass: fingerprint each package spanned
 // by targets, reuse cached summaries whose stored fingerprint matches,
 // regenerate the rest with ONE bounded client.Complete each (no tool loop),
@@ -514,8 +512,6 @@ func packageFingerprint(pkg string, members []string, fps map[string]string) str
 	_ = pkg // pkg name is implicit in the members (their path.Dir matches it)
 	return ingest.HashBytes([]byte(b.String()))
 }
-
-
 
 // CartographyReport summarizes an out-of-band cartographer refresh.
 type CartographyReport struct {

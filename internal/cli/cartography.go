@@ -105,5 +105,3 @@ func printCartography(out io.Writer, summaries []store.PackageSummary, full bool
 	}
 	_ = tw.Flush()
 }
-
-

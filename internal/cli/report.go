@@ -36,8 +36,6 @@ func newReportCmd() *cobra.Command {
 	return cmd
 }
 
-
-
 // newReportListCmd lists stored findings as a table (or JSON with --json).
 func newReportListCmd() *cobra.Command {
 	var (
@@ -186,7 +184,7 @@ func newReportDismissCmd() *cobra.Command {
 
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(),
 				"dismissed %s; fingerprint suppressed — bugbot will not re-report this finding.\n",
-			util.Truncate(f.ID, 12))
+				util.Truncate(f.ID, 12))
 			return nil
 		},
 	}

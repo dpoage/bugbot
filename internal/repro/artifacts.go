@@ -159,5 +159,3 @@ func readme(finding store.Finding, plan *Plan, res sandbox.Result) string {
 	}
 	return b.String()
 }
-
-

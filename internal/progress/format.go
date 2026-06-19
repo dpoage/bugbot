@@ -8,4 +8,3 @@ const timeRound = 100 * time.Millisecond
 
 // timeClock is the wall-clock layout used for schedule ETAs in log output.
 const timeClock = "15:04:05"
-

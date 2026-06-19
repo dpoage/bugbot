@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/store"
 )

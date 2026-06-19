@@ -60,10 +60,10 @@ func TestSortedKeys(t *testing.T) {
 
 	t.Run("ordering", func(t *testing.T) {
 		m := map[string]int{
-			"delta":  3,
-			"alpha":  1,
+			"delta":   3,
+			"alpha":   1,
 			"charlie": 2,
-			"bravo":  4,
+			"bravo":   4,
 		}
 		got := SortedKeys(m)
 		want := []string{"alpha", "bravo", "charlie", "delta"}
