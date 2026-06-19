@@ -112,7 +112,7 @@ func TestScore_CleanCase_AnyFindingIsFP(t *testing.T) {
 	cr := score(c, &funnel.Result{Findings: []store.Finding{
 		finding("a.go", 1, "lens-x", "spurious"),
 	}})
-	if !cr.Clean {
+	if !cr.Clean() {
 		t.Errorf("case with no seeded bugs must be Clean")
 	}
 	if cr.FalsePositives != 1 {

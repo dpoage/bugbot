@@ -119,7 +119,7 @@ func TestCleanCase_FPCountedThroughFullPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run case: %v", err)
 	}
-	if !cr.Clean {
+	if !cr.Clean() {
 		t.Fatalf("case must be clean")
 	}
 	if cr.FalsePositives != 1 {

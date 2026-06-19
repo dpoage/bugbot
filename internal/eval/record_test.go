@@ -145,15 +145,19 @@ func TestRecordCorpus(t *testing.T) {
 			// caps each runner's spend so a wandering model can't run away.
 			limits := agent.Limits{MaxIterations: 12, TokenBudget: 200_000}
 
-			c := base
-			c.Scripted = nil
-			c.Recorded = nil
-			c.Options = funnel.Options{
-				TranscriptDir:  transcriptDir,
-				MaxParallel:    1, // REQUIRED for deterministic replay ordering
-				FinderLimits:   limits,
-				VerifierLimits: limits,
-			}
+			c := NewScriptedCase(
+				base.Name,
+				base.Repo,
+				base.Seeded,
+				nil, // live clients injected via runWithClients; no scripted routes needed
+				funnel.Options{
+					TranscriptDir:  transcriptDir,
+					MaxParallel:    1, // REQUIRED for deterministic replay ordering
+					FinderLimits:   limits,
+					VerifierLimits: limits,
+				},
+				base.Suppress,
+			)
 
 			finderClient := newRecordClient(t, env, "finder")
 			verifierClient := newRecordClient(t, env, "verifier")

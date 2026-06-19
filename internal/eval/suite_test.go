@@ -70,8 +70,8 @@ func TestBuiltinCases_PerCaseExpectations(t *testing.T) {
 			if !ok {
 				t.Fatalf("no expectation registered for case %q", c.Name)
 			}
-			if cr.Clean != exp.clean {
-				t.Errorf("clean = %v, want %v", cr.Clean, exp.clean)
+			if cr.Clean() != exp.clean {
+				t.Errorf("clean = %v, want %v", cr.Clean(), exp.clean)
 			}
 			if cr.TruePositives != exp.tp || cr.FalsePositives != exp.fp || cr.FalseNegatives != exp.fn {
 				t.Errorf("tp/fp/fn = %d/%d/%d, want %d/%d/%d",

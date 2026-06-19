@@ -114,11 +114,8 @@ func LoadRecordedCases(dir string) ([]Case, error) {
 			return nil, fmt.Errorf("eval: load recorded case %q: %w", name, err)
 		}
 
-		// Clone the builtin's fixture + ground truth; replace scripted behavior
-		// with the recordings.
-		c := base
-		c.Scripted = nil
-		c.Recorded = rc
+		// Build a recorded case from the builtin's fixture + ground truth.
+		c := NewRecordedCase(base.Name, base.Repo, base.Seeded, rc, base.Options, base.Suppress)
 		cases = append(cases, c)
 	}
 	return cases, nil

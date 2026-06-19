@@ -60,15 +60,17 @@ func TestRecordedMode_EndToEnd(t *testing.T) {
 		))
 	}
 
-	c := Case{
-		Name:   "recorded-nil-deref",
-		Repo:   FixtureSpec{Files: map[string]string{"greet.go": nilDerefSrc}},
-		Seeded: []SeededBug{{File: "greet.go", Line: 10, LineTolerance: 2, Kind: "nil-deref"}},
-		Recorded: &RecordedCase{
+	c := NewRecordedCase(
+		"recorded-nil-deref",
+		FixtureSpec{Files: map[string]string{"greet.go": nilDerefSrc}},
+		[]SeededBug{{File: "greet.go", Line: 10, LineTolerance: 2, Kind: "nil-deref"}},
+		&RecordedCase{
 			Finder:   NewRoleTranscriptStore("finder", llm.Capabilities{}, finderSessions...),
 			Verifier: NewRoleTranscriptStore("verifier", llm.Capabilities{}, verifierSessions...),
 		},
-	}
+		funnel.Options{},
+		nil,
+	)
 
 	res, err := RunSuite(ctx, []Case{c}, ModeRecorded)
 	if err != nil {
@@ -90,10 +92,7 @@ func TestRecordedMode_EndToEnd(t *testing.T) {
 func TestRecordedMode_MissingRecordings_Errors(t *testing.T) {
 	requireGit(t)
 	ctx := context.Background()
-	c := Case{
-		Name: "no-recordings",
-		Repo: FixtureSpec{Files: map[string]string{"a.go": "package x\n"}},
-	}
+	c := Case{Name: "no-recordings", Repo: FixtureSpec{Files: map[string]string{"a.go": "package x\n"}}}
 	if _, err := RunSuite(ctx, []Case{c}, ModeRecorded); err == nil {
 		t.Errorf("expected error for recorded case with no recordings")
 	}

@@ -49,7 +49,7 @@ func (s *SuiteResult) Recall() float64 {
 func (s *SuiteResult) CleanFalsePositives() int {
 	total := 0
 	for _, c := range s.Cases {
-		if c.Clean {
+		if c.Clean() {
 			total += c.FalsePositives
 		}
 	}
@@ -76,7 +76,7 @@ func Gate(s *SuiteResult) error {
 	if fp := s.CleanFalsePositives(); fp != 0 {
 		problems = append(problems, fmt.Sprintf("clean-code cases produced %d false positive(s); want 0", fp))
 		for _, c := range s.Cases {
-			if c.Clean && c.FalsePositives > 0 {
+			if c.Clean() && c.FalsePositives > 0 {
 				for _, f := range c.UnmatchedFindings {
 					problems = append(problems, fmt.Sprintf("  FP in %q: %s:%d %q (lens=%s)", c.Name, f.File, f.Line, f.Title, f.Lens))
 				}
@@ -138,8 +138,10 @@ func RunSuite(ctx context.Context, cases []Case, mode Mode) (*SuiteResult, error
 }
 
 // runCaseScripted runs one case in scripted mode (its Recorded field, if any,
-// is ignored).
+// is ignored). It forces the case into scripted mode so buildClients uses the
+// scripted path regardless of the case's original kind.
 func runCaseScripted(ctx context.Context, c Case) (*CaseResult, error) {
+	c.kind = CaseKindScripted
 	c.Recorded = nil
 	return RunCase(ctx, c)
 }
@@ -151,6 +153,7 @@ func runCaseRecorded(ctx context.Context, c Case) (*CaseResult, error) {
 	if c.Recorded == nil {
 		return nil, fmt.Errorf("recorded mode requested but case has no recordings")
 	}
+	c.kind = CaseKindRecorded
 	c.Scripted = nil
 	return RunCase(ctx, c)
 }
@@ -166,7 +169,7 @@ func (s *SuiteResult) String() string {
 	_, _ = fmt.Fprintln(tw, "CASE\tKIND\tTP\tFP\tFN\tPREC\tRECALL\tWHERE-KILLED")
 	for _, c := range s.Cases {
 		kind := "seeded"
-		if c.Clean {
+		if c.Clean() {
 			kind = "clean"
 		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%.2f\t%.2f\t%s\n",
