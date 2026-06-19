@@ -18,13 +18,41 @@ const (
 )
 
 // Change is a single path-level change between two commits.
+//
+// Invariant: OldPath is non-empty if and only if Kind == ChangeRenamed.
+// Use NewChange or NewRename to produce a valid Change; use Validate to check
+// one received from an external source.
 type Change struct {
 	Kind ChangeKind
 	// Path is the post-change path (the new name for renames/additions, the
 	// removed path for deletions).
 	Path string
-	// OldPath is set only for renames: the pre-change path.
+	// OldPath is set only for renames: the pre-change path. It is always empty
+	// for ChangeAdded, ChangeModified, and ChangeDeleted.
 	OldPath string
+}
+
+// NewChange constructs a non-rename Change. OldPath is always empty.
+// Kind must be ChangeAdded, ChangeModified, or ChangeDeleted.
+func NewChange(kind ChangeKind, path string) Change {
+	return Change{Kind: kind, Path: path}
+}
+
+// NewRename constructs a rename Change with both paths populated.
+func NewRename(oldPath, newPath string) Change {
+	return Change{Kind: ChangeRenamed, Path: newPath, OldPath: oldPath}
+}
+
+// Validate reports an error when the Change violates the OldPath invariant:
+// OldPath must be non-empty iff Kind is ChangeRenamed.
+func (c Change) Validate() error {
+	if c.Kind == ChangeRenamed && c.OldPath == "" {
+		return fmt.Errorf("ingest: renamed change for %q must have OldPath set", c.Path)
+	}
+	if c.Kind != ChangeRenamed && c.OldPath != "" {
+		return fmt.Errorf("ingest: non-rename change (kind=%s, path=%q) must not have OldPath=%q", c.Kind, c.Path, c.OldPath)
+	}
+	return nil
 }
 
 // ChangedFiles returns the set of changes between two commits, oldest first.
@@ -85,13 +113,13 @@ func parseNameStatusZ(b []byte) ([]Change, error) {
 			if status[0] == 'A' {
 				kind = ChangeAdded
 			}
-			changes = append(changes, Change{Kind: kind, Path: fields[i]})
+			changes = append(changes, NewChange(kind, fields[i]))
 			i++
 		case 'D':
 			if i >= len(fields) {
 				return nil, fmt.Errorf("status %q missing path", status)
 			}
-			changes = append(changes, Change{Kind: ChangeDeleted, Path: fields[i]})
+			changes = append(changes, NewChange(ChangeDeleted, fields[i]))
 			i++
 		case 'R', 'C':
 			if i+1 >= len(fields) {
@@ -103,9 +131,9 @@ func parseNameStatusZ(b []byte) ([]Change, error) {
 			// the new path so dependents of the copy are still scoped. A rename
 			// is reported as such with both paths.
 			if status[0] == 'C' {
-				changes = append(changes, Change{Kind: ChangeAdded, Path: newPath})
+				changes = append(changes, NewChange(ChangeAdded, newPath))
 			} else {
-				changes = append(changes, Change{Kind: ChangeRenamed, Path: newPath, OldPath: oldPath})
+				changes = append(changes, NewRename(oldPath, newPath))
 			}
 		default:
 			// Unknown status (e.g. "U" unmerged): treat conservatively as a

@@ -29,7 +29,10 @@
 //   - Multi / Discard — fanout and no-op helpers.
 package progress
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Kind enumerates the event types. It is a string so events serialize to
 // self-describing JSON (and so a future sink can switch on a stable name rather
@@ -38,13 +41,17 @@ type Kind string
 
 const (
 	// KindScanStarted marks the beginning of a funnel run (Sweep/Targeted).
+	// Fields: ScanKind, Commit.
 	KindScanStarted Kind = "scan_started"
 	// KindStageStarted / KindStageFinished bracket a pipeline stage
-	// (hypothesize, triage, verify, persist). Finished carries the stage counts.
+	// (hypothesize, triage, verify, persist).
+	// Fields: Stage. KindStageFinished also sets Counts (see Counts nil semantics).
 	KindStageStarted  Kind = "stage_started"
 	KindStageFinished Kind = "stage_finished"
 	// KindAgentStarted / KindAgentFinished bracket one finder or verifier agent
-	// run. Finished carries tokens, duration, and any error.
+	// run.
+	// Fields: Role, Label. KindAgentFinished also sets Tokens, Duration, Err
+	// (Err is empty on success), and Candidates (finder only; zero for verifiers).
 	KindAgentStarted  Kind = "agent_started"
 	KindAgentFinished Kind = "agent_finished"
 	// KindAgentActivity carries a short human-readable note about what an
@@ -52,45 +59,59 @@ const (
 	// sandbox"). Emitted at most once per tool-call turn by the runner; the
 	// snapshot and renderers update the relevant AgentStatus.Activity in place.
 	// This is NOT a terminal event.
+	// Fields: Role, Label, Activity.
 	KindAgentActivity Kind = "agent_activity"
 	// KindSpendTick reports cumulative token spend as it accrues.
+	// Fields: InputTokens, OutputTokens, CacheReadTokens, CacheCreationTokens.
 	KindSpendTick Kind = "spend_tick"
 	// KindBudgetDegraded / KindBudgetStopped mirror the funnel's budget
 	// degradation and hard-stop decisions (also surfaced on Result).
+	// Fields: Message.
 	KindBudgetDegraded Kind = "budget_degraded"
 	KindBudgetStopped  Kind = "budget_stopped"
 	// KindFindingVerified reports a candidate that survived adversarial
 	// verification (a Tier-2 survivor).
+	// Fields: File, Line, Title.
 	KindFindingVerified Kind = "finding_verified"
 	// KindFindingKilled reports a candidate that was definitively refuted by the
 	// adversarial verification panel. One event per killed candidate, emitted as
 	// the verdict is reached (not deferred to stage-finish), so live status
 	// counters tick as the verify stage progresses.
+	// Fields: File, Line, Title.
 	KindFindingKilled Kind = "finding_killed"
 	// KindCandidateTriaged reports one candidate forwarded by the streaming
 	// triage consumer to verification (a cluster primary). Live-counter tick;
 	// the authoritative total still arrives with StageFinished(triage).
+	// Fields: Label.
 	KindCandidateTriaged Kind = "candidate_triaged"
 	// KindLensFailed reports a finder (or refuter) agent that produced no
 	// parseable output: its findings, if any, are LOST. Renderers should surface
 	// this prominently — it means an empty result is untrustworthy, not clean.
+	// Fields: Role, Label, Err.
 	KindLensFailed Kind = "lens_failed"
 	// KindScanFinished marks the end of a funnel run and carries the stats
 	// summary.
+	// Fields: Counts (non-nil on normal completion; nil only if abandoned before
+	// any stage completed), InputTokens, OutputTokens, CacheReadTokens,
+	// CacheCreationTokens.
 	KindScanFinished Kind = "scan_finished"
 	// KindHeatOrdered reports that Sweep reordered its targets by churn heat.
 	// HeatFiles carries the number of files with non-zero heat; Label carries a
 	// human-readable top-5 summary (path:score pairs). HeatOrdered is always true
 	// when this event fires (it is not emitted when heat is disabled or the map is
 	// empty).
+	// Fields: Count (number of files with non-zero heat), Label (top-N summary).
 	KindHeatOrdered Kind = "heat_ordered"
 	// KindCycleScheduled reports the daemon's next poll/sweep deadlines.
+	// Fields: NextPoll, NextSweep, NextBacklog (zero when repro is disabled).
 	KindCycleScheduled Kind = "cycle_scheduled"
 	// KindCycleStarted / KindCycleFinished bracket one daemon cycle.
+	// Fields: ScanKind. KindCycleFinished also sets Count (new findings this cycle).
 	KindCycleStarted  Kind = "cycle_started"
 	KindCycleFinished Kind = "cycle_finished"
 	// KindReverify / KindPromote report post-cycle re-verification and
 	// reproduction-promotion outcomes.
+	// Fields: Count.
 	KindReverify Kind = "reverify"
 	KindPromote  Kind = "promote"
 	// KindSweepSummary is emitted once per Sweep call, before the scan starts,
@@ -98,6 +119,7 @@ const (
 	// count, and changed-since-scan count. Count carries the total targets;
 	// Message carries the human-readable summary. Renderers can use this to show
 	// context about the upcoming sweep without waiting for it to finish.
+	// Fields: Count (total targets), Message.
 	KindSweepSummary Kind = "sweep_summary"
 )
 
@@ -119,6 +141,13 @@ const (
 // Counts is the per-stage accounting carried on stage-finished events and the
 // final summary. Fields mirror funnel.Stats but live here so progress does not
 // import funnel (the funnel imports progress, not the reverse).
+//
+// Nil-vs-zero semantics: a nil *Counts pointer means "no accounting available"
+// (the stage did not reach a point where counts were meaningful, or the event
+// kind does not carry counts at all). A non-nil &Counts{} with all-zero fields
+// means the stage ran to completion but produced nothing. Consumers MUST treat
+// nil as "unavailable" and non-nil as "present but possibly zero"; they MUST NOT
+// substitute nil for &Counts{} or vice versa.
 type Counts struct {
 	Hypothesized int `json:"hypothesized,omitempty"`
 	Triaged      int `json:"triaged,omitempty"`
@@ -136,6 +165,12 @@ type Counts struct {
 // are zero and omitted from JSON.
 //
 // Time is set by Emit when zero, so callers never have to stamp events.
+//
+// Field/Kind matrix — each Kind documents its fields in the Kind const comment
+// above. Fields not listed for a given Kind are zero (string="", int=0,
+// pointer=nil, time=zero) and MUST be ignored by consumers. Validate() checks
+// the most common invariant violations but is advisory: Emit does not call it,
+// so construction errors reach sinks as-is for observability, not silence.
 type Event struct {
 	Kind Kind      `json:"kind"`
 	Time time.Time `json:"time"`
@@ -147,6 +182,7 @@ type Event struct {
 	Commit   string `json:"commit,omitempty"`
 
 	// Stage / Counts describe a stage boundary.
+	// Counts follows nil-vs-zero semantics: see Counts type documentation.
 	Stage  string  `json:"stage,omitempty"`
 	Counts *Counts `json:"counts,omitempty"`
 
@@ -199,4 +235,45 @@ type Event struct {
 
 	// Message is a free-form human note (budget degradation reason, skip reason).
 	Message string `json:"message,omitempty"`
+}
+
+// Validate returns an error for clearly-invalid Kind/field combinations.
+// It is advisory: Emit does not call it and existing emitters need not call it.
+// Use it in tests or consumer code where catching construction errors is
+// worthwhile without blocking the happy path.
+//
+// Checked invariants:
+//   - Kind must be non-empty.
+//   - KindStageStarted/KindStageFinished require Stage to be non-empty.
+//   - KindStageFinished with a nil Counts is not an error (stage may have been
+//     abandoned), but KindStageFinished with a Stage and a nil Counts is flagged
+//     as a warning (use &Counts{} to signal "ran but produced nothing").
+//   - KindAgentStarted/KindAgentFinished/KindAgentActivity require Role and Label.
+//   - KindFindingVerified/KindFindingKilled require File.
+//   - KindAgentActivity requires Activity.
+func (e Event) Validate() error {
+	if e.Kind == "" {
+		return fmt.Errorf("progress: event has empty Kind")
+	}
+	switch e.Kind {
+	case KindStageStarted, KindStageFinished:
+		if e.Stage == "" {
+			return fmt.Errorf("progress: %s event missing Stage", e.Kind)
+		}
+	case KindAgentStarted, KindAgentFinished, KindAgentActivity:
+		if e.Role == "" {
+			return fmt.Errorf("progress: %s event missing Role", e.Kind)
+		}
+		if e.Label == "" {
+			return fmt.Errorf("progress: %s event missing Label", e.Kind)
+		}
+		if e.Kind == KindAgentActivity && e.Activity == "" {
+			return fmt.Errorf("progress: %s event missing Activity", e.Kind)
+		}
+	case KindFindingVerified, KindFindingKilled:
+		if e.File == "" {
+			return fmt.Errorf("progress: %s event missing File", e.Kind)
+		}
+	}
+	return nil
 }
