@@ -744,3 +744,51 @@ func TestFindingConfidence_RoundTrip(t *testing.T) {
 		t.Errorf("ListFindings confidence = %v, want %v", list[0].Confidence, stored.Confidence)
 	}
 }
+// TestUpdateFindingSeverity verifies that UpdateFindingSeverity persists
+// severity + verdict_detail, recomputes Confidence, and round-trips through
+// GetFinding. It also verifies ErrNotFound for an unknown id.
+func TestUpdateFindingSeverity(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	// Insert a finding at medium severity.
+	f := sampleFinding()
+	f.Severity = domain.SeverityMedium
+	stored, err := st.UpsertFinding(ctx, f)
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	originalConf := stored.Confidence
+
+	// Re-rank to low with a rationale.
+	const rationale = "zero non-test callers of processBuffer found by AST reference scan"
+	if err := st.UpdateFindingSeverity(ctx, stored.ID, domain.SeverityLow, rationale); err != nil {
+		t.Fatalf("UpdateFindingSeverity: %v", err)
+	}
+
+	// Round-trip through GetFinding.
+	got, err := st.GetFinding(ctx, stored.ID)
+	if err != nil {
+		t.Fatalf("GetFinding: %v", err)
+	}
+	if got.Severity != domain.SeverityLow {
+		t.Errorf("Severity = %s, want low", got.Severity)
+	}
+	if got.VerdictDetail != rationale {
+		t.Errorf("VerdictDetail = %q, want %q", got.VerdictDetail, rationale)
+	}
+	// Confidence must have been recomputed and differ from the medium-severity value.
+	if got.Confidence == originalConf {
+		t.Errorf("Confidence unchanged after severity downrank: %v", got.Confidence)
+	}
+	// Confidence for low severity must be less than for medium (same tier, no corroboration).
+	if got.Confidence >= originalConf {
+		t.Errorf("Confidence after downrank (%v) must be < original (%v)", got.Confidence, originalConf)
+	}
+
+	// ErrNotFound for an unknown id.
+	err = st.UpdateFindingSeverity(ctx, "nonexistent-id", domain.SeverityHigh, "irrelevant")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound for unknown id, got %v", err)
+	}
+}

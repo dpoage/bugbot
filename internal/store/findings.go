@@ -38,20 +38,21 @@ var ErrNotFound = errors.New("store: not found")
 // version through CommitSHA and FileHash so the daemon can detect when the
 // underlying code has changed and re-verification is warranted.
 type Finding struct {
-	ID          string
-	Fingerprint string
-	Title       string
-	Description string
-	Reasoning   string // the adversarial verification trace
-	Severity    domain.Severity
-	Tier        domain.Tier // T0 fix-witnessed, T1 reproduced, T2 verified, T3 suspected
-	Status      Status
-	Lens        string
-	File        string
-	Line        int
-	CommitSHA   string
-	FileHash    string
-	ReproPath   string // empty when no reproduction exists
+	ID            string
+	Fingerprint   string
+	Title         string
+	Description   string
+	Reasoning     string // the adversarial verification trace
+	VerdictDetail string // impact-sweep rationale for severity re-rank (empty = not re-ranked)
+	Severity      domain.Severity
+	Tier          domain.Tier // T0 fix-witnessed, T1 reproduced, T2 verified, T3 suspected
+	Status        Status
+	Lens          string
+	File          string
+	Line          int
+	CommitSHA     string
+	FileHash      string
+	ReproPath     string // empty when no reproduction exists
 	// FixPatch is the unified diff text produced by the patch-prover stage when a
 	// minimal fix candidate was witnessed by the sandbox.  Empty when the prover
 	// was not run or found no plausible fix.
@@ -216,12 +217,12 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			f.Confidence = findingConfidence(f.Tier, f.Severity, len(f.CorroboratingLenses))
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO findings
-				  (id, fingerprint, title, description, reasoning, severity, tier,
+				  (id, fingerprint, title, description, reasoning, verdict_detail, severity, tier,
 				   status, lens, file, line, commit_sha, file_hash, repro_path,
 				   fix_patch, needs_human,
 				   corroborating_lenses, confidence, created_at, updated_at)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-				f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.Severity,
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
 				f.Tier, string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA,
 				f.FileHash, nullStr(f.ReproPath), f.FixPatch, boolInt(f.NeedsHuman),
 				encodeLenses(f.CorroboratingLenses), f.Confidence,
@@ -290,7 +291,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			//   needs_human : ?     → boolInt(f.NeedsHuman)
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE findings SET
-				  title=?, description=?, reasoning=?, severity=?,
+				  title=?, description=?, reasoning=?, verdict_detail=?, severity=?,
 				  tier       = CASE WHEN ? < tier THEN ? ELSE tier END,
 				  status=?,
 				  lens=?, file=?, line=?, commit_sha=?, file_hash=?,
@@ -299,7 +300,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				  needs_human = CASE WHEN needs_human = 1 THEN 1 ELSE ? END,
 				  corroborating_lenses=?, confidence=?, updated_at=?
 				WHERE id=?`,
-				f.Title, f.Description, f.Reasoning, f.Severity,
+				f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
 				f.Tier, f.Tier,
 				string(f.Status),
 				f.Lens, f.File, f.Line, f.CommitSHA, f.FileHash,
@@ -459,8 +460,39 @@ func (s *Store) AddCorroboratingLenses(ctx context.Context, fingerprint string, 
 	})
 }
 
+// UpdateFindingSeverity updates the severity and verdict_detail of a finding by
+// id, recomputing Confidence from the new severity (tier and corroborating-lens
+// count are read from the current row so the confidence formula is applied
+// consistently). Returns ErrNotFound when no finding has that id.
+func (s *Store) UpdateFindingSeverity(ctx context.Context, id string, sev domain.Severity, rationale string) error {
+	now := nowUTC()
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		var tier domain.Tier
+		var corrob string
+		err := tx.QueryRowContext(ctx,
+			`SELECT tier, corroborating_lenses FROM findings WHERE id = ?`, id,
+		).Scan(&tier, &corrob)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return annotateErr(s.path, "update_finding_severity", err)
+		}
+		lenses := decodeLenses(corrob)
+		conf := findingConfidence(tier, sev, len(lenses))
+		_, err = tx.ExecContext(ctx,
+			`UPDATE findings SET severity=?, verdict_detail=?, confidence=?, updated_at=? WHERE id=?`,
+			sev, rationale, conf, now.Format(timeLayout), id,
+		)
+		if err != nil {
+			return annotateErr(s.path, "update_finding_severity", err)
+		}
+		return nil
+	})
+}
+
 // findingColumns is the SELECT column list shared by single- and multi-row reads.
-const findingColumns = `SELECT id, fingerprint, title, description, reasoning,
+const findingColumns = `SELECT id, fingerprint, title, description, reasoning, verdict_detail,
 	severity, tier, status, lens, file, line, commit_sha, file_hash, repro_path,
 	fix_patch, needs_human,
 	corroborating_lenses, confidence, created_at, updated_at`
@@ -492,7 +524,7 @@ func scanFinding(sc rowScanner) (Finding, error) {
 		createdAt, updatedAt string
 	)
 	if err := sc.Scan(
-		&f.ID, &f.Fingerprint, &f.Title, &f.Description, &f.Reasoning,
+		&f.ID, &f.Fingerprint, &f.Title, &f.Description, &f.Reasoning, &f.VerdictDetail,
 		&f.Severity, &f.Tier, &status, &f.Lens, &f.File, &f.Line, &f.CommitSHA,
 		&f.FileHash, &repro, &f.FixPatch, &needsHuman, &corrob, &f.Confidence, &createdAt, &updatedAt,
 	); err != nil {

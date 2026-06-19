@@ -250,6 +250,45 @@ func (b *Backend) References(absPath, symbol string) (Result, error) {
 	return Result{Locations: toLocations(matches), Candidates: len(matches)}, nil
 }
 
+// EnclosingDefinition returns the name of the innermost definition node that
+// contains lineNum (0-based) in absPath, by scanning all definition tags for
+// absPath whose body Range spans the target line. If multiple definitions span
+// the line, the narrowest one (smallest body, i.e. deepest nesting) wins.
+// Returns ("", false) when no grammar covers the file, the file has no
+// definitions, or none spans the given line.
+func (b *Backend) EnclosingDefinition(absPath string, lineNum int) (name string, ok bool) {
+	g := grammarForExt(strings.ToLower(filepath.Ext(absPath)))
+	if g == nil {
+		return "", false
+	}
+	defs, err := b.collect(g, queryDef)
+	if err != nil {
+		return "", false
+	}
+	target := uint32(lineNum)
+	best := ""
+	bestSpan := uint32(^uint32(0)) // max; smaller span = narrower = deeper
+	for _, d := range defs {
+		if d.path != absPath {
+			continue
+		}
+		start := d.Range.StartPoint.Row
+		end := d.Range.EndPoint.Row
+		if target < start || target > end {
+			continue
+		}
+		span := end - start
+		if best == "" || span < bestSpan {
+			best = d.Name
+			bestSpan = span
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return best, true
+}
+
 // queryKind selects which tags query (definitions or references) collect runs.
 type queryKind int
 
