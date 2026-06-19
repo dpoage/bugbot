@@ -157,10 +157,27 @@ func jsonInstruction(schema json.RawMessage) string {
 // [validateSchema] both inspect. An all-whitespace or empty body is
 // reported as an explicit "empty model output" error so the caller can treat
 // it as a parse failure and surface a clear message.
+//
+// If the cleaned body contains a complete JSON value followed by trailing
+// content (e.g. `{...},{...}` or `{...},`), stripBody extracts only the
+// first complete value so that validateSchema and json.Unmarshal see clean
+// JSON. This makes RunJSON tolerant of models that append prose or a second
+// value after a valid answer. If the leading value is incomplete or missing,
+// the original cleaned body is returned unchanged so the existing repair
+// round-trip logic still drives recovery.
 func stripBody(text string) (string, error) {
 	body := stripFences(llm.StripThinkBlocks(text))
 	if strings.TrimSpace(body) == "" {
 		return "", fmt.Errorf("empty model output")
+	}
+	// Extract exactly the first complete JSON value. encoding/json's Decoder
+	// respects string/escape boundaries and errors on an incomplete leading
+	// value, so this never mis-splits on braces or commas inside strings and
+	// never rescues a truncated value.
+	dec := json.NewDecoder(strings.NewReader(body))
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err == nil && len(raw) > 0 {
+		return string(raw), nil
 	}
 	return body, nil
 }

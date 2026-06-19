@@ -902,3 +902,93 @@ func TestRunJSON_DeepValidationTriggersRepair(t *testing.T) {
 		t.Errorf("repair prompt missing the enum-violation detail:\n%s", fc.requests[1].Messages[0].Content)
 	}
 }
+
+// TestRunJSON_TrailingCommaNoRepair proves that a final answer which is a
+// schema-valid JSON object followed by a trailing comma is parsed successfully
+// in the first attempt — no repair round-trip. Exactly one model completion is
+// consumed; a repair would require a second.
+func TestRunJSON_TrailingCommaNoRepair(t *testing.T) {
+	// Queue EXACTLY one completion: if stripBody correctly extracts the leading
+	// JSON value, RunJSON parses and succeeds without repair. A repair would
+	// consume the (unscripted) second slot and produce "(unscripted)", which
+	// would itself fail to parse and cause an error.
+	fc := newFakeClient(
+		textResp(`{"file":"a.go","message":"bug","refuted":false},`, 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	var got findingWithRefuted
+	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got)
+	if err != nil {
+		t.Fatalf("RunJSON: %v", err)
+	}
+	if got.File != "a.go" || got.Message != "bug" || got.Refuted {
+		t.Errorf("parsed = %+v", got)
+	}
+	// Single completion: proves no repair round-trip happened.
+	if fc.callCount() != 1 {
+		t.Errorf("client calls = %d, want 1 (no repair)", fc.callCount())
+	}
+	_ = out
+}
+
+// TestRunJSON_DoubleValueParsesFirst proves that when the model emits two
+// concatenated JSON objects, RunJSON parses and returns the first one.
+func TestRunJSON_DoubleValueParsesFirst(t *testing.T) {
+	first := `{"file":"first.go","message":"first bug","refuted":false}`
+	second := `{"file":"second.go","message":"second bug","refuted":true}`
+	fc := newFakeClient(
+		textResp(first+second, 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	var got findingWithRefuted
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+		t.Fatalf("RunJSON: %v", err)
+	}
+	if got.File != "first.go" || got.Message != "first bug" || got.Refuted {
+		t.Errorf("parsed = %+v, want first object", got)
+	}
+	if fc.callCount() != 1 {
+		t.Errorf("client calls = %d, want 1 (no repair)", fc.callCount())
+	}
+}
+
+// TestRunJSON_TruncatedLeadingValueErrors proves that an INCOMPLETE leading
+// JSON value (truncated mid-object) is NOT rescued by the trailing-content
+// fix: stripBody returns the raw body, the parse fails, repair fires, and when
+// the repair also fails, RunJSON returns a non-nil error.
+func TestRunJSON_TruncatedLeadingValueErrors(t *testing.T) {
+	fc := newFakeClient(
+		textResp(`{"files":{"a.go":"x"}`, 5, 5), // missing closing }
+		textResp(`still truncated {`, 5, 5),     // repair also unparseable
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	var got struct {
+		Files map[string]string `json:"files"`
+	}
+	_, err := r.RunJSON(context.Background(), "task", nil, &got)
+	if err == nil {
+		t.Fatal("expected non-nil error for truncated leading JSON value")
+	}
+}
+
+// TestRunJSON_EmptyBodyErrors confirms an empty/whitespace body still errors
+// via the "empty model output" path, before any JSON extraction is attempted.
+func TestRunJSON_EmptyBodyErrors(t *testing.T) {
+	fc := newFakeClient(
+		textResp("   ", 5, 5),
+		textResp("", 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	var got finding
+	_, err := r.RunJSON(context.Background(), "task", nil, &got)
+	if err == nil {
+		t.Fatal("expected error for empty body")
+	}
+	if !strings.Contains(err.Error(), "empty model output") {
+		t.Errorf("error = %v, want to contain 'empty model output'", err)
+	}
+}
