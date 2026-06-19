@@ -1,0 +1,12 @@
+-- 014_finding_swept_at.sql — durable impact-sweep marker for open findings.
+--
+-- swept_at records when UpdateFindingSeverity last wrote a sweep verdict for
+-- this finding. NULL means unswept (never processed by the impact-sweep pass,
+-- or reset because the anchored code changed). Non-NULL means a verdict has
+-- been recorded; the finding is excluded from UnsweptOpenFindings and a second
+-- sweep drain is a verified no-op for that row.
+--
+-- Preserved across UpsertFinding re-discovery when file_hash is unchanged.
+-- Reset to NULL when file_hash changes (code version changed → re-evaluate
+-- reachability).
+ALTER TABLE findings ADD COLUMN swept_at TEXT;
