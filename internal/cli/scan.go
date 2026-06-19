@@ -268,9 +268,28 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 		return err
 	}
 
+	// Drive the verify and impact-sweep drains to fixpoint so a single
+	// interrupted-then-rerun scan converges. run() already replayed the
+	// pending_candidates WAL at start (stranded candidates verified), so this
+	// reconciles the rest: VerifyDrain clears any pending this process left, and
+	// SweepDrain re-ranks every open finding not yet swept — INCLUDING this
+	// scan's, since the terminal Stage F no longer re-ranks inline. Bounded and
+	// convergence-safe (VerifyDrain only deletes pending, SweepDrain only sets
+	// swept_at, so work-remaining shrinks monotonically). Best-effort.
+	reranked, drainErr := drainToFixpoint(ctx, f, st)
+
+	// Stage F moved out of run(), so res.Findings carry PRE-sweep severities.
+	// Refresh them from the re-ranked set so the oneshot summary matches the
+	// store and any published issues (oracle #3).
+	applyReranked(res.Findings, reranked)
+
 	// Tear down the live pane before printing the final summary so the
 	// summary is not interleaved with in-place repaints.
 	stopPane()
+
+	if drainErr != nil && ctx.Err() == nil {
+		_, _ = fmt.Fprintf(out, "\nWarning: post-scan drain incomplete (finding severities may be stale): %v\n", drainErr)
+	}
 
 	_ = flags.IncludeT3 // reserved: this stage emits T2 only; T3 filtering arrives with the report stage
 	printResult(out, res)
@@ -407,6 +426,67 @@ func executeScan(ctx context.Context, f *funnel.Funnel, kind store.ScanKind, cha
 		return f.Targeted(ctx, changed)
 	}
 	return f.Sweep(ctx)
+}
+
+// maxFixpointRounds bounds the oneshot drain loop so a pathological
+// non-converging case (a finding the LLM repeatedly leaves ambiguous, so its
+// swept_at never gets set) cannot spin. Round 1 does the work; a second confirms
+// convergence; a third absorbs a verify-drain that surfaces a finding the same
+// round's sweep then re-ranks.
+const maxFixpointRounds = 3
+
+// drainToFixpoint runs VerifyDrain then SweepDrain repeatedly until neither has
+// work left (no pending candidates AND no unswept open findings) or the round
+// cap is hit. It returns the union of the findings SweepDrain re-ranked, keyed
+// by finding ID, so the caller can refresh the PRE-sweep severities its scan
+// Result carries, plus the first drain/query error encountered (nil on clean
+// convergence). The order matches the daemon: verify→sweep, so a candidate
+// verified into a finding in a round is swept in the same round.
+func drainToFixpoint(ctx context.Context, f *funnel.Funnel, st *store.Store) (map[string]store.Finding, error) {
+	reranked := make(map[string]store.Finding)
+	for round := 0; round < maxFixpointRounds; round++ {
+		if err := ctx.Err(); err != nil {
+			return reranked, err
+		}
+		if _, err := f.VerifyDrain(ctx); err != nil {
+			return reranked, err
+		}
+		sres, err := f.SweepDrain(ctx)
+		if err != nil {
+			return reranked, err
+		}
+		for _, fnd := range sres.Findings {
+			reranked[fnd.ID] = fnd
+		}
+
+		pending, err := st.ListPendingCandidates(ctx)
+		if err != nil {
+			return reranked, err
+		}
+		unswept, err := st.UnsweptOpenFindings(ctx)
+		if err != nil {
+			return reranked, err
+		}
+		if len(pending) == 0 && len(unswept) == 0 {
+			return reranked, nil
+		}
+	}
+	return reranked, nil
+}
+
+// applyReranked refreshes each finding's severity and verdict detail from the
+// post-sweep set produced by drainToFixpoint, matched by finding ID. With the
+// terminal Stage F removed from run(), a scan Result carries PRE-sweep
+// severities; this brings the oneshot summary in line with the store and any
+// published issues (oracle #3). Findings absent from the set (e.g. nothing
+// unswept to re-rank) are left untouched.
+func applyReranked(findings []store.Finding, reranked map[string]store.Finding) {
+	for i := range findings {
+		if rr, ok := reranked[findings[i].ID]; ok {
+			findings[i].Severity = rr.Severity
+			findings[i].VerdictDetail = rr.VerdictDetail
+		}
+	}
 }
 
 // checkScanLock queries the store for live (fresh-heartbeat, unfinished) scan

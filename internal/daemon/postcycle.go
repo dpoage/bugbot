@@ -27,6 +27,15 @@ func (d *Daemon) postCycle(ctx context.Context, fres *funnel.Result, res *cycleR
 	res.closedF += closed
 	progress.Emit(d.prog, progress.Event{Kind: progress.KindReverify, Count: closed})
 
+	// Reconcile stranded work every cycle: verify any pending_candidates left by
+	// an interrupted run, then re-rank any open finding not yet swept (this
+	// cycle's findings included — run() no longer re-ranks severities inline).
+	// Ordered verify→sweep, BEFORE the publisher and promote: newly-verified
+	// findings and re-ranked severities are reflected before issues are
+	// filed/promoted, and the sweep marker survives promotion (promoteFinding's
+	// UpsertFinding preserves swept_at when file_hash is unchanged).
+	d.runPostCycleDrains(ctx)
+
 	// Publish reconcile: file/close GitHub issues for findings changed this
 	// cycle. Runs AFTER reverify so auto-closed findings are already marked
 	// fixed before the reconciler evaluates them. A missing gh binary logs a
@@ -37,6 +46,51 @@ func (d *Daemon) postCycle(ctx context.Context, fres *funnel.Result, res *cycleR
 		promoted := d.promoteNewFindings(ctx, fres)
 		res.promoted += promoted
 		progress.Emit(d.prog, progress.Event{Kind: progress.KindPromote, Count: promoted})
+	}
+}
+
+// runPostCycleDrains reconciles stranded work after the main cycle: it verifies
+// any pending_candidates left by an interrupted run (a no-op on an empty WAL),
+// then re-ranks every open finding not yet swept (this cycle's findings
+// included — run() no longer re-ranks inline). It builds its own per-cycle
+// funnel because postCycle has callers with no funnel in scope (a poll cycle
+// with new commits but nothing in scope to scan). Day-budget gated via a
+// throwaway sentinel so an exhausted budget skips the drains WITHOUT marking the
+// surrounding cycle skipped. Best-effort: a build/verify failure is logged and
+// never aborts the sweep drain or the rest of postCycle. Each drain records its
+// spend to the store ledger under its own scan run, so it counts toward the day
+// budget without polluting the main cycle's one-line summary.
+func (d *Daemon) runPostCycleDrains(ctx context.Context) {
+	if d.cfg.PerDayTokens > 0 {
+		sentinel := cycleResult{kind: store.ScanVerifyDrain}
+		if d.dayBudgetExhausted(ctx, &sentinel) {
+			d.log.Info("daemon: post-cycle drains skipped: day budget exhausted")
+			return
+		}
+	}
+
+	f, err := d.newFunnel()
+	if err != nil {
+		d.log.Error("daemon: post-cycle drains: build funnel failed", "err", err)
+		return
+	}
+	defer func() { _ = f.Close() }() // shut down per-cycle language servers
+
+	// Verify drain first so a candidate verified into a finding here is swept by
+	// the sweep drain below in the same pass. A failure is logged but must not
+	// strand the sweep drain.
+	if _, err := f.VerifyDrain(ctx); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		d.log.Error("daemon: post-cycle verify drain failed", "err", err)
+	}
+
+	if _, err := f.SweepDrain(ctx); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		d.log.Error("daemon: post-cycle impact sweep drain failed", "err", err)
 	}
 }
 

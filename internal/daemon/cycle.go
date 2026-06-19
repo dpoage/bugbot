@@ -210,13 +210,87 @@ func (d *Daemon) runSweep(ctx context.Context) {
 	d.finishCycle(ctx, res, start)
 }
 
-// recordScanResult folds a funnel.Result into the cycle accounting.
-func (d *Daemon) recordScanResult(res *cycleResult, fres *funnel.Result) {
-	res.scanRunID = fres.ScanRunID
+// runVerifyDrain is the verify-drain timer step: it drains the
+// pending_candidates write-ahead log left by interrupted runs, verifying each
+// WITHOUT re-running the finder/cartographer stage. Cheap when the WAL is empty
+// (a single store query inside VerifyDrain). The day-budget gate is applied by
+// the caller (Run), mirroring the backlog timer; spend is folded into a
+// cycleResult and logged. Returns quietly on context cancellation.
+func (d *Daemon) runVerifyDrain(ctx context.Context) {
+	start := d.clock.now()
+	progress.Emit(d.prog, progress.Event{Kind: progress.KindCycleStarted, ScanKind: string(store.ScanVerifyDrain)})
+	res := cycleResult{kind: store.ScanVerifyDrain}
+
+	f, err := d.newFunnel()
+	if err != nil {
+		d.log.Error("daemon: build funnel failed", "err", err)
+		return
+	}
+	defer func() { _ = f.Close() }() // shut down per-cycle language servers
+
+	fres, err := f.VerifyDrain(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		d.log.Error("daemon: verify drain failed", "err", err)
+		return
+	}
+	// Newly-verified candidates become genuine new Tier-2 findings, so they
+	// count as this cycle's new findings (unlike the impact sweep, which only
+	// re-ranks existing ones).
+	d.foldSpend(&res, fres)
 	res.newF = len(fres.Findings)
+	d.logCycle(res, d.clock.now().Sub(start))
+}
+
+// runImpactSweep is the impact-sweep-drain timer step: it re-ranks every open
+// finding not yet swept (swept_at NULL) by reachability/impact — this run's and
+// any stranded by an interrupted/older run. Cheap when nothing is unswept
+// (SweepDrain early-returns). The day-budget gate is applied by the caller
+// (Run). It surfaces no NEW findings (only re-ranks), so newF stays zero; spend
+// is folded and logged. Returns quietly on context cancellation.
+func (d *Daemon) runImpactSweep(ctx context.Context) {
+	start := d.clock.now()
+	progress.Emit(d.prog, progress.Event{Kind: progress.KindCycleStarted, ScanKind: string(store.ScanImpactSweep)})
+	res := cycleResult{kind: store.ScanImpactSweep}
+
+	f, err := d.newFunnel()
+	if err != nil {
+		d.log.Error("daemon: build funnel failed", "err", err)
+		return
+	}
+	defer func() { _ = f.Close() }() // shut down per-cycle language servers
+
+	fres, err := f.SweepDrain(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		d.log.Error("daemon: impact sweep drain failed", "err", err)
+		return
+	}
+	d.foldSpend(&res, fres)
+	d.logCycle(res, d.clock.now().Sub(start))
+}
+
+// foldSpend folds a funnel.Result's scan-run id and token spend into the cycle
+// accounting. It does NOT emit the finder-reliability warning: callers whose
+// result came from the finder stage (poll/sweep) use recordScanResult, which
+// adds that check. The maintenance drains run no finders, so a "no finders ran"
+// warning would be a false alarm — they fold spend via this helper directly.
+func (d *Daemon) foldSpend(res *cycleResult, fres *funnel.Result) {
+	res.scanRunID = fres.ScanRunID
 	res.inTokens = fres.Stats.InputTokens
 	res.outTokens = fres.Stats.OutputTokens
 	res.cacheRead = fres.Stats.CacheReadTokens
+}
+
+// recordScanResult folds a finder-stage funnel.Result into the cycle accounting
+// (spend + new-finding count) and emits the reliability warning.
+func (d *Daemon) recordScanResult(res *cycleResult, fres *funnel.Result) {
+	d.foldSpend(res, fres)
+	res.newF = len(fres.Findings)
 	d.warnIfUnreliable(fres)
 }
 

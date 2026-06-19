@@ -592,6 +592,74 @@ func TestValidate_ReproBacklogIntervalMustBePositive(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// New-field tests: VerifyDrainInterval and ImpactSweepInterval (bugbot-vpx.5).
+// ---------------------------------------------------------------------------
+
+func TestDefault_DrainIntervals(t *testing.T) {
+	cfg := Default()
+	if cfg.Daemon.VerifyDrainInterval != time.Hour {
+		t.Errorf("Daemon.VerifyDrainInterval default = %s, want 1h", cfg.Daemon.VerifyDrainInterval)
+	}
+	if cfg.Daemon.ImpactSweepInterval != 6*time.Hour {
+		t.Errorf("Daemon.ImpactSweepInterval default = %s, want 6h", cfg.Daemon.ImpactSweepInterval)
+	}
+}
+
+func TestLoad_DrainIntervalsFromYAML(t *testing.T) {
+	yaml := validYAML + `
+daemon:
+  verify_drain_interval: 45m
+  impact_sweep_interval: 12h
+`
+	cfg, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Daemon.VerifyDrainInterval != 45*time.Minute {
+		t.Errorf("VerifyDrainInterval = %s, want 45m", cfg.Daemon.VerifyDrainInterval)
+	}
+	if cfg.Daemon.ImpactSweepInterval != 12*time.Hour {
+		t.Errorf("ImpactSweepInterval = %s, want 12h", cfg.Daemon.ImpactSweepInterval)
+	}
+}
+
+func TestEnvOverride_DrainIntervals(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{
+		"BUGBOT_DAEMON_VERIFY_DRAIN_INTERVAL=90m",
+		"BUGBOT_DAEMON_IMPACT_SWEEP_INTERVAL=3h",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Daemon.VerifyDrainInterval != 90*time.Minute {
+		t.Errorf("VerifyDrainInterval = %s, want 90m", cfg.Daemon.VerifyDrainInterval)
+	}
+	if cfg.Daemon.ImpactSweepInterval != 3*time.Hour {
+		t.Errorf("ImpactSweepInterval = %s, want 3h", cfg.Daemon.ImpactSweepInterval)
+	}
+}
+
+func TestValidate_DrainIntervalsMustBePositive(t *testing.T) {
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+	cfg.Daemon.VerifyDrainInterval = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "verify_drain_interval") {
+		t.Errorf("verify_drain_interval=0 should be rejected, got %v", err)
+	}
+	cfg.Daemon.VerifyDrainInterval = time.Minute
+	cfg.Daemon.ImpactSweepInterval = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "impact_sweep_interval") {
+		t.Errorf("impact_sweep_interval=-1 should be rejected, got %v", err)
+	}
+	cfg.Daemon.ImpactSweepInterval = time.Hour
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("positive drain intervals should be valid, got %v", err)
+	}
+}
+
 func TestDefault_FinderHistoryTokensIsZero(t *testing.T) {
 	// Config default is zero so the funnel applies its own
 	// DefaultFinderHistoryTokens (compaction ON). A non-zero config default here

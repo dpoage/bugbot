@@ -146,6 +146,8 @@ func newDaemonCmd() *cobra.Command {
 				SweepInterval:        cfg.Daemon.SweepInterval,
 				IdleBackoff:          cfg.Daemon.IdleBackoff,
 				ReproBacklogInterval: cfg.Daemon.ReproBacklogInterval,
+				VerifyDrainInterval:  cfg.Daemon.VerifyDrainInterval,
+				ImpactSweepInterval:  cfg.Daemon.ImpactSweepInterval,
 				ReproBacklogBatch:    cfg.Repro.BacklogBatch,
 				PerCycleTokens:       cfg.Budgets.PerCycleTokens,
 				PerDayTokens:         cfg.Budgets.PerDayTokens,

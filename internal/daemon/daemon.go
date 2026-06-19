@@ -183,6 +183,16 @@ type DaemonConfig struct {
 	// PromoteAll per firing. Findings are taken in store-default order
 	// (newest-updated-first). Must be >= 1. Default 3.
 	ReproBacklogBatch int
+	// VerifyDrainInterval is the cadence of the verify-drain timer: the daemon
+	// drains the pending_candidates WAL (interrupted-run leftovers) WITHOUT the
+	// finder stage. New applies a 1h default when <= 0. This is the verify
+	// DRAIN pass, distinct from the full Sweep scan (SweepInterval).
+	VerifyDrainInterval time.Duration
+	// ImpactSweepInterval is the cadence of the impact-sweep-drain timer: the
+	// daemon re-ranks unswept open findings by reachability. New applies a 6h
+	// default when <= 0. This is the impact-sweep DRAIN pass, distinct from the
+	// full Sweep scan (SweepInterval).
+	ImpactSweepInterval time.Duration
 }
 
 // maxBackoffMultiplier caps idle backoff: the next poll is delayed by at most
@@ -254,6 +264,16 @@ func New(deps Deps, cfg DaemonConfig) (*Daemon, error) {
 		if cfg.ReproBacklogBatch < 1 {
 			cfg.ReproBacklogBatch = 3
 		}
+	}
+	// The maintenance drains (verify + impact-sweep) always run; they are NOT
+	// gated on EnableRepro. Apply >0 defaults when unset (mirroring the repro
+	// backlog default) so a caller that constructs DaemonConfig directly (e.g.
+	// tests) without these intervals still gets a working cadence.
+	if cfg.VerifyDrainInterval <= 0 {
+		cfg.VerifyDrainInterval = time.Hour
+	}
+	if cfg.ImpactSweepInterval <= 0 {
+		cfg.ImpactSweepInterval = 6 * time.Hour
 	}
 
 	log := deps.Logger

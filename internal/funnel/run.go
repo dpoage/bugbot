@@ -851,11 +851,6 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		}
 	}
 
-	// ---- Stage F: Impact sweep ----
-	// Re-rank each surviving finding's severity by reachability/impact and
-	// persist the rationale. Best-effort: a sweep failure never aborts the run.
-	f.impactSweep(ctx, findings, f.repo.Root(), verifierClient, budget.stopped.Load(), result)
-
 	result.Stats.SandboxExecs = int(sbExecs.Load())
 	result.Stats.SandboxExecMillis = sbMillis.Load()
 
