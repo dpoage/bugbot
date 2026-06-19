@@ -196,7 +196,7 @@ the hardened sandbox smoke test.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&target, "target", ".", "path to the target repository")
+	addTargetFlag(cmd, &target)
 	cmd.Flags().BoolVar(&enableAgent, "agent", false, "enable the LLM agent tier for edge-case resolution")
 	cmd.Flags().BoolVar(&doVerify, "verify", true, "run the offline smoke-test verifier on the candidate")
 	cmd.Flags().BoolVar(&doWrite, "write", false, "merge the proposed sandbox block into bugbot.yaml")
@@ -273,7 +273,7 @@ func runAgentTier(
 	firstVerdict repro.SmokeVerdict,
 ) (candidateBlock, error) {
 	// Load config for LLM role resolution.
-	cfg, err := config.Load(configPath)
+	cfg, err := config.Load(configPathFromCmd(cmd))
 	if err != nil {
 		return initial, fmt.Errorf("load config: %w (is bugbot.yaml configured?)", err)
 	}

@@ -124,7 +124,7 @@ func TestRenderWorldState(t *testing.T) {
 		PendingLeads: []store.Lead{
 			{TargetLens: "concurrency", File: "a.go", Line: 7, Note: "shared map"},
 		},
-		Published:      map[string]int{"open": 2, "closed": 4},
+		Published:      map[store.IssueState]int{store.IssueStateOpen: 2, store.IssueStateClosed: 4},
 		HasDaySpend:    true,
 		DaySpend:       store.SpendTotals{InputTokens: 250_000, OutputTokens: 50_000},
 		DayBudgetLimit: 1_000_000,

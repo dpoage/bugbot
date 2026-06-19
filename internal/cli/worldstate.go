@@ -24,7 +24,7 @@ type worldState struct {
 	PendingLeads      []store.Lead // newest-first; render at most leadPreviewMax
 	PendingLeadsTotal int
 
-	Published map[string]int // state -> count; empty = never published
+	Published map[store.IssueState]int // state -> count; empty = never published
 
 	DaySpend       store.SpendTotals
 	HasDaySpend    bool
@@ -154,9 +154,9 @@ func findingsLine(t store.FindingTallies) string {
 }
 
 // publishedLine renders issue-sync counts in a stable order, omitting zeros.
-func publishedLine(pub map[string]int) string {
+func publishedLine(pub map[store.IssueState]int) string {
 	out := ""
-	for _, state := range []string{"open", "closing", "pending", "closed"} {
+	for _, state := range []store.IssueState{store.IssueStateOpen, store.IssueStateClosing, store.IssueStatePending, store.IssueStateClosed} {
 		if n := pub[state]; n > 0 {
 			if out != "" {
 				out += " "

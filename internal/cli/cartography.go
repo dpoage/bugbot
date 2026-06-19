@@ -36,7 +36,7 @@ func newCartographyCmd() *cobra.Command {
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			cfg, st, err := cmdOpenStore(ctx)
+			cfg, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
@@ -84,7 +84,7 @@ func newCartographyCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&run, "run", false, "regenerate summaries out of band before showing them (spends tokens on the cartographer model)")
 	cmd.Flags().BoolVar(&full, "full", false, "print each full summary instead of a one-line preview")
-	cmd.Flags().StringVar(&target, "target", ".", "path to the target repository (used with --run)")
+	addTargetFlag(cmd, &target)
 	return cmd
 }
 

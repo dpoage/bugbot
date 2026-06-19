@@ -53,7 +53,7 @@ func newReportListCmd() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			_, st, err := cmdOpenStore(ctx)
+			_, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
@@ -114,7 +114,7 @@ func newReportShowCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			_, st, err := cmdOpenStore(ctx)
+			_, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
@@ -162,7 +162,7 @@ func newReportDismissCmd() *cobra.Command {
 			}
 
 			ctx := cmd.Context()
-			_, st, err := cmdOpenStore(ctx)
+			_, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
@@ -203,7 +203,7 @@ func newReportEmitCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			cfg, st, err := cmdOpenStore(ctx)
+			cfg, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
@@ -265,7 +265,7 @@ skipped_* status. The footer shows coverage stats.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			_, st, err := cmdOpenStore(ctx)
+			_, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
@@ -298,7 +298,7 @@ skipped_* status. The footer shows coverage stats.`,
 			for _, u := range units {
 				lensStrat := u.Lens
 				if u.Strategy != "" && u.Strategy != "sweep-wide" {
-					lensStrat = u.Lens + "@" + u.Strategy
+					lensStrat = u.Lens + "@" + string(u.Strategy)
 				}
 				dur := "-"
 				if !u.StartedAt.IsZero() && !u.FinishedAt.IsZero() {

@@ -44,7 +44,7 @@ func newStatusCmd() *cobra.Command {
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			cfg, err := config.Load(configPath)
+			cfg, err := config.Load(configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}

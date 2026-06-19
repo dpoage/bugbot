@@ -90,7 +90,7 @@ never affect the exit code.`,
 				ctx = context.Background()
 			}
 			env := doctorEnv{
-				configPath:    configPath,
+				configPath:    configPathFromCmd(cmd),
 				repoDir:       ".",
 				lookupEnv:     os.Getenv,
 				lookPath:      exec.LookPath,

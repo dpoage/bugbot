@@ -23,7 +23,7 @@ func newLeadsCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			_, st, err := cmdOpenStore(ctx)
+			_, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}

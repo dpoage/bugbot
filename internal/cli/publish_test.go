@@ -47,7 +47,7 @@ func makeDismissedFinding(fp string) store.Finding {
 	return f
 }
 
-func makePublishedIssue(fp string, issueNumber int, state string, updatedAt time.Time) store.PublishedIssue {
+func makePublishedIssue(fp string, issueNumber int, state store.IssueState, updatedAt time.Time) store.PublishedIssue {
 	return store.PublishedIssue{
 		Fingerprint: fp,
 		IssueNumber: issueNumber,
@@ -63,8 +63,10 @@ func TestPlanPublish_Create(t *testing.T) {
 	open := []store.Finding{makeOpenFinding("fp1", 2, now)}
 	actions := planPublish(open, nil, nil, nil, 2, true)
 
-	if len(actions) != 1 || actions[0].op != publishOpCreate {
-		t.Errorf("expected 1 create action, got %+v", actions)
+	if len(actions) != 1 {
+		t.Errorf("expected 1 action, got %d: %+v", len(actions), actions)
+	} else if _, ok := actions[0].(publishCreate); !ok {
+		t.Errorf("expected publishCreate, got %T", actions[0])
 	}
 }
 
@@ -73,12 +75,14 @@ func TestPlanPublish_Skip(t *testing.T) {
 	t0 := time.Now().Add(-time.Hour)
 	open := []store.Finding{makeOpenFinding("fp1", 2, t0)}
 	published := map[string]store.PublishedIssue{
-		"fp1": makePublishedIssue("fp1", 10, "open", t0.Add(time.Second)),
+		"fp1": makePublishedIssue("fp1", 10, store.IssueStateOpen, t0.Add(time.Second)),
 	}
 	actions := planPublish(open, nil, nil, published, 2, true)
 
-	if len(actions) != 1 || actions[0].op != publishOpSkip {
-		t.Errorf("expected 1 skip action, got %+v", actions)
+	if len(actions) != 1 {
+		t.Errorf("expected 1 action, got %d: %+v", len(actions), actions)
+	} else if _, ok := actions[0].(publishSkip); !ok {
+		t.Errorf("expected publishSkip, got %T", actions[0])
 	}
 }
 
@@ -88,15 +92,16 @@ func TestPlanPublish_Update(t *testing.T) {
 	t1 := t0.Add(2 * time.Hour) // finding updated after published.UpdatedAt
 	open := []store.Finding{makeOpenFinding("fp1", 2, t1)}
 	published := map[string]store.PublishedIssue{
-		"fp1": makePublishedIssue("fp1", 10, "open", t0),
+		"fp1": makePublishedIssue("fp1", 10, store.IssueStateOpen, t0),
 	}
 	actions := planPublish(open, nil, nil, published, 2, true)
 
-	if len(actions) != 1 || actions[0].op != publishOpUpdate {
-		t.Errorf("expected 1 update action, got %+v", actions)
-	}
-	if actions[0].issueNumber != 10 {
-		t.Errorf("issueNumber = %d, want 10", actions[0].issueNumber)
+	if len(actions) != 1 {
+		t.Errorf("expected 1 action, got %d: %+v", len(actions), actions)
+	} else if act, ok := actions[0].(publishUpdate); !ok {
+		t.Errorf("expected publishUpdate, got %T", actions[0])
+	} else if act.issueNumber != 10 {
+		t.Errorf("issueNumber = %d, want 10", act.issueNumber)
 	}
 }
 
@@ -114,10 +119,10 @@ func TestPlanPublish_TierFiltering(t *testing.T) {
 	// Expect 3 creates (T0, T1, T2), not T3.
 	creates := 0
 	for _, a := range actions {
-		if a.op == publishOpCreate {
+		if _, ok := a.(publishCreate); ok {
 			creates++
 		}
-		if a.op == publishOpCreate && a.finding.Tier == 3 {
+		if act, ok := a.(publishCreate); ok && act.finding.Tier == 3 {
 			t.Error("T3 finding should not be created at tierMin=2")
 		}
 	}
@@ -130,15 +135,16 @@ func TestPlanPublish_TierFiltering(t *testing.T) {
 func TestPlanPublish_Close(t *testing.T) {
 	fixed := []store.Finding{makeFixedFinding("fp1")}
 	published := map[string]store.PublishedIssue{
-		"fp1": makePublishedIssue("fp1", 5, "open", time.Now()),
+		"fp1": makePublishedIssue("fp1", 5, store.IssueStateOpen, time.Now()),
 	}
 	actions := planPublish(nil, fixed, nil, published, 2, true)
 
-	if len(actions) != 1 || actions[0].op != publishOpClose {
-		t.Errorf("expected 1 close action, got %+v", actions)
-	}
-	if actions[0].issueNumber != 5 {
-		t.Errorf("issueNumber = %d, want 5", actions[0].issueNumber)
+	if len(actions) != 1 {
+		t.Errorf("expected 1 action, got %d: %+v", len(actions), actions)
+	} else if act, ok := actions[0].(publishClose); !ok {
+		t.Errorf("expected publishClose, got %T", actions[0])
+	} else if act.issueNumber != 5 {
+		t.Errorf("issueNumber = %d, want 5", act.issueNumber)
 	}
 }
 
@@ -147,12 +153,14 @@ func TestPlanPublish_Close(t *testing.T) {
 func TestPlanPublish_DismissedClose(t *testing.T) {
 	dismissed := []store.Finding{makeDismissedFinding("fp1")}
 	published := map[string]store.PublishedIssue{
-		"fp1": makePublishedIssue("fp1", 7, "open", time.Now()),
+		"fp1": makePublishedIssue("fp1", 7, store.IssueStateOpen, time.Now()),
 	}
 	actions := planPublish(nil, nil, dismissed, published, 2, true)
 
-	if len(actions) != 1 || actions[0].op != publishOpClose {
-		t.Errorf("expected 1 close for dismissed with close_on_fixed=true, got %+v", actions)
+	if len(actions) != 1 {
+		t.Errorf("expected 1 action, got %d: %+v", len(actions), actions)
+	} else if _, ok := actions[0].(publishClose); !ok {
+		t.Errorf("expected publishClose for dismissed, got %T", actions[0])
 	}
 }
 
@@ -160,12 +168,12 @@ func TestPlanPublish_DismissedClose(t *testing.T) {
 func TestPlanPublish_CloseOnFixedFalse(t *testing.T) {
 	fixed := []store.Finding{makeFixedFinding("fp1")}
 	published := map[string]store.PublishedIssue{
-		"fp1": makePublishedIssue("fp1", 5, "open", time.Now()),
+		"fp1": makePublishedIssue("fp1", 5, store.IssueStateOpen, time.Now()),
 	}
 	actions := planPublish(nil, fixed, nil, published, 2, false /* close_on_fixed=false */)
 
 	for _, a := range actions {
-		if a.op == publishOpClose {
+		if _, ok := a.(publishClose); ok {
 			t.Errorf("close action should not be planned when close_on_fixed=false")
 		}
 	}
@@ -175,12 +183,12 @@ func TestPlanPublish_CloseOnFixedFalse(t *testing.T) {
 func TestPlanPublish_AlreadyClosed(t *testing.T) {
 	fixed := []store.Finding{makeFixedFinding("fp1")}
 	published := map[string]store.PublishedIssue{
-		"fp1": makePublishedIssue("fp1", 5, "closed", time.Now()),
+		"fp1": makePublishedIssue("fp1", 5, store.IssueStateClosed, time.Now()),
 	}
 	actions := planPublish(nil, fixed, nil, published, 2, true)
 
 	for _, a := range actions {
-		if a.op == publishOpClose {
+		if _, ok := a.(publishClose); ok {
 			t.Errorf("should not close an already-closed issue")
 		}
 	}

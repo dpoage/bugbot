@@ -28,6 +28,29 @@ import (
 	"github.com/dpoage/bugbot/internal/util"
 )
 
+// ScanFlags holds the parsed flag values for `bugbot scan`. It mirrors the
+// per-command overrides pattern used by FunnelOptionOverrides so scan-specific
+// configuration is grouped and independently testable.
+type ScanFlags struct {
+	Target      string
+	Since       string
+	IncludeT3   bool
+	Concurrency int
+	Refuters    int
+	Lenses      []string
+	DoRepro     bool
+	DoEstimate  bool
+	Force       bool
+}
+
+// addTargetFlag registers the shared --target flag on cmd, binding to the
+// provided pointer. All scan-family commands (scan, review, repro, prime,
+// cartography, design-sandbox) carry an identical --target flag; this helper
+// is the single definition of its name, default, and usage text.
+func addTargetFlag(cmd *cobra.Command, dest *string) {
+	cmd.Flags().StringVar(dest, "target", ".", "path to the target repository")
+}
+
 // newScanCmd runs a single pass of the detection funnel over a target repo. It
 // loads config, opens the state store and the target repository, builds the
 // finder/verifier LLM clients from the role mappings, runs the funnel (a whole-
@@ -41,17 +64,7 @@ import (
 // the summary, and a prominent reliability warning is printed whenever any finder
 // failed so an empty result is never mistaken for a clean bill of health.
 func newScanCmd() *cobra.Command {
-	var (
-		target      string
-		since       string
-		includeT3   bool
-		concurrency int
-		refuters    int
-		lenses      []string
-		doRepro     bool
-		doEstimate  bool
-		force       bool
-	)
+	var flags ScanFlags
 
 	cmd := &cobra.Command{
 		Use:   "scan [flags]",
@@ -70,295 +83,327 @@ func newScanCmd() *cobra.Command {
 			// risk: each call returns a new channel and a distinct stop function.
 			ctx, stopSignal := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 			defer stopSignal()
-
-			cfg, st, err := cmdOpenStore(ctx)
-			if err != nil {
-				return err
-			}
-			defer closeStore(st)
-
-			// Advisory single-scan lock: refuse if another process is actively
-			// scanning this state db (heartbeat fresh, not finished, different pid).
-			// --force bypasses the check so an operator can override a stale lock.
-			if lockErr := checkScanLock(ctx, st, force, os.Getpid()); lockErr != nil {
-				return lockErr
-			}
-
-			repo, err := ingest.Open(ctx, target)
-			if err != nil {
-				return fmt.Errorf("open target: %w", err)
-			}
-
-			finder, verifier, cartographer, err := buildRoleClients(ctx, &cfg)
-			if err != nil {
-				return err
-			}
-
-			out := cmd.OutOrStdout()
-
-			// Activity visibility: a snapshot sink (so `bugbot status` can read this
-			// run from another terminal) plus a live renderer — an in-place ANSI pane
-			// when stdout is a TTY, or plain log lines when piped. The pane is stopped
-			// before the final summary so it leaves the terminal clean.
-			snap := progress.NewSnapshotSink(storageDir(cfg))
-			var (
-				pane     *progress.PaneRenderer
-				liveSink progress.Sink
-			)
-			if progress.IsTerminal(out) {
-				pane = progress.NewPaneRenderer(out, 0)
-				liveSink = pane
-			} else {
-				liveSink = progress.NewLogRenderer(out)
-			}
-			progressSink := progress.NewMulti(liveSink, snap)
-			stopPane := func() {
-				if pane != nil {
-					pane.Stop()
-					pane = nil
-				}
-			}
-			defer stopPane()
-
-			// Sandbox opts and the degraded warning are produced by
-			// buildFunnelOptions further down (after the reproHook is
-			// assembled, so its overrides.Repro is set).
-
-			// Build the reproducer and wire it as an in-run hook when --repro is
-			// set. The hook closure captures the reproducer and the spend recorder
-			// so repro LLM spend flows through the same ledger as the funnel.
-			// The funnel does NOT import internal/repro; the CLI owns this wiring.
-			//
-			// Spend attribution: the funnel passes the scan run id into the hook
-			// (it is minted inside the funnel), and the closure pins it on the
-			// recorder once before the first PromoteOne — so in-run repro spend is
-			// attributed to the scan run like finder/verifier spend.
-			//
-			// reproAttempted records every fingerprint the in-run hook attempted —
-			// INCLUDING exhausted attempts, which leave no store-visible marker —
-			// so the catch-up drain never re-burns sandbox time on a finding this
-			// run already tried (the daemon's next-cycle rotation is separate,
-			// pre-existing behavior).
-			var reproHook func(ctx context.Context, scanRunID string, finding store.Finding) error
-			var reproAttempted sync.Map
-			var reproRunOnce sync.Once
-			var r *repro.Reproducer
-			var reproRec *ledgerRecorder
-			if doRepro && !doEstimate {
-				runtime, rtOK := sandbox.Detect()
-				if !rtOK {
-					_, _ = fmt.Fprintln(out, "Reproduce stage skipped: no container runtime (podman/docker) found on PATH.")
-					// doRepro stays true so the catch-up drain prints a note; hook stays nil.
-				} else {
-					sb, sbErr := sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(cfg)...)
-					if sbErr != nil {
-						return fmt.Errorf("build sandbox: %w", sbErr)
-					}
-					// Ledger repro + patch-prover spend; the scan run id is pinned by
-					// the hook on first use (the funnel supplies it), and again after
-					// the sweep for the catch-up drain.
-					reproRec = newLedgerRecorder(ctx, st)
-					reproClient, rErr := llm.ResolveRole(ctx, &cfg, "reproducer", llm.Options{Recorder: reproRec})
-					if rErr != nil {
-						return fmt.Errorf("build reproducer client: %w", rErr)
-					}
-					// Probe image capabilities once; result is cached per image so
-					// subsequent daemon cycles and parallel scan runs are free.
-					caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, target)
-					var rNewErr error
-					r, rNewErr = repro.New(reproClient, sb, target, repro.Options{
-						Image:            cfg.Sandbox.Image,
-						PatchProver:      cfg.Repro.PatchProver,
-						PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
-						PatchSuiteCmd:    cfg.Repro.SuiteCmd,
-						DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
-						SetupCmds:        cfg.Sandbox.SetupCmds,
-						LocalMounts:      localMountsFromConfig(cfg),
-						Capabilities:     caps,
-					})
-					if rNewErr != nil {
-						return fmt.Errorf("build reproducer: %w", rNewErr)
-					}
-					if r != nil {
-						// Hook: called in-run for each Tier-2 finding. Uses PromoteOne
-						// (one finding = one hook call = one idle slot; the funnel's
-						// consumer goroutine is the parallelism bound). The hook calls
-						// PromoteOne which calls Attempt internally — no internal semaphore
-						// is added here. Hook errors are surfaced but do not abort the scan.
-						reproHook = func(hCtx context.Context, scanRunID string, finding store.Finding) error {
-							reproRunOnce.Do(func() { reproRec.SetScanRun(scanRunID) })
-							reproAttempted.Store(finding.Fingerprint, true)
-							_, hErr := r.PromoteOne(hCtx, st, finding)
-							return hErr
-						}
-					}
-				}
-			}
-			opts, sandboxDegraded, sbErr := buildFunnelOptions(cfg, FunnelOptionOverrides{
-				Lenses:      lenses,
-				Refuters:    refuters,
-				MaxParallel: concurrency,
-				Progress:    progressSink,
-				Repro:       reproHook,
-			})
-			if sbErr != nil {
-				return sbErr
-			}
-			if sandboxDegraded {
-				printSandboxDegradedWarning(cmd.OutOrStdout())
-			}
-			f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer}, st, repo, opts)
-			if err != nil {
-				return err
-			}
-			// Shut down any language servers the code-navigation tools spawned.
-			defer func() { _ = f.Close() }()
-
-			// Resolve the scan scope: a Targeted blast-radius run when --since is
-			// given, otherwise a whole-snapshot Sweep. Targeted runs populate
-			// ChangeContext (for the diff-intent lens) and rebuild the funnel so
-			// hypothesize sees it. Computed before seeding and the estimate
-			// short-circuit so every path agrees on scope.
-			var changed []string
-			kind := store.ScanOneshot
-			if since != "" {
-				head, herr := repo.HeadCommit(ctx)
-				if herr != nil {
-					return fmt.Errorf("resolve HEAD: %w", herr)
-				}
-				changes, cerr := repo.ChangedFiles(ctx, since, head)
-				if cerr != nil {
-					return fmt.Errorf("diff %s..HEAD: %w", since, cerr)
-				}
-				changed = ingest.ChangedPaths(changes)
-				_, _ = fmt.Fprintf(out, "Targeted scan: %d changed file(s) since %s\n", len(changed), since)
-				// Populate ChangeContext for the diff-intent lens. Failures are
-				// non-fatal: the scan still runs without diff-intent context.
-				cc := buildScanChangeContext(ctx, repo, since, head, changed)
-				if cc != nil {
-					opts.ChangeContext = cc
-					// Rebuild the funnel with the updated options so ChangeContext is
-					// visible to hypothesize. The old funnel (f) has not run yet so no
-					// language servers have been started. Only swap f after a
-					// successful rebuild so a failure here cannot leave f nil and
-					// cause the deferred f.Close() to panic ((*Funnel).Close has a
-					// nil-receiver guard, but we still prefer not to lose f).
-					f2, buildErr := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer}, st, repo, opts)
-					if buildErr != nil {
-						return buildErr
-					}
-					_ = f.Close()
-					f = f2
-				}
-				kind = store.ScanTargeted
-			}
-
-			// --estimate: project this run's token spend and wall time WITHOUT any
-			// LLM call (and without the analyzer/repro container work below), then
-			// stop. The work breakdown is exact; the token/time figures are
-			// calibrated from recorded history when available, else labeled priors.
-			if doEstimate {
-				est, eerr := f.EstimateScan(ctx, kind, changed)
-				if eerr != nil {
-					return eerr
-				}
-				stopPane()
-				printEstimate(out, est)
-				return nil
-			}
-
-			// Analyzer seeding: run deterministic static analyzers (staticcheck,
-			// ruff) to seed the leads blackboard before the finder stage. Always-on
-			// with graceful-skip: if no container runtime is available, or the
-			// analyzer binary is absent from the image, the seed step is silently
-			// skipped. Analyzer failures never block the scan.
-			runAnalyzerSeed(ctx, cfg, repo.Root(), st, progressSink)
-
-			// Doc-contradiction seeding: a pure-Go, in-process pass that mines
-			// documented-sentinel-vs-validator contradictions (the bugbot-ig7
-			// class) and posts them as leads. Unlike analyzer seeding it needs no
-			// container runtime, so it always runs.
-			runContradictionSeed(ctx, cfg, repo, st, progressSink)
-
-			// Heartbeat goroutine: periodically updates the scan_run row so
-			// ActiveScanRuns can distinguish us from a crashed/stale process.
-			// The goroutine resolves our run ID by querying for the most-recently
-			// started run belonging to this pid (BeginScanRun inside the funnel
-			// creates it synchronously before any agent goroutines start).
-			hbCtx, hbCancel := context.WithCancel(ctx)
-			defer hbCancel()
-			go runHeartbeat(hbCtx, st, os.Getpid())
-
-			var res *funnel.Result
-			if kind == store.ScanTargeted {
-				res, err = f.Targeted(ctx, changed)
-			} else {
-				res, err = f.Sweep(ctx)
-			}
-			if err != nil {
-				// If the funnel failed with a SQLite IOERR, run the
-				// store's quick_check + reopen Diagnose so the
-				// operator log makes the failure mode
-				// self-explaining (transient VFS race vs on-disk
-				// corruption). The original err is returned
-				// unchanged; the diagnostic lines go to stderr.
-				if store.IsIOErr(err) {
-					logStoreDiagnose(ctx, st, err)
-				}
-				return err
-			}
-
-			// Tear down the live pane before printing the final summary so the
-			// summary is not interleaved with in-place repaints.
-			stopPane()
-
-			_ = includeT3 // reserved: this stage emits T2 only; T3 filtering arrives with the report stage
-			printResult(out, res)
-
-			if doRepro && r != nil {
-				// Wire spend to this scan run now that we have the ID. In-run hook
-				// calls already used this recorder; setting the run ID here ensures
-				// any catch-up drain spend is also attributed correctly.
-				if reproRec != nil {
-					reproRec.SetScanRun(res.ScanRunID)
-				}
-				// Catch-up drain: run a backlog-style drain over open T2 findings
-				// from this scan that have no prior repro attempt. This is a cheap
-				// no-op when the in-run hook covered everything; it ensures coverage
-				// for findings that overflowed the reproCh buffer or were produced
-				// by a very fast scan with a slow sandbox. Using the same
-				// PromoteAll path here means the daemon drain's rotation logic (touch
-				// failed findings) also runs for any catch-up attempts.
-				if err := runReproCatchUp(ctx, out, r, st, res.Findings, &reproAttempted); err != nil {
-					return err
-				}
-			}
-
-			// Exit nonzero when most finders failed to parse: automation must not
-			// treat such a run as a clean pass. The summary (with its prominent
-			// reliability warning) is already printed; we suppress cobra's usage and
-			// error re-print so the warning stands as the explanation.
-			if res.Stats.MostFindersFailed() {
-				cmd.SilenceUsage = true
-				cmd.SilenceErrors = true
-				return fmt.Errorf("scan unreliable: %d of %d finder agents produced no parseable output",
-					res.Stats.FinderFailures, res.Stats.FinderRuns)
-			}
-			return nil
+			return runScanCmd(ctx, cmd, flags)
 		},
 	}
 
-	cmd.Flags().StringVar(&target, "target", ".", "path to the target repository")
-	cmd.Flags().StringVar(&since, "since", "", "scan only the blast radius of changes since this commit (targeted scan)")
-	cmd.Flags().BoolVar(&includeT3, "include-suspected", false, "include T3 (suspected) findings in output (reserved; this stage emits T2)")
-	cmd.Flags().IntVar(&concurrency, "concurrency", funnel.DefaultMaxParallel, "number of parallel agents")
-	cmd.Flags().IntVar(&refuters, "refuters", funnel.DefaultRefuters, "number of adversarial refuter agents per candidate")
-	cmd.Flags().StringSliceVar(&lenses, "lens", nil, "restrict finder lenses (repeatable); default is all built-in lenses")
-	cmd.Flags().BoolVar(&doRepro, "repro", false, "run the Reproduce stage: generate sandboxed failing tests and promote demonstrated findings to Tier-1")
-	cmd.Flags().BoolVar(&doEstimate, "estimate", false, "estimate token spend and wall time for this scan without running it (no LLM calls)")
-	cmd.Flags().BoolVar(&force, "force", false, "bypass the advisory single-scan lock and proceed even if another scan appears active")
+	addTargetFlag(cmd, &flags.Target)
+	cmd.Flags().StringVar(&flags.Since, "since", "", "scan only the blast radius of changes since this commit (targeted scan)")
+	cmd.Flags().BoolVar(&flags.IncludeT3, "include-suspected", false, "include T3 (suspected) findings in output (reserved; this stage emits T2)")
+	cmd.Flags().IntVar(&flags.Concurrency, "concurrency", funnel.DefaultMaxParallel, "number of parallel agents")
+	cmd.Flags().IntVar(&flags.Refuters, "refuters", funnel.DefaultRefuters, "number of adversarial refuter agents per candidate")
+	cmd.Flags().StringSliceVar(&flags.Lenses, "lens", nil, "restrict finder lenses (repeatable); default is all built-in lenses")
+	cmd.Flags().BoolVar(&flags.DoRepro, "repro", false, "run the Reproduce stage: generate sandboxed failing tests and promote demonstrated findings to Tier-1")
+	cmd.Flags().BoolVar(&flags.DoEstimate, "estimate", false, "estimate token spend and wall time for this scan without running it (no LLM calls)")
+	cmd.Flags().BoolVar(&flags.Force, "force", false, "bypass the advisory single-scan lock and proceed even if another scan appears active")
 
 	return cmd
+}
+
+// runScanCmd executes the scan pipeline. It is extracted from the RunE closure
+// so each stage is independently callable and testable. The ctx passed in must
+// already have signal cancellation wired by the caller.
+func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error {
+	cfg, st, err := openStoreForScan(ctx, cmd)
+	if err != nil {
+		return err
+	}
+	defer closeStore(st)
+
+	// Advisory single-scan lock: refuse if another process is actively
+	// scanning this state db (heartbeat fresh, not finished, different pid).
+	// --force bypasses the check so an operator can override a stale lock.
+	if lockErr := checkScanLock(ctx, st, flags.Force, os.Getpid()); lockErr != nil {
+		return lockErr
+	}
+
+	repo, err := openRepoForScan(ctx, flags.Target)
+	if err != nil {
+		return err
+	}
+
+	finder, verifier, cartographer, err := buildRoleClients(ctx, &cfg)
+	if err != nil {
+		return err
+	}
+
+	out := cmd.OutOrStdout()
+
+	// Activity visibility: a snapshot sink (so `bugbot status` can read this
+	// run from another terminal) plus a live renderer — an in-place ANSI pane
+	// when stdout is a TTY, or plain log lines when piped. The pane is stopped
+	// before the final summary so it leaves the terminal clean.
+	snap := progress.NewSnapshotSink(storageDir(cfg))
+	var (
+		pane     *progress.PaneRenderer
+		liveSink progress.Sink
+	)
+	if progress.IsTerminal(out) {
+		pane = progress.NewPaneRenderer(out, 0)
+		liveSink = pane
+	} else {
+		liveSink = progress.NewLogRenderer(out)
+	}
+	progressSink := progress.NewMulti(liveSink, snap)
+	stopPane := func() {
+		if pane != nil {
+			pane.Stop()
+			pane = nil
+		}
+	}
+	defer stopPane()
+
+	// Build the reproducer and wire it as an in-run hook when --repro is set.
+	reproHook, reproRec, r, reproAttempted, err := buildReproHookForScan(ctx, out, cfg, st, flags)
+	if err != nil {
+		return err
+	}
+
+	opts, sandboxDegraded, sbErr := buildFunnelOptions(cfg, FunnelOptionOverrides{
+		Lenses:      flags.Lenses,
+		Refuters:    flags.Refuters,
+		MaxParallel: flags.Concurrency,
+		Progress:    progressSink,
+		Repro:       reproHook,
+	})
+	if sbErr != nil {
+		return sbErr
+	}
+	if sandboxDegraded {
+		printSandboxDegradedWarning(cmd.OutOrStdout())
+	}
+	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer}, st, repo, opts)
+	if err != nil {
+		return err
+	}
+	// Shut down any language servers the code-navigation tools spawned.
+	defer func() { _ = f.Close() }()
+
+	// Resolve the scan scope: a Targeted blast-radius run when --since is
+	// given, otherwise a whole-snapshot Sweep. Targeted runs populate
+	// ChangeContext (for the diff-intent lens) and rebuild the funnel so
+	// hypothesize sees it. Computed before seeding and the estimate
+	// short-circuit so every path agrees on scope.
+	var changed []string
+	kind := store.ScanOneshot
+	if flags.Since != "" {
+		head, herr := repo.HeadCommit(ctx)
+		if herr != nil {
+			return fmt.Errorf("resolve HEAD: %w", herr)
+		}
+		changes, cerr := repo.ChangedFiles(ctx, flags.Since, head)
+		if cerr != nil {
+			return fmt.Errorf("diff %s..HEAD: %w", flags.Since, cerr)
+		}
+		changed = ingest.ChangedPaths(changes)
+		_, _ = fmt.Fprintf(out, "Targeted scan: %d changed file(s) since %s\n", len(changed), flags.Since)
+		// Populate ChangeContext for the diff-intent lens. Failures are
+		// non-fatal: the scan still runs without diff-intent context.
+		cc := buildScanChangeContext(ctx, repo, flags.Since, head, changed)
+		if cc != nil {
+			opts.ChangeContext = cc
+			// Rebuild the funnel with the updated options so ChangeContext is
+			// visible to hypothesize. The old funnel (f) has not run yet so no
+			// language servers have been started. Only swap f after a
+			// successful rebuild so a failure here cannot leave f nil and
+			// cause the deferred f.Close() to panic ((*Funnel).Close has a
+			// nil-receiver guard, but we still prefer not to lose f).
+			f2, buildErr := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer}, st, repo, opts)
+			if buildErr != nil {
+				return buildErr
+			}
+			_ = f.Close()
+			f = f2
+		}
+		kind = store.ScanTargeted
+	}
+
+	// --estimate: project this run's token spend and wall time WITHOUT any
+	// LLM call (and without the analyzer/repro container work below), then
+	// stop. The work breakdown is exact; the token/time figures are
+	// calibrated from recorded history when available, else labeled priors.
+	if flags.DoEstimate {
+		est, eerr := f.EstimateScan(ctx, kind, changed)
+		if eerr != nil {
+			return eerr
+		}
+		stopPane()
+		printEstimate(out, est)
+		return nil
+	}
+
+	// Analyzer seeding: run deterministic static analyzers (staticcheck,
+	// ruff) to seed the leads blackboard before the finder stage. Always-on
+	// with graceful-skip: if no container runtime is available, or the
+	// analyzer binary is absent from the image, the seed step is silently
+	// skipped. Analyzer failures never block the scan.
+	runAnalyzerSeed(ctx, cfg, repo.Root(), st, progressSink)
+
+	// Doc-contradiction seeding: a pure-Go, in-process pass that mines
+	// documented-sentinel-vs-validator contradictions (the bugbot-ig7
+	// class) and posts them as leads. Unlike analyzer seeding it needs no
+	// container runtime, so it always runs.
+	runContradictionSeed(ctx, cfg, repo, st, progressSink)
+
+	// Heartbeat goroutine: periodically updates the scan_run row so
+	// ActiveScanRuns can distinguish us from a crashed/stale process.
+	// The goroutine resolves our run ID by querying for the most-recently
+	// started run belonging to this pid (BeginScanRun inside the funnel
+	// creates it synchronously before any agent goroutines start).
+	hbCtx, hbCancel := context.WithCancel(ctx)
+	defer hbCancel()
+	go runHeartbeat(hbCtx, st, os.Getpid())
+
+	res, err := executeScan(ctx, f, kind, changed)
+	if err != nil {
+		// If the funnel failed with a SQLite IOERR, run the
+		// store's quick_check + reopen Diagnose so the
+		// operator log makes the failure mode
+		// self-explaining (transient VFS race vs on-disk
+		// corruption). The original err is returned
+		// unchanged; the diagnostic lines go to stderr.
+		if store.IsIOErr(err) {
+			logStoreDiagnose(ctx, st, err)
+		}
+		return err
+	}
+
+	// Tear down the live pane before printing the final summary so the
+	// summary is not interleaved with in-place repaints.
+	stopPane()
+
+	_ = flags.IncludeT3 // reserved: this stage emits T2 only; T3 filtering arrives with the report stage
+	printResult(out, res)
+
+	if flags.DoRepro && r != nil {
+		// Wire spend to this scan run now that we have the ID. In-run hook
+		// calls already used this recorder; setting the run ID here ensures
+		// any catch-up drain spend is also attributed correctly.
+		if reproRec != nil {
+			reproRec.SetScanRun(res.ScanRunID)
+		}
+		// Catch-up drain: run a backlog-style drain over open T2 findings
+		// from this scan that have no prior repro attempt. This is a cheap
+		// no-op when the in-run hook covered everything; it ensures coverage
+		// for findings that overflowed the reproCh buffer or were produced
+		// by a very fast scan with a slow sandbox. Using the same
+		// PromoteAll path here means the daemon drain's rotation logic (touch
+		// failed findings) also runs for any catch-up attempts.
+		if err := runReproCatchUp(ctx, out, r, st, res.Findings, reproAttempted); err != nil {
+			return err
+		}
+	}
+
+	// Exit nonzero when most finders failed to parse: automation must not
+	// treat such a run as a clean pass. The summary (with its prominent
+	// reliability warning) is already printed; we suppress cobra's usage and
+	// error re-print so the warning stands as the explanation.
+	if res.Stats.MostFindersFailed() {
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		return fmt.Errorf("scan unreliable: %d of %d finder agents produced no parseable output",
+			res.Stats.FinderFailures, res.Stats.FinderRuns)
+	}
+	return nil
+}
+
+// openStoreForScan loads the config and opens the state store for the scan
+// command. It is extracted so it can be called from runScanCmd without the
+// cobra command being visible to the rest of the scan pipeline.
+func openStoreForScan(ctx context.Context, cmd *cobra.Command) (config.Config, *store.Store, error) {
+	return cmdOpenStore(ctx, configPathFromCmd(cmd))
+}
+
+// openRepoForScan opens the target repository for scanning. It wraps
+// ingest.Open with a consistent error prefix so scan failures are identifiable.
+func openRepoForScan(ctx context.Context, target string) (*ingest.Repo, error) {
+	repo, err := ingest.Open(ctx, target)
+	if err != nil {
+		return nil, fmt.Errorf("open target: %w", err)
+	}
+	return repo, nil
+}
+
+// buildReproHookForScan constructs the in-run reproducer hook when --repro is
+// requested. It returns the hook closure and the associated reproducer state
+// needed by the post-scan catch-up drain. When --repro is false or no container
+// runtime is available the hook is nil and the other return values are zero.
+func buildReproHookForScan(
+	ctx context.Context,
+	out io.Writer,
+	cfg config.Config,
+	st *store.Store,
+	flags ScanFlags,
+) (
+	hook func(ctx context.Context, scanRunID string, finding store.Finding) error,
+	rec *ledgerRecorder,
+	r *repro.Reproducer,
+	attempted *sync.Map,
+	err error,
+) {
+	attempted = &sync.Map{}
+	if !flags.DoRepro || flags.DoEstimate {
+		return nil, nil, nil, attempted, nil
+	}
+	runtime, rtOK := sandbox.Detect()
+	if !rtOK {
+		_, _ = fmt.Fprintln(out, "Reproduce stage skipped: no container runtime (podman/docker) found on PATH.")
+		// hook stays nil so the catch-up drain prints a note; DoRepro check in
+		// the caller still runs (with r == nil) so no catch-up is attempted.
+		return nil, nil, nil, attempted, nil
+	}
+	sb, sbErr := sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(cfg)...)
+	if sbErr != nil {
+		return nil, nil, nil, nil, fmt.Errorf("build sandbox: %w", sbErr)
+	}
+	// Ledger repro + patch-prover spend; the scan run id is pinned by the
+	// hook on first use (the funnel supplies it), and again after the sweep
+	// for the catch-up drain.
+	rec = newLedgerRecorder(ctx, st)
+	reproClient, rErr := llm.ResolveRole(ctx, &cfg, "reproducer", llm.Options{Recorder: rec})
+	if rErr != nil {
+		return nil, nil, nil, nil, fmt.Errorf("build reproducer client: %w", rErr)
+	}
+	// Probe image capabilities once; result is cached per image so
+	// subsequent daemon cycles and parallel scan runs are free.
+	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, flags.Target)
+	r, rNewErr := repro.New(reproClient, sb, flags.Target, repro.Options{
+		Image:            cfg.Sandbox.Image,
+		PatchProver:      cfg.Repro.PatchProver,
+		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
+		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
+		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+		SetupCmds:        cfg.Sandbox.SetupCmds,
+		LocalMounts:      localMountsFromConfig(cfg),
+		Capabilities:     caps,
+	})
+	if rNewErr != nil {
+		return nil, nil, nil, nil, fmt.Errorf("build reproducer: %w", rNewErr)
+	}
+	if r == nil {
+		return nil, nil, nil, attempted, nil
+	}
+	// Hook: called in-run for each Tier-2 finding. Uses PromoteOne
+	// (one finding = one hook call = one idle slot; the funnel's
+	// consumer goroutine is the parallelism bound). The hook calls
+	// PromoteOne which calls Attempt internally.
+	var runOnce sync.Once
+	hook = func(hCtx context.Context, scanRunID string, finding store.Finding) error {
+		runOnce.Do(func() { rec.SetScanRun(scanRunID) })
+		attempted.Store(finding.Fingerprint, true)
+		_, hErr := r.PromoteOne(hCtx, st, finding)
+		return hErr
+	}
+	return hook, rec, r, attempted, nil
+}
+
+// executeScan runs the funnel: Targeted when changed files are provided,
+// Sweep otherwise. It is the innermost independently-callable stage.
+func executeScan(ctx context.Context, f *funnel.Funnel, kind store.ScanKind, changed []string) (*funnel.Result, error) {
+	if kind == store.ScanTargeted {
+		return f.Targeted(ctx, changed)
+	}
+	return f.Sweep(ctx)
 }
 
 // checkScanLock queries the store for live (fresh-heartbeat, unfinished) scan
