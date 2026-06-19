@@ -150,8 +150,12 @@ func (f *Funnel) runVerifyAndPersist(
 			if av != nil && av.Refuted {
 				localArbiterKills = 1
 			}
-			arbiterReasoning = fmt.Sprintf("arbiter [%s, confidence=%s]: %s",
-				verdictWord(av), av.Confidence, strings.TrimSpace(av.Reasoning))
+			hallucinatedNote := ""
+			if av != nil && av.HallucinatedRebuttal {
+				hallucinatedNote = " [hallucinated rebuttal detected]"
+			}
+			arbiterReasoning = fmt.Sprintf("arbiter [%s, confidence=%s]%s: %s",
+				verdictWord(av), av.Confidence, hallucinatedNote, strings.TrimSpace(av.Reasoning))
 		}
 	}
 
@@ -265,13 +269,50 @@ func (f *Funnel) runVerifyAndPersist(
 	allLenses := dedupLenses(append(c.CorroboratingLenses, stagedLenses...))
 	c.CorroboratingLenses = allLenses
 
-	reasoning := buildReasoning(verdicts, seatNames, arbiterReasoning, arbiterRan)
+	// Quorum check: require a strict majority of the panel to have examined the
+	// code. Abstaining seats (CouldNotReadCode) do not count toward quorum.
+	// Below floor: survivor is flagged NeedsHuman so a human confirms the result
+	// rather than silently promoting a finding examined by too few seats.
+	//
+	// NeedsHuman dual meaning: this field is also set by the repro/patch-prover
+	// when it exhausts its attempt budget (repro_hook.go). Both meanings cause
+	// the finding to be excluded from the repro backlog (daemon/backlog.go) and
+	// to render the 'needs human review' copy in CLI/report output. The verifier
+	// sets it here for a different reason (below-quorum abstentions) but accepts
+	// those downstream effects deliberately: a below-quorum survivor should not
+	// receive a repro attempt until a human has confirmed the finding. A separate
+	// bead tracks updating the downstream copy to distinguish the two causes.
+	examined := examinedVerdicts(verdicts)
+	needsHuman := belowQuorum(len(examined), len(verdicts))
+	var quorumNote string
+	if needsHuman {
+		quorumNote = fmt.Sprintf("\nNOTE: only %d/%d panel seat(s) examined the code (below quorum floor); human review required.", len(examined), len(verdicts))
+	}
+
+	reasoning := buildReasoning(verdicts, seatNames, arbiterReasoning, arbiterRan) + quorumNote
 	v := verified{cand: c, reasoning: reasoning}
+
+	// nn3: fold mechanism corrections into the persisted description.
+	//
+	// Priority: arbiter > refuter (highest-confidence examined not-refuted seat).
+	// The arbiter path fires on split panels; the refuter path fires on unanimous-
+	// survive panels where a seat set corrected_description (refuted=false means
+	// the seat did not claim to refute, just noted the mechanism was wrong).
+	// Either way we prefer the arbiter's synthesis when it ran.
+	description := c.Description
+	if arbiterVerdict != nil && arbiterVerdict.CorrectedDescription != "" {
+		// Split panel: arbiter synthesized the correction.
+		description = arbiterVerdict.CorrectedDescription
+	} else if !arbiterRan {
+		// Unanimous-survive (or no-arbiter) path: fold the highest-confidence
+		// non-empty CorrectedDescription from an examined not-refuted seat.
+		description = bestRefuterCorrection(examined, c.Description)
+	}
 
 	finding := store.Finding{
 		Fingerprint:         c.Fingerprint,
 		Title:               c.Title,
-		Description:         c.Description,
+		Description:         description,
 		Reasoning:           appendCorroboration(v.reasoning, c.CorroboratingLenses),
 		Severity:            c.Severity,
 		Tier:                domain.TierVerified,
@@ -282,6 +323,7 @@ func (f *Funnel) runVerifyAndPersist(
 		CommitSHA:           commit,
 		FileHash:            fps[c.File],
 		CorroboratingLenses: c.CorroboratingLenses,
+		NeedsHuman:          needsHuman,
 	}
 	stored, err := f.store.UpsertFinding(ctx, finding)
 	if err != nil {

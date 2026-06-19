@@ -106,7 +106,7 @@ func (f *Funnel) runArbiter(ctx context.Context, verifier llm.Client, candTools 
 	runner := f.newAgentRunner(verifier, candTools, arbiterSystemPrompt(persona, hasSandbox), budget.verifyRunnerLimits(f.opts.Limits.VerifierLimits),
 		f.activitySinkFor(progress.RoleVerifier, c.Title))
 	var av refutation
-	outcome, err := runner.RunJSON(ctx, arbiterTask(c, verdicts, seatNames), refutationSchema, &av)
+	outcome, err := runner.RunJSON(ctx, arbiterTask(c, verdicts, seatNames), arbiterSchema, &av)
 	var tokens int64
 	if outcome != nil {
 		tokens = outcome.Usage.InputTokens + outcome.Usage.OutputTokens
@@ -128,16 +128,48 @@ func (f *Funnel) runArbiter(ctx context.Context, verifier llm.Client, candTools 
 	return &av, tokens, false, nil
 }
 
-// isSplitVerdict reports whether the verdicts contain at least one refuted and
-// at least one not-refuted entry. An empty slice is not split (it is unanimous
-// "could not refute"). A single-refuter panel can never be split.
+// examinedVerdicts returns the subset of verdicts from seats that actually
+// examined the code (CouldNotReadCode==false). An unparseable verdict
+// (Reasoning=="refuter produced no parseable verdict") counts as examined
+// because the runner tried; abstaining seats (CouldNotReadCode==true) are
+// excluded because they never saw the evidence.
+func examinedVerdicts(verdicts []refutation) []refutation {
+	out := make([]refutation, 0, len(verdicts))
+	for _, v := range verdicts {
+		if !v.CouldNotReadCode {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// belowQuorum reports whether too few seats examined the code to reach a
+// trustworthy verdict. The quorum floor requires that a strict majority of the
+// panel size N actually examined the code (i.e. examinedCount*2 > N). This
+// mirrors the majorityRefuted threshold: if we require 2/3 to kill, we also
+// require 2/3 to have examined before we trust a survive outcome. When N==0 or
+// N==1 the floor is met as long as at least one seat examined (the degraded
+// single-refuter path must not be penalized).
+func belowQuorum(examined, panelSize int) bool {
+	if panelSize <= 1 {
+		return examined == 0
+	}
+	return examined*2 <= panelSize
+}
+
+// isSplitVerdict reports whether the EXAMINED verdicts contain at least one
+// refuted and at least one not-refuted entry. Abstaining seats
+// (CouldNotReadCode==true) are excluded from the count because they contribute
+// no evidence. An empty examined slice is not split. A single-examined-seat
+// panel can never be split.
 func isSplitVerdict(verdicts []refutation) bool {
-	if len(verdicts) < 2 {
+	examined := examinedVerdicts(verdicts)
+	if len(examined) < 2 {
 		return false
 	}
 	hasRefuted := false
 	hasNotRefuted := false
-	for _, v := range verdicts {
+	for _, v := range examined {
 		if v.Refuted {
 			hasRefuted = true
 		} else {
@@ -191,56 +223,58 @@ func arbiterRefuted(v *refutation) bool {
 	return v != nil && v.Refuted
 }
 
-// majorityRefuted reports whether a strict majority of verdicts are "refuted".
-// A tie (e.g. 1-1 with two refuters) is NOT a majority, so the candidate
-// survives: killing a candidate requires the refuters to reach a clear
-// consensus that it is wrong. With the default of 3 refuters, 2+ must refute to
-// kill. An empty verdict set never refutes.
-//
-// majorityRefuted is the fallback for split panels when the arbiter fails to
-// produce a parseable verdict. Its tie-survives property is intentional and
-// must be preserved: an unparseable arbiter must NEVER be able to kill a
-// candidate on its own.
+// majorityRefuted reports whether a strict majority of EXAMINED verdicts are
+// "refuted". Abstaining seats (CouldNotReadCode==true) are excluded from the
+// denominator — inability to access the code is not a vote. A tie or empty
+// examined set never refutes (tie-survives is intentional: an unparseable
+// arbiter must NEVER silently kill a candidate).
 func majorityRefuted(verdicts []refutation) bool {
-	if len(verdicts) == 0 {
+	examined := examinedVerdicts(verdicts)
+	if len(examined) == 0 {
 		return false
 	}
 	refuted := 0
-	for _, v := range verdicts {
+	for _, v := range examined {
 		if v.Refuted {
 			refuted++
 		}
 	}
-	return refuted*2 > len(verdicts)
+	return refuted*2 > len(examined)
 }
 
 // buildReasoning concatenates the refuters' reasoning into a verification trace
 // recorded on the finding. It labels each refuter's verdict with its seat name
-// so the trace is legible to a human triaging the finding later.
-// When arbiterRan is true, a final line for the arbiter's verdict is appended
-// and the header changes to reflect arbitration.
+// so the trace is legible to a human triaging the finding later. Abstaining
+// seats are labeled distinctly. When arbiterRan is true, a final line for the
+// arbiter's verdict is appended and the header changes to reflect arbitration.
 func buildReasoning(verdicts []refutation, seatNames []string, arbiterLine string, arbiterRan bool) string {
 	var b strings.Builder
+	examined := examinedVerdicts(verdicts)
 	refuted := 0
-	for _, v := range verdicts {
+	for _, v := range examined {
 		if v.Refuted {
 			refuted++
 		}
 	}
-	n := len(verdicts)
+	n := len(examined)
 	if arbiterRan {
-		fmt.Fprintf(&b, "Survived adversarial verification (split panel decided by arbitration, %d/%d refuters could not disprove it):\n", n-refuted, n)
+		fmt.Fprintf(&b, "Survived adversarial verification (split panel decided by arbitration, %d/%d examined refuters could not disprove it):\n", n-refuted, n)
 	} else {
-		fmt.Fprintf(&b, "Survived adversarial verification (%d/%d refuters could not disprove it):\n", n-refuted, n)
+		fmt.Fprintf(&b, "Survived adversarial verification (%d/%d examined refuters could not disprove it):\n", n-refuted, n)
 	}
+	total := len(verdicts)
 	for i, v := range verdicts {
-		verdict := "could not refute"
-		if v.Refuted {
+		var verdict string
+		if v.CouldNotReadCode {
+			verdict = "abstained (could not read cited code)"
+		} else if v.Refuted {
 			verdict = "refuted"
+		} else {
+			verdict = "could not refute"
 		}
-		// Label with seat name when the panel has >= 2 seats (n>=2 means seats
-		// were assigned). n==1 keeps the old unlabeled format.
-		if n >= 2 && i < len(seatNames) && seatNames[i] != "" {
+		// Label with seat name when the panel has >= 2 seats (total>=2 means
+		// seats were assigned). total==1 keeps the old unlabeled format.
+		if total >= 2 && i < len(seatNames) && seatNames[i] != "" {
 			fmt.Fprintf(&b, "  refuter %d [%s, %s, confidence=%s]: %s\n", i+1, seatNames[i], verdict, v.Confidence, strings.TrimSpace(v.Reasoning))
 		} else {
 			fmt.Fprintf(&b, "  refuter %d [%s, confidence=%s]: %s\n", i+1, verdict, v.Confidence, strings.TrimSpace(v.Reasoning))
@@ -250,4 +284,44 @@ func buildReasoning(verdicts []refutation, seatNames []string, arbiterLine strin
 		fmt.Fprintf(&b, "  %s\n", arbiterLine)
 	}
 	return b.String()
+}
+
+// confidenceRank maps a confidence string to a numeric rank (higher = more
+// confident) for use in bestRefuterCorrection.
+func confidenceRank(c string) int {
+	switch c {
+	case "high":
+		return 2
+	case "medium":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// bestRefuterCorrection returns the CorrectedDescription from the examined
+// not-refuted seat with the highest confidence, or fallback when no examined
+// not-refuted seat provided a non-empty correction. This folds mechanism
+// corrections on unanimous-survive panels without an extra arbiter round-trip.
+//
+// Only not-refuted seats are considered: a refuter that claimed to have refuted
+// the bug (Refuted==true) cannot also supply a correction (the bug was refuted,
+// so no correction is warranted).
+func bestRefuterCorrection(examined []refutation, fallback string) string {
+	best := ""
+	bestRank := -1
+	for _, v := range examined {
+		if v.Refuted || v.CorrectedDescription == "" {
+			continue
+		}
+		r := confidenceRank(v.Confidence)
+		if r > bestRank {
+			bestRank = r
+			best = v.CorrectedDescription
+		}
+	}
+	if best == "" {
+		return fallback
+	}
+	return best
 }

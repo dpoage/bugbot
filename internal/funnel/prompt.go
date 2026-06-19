@@ -203,6 +203,10 @@ const verifierRefutationCriteria = `A report is REFUTED if any of these is true,
 
 A report is NOT refuted if, after genuinely trying, you cannot disprove it: the path is reachable, the value really can be bad, and nothing guards it. In that case say so honestly — do not invent a refutation. Being unable to refute a real bug is the correct outcome.
 
+MECHANISM CORRECTION: if the bug stands (refuted=false) but the DESCRIBED MECHANISM is inaccurate (wrong function, wrong call path, wrong variable — the bug is real but the report misdescribes how it triggers), set corrected_description to the accurate mechanism. The corrected description will replace the finder's in the published finding so the bug report is accurate. Leave corrected_description absent when the mechanism description is correct.
+
+IMPORTANT — abstention rule: if you CANNOT LOCATE OR READ the cited file(s) (tool errors, file-not-found, path not in repo, access denied), you have not examined the code. Set could_not_read_code=true and refuted=false. This is an ABSTENTION — you never saw the evidence — and is counted separately from reading the code and being unable to refute. Do NOT return could_not_read_code=true when you successfully read the files; only set it when the file is genuinely inaccessible.
+
 Base your verdict ONLY on the actual code you read, not on assumptions about what "should" be there.
 
 When a verdict hinges on the behavior of the standard library, the language runtime, or a third-party dependency, you MUST confirm that behavior by reading the actual source (GOROOT and vendored/module source are available to the read tools) or by running a probe — NEVER assert it from memory. Your reasoning MUST cite what you read or ran: file path and line, or the command and its observed output. An unverified stdlib/runtime/library claim is not acceptable refutation evidence.`
@@ -221,23 +225,58 @@ func verifierSystemBase(persona string) string {
 ` + verifierRefutationCriteria
 }
 
-// refutationSchema constrains the refuter's verdict.
+// refutationSchema constrains the refuter's verdict. Optional fields:
+//   - could_not_read_code: file access failed → abstention
+//   - corrected_description: bug stands (refuted=false) but the described
+//     mechanism is wrong; refuter supplies the accurate mechanism here so
+//     unanimous-survive panels can fold the correction without an arbiter.
+//   - hallucinated_rebuttal: only meaningful for a refuter that claims to
+//     have refuted; set true when the rebuttal asserts nonexistent code.
+//
+// All three are absent from required so existing response bodies that omit
+// them (e.g. notRefutedJSON in tests) still parse cleanly.
 var refutationSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "refuted": {"type": "boolean", "description": "true if you proved the report wrong with concrete evidence; false if you could not refute it."},
     "reasoning": {"type": "string", "minLength": 1, "description": "The concrete evidence for your verdict: what code you read and what it shows."},
-    "confidence": {"type": "string", "enum": ["high", "medium", "low"]}
+    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    "could_not_read_code": {"type": "boolean", "description": "true if you could not locate or access the cited file(s) and therefore abstained from a verdict. Set ONLY when file access failed; omit or false when you successfully read the code."},
+    "corrected_description": {"type": "string", "description": "When the bug stands (refuted=false) but the described mechanism is inaccurate, emit the accurate mechanism here so the published description is correct. Leave absent when the mechanism description is accurate."},
+    "hallucinated_rebuttal": {"type": "boolean", "description": "true if your rebuttal asserts the existence of code NOT present in the cited files (a fabricated 'safe' guard or path). Set ONLY when you refuted; self-identifies fabrication."}
   },
   "required": ["refuted", "reasoning", "confidence"],
   "additionalProperties": false
 }`)
 
-// refutation is one refuter agent's verdict on a candidate.
+// arbiterSchema extends refutationSchema with the same optional correction
+// fields. The arbiter synthesizes across all panel seats; refuters use
+// refutationSchema (now also carrying the same optional fields so that
+// unanimous-survive corrections can be folded without an arbiter round-trip).
+var arbiterSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "refuted": {"type": "boolean", "description": "true if you proved the report wrong with concrete evidence; false if the bug stands."},
+    "reasoning": {"type": "string", "minLength": 1, "description": "The concrete evidence for your verdict."},
+    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    "could_not_read_code": {"type": "boolean", "description": "true if you could not locate or access the cited file(s)."},
+    "corrected_description": {"type": "string", "description": "When the finding SURVIVES but a panel seat correctly identified an error in the mechanism or sub-claim, emit the accurate mechanism here. Leave absent when no correction is warranted."},
+    "hallucinated_rebuttal": {"type": "boolean", "description": "true if a panel seat's rebuttal asserted the existence of code NOT present in the cited files (a fabricated 'safe' path). Do not credit hallucinated rebuttals."}
+  },
+  "required": ["refuted", "reasoning", "confidence"],
+  "additionalProperties": false
+}`)
+
+// refutation is one refuter agent's verdict on a candidate. The arbiter also
+// uses this struct (with its superset arbiterSchema) so CorrectedDescription
+// and HallucinatedRebuttal are populated only when the arbiter ran.
 type refutation struct {
-	Refuted    bool   `json:"refuted"`
-	Reasoning  string `json:"reasoning"`
-	Confidence string `json:"confidence"`
+	Refuted              bool   `json:"refuted"`
+	Reasoning            string `json:"reasoning"`
+	Confidence           string `json:"confidence"`
+	CouldNotReadCode     bool   `json:"could_not_read_code"`
+	CorrectedDescription string `json:"corrected_description"`
+	HallucinatedRebuttal bool   `json:"hallucinated_rebuttal"`
 }
 
 // verifierSandboxParagraph is appended to the verifier system prompt when the
@@ -294,7 +333,11 @@ func arbiterSystemPrompt(persona string, hasSandbox bool) string {
 
 ` + verifierToolParagraph + `
 
-` + verifierRefutationCriteria
+` + verifierRefutationCriteria + `
+
+ARBITER ADDITIONAL RULES:
+1. MECHANISM CORRECTION: If the finding SURVIVES (refuted=false) but a panel seat correctly identified an error in the described mechanism or sub-claim, emit corrected_description with the accurate mechanism. The published bug report will use your corrected_description instead of the finder's. Leave corrected_description absent when no correction is needed or when you refute the finding.
+2. HALLUCINATED REBUTTAL: If a seat's rebuttal asserts the existence of code that is NOT actually present in the cited files (a fabricated 'safe' guard, function, or check), set hallucinated_rebuttal=true and do NOT credit that seat's rebuttal in your decision.`
 	if hasSandbox {
 		p += verifierSandboxParagraph
 	}
@@ -322,7 +365,9 @@ func arbiterTask(c Candidate, verdicts []refutation, seatNames []string) string 
 			seatName = seatNames[i]
 		}
 		verdict := "could not refute"
-		if v.Refuted {
+		if v.CouldNotReadCode {
+			verdict = "abstained (could not read cited code)"
+		} else if v.Refuted {
 			verdict = "refuted"
 		}
 		// Flatten model-authored reasoning: collapse whitespace so embedded

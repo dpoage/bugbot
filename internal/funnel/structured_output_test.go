@@ -302,13 +302,11 @@ func TestStructuredOutput_RefuterNoCapPassthrough(t *testing.T) {
 	}
 }
 
-// TestStructuredOutput_ArbiterCarriesRefutationSchema is the
-// analogous assertion for the arbiter: when the panel verdict is
-// split, runArbiter's single completion also carries
-// refutationSchema. We drive a 2-seat panel that produces a split
-// verdict (first refutes, second not-refuted), then the arbiter
-// (3rd call) also not-refuted.
-func TestStructuredOutput_ArbiterCarriesRefutationSchema(t *testing.T) {
+// TestStructuredOutput_ArbiterCarriesArbiterSchema verifies that runArbiter
+// sends arbiterSchema (the superset schema with corrected_description and
+// hallucinated_rebuttal) while refuter calls send refutationSchema. We drive
+// a 2-seat split panel so the arbiter is triggered as the 3rd completion.
+func TestStructuredOutput_ArbiterCarriesArbiterSchema(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)
 	f, err := New(RoleClients{Finder: newScriptedClient(), Verifier: newScriptedClient()}, st, repo, Options{})
@@ -343,27 +341,28 @@ func TestStructuredOutput_ArbiterCarriesRefutationSchema(t *testing.T) {
 		t.Fatalf("arbiter verdict = %+v, want not-refuted", av)
 	}
 
-	// Every request — both refuter seats and the arbiter — must
-	// carry refutationSchema as ResponseSchema (cap on).
 	reqs := verifier.allRequests()
 	if len(reqs) < 3 {
 		t.Fatalf("verifier client saw %d completions, want ≥ 3 (2 refuters + arbiter)", len(reqs))
 	}
-	for i, r := range reqs {
+	// Refuter requests (all but the last) carry refutationSchema.
+	for i, r := range reqs[:len(reqs)-1] {
 		if got := string(r.ResponseSchema); got != string(refutationSchema) {
-			t.Errorf("req %d: ResponseSchema = %s\nwant (refutationSchema)", i, got)
+			t.Errorf("refuter req %d: ResponseSchema = %s\nwant refutationSchema", i, got)
 		}
+	}
+	// The arbiter (last request) carries arbiterSchema.
+	arbiterReq := reqs[len(reqs)-1]
+	if got := string(arbiterReq.ResponseSchema); got != string(arbiterSchema) {
+		t.Errorf("arbiter req: ResponseSchema = %s\nwant arbiterSchema", got)
 	}
 	// Sanity: the arbiter task message is in the user content of
 	// the last request.
-	arbiterReq := reqs[len(reqs)-1]
 	if !strings.Contains(arbiterReq.Messages[0].Content, "PANEL VERDICTS") {
 		t.Errorf("arbiter user message did not contain PANEL VERDICTS marker:\n%s", arbiterReq.Messages[0].Content)
 	}
 	// Tools are intentionally NOT asserted for the arbiter here:
 	// unlike the repair path (which is the documented "tools-less
-	// constrained completion" gate at w88), the arbiter's normal
-	// run is a fresh RunJSON with the read-only investigation tools
-	// still on the wire. The schema-on-the-wire contract holds
-	// regardless.
+	// constrained completion" gate), the arbiter's normal run is a
+	// fresh RunJSON with the read-only investigation tools on the wire.
 }
