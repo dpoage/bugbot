@@ -313,13 +313,13 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	// --concurrency, so it must keep the existing classification (its own
 	// counter) and the existing scan-exit semantics.
 	//
-	// runCtx is the breaker-cancellable child of ctx. All runFinderWithPrompt
-	// calls and slot acquisitions go through it; on trip we call runCancel to
-	// unblock any goroutine currently inside a retry loop or waiting on the
-	// slot pool. The caller's ctx is never cancelled by us — only the
-	// derived child.
-	runCtx, runCancel := context.WithCancel(ctx)
-	defer runCancel()
+	// The fanout owns the per-unit goroutine, the slotLow acquire/release, the
+	// WaitGroup, and the breaker-cancellable runCtx (a child of ctx). All
+	// runFinderWithPrompt calls and slot acquisitions go through runCtx; on a
+	// breaker trip the tripping unit calls fo.stop to unblock any goroutine still
+	// inside a retry loop or waiting on the slot pool. The caller's ctx is never
+	// cancelled by us — only the derived child.
+	fo := f.newFanout(ctx, slotLow)
 	breakerThreshold := f.opts.MaxParallel
 	if breakerThreshold < 3 {
 		breakerThreshold = 3
@@ -327,9 +327,8 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	var (
 		transportFailures atomic.Int32 // transport-class parse failures while !anySucceeded
 		anySucceeded      atomic.Bool  // true once any unit returns finderOK
-		breakerTripped    atomic.Bool  // true after runCancel was called by this stage
+		breakerTripped    atomic.Bool  // true after the breaker stopped this stage
 	)
-	var wg sync.WaitGroup
 
 	// Compute degraded survivors from the (lens × strategy) unit-classes that
 	// actually emitted at least one unit in this run. A unit-class is the pair
@@ -387,21 +386,16 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			break
 		}
 
-		wg.Add(1)
 		u := u
 		unitIdx := unitIdx
-		go func() {
-			defer wg.Done()
-			// On context cancellation, acquire returns ctx.Err(); we exit without
-			// recording a row — same as today's behavior where cancelled runs abandon
-			// queued work. The budget-gate and agent launch happen AFTER acquisition.
-			// runCtx (not ctx) so the breaker can unblock a queued unit by
-			// cancelling the derived child without disturbing the caller's ctx.
-			if err := f.slots.acquire(runCtx, slotLow); err != nil {
-				return
-			}
-			defer f.slots.release()
-
+		// The fanout holds a slotLow worker slot for the whole unit; the budget
+		// gate and agent launch below run only once the slot is held. If the run
+		// was stopped (breaker) or the caller's ctx was cancelled while this unit
+		// waited, the slot is never granted and the unit never runs — same as
+		// today, where cancelled runs abandon queued work without recording a row.
+		// runCtx (the fanout's derived child) lets a breaker trip unblock this unit
+		// even mid-run.
+		fo.spawn(func(runCtx context.Context) {
 			// Gate against the LIVE spend total only once we hold a worker slot, so
 			// the decision reflects spend already recorded by earlier units rather
 			// than a stale pre-launch snapshot. This is what makes degradation and
@@ -576,11 +570,11 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 						// / slot-pool waiter returns early; the outer
 						// loop check (breakerTripped.Load() at the top of
 						// each iteration) prevents further launches.
-						// CompareAndSwap makes the runCancel call
+						// CompareAndSwap makes the fo.stop call
 						// exactly-once across all sibling goroutines
 						// regardless of how many reach the threshold
 						// concurrently.
-						runCancel()
+						fo.stop()
 						f.note(result, fmt.Sprintf("finder circuit breaker tripped: %d transport failures with zero successes (threshold %d) — aborting further finder launches", n, breakerThreshold))
 					}
 				}
@@ -678,10 +672,10 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 					f.note(result, fmt.Sprintf("sweep: per-unit TouchScanCoverage failed (unit %d, %s): %v", unitIdx, u.lens.Name, tcErr))
 				}
 			}
-		}()
+		})
 	}
 
-	wg.Wait()
+	fo.wait()
 	if firstErr != nil {
 		return 0, firstErr
 	}
