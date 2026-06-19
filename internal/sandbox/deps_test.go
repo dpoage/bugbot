@@ -1072,3 +1072,642 @@ func TestOperatorSetupCmdsOrderBeforeEcosystem(t *testing.T) {
 		}
 	}
 }
+
+// ---- Rust/Cargo ecosystem unit tests ----------------------------------------
+
+// TestCargoDetectOnOff: detect fires on Cargo.toml, not without.
+func TestCargoDetectOnOff(t *testing.T) {
+	dirNo := t.TempDir()
+	if hasCargoToml(dirNo) {
+		t.Error("hasCargoToml: want false for dir without Cargo.toml")
+	}
+	dirYes := t.TempDir()
+	writeFile(t, filepath.Join(dirYes, "Cargo.toml"), "[package]\nname = \"hello\"\n")
+	if !hasCargoToml(dirYes) {
+		t.Error("hasCargoToml: want true for dir with Cargo.toml")
+	}
+}
+
+// TestCargoVendoredDetection: isCargoVendored is true only when BOTH vendor/
+// exists AND .cargo/config.toml contains replace-with.
+func TestCargoVendoredDetection(t *testing.T) {
+	// vendor/ + config with replace-with → vendored.
+	dirYes := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dirYes, "vendor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dirYes, ".cargo", "config.toml"),
+		"[source.crates-io]\nreplace-with = \"vendored-sources\"\n[source.vendored-sources]\ndirectory = \"vendor\"\n")
+	if !isCargoVendored(dirYes) {
+		t.Error("isCargoVendored: want true when vendor/ + config with replace-with")
+	}
+
+	// vendor/ without config → NOT vendored (cargo ignores vendor/).
+	dirVendorOnly := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dirVendorOnly, "vendor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if isCargoVendored(dirVendorOnly) {
+		t.Error("isCargoVendored: want false when vendor/ exists but no .cargo/config stanza — cargo ignores vendor/ without source replacement")
+	}
+
+	// config with replace-with but no vendor/ → NOT vendored.
+	dirConfigOnly := t.TempDir()
+	writeFile(t, filepath.Join(dirConfigOnly, ".cargo", "config.toml"),
+		"[source.crates-io]\nreplace-with = \"vendored-sources\"\n")
+	if isCargoVendored(dirConfigOnly) {
+		t.Error("isCargoVendored: want false when .cargo/config exists but no vendor/")
+	}
+
+	// Legacy .cargo/config (no .toml extension) is also recognized.
+	dirLegacy := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dirLegacy, "vendor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dirLegacy, ".cargo", "config"),
+		"[source.crates-io]\nreplace-with = \"vendored-sources\"\n")
+	if !isCargoVendored(dirLegacy) {
+		t.Error("isCargoVendored: want true for legacy .cargo/config (no .toml extension)")
+	}
+}
+
+// TestCargoResolveVendoredWinsInAllModes: vendored detection overrides every
+// requested strategy, sets CARGO_NET_OFFLINE=true, no mounts, Strategy=vendored.
+func TestCargoResolveVendoredWinsInAllModes(t *testing.T) {
+	for _, strategy := range []DepStrategy{DepStrategyOff, DepStrategyHost, DepStrategyFetch, ""} {
+		t.Run(string(strategy), func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n")
+			if err := os.MkdirAll(filepath.Join(dir, "vendor"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(dir, ".cargo", "config.toml"),
+				"[source.crates-io]\nreplace-with = \"vendored-sources\"\n")
+
+			res, err := resolveCargo(dir, DepOptions{Strategy: strategy})
+			if err != nil {
+				t.Fatalf("resolveCargo(%q): %v", strategy, err)
+			}
+			if res.Strategy != "vendored" {
+				t.Errorf("Strategy = %q, want vendored", res.Strategy)
+			}
+			if !envHas(res.Env, "CARGO_NET_OFFLINE=true") {
+				t.Errorf("vendored env missing CARGO_NET_OFFLINE=true; got %v", res.Env)
+			}
+			if len(res.ROMounts) != 0 {
+				t.Errorf("vendored must have no mounts, got %+v", res.ROMounts)
+			}
+			if len(res.SetupCmds) != 0 {
+				t.Errorf("vendored must have no SetupCmds, got %v", res.SetupCmds)
+			}
+			if res.Prefetch != nil {
+				t.Error("vendored must have no prefetch hook")
+			}
+		})
+	}
+}
+
+// TestCargoResolveOff: OFF strategy returns empty Resolution.
+func TestCargoResolveOff(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n")
+
+	res, err := resolveCargo(dir, DepOptions{Strategy: DepStrategyOff})
+	if err != nil {
+		t.Fatalf("resolveCargo OFF: %v", err)
+	}
+	if len(res.ROMounts) != 0 || len(res.Env) != 0 || len(res.SetupCmds) != 0 || res.Prefetch != nil {
+		t.Errorf("Cargo OFF: want empty resolution, got %+v", res)
+	}
+	if res.Strategy != DepStrategyOff {
+		t.Errorf("Cargo OFF: Strategy=%q want off", res.Strategy)
+	}
+}
+
+// TestCargoResolveHostMount: HOST strategy mounts ONLY the registry subdir,
+// never all of ~/.cargo; mount path ends with "registry", Shared=true,
+// CARGO_NET_OFFLINE=true, CARGO_HOME=/cargo.
+func TestCargoResolveHostMount(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n")
+
+	// Provide a fake registry directory (must exist for checkCargoRegistryExists).
+	fakeRegistry := t.TempDir()
+
+	res, err := resolveCargo(dir, DepOptions{
+		Strategy:          DepStrategyHost,
+		hostCargoRegistry: fakeRegistry,
+	})
+	if err != nil {
+		t.Fatalf("resolveCargo HOST: %v", err)
+	}
+
+	// Must have exactly one RO mount.
+	if len(res.ROMounts) != 1 {
+		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+	}
+	m := res.ROMounts[0]
+
+	// Container path must be /cargo/registry (not all of /cargo).
+	if m.ContainerPath != cargoRegistryMount {
+		t.Errorf("ContainerPath = %q, want %q", m.ContainerPath, cargoRegistryMount)
+	}
+
+	// Host path must end with "registry" — we never mount all of ~/.cargo.
+	if !strings.HasSuffix(m.HostPath, "registry") && m.HostPath != fakeRegistry {
+		t.Errorf("HostPath = %q: must be the registry subdirectory, not all of ~/.cargo", m.HostPath)
+	}
+
+	// SECURITY: must not contain "credentials" or "/bin" in any mount path.
+	for _, mount := range res.ROMounts {
+		if strings.Contains(mount.HostPath, "credentials") {
+			t.Errorf("SECURITY: mount HostPath %q contains 'credentials' — must not mount ~/.cargo/credentials.toml", mount.HostPath)
+		}
+		if strings.Contains(mount.ContainerPath, "credentials") {
+			t.Errorf("SECURITY: mount ContainerPath %q contains 'credentials'", mount.ContainerPath)
+		}
+		// Ensure we are not mounting ~/.cargo/bin
+		if strings.HasSuffix(mount.HostPath, "/.cargo/bin") || strings.HasSuffix(mount.HostPath, "/.cargo") {
+			t.Errorf("SECURITY: mount HostPath %q looks like all of ~/.cargo or ~/.cargo/bin; must be registry only", mount.HostPath)
+		}
+	}
+
+	// Shared=true: host-owned dir must NOT receive :Z relabel.
+	if !m.Shared {
+		t.Errorf("host strategy ROMount.Shared = false; want true to suppress :Z relabel on shared host Cargo registry")
+	}
+
+	// Required env vars.
+	for _, want := range []string{"CARGO_NET_OFFLINE=true", "CARGO_HOME=" + cargoCacheMount} {
+		if !envHas(res.Env, want) {
+			t.Errorf("host env missing %q; got %v", want, res.Env)
+		}
+	}
+
+	if res.Prefetch != nil {
+		t.Error("host strategy must not set a prefetch hook")
+	}
+	if res.Strategy != DepStrategyHost {
+		t.Errorf("Strategy=%q want host", res.Strategy)
+	}
+}
+
+// TestCargoResolveHostMissingRegistryErrors: HOST with a nonexistent registry
+// path must return an error before podman gets to try the bind mount.
+func TestCargoResolveHostMissingRegistryErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n")
+	missing := filepath.Join(t.TempDir(), "does", "not", "exist")
+
+	_, err := resolveCargo(dir, DepOptions{Strategy: DepStrategyHost, hostCargoRegistry: missing})
+	if err == nil {
+		t.Fatal("expected error for missing host Cargo registry, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error %q should mention 'does not exist'", err)
+	}
+}
+
+// TestCargoResolveFetchShape: FETCH strategy returns correct mount, env,
+// no SetupCmds, non-nil Prefetch hook, Shared=false, CARGO_NET_OFFLINE=true.
+func TestCargoResolveFetchShape(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolveCargo(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolveCargo FETCH: %v", err)
+	}
+
+	// Must have exactly one RO mount at /cargo/registry, bugbot-owned.
+	if len(res.ROMounts) != 1 {
+		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+	}
+	m := res.ROMounts[0]
+	if m.ContainerPath != cargoRegistryMount {
+		t.Errorf("ContainerPath = %q, want %q", m.ContainerPath, cargoRegistryMount)
+	}
+	if !strings.HasPrefix(m.HostPath, cacheBase) {
+		t.Errorf("cargo cache %q should live under user cache base %q", m.HostPath, cacheBase)
+	}
+	// Fetch cache is bugbot-owned: Shared=false (:Z isolation correct).
+	if m.Shared {
+		t.Error("Cargo FETCH ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
+	}
+
+	for _, want := range []string{"CARGO_NET_OFFLINE=true", "CARGO_HOME=" + cargoCacheMount} {
+		if !envHas(res.Env, want) {
+			t.Errorf("fetch env missing %q; got %v", want, res.Env)
+		}
+	}
+	if res.Prefetch == nil {
+		t.Fatal("Cargo FETCH must set a prefetch hook")
+	}
+	if res.Strategy != DepStrategyFetch {
+		t.Errorf("Strategy = %q, want fetch", res.Strategy)
+	}
+}
+
+// TestCargoResolveFetchPrefetchSpec: Running the prefetch hook invokes the
+// sandbox with a network-enabled, writable-cache `cargo fetch` spec.
+func TestCargoResolveFetchPrefetchSpec(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n")
+	// No Cargo.lock → fetch without --locked.
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolveCargo(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolveCargo: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("prefetch: %v", err)
+	}
+	calls := mock.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("prefetch should run exactly one container, got %d", len(calls))
+	}
+	spec := calls[0].Spec
+	if spec.Network == "" || spec.Network == "none" {
+		t.Errorf("prefetch network = %q, want a real network (not none/empty)", spec.Network)
+	}
+	// No Cargo.lock → no --locked flag.
+	wantCmd := []string{"cargo", "fetch"}
+	if !slices.Equal(spec.Cmd, wantCmd) {
+		t.Errorf("prefetch cmd = %v, want %v", spec.Cmd, wantCmd)
+	}
+	// Cache mounted WRITABLE at /cargo (CARGO_HOME).
+	if len(spec.RWMounts) != 1 || spec.RWMounts[0].ContainerPath != cargoCacheMount {
+		t.Errorf("prefetch must bind the cache WRITABLE at %s; got %+v", cargoCacheMount, spec.RWMounts)
+	}
+	if len(spec.ROMounts) != 0 {
+		t.Errorf("prefetch should not use read-only mounts; got %+v", spec.ROMounts)
+	}
+}
+
+// TestCargoResolveFetchWithLockfile: when Cargo.lock exists, prefetch adds --locked.
+func TestCargoResolveFetchWithLockfile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n")
+	writeFile(t, filepath.Join(dir, "Cargo.lock"), "# lockfile\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolveCargo(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolveCargo: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("prefetch: %v", err)
+	}
+	calls := mock.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("want 1 container call, got %d", len(calls))
+	}
+	wantCmd := []string{"cargo", "fetch", "--locked"}
+	if !slices.Equal(calls[0].Spec.Cmd, wantCmd) {
+		t.Errorf("prefetch cmd = %v, want %v", calls[0].Spec.Cmd, wantCmd)
+	}
+}
+
+// TestCargoFetchSentinelKeyedOnCargoLock: sentinel is keyed on Cargo.lock hash;
+// changing Cargo.lock invalidates the cache (different sentinel → re-fetch).
+func TestCargoFetchSentinelKeyedOnCargoLock(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n")
+	writeFile(t, filepath.Join(dir, "Cargo.lock"), "v1\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	// First fetch — populates sentinel keyed on "v1" lockfile.
+	res, err := resolveCargo(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("first resolveCargo: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("first prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Fatalf("first prefetch: want 1 container, got %d", mock.CallCount())
+	}
+
+	// Warm cache: same Cargo.lock → second Resolution skips the download.
+	res2, err := resolveCargo(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("second resolveCargo: %v", err)
+	}
+	if err := res2.Prefetch(context.Background()); err != nil {
+		t.Fatalf("second prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Errorf("warm sentinel should skip download; container ran %d times, want 1", mock.CallCount())
+	}
+
+	// Changed Cargo.lock → sentinel miss → re-fetch.
+	writeFile(t, filepath.Join(dir, "Cargo.lock"), "v2-changed\n")
+	res3, err := resolveCargo(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("third resolveCargo: %v", err)
+	}
+	if err := res3.Prefetch(context.Background()); err != nil {
+		t.Fatalf("third prefetch: %v", err)
+	}
+	if mock.CallCount() != 2 {
+		t.Errorf("changed Cargo.lock should trigger re-fetch; container ran %d times, want 2", mock.CallCount())
+	}
+}
+
+// TestCargoFetchRequiresSandbox: FETCH with nil FetchSandbox must error.
+func TestCargoFetchRequiresSandbox(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n")
+	_, err := resolveCargo(dir, DepOptions{Strategy: DepStrategyFetch}) // nil sandbox
+	if err == nil {
+		t.Fatal("Cargo FETCH with nil sandbox should error")
+	}
+	if !strings.Contains(err.Error(), "fetch sandbox") {
+		t.Errorf("error = %v, want mention of fetch sandbox", err)
+	}
+}
+
+// ---- JS/npm ecosystem unit tests --------------------------------------------
+
+// TestJSDetectOnOff: detect fires on package.json, not without.
+func TestJSDetectOnOff(t *testing.T) {
+	dirNo := t.TempDir()
+	if hasPackageJSON(dirNo) {
+		t.Error("hasPackageJSON: want false for dir without package.json")
+	}
+	dirYes := t.TempDir()
+	writeFile(t, filepath.Join(dirYes, "package.json"), `{"name":"x"}`+"\n")
+	if !hasPackageJSON(dirYes) {
+		t.Error("hasPackageJSON: want true for dir with package.json")
+	}
+}
+
+// TestJSCommittedNodeModulesIsVendored: node_modules/ present → Strategy=vendored,
+// no mounts, no SetupCmds, no Prefetch, in all requested strategy modes.
+func TestJSCommittedNodeModulesIsVendored(t *testing.T) {
+	for _, strategy := range []DepStrategy{DepStrategyOff, DepStrategyHost, DepStrategyFetch, ""} {
+		t.Run(string(strategy), func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+			if err := os.MkdirAll(filepath.Join(dir, "node_modules"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			res, err := resolveJS(dir, DepOptions{Strategy: strategy})
+			if err != nil {
+				t.Fatalf("resolveJS(%q): %v", strategy, err)
+			}
+			if res.Strategy != "vendored" {
+				t.Errorf("Strategy = %q, want vendored", res.Strategy)
+			}
+			if len(res.ROMounts) != 0 {
+				t.Errorf("committed node_modules: want no mounts, got %+v", res.ROMounts)
+			}
+			if len(res.SetupCmds) != 0 {
+				t.Errorf("committed node_modules: want no SetupCmds, got %v", res.SetupCmds)
+			}
+			if res.Prefetch != nil {
+				t.Error("committed node_modules: want no prefetch hook")
+			}
+		})
+	}
+}
+
+// TestJSResolveOff: OFF strategy returns empty Resolution.
+func TestJSResolveOff(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+
+	res, err := resolveJS(dir, DepOptions{Strategy: DepStrategyOff})
+	if err != nil {
+		t.Fatalf("resolveJS OFF: %v", err)
+	}
+	if len(res.ROMounts) != 0 || len(res.Env) != 0 || len(res.SetupCmds) != 0 || res.Prefetch != nil {
+		t.Errorf("JS OFF: want empty resolution, got %+v", res)
+	}
+	if res.Strategy != DepStrategyOff {
+		t.Errorf("JS OFF: Strategy=%q want off", res.Strategy)
+	}
+}
+
+// TestJSResolveHostIsOff: HOST strategy for JS returns OFF (npm HTTP cache
+// does not materialize node_modules; see file-level comment).
+func TestJSResolveHostIsOff(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+
+	res, err := resolveJS(dir, DepOptions{Strategy: DepStrategyHost})
+	if err != nil {
+		t.Fatalf("resolveJS HOST: %v", err)
+	}
+	if len(res.ROMounts) != 0 || len(res.Env) != 0 || len(res.SetupCmds) != 0 || res.Prefetch != nil {
+		t.Errorf("JS HOST must resolve to OFF (npm cache not a materializer), got %+v", res)
+	}
+	if res.Strategy != DepStrategyOff {
+		t.Errorf("JS HOST: Strategy=%q want off", res.Strategy)
+	}
+}
+
+// TestJSResolveNoLockfileIsOff: FETCH without package-lock.json resolves to OFF
+// (pnpm/yarn repos fall back to off; deferred to a future bead).
+func TestJSResolveNoLockfileIsOff(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+	// Deliberately no package-lock.json.
+
+	res, err := resolveJS(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: NewMock(MockResponse{Result: Result{ExitCode: 0}})})
+	if err != nil {
+		t.Fatalf("resolveJS FETCH (no lockfile): %v", err)
+	}
+	if res.Strategy != DepStrategyOff {
+		t.Errorf("JS FETCH without package-lock.json: Strategy=%q want off (deferred)", res.Strategy)
+	}
+}
+
+// TestJSResolveFetchShape: FETCH strategy returns correct mount, env, SetupCmds,
+// non-nil Prefetch hook.
+func TestJSResolveFetchShape(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x","dependencies":{"lodash":"4.17.21"}}`+"\n")
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"lockfileVersion":2}`+"\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolveJS(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolveJS FETCH: %v", err)
+	}
+
+	// Must have exactly one RO mount at /npmcache, bugbot-owned (Shared=false).
+	if len(res.ROMounts) != 1 {
+		t.Fatalf("want 1 RO mount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+	}
+	m := res.ROMounts[0]
+	if m.ContainerPath != npmCacheMount {
+		t.Errorf("RO mount ContainerPath = %q, want %q", m.ContainerPath, npmCacheMount)
+	}
+	if !strings.HasPrefix(m.HostPath, cacheBase) {
+		t.Errorf("npm cache %q should live under user cache base %q", m.HostPath, cacheBase)
+	}
+	if m.Shared {
+		t.Error("JS FETCH ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
+	}
+
+	// npm_config_offline=true must be in env.
+	if !envHas(res.Env, "npm_config_offline=true") {
+		t.Errorf("JS FETCH env missing npm_config_offline=true; got %v", res.Env)
+	}
+
+	// SetupCmds must have exactly one command that performs the offline install.
+	if len(res.SetupCmds) != 1 {
+		t.Fatalf("want 1 SetupCmd, got %d: %v", len(res.SetupCmds), res.SetupCmds)
+	}
+	setupCmd := res.SetupCmds[0]
+	if len(setupCmd) == 0 {
+		t.Fatal("SetupCmds[0] must not be empty")
+	}
+	// The setup command must perform an offline npm ci from the copied cache.
+	setupStr := strings.Join(setupCmd, " ")
+	if !strings.Contains(setupStr, "npm ci") {
+		t.Errorf("SetupCmds[0] = %v, want an npm ci offline install", setupCmd)
+	}
+
+	if res.Prefetch == nil {
+		t.Fatal("JS FETCH must set a prefetch hook")
+	}
+	if res.Strategy != DepStrategyFetch {
+		t.Errorf("Strategy = %q, want fetch", res.Strategy)
+	}
+}
+
+// TestJSResolveFetchPrefetchSpec: Running the prefetch hook invokes the sandbox
+// with --ignore-scripts mandatory (SECURITY requirement).
+func TestJSResolveFetchPrefetchSpec(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"lockfileVersion":2}`+"\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolveJS(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolveJS: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("prefetch: %v", err)
+	}
+	calls := mock.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("prefetch should run exactly one container, got %d", len(calls))
+	}
+	spec := calls[0].Spec
+	if spec.Network == "" || spec.Network == "none" {
+		t.Errorf("prefetch network = %q, want a real network (not none/empty)", spec.Network)
+	}
+	// SECURITY: --ignore-scripts is MANDATORY in the prefetch Spec.
+	if !slices.Contains(spec.Cmd, "--ignore-scripts") {
+		t.Errorf("SECURITY: prefetch Cmd %v missing --ignore-scripts; npm lifecycle scripts must not run in the online (network-enabled) prefetch container", spec.Cmd)
+	}
+	// Cache mounted WRITABLE at /npmcache.
+	if len(spec.RWMounts) != 1 || spec.RWMounts[0].ContainerPath != npmCacheMount {
+		t.Errorf("prefetch must bind the cache WRITABLE at %s; got %+v", npmCacheMount, spec.RWMounts)
+	}
+	if len(spec.ROMounts) != 0 {
+		t.Errorf("prefetch should not use read-only mounts; got %+v", spec.ROMounts)
+	}
+
+	// sync.Once: second call must not re-run the container.
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("prefetch second call: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Errorf("prefetch ran %d times, want 1 (sync.Once)", mock.CallCount())
+	}
+}
+
+// TestJSPrefetchSentinelKeyedOnPackageLock: sentinel is keyed on package-lock.json
+// hash; warm cache is skipped, changed lockfile triggers re-fetch.
+func TestJSPrefetchSentinelKeyedOnPackageLock(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"lockfileVersion":2,"v":"1"}`+"\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	// First fetch.
+	res, err := resolveJS(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("first resolveJS: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("first prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Fatalf("first prefetch: want 1 container, got %d", mock.CallCount())
+	}
+
+	// Warm sentinel: same package-lock.json → skip.
+	res2, err := resolveJS(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("second resolveJS: %v", err)
+	}
+	if err := res2.Prefetch(context.Background()); err != nil {
+		t.Fatalf("second prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Errorf("warm sentinel should skip download; container ran %d times, want 1", mock.CallCount())
+	}
+
+	// Changed package-lock.json → re-fetch.
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"lockfileVersion":2,"v":"2-changed"}`+"\n")
+	res3, err := resolveJS(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("third resolveJS: %v", err)
+	}
+	if err := res3.Prefetch(context.Background()); err != nil {
+		t.Fatalf("third prefetch: %v", err)
+	}
+	if mock.CallCount() != 2 {
+		t.Errorf("changed lockfile should trigger re-fetch; container ran %d times, want 2", mock.CallCount())
+	}
+}
+
+// TestJSFetchRequiresSandbox: FETCH with nil FetchSandbox must error.
+func TestJSFetchRequiresSandbox(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"lockfileVersion":2}`+"\n")
+	_, err := resolveJS(dir, DepOptions{Strategy: DepStrategyFetch}) // nil sandbox
+	if err == nil {
+		t.Fatal("JS FETCH with nil sandbox should error")
+	}
+	if !strings.Contains(err.Error(), "fetch sandbox") {
+		t.Errorf("error = %v, want mention of fetch sandbox", err)
+	}
+}
