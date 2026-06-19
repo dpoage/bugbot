@@ -43,7 +43,7 @@ func (s *Store) BeginScanRun(ctx context.Context, kind ScanKind, commitSHA strin
 		id, string(kind), commitSHA, nowUTC().Format(timeLayout),
 	)
 	if err != nil {
-		return "", err
+		return "", annotateErr(s.path, "begin_scan_run", err)
 	}
 	return id, nil
 }
@@ -56,11 +56,11 @@ func (s *Store) FinishScanRun(ctx context.Context, id, statsJSON string) error {
 		nowUTC().Format(timeLayout), statsJSON, id,
 	)
 	if err != nil {
-		return err
+		return annotateErr(s.path, "finish_scan_run", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return annotateErr(s.path, "finish_scan_run", err)
 	}
 	if n == 0 {
 		return ErrNotFound
@@ -81,7 +81,7 @@ func (s *Store) GetScanRun(ctx context.Context, id string) (ScanRun, error) {
 		return ScanRun{}, ErrNotFound
 	}
 	if err != nil {
-		return ScanRun{}, err
+		return ScanRun{}, annotateErr(s.path, "get_scan_run", err)
 	}
 	r.Kind = ScanKind(kind)
 	if r.StartedAt, err = parseTime(started); err != nil {
@@ -97,6 +97,14 @@ func (s *Store) GetScanRun(ctx context.Context, id string) (ScanRun, error) {
 
 // LatestScanRun returns the most recently started scan run, or ErrNotFound
 // when no run has ever been recorded.
+//
+// CAVEAT: the ORDER BY started_at DESC tiebreaks on id DESC, but started_at
+// is a RFC3339Nano TEXT and does not sort consistently as a string across
+// the second boundary (see the warning on filestate.go's epochSentinel and
+// the matching caution on agent_units). In practice every scan run's
+// started_at is written by nowUTC() at sub-second resolution, so the
+// tiebreak is rarely exercised; the spec was "only wrap errors" for this
+// file, so the ORDER BY is intentionally left as-is.
 func (s *Store) LatestScanRun(ctx context.Context) (ScanRun, error) {
 	var id string
 	err := s.db.QueryRowContext(ctx,
@@ -105,7 +113,7 @@ func (s *Store) LatestScanRun(ctx context.Context) (ScanRun, error) {
 		return ScanRun{}, ErrNotFound
 	}
 	if err != nil {
-		return ScanRun{}, err
+		return ScanRun{}, annotateErr(s.path, "latest_scan_run", err)
 	}
 	return s.GetScanRun(ctx, id)
 }
