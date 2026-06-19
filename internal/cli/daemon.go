@@ -227,6 +227,7 @@ func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 		Capabilities:     caps,
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
+		TranscriptDir:    cfg.Repro.TranscriptDir,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer: %w", err)

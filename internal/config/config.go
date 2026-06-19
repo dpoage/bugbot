@@ -285,6 +285,13 @@ type Repro struct {
 	// The batch cap prevents a large backlog from exhausting the per-day budget
 	// in a single firing; the backlog drains gradually across multiple firings.
 	BacklogBatch int `yaml:"backlog_batch"`
+	// TranscriptDir, when non-empty, makes every reproducer (and patch-prover)
+	// agent auto-save its JSONL transcript there — one file per finding per
+	// attempt — for post-hoc diagnosis of why a finding did or did not
+	// reproduce. Empty (the default) disables transcript capture. Honored by the
+	// daemon backlog, `bugbot scan --repro`, and `bugbot repro` (whose
+	// --transcript-dir flag overrides it).
+	TranscriptDir string `yaml:"transcript_dir"`
 }
 
 // LLM tunes the shared LLM client wrapper applied to every role's client. The
@@ -499,6 +506,7 @@ func Load(path string) (Config, error) {
 //	BUGBOT_REPRO_PATCH_MAX_ATTEMPTS   (integer >= 1)
 //	BUGBOT_REPRO_SUITE_CMD            (comma-separated argv)
 //	BUGBOT_REPRO_BACKLOG_BATCH        (integer >= 1)
+//	BUGBOT_REPRO_TRANSCRIPT_DIR      (directory for reproducer agent transcripts)
 func applyEnvOverrides(cfg *Config, environ []string) error {
 	env := make(map[string]string, len(environ))
 	for _, kv := range environ {
@@ -585,6 +593,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	}
 	setStr("BUGBOT_REVIEW_SUSPECTED", &cfg.Review.Suspected)
 	setStr("BUGBOT_VERIFY_SANDBOX_MIN_SEVERITY", &cfg.Verify.SandboxMinSeverity)
+	setStr("BUGBOT_REPRO_TRANSCRIPT_DIR", &cfg.Repro.TranscriptDir)
 
 	// BUGBOT_PUBLISH_LABELS is comma-separated; an explicit env var replaces the
 	// whole slice rather than appending, matching the override pattern elsewhere.

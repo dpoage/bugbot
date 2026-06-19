@@ -398,6 +398,7 @@ func buildReproHookForScan(
 		Capabilities:     caps,
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
+		TranscriptDir:    cfg.Repro.TranscriptDir,
 	})
 	if rNewErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer: %w", rNewErr)

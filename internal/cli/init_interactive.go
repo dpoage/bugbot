@@ -369,12 +369,14 @@ func renderConfig(cfg wizardConfig) (string, error) {
 		sb.WriteString("repro:\n")
 		sb.WriteString("  enabled: true\n")
 		sb.WriteString("  max_attempts: 3\n")
-		sb.WriteString("  timeout_seconds: 600\n\n")
+		sb.WriteString("  timeout_seconds: 600\n")
+		sb.WriteString("  # transcript_dir: .bugbot/transcripts  # save reproducer agent transcripts (JSONL) for diagnosis; empty/off by default\n\n")
 	} else {
 		sb.WriteString("# repro:\n")
 		sb.WriteString("#   enabled: true\n")
 		sb.WriteString("#   max_attempts: 3\n")
-		sb.WriteString("#   timeout_seconds: 600\n\n")
+		sb.WriteString("#   timeout_seconds: 600\n")
+		sb.WriteString("#   transcript_dir: .bugbot/transcripts\n\n")
 	}
 
 	// verify section.

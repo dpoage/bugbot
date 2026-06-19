@@ -544,6 +544,16 @@ func TestEnvOverride_BacklogBatch(t *testing.T) {
 	}
 }
 
+func TestEnvOverride_TranscriptDir(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_REPRO_TRANSCRIPT_DIR=/tmp/bugbot-transcripts"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Repro.TranscriptDir != "/tmp/bugbot-transcripts" {
+		t.Errorf("TranscriptDir = %q, want %q", cfg.Repro.TranscriptDir, "/tmp/bugbot-transcripts")
+	}
+}
+
 func TestEnvOverride_ReproBacklogInterval(t *testing.T) {
 	cfg := Default()
 	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_DAEMON_REPRO_BACKLOG_INTERVAL=2h"}); err != nil {
