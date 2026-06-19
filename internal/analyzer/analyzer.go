@@ -111,9 +111,12 @@ const defaultAnalyzerTimeout = 5 * time.Minute
 //     go vet because go vet cannot emit SARIF directly. Detected by go.mod.
 //   - ruff: Python linter emitting SARIF via `--output-format=sarif`. Detected
 //     by requirements.txt or pyproject.toml.
+//   - gosec: Go security linter emitting SARIF via `-fmt=sarif`. Detected by
+//     go.mod. Covers injection, weak crypto, unsafe permissions, and bounds.
 var registry = []analyzerSpec{
 	staticcheckSpec,
 	ruffSpec,
+	gosecSpec,
 }
 
 // staticcheckSpec is the staticcheck Go analyzer entry.
@@ -271,6 +274,95 @@ func ruffRuleLens(ruleID string) string {
 		return "" // skip: style / convention
 
 	// Default: unmapped rule → treat as correctness
+	default:
+		return lensNilSafety
+	}
+}
+
+// gosecSpec is the gosec Go security analyzer entry.
+//
+// gosec is run as `gosec -fmt=sarif -quiet -no-fail ./...` from the repo root.
+// -fmt=sarif:   emit SARIF to stdout.
+// -quiet:       suppress the banner/progress lines that go to stderr.
+// -no-fail:     always exit 0; without this, gosec exits nonzero when it finds
+//
+//	issues, which the analyzer framework treats as a potential error
+//	only when SARIF cannot be parsed. -no-fail makes the exit code
+//	unambiguous: nonzero always means execution failure, not findings.
+//
+// Rule group → lens mapping (gosec rule families):
+//
+//	G1xx (credential/audit), G2xx (injection: SQL/template/command/SSRF),
+//	G4xx (weak crypto), G5xx (blocklisted imports) → injection/input-validation
+//	G3xx (file perms / tempfile / path traversal):
+//	  G301-G306 (file/dir perms) → resource-leaks (improper ACL = resource exposure)
+//	  G304, G310 (path traversal, symlink) → injection/input-validation
+//	  G307 (deferred close / tempfile cleanup) → resource-leaks
+//	G6xx (memory safety):
+//	  G601 (implicit memory aliasing in for-range) → boundary-conditions
+//	  G602 (slice access out of bounds) → boundary-conditions
+//	  G115 (integer overflow in conversion) → boundary-conditions
+//	default → nil-safety/error-handling
+var gosecSpec = analyzerSpec{
+	name:     "gosec",
+	detect:   hasGoModule,
+	cmd:      []string{"gosec", "-fmt=sarif", "-quiet", "-no-fail", "./..."},
+	ruleLens: gosecRuleLens,
+	timeout:  defaultAnalyzerTimeout,
+}
+
+// gosecRuleLens maps a gosec rule ID to a lens name.
+// See: https://github.com/securego/gosec#available-rules for the full taxonomy.
+//
+// Precision note: gosec G2xx/G4xx/G5xx rules are high-signal security rules
+// that map directly to the injection lens. G1xx credential rules are also
+// injection-class (hardcoded credentials feed injection paths). G3xx is split
+// by sub-rule: path-traversal rules (G304, G310) are injection-class because
+// the attacker-controlled path is the injection; permission bits (G301-G306,
+// G307) are resource-class because they represent improper access control on
+// resources. G6xx rules are boundary conditions (memory safety). The default
+// maps to nil-safety to match the staticcheck convention.
+func gosecRuleLens(ruleID string) string {
+	switch {
+	// G1xx — hardcoded credentials, insecure random, audit markers → injection
+	// G101: hardcoded credentials; G102: network binding; G106: SSH InsecureIgnoreHostKey;
+	// G107: URL from variable (SSRF precursor); G108-G115: various audit findings.
+	case strings.HasPrefix(ruleID, "G1"):
+		return lensInjection
+
+	// G2xx — injection rules: SQL injection (G201/G202), template injection
+	// (G203), command injection (G204), SSRF (G107 is G1 actually; G2 covers
+	// the injection sinks). All are injection/input-validation.
+	case strings.HasPrefix(ruleID, "G2"):
+		return lensInjection
+
+	// G3xx — file system / permission rules. Split by sub-rule:
+	//   G304 (file path from variable = path traversal) → injection
+	//   G310 (symlink follow = path traversal) → injection
+	//   G301-G303, G305-G309 (permission bits, tempfile, deferred close) → resources
+	case ruleID == "G304", ruleID == "G310":
+		return lensInjection
+	case strings.HasPrefix(ruleID, "G3"):
+		return lensResources
+
+	// G4xx — weak cryptographic primitives (weak rand, MD5/SHA1, DES, RC4,
+	// weak RSA, ECB mode). These feed injection-class exploitability.
+	case strings.HasPrefix(ruleID, "G4"):
+		return lensInjection
+
+	// G5xx — blocklisted imports (unsafe, CGO, net/http/cgi, etc.) → injection
+	case strings.HasPrefix(ruleID, "G5"):
+		return lensInjection
+
+	// G6xx — memory safety:
+	//   G601: implicit memory aliasing (loop variable address) → boundary
+	//   G602: slice access out of bounds → boundary
+	// Other G6xx rules default to boundary as well since they are all
+	// memory-safety / integer-safety concerns.
+	case strings.HasPrefix(ruleID, "G6"):
+		return lensBoundary
+
+	// Default: unknown gosec rule → treat as correctness (nil-safety proxy).
 	default:
 		return lensNilSafety
 	}

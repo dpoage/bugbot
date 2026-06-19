@@ -40,6 +40,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -122,6 +123,9 @@ type Summary struct {
 	DocSites        int
 	ConstraintSites int
 	LeadsPosted     int
+	// EnumDriftLeads counts leads from the enum/const-drift pass
+	// (switch cases using raw integer literals instead of named constants).
+	EnumDriftLeads int
 }
 
 type leadKey struct {
@@ -204,6 +208,10 @@ consLoop:
 			return sum, fmt.Errorf("miner: add lead for %s:%d: %w", p.c.codeFile, p.c.codeLine, err)
 		}
 		sum.LeadsPosted++
+	}
+
+	if err := seedEnumDrift(ctx, snap, st, &sum); err != nil {
+		return sum, err
 	}
 
 	return sum, nil
@@ -647,4 +655,280 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(runes[:n-1]) + "…"
+}
+
+// ============================================================================
+// Enum / const-drift pass
+// ============================================================================
+//
+// Motivation: Go code frequently defines a set of named integer constants
+// (either an iota block or explicit assignments) and later uses raw integer
+// literals in switch cases instead of the named constants. This "magic
+// literal" pattern creates a maintenance hazard: if constants are reordered
+// the switch silently handles the wrong case. It is also an api-contract-
+// misuse: the contract is "use the named constant", and the call site
+// violates it by embedding the raw numeric value.
+//
+// Detection algorithm (per file, single-pass join):
+//  1. passConstDecls: regex-scan for `const NAME = <int>` lines and
+//     `iota` const blocks. Build a map of integer value → constant name.
+//     Only non-generic names pass isPlausibleEntity.
+//  2. passSwitchCaseLiterals: regex-scan for `case <int>:` lines.
+//     Record the integer value and source location.
+//  3. Join: if a case literal matches a declared constant's value AND the
+//     constant name is plausible, emit a drift lead.
+//
+// Precision guards:
+//   - Constant names must pass isPlausibleEntity (len ≥ 3, not in stoplist,
+//     no Go keywords).
+//   - Literal value must be non-negative and ≤ 255 (above 255 the chance of
+//     accidental collision with a real protocol constant rises sharply).
+//   - Only one lead per (file, line) pair (seen map dedup).
+//   - Files with no const declarations matching the pattern are skipped fast.
+
+const (
+	enumDriftPosterLens = "miner:enum-const-drift"
+	enumDriftTargetLens = "api-contract-misuse"
+
+	// maxDriftLiteral caps the integer range we consider. Values above this
+	// threshold are likely protocol constants or offsets, not enum indices,
+	// reducing false positives.
+	maxDriftLiteral = 255
+)
+
+// constDecl holds one named integer constant extracted from source.
+type constDecl struct {
+	name  string
+	value int64
+	file  string
+	line  int
+}
+
+// caseLiteral holds one raw integer case literal found in a switch block.
+type caseLiteral struct {
+	value int64
+	file  string
+	line  int
+}
+
+// constDeclRe matches `<name> = <int>` or `<name> <type> = <int>` const
+// declarations. Also matches iota lines with an explicit value comment
+// convention. We do NOT match iota itself — we match explicit integer RHS only.
+//
+// Examples matched:
+//
+//	StatusOK    = 0
+//	StatusError = 2
+//	ModeRead    HTTPMethod = 3
+var constDeclRe = regexp.MustCompile(`^\s*([A-Z][A-Za-z0-9_]*)(?:\s+[A-Za-z][A-Za-z0-9_]*)?\s*=\s*([0-9]+)\s*(?://.*)?$`)
+
+// iotaDeclRe matches iota lines in a const block. Captures the name so we
+// can assign the sequential iota value (starting at 0 within a block).
+// We only match iota-without-offset (bare `= iota`); shift/mask iota
+// expressions are excluded to avoid precision errors.
+var iotaDeclRe = regexp.MustCompile(`^\s*([A-Z][A-Za-z0-9_]*)\s*(?:[A-Za-z][A-Za-z0-9_]*)?\s*=\s*iota\b`)
+
+// iotaContinuationRe matches continuation names in an iota block (subsequent
+// lines after `= iota` that implicitly increment). Only uppercase leading char
+// (exported constants).
+var iotaContinuationRe = regexp.MustCompile(`^\s*([A-Z][A-Za-z0-9_]*)\s*(?:[A-Za-z][A-Za-z0-9_]*)?\s*$`)
+
+// caseLiteralRe matches `case <int>:` lines in switch blocks.
+var caseLiteralRe = regexp.MustCompile(`\bcase\s+([0-9]+)\s*:`)
+
+// passConstDecls extracts named integer constants from Go source.
+func passConstDecls(path, content string) []constDecl {
+	var out []constDecl
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	scanner.Buffer(make([]byte, 64*1024), maxFileBytes)
+	lines := scanAllLines(scanner)
+
+	inConst := false // inside a const ( ) block
+	inIota := false  // inside an iota sub-block
+	iotaVal := int64(0)
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Detect const block entry/exit.
+		if strings.HasPrefix(trimmed, "const (") || trimmed == "const (" {
+			inConst = true
+			inIota = false
+			iotaVal = 0
+			continue
+		}
+		if inConst && trimmed == ")" {
+			inConst = false
+			inIota = false
+			iotaVal = 0
+			continue
+		}
+
+		// Single-line const (outside block): `const NAME = <int>`
+		// Strip the leading `const ` keyword so constDeclRe (which expects
+		// `NAME = value`) can match correctly.
+		if !inConst {
+			stripped := strings.TrimPrefix(strings.TrimSpace(line), "const ")
+			if m := constDeclRe.FindStringSubmatch(stripped); m != nil {
+				name := m[1]
+				val, err := strconv.ParseInt(m[2], 10, 64)
+				if err == nil && val >= 0 && val <= maxDriftLiteral && isPlausibleEntity(name) {
+					out = append(out, constDecl{name: name, value: val, file: path, line: i + 1})
+				}
+			}
+			continue
+		}
+
+		// Inside a const block: detect iota start.
+		if m := iotaDeclRe.FindStringSubmatch(line); m != nil {
+			inIota = true
+			iotaVal = 0
+			name := m[1]
+			if isPlausibleEntity(name) {
+				out = append(out, constDecl{name: name, value: iotaVal, file: path, line: i + 1})
+			}
+			iotaVal++
+			continue
+		}
+
+		if inIota {
+			// Blank or comment line resets iota tracking (conservative).
+			if trimmed == "" || strings.HasPrefix(trimmed, "//") {
+				continue
+			}
+			// Check if it's a continuation (no explicit = sign).
+			if !strings.Contains(trimmed, "=") {
+				if m := iotaContinuationRe.FindStringSubmatch(line); m != nil {
+					name := m[1]
+					if isPlausibleEntity(name) && iotaVal <= maxDriftLiteral {
+						out = append(out, constDecl{name: name, value: iotaVal, file: path, line: i + 1})
+					}
+					iotaVal++
+					continue
+				}
+				// Not a continuation — stop iota tracking.
+				inIota = false
+			} else {
+				// Explicit = inside a const block: check for plain integer.
+				if m := constDeclRe.FindStringSubmatch(line); m != nil {
+					name := m[1]
+					val, err := strconv.ParseInt(m[2], 10, 64)
+					if err == nil && val >= 0 && val <= maxDriftLiteral && isPlausibleEntity(name) {
+						out = append(out, constDecl{name: name, value: val, file: path, line: i + 1})
+					}
+				}
+				inIota = false // explicit = breaks iota sequence
+			}
+			continue
+		}
+
+		// Inside const block, not in iota: look for explicit assignments.
+		if m := constDeclRe.FindStringSubmatch(line); m != nil {
+			name := m[1]
+			val, err := strconv.ParseInt(m[2], 10, 64)
+			if err == nil && val >= 0 && val <= maxDriftLiteral && isPlausibleEntity(name) {
+				out = append(out, constDecl{name: name, value: val, file: path, line: i + 1})
+			}
+		}
+	}
+	return out
+}
+
+// passSwitchCaseLiterals extracts raw integer case literals from switch blocks.
+func passSwitchCaseLiterals(path, content string) []caseLiteral {
+	var out []caseLiteral
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	scanner.Buffer(make([]byte, 64*1024), maxFileBytes)
+	lines := scanAllLines(scanner)
+	for i, line := range lines {
+		m := caseLiteralRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		val, err := strconv.ParseInt(m[1], 10, 64)
+		if err != nil || val < 0 || val > maxDriftLiteral {
+			continue
+		}
+		out = append(out, caseLiteral{value: val, file: path, line: i + 1})
+	}
+	return out
+}
+
+// seedEnumDrift runs the enum/const-drift pass over the snapshot and posts
+// leads. It is called from Seed after the doc-contradiction pass. Store errors
+// are returned; file errors are skipped best-effort (matching mineFile).
+func seedEnumDrift(ctx context.Context, snap *ingest.Snapshot, st *store.Store, sum *Summary) error {
+	seen := make(map[leadKey]bool)
+
+	for _, f := range snap.Files {
+		if !minerLang(f.Language) {
+			continue
+		}
+		abs := filepath.Join(snap.Root, filepath.FromSlash(f.Path))
+		fi, err := os.Stat(abs)
+		if err != nil {
+			continue
+		}
+		if fi.Size() > maxFileBytes {
+			continue
+		}
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			continue
+		}
+		content := string(data)
+
+		decls := passConstDecls(f.Path, content)
+		if len(decls) == 0 {
+			continue // fast path: no matching consts in this file
+		}
+		cases := passSwitchCaseLiterals(f.Path, content)
+		if len(cases) == 0 {
+			continue
+		}
+
+		// Build a lookup: value → const name (first-declared wins for dedup).
+		valToConst := make(map[int64]constDecl, len(decls))
+		for _, d := range decls {
+			if _, exists := valToConst[d.value]; !exists {
+				valToConst[d.value] = d
+			}
+		}
+
+		for _, c := range cases {
+			cd, ok := valToConst[c.value]
+			if !ok {
+				continue
+			}
+			k := leadKey{TargetLens: enumDriftTargetLens, File: c.file, Line: c.line}
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+
+			note := fmt.Sprintf(
+				"enum-drift: switch case uses raw literal %d (file %s, line %d) "+
+					"where named constant %s (declared at %s:%d) should be used; "+
+					"reordering constants silently breaks this case",
+				c.value, c.file, c.line, cd.name, cd.file, cd.line,
+			)
+			note = truncate(note, noteMaxLen)
+
+			if err := st.AddLead(ctx, store.Lead{
+				PosterLens: enumDriftPosterLens,
+				TargetLens: enumDriftTargetLens,
+				File:       c.file,
+				Line:       c.line,
+				Note:       note,
+			}); err != nil {
+				return fmt.Errorf("miner: enum-drift lead %s:%d: %w", c.file, c.line, err)
+			}
+			sum.EnumDriftLeads++
+			sum.LeadsPosted++
+			if sum.LeadsPosted >= maxLeads {
+				return nil
+			}
+		}
+	}
+	return nil
 }

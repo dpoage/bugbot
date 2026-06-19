@@ -258,6 +258,138 @@ func TestSeed_RealBugbotRepo(t *testing.T) {
 	}
 }
 
+// --------------------------------------------------------------------------
+// Enum / const-drift pass tests
+// --------------------------------------------------------------------------
+
+// TestPassConstDecls_IotaAndExplicit verifies that passConstDecls extracts
+// both iota-based and explicit integer constant declarations.
+func TestPassConstDecls_IotaAndExplicit(t *testing.T) {
+	src := `package x
+
+const (
+	StatusPending  = iota
+	StatusApproved
+	StatusRejected
+)
+
+const MaxRetries = 3
+const minRetries = 0
+`
+	decls := passConstDecls("f.go", src)
+	byName := map[string]int64{}
+	for _, d := range decls {
+		byName[d.name] = d.value
+	}
+	// Exported names should be captured.
+	if v, ok := byName["StatusPending"]; !ok || v != 0 {
+		t.Errorf("StatusPending = %d, want 0", byName["StatusPending"])
+	}
+	if v, ok := byName["StatusApproved"]; !ok || v != 1 {
+		t.Errorf("StatusApproved = %d, want 1", byName["StatusApproved"])
+	}
+	if v, ok := byName["StatusRejected"]; !ok || v != 2 {
+		t.Errorf("StatusRejected = %d, want 2", byName["StatusRejected"])
+	}
+	if v, ok := byName["MaxRetries"]; !ok || v != 3 {
+		t.Errorf("MaxRetries = %d, want 3", byName["MaxRetries"])
+	}
+	// Unexported constant should NOT be captured (regex requires uppercase start).
+	if _, ok := byName["minRetries"]; ok {
+		t.Errorf("minRetries should not be captured (not exported)")
+	}
+}
+
+// TestPassSwitchCaseLiterals_Basic verifies extraction of raw integer case literals.
+func TestPassSwitchCaseLiterals_Basic(t *testing.T) {
+	src := `package x
+
+func handle(n int) {
+	switch n {
+	case 0:
+		return
+	case 1:
+		return
+	case StatusDone: // named constant: should not match
+		return
+	}
+}
+`
+	cases := passSwitchCaseLiterals("f.go", src)
+	if len(cases) != 2 {
+		t.Fatalf("expected 2 case literals, got %d: %+v", len(cases), cases)
+	}
+	vals := map[int64]bool{}
+	for _, c := range cases {
+		vals[c.value] = true
+	}
+	if !vals[0] || !vals[1] {
+		t.Errorf("expected case values 0 and 1, got %+v", vals)
+	}
+}
+
+// TestEnumDrift_DetectsContradiction verifies that the drift pass flags
+// switch cases using raw integer literals that match named constants.
+func TestEnumDrift_DetectsContradiction(t *testing.T) {
+	dir := filepath.Join("testdata", "enum_drift")
+	snap := buildSnapshot(t, dir, []string{"status_codes.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	sum, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	if sum.EnumDriftLeads < 1 {
+		t.Errorf("EnumDriftLeads = %d, want >= 1 (case 0 and case 1 both match named constants)", sum.EnumDriftLeads)
+	}
+
+	leads, err := st.PendingLeads(ctx, enumDriftTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads(%s): %v", enumDriftTargetLens, err)
+	}
+	if len(leads) < 1 {
+		t.Fatalf("expected at least 1 enum-drift lead, got 0")
+	}
+	// Verify attribution.
+	for _, l := range leads {
+		if l.PosterLens != enumDriftPosterLens {
+			t.Errorf("PosterLens = %q, want %q", l.PosterLens, enumDriftPosterLens)
+		}
+		if l.TargetLens != enumDriftTargetLens {
+			t.Errorf("TargetLens = %q, want %q", l.TargetLens, enumDriftTargetLens)
+		}
+		if !strings.Contains(l.Note, "enum-drift") {
+			t.Errorf("Note missing 'enum-drift' prefix: %q", l.Note)
+		}
+	}
+}
+
+// TestEnumDrift_CleanFixtureProducesZeroLeads verifies that code using only
+// named constants in switch cases produces no enum-drift leads (precision guard).
+func TestEnumDrift_CleanFixtureProducesZeroLeads(t *testing.T) {
+	dir := filepath.Join("testdata", "clean_enum")
+	snap := buildSnapshot(t, dir, []string{"clean_codes.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	sum, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	if sum.EnumDriftLeads != 0 {
+		t.Errorf("EnumDriftLeads = %d, want 0 (clean fixture uses named constants)", sum.EnumDriftLeads)
+	}
+
+	leads, err := st.PendingLeads(ctx, enumDriftTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads(%s): %v", enumDriftTargetLens, err)
+	}
+	if len(leads) != 0 {
+		t.Errorf("expected 0 enum-drift leads, got %d: %+v", len(leads), leads)
+	}
+}
+
 func buildSnapshot(t *testing.T, root string, rels []string) *ingest.Snapshot {
 	t.Helper()
 	files := make([]ingest.File, 0, len(rels))
