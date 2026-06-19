@@ -193,10 +193,25 @@ var ecosystemTable = []ecosystemRules{
 	},
 	{
 		name: sandbox.EcosystemCpp,
+		// Positive ran-evidence MUST be anchored to real test-runner output.
+		// Bare "failed"/"fail" are deliberately NOT used: C/C++ build, link,
+		// and CMake-configure output is saturated with them ("ABI info -
+		// failed", "Build step ... failed", "linker command failed"), so a
+		// non-zero exit from a broken build would otherwise be minted as a
+		// demonstration (the services-runtime standalone-repro regression).
+		// What IS dispositive: gtest prints "[  FAILED  ]" per failing
+		// EXPECT_*/ASSERT_*/CHECK plus an "N FAILED TEST(S)" tail; ctest prints
+		// "N tests failed out of M" / "The following tests FAILED:"; a tripped
+		// assert() aborts with "Assertion `expr' failed." (glibc) or "Assertion
+		// failed: (expr)" (BSD/macOS). Catch2/doctest/Boost.Test summary lines
+		// are NOT matched yet — precision-first, such repros fall through to
+		// not_demonstrated and the agent revises (tracked in bugbot-dmy notes).
 		ranMarkers: []string{
-			"failed",
-			"fail",
-			"assertion failed",
+			"[  failed  ]",     // gtest per-test FAILED line + summary
+			"failed test",      // gtest "N FAILED TEST(S)" tail
+			"tests failed",     // ctest summary / "The following tests FAILED:"
+			"assertion failed", // BSD/macOS assert(): "Assertion failed: (expr)"
+			"assertion \x60",   // glibc assert(): "Assertion `expr' failed." (\x60 = backtick; expr splits the two words)
 		},
 		buildMarkers: []string{
 			"error: ",
@@ -241,12 +256,18 @@ var ecosystemTable = []ecosystemRules{
 	// promote to T1.
 	{
 		name: sandbox.EcosystemUnknown,
+		// Strong, generic "the program ran and blew up" signals ONLY. Bare
+		// "failed"/"fail "/"failure" were removed: they match build/link noise
+		// and even test-target names (e.g. *Failure*), which minted false T1s
+		// for C/C++ repros that landed here before cmake/g++/clang were routed
+		// to the cpp ecosystem. gtest's "[  failed  ]" is kept because a bare
+		// `./run_tests` binary (no ctest wrapper) lands on unknown yet is still
+		// dispositive ran-evidence.
 		ranMarkers: []string{
-			"failed",
-			"fail ",
-			"failure",
-			"assertion failed",
-			"assertionerror",
+			"[  failed  ]",     // gtest run via a bare ./test binary
+			"assertion failed", // BSD/macOS assert()
+			"assertion \x60",   // glibc assert() (\x60 = backtick)
+			"assertionerror",   // Python-style AssertionError
 			"panic:",
 		},
 		// No ecosystem-specific build markers — we don't know the
@@ -323,7 +344,15 @@ func detectEcosystem(argv []string) ecosystemRules {
 		return ecosystemTable[ecosystemIndex(sandbox.EcosystemJS)]
 	case "jest", "vitest", "mocha":
 		return ecosystemTable[ecosystemIndex(sandbox.EcosystemJS)]
-	case "ctest":
+	case "cmake", "gcc", "g++", "clang", "clang++", "cc", "c++", "ctest":
+		// The C/C++ build + compile + test launchers. Routing them to the cpp
+		// ecosystem means a broken build is classified against cpp's toolchain
+		// ("cmake error") and build ("error: ", "fatal error:", "undefined
+		// reference", "no such file") markers BEFORE ran-evidence, so a
+		// configure/compile/link failure is never mistaken for a demonstration.
+		// `make` is intentionally left on the unknown path: it is a generic
+		// build tool, and the not-demonstrated contract for a bare `make`
+		// non-zero exit is preserved by the tightened unknown ran-markers.
 		return ecosystemTable[ecosystemIndex(sandbox.EcosystemCpp)]
 	case "bazel", "bazelisk":
 		// Bazel is a build/test launcher. Bugbot runs `bazel test //...`
@@ -345,7 +374,12 @@ func detectEcosystem(argv []string) ecosystemRules {
 // when the inner command is a single contiguous string. Anything more
 // elaborate is left alone.
 func unwrapShell(argv []string) []string {
-	if len(argv) >= 3 && (argv[0] == "bash" || argv[0] == "sh" || argv[0] == "/bin/bash" || argv[0] == "/bin/sh") && argv[1] == "-c" {
+	// argv[1] matches a shell flag cluster whose final flag is -c (e.g. "-c",
+	// "-lc" for a login shell, "-ec"): bash/sh read the command string from the
+	// next operand, so argv[2] is the inner command regardless of the leading
+	// flags. Matching only "-c" missed the common `bash -lc '...'` form.
+	if len(argv) >= 3 && (argv[0] == "bash" || argv[0] == "sh" || argv[0] == "/bin/bash" || argv[0] == "/bin/sh") &&
+		strings.HasPrefix(argv[1], "-") && strings.HasSuffix(argv[1], "c") {
 		// Split the inner command on whitespace to recover the actual
 		// launcher tokens. This is best-effort: quoted args with
 		// embedded spaces will be mis-tokenized, but for the purpose
