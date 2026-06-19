@@ -362,3 +362,145 @@ func TestRenderConfig_AnthropicDefaults(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderConfig_NoDriftFromStarterYAML is the drift-guard test: it loads
+// config.StarterYAML and the Enter-through wizard output (no env vars set, all
+// toggles default-off) into config.Config values and asserts that every section
+// renderConfig hard-codes equals the StarterYAML-loaded value. If StarterYAML
+// changes a default that renderConfig also emits, this test fails loudly,
+// preventing silent drift between the two sources of truth.
+func TestRenderConfig_NoDriftFromStarterYAML(t *testing.T) {
+	dir := t.TempDir()
+
+	// --- Load StarterYAML ---
+	starterPath := filepath.Join(dir, "starter.yaml")
+	if err := os.WriteFile(starterPath, []byte(config.StarterYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	starterCfg, err := config.Load(starterPath)
+	if err != nil {
+		t.Fatalf("config.Load(StarterYAML): %v", err)
+	}
+
+	// --- Load wizard-rendered output (Enter-through, no env vars, all defaults) ---
+	wCfg, err := runInteractive(
+		defaultInteractiveInput(),
+		new(bytes.Buffer),
+		dir,
+		func(string) string { return "" },
+		func(string) (string, error) { return "", os.ErrNotExist },
+	)
+	if err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	wizYAML, err := renderConfig(wCfg)
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	wizPath := filepath.Join(dir, "wizard.yaml")
+	if err := os.WriteFile(wizPath, []byte(wizYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wizCfg, err := config.Load(wizPath)
+	if err != nil {
+		t.Fatalf("config.Load(wizardYAML): %v\nYAML:\n%s", err, wizYAML)
+	}
+
+	// --- Assert hardcoded sections match StarterYAML ---
+
+	// Budgets: every field renderConfig emits verbatim.
+	if got, want := wizCfg.Budgets.PerCycleTokens, starterCfg.Budgets.PerCycleTokens; got != want {
+		t.Errorf("Budgets.PerCycleTokens: wizard=%d starter=%d", got, want)
+	}
+	if got, want := wizCfg.Budgets.PerDayTokens, starterCfg.Budgets.PerDayTokens; got != want {
+		t.Errorf("Budgets.PerDayTokens: wizard=%d starter=%d", got, want)
+	}
+	if got, want := wizCfg.Budgets.CacheReadWeight, starterCfg.Budgets.CacheReadWeight; got != want {
+		t.Errorf("Budgets.CacheReadWeight: wizard=%v starter=%v", got, want)
+	}
+	if got, want := wizCfg.Budgets.FinderBudgetShare, starterCfg.Budgets.FinderBudgetShare; got != want {
+		t.Errorf("Budgets.FinderBudgetShare: wizard=%v starter=%v", got, want)
+	}
+	if got, want := wizCfg.Budgets.FinderTokenClaim, starterCfg.Budgets.FinderTokenClaim; got != want {
+		t.Errorf("Budgets.FinderTokenClaim: wizard=%d starter=%d", got, want)
+	}
+	if got, want := wizCfg.Budgets.VerifierTokenClaim, starterCfg.Budgets.VerifierTokenClaim; got != want {
+		t.Errorf("Budgets.VerifierTokenClaim: wizard=%d starter=%d", got, want)
+	}
+
+	// Scan: include list and cartographer (excludes legitimately differ — wizard
+	// probes actual directories).
+	if got, want := len(wizCfg.Scan.Include), len(starterCfg.Scan.Include); got != want {
+		t.Errorf("Scan.Include len: wizard=%d starter=%d", got, want)
+	} else {
+		for i, v := range starterCfg.Scan.Include {
+			if wizCfg.Scan.Include[i] != v {
+				t.Errorf("Scan.Include[%d]: wizard=%q starter=%q", i, wizCfg.Scan.Include[i], v)
+			}
+		}
+	}
+	if got, want := wizCfg.Scan.Cartographer, starterCfg.Scan.Cartographer; got != want {
+		t.Errorf("Scan.Cartographer: wizard=%v starter=%v", got, want)
+	}
+
+	// Sandbox: all fields except Runtime (wizard auto-detects).
+	if got, want := wizCfg.Sandbox.Backend, starterCfg.Sandbox.Backend; got != want {
+		t.Errorf("Sandbox.Backend: wizard=%q starter=%q", got, want)
+	}
+	if got, want := wizCfg.Sandbox.Image, starterCfg.Sandbox.Image; got != want {
+		t.Errorf("Sandbox.Image: wizard=%q starter=%q", got, want)
+	}
+	if got, want := wizCfg.Sandbox.CPUs, starterCfg.Sandbox.CPUs; got != want {
+		t.Errorf("Sandbox.CPUs: wizard=%d starter=%d", got, want)
+	}
+	if got, want := wizCfg.Sandbox.MemoryMB, starterCfg.Sandbox.MemoryMB; got != want {
+		t.Errorf("Sandbox.MemoryMB: wizard=%d starter=%d", got, want)
+	}
+	if got, want := wizCfg.Sandbox.TimeoutSeconds, starterCfg.Sandbox.TimeoutSeconds; got != want {
+		t.Errorf("Sandbox.TimeoutSeconds: wizard=%d starter=%d", got, want)
+	}
+	if got, want := wizCfg.Sandbox.IdleTimeoutSeconds, starterCfg.Sandbox.IdleTimeoutSeconds; got != want {
+		t.Errorf("Sandbox.IdleTimeoutSeconds: wizard=%d starter=%d", got, want)
+	}
+	if got, want := wizCfg.Sandbox.Network, starterCfg.Sandbox.Network; got != want {
+		t.Errorf("Sandbox.Network: wizard=%q starter=%q", got, want)
+	}
+	if got, want := wizCfg.Sandbox.DepStrategy, starterCfg.Sandbox.DepStrategy; got != want {
+		t.Errorf("Sandbox.DepStrategy: wizard=%q starter=%q", got, want)
+	}
+
+	// Report.
+	if got, want := wizCfg.Report.Dir, starterCfg.Report.Dir; got != want {
+		t.Errorf("Report.Dir: wizard=%q starter=%q", got, want)
+	}
+	if got, want := len(wizCfg.Report.Sinks), len(starterCfg.Report.Sinks); got != want {
+		t.Errorf("Report.Sinks len: wizard=%d starter=%d", got, want)
+	} else {
+		for i, v := range starterCfg.Report.Sinks {
+			if wizCfg.Report.Sinks[i] != v {
+				t.Errorf("Report.Sinks[%d]: wizard=%q starter=%q", i, wizCfg.Report.Sinks[i], v)
+			}
+		}
+	}
+
+	// LLM.
+	if got, want := wizCfg.LLM.RequestTimeout, starterCfg.LLM.RequestTimeout; got != want {
+		t.Errorf("LLM.RequestTimeout: wizard=%v starter=%v", got, want)
+	}
+
+	// Daemon.
+	if got, want := wizCfg.Daemon.PollInterval, starterCfg.Daemon.PollInterval; got != want {
+		t.Errorf("Daemon.PollInterval: wizard=%v starter=%v", got, want)
+	}
+	if got, want := wizCfg.Daemon.SweepInterval, starterCfg.Daemon.SweepInterval; got != want {
+		t.Errorf("Daemon.SweepInterval: wizard=%v starter=%v", got, want)
+	}
+	if got, want := wizCfg.Daemon.IdleBackoff, starterCfg.Daemon.IdleBackoff; got != want {
+		t.Errorf("Daemon.IdleBackoff: wizard=%v starter=%v", got, want)
+	}
+
+	// Storage.
+	if got, want := wizCfg.Storage.Path, starterCfg.Storage.Path; got != want {
+		t.Errorf("Storage.Path: wizard=%q starter=%q", got, want)
+	}
+}
