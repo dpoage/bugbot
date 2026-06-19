@@ -1,0 +1,128 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/spf13/cobra"
+
+	"github.com/dpoage/bugbot/internal/funnel"
+)
+
+// newVerifyCmd implements `bugbot verify`: a one-shot verify drain that picks
+// up pending_candidates left by any interrupted run and verifies them through
+// the normal triage+verify pipeline WITHOUT invoking the finder/cartographer.
+//
+// Like `bugbot scan`, it acquires an advisory scan-lock and spawns a heartbeat
+// goroutine so a concurrently-running daemon does not mistake it for a stale
+// process. Pass --force to bypass the lock when you know what you are doing.
+//
+// Note: newVerifyCmd is defined but NOT registered on the root command here.
+// Registration happens in root.go (owned by Main) to avoid cross-agent
+// conflicts during the epic.
+func newVerifyCmd() *cobra.Command {
+	var (
+		target string
+		force  bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "verify [flags]",
+		Short: "One-shot verify drain: verify pending candidates left by interrupted runs",
+		Long: `verify picks up any pending_candidates rows (the write-ahead log of an
+interrupted or budget-truncated scan) and runs them through the triage and
+verification pipeline without invoking the finder or cartographer.
+
+This is the same verify-drain logic the daemon runs on its periodic verify-drain
+timer, exposed as a one-shot command for manual operation or scripted workflows.
+
+The command is idempotent: a second run on a drained store is a no-op (single
+store query, no LLM calls).`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			// Wire SIGINT/SIGTERM → context cancellation for interrupt-safe
+			// finalization (scan_runs row sealed with interrupted=true on Ctrl-C).
+			ctx, stopSignal := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+			defer stopSignal()
+
+			cfg, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
+			if err != nil {
+				return err
+			}
+			defer closeStore(st)
+
+			// Advisory scan-lock: mirrors bugbot scan's checkScanLock so a
+			// manual verify does not race the daemon or a concurrent scan.
+			if lockErr := checkScanLock(ctx, st, force, os.Getpid()); lockErr != nil {
+				return lockErr
+			}
+
+			repo, err := openRepoForScan(ctx, target)
+			if err != nil {
+				return err
+			}
+
+			finder, verifier, cartographer, err := buildRoleClients(ctx, &cfg)
+			if err != nil {
+				return err
+			}
+
+			// nil progress sink: the one-shot `bugbot verify` prints its summary
+			// to stdout and does not own a status.json snapshot. Writing one here
+			// would race a running daemon's single-writer snapshot.
+			opts, _, sbErr := buildFunnelOptions(cfg, FunnelOptionOverrides{})
+			if sbErr != nil {
+				return sbErr
+			}
+			opts.Progress = nil
+
+			f, err := funnel.New(funnel.RoleClients{
+				Finder:       finder,
+				Verifier:     verifier,
+				Cartographer: cartographer,
+			}, st, repo, opts)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = f.Close() }()
+
+			// Heartbeat goroutine: periodically refreshes our scan_run row so
+			// ActiveScanRuns can distinguish us from a crashed/stale process.
+			// Mirrors the pattern in runScanCmd (scan.go).
+			hbCtx, hbCancel := context.WithCancel(ctx)
+			defer hbCancel()
+			go runHeartbeat(hbCtx, st, os.Getpid())
+
+			out := cmd.OutOrStdout()
+
+			res, err := f.VerifyDrain(ctx)
+			if err != nil {
+				return fmt.Errorf("verify drain: %w", err)
+			}
+
+			if res == nil || (res.Stats.Resumed == 0 && len(res.Findings) == 0) {
+				_, _ = fmt.Fprintln(out, "Verify drain: no pending candidates.")
+				return nil
+			}
+
+			_, _ = fmt.Fprintf(out,
+				"\nVerify drain: %d resumed, %d finding(s) persisted.\n",
+				res.Stats.Resumed, len(res.Findings),
+			)
+			return nil
+		},
+	}
+
+	addTargetFlag(cmd, &target)
+	cmd.Flags().BoolVar(&force, "force", false,
+		"bypass the advisory single-scan lock and proceed even if another scan appears active")
+
+	return cmd
+}
