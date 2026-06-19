@@ -48,7 +48,7 @@ func TestEmit_StampsTime(t *testing.T) {
 func TestMulti_FansOutInOrder(t *testing.T) {
 	var order []int
 	var mu sync.Mutex
-	mk := func(id int) Sink {
+	mk := func(id int) EventSink {
 		return SinkFunc(func(Event) {
 			mu.Lock()
 			order = append(order, id)

@@ -412,7 +412,7 @@ type Options struct {
 	// SandboxOpts configures the sandbox_exec tool offered to refuter agents.
 	SandboxOpts SandboxOpts
 	// Progress, when non-nil, receives activity events as the run proceeds.
-	Progress progress.Sink
+	Progress progress.EventSink
 	// Repro, when non-nil, is invoked in-run for each Tier-2 finding that
 	// survives verification. Must be safe for concurrent use.
 	Repro func(ctx context.Context, scanRunID string, finding store.Finding) error

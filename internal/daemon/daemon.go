@@ -101,7 +101,7 @@ type Deps struct {
 	// schedule, re-verify and promotion outcomes) and is threaded into each
 	// cycle's funnel as its progress sink. Emission is best-effort and never
 	// blocks or fails the loop. See internal/progress.
-	Progress progress.Sink
+	Progress progress.EventSink
 	// Publisher, when non-nil, is invoked after each post-cycle reverify to
 	// keep GitHub issues in sync with the store. Only wired when
 	// cfg.Publish.Enabled is true and the gh binary is on PATH.
@@ -202,7 +202,7 @@ type Daemon struct {
 	fopts     funnel.Options
 	sinks     []report.Sink
 	log       *slog.Logger
-	prog      progress.Sink
+	prog      progress.EventSink
 	cfg       DaemonConfig
 
 	// sharedNav is the daemon-lifetime CodeNav (LSP manager) constructed once in

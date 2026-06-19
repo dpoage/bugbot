@@ -521,8 +521,14 @@ func (r *Runner) overBudget(u llm.Usage) bool {
 	return u.ChargeableTokens(r.limits.CacheReadWeight) > r.limits.TokenBudget
 }
 
-// finishTruncated marks the outcome as a clean partial result.
+// finishTruncated marks the outcome as a clean partial result. reason MUST be
+// one of the Trunc* constants and non-empty; passing an empty reason panics to
+// surface a programming error at the call site rather than silently producing
+// an Outcome that violates the Truncated→TruncationReason invariant.
 func (r *Runner) finishTruncated(o *Outcome, reason string) {
+	if reason == "" {
+		panic("agent: finishTruncated called with empty reason — callers must pass a Trunc* constant")
+	}
 	o.Truncated = true
 	o.TruncationReason = reason
 }

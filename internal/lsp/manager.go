@@ -187,6 +187,13 @@ func (m *Manager) serverFor(path string) (*managedServer, error) {
 // liveServer returns ms's running server, starting or restarting it as
 // allowed. A server that has crashed more than maxRestarts times is
 // permanently failed for this manager.
+//
+// It checks m.closed under m.mu before spawning to close the race between a
+// goroutine that obtained ms from serverFor (which gates on m.closed) and a
+// concurrent Close() that sets m.closed then walks ms entries: without this
+// second check a goroutine could pass the serverFor gate, lose the race to
+// Close, and then enter liveServer before Close has set ms.failed — and start
+// a new server process after the manager is already shut down.
 func (m *Manager) liveServer(ctx context.Context, ms *managedServer) (*server, error) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
@@ -194,6 +201,21 @@ func (m *Manager) liveServer(ctx context.Context, ms *managedServer) (*server, e
 	if ms.failed != nil {
 		return nil, ms.failed
 	}
+
+	// Secondary closed-check: a goroutine that passed serverFor's m.closed gate
+	// may race with Close() before Close has had a chance to set ms.failed.
+	// Check m.closed here (under m.mu, not ms.mu — no inversion: m.mu is
+	// always taken before ms.mu in serverFor and Close) so we never spawn a
+	// new server process after the manager is shut down.
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		closedErr := fmt.Errorf("lsp: manager is closed — fall back to grep")
+		ms.failed = closedErr
+		return nil, closedErr
+	}
+
 	if ms.srv != nil && !ms.srv.dead() {
 		return ms.srv, nil
 	}

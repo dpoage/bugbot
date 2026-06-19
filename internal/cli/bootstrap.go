@@ -97,7 +97,7 @@ type FunnelOptionOverrides struct {
 	Lenses      []string
 	Refuters    int
 	MaxParallel int
-	Progress    progress.Sink
+	Progress    progress.EventSink
 	// Repro is the in-run reproducer hook (scan-only); nil disables in-run
 	// reproduction. The hook signature matches funnel.Options.Repro.
 	Repro func(ctx context.Context, scanRunID string, finding store.Finding) error

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -70,28 +71,35 @@ type Finding struct {
 	UpdatedAt           time.Time
 }
 
-// encodeLenses joins a lens list into the comma-separated form stored in the
-// corroborating_lenses column. Lens names must not contain commas for the
-// encoding to round-trip; any comma is replaced with a semicolon so a
-// nonconforming lens name degrades visibly instead of splitting into phantom
-// entries on read-back. Nil/empty yields the empty string.
+// encodeLenses encodes the lens list as a JSON array for storage in the
+// corroborating_lenses column. Nil/empty yields the empty string.
 func encodeLenses(lenses []string) string {
 	if len(lenses) == 0 {
 		return ""
 	}
-	safe := make([]string, len(lenses))
-	for i, l := range lenses {
-		safe[i] = strings.ReplaceAll(l, ",", ";")
+	b, err := json.Marshal(lenses)
+	if err != nil {
+		// json.Marshal on []string never errors; panic would be a bug.
+		panic("store: encodeLenses: unexpected marshal error: " + err.Error())
 	}
-	return strings.Join(safe, ",")
+	return string(b)
 }
 
-// decodeLenses parses the comma-separated corroborating_lenses column back into
-// a slice. The empty string yields nil (no corroboration).
+// decodeLenses parses the corroborating_lenses column back into a slice.
+// It is tolerant of the legacy comma-separated encoding: if the stored value
+// does not begin with '[' it is split on commas (old rows), otherwise it is
+// decoded as a JSON array (new rows). The empty string yields nil.
 func decodeLenses(s string) []string {
 	if s == "" {
 		return nil
 	}
+	if len(s) > 0 && s[0] == '[' {
+		var out []string
+		if err := json.Unmarshal([]byte(s), &out); err == nil {
+			return out
+		}
+	}
+	// Legacy comma-separated fallback.
 	return strings.Split(s, ",")
 }
 

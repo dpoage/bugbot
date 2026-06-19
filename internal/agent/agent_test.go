@@ -19,3 +19,19 @@ func TestOverBudget_CacheReadWeighted(t *testing.T) {
 		t.Error("raw usage 5100 should exceed budget 2000")
 	}
 }
+
+// TestOutcome_Validate enforces the Truncated→TruncationReason invariant.
+func TestOutcome_Validate(t *testing.T) {
+	// Clean outcome: no truncation.
+	if err := (&Outcome{}).Validate(); err != nil {
+		t.Errorf("zero Outcome should be valid, got %v", err)
+	}
+	// Valid truncation: both fields set.
+	if err := (&Outcome{Truncated: true, TruncationReason: TruncMaxIterations}).Validate(); err != nil {
+		t.Errorf("Truncated+reason should be valid, got %v", err)
+	}
+	// Invariant violation: Truncated without reason.
+	if err := (&Outcome{Truncated: true}).Validate(); err == nil {
+		t.Error("Truncated with empty TruncationReason should fail Validate")
+	}
+}
