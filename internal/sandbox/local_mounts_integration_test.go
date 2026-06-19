@@ -12,7 +12,6 @@ package sandbox
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -118,12 +117,5 @@ func TestAnswer(t *testing.T) {
 	if result.ExitCode != 0 {
 		t.Fatalf("go test failed (exit %d):\nstdout: %s\nstderr: %s",
 			result.ExitCode, result.Stdout, result.Stderr)
-	}
-}
-
-func mustMkdir(t *testing.T, dir string) {
-	t.Helper()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", dir, err)
 	}
 }
