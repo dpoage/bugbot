@@ -49,6 +49,7 @@ func newScanCmd() *cobra.Command {
 		lenses      []string
 		doRepro     bool
 		doEstimate  bool
+		force       bool
 	)
 
 	cmd := &cobra.Command{
@@ -74,6 +75,13 @@ func newScanCmd() *cobra.Command {
 				return err
 			}
 			defer closeStore(st)
+
+			// Advisory single-scan lock: refuse if another process is actively
+			// scanning this state db (heartbeat fresh, not finished, different pid).
+			// --force bypasses the check so an operator can override a stale lock.
+			if lockErr := checkScanLock(ctx, st, force, os.Getpid()); lockErr != nil {
+				return lockErr
+			}
 
 			repo, err := ingest.Open(ctx, target)
 			if err != nil {
@@ -271,6 +279,15 @@ func newScanCmd() *cobra.Command {
 			// container runtime, so it always runs.
 			runContradictionSeed(ctx, cfg, repo, st, progressSink)
 
+			// Heartbeat goroutine: periodically updates the scan_run row so
+			// ActiveScanRuns can distinguish us from a crashed/stale process.
+			// The goroutine resolves our run ID by querying for the most-recently
+			// started run belonging to this pid (BeginScanRun inside the funnel
+			// creates it synchronously before any agent goroutines start).
+			hbCtx, hbCancel := context.WithCancel(ctx)
+			defer hbCancel()
+			go runHeartbeat(hbCtx, st, os.Getpid())
+
 			var res *funnel.Result
 			if kind == store.ScanTargeted {
 				res, err = f.Targeted(ctx, changed)
@@ -338,8 +355,77 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&lenses, "lens", nil, "restrict finder lenses (repeatable); default is all built-in lenses")
 	cmd.Flags().BoolVar(&doRepro, "repro", false, "run the Reproduce stage: generate sandboxed failing tests and promote demonstrated findings to Tier-1")
 	cmd.Flags().BoolVar(&doEstimate, "estimate", false, "estimate token spend and wall time for this scan without running it (no LLM calls)")
+	cmd.Flags().BoolVar(&force, "force", false, "bypass the advisory single-scan lock and proceed even if another scan appears active")
 
 	return cmd
+}
+
+// checkScanLock queries the store for live (fresh-heartbeat, unfinished) scan
+// runs. If any run belongs to a different pid, it returns an error naming the
+// conflicting run and instructing the user to pass --force. Passing force=true
+// skips the check entirely. Extracted as a standalone function for unit testing
+// without driving the whole cobra command.
+func checkScanLock(ctx context.Context, st *store.Store, force bool, selfPID int) error {
+	if force {
+		return nil
+	}
+	active, err := st.ActiveScanRuns(ctx, 10*time.Minute)
+	if err != nil {
+		return fmt.Errorf("scan lock check: %w", err)
+	}
+	for _, r := range active {
+		if r.PID != selfPID {
+			return fmt.Errorf(
+				"another scan is already running against this state db "+
+					"(scan_run_id=%s pid=%d); wait for it to finish or pass --force to override",
+				r.ID, r.PID,
+			)
+		}
+	}
+	return nil
+}
+
+// runHeartbeat periodically refreshes the heartbeat of the active scan run
+// owned by selfPID. It resolves the run ID on the first tick by querying
+// ActiveScanRuns for our own pid, then calls UpdateHeartbeat every ~30 s
+// until the context is cancelled (i.e. until the scan finishes or is
+// interrupted). The heartbeat interval matches the staleAfter window in
+// checkScanLock (10 min) with comfortable margin (30 s); a missed heartbeat
+// due to a slow tick does not expire within the window.
+//
+// This function is meant to be called as a goroutine.
+func runHeartbeat(ctx context.Context, st *store.Store, selfPID int) {
+	const interval = 30 * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var runID string
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Lazily resolve the run ID: the funnel's BeginScanRun is called
+			// synchronously inside f.Sweep/f.Targeted before the first tick,
+			// so by the time we reach here the row exists.
+			if runID == "" {
+				runs, err := st.ActiveScanRuns(ctx, 10*time.Minute)
+				if err != nil || len(runs) == 0 {
+					continue
+				}
+				for _, r := range runs {
+					if r.PID == selfPID {
+						runID = r.ID
+						break
+					}
+				}
+			}
+			if runID == "" {
+				continue
+			}
+			_ = st.UpdateHeartbeat(ctx, runID)
+		}
+	}
 }
 
 // buildSandboxOpts constructs a funnel.SandboxOpts from the config. When
