@@ -80,7 +80,6 @@ func (t *outlineTool) Run(_ context.Context, raw json.RawMessage) (string, error
 		return entries[i].StartLine < entries[j].StartLine
 	})
 
-
 	if len(entries) == 0 {
 		return fmt.Sprintf("(no top-level symbols found in %s)\n", args.File), nil
 	}

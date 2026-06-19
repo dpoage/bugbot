@@ -160,6 +160,8 @@ func newScanCmd() *cobra.Command {
 						PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
 						PatchSuiteCmd:    cfg.Repro.SuiteCmd,
 						DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+						SetupCmds:        cfg.Sandbox.SetupCmds,
+						LocalMounts:      localMountsFromConfig(cfg),
 					})
 					if rNewErr != nil {
 						return fmt.Errorf("build reproducer: %w", rNewErr)
@@ -361,6 +363,8 @@ func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool
 		MinSeverity: cfg.Verify.SandboxMinSeverity,
 		MaxExecs:    cfg.Verify.SandboxMaxExecs,
 		DepStrategy: sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+		SetupCmds:   cfg.Sandbox.SetupCmds,
+		LocalMounts: localMountsFromConfig(cfg),
 	}, false, nil
 }
 
@@ -374,6 +378,23 @@ func sandboxRunOpts(cfg config.Config) []sandbox.Option {
 		opts = append(opts, sandbox.WithIdleTimeout(time.Duration(cfg.Sandbox.IdleTimeoutSeconds)*time.Second))
 	}
 	return opts
+}
+
+// localMountsFromConfig converts the operator's sandbox.local_mounts config
+// entries into read-only sandbox.ROMounts. They are Shared=true (host-owned
+// source trees that must NOT be SELinux :Z relabeled) per the local-mount
+// contract; absolute-path, container-uniqueness, and existence checks already
+// ran in config.Validate. Shared by the repro and funnel sandbox paths so both
+// expose the same out-of-tree dependency directories offline.
+func localMountsFromConfig(cfg config.Config) []sandbox.ROMount {
+	if len(cfg.Sandbox.LocalMounts) == 0 {
+		return nil
+	}
+	mounts := make([]sandbox.ROMount, len(cfg.Sandbox.LocalMounts))
+	for i, m := range cfg.Sandbox.LocalMounts {
+		mounts[i] = sandbox.ROMount{HostPath: m.Host, ContainerPath: m.Container, Shared: true}
+	}
+	return mounts
 }
 
 // runReproCatchUp runs a backlog-style drain over the run's Tier-2 findings

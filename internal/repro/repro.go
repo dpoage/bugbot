@@ -19,10 +19,8 @@
 // bundle.
 //
 // The stage drives an [agent.Runner] with read-only tools (read_file,
-// list_dir, grep, find_definition, find_references, find_implementations,
-// read_symbol, find_usages, outline) rooted at the target repo, so the
-// reproducer can investigate the finding's file/line/reasoning before
-// proposing a repro plan. Execution
+// list_dir, grep) rooted at the target repo, so the reproducer can investigate
+// the finding's file/line/reasoning before proposing a repro plan. Execution
 // goes through the [sandbox.Sandbox] interface, so unit tests use
 // sandbox.NewMock and a scripted llm.Client with no real container runtime.
 package repro
@@ -319,10 +317,7 @@ func (r *Reproducer) newRunner(lang ingest.Language, systems []ingest.BuildSyste
 	return agent.NewRunner(r.client, tools, systemPrompt(lang, systems), opts...), nil
 }
 
-// readOnlyTools builds the read-only investigation tool set rooted at dir:
-// read_file, list_dir, grep, plus the LSP-backed find_definition /
-// find_references / find_implementations, read_symbol, find_usages, and
-// outline tools backed by tree-sitter.
+// readOnlyTools builds the read-only investigation tool set rooted at dir.
 func readOnlyTools(dir string) ([]agent.Tool, error) {
 	read, err := agent.NewReadFile(dir)
 	if err != nil {
@@ -336,12 +331,7 @@ func readOnlyTools(dir string) ([]agent.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	nav, err := agent.NewCodeNav(dir)
-	if err != nil {
-		return nil, err
-	}
-	tools := append([]agent.Tool{read, list, grep}, nav.Tools()...)
-	return tools, nil
+	return []agent.Tool{read, list, grep}, nil
 }
 
 // execute runs a plan in the sandbox with the stage's network/timeout/image
