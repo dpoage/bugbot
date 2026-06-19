@@ -6,11 +6,26 @@ import (
 	"strings"
 )
 
+// Kind is the tree-sitter symbol kind for a declaration; it follows the
+// "definition.X" convention (e.g. "definition.function", "definition.type").
+type Kind string
+
+const (
+	KindFunction  Kind = "definition.function"
+	KindMethod    Kind = "definition.method"
+	KindType      Kind = "definition.type"
+	KindClass     Kind = "definition.class"
+	KindInterface Kind = "definition.interface"
+	KindVar       Kind = "definition.var"
+	KindConst     Kind = "definition.const"
+	KindModule    Kind = "definition.module"
+)
+
 // OutlineEntry is one top-level declaration in a file: its name, kind (e.g.
-// "definition.function"), and the 1-based start/end line of the full node body.
+// KindFunction), and the 1-based start/end line of the full node body.
 type OutlineEntry struct {
 	Name      string
-	Kind      string
+	Kind      Kind
 	StartLine int // 1-based, inclusive
 	EndLine   int // 1-based, inclusive
 }
@@ -46,7 +61,7 @@ func (b *Backend) Outline(absPath string) ([]OutlineEntry, error) {
 		startRow := decoratorAdjustedStart(absPath, t.Range.StartPoint.Row)
 		out = append(out, OutlineEntry{
 			Name:      t.Name,
-			Kind:      t.Kind,
+			Kind:      Kind(t.Kind),
 			StartLine: int(startRow) + 1,
 			EndLine:   int(t.Range.EndPoint.Row) + 1,
 		})

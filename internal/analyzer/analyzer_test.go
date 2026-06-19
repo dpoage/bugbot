@@ -189,7 +189,7 @@ func TestParseSARIF_uriNormalization(t *testing.T) {
 func TestStaticcheckRuleLens(t *testing.T) {
 	tests := []struct {
 		ruleID   string
-		wantLens string
+		wantLens LensName
 	}{
 		{"SA2001", lensConcurrency},
 		{"SA2000", lensConcurrency},
@@ -218,7 +218,7 @@ func TestStaticcheckRuleLens(t *testing.T) {
 func TestRuffRuleLens(t *testing.T) {
 	tests := []struct {
 		ruleID   string
-		wantLens string
+		wantLens LensName
 	}{
 		// Style: skip
 		{"E101", ""},
@@ -379,7 +379,7 @@ func TestSeed_staticcheckLeads(t *testing.T) {
 	}
 
 	// Verify the leads are in the store with correct fields.
-	leads, err := st.PendingLeads(ctx, lensConcurrency)
+	leads, err := st.PendingLeads(ctx, string(lensConcurrency))
 	if err != nil {
 		t.Fatalf("PendingLeads(concurrency): %v", err)
 	}
@@ -396,11 +396,11 @@ func TestSeed_staticcheckLeads(t *testing.T) {
 	if l.Line != 12 {
 		t.Errorf("Line = %d, want 12", l.Line)
 	}
-	if l.TargetLens != lensConcurrency {
+	if l.TargetLens != string(lensConcurrency) {
 		t.Errorf("TargetLens = %q, want %q", l.TargetLens, lensConcurrency)
 	}
 
-	nilLeads, err := st.PendingLeads(ctx, lensNilSafety)
+	nilLeads, err := st.PendingLeads(ctx, string(lensNilSafety))
 	if err != nil {
 		t.Fatalf("PendingLeads(nil-safety): %v", err)
 	}
@@ -614,7 +614,7 @@ func TestSeed_upsertDedup(t *testing.T) {
 		t.Fatalf("second Seed: %v", err)
 	}
 
-	leads, err := st.PendingLeads(ctx, lensConcurrency)
+	leads, err := st.PendingLeads(ctx, string(lensConcurrency))
 	if err != nil {
 		t.Fatalf("PendingLeads: %v", err)
 	}
@@ -657,7 +657,7 @@ func TestSeed_ruff_leads(t *testing.T) {
 		t.Errorf("TotalPosted = %d, want 1 (E501 style should be skipped)", sum.TotalPosted)
 	}
 
-	leads, err := st.PendingLeads(ctx, lensInjection)
+	leads, err := st.PendingLeads(ctx, string(lensInjection))
 	if err != nil {
 		t.Fatalf("PendingLeads(injection): %v", err)
 	}
@@ -676,7 +676,7 @@ func TestSeed_ruff_leads(t *testing.T) {
 func TestGosecRuleLens(t *testing.T) {
 	tests := []struct {
 		ruleID   string
-		wantLens string
+		wantLens LensName
 	}{
 		// G1xx — credentials / audit → injection
 		{"G101", lensInjection}, // hardcoded credentials
@@ -783,7 +783,7 @@ func TestSeed_gosec_leads(t *testing.T) {
 		t.Errorf("posted = %d, want 3", posted)
 	}
 
-	injLeads, err := st.PendingLeads(ctx, lensInjection)
+	injLeads, err := st.PendingLeads(ctx, string(lensInjection))
 	if err != nil {
 		t.Fatalf("PendingLeads(injection): %v", err)
 	}
@@ -794,7 +794,7 @@ func TestSeed_gosec_leads(t *testing.T) {
 		t.Errorf("PosterLens = %q, want analyzer:gosec", injLeads[0].PosterLens)
 	}
 
-	bndLeads, err := st.PendingLeads(ctx, lensBoundary)
+	bndLeads, err := st.PendingLeads(ctx, string(lensBoundary))
 	if err != nil {
 		t.Fatalf("PendingLeads(boundary): %v", err)
 	}
@@ -802,7 +802,7 @@ func TestSeed_gosec_leads(t *testing.T) {
 		t.Fatalf("boundary leads = %d, want 1 (G601 only)", len(bndLeads))
 	}
 
-	nilLeads, err := st.PendingLeads(ctx, lensNilSafety)
+	nilLeads, err := st.PendingLeads(ctx, string(lensNilSafety))
 	if err != nil {
 		t.Fatalf("PendingLeads(nil-safety): %v", err)
 	}

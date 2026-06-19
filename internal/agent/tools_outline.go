@@ -116,9 +116,9 @@ func (t *outlineTool) Run(_ context.Context, raw json.RawMessage) (string, error
 }
 
 // kindLabel maps a tree-sitter definition kind string to a short readable label.
-func kindLabel(kind string) string {
+func kindLabel(kind treesitter.Kind) string {
 	// kind follows the pattern "definition.X" where X is the symbol kind.
-	if after, ok := strings.CutPrefix(kind, "definition."); ok {
+	if after, ok := strings.CutPrefix(string(kind), "definition."); ok {
 		switch after {
 		case "function":
 			return "func"
@@ -140,7 +140,7 @@ func kindLabel(kind string) string {
 			return after
 		}
 	}
-	return kind
+	return string(kind)
 }
 
 // fakeOutlineBackend is a tsOutlineBackend implementation for testing.

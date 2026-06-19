@@ -85,6 +85,9 @@ var genericEntityStoplist = map[string]bool{
 	"candidates": true, "observations": true,
 }
 
+// sentinelClass classifies a documented sentinel value in a comment.
+// The zero value ("") means "not a sentinel" and is used as a negative signal.
+// All other valid values are one of the three named constants below.
 type sentinelClass string
 
 const (
@@ -93,6 +96,18 @@ const (
 	sentinelEmpty    sentinelClass = "emptyMeaningful"
 )
 
+// Valid reports whether s is one of the three known sentinel classes.
+// The zero value ("") is not valid — it signals "no sentinel found".
+func (s sentinelClass) Valid() bool {
+	switch s {
+	case sentinelZero, sentinelNegative, sentinelEmpty:
+		return true
+	}
+	return false
+}
+
+// constraintClass classifies what a validation site rejects.
+// All valid values are one of the three named constants below.
 type constraintClass string
 
 const (
@@ -100,6 +115,15 @@ const (
 	constraintRejectsNegative constraintClass = "rejectsNegative"
 	constraintRejectsEmpty    constraintClass = "rejectsEmpty"
 )
+
+// Valid reports whether c is one of the three known constraint classes.
+func (c constraintClass) Valid() bool {
+	switch c {
+	case constraintRejectsZero, constraintRejectsNegative, constraintRejectsEmpty:
+		return true
+	}
+	return false
+}
 
 type docSite struct {
 	entity    string
@@ -449,6 +473,12 @@ func extractSnakeKeys(s string) []string {
 }
 
 func sentinelContradictsDoc(d sentinelClass, c constraintClass) bool {
+	// Guard: both classes must be valid. The zero value of sentinelClass ("")
+	// means "no sentinel found" and should never reach this function; similarly
+	// an unknown constraintClass would be a programming error.
+	if !d.Valid() || !c.Valid() {
+		return false
+	}
 	switch d {
 	case sentinelZero:
 		return c == constraintRejectsZero

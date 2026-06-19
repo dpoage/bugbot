@@ -178,7 +178,7 @@ func TestOutlineInvalidJSON(t *testing.T) {
 
 func TestOutlineKindLabels(t *testing.T) {
 	cases := []struct {
-		kind  string
+		kind  treesitter.Kind
 		label string
 	}{
 		{"definition.function", "func"},
