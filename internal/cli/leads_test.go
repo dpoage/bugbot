@@ -154,6 +154,43 @@ func TestRenderWorldState(t *testing.T) {
 	}
 }
 
+// TestRenderWorldState_DayBudgetUsesChargeable pins the fix for the day-cap
+// reporting bug: the "% of day budget" must be computed on cache-DISCOUNTED
+// chargeable spend (the same accounting daemon.dayBudgetExhausted gates on),
+// not on raw input+output. Otherwise a cache-heavy day reads as ">100% of
+// budget" while the daemon correctly keeps running. Mirrors the real
+// services-runtime numbers that triggered the report.
+func TestRenderWorldState_DayBudgetUsesChargeable(t *testing.T) {
+	now := time.Date(2026, 6, 19, 20, 0, 0, 0, time.UTC)
+	// 102.4M in (85.8M of it cache reads), 1.96M out, 100M/day cap, weight 0.1.
+	// Raw total 104.38M would be 104.4% of cap; chargeable is far smaller:
+	// (102419131-85778426) + 85778426*0.1 + 1960903 = 27179449 -> 27.2%.
+	ws := worldState{
+		HasDaySpend: true,
+		DaySpend: store.SpendTotals{
+			InputTokens:     102_419_131,
+			OutputTokens:    1_960_903,
+			CacheReadTokens: 85_778_426,
+		},
+		DayBudgetLimit:  100_000_000,
+		CacheReadWeight: 0.1,
+	}
+
+	var b strings.Builder
+	renderWorldState(&b, ws, now)
+	out := b.String()
+
+	// Raw totals stay honest; the percentage and chargeable figure reflect the gate.
+	want := "spend today:  in=102419131 out=1960903 total=104380034 tokens (chargeable 27179450, 27.2% of day budget)"
+	if !strings.Contains(out, want) {
+		t.Errorf("day-spend line not chargeable-based\nwant substring: %q\n--- got ---\n%s", want, out)
+	}
+	// The misleading raw-based percentage must NOT appear.
+	if strings.Contains(out, "104.4% of day budget") {
+		t.Errorf("percentage still computed on raw spend:\n%s", out)
+	}
+}
+
 // TestTruncateNote_UTF8Safe moved to internal/util/util_test.go's
 // TestTruncateRunes/multibyte-rune-boundary after the helper was lifted
 // out of cli. The pinning coverage (50 runes truncated to 10 must remain

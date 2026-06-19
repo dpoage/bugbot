@@ -29,6 +29,11 @@ type worldState struct {
 	DaySpend       store.SpendTotals
 	HasDaySpend    bool
 	DayBudgetLimit int64 // budgets.per_day_tokens (0 = unlimited)
+	// CacheReadWeight is budgets.cache_read_weight. The day-budget gate
+	// (daemon.dayBudgetExhausted) discounts cache reads by this weight before
+	// comparing against DayBudgetLimit, so the rendered "% of day budget" must
+	// use the same accounting or it diverges from what actually triggers a skip.
+	CacheReadWeight float64
 
 	LastRun    store.ScanRun
 	HasLastRun bool
@@ -76,6 +81,7 @@ func fetchWorldState(ctx context.Context, cfg config.Config) (worldState, bool) 
 		ws.HasDaySpend = totals.InputTokens > 0 || totals.OutputTokens > 0
 	}
 	ws.DayBudgetLimit = cfg.Budgets.PerDayTokens
+	ws.CacheReadWeight = cfg.Budgets.CacheReadWeight
 	if run, err := st.LatestScanRun(ctx); err == nil {
 		ws.LastRun = run
 		ws.HasLastRun = true
@@ -111,13 +117,25 @@ func renderWorldState(out io.Writer, ws worldState, now time.Time) {
 	}
 
 	if ws.HasDaySpend {
+		raw := ws.DaySpend.InputTokens + ws.DaySpend.OutputTokens
 		line := fmt.Sprintf("in=%d out=%d total=%d tokens",
-			ws.DaySpend.InputTokens, ws.DaySpend.OutputTokens,
-			ws.DaySpend.InputTokens+ws.DaySpend.OutputTokens)
+			ws.DaySpend.InputTokens, ws.DaySpend.OutputTokens, raw)
 		if ws.DayBudgetLimit > 0 {
+			// The day-budget gate (daemon.dayBudgetExhausted) compares
+			// cache-discounted CHARGEABLE spend against per_day_tokens, so the
+			// percentage MUST use the same accounting. Computing it on raw spend
+			// makes a cache-heavy day read as ">100% of budget" while the daemon
+			// keeps running (it gates on the far-smaller chargeable total).
+			chargeable := ws.DaySpend.Chargeable(ws.CacheReadWeight)
 			// One decimal so small spends don't render as a misleading 0%.
-			pct := float64(ws.DaySpend.InputTokens+ws.DaySpend.OutputTokens) * 100 / float64(ws.DayBudgetLimit)
-			line += fmt.Sprintf(" (%.1f%% of day budget)", pct)
+			pct := float64(chargeable) * 100 / float64(ws.DayBudgetLimit)
+			// Surface the chargeable figure when the cache discount makes it
+			// diverge from the raw total, so the percentage is self-explaining.
+			if chargeable != raw {
+				line += fmt.Sprintf(" (chargeable %d, %.1f%% of day budget)", chargeable, pct)
+			} else {
+				line += fmt.Sprintf(" (%.1f%% of day budget)", pct)
+			}
 		}
 		_, _ = fmt.Fprintf(out, "  spend today:  %s\n", line)
 	}
