@@ -350,7 +350,15 @@ func TestSeed_staticcheckLeads(t *testing.T) {
 	}`
 
 	// Mock: staticcheck returns exitCode=1 (found issues) with SARIF on stdout.
+	// gosec also detects go.mod — enqueue a binary-absent response (exit 127)
+	// for it so it skips cleanly and only staticcheck's 2 leads are counted.
 	mock := sandbox.NewMock(sandbox.MockResponse{
+		// Default: binary absent (gosec or any extra invocation).
+		Result: sandbox.Result{ExitCode: 127, Stderr: "command not found"},
+	})
+	// First call is staticcheck (registry order: staticcheck, ruff, gosec).
+	// ruff is skipped (no Python marker), so only staticcheck + gosec run.
+	mock.EnqueueResponse(sandbox.MockResponse{
 		Result: sandbox.Result{ExitCode: 1, Stdout: sarifOut},
 	})
 
@@ -658,6 +666,148 @@ func TestSeed_ruff_leads(t *testing.T) {
 	}
 	if leads[0].File != "app.py" || leads[0].Line != 20 {
 		t.Errorf("lead = {%s %d}, want {app.py 20}", leads[0].File, leads[0].Line)
+	}
+}
+
+// --------------------------------------------------------------------------
+// gosec rule → lens mapping tests
+// --------------------------------------------------------------------------
+
+func TestGosecRuleLens(t *testing.T) {
+	tests := []struct {
+		ruleID   string
+		wantLens string
+	}{
+		// G1xx — credentials / audit → injection
+		{"G101", lensInjection}, // hardcoded credentials
+		{"G102", lensInjection}, // network binding
+		{"G107", lensInjection}, // URL from variable (SSRF precursor)
+		{"G115", lensInjection}, // integer overflow (G1 prefix)
+
+		// G2xx — injection sinks → injection
+		{"G201", lensInjection}, // SQL injection (string formatting)
+		{"G202", lensInjection}, // SQL injection (string concatenation)
+		{"G203", lensInjection}, // template injection
+		{"G204", lensInjection}, // command injection
+
+		// G3xx — filesystem / permissions split by sub-rule
+		{"G304", lensInjection}, // path traversal (file from variable) → injection
+		{"G310", lensInjection}, // symlink follow → injection
+		{"G301", lensResources}, // file permissions (mkdir) → resources
+		{"G302", lensResources}, // file permissions (chmod) → resources
+		{"G303", lensResources}, // tempfile in predictable location → resources
+		{"G306", lensResources}, // file permissions (os.WriteFile) → resources
+		{"G307", lensResources}, // deferred close → resources
+
+		// G4xx — weak crypto → injection
+		{"G401", lensInjection}, // use of MD5
+		{"G402", lensInjection}, // TLS InsecureSkipVerify
+		{"G403", lensInjection}, // weak RSA key
+		{"G404", lensInjection}, // weak random (math/rand)
+		{"G406", lensInjection}, // use of SHA1
+
+		// G5xx — blocklisted imports → injection
+		{"G501", lensInjection}, // import of crypto/md5 blocklisted
+		{"G502", lensInjection}, // import of crypto/des
+		{"G505", lensInjection}, // import of crypto/sha1
+
+		// G6xx — memory safety → boundary
+		{"G601", lensBoundary}, // implicit memory aliasing in for-range
+		{"G602", lensBoundary}, // slice access out of bounds
+
+		// Default: unknown rule → nil-safety
+		{"UNKNOWN", lensNilSafety},
+		{"G999", lensNilSafety}, // G9xx → default → nil-safety
+	}
+	for _, tt := range tests {
+		got := gosecRuleLens(tt.ruleID)
+		if got != tt.wantLens {
+			t.Errorf("gosecRuleLens(%q) = %q, want %q", tt.ruleID, got, tt.wantLens)
+		}
+	}
+}
+
+func TestSeed_gosec_leads(t *testing.T) {
+	dir := t.TempDir()
+	// go.mod is the Go project marker for gosec detection.
+	if err := writeFile(dir, "go.mod", "module example.com/foo\ngo 1.21\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate gosec SARIF output: G401 (MD5) → injection, G601 → boundary,
+	// and a hypothetical unknown rule → nil-safety.
+	sarifOut := `{
+		"runs":[{"results":[
+			{"ruleId":"G401","message":{"text":"use of MD5"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"crypto.go"},"region":{"startLine":10}}}]},
+			{"ruleId":"G601","message":{"text":"implicit memory aliasing in for loop"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"iter.go"},"region":{"startLine":5}}}]},
+			{"ruleId":"G999","message":{"text":"unknown gosec rule"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"misc.go"},"region":{"startLine":3}}}]}
+		]}]
+	}`
+
+	// The mock is keyed by cmd; since the registry runs staticcheck first
+	// (go.mod present), we need to ensure the mock handles both staticcheck
+	// and gosec invocations. Use a no-op staticcheck response and a gosec
+	// response. sandbox.NewMock returns the same response for any cmd, so
+	// we use a single mock and check TotalPosted across all runs.
+	//
+	// Strategy: run gosecSpec directly via runAnalyzer to test gosec in
+	// isolation, exactly as the ruff integration test does.
+	mock := sandbox.NewMock(sandbox.MockResponse{
+		Result: sandbox.Result{ExitCode: 0, Stdout: sarifOut},
+	})
+
+	ctx := context.Background()
+	arun := runAnalyzer(ctx, gosecSpec, mock, dir, "test-image")
+
+	if !arun.Ran {
+		t.Fatalf("gosec did not run: %s", arun.SkippedReason)
+	}
+	if arun.SkippedReason != "" {
+		t.Fatalf("gosec skipped unexpectedly: %s", arun.SkippedReason)
+	}
+	if arun.Hits != 3 {
+		t.Errorf("Hits = %d, want 3", arun.Hits)
+	}
+
+	st, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	posted, err := postLeads(ctx, arun.results, "gosec", st)
+	if err != nil {
+		t.Fatalf("postLeads: %v", err)
+	}
+	if posted != 3 {
+		t.Errorf("posted = %d, want 3", posted)
+	}
+
+	injLeads, err := st.PendingLeads(ctx, lensInjection)
+	if err != nil {
+		t.Fatalf("PendingLeads(injection): %v", err)
+	}
+	if len(injLeads) != 1 {
+		t.Fatalf("injection leads = %d, want 1 (G401)", len(injLeads))
+	}
+	if injLeads[0].PosterLens != "analyzer:gosec" {
+		t.Errorf("PosterLens = %q, want analyzer:gosec", injLeads[0].PosterLens)
+	}
+
+	bndLeads, err := st.PendingLeads(ctx, lensBoundary)
+	if err != nil {
+		t.Fatalf("PendingLeads(boundary): %v", err)
+	}
+	if len(bndLeads) != 1 {
+		t.Fatalf("boundary leads = %d, want 1 (G601 only)", len(bndLeads))
+	}
+
+	nilLeads, err := st.PendingLeads(ctx, lensNilSafety)
+	if err != nil {
+		t.Fatalf("PendingLeads(nil-safety): %v", err)
+	}
+	if len(nilLeads) != 1 {
+		t.Fatalf("nil-safety leads = %d, want 1 (G999)", len(nilLeads))
 	}
 }
 

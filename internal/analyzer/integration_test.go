@@ -122,3 +122,110 @@ def load_data(path):
 		}
 	}
 }
+
+// gosecImage is a public gosec container image. gosec is available in the
+// securego/gosec image; it expects the full gosec command as argv (not as an
+// entrypoint-only image) so we pass the full command including "gosec".
+const gosecImage = "docker.io/securego/gosec:latest"
+
+// TestSeed_gosec_integration exercises gosec end-to-end in a container:
+// container execution → SARIF stdout → parseSARIF → postLeads → store.PendingLeads.
+//
+// The fixture contains a known G404 finding (use of math/rand, weak random).
+// We run gosecSpec directly via runAnalyzer (same approach as the ruff
+// integration test) so we can control the image and spec independently of
+// the registry.
+//
+// Requires podman or docker on PATH. Skips gracefully when none is found.
+func TestSeed_gosec_integration(t *testing.T) {
+	runtime, ok := sandbox.Detect()
+	if !ok {
+		t.Skip("no container runtime (podman/docker) found on PATH; skipping gosec integration test")
+	}
+
+	// Minimal Go module fixture with a G404 (weak random) and G101 (hardcoded
+	// credential string). Both should map to the injection lens.
+	const goMod = `module example.com/gosectest
+
+go 1.21
+`
+	const mainGo = `package main
+
+import (
+	"fmt"
+	"math/rand"
+)
+
+// apiKey is a placeholder credential stored in source.
+const apiKey = "hardcoded-secret-key-12345" // G101
+
+func main() {
+	n := rand.Intn(100) // G404: weak random
+	fmt.Println(n, apiKey)
+}
+`
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(mainGo), 0o644); err != nil {
+		t.Fatalf("write main.go: %v", err)
+	}
+
+	sb, err := sandbox.NewCLI(runtime, gosecImage)
+	if err != nil {
+		t.Fatalf("build sandbox: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	arun := runAnalyzer(ctx, gosecSpec, sb, dir, gosecImage)
+
+	t.Logf("gosec integration run: ran=%v hits=%d skipped=%q duration=%s",
+		arun.Ran, arun.Hits, arun.SkippedReason, arun.Duration)
+
+	if !arun.Ran {
+		t.Fatalf("gosec did not run (skipped: %s)", arun.SkippedReason)
+	}
+	if arun.SkippedReason != "" {
+		t.Fatalf("gosec was skipped unexpectedly: %s", arun.SkippedReason)
+	}
+	if arun.Hits == 0 {
+		t.Fatal("expected at least one gosec hit (G101 hardcoded cred or G404 weak rand), got 0")
+	}
+
+	st, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	posted, err := postLeads(ctx, arun.results, "gosec", st)
+	if err != nil {
+		t.Fatalf("postLeads: %v", err)
+	}
+	t.Logf("posted %d lead(s)", posted)
+	if posted == 0 {
+		t.Fatal("expected at least one lead to be posted")
+	}
+
+	// G101 and G404 both map to lensInjection; expect at least one injection lead.
+	leads, err := st.PendingLeads(ctx, lensInjection)
+	if err != nil {
+		t.Fatalf("PendingLeads(injection): %v", err)
+	}
+	if len(leads) == 0 {
+		t.Error("expected at least one injection lead from G101/G404, got 0")
+	}
+	for _, l := range leads {
+		t.Logf("  lead: poster=%s target=%s file=%s line=%d note=%q",
+			l.PosterLens, l.TargetLens, l.File, l.Line, l.Note)
+		if l.PosterLens != "analyzer:gosec" {
+			t.Errorf("PosterLens = %q, want 'analyzer:gosec'", l.PosterLens)
+		}
+		if l.TargetLens != lensInjection {
+			t.Errorf("TargetLens = %q, want %q", l.TargetLens, lensInjection)
+		}
+	}
+}
