@@ -290,14 +290,12 @@ func (f *Funnel) regenSummaries(
 	onResult func(regenResult),
 ) {
 	persistParent := context.WithoutCancel(ctx)
-	var (
-		mu sync.Mutex
-		wg sync.WaitGroup
-	)
-	// A cancellable child so a goroutine blocked waiting for a slot unblocks on
-	// cancellation; the caller's ctx is never cancelled by us.
-	runCtx, runCancel := context.WithCancel(ctx)
-	defer runCancel()
+	var mu sync.Mutex
+	// The fanout owns the per-package goroutine, the slotLow acquire/release, the
+	// WaitGroup, and a derived cancellable runCtx so a goroutine blocked waiting
+	// for a slot unblocks on cancellation; the caller's ctx is never cancelled by
+	// us.
+	fo := f.newFanout(ctx, slotLow)
 
 	report := func(r regenResult) {
 		if onResult == nil {
@@ -309,23 +307,21 @@ func (f *Funnel) regenSummaries(
 	}
 
 	for _, pkg := range toRegen {
-		if runCtx.Err() != nil {
+		// Pre-launch break: stop spawning once the run is cancelled or the budget
+		// is exhausted. ctx is the fanout's parent and regenSummaries never calls
+		// fo.stop, so ctx.Err() coincides with the workers' runCtx.Err().
+		if ctx.Err() != nil {
 			break
 		}
 		if budget != nil && budget.finderOverHard() {
 			break
 		}
-		// Acquire before launching so in-flight summaries never exceed the
-		// funnel-wide agent bound (the cartographer shares the pool with finders).
-		if err := f.slots.acquire(runCtx, slotLow); err != nil {
-			break // ctx cancelled while waiting for a slot
-		}
-		wg.Add(1)
-		go func(pkg string) {
-			defer wg.Done()
-			defer f.slots.release()
+		pkg := pkg
+		fo.spawn(func(runCtx context.Context) {
 			// Re-check now that we hold a slot: earlier units may have tripped the
-			// budget, or the run may have been cancelled, while we waited.
+			// budget, or the run may have been cancelled, while we waited. The slot
+			// pool's fast path can hand out a slot on an already-cancelled ctx, so
+			// this recheck is the cartographer's own guard, not the primitive's.
 			if runCtx.Err() != nil {
 				return
 			}
@@ -351,9 +347,9 @@ func (f *Funnel) regenSummaries(
 				return
 			}
 			report(regenResult{pkg: pkg, summary: summary})
-		}(pkg)
+		})
 	}
-	wg.Wait()
+	fo.wait()
 }
 
 // cartographySummarySchema constrains the package-summary completion to a
