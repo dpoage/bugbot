@@ -138,17 +138,18 @@ func TestBudgetPool_StopsInFlight(t *testing.T) {
 	}
 }
 
-// TestBudgetPool_Unlimited confirms a non-positive limit never stops a run.
+// TestBudgetPool_Unlimited confirms a nil *BudgetPool is the unlimited
+// representation: Check always passes and Remaining returns math.MaxInt64.
 func TestBudgetPool_Unlimited(t *testing.T) {
-	pool := NewBudgetPool(0)
+	var pool *BudgetPool
 	if err := pool.Check(); err != nil {
-		t.Fatalf("unlimited pool Check = %v, want nil", err)
+		t.Fatalf("nil pool Check = %v, want nil", err)
 	}
-	pool.Add(1 << 40)
+	pool.Add(1 << 40) // no-op on nil; must not panic
 	if err := pool.Check(); err != nil {
-		t.Fatalf("unlimited pool Check after huge Add = %v, want nil", err)
+		t.Fatalf("nil pool Check after Add = %v, want nil", err)
 	}
 	if rem := pool.Remaining(); rem <= 0 {
-		t.Fatalf("unlimited pool Remaining = %d, want large positive sentinel", rem)
+		t.Fatalf("nil pool Remaining = %d, want math.MaxInt64", rem)
 	}
 }

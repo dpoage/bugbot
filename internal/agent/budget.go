@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"math"
 	"sync/atomic"
 )
 
@@ -21,18 +22,23 @@ var ErrBudgetExhausted = errors.New("agent: shared budget pool exhausted")
 // charged, so real-dollar overshoot can modestly exceed the charged bound.
 //
 // The pool tracks cumulative spend (input+output tokens, the same quantity the
-// funnel ledgers) against a fixed limit. A non-positive limit means unlimited:
-// Check never blocks and Remaining reports a large sentinel.
+// funnel ledgers) against a fixed limit. A nil *BudgetPool is the canonical
+// unlimited representation: Check always returns nil and Remaining returns
+// math.MaxInt64. NewBudgetPool requires a positive limit; callers that want an
+// unlimited pool should hold a nil pointer.
 //
 // All methods are safe for concurrent use.
 type BudgetPool struct {
-	limit int64 // <= 0 means unlimited
+	limit int64
 	spent atomic.Int64
 }
 
-// NewBudgetPool returns a pool bounding cumulative spend to limit tokens. A
-// non-positive limit yields an unlimited pool (Check always passes).
+// NewBudgetPool returns a pool bounding cumulative spend to limit tokens.
+// limit must be positive; use a nil *BudgetPool to represent an unlimited pool.
 func NewBudgetPool(limit int64) *BudgetPool {
+	if limit <= 0 {
+		panic("agent.NewBudgetPool: limit must be positive; use a nil *BudgetPool for unlimited")
+	}
 	return &BudgetPool{limit: limit}
 }
 
@@ -49,10 +55,9 @@ func (p *BudgetPool) Add(tokens int64) {
 
 // Check reports whether the pool still has headroom for another model call. It
 // returns ErrBudgetExhausted once cumulative spend has reached the limit, and
-// nil otherwise (always nil for an unlimited pool). This is the pre-turn gate:
-// it does not mutate the pool, so it never breaks request prefix stability.
+// nil otherwise. A nil pool is unlimited: Check always returns nil.
 func (p *BudgetPool) Check() error {
-	if p == nil || p.limit <= 0 {
+	if p == nil {
 		return nil
 	}
 	if p.spent.Load() >= p.limit {
@@ -62,11 +67,11 @@ func (p *BudgetPool) Check() error {
 }
 
 // Remaining returns the tokens left before the pool is exhausted, clamped at
-// zero. For an unlimited pool it returns a large sentinel so callers deriving
-// per-run allowances treat it as "plenty". Safe for concurrent use.
+// zero. A nil pool is unlimited: Remaining returns math.MaxInt64 so callers
+// deriving per-run allowances treat it as "plenty". Safe for concurrent use.
 func (p *BudgetPool) Remaining() int64 {
-	if p == nil || p.limit <= 0 {
-		return 1 << 62
+	if p == nil {
+		return math.MaxInt64
 	}
 	rem := p.limit - p.spent.Load()
 	if rem < 0 {
