@@ -46,36 +46,20 @@ func newDaemonCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
-			cfg, err := config.Load(configPath)
+			cfg, st, err := cmdOpenStore(ctx)
 			if err != nil {
 				return err
 			}
-
-			st, err := store.Open(ctx, cfg.Storage.Path)
-			if err != nil {
-				return fmt.Errorf("open store: %w", err)
-			}
-			defer func() { _ = st.Close() }()
+			defer closeStore(st)
 
 			repo, err := ingest.Open(ctx, repoPath)
 			if err != nil {
 				return fmt.Errorf("open target: %w", err)
 			}
 
-			finder, err := llm.ResolveRole(ctx, &cfg, "finder", llm.Options{})
+			finder, verifier, cartographer, err := buildRoleClients(ctx, &cfg)
 			if err != nil {
-				return fmt.Errorf("build finder client: %w", err)
-			}
-			verifier, err := llm.ResolveRole(ctx, &cfg, "verifier", llm.Options{})
-			if err != nil {
-				return fmt.Errorf("build verifier client: %w", err)
-			}
-			var cartographer llm.Client
-			if cfg.Scan.Cartographer {
-				cartographer, err = llm.ResolveRole(ctx, &cfg, "cartographer", llm.Options{})
-				if err != nil {
-					return fmt.Errorf("build cartographer client: %w", err)
-				}
+				return err
 			}
 
 			sinks, err := report.SinksFromConfig(cfg)
@@ -100,7 +84,7 @@ func newDaemonCmd() *cobra.Command {
 				WithDaySpend(daySpendGetter(ctx, st))
 			progressSink := progress.NewMulti(progress.NewSlogRenderer(logger), snap)
 
-			sbOpts, sbDegraded, sbErr := buildSandboxOpts(cfg)
+			funnelOpts, sbDegraded, sbErr := buildFunnelOptions(cfg, FunnelOptionOverrides{})
 			if sbErr != nil {
 				return sbErr
 			}
@@ -109,25 +93,13 @@ func newDaemonCmd() *cobra.Command {
 			}
 
 			deps := daemon.Deps{
-				Repo:    repo,
-				Store:   st,
-				Clients: funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer},
-				FunnelOpts: funnel.Options{
-					Filter:                ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
-					TokenBudget:           cfg.Budgets.PerCycleTokens,
-					CacheReadBudgetWeight: cfg.Budgets.CacheReadWeight,
-					FinderBudgetShare:     cfg.Budgets.FinderBudgetShare,
-					FinderTokenClaim:      cfg.Budgets.FinderTokenClaim,
-					VerifierTokenClaim:    cfg.Budgets.VerifierTokenClaim,
-					FinderHistoryTokens:   cfg.Budgets.FinderHistoryTokens,
-					FinderReadLines:       cfg.Budgets.FinderReadLines,
-					FinderReadBytes:       cfg.Budgets.FinderReadBytes,
-					SandboxOpts:           sbOpts,
-					Cartographer:          cfg.Scan.Cartographer,
-				},
-				Sinks:    sinks,
-				Logger:   logger,
-				Progress: progressSink,
+				Repo:      repo,
+				Store:     st,
+				Clients:   funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer},
+				FunnelOpts: funnelOpts,
+				Sinks:     sinks,
+				Logger:    logger,
+				Progress:  progressSink,
 			}
 
 			// Reproduction is opt-in (--repro) and only wired when a container

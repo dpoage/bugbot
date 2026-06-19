@@ -10,7 +10,6 @@ import (
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -245,22 +244,11 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
-	defer func() { _ = st.Close() }()
+	defer closeStore(st)
 
-	finder, err := llm.ResolveRole(ctx, &p.cfg, "finder", llm.Options{})
+	finder, verifier, cartographer, err := buildRoleClients(ctx, &p.cfg)
 	if err != nil {
-		return nil, fmt.Errorf("build finder client: %w", err)
-	}
-	verifier, err := llm.ResolveRole(ctx, &p.cfg, "verifier", llm.Options{})
-	if err != nil {
-		return nil, fmt.Errorf("build verifier client: %w", err)
-	}
-	var cartographer llm.Client
-	if p.cfg.Scan.Cartographer {
-		cartographer, err = llm.ResolveRole(ctx, &p.cfg, "cartographer", llm.Options{})
-		if err != nil {
-			return nil, fmt.Errorf("build cartographer client: %w", err)
-		}
+		return nil, err
 	}
 
 	// PR base..head changed files drive the targeted scan; the funnel expands the
@@ -273,30 +261,17 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 	_, _ = fmt.Fprintf(p.out, "Reviewing PR #%d: %d changed file(s) (%s..%s)\n",
 		p.prNumber, len(changed), shortSHA(pr.BaseSHA), shortSHA(pr.HeadSHA))
 
-	sandboxOpts, sandboxDegraded, sandboxErr := buildSandboxOpts(p.cfg)
-	if sandboxErr != nil {
-		return nil, sandboxErr
+	opts, sbDegraded, sbErr := buildFunnelOptions(p.cfg, FunnelOptionOverrides{
+		Lenses:      p.lenses,
+		Refuters:    p.refuters,
+		MaxParallel: p.concurrency,
+		Progress:    progress.NewLogRenderer(p.out),
+	})
+	if sbErr != nil {
+		return nil, sbErr
 	}
-	if sandboxDegraded {
-		_, _ = fmt.Fprintf(p.out, "Warning: %s\n", sandboxDegradedWarning)
-	}
-
-	opts := funnel.Options{
-		Lenses:                p.lenses,
-		Filter:                ingest.ScanFilter{Include: p.cfg.Scan.Include, Exclude: p.cfg.Scan.Exclude},
-		Refuters:              p.refuters,
-		MaxParallel:           p.concurrency,
-		TokenBudget:           p.cfg.Budgets.PerCycleTokens,
-		CacheReadBudgetWeight: p.cfg.Budgets.CacheReadWeight,
-		FinderBudgetShare:     p.cfg.Budgets.FinderBudgetShare,
-		FinderTokenClaim:      p.cfg.Budgets.FinderTokenClaim,
-		VerifierTokenClaim:    p.cfg.Budgets.VerifierTokenClaim,
-		FinderHistoryTokens:   p.cfg.Budgets.FinderHistoryTokens,
-		FinderReadLines:       p.cfg.Budgets.FinderReadLines,
-		FinderReadBytes:       p.cfg.Budgets.FinderReadBytes,
-		Progress:              progress.NewLogRenderer(p.out),
-		SandboxOpts:           sandboxOpts,
-		Cartographer:          p.cfg.Scan.Cartographer,
+	if sbDegraded {
+		printSandboxDegradedWarning(p.out)
 	}
 	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer}, st, repo, opts)
 	if err != nil {

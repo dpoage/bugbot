@@ -50,7 +50,7 @@ func fetchWorldState(ctx context.Context, cfg config.Config) (worldState, bool) 
 	if err != nil {
 		return worldState{}, false
 	}
-	defer func() { _ = st.Close() }()
+	defer closeStore(st)
 
 	var ws worldState
 

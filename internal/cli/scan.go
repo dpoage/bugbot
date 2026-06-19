@@ -68,38 +68,20 @@ func newScanCmd() *cobra.Command {
 			ctx, stopSignal := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 			defer stopSignal()
 
-			cfg, err := config.Load(configPath)
+			cfg, st, err := cmdOpenStore(ctx)
 			if err != nil {
 				return err
 			}
-
-			st, err := store.Open(ctx, cfg.Storage.Path)
-			if err != nil {
-				return fmt.Errorf("open store: %w", err)
-			}
-			defer func() { _ = st.Close() }()
+			defer closeStore(st)
 
 			repo, err := ingest.Open(ctx, target)
 			if err != nil {
 				return fmt.Errorf("open target: %w", err)
 			}
 
-			finder, err := llm.ResolveRole(ctx, &cfg, "finder", llm.Options{})
+			finder, verifier, cartographer, err := buildRoleClients(ctx, &cfg)
 			if err != nil {
-				return fmt.Errorf("build finder client: %w", err)
-			}
-			verifier, err := llm.ResolveRole(ctx, &cfg, "verifier", llm.Options{})
-			if err != nil {
-				return fmt.Errorf("build verifier client: %w", err)
-			}
-			// Cartographer client is built only when the package-summary pass is
-			// enabled; otherwise it stays nil and the funnel reuses the finder.
-			var cartographer llm.Client
-			if cfg.Scan.Cartographer {
-				cartographer, err = llm.ResolveRole(ctx, &cfg, "cartographer", llm.Options{})
-				if err != nil {
-					return fmt.Errorf("build cartographer client: %w", err)
-				}
+				return err
 			}
 
 			out := cmd.OutOrStdout()
@@ -128,13 +110,9 @@ func newScanCmd() *cobra.Command {
 			}
 			defer stopPane()
 
-			sandboxOpts, sandboxDegraded, sandboxErr := buildSandboxOpts(cfg)
-			if sandboxErr != nil {
-				return sandboxErr
-			}
-			if sandboxDegraded {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Warning: %s\n", sandboxDegradedWarning)
-			}
+			// Sandbox opts and the degraded warning are produced by
+			// buildFunnelOptions further down (after the reproHook is
+			// assembled, so its overrides.Repro is set).
 
 			// Build the reproducer and wire it as an in-run hook when --repro is
 			// set. The hook closure captures the reproducer and the spend recorder
@@ -200,24 +178,18 @@ func newScanCmd() *cobra.Command {
 					}
 				}
 			}
-
-			opts := funnel.Options{
-				Lenses:                lenses,
-				Filter:                ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
-				Refuters:              refuters,
-				MaxParallel:           concurrency,
-				TokenBudget:           cfg.Budgets.PerCycleTokens,
-				CacheReadBudgetWeight: cfg.Budgets.CacheReadWeight,
-				FinderBudgetShare:     cfg.Budgets.FinderBudgetShare,
-				FinderTokenClaim:      cfg.Budgets.FinderTokenClaim,
-				VerifierTokenClaim:    cfg.Budgets.VerifierTokenClaim,
-				FinderHistoryTokens:   cfg.Budgets.FinderHistoryTokens,
-				FinderReadLines:       cfg.Budgets.FinderReadLines,
-				FinderReadBytes:       cfg.Budgets.FinderReadBytes,
-				Progress:              progressSink,
-				SandboxOpts:           sandboxOpts,
-				Repro:                 reproHook,
-				Cartographer:          cfg.Scan.Cartographer,
+			opts, sandboxDegraded, sbErr := buildFunnelOptions(cfg, FunnelOptionOverrides{
+				Lenses:      lenses,
+				Refuters:    refuters,
+				MaxParallel: concurrency,
+				Progress:    progressSink,
+				Repro:       reproHook,
+			})
+			if sbErr != nil {
+				return sbErr
+			}
+			if sandboxDegraded {
+				printSandboxDegradedWarning(cmd.OutOrStdout())
 			}
 			f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer}, st, repo, opts)
 			if err != nil {
@@ -362,11 +334,6 @@ func newScanCmd() *cobra.Command {
 
 	return cmd
 }
-
-// sandboxDegradedWarning is printed when verify.sandbox_exec is enabled but no
-// container runtime exists: the user asked for empirical refutation and must
-// be told it was dropped, mirroring the repro stage's skip notice.
-const sandboxDegradedWarning = "verify.sandbox_exec is enabled but no container runtime (podman/docker) was found on PATH; refuters will argue without sandbox execution"
 
 // buildSandboxOpts constructs a funnel.SandboxOpts from the config. When
 // verify.sandbox_exec is false (the default) it returns a zero-value

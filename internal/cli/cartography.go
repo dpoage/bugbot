@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
@@ -37,15 +36,11 @@ func newCartographyCmd() *cobra.Command {
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			cfg, err := config.Load(configPath)
+			cfg, st, err := cmdOpenStore(ctx)
 			if err != nil {
 				return err
 			}
-			st, err := store.Open(ctx, cfg.Storage.Path)
-			if err != nil {
-				return fmt.Errorf("open store: %w", err)
-			}
-			defer func() { _ = st.Close() }()
+			defer closeStore(st)
 			out := cmd.OutOrStdout()
 
 			if run {

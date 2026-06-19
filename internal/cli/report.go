@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -10,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -37,18 +35,6 @@ func newReportCmd() *cobra.Command {
 	return cmd
 }
 
-// openStore loads config and opens the state store. Callers must Close it.
-func openStore(ctx context.Context) (config.Config, *store.Store, error) {
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return config.Config{}, nil, err
-	}
-	st, err := store.Open(ctx, cfg.Storage.Path)
-	if err != nil {
-		return config.Config{}, nil, err
-	}
-	return cfg, st, nil
-}
 
 // shortID returns the first 12 hex chars of an id for compact table display.
 func shortID(id string) string {
@@ -75,11 +61,11 @@ func newReportListCmd() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			_, st, err := openStore(ctx)
+			_, st, err := cmdOpenStore(ctx)
 			if err != nil {
 				return err
 			}
-			defer func() { _ = st.Close() }()
+			defer closeStore(st)
 
 			filter := store.FindingFilter{Tier: tier}
 			switch strings.ToLower(strings.TrimSpace(status)) {
@@ -136,11 +122,11 @@ func newReportShowCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			_, st, err := openStore(ctx)
+			_, st, err := cmdOpenStore(ctx)
 			if err != nil {
 				return err
 			}
-			defer func() { _ = st.Close() }()
+			defer closeStore(st)
 
 			f, err := report.ResolveID(ctx, st, args[0])
 			if err != nil {
@@ -184,11 +170,11 @@ func newReportDismissCmd() *cobra.Command {
 			}
 
 			ctx := cmd.Context()
-			_, st, err := openStore(ctx)
+			_, st, err := cmdOpenStore(ctx)
 			if err != nil {
 				return err
 			}
-			defer func() { _ = st.Close() }()
+			defer closeStore(st)
 
 			f, err := report.ResolveID(ctx, st, args[0])
 			if err != nil {
@@ -225,11 +211,11 @@ func newReportEmitCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			cfg, st, err := openStore(ctx)
+			cfg, st, err := cmdOpenStore(ctx)
 			if err != nil {
 				return err
 			}
-			defer func() { _ = st.Close() }()
+			defer closeStore(st)
 
 			if len(sinkOverride) > 0 {
 				cfg.Report.Sinks = sinkOverride
@@ -287,11 +273,11 @@ skipped_* status. The footer shows coverage stats.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			_, st, err := openStore(ctx)
+			_, st, err := cmdOpenStore(ctx)
 			if err != nil {
 				return err
 			}
-			defer func() { _ = st.Close() }()
+			defer closeStore(st)
 
 			scanRunID := args[0]
 			// Allow a short prefix of the LATEST run id only (a convenience for "the

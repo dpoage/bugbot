@@ -53,11 +53,11 @@ Requires the gh CLI to be installed and authenticated.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 
-			cfg, st, err := openStore(ctx)
+			cfg, st, err := cmdOpenStore(ctx)
 			if err != nil {
 				return err
 			}
-			defer func() { _ = st.Close() }()
+			defer closeStore(st)
 
 			// --tier-min flag overrides config if explicitly set.
 			effective := cfg.Publish.TierMin

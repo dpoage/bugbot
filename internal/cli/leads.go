@@ -23,11 +23,11 @@ func newLeadsCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			_, st, err := openStore(ctx)
+			_, st, err := cmdOpenStore(ctx)
 			if err != nil {
 				return err
 			}
-			defer func() { _ = st.Close() }()
+			defer closeStore(st)
 
 			leads, err := st.ListLeads(ctx)
 			if err != nil {

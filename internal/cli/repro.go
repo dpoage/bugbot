@@ -7,10 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/daemon"
 	"github.com/dpoage/bugbot/internal/sandbox"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // newReproCmd implements `bugbot repro`: a one-shot backlog drain that queries
@@ -52,16 +50,11 @@ the command exits with a graceful message rather than an error.`,
 				ctx = context.Background()
 			}
 
-			cfg, err := config.Load(configPath)
+			cfg, st, err := cmdOpenStore(ctx)
 			if err != nil {
 				return err
 			}
-
-			st, err := store.Open(ctx, cfg.Storage.Path)
-			if err != nil {
-				return fmt.Errorf("open store: %w", err)
-			}
-			defer func() { _ = st.Close() }()
+			defer closeStore(st)
 
 			// --max overrides the config default; 0 means "use config".
 			batchSize := cfg.Repro.BacklogBatch
