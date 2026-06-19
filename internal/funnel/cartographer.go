@@ -358,7 +358,7 @@ func (f *Funnel) regenSummaries(
 // same guarantees every other agent has: shape validation, a one-shot repair
 // round-trip when the first completion is malformed (so a bad summary is fixed,
 // not silently dropped), and think-block stripping via stripBody.
-var cartographySummarySchema = json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","description":"<=120 word package summary"}},"required":["summary"],"additionalProperties":false}`)
+var cartographySummarySchema = json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","minLength":1,"description":"<=120 word package summary"}},"required":["summary"],"additionalProperties":false}`)
 
 // summarizePackage builds the bounded input for one package's summary and runs
 // a zero-tool agent.Runner via RunJSON to produce it. The input is the

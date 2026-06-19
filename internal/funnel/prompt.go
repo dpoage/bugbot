@@ -50,12 +50,12 @@ var candidatesSchema = json.RawMessage(`{
       "items": {
         "type": "object",
         "properties": {
-          "file": {"type": "string", "description": "Repo-relative path to the file containing the bug."},
-          "line": {"type": "integer", "description": "1-based line number of the defect."},
-          "title": {"type": "string", "description": "Short one-line title."},
-          "description": {"type": "string", "description": "What goes wrong and why."},
+          "file": {"type": "string", "minLength": 1, "description": "Repo-relative path to the file containing the bug."},
+          "line": {"type": "integer", "minimum": 1, "description": "1-based line number of the defect."},
+          "title": {"type": "string", "minLength": 1, "description": "Short one-line title."},
+          "description": {"type": "string", "minLength": 1, "description": "What goes wrong and why."},
           "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
-          "evidence": {"type": "string", "description": "The concrete code path / lines proving the bug is real and reachable."},
+          "evidence": {"type": "string", "minLength": 1, "description": "The concrete code path / lines proving the bug is real and reachable."},
           "confidence": {"type": "string", "enum": ["high", "medium", "low"]}
         },
         "required": ["file", "line", "title", "description", "severity", "evidence", "confidence"],
@@ -224,7 +224,7 @@ var refutationSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "refuted": {"type": "boolean", "description": "true if you proved the report wrong with concrete evidence; false if you could not refute it."},
-    "reasoning": {"type": "string", "description": "The concrete evidence for your verdict: what code you read and what it shows."},
+    "reasoning": {"type": "string", "minLength": 1, "description": "The concrete evidence for your verdict: what code you read and what it shows."},
     "confidence": {"type": "string", "enum": ["high", "medium", "low"]}
   },
   "required": ["refuted", "reasoning", "confidence"],

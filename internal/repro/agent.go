@@ -139,7 +139,8 @@ var planSchema = json.RawMessage(`{
     "files": {
       "type": "object",
       "description": "Repro/test files to inject, keyed by workspace-relative path. For Go, typically one _test.go file.",
-      "additionalProperties": {"type": "string"}
+      "additionalProperties": {"type": "string"},
+      "minProperties": 1
     },
     "cmd": {
       "type": "array",
@@ -149,6 +150,7 @@ var planSchema = json.RawMessage(`{
     },
     "expect": {
       "type": "string",
+      "minLength": 1,
       "description": "Short description of the expected failure (what assertion fails and why)."
     }
   },

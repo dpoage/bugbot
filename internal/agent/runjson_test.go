@@ -19,7 +19,7 @@ type finding struct {
 // "refuted" field that the historical finding struct omits. The native
 // schema tests use this struct so the schema's required=["file","message",
 // "refuted"] check actually exercises the missing-required-field branch
-// of validateRootShape.
+// of validateSchema.
 type findingWithRefuted struct {
 	File    string `json:"file"`
 	Message string `json:"message"`
@@ -564,7 +564,7 @@ func TestRunJSON_RunPathNoExtraCall(t *testing.T) {
 
 // findWithCandidatesSchema is the JSON schema the bugbot finder/verifier
 // historically uses for the "find a bug" answer shape. It exercises the
-// "object root + required top-level fields" branch of validateRootShape.
+// "object root + required top-level fields" branch of validateSchema.
 const findWithCandidatesSchema = `{
   "type": "object",
   "required": ["file", "message", "refuted"],
@@ -642,7 +642,7 @@ func TestRunJSON_CapOnCarriesSchema(t *testing.T) {
 // grammar-constrained decoding on the retry and the answer is shape-correct
 // on the wire. This is the "VALIDATION-TRIGGERED REPAIR" acceptance case.
 func TestRunJSON_ValidationTriggersRepair(t *testing.T) {
-	// First answer is a bare JSON array — parses, but validateRootShape
+	// First answer is a bare JSON array — parses, but validateSchema
 	// detects the root-type mismatch against the schema's "object" type.
 	// Repair returns a correct-shape object.
 	fc := newFakeClient(
@@ -686,7 +686,7 @@ func TestRunJSON_ValidationTriggersRepair(t *testing.T) {
 
 // TestRunJSON_ValidationTriggersRepair_MissingRequired is the same
 // shape-violation routing but exercises the "missing required field" branch
-// of validateRootShape (object root, type matches, but a required key is
+// of validateSchema (object root, type matches, but a required key is
 // absent). The repair should still fire and ultimately succeed.
 func TestRunJSON_ValidationTriggersRepair_MissingRequired(t *testing.T) {
 	// First answer is an object missing the schema-required "refuted" key.
@@ -739,13 +739,62 @@ func TestRunJSON_RepairStillWrongShape(t *testing.T) {
 	}
 }
 
-// TestValidateRootShape pins down the helper's contract on its own, separate
-// from the RunJSON routing above. It covers the four cases the helper is
-// documented to handle: nil/empty schema (no-op), matching type with all
-// required fields (pass), type mismatch (fail), missing required field
-// (fail).
-func TestValidateRootShape(t *testing.T) {
-	schema := json.RawMessage(findWithCandidatesSchema)
+// deepCandidatesSchema mirrors the production finder schema's nested shape: an
+// object with a "candidates" array of objects carrying an enum severity, an
+// integer line with a minimum, a min-length evidence string, and
+// additionalProperties:false. It exercises every branch validateSchema adds
+// over the old shallow root check.
+const deepCandidatesSchema = `{
+  "type":"object",
+  "properties":{
+    "candidates":{
+      "type":"array",
+      "items":{
+        "type":"object",
+        "properties":{
+          "file":{"type":"string","minLength":1},
+          "line":{"type":"integer","minimum":1},
+          "severity":{"type":"string","enum":["critical","high","medium","low"]},
+          "evidence":{"type":"string","minLength":1}
+        },
+        "required":["file","line","severity","evidence"],
+        "additionalProperties":false
+      }
+    }
+  },
+  "required":["candidates"],
+  "additionalProperties":false
+}`
+
+// filesMapSchema mirrors the repro/patch "files" contract: an object whose
+// values are constrained by an additionalProperties subschema (string) and
+// which must hold at least one entry (minProperties).
+const filesMapSchema = `{
+  "type":"object",
+  "properties":{
+    "files":{"type":"object","additionalProperties":{"type":"string"},"minProperties":1}
+  },
+  "required":["files"],
+  "additionalProperties":false
+}`
+
+// oneCandidate wraps a single candidate body in the {"candidates":[...]} root
+// so test cases can focus on the one field under test.
+func oneCandidate(fields string) string {
+	return `{"candidates":[` + fields + `]}`
+}
+
+// validCandidate is one well-shaped candidate object for deepCandidatesSchema.
+const validCandidate = `{"file":"a.go","line":7,"severity":"high","evidence":"x"}`
+
+// TestValidateSchema pins down the deep validator's contract: the historical
+// root-level cases (preserved verbatim error phrasing) plus the nested
+// type/required/enum/minimum/minLength/additionalProperties/minItems/
+// minProperties branches that the old shallow check ignored.
+func TestValidateSchema(t *testing.T) {
+	deep := json.RawMessage(deepCandidatesSchema)
+	files := json.RawMessage(filesMapSchema)
+	root := json.RawMessage(findWithCandidatesSchema)
 	cases := []struct {
 		name    string
 		schema  json.RawMessage
@@ -753,58 +802,103 @@ func TestValidateRootShape(t *testing.T) {
 		wantErr bool
 		wantMsg string
 	}{
-		{
-			name:    "nil schema is a no-op",
-			schema:  nil,
-			body:    `not even json`,
-			wantErr: false,
-		},
-		{
-			name:    "matching object with all required fields passes",
-			schema:  schema,
-			body:    validFindingJSON,
-			wantErr: false,
-		},
-		{
-			name:    "type mismatch: bare array when object required",
-			schema:  schema,
-			body:    `[{"file":"a.go"}]`,
-			wantErr: true,
-			wantMsg: "root JSON type",
-		},
-		{
-			name:    "object missing required field fails",
-			schema:  schema,
-			body:    `{"file":"a.go","message":"bug"}`,
-			wantErr: true,
-			wantMsg: `missing required field "refuted"`,
-		},
-		{
-			name:    "schema requires nothing: any object passes",
-			schema:  json.RawMessage(`{"type":"object"}`),
-			body:    `{}`,
-			wantErr: false,
-		},
-		{
-			name:    "schema with no type: any value passes",
-			schema:  json.RawMessage(`{}`),
-			body:    `42`,
-			wantErr: false,
-		},
+		// --- preserved root-level behavior ---
+		{name: "nil schema is a no-op", schema: nil, body: `not even json`},
+		{name: "matching object with all required passes", schema: root, body: validFindingJSON},
+		{name: "root type mismatch: bare array", schema: root, body: `[{"file":"a.go"}]`,
+			wantErr: true, wantMsg: "root JSON type"},
+		{name: "root missing required field", schema: root, body: `{"file":"a.go","message":"bug"}`,
+			wantErr: true, wantMsg: `root object missing required field "refuted"`},
+		{name: "schema requires nothing: any object passes", schema: json.RawMessage(`{"type":"object"}`), body: `{}`},
+		{name: "schema with no type: any value passes", schema: json.RawMessage(`{}`), body: `42`},
+		// --- deep: nested object/array recursion ---
+		{name: "valid nested candidate passes", schema: deep, body: oneCandidate(validCandidate)},
+		{name: "empty candidates array passes (found nothing)", schema: deep, body: `{"candidates":[]}`},
+		{name: "nested missing required field", schema: deep,
+			body:    oneCandidate(`{"file":"a.go","line":7,"severity":"high"}`),
+			wantErr: true, wantMsg: `candidates[0]: missing required field "evidence"`},
+		{name: "nested bad enum", schema: deep,
+			body:    oneCandidate(`{"file":"a.go","line":7,"severity":"blocker","evidence":"x"}`),
+			wantErr: true, wantMsg: `candidates[0].severity: value "blocker" is not one of the allowed values`},
+		{name: "nested wrong type (string where integer)", schema: deep,
+			body:    oneCandidate(`{"file":"a.go","line":"7","severity":"high","evidence":"x"}`),
+			wantErr: true, wantMsg: `candidates[0].line: JSON type "string" does not match schema type "integer"`},
+		{name: "integer keyword rejects a fractional number", schema: deep,
+			body:    oneCandidate(`{"file":"a.go","line":7.5,"severity":"high","evidence":"x"}`),
+			wantErr: true, wantMsg: `candidates[0].line: JSON type "number" does not match schema type "integer"`},
+		{name: "minimum violation", schema: deep,
+			body:    oneCandidate(`{"file":"a.go","line":0,"severity":"high","evidence":"x"}`),
+			wantErr: true, wantMsg: `candidates[0].line: value 0 is below the minimum 1`},
+		{name: "minLength violation on required string", schema: deep,
+			body:    oneCandidate(`{"file":"a.go","line":7,"severity":"high","evidence":""}`),
+			wantErr: true, wantMsg: `candidates[0].evidence: string length 0 is below the minimum 1`},
+		{name: "additionalProperties:false rejects an unknown key", schema: deep,
+			body:    oneCandidate(`{"file":"a.go","line":7,"severity":"high","evidence":"x","cwe":"CWE-20"}`),
+			wantErr: true, wantMsg: `candidates[0]: unexpected property "cwe"`},
+		// --- deep: free-form map (additionalProperties subschema + minProperties) ---
+		{name: "files map with string values passes", schema: files, body: `{"files":{"a_test.go":"package a"}}`},
+		{name: "files map empty violates minProperties", schema: files, body: `{"files":{}}`,
+			wantErr: true, wantMsg: `files: object has 0 properties, fewer than the required minimum 1`},
+		{name: "files map non-string value rejected by additionalProperties schema", schema: files,
+			body:    `{"files":{"a_test.go":123}}`,
+			wantErr: true, wantMsg: `files.a_test.go: JSON type "number" does not match schema type "string"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateRootShape(tc.schema, []byte(tc.body))
+			err := validateSchema(tc.schema, []byte(tc.body))
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("validateRootShape(%q, %q) = nil, want error containing %q", tc.schema, tc.body, tc.wantMsg)
+					t.Fatalf("validateSchema(%s) = nil, want error containing %q", tc.body, tc.wantMsg)
 				}
 				if tc.wantMsg != "" && !strings.Contains(err.Error(), tc.wantMsg) {
 					t.Errorf("error = %q, want substring %q", err.Error(), tc.wantMsg)
 				}
 			} else if err != nil {
-				t.Errorf("validateRootShape(%q, %q) = %v, want nil", tc.schema, tc.body, err)
+				t.Errorf("validateSchema(%s) = %v, want nil", tc.body, err)
 			}
 		})
+	}
+}
+
+// TestRunJSON_DeepValidationTriggersRepair is the headline regression for the
+// deep validator: an answer that is valid JSON, the right ROOT shape, AND
+// unmarshals cleanly into the typed struct — but carries a CONTRACT violation
+// the old shallow root check could never see (an out-of-enum severity). The
+// strengthened validateSchema rejects it and routes the call through the single
+// repair round-trip, which returns a schema-valid answer.
+func TestRunJSON_DeepValidationTriggersRepair(t *testing.T) {
+	const enumSchema = `{
+  "type":"object",
+  "required":["severity"],
+  "properties":{"severity":{"type":"string","enum":["high","low"]}},
+  "additionalProperties":false
+}`
+	type sev struct {
+		Severity string `json:"severity"`
+	}
+	// First answer: a wrong-enum value. It parses, has the required root key,
+	// and unmarshals into sev{Severity:"blocker"} without error — exactly the
+	// silent corruption the shallow check let through. Repair returns a valid
+	// enum value.
+	fc := newFakeClient(
+		textResp(`{"severity":"blocker"}`, 5, 5),
+		textResp(`{"severity":"high"}`, 5, 5),
+	)
+	fc.caps = llm.Capabilities{StructuredOutput: true}
+	r := NewRunner(fc, nil, "sys")
+
+	var got sev
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(enumSchema), &got); err != nil {
+		t.Fatalf("RunJSON should succeed after deep-validation repair: %v", err)
+	}
+	if got.Severity != "high" {
+		t.Errorf("parsed severity = %q, want %q (the repaired value)", got.Severity, "high")
+	}
+	if len(fc.requests) != 2 {
+		t.Fatalf("client calls = %d, want 2 (main + repair)", len(fc.requests))
+	}
+	// The repair prompt must name the enum violation so the model can fix it.
+	if !strings.Contains(fc.requests[1].Messages[0].Content, "allowed values") {
+		t.Errorf("repair prompt missing the enum-violation detail:\n%s", fc.requests[1].Messages[0].Content)
 	}
 }

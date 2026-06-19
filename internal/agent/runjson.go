@@ -4,16 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/dpoage/bugbot/internal/llm"
 )
 
 // RunJSON runs the tool loop for task, instructing the model to return its final
 // answer as a single JSON value matching schema, then unmarshals that answer
-// into out (a pointer). If the model's output fails to parse OR fails the
-// shallow root-level shape check, RunJSON makes one repair round-trip — sending
-// the error back and asking for valid JSON only — before failing.
+// into out (a pointer). If the model's output fails to parse OR fails deep
+// schema validation (see [validateSchema]), RunJSON makes one repair
+// round-trip — sending the precise error back and asking for valid JSON only —
+// before failing.
 //
 // schema is a JSON Schema (raw JSON) describing the expected shape. It is
 // threaded natively as llm.Request.ResponseSchema (capability-gated: when the
@@ -43,18 +48,19 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 		return outcome, err
 	}
 
-	// Strip + shape check first (cheap, schema-aware) — this is the check that
-	// catches wrong-shape-but-valid-JSON (a bare array when the schema requires
-	// an object, a missing required field, etc.). Only after the body passes
-	// the root-shape check do we attempt the typed unmarshal: a typed unmarshal
-	// of an array into a struct fails with "cannot unmarshal array into Go
-	// value", which is misleading to a caller that wants to know the body was
-	// the wrong shape. The shape check's error message is the actionable one.
+	// Strip + deep schema validation first (cheap, schema-aware): this catches
+	// valid-JSON-but-contract-violating output that a typed unmarshal silently
+	// tolerates — a bad enum (severity "blocker"), a candidate missing its
+	// nested "evidence", an empty required string, an empty repro "files" map.
+	// Only after the body satisfies the full schema do we attempt the typed
+	// unmarshal: an early unmarshal of a wrong-shaped body yields a misleading
+	// "cannot unmarshal …" error, where the schema violation is the actionable
+	// one and is what the repair round-trip echoes back to the model.
 	var perr error
 	body, berr := stripBody(outcome.FinalText)
 	if berr != nil {
 		perr = berr
-	} else if v := validateRootShape(schema, []byte(body)); v != nil {
+	} else if v := validateSchema(schema, []byte(body)); v != nil {
 		perr = v
 	} else if p := json.Unmarshal([]byte(body), out); p != nil {
 		perr = p
@@ -94,7 +100,7 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 		return repairOutcome, fmt.Errorf("agent: model output did not parse as JSON after one repair%s: %w",
 			truncationNote(repairOutcome), berr2)
 	}
-	if verr := validateRootShape(schema, []byte(repairBody)); verr != nil {
+	if verr := validateSchema(schema, []byte(repairBody)); verr != nil {
 		return repairOutcome, fmt.Errorf("agent: model output did not parse as JSON after one repair%s: %w",
 			truncationNote(repairOutcome), verr)
 	}
@@ -148,7 +154,7 @@ func jsonInstruction(schema json.RawMessage) string {
 
 // stripBody returns the cleaned JSON body the model produced (think blocks and
 // markdown fences removed), exactly the bytes the typed unmarshal and
-// [validateRootShape] both inspect. An all-whitespace or empty body is
+// [validateSchema] both inspect. An all-whitespace or empty body is
 // reported as an explicit "empty model output" error so the caller can treat
 // it as a parse failure and surface a clear message.
 func stripBody(text string) (string, error) {
@@ -159,28 +165,38 @@ func stripBody(text string) (string, error) {
 	return body, nil
 }
 
-// validateRootShape checks the SHALLOW root-level shape of body against
-// schema. It is deliberately lenient — it does NOT recurse into items or
-// properties and ignores additionalProperties. The two checks it performs are:
+// validateSchema deeply validates body against schema. Unlike a shallow
+// root-only check, it walks the schema and the parsed instance together and
+// enforces the JSON-Schema subset the bugbot phase schemas actually use:
 //
-//  1. The root JSON type matches the schema's top-level "type" when set
-//     (e.g. body is an object when schema requires an object, not a bare
-//     array).
-//  2. When the body is an object, every name in the schema's top-level
-//     "required" array is present as a key.
+//   - type — object/array/string/integer/number/boolean/null (integer accepts
+//     only integral numbers; number accepts any).
+//   - required — at EVERY object level, not just the root (a candidate missing
+//     its "evidence", a plan missing "cmd").
+//   - properties — recursively.
+//   - additionalProperties — false rejects unknown keys; a subschema validates
+//     the values of free-form maps (the repro/patch "files" object keyed by
+//     path with string values).
+//   - items — recursively, for every array element.
+//   - enum — exact membership (a severity of "blocker", a confidence of
+//     "Medium").
+//   - minItems / minProperties / minLength / maxLength / minimum / maximum.
 //
-// Empty/nil schema is a no-op. The function returns a descriptive error on
-// mismatch (catching a bare-array-where-an-object-was-required or a missing
-// required field) so the RunJSON caller can route it through the repair path
-// — the whole point of this check is to catch wrong-shape-but-valid-JSON that
-// a typed unmarshal of `out` cannot detect (the typed unmarshal succeeds, the
-// caller gets a struct with default values, and downstream code silently
-// misbehaves).
-func validateRootShape(schema json.RawMessage, body []byte) error {
+// Errors are path-qualified (e.g. candidates[0].severity) so the RunJSON
+// repair round-trip can tell the model exactly what to fix. This is the
+// harness-side guarantee that every agent->phase JSON boundary is bounded by
+// its declared schema even when the provider's StructuredOutput capability is
+// off and no grammar-constrained decoding happened on the wire (the dominant
+// weak-model path). An empty/nil schema is a no-op.
+//
+// The validator is a deliberately closed subset: it does NOT implement $ref,
+// allOf/anyOf/oneOf, pattern, format, or multipleOf, because no bugbot phase
+// schema uses them. Unknown keywords are ignored, not rejected.
+func validateSchema(schema json.RawMessage, body []byte) error {
 	if len(schema) == 0 {
 		return nil
 	}
-	var root map[string]any
+	var root any
 	if err := json.Unmarshal(schema, &root); err != nil {
 		return fmt.Errorf("schema is not valid JSON: %w", err)
 	}
@@ -188,31 +204,301 @@ func validateRootShape(schema json.RawMessage, body []byte) error {
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return fmt.Errorf("body is not valid JSON: %w", err)
 	}
-	actualType := jsonTypeOf(parsed)
-	if wantType, _ := root["type"].(string); wantType != "" && wantType != actualType {
-		return fmt.Errorf("root JSON type %q does not match schema type %q", actualType, wantType)
-	}
-	// Required-keys check: only meaningful when the body is an object. If the
-	// schema requires fields but the body is not an object, the type check
-	// above already caught it.
-	req, _ := root["required"].([]any)
-	if len(req) == 0 {
+	return validateNode("", root, parsed)
+}
+
+// validateNode validates val against a single schema node, which is either a
+// map (a normal schema object) or a bool (a JSON-Schema boolean schema: true
+// accepts anything, false rejects everything). Any other node shape is treated
+// as "no constraint" and accepted.
+func validateNode(path string, schema, val any) error {
+	switch s := schema.(type) {
+	case bool:
+		if !s {
+			return fmt.Errorf("%s: value is not permitted (schema is false)", loc(path))
+		}
+		return nil
+	case map[string]any:
+		if err := checkType(path, s, val); err != nil {
+			return err
+		}
+		if err := checkEnum(path, s, val); err != nil {
+			return err
+		}
+		// Structural keywords apply only to the matching instance type
+		// (standard JSON-Schema semantics): a "minItems" on a string instance,
+		// say, is simply inapplicable. The type mismatch (if any) was already
+		// reported by checkType above.
+		switch v := val.(type) {
+		case map[string]any:
+			return validateObject(path, s, v)
+		case []any:
+			return validateArray(path, s, v)
+		case string:
+			return validateString(path, s, v)
+		case float64:
+			return validateNumber(path, s, v)
+		}
+		return nil
+	default:
 		return nil
 	}
-	m, ok := parsed.(map[string]any)
+}
+
+// checkType enforces the schema's "type" keyword, which may be a single type
+// name or an array of acceptable names.
+func checkType(path string, schema map[string]any, val any) error {
+	t, ok := schema["type"]
 	if !ok {
 		return nil
 	}
-	for _, name := range req {
-		key, _ := name.(string)
-		if key == "" {
+	switch want := t.(type) {
+	case string:
+		if !matchesType(want, val) {
+			return typeErr(path, jsonTypeOf(val), want)
+		}
+	case []any:
+		for _, w := range want {
+			if ws, ok := w.(string); ok && matchesType(ws, val) {
+				return nil
+			}
+		}
+		return typeErr(path, jsonTypeOf(val), typeListString(want))
+	}
+	return nil
+}
+
+// matchesType reports whether val satisfies the JSON-Schema type name want.
+// Numbers always decode to float64 through encoding/json, so "integer" is an
+// integral float64 and "number" is any float64. Unknown type names accept.
+func matchesType(want string, val any) bool {
+	switch want {
+	case "object":
+		_, ok := val.(map[string]any)
+		return ok
+	case "array":
+		_, ok := val.([]any)
+		return ok
+	case "string":
+		_, ok := val.(string)
+		return ok
+	case "boolean":
+		_, ok := val.(bool)
+		return ok
+	case "number":
+		_, ok := val.(float64)
+		return ok
+	case "integer":
+		f, ok := val.(float64)
+		return ok && !math.IsInf(f, 0) && !math.IsNaN(f) && f == math.Trunc(f)
+	case "null":
+		return val == nil
+	default:
+		return true
+	}
+}
+
+// checkEnum enforces "enum" membership. Values are compared by canonical-JSON
+// equality, which is exact for the scalar enums the phase schemas use.
+func checkEnum(path string, schema map[string]any, val any) error {
+	raw, ok := schema["enum"]
+	if !ok {
+		return nil
+	}
+	list, ok := raw.([]any)
+	if !ok || len(list) == 0 {
+		return nil
+	}
+	target := jsonString(val)
+	for _, e := range list {
+		if jsonString(e) == target {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s: value %s is not one of the allowed values %s",
+		loc(path), target, jsonString(list))
+}
+
+// validateObject enforces required, properties, additionalProperties, and
+// minProperties on an object instance. required is checked first (the most
+// actionable failure), then per-property recursion proceeds over SORTED keys so
+// the first reported violation is deterministic across runs.
+func validateObject(path string, schema, obj map[string]any) error {
+	if req, ok := schema["required"].([]any); ok {
+		for _, r := range req {
+			key, _ := r.(string)
+			if key == "" {
+				continue
+			}
+			if _, present := obj[key]; !present {
+				return requiredErr(path, key)
+			}
+		}
+	}
+	if n, ok := numKeyword(schema, "minProperties"); ok && len(obj) < int(n) {
+		return fmt.Errorf("%s: object has %d properties, fewer than the required minimum %d",
+			loc(path), len(obj), int(n))
+	}
+	props, _ := schema["properties"].(map[string]any)
+	addl, hasAddl := schema["additionalProperties"]
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := obj[k]
+		if sub, ok := props[k]; ok {
+			if err := validateNode(childPath(path, k), sub, v); err != nil {
+				return err
+			}
 			continue
 		}
-		if _, present := m[key]; !present {
-			return fmt.Errorf("root object missing required field %q", key)
+		if !hasAddl {
+			continue // additionalProperties defaults to true (permit)
+		}
+		switch a := addl.(type) {
+		case bool:
+			if !a {
+				return fmt.Errorf("%s: unexpected property %q is not allowed by the schema",
+					loc(path), k)
+			}
+		case map[string]any:
+			if err := validateNode(childPath(path, k), a, v); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// validateArray enforces minItems/maxItems and recurses into each element
+// against the "items" subschema.
+func validateArray(path string, schema map[string]any, arr []any) error {
+	if n, ok := numKeyword(schema, "minItems"); ok && len(arr) < int(n) {
+		return fmt.Errorf("%s: array has %d items, fewer than the required minimum %d",
+			loc(path), len(arr), int(n))
+	}
+	if n, ok := numKeyword(schema, "maxItems"); ok && len(arr) > int(n) {
+		return fmt.Errorf("%s: array has %d items, more than the allowed maximum %d",
+			loc(path), len(arr), int(n))
+	}
+	if items, ok := schema["items"]; ok {
+		for i, el := range arr {
+			if err := validateNode(indexPath(path, i), items, el); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateString enforces minLength/maxLength, counted in Unicode code points
+// (JSON-Schema semantics), not bytes.
+func validateString(path string, schema map[string]any, s string) error {
+	if n, ok := numKeyword(schema, "minLength"); ok {
+		if l := utf8.RuneCountInString(s); l < int(n) {
+			return fmt.Errorf("%s: string length %d is below the minimum %d", loc(path), l, int(n))
+		}
+	}
+	if n, ok := numKeyword(schema, "maxLength"); ok {
+		if l := utf8.RuneCountInString(s); l > int(n) {
+			return fmt.Errorf("%s: string length %d exceeds the maximum %d", loc(path), l, int(n))
+		}
+	}
+	return nil
+}
+
+// validateNumber enforces minimum/maximum on a numeric instance.
+func validateNumber(path string, schema map[string]any, f float64) error {
+	if n, ok := numKeyword(schema, "minimum"); ok && f < n {
+		return fmt.Errorf("%s: value %s is below the minimum %s",
+			loc(path), trimNum(f), trimNum(n))
+	}
+	if n, ok := numKeyword(schema, "maximum"); ok && f > n {
+		return fmt.Errorf("%s: value %s exceeds the maximum %s",
+			loc(path), trimNum(f), trimNum(n))
+	}
+	return nil
+}
+
+// typeErr formats a type-mismatch error, preserving the historical root-level
+// phrasing ("root JSON type ...") so callers and tests that match on it stay
+// stable while nested mismatches gain a path prefix.
+func typeErr(path, actual, want string) error {
+	if path == "" {
+		return fmt.Errorf("root JSON type %q does not match schema type %q", actual, want)
+	}
+	return fmt.Errorf("%s: JSON type %q does not match schema type %q", path, actual, want)
+}
+
+// requiredErr formats a missing-required-field error, preserving the
+// historical root-level phrasing ("root object missing required field ...").
+func requiredErr(path, key string) error {
+	if path == "" {
+		return fmt.Errorf("root object missing required field %q", key)
+	}
+	return fmt.Errorf("%s: missing required field %q", path, key)
+}
+
+// loc renders a path for error messages, using "root" for the empty path.
+func loc(path string) string {
+	if path == "" {
+		return "root"
+	}
+	return path
+}
+
+// childPath extends path with an object property name.
+func childPath(path, key string) string {
+	if path == "" {
+		return key
+	}
+	return path + "." + key
+}
+
+// indexPath extends path with an array index.
+func indexPath(path string, i int) string {
+	return fmt.Sprintf("%s[%d]", loc(path), i)
+}
+
+// numKeyword reads a numeric schema keyword (minItems, minLength, minimum, …).
+// JSON numbers decode to float64, so the keyword is a float64 when present.
+func numKeyword(schema map[string]any, name string) (float64, bool) {
+	v, ok := schema[name]
+	if !ok {
+		return 0, false
+	}
+	f, ok := v.(float64)
+	return f, ok
+}
+
+// typeListString renders a "type" array (e.g. ["string","null"]) as
+// "string|null" for an error message.
+func typeListString(types []any) string {
+	parts := make([]string, 0, len(types))
+	for _, t := range types {
+		if s, ok := t.(string); ok {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, "|")
+}
+
+// jsonString renders v as canonical JSON for an error message (and for enum
+// equality). Falls back to %v on the (unexpected) marshal error.
+func jsonString(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(b)
+}
+
+// trimNum renders a float64 without a trailing ".0" for whole numbers, so a
+// "minimum: 1" violation reads "value 0 is below the minimum 1", not "0.0".
+func trimNum(f float64) string {
+	return strconv.FormatFloat(f, 'g', -1, 64)
 }
 
 // jsonTypeOf returns the JSON Schema name for the JSON value v: one of

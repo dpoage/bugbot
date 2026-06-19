@@ -124,6 +124,7 @@ var patchSchema = json.RawMessage(`{
     },
     "summary": {
       "type": "string",
+      "minLength": 1,
       "description": "Short human-readable description of what was changed and why."
     }
   },
