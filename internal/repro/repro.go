@@ -164,6 +164,11 @@ type Reproducer struct {
 	// capabilities is the probed CapabilitySet threaded from Options.Capabilities,
 	// passed to systemPrompt to constrain available invocation modes.
 	capabilities sandbox.CapabilitySet
+	// nav is the shared code-navigation tool bundle (find_definition,
+	// find_references, find_implementations, read_symbol, find_usages, outline)
+	// rooted at repoDir. Constructed eagerly in New; no language-server process
+	// is started until the first query. Closed by Close.
+	nav *agent.CodeNav
 }
 
 // New constructs a Reproducer. client is the reproducer-role LLM client, sb is
@@ -198,6 +203,10 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 	if len(resolved.SetupCmds) > 0 {
 		deps.SetupCmds = append(resolved.SetupCmds, deps.SetupCmds...)
 	}
+	nav, err := agent.NewCodeNav(repoDir)
+	if err != nil {
+		return nil, fmt.Errorf("repro: init code-nav: %w", err)
+	}
 	return &Reproducer{
 		client:       client,
 		sb:           sb,
@@ -206,6 +215,7 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 		deps:         deps,
 		buildSystems: ingest.DetectBuildSystems(repoDir),
 		capabilities: resolved.Capabilities,
+		nav:          nav,
 	}, nil
 }
 
@@ -319,12 +329,23 @@ func (r *Reproducer) newRunner(lang ingest.Language, systems []ingest.BuildSyste
 	if err != nil {
 		return nil, err
 	}
+	tools = append(tools, r.nav.Tools()...)
 	var opts []agent.Option
 	opts = append(opts, agent.WithLimits(r.opts.AgentLimits))
 	if r.opts.TranscriptDir != "" {
 		opts = append(opts, agent.WithTranscriptDir(r.opts.TranscriptDir))
 	}
 	return agent.NewRunner(r.client, tools, systemPrompt(lang, systems, r.capabilities), opts...), nil
+}
+
+// Close shuts down any language servers the code-navigation tools spawned.
+// Safe to call multiple times and on a nil receiver (so deferred Close calls
+// on a partially-initialised Reproducer never panic).
+func (r *Reproducer) Close() error {
+	if r == nil || r.nav == nil {
+		return nil
+	}
+	return r.nav.Close()
 }
 
 // readOnlyTools builds the read-only investigation tool set rooted at dir.

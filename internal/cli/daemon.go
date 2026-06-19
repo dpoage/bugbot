@@ -111,6 +111,7 @@ func newDaemonCmd() *cobra.Command {
 				if rerr != nil {
 					return rerr
 				}
+				defer reproducer.repro.Close() //nolint:errcheck
 				deps.ReproClient = reproducer.client
 				deps.Reproducer = reproducer.repro
 				deps.ReproTagger = reproducer.spend

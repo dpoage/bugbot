@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -739,5 +740,84 @@ func TestNewValidation(t *testing.T) {
 	}
 	if _, err := New(client, sb, "", Options{}); err == nil {
 		t.Error("empty repoDir should error")
+	}
+}
+
+// --- code-nav tool wiring (bugbot-yc8) -------------------------------------
+
+// TestNewRunner_IncludesCodeNavTools asserts that the tool list passed to the
+// runner includes both the read-only baseline tools and the code-nav tools
+// from agent.CodeNav. Because Runner does not expose its tool set, we verify
+// the composition at the source: readOnlyTools gives the baseline 3, and
+// r.nav.Tools() gives the code-nav tools, and newRunner appends them.
+func TestNewRunner_IncludesCodeNavTools(t *testing.T) {
+	repoDir := newRepoDir(t)
+	sb := sandbox.NewMock(sandbox.MockResponse{})
+	r, err := New(newScriptedClient(), sb, repoDir, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer r.Close()
+
+	// Baseline read-only tools.
+	baseline, err := readOnlyTools(repoDir)
+	if err != nil {
+		t.Fatalf("readOnlyTools: %v", err)
+	}
+	if len(baseline) != 3 {
+		t.Errorf("readOnlyTools: want 3 tools, got %d", len(baseline))
+	}
+	baselineNames := make(map[string]bool)
+	for _, tool := range baseline {
+		baselineNames[tool.Def().Name] = true
+	}
+	for _, want := range []string{"read_file", "list_dir", "grep"} {
+		if !baselineNames[want] {
+			t.Errorf("readOnlyTools missing %q", want)
+		}
+	}
+
+	// Code-nav tools from r.nav must include the expected nav tool names.
+	navTools := r.nav.Tools()
+	if len(navTools) == 0 {
+		t.Fatal("r.nav.Tools() returned no tools")
+	}
+	navNames := make(map[string]bool)
+	for _, tool := range navTools {
+		navNames[tool.Def().Name] = true
+	}
+	for _, want := range []string{"find_definition", "find_references", "find_implementations", "read_symbol"} {
+		if !navNames[want] {
+			t.Errorf("nav tools missing %q", want)
+		}
+	}
+
+	// newRunner must not fail — it will compose baseline + nav tools.
+	if _, err := r.newRunner(ingest.LangGo, nil); err != nil {
+		t.Fatalf("newRunner: %v", err)
+	}
+}
+
+// TestReproducerClose_Idempotent verifies that Close is safe to call multiple
+// times and on a nil receiver.
+func TestReproducerClose_Idempotent(t *testing.T) {
+	repoDir := newRepoDir(t)
+	sb := sandbox.NewMock(sandbox.MockResponse{})
+	r, err := New(newScriptedClient(), sb, repoDir, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := r.Close(); err != nil {
+		t.Errorf("first Close: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Errorf("second Close (idempotent): %v", err)
+	}
+
+	// nil receiver must not panic.
+	var nilR *Reproducer
+	if err := nilR.Close(); err != nil {
+		t.Errorf("nil Close: %v", err)
 	}
 }

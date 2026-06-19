@@ -91,6 +91,7 @@ the command exits with a graceful message rather than an error.`,
 			if err != nil {
 				return err
 			}
+			defer rd.repro.Close() //nolint:errcheck
 
 			out := cmd.OutOrStdout()
 			_, _ = fmt.Fprintf(out,
