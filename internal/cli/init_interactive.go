@@ -49,16 +49,16 @@ func runInteractive(
 
 	prompt := func(question, defaultVal string) (string, error) {
 		if defaultVal != "" {
-			fmt.Fprintf(out, "%s [%s]: ", question, defaultVal)
+			_, _ = fmt.Fprintf(out, "%s [%s]: ", question, defaultVal)
 		} else {
-			fmt.Fprintf(out, "%s: ", question)
+			_, _ = fmt.Fprintf(out, "%s: ", question)
 		}
 		if !sc.Scan() {
 			if err := sc.Err(); err != nil {
 				return "", err
 			}
 			// EOF with no input: use default.
-			fmt.Fprintln(out)
+			_, _ = fmt.Fprintln(out)
 			return defaultVal, nil
 		}
 		line := strings.TrimSpace(sc.Text())
@@ -86,14 +86,12 @@ func runInteractive(
 	// -----------------------------------------------------------------------
 	// Step 1: Provider
 	// -----------------------------------------------------------------------
-	fmt.Fprintln(out, "\n=== Step 1: LLM Provider ===")
-	fmt.Fprintln(out, "Bugbot supports anthropic (Claude) and openai (GPT) providers.")
+	_, _ = fmt.Fprintln(out, "\n=== Step 1: LLM Provider ===")
+	_, _ = fmt.Fprintln(out, "Bugbot supports anthropic (Claude) and openai (GPT) providers.")
 
 	defaultProvider := "anthropic"
-	defaultKeyEnv := "ANTHROPIC_API_KEY"
 	if lookupEnv("ANTHROPIC_API_KEY") == "" && lookupEnv("OPENAI_API_KEY") != "" {
 		defaultProvider = "openai"
-		defaultKeyEnv = "OPENAI_API_KEY"
 	}
 
 	provider, err := prompt("Provider (anthropic|openai)", defaultProvider)
@@ -106,10 +104,9 @@ func runInteractive(
 	}
 	cfg.ProviderName = provider
 
+	defaultKeyEnv := "ANTHROPIC_API_KEY"
 	if provider == "openai" {
 		defaultKeyEnv = "OPENAI_API_KEY"
-	} else {
-		defaultKeyEnv = "ANTHROPIC_API_KEY"
 	}
 	keyEnv, err := prompt("API key env var", defaultKeyEnv)
 	if err != nil {
@@ -120,8 +117,8 @@ func runInteractive(
 	// -----------------------------------------------------------------------
 	// Step 2: Role models
 	// -----------------------------------------------------------------------
-	fmt.Fprintln(out, "\n=== Step 2: Role Models ===")
-	fmt.Fprintln(out, "Each pipeline role uses a model. Press Enter to accept the defaults.")
+	_, _ = fmt.Fprintln(out, "\n=== Step 2: Role Models ===")
+	_, _ = fmt.Fprintln(out, "Each pipeline role uses a model. Press Enter to accept the defaults.")
 
 	var defaultFinder, defaultVerifier, defaultRepro string
 	if provider == "openai" {
@@ -150,7 +147,7 @@ func runInteractive(
 	// -----------------------------------------------------------------------
 	// Step 3: Sandbox runtime
 	// -----------------------------------------------------------------------
-	fmt.Fprintln(out, "\n=== Step 3: Sandbox Runtime ===")
+	_, _ = fmt.Fprintln(out, "\n=== Step 3: Sandbox Runtime ===")
 
 	detectedRuntime, ok := sandbox.Detect()
 	if !ok {
@@ -164,8 +161,8 @@ func runInteractive(
 	// -----------------------------------------------------------------------
 	// Step 4: Scan excludes
 	// -----------------------------------------------------------------------
-	fmt.Fprintln(out, "\n=== Step 4: Scan Excludes ===")
-	fmt.Fprintln(out, "Detecting repo-specific directories to exclude...")
+	_, _ = fmt.Fprintln(out, "\n=== Step 4: Scan Excludes ===")
+	_, _ = fmt.Fprintln(out, "Detecting repo-specific directories to exclude...")
 
 	// Always-exclude globs.
 	excludes := []string{`".git/**"`, `"**/*_test.go"`}
@@ -217,13 +214,13 @@ func runInteractive(
 	}
 	proposedExcludes := strings.TrimRight(buf.String(), "\n")
 
-	fmt.Fprintf(out, "Proposed excludes:\n%s\n", proposedExcludes)
+	_, _ = fmt.Fprintf(out, "Proposed excludes:\n%s\n", proposedExcludes)
 	accept, err := promptBool("Accept proposed excludes?", true)
 	if err != nil {
 		return cfg, err
 	}
 	if !accept {
-		fmt.Fprintln(out, "Enter excludes one per line (empty line to finish, use glob patterns):")
+		_, _ = fmt.Fprintln(out, "Enter excludes one per line (empty line to finish, use glob patterns):")
 		var custom []string
 		for {
 			line, scanErr := prompt("  exclude", "")
@@ -244,7 +241,7 @@ func runInteractive(
 	// -----------------------------------------------------------------------
 	// Step 5: Feature toggles
 	// -----------------------------------------------------------------------
-	fmt.Fprintln(out, "\n=== Step 5: Feature Toggles ===")
+	_, _ = fmt.Fprintln(out, "\n=== Step 5: Feature Toggles ===")
 
 	cfg.EnableRepro, err = promptBool(
 		"Enable repro (generate self-contained reproduction tests — uses sandbox tokens)",

@@ -153,9 +153,7 @@ func (c *cartography) QueryGraph(pkg, direction string) (importerList, importLis
 	}
 
 	if direction == "importers" || direction == "both" {
-		for _, imp := range c.importers[pkg] {
-			importerList = append(importerList, imp)
-		}
+		importerList = append(importerList, c.importers[pkg]...)
 		sort.Strings(importerList)
 	}
 

@@ -94,9 +94,9 @@ func runInitInteractive(cmd *cobra.Command) (err error) {
 	}
 
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "Bugbot interactive setup wizard\n")
-	fmt.Fprintf(out, "================================\n")
-	fmt.Fprintf(out, "Press Enter to accept [defaults]. Ctrl-C to abort.\n")
+	_, _ = fmt.Fprintf(out, "Bugbot interactive setup wizard\n")
+	_, _ = fmt.Fprintf(out, "================================\n")
+	_, _ = fmt.Fprintf(out, "Press Enter to accept [defaults]. Ctrl-C to abort.\n")
 
 	wCfg, wizErr := runInteractive(
 		cmd.InOrStdin(),
@@ -133,10 +133,10 @@ func runInitInteractive(cmd *cobra.Command) (err error) {
 		return fmt.Errorf("write %s: %w", path, writeErr)
 	}
 
-	fmt.Fprintf(out, "\nWrote %s\n\n", path)
+	_, _ = fmt.Fprintf(out, "\nWrote %s\n\n", path)
 
 	// Run doctor checks so the user sees any immediate problems.
-	fmt.Fprintln(out, "Running doctor checks...")
+	_, _ = fmt.Fprintln(out, "Running doctor checks...")
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -162,12 +162,12 @@ func runInitInteractive(cmd *cobra.Command) (err error) {
 	printResults(out, results)
 
 	// Print next steps regardless of doctor outcome.
-	fmt.Fprintln(out, "\nNext steps:")
-	fmt.Fprintf(out, "  1. Set the %s environment variable.\n", wCfg.APIKeyEnv)
-	fmt.Fprintln(out, "  2. Set sandbox.image to a toolchain image for your repo language.")
-	fmt.Fprintln(out, "  3. Run `bugbot scan` to start your first analysis.")
+	_, _ = fmt.Fprintln(out, "\nNext steps:")
+	_, _ = fmt.Fprintf(out, "  1. Set the %s environment variable.\n", wCfg.APIKeyEnv)
+	_, _ = fmt.Fprintln(out, "  2. Set sandbox.image to a toolchain image for your repo language.")
+	_, _ = fmt.Fprintln(out, "  3. Run `bugbot scan` to start your first analysis.")
 	if wCfg.EnablePublish {
-		fmt.Fprintln(out, "  4. Ensure `gh` CLI is installed and authenticated for publish.")
+		_, _ = fmt.Fprintln(out, "  4. Ensure `gh` CLI is installed and authenticated for publish.")
 	}
 
 	// Return an error if doctor found hard failures, so the exit code reflects

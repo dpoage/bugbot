@@ -382,13 +382,13 @@ Rules:
 func buildAgentTask(c candidateBlock, mined minerOutput, verdict repro.SmokeVerdict) string {
 	var sb strings.Builder
 	sb.WriteString("The smoke-test verifier failed with:\n")
-	sb.WriteString(fmt.Sprintf("  category: %s\n  detail: %s\n\n", verdict.Category, verdict.Detail))
+	fmt.Fprintf(&sb, "  category: %s\n  detail: %s\n\n", verdict.Category, verdict.Detail)
 
 	sb.WriteString("Current candidate sandbox block:\n")
-	sb.WriteString(fmt.Sprintf("  image: %s\n  dep_strategy: %s\n  network: none\n",
-		c.Image, c.DepStrategy))
+	fmt.Fprintf(&sb, "  image: %s\n  dep_strategy: %s\n  network: none\n",
+		c.Image, c.DepStrategy)
 	if len(c.SetupCmds) > 0 {
-		sb.WriteString(fmt.Sprintf("  setup_cmds: %v\n", c.SetupCmds))
+		fmt.Fprintf(&sb, "  setup_cmds: %v\n", c.SetupCmds)
 	}
 	sb.WriteString("\n")
 
@@ -399,7 +399,7 @@ func buildAgentTask(c candidateBlock, mined minerOutput, verdict repro.SmokeVerd
 			if len(content) > 4000 {
 				content = content[:4000] + "\n... (truncated)"
 			}
-			sb.WriteString(fmt.Sprintf("\n--- %s ---\n%s\n", label, content))
+			fmt.Fprintf(&sb, "\n--- %s ---\n%s\n", label, content)
 		}
 	}
 

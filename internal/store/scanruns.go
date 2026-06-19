@@ -98,7 +98,7 @@ func (s *Store) ActiveScanRuns(ctx context.Context, staleAfter time.Duration) ([
 	if err != nil {
 		return nil, annotateErr(s.path, "active_scan_runs", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return scanRows(rows, scanScanRun)
 }

@@ -757,7 +757,7 @@ func TestNewRunner_IncludesCodeNavTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	// Baseline read-only tools.
 	baseline, err := readOnlyTools(repoDir)

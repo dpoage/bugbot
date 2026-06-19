@@ -90,7 +90,7 @@ func TestOutlineRankedByPosition(t *testing.T) {
 	if firstIdx < 0 || middleIdx < 0 || lastIdx < 0 {
 		t.Fatalf("missing symbol in output:\n%s", out)
 	}
-	if !(firstIdx < middleIdx && middleIdx < lastIdx) {
+	if firstIdx >= middleIdx || middleIdx >= lastIdx {
 		t.Errorf("symbols not in position order (First=%d Middle=%d Last=%d):\n%s",
 			firstIdx, middleIdx, lastIdx, out)
 	}

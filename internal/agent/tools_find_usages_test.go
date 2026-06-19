@@ -11,34 +11,6 @@ import (
 	"github.com/dpoage/bugbot/internal/lsp"
 )
 
-// newFindUsagesToolWithLocs creates a findUsagesTool over a temp repo; the
-// scripted navigator returns locs for References queries. absPath is the
-// resolved temp-dir root so test code can build absolute URIs.
-func newFindUsagesToolWithLocs(t *testing.T, files map[string]string, locs []lsp.Location) (*findUsagesTool, string) {
-	t.Helper()
-	dir := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = resolved
-	}
-	for name, content := range files {
-		p := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	nav, err := NewCodeNav(dir)
-	if err != nil {
-		t.Fatalf("NewCodeNav: %v", err)
-	}
-	_ = nav.nav.Close()
-	nav.nav = &fakeNavigator{locs: locs}
-	t.Cleanup(func() { _ = nav.Close() })
-	return &findUsagesTool{nav: nav}, dir
-}
-
 func TestFindUsagesHappyPath(t *testing.T) {
 	src := "package main\n" + // 1
 		"\n" + // 2

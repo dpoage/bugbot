@@ -312,9 +312,10 @@ func TestSmokeCmd_KnownEcosystems(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			content := []byte("placeholder\n")
-			if tc.file == "go.mod" {
+			switch tc.file {
+			case "go.mod":
 				content = []byte("module example.com/x\ngo 1.21\n")
-			} else if tc.file == "Cargo.toml" {
+			case "Cargo.toml":
 				content = []byte("[package]\nname = \"x\"\nversion = \"0.1.0\"\n")
 			}
 			if err := writeFileBytes(dir+"/"+tc.file, content); err != nil {
@@ -337,7 +338,7 @@ func writeFileBytes(path string, content []byte) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = f.Write(content)
 	return err
 }
