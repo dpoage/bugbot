@@ -1,31 +1,34 @@
 package cli
 
-import "testing"
+import (
+	"testing"
 
-// TestTierLabel_T0 confirms tierLabel returns the correct label for tier 0.
+	"github.com/dpoage/bugbot/internal/domain"
+)
+
+// TestTierLabel_T0 confirms domain.Tier.Label() returns the correct label for tier 0.
 func TestTierLabel_T0(t *testing.T) {
-	got := tierLabel(0)
+	got := domain.TierFixWitnessed.Label()
 	want := "T0 Fix-witnessed"
 	if got != want {
-		t.Errorf("tierLabel(0) = %q, want %q", got, want)
+		t.Errorf("TierFixWitnessed.Label() = %q, want %q", got, want)
 	}
 }
 
-// TestTierLabel_ExistingTiers confirms existing tier labels are unchanged by
-// the addition of tier 0.
+// TestTierLabel_ExistingTiers confirms existing tier labels are unchanged.
 func TestTierLabel_ExistingTiers(t *testing.T) {
 	cases := []struct {
-		tier int
+		tier domain.Tier
 		want string
 	}{
-		{1, "T1 Reproduced"},
-		{2, "T2 Verified"},
-		{3, "T3 Suspected"},
+		{domain.TierReproduced, "T1 Reproduced"},
+		{domain.TierVerified, "T2 Verified"},
+		{domain.TierSuspected, "T3 Suspected"},
 	}
 	for _, tc := range cases {
-		got := tierLabel(tc.tier)
+		got := tc.tier.Label()
 		if got != tc.want {
-			t.Errorf("tierLabel(%d) = %q, want %q", tc.tier, got, tc.want)
+			t.Errorf("Tier(%d).Label() = %q, want %q", tc.tier, got, tc.want)
 		}
 	}
 }

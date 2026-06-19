@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
@@ -143,8 +144,8 @@ func (d *Daemon) reverifyOpenFindings(ctx context.Context) int {
 		// full refuter vote, which is exactly what tier 2 means — promote it.
 		fnd.FileHash = curHash
 		fnd.Reasoning = reasoning
-		if fnd.Tier == 3 {
-			fnd.Tier = 2
+		if fnd.Tier == domain.TierSuspected {
+			fnd.Tier = domain.TierVerified
 		}
 		if _, uerr := d.store.UpsertFinding(ctx, fnd); uerr != nil {
 			d.log.Error("daemon: reverify: re-anchor failed", "fingerprint", fnd.Fingerprint, "err", uerr)
@@ -183,7 +184,7 @@ func (d *Daemon) promoteNewFindings(ctx context.Context, fres *funnel.Result) in
 	}
 	t2 := make([]store.Finding, 0, len(fres.Findings))
 	for _, fnd := range fres.Findings {
-		if fnd.Tier == 2 {
+		if fnd.Tier == domain.TierVerified {
 			t2 = append(t2, fnd)
 		}
 	}

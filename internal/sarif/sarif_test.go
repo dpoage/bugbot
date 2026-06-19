@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/sarif"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -232,12 +233,12 @@ func TestFromFindings_TierLevel(t *testing.T) {
 		{1, "error"},
 		{2, "warning"},
 		{3, "note"},
-		{0, "note"}, // unknown tier defaults to note
+		{0, "error"}, // T0 fix-witnessed is strongest evidence -> error (corrected, bugbot-0nc.2)
 		{4, "note"},
 	}
 	for _, tc := range cases {
 		f := base
-		f.Tier = tc.tier
+		f.Tier = domain.Tier(tc.tier)
 		f.Fingerprint = "fp" + string(rune('0'+tc.tier))
 		doc := sarif.FromFindings([]store.Finding{f})
 		got := doc.Runs[0].Results[0].Level

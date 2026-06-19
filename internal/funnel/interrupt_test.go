@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
@@ -267,8 +268,8 @@ func TestSweep_InterruptThenResume_PendingCandidates(t *testing.T) {
 	if got.Title != "nil deref of cfg in Greeting" {
 		t.Errorf("finding title = %q, want the resumed hypothesis", got.Title)
 	}
-	if got.Tier != tierVerified {
-		t.Errorf("finding tier = %d, want %d (verified)", got.Tier, tierVerified)
+	if got.Tier != domain.TierVerified {
+		t.Errorf("finding tier = %d, want %d (verified)", got.Tier, domain.TierVerified)
 	}
 
 	// The WAL must be drained: the replayed row was deleted at its verify

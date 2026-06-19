@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // Status enumerates the lifecycle states of a finding.
@@ -40,8 +42,8 @@ type Finding struct {
 	Title       string
 	Description string
 	Reasoning   string // the adversarial verification trace
-	Severity    string
-	Tier        int // 1 reproduced, 2 verified, 3 suspected
+	Severity    domain.Severity
+	Tier        domain.Tier // T0 fix-witnessed, T1 reproduced, T2 verified, T3 suspected
 	Status      Status
 	Lens        string
 	File        string
@@ -96,9 +98,8 @@ func decodeLenses(s string) []string {
 // findingConfidence derives a [0,1] confidence score from the evidence quality
 // of a finding. The score is monotonic in both axes:
 //
-//   - tier: 1 (reproduced) is strongest, 2 (verified) is middle, 3 (suspected)
-//     is weakest. Each tier step subtracts a fixed weight so the ordering is
-//     preserved regardless of corroboration.
+//   - tier: fix-witnessed (T0) is strongest, reproduced (T1) is next, verified
+//     (T2) is middle, suspected (T3) is weakest.
 //
 //   - corroboratingLensCount: each additional corroborating lens adds a fixed
 //     increment, capped so the combined value never exceeds 1.
@@ -106,27 +107,17 @@ func decodeLenses(s string) []string {
 // severity contributes a small tie-breaking bonus (critical > high > medium >
 // everything else) so that among equally-tiered, equally-corroborated findings
 // the more severe ones surface first.
-func findingConfidence(tier int, severity string, corroboratingLensCount int) float64 {
-	// Tier base: tier 1 → 0.8, tier 2 → 0.5, tier 3 → 0.2.
-	// Out-of-range tiers (0 or >3) are treated as suspected.
-	var base float64
-	switch tier {
-	case 1:
-		base = 0.80
-	case 2:
-		base = 0.50
-	default:
-		base = 0.20
-	}
+func findingConfidence(tier domain.Tier, severity domain.Severity, corroboratingLensCount int) float64 {
+	base := tier.BaseConfidence()
 
 	// Severity bonus: up to 0.08 so it never overrides a tier boundary.
 	var sevBonus float64
-	switch strings.ToLower(severity) {
-	case "critical":
+	switch severity {
+	case domain.SeverityCritical:
 		sevBonus = 0.08
-	case "high":
+	case domain.SeverityHigh:
 		sevBonus = 0.05
-	case "medium":
+	case domain.SeverityMedium:
 		sevBonus = 0.02
 	}
 
@@ -200,7 +191,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 
 		// Does a row already exist for this fingerprint?
 		var existingID, existingCreated string
-		var existingTier int
+		var existingTier domain.Tier
 		var existingRepro sql.NullString
 		var existingNeedsHuman int
 		err = tx.QueryRowContext(ctx,

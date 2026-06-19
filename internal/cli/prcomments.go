@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
@@ -57,7 +58,7 @@ func renderInlineBody(f store.Finding) string {
 	b.WriteString(markerFor(f.Fingerprint))
 	b.WriteString("\n\n")
 
-	fmt.Fprintf(&b, "**[%s] %s — %s**\n\n", tierLabel(f.Tier), severityLabel(f.Severity), titleOrUnknown(f.Title))
+	fmt.Fprintf(&b, "**[%s] %s — %s**\n\n", f.Tier.Label(), severityLabel(f.Severity), titleOrUnknown(f.Title))
 
 	if f.Description != "" {
 		b.WriteString(f.Description)
@@ -91,28 +92,11 @@ func isResolvedBody(body string) bool {
 	return strings.Contains(body, markerResolved)
 }
 
-// tierLabel / severityLabel / titleOrUnknown keep rendered bodies non-empty and
-// deterministic even when a field is blank, so idempotence holds.
-func tierLabel(tier int) string {
-	switch tier {
-	case 0:
-		return "T0 Fix-witnessed"
-	case 1:
-		return "T1 Reproduced"
-	case 2:
-		return "T2 Verified"
-	case 3:
-		return "T3 Suspected"
-	default:
-		return "T? Unknown"
-	}
-}
-
-func severityLabel(s string) string {
-	if strings.TrimSpace(s) == "" {
+func severityLabel(s domain.Severity) string {
+	if string(s) == "" {
 		return "unspecified"
 	}
-	return s
+	return string(s)
 }
 
 func titleOrUnknown(s string) string {
@@ -288,12 +272,12 @@ func planSync(
 
 	for _, f := range res.Findings {
 		// T3 may be withheld entirely.
-		if f.Tier >= 3 && suspectedMode == "withhold" {
+		if f.Tier >= domain.TierSuspected && suspectedMode == "withhold" {
 			continue
 		}
 		current[f.Fingerprint] = true
 
-		isInline := f.Tier <= 2 && commentable.has(f.File, f.Line)
+		isInline := f.Tier <= domain.TierVerified && commentable.has(f.File, f.Line)
 		if isInline {
 			inline = append(inline, renderedFinding{finding: f, commentable: true})
 		}
@@ -303,7 +287,7 @@ func planSync(
 		// CI. A resolved notice does NOT count as "already on the PR": a finding
 		// that cleared on an earlier push and reappears (fix-then-revert) must
 		// trip the gate again, not slide through on its tombstone.
-		if f.Tier <= 2 {
+		if f.Tier <= domain.TierVerified {
 			prev, seen := existing.byFingerprint[f.Fingerprint]
 			if !seen || isResolvedBody(prev.Body) {
 				plan.newGateFingerprints[f.Fingerprint] = true
@@ -381,9 +365,9 @@ func renderSummaryBody(res *funnel.Result, findings []store.Finding, inlineFP ma
 	var verified, suspected int
 	for _, f := range findings {
 		switch {
-		case f.Tier <= 2:
+		case f.Tier <= domain.TierVerified:
 			verified++
-		case f.Tier >= 3:
+		case f.Tier >= domain.TierSuspected:
 			suspected++
 		}
 	}

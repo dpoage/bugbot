@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/store"
@@ -55,7 +56,7 @@ func buildDaemonWithRepro(
 
 // seedFinding inserts a finding into st with the given tier, reproPath, and
 // needsHuman flag. Status is always StatusOpen. Returns the upserted finding.
-func seedFinding(t *testing.T, st *store.Store, title string, tier int, reproPath string, needsHuman bool) store.Finding {
+func seedFinding(t *testing.T, st *store.Store, title string, tier domain.Tier, reproPath string, needsHuman bool) store.Finding {
 	t.Helper()
 	fp := store.Fingerprint("nil-deref", fixtureFile, fixtureLine, title)
 	f, err := st.UpsertFinding(context.Background(), store.Finding{

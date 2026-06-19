@@ -25,13 +25,11 @@ func TestTierLevel(t *testing.T) {
 		tier Tier
 		want string
 	}{
-		// Preserved verbatim from sarif.tierLevel.
+		// TierFixWitnessed is now the strongest tier: Level() == "error".
+		{TierFixWitnessed, "error"},
 		{TierReproduced, "error"},
 		{TierVerified, "warning"},
 		{TierSuspected, "note"},
-		// Tier 0 (fix-witnessed) currently falls through to "note" despite being
-		// the strongest evidence — preserved on purpose, flagged in bugbot-0nc.2.
-		{TierFixWitnessed, "note"},
 		{Tier(9), "note"},
 	}
 	for _, c := range cases {
@@ -46,20 +44,35 @@ func TestTierBaseConfidence(t *testing.T) {
 		tier Tier
 		want float64
 	}{
-		// Preserved verbatim from store.findingConfidence.
+		// TierFixWitnessed is the strongest tier: highest BaseConfidence.
+		{TierFixWitnessed, 0.90},
 		{TierReproduced, 0.80},
 		{TierVerified, 0.50},
 		{TierSuspected, 0.20},
-		// Tier 0 (fix-witnessed) scores the weakest base today (no case 0 in the
-		// original switch). Intentional preservation; correction tracked in
-		// bugbot-0nc.2. If this ever changes, the migration must update too.
-		{TierFixWitnessed, 0.20},
 		{Tier(9), 0.20},
 	}
 	for _, c := range cases {
 		if got := c.tier.BaseConfidence(); got != c.want {
 			t.Errorf("Tier(%d).BaseConfidence() = %v, want %v", c.tier, got, c.want)
 		}
+	}
+}
+
+func TestTierBaseConfidenceOrdering(t *testing.T) {
+	if !(TierFixWitnessed.BaseConfidence() > TierReproduced.BaseConfidence()) {
+		t.Error("TierFixWitnessed.BaseConfidence() should be > TierReproduced.BaseConfidence()")
+	}
+	if !(TierReproduced.BaseConfidence() > TierVerified.BaseConfidence()) {
+		t.Error("TierReproduced.BaseConfidence() should be > TierVerified.BaseConfidence()")
+	}
+	if !(TierVerified.BaseConfidence() > TierSuspected.BaseConfidence()) {
+		t.Error("TierVerified.BaseConfidence() should be > TierSuspected.BaseConfidence()")
+	}
+}
+
+func TestTierLevelFixWitnessed(t *testing.T) {
+	if got := TierFixWitnessed.Level(); got != "error" {
+		t.Errorf("TierFixWitnessed.Level() = %q, want %q", got, "error")
 	}
 }
 
@@ -89,10 +102,10 @@ func TestParseSeverity(t *testing.T) {
 
 func TestSeverityRankAndAtLeast(t *testing.T) {
 	// Higher rank = more severe; unknown sorts last.
-	if !(SeverityCritical.Rank() > SeverityHigh.Rank() &&
-		SeverityHigh.Rank() > SeverityMedium.Rank() &&
-		SeverityMedium.Rank() > SeverityLow.Rank() &&
-		SeverityLow.Rank() > Severity("").Rank()) {
+	if SeverityCritical.Rank() <= SeverityHigh.Rank() ||
+		SeverityHigh.Rank() <= SeverityMedium.Rank() ||
+		SeverityMedium.Rank() <= SeverityLow.Rank() ||
+		SeverityLow.Rank() <= Severity("").Rank() {
 		t.Fatalf("severity rank ordering broken: crit=%d high=%d med=%d low=%d unknown=%d",
 			SeverityCritical.Rank(), SeverityHigh.Rank(), SeverityMedium.Rank(),
 			SeverityLow.Rank(), Severity("").Rank())
@@ -130,9 +143,9 @@ func TestParseConfidence(t *testing.T) {
 }
 
 func TestConfidenceRankAndAtLeast(t *testing.T) {
-	if !(ConfidenceHigh.Rank() > ConfidenceMedium.Rank() &&
-		ConfidenceMedium.Rank() > ConfidenceLow.Rank() &&
-		ConfidenceLow.Rank() > Confidence("").Rank()) {
+	if ConfidenceHigh.Rank() <= ConfidenceMedium.Rank() ||
+		ConfidenceMedium.Rank() <= ConfidenceLow.Rank() ||
+		ConfidenceLow.Rank() <= Confidence("").Rank() {
 		t.Fatalf("confidence rank ordering broken")
 	}
 	if ConfidenceLow.AtLeast(ConfidenceMedium) {

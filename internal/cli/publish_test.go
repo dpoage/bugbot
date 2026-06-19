@@ -15,13 +15,14 @@ import (
 	"unicode/utf8"
 
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
 // ---- planPublish unit tests (pure; no gh calls) ----
 
 // makeOpenFinding builds a minimal open finding for plan tests.
-func makeOpenFinding(fp string, tier int, updatedAt time.Time) store.Finding {
+func makeOpenFinding(fp string, tier domain.Tier, updatedAt time.Time) store.Finding {
 	return store.Finding{
 		ID:          fp,
 		Fingerprint: fp,

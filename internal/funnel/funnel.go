@@ -36,6 +36,7 @@ import (
 	"sync/atomic"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
@@ -618,9 +619,9 @@ type Candidate struct {
 	Line        int
 	Title       string
 	Description string
-	Severity    string
+	Severity    domain.Severity
 	Evidence    string
-	Confidence  string
+	Confidence  domain.Confidence
 	// Fingerprint is the store dedup key (lens+file+line+title). Set in triage.
 	Fingerprint string
 	// CorroboratingLenses lists the OTHER lenses that independently reported the
@@ -1151,33 +1152,18 @@ func (b *budgetState) verifyOverHard() bool {
 	return b.overHard()
 }
 
-// sortFindings orders findings critical-first, then by file/line for stable
-// output.
+// sortFindings orders findings critical-first (highest Rank first), then by
+// file/line for stable output. domain.Severity.Rank() uses higher=more-severe
+// (critical=4, low=1), so critical-first means si > sj.
 func sortFindings(fs []store.Finding) {
 	sort.SliceStable(fs, func(i, j int) bool {
-		si, sj := severityRank(fs[i].Severity), severityRank(fs[j].Severity)
+		si, sj := fs[i].Severity.Rank(), fs[j].Severity.Rank()
 		if si != sj {
-			return si < sj
+			return si > sj
 		}
 		if fs[i].File != fs[j].File {
 			return fs[i].File < fs[j].File
 		}
 		return fs[i].Line < fs[j].Line
 	})
-}
-
-// severityRank maps a severity string to a sort key (lower = more severe).
-func severityRank(s string) int {
-	switch s {
-	case "critical":
-		return 0
-	case "high":
-		return 1
-	case "medium":
-		return 2
-	case "low":
-		return 3
-	default:
-		return 4
-	}
 }

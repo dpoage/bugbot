@@ -5,12 +5,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
 // finding is a small constructor for test findings.
-func finding(fp, file string, line, tier int) store.Finding {
+func finding(fp, file string, line int, tier domain.Tier) store.Finding {
 	return store.Finding{
 		Fingerprint: fp,
 		Title:       "Title " + fp,

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 func sampleFinding() Finding {
@@ -172,7 +174,7 @@ func TestListFindings_Filters(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
-	mk := func(lens, file string, line, tier int, status Status, commit string) {
+	mk := func(lens, file string, line int, tier domain.Tier, status Status, commit string) {
 		f := Finding{
 			Fingerprint: Fingerprint(lens, file, line, "t"),
 			Title:       "t",
@@ -574,7 +576,7 @@ func TestCountFindings(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
-	seed := func(file string, line, tier int, status Status, needsHuman bool) {
+	seed := func(file string, line int, tier domain.Tier, status Status, needsHuman bool) {
 		t.Helper()
 		f := Finding{
 			Fingerprint: Fingerprint("l", file, line, "t"),
@@ -614,29 +616,39 @@ func TestCountFindings(t *testing.T) {
 //   - all values in [0,1]
 func TestFindingConfidence_Monotonic(t *testing.T) {
 	// Tier monotonicity: tier 1 > tier 2 > tier 3.
-	c1 := findingConfidence(1, "high", 0)
-	c2 := findingConfidence(2, "high", 0)
-	c3 := findingConfidence(3, "high", 0)
+	c1 := findingConfidence(domain.TierReproduced, "high", 0)
+	c2 := findingConfidence(domain.TierVerified, "high", 0)
+	c3 := findingConfidence(domain.TierSuspected, "high", 0)
 	if !(c1 > c2 && c2 > c3) {
 		t.Errorf("tier monotonicity violated: c1=%v c2=%v c3=%v", c1, c2, c3)
 	}
 
 	// Corroboration monotonicity: more lenses => higher confidence (same tier+severity).
-	c0 := findingConfidence(2, "medium", 0)
-	cA := findingConfidence(2, "medium", 1)
-	cB := findingConfidence(2, "medium", 2)
+	c0 := findingConfidence(domain.TierVerified, "medium", 0)
+	cA := findingConfidence(domain.TierVerified, "medium", 1)
+	cB := findingConfidence(domain.TierVerified, "medium", 2)
 	if !(cB > cA && cA > c0) {
 		t.Errorf("corroboration monotonicity violated: c0=%v cA=%v cB=%v", c0, cA, cB)
 	}
 
 	// Bounded [0,1] across a range of inputs.
-	for _, tier := range []int{0, 1, 2, 3, 99} {
+	for _, tier := range []domain.Tier{0, 1, 2, 3, 99} {
 		for _, corrob := range []int{0, 1, 5, 100} {
 			v := findingConfidence(tier, "critical", corrob)
 			if v < 0 || v > 1 {
 				t.Errorf("out of range: findingConfidence(%d, critical, %d) = %v", tier, corrob, v)
 			}
 		}
+	}
+}
+
+// TestFindingConfidence_FixWitnessedStrongest pins the tier-0 correction: a
+// fix-witnessed finding must score higher than an otherwise-identical reproduced finding.
+func TestFindingConfidence_FixWitnessedStrongest(t *testing.T) {
+	c0 := findingConfidence(domain.TierFixWitnessed, "high", 0)
+	c1 := findingConfidence(domain.TierReproduced, "high", 0)
+	if c0 <= c1 {
+		t.Errorf("TierFixWitnessed confidence (%v) should be > TierReproduced (%v)", c0, c1)
 	}
 }
 
