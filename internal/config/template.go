@@ -141,6 +141,22 @@ sandbox:
                                # progressing build finish while killing hangs fast.
   network: none
   dep_strategy: off            # off | host | fetch
+  # setup_cmds: pre-run commands (argv lists) executed BEFORE the main command
+  # and BEFORE per-ecosystem offline installs, so system libs are present when
+  # ecosystem tools run. Commands share the same network-none run — anything
+  # needing the network must be baked into the image or handled by fetch.
+  # Each entry is a non-empty argv; leave commented out (empty default).
+  # setup_cmds:
+  #   - ["apt-get", "install", "-y", "--no-install-recommends", "libpq-dev"]
+  #   - ["protoc", "--version"]
+  # local_mounts: read-only bind-mounts for on-disk deps (monorepo siblings,
+  # locally-checked-out path deps). Orthogonal to dep_strategy — both may be
+  # active at once. Paths are ONLY from this config (trusted boundary); paths
+  # from in-repo manifests are a deliberate fast-follow (security gating).
+  # Mounts are read-only with no SELinux :Z relabel (host-owned shared dirs).
+  # local_mounts:
+  #   - host: /absolute/path/to/sibling     # must exist on the host
+  #     container: /sibling                  # absolute container path; unique
 
 # ---------------------------------------------------------------------------
 # verify: configuration for the LLM-assisted patch-verification stage.

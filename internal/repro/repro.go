@@ -98,6 +98,19 @@ type Options struct {
 	// online download then mounts it read-only. Vendored repos are always
 	// detected regardless of this value.
 	DepStrategy sandbox.DepStrategy
+	// SetupCmds are operator-supplied commands to run inside the sandbox BEFORE
+	// the main command AND BEFORE any per-ecosystem offline-install setup (e.g.
+	// pip install from cache). Use to install system-level dependencies
+	// (apt packages, shared libraries) that must be present before ecosystem
+	// tools run. Commands share the same network-none run and must not need the
+	// network. Each entry is a non-empty argv; a failed setup exits with code
+	// 125 (env_error, never a bug demonstration).
+	SetupCmds [][]string
+	// LocalMounts are read-only host directories bind-mounted into the sandbox,
+	// independent of dep_strategy. Use to expose monorepo siblings or
+	// locally-checked-out path dependencies that fall outside the scanned repo.
+	// Mounts are read-only with Shared=true (no SELinux :Z relabel).
+	LocalMounts []sandbox.ROMount
 }
 
 // resolve returns a copy of o with defaults applied; it does not mutate the
@@ -163,9 +176,18 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 		Strategy:     resolved.DepStrategy,
 		FetchSandbox: sb,
 		FetchImage:   resolved.Image,
+		LocalMounts:  resolved.LocalMounts,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("repro: resolve dependency strategy: %w", err)
+	}
+	// Prepend operator setup_cmds BEFORE ecosystem-derived setup commands so
+	// system-level dependencies (apt packages, shared libraries) are present
+	// when the ecosystem installer (e.g. pip install from wheelhouse) runs.
+	// Both run in the same network-none container; operator cmds must not need
+	// the network. See config.Sandbox.SetupCmds.
+	if len(resolved.SetupCmds) > 0 {
+		deps.SetupCmds = append(resolved.SetupCmds, deps.SetupCmds...)
 	}
 	return &Reproducer{
 		client:       client,

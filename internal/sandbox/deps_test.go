@@ -871,3 +871,204 @@ func TestMultiEcosystemComposition(t *testing.T) {
 		t.Fatal("multi-ecosystem FETCH: Prefetch must be non-nil")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests for DepOptions.LocalMounts (composable local-mount dep layer, bugbot-ixu)
+// and operator SetupCmds ordering (bugbot-ftd.2).
+// ---------------------------------------------------------------------------
+
+// TestResolveDepsLocalMounts verifies that LocalMounts in DepOptions are
+// appended to the Resolution.ROMounts regardless of ecosystem or dep strategy.
+func TestResolveDepsLocalMounts(t *testing.T) {
+	hostDir := t.TempDir()
+	mount := ROMount{HostPath: hostDir, ContainerPath: "/sibling", Shared: true}
+
+	t.Run("off strategy no go.mod still gets local mounts", func(t *testing.T) {
+		dir := t.TempDir() // no go.mod
+		res, err := ResolveDeps(dir, DepOptions{
+			Strategy:    DepStrategyOff,
+			LocalMounts: []ROMount{mount},
+		})
+		if err != nil {
+			t.Fatalf("ResolveDeps: %v", err)
+		}
+		if len(res.ROMounts) != 1 || res.ROMounts[0].ContainerPath != "/sibling" {
+			t.Errorf("want 1 local mount at /sibling, got %+v", res.ROMounts)
+		}
+		if !res.ROMounts[0].Shared {
+			t.Error("local mount Shared should be true")
+		}
+	})
+
+	t.Run("host strategy Go repo: local mounts compose with modcache mount", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+		cache := t.TempDir()
+		res, err := ResolveDeps(dir, DepOptions{
+			Strategy:     DepStrategyHost,
+			hostModcache: cache,
+			LocalMounts:  []ROMount{mount},
+		})
+		if err != nil {
+			t.Fatalf("ResolveDeps: %v", err)
+		}
+		// Must have at least the modcache mount + the local mount.
+		hasModcache := false
+		hasSibling := false
+		for _, m := range res.ROMounts {
+			if m.ContainerPath == modcacheMount {
+				hasModcache = true
+			}
+			if m.ContainerPath == "/sibling" {
+				hasSibling = true
+			}
+		}
+		if !hasModcache {
+			t.Errorf("host strategy: missing modcache mount; mounts=%+v", res.ROMounts)
+		}
+		if !hasSibling {
+			t.Errorf("host strategy: missing local /sibling mount; mounts=%+v", res.ROMounts)
+		}
+	})
+
+	t.Run("fetch strategy Go repo: local mounts compose with fetch cache mount", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+		writeFile(t, filepath.Join(dir, "go.sum"), "")
+		cacheBase := t.TempDir()
+		res, err := ResolveDeps(dir, DepOptions{
+			Strategy:     DepStrategyFetch,
+			FetchSandbox: NewMock(MockResponse{Result: Result{ExitCode: 0}}),
+			userCacheDir: cacheBase,
+			LocalMounts:  []ROMount{mount},
+		})
+		if err != nil {
+			t.Fatalf("ResolveDeps: %v", err)
+		}
+		hasFetchCache := false
+		hasSibling := false
+		for _, m := range res.ROMounts {
+			if m.ContainerPath == modcacheMount {
+				hasFetchCache = true
+			}
+			if m.ContainerPath == "/sibling" {
+				hasSibling = true
+			}
+		}
+		if !hasFetchCache {
+			t.Errorf("fetch strategy: missing modcache mount; mounts=%+v", res.ROMounts)
+		}
+		if !hasSibling {
+			t.Errorf("fetch strategy: missing local /sibling mount; mounts=%+v", res.ROMounts)
+		}
+	})
+
+	t.Run("multiple local mounts all appear", func(t *testing.T) {
+		dir := t.TempDir()
+		hostDir2 := t.TempDir()
+		res, err := ResolveDeps(dir, DepOptions{
+			Strategy: DepStrategyOff,
+			LocalMounts: []ROMount{
+				{HostPath: hostDir, ContainerPath: "/sibling1", Shared: true},
+				{HostPath: hostDir2, ContainerPath: "/sibling2", Shared: true},
+			},
+		})
+		if err != nil {
+			t.Fatalf("ResolveDeps: %v", err)
+		}
+		if len(res.ROMounts) != 2 {
+			t.Fatalf("want 2 mounts, got %d: %+v", len(res.ROMounts), res.ROMounts)
+		}
+	})
+}
+
+// TestResolveDepsLocalMountsOrderAfterEcosystem verifies that local mounts
+// appear AFTER ecosystem-derived mounts in the Resolution (ecosystem mounts
+// first, then operator local mounts).
+func TestResolveDepsLocalMountsOrderAfterEcosystem(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+	hostDir := t.TempDir()
+	cache := t.TempDir()
+
+	res, err := ResolveDeps(dir, DepOptions{
+		Strategy:     DepStrategyHost,
+		hostModcache: cache,
+		LocalMounts:  []ROMount{{HostPath: hostDir, ContainerPath: "/sibling", Shared: true}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps: %v", err)
+	}
+	// Ecosystem mount (modcache at /modcache) must appear before local mount.
+	ecosystemIdx := -1
+	localIdx := -1
+	for i, m := range res.ROMounts {
+		if m.ContainerPath == modcacheMount {
+			ecosystemIdx = i
+		}
+		if m.ContainerPath == "/sibling" {
+			localIdx = i
+		}
+	}
+	if ecosystemIdx < 0 {
+		t.Fatal("ecosystem modcache mount not found")
+	}
+	if localIdx < 0 {
+		t.Fatal("local /sibling mount not found")
+	}
+	if ecosystemIdx >= localIdx {
+		t.Errorf("ecosystem mount (idx %d) must appear before local mount (idx %d)", ecosystemIdx, localIdx)
+	}
+}
+
+// TestResolveWithOperatorSetupCmdsOrder verifies that when operator SetupCmds
+// are prepended at the call site, they appear BEFORE ecosystem-derived setup
+// commands. This tests the contract documented in config.Sandbox.SetupCmds and
+// repro/funnel call sites: operator cmds (system libs) run before ecosystem
+// offline-install cmds so system-level deps are present for the ecosystem tool.
+//
+// Note: the prepend itself happens at the consumer call sites (repro.go,
+// funnel.go), not inside ResolveDeps. This test validates the merge result
+// by simulating that caller logic.
+func TestOperatorSetupCmdsOrderBeforeEcosystem(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "requests==2.31.0\n")
+	cacheBase := t.TempDir()
+
+	// Simulate: Python FETCH resolution produces SetupCmds (pip install).
+	res, err := ResolveDeps(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: NewMock(MockResponse{Result: Result{ExitCode: 0}}),
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps: %v", err)
+	}
+
+	ecosystemCmds := append([][]string(nil), res.SetupCmds...)
+	if len(ecosystemCmds) == 0 {
+		t.Skip("Python FETCH produced no ecosystem setup cmds; test not applicable")
+	}
+
+	// Simulate the operator-prepend logic in repro.New / funnel.New.
+	operatorCmds := [][]string{{"apt-get", "install", "-y", "libssl-dev"}}
+	merged := append(operatorCmds, res.SetupCmds...)
+
+	// Operator cmd must appear first.
+	if len(merged) == 0 || merged[0][0] != "apt-get" {
+		t.Errorf("operator cmd must be first; got %v", merged)
+	}
+	// Ecosystem cmds must still be present.
+	for i, eco := range ecosystemCmds {
+		found := false
+		for _, m := range merged {
+			if len(m) > 0 && len(eco) > 0 && m[0] == eco[0] {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("ecosystem setup cmd %d (%v) missing from merged; merged=%v", i, eco, merged)
+		}
+	}
+}

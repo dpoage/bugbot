@@ -240,6 +240,13 @@ type SandboxOpts struct {
 	// repos are always detected. The one-time online prefetch for "fetch" runs
 	// once, lazily, the first time a sandbox tool is built.
 	DepStrategy sandbox.DepStrategy
+	// SetupCmds are operator-supplied commands run inside the sandbox BEFORE the
+	// main command AND BEFORE per-ecosystem offline installs. See
+	// config.Sandbox.SetupCmds for the full contract and ordering rationale.
+	SetupCmds [][]string
+	// LocalMounts are read-only host directories bind-mounted into the sandbox,
+	// independent of dep_strategy. See config.Sandbox.LocalMounts.
+	LocalMounts []sandbox.ROMount
 }
 
 // ChangeContext carries commit-scoped context for a targeted (commit-triggered)
@@ -520,9 +527,15 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 		d, err := sandbox.ResolveDeps(repo.Root(), sandbox.DepOptions{
 			Strategy:     resolved.SandboxOpts.DepStrategy,
 			FetchSandbox: resolved.SandboxOpts.Sandbox,
+			LocalMounts:  resolved.SandboxOpts.LocalMounts,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("funnel: resolve dependency strategy: %w", err)
+		}
+		// Prepend operator setup_cmds BEFORE ecosystem-derived setup commands.
+		// See config.Sandbox.SetupCmds for the ordering rationale.
+		if len(resolved.SandboxOpts.SetupCmds) > 0 {
+			d.SetupCmds = append(resolved.SandboxOpts.SetupCmds, d.SetupCmds...)
 		}
 		deps = d
 	}

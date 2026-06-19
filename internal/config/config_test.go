@@ -802,3 +802,167 @@ func TestValidate_LLMRequestTimeoutRejectsNegative(t *testing.T) {
 		t.Errorf("request_timeout=30s should be valid, got %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// sandbox.setup_cmds and sandbox.local_mounts validation tests.
+// ---------------------------------------------------------------------------
+
+func TestValidate_SetupCmds(t *testing.T) {
+	load := func(t *testing.T) Config {
+		t.Helper()
+		cfg, err := Load(writeTemp(t, validYAML))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		return cfg
+	}
+
+	t.Run("empty setup_cmds is valid", func(t *testing.T) {
+		cfg := load(t)
+		cfg.Sandbox.SetupCmds = nil
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("nil SetupCmds should be valid, got %v", err)
+		}
+	})
+
+	t.Run("non-empty argv entries are valid", func(t *testing.T) {
+		cfg := load(t)
+		cfg.Sandbox.SetupCmds = [][]string{
+			{"apt-get", "install", "-y", "libpq-dev"},
+			{"protoc", "--version"},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("valid SetupCmds should pass, got %v", err)
+		}
+	})
+
+	t.Run("empty argv entry is invalid", func(t *testing.T) {
+		cfg := load(t)
+		cfg.Sandbox.SetupCmds = [][]string{
+			{"apt-get", "install"},
+			{}, // empty argv
+		}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatal("empty argv entry should be rejected")
+		}
+		if !strings.Contains(err.Error(), "setup_cmds[1]") {
+			t.Errorf("error should mention setup_cmds[1], got %q", err.Error())
+		}
+	})
+
+	t.Run("parse from yaml", func(t *testing.T) {
+		yaml := validYAML + `
+sandbox:
+  setup_cmds:
+    - ["apt-get", "install", "-y", "libpq-dev"]
+    - ["sh", "-c", "echo hi"]
+`
+		cfg, err := Load(writeTemp(t, yaml))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if len(cfg.Sandbox.SetupCmds) != 2 {
+			t.Fatalf("want 2 setup_cmds, got %d", len(cfg.Sandbox.SetupCmds))
+		}
+		if cfg.Sandbox.SetupCmds[0][0] != "apt-get" {
+			t.Errorf("setup_cmds[0][0] = %q, want apt-get", cfg.Sandbox.SetupCmds[0][0])
+		}
+	})
+}
+
+func TestValidate_LocalMounts(t *testing.T) {
+	load := func(t *testing.T) Config {
+		t.Helper()
+		cfg, err := Load(writeTemp(t, validYAML))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		return cfg
+	}
+
+	t.Run("empty local_mounts is valid", func(t *testing.T) {
+		cfg := load(t)
+		cfg.Sandbox.LocalMounts = nil
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("nil LocalMounts should be valid, got %v", err)
+		}
+	})
+
+	t.Run("valid mount passes", func(t *testing.T) {
+		hostDir := t.TempDir()
+		cfg := load(t)
+		cfg.Sandbox.LocalMounts = []LocalMount{
+			{Host: hostDir, Container: "/sibling"},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("valid mount should pass, got %v", err)
+		}
+	})
+
+	t.Run("relative host path is invalid", func(t *testing.T) {
+		cfg := load(t)
+		cfg.Sandbox.LocalMounts = []LocalMount{
+			{Host: "relative/path", Container: "/sibling"},
+		}
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "host") {
+			t.Errorf("relative host path should be rejected with 'host' in message, got %v", err)
+		}
+	})
+
+	t.Run("relative container path is invalid", func(t *testing.T) {
+		hostDir := t.TempDir()
+		cfg := load(t)
+		cfg.Sandbox.LocalMounts = []LocalMount{
+			{Host: hostDir, Container: "relative/ctr"},
+		}
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "container") {
+			t.Errorf("relative container path should be rejected with 'container' in message, got %v", err)
+		}
+	})
+
+	t.Run("duplicate container path is invalid", func(t *testing.T) {
+		hostDir1 := t.TempDir()
+		hostDir2 := t.TempDir()
+		cfg := load(t)
+		cfg.Sandbox.LocalMounts = []LocalMount{
+			{Host: hostDir1, Container: "/shared"},
+			{Host: hostDir2, Container: "/shared"},
+		}
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "duplicated") {
+			t.Errorf("duplicate container path should be rejected, got %v", err)
+		}
+	})
+
+	t.Run("missing host dir is invalid", func(t *testing.T) {
+		cfg := load(t)
+		cfg.Sandbox.LocalMounts = []LocalMount{
+			{Host: "/this/path/does/not/exist/at/all", Container: "/sibling"},
+		}
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "existing directory") {
+			t.Errorf("missing host dir should be rejected with 'existing directory' in message, got %v", err)
+		}
+	})
+
+	t.Run("parse from yaml", func(t *testing.T) {
+		hostDir := t.TempDir()
+		yaml := validYAML + "sandbox:\n  local_mounts:\n    - host: " + hostDir + "\n      container: /sibling\n"
+		cfg, err := Load(writeTemp(t, yaml))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if len(cfg.Sandbox.LocalMounts) != 1 {
+			t.Fatalf("want 1 local_mount, got %d", len(cfg.Sandbox.LocalMounts))
+		}
+		if cfg.Sandbox.LocalMounts[0].Host != hostDir {
+			t.Errorf("host = %q, want %q", cfg.Sandbox.LocalMounts[0].Host, hostDir)
+		}
+		if cfg.Sandbox.LocalMounts[0].Container != "/sibling" {
+			t.Errorf("container = %q, want /sibling", cfg.Sandbox.LocalMounts[0].Container)
+		}
+	})
+}

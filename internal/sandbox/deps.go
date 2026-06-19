@@ -148,6 +148,16 @@ type DepOptions struct {
 	// userCacheDir, when set, overrides the base directory for bugbot-managed
 	// fetch caches (test seam). Empty uses os.UserCacheDir.
 	userCacheDir string
+
+	// LocalMounts, when non-nil, are additional read-only host directories to
+	// bind-mount into the sandbox INDEPENDENT of ecosystem detection. They
+	// compose with any ecosystem-derived mounts (off/host/fetch) so a repo can
+	// have both a registry-cache mount AND sibling-directory mounts active in
+	// the same Spec. Resolved from config.Sandbox.LocalMounts by the caller;
+	// the sandbox package does not parse in-repo manifests (v1 security boundary).
+	// Each mount must have HostPath set; Shared is always true (host-owned dirs,
+	// no SELinux :Z relabel). See ROMount.Shared for the full rationale.
+	LocalMounts []ROMount
 }
 
 // Resolution is the result of resolving a repo's dependency strategy: the
@@ -314,7 +324,17 @@ func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
 	if !ValidDepStrategy(opts.Strategy) {
 		return Resolution{}, fmt.Errorf("sandbox: invalid dependency strategy %q (want off, host, or fetch)", opts.Strategy)
 	}
-	return resolveWith(ecosystems, repoDir, opts)
+	res, err := resolveWith(ecosystems, repoDir, opts)
+	if err != nil {
+		return Resolution{}, err
+	}
+	// Append operator-configured local mounts AFTER ecosystem-derived mounts.
+	// This is independent of ecosystem detection: a repo may have local mounts
+	// even when no ecosystem matched (Strategy=off). Order: ecosystem mounts
+	// first (registry caches), then operator local mounts. The validateMounts
+	// uniqueness check in sandbox.Exec backstops any ContainerPath collisions.
+	res.ROMounts = append(res.ROMounts, opts.LocalMounts...)
+	return res, nil
 }
 
 // resolveWith is the internal dispatcher that iterates the provided table and

@@ -9,6 +9,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -177,6 +178,44 @@ type Sandbox struct {
 	//         bugbot-managed cache, then mount it read-only; everything after is
 	//         network-none.
 	DepStrategy string `yaml:"dep_strategy"`
+	// SetupCmds is an ordered list of argv commands to run inside the container
+	// BEFORE the main sandbox command but BEFORE any per-ecosystem offline-install
+	// setup (e.g. pip install from cache). This ordering ensures system-level
+	// dependencies (apt packages, shared libraries, custom protoc installs) are
+	// present when the ecosystem installer runs. Commands share the same
+	// network-none run, so they MUST NOT require network access; anything needing
+	// the network must be baked into the image or handled via dep_strategy fetch.
+	// Each entry is a non-empty argv slice; empty argv entries are rejected by
+	// config.Validate. Failures exit with code 125 (env_error semantics, never a
+	// bug demonstration). Empty default — no operator setup commands.
+	SetupCmds [][]string `yaml:"setup_cmds"`
+	// LocalMounts is an ordered list of host directories to bind-mount
+	// read-only into the sandbox. This is an ORTHOGONAL layer to dep_strategy:
+	// both may be active simultaneously (e.g. fetch + local mounts). Use it to
+	// expose monorepo siblings, locally-checked-out path dependencies, or any
+	// on-disk dependency that falls outside the scanned repo tree.
+	//
+	// Mounts are read-only with Shared=true (no SELinux :Z relabeling) because
+	// operator-supplied source trees are host-owned, multi-access directories.
+	//
+	// v1 constraint: paths come ONLY from this operator config (trusted boundary).
+	// Auto-derivation from in-repo manifests (go.work, Cargo.toml, package.json)
+	// is a deliberate fast-follow gated on containment validation — see issue
+	// bugbot-ixu for the security rationale.
+	LocalMounts []LocalMount `yaml:"local_mounts"`
+}
+
+// LocalMount is one entry in sandbox.local_mounts: a host directory
+// bind-mounted read-only at a fixed container path.
+type LocalMount struct {
+	// Host is the absolute host filesystem path to expose. Required; must exist
+	// at config-load time so a missing directory is caught before podman emits
+	// an opaque bind-mount error.
+	Host string `yaml:"host"`
+	// Container is the absolute container path where the host directory appears.
+	// Required; must be unique across all local_mounts entries and across any
+	// registry-cache mounts that the dep_strategy may add.
+	Container string `yaml:"container"`
 }
 
 // Report configures where findings are written and which sinks receive them.
@@ -694,6 +733,27 @@ func (c *Config) Validate() error {
 	case "", "off", "host", "fetch":
 	default:
 		return fmt.Errorf("config: sandbox.dep_strategy %q invalid (want off, host, or fetch)", c.Sandbox.DepStrategy)
+	}
+	for i, argv := range c.Sandbox.SetupCmds {
+		if len(argv) == 0 {
+			return fmt.Errorf("config: sandbox.setup_cmds[%d] must not be empty", i)
+		}
+	}
+	seen := make(map[string]bool)
+	for i, m := range c.Sandbox.LocalMounts {
+		if m.Host == "" || !filepath.IsAbs(m.Host) {
+			return fmt.Errorf("config: sandbox.local_mounts[%d].host %q must be an absolute path", i, m.Host)
+		}
+		if m.Container == "" || !filepath.IsAbs(m.Container) {
+			return fmt.Errorf("config: sandbox.local_mounts[%d].container %q must be an absolute path", i, m.Container)
+		}
+		if seen[m.Container] {
+			return fmt.Errorf("config: sandbox.local_mounts[%d].container %q is duplicated", i, m.Container)
+		}
+		seen[m.Container] = true
+		if info, err := os.Stat(m.Host); err != nil || !info.IsDir() {
+			return fmt.Errorf("config: sandbox.local_mounts[%d].host %q must be an existing directory", i, m.Host)
+		}
 	}
 
 	if c.Storage.Path == "" {
