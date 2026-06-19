@@ -164,6 +164,61 @@ func TestDetectBuildSystems(t *testing.T) {
 			markers: []string{"CMakeLists.txt", "meson.build", "Makefile", "build.ninja"},
 			want:    []BuildSystem{BuildSystemCMake, BuildSystemMeson, BuildSystemMake, BuildSystemNinja},
 		},
+		// --- .NET / dotnet single-marker cases ---
+		{
+			name:    "dotnet via .sln (glob)",
+			markers: []string{"MyApp.sln"},
+			want:    []BuildSystem{BuildSystemDotnet},
+		},
+		{
+			name:    "dotnet via .csproj (glob)",
+			markers: []string{"MyLib.csproj"},
+			want:    []BuildSystem{BuildSystemDotnet},
+		},
+		{
+			name:    "dotnet via Directory.Build.props",
+			markers: []string{"Directory.Build.props"},
+			want:    []BuildSystem{BuildSystemDotnet},
+		},
+		// --- Maven single-marker case ---
+		{
+			name:    "maven via pom.xml",
+			markers: []string{"pom.xml"},
+			want:    []BuildSystem{BuildSystemMaven},
+		},
+		// --- Gradle single-marker cases ---
+		{
+			name:    "gradle via build.gradle",
+			markers: []string{"build.gradle"},
+			want:    []BuildSystem{BuildSystemGradle},
+		},
+		{
+			name:    "gradle via build.gradle.kts",
+			markers: []string{"build.gradle.kts"},
+			want:    []BuildSystem{BuildSystemGradle},
+		},
+		{
+			name:    "gradle via settings.gradle",
+			markers: []string{"settings.gradle"},
+			want:    []BuildSystem{BuildSystemGradle},
+		},
+		{
+			name:    "gradle via settings.gradle.kts",
+			markers: []string{"settings.gradle.kts"},
+			want:    []BuildSystem{BuildSystemGradle},
+		},
+		// --- ordering: go.mod + .csproj + Makefile → go_module before dotnet before make ---
+		{
+			name:    "go.mod+.csproj+Makefile ordering",
+			markers: []string{"go.mod", "App.csproj", "Makefile"},
+			want:    []BuildSystem{BuildSystemGoModule, BuildSystemDotnet, BuildSystemMake},
+		},
+		// --- coexistence: Maven + Gradle in same repo (polyglot / migration scenario) ---
+		{
+			name:    "maven+gradle coexistence",
+			markers: []string{"pom.xml", "build.gradle"},
+			want:    []BuildSystem{BuildSystemMaven, BuildSystemGradle},
+		},
 	}
 
 	for _, tc := range cases {

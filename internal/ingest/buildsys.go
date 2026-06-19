@@ -25,6 +25,15 @@ const (
 	BuildSystemNPM BuildSystem = "npm"
 	// BuildSystemPython is detected from a root-level pyproject.toml or setup.py.
 	BuildSystemPython BuildSystem = "python"
+	// BuildSystemDotnet is detected from a root-level *.sln, *.csproj, or
+	// Directory.Build.props. Solution and project files are user-named, so
+	// detection uses glob matching rather than a fixed name.
+	BuildSystemDotnet BuildSystem = "dotnet"
+	// BuildSystemMaven is detected from a root-level pom.xml.
+	BuildSystemMaven BuildSystem = "maven"
+	// BuildSystemGradle is detected from a root-level build.gradle,
+	// build.gradle.kts, settings.gradle, or settings.gradle.kts.
+	BuildSystemGradle BuildSystem = "gradle"
 	// BuildSystemCMake is detected from a root-level CMakeLists.txt.
 	// C/C++ repos commonly coexist with other markers (e.g. Bazel), so cmake
 	// appears after all language-specific systems to avoid displacing a more
@@ -53,13 +62,17 @@ const (
 //  5. Cargo (Cargo.toml) — Rust.
 //  6. NPM (package.json) — bare npm / single-package JS.
 //  7. Python (pyproject.toml, setup.py) — Python.
-//  8. CMake (CMakeLists.txt) — C/C++ with cmake+ctest support.
-//  9. Meson (meson.build) — C/C++ with meson test support.
-//  10. Make (Makefile / GNUmakefile) — detected but heterogeneous; no specific
+//  8. Dotnet (*.sln, *.csproj, Directory.Build.props) — C# / .NET.
+//  9. Maven (pom.xml) — Java / JVM with Maven.
+//  10. Gradle (build.gradle, build.gradle.kts, settings.gradle,
+//     settings.gradle.kts) — Java / Kotlin with Gradle.
+//  11. CMake (CMakeLists.txt) — C/C++ with cmake+ctest support.
+//  12. Meson (meson.build) — C/C++ with meson test support.
+//  13. Make (Makefile / GNUmakefile) — detected but heterogeneous; no specific
 //     repro guidance is generated (targets are not introspectable).
-//  11. Ninja (build.ninja) — same constraint as make.
+//  14. Ninja (build.ninja) — same constraint as make.
 //
-// C/C++ markers (8-11) are placed after all language-specific entries so that
+// C/C++ markers (11-14) are placed after all language-specific entries so that
 // a Go repo with a convenience Makefile keeps go_module as primary, and a Bazel
 // C++ repo keeps bazel first — both fall out of the existing priority positions.
 //
@@ -72,6 +85,15 @@ func DetectBuildSystems(repoDir string) []BuildSystem {
 	has := func(name string) bool {
 		_, err := os.Stat(filepath.Join(repoDir, name))
 		return err == nil
+	}
+
+	// hasGlob reports whether any root-level file matches the given glob pattern
+	// (e.g. "*.sln"). It operates on the immediate directory only — no
+	// sub-directory traversal — so it matches user-named project files such as
+	// MyApp.sln or MyLib.csproj without requiring a fixed filename.
+	hasGlob := func(pattern string) bool {
+		matches, err := filepath.Glob(filepath.Join(repoDir, pattern))
+		return err == nil && len(matches) > 0
 	}
 
 	var out []BuildSystem
@@ -111,22 +133,38 @@ func DetectBuildSystems(repoDir string) []BuildSystem {
 		out = append(out, BuildSystemPython)
 	}
 
-	// 8. CMake — C/C++ with cmake+ctest.
+	// 8. Dotnet — C# / .NET. Solution and project files are user-named, so *.sln
+	// and *.csproj use glob matching; Directory.Build.props is a fixed name.
+	if hasGlob("*.sln") || hasGlob("*.csproj") || has("Directory.Build.props") {
+		out = append(out, BuildSystemDotnet)
+	}
+
+	// 9. Maven — Java / JVM with Maven.
+	if has("pom.xml") {
+		out = append(out, BuildSystemMaven)
+	}
+
+	// 10. Gradle — Java / Kotlin with Gradle.
+	if has("build.gradle") || has("build.gradle.kts") || has("settings.gradle") || has("settings.gradle.kts") {
+		out = append(out, BuildSystemGradle)
+	}
+
+	// 11. CMake — C/C++ with cmake+ctest.
 	if has("CMakeLists.txt") {
 		out = append(out, BuildSystemCMake)
 	}
 
-	// 9. Meson — C/C++ with meson test.
+	// 12. Meson — C/C++ with meson test.
 	if has("meson.build") {
 		out = append(out, BuildSystemMeson)
 	}
 
-	// 10. Make — heterogeneous; detect-and-record only.
+	// 13. Make — heterogeneous; detect-and-record only.
 	if has("Makefile") || has("GNUmakefile") {
 		out = append(out, BuildSystemMake)
 	}
 
-	// 11. Ninja — heterogeneous; detect-and-record only.
+	// 14. Ninja — heterogeneous; detect-and-record only.
 	if has("build.ninja") {
 		out = append(out, BuildSystemNinja)
 	}

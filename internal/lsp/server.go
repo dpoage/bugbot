@@ -29,9 +29,9 @@ type ServerConfig struct {
 
 // DefaultServers is the built-in server registry: gopls for Go,
 // typescript-language-server for TS/JS, pyright (with pylsp as fallback) for
-// Python, rust-analyzer for Rust, and clangd for C/C++. Order matters only for
-// extensions served by multiple configs (Python): the first config whose binary
-// is installed wins.
+// Python, rust-analyzer for Rust, clangd for C/C++, and csharp-ls for C#.
+// Order matters only for extensions served by multiple configs (Python): the
+// first config whose binary is installed wins.
 func DefaultServers() []ServerConfig {
 	return []ServerConfig{
 		{
@@ -67,6 +67,11 @@ func DefaultServers() []ServerConfig {
 				".c": "c", ".h": "c",
 				".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp",
 			},
+		},
+		{
+			// csharp-ls speaks LSP over stdio with no extra arguments.
+			Cmd:         "csharp-ls",
+			LanguageIDs: map[string]string{".cs": "csharp"},
 		},
 	}
 }

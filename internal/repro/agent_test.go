@@ -71,9 +71,12 @@ func TestHasGuidance(t *testing.T) {
 	}
 
 	// Pin the expected membership with no systems.
+	// C# is build-system-independent (dotnet test is uniform) → true always.
+	// Java and Kotlin are build-system-dependent (Maven vs Gradle differ) → false
+	// with no systems (falls through to generic fallback).
 	wantNoSystems := map[ingest.Language]bool{
 		ingest.LangGo: true, ingest.LangPython: true, ingest.LangJavaScript: true,
-		ingest.LangTypeScript: true, ingest.LangRust: true,
+		ingest.LangTypeScript: true, ingest.LangRust: true, ingest.LangCSharp: true,
 	}
 	for _, lang := range all {
 		if got := HasGuidance(lang); got != wantNoSystems[lang] {
@@ -98,6 +101,23 @@ func TestHasGuidance(t *testing.T) {
 		}
 		if HasGuidance(cLang, ingest.BuildSystemNinja) {
 			t.Errorf("HasGuidance(%s, ninja only) must be false (heterogeneous targets, no specific guidance)", cLang)
+		}
+	}
+
+	// Java/Kotlin with maven or gradle → HasGuidance must be true.
+	for _, jLang := range []ingest.Language{ingest.LangJava, ingest.LangKotlin} {
+		if !HasGuidance(jLang, ingest.BuildSystemMaven) {
+			t.Errorf("HasGuidance(%s, maven) must be true", jLang)
+		}
+		if !HasGuidance(jLang, ingest.BuildSystemGradle) {
+			t.Errorf("HasGuidance(%s, gradle) must be true", jLang)
+		}
+	}
+
+	// Java/Kotlin with no systems → HasGuidance must be false.
+	for _, jLang := range []ingest.Language{ingest.LangJava, ingest.LangKotlin} {
+		if HasGuidance(jLang) {
+			t.Errorf("HasGuidance(%s) [no systems] must be false (build-system-dependent)", jLang)
 		}
 	}
 }
@@ -184,5 +204,81 @@ func TestSystemPrompt_CppMeson(t *testing.T) {
 	}
 	if strings.Contains(p, "ctest") {
 		t.Error("C++ + meson prompt must not mention ctest (cmake absent)")
+	}
+}
+
+// TestSystemPrompt_CSharp confirms that a C# finding gets dotnet test guidance
+// regardless of build systems supplied, and does not contain invented maven or
+// gradle invocations.
+func TestSystemPrompt_CSharp(t *testing.T) {
+	p := systemPrompt(ingest.LangCSharp, noSystems, nil)
+
+	if !strings.Contains(p, "dotnet test") {
+		t.Error("C# prompt must mention dotnet test")
+	}
+	if !strings.Contains(p, "--filter") {
+		t.Error("C# prompt must include --filter flag")
+	}
+	// Must not include Java build tool commands.
+	if strings.Contains(p, "mvn test") || strings.Contains(p, "gradle test") {
+		t.Error("C# prompt must not contain mvn or gradle invocations")
+	}
+	if !strings.Contains(p, "You are Bugbot's reproducer agent.") {
+		t.Error("repro prompt lost its fixed intro")
+	}
+}
+
+// TestSystemPrompt_JavaMaven confirms that a Java finding in a Maven repo gets
+// mvn test guidance and does not contain gradle invocations.
+func TestSystemPrompt_JavaMaven(t *testing.T) {
+	mavenSystems := []ingest.BuildSystem{ingest.BuildSystemMaven}
+	p := systemPrompt(ingest.LangJava, mavenSystems, nil)
+
+	if !strings.Contains(p, "mvn test") {
+		t.Error("Java + maven prompt must mention mvn test")
+	}
+	if !strings.Contains(p, "-Dtest=") {
+		t.Error("Java + maven prompt must include -Dtest= filter")
+	}
+	// Must not contain gradle commands when Maven is the build system.
+	if strings.Contains(p, "gradle test") {
+		t.Error("Java + maven prompt must not contain gradle invocations")
+	}
+}
+
+// TestSystemPrompt_JavaGradle confirms that a Java finding in a Gradle repo
+// gets gradle test guidance and does not contain maven invocations.
+func TestSystemPrompt_JavaGradle(t *testing.T) {
+	gradleSystems := []ingest.BuildSystem{ingest.BuildSystemGradle}
+	p := systemPrompt(ingest.LangJava, gradleSystems, nil)
+
+	if !strings.Contains(p, "gradle test") {
+		t.Error("Java + gradle prompt must mention gradle test")
+	}
+	if !strings.Contains(p, "--tests") {
+		t.Error("Java + gradle prompt must include --tests filter")
+	}
+	// Must not contain maven commands when Gradle is the build system.
+	if strings.Contains(p, "mvn test") {
+		t.Error("Java + gradle prompt must not contain mvn invocations")
+	}
+}
+
+// TestSystemPrompt_KotlinGradle confirms that a Kotlin finding in a Gradle repo
+// gets gradle test guidance — Kotlin builds with Gradle, so the Kotlin+Gradle
+// case shares the Java+Gradle path.
+func TestSystemPrompt_KotlinGradle(t *testing.T) {
+	gradleSystems := []ingest.BuildSystem{ingest.BuildSystemGradle}
+	p := systemPrompt(ingest.LangKotlin, gradleSystems, nil)
+
+	if !strings.Contains(p, "gradle test") {
+		t.Error("Kotlin + gradle prompt must mention gradle test")
+	}
+	if !strings.Contains(p, "--tests") {
+		t.Error("Kotlin + gradle prompt must include --tests filter")
+	}
+	// Must not contain maven commands.
+	if strings.Contains(p, "mvn test") {
+		t.Error("Kotlin + gradle prompt must not contain mvn invocations")
 	}
 }
