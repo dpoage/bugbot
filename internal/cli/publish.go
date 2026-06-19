@@ -995,8 +995,5 @@ func isGHGoneOrNotFound(err error) bool {
 		return true
 	}
 	lower := strings.ToLower(msg)
-	if strings.Contains(lower, "was deleted") {
-		return true
-	}
-	return false
+	return strings.Contains(lower, "was deleted")
 }

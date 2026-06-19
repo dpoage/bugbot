@@ -414,7 +414,8 @@ func (t *gitLogTool) Run(ctx context.Context, raw json.RawMessage) (string, erro
 		}
 		for i := 0; i < sp; i++ {
 			c := line[i]
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+			if !isHex {
 				return false
 			}
 		}
