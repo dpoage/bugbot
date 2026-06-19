@@ -202,7 +202,7 @@ func TestCartography_FingerprintCache(t *testing.T) {
 	st, repo := openCartographyFixture(t)
 
 	finder := newScriptedClient()
-	finder.fallback = `A canned summary.`
+	finder.fallback = `{"summary":"A canned summary."}`
 	verifier := newScriptedClient()
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
 		Cartographer: true,
@@ -359,7 +359,7 @@ func TestCartography_StripsThinkBlock(t *testing.T) {
 	st, repo := openCartographyFixture(t)
 
 	finder := newScriptedClient()
-	finder.fallback = "<think>\nThe user wants a summary. Let me reason about the package...\n</think>\n\nPurpose: a helper package."
+	finder.fallback = "<think>\nThe user wants a summary. Let me reason about the package...\n</think>\n\n{\"summary\":\"Purpose: a helper package.\"}"
 	verifier := newScriptedClient()
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{Cartographer: true})
 	if err != nil {
@@ -397,6 +397,44 @@ func TestCartography_StripsThinkBlock(t *testing.T) {
 	}
 	if !found {
 		t.Error("sub package summary was not persisted")
+	}
+}
+
+// TestCartography_RepairsMalformedSummary pins bugbot-89r.1: routing the summary
+// through agent.Runner.RunJSON means a first completion that is not valid JSON is
+// REPAIRED on a second round-trip rather than silently dropped (the old
+// client.Complete path returned the raw text and lost a malformed answer). The
+// sequence client returns junk first, then a schema-valid object; the stored
+// summary must be the repaired value, and a second completion must have run.
+func TestCartography_RepairsMalformedSummary(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openCartographyFixture(t)
+
+	valid := `{"summary":"Repaired package summary."}`
+	finder := newScriptedSequenceClient(valid, "this is not json, only reasoning prose", valid)
+	verifier := newScriptedClient()
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{Cartographer: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := repo.Snapshot(ctx, ingest.ScanFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fps, err := repo.Fingerprints(ctx, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cart := f.cartograph(ctx, &Result{}, finder, snap, []string{"sub/sub.go"}, fps, nil)
+	if cart == nil {
+		t.Fatal("nil cartography")
+	}
+	if got := cart.summaries["sub"]; got != "Repaired package summary." {
+		t.Errorf("summary = %q, want the repaired value; a malformed first completion must be repaired, not dropped", got)
+	}
+	if n := len(finder.allRequests()); n < 2 {
+		t.Errorf("expected >=2 completions (initial + repair round-trip), got %d", n)
 	}
 }
 

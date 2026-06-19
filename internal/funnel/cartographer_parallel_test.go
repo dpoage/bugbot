@@ -118,7 +118,7 @@ func (c *cancelAfterFirstClient) Complete(ctx context.Context, _ llm.Request) (l
 		return llm.Response{}, context.Canceled
 	}
 	resp := llm.Response{
-		Text:       "summary for first package",
+		Text:       `{"summary":"summary for first package"}`,
 		StopReason: llm.StopEndTurn,
 		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5},
 	}
@@ -173,7 +173,8 @@ func TestCartographer_FullPassPersistsAll(t *testing.T) {
 	st, repo, targets := openMultiPkgFixture(t, "alpha", "bravo", "charlie")
 	snap, fps := snapAndFps(t, repo)
 
-	client := newScriptedClient() // fallback returns a non-empty body for every package
+	client := newScriptedClient()
+	client.fallback = `{"summary":"package summary"}` // valid summary JSON for every package
 	f, err := New(RoleClients{Finder: client, Verifier: newScriptedClient()}, st, repo, Options{
 		Cartographer: true,
 		MaxParallel:  4,
@@ -222,7 +223,7 @@ func (c *barrierClient) Complete(ctx context.Context, _ llm.Request) (llm.Respon
 		return llm.Response{}, ctx.Err()
 	}
 	return llm.Response{
-		Text:       "concurrent summary",
+		Text:       `{"summary":"concurrent summary"}`,
 		StopReason: llm.StopEndTurn,
 		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5},
 	}, nil

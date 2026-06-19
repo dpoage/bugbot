@@ -180,14 +180,6 @@ const (
 	// windows and the summary is cached, so a generous 128 KB buys a
 	// well-grounded summary at a one-time-per-change cost.
 	DefaultCartographerInputBytes = 128 * 1024
-	// DefaultCartographerMaxTokens caps the OUTPUT of one summary completion.
-	// It must cover BOTH the model's reasoning AND the visible summary:
-	// reasoning models (e.g. MiniMax-M3) emit a <think> block inline before
-	// the answer, so a cap that is too low is spent entirely on reasoning and
-	// returns empty/truncated visible text — the summary is then dropped and
-	// the input tokens wasted. 8192 leaves ample room for reasoning plus a
-	// full summary; the summary itself stays short by the system prompt.
-	DefaultCartographerMaxTokens = 8192
 )
 
 // cartographyInjectMaxPkgs and cartographyInjectMaxBytes bound the size of

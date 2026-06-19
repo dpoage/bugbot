@@ -354,7 +354,7 @@ func (f *Funnel) regenSummaries(
 			if budget != nil && budget.finderOverHard() {
 				return
 			}
-			summary, sErr := f.summarizePackage(runCtx, client, pkg, packages[pkg], fps)
+			summary, sErr := f.summarizePackage(runCtx, client, budget, pkg, packages[pkg], fps)
 			if sErr != nil || summary == "" {
 				if sErr == nil {
 					sErr = errors.New("cartograph: empty summary")
@@ -378,14 +378,23 @@ func (f *Funnel) regenSummaries(
 	wg.Wait()
 }
 
-// summarizePackage builds the bounded input for one package's summary
-// completion and calls client.Complete once (no tool loop). The input is
-// the package's member files head-truncated to
-// DefaultCartographerHeadLines, the whole package capped at
-// DefaultCartographerInputBytes. The output is the assistant text trimmed
-// of whitespace; an empty result is reported as an error so the caller
-// drops the package from the regen batch.
-func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, pkg string, members []string, fps map[string]string) (string, error) {
+// cartographySummarySchema constrains the package-summary completion to a
+// single {"summary": string} object. Routing the summary through RunJSON with
+// this schema (instead of a bare client.Complete) gives the cartographer the
+// same guarantees every other agent has: shape validation, a one-shot repair
+// round-trip when the first completion is malformed (so a bad summary is fixed,
+// not silently dropped), and think-block stripping via stripBody.
+var cartographySummarySchema = json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","description":"<=120 word package summary"}},"required":["summary"],"additionalProperties":false}`)
+
+// summarizePackage builds the bounded input for one package's summary and runs
+// a zero-tool agent.Runner via RunJSON to produce it. The input is the
+// package's member files head-truncated to DefaultCartographerHeadLines, the
+// whole package capped at DefaultCartographerInputBytes. The runner shares the
+// finder budget pool (via budget.finderRunnerLimits) so an in-flight summary
+// respects the run-wide token budget; budget may be nil (no pool gating). The
+// output is the schema's "summary" field trimmed of whitespace; an empty result
+// is reported as an error so the caller drops the package from the regen batch.
+func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, budget *budgetState, pkg string, members []string, fps map[string]string) (string, error) {
 	if len(members) == 0 {
 		return "", errors.New("cartograph: empty members for package")
 	}
@@ -435,18 +444,21 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, pkg st
 		}
 	}
 
-	req := llm.Request{
-		System: cartographySystemPrompt,
-		Messages: []llm.Message{
-			{Role: llm.RoleUser, Content: body.String()},
-		},
-		MaxTokens: DefaultCartographerMaxTokens,
+	limits := f.opts.FinderLimits
+	if budget != nil {
+		// The cartographer shares the finder pool, so its per-run limits and
+		// per-turn budget check come from finderRunnerLimits — the same hook
+		// finders use to stop mid-run when the shared budget is exhausted.
+		limits = budget.finderRunnerLimits(f.opts.FinderLimits)
 	}
-	resp, err := client.Complete(ctx, req)
-	if err != nil {
+	runner := f.newAgentRunner(client, nil, cartographySystemPrompt, limits)
+	var out struct {
+		Summary string `json:"summary"`
+	}
+	if _, err := runner.RunJSON(ctx, body.String(), cartographySummarySchema, &out); err != nil {
 		return "", err
 	}
-	summary := strings.TrimSpace(llm.StripThinkBlocks(resp.Text))
+	summary := strings.TrimSpace(out.Summary)
 	if summary == "" {
 		return "", errors.New("cartograph: empty summary from LLM")
 	}
