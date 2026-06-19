@@ -6,6 +6,86 @@ import (
 	"github.com/dpoage/bugbot/internal/ingest"
 )
 
+// LensName is the stable identifier for a builtin lens. It matches the Name
+// field of the corresponding Lens descriptor and keys the manifestations and
+// lensYields tables. Typed so callers reference consts rather than bare
+// string literals; the underlying type is string so it assigns to Lens.Name
+// and map keys without conversion.
+type LensName = string
+
+// Builtin lens name constants. These are the authoritative values; all
+// references inside the funnel package should use these rather than repeated
+// string literals so a rename is a single-site change.
+const (
+	LensNilSafety             LensName = "nil-safety/error-handling"
+	LensDiffIntent            LensName = "diff-intent"
+	LensConcurrency           LensName = "concurrency"
+	LensResourceLeaks         LensName = "resource-leaks"
+	LensBoundaryConditions    LensName = "boundary-conditions"
+	LensAPIContractMisuse     LensName = "api-contract-misuse"
+	LensInjection             LensName = "injection/input-validation"
+	LensMemorySafety          LensName = "memory-safety"
+	LensExceptionSafety       LensName = "exception-safety"
+	LensDynamicTyping         LensName = "dynamic-typing"
+	LensCrossLanguageBoundary LensName = "cross-language-boundary"
+)
+
+// builtinDiffIntentLens and builtinCrossLanguageBoundaryLens are the resolved
+// Lens descriptors for the two custom-unit lenses. Defining them once here
+// eliminates the per-call linear search (and its panic-on-missing branch) in
+// hypothesize.go: diffIntentLens() and crossLanguageBoundaryLens() simply
+// return these values.
+var builtinDiffIntentLens = Lens{
+	// diff-intent is the unique-advantage lens on commit scans, where the
+	// commit message and diff are both available and the change is fresh.
+	// It fires ONLY on commit-triggered runs (the funnel emits zero
+	// diff-intent tasks on sweeps or when ChangeContext is nil), so it
+	// never competes with the taxonomy lenses on sweep runs. It is
+	// language-free: Core-only, no manifestation rows; its yield lives in
+	// lensYields under anyLanguage (95 — above concurrency's Go column,
+	// below nil-safety's).
+	Name: LensDiffIntent,
+	Core: "Hunt for intent-vs-implementation mismatches in a specific commit: " +
+		"the change's implementation contradicts its stated intent (the diff does " +
+		"something the commit message says it does not, or omits something it " +
+		"claims to do); and existing callers whose assumptions the change silently " +
+		"breaks (a function's contract, precondition, or return invariant shifts " +
+		"in the diff, but call sites checked via find_references still rely on the " +
+		"old behavior). Confirm every finding by reading the diff AND the call " +
+		"sites with find_references — do not report a mismatch you have not " +
+		"verified in the actual code. Finding nothing is a valid outcome.",
+}
+
+var builtinCrossLanguageBoundaryLens = Lens{
+	// cross-language-boundary is the cross-language differentiator: in a
+	// polyglot repo the densest bug habitat is the seam BETWEEN
+	// languages (a producer in one language, a consumer in another).
+	// Single-language tools are blind there because they only see one
+	// side of the contract. The lens is Core-only/language-free (no
+	// manifestation rows): the failure mode is the contract gap, which
+	// is language-free by definition — what matters is that two
+	// different languages touch the same surface. Like diff-intent, it
+	// is a custom-unit lens: hypothesize skips it in the per-chunk loop
+	// (see buildUnits) and emits exactly one custom task per cross-
+	// language seam discovered by EnumerateSeams (see buildSeamTask).
+	// Yield lives in lensYields under anyLanguage only, since the lens
+	// applies to every language mix (the precondition is "the repo is
+	// polyglot", which the seam discovery enforces upstream).
+	Name: LensCrossLanguageBoundary,
+	Core: "Hunt for producer/consumer contract mismatches across a language " +
+		"boundary where one side WRITES a shared data format or env var and " +
+		"another side READS it: a field that one side emits and the other " +
+		"side does not expect (or expects under a different name); a type, " +
+		"unit, encoding, or nullability disagreement (string vs int, " +
+		"seconds vs milliseconds, base64 vs raw, empty-string vs null); a " +
+		"value one side can emit that the other side cannot parse; and a " +
+		"required-vs-optional disagreement (a producer that sometimes omits " +
+		"a key the consumer requires, or vice versa). Confirm every finding " +
+		"by reading BOTH named sides end-to-end — do not report a mismatch " +
+		"you have not verified in the actual code on each side. Finding " +
+		"nothing is a valid outcome: many seams are perfectly aligned.",
+}
+
 // Lens is a single hypothesis specialization for the finder stage. Each lens
 // narrows the finder agent to one class of defect, with a system-prompt
 // specialization that focuses attention without changing the strict
@@ -92,26 +172,7 @@ func BuiltinLenses() []Lens {
 				"value the caller will use. Confirm the bad value or missed failure can " +
 				"actually reach the use site on a reachable path.",
 		},
-		{
-			// diff-intent is the unique-advantage lens on commit scans, where the
-			// commit message and diff are both available and the change is fresh.
-			// It fires ONLY on commit-triggered runs (the funnel emits zero
-			// diff-intent tasks on sweeps or when ChangeContext is nil), so it
-			// never competes with the taxonomy lenses on sweep runs. It is
-			// language-free: Core-only, no manifestation rows; its yield lives in
-			// lensYields under anyLanguage (95 — above concurrency's Go column,
-			// below nil-safety's).
-			Name: "diff-intent",
-			Core: "Hunt for intent-vs-implementation mismatches in a specific commit: " +
-				"the change's implementation contradicts its stated intent (the diff does " +
-				"something the commit message says it does not, or omits something it " +
-				"claims to do); and existing callers whose assumptions the change silently " +
-				"breaks (a function's contract, precondition, or return invariant shifts " +
-				"in the diff, but call sites checked via find_references still rely on the " +
-				"old behavior). Confirm every finding by reading the diff AND the call " +
-				"sites with find_references — do not report a mismatch you have not " +
-				"verified in the actual code. Finding nothing is a valid outcome.",
-		},
+		builtinDiffIntentLens,
 		{
 			Name: "concurrency",
 			Core: "Hunt for concurrency defects: shared state read and written from " +
@@ -244,35 +305,7 @@ func BuiltinLenses() []Lens {
 				"outcome.",
 			Languages: []ingest.Language{ingest.LangPython, ingest.LangJavaScript, ingest.LangTypeScript},
 		},
-		{
-			// cross-language-boundary is the cross-language differentiator: in a
-			// polyglot repo the densest bug habitat is the seam BETWEEN
-			// languages (a producer in one language, a consumer in another).
-			// Single-language tools are blind there because they only see one
-			// side of the contract. The lens is Core-only/language-free (no
-			// manifestation rows): the failure mode is the contract gap, which
-			// is language-free by definition — what matters is that two
-			// different languages touch the same surface. Like diff-intent, it
-			// is a custom-unit lens: hypothesize skips it in the per-chunk loop
-			// (see buildUnits) and emits exactly one custom task per cross-
-			// language seam discovered by EnumerateSeams (see buildSeamTask).
-			// Yield lives in lensYields under anyLanguage only, since the lens
-			// applies to every language mix (the precondition is "the repo is
-			// polyglot", which the seam discovery enforces upstream).
-			Name: "cross-language-boundary",
-			Core: "Hunt for producer/consumer contract mismatches across a language " +
-				"boundary where one side WRITES a shared data format or env var and " +
-				"another side READS it: a field that one side emits and the other " +
-				"side does not expect (or expects under a different name); a type, " +
-				"unit, encoding, or nullability disagreement (string vs int, " +
-				"seconds vs milliseconds, base64 vs raw, empty-string vs null); a " +
-				"value one side can emit that the other side cannot parse; and a " +
-				"required-vs-optional disagreement (a producer that sometimes omits " +
-				"a key the consumer requires, or vice versa). Confirm every finding " +
-				"by reading BOTH named sides end-to-end — do not report a mismatch " +
-				"you have not verified in the actual code on each side. Finding " +
-				"nothing is a valid outcome: many seams are perfectly aligned.",
-		},
+		builtinCrossLanguageBoundaryLens,
 	}
 }
 
