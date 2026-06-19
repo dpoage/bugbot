@@ -307,7 +307,7 @@ func (f *Funnel) regenSummaries(
 	}
 
 	for _, pkg := range toRegen {
-		// Pre-launch break: stop spawning once the run is cancelled or the budget
+		// Pre-launch break: stop admitting once the run is cancelled or the budget
 		// is exhausted. ctx is the fanout's parent and regenSummaries never calls
 		// fo.stop, so ctx.Err() coincides with the workers' runCtx.Err().
 		if ctx.Err() != nil {
@@ -317,7 +317,7 @@ func (f *Funnel) regenSummaries(
 			break
 		}
 		pkg := pkg
-		fo.spawn(func(runCtx context.Context) {
+		if !fo.spawnSerial(func(runCtx context.Context) {
 			// Re-check now that we hold a slot: earlier units may have tripped the
 			// budget, or the run may have been cancelled, while we waited. The slot
 			// pool's fast path can hand out a slot on an already-cancelled ctx, so
@@ -347,7 +347,9 @@ func (f *Funnel) regenSummaries(
 				return
 			}
 			report(regenResult{pkg: pkg, summary: summary})
-		})
+		}) {
+			break // ctx cancelled while waiting for a slot
+		}
 	}
 	fo.wait()
 }

@@ -17,7 +17,9 @@ import (
 // What it owns:
 //   - a derived, cancellable runCtx (child of the caller's ctx), so stop()
 //     unblocks any unit still parked in slots.acquire;
-//   - one goroutine per spawned unit;
+//   - one goroutine per spawned unit, in either of two admission modes — spawn
+//     (eager: the unit's own goroutine contends for a slot) or spawnSerial
+//     (ordered: the caller blocks on the slot so units are admitted in order);
 //   - slot acquire (on runCtx, for the configured class) / deferred release;
 //   - the "acquire returned an error => the unit never runs" guard;
 //   - the shared WaitGroup that wait() joins.
@@ -60,6 +62,12 @@ func (f *Funnel) newFanout(ctx context.Context, class slotClass) *fanout {
 // runs. On success the slot is held for the whole of unit and released when unit
 // returns. unit receives the derived runCtx and must use it for the run so that
 // stop can cancel an in-flight unit.
+//
+// Admission is eager: the unit's OWN goroutine contends for the slot, so spawn
+// never blocks the caller and units are admitted in scheduler order, not spawn
+// order. Use it when every unit eventually runs (or a breaker/budget prunes the
+// tail and order is irrelevant). When a pool smaller than the unit count must
+// admit a reproducible prefix, use spawnSerial instead.
 func (fo *fanout) spawn(unit func(ctx context.Context)) {
 	fo.wg.Add(1)
 	go func() {
@@ -70,6 +78,28 @@ func (fo *fanout) spawn(unit func(ctx context.Context)) {
 		defer fo.pool.release()
 		unit(fo.runCtx)
 	}()
+}
+
+// spawnSerial acquires a slot in the CALLER's goroutine, then launches unit in
+// its own goroutine holding that slot. Because the caller blocks on
+// acquisition, units are admitted strictly in call order — the reproducible
+// prefix a constrained pool needs when there are more units than slots (e.g. the
+// cartographer must summarize toRegen[0] first under a budget or cancellation
+// cutoff, not whichever goroutine the scheduler happens to run first). It
+// returns false when acquisition fails (the run was stopped or the caller's ctx
+// was cancelled while waiting) so the caller can stop iterating. unit receives
+// the derived runCtx.
+func (fo *fanout) spawnSerial(unit func(ctx context.Context)) bool {
+	if err := fo.pool.acquire(fo.runCtx, fo.class); err != nil {
+		return false
+	}
+	fo.wg.Add(1)
+	go func() {
+		defer fo.wg.Done()
+		defer fo.pool.release()
+		unit(fo.runCtx)
+	}()
+	return true
 }
 
 // stop cancels the run: any unit still queued on slot acquisition returns at
