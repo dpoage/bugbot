@@ -93,6 +93,10 @@ func NewClient(ctx context.Context, provider config.Provider, providerName, mode
 			httpClient: opts.HTTPClient,
 			provider:   string(config.ProviderOpenAICompatible),
 			caps:       caps,
+			// Strict openai-compatible validators (MiniMax) reject object-valued
+			// additionalProperties; downgrade it to a boolean on the wire. See
+			// coerceBoolAdditionalProperties. First-party OpenAI keeps the subschema.
+			requireBoolAdditionalProps: true,
 		})
 	case config.ProviderGoogle:
 		ga, err := newGoogleAdapter(ctx, model, googleOptions{
