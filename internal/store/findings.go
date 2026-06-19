@@ -139,7 +139,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		suppressed, err := isSuppressedTx(ctx, tx, f.Fingerprint)
 		if err != nil {
-			return err
+			return annotateErr(s.path, "upsert_finding", err)
 		}
 		if suppressed {
 			f.Status = StatusDismissed
@@ -176,11 +176,11 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				encodeLenses(f.CorroboratingLenses),
 				f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout),
 			); err != nil {
-				return err
+				return annotateErr(s.path, "upsert_finding", err)
 			}
 
 		case err != nil:
-			return err
+			return annotateErr(s.path, "upsert_finding", err)
 
 		default:
 			// Update in place: keep id and created_at, refresh everything else.
@@ -256,7 +256,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				encodeLenses(f.CorroboratingLenses),
 				f.UpdatedAt.Format(timeLayout), f.ID,
 			); err != nil {
-				return err
+				return annotateErr(s.path, "upsert_finding", err)
 			}
 		}
 		return nil
@@ -279,6 +279,10 @@ func (s *Store) GetFindingByFingerprint(ctx context.Context, fingerprint string)
 }
 
 // ListFindings returns findings matching the filter, newest-updated first.
+//
+// ORDER BY updated_at DESC, id ASC: updated_at is the primary key for "newest";
+// id (the unique primary key) is the tiebreaker for findings that share an
+// updated_at down to the nanosecond.
 func (s *Store) ListFindings(ctx context.Context, filter FindingFilter) ([]Finding, error) {
 	var where []string
 	var args []any
@@ -307,19 +311,12 @@ func (s *Store) ListFindings(ctx context.Context, filter FindingFilter) ([]Findi
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, annotateErr(s.path, "list_findings", err)
 	}
 	defer func() { _ = rows.Close() }()
-
-	var out []Finding
-	for rows.Next() {
-		f, err := scanFinding(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, f)
-	}
-	return out, rows.Err()
+	// scanFinding takes a rowScanner (works for both *sql.Row and *sql.Rows).
+	// The closure adapts it to scanRows' *sql.Rows signature.
+	return scanRows(rows, func(r *sql.Rows) (Finding, error) { return scanFinding(r) })
 }
 
 // UpdateStatus sets the status of the finding with the given fingerprint. When
@@ -335,11 +332,11 @@ func (s *Store) UpdateStatus(ctx context.Context, fingerprint string, status Sta
 			string(status), nowUTC().Format(timeLayout), fingerprint,
 		)
 		if err != nil {
-			return err
+			return annotateErr(s.path, "update_status", err)
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return err
+			return annotateErr(s.path, "update_status", err)
 		}
 		if n == 0 {
 			return ErrNotFound
@@ -347,7 +344,7 @@ func (s *Store) UpdateStatus(ctx context.Context, fingerprint string, status Sta
 
 		if status == StatusDismissed {
 			if err := addSuppressionTx(ctx, tx, fingerprint, reason); err != nil {
-				return err
+				return annotateErr(s.path, "update_status", err)
 			}
 		}
 		return nil
@@ -380,7 +377,7 @@ func (s *Store) AddCorroboratingLenses(ctx context.Context, fingerprint string, 
 			return ErrNotFound
 		}
 		if err != nil {
-			return err
+			return annotateErr(s.path, "add_corroborating_lenses", err)
 		}
 
 		// Merge existing + new, deduplicate, sort.
@@ -403,7 +400,7 @@ func (s *Store) AddCorroboratingLenses(ctx context.Context, fingerprint string, 
 			`UPDATE findings SET corroborating_lenses = ?, updated_at = ? WHERE fingerprint = ?`,
 			encodeLenses(merged), now.Format(timeLayout), fingerprint,
 		); err != nil {
-			return err
+			return annotateErr(s.path, "add_corroborating_lenses", err)
 		}
 		return nil
 	})
@@ -421,7 +418,10 @@ func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (
 	if errors.Is(err, sql.ErrNoRows) {
 		return Finding{}, ErrNotFound
 	}
-	return f, err
+	if err != nil {
+		return Finding{}, annotateErr(s.path, "query_finding", err)
+	}
+	return f, nil
 }
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows.
@@ -493,14 +493,14 @@ func (s *Store) CountFindings(ctx context.Context) (FindingTallies, error) {
 		SELECT status, tier, COUNT(*), COALESCE(SUM(needs_human), 0)
 		FROM findings GROUP BY status, tier`)
 	if err != nil {
-		return FindingTallies{}, err
+		return FindingTallies{}, annotateErr(s.path, "count_findings", err)
 	}
 	defer func() { _ = rows.Close() }()
-	for rows.Next() {
+	_, err = scanRows(rows, func(r *sql.Rows) (struct{}, error) {
 		var status string
 		var tier, n, needs int
-		if err := rows.Scan(&status, &tier, &n, &needs); err != nil {
-			return FindingTallies{}, err
+		if err := r.Scan(&status, &tier, &n, &needs); err != nil {
+			return struct{}{}, err
 		}
 		switch Status(status) {
 		case StatusOpen:
@@ -515,6 +515,7 @@ func (s *Store) CountFindings(ctx context.Context) (FindingTallies, error) {
 			// from the pane: nothing writes superseded today, and the tallies
 			// show actionable lifecycle states only.
 		}
-	}
-	return t, rows.Err()
+		return struct{}{}, nil
+	})
+	return t, err
 }
