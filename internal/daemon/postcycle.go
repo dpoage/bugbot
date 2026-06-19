@@ -10,6 +10,7 @@ import (
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // postCycle runs the shared work that follows every scan: re-verify open
@@ -149,7 +150,7 @@ func (d *Daemon) reverifyOpenFindings(ctx context.Context) int {
 			d.log.Error("daemon: reverify: re-anchor failed", "fingerprint", fnd.Fingerprint, "err", uerr)
 		} else {
 			d.log.Info("daemon: finding re-verified, still open",
-				"fingerprint", shortSHA(fnd.Fingerprint), "file", fnd.File, "line", fnd.Line)
+				"fingerprint", util.ShortSHA(fnd.Fingerprint), "file", fnd.File, "line", fnd.Line)
 		}
 	}
 	return closed
@@ -166,7 +167,7 @@ func (d *Daemon) autoClose(ctx context.Context, fnd store.Finding, reason string
 	}
 	*closed++
 	d.log.Info("daemon: finding auto-closed (fixed)",
-		"fingerprint", shortSHA(fnd.Fingerprint),
+		"fingerprint", util.ShortSHA(fnd.Fingerprint),
 		"file", fnd.File, "line", fnd.Line,
 		"reason", reason,
 	)

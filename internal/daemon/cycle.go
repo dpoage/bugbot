@@ -9,6 +9,7 @@ import (
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // cycleResult captures the per-cycle accounting the daemon logs as a one-line
@@ -60,7 +61,7 @@ func (d *Daemon) runPoll(ctx context.Context) {
 			d.idleMultiplier.Add(1)
 		}
 		d.log.Info("daemon: poll idle",
-			"head", shortSHA(pr.HeadSHA),
+			"head", util.ShortSHA(pr.HeadSHA),
 			"backoff_mult", d.idleMultiplier.Load(),
 			"next_poll_in", d.nextPollDelay().String(),
 		)
@@ -73,7 +74,7 @@ func (d *Daemon) runPoll(ctx context.Context) {
 	changed := changedPathsSince(ctx, d.repo, lastSeen, pr.HeadSHA)
 	d.log.Info("daemon: new commits",
 		"count", len(pr.NewCommits),
-		"head", shortSHA(pr.HeadSHA),
+		"head", util.ShortSHA(pr.HeadSHA),
 		"changed_files", len(changed),
 	)
 
@@ -384,10 +385,4 @@ func startOfUTCDay(t time.Time) time.Time {
 	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
 }
 
-// shortSHA abbreviates a commit SHA for logs.
-func shortSHA(sha string) string {
-	if len(sha) > 12 {
-		return sha[:12]
-	}
-	return sha
-}
+
