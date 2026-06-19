@@ -43,6 +43,20 @@ package sandbox
 // A repo with no matching ecosystem resolves to an empty Resolution{Strategy:
 // DepStrategyOff}, identical to today's non-Go behavior.
 //
+// # Ecosystem coverage
+//
+// Strategy support per ecosystem (vendored / off / host / fetch):
+//
+//	Go      go.mod            vendored(vendor/modules.txt) · off · host · fetch
+//	Python  requirements.txt  off · fetch          (host→off; no vendored convention)
+//	Rust    Cargo.toml        vendored(vendor/ + .cargo/config replace-with) · off · host · fetch
+//	JS/npm  package.json      vendored(node_modules/) · off · fetch   (host→off)
+//
+// Each ecosystem owns a unique container mount path: /modcache (Go),
+// /depcache (Python), /cargo/registry (Rust), /npmcache (JS). See the README
+// section "Sandbox dependency strategies" for the full per-ecosystem matrix
+// (prefetch commands, offline-enforcement env, in-sandbox setup, security).
+//
 // # Security posture (per-mount Shared semantics)
 //
 // Each ecosystem's resolve func controls the Shared flag on its ROMounts.

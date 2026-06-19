@@ -118,15 +118,21 @@ scan:
 # Python -> python:3-slim, Node -> node:22-slim, Rust -> rust:1-slim,
 # C/C++ -> gcc:14). Run "bugbot prime" in the target repo for a tailored pick.
 #
-# dep_strategy controls how a NON-vendored Go module resolves its external
-# dependencies under network=none. Vendored repos (vendor/modules.txt) always
-# build offline regardless of this setting.
+# dep_strategy controls how a NON-vendored repo resolves its external
+# dependencies under network=none. It applies per detected ecosystem (Go
+# go.mod, Python requirements.txt, Rust Cargo.toml, JS package.json); already-
+# vendored repos (Go vendor/modules.txt, Rust vendor/ + .cargo/config, committed
+# node_modules/) build offline regardless of this setting.
 #   off   (default) no dependency mounts; only vendored repos build offline.
-#   host  mount the host's Go module cache read-only into the sandbox. Exposes
-#         PUBLIC module source (never put secrets in your module cache).
-#   fetch run one online "go mod download" in a hardened container to warm a
-#         bugbot-managed cache, then mount it read-only; the test/build run that
-#         follows is still network=none. The network is touched ONCE.
+#   host  mount the host's package cache read-only into the sandbox. Exposes
+#         PUBLIC package source (never put secrets in your caches). Go and Rust
+#         only; Python and JS fall back to off (their HTTP caches cannot install
+#         offline) — use fetch for those.
+#   fetch run one online prefetch (go mod download / pip download / cargo fetch /
+#         npm ci) in a hardened container to warm a bugbot-managed cache, then
+#         mount it read-only; the build/test run that follows is still
+#         network=none. The network is touched ONCE.
+# See the README "Sandbox dependency strategies" matrix for per-ecosystem detail.
 # ---------------------------------------------------------------------------
 sandbox:
   backend: cli
