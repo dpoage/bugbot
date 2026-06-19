@@ -59,13 +59,18 @@ type doctorEnv struct {
 	// snapshot returns the dominant languages for the current repo. Exists as a
 	// seam so unit tests don't need a real git repository.
 	snapshot func(ctx context.Context) ([]ingest.Language, error)
-	out      io.Writer
+	// verifySandbox, when non-nil, overrides the real sandbox verifier call.
+	// Unit tests inject a scripted function here to avoid needing a container
+	// runtime. When nil, the real repro.VerifySandbox is used.
+	verifySandbox func(ctx context.Context, repoDir string, cfg config.Config) (repro.SmokeVerdict, error)
+	out           io.Writer
 }
 
 // newDoctorCmd builds the `bugbot doctor` subcommand. It runs a checklist of
 // environment and config probes and exits nonzero if any hard check fails.
 func newDoctorCmd() *cobra.Command {
-	return &cobra.Command{
+	var verifySandboxFlag bool
+	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check environment and config for common setup problems",
 		Long: `Doctor runs a checklist of environment and configuration probes.
@@ -85,10 +90,11 @@ never affect the exit code.`,
 				ctx = context.Background()
 			}
 			env := doctorEnv{
-				configPath: configPath,
-				repoDir:    ".",
-				lookupEnv:  os.Getenv,
-				lookPath:   exec.LookPath,
+				configPath:    configPath,
+				repoDir:       ".",
+				lookupEnv:     os.Getenv,
+				lookPath:      exec.LookPath,
+				verifySandbox: nil, // nil → enabled only when --verify-sandbox is passed
 				runCommand: func(ctx context.Context, name string, args ...string) (string, error) {
 					c := exec.CommandContext(ctx, name, args...)
 					// A killed child can leave a grandchild holding the output
@@ -101,7 +107,7 @@ never affect the exit code.`,
 				snapshot: nil, // nil triggers the real git path in runChecks
 				out:      cmd.OutOrStdout(),
 			}
-			results := runChecks(ctx, env)
+			results := runChecks(ctx, env, verifySandboxFlag)
 			printResults(env.out, results)
 			for _, r := range results {
 				if r.hard && r.Status == statusFail {
@@ -111,11 +117,14 @@ never affect the exit code.`,
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&verifySandboxFlag, "verify-sandbox", false,
+		"run a live sandbox toolchain smoke-test (requires the container runtime and image pull; off by default)")
+	return cmd
 }
 
 // runChecks executes every doctor check in order and returns the full result
 // list. Hard failures in early checks cause dependent checks to report SKIP.
-func runChecks(ctx context.Context, env doctorEnv) []checkResult {
+func runChecks(ctx context.Context, env doctorEnv, runSandboxVerify bool) []checkResult {
 	var results []checkResult
 
 	// 1. Config load — hard. Downstream checks that need a valid config are
@@ -172,6 +181,14 @@ func runChecks(ctx context.Context, env doctorEnv) []checkResult {
 	// affects the exit code (mirrors checkLangTier above).
 	if cfgOK {
 		results = append(results, checkImageToolchain(langs, buildSystems, cfg)...)
+	}
+
+	// 6. Live sandbox toolchain smoke-test (--verify-sandbox only).
+	// Off by default because it requires the container runtime and may pull an
+	// image. The cheap checkImageToolchain name-match warn above still runs
+	// regardless.
+	if runSandboxVerify && cfgOK {
+		results = append(results, checkSandboxVerifier(ctx, env, cfg)...)
 	}
 
 	return results
@@ -607,6 +624,47 @@ func containsBuildSystemBazel(buildSystems []ingest.BuildSystem) bool {
 		}
 	}
 	return false
+}
+
+// sandboxVerifyTimeout bounds the live smoke-test run. Generous because the
+// image may need to be pulled and the smoke command (e.g. go vet ./...) has to
+// build index caches on first run.
+const sandboxVerifyTimeout = 3 * time.Minute
+
+// checkSandboxVerifier runs the repro.VerifySandbox smoke-test against the
+// configured image and emits PASS/FAIL + category. It is only called when
+// --verify-sandbox is set. The existing cheap checkImageToolchain name-match
+// warn is always emitted; this is the authoritative live check.
+func checkSandboxVerifier(ctx context.Context, env doctorEnv, cfg config.Config) []checkResult {
+	tctx, cancel := context.WithTimeout(ctx, sandboxVerifyTimeout)
+	defer cancel()
+
+	var verdict repro.SmokeVerdict
+	var err error
+	if env.verifySandbox != nil {
+		verdict, err = env.verifySandbox(tctx, env.repoDir, cfg)
+	} else {
+		verdict, err = repro.RunSandboxVerify(tctx, env.repoDir, cfg)
+	}
+	if err != nil {
+		return []checkResult{{
+			Name:   "sandbox verifier",
+			Status: statusFail,
+			Detail: "smoke-test failed to run: " + err.Error(),
+		}}
+	}
+	if verdict.OK {
+		return []checkResult{{
+			Name:   "sandbox verifier",
+			Status: statusPass,
+			Detail: "toolchain smoke PASS (" + verdict.Category + "): " + verdict.Detail,
+		}}
+	}
+	return []checkResult{{
+		Name:   "sandbox verifier",
+		Status: statusFail,
+		Detail: "toolchain smoke FAIL (" + verdict.Category + "): " + verdict.Detail,
+	}}
 }
 
 // checkLSP checks whether an LSP server is installed for each dominant

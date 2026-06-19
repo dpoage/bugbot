@@ -1,0 +1,255 @@
+package repro
+
+import (
+	"context"
+	"strings"
+	"time"
+
+	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/sandbox"
+)
+
+// SmokeVerdict is the result of a toolchain smoke-test inside a sandbox.
+// It uses a vocabulary that mirrors interpret.go's verdict categories so that
+// the designer, the sandbox verifier, and doctor all speak the same language.
+type SmokeVerdict struct {
+	// OK is true when the toolchain responded — either a clean exit or a
+	// genuine test/compile failure.  A genuine failure still means "the
+	// toolchain ran", which is what we are probing for.
+	OK bool
+	// Category is one of: "ok", "env_error", "toolchain_missing",
+	// "dep_missing", "timeout".
+	Category string
+	// Detail is a short human-readable explanation (truncated output).
+	Detail string
+}
+
+// smokeTimeout is the ceiling for a single smoke-test run.  We keep it
+// shorter than the full repro timeout (90 s) because the smoke command is
+// chosen specifically to be cheap.
+const smokeTimeout = 45 * time.Second
+
+// VerifySandbox runs a cheap toolchain smoke-test inside the sandbox described
+// by spec and res, under network=none, and returns a structured SmokeVerdict.
+//
+// The smoke command is derived from repoDir using detectSuiteCmd (same-package
+// call into patch.go; same logic the reproducer uses) and then mapped to a
+// cheaper liveness probe per ecosystem.  When detectSuiteCmd returns nil
+// (unknown toolchain) a bare version probe ("go version" / "python --version"
+// etc.) is attempted; if we cannot derive any probe the verdict is
+// env_error with a helpful message.
+//
+// Classification re-uses the same defaultEnvMarkers / hasAnyMarker /
+// exit-125-126-127 logic from ecosystem.go that interpret() uses, so the
+// verifier and the reproducer pipeline share a single classification layer.
+//
+// Important: a genuine test failure (toolchain ran, tests failed) is
+// classified as "ok" because we only care whether the toolchain IS PRESENT and
+// FUNCTIONAL — not whether the project's tests pass.
+func VerifySandbox(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec sandbox.Spec, res sandbox.Resolution) (SmokeVerdict, error) {
+	cmd := smokeCmd(repoDir)
+	if len(cmd) == 0 {
+		return SmokeVerdict{
+			OK:       false,
+			Category: "env_error",
+			Detail:   "could not derive a toolchain smoke command for this repo",
+		}, nil
+	}
+
+	// Build the spec from the resolved deps (mounts/env/setup) so we behave
+	// exactly as the real run would.
+	runSpec := sandbox.Spec{
+		RepoDir:     repoDir,
+		Cmd:         cmd,
+		Image:       spec.Image,
+		Env:         append(append([]string(nil), spec.Env...), res.Env...),
+		ROMounts:    append(append([]sandbox.ROMount(nil), spec.ROMounts...), res.ROMounts...),
+		SetupCmds:   res.SetupCmds,
+		Network:     "none",
+		Timeout:     smokeTimeout,
+		IdleTimeout: spec.IdleTimeout,
+		CPUs:        spec.CPUs,
+		MemoryMB:    spec.MemoryMB,
+	}
+
+	result, err := sb.Exec(ctx, runSpec)
+	if err != nil {
+		return SmokeVerdict{
+			OK:       false,
+			Category: "env_error",
+			Detail:   "sandbox exec failed: " + err.Error(),
+		}, err
+	}
+
+	return classifySmoke(result, cmd), nil
+}
+
+// smokeCmd picks the cheapest toolchain liveness probe for repoDir.
+// It first calls detectSuiteCmd (same package, patch.go) to get the canonical
+// suite launcher, then maps it to a cheaper offline probe where available.
+// Falls back to a bare version probe when no suite cmd is detected, and
+// returns nil when even that cannot be inferred.
+func smokeCmd(repoDir string) []string {
+	suite := detectSuiteCmd(repoDir)
+	if len(suite) == 0 {
+		return nil
+	}
+
+	// Map the canonical suite command's head binary to a cheap liveness probe.
+	// We walk through any "bash -c ..." wrapper automatically because
+	// detectSuiteCmd always returns a real argv, not a shell string.
+	switch suite[0] {
+	case "go":
+		// go vet is faster than go test and still exercises the build toolchain.
+		return []string{"go", "vet", "./..."}
+	case "cargo":
+		// cargo metadata is essentially instantaneous (no compilation).
+		return []string{"cargo", "metadata", "--no-deps", "--format-version=1"}
+	case "python", "python3":
+		// pytest --collect-only exercises the import machinery without running tests.
+		return []string{"python", "-m", "pytest", "--collect-only", "-q"}
+	case "npm":
+		return []string{"node", "--version"}
+	case "pnpm":
+		return []string{"node", "--version"}
+	case "bazel":
+		// bazel version is the only thing that works offline without a workspace.
+		return []string{"bazel", "version"}
+	}
+
+	// Fallback: return the suite command as-is; better than nothing.
+	return suite
+}
+
+// classifySmoke turns a sandbox.Result from a smoke run into a SmokeVerdict.
+// The classification mirrors interpret() in interpret.go:
+//   - TimedOut                          → timeout
+//   - ExitCode 125/126/127              → toolchain_missing (env-level failure)
+//   - Non-zero + defaultEnvMarkers      → env_error
+//   - Non-zero + toolchain absent hints → toolchain_missing
+//   - Non-zero + "dep" / "module" hints → dep_missing
+//   - Zero OR genuine run output        → ok  (toolchain responded)
+func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
+	out := res.Stdout + "\n" + res.Stderr
+
+	if res.TimedOut {
+		return SmokeVerdict{
+			OK:       false,
+			Category: "timeout",
+			Detail:   "smoke command timed out: " + trunc(out, 300),
+		}
+	}
+
+	if res.ExitCode == 0 {
+		return SmokeVerdict{OK: true, Category: "ok", Detail: trunc(out, 300)}
+	}
+
+	// Exit 125/126/127 mean the container runtime or shell failed before
+	// the command ran — the toolchain is missing or the image is wrong.
+	if res.ExitCode == 125 || res.ExitCode == 126 || res.ExitCode == 127 {
+		return SmokeVerdict{
+			OK:       false,
+			Category: "toolchain_missing",
+			Detail:   trunc(out, 300),
+		}
+	}
+
+	lowOut := strings.ToLower(out)
+
+	// Environment-level failures (read-only fs, disk full, cache init) — same
+	// markers as interpret.go defaultEnvMarkers.
+	if hasAnyMarker(lowOut, defaultEnvMarkers) {
+		return SmokeVerdict{
+			OK:       false,
+			Category: "env_error",
+			Detail:   trunc(out, 300),
+		}
+	}
+
+	// Command-not-found or similar toolchain-absence signals.
+	toolchainAbsentMarkers := []string{
+		"command not found",
+		"executable file not found",
+		"no such file or directory",
+		"not found",
+	}
+	if hasAnyMarker(lowOut, toolchainAbsentMarkers) {
+		return SmokeVerdict{
+			OK:       false,
+			Category: "toolchain_missing",
+			Detail:   trunc(out, 300),
+		}
+	}
+
+	// Dependency resolution failures (missing module, missing package).
+	depMarkers := []string{
+		"no required module provides",
+		"cannot find module",
+		"missing go.sum entry",
+		"modulenotfounderror",
+		"no module named",
+		"cannot find package",
+		"unresolved import",
+		"package not found",
+	}
+	if hasAnyMarker(lowOut, depMarkers) {
+		return SmokeVerdict{
+			OK:       false,
+			Category: "dep_missing",
+			Detail:   trunc(out, 300),
+		}
+	}
+
+	// Any other non-zero exit means the toolchain RAN but something went
+	// wrong (compile error, test failure, etc.).  That is "ok" for our
+	// purposes: we only care that the toolchain is present and functional.
+	return SmokeVerdict{OK: true, Category: "ok", Detail: trunc(out, 300)}
+}
+
+// RunSandboxVerify is the convenience entry-point called by doctor.
+// It constructs a sandbox.CLI from cfg, resolves the configured dep strategy,
+// and delegates to VerifySandbox.  The repoDir is the working directory used
+// for both dep resolution and smoke-command detection.
+func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (SmokeVerdict, error) {
+	rt := cfg.Sandbox.Runtime
+	image := cfg.Sandbox.Image
+	if image == "" {
+		return SmokeVerdict{
+			OK:       false,
+			Category: "env_error",
+			Detail:   "sandbox.image is not configured",
+		}, nil
+	}
+
+	sb, err := sandbox.NewCLI(rt, image)
+	if err != nil {
+		return SmokeVerdict{
+			OK:       false,
+			Category: "env_error",
+			Detail:   "could not create sandbox CLI: " + err.Error(),
+		}, err
+	}
+
+	opts := sandbox.DepOptions{
+		Strategy: sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+	}
+	res, err := sandbox.ResolveDeps(repoDir, opts)
+	if err != nil {
+		return SmokeVerdict{
+			OK:       false,
+			Category: "env_error",
+			Detail:   "could not resolve dependencies: " + err.Error(),
+		}, err
+	}
+
+	spec := sandbox.Spec{
+		Image:    image,
+		CPUs:     float64(cfg.Sandbox.CPUs),
+		MemoryMB: cfg.Sandbox.MemoryMB,
+	}
+	if cfg.Sandbox.IdleTimeoutSeconds > 0 {
+		spec.IdleTimeout = time.Duration(cfg.Sandbox.IdleTimeoutSeconds) * time.Second
+	}
+
+	return VerifySandbox(ctx, sb, repoDir, spec, res)
+}

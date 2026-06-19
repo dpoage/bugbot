@@ -12,6 +12,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/repro"
 )
 
 // doctorMinimalConfig is a minimal valid config for doctor tests. It sets the
@@ -104,7 +105,7 @@ func TestDoctor_AllGreen(t *testing.T) {
 	env := allGreenEnv(t, cfgPath)
 	env.out = &sb
 
-	results := runChecks(context.Background(), env)
+	results := runChecks(context.Background(), env, false)
 	for _, r := range results {
 		if r.hard && r.Status == statusFail {
 			t.Errorf("all-green: unexpected FAIL on hard check %q: %s", r.Name, r.Detail)
@@ -122,7 +123,7 @@ func TestDoctor_UnsetAPIKey(t *testing.T) {
 	env.lookupEnv = func(_ string) string { return "" }
 	env.out = &sb
 
-	results := runChecks(context.Background(), env)
+	results := runChecks(context.Background(), env, false)
 	printResults(&sb, results)
 	out := sb.String()
 
@@ -171,7 +172,7 @@ func TestDoctor_MissingRuntime(t *testing.T) {
 	}
 	env.out = &sb
 
-	results := runChecks(context.Background(), env)
+	results := runChecks(context.Background(), env, false)
 
 	var binaryFailed bool
 	for _, r := range results {
@@ -211,7 +212,7 @@ func TestDoctor_WedgedRuntime(t *testing.T) {
 	env.out = &sb
 
 	start := time.Now()
-	results := runChecks(context.Background(), env)
+	results := runChecks(context.Background(), env, false)
 	elapsed := time.Since(start)
 
 	// The whole doctor run must finish well within 30s (probe timeout is 5s).
@@ -248,7 +249,7 @@ func TestDoctor_InvalidConfig(t *testing.T) {
 	env.configPath = badPath
 	env.out = &sb
 
-	results := runChecks(context.Background(), env)
+	results := runChecks(context.Background(), env, false)
 
 	var configFailed bool
 	for _, r := range results {
@@ -284,7 +285,7 @@ func TestDoctor_SecretsNeverInOutput(t *testing.T) {
 	}
 	env.out = &sb
 
-	results := runChecks(context.Background(), env)
+	results := runChecks(context.Background(), env, false)
 	printResults(&sb, results)
 	out := sb.String()
 
@@ -317,7 +318,7 @@ func TestDoctor_ImageAbsent(t *testing.T) {
 	}
 	env.out = &sb
 
-	results := runChecks(context.Background(), env)
+	results := runChecks(context.Background(), env, false)
 
 	var imageWarn bool
 	for _, r := range results {
@@ -417,7 +418,7 @@ func TestDoctor_ImageToolchain_WarnMissingLanguages(t *testing.T) {
 	cfgPath := writeDoctorConfigWithImage(t, "docker.io/library/golang:1.25-alpine", "none")
 	env := envWithLangs(t, cfgPath, []ingest.Language{ingest.LangTypeScript, ingest.LangPython, ingest.LangGo})
 
-	results := runChecks(context.Background(), env)
+	results := runChecks(context.Background(), env, false)
 
 	warned := map[ingest.Language]bool{}
 	for _, r := range results {
@@ -465,7 +466,7 @@ func TestDoctor_ImageToolchain_CoveringImageNoWarns(t *testing.T) {
 	cfgPath := writeDoctorConfigWithImage(t, "example.com/polyglot-node-python-golang:1", "none")
 	env := envWithLangs(t, cfgPath, []ingest.Language{ingest.LangTypeScript, ingest.LangPython, ingest.LangGo})
 
-	results := runChecks(context.Background(), env)
+	results := runChecks(context.Background(), env, false)
 
 	for _, r := range results {
 		if strings.HasPrefix(r.Name, "image toolchain ") {
@@ -490,7 +491,7 @@ func TestDoctor_ImageToolchain_BazelOfflineWarns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results := runChecks(context.Background(), env)
+	results := runChecks(context.Background(), env, false)
 
 	var saw bool
 	for _, r := range results {
@@ -651,6 +652,95 @@ func TestExtensionsForLanguage(t *testing.T) {
 				t.Errorf("ExtensionsForLanguage(%s): not sorted: %v", tc.lang, exts)
 				break
 			}
+		}
+	}
+}
+
+// TestCheckSandboxVerifier_Pass exercises the PASS path of checkSandboxVerifier
+// using an injected verifySandbox seam that returns ok=true.
+func TestCheckSandboxVerifier_Pass(t *testing.T) {
+	cfgPath := writeDoctorConfig(t)
+	env := doctorEnv{
+		configPath: cfgPath,
+		repoDir:    t.TempDir(),
+		lookupEnv:  func(string) string { return "fake-key" },
+		lookPath:   func(string) (string, error) { return "/usr/bin/podman", nil },
+		runCommand: func(_ context.Context, _ string, _ ...string) (string, error) { return "", nil },
+		verifySandbox: func(_ context.Context, _ string, _ config.Config) (repro.SmokeVerdict, error) {
+			return repro.SmokeVerdict{OK: true, Category: "ok", Detail: "ok"}, nil
+		},
+		out: &strings.Builder{},
+	}
+	results := runChecks(context.Background(), env, true)
+	var found *checkResult
+	for i := range results {
+		if results[i].Name == "sandbox verifier" {
+			found = &results[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("sandbox verifier result not found")
+	}
+	if found.Status != statusPass {
+		t.Errorf("status=%q, want PASS; detail=%q", found.Status, found.Detail)
+	}
+}
+
+// TestCheckSandboxVerifier_Fail exercises the FAIL path of checkSandboxVerifier
+// using an injected seam that returns ok=false (toolchain_missing).
+func TestCheckSandboxVerifier_Fail(t *testing.T) {
+	cfgPath := writeDoctorConfig(t)
+	env := doctorEnv{
+		configPath: cfgPath,
+		repoDir:    t.TempDir(),
+		lookupEnv:  func(string) string { return "fake-key" },
+		lookPath:   func(string) (string, error) { return "/usr/bin/podman", nil },
+		runCommand: func(_ context.Context, _ string, _ ...string) (string, error) { return "", nil },
+		verifySandbox: func(_ context.Context, _ string, _ config.Config) (repro.SmokeVerdict, error) {
+			return repro.SmokeVerdict{OK: false, Category: "toolchain_missing", Detail: "go: command not found"}, nil
+		},
+		out: &strings.Builder{},
+	}
+	results := runChecks(context.Background(), env, true)
+	var found *checkResult
+	for i := range results {
+		if results[i].Name == "sandbox verifier" {
+			found = &results[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("sandbox verifier result not found")
+	}
+	if found.Status != statusFail {
+		t.Errorf("status=%q, want FAIL; detail=%q", found.Status, found.Detail)
+	}
+	if !strings.Contains(found.Detail, "toolchain_missing") {
+		t.Errorf("detail=%q missing category", found.Detail)
+	}
+}
+
+// TestCheckSandboxVerifier_Disabled verifies that the sandbox verifier check
+// is not emitted when runSandboxVerify=false.
+func TestCheckSandboxVerifier_Disabled(t *testing.T) {
+	cfgPath := writeDoctorConfig(t)
+	env := doctorEnv{
+		configPath: cfgPath,
+		repoDir:    t.TempDir(),
+		lookupEnv:  func(string) string { return "fake-key" },
+		lookPath:   func(string) (string, error) { return "/usr/bin/podman", nil },
+		runCommand: func(_ context.Context, _ string, _ ...string) (string, error) { return "", nil },
+		// verifySandbox would panic if called — it must not be called.
+		verifySandbox: func(_ context.Context, _ string, _ config.Config) (repro.SmokeVerdict, error) {
+			panic("verifySandbox called when disabled")
+		},
+		out: &strings.Builder{},
+	}
+	results := runChecks(context.Background(), env, false)
+	for _, r := range results {
+		if r.Name == "sandbox verifier" {
+			t.Errorf("sandbox verifier check emitted when disabled: %+v", r)
 		}
 	}
 }
