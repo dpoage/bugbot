@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/lsp"
@@ -284,6 +285,27 @@ func renderBodyRange(abs string, startLine, endLine int) (string, int, error) {
 		line := strings.TrimRight(lines[i-1], "\r")
 		// +1 for the trailing newline each rendered line carries.
 		cost := len(line) + 1
+		// First line: never emit unbounded. Slice the line to the remaining
+		// byte budget, walking back to a valid UTF-8 rune boundary so we
+		// never split a multi-byte character. If even the smallest slice
+		// would exceed the budget, emit nothing for the body but still
+		// signal truncation with the marker.
+		if i == startLine && cost > byteBudget {
+			emit := byteBudget
+			if emit > len(line) {
+				emit = len(line)
+			}
+			for emit > 0 && emit < len(line) && !utf8.RuneStart(line[emit]) {
+				emit--
+			}
+			if emit > 0 {
+				fmt.Fprintf(&b, "%*d\t%s\n", width, i, line[:emit])
+				last = i
+			}
+			byteTruncated = true
+			fmt.Fprint(&b, "… [line truncated]\n")
+			break
+		}
 		if byteBudget-cost < 0 && i > startLine {
 			byteTruncated = true
 			break

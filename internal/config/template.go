@@ -174,6 +174,15 @@ report:
     - fs
 
 # ---------------------------------------------------------------------------
+# llm: shared LLM client wrapper settings applied to every role's client.
+# request_timeout is the per-attempt wall-clock deadline for one provider
+# request (bounds a stalled HTTP round-trip). 0 / omitted uses the LLM
+# package default (5m). Negative is rejected at load time.
+# ---------------------------------------------------------------------------
+llm:
+  request_timeout: 5m
+
+# ---------------------------------------------------------------------------
 # daemon: continuous-run scheduler timing (Go duration strings).
 # ---------------------------------------------------------------------------
 daemon:

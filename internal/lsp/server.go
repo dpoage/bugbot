@@ -122,6 +122,10 @@ func startServer(ctx context.Context, cfg ServerConfig, rootDir string) (*server
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		// StdinPipe already succeeded and the parent holds the write end of a
+		// pipe whose read end is the child's stdin; close it now so the fd
+		// (and the kernel pipe) is released before we return.
+		_ = stdin.Close()
 		return nil, fmt.Errorf("lsp: %s stdout: %w", cfg.Cmd, err)
 	}
 	if err := cmd.Start(); err != nil {

@@ -150,6 +150,15 @@ func ResolveRole(ctx context.Context, cfg *config.Config, role string, opts Opti
 		return nil, err
 	}
 
+	// Apply the per-attempt request timeout from config when set. NewClient
+	// resets opts.Retry to defaults whenever MaxAttempts==0, which would
+	// silently drop a RequestTimeout set alone on opts.Retry; start from
+	// DefaultRetryConfig so MaxAttempts is non-zero (the reset is skipped)
+	// and the user's RequestTimeout is the only field overridden.
+	opts.Retry = DefaultRetryConfig()
+	if cfg.LLM.RequestTimeout > 0 {
+		opts.Retry.RequestTimeout = cfg.LLM.RequestTimeout
+	}
 	opts.Role = role
 	return NewClient(ctx, provider, rm.Provider, rm.Model, apiKey, opts)
 }

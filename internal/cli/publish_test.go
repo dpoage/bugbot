@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/store"
@@ -1285,4 +1287,295 @@ func TestNewStorePublisher_DelegatesProvenance(t *testing.T) {
 		t.Errorf("NewStorePublisher shim prov = %+v, want zero", shim.prov)
 	}
 	_ = ctx
+}
+
+// TestTruncateUTF8 pins the rune-boundary walk-back: when s is split mid-rune
+// at byte offset `max`, the helper walks back to the start of the rune, so the
+// returned slice is always valid UTF-8. The behavior is the precondition for
+// every byte-cap truncation site in renderIssueBody and renderReproSection
+// (description, fix patch, reasoning, repro per-file, repro total, plus the
+// belt-and-braces body guard) — model-authored content cut at a raw byte
+// offset would otherwise land in the issue body as a U+FFFD replacement.
+func TestTruncateUTF8(t *testing.T) {
+	t.Run("ascii-shorter-than-max", func(t *testing.T) {
+		if got := truncateUTF8("hello", 10); got != "hello" {
+			t.Errorf("truncateUTF8(%q, 10) = %q, want %q", "hello", got, "hello")
+		}
+	})
+
+	t.Run("ascii-truncated-exact", func(t *testing.T) {
+		if got := truncateUTF8("hello", 5); got != "hello" {
+			t.Errorf("truncateUTF8(%q, 5) = %q, want %q", "hello", got, "hello")
+		}
+	})
+
+	t.Run("multibyte-split-mid-rune", func(t *testing.T) {
+		// Each 锁 is 3 bytes. 50 runes (150 bytes) truncated to 10 bytes
+		// would split a rune in half without the walk-back, producing
+		// invalid UTF-8. The helper walks back to byte 9 (the last byte
+		// boundary inside the third rune) and returns 3 complete runes.
+		in := strings.Repeat("锁", 50)
+		got := truncateUTF8(in, 10)
+		if !utf8.ValidString(got) {
+			t.Fatalf("truncateUTF8 produced invalid UTF-8: %q (bytes %v)", got, []byte(got))
+		}
+		if len(got) > 10 {
+			t.Errorf("truncateUTF8 result length = %d, want <= 10", len(got))
+		}
+		// 3 runes * 3 bytes/rune = 9 bytes (the rune start at byte 9 is
+		// the 4th rune, so we keep 3 complete runes).
+		wantRunes := 3
+		if r := []rune(got); len(r) != wantRunes {
+			t.Errorf("rune count = %d, want %d (3 complete 锁 runes)", len(r), wantRunes)
+		}
+	})
+
+	t.Run("multibyte-exact-boundary", func(t *testing.T) {
+		// 30 runes * 3 bytes = 90 bytes; cap at 90 should not walk back.
+		in := strings.Repeat("锁", 30)
+		got := truncateUTF8(in, 90)
+		if got != in {
+			t.Errorf("truncateUTF8 exact-boundary = %q, want unchanged", got)
+		}
+	})
+
+	t.Run("empty-string", func(t *testing.T) {
+		if got := truncateUTF8("", 5); got != "" {
+			t.Errorf("truncateUTF8 empty = %q, want empty", got)
+		}
+	})
+
+	t.Run("zero-max", func(t *testing.T) {
+		if got := truncateUTF8("hello", 0); got != "" {
+			t.Errorf("truncateUTF8 zero-max = %q, want empty", got)
+		}
+	})
+}
+
+// TestApplyPublish_UpdateStaleRecreate pins the bugbot-09m resilience path:
+// when the PATCH for an existing issue returns 410/404, the local
+// published_issues row is stale. The reconciler must log it, delete the
+// stale row, create a fresh issue, record the new number, and CONTINUE
+// with the rest of the plan — never abort the run on a deleted/transferred
+// issue.
+func TestApplyPublish_UpdateStaleRecreate(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+
+	// Pre-record an open published row pointing at a now-deleted issue.
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 50, "open"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Bump the finding's UpdatedAt so the planner produces an update action
+	// (it only updates when the finding is newer than the published row).
+	findings, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	if err != nil || len(findings) == 0 {
+		t.Fatalf("list: %v", err)
+	}
+	findings[0].UpdatedAt = time.Now().Add(time.Hour)
+	if _, err := st.UpsertFinding(ctx, findings[0]); err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+
+	fake := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":123}`)).
+		on("issues/50 -X PATCH", nil)
+	// The PATCH on the stale #50 returns 410. Inject via the fake's errs map
+	// (not a wrapper) so the call is still recorded for callsContaining.
+	fake.errs["issues/50 -X PATCH"] = fmt.Errorf("gh api: HTTP 410: issue was deleted")
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, fake.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("runPublish must NOT abort on 410: %v", err)
+	}
+
+	// The stale row must have been deleted and a new row with the new
+	// number recorded.
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published: %v", err)
+	}
+	if pi.IssueNumber != 123 {
+		t.Errorf("issue_number = %d, want 123 (recreated)", pi.IssueNumber)
+	}
+	if pi.State != "open" {
+		t.Errorf("state = %q, want open", pi.State)
+	}
+
+	// The PATCH on the stale #50 and a CREATE on the new #123 must have
+	// both been attempted.
+	if n := len(fake.callsContaining("issues/50 -X PATCH")); n != 1 {
+		t.Errorf("expected 1 PATCH on stale #50, got %d", n)
+	}
+	if n := len(fake.callsContaining("repos/{owner}/{repo}/issues -X POST")); n != 1 {
+		t.Errorf("expected 1 recreate POST, got %d", n)
+	}
+
+	// Summary must report stale=1 and created=1.
+	out := buf.String()
+	if !strings.Contains(out, "stale=1") {
+		t.Errorf("summary must include stale=1; got: %s", out)
+	}
+	if !strings.Contains(out, "created=1") {
+		t.Errorf("summary must include created=1; got: %s", out)
+	}
+}
+
+// TestApplyPublish_UpdateStaleRecreate_404 covers the 404 variant: the issue
+// was transferred/renamed rather than deleted, but the published_issues row
+// is still stale and the reconciler must recover identically.
+func TestApplyPublish_UpdateStaleRecreate_404(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	findings, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	if err != nil || len(findings) == 0 {
+		t.Fatalf("list: %v", err)
+	}
+	findings[0].UpdatedAt = time.Now().Add(time.Hour)
+	if _, err := st.UpsertFinding(ctx, findings[0]); err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+	fake := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":456}`)).
+		on("issues/77 -X PATCH", nil)
+	// The PATCH on the stale #77 returns 404. Inject via the fake's errs map
+	// so the call is recorded.
+	fake.errs["issues/77 -X PATCH"] = fmt.Errorf("gh api: HTTP 404 Not Found")
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, fake.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("runPublish must NOT abort on 404: %v", err)
+	}
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if pi.IssueNumber != 456 {
+		t.Errorf("issue_number = %d, want 456 (recreated)", pi.IssueNumber)
+	}
+	if !strings.Contains(buf.String(), "stale=1") {
+		t.Errorf("summary must include stale=1; got: %s", buf.String())
+	}
+}
+
+// TestApplyPublish_CloseStaleDrop pins the close path: when the PATCH for a
+// close returns 410/404, the issue is already gone. The reconciler must
+// log it, drop the row, and continue (no error, no abort).
+func TestApplyPublish_CloseStaleDrop(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 88, "open"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := st.MarkFixed(ctx, f.Fingerprint); err != nil {
+		t.Fatalf("mark fixed: %v", err)
+	}
+
+	ghErr := fmt.Errorf("gh api: HTTP 410 Gone")
+	fake := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues/88/comments", []byte(`{"id":1}`))
+	// Wrap so the PATCH on close returns 410.
+	baseRun := fake.run
+	gh := func(ctx context.Context, args ...string) ([]byte, error) {
+		if strings.Contains(strings.Join(args, " "), "issues/88 -X PATCH") {
+			return nil, ghErr
+		}
+		return baseRun(ctx, args...)
+	}
+
+	cfg := config.Publish{TierMin: 2, CloseOnFixed: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("runPublish must NOT abort on close 410: %v", err)
+	}
+	// Row must be gone (close is a no-op success on a gone issue).
+	if _, err := st.GetPublishedIssue(ctx, f.Fingerprint); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("row must be deleted after stale close; got err = %v", err)
+	}
+	if !strings.Contains(buf.String(), "stale=1") {
+		t.Errorf("summary must include stale=1; got: %s", buf.String())
+	}
+}
+
+// TestIsGHGoneOrNotFound guards the bugbot-09m stale-detection predicate. It
+// must key off gh's HTTP status token ("HTTP 404"/"HTTP 410") or the explicit
+// "was deleted" phrase — never a bare "404"/"410" substring, which the wrapped
+// error embeds via the issue number and API path. A real transient failure on
+// an issue numbered like #404 must NOT be read as "gone" (that would delete
+// the row and create a duplicate).
+func TestIsGHGoneOrNotFound(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"410-deleted", fmt.Errorf("publish: update issue #50: gh api repos/{owner}/{repo}/issues/50: HTTP 410: This issue was deleted"), true},
+		{"404-not-found", fmt.Errorf("publish: update issue #77: gh api repos/{owner}/{repo}/issues/77: HTTP 404 Not Found"), true},
+		{"410-status", fmt.Errorf("HTTP 410 Gone"), true},
+		{"404-status", fmt.Errorf("HTTP 404 Not Found"), true},
+		{"was-deleted", fmt.Errorf("This issue was deleted"), true},
+		{"403-on-issue-404", fmt.Errorf("publish: update issue #404: gh api repos/{owner}/{repo}/issues/404: HTTP 403 rate limited"), false},
+		{"422-on-issue-410", fmt.Errorf("publish: update issue #410: gh api repos/{owner}/{repo}/issues/410: HTTP 422 validation failed"), false},
+		{"unrelated-auth", fmt.Errorf("gh: HTTP 401 Unauthorized"), false},
+		{"unrelated-network", fmt.Errorf("dial tcp: connection refused"), false},
+		{"generic", fmt.Errorf("boom"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isGHGoneOrNotFound(tc.err); got != tc.want {
+				t.Errorf("isGHGoneOrNotFound(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestApplyPublish_UpdateRecordsSuccess pins the bugbot-09m success path: a
+// successful update must record the published row (UpsertPublishedIssue) and
+// count updated++, so the planner converges instead of re-PATCHing the same
+// issue every cycle. The merge briefly dropped these lines.
+func TestApplyPublish_UpdateRecordsSuccess(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 60, "open"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Make the finding newer than the published row so the planner updates.
+	findings, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	if err != nil || len(findings) == 0 {
+		t.Fatalf("list: %v", err)
+	}
+	findings[0].UpdatedAt = time.Now().Add(time.Hour)
+	if _, err := st.UpsertFinding(ctx, findings[0]); err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+	fake := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues/60 -X PATCH", []byte(``))
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, fake.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("runPublish: %v", err)
+	}
+	if n := len(fake.callsContaining("issues/60 -X PATCH")); n != 1 {
+		t.Errorf("expected 1 PATCH on #60, got %d", n)
+	}
+	if out := buf.String(); !strings.Contains(out, "updated=1") {
+		t.Errorf("summary must report updated=1 (success path records the update); got: %s", out)
+	}
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published: %v", err)
+	}
+	if pi.IssueNumber != 60 || pi.State != "open" {
+		t.Errorf("published row = #%d %q, want #60 open", pi.IssueNumber, pi.State)
+	}
 }

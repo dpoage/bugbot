@@ -203,7 +203,46 @@ func TestParseHeat_KeepsLangShellPaths(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
+// TestParseHeat_LongPathNotDropped proves that a file-path line longer than
+// bufio.Scanner's 64KB default token cap is still counted in the heat map.
+// Before the strings.Split rewrite, bufio.NewScanner would silently drop
+// (or, depending on the buffer state, truncate) any line over the cap,
+// causing the heat score for the touched file to be zero — a silent data
+// loss for deeply-nested generated code, vendored trees, or any path
+// constructed by tooling. The path used here is 100KB of repeating prefix
+// segments plus a real ".go" extension so DetectLanguage keeps it.
+func TestParseHeat_LongPathNotDropped(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	ts := strconv.FormatInt(now.Add(-5*24*time.Hour).Unix(), 10)
+
+	// 100KB path: 2500 segments of "subdir/" (8 bytes each = 20000 bytes)
+	// plus a short "long.go" tail. We size it well past 64KB to make the
+	// regression meaningful: any prior bufio.Scanner-based implementation
+	// would drop or split this line and the file would receive no heat.
+	const segment = "subdir/"
+	const segments = 12500 // 12500 * 8 = 100_000 bytes
+	var sb strings.Builder
+	sb.Grow(len(segment)*segments + 32)
+	for range segments {
+		sb.WriteString(segment)
+	}
+	sb.WriteString("long.go")
+	longPath := sb.String()
+	if len(longPath) <= 64*1024 {
+		t.Fatalf("test path must exceed 64KB to exercise the scanner-cap case, got %d bytes", len(longPath))
+	}
+
+	data := ts + "\n" + longPath + "\n"
+
+	heat := parseHeat([]byte(data), now)
+
+	if got, ok := heat[longPath]; !ok {
+		t.Errorf("long path (%d bytes) was dropped from heat map; expected an entry", len(longPath))
+	} else if got <= 0 {
+		t.Errorf("long path should have positive heat, got %.6f", got)
+	}
+}
+
 // ChurnHeat integration tests (real git repo)
 
 // TestChurnHeat_NonASCIIPaths proves that files with non-ASCII names (accented

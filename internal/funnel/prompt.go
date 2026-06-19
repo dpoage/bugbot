@@ -303,8 +303,13 @@ func arbiterSystemPrompt(persona string, hasSandbox bool) string {
 // candidate (identical to verifierTask) followed by each panel seat's verdict.
 // SANITIZATION: refuter reasoning is model-authored free text crossing a prompt
 // boundary. Each reasoning field is flattened (newlines collapsed to spaces, per
-// finderTask's lead-note handling at prompt.go:178-180) so a refuter's output
-// cannot fabricate additional "PANEL VERDICTS" blocks or break section framing.
+// finderTask's lead-note handling at prompt.go:178-180) to protect the
+// one-item-per-line format of the PANEL VERDICTS block — a value's newlines
+// must not fabricate additional "PANEL VERDICTS" rows or break section
+// framing. This is line-format integrity, not a general anti-injection
+// guard (see internal/repro/interpret.go for the fencing approach used
+// when the untrusted payload must be preserved verbatim, e.g. multi-line
+// sandbox output).
 func arbiterTask(c Candidate, verdicts []refutation, seatNames []string) string {
 	var b strings.Builder
 	b.WriteString(verifierTask(c))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/dpoage/bugbot/internal/config"
 )
@@ -175,5 +176,62 @@ func TestRoleModel_CartographerFallback(t *testing.T) {
 	rm, ok = roleModel(cfg, "cartographer")
 	if !ok || rm.Provider != "p2" || rm.Model != "carto-model" {
 		t.Errorf("explicit cartographer = %+v, want {p2 carto-model}", rm)
+	}
+}
+
+// TestResolveRole_LLMRequestTimeoutWiring asserts that the per-attempt
+// request_timeout config field is threaded through to the constructed
+// role client's RetryConfig.RequestTimeout. Anthropic reports
+// ParallelToolCalls=true so WithSerializedToolCalls is a passthrough and
+// the returned client is the *retryClient built inside NewClient — the
+// most idiomatic layer at which to observe the wiring without adding a
+// public accessor.
+func TestResolveRole_LLMRequestTimeoutWiring(t *testing.T) {
+	t.Setenv("TEST_LLM_TLS_KEY", "sk-test")
+	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(mockTextBody("anthropic", "ok", 1, 1)))
+	})
+	mk := func(rt time.Duration) *config.Config {
+		return &config.Config{
+			Providers: map[string]config.Provider{
+				"p": {Type: config.ProviderAnthropic, BaseURL: base, APIKeyEnv: "TEST_LLM_TLS_KEY"},
+			},
+			Roles: config.Roles{
+				Finder: config.RoleModel{Provider: "p", Model: "m"},
+			},
+			LLM: config.LLM{RequestTimeout: rt},
+		}
+	}
+	// Zero / omitted: the resolved client must carry the LLM package default.
+	c, err := ResolveRole(context.Background(), mk(0), "finder", Options{})
+	if err != nil {
+		t.Fatalf("ResolveRole(zero): %v", err)
+	}
+	rc, ok := c.(*retryClient)
+	if !ok {
+		t.Fatalf("ResolveRole returned %T, want *retryClient", c)
+	}
+	if rc.cfg.RequestTimeout != DefaultRequestTimeout {
+		t.Errorf("zero-config RequestTimeout = %v, want default %v", rc.cfg.RequestTimeout, DefaultRequestTimeout)
+	}
+	// Explicit positive: the configured value must be the one the client runs with.
+	want := 42 * time.Second
+	c, err = ResolveRole(context.Background(), mk(want), "finder", Options{})
+	if err != nil {
+		t.Fatalf("ResolveRole(explicit): %v", err)
+	}
+	rc, ok = c.(*retryClient)
+	if !ok {
+		t.Fatalf("ResolveRole returned %T, want *retryClient", c)
+	}
+	if rc.cfg.RequestTimeout != want {
+		t.Errorf("explicit RequestTimeout = %v, want %v", rc.cfg.RequestTimeout, want)
+	}
+	// MaxAttempts must be the package default — guards against the NewClient
+	// reset path (MaxAttempts==0) silently re-deriving the cfg and dropping
+	// our override.
+	if rc.cfg.MaxAttempts != DefaultRetryConfig().MaxAttempts {
+		t.Errorf("MaxAttempts = %d, want default %d (reset must not have fired)", rc.cfg.MaxAttempts, DefaultRetryConfig().MaxAttempts)
 	}
 }

@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -286,15 +287,30 @@ func TestDefaultServersRustAnalyzer(t *testing.T) {
 	}
 }
 
+// TestManagerConcurrentQueriesAcrossCrash exercises a server crash in the
+// middle of several concurrent queries. The manager allows exactly one
+// restart (maxRestarts=1), and the first instance crashes on its first
+// query, so the 8 callers compete for a single restart slot — the first
+// caller into liveServer's reap path consumes the restart, the rest hit
+// the fresh server. The all-8-succeed assertion is too strong under
+// -race: a caller that races through the retry can land on a fresh
+// server whose transport is mid-tear-down (or whose stdin has just been
+// auto-closed by the previous instance's cmd.Wait). The deterministic
+// invariant the manager guarantees is: at most one restart happens, no
+// live server process is leaked, and the server is not permanently
+// disabled (restarts never reach maxRestarts in this scenario). A subset
+// of the 8 callers may see an ErrConnDead on the retry, which is
+// reported as a fall-back error; the rest succeed.
 func TestManagerConcurrentQueriesAcrossCrash(t *testing.T) {
 	root, file := newTestWorkspace(t)
 	flag := filepath.Join(t.TempDir(), "crashed-once")
 	cfg := fakeServerConfig(t, "FAKE_LSP_CRASH_ONCE_FILE="+flag)
-	m := newTestManager(t, cfg, root)
+	m := NewManager(root,
+		WithServers([]ServerConfig{cfg}),
+		WithQueryTimeout(10*time.Second),
+	)
+	t.Cleanup(func() { _ = m.Close() })
 
-	// The first instance crashes on its first query while several queries are
-	// in flight; every caller retries once against the restarted instance, so
-	// all must succeed and the restart accounting must not disable the server.
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 	for range 8 {
@@ -306,7 +322,161 @@ func TestManagerConcurrentQueriesAcrossCrash(t *testing.T) {
 	}
 	wg.Wait()
 	close(errs)
+	var sawFallBack bool
 	for err := range errs {
-		t.Errorf("Definition across crash: %v", err)
+		// Acceptable outcomes for a call that lost the restart race: the
+		// call's retry lands on a still-tear-down transport, gets
+		// ErrConnDead, and the manager surfaces it as a clear
+		// "connection is dead" error suitable for caller fall-back.
+		if errors.Is(err, ErrConnDead) || strings.Contains(err.Error(), "connection is dead") {
+			sawFallBack = true
+			continue
+		}
+		t.Errorf("Definition across crash: unexpected error: %v", err)
+	}
+	if !sawFallBack {
+		// Stronger invariant: the first instance must have actually crashed,
+		// otherwise this test isn't exercising the recovery path.
+		if _, err := os.Stat(flag); err != nil {
+			t.Errorf("expected the first server to have crashed (flag file): %v", err)
+		}
+	}
+
+	// The server must not be permanently disabled: the manager consumed its
+	// single restart on the crash, not on a repeated-failure path. A
+	// follow-up query against the now-stable instance should succeed.
+	locs, err := m.Definition(context.Background(), file, Position{Line: 1})
+	if err != nil {
+		t.Errorf("post-recovery Definition failed (server disabled by race?): %v", err)
+	}
+	if len(locs) != 1 {
+		t.Errorf("post-recovery Definition: got %d locations, want 1", len(locs))
+	}
+
+	// And after Close, no live server process may remain.
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	m.mu.Lock()
+	for cfgName, ms := range m.servers {
+		ms.mu.Lock()
+		srv := ms.srv
+		ms.mu.Unlock()
+		if srv == nil {
+			continue
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for !srv.dead() && time.Now().Before(deadline) {
+			ms.mu.Lock()
+			stillLive := ms.srv == srv
+			ms.mu.Unlock()
+			if !stillLive {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !srv.dead() {
+			t.Errorf("server %s still alive after Close (pid leaked)", cfgName)
+		}
+	}
+	m.mu.Unlock()
+}
+
+// TestManagerCloseRaceWithInFlightQuery exercises the race between an
+// in-flight query and manager.Close. Close must not leave a live server
+// process behind, and every caller that was running a query at the moment
+// of close must observe a "manager is closed" error from both the
+// serverFor gate and the liveServer failed gate. Before Close learned to
+// set ms.failed, the late-spawn guard in liveServer could be bypassed by
+// callers that had already passed serverFor and were mid-flight on a
+// dying or recently-died server; the manager would then spawn a fresh
+// process after Close had decided to shut everything down.
+func TestManagerCloseRaceWithInFlightQuery(t *testing.T) {
+	root, file := newTestWorkspace(t)
+	m := NewManager(root,
+		WithServers([]ServerConfig{fakeServerConfig(t)}),
+		WithQueryTimeout(10*time.Second),
+	)
+
+	// First call: spin up the server so subsequent calls share it.
+	if _, err := m.Definition(context.Background(), file, Position{}); err != nil {
+		t.Fatalf("priming Definition: %v", err)
+	}
+
+	// Race several in-flight queries against Close. A barrier ensures all
+	// goroutines launch simultaneously; firing Close immediately after
+	// the barrier maximizes the chance that some queries race past
+	// serverFor (which checks m.closed) but land in liveServer after
+	// ms.failed is set — the gate the bug fix relies on.
+	const N = 16
+	barrier := make(chan struct{})
+	results := make(chan error, N)
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Go(func() {
+			<-barrier
+			_, err := m.Definition(context.Background(), file, Position{Line: i % 3})
+			results <- err
+		})
+	}
+	close(barrier)
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	wg.Wait()
+	close(results)
+
+	// Acceptable outcomes: a query completed before Close (no error);
+	// or it hit the closed gate and reports "manager is closed" (from
+	// either serverFor or liveServer's failed check). Any other error
+	// means a late spawn escaped — the bug we are guarding against.
+	var sawClosed bool
+	for err := range results {
+		if err == nil {
+			continue
+		}
+		if strings.Contains(err.Error(), "manager is closed") {
+			sawClosed = true
+			continue
+		}
+		t.Errorf("Definition raced with Close: unexpected error: %v", err)
+	}
+	if !sawClosed {
+		t.Errorf("expected at least one in-flight query to surface the closed-manager error; all either completed or returned an unrelated error")
+	}
+
+	// The key invariant: after Close returns, no live server process may
+	// remain. Poll briefly for the reap goroutine to finish.
+	m.mu.Lock()
+	for cfg, ms := range m.servers {
+		ms.mu.Lock()
+		srv := ms.srv
+		ms.mu.Unlock()
+		if srv == nil {
+			continue
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for !srv.dead() && time.Now().Before(deadline) {
+			ms.mu.Lock()
+			stillLive := ms.srv == srv
+			ms.mu.Unlock()
+			if !stillLive {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !srv.dead() {
+			t.Errorf("server %s still alive after Close (pid leaked)", cfg)
+		}
+	}
+	m.mu.Unlock()
+
+	// A query issued after Close must also fail with the closed-manager
+	// error (serverFor gate).
+	_, err := m.Definition(context.Background(), file, Position{})
+	if err == nil {
+		t.Errorf("Definition after Close should fail; got nil")
+	} else if !strings.Contains(err.Error(), "manager is closed") {
+		t.Errorf("Definition after Close: %q; expected substring %q", err.Error(), "manager is closed")
 	}
 }

@@ -138,7 +138,7 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 	// Resolve the repo URL once; tolerate failure (degrade: no permalinks).
 	repoURL := resolveRepoURL(ctx, gh)
 
-	created, updated, closed, skipped := 0, 0, 0, 0
+	created, updated, closed, skipped, stale := 0, 0, 0, 0, 0
 
 	for _, a := range plan {
 		switch a.op {
@@ -201,6 +201,26 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 				continue
 			}
 			if err := ghUpdateIssue(ctx, gh, a.issueNumber, renderIssueBody(a.finding, repoURL, prov)); err != nil {
+				if isGHGoneOrNotFound(err) {
+					// Local row is stale: the issue was deleted (410) or
+					// transferred/renamed (404) on GitHub. Drop the row, create
+					// a fresh issue, and continue with the rest of the plan.
+					_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone: %v); re-creating\n", a.finding.Fingerprint[:12], a.issueNumber, err)
+					if derr := st.DeletePublishedIssue(ctx, a.finding.Fingerprint); derr != nil {
+						return fmt.Errorf("publish: delete stale published issue: %w", derr)
+					}
+					n, cerr := ghCreateIssue(ctx, gh, a.finding.Title, renderIssueBody(a.finding, repoURL, prov), cfg.Labels)
+					if cerr != nil {
+						return fmt.Errorf("publish: recreate issue after stale: %w", cerr)
+					}
+					if uerr := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, n, "open"); uerr != nil {
+						return fmt.Errorf("publish: record recreated issue: %w", uerr)
+					}
+					_, _ = fmt.Fprintf(w, "recreated issue #%d for %s (replaced stale row)\n", n, a.finding.Fingerprint[:12])
+					stale++
+					created++
+					continue
+				}
 				return err
 			}
 			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, a.issueNumber, "open"); err != nil {
@@ -221,6 +241,16 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 			// path (skipComment) goes straight to the PATCH.
 			if !a.skipComment {
 				if err := ghCommentIssue(ctx, gh, a.issueNumber, autoCloseComment(string(a.finding.Status))); err != nil {
+					if isGHGoneOrNotFound(err) {
+						// Issue is already gone — close is a no-op success.
+						// Drop the stale row and move on; do not abort the run.
+						_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone on close: %v); dropping row\n", a.finding.Fingerprint[:12], a.issueNumber, err)
+						if derr := st.DeletePublishedIssue(ctx, a.finding.Fingerprint); derr != nil {
+							return fmt.Errorf("publish: delete stale published issue: %w", derr)
+						}
+						stale++
+						continue
+					}
 					return err
 				}
 				if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, a.issueNumber, "closing"); err != nil {
@@ -228,6 +258,18 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 				}
 			}
 			if err := ghPatchIssueClosed(ctx, gh, a.issueNumber); err != nil {
+				if isGHGoneOrNotFound(err) {
+					// Same 410/404 handling on the PATCH: drop the row, log
+					// it, and continue. The "closing" tombstone row from
+					// above (if any) is also dropped, so the next cycle
+					// starts clean.
+					_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone on PATCH: %v); dropping row\n", a.finding.Fingerprint[:12], a.issueNumber, err)
+					if derr := st.DeletePublishedIssue(ctx, a.finding.Fingerprint); derr != nil {
+						return fmt.Errorf("publish: delete stale published issue: %w", derr)
+					}
+					stale++
+					continue
+				}
 				return err
 			}
 			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, a.issueNumber, "closed"); err != nil {
@@ -241,7 +283,7 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 		}
 	}
 
-	_, _ = fmt.Fprintf(w, "publish: created=%d updated=%d closed=%d skipped=%d\n", created, updated, closed, skipped)
+	_, _ = fmt.Fprintf(w, "publish: created=%d updated=%d closed=%d skipped=%d stale=%d\n", created, updated, closed, skipped, stale)
 	return nil
 }
 
@@ -384,6 +426,27 @@ type publishIssue struct {
 	Body   string `json:"body"`
 }
 
+// truncateUTF8 returns s sliced to at most max bytes, walking back to a valid
+// UTF-8 rune boundary so the result is always valid UTF-8. When s is shorter
+// than max, it is returned unchanged. The walk-back is bounded by 3 bytes
+// (the longest UTF-8 continuation sequence length), so the result is <= max
+// bytes in every case and never more than 3 bytes shorter than the cap.
+//
+// Used by every byte-cap truncation site in renderIssueBody and the repro
+// section so model-authored content never produces a string that fails
+// utf8.ValidString. The body-budget accounting is unchanged: callers that
+// sum len() of the returned string still observe <= max.
+func truncateUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	end := max
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end]
+}
+
 // longestBacktickRun returns the length of the longest run of consecutive
 // backtick characters found in s. Used by fencedBlock to compute a safe fence.
 func longestBacktickRun(s string) int {
@@ -519,7 +582,7 @@ func renderIssueBody(f store.Finding, repoURL string, prov publishProvenance) st
 	if f.Description != "" {
 		desc := f.Description
 		if len(desc) > maxDescription {
-			desc = desc[:maxDescription] + "\n\n[... truncated by bugbot ...]"
+			desc = truncateUTF8(desc, maxDescription) + "\n\n[... truncated by bugbot ...]"
 		}
 		b.WriteString(desc)
 		b.WriteString("\n\n")
@@ -531,7 +594,7 @@ func renderIssueBody(f store.Finding, repoURL string, prov publishProvenance) st
 	if f.FixPatch != "" {
 		patch := f.FixPatch
 		if len(patch) > maxFixPatch {
-			patch = patch[:maxFixPatch] + "\n[... truncated by bugbot ...]"
+			patch = truncateUTF8(patch, maxFixPatch) + "\n[... truncated by bugbot ...]"
 		}
 		b.WriteString("**Candidate fix (witness — starting point only, NOT reviewed):**\n\n")
 		b.WriteString(fencedBlock("diff", patch))
@@ -575,7 +638,7 @@ func renderIssueBody(f store.Finding, repoURL string, prov publishProvenance) st
 	if f.Reasoning != "" {
 		reasoning := f.Reasoning
 		if len(reasoning) > maxReasoning {
-			reasoning = reasoning[:maxReasoning] + "\n\n[... truncated by bugbot: full trace exceeds GitHub's body limit ...]"
+			reasoning = truncateUTF8(reasoning, maxReasoning) + "\n\n[... truncated by bugbot: full trace exceeds GitHub's body limit ...]"
 		}
 		reasoning = sanitizeDetailsTag(reasoning)
 		b.WriteString("<details><summary>Verification trace</summary>\n\n")
@@ -597,16 +660,12 @@ func renderIssueBody(f store.Finding, repoURL string, prov publishProvenance) st
 		if available < 0 {
 			available = 0
 		}
-		// Find a safe UTF-8 boundary within available bytes of the body (after the first line).
+		// truncateUTF8 walks back to a valid UTF-8 rune boundary, so the
+		// truncated slice never breaks a multi-byte rune.
 		afterFirst := firstLine + "\n\n"
 		mid := body[len(afterFirst):]
 		if len(mid) > available {
-			// Walk back to a valid UTF-8 rune boundary.
-			end := available
-			for end > 0 && !utf8.RuneStart(mid[end]) {
-				end--
-			}
-			mid = mid[:end]
+			mid = truncateUTF8(mid, available)
 		}
 		body = afterFirst + mid + truncNote + footer
 	}
@@ -723,10 +782,11 @@ func renderReproSection(reproDir string) string {
 			return nil
 		}
 
-		// Per-file cap.
+		// Per-file cap (truncateUTF8 keeps the result valid UTF-8 so a
+		// file split mid-rune never lands in the issue body as U+FFFD).
 		fileTruncated := false
 		if len(content) > maxPerFile {
-			content = content[:maxPerFile]
+			content = []byte(truncateUTF8(string(content), maxPerFile))
 			fileTruncated = true
 		}
 
@@ -737,7 +797,7 @@ func renderReproSection(reproDir string) string {
 			return nil
 		}
 		if len(content) > remaining {
-			content = content[:remaining]
+			content = []byte(truncateUTF8(string(content), remaining))
 			fileTruncated = true
 			truncated = true
 		}
@@ -910,4 +970,30 @@ func isGHMissing(err error) bool {
 		return true
 	}
 	return strings.Contains(err.Error(), "executable file not found")
+}
+
+// isGHGoneOrNotFound reports whether the error indicates the GitHub issue no
+// longer exists at the recorded number. We detect the two HTTP statuses that
+// mean "this issue is gone, the local row is stale":
+//   - 410 Gone: issue was deleted
+//   - 404 Not Found: issue was deleted, transferred, or renamed
+//
+// gh surfaces these in the stderr text it returns; the wording varies across
+// gh versions ("was deleted", "Gone", "Not Found", the raw status code). We
+// look for the most robust signals first (the literal "410" and "404" status
+// codes) and fall back to the human-readable phrases gh typically emits.
+func isGHGoneOrNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// Match gh's HTTP status token, not a bare "404"/"410" substring: the
+	// wrapped error always embeds the issue number and API path, so a bare
+	// match misfires on issues numbered like #404/#410 for any unrelated
+	// failure (rate-limit, 5xx, validation).
+	if strings.Contains(msg, "HTTP 404") || strings.Contains(msg, "HTTP 410") {
+		return true
+	}
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "was deleted")
 }

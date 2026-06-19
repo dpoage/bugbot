@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/dpoage/bugbot/internal/lsp"
 )
@@ -246,6 +247,103 @@ func TestReadSymbolArgumentErrors(t *testing.T) {
 				t.Errorf("error = %v, want containing %q", err, tt.want)
 			}
 		})
+	}
+}
+
+// TestRenderBodyRangeFirstLineOversized proves the byte-budget guard applies
+// even to the first (and only) line of the requested range. Without this fix
+// the first line is emitted unbounded, letting a single pathologically long
+// line blow the context cap (the outer file-size cap at 5 MiB is the only
+// remaining guard). After the fix, the first line is sliced to the remaining
+// byte budget, walked back to a valid UTF-8 rune boundary, and capped with
+// the `… [line truncated]` marker so the model knows the body is incomplete.
+func TestRenderBodyRangeFirstLineOversized(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.go")
+
+	// Build a line deliberately longer than the byte budget, with a 2-byte
+	// UTF-8 sequence straddling the budget boundary so the rune walk-back
+	// has something to do. A single line covers the single-line-oversized
+	// case (startLine == endLine) directly.
+	prefix := "package main\n\nconst giant = \""
+	boundary := "\xe9" // 'é' = 2 bytes, truncated mid-rune without walk-back
+	filler := strings.Repeat("a", readSymbolMaxBytes)
+	suffix := "\"\n"
+	if err := os.WriteFile(path, []byte(prefix+filler+boundary+suffix), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Single-line oversized range — startLine == endLine == 3 (the constant).
+	out, last, err := renderBodyRange(path, 3, 3)
+	if err != nil {
+		t.Fatalf("renderBodyRange: %v", err)
+	}
+	// Truncation is signaled by the `… [line truncated]` marker in the body.
+	if !strings.Contains(out, "… [line truncated]") {
+		t.Errorf("expected `… [line truncated]` marker, got:\n%s", lastLines(out, 3))
+	}
+	// Output stays within the byte budget plus a fixed overhead for the
+	// marker and the trailing "read_file with offset=" pointer note.
+	overhead := len("… [line truncated]\n… [truncated at line 999 — call read_file with offset=1000 to continue]\n")
+	if len(out) > readSymbolMaxBytes+overhead {
+		t.Errorf("output length %d is unbounded (budget %d + overhead %d)",
+			len(out), readSymbolMaxBytes, overhead)
+	}
+	if !utf8.ValidString(out) {
+		t.Errorf("output is not valid UTF-8:\n%s", lastLines(out, 3))
+	}
+	// last is the last line actually emitted; with first-line cap it is
+	// either 0 (no body emitted at all) or startLine (sliver of body).
+	// It must never be > startLine.
+	if last > 3 {
+		t.Errorf("last = %d, want <= 3", last)
+	}
+
+	// Multi-line case: file with two giant lines. Both are oversized so we
+	// expect the first line to be sliced, the marker appended, and the
+	// second line to NOT appear.
+	path2 := filepath.Join(dir, "huge2.go")
+	src2 := "package main\n\n" +
+		strings.Repeat("b", readSymbolMaxBytes+4096) + "\n" +
+		strings.Repeat("c", readSymbolMaxBytes+4096) + "\n"
+	if err := os.WriteFile(path2, []byte(src2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out2, last2, err := renderBodyRange(path2, 3, 4)
+	if err != nil {
+		t.Fatalf("renderBodyRange multi: %v", err)
+	}
+	if !strings.Contains(out2, "… [line truncated]") {
+		t.Errorf("multi-line output missing first-line marker:\n%s", lastLines(out2, 3))
+	}
+	if strings.Contains(out2, "\t"+strings.Repeat("c", 100)) {
+		t.Errorf("second oversized line leaked past first-line cap:\n%s", lastLines(out2, 3))
+	}
+	if last2 > 3 {
+		t.Errorf("multi-line last = %d, want <= 3", last2)
+	}
+	if !utf8.ValidString(out2) {
+		t.Errorf("multi-line output is not valid UTF-8:\n%s", lastLines(out2, 3))
+	}
+
+	// Exact-budget boundary: a first/only line of EXACTLY readSymbolMaxBytes
+	// bytes drives the truncation branch to emit == len(line), which indexed
+	// one byte past the end before the bounds guard (panic). It must truncate
+	// cleanly instead of crashing.
+	path3 := filepath.Join(dir, "exact.go")
+	src3 := "package main\n\n" + strings.Repeat("d", readSymbolMaxBytes) + "\n"
+	if err := os.WriteFile(path3, []byte(src3), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out3, _, err := renderBodyRange(path3, 3, 3)
+	if err != nil {
+		t.Fatalf("renderBodyRange exact-budget: %v", err)
+	}
+	if !strings.Contains(out3, "… [line truncated]") {
+		t.Errorf("exact-budget line missing truncation marker:\n%s", lastLines(out3, 3))
+	}
+	if !utf8.ValidString(out3) {
+		t.Errorf("exact-budget output is not valid UTF-8")
 	}
 }
 

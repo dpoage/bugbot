@@ -1,8 +1,6 @@
 package ingest
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"math"
 	"strconv"
@@ -120,9 +118,12 @@ func parseHeat(data []byte, now time.Time) map[string]float64 {
 	nowUnix := float64(now.Unix())
 
 	var currentTS float64 = -1
-	sc := bufio.NewScanner(bytes.NewReader(data))
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
+	// strings.Split (not bufio.Scanner) so lines longer than the 64KB
+	// default scanner token cap are not silently dropped. Long file paths
+	// (deeply-nested generated code, vendored trees) can exceed that
+	// limit and must still count toward the heat score.
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
 		}

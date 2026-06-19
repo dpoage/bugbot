@@ -170,16 +170,92 @@ func (t *gitBlameTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 			gitBlameMaxLines, start, end)
 	}
 
-	// Trim each line to a bounded length to prevent minified/generated code
-	// from producing enormous single lines. git blame's default output has
-	// fixed-width fields, so normal lines are short.
-	const maxLineBytes = 256
-	for _, line := range strings.SplitAfter(string(out), "\n") {
-		if len(line) > maxLineBytes {
-			b.WriteString(line[:maxLineBytes])
+	// Trim each entry to a bounded length to prevent minified/generated
+	// code from producing enormous single lines. git blame's default
+	// output has fixed-width fields, so normal entries are short.
+	//
+	// Inside the "(author date line)" prefix, the author is attacker-
+	// controllable free text (in public repos). Flatten newlines and
+	// collapse internal whitespace so an injected newline cannot fabricate
+	// a new tool-output line or section. The hash, date, line number, and
+	// the line content itself are not flattened: the line content is a
+	// single source line (no embedded newline) and the rest are
+	// structural fields. The author's newlines are stripped here, matching
+	// the funnel's lead-note / refuter-reasoning guard.
+	//
+	// We walk the output as a stream rather than per-line, because a
+	// newline inside the author would split a single blame entry across
+	// multiple "lines" and defeat any line-oriented parse. The delimiter
+	// between entries is a `\n` that follows the closing `) ` of the
+	// meta region. Everything between the opening `(` of the meta region
+	// and its closing `) ` is the author/date/line, and any newline that
+	// appears inside that span is treated as whitespace.
+	const maxEntryBytes = 256
+	writeBlame := func(line string) {
+		if len(line) > maxEntryBytes {
+			b.WriteString(line[:maxEntryBytes])
 			b.WriteString("…\n")
+			return
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	rest := string(out)
+	for len(rest) > 0 {
+		// Locate the meta region. A valid blame entry starts with a hash
+		// and a " (" prefix. If we don't find one, emit the rest as-is
+		// (nothing to sanitize) and stop.
+		i := strings.Index(rest, " (")
+		if i < 0 {
+			b.WriteString(rest)
+			break
+		}
+		// Emit everything up to and including the opening "(".
+		b.WriteString(rest[:i+2])
+		afterOpen := rest[i+2:]
+		// Find the closing ") " of the meta region.
+		j := strings.Index(afterOpen, ") ")
+		if j < 0 {
+			// Unterminated meta region. Emit what we have and stop; the
+			// author cannot be safely parsed and we won't risk a forged
+			// section header by guessing.
+			b.WriteString(afterOpen)
+			break
+		}
+		// The meta region is afterOpen[:j]. Flatten any newlines/tabs to
+		// single spaces via strings.Fields, then take everything except
+		// the last two tokens (date, line-number) as the author.
+		meta := afterOpen[:j]
+		parts := strings.Fields(meta)
+		if len(parts) < 3 {
+			// Malformed meta region (no recognizable date/line). Emit
+			// the original bytes and continue.
+			b.WriteString(afterOpen[:j+2])
+			rest = afterOpen[j+2:]
+			continue
+		}
+		author := strings.Join(strings.Fields(strings.Join(parts[:len(parts)-2], " ")), " ")
+		date := parts[len(parts)-2]
+		lineno := parts[len(parts)-1]
+		// Emit "<author> <date> <lineno>) " then continue past the meta
+		// region.
+		b.WriteString(author)
+		b.WriteByte(' ')
+		b.WriteString(date)
+		b.WriteByte(' ')
+		b.WriteString(lineno)
+		b.WriteString(") ")
+		afterMeta := afterOpen[j+2:]
+		// The entry content runs from here to the next newline (or end
+		// of output). Newlines in the content are not part of well-formed
+		// blame output, but a hostile author could still attempt to inject
+		// them. We scan up to the next \n to find the end of this entry.
+		if nl := strings.IndexByte(afterMeta, '\n'); nl >= 0 {
+			writeBlame(afterMeta[:nl])
+			rest = afterMeta[nl+1:]
 		} else {
-			b.WriteString(line)
+			writeBlame(afterMeta)
+			rest = ""
 		}
 	}
 
@@ -286,8 +362,97 @@ func (t *gitLogTool) Run(ctx context.Context, raw json.RawMessage) (string, erro
 			"git log failed (not a git repository or no history — "+
 				"rely on file content instead): %w", err)
 	}
+	// The format string is "%h %ad %an %s". The author (%an) and subject
+	// (%s) are attacker-controllable free text in public repos. Flatten
+	// each rendered log entry so an injected newline in the author or
+	// subject cannot fabricate a new tool-output line or section. The
+	// hash and date are structural fields and are not flattened. This
+	// matches the funnel's lead-note / refuter-reasoning guard: collapse
+	// whitespace with strings.Fields and re-join with single spaces.
+	//
+	// We treat the output as a stream of entries, not lines. A newline
+	// inside the author or subject would otherwise spill a single
+	// commit across multiple "lines" and let the attacker forge a new
+	// entry. A new entry is recognized by a leading "<short hash>
+	// <YYYY-MM-DD> " prefix (matching `%h` and `%ad`). Lines that do
+	// not start with such a prefix are continuations of the previous
+	// entry and are joined to it with a space before flattening.
+	//
+	// `%h` is a 7-char short hash, but a longer `--abbrev` is harmless
+	// here — we only require a token of hex digits to begin an entry.
+	var logOut strings.Builder
+	var current strings.Builder
+	flushEntry := func() {
+		if current.Len() == 0 {
+			return
+		}
+		entry := current.String()
+		current.Reset()
+		fields := strings.Fields(entry)
+		if len(fields) < 3 {
+			// Not a well-formed entry (no recognizable hash/date).
+			// Pass through untouched — no attacker-controllable fields
+			// to flatten and we don't want to drop diagnostic noise.
+			logOut.WriteString(entry)
+			logOut.WriteByte('\n')
+			return
+		}
+		hash := fields[0]
+		date := fields[1]
+		subject := strings.Join(strings.Fields(fields[len(fields)-1]), " ")
+		author := strings.Join(strings.Fields(strings.Join(fields[2:len(fields)-1], " ")), " ")
+		fmt.Fprintf(&logOut, "%s %s %s %s\n", hash, date, author, subject)
+	}
+	// A new entry begins with "<hex digits> <YYYY-MM-DD> " (matching
+	// `%h` and `%ad`). A line that does not start with that pattern is
+	// treated as a continuation of the previous entry.
+	isEntryStart := func(line string) bool {
+		// Find the first space; everything before is the hash token.
+		sp := strings.IndexByte(line, ' ')
+		if sp <= 0 {
+			return false
+		}
+		for i := 0; i < sp; i++ {
+			c := line[i]
+			isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+			if !isHex {
+				return false
+			}
+		}
+		// Expect a 10-char YYYY-MM-DD date immediately after the space.
+		if len(line) < sp+1+10 {
+			return false
+		}
+		date := line[sp+1 : sp+1+10]
+		if date[4] != '-' || date[7] != '-' {
+			return false
+		}
+		for _, hi := range []int{0, 1, 2, 3, 5, 6, 8, 9} {
+			if c := date[hi]; c < '0' || c > '9' {
+				return false
+			}
+		}
+		// Followed by a space.
+		return len(line) >= sp+1+10+1 && line[sp+1+10] == ' '
+	}
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if isEntryStart(line) {
+			flushEntry()
+			current.WriteString(line)
+		} else {
+			// Continuation of the previous entry (likely an attacker-
+			// injected newline inside the author/subject). Join with a
+			// single space; strings.Fields later will collapse any
+			// embedded multi-space runs.
+			if current.Len() > 0 {
+				current.WriteByte(' ')
+			}
+			current.WriteString(line)
+		}
+	}
+	flushEntry()
+	result := logOut.String()
 
-	result := string(out)
 	if len(result) > gitLogMaxBytes {
 		result = result[:gitLogMaxBytes] +
 			fmt.Sprintf("\n... [truncated at %dKB]\n", gitLogMaxBytes/1024)
