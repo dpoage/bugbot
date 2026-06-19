@@ -65,7 +65,7 @@ func openMultiPkgFixture(t *testing.T, pkgs ...string) (*store.Store, *ingest.Re
 	return st, repo, targets
 }
 
-// snapAndFps is a small helper: snapshot + fingerprints for a cartograph call.
+// snapAndFps is a small helper: snapshot + fingerprints for a newCartographer call.
 func snapAndFps(t *testing.T, repo *ingest.Repo) (*ingest.Snapshot, map[string]string) {
 	t.Helper()
 	ctx := context.Background()
@@ -131,16 +131,18 @@ func (c *cancelAfterFirstClient) Complete(ctx context.Context, _ llm.Request) (l
 // TestCartographer_PersistsOnTheFlyAcrossInterruption is the core regression for
 // the persist-on-the-fly fix: an interrupted pass keeps the summaries already
 // produced instead of discarding the whole run's work.
+//
+// In the lazy path, concurrent finder goroutines each call ensureContextFor for
+// their own package. After the first package is generated+persisted, the ctx is
+// cancelled. Remaining goroutines get a cancelled ctx inside summarizePackage and
+// return no summary. Exactly one summary must be in the store.
 func TestCartographer_PersistsOnTheFlyAcrossInterruption(t *testing.T) {
 	st, repo, targets := openMultiPkgFixture(t, "alpha", "bravo", "charlie")
 	snap, fps := snapAndFps(t, repo)
 
-	// MaxParallel=1 makes the interruption deterministic: alpha is summarized
-	// and persisted, its completion cancels the run, and bravo/charlie are
-	// skipped before they summarize.
 	f, err := New(RoleClients{Finder: newScriptedClient(), Verifier: newScriptedClient()}, st, repo, Options{
 		Features: FeatureFlags{Cartographer: true},
-		Limits:   StageLimits{MaxParallel: 1},
+		Limits:   StageLimits{MaxParallel: 4},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -151,24 +153,34 @@ func TestCartographer_PersistsOnTheFlyAcrossInterruption(t *testing.T) {
 	defer cancel()
 	client := &cancelAfterFirstClient{cancel: cancel}
 
-	cart := f.cartograph(ctx, &Result{}, client, snap, targets, fps, nil)
+	cart := f.newCartographer(ctx, &Result{}, client, snap, targets, fps, nil)
 	if cart == nil {
-		t.Fatal("cartograph returned nil with Cartographer=true")
+		t.Fatal("newCartographer returned nil with Cartographer=true")
 	}
 
+	// Launch one goroutine per package so they call summarizePackage concurrently
+	// (different singleflight keys, no dedup). The first completes and cancels ctx;
+	// the rest fail on cancelled ctx inside summarizePackage.
+	var wg sync.WaitGroup
+	for _, tgt := range targets {
+		tgt := tgt
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = cart.ensureContextFor(ctx, []string{tgt})
+		}()
+	}
+	wg.Wait()
+
 	// Exactly one summary persisted — proving the first was written before the
-	// interruption (old code: the end-of-pass batch upsert with a cancelled ctx
-	// would have persisted zero).
+	// interruption (the cancel-detached persist ctx keeps it safe).
 	if got := countPersisted(t, st, "alpha", "bravo", "charlie"); got != 1 {
 		t.Errorf("persisted summaries after interruption = %d, want 1 (on-the-fly)", got)
-	}
-	if cart.summaries["alpha"] == "" {
-		t.Errorf("alpha summary missing from cartography; on-the-fly persist should have recorded it")
 	}
 }
 
 // TestCartographer_FullPassPersistsAll pins that a normal (uninterrupted)
-// concurrent pass persists every uncached package and populates the cartography.
+// lazy pass persists every uncached package and populates the cartography memo.
 func TestCartographer_FullPassPersistsAll(t *testing.T) {
 	st, repo, targets := openMultiPkgFixture(t, "alpha", "bravo", "charlie")
 	snap, fps := snapAndFps(t, repo)
@@ -184,15 +196,31 @@ func TestCartographer_FullPassPersistsAll(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 
-	cart := f.cartograph(context.Background(), &Result{}, client, snap, targets, fps, nil)
+	cart := f.newCartographer(context.Background(), &Result{}, client, snap, targets, fps, nil)
 	if cart == nil {
-		t.Fatal("cartograph returned nil with Cartographer=true")
+		t.Fatal("newCartographer returned nil with Cartographer=true")
 	}
-	if len(cart.summaries) != 3 {
-		t.Errorf("cartography summaries = %d, want 3", len(cart.summaries))
+
+	// Trigger lazy generation for all three packages concurrently.
+	var wg sync.WaitGroup
+	for _, tgt := range targets {
+		tgt := tgt
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = cart.ensureContextFor(context.Background(), []string{tgt})
+		}()
+	}
+	wg.Wait()
+
+	cart.mu.Lock()
+	nMemo := len(cart.summaries)
+	cart.mu.Unlock()
+	if nMemo != 3 {
+		t.Errorf("cartography memo summaries = %d, want 3", nMemo)
 	}
 	if got := countPersisted(t, st, "alpha", "bravo", "charlie"); got != 3 {
-		t.Errorf("persisted summaries = %d, want 3 (full pass)", got)
+		t.Errorf("persisted summaries = %d, want 3 (full lazy pass)", got)
 	}
 }
 
@@ -230,16 +258,18 @@ func (c *barrierClient) Complete(ctx context.Context, _ llm.Request) (llm.Respon
 }
 
 // TestCartographer_GeneratesConcurrently proves the parallelism: three packages
-// must be summarized concurrently (barrier of 3). Under a sequential regression
-// only one completion is ever in flight, the barrier never trips, and the
-// context deadline fires — leaving fewer than three summaries persisted.
+// must be summarized concurrently (barrier of 3). Each goroutine calls
+// ensureContextFor for a single distinct package; since the singleflight keys
+// differ, all three sf.Do calls run simultaneously — reaching the barrier.
+// Under a sequential regression only one sf.Do runs at a time, the barrier never
+// trips to 3, and the context deadline fires.
 func TestCartographer_GeneratesConcurrently(t *testing.T) {
 	st, repo, targets := openMultiPkgFixture(t, "alpha", "bravo", "charlie")
 	snap, fps := snapAndFps(t, repo)
 
 	f, err := New(RoleClients{Finder: newScriptedClient(), Verifier: newScriptedClient()}, st, repo, Options{
 		Features: FeatureFlags{Cartographer: true},
-		Limits:   StageLimits{MaxParallel: 4}, // >= 3 so all three can run at once
+		Limits:   StageLimits{MaxParallel: 4},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -250,12 +280,29 @@ func TestCartographer_GeneratesConcurrently(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cart := f.cartograph(ctx, &Result{}, client, snap, targets, fps, nil)
+	cart := f.newCartographer(ctx, &Result{}, client, snap, targets, fps, nil)
 	if cart == nil {
-		t.Fatal("cartograph returned nil with Cartographer=true")
+		t.Fatal("newCartographer returned nil with Cartographer=true")
 	}
-	if len(cart.summaries) != 3 {
-		t.Errorf("cartography summaries = %d, want 3 (all generated concurrently)", len(cart.summaries))
+
+	// Three goroutines, each targeting a different package, so each hits
+	// sf.Do with a distinct key and all three run summarizePackage concurrently.
+	var wg sync.WaitGroup
+	for _, tgt := range targets {
+		tgt := tgt
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = cart.ensureContextFor(ctx, []string{tgt})
+		}()
+	}
+	wg.Wait()
+
+	cart.mu.Lock()
+	nMemo := len(cart.summaries)
+	cart.mu.Unlock()
+	if nMemo != 3 {
+		t.Errorf("cartography summaries = %d, want 3 (all generated concurrently)", nMemo)
 	}
 	if got := countPersisted(t, st, "alpha", "bravo", "charlie"); got != 3 {
 		t.Errorf("persisted summaries = %d, want 3 (concurrent pass)", got)

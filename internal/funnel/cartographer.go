@@ -19,6 +19,7 @@ import (
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
+	"golang.org/x/sync/singleflight"
 )
 
 // cartographySystemPrompt is the cartographer's terse system prompt. The
@@ -34,31 +35,169 @@ const cartographySystemPrompt = `Summarize this package in <=120 words: purpose,
 // finder tasks. A nil cartography represents "feature off" — every
 // downstream caller (contextFor, the hypothesize plumbing) handles a nil
 // receiver and injects nothing.
+// cartography holds the per-run package summaries and the package-importer
+// graph used to inject "this package + its direct dependents" context into
+// finder tasks. A nil cartography represents "feature off" — every
+// downstream caller (ensureContextFor, the hypothesize plumbing) handles a nil
+// receiver and injects nothing.
+//
+// In lazy mode (newCartographer path), summaries is populated on demand by
+// ensureContextFor rather than up-front. The mu guard + sf singleflight group
+// ensure concurrent finder units spanning the same un-summarized package
+// generate the summary exactly once and share the result.
 type cartography struct {
-	summaries map[string]string   // pkgDir -> summary text
-	importers map[string][]string // pkgDir -> direct importer pkgDirs
+	summaries map[string]string   // pkgDir -> summary text (memo; guarded by mu)
+	importers map[string][]string // pkgDir -> direct importer pkgDirs (built eagerly, pure-Go)
+
+	// Lazy-generation state. Populated by newCartographer; zero in legacy path.
+	mu       sync.Mutex
+	sf       singleflight.Group
+	funnel   *Funnel
+	client   llm.Client
+	packages map[string][]string // pkgDir -> sorted member files (from packagesSpanned)
+	pkgFps   map[string]string   // pkgDir -> fingerprint
+	fps      map[string]string   // file -> content fingerprint
+	budget   *budgetState
+	enabled  bool // mirrors f.opts.Features.Cartographer; false -> nil behavior
 }
 
-// contextFor renders the injection block for a finder unit's files:
-// summaries for the files' own packages plus their direct dependents (from
-// importers), bounded by cartographyInjectMaxPkgs /
-// cartographyInjectMaxBytes. A nil receiver or no matching summaries
-// returns "" (the feature is off, or no summary matched the unit).
-//
-// The block is structured so the model can tell at a glance what is its
-// own package and what is a dependency. Dependency packages are marked
-// "(dependency)" so the agent does not confuse them with the audit target
-// when reasoning about invariants. The leading "verify against the code"
-// note is deliberate: summaries are best-effort and may be stale or
-// imprecise; the model is told to confirm against the actual code it reads
-// (the existing system prompt already licenses this).
-//
-// Truncation: once either cap is hit the block is closed and a final
-// "[truncated]" line is appended so the agent knows the context is partial
-// rather than missing without explanation. Packages appear in
-// (alphabetical, dependency-last) order, deterministic across runs.
+// contextFor renders the injection block for a finder unit's files using the
+// current in-memory summaries memo. It is the legacy (eager-pass) entry point
+// that passes the lock-held summaries snapshot directly to renderContext. A nil
+// receiver or no matching summaries returns "" (feature off, or no summary
+// matched the unit).
 func (c *cartography) contextFor(files []string) string {
-	if c == nil || len(c.summaries) == 0 {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	sums := c.summaries
+	c.mu.Unlock()
+	return c.renderContext(files, sums)
+}
+
+// ensureContextFor is the lazy entry point used by the scan path. For each
+// package spanned by files (own packages + their direct dependents from
+// importers), it materialises the summary on demand:
+//
+//  1. Memo hit (mu-protected in-memory map) → use immediately.
+//  2. Store hit (GetPackageSummaries, fingerprint match) → populate memo, use.
+//  3. Miss → generate via singleflight.Do (one LLM call per pkg across all
+//     concurrent finder units) → UpsertPackageSummaries immediately → memo.
+//
+// Budget gate: if budget.finderOverHard() skip generation and render only
+// cached/memoized (same degradation as the old eager pass when budget trips
+// mid-cartographer-run).
+//
+// A nil receiver (feature off) returns "" without acquiring any lock.
+func (c *cartography) ensureContextFor(ctx context.Context, files []string) string {
+	if c == nil || !c.enabled {
+		return ""
+	}
+
+	// Compute the set of packages we need: own + direct dependents.
+	ownSet := make(map[string]struct{})
+	for _, f := range files {
+		d := path.Dir(f)
+		if d == "." {
+			d = ""
+		}
+		ownSet[d] = struct{}{}
+	}
+	depSet := make(map[string]struct{})
+	for own := range ownSet {
+		for _, dep := range c.importers[own] {
+			depSet[dep] = struct{}{}
+		}
+	}
+	delete(depSet, "")
+
+	needed := make([]string, 0, len(ownSet)+len(depSet))
+	for pkg := range ownSet {
+		if pkg != "" {
+			needed = append(needed, pkg)
+		}
+	}
+	for pkg := range depSet {
+		needed = append(needed, pkg)
+	}
+
+	// Phase 1: collect memo hits and build the miss list.
+	c.mu.Lock()
+	var miss []string
+	for _, pkg := range needed {
+		if _, ok := c.summaries[pkg]; !ok {
+			miss = append(miss, pkg)
+		}
+	}
+	c.mu.Unlock()
+
+	if len(miss) > 0 {
+		budgetHard := c.budget != nil && c.budget.finderOverHard()
+
+		// Phase 2: store lookup for misses (one batched query).
+		var storeHit map[string]store.PackageSummary
+		if !budgetHard {
+			storeHit, _ = c.funnel.store.GetPackageSummaries(ctx, miss)
+		}
+
+		for _, pkg := range miss {
+			members := c.packages[pkg]
+			fp := c.pkgFps[pkg]
+
+			// Store hit with fresh fingerprint → populate memo, skip generation.
+			if row, ok := storeHit[pkg]; ok && row.Fingerprint == fp && row.Summary != "" {
+				c.mu.Lock()
+				c.summaries[pkg] = row.Summary
+				c.mu.Unlock()
+				continue
+			}
+
+			// Budget hard → skip generation entirely; render whatever is cached.
+			if budgetHard {
+				continue
+			}
+
+			// Generate via singleflight: concurrent units sharing this pkg produce
+			// exactly one LLM call; the result is shared to all waiters.
+			result, _, _ := c.sf.Do(pkg, func() (interface{}, error) {
+				summary, err := c.funnel.summarizePackage(ctx, c.client, c.budget, pkg, members, c.fps)
+				if err != nil || summary == "" {
+					return "", nil // degrade silently (same as eager pass)
+				}
+				// Persist immediately with a cancel-detached context so an
+				// interruption does not discard an already-produced summary.
+				pCtx, pCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				_ = c.funnel.store.UpsertPackageSummaries(pCtx, []store.PackageSummary{
+					{Pkg: pkg, Fingerprint: fp, Summary: summary},
+				})
+				pCancel()
+				return summary, nil
+			})
+			if s, ok := result.(string); ok && s != "" {
+				c.mu.Lock()
+				c.summaries[pkg] = s
+				c.mu.Unlock()
+			}
+		}
+	}
+
+	// Snapshot the memo under lock and render.
+	c.mu.Lock()
+	sums := make(map[string]string, len(c.summaries))
+	for k, v := range c.summaries {
+		sums[k] = v
+	}
+	c.mu.Unlock()
+	return c.renderContext(files, sums)
+}
+
+// renderContext builds the injection block given a pre-materialised summaries
+// snapshot. It is called by both contextFor (legacy) and ensureContextFor
+// (lazy) so the truncation/ordering logic lives in exactly one place.
+// A nil/empty summaries map returns "".
+func (c *cartography) renderContext(files []string, summaries map[string]string) string {
+	if len(summaries) == 0 {
 		return ""
 	}
 	// Collect unique own packages of the unit's files.
@@ -88,12 +227,12 @@ func (c *cartography) contextFor(files []string) string {
 		if own == "" {
 			continue
 		}
-		if s, ok := c.summaries[own]; ok && s != "" {
+		if s, ok := summaries[own]; ok && s != "" {
 			ownList = append(ownList, own)
 		}
 	}
 	for dep := range depSet {
-		if s, ok := c.summaries[dep]; ok && s != "" {
+		if s, ok := summaries[dep]; ok && s != "" {
 			depList = append(depList, dep)
 		}
 	}
@@ -122,7 +261,7 @@ func (c *cartography) contextFor(files []string) string {
 		// consistent visual rhythm. Newlines in the summary are collapsed
 		// to spaces to keep the block single-line-per-package; multi-line
 		// summaries would confuse the truncation math.
-		line := "  " + label + ": " + util.CollapseWhitespace(c.summaries[pkg]) + "\n"
+		line := "  " + label + ": " + util.CollapseWhitespace(summaries[pkg]) + "\n"
 		if b.Len()+len(line) > cartographyInjectMaxBytes {
 			b.WriteString("  [truncated: byte limit reached]\n")
 			break
@@ -174,108 +313,40 @@ func (c *cartography) QueryGraph(pkg, direction string) (importerList, importLis
 	return importerList, importList
 }
 
-// cartograph runs the cartographer pass: fingerprint each package spanned
-// by targets, reuse cached summaries whose stored fingerprint matches,
-// regenerate the rest with ONE bounded client.Complete each (no tool loop),
-// persist the regenerated set, and return the run's cartography. Returns
-// nil when f.opts.Features.Cartographer is false. Degrades gracefully (returns
-// whatever summaries it has, possibly nil) on store/LLM errors or when
-// budget.finderOverHard() flips to true mid-pass.
+// newCartographer constructs a lazy cartography provider. Unlike cartograph it
+// does NOT summarize anything up front: it builds only the importer graph
+// (pure-Go, needed across all finder units for cross-package dependents) and
+// stores the client/fps/budget for on-demand use by ensureContextFor.
 //
-// The pass runs CONCURRENTLY: each uncached package is summarized in its own
-// goroutine bounded by the funnel slot pool (the same bound finders use), and
-// each summary is persisted the moment it is produced (see regenSummaries). The
-// cartographer runs before the finder stage, so the pool is free and the fan-out
-// does not compete with finders. The cost bound (DefaultCartographerMaxFiles
-// member files, head-capped, total bytes capped) keeps each completion cheap.
-func (f *Funnel) cartograph(ctx context.Context, result *Result, client llm.Client, snap *ingest.Snapshot, targets []string, fps map[string]string, budget *budgetState) *cartography {
+// Returns nil when f.opts.Features.Cartographer is false (byte-identical off
+// path). Returns a non-nil cartography with an empty summaries memo and a
+// pre-built importers graph when enabled — even when client/snap/targets are
+// nil/empty (same degenerate-but-non-nil contract as cartograph).
+func (f *Funnel) newCartographer(ctx context.Context, _ *Result, client llm.Client, snap *ingest.Snapshot, targets []string, fps map[string]string, budget *budgetState) *cartography {
 	if !f.opts.Features.Cartographer {
 		return nil
 	}
 	if client == nil || snap == nil || len(targets) == 0 {
-		// Without inputs the pass has nothing to do. Return a non-nil
-		// empty cartography so contextFor still produces a well-defined
-		// "no injection" answer; callers that branch on nil must NOT
-		// also branch on len.
-		return &cartography{summaries: map[string]string{}, importers: map[string][]string{}}
+		return &cartography{
+			summaries: map[string]string{},
+			importers: map[string][]string{},
+			enabled:   true,
+			funnel:    f,
+			client:    client,
+			packages:  map[string][]string{},
+			pkgFps:    map[string]string{},
+			fps:       fps,
+			budget:    budget,
+		}
 	}
 
-	// Enumerate the packages spanned by targets and compute each
-	// package's deterministic fingerprint (see the contract: members =
-	// sorted repo-relative paths p with path.Dir(p) == pkg; fp =
-	// ingest.HashBytes of "for each p: p + NUL + fps[p] + \n").
 	packages := packagesSpanned(targets)
-	if len(packages) == 0 {
-		return &cartography{summaries: map[string]string{}, importers: map[string][]string{}}
-	}
-	pkgFingerprints := make(map[string]string, len(packages))
+	pkgFps := make(map[string]string, len(packages))
 	for pkg, members := range packages {
-		pkgFingerprints[pkg] = packageFingerprint(pkg, members, fps)
+		pkgFps[pkg] = packageFingerprint(pkg, members, fps)
 	}
 
-	// Read whatever the store already has for these packages. Rows with a
-	// matching fingerprint are reused verbatim; mismatches and absentees
-	// go on the regen list.
-	cached, err := f.store.GetPackageSummaries(ctx, util.SortedKeys(pkgFingerprints))
-	if err != nil {
-		// Store read failure: degrade to empty cartography. The scan
-		// proceeds without injection — the byte-identical-off path is
-		// still honored because Cartographer=true is the user's request
-		// and a degraded pass is still better than a halted scan.
-		return &cartography{summaries: map[string]string{}, importers: map[string][]string{}}
-	}
-
-	summaries := make(map[string]string, len(pkgFingerprints))
-	for pkg, fp := range pkgFingerprints {
-		if row, ok := cached[pkg]; ok && row.Fingerprint == fp && row.Summary != "" {
-			summaries[pkg] = row.Summary
-		}
-	}
-
-	// Build the regen list (sorted so the launch order — and therefore the
-	// prefix that survives a budget cutoff — is reproducible). Generation and
-	// persistence happen concurrently below; completion order is unspecified.
-	var toRegen []string
-	for pkg, fp := range pkgFingerprints {
-		if _, ok := summaries[pkg]; ok {
-			continue
-		}
-		if _, ok := packages[pkg]; !ok {
-			continue
-		}
-		_ = fp
-		toRegen = append(toRegen, pkg)
-	}
-	sort.Strings(toRegen)
-
-	// Regenerate uncached summaries CONCURRENTLY (bounded by the funnel slot
-	// pool, the same bound finders use) and persist EACH summary the instant it
-	// is produced — never batched — so an interrupted or budget-stopped pass
-	// keeps every summary already written instead of discarding the run's work.
-	f.regenSummaries(ctx, client, packages, pkgFingerprints, fps, toRegen, budget,
-		func(r regenResult) {
-			switch {
-			case r.err == nil:
-				summaries[r.pkg] = r.summary
-			case r.stage == "persist":
-				// The silent-loss case (tokens spent, nothing stored): surface it
-				// as a run note rather than swallowing it.
-				f.note(result, fmt.Sprintf("cartographer: persisting summary for %q failed: %v", r.pkg, r.err))
-			}
-			// summarize failures stay silent, matching the pre-parallel behavior.
-		})
-
-	// Build the importer graph scoped to the SPANNED PACKAGES (every file of any
-	// package that has a target), not just the target files. contextFor only
-	// injects a dependent's summary when that summary exists, and summaries
-	// exist exactly for the spanned packages (packagesSpanned). The import that
-	// makes package D a dependent of package O may live in a file of D that is
-	// not itself a target, so scoping to target files alone would drop that edge
-	// and silently omit D's summary. Scoping to every file of the spanned
-	// packages captures exactly the edges among summarized packages
-	// (byte-identical injection) while staying O(spanned packages) — far below
-	// O(snapshot) on a large repo. A failure returns an empty importers map
-	// (dependency injection degrades to "own package only", not a failed scan).
+	// Build the importer graph eagerly (pure-Go, O(spanned packages), no LLM).
 	spannedDirs := make(map[string]bool, len(packages))
 	for pkg := range packages {
 		spannedDirs[pkg] = true
@@ -291,7 +362,76 @@ func (f *Funnel) cartograph(ctx context.Context, result *Result, client llm.Clie
 		importers = map[string][]string{}
 	}
 
-	return &cartography{summaries: summaries, importers: importers}
+	return &cartography{
+		summaries: map[string]string{},
+		importers: importers,
+		enabled:   true,
+		funnel:    f,
+		client:    client,
+		packages:  packages,
+		pkgFps:    pkgFps,
+		fps:       fps,
+		budget:    budget,
+	}
+}
+
+// getSummary returns the summary for a single package, generating it on demand
+// if needed (same memo/singleflight/store logic as ensureContextFor, without
+// the rendering step). Returns ("", false) when the package is unknown or
+// generation was budget-skipped. A nil receiver returns ("", false).
+func (c *cartography) getSummary(ctx context.Context, pkg string) (string, bool) {
+	if c == nil || !c.enabled || pkg == "" {
+		return "", false
+	}
+
+	// Memo hit.
+	c.mu.Lock()
+	if s, ok := c.summaries[pkg]; ok {
+		c.mu.Unlock()
+		return s, s != ""
+	}
+	c.mu.Unlock()
+
+	budgetHard := c.budget != nil && c.budget.finderOverHard()
+
+	// Store hit.
+	if !budgetHard {
+		if rows, err := c.funnel.store.GetPackageSummaries(ctx, []string{pkg}); err == nil {
+			if row, ok := rows[pkg]; ok && row.Fingerprint == c.pkgFps[pkg] && row.Summary != "" {
+				c.mu.Lock()
+				c.summaries[pkg] = row.Summary
+				c.mu.Unlock()
+				return row.Summary, true
+			}
+		}
+	}
+
+	members := c.packages[pkg]
+	if len(members) == 0 || budgetHard {
+		return "", false
+	}
+	fp := c.pkgFps[pkg]
+
+	// Generate via singleflight.
+	result, _, _ := c.sf.Do(pkg, func() (interface{}, error) {
+		summary, err := c.funnel.summarizePackage(ctx, c.client, c.budget, pkg, members, c.fps)
+		if err != nil || summary == "" {
+			return "", nil
+		}
+		pCtx, pCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		_ = c.funnel.store.UpsertPackageSummaries(pCtx, []store.PackageSummary{
+			{Pkg: pkg, Fingerprint: fp, Summary: summary},
+		})
+		pCancel()
+		return summary, nil
+	})
+	if s, ok := result.(string); ok && s != "" {
+		c.mu.Lock()
+		c.summaries[pkg] = s
+		c.mu.Unlock()
+		return s, true
+	}
+	return "", false
 }
 
 // regenResult is one package's outcome from regenSummaries. err == nil means the

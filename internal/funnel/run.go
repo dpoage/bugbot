@@ -23,6 +23,20 @@ import (
 // importing the store package's internal epoch constant.
 var epochSentinelParsed = store.EpochSentinelTime()
 
+// runMode controls what the shared run() pipeline produces.
+type runMode int
+
+const (
+	// modeFull is the normal sweep/targeted mode: hypothesize runs the
+	// finder/cartographer to produce fresh candidates in addition to replaying
+	// any pending WAL candidates.
+	modeFull runMode = iota
+	// modeVerifyDrain skips the finder/cartographer stages entirely. candCh
+	// carries only the replayed WAL candidates from ListPendingCandidates.
+	// This is the mode used by VerifyDrain.
+	modeVerifyDrain
+)
+
 // Sweep runs the funnel over the entire current snapshot of the repository. It
 // is the manual `bugbot scan` and periodic-sweep entrypoint.
 //
@@ -78,7 +92,7 @@ func (f *Funnel) Sweep(ctx context.Context) (*Result, error) {
 	// completes (incremental durability). Targeted scans do NOT touch coverage —
 	// sweeps are the coverage source of truth. See the Deliberate Asymmetry note
 	// in the hypothesize docstring and the design comment in run().
-	result, err := f.run(ctx, store.ScanOneshot, snap, targets, fps, true)
+	result, err := f.run(ctx, store.ScanOneshot, snap, targets, fps, true, modeFull)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +283,7 @@ func (f *Funnel) Targeted(ctx context.Context, changedFiles []string) (*Result, 
 	sort.Strings(targets)
 
 	// touchCoverage=false: targeted scans do not stamp coverage. See Sweep.
-	return f.run(ctx, store.ScanTargeted, snap, targets, nil, false)
+	return f.run(ctx, store.ScanTargeted, snap, targets, nil, false, modeFull)
 }
 
 // snapshot builds the current snapshot through the configured scan filter
@@ -328,7 +342,7 @@ func (f *Funnel) snapshot(ctx context.Context) (*ingest.Snapshot, error) {
 // The finalize write uses a short detached context (context.WithTimeout over
 // context.Background()) rather than the run's ctx, because the run ctx is
 // already cancelled on the interruption path.
-func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snapshot, targets []string, fps map[string]string, touchCoverage bool) (*Result, error) {
+func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snapshot, targets []string, fps map[string]string, touchCoverage bool, mode runMode) (*Result, error) {
 	scanRunID, err := f.store.BeginScanRun(ctx, kind, snap.Commit)
 	if err != nil {
 		return nil, fmt.Errorf("funnel: begin scan run: %w", err)
@@ -384,7 +398,16 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// breadth-heavy finder stage cannot drain the whole pool and orphan every
 	// candidate before it is verified (bugbot-8mj / bugbot-3lt). A no-op when the
 	// budget is unlimited or the share disables the reservation.
-	budget.reserveForDownstream(f.opts.Budget.FinderBudgetShare)
+	// Reserve a slice of the per-run budget for downstream verification so the
+	// breadth-heavy finder stage cannot drain the whole pool and orphan every
+	// candidate before it is verified (bugbot-8mj / bugbot-3lt). A no-op when the
+	// budget is unlimited or the share disables the reservation.
+	// In modeVerifyDrain the finder stage never runs, so skip the reservation:
+	// without this guard verifyPool is capped at 30% of TokenBudget, orphaning
+	// every candidate as T3 while 70% sits idle in the never-charged finder pool.
+	if mode == modeFull {
+		budget.reserveForDownstream(f.opts.Budget.FinderBudgetShare)
+	}
 
 	result := &Result{ScanRunID: scanRunID, Commit: snap.Commit}
 	// Persist whether the cartographer pass was active, on every exit path
@@ -502,7 +525,9 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	}
 
 	// ---- Stage A: Hypothesize ----
-	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageHypothesize})
+	if mode == modeFull {
+		progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageHypothesize})
+	}
 
 	// Launch hypothesize in a goroutine so the triage consumer can run
 	// concurrently. The emit callback sends to candCh.
@@ -530,39 +555,43 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			emit(pendingToCandidate(pc))
 		}
 		result.Stats.Resumed = len(resume)
-		// Enumerate cross-language seams once per run: the boundary lens's
-		// unit of work is one seam, and the count populates Stats.SeamsFound
-		// for observability. Computation is O(files) over the snapshot and
-		// runs in the hypothesize goroutine so the per-stage progression
-		// reports (which are emitted before this call) are unaffected.
-		seams := ingest.EnumerateSeams(snap)
-		result.Stats.SeamsFound = len(seams)
-		// Cartographer pass: one-shot, runs once per scan BEFORE the
-		// finder stage. When Options.Cartographer is false (default) it
-		// returns nil and the injection below yields "". A nil cart
-		// is the documented off-state; the finder's task message is
-		// byte-identical to the pre-cartographer build.
-		cart := f.cartograph(ctx, result, cartographerClient, snap, targets, fps, budget)
-		n, err := f.hypothesize(ctx, scanRunID, finderClient, persona, kind,
-			f.opts.Discovery.ChangeContext, langs, targets, seams, budget, result, fps, touchCoverage, cart, emit)
-		hypothesizedCount = n
-		hypothesizeErr = err
-		close(candCh)
-		// Emit StageFinished(hypothesize) at FINDER DRAIN time, not after the
-		// whole pipeline settles: the status snapshot resets LiveCandidates on
-		// this event, and with verify running concurrently the live finder
-		// counter would otherwise never reset until end-of-run. FinderFailures
-		// was folded into result.Stats under the stage's own mutex before
-		// hypothesize returned, so the read here is ordered.
-		if err == nil {
-			progress.Emit(sink, progress.Event{
-				Kind: progress.KindStageFinished, Stage: progress.StageHypothesize,
-				Counts: &progress.Counts{
-					Hypothesized:   n,
-					FinderFailures: result.Stats.FinderFailures,
-				},
-			})
+		// In modeVerifyDrain the finder/cartographer are skipped: candCh carries
+		// only the replayed WAL candidates. Everything downstream is identical.
+		if mode == modeFull {
+			// Enumerate cross-language seams once per run: the boundary lens's
+			// unit of work is one seam, and the count populates Stats.SeamsFound
+			// for observability. Computation is O(files) over the snapshot and
+			// runs in the hypothesize goroutine so the per-stage progression
+			// reports (which are emitted before this call) are unaffected.
+			seams := ingest.EnumerateSeams(snap)
+			result.Stats.SeamsFound = len(seams)
+			// Cartographer pass: one-shot, runs once per scan BEFORE the
+			// finder stage. When Options.Cartographer is false (default) it
+			// returns nil and the injection below yields "". A nil cart
+			// is the documented off-state; the finder's task message is
+			// byte-identical to the pre-cartographer build.
+			cart := f.newCartographer(ctx, result, cartographerClient, snap, targets, fps, budget)
+			n, err := f.hypothesize(ctx, scanRunID, finderClient, persona, kind,
+				f.opts.Discovery.ChangeContext, langs, targets, seams, budget, result, fps, touchCoverage, cart, emit)
+			hypothesizedCount = n
+			hypothesizeErr = err
+			// Emit StageFinished(hypothesize) at FINDER DRAIN time, not after the
+			// whole pipeline settles: the status snapshot resets LiveCandidates on
+			// this event, and with verify running concurrently the live finder
+			// counter would otherwise never reset until end-of-run. FinderFailures
+			// was folded into result.Stats under the stage's own mutex before
+			// hypothesize returned, so the read here is ordered.
+			if err == nil {
+				progress.Emit(sink, progress.Event{
+					Kind: progress.KindStageFinished, Stage: progress.StageHypothesize,
+					Counts: &progress.Counts{
+						Hypothesized:   n,
+						FinderFailures: result.Stats.FinderFailures,
+					},
+				})
+			}
 		}
+		close(candCh)
 	}()
 
 	// ---- Stage B: Triage (streaming consumer) ----
@@ -821,11 +850,6 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			}
 		}
 	}
-
-	// ---- Stage F: Impact sweep ----
-	// Re-rank each surviving finding's severity by reachability/impact and
-	// persist the rationale. Best-effort: a sweep failure never aborts the run.
-	f.impactSweep(ctx, findings, f.repo.Root(), verifierClient, budget.stopped.Load(), result)
 
 	result.Stats.SandboxExecs = int(sbExecs.Load())
 	result.Stats.SandboxExecMillis = sbMillis.Load()

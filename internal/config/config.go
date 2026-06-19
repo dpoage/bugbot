@@ -307,6 +307,17 @@ type Daemon struct {
 	// ReproPath empty, NeedsHuman false). Must be > 0 when repro is enabled.
 	// Default 1h. Only consulted when repro is enabled; otherwise ignored.
 	ReproBacklogInterval time.Duration `yaml:"repro_backlog_interval"`
+	// VerifyDrainInterval is the cadence at which the daemon drains the
+	// pending_candidates write-ahead log: candidates stranded by interrupted
+	// runs are verified WITHOUT re-running the finder stage. Cheap when the WAL
+	// is empty (a single store query). Must be > 0. Default 1h.
+	VerifyDrainInterval time.Duration `yaml:"verify_drain_interval"`
+	// ImpactSweepInterval is the cadence at which the daemon runs the
+	// impact-sweep drain: open findings not yet swept (swept_at NULL) are
+	// re-ranked by reachability/impact. Decoupled from the per-scan terminal
+	// stage so findings stranded by interrupted runs are still reconciled.
+	// Must be > 0. Default 6h.
+	ImpactSweepInterval time.Duration `yaml:"impact_sweep_interval"`
 }
 
 // Storage configures the embedded SQLite state store.
@@ -420,6 +431,8 @@ func Default() Config {
 			SweepInterval:        6 * time.Hour,
 			IdleBackoff:          5 * time.Minute,
 			ReproBacklogInterval: 1 * time.Hour,
+			VerifyDrainInterval:  1 * time.Hour,
+			ImpactSweepInterval:  6 * time.Hour,
 		},
 		Storage: Storage{
 			Path: ".bugbot/state.db",
@@ -472,6 +485,8 @@ func Load(path string) (Config, error) {
 //	BUGBOT_DAEMON_SWEEP_INTERVAL
 //	BUGBOT_DAEMON_IDLE_BACKOFF
 //	BUGBOT_DAEMON_REPRO_BACKLOG_INTERVAL
+//	BUGBOT_DAEMON_VERIFY_DRAIN_INTERVAL
+//	BUGBOT_DAEMON_IMPACT_SWEEP_INTERVAL
 //	BUGBOT_LLM_REQUEST_TIMEOUT
 //	BUGBOT_VERIFY_SANDBOX_EXEC        ("true" or "false")
 //	BUGBOT_VERIFY_SANDBOX_MIN_SEVERITY (critical|high|medium|low)
@@ -605,6 +620,8 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setDur("BUGBOT_DAEMON_SWEEP_INTERVAL", &cfg.Daemon.SweepInterval),
 		setDur("BUGBOT_DAEMON_IDLE_BACKOFF", &cfg.Daemon.IdleBackoff),
 		setDur("BUGBOT_DAEMON_REPRO_BACKLOG_INTERVAL", &cfg.Daemon.ReproBacklogInterval),
+		setDur("BUGBOT_DAEMON_VERIFY_DRAIN_INTERVAL", &cfg.Daemon.VerifyDrainInterval),
+		setDur("BUGBOT_DAEMON_IMPACT_SWEEP_INTERVAL", &cfg.Daemon.ImpactSweepInterval),
 		setDur("BUGBOT_LLM_REQUEST_TIMEOUT", &cfg.LLM.RequestTimeout),
 		setBool("BUGBOT_VERIFY_SANDBOX_EXEC", &cfg.Verify.SandboxExec),
 		setBool("BUGBOT_PUBLISH_ENABLED", &cfg.Publish.Enabled),
@@ -811,6 +828,12 @@ func (c *Config) Validate() error {
 	// rather than silently ignored.
 	if c.Daemon.ReproBacklogInterval <= 0 {
 		return fmt.Errorf("config: daemon.repro_backlog_interval must be > 0")
+	}
+	if c.Daemon.VerifyDrainInterval <= 0 {
+		return fmt.Errorf("config: daemon.verify_drain_interval must be > 0")
+	}
+	if c.Daemon.ImpactSweepInterval <= 0 {
+		return fmt.Errorf("config: daemon.impact_sweep_interval must be > 0")
 	}
 	if c.LLM.RequestTimeout < 0 {
 		return fmt.Errorf("config: llm.request_timeout must be >= 0 (0 uses LLM package default)")

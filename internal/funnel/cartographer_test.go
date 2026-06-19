@@ -6,8 +6,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
@@ -85,12 +87,12 @@ func openCartographyFixture(t *testing.T) (*store.Store, *ingest.Repo) {
 // TestCartography_InjectIntoFinderTask pins the happy path: with
 // Options.Cartographer=true, a finder request's TASK user message contains
 // the injected summary string. We pre-seed a summary row in the store
-// (the cartographer's pass reuses cached rows whose fingerprint matches)
+// (the cartographer's lazy pass reuses cached rows whose fingerprint matches)
 // and assert the resulting injection block contains the seeded text.
 //
-// We test through the cartograph -> contextFor -> finderTask path so the
-// test exercises the real injection logic without spinning up the full
-// Sweep pipeline (which would also exercise the verifier / triage).
+// We test through the newCartographer -> ensureContextFor -> finderTask path so
+// the test exercises the real lazy injection logic without spinning up the full
+// Sweep pipeline.
 func TestCartography_InjectIntoFinderTask(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openCartographyFixture(t)
@@ -130,15 +132,21 @@ func TestCartography_InjectIntoFinderTask(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	cart := f.cartograph(ctx, &Result{}, finder, snap, targets, fps, nil)
+	cart := f.newCartographer(ctx, &Result{}, finder, snap, targets, fps, nil)
 	if cart == nil {
-		t.Fatal("cartograph returned nil; expected non-nil with Cartographer=true")
-	}
-	if cart.summaries[pkg] != want {
-		t.Errorf("cartography.summaries[%q] = %q, want %q", pkg, cart.summaries[pkg], want)
+		t.Fatal("newCartographer returned nil; expected non-nil with Cartographer=true")
 	}
 
-	task := finderTask(targets, nil, cart.contextFor(targets))
+	injection := cart.ensureContextFor(ctx, targets)
+	// Verify the memo was populated from the store hit.
+	cart.mu.Lock()
+	gotSummary := cart.summaries[pkg]
+	cart.mu.Unlock()
+	if gotSummary != want {
+		t.Errorf("cartography.summaries[%q] = %q, want %q", pkg, gotSummary, want)
+	}
+
+	task := finderTask(targets, nil, injection)
 	if !strings.Contains(task, "REPO CONTEXT — package summaries") {
 		t.Errorf("finder task missing cartography block; got:\n%s", task)
 	}
@@ -146,11 +154,7 @@ func TestCartography_InjectIntoFinderTask(t *testing.T) {
 		t.Errorf("finder task missing seeded summary text %q; got:\n%s", want, task)
 	}
 
-	// And the injection must be in the TASK message (the first user
-	// message), NOT the system prompt. We constructed the task above
-	// directly so this is by construction — but a separate path
-	// assertion is worth pinning: the cartography block never escapes
-	// into the system prompt.
+	// The injection must be in the TASK message, NOT the system prompt.
 	for _, r := range finder.allRequests() {
 		if strings.Contains(r.System, "REPO CONTEXT") {
 			t.Errorf("cartography block leaked into system prompt: %s", r.System)
@@ -159,8 +163,8 @@ func TestCartography_InjectIntoFinderTask(t *testing.T) {
 }
 
 // TestCartography_DisabledByDefault pins the regression-guard: with
-// Options.Cartographer=false (the default), no summary block appears in
-// finder tasks and the cartograph pass returns nil.
+// Options.Cartographer=false (the default), newCartographer returns nil and
+// ensureContextFor on a nil receiver returns "".
 func TestCartography_DisabledByDefault(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openCartographyFixture(t)
@@ -182,21 +186,23 @@ func TestCartography_DisabledByDefault(t *testing.T) {
 	}
 	targets := []string{"sub/sub.go"}
 
-	cart := f.cartograph(ctx, &Result{}, finder, snap, targets, fps, nil)
+	cart := f.newCartographer(ctx, &Result{}, finder, snap, targets, fps, nil)
 	if cart != nil {
-		t.Errorf("cartograph with Cartographer=false returned %+v, want nil", cart)
+		t.Errorf("newCartographer with Cartographer=false returned %+v, want nil", cart)
 	}
 
-	task := finderTask(targets, nil, "")
+	var nilCart *cartography
+	injection := nilCart.ensureContextFor(ctx, targets)
+	task := finderTask(targets, nil, injection)
 	if strings.Contains(task, "REPO CONTEXT") {
 		t.Errorf("finder task contains REPO CONTEXT block despite Cartographer=false:\n%s", task)
 	}
 }
 
 // TestCartography_FingerprintCache pins the cache discipline: a second
-// call with the same fingerprints does NOT re-call the LLM. We rely on
-// the scripted client's allRequests log: any completion with the
-// cartography system prompt counts as a summary-generation call.
+// ensureContextFor call with the same fingerprints does NOT re-call the LLM.
+// The first call generates and persists the summary; the second call picks it
+// up from the store (fingerprint match) without invoking the client.
 func TestCartography_FingerprintCache(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openCartographyFixture(t)
@@ -221,13 +227,19 @@ func TestCartography_FingerprintCache(t *testing.T) {
 	}
 	targets := []string{"sub/sub.go"}
 
-	_ = f.cartograph(ctx, &Result{}, finder, snap, targets, fps, nil)
+	// First provider: generates and persists.
+	cart1 := f.newCartographer(ctx, &Result{}, finder, snap, targets, fps, nil)
+	_ = cart1.ensureContextFor(ctx, targets)
 	afterFirst := summaryCallCount(finder)
 	if afterFirst == 0 {
 		t.Fatalf("expected at least one summary completion on first pass, got 0")
 	}
 
-	_ = f.cartograph(ctx, &Result{}, finder, snap, targets, fps, nil)
+	// Second provider (fresh instance, same store): must hit the persisted row.
+	// Suppress the unused-store warning — st is used for the fixture DB.
+	_ = st
+	cart2 := f.newCartographer(ctx, &Result{}, finder, snap, targets, fps, nil)
+	_ = cart2.ensureContextFor(ctx, targets)
 	afterSecond := summaryCallCount(finder)
 	if afterSecond != afterFirst {
 		t.Errorf("summary completion count rose from %d to %d on second pass; expected no regeneration", afterFirst, afterSecond)
@@ -235,12 +247,12 @@ func TestCartography_FingerprintCache(t *testing.T) {
 }
 
 // TestCartography_DegradesOnLLMError pins the graceful-degrade contract:
-// if the summary-generation completion errors, the cartograph pass still
-// returns a non-nil cartography (with empty summaries), and the
-// injection block is empty.
+// if the summary-generation completion errors, ensureContextFor still returns
+// "" (not a panic) and the provider is non-nil.
 func TestCartography_DegradesOnLLMError(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openCartographyFixture(t)
+	_ = st
 
 	finder := newScriptedClient()
 	verifier := newScriptedClient()
@@ -261,16 +273,20 @@ func TestCartography_DegradesOnLLMError(t *testing.T) {
 	}
 	targets := []string{"sub/sub.go"}
 
-	errClient := &errClient{err: errFakeLLM}
-	cart := f.cartograph(ctx, &Result{}, errClient, snap, targets, fps, nil)
+	errC := &errClient{err: errFakeLLM}
+	cart := f.newCartographer(ctx, &Result{}, errC, snap, targets, fps, nil)
 	if cart == nil {
-		t.Fatal("cartograph returned nil on LLM error; expected non-nil empty cartography for graceful degrade")
+		t.Fatal("newCartographer returned nil; expected non-nil with Cartographer=true")
 	}
-	if len(cart.summaries) != 0 {
-		t.Errorf("expected no summaries after LLM error, got %d", len(cart.summaries))
+	if got := cart.ensureContextFor(ctx, targets); got != "" {
+		t.Errorf("ensureContextFor returned non-empty block despite LLM error: %q", got)
 	}
-	if got := cart.contextFor(targets); got != "" {
-		t.Errorf("contextFor returned non-empty block despite no summaries: %q", got)
+	// Memo must be empty — no summary materialised.
+	cart.mu.Lock()
+	n := len(cart.summaries)
+	cart.mu.Unlock()
+	if n != 0 {
+		t.Errorf("expected no summaries after LLM error, got %d", n)
 	}
 }
 
@@ -353,7 +369,8 @@ func (c *errClient) Complete(ctx context.Context, req llm.Request) (llm.Response
 // TestCartography_StripsThinkBlock pins the fix for the reasoning-model
 // pollution bug: MiniMax-M3 emits an inline <think>...</think> preamble in the
 // content, and the cartographer must store/return only the summary after it —
-// not the raw reasoning.
+// not the raw reasoning. Exercises the lazy path: ensureContextFor triggers
+// summarizePackage which routes through RunJSON (think-block stripping).
 func TestCartography_StripsThinkBlock(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openCartographyFixture(t)
@@ -374,11 +391,16 @@ func TestCartography_StripsThinkBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cart := f.cartograph(ctx, &Result{}, finder, snap, []string{"sub/sub.go"}, fps, nil)
+	cart := f.newCartographer(ctx, &Result{}, finder, snap, []string{"sub/sub.go"}, fps, nil)
 	if cart == nil {
 		t.Fatal("nil cartography")
 	}
-	if got := cart.summaries["sub"]; got != "Purpose: a helper package." {
+	_ = cart.ensureContextFor(ctx, []string{"sub/sub.go"})
+
+	cart.mu.Lock()
+	got := cart.summaries["sub"]
+	cart.mu.Unlock()
+	if got != "Purpose: a helper package." {
 		t.Errorf("returned summary = %q, want the text after </think> with the think block stripped", got)
 	}
 	// The persisted row must be clean too.
@@ -402,13 +424,12 @@ func TestCartography_StripsThinkBlock(t *testing.T) {
 
 // TestCartography_RepairsMalformedSummary pins bugbot-89r.1: routing the summary
 // through agent.Runner.RunJSON means a first completion that is not valid JSON is
-// REPAIRED on a second round-trip rather than silently dropped (the old
-// client.Complete path returned the raw text and lost a malformed answer). The
-// sequence client returns junk first, then a schema-valid object; the stored
-// summary must be the repaired value, and a second completion must have run.
+// REPAIRED on a second round-trip rather than silently dropped. Exercises the
+// lazy path: ensureContextFor triggers summarizePackage which uses RunJSON.
 func TestCartography_RepairsMalformedSummary(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openCartographyFixture(t)
+	_ = st
 
 	valid := `{"summary":"Repaired package summary."}`
 	finder := newScriptedSequenceClient(valid, "this is not json, only reasoning prose", valid)
@@ -426,11 +447,16 @@ func TestCartography_RepairsMalformedSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cart := f.cartograph(ctx, &Result{}, finder, snap, []string{"sub/sub.go"}, fps, nil)
+	cart := f.newCartographer(ctx, &Result{}, finder, snap, []string{"sub/sub.go"}, fps, nil)
 	if cart == nil {
 		t.Fatal("nil cartography")
 	}
-	if got := cart.summaries["sub"]; got != "Repaired package summary." {
+	_ = cart.ensureContextFor(ctx, []string{"sub/sub.go"})
+
+	cart.mu.Lock()
+	got := cart.summaries["sub"]
+	cart.mu.Unlock()
+	if got != "Repaired package summary." {
 		t.Errorf("summary = %q, want the repaired value; a malformed first completion must be repaired, not dropped", got)
 	}
 	if n := len(finder.allRequests()); n < 2 {
@@ -556,5 +582,231 @@ func TestCartography_QueryGraph_Sorted(t *testing.T) {
 		if importerList[i] < importerList[i-1] {
 			t.Fatalf("importerList not sorted: %v", importerList)
 		}
+	}
+}
+
+// --- lazy-pass tests (newCartographer / ensureContextFor) ---
+
+// openLazyFixture returns a Funnel configured with Cartographer=true and the
+// standard sub/ fixture. It also returns a snapshot and fps map ready for use.
+func openLazyFixture(t *testing.T) (*store.Store, *ingest.Repo, *Funnel, *scriptedClient, *ingest.Snapshot, map[string]string) {
+	t.Helper()
+	ctx := context.Background()
+	st, repo := openCartographyFixture(t)
+	finder := newScriptedClient()
+	finder.fallback = `{"summary":"Lazy test summary."}`
+	verifier := newScriptedClient()
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
+		Features: FeatureFlags{Cartographer: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := repo.Snapshot(ctx, ingest.ScanFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fps, err := repo.Fingerprints(ctx, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st, repo, f, finder, snap, fps
+}
+
+// TestLazyCartography_SingleGeneration asserts that the first ensureContextFor
+// call for an un-summarized package triggers exactly ONE summarizePackage/client
+// call and persists the row (verified via GetPackageSummaries round-trip).
+func TestLazyCartography_SingleGeneration(t *testing.T) {
+	ctx := context.Background()
+	st, _, f, finder, snap, fps := openLazyFixture(t)
+	targets := []string{"sub/sub.go"}
+
+	cart := f.newCartographer(ctx, &Result{}, finder, snap, targets, fps, nil)
+	if cart == nil {
+		t.Fatal("newCartographer returned nil; expected non-nil with Cartographer=true")
+	}
+
+	before := summaryCallCount(finder)
+
+	got := cart.ensureContextFor(ctx, targets)
+	if got == "" {
+		t.Error("ensureContextFor returned empty string; expected injection block")
+	}
+	if !strings.Contains(got, "REPO CONTEXT — package summaries") {
+		t.Errorf("missing header in: %q", got)
+	}
+
+	after := summaryCallCount(finder)
+	if after-before != 1 {
+		t.Errorf("expected exactly 1 summary client call, got %d", after-before)
+	}
+
+	// Verify row persisted.
+	rows, err := st.GetPackageSummaries(ctx, []string{"sub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rows["sub"]; !ok {
+		t.Error("expected persisted PackageSummary for 'sub' after ensureContextFor")
+	}
+}
+
+// TestLazyCartography_MemoHit asserts that a second ensureContextFor call over
+// the same package triggers zero new client calls (memo satisfied).
+func TestLazyCartography_MemoHit(t *testing.T) {
+	ctx := context.Background()
+	_, _, f, finder, snap, fps := openLazyFixture(t)
+	targets := []string{"sub/sub.go"}
+
+	cart := f.newCartographer(ctx, &Result{}, finder, snap, targets, fps, nil)
+
+	// First call — populates memo.
+	_ = cart.ensureContextFor(ctx, targets)
+	after1 := summaryCallCount(finder)
+
+	// Second call — memo hit; no new generation.
+	_ = cart.ensureContextFor(ctx, targets)
+	after2 := summaryCallCount(finder)
+
+	if after2 != after1 {
+		t.Errorf("second ensureContextFor triggered %d additional client calls; expected 0", after2-after1)
+	}
+}
+
+// TestLazyCartography_Singleflight asserts that two concurrent ensureContextFor
+// calls on the same un-summarized package produce exactly ONE client call.
+func TestLazyCartography_Singleflight(t *testing.T) {
+	ctx := context.Background()
+	_, _, f, finder, snap, fps := openLazyFixture(t)
+	targets := []string{"sub/sub.go"}
+
+	cart := f.newCartographer(ctx, &Result{}, finder, snap, targets, fps, nil)
+
+	// Add a small delay to the client so both goroutines enter sf.Do
+	// before the first one returns (otherwise the second may hit the memo).
+	// We install a per-call sleep via a scriptedClient wrapper; since
+	// scriptedClient has a fallback we just rely on both goroutines racing
+	// the real singleflight group — the deduplication guarantee holds
+	// regardless of scheduling.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	errs := make([]string, 2)
+	for i := 0; i < 2; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			got := cart.ensureContextFor(ctx, targets)
+			if got == "" {
+				errs[i] = "ensureContextFor returned empty; expected injection block"
+			}
+		}()
+	}
+	wg.Wait()
+	for _, e := range errs {
+		if e != "" {
+			t.Error(e)
+		}
+	}
+
+	if n := summaryCallCount(finder); n != 1 {
+		t.Errorf("expected exactly 1 summary client call across 2 concurrent goroutines, got %d", n)
+	}
+}
+
+// TestLazyCartography_BudgetHardSkip asserts that when the budget hard limit
+// is already tripped, ensureContextFor skips generation and renders only
+// cached/memoized summaries (returns "" if none cached).
+func TestLazyCartography_BudgetHardSkip(t *testing.T) {
+	ctx := context.Background()
+	_, _, f, finder, snap, fps := openLazyFixture(t)
+	targets := []string{"sub/sub.go"}
+
+	// Construct a budget where finderOverHard() == true:
+	// use a finderPool of capacity 1 and immediately spend 1 token.
+	pool := agent.NewBudgetPool(1)
+	pool.Add(1) // now Spent() == limit => finderOverHard() true
+	b := &budgetState{
+		budget:       1,
+		finderBudget: 1,
+		finderPool:   pool,
+	}
+
+	cart := f.newCartographer(ctx, &Result{}, finder, snap, targets, fps, b)
+
+	got := cart.ensureContextFor(ctx, targets)
+	// No cached summaries in store, budget hard — must return "".
+	if got != "" {
+		t.Errorf("expected empty string with budget hard-tripped; got %q", got)
+	}
+	if n := summaryCallCount(finder); n != 0 {
+		t.Errorf("expected 0 client calls with budget hard-tripped, got %d", n)
+	}
+}
+
+// TestLazyCartography_OffPath asserts that Features.Cartographer=false causes
+// newCartographer to return nil and ensureContextFor on nil to return "".
+func TestLazyCartography_OffPath(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openCartographyFixture(t)
+	finder := newScriptedClient()
+	finder.fallback = `{"summary":"should not appear"}`
+	verifier := newScriptedClient()
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
+		Features: FeatureFlags{Cartographer: false},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, snapErr := repo.Snapshot(ctx, ingest.ScanFilter{})
+	if snapErr != nil {
+		t.Fatal(snapErr)
+	}
+	fps, fpsErr := repo.Fingerprints(ctx, snap)
+	if fpsErr != nil {
+		t.Fatal(fpsErr)
+	}
+
+	cart := f.newCartographer(ctx, &Result{}, finder, snap, []string{"sub/sub.go"}, fps, nil)
+	if cart != nil {
+		t.Errorf("newCartographer with Cartographer=false returned non-nil: %+v", cart)
+	}
+
+	var c *cartography
+	if got := c.ensureContextFor(ctx, []string{"sub/sub.go"}); got != "" {
+		t.Errorf("nil ensureContextFor returned %q; want \"\"", got)
+	}
+	if n := summaryCallCount(finder); n != 0 {
+		t.Errorf("expected 0 client calls on off path, got %d", n)
+	}
+}
+
+// TestLazyCartography_StoreSeedHit verifies that a pre-seeded store row is
+// picked up as a store hit (no LLM call) on first ensureContextFor.
+func TestLazyCartography_StoreSeedHit(t *testing.T) {
+	ctx := context.Background()
+	st, _, f, finder, snap, fps := openLazyFixture(t)
+	targets := []string{"sub/sub.go"}
+
+	// Pre-seed the summary row with the correct fingerprint.
+	pkgs := packagesSpanned(targets)
+	members := pkgs["sub"]
+	fp := packageFingerprint("sub", members, fps)
+	want := "Pre-seeded summary."
+	if err := st.UpsertPackageSummaries(ctx, []store.PackageSummary{
+		{Pkg: "sub", Fingerprint: fp, Summary: want},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// finder.fallback is set but should not be called.
+	finder.fallback = `{"summary":"should not be called"}`
+	cart := f.newCartographer(ctx, &Result{}, finder, snap, targets, fps, nil)
+
+	got := cart.ensureContextFor(ctx, targets)
+	if !strings.Contains(got, want) {
+		t.Errorf("expected pre-seeded summary %q in output; got %q", want, got)
+	}
+	if n := summaryCallCount(finder); n != 0 {
+		t.Errorf("expected 0 LLM calls (store hit); got %d", n)
 	}
 }

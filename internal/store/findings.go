@@ -82,6 +82,10 @@ type Finding struct {
 	Confidence float64 // derived: findingConfidence(tier, severity, len(corroboratingLenses))
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
+	// SweptAt is the timestamp when UpdateFindingSeverity last recorded a sweep
+	// verdict. Zero = not swept (impact-sweep marker; set by UpdateFindingSeverity,
+	// preserved across re-upsert when file_hash is unchanged, reset on file_hash change).
+	SweptAt time.Time
 }
 
 // encodeLenses encodes the lens list as a JSON array for storage in the
@@ -259,13 +263,13 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 		now := nowUTC()
 
 		// Does a row already exist for this fingerprint?
-		var existingID, existingCreated string
+		var existingID, existingCreated, existingFileHash string
 		var existingTier domain.Tier
-		var existingRepro sql.NullString
+		var existingRepro, existingSweptAt sql.NullString
 		var existingNeedsHuman int
 		err = tx.QueryRowContext(ctx,
-			`SELECT id, created_at, tier, repro_path, needs_human FROM findings WHERE fingerprint = ?`, f.Fingerprint,
-		).Scan(&existingID, &existingCreated, &existingTier, &existingRepro, &existingNeedsHuman)
+			`SELECT id, created_at, tier, repro_path, needs_human, file_hash, swept_at FROM findings WHERE fingerprint = ?`, f.Fingerprint,
+		).Scan(&existingID, &existingCreated, &existingTier, &existingRepro, &existingNeedsHuman, &existingFileHash, &existingSweptAt)
 
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -280,13 +284,13 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				  (id, fingerprint, title, description, reasoning, verdict_detail, severity, tier,
 				   status, lens, file, line, commit_sha, file_hash, repro_path,
 				   fix_patch, needs_human,
-				   corroborating_lenses, sites, confidence, created_at, updated_at)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				   corroborating_lenses, sites, confidence, created_at, updated_at, swept_at)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
 				f.Tier, string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA,
 				f.FileHash, nullStr(f.ReproPath), f.FixPatch, boolInt(f.NeedsHuman),
 				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
-				f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout),
+				f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout), nullTime(f.SweptAt),
 			); err != nil {
 				return annotateErr(s.path, "upsert_finding", err)
 			}
@@ -340,6 +344,13 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				// Stored needs_human=true; do not let a re-scan clear it.
 				f.NeedsHuman = true
 			}
+			// swept_at: preserve across idempotent re-discovery; reset when the
+			// anchored code (file_hash) changed so the sweep re-evaluates reachability.
+			if f.FileHash == existingFileHash && existingSweptAt.Valid && existingSweptAt.String != "" {
+				f.SweptAt, _ = parseTime(existingSweptAt.String) // preserve stored marker
+			} else {
+				f.SweptAt = time.Time{} // new code version (or never swept) → re-sweep eligible
+			}
 
 			f.Confidence = findingConfidence(f.Tier, f.Severity, len(f.CorroboratingLenses))
 
@@ -349,6 +360,8 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			//   tier        : ?, ?  → f.Tier (compare), f.Tier (THEN value)
 			//   repro_path  : ?, ?  → nullStr(f.ReproPath) × 2
 			//   needs_human : ?     → boolInt(f.NeedsHuman)
+			//   swept_at    : ?     → f.FileHash (compare to stored file_hash;
+			//                         preserve stored swept_at if unchanged, else NULL)
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE findings SET
 				  title=?, description=?, reasoning=?, verdict_detail=?, severity=?,
@@ -358,7 +371,8 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				  repro_path = CASE WHEN ? IS NULL THEN repro_path ELSE ? END,
 				  fix_patch=?,
 				  needs_human = CASE WHEN needs_human = 1 THEN 1 ELSE ? END,
-				  corroborating_lenses=?, sites=?, confidence=?, updated_at=?
+				  corroborating_lenses=?, sites=?, confidence=?, updated_at=?,
+				  swept_at = CASE WHEN ? = file_hash THEN swept_at ELSE NULL END
 				WHERE id=?`,
 				f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
 				f.Tier, f.Tier,
@@ -368,7 +382,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				f.FixPatch,
 				boolInt(f.NeedsHuman),
 				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
-				f.UpdatedAt.Format(timeLayout), f.ID,
+				f.UpdatedAt.Format(timeLayout), f.FileHash, f.ID,
 			); err != nil {
 				return annotateErr(s.path, "upsert_finding", err)
 			}
@@ -541,14 +555,29 @@ func (s *Store) UpdateFindingSeverity(ctx context.Context, id string, sev domain
 		lenses := decodeLenses(corrob)
 		conf := findingConfidence(tier, sev, len(lenses))
 		_, err = tx.ExecContext(ctx,
-			`UPDATE findings SET severity=?, verdict_detail=?, confidence=?, updated_at=? WHERE id=?`,
-			sev, rationale, conf, now.Format(timeLayout), id,
+			`UPDATE findings SET severity=?, verdict_detail=?, confidence=?, updated_at=?, swept_at=? WHERE id=?`,
+			sev, rationale, conf, now.Format(timeLayout), now.UTC().Format(timeLayout), id,
 		)
 		if err != nil {
 			return annotateErr(s.path, "update_finding_severity", err)
 		}
 		return nil
 	})
+}
+
+// UnsweptOpenFindings returns all open findings whose swept_at marker is NULL,
+// ordered oldest-updated-first. This is the WorkRemaining query for the
+// impact-sweep pass: it drives SweepDrain and ensures rotation parity with
+// OpenBacklog (deferred items have their updated_at bumped and move to the back).
+func (s *Store) UnsweptOpenFindings(ctx context.Context) ([]Finding, error) {
+	rows, err := s.db.QueryContext(ctx,
+		findingColumns+" FROM findings WHERE status = 'open' AND swept_at IS NULL ORDER BY updated_at ASC, id ASC",
+	)
+	if err != nil {
+		return nil, annotateErr(s.path, "unswept_open_findings", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanRows(rows, func(r *sql.Rows) (Finding, error) { return scanFinding(r) })
 }
 
 // AppendFindingSites appends sites to the sites column of the finding identified
@@ -611,7 +640,7 @@ func (s *Store) AppendFindingSites(ctx context.Context, fingerprint string, site
 const findingColumns = `SELECT id, fingerprint, title, description, reasoning, verdict_detail,
 	severity, tier, status, lens, file, line, commit_sha, file_hash, repro_path,
 	fix_patch, needs_human,
-	corroborating_lenses, sites, confidence, created_at, updated_at`
+	corroborating_lenses, sites, confidence, created_at, updated_at, swept_at`
 
 func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (Finding, error) {
 	row := s.db.QueryRowContext(ctx, findingColumns+" FROM findings "+whereClause, args...)
@@ -639,11 +668,12 @@ func scanFinding(sc rowScanner) (Finding, error) {
 		corrob               string
 		sitesStr             string
 		createdAt, updatedAt string
+		sweptAt              sql.NullString
 	)
 	if err := sc.Scan(
 		&f.ID, &f.Fingerprint, &f.Title, &f.Description, &f.Reasoning, &f.VerdictDetail,
 		&f.Severity, &f.Tier, &status, &f.Lens, &f.File, &f.Line, &f.CommitSHA,
-		&f.FileHash, &repro, &f.FixPatch, &needsHuman, &corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt,
+		&f.FileHash, &repro, &f.FixPatch, &needsHuman, &corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt, &sweptAt,
 	); err != nil {
 		return Finding{}, err
 	}
@@ -659,6 +689,11 @@ func scanFinding(sc rowScanner) (Finding, error) {
 	if f.UpdatedAt, err = parseTime(updatedAt); err != nil {
 		return Finding{}, err
 	}
+	if sweptAt.Valid && sweptAt.String != "" {
+		if f.SweptAt, err = parseTime(sweptAt.String); err != nil {
+			return Finding{}, err
+		}
+	}
 	return f, nil
 }
 
@@ -667,6 +702,13 @@ func nullStr(s string) any {
 		return nil
 	}
 	return s
+}
+
+func nullTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.UTC().Format(timeLayout)
 }
 
 // boolInt converts a bool to the SQLite convention: 1 for true, 0 for false.

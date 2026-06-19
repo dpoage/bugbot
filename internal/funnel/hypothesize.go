@@ -469,15 +469,22 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				if cart == nil {
 					return "", false, nil
 				}
+				// generate-on-miss via the lazy provider (singleflight-deduped,
+				// persisted immediately). Falls back to a direct store read for
+				// packages outside the spanned set (e.g. the agent asks about a
+				// transitive dep we didn't fingerprint).
+				if s, ok := cart.getSummary(ctx, pkg); ok {
+					return s, true, nil
+				}
 				summaries, err := f.store.GetPackageSummaries(ctx, []string{pkg})
 				if err != nil {
 					return "", false, err
 				}
-				s, ok := summaries[pkg]
+				row, ok := summaries[pkg]
 				if !ok {
 					return "", false, nil
 				}
-				return s.Summary, true, nil
+				return row.Summary, true, nil
 			})
 			pkgGraphTool := agent.NewPackageGraphTool(func(pkg, direction string) ([]string, []string, error) {
 				if cart == nil {
@@ -500,7 +507,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				if u.strategy.BuildTask != nil {
 					task = u.strategy.BuildTask(u.files, u.leads)
 				} else {
-					task = finderTask(u.files, u.leads, cart.contextFor(u.files))
+					task = finderTask(u.files, u.leads, cart.ensureContextFor(ctx, u.files))
 				}
 			}
 

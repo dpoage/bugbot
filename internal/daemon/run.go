@@ -9,33 +9,74 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
-// schedule groups the three independent timer deadlines for the scheduler loop.
-// nextBacklog is nil when the backlog-repro timer is disabled (EnableRepro is
-// false or repro is nil); nil means "never fire", not a magic far-future time.
+// timerKind identifies which scheduler timer won the deadline race in
+// schedule.earliest, so the Run loop dispatches the matching cycle.
+type timerKind int
+
+const (
+	timerPoll timerKind = iota
+	timerSweep
+	timerBacklog
+	timerVerifyDrain
+	timerImpactSweep
+)
+
+// schedule groups the scheduler's independent timer deadlines. Pointer fields
+// are nil when that timer is disabled (nil = "never fire", not a magic
+// far-future time):
+//   - nextBacklog: nil when EnableRepro is false or repro is nil.
+//   - nextVerifyDrain / nextImpactSweep: the two low-priority maintenance
+//     drains; nil only when their interval is non-positive (New defaults both
+//     to >0, so non-nil in practice).
+//
+// NAMING: nextVerifyDrain/nextImpactSweep are the verify-drain and impact-sweep
+// DRAIN passes (funnel.VerifyDrain / funnel.SweepDrain). They are DISTINCT from
+// nextSweep, which is the FULL funnel scan (f.Sweep, cycle.go runSweep). Do not
+// conflate the impact-sweep drain with the full sweep.
 type schedule struct {
-	nextPoll    time.Time
-	nextSweep   time.Time
-	nextBacklog *time.Time // nil = disabled
+	nextPoll        time.Time
+	nextSweep       time.Time
+	nextBacklog     *time.Time // nil = disabled (EnableRepro off)
+	nextVerifyDrain *time.Time // nil = disabled; verify-drain pass, NOT nextSweep
+	nextImpactSweep *time.Time // nil = disabled; impact-sweep drain, NOT nextSweep
 }
 
-// earliest returns the nearest active deadline and flags which timer fired.
-// When nextBacklog is nil it is excluded from the race.
-func (s schedule) earliest() (deadline time.Time, fireSweep, fireBacklog bool) {
-	// Preserve the original tie-break priority exactly: sweep wins ties over
-	// backlog, backlog over poll. A nil nextBacklog (disabled) never wins.
-	sweepLEPoll := !s.nextSweep.After(s.nextPoll)
-	sweepLEBacklog := s.nextBacklog == nil || !s.nextSweep.After(*s.nextBacklog)
-	fireSweep = sweepLEPoll && sweepLEBacklog
-	fireBacklog = !fireSweep && s.nextBacklog != nil && !s.nextBacklog.After(s.nextPoll)
-	switch {
-	case fireSweep:
-		deadline = s.nextSweep
-	case fireBacklog:
-		deadline = *s.nextBacklog
-	default:
-		deadline = s.nextPoll
+// timerDeadline pairs an active timer's deadline with its kind for the
+// priority-ordered earliest() race.
+type timerDeadline struct {
+	when time.Time
+	kind timerKind
+}
+
+// earliest returns the nearest active deadline and which timer it belongs to.
+// Candidates are listed in strict priority order — sweep > backlog > verify-drain
+// > impact-sweep > poll — then the race seeds the first (highest-priority) one
+// and replaces the incumbent only on a STRICTLY-earlier deadline. So the nearest
+// deadline always wins, and on an exact tie the higher-priority timer wins. This
+// preserves the original sweep>backlog>poll tie-break and slots the two
+// maintenance drains after backlog and before poll. Disabled (nil) timers are
+// excluded from the race entirely.
+func (s schedule) earliest() (time.Time, timerKind) {
+	cands := make([]timerDeadline, 0, 5)
+	cands = append(cands, timerDeadline{s.nextSweep, timerSweep})
+	if s.nextBacklog != nil {
+		cands = append(cands, timerDeadline{*s.nextBacklog, timerBacklog})
 	}
-	return deadline, fireSweep, fireBacklog
+	if s.nextVerifyDrain != nil {
+		cands = append(cands, timerDeadline{*s.nextVerifyDrain, timerVerifyDrain})
+	}
+	if s.nextImpactSweep != nil {
+		cands = append(cands, timerDeadline{*s.nextImpactSweep, timerImpactSweep})
+	}
+	cands = append(cands, timerDeadline{s.nextPoll, timerPoll})
+
+	best := cands[0]
+	for _, c := range cands[1:] {
+		if c.when.Before(best.when) {
+			best = c
+		}
+	}
+	return best.when, best.kind
 }
 
 // Run drives the scheduler until ctx is cancelled, at which point it returns
@@ -85,6 +126,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 		t := now.Add(d.cfg.ReproBacklogInterval)
 		sched.nextBacklog = &t
 	}
+	// The two maintenance drains always fire (New defaults their intervals to
+	// >0); a non-positive interval disables one (nil = excluded from the race).
+	if d.cfg.VerifyDrainInterval > 0 {
+		vt := now.Add(d.cfg.VerifyDrainInterval)
+		sched.nextVerifyDrain = &vt
+	}
+	if d.cfg.ImpactSweepInterval > 0 {
+		it := now.Add(d.cfg.ImpactSweepInterval)
+		sched.nextImpactSweep = &it
+	}
 
 	d.log.Info("daemon: started",
 		"poll_interval", d.cfg.PollInterval.String(),
@@ -96,6 +147,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		"sinks", len(d.sinks),
 		"repro", reproEnabled,
 		"repro_backlog_interval", d.cfg.ReproBacklogInterval.String(),
+		"verify_drain_interval", d.cfg.VerifyDrainInterval.String(),
+		"impact_sweep_interval", d.cfg.ImpactSweepInterval.String(),
 	)
 
 	for {
@@ -112,7 +165,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		progress.Emit(d.prog, schedEv)
 
 		// Pick the nearest active deadline and wait for it (or cancellation).
-		deadline, fireSweep, fireBacklog := sched.earliest()
+		deadline, fired := sched.earliest()
 		wait := deadline.Sub(now)
 		if wait < 0 {
 			wait = 0
@@ -134,11 +187,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return nil
 		}
 
-		switch {
-		case fireSweep:
+		switch fired {
+		case timerSweep:
 			d.runSweep(ctx)
 			sched.nextSweep = d.clock.now().Add(d.cfg.SweepInterval)
-		case fireBacklog:
+		case timerBacklog:
 			// Gate backlog on day budget: if the budget is exhausted we skip and
 			// reschedule — the backlog will be retried at the next interval.
 			if d.cfg.PerDayTokens > 0 {
@@ -153,7 +206,35 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.runReproBacklog(ctx)
 			t := d.clock.now().Add(d.cfg.ReproBacklogInterval)
 			sched.nextBacklog = &t
-		default:
+		case timerVerifyDrain:
+			// Same day-budget gate as backlog: skip + reschedule when exhausted.
+			if d.cfg.PerDayTokens > 0 {
+				sentinel := cycleResult{kind: store.ScanVerifyDrain}
+				if d.dayBudgetExhausted(ctx, &sentinel) {
+					d.log.Info("daemon: verify drain skipped: day budget exhausted")
+					t := d.clock.now().Add(d.cfg.VerifyDrainInterval)
+					sched.nextVerifyDrain = &t
+					break
+				}
+			}
+			d.runVerifyDrain(ctx)
+			t := d.clock.now().Add(d.cfg.VerifyDrainInterval)
+			sched.nextVerifyDrain = &t
+		case timerImpactSweep:
+			// Same day-budget gate as backlog: skip + reschedule when exhausted.
+			if d.cfg.PerDayTokens > 0 {
+				sentinel := cycleResult{kind: store.ScanImpactSweep}
+				if d.dayBudgetExhausted(ctx, &sentinel) {
+					d.log.Info("daemon: impact sweep skipped: day budget exhausted")
+					t := d.clock.now().Add(d.cfg.ImpactSweepInterval)
+					sched.nextImpactSweep = &t
+					break
+				}
+			}
+			d.runImpactSweep(ctx)
+			t := d.clock.now().Add(d.cfg.ImpactSweepInterval)
+			sched.nextImpactSweep = &t
+		default: // timerPoll
 			d.runPoll(ctx)
 			sched.nextPoll = d.clock.now().Add(d.nextPollDelay())
 		}

@@ -630,3 +630,211 @@ func TestIsWindowsOrMacOnly(t *testing.T) {
 		}
 	}
 }
+
+// ---- SweepDrain integration tests ----
+
+// TestSweepDrain_SweepsUnswept: seeds an unswept open finding (a dead
+// unexported C++ function with zero callers — deterministically classified),
+// runs SweepDrain, and asserts swept_at is non-zero and UnsweptOpenFindings
+// no longer returns it.
+func TestSweepDrain_SweepsUnswept(t *testing.T) {
+	repoDir := makeGitRepo(t, map[string]string{
+		"src/dead.cpp": "void deadHelper() {}\n",
+		"src/main.cpp": "int main() { return 0; }\n",
+	})
+
+	st := openImpactStore(t)
+	ctx := context.Background()
+	client := newScriptedClient()
+	f := makeImpactFunnel(t, st, repoDir, client)
+
+	fi := seedFinding(t, st, makeImpactFinding("sd-unswept1", "src/dead.cpp", 1, domain.SeverityHigh))
+
+	// Sanity: unswept before drain.
+	before, err := st.UnsweptOpenFindings(ctx)
+	if err != nil {
+		t.Fatalf("UnsweptOpenFindings (before): %v", err)
+	}
+	found := false
+	for _, x := range before {
+		if x.ID == fi.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("seeded finding should appear in UnsweptOpenFindings before drain")
+	}
+
+	result, err := f.SweepDrain(ctx)
+	if err != nil {
+		t.Fatalf("SweepDrain: %v", err)
+	}
+	if result.ScanRunID == "" {
+		t.Error("ScanRunID should be non-empty after a non-empty drain")
+	}
+
+	// Zero LLM calls: deadHelper is unexported, non-header, zero callers → deterministic.
+	if n := client.callCount(); n != 0 {
+		t.Errorf("expected 0 LLM calls, got %d", n)
+	}
+
+	// swept_at must be set in the store.
+	got, err := st.GetFinding(ctx, fi.ID)
+	if err != nil {
+		t.Fatalf("GetFinding: %v", err)
+	}
+	if got.SweptAt.IsZero() {
+		t.Error("swept_at must be non-zero after SweepDrain")
+	}
+	if got.Severity != domain.SeverityLow {
+		t.Errorf("severity = %s after sweep, want low", got.Severity)
+	}
+
+	// Finding must be excluded from UnsweptOpenFindings after drain.
+	after, err := st.UnsweptOpenFindings(ctx)
+	if err != nil {
+		t.Fatalf("UnsweptOpenFindings (after): %v", err)
+	}
+	for _, x := range after {
+		if x.ID == fi.ID {
+			t.Error("swept finding still appears in UnsweptOpenFindings")
+		}
+	}
+}
+
+// TestSweepDrain_Idempotent: after a first drain, UnsweptOpenFindings is empty
+// so a second SweepDrain returns an empty Result with no LLM calls.
+func TestSweepDrain_Idempotent(t *testing.T) {
+	repoDir := makeGitRepo(t, map[string]string{
+		"src/dead.cpp": "void deadHelper() {}\n",
+		"src/main.cpp": "int main() { return 0; }\n",
+	})
+
+	st := openImpactStore(t)
+	ctx := context.Background()
+	client := newScriptedClient()
+	f := makeImpactFunnel(t, st, repoDir, client)
+
+	_ = seedFinding(t, st, makeImpactFinding("sd-idem1", "src/dead.cpp", 1, domain.SeverityHigh))
+
+	// First drain: sweeps the finding.
+	if _, err := f.SweepDrain(ctx); err != nil {
+		t.Fatalf("first SweepDrain: %v", err)
+	}
+	callsAfterFirst := client.callCount()
+
+	// Second drain: nothing unswept → no-op.
+	result2, err := f.SweepDrain(ctx)
+	if err != nil {
+		t.Fatalf("second SweepDrain: %v", err)
+	}
+	if result2.ScanRunID != "" {
+		t.Error("second drain should return empty Result (no scan run opened)")
+	}
+	if len(result2.Findings) != 0 {
+		t.Errorf("second drain returned %d findings, want 0", len(result2.Findings))
+	}
+	// No additional LLM calls on the second drain.
+	if n := client.callCount(); n != callsAfterFirst {
+		t.Errorf("second drain made %d additional LLM calls, want 0", n-callsAfterFirst)
+	}
+
+	// Store confirms empty.
+	unswept, err := st.UnsweptOpenFindings(ctx)
+	if err != nil {
+		t.Fatalf("UnsweptOpenFindings after second drain: %v", err)
+	}
+	if len(unswept) != 0 {
+		t.Errorf("expected 0 unswept findings, got %d", len(unswept))
+	}
+}
+
+// TestSweepDrain_AmbiguousDeferredRePickedUp: a .hpp finding routed to LLM
+// adjudication with a nil verifier client stays swept_at NULL (ambiguous-
+// deferred). A subsequent drain with a real (scripted) client sweeps it.
+func TestSweepDrain_AmbiguousDeferredRePickedUp(t *testing.T) {
+	repoDir := makeGitRepo(t, map[string]string{
+		"include/registry.hpp": "class Foo {\npublic:\n    void bar();\n};\n",
+	})
+
+	st := openImpactStore(t)
+	ctx := context.Background()
+
+	// Build funnel with nil verifier so ambiguous finding is not adjudicated.
+	nilClient := newScriptedClient()
+	fNil := makeImpactFunnel(t, st, repoDir, nilClient)
+
+	fi := seedFinding(t, st, makeImpactFinding("sd-defer1", "include/registry.hpp", 3, domain.SeverityHigh))
+
+	// Drain 1: verifier is effectively nil for impactSweep (we pass nil directly);
+	// call impactSweep directly to simulate nil-client deferred path.
+	result1 := &Result{}
+	findings1, err := st.UnsweptOpenFindings(ctx)
+	if err != nil {
+		t.Fatalf("UnsweptOpenFindings: %v", err)
+	}
+	fNil.impactSweep(ctx, findings1, repoDir, nil, false, result1)
+
+	// Ambiguous .hpp with nil client → swept_at stays NULL → still in unswept.
+	if n := nilClient.callCount(); n != 0 {
+		t.Errorf("expected 0 LLM calls with nil client, got %d", n)
+	}
+	got1, err := st.GetFinding(ctx, fi.ID)
+	if err != nil {
+		t.Fatalf("GetFinding after first (nil) sweep: %v", err)
+	}
+	if !got1.SweptAt.IsZero() {
+		t.Error("swept_at should be zero (deferred) after nil-client sweep")
+	}
+	unswept1, err := st.UnsweptOpenFindings(ctx)
+	if err != nil {
+		t.Fatalf("UnsweptOpenFindings after nil sweep: %v", err)
+	}
+	found := false
+	for _, x := range unswept1 {
+		if x.ID == fi.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("deferred finding should still be in UnsweptOpenFindings")
+	}
+
+	// Drain 2: real scripted client adjudicates → swept_at set.
+	realClient := newScriptedClient()
+	realClient.fallback = `{"results":[{"id":"sd-defer1","severity":"low","rationale":"dead header member, no callers"}]}`
+	fReal := makeImpactFunnel(t, st, repoDir, realClient)
+
+	result2, err := fReal.SweepDrain(ctx)
+	if err != nil {
+		t.Fatalf("second SweepDrain (with real client): %v", err)
+	}
+	if result2.ScanRunID == "" {
+		t.Error("second drain should have opened a scan run (finding was still unswept)")
+	}
+	if n := realClient.callCount(); n != 1 {
+		t.Errorf("expected exactly 1 LLM call for deferred .hpp adjudication, got %d", n)
+	}
+
+	got2, err := st.GetFinding(ctx, fi.ID)
+	if err != nil {
+		t.Fatalf("GetFinding after second sweep: %v", err)
+	}
+	if got2.SweptAt.IsZero() {
+		t.Error("swept_at should be non-zero after budgeted drain")
+	}
+	if got2.Severity != domain.SeverityLow {
+		t.Errorf("severity = %s after adjudication, want low", got2.Severity)
+	}
+
+	// No longer in UnsweptOpenFindings.
+	unswept2, err := st.UnsweptOpenFindings(ctx)
+	if err != nil {
+		t.Fatalf("UnsweptOpenFindings after second sweep: %v", err)
+	}
+	for _, x := range unswept2 {
+		if x.ID == fi.ID {
+			t.Error("adjudicated finding should be excluded from UnsweptOpenFindings")
+		}
+	}
+}
