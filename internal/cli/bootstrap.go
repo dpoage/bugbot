@@ -127,24 +127,32 @@ func buildFunnelOptions(cfg config.Config, overrides FunnelOptionOverrides) (fun
 		return funnel.Options{}, false, sandboxErr
 	}
 	opts := funnel.Options{
-		Filter:                ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
-		TokenBudget:           cfg.Budgets.PerCycleTokens,
-		CacheReadBudgetWeight: cfg.Budgets.CacheReadWeight,
-		FinderBudgetShare:     cfg.Budgets.FinderBudgetShare,
-		FinderTokenClaim:      cfg.Budgets.FinderTokenClaim,
-		VerifierTokenClaim:    cfg.Budgets.VerifierTokenClaim,
-		FinderHistoryTokens:   cfg.Budgets.FinderHistoryTokens,
-		FinderReadLines:       cfg.Budgets.FinderReadLines,
-		FinderReadBytes:       cfg.Budgets.FinderReadBytes,
-		Cartographer:          cfg.Scan.Cartographer,
-		StatusNotes:           cfg.Scan.StatusNotes,
-		DisableHeatOrdering:   !cfg.Scan.HeatOrdering,
-		SandboxOpts:           sandboxOpts,
-		Lenses:                overrides.Lenses,
-		Refuters:              overrides.Refuters,
-		MaxParallel:           overrides.MaxParallel,
-		Progress:              overrides.Progress,
-		Repro:                 overrides.Repro,
+		Budget: funnel.BudgetConfig{
+			TokenBudget:           cfg.Budgets.PerCycleTokens,
+			CacheReadBudgetWeight: cfg.Budgets.CacheReadWeight,
+			FinderBudgetShare:     cfg.Budgets.FinderBudgetShare,
+			FinderTokenClaim:      cfg.Budgets.FinderTokenClaim,
+			VerifierTokenClaim:    cfg.Budgets.VerifierTokenClaim,
+		},
+		Limits: funnel.StageLimits{
+			FinderHistoryTokens: cfg.Budgets.FinderHistoryTokens,
+			FinderReadLines:     cfg.Budgets.FinderReadLines,
+			FinderReadBytes:     cfg.Budgets.FinderReadBytes,
+			Refuters:            overrides.Refuters,
+			MaxParallel:         overrides.MaxParallel,
+		},
+		Features: funnel.FeatureFlags{
+			Cartographer:        cfg.Scan.Cartographer,
+			StatusNotes:         cfg.Scan.StatusNotes,
+			DisableHeatOrdering: !cfg.Scan.HeatOrdering,
+		},
+		Discovery: funnel.DiscoveryConfig{
+			Filter: ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
+			Lenses: overrides.Lenses,
+		},
+		SandboxOpts: sandboxOpts,
+		Progress:    overrides.Progress,
+		Repro:       overrides.Repro,
 	}
 	return opts, sandboxDegraded, nil
 }

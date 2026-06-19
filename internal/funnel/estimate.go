@@ -136,7 +136,7 @@ func (f *Funnel) EstimateScan(ctx context.Context, kind store.ScanKind, changedF
 		Kind:                kind,
 		Commit:              snap.Commit,
 		Files:               len(targets),
-		CartographerEnabled: f.opts.Cartographer,
+		CartographerEnabled: f.opts.Features.Cartographer,
 	}
 
 	// Resolve the finder chunk size exactly as run() does: a small-context
@@ -155,11 +155,11 @@ func (f *Funnel) EstimateScan(ctx context.Context, kind store.ScanKind, changedF
 	// drift from what hypothesize launches. Mirror hypothesize's early return:
 	// with no targets AND no change context the finder stage launches nothing —
 	// including no per-seam units.
-	if len(targets) > 0 || f.opts.ChangeContext != nil {
-		chunks := chunkByLanguage(targets, opts.ChunkSize)
+	if len(targets) > 0 || f.opts.Discovery.ChangeContext != nil {
+		chunks := chunkByLanguage(targets, opts.Limits.ChunkSize)
 		est.Chunks = len(chunks)
 		finderUnits := len(buildUnits(lenses, builtinStrategies(), chunks, nil))
-		if kind == store.ScanTargeted && f.opts.ChangeContext != nil {
+		if kind == store.ScanTargeted && f.opts.Discovery.ChangeContext != nil {
 			est.DiffIntent = true
 			finderUnits++
 		}
@@ -173,7 +173,7 @@ func (f *Funnel) EstimateScan(ctx context.Context, kind store.ScanKind, changedF
 	// fresh summary (cache miss/stale), mirroring cartograph's cache check.
 	pkgMembers := packagesSpanned(targets)
 	est.Packages = len(pkgMembers)
-	if f.opts.Cartographer && len(pkgMembers) > 0 {
+	if f.opts.Features.Cartographer && len(pkgMembers) > 0 {
 		f.estimateCartographer(ctx, pkgMembers, fps, est)
 	}
 

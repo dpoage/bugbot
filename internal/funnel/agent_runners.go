@@ -82,12 +82,12 @@ func (f *Funnel) activitySinkFor(role, label string) agent.Option {
 	})
 }
 
-// maybeStatusNoteTool returns a status_note Tool when f.opts.StatusNotes is
+// maybeStatusNoteTool returns a status_note Tool when f.opts.Features.StatusNotes is
 // true, or nil when the flag is off. Callers append the non-nil result to
 // their tool slice before building the runner; when nil, the tool is absent
 // and the tool set is byte-identical to the pre-feature state.
 func (f *Funnel) maybeStatusNoteTool(role, label string) agent.Tool {
-	if !f.opts.StatusNotes {
+	if !f.opts.Features.StatusNotes {
 		return nil
 	}
 	sink := f.opts.Progress

@@ -201,7 +201,7 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 		// non-fatal: the scan still runs without diff-intent context.
 		cc := buildScanChangeContext(ctx, repo, flags.Since, head, changed)
 		if cc != nil {
-			opts.ChangeContext = cc
+			opts.Discovery.ChangeContext = cc
 			// Rebuild the funnel with the updated options so ChangeContext is
 			// visible to hypothesize. The old funnel (f) has not run yet so no
 			// language servers have been started. Only swap f after a

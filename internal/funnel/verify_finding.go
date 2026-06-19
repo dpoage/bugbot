@@ -40,7 +40,7 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd store.Finding) (refuted 
 
 	c := candidateFromFinding(fnd)
 
-	n := f.opts.Refuters
+	n := f.opts.Limits.Refuters
 	if n <= 0 {
 		n = DefaultRefuters
 	}

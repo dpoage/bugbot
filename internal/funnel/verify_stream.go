@@ -91,7 +91,7 @@ func (f *Funnel) runVerifyAndPersist(
 		return
 	}
 
-	nRefuters := f.opts.Refuters
+	nRefuters := f.opts.Limits.Refuters
 	if budget.verifyOverSoft() {
 		budget.degraded.Store(true)
 		if nRefuters > degradedRefuters {

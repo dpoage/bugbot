@@ -304,8 +304,8 @@ func (d *Daemon) newFunnel() (*funnel.Funnel, error) {
 // cycles and commit cycles without a resolved context both pass nil).
 func (d *Daemon) newFunnelWith(cc *funnel.ChangeContext) (*funnel.Funnel, error) {
 	opts := d.fopts
-	opts.TokenBudget = d.cfg.PerCycleTokens
+	opts.Budget.TokenBudget = d.cfg.PerCycleTokens
 	opts.Progress = d.prog
-	opts.ChangeContext = cc
+	opts.Discovery.ChangeContext = cc
 	return funnel.New(d.clients, d.store, d.repo, opts)
 }
