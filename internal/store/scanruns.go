@@ -20,6 +20,12 @@ const (
 	// ScanCartography is an out-of-band cartographer refresh (bugbot cartography
 	// --run): the package-summary pass without any finder/verify stages.
 	ScanCartography ScanKind = "cartography"
+	// ScanVerifyDrain is a standalone verify-drain pass: it verifies pending
+	// candidates left by interrupted runs WITHOUT invoking the finder stage.
+	ScanVerifyDrain ScanKind = "verify-drain"
+	// ScanImpactSweep is a standalone impact-sweep drain: it re-ranks unswept
+	// open findings by reachability, decoupled from the terminal Stage F.
+	ScanImpactSweep ScanKind = "impact-sweep"
 )
 
 // ScanRun records a single scan invocation. StatsJSON holds an opaque,
