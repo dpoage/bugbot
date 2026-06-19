@@ -30,7 +30,7 @@ func TestAgentUnits_FinderIntegration(t *testing.T) {
 	verifier.fallback = notRefutedJSON
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		MaxParallel: 1, // serialize so ordering is deterministic for assertions
+		Limits: StageLimits{MaxParallel: 1}, // serialize so ordering is deterministic for assertions
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -162,10 +162,9 @@ func TestAgentUnits_BudgetSkipRecording(t *testing.T) {
 	verifier.fallback = notRefutedJSON
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		TokenBudget:           100, // < 150 — pool exhausts after first completion
-		CacheReadBudgetWeight: 1.0,
-		MaxParallel:           1,
-		Lenses:                []string{"nil-safety/error-handling", "concurrency"}, // use exactly 2 lenses to keep test fast
+		Budget:    BudgetConfig{TokenBudget: 100, CacheReadBudgetWeight: 1.0}, // < 150 — pool exhausts after first completion
+		Limits:    StageLimits{MaxParallel: 1},
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling", "concurrency"}}, // use exactly 2 lenses to keep test fast
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -220,8 +219,8 @@ func TestAgentUnits_ParseFailedDetailRecorded(t *testing.T) {
 	verifier := newScriptedClient()
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		MaxParallel: 1,
-		Lenses:      []string{"nil-safety/error-handling"}, // one lens to keep test fast
+		Limits:    StageLimits{MaxParallel: 1},
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}}, // one lens to keep test fast
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -276,7 +275,7 @@ func TestAgentUnits_VerifierRows(t *testing.T) {
 	verifier := verifierRouting(newScriptedClient())
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		MaxParallel: 1,
+		Limits: StageLimits{MaxParallel: 1},
 	})
 	if err != nil {
 		t.Fatal(err)

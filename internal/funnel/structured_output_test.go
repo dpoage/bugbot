@@ -112,7 +112,8 @@ func newFunnelForFinder(t *testing.T, finder llm.Client, verifier llm.Client) (*
 	t.Helper()
 	st, repo := openFixture(t)
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses: []string{"nil-safety/error-handling"}, ChunkSize: 1,
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		Limits:    StageLimits{ChunkSize: 1},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

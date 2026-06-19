@@ -35,8 +35,8 @@ func TestBuildFunnelOptions_HeatOrdering(t *testing.T) {
 			if err != nil {
 				t.Fatalf("buildFunnelOptions() error = %v", err)
 			}
-			if opts.DisableHeatOrdering != tt.wantDisableHeat {
-				t.Errorf("DisableHeatOrdering = %v, want %v", opts.DisableHeatOrdering, tt.wantDisableHeat)
+			if opts.Features.DisableHeatOrdering != tt.wantDisableHeat {
+				t.Errorf("DisableHeatOrdering = %v, want %v", opts.Features.DisableHeatOrdering, tt.wantDisableHeat)
 			}
 		})
 	}

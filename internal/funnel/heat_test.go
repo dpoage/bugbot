@@ -259,7 +259,7 @@ func TestSweep_DisableHeatOrdering(t *testing.T) {
 	verifier := newScriptedClient()
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		DisableHeatOrdering: true,
+		Features: FeatureFlags{DisableHeatOrdering: true},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -43,7 +43,7 @@ func buildDaemonWithRepro(
 		Store:      st,
 		Clients:    funnel.RoleClients{Finder: llmc, Verifier: llmc},
 		Reproducer: prom,
-		FunnelOpts: funnel.Options{Refuters: 1, MaxParallel: 2},
+		FunnelOpts: funnel.Options{Limits: funnel.StageLimits{Refuters: 1, MaxParallel: 2}},
 		Sinks:      []report.Sink{&captureSink{}},
 		Logger:     discardLogger(),
 	}, cfg)
@@ -424,7 +424,7 @@ func TestDaemonReproBacklogDisabled(t *testing.T) {
 		Store:      st,
 		Clients:    funnel.RoleClients{Finder: llmc, Verifier: llmc},
 		Reproducer: prom, // wired but EnableRepro=false
-		FunnelOpts: funnel.Options{Refuters: 1, MaxParallel: 2},
+		FunnelOpts: funnel.Options{Limits: funnel.StageLimits{Refuters: 1, MaxParallel: 2}},
 		Sinks:      []report.Sink{&captureSink{}},
 		Logger:     discardLogger(),
 	}, cfg)

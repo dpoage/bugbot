@@ -361,7 +361,7 @@ func TestRunRefuters_ExecutorClauseInPanelPrompts(t *testing.T) {
 
 	f := &Funnel{
 		repo:    repo,
-		opts:    Options{Refuters: 3},
+		opts:    Options{Limits: StageLimits{Refuters: 3}},
 		lenses:  selectLenses(nil),
 		clients: RoleClients{Verifier: capture},
 	}
@@ -414,7 +414,7 @@ func TestRunRefuters_ExecutorClauseWithSandboxTool(t *testing.T) {
 		repo:    repo,
 		clients: RoleClients{Verifier: capture},
 		opts: Options{
-			Refuters: 3,
+			Limits: StageLimits{Refuters: 3},
 			SandboxOpts: SandboxOpts{
 				Enabled:     true,
 				Sandbox:     sb,
@@ -550,8 +550,8 @@ func TestReplay_ParseSARIFCap_RefutedByExecutor(t *testing.T) {
 		RoleClients{Finder: finder, Verifier: verifier},
 		st, repo,
 		Options{
-			Lenses:      []string{"boundary-conditions"},
-			Refuters:    3,
+			Discovery:   DiscoveryConfig{Lenses: []string{"boundary-conditions"}},
+			Limits:      StageLimits{Refuters: 3},
 			SandboxOpts: sandboxOpts,
 		},
 	)

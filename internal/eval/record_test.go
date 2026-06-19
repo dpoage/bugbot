@@ -151,10 +151,12 @@ func TestRecordCorpus(t *testing.T) {
 				base.Seeded,
 				nil, // live clients injected via runWithClients; no scripted routes needed
 				funnel.Options{
-					TranscriptDir:  transcriptDir,
-					MaxParallel:    1, // REQUIRED for deterministic replay ordering
-					FinderLimits:   limits,
-					VerifierLimits: limits,
+					TranscriptDir: transcriptDir,
+					Limits: funnel.StageLimits{
+						MaxParallel:    1, // REQUIRED for deterministic replay ordering
+						FinderLimits:   limits,
+						VerifierLimits: limits,
+					},
 				},
 				base.Suppress,
 			)
@@ -204,7 +206,7 @@ func TestRecordCorpus(t *testing.T) {
 				},
 				FinderSessions:   len(finderSessions),
 				VerifierSessions: len(verifierSessions),
-				ChunkSize:        effectiveChunkSize(c.Options.ChunkSize),
+				ChunkSize:        effectiveChunkSize(c.Options.Limits.ChunkSize),
 			}
 			if err := writeManifest(caseDir, manifest); err != nil {
 				t.Fatalf("write manifest for %q: %v", base.Name, err)

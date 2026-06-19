@@ -126,12 +126,12 @@ func TestEstimateScan_DiffIntentOnlyWhenTargetedWithContext(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)
 	f, err := New(RoleClients{Finder: newScriptedClient(), Verifier: newScriptedClient()}, st, repo, Options{
-		ChangeContext: &ChangeContext{
+		Discovery: DiscoveryConfig{ChangeContext: &ChangeContext{
 			FromCommit:   "a",
 			ToCommit:     "b",
 			Message:      "tweak greeting",
 			ChangedFiles: []string{"bug.go"},
-		},
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -39,7 +39,7 @@ func TestHypothesize_CoverageTruthfulness(t *testing.T) {
 	verifier := verifierRouting(newScriptedClient())
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses: []string{nilSafety, apiLens},
+		Discovery: DiscoveryConfig{Lenses: []string{nilSafety, apiLens}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -89,10 +89,9 @@ func TestHypothesize_BudgetSkippedNotCovered(t *testing.T) {
 	verifier.fallback = notRefutedJSON
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses:                []string{"nil-safety/error-handling"},
-		TokenBudget:           100, // < 150 so pool is exhausted after first finder
-		CacheReadBudgetWeight: 1.0,
-		MaxParallel:           1,
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		Budget:    BudgetConfig{TokenBudget: 100, CacheReadBudgetWeight: 1.0}, // < 150 so pool is exhausted after first finder
+		Limits:    StageLimits{MaxParallel: 1},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -382,9 +381,8 @@ func TestSweep_PartialCoverage_RotatesToFullCoverage(t *testing.T) {
 		routeSub := "- " + wantChunk[0] + "\n  - " + wantChunk[1]
 		finder.onTaskContains(routeSub, emptyCandidates)
 		f, err := New(RoleClients{Finder: finder, Verifier: newScriptedClient()}, st, repo, Options{
-			Lenses:      []string{"nil-safety/error-handling"},
-			ChunkSize:   2,
-			MaxParallel: 1,
+			Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+			Limits:    StageLimits{ChunkSize: 2, MaxParallel: 1},
 		})
 		if err != nil {
 			t.Fatalf("%s: New: %v", label, err)

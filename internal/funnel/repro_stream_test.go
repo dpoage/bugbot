@@ -133,9 +133,9 @@ func TestRepro_InRun_Streaming(t *testing.T) {
 	verifier.fallback = notRefutedJSON
 
 	f, err := New(RoleClients{Finder: combinedFinder, Verifier: verifier}, st, repo, Options{
-		Lenses:      []string{"nil-safety/error-handling", "resource-leaks"},
-		MaxParallel: 3, // enough for finder + verifier + repro concurrently
-		Repro:       hook,
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling", "resource-leaks"}},
+		Limits:    StageLimits{MaxParallel: 3}, // enough for finder + verifier + repro concurrently
+		Repro:     hook,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -548,9 +548,9 @@ func TestRepro_Burst_ExactlyOncePerFinding(t *testing.T) {
 
 	hook := newFakeReproHook()
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses:      []string{"nil-safety/error-handling"},
-		MaxParallel: 4,
-		Repro:       hook.hook,
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		Limits:    StageLimits{MaxParallel: 4},
+		Repro:     hook.hook,
 	})
 	if err != nil {
 		t.Fatal(err)
