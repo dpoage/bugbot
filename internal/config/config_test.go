@@ -752,3 +752,53 @@ func TestValidate_SandboxIdleTimeout(t *testing.T) {
 		t.Errorf("idle_timeout_seconds=-1 should be rejected with idle_timeout_seconds in message, got %v", err)
 	}
 }
+
+func TestDefault_LLMRequestTimeoutIsZero(t *testing.T) {
+	// Zero config defers to the LLM package default (llm.DefaultRequestTimeout).
+	if got := Default().LLM.RequestTimeout; got != 0 {
+		t.Errorf("Default LLM.RequestTimeout = %s, want 0 (defer to LLM package default)", got)
+	}
+}
+
+func TestLoad_LLMRequestTimeoutFromYAML(t *testing.T) {
+	yaml := validYAML + `
+llm:
+  request_timeout: 90s
+`
+	cfg, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.LLM.RequestTimeout != 90*time.Second {
+		t.Errorf("LLM.RequestTimeout = %s, want 90s", cfg.LLM.RequestTimeout)
+	}
+}
+
+func TestEnvOverride_LLMRequestTimeout(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_LLM_REQUEST_TIMEOUT=2m"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.RequestTimeout != 2*time.Minute {
+		t.Errorf("env override = %s, want 2m", cfg.LLM.RequestTimeout)
+	}
+}
+
+func TestValidate_LLMRequestTimeoutRejectsNegative(t *testing.T) {
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+	cfg.LLM.RequestTimeout = -1 * time.Second
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "request_timeout") {
+		t.Errorf("request_timeout=-1s should be rejected, got %v", err)
+	}
+	cfg.LLM.RequestTimeout = 0
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("request_timeout=0 should be valid (use LLM package default), got %v", err)
+	}
+	cfg.LLM.RequestTimeout = 30 * time.Second
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("request_timeout=30s should be valid, got %v", err)
+	}
+}

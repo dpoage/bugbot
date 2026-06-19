@@ -822,6 +822,51 @@ func TestComputeDiff_Truncation(t *testing.T) {
 	}
 }
 
+// TestComputeDiff_CleanHeaders asserts that computeDiff rewrites the
+// `git diff --no-index` header lines so the temp staging dir and the
+// repo-absolute prefix never appear in the stored patch. The fix-witness
+// text is shown verbatim in reports and issue bodies, so a stray
+// `bugbot-patch-diff-XXX` path would leak the sandbox layout to every
+// downstream consumer.
+func TestComputeDiff_CleanHeaders(t *testing.T) {
+	if _, err := lookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	repoDir := t.TempDir()
+	orig := "package bug\n\nfunc Divide(a, b int) (int, bool) { return a/b, true }\n"
+	if err := os.WriteFile(filepath.Join(repoDir, "calc.go"), []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patched := "package bug\n\nfunc Divide(a, b int) (int, bool) {\n\tif b == 0 {\n\t\treturn 0, false\n\t}\n\treturn a / b, true\n}\n"
+
+	diff, err := computeDiff(repoDir, map[string]string{"calc.go": patched})
+	if err != nil {
+		t.Fatalf("computeDiff: %v", err)
+	}
+
+	// Headers must use the clean repo-relative form.
+	if !strings.Contains(diff, "a/calc.go") {
+		t.Errorf("diff missing `a/calc.go` header:\n%s", diff)
+	}
+	if !strings.Contains(diff, "b/calc.go") {
+		t.Errorf("diff missing `b/calc.go` header:\n%s", diff)
+	}
+
+	// No temp staging components should leak into the stored patch.
+	if strings.Contains(diff, "bugbot-patch-diff-") {
+		t.Errorf("diff leaks bugbot-patch-diff-* temp dir:\n%s", diff)
+	}
+	if strings.Contains(diff, "/tmp/") {
+		t.Errorf("diff leaks /tmp/ path component:\n%s", diff)
+	}
+
+	// Sanity: the hunk body must still be present and unaltered.
+	if !strings.Contains(diff, "+") {
+		t.Errorf("diff missing + hunk lines:\n%s", diff)
+	}
+}
+
 // lookPath is a thin wrapper around exec.LookPath to keep the import within
 // this test file.
 func lookPath(name string) (string, error) {

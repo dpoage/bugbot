@@ -236,9 +236,20 @@ func (m *Manager) Close() error {
 	}
 	m.mu.Unlock()
 
+	// Mark every tracked managed server as permanently failed. The existing
+	// failed gate in liveServer then blocks late spawns for concurrent callers
+	// on BOTH the serverFor route (which only blocks NEW extensions) and the
+	// ErrConnDead retry route (which re-enters liveServer, where this gate
+	// fires). The error message contains "manager is closed" so
+	// shouldFallBack (internal/agent/tools_codenav_tiered.go) recognizes it.
+	// We read m.closed and snapshot servers while holding m.mu, then drop it
+	// before taking each ms.mu — holding m.mu while taking ms.mu would invert
+	// the lock order taken by serverFor.
+	closedErr := errors.New("lsp: manager is closed — fall back to grep")
 	var wg sync.WaitGroup
 	for _, ms := range servers {
 		ms.mu.Lock()
+		ms.failed = closedErr
 		srv := ms.srv
 		ms.srv = nil
 		ms.mu.Unlock()

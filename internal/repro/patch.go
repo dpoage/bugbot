@@ -592,6 +592,72 @@ func mergedWriteFiles(reproPlan *Plan, patchPlan *PatchPlan) map[string][]byte {
 	return out
 }
 
+// rewriteDiffPaths rewrites the path-bearing header lines in a
+// `git diff --no-index` output so the temp staging paths (and the
+// repo-absolute prefix) are replaced with the clean repo-relative form
+// a/<clean> / b/<clean>. Hunk bodies and other lines are passed through
+// untouched, so file contents that happen to mention a temp path are
+// left alone.
+func rewriteDiffPaths(diff, clean, origPath, patchedPath string) string {
+	cleanSlash := filepath.ToSlash(clean)
+	aClean := "a/" + cleanSlash
+	bClean := "b/" + cleanSlash
+
+	var b strings.Builder
+	b.Grow(len(diff))
+	for _, line := range strings.SplitAfter(diff, "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			if strings.Contains(line, origPath) || strings.Contains(line, patchedPath) {
+				b.WriteString("diff --git ")
+				b.WriteString(aClean)
+				b.WriteByte(' ')
+				b.WriteString(bClean)
+				b.WriteByte('\n')
+			} else {
+				b.WriteString(line)
+			}
+		case strings.HasPrefix(line, "--- "):
+			trimmed := strings.TrimSuffix(line, "\n")
+			if strings.Contains(trimmed, origPath) || strings.Contains(trimmed, patchedPath) {
+				b.WriteString("--- ")
+				b.WriteString(aClean)
+				b.WriteByte('\n')
+			} else {
+				b.WriteString(line)
+			}
+		case strings.HasPrefix(line, "+++ "):
+			trimmed := strings.TrimSuffix(line, "\n")
+			if strings.Contains(trimmed, origPath) || strings.Contains(trimmed, patchedPath) {
+				b.WriteString("+++ ")
+				b.WriteString(bClean)
+				b.WriteByte('\n')
+			} else {
+				b.WriteString(line)
+			}
+		case strings.HasPrefix(line, "rename from "):
+			if strings.Contains(line, origPath) {
+				b.WriteString("rename from ")
+				b.WriteString(cleanSlash)
+				b.WriteByte('\n')
+			} else {
+				b.WriteString(line)
+			}
+		case strings.HasPrefix(line, "rename to "):
+			if strings.Contains(line, patchedPath) {
+				b.WriteString("rename to ")
+				b.WriteString(cleanSlash)
+				b.WriteByte('\n')
+			} else {
+				b.WriteString(line)
+			}
+		default:
+			b.WriteString(line)
+		}
+	}
+	return b.String()
+}
+
 // computeDiff computes a unified diff between original repo files and the
 // patched content by writing the patched versions to a temp directory and
 // running `git diff --no-index`.
@@ -600,6 +666,11 @@ func mergedWriteFiles(reproPlan *Plan, patchPlan *PatchPlan) map[string][]byte {
 // exits 0 when they are identical.  Both are treated as success; only exit
 // codes >= 2 indicate a genuine git error.  The diff text is capped at
 // patchMaxDiffBytes.
+//
+// The temp paths used by `git diff --no-index` would otherwise leak into the
+// stored patch (e.g. `a/tmp/bugbot-patch-diff-XXX/calc.go`), so we post-
+// process each per-file output with rewriteDiffPaths to substitute the
+// clean repo-relative form `a/<path>` / `b/<path>`.
 func computeDiff(repoDir string, patchFiles map[string]string) (string, error) {
 	tmp, err := os.MkdirTemp("", "bugbot-patch-diff-*")
 	if err != nil {
@@ -640,7 +711,9 @@ func computeDiff(repoDir string, patchFiles map[string]string) (string, error) {
 		if exitCode >= 2 {
 			return "", fmt.Errorf("compute diff: git error (exit %d): %s", exitCode, out.String())
 		}
-		diffParts = append(diffParts, out.String())
+		// Strip the temp staging paths from header lines so the stored
+		// patch carries clean a/<path> / b/<path> references.
+		diffParts = append(diffParts, rewriteDiffPaths(out.String(), clean, origPath, patchedPath))
 	}
 
 	full := strings.Join(diffParts, "")

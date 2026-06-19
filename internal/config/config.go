@@ -243,6 +243,16 @@ type Repro struct {
 	BacklogBatch int `yaml:"backlog_batch"`
 }
 
+// LLM tunes the shared LLM client wrapper applied to every role's client. The
+// zero value is valid: zero/omitted on any field means "use the LLM package's
+// built-in default" (e.g. llm.DefaultRequestTimeout).
+type LLM struct {
+	// RequestTimeout bounds a single LLM request attempt (per-attempt wall-clock
+	// deadline). Zero or omitted uses the LLM package default
+	// (llm.DefaultRequestTimeout, currently 5m). Negative is invalid.
+	RequestTimeout time.Duration `yaml:"request_timeout"`
+}
+
 // Daemon configures the continuous-run scheduler.
 type Daemon struct {
 	PollInterval  time.Duration `yaml:"poll_interval"`
@@ -302,6 +312,7 @@ type Config struct {
 	Publish   Publish             `yaml:"publish"`
 	Daemon    Daemon              `yaml:"daemon"`
 	Storage   Storage             `yaml:"storage"`
+	LLM       LLM                 `yaml:"llm"`
 }
 
 // Default returns a Config populated with sane defaults. Callers typically
@@ -416,8 +427,7 @@ func Load(path string) (Config, error) {
 //	BUGBOT_DAEMON_SWEEP_INTERVAL
 //	BUGBOT_DAEMON_IDLE_BACKOFF
 //	BUGBOT_DAEMON_REPRO_BACKLOG_INTERVAL
-//	BUGBOT_REVIEW_FAIL_ON
-//	BUGBOT_REVIEW_SUSPECTED
+//	BUGBOT_LLM_REQUEST_TIMEOUT
 //	BUGBOT_VERIFY_SANDBOX_EXEC        ("true" or "false")
 //	BUGBOT_VERIFY_SANDBOX_MIN_SEVERITY (critical|high|medium|low)
 //	BUGBOT_VERIFY_SANDBOX_MAX_EXECS   (integer >= 1)
@@ -550,6 +560,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setDur("BUGBOT_DAEMON_SWEEP_INTERVAL", &cfg.Daemon.SweepInterval),
 		setDur("BUGBOT_DAEMON_IDLE_BACKOFF", &cfg.Daemon.IdleBackoff),
 		setDur("BUGBOT_DAEMON_REPRO_BACKLOG_INTERVAL", &cfg.Daemon.ReproBacklogInterval),
+		setDur("BUGBOT_LLM_REQUEST_TIMEOUT", &cfg.LLM.RequestTimeout),
 		setBool("BUGBOT_VERIFY_SANDBOX_EXEC", &cfg.Verify.SandboxExec),
 		setBool("BUGBOT_PUBLISH_ENABLED", &cfg.Publish.Enabled),
 		setBool("BUGBOT_PUBLISH_CLOSE_ON_FIXED", &cfg.Publish.CloseOnFixed),
@@ -730,6 +741,9 @@ func (c *Config) Validate() error {
 	// rather than silently ignored.
 	if c.Daemon.ReproBacklogInterval <= 0 {
 		return fmt.Errorf("config: daemon.repro_backlog_interval must be > 0")
+	}
+	if c.LLM.RequestTimeout < 0 {
+		return fmt.Errorf("config: llm.request_timeout must be >= 0 (0 uses LLM package default)")
 	}
 
 	return nil
