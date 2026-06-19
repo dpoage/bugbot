@@ -581,6 +581,15 @@ func (f *Funnel) Close() error {
 	return f.nav.Close()
 }
 
+// Site is one code location (file + line) that a merged candidate represents.
+// The primary candidate's own File/Line is always Sites[0]. Subsequent entries
+// are the other same-root-cause members that were collapsed into this primary
+// during triage's expanded merge pass.
+type Site struct {
+	File string
+	Line int
+}
+
 // Candidate is a finder-proposed bug after it has been associated with a lens
 // and a fingerprint. It is the unit that flows from hypothesize through triage
 // into verification.
@@ -611,6 +620,11 @@ type Candidate struct {
 	// deletes this row, so a clean run leaves the WAL empty and only an
 	// interrupt leaves rows for the next run to replay.
 	PendingID string
+	// Sites accumulates every code location a same-root-cause merge collapsed
+	// into this primary. Sites[0] is the primary's own (File, Line); later
+	// entries come from merged-away members. Empty when no root-cause merges
+	// occurred (single-site finding).
+	Sites []Site
 }
 
 // Stats is the per-stage funnel accounting recorded on the scan run.
@@ -651,6 +665,10 @@ type Stats struct {
 	// fingerprint that nonetheless points at the same underlying bug.
 	MergedWithinLens int `json:"merged_within_lens"`
 	MergedCrossLens  int `json:"merged_cross_lens"`
+	// MergedRootCause counts candidates collapsed by the same-root-cause merge
+	// (same-file broad-window or cross-file decl/def) — distinct from
+	// MergedWithinLens/MergedCrossLens which track the tighter 10-line window.
+	MergedRootCause int `json:"merged_root_cause,omitempty"`
 	// FinderRuns is the number of finder (lens, chunk) agents that actually
 	// launched (i.e. were not skipped by budget degradation/stop). FinderFailures
 	// is how many of those produced NO parseable output even after the repair

@@ -1826,11 +1826,10 @@ func TestTriageState_SameBucketDissimilarClusters(t *testing.T) {
 	}
 }
 
-// TestTriageState_NoMergeAcrossFilesOrBeyondWindow ports the batch
-// clustering's negative guarantees to the streaming layer: identical
-// descriptions must NOT merge across different files, nor beyond the line
-// window within one file.
-func TestTriageState_NoMergeAcrossFilesOrBeyondWindow(t *testing.T) {
+// TestTriageState_NoMergeAcrossFiles verifies cross-file merging only happens
+// for source/header pairs (see TestTriageState_CrossFileDeclDef). Unrelated
+// files with identical descriptions must NOT merge even when nearby.
+func TestTriageState_NoMergeAcrossFiles(t *testing.T) {
 	ctx := context.Background()
 	st, _ := openFixture(t)
 
@@ -1845,18 +1844,386 @@ func TestTriageState_NoMergeAcrossFilesOrBeyondWindow(t *testing.T) {
 	var stats Stats
 	for _, cand := range []Candidate{
 		mk("nil-safety/error-handling", "bug.go", 10),
-		mk("resource-leaks", "clean.go", 10),                   // other file: no merge
-		mk("concurrency", "bug.go", 10+DefaultMergeWindow*3+1), // same file, far: no merge
+		mk("resource-leaks", "clean.go", 10), // unrelated file: no merge
 	} {
 		if err := ts.process(ctx, st, &stats, cand); err != nil {
 			t.Fatalf("process: %v", err)
 		}
 	}
-	if got := len(ts.popReady()); got != 3 {
-		t.Errorf("primaries = %d, want 3 (no cross-file or beyond-window merging)", got)
+	if got := len(ts.popReady()); got != 2 {
+		t.Errorf("primaries = %d, want 2 (no cross-file merging for unrelated files)", got)
 	}
-	if stats.MergedCrossLens+stats.MergedWithinLens != 0 {
-		t.Errorf("merges = %d/%d, want none", stats.MergedWithinLens, stats.MergedCrossLens)
+	if stats.MergedCrossLens+stats.MergedWithinLens+stats.MergedRootCause != 0 {
+		t.Errorf("merges = %d/%d/%d, want none", stats.MergedWithinLens, stats.MergedCrossLens, stats.MergedRootCause)
+	}
+}
+
+// TestTriageState_SameFileSameRootCause is the publish.go scenario: multiple
+// sites of the same defect pattern in one file, some far apart (> DefaultMergeWindow),
+// collapse into ONE primary with MergedRootCause==4. Critically, it simulates
+// run.go's per-candidate process-then-popReady loop: the forwarded primary
+// Candidate carries only its own site, and the 4 merged members' sites are
+// staged in the clusterRegistry so DrainStagedSites (called in
+// runVerifyAndPersist) can attach them to the persisted Finding.
+func TestTriageState_SameFileSameRootCause(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openFixture(t)
+
+	// 10-token description — ensures sameRootCauseMinSharedTokens (5) is met.
+	truncDesc := "byte cap utf8 truncation without rune walkback boundary missing truncate"
+	mk := func(lens, title string, line int) Candidate {
+		return Candidate{
+			Lens: lens, File: "internal/cli/publish.go", Line: line, Title: title,
+			Description: truncDesc, Severity: "high", Confidence: "high",
+		}
+	}
+
+	// Fixture precondition: self-jaccard must meet both thresholds.
+	tok := descTokens(truncDesc)
+	if j := jaccard(tok, tok); j < sameRootCauseThreshold {
+		t.Fatalf("fixture broken: self-jaccard %.2f < threshold %.2f", j, sameRootCauseThreshold)
+	}
+	if n := sharedTokenCount(tok, tok); n < sameRootCauseMinSharedTokens {
+		t.Fatalf("fixture broken: shared tokens %d < min %d", n, sameRootCauseMinSharedTokens)
+	}
+
+	candidates := []Candidate{
+		mk("nil-safety/error-handling", "truncation site A", 45),
+		mk("resource-leaks", "truncation site B", 78), // same file, >10 lines from A
+		mk("concurrency", "truncation site C", 112),   // same file, >10 lines from B
+		mk("boundary-conditions", "truncation site D", 145),
+		mk("injection/input-validation", "truncation site E", 210), // same file, different func
+	}
+
+	snap := &ingest.Snapshot{Files: []ingest.File{{Path: "internal/cli/publish.go"}}}
+	ts, reg := newTriageState(snap)
+	var stats Stats
+
+	// Simulate run.go: process each candidate then immediately pop (forwarding
+	// primary copies to verify). Collect the forwarded primaries.
+	var forwarded []Candidate
+	for _, c := range candidates {
+		if err := ts.process(ctx, st, &stats, c); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+		forwarded = append(forwarded, ts.popReady()...)
+	}
+
+	// Only ONE primary is forwarded (the first candidate).
+	if len(forwarded) != 1 {
+		t.Fatalf("forwarded = %d, want 1 (all sites same root cause)", len(forwarded))
+	}
+	if stats.MergedRootCause != 4 {
+		t.Errorf("MergedRootCause = %d, want 4", stats.MergedRootCause)
+	}
+
+	// The forwarded Candidate carries only the primary's own site (Sites[0]).
+	// The 4 merged members' sites are staged in the registry.
+	primary := forwarded[0]
+	if len(primary.Sites) != 1 {
+		t.Errorf("forwarded primary Sites len = %d, want 1 (only own site)", len(primary.Sites))
+	}
+	if primary.Sites[0].File != "internal/cli/publish.go" || primary.Sites[0].Line != 45 {
+		t.Errorf("primary Sites[0] = %+v, want {internal/cli/publish.go 45}", primary.Sites[0])
+	}
+
+	// Drain staged sites from the registry (as runVerifyAndPersist would).
+	staged := reg.DrainStagedSites(primary.Fingerprint)
+	if len(staged) != 4 {
+		t.Errorf("staged sites = %d, want 4: %+v", len(staged), staged)
+	}
+	// After draining, the combined sites (own + staged) cover all 5 locations.
+	allSites := append(candidateSitesToStore(primary.Sites), staged...)
+	if len(allSites) != 5 {
+		t.Errorf("all sites (own+staged) = %d, want 5", len(allSites))
+	}
+}
+
+// TestTriageState_SameFileSameRootCause_GrayZone verifies the dual-condition
+// protection: two short descriptions that share generic vocabulary ("index
+// buffer length") score high Jaccard but fail the minimum-shared-token count,
+// so distinct bugs with high-ratio-but-small-vocabulary overlap do NOT merge.
+func TestTriageState_SameFileSameRootCause_GrayZone(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openFixture(t)
+
+	snap := &ingest.Snapshot{Files: []ingest.File{{Path: "buffer.cpp"}}}
+
+	// Descriptions share 4 tokens (integer, overflow, result, calculation) giving
+	// jaccard = 4/6 = 0.667 >= 0.35, but shared token count = 4 < sameRootCauseMinSharedTokens=5.
+	// The dual condition rejects the merge even though Jaccard alone would accept it.
+	bugA := Candidate{
+		Lens: "boundary-conditions", File: "buffer.cpp", Line: 40,
+		Title:       "integer overflow result negative",
+		Description: "integer overflow result negative calculation",
+		Severity:    "high", Confidence: "high",
+	}
+	bugB := Candidate{
+		Lens: "boundary-conditions", File: "buffer.cpp", Line: 900,
+		Title:       "integer overflow result positive",
+		Description: "integer overflow result positive calculation",
+		Severity:    "high", Confidence: "high",
+	}
+	tokA, tokB := descTokens(bugA.Description), descTokens(bugB.Description)
+	j := jaccard(tokA, tokB)
+	shared := sharedTokenCount(tokA, tokB)
+	t.Logf("gray-zone: jaccard=%.3f shared=%d (want jaccard>=%.2f but shared<%d)",
+		j, shared, sameRootCauseThreshold, sameRootCauseMinSharedTokens)
+	if j < sameRootCauseThreshold {
+		t.Fatalf("fixture broken: jaccard %.3f < %.2f — gray-zone not reached", j, sameRootCauseThreshold)
+	}
+	if shared >= sameRootCauseMinSharedTokens {
+		t.Fatalf("fixture broken: shared=%d >= min=%d — min-token guard would pass", shared, sameRootCauseMinSharedTokens)
+	}
+
+	ts, _ := newTriageState(snap)
+	var stats Stats
+	var forwarded []Candidate
+	for _, c := range []Candidate{bugA, bugB} {
+		if err := ts.process(ctx, st, &stats, c); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+		forwarded = append(forwarded, ts.popReady()...)
+	}
+	if len(forwarded) != 2 {
+		t.Errorf("forwarded = %d, want 2 (distinct defects must not merge despite high jaccard)", len(forwarded))
+	}
+	if stats.MergedRootCause != 0 {
+		t.Errorf("MergedRootCause = %d, want 0", stats.MergedRootCause)
+	}
+}
+
+// TestTriageState_SameFileSameRootCause_DistinctDefectProtection verifies
+// that two clearly dissimilar bugs in the same file far apart do NOT merge.
+func TestTriageState_SameFileSameRootCause_DistinctDefectProtection(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openFixture(t)
+
+	snap := &ingest.Snapshot{Files: []ingest.File{{Path: "bug.go"}}}
+	ts, _ := newTriageState(snap)
+	var stats Stats
+	bugA := Candidate{
+		Lens: "nil-safety/error-handling", File: "bug.go", Line: 10,
+		Title:       "nil deref on user input",
+		Description: "null pointer dereference when user input missing validation check",
+		Severity:    "high", Confidence: "high",
+	}
+	bugB := Candidate{
+		Lens: "resource-leaks", File: "bug.go", Line: 200,
+		Title:       "file descriptor leak",
+		Description: "file descriptor leaked close not called error exit path",
+		Severity:    "high", Confidence: "high",
+	}
+	tokA, tokB := descTokens(bugA.Description), descTokens(bugB.Description)
+	if j := jaccard(tokA, tokB); j >= sameRootCauseThreshold {
+		t.Fatalf("fixture broken: jaccard %.2f >= threshold — descriptions are too similar", j)
+	}
+	var forwarded []Candidate
+	for _, c := range []Candidate{bugA, bugB} {
+		if err := ts.process(ctx, st, &stats, c); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+		forwarded = append(forwarded, ts.popReady()...)
+	}
+	if len(forwarded) != 2 {
+		t.Errorf("forwarded = %d, want 2 (distinct defects must not merge)", len(forwarded))
+	}
+	if stats.MergedRootCause != 0 {
+		t.Errorf("MergedRootCause = %d, want 0", stats.MergedRootCause)
+	}
+}
+
+// TestTriageState_CrossFileDeclDef verifies that a .cpp/.hpp same-stem
+// same-directory same-defect pair merges into one finding with both sites,
+// while an unrelated description pair and a cross-directory pair do NOT merge.
+func TestTriageState_CrossFileDeclDef(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openFixture(t)
+
+	// 10-token description to satisfy sameRootCauseMinSharedTokens=5.
+	bufDesc := "buffer overflow write past end array bounds missing size check"
+
+	mkCross := func(lens, file string, line int, desc string) Candidate {
+		return Candidate{
+			Lens: lens, File: file, Line: line, Title: "bounds check " + file,
+			Description: desc, Severity: "high", Confidence: "high",
+		}
+	}
+
+	snap := &ingest.Snapshot{Files: []ingest.File{
+		{Path: "src/RenderSystem.cpp"},
+		{Path: "src/RenderSystem.hpp"},
+		{Path: "src/AudioSystem.cpp"},
+		{Path: "src/AudioSystem.hpp"},
+		{Path: "src/render/utils.cpp"},
+		{Path: "src/audio/utils.hpp"},
+	}}
+
+	// Pair 1: same dir RenderSystem.cpp + .hpp, same defect → SHOULD merge.
+	// Pair 2: same dir AudioSystem.cpp + .hpp, different description → NO merge.
+	// Pair 3: cross-dir render/utils.cpp + audio/utils.hpp, same defect → NO merge.
+	candidates := []Candidate{
+		mkCross("boundary-conditions", "src/RenderSystem.cpp", 42, bufDesc),
+		mkCross("nil-safety/error-handling", "src/RenderSystem.hpp", 15, bufDesc),
+		mkCross("boundary-conditions", "src/AudioSystem.cpp", 77, bufDesc),
+		mkCross("nil-safety/error-handling", "src/AudioSystem.hpp", 20, "unrelated audio mixer volume clamp unused"),
+		mkCross("boundary-conditions", "src/render/utils.cpp", 55, bufDesc),
+		mkCross("nil-safety/error-handling", "src/audio/utils.hpp", 10, bufDesc),
+	}
+
+	ts, _ := newTriageState(snap)
+	var stats Stats
+	var forwarded []Candidate
+	for _, c := range candidates {
+		if err := ts.process(ctx, st, &stats, c); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+		forwarded = append(forwarded, ts.popReady()...)
+	}
+	// RenderSystem: 1 merged → 1 primary. AudioSystem: 2 separate. render/audio utils: 2 separate.
+	if len(forwarded) != 5 {
+		t.Errorf("forwarded = %d, want 5 (1 merged + 4 unmerged)", len(forwarded))
+	}
+	if stats.MergedRootCause != 1 {
+		t.Errorf("MergedRootCause = %d, want 1", stats.MergedRootCause)
+	}
+	// The RenderSystem primary should have its own site in Sites[0], and the
+	// .hpp site staged in the registry.
+	var renderPrimary *Candidate
+	for i := range forwarded {
+		if strings.Contains(forwarded[i].File, "RenderSystem") {
+			renderPrimary = &forwarded[i]
+			break
+		}
+	}
+	if renderPrimary == nil {
+		t.Fatal("RenderSystem primary not found in forwarded")
+	}
+	if len(renderPrimary.Sites) != 1 {
+		t.Errorf("RenderSystem forwarded Sites = %d, want 1 (own only; mate is staged)", len(renderPrimary.Sites))
+	}
+}
+
+// TestTriageState_CrossFileDeclDef_CrossDir verifies that same-stem files in
+// different directories do NOT merge (src/render/utils.cpp ≠ src/audio/utils.hpp).
+func TestTriageState_CrossFileDeclDef_CrossDir(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openFixture(t)
+
+	bufDesc := "buffer overflow write past end array bounds missing size check"
+	snap := &ingest.Snapshot{Files: []ingest.File{
+		{Path: "src/render/utils.cpp"},
+		{Path: "src/audio/utils.hpp"},
+	}}
+	candidates := []Candidate{
+		{
+			Lens: "boundary-conditions", File: "src/render/utils.cpp", Line: 42,
+			Title: "overflow in render utils", Description: bufDesc, Severity: "high", Confidence: "high",
+		},
+		{
+			Lens: "nil-safety/error-handling", File: "src/audio/utils.hpp", Line: 10,
+			Title: "overflow in audio utils", Description: bufDesc, Severity: "high", Confidence: "high",
+		},
+	}
+	ts, _ := newTriageState(snap)
+	var stats Stats
+	var forwarded []Candidate
+	for _, c := range candidates {
+		if err := ts.process(ctx, st, &stats, c); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+		forwarded = append(forwarded, ts.popReady()...)
+	}
+	if len(forwarded) != 2 {
+		t.Errorf("forwarded = %d, want 2 (cross-dir same-stem must NOT merge)", len(forwarded))
+	}
+	if stats.MergedRootCause != 0 {
+		t.Errorf("MergedRootCause = %d, want 0", stats.MergedRootCause)
+	}
+}
+
+// TestSweep_SameRootCauseMerge_SitesPersistedE2E is the end-to-end test for
+// bugbot-wf1: five candidates at different lines in publish.go with similar
+// truncation descriptions collapse to ONE primary via same-root-cause merge,
+// the primary is verified exactly once, and the persisted Finding carries all
+// 5 Sites (the primary's own + 4 staged by merged members).
+func TestSweep_SameRootCauseMerge_SitesPersistedE2E(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// Use the same rich description for all 5 sites so they meet both the
+	// Jaccard and min-shared-token thresholds.
+	truncDesc := func(line int) string {
+		// Include the line to make the title unique (different fingerprints)
+		// but keep the description identical so Jaccard=1 and shared=10.
+		_ = line
+		return "byte cap utf8 truncation without rune walkback boundary missing truncate"
+	}
+	siteJSON := func(line int) string {
+		return fmt.Sprintf(`{"file": "bug.go", "line": %d,`+
+			` "title": "utf8-truncation-site-%d",`+
+			` "description": %q,`+
+			` "severity": "high", "evidence": "truncation", "confidence": "high"}`,
+			line, line, truncDesc(line))
+	}
+
+	// Each of 5 lenses reports one site of the same defect.
+	// We pick 5 distinct lenses so they all get finder units.
+	lenses := []string{
+		"nil-safety/error-handling",
+		"resource-leaks",
+		"boundary-conditions",
+		"injection/input-validation",
+		"concurrency",
+	}
+	lines := []int{45, 78, 112, 145, 210}
+
+	finder := newScriptedClient()
+	for i, lens := range lenses {
+		// Each lens reports exactly one site (its unique line).
+		finder.onSystemContains(lens, candJSON(siteJSON(lines[i])))
+	}
+
+	// Refuter always says not-refuted so the primary survives.
+	verifier := newScriptedClient()
+	for _, ln := range lines {
+		verifier.onTaskContains(fmt.Sprintf("utf8-truncation-site-%d", ln), notRefutedJSON)
+	}
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Exactly one finding (5-site root-cause merge, verified once).
+	if len(res.Findings) != 1 {
+		t.Fatalf("findings = %d, want 1; stats=%+v", len(res.Findings), res.Stats)
+	}
+	if res.Stats.MergedRootCause != 4 {
+		t.Errorf("MergedRootCause = %d, want 4", res.Stats.MergedRootCause)
+	}
+	// Exactly one verify panel ran (the single primary).
+	if res.Stats.VerifierRuns != DefaultRefuters {
+		t.Errorf("verifier_runs = %d, want %d (one panel for the one cluster)", res.Stats.VerifierRuns, DefaultRefuters)
+	}
+
+	// The persisted Finding must carry all 5 sites.
+	got := res.Findings[0]
+	if len(got.Sites) != 5 {
+		t.Errorf("persisted Sites = %d, want 5: %+v", len(got.Sites), got.Sites)
+	}
+
+	// Reload from store to confirm the sites are durable.
+	stored, err := st.GetFindingByFingerprint(ctx, got.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint: %v", err)
+	}
+	if len(stored.Sites) != 5 {
+		t.Errorf("stored Sites = %d, want 5: %+v", len(stored.Sites), stored.Sites)
 	}
 }
 
@@ -1874,5 +2241,87 @@ func TestSpendRecorder_CartographerChargesFinderPool(t *testing.T) {
 	}
 	if got := b.verifyPool.Spent(); got != 0 {
 		t.Errorf("verifyPool charged %d, want 0 (cartographer must not touch the verify reserve)", got)
+	}
+}
+
+// TestRegistry_TOCTOU_LateLensInBothCorrobAndReasoning verifies the TOCTOU
+// ordering deterministically at the registry level:
+//  1. Register primary fingerprint.
+//  2. Simulate DrainStagedLenses (returns nil — no lens staged yet).
+//  3. AddStagedLens called by triage AFTER the drain but BEFORE SignalPersisted
+//     (the narrow TOCTOU window): lens is queued in stagedLenses.
+//  4. SignalPersisted returns it as `late`.
+//  5. The caller-side fold must put the lens in BOTH CorroboratingLenses AND
+//     the Reasoning trace — not just one of them. This guards the regression
+//     where folding into CorroboratingLenses caused run.go's AttachedLenses
+//     loop to compute added=[] and skip the Reasoning note.
+func TestRegistry_TOCTOU_LateLensInBothCorrobAndReasoning(t *testing.T) {
+	reg := newClusterRegistry()
+	const fp = "test-fingerprint"
+	const lens = "api-contract-misuse"
+
+	// Step 1: register primary.
+	reg.Register(fp)
+
+	// Step 2: drain staged lenses (none yet — primary just registered).
+	if got := reg.DrainStagedLenses(fp); len(got) != 0 {
+		t.Fatalf("drain before any staged lens: want [], got %v", got)
+	}
+
+	// Step 3: triage adds a lens in the TOCTOU window (after drain, before signal).
+	staged, killed := reg.AddStagedLens(fp, lens)
+	if !staged {
+		t.Fatalf("AddStagedLens: want staged=true (primary not yet persisted), got staged=%v killed=%v", staged, killed)
+	}
+
+	// Step 4: verify goroutine signals persisted; the lens is returned as late.
+	late := reg.SignalPersisted(fp, true)
+	if len(late) != 1 || late[0] != lens {
+		t.Fatalf("SignalPersisted late lenses: want [%q], got %v", lens, late)
+	}
+
+	// Step 5: caller-side fold (mirrors the code in runVerifyAndPersist).
+	// Start with a stored Finding that has no corroborating lenses or note yet.
+	corrobLenses := []string(nil)
+	reasoning := "The nil path is reachable. No guard exists."
+
+	corrobLenses = dedupLenses(append(corrobLenses, late...))
+	reasoning = appendCorroboration(reasoning, late)
+
+	// CorroboratingLenses must contain the lens.
+	if len(corrobLenses) != 1 || corrobLenses[0] != lens {
+		t.Errorf("CorroboratingLenses = %v, want [%q]", corrobLenses, lens)
+	}
+	// Reasoning must contain the human-readable note.
+	if !strings.Contains(reasoning, "Corroborated by lenses: "+lens) {
+		t.Errorf("Reasoning missing corroboration note; got:\n%s", reasoning)
+	}
+
+	// Confirm run.go's AttachedLenses sees the lens (stored in attachedLate).
+	attached := reg.AttachedLenses(fp)
+	if len(attached) != 1 || attached[0] != lens {
+		t.Errorf("AttachedLenses = %v, want [%q]", attached, lens)
+	}
+
+	// Simulate run.go's fold: `added = lenses not already in corrobLenses`.
+	// With the correct fix, corrobLenses already contains the lens, so added=[].
+	// run.go must NOT append a second Reasoning note.
+	have := make(map[string]bool, len(corrobLenses))
+	for _, l := range corrobLenses {
+		have[l] = true
+	}
+	var added []string
+	for _, l := range attached {
+		if !have[l] {
+			added = append(added, l)
+		}
+	}
+	if len(added) != 0 {
+		t.Errorf("run.go added = %v, want [] (lens already folded; double-note would occur)", added)
+	}
+	// Reasoning must contain exactly one corroboration note (no double-append).
+	noteCount := strings.Count(reasoning, "Corroborated by lenses:")
+	if noteCount != 1 {
+		t.Errorf("Reasoning corroboration note count = %d, want 1 (no double-note):\n%s", noteCount, reasoning)
 	}
 }

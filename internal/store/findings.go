@@ -16,6 +16,14 @@ import (
 	"github.com/dpoage/bugbot/internal/domain"
 )
 
+// Site is one code location (file + line) contributing to a finding. The
+// primary's own location is always Sites[0]; additional entries come from
+// same-root-cause members collapsed into the primary during triage.
+type Site struct {
+	File string
+	Line int
+}
+
 // Status enumerates the lifecycle states of a finding.
 type Status string
 
@@ -67,9 +75,13 @@ type Finding struct {
 	// comma-separated text column; it is a reporting signal only and does NOT
 	// affect the finding's tier or status.
 	CorroboratingLenses []string
-	Confidence          float64 // derived: findingConfidence(tier, severity, len(corroboratingLenses))
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	// Sites records every code location this finding represents. Sites[0] is the
+	// primary's (File, Line). Additional entries are same-root-cause merge sites.
+	// Stored as a pipe-separated "file:line" list; empty when no merge occurred.
+	Sites      []Site
+	Confidence float64 // derived: findingConfidence(tier, severity, len(corroboratingLenses))
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // encodeLenses encodes the lens list as a JSON array for storage in the
@@ -102,6 +114,54 @@ func decodeLenses(s string) []string {
 	}
 	// Legacy comma-separated fallback.
 	return strings.Split(s, ",")
+}
+
+// encodeSites encodes a slice of Site into a newline-separated list of
+// "file|line" entries. Format: "file|line\nfile|line\n..."
+// Empty/nil yields "".
+//
+// Encoding limitations (accept these for source-file paths in practice):
+//   - Pipe characters ('|') in file paths are replaced with U+FFFD (lossy).
+//     Decoding restores U+FFFD to '|' for display, but a file path that
+//     genuinely contained U+FFFD would not round-trip correctly.
+//   - Newline characters ('\n') in file paths are not escaped; they would
+//     split into bogus entries on decode. Source-file paths do not contain
+//     newlines in practice.
+func encodeSites(sites []Site) string {
+	if len(sites) == 0 {
+		return ""
+	}
+	parts := make([]string, len(sites))
+	for i, s := range sites {
+		safeFile := strings.ReplaceAll(s.File, "|", "\ufffd")
+		parts[i] = safeFile + "|" + fmt.Sprintf("%d", s.Line)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// decodeSites parses the pipe/newline encoded sites column. Empty string yields nil.
+func decodeSites(s string) []Site {
+	if s == "" {
+		return nil
+	}
+	entries := strings.Split(s, "\n")
+	out := make([]Site, 0, len(entries))
+	for _, e := range entries {
+		idx := strings.LastIndex(e, "|")
+		if idx < 0 {
+			continue // malformed entry; skip
+		}
+		file := strings.ReplaceAll(e[:idx], "\ufffd", "|")
+		var line int
+		if _, err := fmt.Sscanf(e[idx+1:], "%d", &line); err != nil {
+			continue // malformed line number; skip entry
+		}
+		out = append(out, Site{File: file, Line: line})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // findingConfidence derives a [0,1] confidence score from the evidence quality
@@ -220,12 +280,12 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				  (id, fingerprint, title, description, reasoning, verdict_detail, severity, tier,
 				   status, lens, file, line, commit_sha, file_hash, repro_path,
 				   fix_patch, needs_human,
-				   corroborating_lenses, confidence, created_at, updated_at)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				   corroborating_lenses, sites, confidence, created_at, updated_at)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
 				f.Tier, string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA,
 				f.FileHash, nullStr(f.ReproPath), f.FixPatch, boolInt(f.NeedsHuman),
-				encodeLenses(f.CorroboratingLenses), f.Confidence,
+				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
 				f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout),
 			); err != nil {
 				return annotateErr(s.path, "upsert_finding", err)
@@ -298,7 +358,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				  repro_path = CASE WHEN ? IS NULL THEN repro_path ELSE ? END,
 				  fix_patch=?,
 				  needs_human = CASE WHEN needs_human = 1 THEN 1 ELSE ? END,
-				  corroborating_lenses=?, confidence=?, updated_at=?
+				  corroborating_lenses=?, sites=?, confidence=?, updated_at=?
 				WHERE id=?`,
 				f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
 				f.Tier, f.Tier,
@@ -307,7 +367,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				nullStr(f.ReproPath), nullStr(f.ReproPath),
 				f.FixPatch,
 				boolInt(f.NeedsHuman),
-				encodeLenses(f.CorroboratingLenses), f.Confidence,
+				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
 				f.UpdatedAt.Format(timeLayout), f.ID,
 			); err != nil {
 				return annotateErr(s.path, "upsert_finding", err)
@@ -491,11 +551,67 @@ func (s *Store) UpdateFindingSeverity(ctx context.Context, id string, sev domain
 	})
 }
 
+// AppendFindingSites appends sites to the sites column of the finding identified
+// by fingerprint, deduplicating entries with the same (file,line). Used by the
+// streaming triage consumer when a root-cause-merged member's primary has already
+// been persisted before the member arrived. Returns ErrNotFound when no finding
+// with that fingerprint exists; callers treat this as a no-op (primary killed).
+// No-op when sites is empty.
+func (s *Store) AppendFindingSites(ctx context.Context, fingerprint string, sites []Site) error {
+	if len(sites) == 0 {
+		return nil
+	}
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		var sitesStr string
+		err := tx.QueryRowContext(ctx,
+			`SELECT sites FROM findings WHERE fingerprint = ?`, fingerprint,
+		).Scan(&sitesStr)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return annotateErr(s.path, "append_finding_sites", err)
+		}
+
+		existing := decodeSites(sitesStr)
+		// Deduplicate by (file,line).
+		type key struct {
+			f string
+			l int
+		}
+		seen := make(map[key]bool, len(existing)+len(sites))
+		merged := make([]Site, 0, len(existing)+len(sites))
+		for _, s := range existing {
+			k := key{s.File, s.Line}
+			if !seen[k] {
+				seen[k] = true
+				merged = append(merged, s)
+			}
+		}
+		for _, s := range sites {
+			k := key{s.File, s.Line}
+			if !seen[k] {
+				seen[k] = true
+				merged = append(merged, s)
+			}
+		}
+
+		now := nowUTC()
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE findings SET sites = ?, updated_at = ? WHERE fingerprint = ?`,
+			encodeSites(merged), now.Format(timeLayout), fingerprint,
+		); err != nil {
+			return annotateErr(s.path, "append_finding_sites", err)
+		}
+		return nil
+	})
+}
+
 // findingColumns is the SELECT column list shared by single- and multi-row reads.
 const findingColumns = `SELECT id, fingerprint, title, description, reasoning, verdict_detail,
 	severity, tier, status, lens, file, line, commit_sha, file_hash, repro_path,
 	fix_patch, needs_human,
-	corroborating_lenses, confidence, created_at, updated_at`
+	corroborating_lenses, sites, confidence, created_at, updated_at`
 
 func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (Finding, error) {
 	row := s.db.QueryRowContext(ctx, findingColumns+" FROM findings "+whereClause, args...)
@@ -521,12 +637,13 @@ func scanFinding(sc rowScanner) (Finding, error) {
 		repro                sql.NullString
 		needsHuman           int
 		corrob               string
+		sitesStr             string
 		createdAt, updatedAt string
 	)
 	if err := sc.Scan(
 		&f.ID, &f.Fingerprint, &f.Title, &f.Description, &f.Reasoning, &f.VerdictDetail,
 		&f.Severity, &f.Tier, &status, &f.Lens, &f.File, &f.Line, &f.CommitSHA,
-		&f.FileHash, &repro, &f.FixPatch, &needsHuman, &corrob, &f.Confidence, &createdAt, &updatedAt,
+		&f.FileHash, &repro, &f.FixPatch, &needsHuman, &corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt,
 	); err != nil {
 		return Finding{}, err
 	}
@@ -534,6 +651,7 @@ func scanFinding(sc rowScanner) (Finding, error) {
 	f.ReproPath = repro.String
 	f.NeedsHuman = needsHuman != 0
 	f.CorroboratingLenses = decodeLenses(corrob)
+	f.Sites = decodeSites(sitesStr)
 	var err error
 	if f.CreatedAt, err = parseTime(createdAt); err != nil {
 		return Finding{}, err

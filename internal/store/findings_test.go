@@ -744,6 +744,7 @@ func TestFindingConfidence_RoundTrip(t *testing.T) {
 		t.Errorf("ListFindings confidence = %v, want %v", list[0].Confidence, stored.Confidence)
 	}
 }
+
 // TestUpdateFindingSeverity verifies that UpdateFindingSeverity persists
 // severity + verdict_detail, recomputes Confidence, and round-trips through
 // GetFinding. It also verifies ErrNotFound for an unknown id.
@@ -790,5 +791,134 @@ func TestUpdateFindingSeverity(t *testing.T) {
 	err = st.UpdateFindingSeverity(ctx, "nonexistent-id", domain.SeverityHigh, "irrelevant")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound for unknown id, got %v", err)
+	}
+}
+
+// TestFindingSites_EncodeDecode verifies the encode/decode round-trip for the
+// Sites column, including paths with pipes and the empty case.
+func TestFindingSites_EncodeDecode(t *testing.T) {
+	cases := []struct {
+		name  string
+		sites []Site
+	}{
+		{"nil", nil},
+		{"empty", []Site{}},
+		{"single", []Site{{File: "internal/cli/publish.go", Line: 45}}},
+		{"multi", []Site{
+			{File: "internal/cli/publish.go", Line: 45},
+			{File: "internal/cli/publish.go", Line: 78},
+			{File: "internal/cli/publish.go", Line: 112},
+		}},
+		{"with pipe in path", []Site{
+			{File: "src/foo|bar.go", Line: 1},
+			{File: "src/baz.go", Line: 2},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			enc := encodeSites(tc.sites)
+			got := decodeSites(enc)
+			// Normalize: nil and empty both decode as nil.
+			if len(tc.sites) == 0 {
+				if got != nil {
+					t.Errorf("want nil, got %+v", got)
+				}
+				return
+			}
+			if len(got) != len(tc.sites) {
+				t.Fatalf("len = %d, want %d; encoded=%q decoded=%+v", len(got), len(tc.sites), enc, got)
+			}
+			for i, want := range tc.sites {
+				if got[i] != want {
+					t.Errorf("[%d] got %+v, want %+v", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
+// TestUpsertFinding_SitesRoundTrip verifies Sites persist through
+// UpsertFinding and are recovered by GetFinding.
+func TestUpsertFinding_SitesRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	sites := []Site{
+		{File: "internal/cli/publish.go", Line: 45},
+		{File: "internal/cli/publish.go", Line: 78},
+		{File: "internal/cli/publish.go", Line: 112},
+	}
+
+	f := sampleFinding()
+	f.Sites = sites
+	stored, err := st.UpsertFinding(ctx, f)
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	if len(stored.Sites) != len(sites) {
+		t.Fatalf("stored Sites len = %d, want %d", len(stored.Sites), len(sites))
+	}
+	for i, want := range sites {
+		if stored.Sites[i] != want {
+			t.Errorf("stored.Sites[%d] = %+v, want %+v", i, stored.Sites[i], want)
+		}
+	}
+
+	// Recover via GetFinding.
+	got, err := st.GetFinding(ctx, stored.ID)
+	if err != nil {
+		t.Fatalf("GetFinding: %v", err)
+	}
+	if len(got.Sites) != len(sites) {
+		t.Fatalf("retrieved Sites len = %d, want %d", len(got.Sites), len(sites))
+	}
+	for i, want := range sites {
+		if got.Sites[i] != want {
+			t.Errorf("retrieved Sites[%d] = %+v, want %+v", i, got.Sites[i], want)
+		}
+	}
+}
+
+// TestMigration013_SitesColumn verifies that the 013 migration adds the sites
+// column and that a finding inserted after migration round-trips Sites.
+func TestMigration013_SitesColumn(t *testing.T) {
+	ctx := context.Background()
+	// openTemp applies all migrations including 013.
+	st := openTemp(t)
+
+	sites := []Site{
+		{File: "src/RenderSystem.cpp", Line: 42},
+		{File: "src/RenderSystem.hpp", Line: 15},
+	}
+	f := Finding{
+		Fingerprint: Fingerprint("boundary-conditions", "src/RenderSystem.cpp", 42, "buffer overflow"),
+		Title:       "buffer overflow",
+		Description: "write past array end",
+		Severity:    domain.SeverityHigh,
+		Tier:        domain.TierVerified,
+		Status:      StatusOpen,
+		Lens:        "boundary-conditions",
+		File:        "src/RenderSystem.cpp",
+		Line:        42,
+		CommitSHA:   "cafebabe",
+		FileHash:    "h1",
+		Sites:       sites,
+	}
+	stored, err := st.UpsertFinding(ctx, f)
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	got, err := st.GetFinding(ctx, stored.ID)
+	if err != nil {
+		t.Fatalf("GetFinding: %v", err)
+	}
+	if len(got.Sites) != 2 {
+		t.Fatalf("Sites len = %d, want 2: %+v", len(got.Sites), got.Sites)
+	}
+	if got.Sites[0].File != "src/RenderSystem.cpp" || got.Sites[0].Line != 42 {
+		t.Errorf("Sites[0] = %+v", got.Sites[0])
+	}
+	if got.Sites[1].File != "src/RenderSystem.hpp" || got.Sites[1].Line != 15 {
+		t.Errorf("Sites[1] = %+v", got.Sites[1])
 	}
 }

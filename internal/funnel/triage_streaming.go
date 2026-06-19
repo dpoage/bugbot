@@ -35,6 +35,16 @@ type registryEntry struct {
 	// folds these into the IN-MEMORY finding after all consumers drain, so
 	// Result.Findings matches the store regardless of arrival timing.
 	attachedLate []string
+	// stagedSites are extra code locations staged by root-cause-merged members
+	// that arrive in triage BEFORE the primary's verify goroutine persists the
+	// finding. Exactly mirrors the stagedLenses mechanism: DrainStagedSites is
+	// called in runVerifyAndPersist before UpsertFinding; the TOCTOU window is
+	// closed by SignalPersisted's late-site return.
+	stagedSites []store.Site
+	// lateSites are sites appended AFTER the finding persisted. The store row
+	// is updated via AppendFindingSites; run() folds these into the in-memory
+	// finding after all consumers drain.
+	lateSites []store.Site
 	// persisted is true once the verify goroutine calls SignalPersisted.
 	// Subsequent triage corroborating members use AddCorroboratingLenses instead
 	// of staging.
@@ -115,11 +125,18 @@ func (r *clusterRegistry) SignalPersisted(fingerprint string, persisted bool) []
 	if !persisted {
 		e.killed = true
 		e.stagedLenses = nil
+		e.stagedSites = nil
 		return nil
 	}
 	e.persisted = true
 	late := e.stagedLenses
 	e.stagedLenses = nil
+	// Move any sites staged in the TOCTOU window into lateSites so
+	// DrainLateSites can retrieve them after SignalPersisted returns.
+	if len(e.stagedSites) > 0 {
+		e.lateSites = append(e.lateSites, e.stagedSites...)
+		e.stagedSites = nil
+	}
 	if len(late) == 0 {
 		return nil
 	}
@@ -127,6 +144,61 @@ func (r *clusterRegistry) SignalPersisted(fingerprint string, persisted bool) []
 	// finding by run() at drain time.
 	e.attachedLate = append(e.attachedLate, late...)
 	return dedupLenses(late)
+}
+
+// AddStagedSite records a merged-member site from triage arriving BEFORE the
+// primary's verification completed. Symmetric to AddStagedLens.
+// Returns staged=true if queued for DrainStagedSites; killed=true if the
+// primary is dead (site can be discarded); false,false if already persisted
+// (caller must call AppendFindingSites on the store directly).
+func (r *clusterRegistry) AddStagedSite(fingerprint string, s store.Site) (staged bool, killed bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[fingerprint]
+	if !ok {
+		return false, false
+	}
+	if e.killed {
+		return false, true
+	}
+	if e.persisted {
+		// Post-persist arrival: caller updates the store; record here for
+		// run()-side in-memory reconciliation.
+		e.lateSites = append(e.lateSites, s)
+		return false, false
+	}
+	e.stagedSites = append(e.stagedSites, s)
+	return true, false
+}
+
+// DrainStagedSites retrieves and clears the staged sites for a primary.
+// Called from the verify goroutine just before UpsertFinding, alongside
+// DrainStagedLenses. Returns nil when no sites were staged.
+func (r *clusterRegistry) DrainStagedSites(fingerprint string) []store.Site {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[fingerprint]
+	if !ok || len(e.stagedSites) == 0 {
+		return nil
+	}
+	sites := e.stagedSites
+	e.stagedSites = nil
+	return sites
+}
+
+// DrainLateSites returns sites that were added after the primary persisted
+// (both the TOCTOU window and genuine post-persist arrivals). Called by run()
+// after all consumers have drained, so no further additions can race the read.
+func (r *clusterRegistry) DrainLateSites(fingerprint string) []store.Site {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[fingerprint]
+	if !ok || len(e.lateSites) == 0 {
+		return nil
+	}
+	sites := e.lateSites
+	e.lateSites = nil
+	return sites
 }
 
 // AttachedLenses returns the lenses attached to a primary's finding after it
@@ -176,6 +248,10 @@ type triageState struct {
 	// primaries — reproduced by the recorded eval corpus.
 	clusters map[string][]*internalCluster
 
+	// fileClusters maps normPath(file) → clusters in that file, used by
+	// same-root-cause broad-window (same-file) and cross-file decl/def merges.
+	fileClusters map[string][]*internalCluster
+
 	// registry is shared with verify goroutines for staged-lens coordination.
 	registry *clusterRegistry
 
@@ -204,10 +280,11 @@ func newTriageState(snap *ingest.Snapshot) (*triageState, *clusterRegistry) {
 	}
 	reg := newClusterRegistry()
 	return &triageState{
-		inScope:  inScope,
-		seen:     make(map[string]bool),
-		clusters: make(map[string][]*internalCluster),
-		registry: reg,
+		inScope:      inScope,
+		seen:         make(map[string]bool),
+		clusters:     make(map[string][]*internalCluster),
+		fileClusters: make(map[string][]*internalCluster),
+		registry:     reg,
 	}, reg
 }
 
@@ -276,9 +353,42 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 				// the member list so later chain links can bridge through this
 				// member, and alias this member's bucket to the cluster so the
 				// chain stays discoverable as it spans buckets.
-				ts.handleMember(ctx, st, cluster, c, stats)
+				ts.handleMember(ctx, st, cluster, c, stats, false)
 				cluster.members = append(cluster.members, ic)
 				ts.addClusterToBucket(canonicalClusterKey(c), cluster)
+				return nil
+			}
+		}
+	}
+
+	// Step 5b: same-root-cause merge — same file, beyond DefaultMergeWindow.
+	// Checks clusters that share the same normalized file path.
+	normFile := normPath(c.File)
+	for _, cluster := range ts.fileClusters[normFile] {
+		if seenClusters[cluster] {
+			continue // already handled in the window-based pass above
+		}
+		seenClusters[cluster] = true
+		if sameFileSameRootCause(cluster.members, ic) {
+			ts.handleMember(ctx, st, cluster, c, stats, true)
+			cluster.members = append(cluster.members, ic)
+			return nil
+		}
+	}
+
+	// Step 5c: cross-file decl/def same-root-cause merge (e.g. Foo.cpp + Foo.hpp).
+	for _, candFile := range ts.crossFilePeerKeys(c.File) {
+		for _, cluster := range ts.fileClusters[candFile] {
+			if seenClusters[cluster] {
+				continue
+			}
+			seenClusters[cluster] = true
+			if crossFileDeclDefSameRootCause(cluster.members, ic) {
+				ts.handleMember(ctx, st, cluster, c, stats, true)
+				cluster.members = append(cluster.members, ic)
+				// Also index this cross-file member under its own file key so
+				// further members in the same file can bridge through it.
+				ts.addToFileClusters(normFile, cluster)
 				return nil
 			}
 		}
@@ -291,7 +401,10 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 	// have produced one cluster only if the bridge arrived before forwarding).
 	nc := &internalCluster{members: []indexedCand{ic}, fingerprint: fp}
 	ts.addClusterToBucket(canonicalClusterKey(c), nc)
+	ts.addToFileClusters(normFile, nc)
 	ts.registry.Register(fp)
+	// Initialize Sites with the primary's own location.
+	c.Sites = []Site{{File: c.File, Line: c.Line}}
 	ts.ready = append(ts.ready, c)
 	ts.survivorCount++
 	return nil
@@ -310,13 +423,44 @@ func (ts *triageState) addClusterToBucket(key string, cluster *internalCluster) 
 }
 
 // handleMember handles a corroborating member of an existing cluster.
-func (ts *triageState) handleMember(ctx context.Context, st *store.Store, cluster *internalCluster, c Candidate, stats *Stats) {
+// rootCause is true when this is a same-root-cause merge (broad-window same-file
+// or cross-file decl/def); false for the ordinary window-based cross-lens merge.
+func (ts *triageState) handleMember(ctx context.Context, st *store.Store, cluster *internalCluster, c Candidate, stats *Stats, rootCause bool) {
 	// This member is merged into an existing cluster (its lens may be recorded as
 	// corroboration, but its own claim does not proceed to verify): a triage
 	// terminal fate. Drop its write-ahead-log row, best-effort. The cluster
 	// primary carries the cluster forward and deletes its own row at its verify
 	// terminal fate.
 	_ = st.DeletePendingCandidate(ctx, c.PendingID)
+
+	// Stage this member's site so it reaches the persisted Finding. Because the
+	// primary may already be forwarded to verify (ts.ready drained), we mirror
+	// the corroborating-lens mechanism: stage in the registry for
+	// DrainStagedSites to pick up at persist time, or update the store directly
+	// when the primary is already persisted.
+	site := store.Site{File: c.File, Line: c.Line}
+	siteStaged, siteKilled := ts.registry.AddStagedSite(cluster.fingerprint, site)
+	if !siteStaged && !siteKilled {
+		// Primary already persisted; update the store row directly. Best-effort.
+		_ = st.AppendFindingSites(ctx, cluster.fingerprint, []store.Site{site})
+	}
+
+	if rootCause {
+		stats.MergedRootCause++
+		// For root-cause merges that are also same-lens, no new corroborating lens.
+		if strings.EqualFold(c.Lens, cluster.members[0].c.Lens) {
+			return
+		}
+		// Cross-lens root-cause: also record corroboration so the lens is visible.
+		lens := c.Lens
+		staged2, killed2 := ts.registry.AddStagedLens(cluster.fingerprint, lens)
+		if staged2 || killed2 {
+			return
+		}
+		_ = st.AddCorroboratingLenses(ctx, cluster.fingerprint, []string{lens})
+		return
+	}
+
 	if strings.EqualFold(c.Lens, cluster.members[0].c.Lens) {
 		// Same-lens merge: within-lens, no new corroborating lens.
 		stats.MergedWithinLens++
@@ -328,16 +472,56 @@ func (ts *triageState) handleMember(ctx context.Context, st *store.Store, cluste
 
 	// Try to stage the lens in the registry. If the primary was already
 	// persisted, use AddCorroboratingLenses directly. If killed, discard.
-	staged, killed := ts.registry.AddStagedLens(cluster.fingerprint, lens)
-	if staged {
+	staged3, killed3 := ts.registry.AddStagedLens(cluster.fingerprint, lens)
+	if staged3 {
 		return // Staged for attach at persist time.
 	}
-	if killed {
+	if killed3 {
 		return // Primary was killed; corroboration is moot.
 	}
 	// Primary was persisted before this member arrived: update the store directly.
 	// Best-effort: a failure here loses this corroboration but doesn't abort the run.
 	_ = st.AddCorroboratingLenses(ctx, cluster.fingerprint, []string{lens})
+}
+
+// addToFileClusters registers cluster under the file key unless already present.
+func (ts *triageState) addToFileClusters(normFile string, cluster *internalCluster) {
+	for _, existing := range ts.fileClusters[normFile] {
+		if existing == cluster {
+			return
+		}
+	}
+	ts.fileClusters[normFile] = append(ts.fileClusters[normFile], cluster)
+}
+
+// crossFilePeerKeys returns the normalized file paths of potential source/header
+// mates for file. Used in step 5c to look up clusters from paired files.
+// Only same-directory same-stem paired-extension keys are returned, matching
+// the isSrcHdrPair requirement (prevents cross-directory same-stem matches).
+func (ts *triageState) crossFilePeerKeys(file string) []string {
+	norm := normPath(file)
+	ext := fileExt(file)
+	mates, ok := sourceExtensions[ext]
+	if !ok {
+		return nil
+	}
+	stem := fileStem(file)
+	dir := fileDir(file)
+	// Collect all file-cluster keys that share same dir + stem + a mating extension.
+	var keys []string
+	seen := make(map[string]bool)
+	for _, mateExt := range mates {
+		for k := range ts.fileClusters {
+			if seen[k] || k == norm {
+				continue
+			}
+			if fileDir(k) == dir && fileStem(k) == stem && fileExt(k) == mateExt {
+				keys = append(keys, k)
+				seen[k] = true
+			}
+		}
+	}
+	return keys
 }
 
 // flush is a no-op in the streaming model: all primaries are forwarded

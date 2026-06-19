@@ -427,8 +427,8 @@ func writeStatsFooter(b *strings.Builder, s funnel.Stats) {
 		s.Hypothesized, s.Triaged, s.Verified, s.Killed)
 	fmt.Fprintf(b, "- Agents: finders=%d/%d failed, verifiers=%d/%d failed\n",
 		s.FinderFailures, s.FinderRuns, s.VerifierFailures, s.VerifierRuns)
-	if s.MergedWithinLens > 0 || s.MergedCrossLens > 0 {
-		fmt.Fprintf(b, "- Location merges: within_lens=%d cross_lens=%d\n", s.MergedWithinLens, s.MergedCrossLens)
+	if s.MergedWithinLens > 0 || s.MergedCrossLens > 0 || s.MergedRootCause > 0 {
+		fmt.Fprintf(b, "- Location merges: within_lens=%d cross_lens=%d root_cause=%d\n", s.MergedWithinLens, s.MergedCrossLens, s.MergedRootCause)
 	}
 	fmt.Fprintf(b, "- Tokens: input=%d output=%d total=%d\n", s.InputTokens, s.OutputTokens, s.InputTokens+s.OutputTokens)
 	if s.CacheReadTokens > 0 || s.CacheCreationTokens > 0 {

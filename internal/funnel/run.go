@@ -790,6 +790,38 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		findings[i].Reasoning = appendCorroboration(findings[i].Reasoning, added)
 	}
 
+	// Fold late sites into the IN-MEMORY findings and the store row. A site
+	// staged by a root-cause-merged member that arrived after its primary's
+	// verify goroutine completed DrainStagedSites ends up in the registry's
+	// lateSites (via SignalPersisted's TOCTOU move or AddStagedSite's
+	// post-persist path). All triage processing has finished by now
+	// (triageWg.Wait above), so the registry is stable and this read cannot race.
+	for i := range findings {
+		late := clusterReg.DrainLateSites(findings[i].Fingerprint)
+		if len(late) == 0 {
+			continue
+		}
+		if err := f.store.AppendFindingSites(ctx, findings[i].Fingerprint, late); err != nil {
+			// Best-effort: a failure here loses these extra sites but doesn't
+			// abort the run. The primary finding still stands.
+			continue
+		}
+		// Merge into the in-memory finding, deduplicating by (file,line).
+		type siteKey struct {
+			f string
+			l int
+		}
+		have := make(map[siteKey]bool, len(findings[i].Sites))
+		for _, s := range findings[i].Sites {
+			have[siteKey{s.File, s.Line}] = true
+		}
+		for _, s := range late {
+			if !have[siteKey{s.File, s.Line}] {
+				findings[i].Sites = append(findings[i].Sites, s)
+			}
+		}
+	}
+
 	// ---- Stage F: Impact sweep ----
 	// Re-rank each surviving finding's severity by reachability/impact and
 	// persist the rationale. Best-effort: a sweep failure never aborts the run.

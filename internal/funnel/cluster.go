@@ -122,3 +122,131 @@ func abs(n int) int {
 	}
 	return n
 }
+
+// sameRootCauseThreshold is the minimum Jaccard overlap for the broad same-file
+// and cross-file decl/def root-cause merge. Higher than mergeSimilarityThreshold
+// (0.18) to guard the wider merge window.
+const sameRootCauseThreshold = 0.35
+
+// sameRootCauseMinSharedTokens is the minimum number of description tokens that
+// must appear in BOTH candidates for a same-root-cause merge. This prevents
+// short descriptions whose Jaccard ratio is high due to small vocabulary from
+// binding across genuinely distinct defect patterns (e.g. "index buffer length
+// overflow" vs "index buffer length underflow" at lines 40/900 score jaccard
+// 0.6 on 3 shared tokens, but the distinct overflow/underflow words are exactly
+// the signal). Together with the Jaccard threshold, both conditions must hold.
+const sameRootCauseMinSharedTokens = 5
+
+// sharedTokenCount returns the number of tokens common to both sets.
+func sharedTokenCount(a, b map[string]bool) int {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	n := 0
+	for w := range a {
+		if b[w] {
+			n++
+		}
+	}
+	return n
+}
+
+// sameFileSameRootCause reports whether it should merge into the same-file
+// cluster cl due to matching defect pattern, ignoring line distance. Both
+// candidates must be in the same file; the caller enforces that precondition.
+//
+// Both conditions must hold for ANY cluster member:
+//  1. Jaccard >= sameRootCauseThreshold (strong overlap ratio)
+//  2. At least sameRootCauseMinSharedTokens tokens in common (prevents
+//     high-ratio-but-tiny-vocabulary false positives)
+func sameFileSameRootCause(cl []indexedCand, it indexedCand) bool {
+	for _, m := range cl {
+		if jaccard(m.tok, it.tok) >= sameRootCauseThreshold &&
+			sharedTokenCount(m.tok, it.tok) >= sameRootCauseMinSharedTokens {
+			return true
+		}
+	}
+	return false
+}
+
+// sourceExtensions maps source file extensions to their header/declaration
+// counterparts. The mapping is symmetric: each extension listed as a key can
+// be matched against the extensions in its value, and vice versa.
+var sourceExtensions = map[string][]string{
+	".cpp": {".hpp", ".h"},
+	".cc":  {".hpp", ".h", ".hh"},
+	".cxx": {".hpp", ".h", ".hh"},
+	".c":   {".h"},
+	".hpp": {".cpp", ".cc", ".cxx"},
+	".hh":  {".cc", ".cxx"},
+	".h":   {".cpp", ".cc", ".cxx", ".c"},
+}
+
+// fileStem returns the base filename without extension, lowercased.
+func fileStem(file string) string {
+	base := path.Base(normPath(file))
+	ext := path.Ext(base)
+	if ext == "" {
+		return base
+	}
+	return base[:len(base)-len(ext)]
+}
+
+// fileExt returns the lowercased extension including the leading dot.
+func fileExt(file string) string {
+	return path.Ext(normPath(file))
+}
+
+// fileDir returns the lowercased directory component of a path.
+func fileDir(file string) string {
+	return path.Dir(normPath(file))
+}
+
+// isSrcHdrPair reports whether files a and b form a source/header declaration-
+// definition pair. Both the DIRECTORY, the stem, and the extension pairing must
+// match. The directory guard prevents render/utils.cpp from pairing with
+// audio/utils.hpp — a ubiquitous false-positive shape in C++ projects.
+func isSrcHdrPair(a, b string) bool {
+	if fileDir(a) != fileDir(b) {
+		return false // different directories: cannot be the same translation unit
+	}
+	if fileStem(a) != fileStem(b) {
+		return false
+	}
+	extA := fileExt(a)
+	extB := fileExt(b)
+	if extA == extB {
+		return false // same extension, not a pair
+	}
+	for _, mate := range sourceExtensions[extA] {
+		if mate == extB {
+			return true
+		}
+	}
+	return false
+}
+
+// crossFileDeclDefSameRootCause reports whether it (from a different file than
+// the cluster primary) is the same root cause via decl/def pairing. Conditions:
+//  1. Same directory + same stem + complementary extension (isSrcHdrPair).
+//  2. Strongly description-similar (Jaccard >= sameRootCauseThreshold AND at
+//     least sameRootCauseMinSharedTokens tokens in common).
+//
+// Both conditions are required; either failing means no merge.
+func crossFileDeclDefSameRootCause(cl []indexedCand, it indexedCand) bool {
+	if len(cl) == 0 {
+		return false
+	}
+	primary := cl[0]
+	if !isSrcHdrPair(primary.c.File, it.c.File) {
+		return false
+	}
+	// Check description similarity against any member.
+	for _, m := range cl {
+		if jaccard(m.tok, it.tok) >= sameRootCauseThreshold &&
+			sharedTokenCount(m.tok, it.tok) >= sameRootCauseMinSharedTokens {
+			return true
+		}
+	}
+	return false
+}

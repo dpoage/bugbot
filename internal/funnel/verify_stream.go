@@ -290,6 +290,11 @@ func (f *Funnel) runVerifyAndPersist(
 	}
 
 	reasoning := buildReasoning(verdicts, seatNames, arbiterReasoning, arbiterRan) + quorumNote
+	// Drain sites staged by root-cause-merged members that arrived in triage
+	// before this verify goroutine reached this point.
+	stagedSites := reg.DrainStagedSites(c.Fingerprint)
+	allSites := candidateSitesToStore(c.Sites)
+	allSites = append(allSites, stagedSites...)
 	v := verified{cand: c, reasoning: reasoning}
 
 	// nn3: fold mechanism corrections into the persisted description.
@@ -324,6 +329,7 @@ func (f *Funnel) runVerifyAndPersist(
 		FileHash:            fps[c.File],
 		CorroboratingLenses: c.CorroboratingLenses,
 		NeedsHuman:          needsHuman,
+		Sites:               allSites,
 	}
 	stored, err := f.store.UpsertFinding(ctx, finding)
 	if err != nil {
@@ -339,20 +345,37 @@ func (f *Funnel) runVerifyAndPersist(
 		reg.SignalPersisted(c.Fingerprint, false)
 		return
 	}
-	findingsMu.Lock()
-	*allFindings = append(*allFindings, stored)
-	findingsMu.Unlock()
 	// Survived and durably persisted as T2: drop the WAL row.
 	f.deletePending(ctx, c.PendingID, result)
-	// Atomically mark persisted and collect any lenses staged since the drain
-	// above — the TOCTOU window where a triage member arrived after
-	// DrainStagedLenses but before this signal. Without this, such a lens is
-	// stranded: staged (so triage skipped the store path) but never attached.
+	// Atomically mark persisted and collect any lenses AND sites staged since
+	// the drain above — the TOCTOU window where a triage member arrived after
+	// DrainStagedLenses/DrainStagedSites but before this signal.
 	if late := reg.SignalPersisted(c.Fingerprint, true); len(late) > 0 {
 		if err := f.store.AddCorroboratingLenses(ctx, c.Fingerprint, late); err != nil {
 			f.note(result, fmt.Sprintf("corroboration: late attach to %q failed: %v", c.Title, err))
 		}
+		// Fold TOCTOU lenses into stored so allFindings reflects them in both
+		// CorroboratingLenses and Reasoning. The Reasoning fold must happen here
+		// (not deferred to run.go's AttachedLenses loop) because run.go computes
+		// `added = lenses not already in stored.CorroboratingLenses`; once we put
+		// `late` into stored.CorroboratingLenses below, run.go's `added` is []
+		// and it would never append the human-readable note.
+		stored.CorroboratingLenses = dedupLenses(append(stored.CorroboratingLenses, late...))
+		stored.Reasoning = appendCorroboration(stored.Reasoning, late)
 	}
+	// TOCTOU window for sites: any staged site that arrived between DrainStagedSites
+	// and SignalPersisted was moved to lateSites by SignalPersisted; retrieve,
+	// persist, and fold into the in-memory stored finding.
+	if lateSites := reg.DrainLateSites(c.Fingerprint); len(lateSites) > 0 {
+		if err := f.store.AppendFindingSites(ctx, c.Fingerprint, lateSites); err != nil {
+			f.note(result, fmt.Sprintf("sites: late attach to %q failed: %v", c.Title, err))
+		} else {
+			stored.Sites = append(stored.Sites, lateSites...)
+		}
+	}
+	findingsMu.Lock()
+	*allFindings = append(*allFindings, stored)
+	findingsMu.Unlock()
 
 	// Enqueue for in-run reproduction. Never blocks (see reproQueue); only
 	// Tier-2 (survived, not orphaned/suspected) findings are enqueued.
@@ -379,6 +402,7 @@ func persistOrphan(ctx context.Context, f *Funnel, c Candidate, commit string, f
 		CommitSHA:           commit,
 		FileHash:            fps[c.File],
 		CorroboratingLenses: c.CorroboratingLenses,
+		Sites:               candidateSitesToStore(c.Sites),
 	}
 	stored, err := f.store.UpsertFinding(ctx, finding)
 	if err != nil {
@@ -391,4 +415,16 @@ func persistOrphan(ctx context.Context, f *Funnel, c Candidate, commit string, f
 	msg := fmt.Sprintf("budget stop: %q (%s:%d) kept as T3 suspected", c.Title, c.File, c.Line)
 	f.note(result, msg)
 	return &stored
+}
+
+// candidateSitesToStore converts funnel.Site to store.Site.
+func candidateSitesToStore(sites []Site) []store.Site {
+	if len(sites) == 0 {
+		return nil
+	}
+	out := make([]store.Site, len(sites))
+	for i, s := range sites {
+		out[i] = store.Site{File: s.File, Line: s.Line}
+	}
+	return out
 }
