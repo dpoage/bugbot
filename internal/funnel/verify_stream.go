@@ -115,6 +115,9 @@ func (f *Funnel) runVerifyAndPersist(
 	} else if sbTool := f.buildSandboxTool(c, sbExecs, sbMillis); sbTool != nil {
 		candTools = append(candTools, sbTool)
 	}
+	if t := f.maybeStatusNoteTool(progress.RoleVerifier, c.Title); t != nil {
+		candTools = append(candTools, t)
+	}
 
 	sink := f.opts.Progress
 	startedAt := time.Now()

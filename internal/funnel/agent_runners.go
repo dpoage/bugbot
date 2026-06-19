@@ -3,6 +3,7 @@ package funnel
 import (
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 )
 
 // budgetStopped reports whether outcome was truncated by a budget limit (the
@@ -55,10 +56,48 @@ func hasSandboxExec(tools []agent.Tool) bool {
 // agent.NewRunner(...) call sites (hypothesize.go:793, verify.go:68, verify.go:116)
 // so a future tweak — say a new per-stage hook, or a per-stage option split
 // for finding vs verifying — happens in one place.
-func (f *Funnel) newAgentRunner(client llm.Client, tools []agent.Tool, systemPrompt string, limits agent.Limits) *agent.Runner {
-	return agent.NewRunner(client, tools, systemPrompt,
+func (f *Funnel) newAgentRunner(client llm.Client, tools []agent.Tool, systemPrompt string, limits agent.Limits, extra ...agent.Option) *agent.Runner {
+	opts := []agent.Option{
 		agent.WithLimits(limits),
 		agent.WithMaxTokens(DefaultMaxOutputTokens),
 		f.transcriptOption(),
-	)
+	}
+	opts = append(opts, extra...)
+	return agent.NewRunner(client, tools, systemPrompt, opts...)
+}
+
+// activitySinkFor returns a WithActivitySink option that emits a
+// KindAgentActivity event on the funnel's progress sink for the given role and
+// label. When the funnel's progress sink is nil the option is still valid but
+// emitting is a no-op (progress.Emit handles nil sinks).
+func (f *Funnel) activitySinkFor(role, label string) agent.Option {
+	sink := f.opts.Progress
+	return agent.WithActivitySink(func(activity string) {
+		progress.Emit(sink, progress.Event{
+			Kind:     progress.KindAgentActivity,
+			Role:     role,
+			Label:    label,
+			Activity: activity,
+		})
+	})
+}
+
+// maybeStatusNoteTool returns a status_note Tool when f.opts.StatusNotes is
+// true, or nil when the flag is off. Callers append the non-nil result to
+// their tool slice before building the runner; when nil, the tool is absent
+// and the tool set is byte-identical to the pre-feature state.
+func (f *Funnel) maybeStatusNoteTool(role, label string) agent.Tool {
+	if !f.opts.StatusNotes {
+		return nil
+	}
+	sink := f.opts.Progress
+	activityFn := func(activity string) {
+		progress.Emit(sink, progress.Event{
+			Kind:     progress.KindAgentActivity,
+			Role:     role,
+			Label:    label,
+			Activity: activity,
+		})
+	}
+	return agent.NewStatusNoteTool(activityFn)
 }

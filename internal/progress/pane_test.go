@@ -127,3 +127,41 @@ func TestPane_RepaintRedrawsInPlace(t *testing.T) {
 		t.Fatal("first paint wrote nothing")
 	}
 }
+
+// TestPane_AgentActivityRendered verifies that a KindAgentActivity event
+// updates the pane's agent line so the activity note appears in the frame.
+func TestPane_AgentActivityRendered(t *testing.T) {
+	var buf bytes.Buffer
+	start := time.Unix(1_000_000, 0)
+	p := newTestPane(&buf, 200, fixedClock(start))
+
+	p.Handle(Event{Kind: KindAgentStarted, Role: RoleFinder, Label: "nil-safety"})
+	p.Handle(Event{Kind: KindAgentActivity, Role: RoleFinder, Label: "nil-safety", Activity: "reading main.go"})
+	buf.Reset()
+	p.paintNow()
+
+	got := StripANSI(buf.String())
+	if !strings.Contains(got, "reading main.go") {
+		t.Errorf("expected activity note in pane frame, got:\n%s", got)
+	}
+}
+
+// TestPane_AgentActivityIgnoresUnknown verifies that a KindAgentActivity event
+// for an agent that isn't tracked does NOT add a line or panic.
+func TestPane_AgentActivityIgnoresUnknown(t *testing.T) {
+	var buf bytes.Buffer
+	p := newTestPane(&buf, 200, fixedClock(time.Unix(1, 0)))
+
+	// Activity for an agent that was never started.
+	p.Handle(Event{Kind: KindAgentActivity, Role: RoleFinder, Label: "ghost", Activity: "never tracked"})
+	buf.Reset()
+	p.paintNow()
+
+	got := StripANSI(buf.String())
+	if strings.Contains(got, "never tracked") {
+		t.Errorf("untracked agent activity must not appear in pane:\n%s", got)
+	}
+	if !strings.Contains(got, "(no active agents)") {
+		t.Errorf("expected no-active-agents placeholder:\n%s", got)
+	}
+}

@@ -399,6 +399,12 @@ type Options struct {
 	// summaries it has (possibly none), and finder tasks receive no
 	// injection when nothing is available.
 	Cartographer bool
+	// StatusNotes enables the status_note tool for finder and verifier agents.
+	// When true, a status_note tool is added to each agent's tool set,
+	// allowing agents to surface hypothesis notes as live activity updates
+	// (visible in the pane and `bugbot status`). Off by default: zero behavior
+	// change, zero LLM cost, byte-identical tool set when false.
+	StatusNotes bool
 }
 
 // resolve fills in defaults without mutating the caller's Options.

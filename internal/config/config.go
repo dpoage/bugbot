@@ -152,6 +152,12 @@ type Scan struct {
 	// default; the injection is append-only to the finder task and never
 	// mutates the cached system-prompt prefix.
 	Cartographer bool `yaml:"cartographer"`
+	// StatusNotes enables the status_note tool for finder and verifier agents.
+	// When on, agents can call status_note(note) to surface their current
+	// working hypothesis as a live activity update visible in the pane and
+	// `bugbot status`. This is a Tier-2 feature gated here so it imposes zero
+	// LLM cost and zero behavior change when off (the default).
+	StatusNotes bool `yaml:"status_notes"`
 }
 
 // Sandbox configures the isolated execution environment used for verification
@@ -605,6 +611,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setBool("BUGBOT_PUBLISH_CLOSE_ON_FIXED", &cfg.Publish.CloseOnFixed),
 		setBool("BUGBOT_REPRO_PATCH_PROVER", &cfg.Repro.PatchProver),
 		setBool("BUGBOT_SCAN_CARTOGRAPHER", &cfg.Scan.Cartographer),
+		setBool("BUGBOT_SCAN_STATUS_NOTES", &cfg.Scan.StatusNotes),
 	} {
 		if err != nil {
 			return err

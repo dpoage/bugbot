@@ -93,7 +93,11 @@ func renderStatus(ctx context.Context, out io.Writer, cfg config.Config, st prog
 		_, _ = fmt.Fprintf(out, "  stage:        %s\n", st.Stage)
 	}
 	for _, a := range st.ActiveAgents {
-		_, _ = fmt.Fprintf(out, "  agent:        %-8s %s\n", a.Role, a.Label)
+		line := fmt.Sprintf("  agent:        %-8s %s", a.Role, a.Label)
+		if a.Activity != "" {
+			line += "  [" + a.Activity + "]"
+		}
+		_, _ = fmt.Fprintln(out, line)
 	}
 	_, _ = fmt.Fprintln(out, "  stages:       "+fmtStageCounts(st))
 	_, _ = fmt.Fprintf(out, "  run spend:    in=%d out=%d total=%d tokens%s\n",

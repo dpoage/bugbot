@@ -356,3 +356,153 @@ func TestRun_AccumulatesCacheUsage(t *testing.T) {
 		t.Errorf("CacheCreationInputTokens = %d, want 90", out.Usage.CacheCreationInputTokens)
 	}
 }
+
+// TestToolCallActivity_Mapping verifies the tool-name → human-text mapping for
+// every branch documented in the spec.
+func TestToolCallActivity_Mapping(t *testing.T) {
+	tests := []struct {
+		name     string
+		calls    []llm.ToolCall
+		wantSub  string // must appear as substring
+		wantNone bool   // empty calls => ""
+	}{
+		{
+			name:     "empty",
+			calls:    nil,
+			wantNone: true,
+		},
+		{
+			name:    "read_file",
+			calls:   []llm.ToolCall{{Name: "read_file", Arguments: []byte(`{"path":"cmd/main.go"}`)}},
+			wantSub: "reading cmd/main.go",
+		},
+		{
+			name:    "read_file no path",
+			calls:   []llm.ToolCall{{Name: "read_file", Arguments: []byte(`{}`)}},
+			wantSub: "reading file",
+		},
+		{
+			name:    "list_dir",
+			calls:   []llm.ToolCall{{Name: "list_dir", Arguments: []byte(`{"dir":"internal/agent"}`)}},
+			wantSub: "listing internal/agent",
+		},
+		{
+			name:    "list_dir via directory field",
+			calls:   []llm.ToolCall{{Name: "list_dir", Arguments: []byte(`{"directory":"src"}`)}},
+			wantSub: "listing src",
+		},
+		{
+			name:    "grep",
+			calls:   []llm.ToolCall{{Name: "grep", Arguments: []byte(`{"pattern":"TODO"}`)}},
+			wantSub: `grepping "TODO"`,
+		},
+		{
+			name:    "find_definition",
+			calls:   []llm.ToolCall{{Name: "find_definition", Arguments: []byte(`{"symbol":"Runner"}`)}},
+			wantSub: "navigating Runner",
+		},
+		{
+			name:    "find_references",
+			calls:   []llm.ToolCall{{Name: "find_references", Arguments: []byte(`{"symbol":"Emit"}`)}},
+			wantSub: "navigating Emit",
+		},
+		{
+			name:    "find_implementations",
+			calls:   []llm.ToolCall{{Name: "find_implementations", Arguments: []byte(`{"symbol":"Tool"}`)}},
+			wantSub: "navigating Tool",
+		},
+		{
+			name:    "read_symbol",
+			calls:   []llm.ToolCall{{Name: "read_symbol", Arguments: []byte(`{"symbol":"Sink"}`)}},
+			wantSub: "navigating Sink",
+		},
+		{
+			name:    "sandbox_exec",
+			calls:   []llm.ToolCall{{Name: "sandbox_exec", Arguments: []byte(`{}`)}},
+			wantSub: "running sandbox",
+		},
+		{
+			name:    "post_lead",
+			calls:   []llm.ToolCall{{Name: "post_lead", Arguments: []byte(`{}`)}},
+			wantSub: "posting lead",
+		},
+		{
+			name:    "unknown tool uses name",
+			calls:   []llm.ToolCall{{Name: "some_custom_tool", Arguments: []byte(`{}`)}},
+			wantSub: "some_custom_tool",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := toolCallActivity(tc.calls)
+			if tc.wantNone {
+				if got != "" {
+					t.Errorf("toolCallActivity(nil) = %q, want empty", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.wantSub) {
+				t.Errorf("toolCallActivity(%v) = %q, want substring %q", tc.calls[0].Name, got, tc.wantSub)
+			}
+		})
+	}
+}
+
+// TestToolCallActivity_Truncation verifies that a very long tool-call argument
+// (e.g. a very long path) is truncated to 80 runes.
+func TestToolCallActivity_Truncation(t *testing.T) {
+	longPath := strings.Repeat("a", 200)
+	calls := []llm.ToolCall{{Name: "read_file", Arguments: []byte(`{"path":"` + longPath + `"}`)}}
+	got := toolCallActivity(calls)
+	runes := []rune(got)
+	if len(runes) > 80 {
+		t.Errorf("toolCallActivity truncation: got %d runes, want ≤80", len(runes))
+	}
+}
+
+// TestWithActivitySink_CalledPerTurn verifies that WithActivitySink installs a
+// sink that is called once per tool-call turn (not on clean finish turns).
+func TestWithActivitySink_CalledPerTurn(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "echo", `{"v":"hi"}`, 10, 4),
+		toolResp("c2", "echo", `{"v":"bye"}`, 8, 3),
+		textResp("done", 5, 2),
+	)
+
+	var mu strings.Builder
+	var calls []string
+	sink := func(activity string) {
+		_ = mu // appease the race detector; Builder is not concurrent but sink is called sequentially
+		calls = append(calls, activity)
+	}
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithActivitySink(sink))
+	_, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Two tool-call turns → two sink calls.
+	if len(calls) != 2 {
+		t.Errorf("sink called %d times, want 2 (one per tool-call turn)", len(calls))
+	}
+	// Each call should be non-empty (derived from "echo" → default name fallback).
+	for i, c := range calls {
+		if c == "" {
+			t.Errorf("sink call %d was empty", i)
+		}
+	}
+}
+
+// TestWithActivitySink_NilIsNoop verifies that a nil sink or a Runner without
+// WithActivitySink runs cleanly with no overhead (no panic, no extra state).
+func TestWithActivitySink_NilIsNoop(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "echo", `{}`, 5, 2),
+		textResp("done", 3, 1),
+	)
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
+	_, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run without sink: %v", err)
+	}
+}

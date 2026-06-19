@@ -34,9 +34,10 @@ const eventRepaintMin = 50 * time.Millisecond
 
 // activeAgent tracks one in-flight agent for the live pane.
 type activeAgent struct {
-	role    string
-	label   string
-	started time.Time
+	role     string
+	label    string
+	started  time.Time
+	activity string // most recent short note from tool calls
 }
 
 // PaneRenderer maintains an in-place, multi-line ANSI status pane on a TTY. It
@@ -163,6 +164,10 @@ func (p *PaneRenderer) apply(ev Event) {
 			p.counts.Hypothesized += ev.Candidates
 		}
 		p.lastEvent = fmt.Sprintf("%s done: %s", ev.Role, ev.Label)
+	case KindAgentActivity:
+		if a, ok := p.agents[agentKey(ev.Role, ev.Label)]; ok {
+			a.activity = ev.Activity
+		}
 	case KindSpendTick:
 		p.inTokens = ev.InputTokens
 		p.outTokens = ev.OutputTokens
@@ -302,7 +307,11 @@ func (p *PaneRenderer) frame() []string {
 	for _, k := range keys {
 		a := p.agents[k]
 		run := p.now().Sub(a.started).Round(time.Second)
-		lines = append(lines, fmt.Sprintf("  %-8s %-40s %s", a.role, a.label, run))
+		line := fmt.Sprintf("  %-8s %-40s %s", a.role, a.label, run)
+		if a.activity != "" {
+			line += "  " + a.activity
+		}
+		lines = append(lines, line)
 	}
 
 	lines = append(lines, fmt.Sprintf("  stages: hypothesized=%d triaged=%d verified=%d killed=%d",

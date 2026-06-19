@@ -287,3 +287,59 @@ func TestStatus_NoStoreNoSideEffect(t *testing.T) {
 		t.Error("status must not create the store as a side effect")
 	}
 }
+
+// TestStatus_ActivityRendered verifies that an agent with a non-empty Activity
+// field displays it in the `bugbot status` output, bracketed next to the agent
+// role and label.
+func TestStatus_ActivityRendered(t *testing.T) {
+	cfgPath, _, _ := setup(t)
+	writeStatus(t, cfgPath, progress.Status{
+		PID:         os.Getpid(),
+		StartedAt:   time.Now().Add(-time.Minute),
+		LastUpdated: time.Now(),
+		ScanKind:    "sweep",
+		Stage:       "hypothesize",
+		ActiveAgents: []progress.AgentStatus{
+			{Role: "finder", Label: "nil-safety", Activity: "reading main.go"},
+			{Role: "finder", Label: "sql-injection"}, // no activity
+		},
+	})
+
+	out, err := run(t, cfgPath, "status")
+	if err != nil {
+		t.Fatalf("status errored: %v", err)
+	}
+	if !strings.Contains(out, "reading main.go") {
+		t.Errorf("activity note not rendered:\n%s", out)
+	}
+	// The agent with no activity should appear without extra brackets.
+	if !strings.Contains(out, "sql-injection") {
+		t.Errorf("second agent (no activity) not shown:\n%s", out)
+	}
+	// Verify the activity is bracketed.
+	if !strings.Contains(out, "[reading main.go]") {
+		t.Errorf("activity note not bracketed:\n%s", out)
+	}
+}
+
+// TestStatus_NoActivityNoBracket verifies that an agent without an activity
+// string does NOT show brackets in the output.
+func TestStatus_NoActivityNoBracket(t *testing.T) {
+	cfgPath, _, _ := setup(t)
+	writeStatus(t, cfgPath, progress.Status{
+		PID:         os.Getpid(),
+		LastUpdated: time.Now(),
+		ScanKind:    "sweep",
+		ActiveAgents: []progress.AgentStatus{
+			{Role: "verifier", Label: "some bug"},
+		},
+	})
+
+	out, err := run(t, cfgPath, "status")
+	if err != nil {
+		t.Fatalf("status errored: %v", err)
+	}
+	if strings.Contains(out, "[") || strings.Contains(out, "]") {
+		t.Errorf("no activity should produce no brackets:\n%s", out)
+	}
+}

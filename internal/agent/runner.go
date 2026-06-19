@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/dpoage/bugbot/internal/llm"
@@ -29,6 +30,10 @@ type Runner struct {
 	// maxTokens caps output tokens per completion (passed through to the client).
 	// Zero lets the adapter apply its own default.
 	maxTokens int
+	// activitySink, when non-nil, is called once per turn with a short
+	// single-line note about what the agent is doing (derived from tool calls).
+	// Nil by default; zero overhead when unset.
+	activitySink func(activity string)
 }
 
 // Option configures a [Runner] at construction.
@@ -51,6 +56,15 @@ func WithTranscriptDir(dir string) Option {
 // default.
 func WithMaxTokens(n int) Option {
 	return func(r *Runner) { r.maxTokens = n }
+}
+
+// WithActivitySink registers a callback invoked once per tool-call turn with a
+// short single-line note about what the agent is doing (derived from its tool
+// calls via [toolCallActivity]). The callback must be safe for concurrent use.
+// A nil fn is a no-op. When unset, the runner emits no activity notes and
+// incurs zero overhead.
+func WithActivitySink(fn func(activity string)) Option {
+	return func(r *Runner) { r.activitySink = fn }
 }
 
 // NewRunner builds a Runner bound to client, the given tools, and a system
@@ -184,6 +198,14 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 		// No tool calls => the model finished its turn. Clean completion.
 		if len(resp.ToolCalls) == 0 {
 			break
+		}
+
+		// Derive a short activity note from this turn's tool calls and route
+		// it to the activity sink (if any). Done before executing the tools
+		// so the observer sees "reading foo.go" as the work is happening, not
+		// after the slow tool call completes.
+		if r.activitySink != nil {
+			r.activitySink(toolCallActivity(resp.ToolCalls))
 		}
 
 		// Execute each requested tool call sequentially and feed results back.
@@ -554,4 +576,74 @@ func slug(task string) string {
 		}
 	}
 	return s
+}
+
+// toolCallActivity derives a short, single-line activity string from a turn's
+// tool calls. It returns a human-readable description of the first call (e.g.
+// "reading main.go", "grepping "foo"") truncated to 80 runes. When calls is
+// empty, it returns "".
+//
+// This is a PURE function: it reads only the tool-call metadata that the LLM
+// already produced and makes no model calls. Safe for concurrent use.
+func toolCallActivity(calls []llm.ToolCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	call := calls[0]
+
+	// Extract a key argument from the JSON args to make the note concrete.
+	var args struct {
+		Path      string `json:"path"`
+		Dir       string `json:"dir"`
+		Directory string `json:"directory"`
+		Pattern   string `json:"pattern"`
+		Symbol    string `json:"symbol"`
+	}
+	// Best-effort parse; zero struct fields on failure produce a sane fallback.
+	_ = json.Unmarshal(call.Arguments, &args)
+
+	var note string
+	switch call.Name {
+	case "read_file":
+		p := args.Path
+		if p == "" {
+			p = "file"
+		}
+		note = "reading " + p
+	case "list_dir":
+		d := args.Dir
+		if d == "" {
+			d = args.Directory
+		}
+		if d == "" {
+			d = "."
+		}
+		note = "listing " + d
+	case "grep":
+		pat := args.Pattern
+		if pat == "" {
+			pat = "…"
+		}
+		note = "grepping " + strconv.Quote(pat)
+	case "find_definition", "find_references", "find_implementations", "read_symbol":
+		sym := args.Symbol
+		if sym == "" {
+			sym = "symbol"
+		}
+		note = "navigating " + sym
+	case "sandbox_exec":
+		note = "running sandbox"
+	case "post_lead":
+		note = "posting lead"
+	default:
+		note = call.Name
+	}
+
+	// Collapse any embedded newlines and truncate to 80 runes.
+	note = strings.Join(strings.Fields(note), " ")
+	runes := []rune(note)
+	if len(runes) > 80 {
+		note = string(runes[:79]) + "…"
+	}
+	return note
 }

@@ -486,6 +486,9 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				return imp, dep, nil
 			})
 			unitTools := append(baseTools[:len(baseTools):len(baseTools)], postLeadTool, pkgContextTool, pkgGraphTool)
+			if t := f.maybeStatusNoteTool(progress.RoleFinder, u.lens.Name); t != nil {
+				unitTools = append(unitTools, t)
+			}
 
 			// Resolve the task content. customTask takes highest priority
 			// (diff-intent pre-built task). Then the strategy's BuildTask if
@@ -841,7 +844,8 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 		Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: label,
 	})
 
-	runner := f.newAgentRunner(finder, tools, sysprompt, budget.finderRunnerLimits(f.opts.FinderLimits))
+	runner := f.newAgentRunner(finder, tools, sysprompt, budget.finderRunnerLimits(f.opts.FinderLimits),
+		f.activitySinkFor(progress.RoleFinder, label))
 
 	var out candidateList
 	outcome, err := runner.RunJSON(ctx, task, candidatesSchema, &out)

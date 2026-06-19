@@ -47,6 +47,12 @@ const (
 	// run. Finished carries tokens, duration, and any error.
 	KindAgentStarted  Kind = "agent_started"
 	KindAgentFinished Kind = "agent_finished"
+	// KindAgentActivity carries a short human-readable note about what an
+	// in-flight agent is currently doing (e.g. "reading main.go", "running
+	// sandbox"). Emitted at most once per tool-call turn by the runner; the
+	// snapshot and renderers update the relevant AgentStatus.Activity in place.
+	// This is NOT a terminal event.
+	KindAgentActivity Kind = "agent_activity"
 	// KindSpendTick reports cumulative token spend as it accrues.
 	KindSpendTick Kind = "spend_tick"
 	// KindBudgetDegraded / KindBudgetStopped mirror the funnel's budget
@@ -174,6 +180,11 @@ type Event struct {
 	// found (not omitted so a zero count is distinguishable from an unset field
 	// in typed consumers; JSON omitempty keeps wire size small).
 	Candidates int `json:"candidates,omitempty"`
+
+	// Activity carries a short single-line note for KindAgentActivity events:
+	// what the in-flight agent is currently doing, derived from its tool calls
+	// (e.g. "reading main.go", "running sandbox"). Unused on all other events.
+	Activity string `json:"activity,omitempty"`
 
 	// NextPoll / NextSweep / NextBacklog carry the daemon schedule
 	// (cycle_scheduled). NextBacklog is zero when the backlog-repro timer is

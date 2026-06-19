@@ -84,6 +84,11 @@ type AgentStatus struct {
 	Role    string    `json:"role"`
 	Label   string    `json:"label"`
 	Started time.Time `json:"started"`
+	// Activity is the most recent short note about what this agent is doing,
+	// derived from its tool calls. Empty until the first KindAgentActivity
+	// event arrives for this agent.
+	Activity   string    `json:"activity,omitempty"`
+	ActivityAt time.Time `json:"activity_at,omitempty"`
 }
 
 // SnapshotSink maintains status.json: it folds each event into an in-memory
@@ -205,6 +210,14 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 			s.st.LiveCandidates += ev.Candidates
 		}
 		s.st.LastEvent = ev.Role + " done: " + ev.Label
+	case KindAgentActivity:
+		// Update the activity note in-place only when the agent is already
+		// tracked. A stray/late activity must not resurrect a finished agent.
+		if a, ok := s.agents[agentKey(ev.Role, ev.Label)]; ok {
+			a.Activity = ev.Activity
+			a.ActivityAt = ev.Time
+			s.agents[agentKey(ev.Role, ev.Label)] = a
+		}
 	case KindSpendTick:
 		s.st.SpendInput = ev.InputTokens
 		s.st.SpendOutput = ev.OutputTokens
