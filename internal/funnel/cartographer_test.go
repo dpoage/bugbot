@@ -726,9 +726,9 @@ func TestLazyCartography_BudgetHardSkip(t *testing.T) {
 	pool := agent.NewBudgetPool(1)
 	pool.Add(1) // now Spent() == limit => finderOverHard() true
 	b := &budgetState{
-		budget:      1,
+		budget:       1,
 		finderBudget: 1,
-		finderPool:  pool,
+		finderPool:   pool,
 	}
 
 	cart := f.newCartographer(ctx, &Result{}, finder, snap, targets, fps, b)

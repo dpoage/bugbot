@@ -81,7 +81,7 @@ type Finding struct {
 	Sites      []Site
 	Confidence float64 // derived: findingConfidence(tier, severity, len(corroboratingLenses))
 	CreatedAt  time.Time
-	UpdatedAt time.Time
+	UpdatedAt  time.Time
 	// SweptAt is the timestamp when UpdateFindingSeverity last recorded a sweep
 	// verdict. Zero = not swept (impact-sweep marker; set by UpdateFindingSeverity,
 	// preserved across re-upsert when file_hash is unchanged, reset on file_hash change).

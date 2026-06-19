@@ -50,15 +50,15 @@ type cartography struct {
 	importers map[string][]string // pkgDir -> direct importer pkgDirs (built eagerly, pure-Go)
 
 	// Lazy-generation state. Populated by newCartographer; zero in legacy path.
-	mu      sync.Mutex
-	sf      singleflight.Group
-	funnel  *Funnel
-	client  llm.Client
+	mu       sync.Mutex
+	sf       singleflight.Group
+	funnel   *Funnel
+	client   llm.Client
 	packages map[string][]string // pkgDir -> sorted member files (from packagesSpanned)
-	pkgFps  map[string]string    // pkgDir -> fingerprint
-	fps     map[string]string    // file -> content fingerprint
-	budget  *budgetState
-	enabled bool // mirrors f.opts.Features.Cartographer; false -> nil behavior
+	pkgFps   map[string]string   // pkgDir -> fingerprint
+	fps      map[string]string   // file -> content fingerprint
+	budget   *budgetState
+	enabled  bool // mirrors f.opts.Features.Cartographer; false -> nil behavior
 }
 
 // contextFor renders the injection block for a finder unit's files using the
