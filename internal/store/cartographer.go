@@ -79,7 +79,10 @@ func (s *Store) getPackageSummariesChunk(ctx context.Context, pkgs []string, out
 		}
 		out[ps.Pkg] = ps
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return annotateErr(s.path, "get_package_summaries", err)
+	}
+	return nil
 }
 
 // UpsertPackageSummaries writes a batch in one transaction, overwriting by
