@@ -790,11 +790,7 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 		Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: label,
 	})
 
-	runner := agent.NewRunner(finder, tools, sysprompt,
-		agent.WithLimits(budget.finderRunnerLimits(f.opts.FinderLimits)),
-		agent.WithMaxTokens(DefaultMaxOutputTokens),
-		f.transcriptOption(),
-	)
+	runner := f.newAgentRunner(finder, tools, sysprompt, budget.finderRunnerLimits(f.opts.FinderLimits))
 
 	var out candidateList
 	outcome, err := runner.RunJSON(ctx, task, candidatesSchema, &out)
@@ -848,17 +844,6 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 		})
 	}
 	return cands, finderOK, outcome, nil, nil
-}
-
-// budgetStopped reports whether outcome was truncated by a budget limit (the
-// run's own token budget or the shared cross-runner budget pool), as opposed to
-// the iteration cap or no truncation at all. An unparseable result from such a
-// run is an expected budget stop, not a finder reliability failure.
-func budgetStopped(o *agent.Outcome) bool {
-	if o == nil || !o.Truncated {
-		return false
-	}
-	return o.TruncationReason == agent.TruncTokenBudget || o.TruncationReason == agent.TruncBudgetPool
 }
 
 // finderFailureClass is a coarse classification of why a finder failed to

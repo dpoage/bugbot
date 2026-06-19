@@ -150,6 +150,10 @@ type PatchProver struct {
 	image       string
 	artifactDir string
 	agentLimits agent.Limits
+	// transcriptDir, when non-empty, makes each patch-prover agent auto-save
+	// its run transcript there. Mirrors Reproducer.opts.TranscriptDir so the
+	// fix-witness step is observable end-to-end on the same artifact path.
+	transcriptDir string
 	// suiteCmd runs the full test suite for the suite-green witness. Empty
 	// means "detect from repo markers"; if detection also fails the prover
 	// skips rather than guessing — a wrong suite command would silently
@@ -364,6 +368,9 @@ func (p *PatchProver) newRunner() (*agent.Runner, error) {
 	}
 	var opts []agent.Option
 	opts = append(opts, agent.WithLimits(p.agentLimits))
+	if p.transcriptDir != "" {
+		opts = append(opts, agent.WithTranscriptDir(p.transcriptDir))
+	}
 	return agent.NewRunner(p.client, tools, patchSystemPrompt, opts...), nil
 }
 

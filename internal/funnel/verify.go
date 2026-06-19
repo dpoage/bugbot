@@ -28,26 +28,20 @@ type verified struct {
 //
 // The returned int counts refuters that produced no parseable verdict (a
 // reliability signal). The returned stopped flag is true when a refuter run was
-// cut short by the shared budget pool (TruncBudgetPool): once the pool is dry,
-// the remaining votes for this candidate would be untrustworthy, so the caller
-// treats the candidate as budget-orphaned rather than reaching a verdict on a
-// partial vote. Limits are derived from the pool at launch so a refuter launched
-// late gets the remaining headroom and one in flight stops at its next turn.
+// cut short by a budget stop — either the shared cross-runner pool
+// (TruncBudgetPool) or this refuter's own per-run token budget
+// (TruncTokenBudget): once either is gone, the remaining votes for this
+// candidate would be untrustworthy, so the caller treats the candidate as
+// budget-orphaned rather than reaching a verdict on a partial vote. Limits are
+// derived from the pool at launch so a refuter launched late gets the remaining
+// headroom and one in flight stops at its next turn.
 //
 // Each seat gets a distinct specialty clause appended to its system prompt (see
 // seats.go) so the panel attacks the report from different angles. When n==1
 // (budget-degraded path, degradedRefuters) no seat clause is added — the single
 // generalist produces today's prompt byte-identical.
 func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, persona string, c Candidate, n int, budget *budgetState) ([]refutation, []string, int64, int, bool, error) {
-	// Detect whether the sandbox_exec tool is present so we can tailor the
-	// system prompt to mention it.
-	hasSandbox := false
-	for _, t := range tools {
-		if t.Def().Name == "sandbox_exec" {
-			hasSandbox = true
-			break
-		}
-	}
+	hasSandbox := hasSandboxExec(tools)
 
 	var tokens int64
 	var failed int
@@ -65,18 +59,17 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 		if seat.clause != "" {
 			sysPrompt += "\n\n" + seat.clause
 		}
-		runner := agent.NewRunner(verifier, tools, sysPrompt,
-			agent.WithLimits(budget.verifyRunnerLimits(f.opts.VerifierLimits)),
-			agent.WithMaxTokens(DefaultMaxOutputTokens),
-			f.transcriptOption(),
-		)
+		runner := f.newAgentRunner(verifier, tools, sysPrompt, budget.verifyRunnerLimits(f.opts.VerifierLimits))
 		var v refutation
 		outcome, err := runner.RunJSON(ctx, verifierTask(c), refutationSchema, &v)
 		if outcome != nil {
 			tokens += outcome.Usage.InputTokens + outcome.Usage.OutputTokens
-			// A budget-pool stop means this refuter never got to complete its
-			// challenge; stop voting and signal the caller to orphan the candidate.
-			if outcome.TruncationReason == agent.TruncBudgetPool {
+			// Any budget stop — shared pool OR this refuter's own per-run
+			// allowance — means this refuter never got to complete its
+			// challenge; stop voting and signal the caller to orphan the
+			// candidate. The shared predicate (agent_runners.go) keeps the
+			// finder/verify paths in sync.
+			if budgetStopped(outcome) {
 				return verdicts, seatNames, tokens, failed, true, nil
 			}
 		}
@@ -97,35 +90,28 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 
 // runArbiter runs a single arbiter agent on a split-verdict candidate.
 // It returns the arbiter's refutation verdict, the tokens used, a stopped flag,
-// and any error. The stopped flag is true when the arbiter was cut by the shared
-// budget pool (TruncBudgetPool), signalling the caller to orphan the candidate.
-// An unparseable verdict is returned as a non-nil error with stopped=false so
-// the caller can fall back to majorityRefuted.
+// and any error. The stopped flag is true when the arbiter was cut by a budget
+// stop — the shared cross-runner pool (TruncBudgetPool) or the arbiter's own
+// per-run token budget (TruncTokenBudget) — signalling the caller to orphan
+// the candidate. An unparseable verdict is returned as a non-nil error with
+// stopped=false so the caller can fall back to majorityRefuted.
 //
 // post_lead is absent from candTools (same rationale as refuters: refuter
 // independence is the core false-positive killer; the arbiter must be equally
 // independent).
 func (f *Funnel) runArbiter(ctx context.Context, verifier llm.Client, candTools []agent.Tool, persona string, c Candidate, verdicts []refutation, seatNames []string, budget *budgetState) (*refutation, int64, bool, error) {
-	hasSandbox := false
-	for _, t := range candTools {
-		if t.Def().Name == "sandbox_exec" {
-			hasSandbox = true
-			break
-		}
-	}
-	runner := agent.NewRunner(verifier, candTools, arbiterSystemPrompt(persona, hasSandbox),
-		agent.WithLimits(budget.verifyRunnerLimits(f.opts.VerifierLimits)),
-		agent.WithMaxTokens(DefaultMaxOutputTokens),
-		f.transcriptOption(),
-	)
+	hasSandbox := hasSandboxExec(candTools)
+	runner := f.newAgentRunner(verifier, candTools, arbiterSystemPrompt(persona, hasSandbox), budget.verifyRunnerLimits(f.opts.VerifierLimits))
 	var av refutation
 	outcome, err := runner.RunJSON(ctx, arbiterTask(c, verdicts, seatNames), refutationSchema, &av)
 	var tokens int64
 	if outcome != nil {
 		tokens = outcome.Usage.InputTokens + outcome.Usage.OutputTokens
-		if outcome.TruncationReason == agent.TruncBudgetPool {
-			// Budget-pool stop: the arbiter never completed its challenge.
-			// Signal the caller to orphan the candidate (T3 suspected).
+		// Any budget stop: signal the caller to orphan the candidate
+		// (T3 suspected). The shared predicate matches the finder stage so
+		// a verifier that exhausts its own per-run allowance is classified
+		// consistently with one stopped by the shared pool.
+		if budgetStopped(outcome) {
 			return nil, tokens, true, nil
 		}
 	}
