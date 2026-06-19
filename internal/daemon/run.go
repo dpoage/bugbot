@@ -23,6 +23,13 @@ import (
 // pushed infinitely far into the future so it never wins the deadline race.
 func (d *Daemon) Run(ctx context.Context) error {
 	now := d.clock.now()
+	// Close the daemon-lifetime CodeNav (LSP manager) exactly once when Run exits,
+	// regardless of the exit path (graceful context cancel, error, or panic-recovery).
+	defer func() {
+		if err := d.sharedNav.Close(); err != nil {
+			d.log.Warn("daemon: codenav close", "err", err)
+		}
+	}()
 
 	// Sweep fires once at startup if the store has no prior sweep run; otherwise
 	// it waits a full SweepInterval. Poll always starts one interval out.

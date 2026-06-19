@@ -405,6 +405,13 @@ type Options struct {
 	// (visible in the pane and `bugbot status`). Off by default: zero behavior
 	// change, zero LLM cost, byte-identical tool set when false.
 	StatusNotes bool
+	// CodeNav, when non-nil, is a pre-constructed code-navigation bundle that the
+	// funnel BORROWS rather than owns. The daemon injects its long-lived CodeNav
+	// here so language-server indexes stay warm across cycles. When nil, the
+	// funnel constructs and owns its own CodeNav (the default for one-shot scans).
+	// The funnel NEVER closes an injected CodeNav; only daemon-lifetime teardown
+	// closes it.
+	CodeNav *agent.CodeNav
 }
 
 // resolve fills in defaults without mutating the caller's Options.
@@ -497,6 +504,9 @@ type Funnel struct {
 	navOnce sync.Once
 	nav     *agent.CodeNav
 	navErr  error
+	// ownsNav is true when the funnel constructed nav itself (Options.CodeNav was
+	// nil). A borrowed (injected) nav must NOT be closed by the funnel.
+	ownsNav bool
 
 	// deps is the resolved dependency strategy for the sandbox_exec tool,
 	// computed in New from SandboxOpts. depPrefetchOnce ensures the one-time
@@ -546,7 +556,7 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 		deps = d
 	}
 
-	return &Funnel{
+	f := &Funnel{
 		clients: clients,
 		store:   st,
 		repo:    repo,
@@ -554,15 +564,29 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 		lenses:  selectLenses(resolved.Lenses),
 		deps:    deps,
 		slots:   newSlotPool(resolved.MaxParallel),
-	}, nil
+	}
+	if resolved.CodeNav != nil {
+		// Daemon-injected: borrow, never own.
+		f.nav = resolved.CodeNav
+		f.ownsNav = false
+	}
+	return f, nil
 }
 
 // codeNav returns the shared code-navigation tool bundle, creating it (and its
 // lazy language-server manager — no processes are spawned until a tool's first
 // query) on first call.
 func (f *Funnel) codeNav() (*agent.CodeNav, error) {
+	// Fast path: a daemon-injected nav (Options.CodeNav) is set once in New and
+	// never mutated, so reading it needs no synchronization. We must NOT read
+	// f.nav here: in the lazy (non-injected) case f.nav is written inside
+	// navOnce below, and an unsynchronized read of it would race that write.
+	if f.opts.CodeNav != nil {
+		return f.opts.CodeNav, nil
+	}
 	f.navOnce.Do(func() {
 		f.nav, f.navErr = agent.NewCodeNav(f.repo.Root())
+		f.ownsNav = true
 	})
 	return f.nav, f.navErr
 }
@@ -577,7 +601,9 @@ func (f *Funnel) Close() error {
 	// Synchronize with codeNav() so a Close racing the lazy init still sees
 	// the bundle.
 	f.navOnce.Do(func() {})
-	if f.nav == nil {
+	if f.nav == nil || !f.ownsNav {
+		// Either no nav was ever created, or it is daemon-owned: never close it
+		// here. The daemon closes its shared CodeNav exactly once on exit.
 		return nil
 	}
 	return f.nav.Close()

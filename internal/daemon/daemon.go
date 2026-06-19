@@ -45,6 +45,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
@@ -204,6 +205,12 @@ type Daemon struct {
 	prog      progress.Sink
 	cfg       DaemonConfig
 
+	// sharedNav is the daemon-lifetime CodeNav (LSP manager) constructed once in
+	// New and reused across all cycles. It is injected into each cycle's funnel
+	// via fopts.CodeNav so language-server indexes stay warm between cycles.
+	// Closed exactly once on daemon exit (in Run before it returns).
+	sharedNav *agent.CodeNav
+
 	poller             *ingest.Poller
 	seedAnalyzers      func(ctx context.Context)
 	seedContradictions func(ctx context.Context)
@@ -254,6 +261,17 @@ func New(deps Deps, cfg DaemonConfig) (*Daemon, error) {
 		log = slog.Default()
 	}
 
+	// Build the daemon-lifetime CodeNav (LSP manager). agent.NewCodeNav creates
+	// the manager lazily — no language server is spawned until first use — so
+	// this is cheap at construction time. The shared nav is injected into each
+	// cycle's funnel via fopts.CodeNav; Run closes it once on daemon exit.
+	sharedNav, err := agent.NewCodeNav(deps.Repo.Root())
+	if err != nil {
+		return nil, fmt.Errorf("daemon: init codenav: %w", err)
+	}
+	fopts := deps.FunnelOpts
+	fopts.CodeNav = sharedNav
+
 	return &Daemon{
 		repo:               deps.Repo,
 		store:              deps.Store,
@@ -263,7 +281,8 @@ func New(deps Deps, cfg DaemonConfig) (*Daemon, error) {
 		publisher:          deps.Publisher,
 		seedAnalyzers:      deps.SeedAnalyzers,
 		seedContradictions: deps.SeedContradictions,
-		fopts:              deps.FunnelOpts,
+		fopts:              fopts,
+		sharedNav:          sharedNav,
 		sinks:              deps.Sinks,
 		log:                log,
 		prog:               deps.Progress,
