@@ -68,6 +68,10 @@ type CodeNav struct {
 	// here so read_symbol can do an exact-body lookup without an LSP round trip.
 	// An interface so unit tests can script body locations without real grammars.
 	body tsBodyBackend
+	// outline is the syntactic backend used by the outline tool to enumerate
+	// top-level declarations in a file. Shares the same *treesitter.Backend as
+	// body in production; an interface so unit tests can script outline results.
+	outline tsOutlineBackend
 }
 
 // tsBodyBackend is the slice of the tree-sitter backend read_symbol consumes: a
@@ -75,6 +79,14 @@ type CodeNav struct {
 // interface so the tool can be unit-tested without compiling real grammars.
 type tsBodyBackend interface {
 	DefinitionBodies(absPath, symbol string) (treesitter.Result, error)
+	Supports(path string) bool
+}
+
+// tsOutlineBackend is the slice of the tree-sitter backend the outline tool
+// consumes: a per-file definition listing plus the language-support predicate.
+// It is an interface so the tool can be unit-tested without real grammars.
+type tsOutlineBackend interface {
+	Outline(absPath string) ([]treesitter.OutlineEntry, error)
 	Supports(path string) bool
 }
 
@@ -92,18 +104,21 @@ func NewCodeNav(dir string) (*CodeNav, error) {
 	}
 	ts := treesitter.New(root.root)
 	nav := newTieredNavigator(&lspNavigator{mgr: lsp.NewManager(root.root)}, ts, root.root)
-	return &CodeNav{root: root, nav: nav, body: ts}, nil
+	return &CodeNav{root: root, nav: nav, body: ts, outline: ts}, nil
 }
 
 // Tools returns the navigation tools backed by this bundle: the three position
-// queries (find_definition / find_references / find_implementations) plus
-// read_symbol, which returns a located declaration's full body.
+// queries (find_definition / find_references / find_implementations),
+// read_symbol (full declaration body), find_usages (call sites with context),
+// and outline (top-level symbols with signatures and line ranges).
 func (c *CodeNav) Tools() []Tool {
 	return []Tool{
 		&codeNavTool{nav: c, kind: navDefinition},
 		&codeNavTool{nav: c, kind: navReferences},
 		&codeNavTool{nav: c, kind: navImplementations},
 		&readSymbolTool{nav: c},
+		&findUsagesTool{nav: c},
+		&outlineTool{nav: c},
 	}
 }
 
