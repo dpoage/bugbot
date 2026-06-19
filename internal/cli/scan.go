@@ -324,9 +324,6 @@ func openRepoForScan(ctx context.Context, target string) (*ingest.Repo, error) {
 	return repo, nil
 }
 
-// reproState carries the in-run reproducer state produced by buildReproHookForScan.
-// All fields may be nil/zero when --repro is unset or no container runtime is found.
-
 // buildReproHookForScan constructs the in-run reproducer hook when --repro is
 // requested. It returns the hook closure and the associated reproducer state
 // needed by the post-scan catch-up drain. When --repro is false or no container

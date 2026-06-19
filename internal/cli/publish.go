@@ -281,6 +281,8 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 
 		case publishSkip:
 			skipped++
+		default:
+			return fmt.Errorf("publish: unhandled action type %T", act)
 		}
 	}
 
