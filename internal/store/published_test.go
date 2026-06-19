@@ -134,7 +134,7 @@ func TestCountPublishedIssues(t *testing.T) {
 		t.Fatalf("empty store: %v", empty)
 	}
 
-	for i, state := range []string{"open", "open", "closed", "pending"} {
+	for i, state := range []IssueState{IssueStateOpen, IssueStateOpen, IssueStateClosed, IssueStatePending} {
 		if err := st.UpsertPublishedIssue(ctx, fmt.Sprintf("fp%d", i), i+1, state); err != nil {
 			t.Fatal(err)
 		}

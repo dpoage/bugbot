@@ -7,7 +7,7 @@ import (
 )
 
 // makeUnit returns a minimal valid AgentUnit for use in tests.
-func makeUnit(scanRunID, role, lens, strategy, status string, launchOrder int) AgentUnit {
+func makeUnit(scanRunID string, role AgentRole, lens string, strategy AgentStrategy, status AgentStatus, launchOrder int) AgentUnit {
 	return AgentUnit{
 		ScanRunID:   scanRunID,
 		Role:        role,

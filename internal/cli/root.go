@@ -8,10 +8,6 @@ import (
 	"github.com/dpoage/bugbot/internal/config"
 )
 
-// configPath is the global --config flag value, shared by commands that load
-// configuration.
-var configPath string
-
 // NewRootCmd builds the root command and attaches all subcommands.
 func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
@@ -26,6 +22,7 @@ reproduce, report) and tracks findings across confidence tiers:
 		SilenceErrors: true,
 	}
 
+	var configPath string
 	root.PersistentFlags().StringVar(&configPath, "config", config.DefaultFileName,
 		"path to the Bugbot config file")
 

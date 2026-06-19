@@ -110,7 +110,7 @@ func (f *Funnel) runReproAttempt(ctx context.Context, finding store.Finding, sca
 		Files:      []string{finding.File},
 		StartedAt:  startedAt,
 		FinishedAt: finishedAt,
-		Status:     status,
+		Status:     store.AgentStatus(status),
 		// InputTokens: 0 — spend is attributed via the hook closure's recorder,
 		// not double-counted here. See comment above.
 		Candidates: reproSucceededInt(status),

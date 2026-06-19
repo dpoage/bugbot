@@ -50,7 +50,7 @@ the command exits with a graceful message rather than an error.`,
 				ctx = context.Background()
 			}
 
-			cfg, st, err := cmdOpenStore(ctx)
+			cfg, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
@@ -114,7 +114,7 @@ the command exits with a graceful message rather than an error.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&target, "target", ".", "path to the target repository")
+	addTargetFlag(cmd, &target)
 	cmd.Flags().IntVar(&maxN, "max", 0,
 		"maximum findings to attempt (0 = use repro.backlog_batch from config)")
 

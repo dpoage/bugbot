@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/spf13/cobra"
+
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
@@ -21,10 +23,21 @@ import (
 // open/close pattern, the three-way drift risk in the funnel plumbing, and
 // the inconsistent error wrapping that crept in across scan/daemon/review.
 //
-// Helpers in this file MUST NOT call cobra or read cmd flags. The package-
-// level configPath is read on purpose — every CLI subcommand derives its
-// config from the same global --config flag, and the helper signature would
-// be noisier if every caller had to pass it.
+// Helpers in this file MUST NOT call cobra or read cmd flags directly.
+// configPathFromCmd extracts the --config path from the root persistent flag
+// and is called at the top of every RunE closure.
+
+// configPathFromCmd returns the --config flag value from the root persistent
+// flags. Every RunE closure calls this at the top; the root command registers
+// the flag with config.DefaultFileName as the default so the returned value is
+// always a valid path.
+func configPathFromCmd(cmd *cobra.Command) string {
+	p, err := cmd.Root().PersistentFlags().GetString("config")
+	if err != nil || p == "" {
+		return config.DefaultFileName
+	}
+	return p
+}
 
 // cmdOpenStore loads the user config and opens the state store. Errors from
 // store.Open are wrapped with "open store:" so a failed-to-open failure
@@ -32,8 +45,8 @@ import (
 // to preserve the existing surface for config-validation messages.
 //
 // Callers MUST close the store, typically via defer closeStore(st).
-func cmdOpenStore(ctx context.Context) (config.Config, *store.Store, error) {
-	cfg, err := config.Load(configPath)
+func cmdOpenStore(ctx context.Context, cfgPath string) (config.Config, *store.Store, error) {
+	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return config.Config{}, nil, err
 	}

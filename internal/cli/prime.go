@@ -48,7 +48,7 @@ only prints guidance; use ` + "`bugbot init`" + ` to write the template and
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&target, "target", ".", "path to the target repository")
+	addTargetFlag(cmd, &target)
 	return cmd
 }
 

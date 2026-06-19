@@ -54,7 +54,7 @@ Requires the gh CLI to be installed and authenticated.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 
-			cfg, st, err := cmdOpenStore(ctx)
+			cfg, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
@@ -142,10 +142,10 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 	created, updated, closed, skipped, stale := 0, 0, 0, 0, 0
 
 	for _, a := range plan {
-		switch a.op {
-		case publishOpCreate:
+		switch act := a.(type) {
+		case publishCreate:
 			if dryRun {
-				_, _ = fmt.Fprintf(w, "dry-run: create issue for %s (%s)\n", a.finding.Fingerprint[:12], a.finding.Title)
+				_, _ = fmt.Fprintf(w, "dry-run: create issue for %s (%s)\n", act.finding.Fingerprint[:12], act.finding.Title)
 				created++
 				continue
 			}
@@ -154,22 +154,22 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 			// gh create and the store write leaves a tombstone: the next run
 			// plans a recover (marker search) instead of blindly creating a
 			// duplicate issue.
-			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, 0, "pending"); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, 0, store.IssueStatePending); err != nil {
 				return fmt.Errorf("publish: record pending issue: %w", err)
 			}
-			n, err := ghCreateIssue(ctx, gh, a.finding.Title, renderIssueBody(a.finding, repoURL, prov), cfg.Labels)
+			n, err := ghCreateIssue(ctx, gh, act.finding.Title, renderIssueBody(act.finding, repoURL, prov), cfg.Labels)
 			if err != nil {
 				return err
 			}
-			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, n, "open"); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen); err != nil {
 				return fmt.Errorf("publish: record created issue: %w", err)
 			}
-			_, _ = fmt.Fprintf(w, "created issue #%d for %s (%s)\n", n, a.finding.Fingerprint[:12], a.finding.Title)
+			_, _ = fmt.Fprintf(w, "created issue #%d for %s (%s)\n", n, act.finding.Fingerprint[:12], act.finding.Title)
 			created++
 
-		case publishOpRecover:
+		case publishRecover:
 			if dryRun {
-				_, _ = fmt.Fprintf(w, "dry-run: recover pending publish for %s\n", a.finding.Fingerprint[:12])
+				_, _ = fmt.Fprintf(w, "dry-run: recover pending publish for %s\n", act.finding.Fingerprint[:12])
 				skipped++
 				continue
 			}
@@ -177,62 +177,62 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 			// number — the gh create may or may not have happened. Search the
 			// repo's bugbot issues for the fingerprint marker; adopt on hit,
 			// create on miss.
-			n, found, err := findIssueByMarker(ctx, gh, cfg.Labels, a.finding.Fingerprint)
+			n, found, err := findIssueByMarker(ctx, gh, cfg.Labels, act.finding.Fingerprint)
 			if err != nil {
 				return fmt.Errorf("publish: recover pending issue: %w", err)
 			}
 			if !found {
-				n, err = ghCreateIssue(ctx, gh, a.finding.Title, renderIssueBody(a.finding, repoURL, prov), cfg.Labels)
+				n, err = ghCreateIssue(ctx, gh, act.finding.Title, renderIssueBody(act.finding, repoURL, prov), cfg.Labels)
 				if err != nil {
 					return err
 				}
 				created++
-				_, _ = fmt.Fprintf(w, "created issue #%d for %s (recovered pending; no existing issue found)\n", n, a.finding.Fingerprint[:12])
+				_, _ = fmt.Fprintf(w, "created issue #%d for %s (recovered pending; no existing issue found)\n", n, act.finding.Fingerprint[:12])
 			} else {
-				_, _ = fmt.Fprintf(w, "recovered issue #%d for %s (adopted via fingerprint marker)\n", n, a.finding.Fingerprint[:12])
+				_, _ = fmt.Fprintf(w, "recovered issue #%d for %s (adopted via fingerprint marker)\n", n, act.finding.Fingerprint[:12])
 			}
-			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, n, "open"); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen); err != nil {
 				return fmt.Errorf("publish: record recovered issue: %w", err)
 			}
 
-		case publishOpUpdate:
+		case publishUpdate:
 			if dryRun {
-				_, _ = fmt.Fprintf(w, "dry-run: update issue #%d for %s\n", a.issueNumber, a.finding.Fingerprint[:12])
+				_, _ = fmt.Fprintf(w, "dry-run: update issue #%d for %s\n", act.issueNumber, act.finding.Fingerprint[:12])
 				updated++
 				continue
 			}
-			if err := ghUpdateIssue(ctx, gh, a.issueNumber, renderIssueBody(a.finding, repoURL, prov)); err != nil {
+			if err := ghUpdateIssue(ctx, gh, act.issueNumber, renderIssueBody(act.finding, repoURL, prov)); err != nil {
 				if isGHGoneOrNotFound(err) {
 					// Local row is stale: the issue was deleted (410) or
 					// transferred/renamed (404) on GitHub. Drop the row, create
 					// a fresh issue, and continue with the rest of the plan.
-					_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone: %v); re-creating\n", a.finding.Fingerprint[:12], a.issueNumber, err)
-					if derr := st.DeletePublishedIssue(ctx, a.finding.Fingerprint); derr != nil {
+					_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone: %v); re-creating\n", act.finding.Fingerprint[:12], act.issueNumber, err)
+					if derr := st.DeletePublishedIssue(ctx, act.finding.Fingerprint); derr != nil {
 						return fmt.Errorf("publish: delete stale published issue: %w", derr)
 					}
-					n, cerr := ghCreateIssue(ctx, gh, a.finding.Title, renderIssueBody(a.finding, repoURL, prov), cfg.Labels)
+					n, cerr := ghCreateIssue(ctx, gh, act.finding.Title, renderIssueBody(act.finding, repoURL, prov), cfg.Labels)
 					if cerr != nil {
 						return fmt.Errorf("publish: recreate issue after stale: %w", cerr)
 					}
-					if uerr := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, n, "open"); uerr != nil {
+					if uerr := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen); uerr != nil {
 						return fmt.Errorf("publish: record recreated issue: %w", uerr)
 					}
-					_, _ = fmt.Fprintf(w, "recreated issue #%d for %s (replaced stale row)\n", n, a.finding.Fingerprint[:12])
+					_, _ = fmt.Fprintf(w, "recreated issue #%d for %s (replaced stale row)\n", n, act.finding.Fingerprint[:12])
 					stale++
 					created++
 					continue
 				}
 				return err
 			}
-			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, a.issueNumber, "open"); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen); err != nil {
 				return fmt.Errorf("publish: record updated issue: %w", err)
 			}
-			_, _ = fmt.Fprintf(w, "updated issue #%d for %s\n", a.issueNumber, a.finding.Fingerprint[:12])
+			_, _ = fmt.Fprintf(w, "updated issue #%d for %s\n", act.issueNumber, act.finding.Fingerprint[:12])
 			updated++
 
-		case publishOpClose:
+		case publishClose:
 			if dryRun {
-				_, _ = fmt.Fprintf(w, "dry-run: close issue #%d for %s (status: %s)\n", a.issueNumber, a.finding.Fingerprint[:12], a.finding.Status)
+				_, _ = fmt.Fprintf(w, "dry-run: close issue #%d for %s (status: %s)\n", act.issueNumber, act.finding.Fingerprint[:12], act.finding.Status)
 				closed++
 				continue
 			}
@@ -240,13 +240,13 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 			// Record "closing" once the comment lands so a PATCH failure does
 			// NOT re-post the comment on every subsequent cycle — the resume
 			// path (skipComment) goes straight to the PATCH.
-			if !a.skipComment {
-				if err := ghCommentIssue(ctx, gh, a.issueNumber, autoCloseComment(string(a.finding.Status))); err != nil {
+			if !act.skipComment {
+				if err := ghCommentIssue(ctx, gh, act.issueNumber, autoCloseComment(string(act.finding.Status))); err != nil {
 					if isGHGoneOrNotFound(err) {
 						// Issue is already gone — close is a no-op success.
 						// Drop the stale row and move on; do not abort the run.
-						_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone on close: %v); dropping row\n", a.finding.Fingerprint[:12], a.issueNumber, err)
-						if derr := st.DeletePublishedIssue(ctx, a.finding.Fingerprint); derr != nil {
+						_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone on close: %v); dropping row\n", act.finding.Fingerprint[:12], act.issueNumber, err)
+						if derr := st.DeletePublishedIssue(ctx, act.finding.Fingerprint); derr != nil {
 							return fmt.Errorf("publish: delete stale published issue: %w", derr)
 						}
 						stale++
@@ -254,18 +254,18 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 					}
 					return err
 				}
-				if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, a.issueNumber, "closing"); err != nil {
+				if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateClosing); err != nil {
 					return fmt.Errorf("publish: record closing issue: %w", err)
 				}
 			}
-			if err := ghPatchIssueClosed(ctx, gh, a.issueNumber); err != nil {
+			if err := ghPatchIssueClosed(ctx, gh, act.issueNumber); err != nil {
 				if isGHGoneOrNotFound(err) {
 					// Same 410/404 handling on the PATCH: drop the row, log
 					// it, and continue. The "closing" tombstone row from
 					// above (if any) is also dropped, so the next cycle
 					// starts clean.
-					_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone on PATCH: %v); dropping row\n", a.finding.Fingerprint[:12], a.issueNumber, err)
-					if derr := st.DeletePublishedIssue(ctx, a.finding.Fingerprint); derr != nil {
+					_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone on PATCH: %v); dropping row\n", act.finding.Fingerprint[:12], act.issueNumber, err)
+					if derr := st.DeletePublishedIssue(ctx, act.finding.Fingerprint); derr != nil {
 						return fmt.Errorf("publish: delete stale published issue: %w", derr)
 					}
 					stale++
@@ -273,13 +273,13 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 				}
 				return err
 			}
-			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, a.issueNumber, "closed"); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateClosed); err != nil {
 				return fmt.Errorf("publish: record closed issue: %w", err)
 			}
-			_, _ = fmt.Fprintf(w, "closed issue #%d for %s (status: %s)\n", a.issueNumber, a.finding.Fingerprint[:12], a.finding.Status)
+			_, _ = fmt.Fprintf(w, "closed issue #%d for %s (status: %s)\n", act.issueNumber, act.finding.Fingerprint[:12], act.finding.Status)
 			closed++
 
-		case publishOpSkip:
+		case publishSkip:
 			skipped++
 		}
 	}
@@ -288,26 +288,47 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 	return nil
 }
 
-// publishOp is a planned action in the publish reconcile cycle.
-type publishOp int
+// publishAction is the sum type for one unit of planned publish work. The
+// concrete types are publishCreate, publishRecover, publishUpdate,
+// publishClose, and publishSkip; each carries only the fields valid for its
+// op so invalid combinations are unrepresentable.
+type publishAction interface{ publishAction() }
 
-const (
-	publishOpCreate  publishOp = iota
-	publishOpRecover           // pending row from an interrupted create: search-then-adopt-or-create
-	publishOpUpdate
-	publishOpClose
-	publishOpSkip
-)
+// publishCreate plans a new GitHub issue for a finding with no published row.
+type publishCreate struct{ finding store.Finding }
 
-// publishAction is one unit of planned publish work.
-type publishAction struct {
-	op          publishOp
+// publishRecover plans a marker search + adopt-or-create for a finding whose
+// published row is stuck in "pending" (interrupted create).
+type publishRecover struct{ finding store.Finding }
+
+// publishUpdate plans a body re-push for a finding updated after its last
+// publish. issueNumber is the existing GitHub issue to PATCH.
+type publishUpdate struct {
 	finding     store.Finding
-	issueNumber int // set for update/close/skip
-	// skipComment resumes an interrupted close (state "closing"): the auto-close
-	// comment already landed, only the state PATCH remains.
+	issueNumber int
+}
+
+// publishClose plans an issue close (comment then state PATCH). skipComment
+// resumes an interrupted close: the auto-close comment already landed, only
+// the state PATCH remains.
+type publishClose struct {
+	finding     store.Finding
+	issueNumber int
 	skipComment bool
 }
+
+// publishSkip records that a finding already has an up-to-date published row.
+// issueNumber is carried for logging.
+type publishSkip struct {
+	finding     store.Finding
+	issueNumber int
+}
+
+func (publishCreate) publishAction()  {}
+func (publishRecover) publishAction() {}
+func (publishUpdate) publishAction()  {}
+func (publishClose) publishAction()   {}
+func (publishSkip) publishAction()    {}
 
 // planPublish is the pure reconciler: given open/fixed/dismissed findings and
 // the current published_issues map, it decides what to do with each finding.
@@ -341,18 +362,18 @@ func planPublish(
 		pi, found := published[f.Fingerprint]
 		switch {
 		case !found:
-			actions = append(actions, publishAction{op: publishOpCreate, finding: f})
-		case pi.State == "pending":
+			actions = append(actions, publishCreate{finding: f})
+		case pi.State == store.IssueStatePending:
 			// An earlier create was interrupted between the gh call and the
 			// store write; the issue may or may not exist on GitHub.
-			actions = append(actions, publishAction{op: publishOpRecover, finding: f})
+			actions = append(actions, publishRecover{finding: f})
 		case f.UpdatedAt.After(pi.UpdatedAt):
 			// Published row exists ("open", or "closing" from a reintroduced
 			// finding — the body re-push is correct either way). If the finding
 			// was updated after our last publish, re-push the body.
-			actions = append(actions, publishAction{op: publishOpUpdate, finding: f, issueNumber: pi.IssueNumber})
+			actions = append(actions, publishUpdate{finding: f, issueNumber: pi.IssueNumber})
 		default:
-			actions = append(actions, publishAction{op: publishOpSkip, finding: f, issueNumber: pi.IssueNumber})
+			actions = append(actions, publishSkip{finding: f, issueNumber: pi.IssueNumber})
 		}
 	}
 
@@ -367,12 +388,13 @@ func planPublish(
 	// interrupted-create-then-fixed overlap is left for a future open cycle.
 	for _, f := range append(fixed, dismissed...) {
 		pi, found := published[f.Fingerprint]
-		if !found || pi.State == "closed" || pi.State == "pending" {
+		if !found || pi.State == store.IssueStateClosed || pi.State == store.IssueStatePending {
 			continue
 		}
-		actions = append(actions, publishAction{
-			op: publishOpClose, finding: f, issueNumber: pi.IssueNumber,
-			skipComment: pi.State == "closing",
+		actions = append(actions, publishClose{
+			finding:     f,
+			issueNumber: pi.IssueNumber,
+			skipComment: pi.State == store.IssueStateClosing,
 		})
 	}
 

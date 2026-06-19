@@ -7,13 +7,30 @@ import (
 	"time"
 )
 
+// IssueState is the lifecycle state of a published GitHub issue.
+type IssueState string
+
+const (
+	// IssueStatePending records that a create was started but not yet confirmed
+	// (crash-safe tombstone: the next run recovers by searching for the
+	// fingerprint marker and adopting or recreating the issue).
+	IssueStatePending IssueState = "pending"
+	// IssueStateOpen is the normal post-create state.
+	IssueStateOpen IssueState = "open"
+	// IssueStateClosing is set once the auto-close comment lands; a subsequent
+	// run will issue the PATCH to close the GitHub issue.
+	IssueStateClosing IssueState = "closing"
+	// IssueStateClosed is the terminal state after the GitHub issue is closed.
+	IssueStateClosed IssueState = "closed"
+)
+
 // PublishedIssue records that a finding has been filed as a GitHub issue. It
 // is keyed by fingerprint so the publish reconciler can look up the issue
 // number for any finding without scanning a secondary index.
 type PublishedIssue struct {
 	Fingerprint string
 	IssueNumber int
-	State       string // "open" or "closed"
+	State       IssueState
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
@@ -22,7 +39,7 @@ type PublishedIssue struct {
 // finding fingerprint. On conflict it updates issue_number, state, and
 // updated_at while preserving created_at, so a re-create after a manual close
 // records the new number without losing the original creation timestamp.
-func (s *Store) UpsertPublishedIssue(ctx context.Context, fingerprint string, issueNumber int, state string) error {
+func (s *Store) UpsertPublishedIssue(ctx context.Context, fingerprint string, issueNumber int, state IssueState) error {
 	now := nowUTC().Format(timeLayout)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO published_issues (fingerprint, issue_number, state, created_at, updated_at)
@@ -31,7 +48,7 @@ func (s *Store) UpsertPublishedIssue(ctx context.Context, fingerprint string, is
 		  issue_number = excluded.issue_number,
 		  state        = excluded.state,
 		  updated_at   = excluded.updated_at`,
-		fingerprint, issueNumber, state, now, now,
+		fingerprint, issueNumber, string(state), now, now,
 	)
 	if err != nil {
 		return annotateErr(s.path, "upsert_published_issue", err)
@@ -62,18 +79,20 @@ func (s *Store) DeletePublishedIssue(ctx context.Context, fingerprint string) er
 // ErrNotFound if no issue has been filed for this finding.
 func (s *Store) GetPublishedIssue(ctx context.Context, fingerprint string) (PublishedIssue, error) {
 	var pi PublishedIssue
+	var state string
 	var createdAt, updatedAt string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT fingerprint, issue_number, state, created_at, updated_at
 		   FROM published_issues
 		  WHERE fingerprint = ?`, fingerprint,
-	).Scan(&pi.Fingerprint, &pi.IssueNumber, &pi.State, &createdAt, &updatedAt)
+	).Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PublishedIssue{}, ErrNotFound
 	}
 	if err != nil {
 		return PublishedIssue{}, annotateErr(s.path, "get_published_issue", err)
 	}
+	pi.State = IssueState(state)
 	var perr error
 	if pi.CreatedAt, perr = parseTime(createdAt); perr != nil {
 		return PublishedIssue{}, perr
@@ -102,10 +121,12 @@ func (s *Store) ListPublishedIssues(ctx context.Context) ([]PublishedIssue, erro
 	defer func() { _ = rows.Close() }()
 	return scanRows(rows, func(r *sql.Rows) (PublishedIssue, error) {
 		var pi PublishedIssue
+		var state string
 		var createdAt, updatedAt string
-		if err := r.Scan(&pi.Fingerprint, &pi.IssueNumber, &pi.State, &createdAt, &updatedAt); err != nil {
+		if err := r.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt); err != nil {
 			return PublishedIssue{}, err
 		}
+		pi.State = IssueState(state)
 		if pi.CreatedAt, err = parseTime(createdAt); err != nil {
 			return PublishedIssue{}, err
 		}
@@ -118,21 +139,21 @@ func (s *Store) ListPublishedIssues(ctx context.Context) ([]PublishedIssue, erro
 
 // CountPublishedIssues tallies published_issues rows by state for the status
 // world-state block. The zero map means nothing has ever been published.
-func (s *Store) CountPublishedIssues(ctx context.Context) (map[string]int, error) {
+func (s *Store) CountPublishedIssues(ctx context.Context) (map[IssueState]int, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT state, COUNT(*) FROM published_issues GROUP BY state`)
 	if err != nil {
 		return nil, annotateErr(s.path, "count_published_issues", err)
 	}
 	defer func() { _ = rows.Close() }()
-	out := map[string]int{}
+	out := map[IssueState]int{}
 	_, err = scanRows(rows, func(r *sql.Rows) (struct{}, error) {
 		var state string
 		var n int
 		if err := r.Scan(&state, &n); err != nil {
 			return struct{}{}, err
 		}
-		out[state] = n
+		out[IssueState(state)] = n
 		return struct{}{}, nil
 	})
 	return out, err

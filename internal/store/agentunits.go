@@ -7,6 +7,42 @@ import (
 	"time"
 )
 
+// AgentRole classifies which pipeline stage the agent served.
+type AgentRole string
+
+const (
+	AgentRoleFinder     AgentRole = "finder"
+	AgentRoleVerifier   AgentRole = "verifier"
+	AgentRoleReproducer AgentRole = "reproducer"
+)
+
+// AgentStatus is the terminal outcome for an agent unit.
+// The valid values vary by role; see AgentUnit documentation for the full
+// vocabulary.
+type AgentStatus string
+
+const (
+	// finder outcomes
+	AgentStatusOK              AgentStatus = "ok"
+	AgentStatusParseFailed     AgentStatus = "parse_failed"
+	AgentStatusBudgetStopped   AgentStatus = "budget_stopped"
+	AgentStatusSkippedHard     AgentStatus = "skipped_hard_budget"
+	AgentStatusSkippedDegraded AgentStatus = "skipped_degraded"
+
+	// verifier outcomes
+	AgentStatusSurvived       AgentStatus = "survived"
+	AgentStatusKilled         AgentStatus = "killed"
+	AgentStatusOrphanedBudget AgentStatus = "orphaned_budget"
+
+	// reproducer outcomes
+	AgentStatusReproduced AgentStatus = "reproduced"
+	AgentStatusExhausted  AgentStatus = "exhausted"
+	AgentStatusInfraError AgentStatus = "infra_error"
+)
+
+// AgentStrategy is the finder strategy name; empty for non-finder roles.
+type AgentStrategy string
+
 // AgentUnit is one row in the agent_units observability table. Each row
 // represents a single finder, verifier, or reproducer agent execution, or a
 // unit that was skipped before launch (status = skipped_hard_budget or
@@ -20,14 +56,14 @@ import (
 type AgentUnit struct {
 	ID              string
 	ScanRunID       string
-	Role            string    // "finder" | "verifier" | "reproducer"
-	Lens            string    // bare lens name (finder) or candidate's lens (verifier)
-	Strategy        string    // finder strategy name; "" for other roles
-	LaunchOrder     int       // index in the units slice at construction time
+	Role            AgentRole
+	Lens            string // bare lens name (finder) or candidate's lens (verifier)
+	Strategy        AgentStrategy
+	LaunchOrder     int
 	Files           []string  // target files for this unit; nil/empty for diff-intent and verifiers
 	StartedAt       time.Time // zero for skipped units
 	FinishedAt      time.Time // zero for skipped units
-	Status          string    // see status vocabulary above
+	Status          AgentStatus
 	InputTokens     int64
 	OutputTokens    int64
 	CacheReadTokens int64
@@ -67,9 +103,9 @@ func (s *Store) AddAgentUnit(ctx context.Context, u AgentUnit) error {
 		   input_tokens, output_tokens, cache_read_tokens,
 		   candidates, leads_posted, detail, created_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		u.ID, u.ScanRunID, u.Role, u.Lens, u.Strategy,
+		u.ID, u.ScanRunID, string(u.Role), u.Lens, string(u.Strategy),
 		u.LaunchOrder, string(filesJSON),
-		startedAt, finishedAt, u.Status,
+		startedAt, finishedAt, string(u.Status),
 		u.InputTokens, u.OutputTokens, u.CacheReadTokens,
 		u.Candidates, u.LeadsPosted, u.Detail,
 		u.CreatedAt.UTC().Format(timeLayout),
@@ -141,18 +177,23 @@ func (s *Store) PruneAgentUnits(ctx context.Context, keepRuns int) (int64, error
 // scanAgentUnit reads one agent_units row from a *sql.Rows cursor.
 func scanAgentUnit(rows *sql.Rows) (AgentUnit, error) {
 	var u AgentUnit
+	var role, strategy, status string
 	var startedAt, finishedAt, createdAt string
 	var filesJSON string
 
 	if err := rows.Scan(
-		&u.ID, &u.ScanRunID, &u.Role, &u.Lens, &u.Strategy,
+		&u.ID, &u.ScanRunID, &role, &u.Lens, &strategy,
 		&u.LaunchOrder, &filesJSON,
-		&startedAt, &finishedAt, &u.Status,
+		&startedAt, &finishedAt, &status,
 		&u.InputTokens, &u.OutputTokens, &u.CacheReadTokens,
 		&u.Candidates, &u.LeadsPosted, &u.Detail, &createdAt,
 	); err != nil {
 		return AgentUnit{}, err
 	}
+
+	u.Role = AgentRole(role)
+	u.Strategy = AgentStrategy(strategy)
+	u.Status = AgentStatus(status)
 
 	if err := json.Unmarshal([]byte(filesJSON), &u.Files); err != nil {
 		u.Files = nil

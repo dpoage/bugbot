@@ -55,7 +55,7 @@ func newReviewCmd() *cobra.Command {
 				return fmt.Errorf("--pr is required and must be a positive PR number")
 			}
 
-			cfg, err := config.Load(configPath)
+			cfg, err := config.Load(configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
@@ -95,7 +95,7 @@ func newReviewCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&target, "target", ".", "path to the target repository (the PR head checkout)")
+	addTargetFlag(cmd, &target)
 	cmd.Flags().IntVar(&prNumber, "pr", 0, "pull request number to review (required)")
 	cmd.Flags().IntVar(&concurrency, "concurrency", funnel.DefaultMaxParallel, "number of parallel agents")
 	cmd.Flags().IntVar(&refuters, "refuters", funnel.DefaultRefuters, "number of adversarial refuter agents per candidate")
