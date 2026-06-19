@@ -59,8 +59,8 @@ var contractTraceDeep = Strategy{
 // buildContractTraceDeepTask builds the finder task for the contract-trace-deep
 // strategy. The chunk files are framed as SEED FILES (a starting point for
 // contract tracing) rather than an audit boundary. The CROSS-LENS LEADS section
-// is rendered via the same shared helper as finderTask so the newline-flattening
-// prompt-injection guard is never forked.
+// is rendered via the same shared helper as finderTask so the one-item-per-line
+// lead-list format is preserved across both call sites.
 func buildContractTraceDeepTask(files []string, leads []store.Lead) string {
 	var b strings.Builder
 	b.WriteString("Trace the contracts declared in these SEED files to their far ends across the repository, following your search strategy.\n\n")
@@ -74,7 +74,9 @@ func buildContractTraceDeepTask(files []string, leads []store.Lead) string {
 
 // appendLeadsSection renders the CROSS-LENS LEADS block when leads is non-empty.
 // Factored out so both finderTask and buildContractTraceDeepTask share the exact
-// same newline-flattening logic — that flattening is a prompt-injection guard and
+// same newline-flattening logic — that flattening protects the
+// one-item-per-line format of the lead list (a value's newlines must not
+// fabricate extra bullet rows or break out of this section's framing), and
 // must not fork.
 func appendLeadsSection(b *strings.Builder, leads []store.Lead) {
 	if len(leads) == 0 {

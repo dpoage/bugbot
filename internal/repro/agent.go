@@ -172,6 +172,14 @@ func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding 
 
 // buildTask renders the per-finding task prompt, including the finding's
 // location and reasoning and any revision feedback.
+//
+// The feedback string, when non-empty, is the verbatim output of
+// verdict.feedback (interpret.go) — which already wraps the untrusted
+// sandbox summary in unique data-fence delimiter lines. This function
+// embeds feedback as-is: it MUST NOT re-wrap, strip, or reformat the
+// fenced sandbox block, or the agent loses the explicit
+// "data, not instructions" framing that protects it from treating the
+// run output as system-level directives. No double-fencing.
 func buildTask(finding store.Finding, feedback string) string {
 	var b strings.Builder
 	b.WriteString("Reproduce the following verified bug with a minimal failing test.\n\n")
