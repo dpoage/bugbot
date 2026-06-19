@@ -552,9 +552,10 @@ func postLeads(ctx context.Context, results []parsedResult, analyzerName string,
 
 // sarifMinimal is a minimal SARIF envelope for ingestion. We parse only the
 // fields needed by Seed; the full SARIF 2.1.0 schema has many more. Using a
-// separate minimal struct (rather than importing report.SARIFLog) keeps the
-// package self-contained and the struct fields exactly scoped to what we need.
-// The report package's types are the OUTPUT side; this is the INPUT side.
+// separate minimal struct (rather than importing the emitter types in
+// internal/sarif) keeps the package self-contained and the struct fields
+// exactly scoped to what we need. The internal/sarif types are the OUTPUT
+// side; this is the INPUT side.
 type sarifMinimal struct {
 	Runs []sarifRunMin `json:"runs"`
 }
