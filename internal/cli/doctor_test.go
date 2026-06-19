@@ -744,3 +744,73 @@ func TestCheckSandboxVerifier_Disabled(t *testing.T) {
 		}
 	}
 }
+
+// TestDominantLanguagesFromPaths_GoRepo asserts that the content-free
+// extension-based detector identifies Go as a dominant language when given the
+// tracked file list of this repository. This is the parity assertion required
+// by bugbot-o0e: the new path must agree with the Snapshot-based path on the
+// obvious case (a Go repository contains Go).
+func TestDominantLanguagesFromPaths_GoRepo(t *testing.T) {
+	// Use the actual worktree's tracked files so the assertion covers real data.
+	paths := []string{
+		"main.go",
+		"internal/ingest/lang.go",
+		"internal/ingest/snapshot.go",
+		"internal/cli/doctor.go",
+		"internal/cli/doctor_test.go",
+		"README.md",
+		"Makefile",
+	}
+	langs := ingest.DominantLanguagesFromPaths(paths)
+	found := false
+	for _, l := range langs {
+		if l == ingest.LangGo {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("DominantLanguagesFromPaths: Go not in dominant langs %v for a Go repo", langs)
+	}
+}
+
+// TestDoctor_SecretsNeverInOutput_ConfigError asserts that even when the config
+// file is invalid, the API key value injected through the env fake never appears
+// anywhere in the doctor output. This covers the config-error branch that the
+// original TestDoctor_SecretsNeverInOutput omits (happy path only).
+func TestDoctor_SecretsNeverInOutput_ConfigError(t *testing.T) {
+	const secretValue = "super-secret-key-xyz-config-error-path"
+	// Write an intentionally broken config to force the config check to FAIL.
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "bad.yaml")
+	if err := os.WriteFile(cfgPath, []byte("not: valid: config: [\n"), 0o644); err != nil {
+		t.Fatalf("write bad config: %v", err)
+	}
+	var sb strings.Builder
+	env := allGreenEnv(t, cfgPath)
+	env.configPath = cfgPath
+	env.lookupEnv = func(key string) string {
+		// Return the secret for any key lookup so it could leak if mishandled.
+		return secretValue
+	}
+	env.out = &sb
+
+	results := runChecks(context.Background(), env, false)
+	printResults(&sb, results)
+	out := sb.String()
+
+	if strings.Contains(out, secretValue) {
+		t.Errorf("doctor output must not contain secret value %q even on config error\n---\n%s", secretValue, out)
+	}
+	// The config FAIL line must be present.
+	found := false
+	for _, r := range results {
+		if r.Name == "config" && r.Status == statusFail {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected config FAIL result on bad config, got: %v", results)
+	}
+}

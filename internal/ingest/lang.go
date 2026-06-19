@@ -127,6 +127,43 @@ func ExtensionsForLanguage(lang Language) []string {
 	return out
 }
 
+// DominantLanguagesFromPaths classifies a list of file paths by extension and
+// returns the dominant languages using the same algorithm as DominantLanguages:
+// count files per language (excluding LangOther and LangShell), sort by
+// descending count with a stable Language-string tie-break, and cap at
+// maxProfileLanguages. No file contents are read — classification is purely
+// extension-based via DetectLanguage.
+//
+// This is the content-free variant used by doctor's language check: it runs
+// over the output of `git ls-files` and skips all binary sniffing.
+func DominantLanguagesFromPaths(paths []string) []Language {
+	counts := make(map[Language]int)
+	for _, p := range paths {
+		l := DetectLanguage(p)
+		if l == LangOther || l == LangShell {
+			continue
+		}
+		counts[l]++
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+	langs := make([]Language, 0, len(counts))
+	for l := range counts {
+		langs = append(langs, l)
+	}
+	sort.Slice(langs, func(i, j int) bool {
+		if counts[langs[i]] != counts[langs[j]] {
+			return counts[langs[i]] > counts[langs[j]]
+		}
+		return langs[i] < langs[j]
+	})
+	if len(langs) > maxProfileLanguages {
+		langs = langs[:maxProfileLanguages]
+	}
+	return langs
+}
+
 // isBinaryContent applies the classic "null byte in the first chunk" heuristic.
 // Git uses the same approach: a NUL byte in the leading bytes is a strong
 // signal that a file is binary rather than text.

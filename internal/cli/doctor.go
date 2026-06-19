@@ -270,8 +270,8 @@ func checkProviders(env doctorEnv, cfg config.Config) []checkResult {
 const sandboxProbeTimeout = 5 * time.Second
 
 // repoFactsTimeout bounds the informational repo-facts group (git rev-parse
-// plus the ingest snapshot, which walks every tracked file). Generous because
-// snapshotting a large repo legitimately takes time, but finite because an
+// plus `git ls-files` for extension-based language detection). Generous because
+// ls-files on a large repo legitimately takes time, but finite because an
 // informational check must never wedge doctor.
 const repoFactsTimeout = 30 * time.Second
 
@@ -406,30 +406,24 @@ func checkRepo(ctx context.Context, env doctorEnv, cfg config.Config, cfgOK bool
 			results = append(results, langInfoResult(langs))
 		}
 	} else {
-		// Production path: open the repo and snapshot it.
-		var filter ingest.ScanFilter
-		if cfgOK {
-			filter = ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude}
-		}
-		repo, err := ingest.Open(ctx, env.repoDir)
+		// Production path: list tracked files via `git ls-files` (no content
+		// reads, no binary sniffing) and classify by extension only.
+		out, err := env.runCommand(ctx, "git", "-C", env.repoDir, "ls-files")
 		if err != nil {
 			results = append(results, checkResult{
 				Name:   "languages",
 				Status: statusWarn,
-				Detail: "could not open repo: " + err.Error(),
+				Detail: "could not list tracked files: " + err.Error(),
 			})
 		} else {
-			snap, err := repo.Snapshot(ctx, filter)
-			if err != nil {
-				results = append(results, checkResult{
-					Name:   "languages",
-					Status: statusWarn,
-					Detail: "could not snapshot repo: " + err.Error(),
-				})
-			} else {
-				langs = ingest.DominantLanguages(snap)
-				results = append(results, langInfoResult(langs))
+			var paths []string
+			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+				if line != "" {
+					paths = append(paths, line)
+				}
 			}
+			langs = ingest.DominantLanguagesFromPaths(paths)
+			results = append(results, langInfoResult(langs))
 		}
 	}
 
