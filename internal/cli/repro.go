@@ -87,7 +87,10 @@ the command exits with a graceful message rather than an error.`,
 			// Ledger spend with an empty scan-run id: backlog findings span
 			// multiple past runs, so there is no single run to attribute to.
 			// This matches the daemon's backlog attribution choice.
-			rd, err := buildReproducer(ctx, &cfg, st, target, runtime)
+			// nil progress sink: the one-shot `bugbot repro` prints its summary to
+			// stdout and does not own a status.json snapshot (the daemon/scan do).
+			// Writing one here would race a running daemon's single-writer snapshot.
+			rd, err := buildReproducer(ctx, &cfg, st, target, runtime, nil)
 			if err != nil {
 				return err
 			}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
 )
@@ -466,11 +467,20 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, budget
 		// finders use to stop mid-run when the shared budget is exhausted.
 		limits = budget.finderRunnerLimits(f.opts.Limits.FinderLimits)
 	}
+	// Surface this per-package summary as an in-flight agent in `bugbot status`
+	// and the live pane via the shared AgentScope seam. The cartographer drives
+	// a single tool-less completion, so there is no per-turn tool-call activity;
+	// the started/finished bracket is what shows the operator the cartograph
+	// stage is doing work (and on which package).
+	progress.NewAgentScope(f.opts.Progress, progress.RoleCartographer, pkg).Start()
 	runner := f.newAgentRunner(client, nil, cartographySystemPrompt, limits)
 	var out struct {
 		Summary string `json:"summary"`
 	}
-	if _, err := runner.RunJSON(ctx, body.String(), cartographySummarySchema, &out); err != nil {
+	start := time.Now()
+	outcome, err := runner.RunJSON(ctx, body.String(), cartographySummarySchema, &out)
+	emitAgentFinished(f.opts.Progress, progress.RoleCartographer, pkg, outcome, start, err)
+	if err != nil {
 		return "", err
 	}
 	summary := strings.TrimSpace(out.Summary)

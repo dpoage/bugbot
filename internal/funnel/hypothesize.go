@@ -840,10 +840,7 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 // recordFinderUnitWithTimeDetail call. This keeps the recording at a single
 // site and avoids threading a store reference into this function.
 func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState, startedAt time.Time) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, error) {
-	sink := f.opts.Progress
-	progress.Emit(sink, progress.Event{
-		Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: label,
-	})
+	progress.NewAgentScope(f.opts.Progress, progress.RoleFinder, label).Start()
 
 	runner := f.newAgentRunner(finder, tools, sysprompt, budget.finderRunnerLimits(f.opts.Limits.FinderLimits),
 		f.activitySinkFor(progress.RoleFinder, label))

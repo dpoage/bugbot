@@ -194,15 +194,6 @@ func verdictWord(v *refutation) string {
 	return "not-refuted"
 }
 
-// errString returns err.Error() or "" for a nil error, for embedding in a
-// JSON-serializable progress event.
-func errString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
 // seatRefutedSlice returns a parallel bool slice indicating which verdicts were
 // "refuted", for use in the per-unit observability row. Returns nil when the
 // slice is empty.

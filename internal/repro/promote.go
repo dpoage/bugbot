@@ -261,6 +261,8 @@ func (r *Reproducer) provePatch(ctx context.Context, st *store.Store, f store.Fi
 		depMounts:     r.deps.ROMounts,
 		depEnv:        r.deps.Env,
 		setupCmds:     r.deps.SetupCmds,
+		progress:      r.opts.Progress,
+		statusNotes:   r.opts.StatusNotes,
 	}
 	return prover.Prove(ctx, st, f, att)
 }

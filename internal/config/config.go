@@ -153,7 +153,8 @@ type Scan struct {
 	// default; the injection is append-only to the finder task and never
 	// mutates the cached system-prompt prefix.
 	Cartographer bool `yaml:"cartographer"`
-	// StatusNotes enables the status_note tool for finder and verifier agents.
+	// StatusNotes enables the status_note tool for the tool-using agents
+	// (finder, verifier, reproducer, and patch-prover).
 	// When on, agents can call status_note(note) to surface their current
 	// working hypothesis as a live activity update visible in the pane and
 	// `bugbot status`. This is a Tier-2 feature gated here so it imposes zero

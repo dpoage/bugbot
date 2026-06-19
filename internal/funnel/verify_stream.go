@@ -127,9 +127,7 @@ func (f *Funnel) runVerifyAndPersist(
 
 	sink := f.opts.Progress
 	startedAt := time.Now()
-	progress.Emit(sink, progress.Event{
-		Kind: progress.KindAgentStarted, Role: progress.RoleVerifier, Label: c.Title,
-	})
+	scope := progress.NewAgentScope(sink, progress.RoleVerifier, c.Title).Start()
 	verdicts, seatNames, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, candTools, persona, c, nRefuters, budget)
 
 	// Arbiter path.
@@ -160,10 +158,7 @@ func (f *Funnel) runVerifyAndPersist(
 	}
 
 	finishedAt := time.Now()
-	progress.Emit(sink, progress.Event{
-		Kind: progress.KindAgentFinished, Role: progress.RoleVerifier, Label: c.Title,
-		Tokens: tokens, Duration: finishedAt.Sub(startedAt), Err: errString(err),
-	})
+	scope.Finish(tokens, finishedAt.Sub(startedAt), err)
 
 	// Error path: fatal (ctx cancel or unexpected runner error).
 	if err != nil {

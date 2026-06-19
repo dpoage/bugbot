@@ -8,6 +8,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -280,13 +281,18 @@ var planSchema = json.RawMessage(`{
 // planFor asks the agent for a repro plan for finding. feedback, when
 // non-empty, is appended to steer a revision after a prior non-demonstrating
 // attempt.
-func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding store.Finding, feedback string) (*Plan, error) {
+func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding store.Finding, feedback string) (*Plan, llm.Usage, error) {
 	task := buildTask(finding, feedback)
 	var plan Plan
-	if _, err := runner.RunJSON(ctx, task, planSchema, &plan); err != nil {
-		return nil, err
+	outcome, err := runner.RunJSON(ctx, task, planSchema, &plan)
+	var usage llm.Usage
+	if outcome != nil {
+		usage = outcome.Usage
 	}
-	return &plan, nil
+	if err != nil {
+		return nil, usage, err
+	}
+	return &plan, usage, nil
 }
 
 // buildTask renders the per-finding task prompt, including the finding's

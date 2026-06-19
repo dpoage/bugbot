@@ -34,6 +34,7 @@ import (
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -117,6 +118,17 @@ type Options struct {
 	// when cgo is absent). A nil CapabilitySet is treated as "all unknown"
 	// and the prompt omits capability guidance.
 	Capabilities sandbox.CapabilitySet
+	// Progress, when non-nil, receives agent observability events: each repro
+	// (and patch-prover) run is bracketed with KindAgentStarted/Finished and its
+	// per-turn tool-call activity is emitted as KindAgentActivity, so a running
+	// reproduce stage surfaces in `bugbot status` and the live pane via the
+	// shared progress.AgentScope seam. Nil disables emission (no-op).
+	Progress progress.EventSink
+	// StatusNotes, when true, offers the reproducer and patch-prover agents the
+	// status_note tool so the model can record an explicit working note in
+	// addition to the automatic tool-call activity. Mirrors the funnel's
+	// Scan.StatusNotes gate; off by default.
+	StatusNotes bool
 }
 
 // resolve returns a copy of o with defaults applied; it does not mutate the
@@ -266,8 +278,20 @@ type Plan struct {
 // Attempt does NOT update the store; PromoteAll owns persistence so that the
 // promotion (tier + repro_path) and the Summary stay consistent. Callers using
 // Attempt directly are responsible for any store updates.
-func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (*Attempt, error) {
-	runner, err := r.newRunner(ingest.DetectLanguage(finding.File), r.buildSystems)
+func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (_ *Attempt, retErr error) {
+	// Bracket the whole per-finding reproduce run (all revision attempts) as a
+	// single "reproducer" agent in `bugbot status` / the live pane. The scope's
+	// activity sink is wired into the runner so each turn's tool call (and any
+	// status_note) shows what the reproducer is doing; the deferred Finish
+	// settles the bracket with the accumulated token usage and final error.
+	scope := progress.NewAgentScope(r.opts.Progress, progress.RoleReproducer, finding.Title).Start()
+	start := time.Now()
+	var usage llm.Usage
+	defer func() {
+		scope.Finish(usage.InputTokens+usage.OutputTokens, time.Since(start), retErr)
+	}()
+
+	runner, err := r.newRunner(ingest.DetectLanguage(finding.File), r.buildSystems, scope)
 	if err != nil {
 		return nil, fmt.Errorf("repro: build agent runner: %w", err)
 	}
@@ -281,7 +305,9 @@ func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (*Attem
 	for i := 0; i < r.opts.MaxAttempts; i++ {
 		att.Attempts = i + 1
 
-		plan, perr := r.planFor(ctx, runner, finding, feedback)
+		plan, u, perr := r.planFor(ctx, runner, finding, feedback)
+		usage.InputTokens += u.InputTokens
+		usage.OutputTokens += u.OutputTokens
 		if perr != nil {
 			return nil, fmt.Errorf("repro: plan finding %s: %w", finding.ID, perr)
 		}
@@ -323,18 +349,25 @@ func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (*Attem
 // newRunner builds a read-only agent runner rooted at the repo for the
 // reproducer role. lang is the finding's file language, used to seed the
 // language-specific test-framework guidance in the system prompt. systems
-// refines that guidance for C/C++ (cmake > meson > generic fallback).
-func (r *Reproducer) newRunner(lang ingest.Language, systems []ingest.BuildSystem) (*agent.Runner, error) {
+// refines that guidance for C/C++ (cmake > meson > generic fallback). scope is
+// the run's observability handle: its activity sink is wired so the agent's
+// per-turn tool calls surface live, and when StatusNotes is enabled the agent
+// also gets the status_note tool routed to the same sink.
+func (r *Reproducer) newRunner(lang ingest.Language, systems []ingest.BuildSystem, scope progress.AgentScope) (*agent.Runner, error) {
 	tools, err := readOnlyTools(r.repoDir)
 	if err != nil {
 		return nil, err
 	}
 	tools = append(tools, r.nav.Tools()...)
+	if r.opts.StatusNotes {
+		tools = append(tools, agent.NewStatusNoteTool(scope.ActivitySink()))
+	}
 	var opts []agent.Option
 	opts = append(opts, agent.WithLimits(r.opts.AgentLimits))
 	if r.opts.TranscriptDir != "" {
 		opts = append(opts, agent.WithTranscriptDir(r.opts.TranscriptDir))
 	}
+	opts = append(opts, agent.WithActivitySink(scope.ActivitySink()))
 	return agent.NewRunner(r.client, tools, systemPrompt(lang, systems, r.capabilities), opts...), nil
 }
 

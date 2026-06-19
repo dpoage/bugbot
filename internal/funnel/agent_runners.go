@@ -66,38 +66,23 @@ func (f *Funnel) newAgentRunner(client llm.Client, tools []agent.Tool, systemPro
 	return agent.NewRunner(client, tools, systemPrompt, opts...)
 }
 
-// activitySinkFor returns a WithActivitySink option that emits a
-// KindAgentActivity event on the funnel's progress sink for the given role and
-// label. When the funnel's progress sink is nil the option is still valid but
-// emitting is a no-op (progress.Emit handles nil sinks).
+// activitySinkFor returns a WithActivitySink option that routes each turn's
+// tool-call note to the funnel's progress sink as a KindAgentActivity event for
+// (role, label), via the shared progress.AgentScope seam. A nil progress sink
+// makes emission a no-op (progress.Emit handles nil sinks).
 func (f *Funnel) activitySinkFor(role, label string) agent.Option {
-	sink := f.opts.Progress
-	return agent.WithActivitySink(func(activity string) {
-		progress.Emit(sink, progress.Event{
-			Kind:     progress.KindAgentActivity,
-			Role:     role,
-			Label:    label,
-			Activity: activity,
-		})
-	})
+	return agent.WithActivitySink(progress.NewAgentScope(f.opts.Progress, role, label).ActivitySink())
 }
 
 // maybeStatusNoteTool returns a status_note Tool when f.opts.Features.StatusNotes is
 // true, or nil when the flag is off. Callers append the non-nil result to
 // their tool slice before building the runner; when nil, the tool is absent
-// and the tool set is byte-identical to the pre-feature state.
+// and the tool set is byte-identical to the pre-feature state. The tool's notes
+// flow through the same AgentScope activity sink as automatic tool-call notes,
+// so manual and derived activity render identically.
 func (f *Funnel) maybeStatusNoteTool(role, label string) agent.Tool {
 	if !f.opts.Features.StatusNotes {
 		return nil
 	}
-	sink := f.opts.Progress
-	activityFn := func(activity string) {
-		progress.Emit(sink, progress.Event{
-			Kind:     progress.KindAgentActivity,
-			Role:     role,
-			Label:    label,
-			Activity: activity,
-		})
-	}
-	return agent.NewStatusNoteTool(activityFn)
+	return agent.NewStatusNoteTool(progress.NewAgentScope(f.opts.Progress, role, label).ActivitySink())
 }

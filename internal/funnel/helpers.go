@@ -16,24 +16,15 @@ import (
 )
 
 // emitAgentFinished emits an agent-finished progress event with the run's token
-// usage, wall-clock duration, and error (if any). outcome may be nil when the
-// run failed before producing one; tokens then default to zero.
+// usage, wall-clock duration, and error (if any), via the shared
+// progress.AgentScope seam. outcome may be nil when the run failed before
+// producing one; tokens then default to zero.
 func emitAgentFinished(sink progress.EventSink, role, label string, outcome *agent.Outcome, start time.Time, err error) {
-	if sink == nil {
-		return
-	}
 	var tokens int64
 	if outcome != nil {
 		tokens = outcome.Usage.InputTokens + outcome.Usage.OutputTokens
 	}
-	ev := progress.Event{
-		Kind: progress.KindAgentFinished, Role: role, Label: label,
-		Tokens: tokens, Duration: time.Since(start),
-	}
-	if err != nil {
-		ev.Err = err.Error()
-	}
-	progress.Emit(sink, ev)
+	progress.NewAgentScope(sink, role, label).Finish(tokens, time.Since(start), err)
 }
 
 // emitFinderAgentFinished emits a KindAgentFinished event for a finder unit,

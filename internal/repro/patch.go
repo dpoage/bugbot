@@ -41,6 +41,7 @@ import (
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -168,6 +169,13 @@ type PatchProver struct {
 	depMounts []sandbox.ROMount
 	depEnv    []string
 	setupCmds [][]string
+	// progress, when non-nil, receives the patch-prover run's
+	// KindAgentStarted/Activity/Finished events via the shared AgentScope seam,
+	// so the fix-witness step surfaces in `bugbot status` and the live pane.
+	// statusNotes gates the status_note tool. Both mirror Reproducer.opts so the
+	// reproduce and patch-prover stages are observable identically.
+	progress    progress.EventSink
+	statusNotes bool
 }
 
 // detectSuiteCmd infers the full-suite test command from well-known repo
@@ -237,7 +245,7 @@ func detectSuiteCmd(repoDir string) []string {
 
 // Prove runs the patch-prover loop for a finding that was just promoted to T1.
 // It either promotes to T0 (FixWitnessed) or records NeedsHuman on exhaustion.
-func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f store.Finding, att *Attempt) (patchOutcome, error) {
+func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f store.Finding, att *Attempt) (_ patchOutcome, retErr error) {
 	maxAtt := p.maxAttempts
 	if maxAtt <= 0 {
 		maxAtt = patchDefaultMaxAttempts
@@ -254,7 +262,18 @@ func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f store.Findin
 		return patchOutcome{kind: patchOutcomeSkipped}, nil
 	}
 
-	runner, err := p.newRunner()
+	// Bracket the patch-prover run (post-skip-check: a skipped finding ran no
+	// agent) as a "patch-prover" agent in `bugbot status` / the live pane. The
+	// scope's activity sink is wired into the runner; the deferred Finish settles
+	// the bracket with accumulated token usage and the final error.
+	scope := progress.NewAgentScope(p.progress, progress.RolePatchProver, f.Title).Start()
+	start := time.Now()
+	var usage llm.Usage
+	defer func() {
+		scope.Finish(usage.InputTokens+usage.OutputTokens, time.Since(start), retErr)
+	}()
+
+	runner, err := p.newRunner(scope)
 	if err != nil {
 		return patchOutcome{}, fmt.Errorf("patch-prover: build runner: %w", err)
 	}
@@ -263,7 +282,9 @@ func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f store.Findin
 	var lastFailure string
 
 	for i := 0; i < maxAtt; i++ {
-		plan, perr := p.planFor(ctx, runner, f, att, feedback)
+		plan, u, perr := p.planFor(ctx, runner, f, att, feedback)
+		usage.InputTokens += u.InputTokens
+		usage.OutputTokens += u.OutputTokens
 		if perr != nil {
 			return patchOutcome{}, fmt.Errorf("patch-prover: plan: %w", perr)
 		}
@@ -361,28 +382,41 @@ func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f store.Findin
 	return patchOutcome{kind: patchOutcomeNeedsHuman}, nil
 }
 
-// newRunner builds a read-only agent runner for the patch-prover role.
-func (p *PatchProver) newRunner() (*agent.Runner, error) {
+// newRunner builds a read-only agent runner for the patch-prover role. scope is
+// the run's observability handle: its activity sink is wired so the agent's
+// per-turn tool calls surface live, and when statusNotes is enabled the agent
+// also gets the status_note tool routed to the same sink.
+func (p *PatchProver) newRunner(scope progress.AgentScope) (*agent.Runner, error) {
 	tools, err := readOnlyTools(p.repoDir)
 	if err != nil {
 		return nil, err
+	}
+	if p.statusNotes {
+		tools = append(tools, agent.NewStatusNoteTool(scope.ActivitySink()))
 	}
 	var opts []agent.Option
 	opts = append(opts, agent.WithLimits(p.agentLimits))
 	if p.transcriptDir != "" {
 		opts = append(opts, agent.WithTranscriptDir(p.transcriptDir))
 	}
+	opts = append(opts, agent.WithActivitySink(scope.ActivitySink()))
 	return agent.NewRunner(p.client, tools, patchSystemPrompt, opts...), nil
 }
 
-// planFor asks the patch-prover agent for a fix plan.
-func (p *PatchProver) planFor(ctx context.Context, runner *agent.Runner, f store.Finding, att *Attempt, feedback string) (*PatchPlan, error) {
+// planFor asks the patch-prover agent for a fix plan, returning the run's token
+// usage so Prove can settle the agent-finished bracket with an accurate total.
+func (p *PatchProver) planFor(ctx context.Context, runner *agent.Runner, f store.Finding, att *Attempt, feedback string) (*PatchPlan, llm.Usage, error) {
 	task := buildPatchTask(f, att, feedback)
 	var plan PatchPlan
-	if _, err := runner.RunJSON(ctx, task, patchSchema, &plan); err != nil {
-		return nil, err
+	outcome, err := runner.RunJSON(ctx, task, patchSchema, &plan)
+	var usage llm.Usage
+	if outcome != nil {
+		usage = outcome.Usage
 	}
-	return &plan, nil
+	if err != nil {
+		return nil, usage, err
+	}
+	return &plan, usage, nil
 }
 
 // buildPatchTask renders the per-finding patch-prover task prompt.

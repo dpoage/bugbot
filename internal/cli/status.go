@@ -93,7 +93,9 @@ func renderStatus(ctx context.Context, out io.Writer, cfg config.Config, st prog
 		_, _ = fmt.Fprintf(out, "  stage:        %s\n", st.Stage)
 	}
 	for _, a := range st.ActiveAgents {
-		line := fmt.Sprintf("  agent:        %-8s %s", a.Role, a.Label)
+		// Pad to the widest role name ("cartographer"/"patch-prover" = 12) so
+		// the label column stays aligned across all agent roles.
+		line := fmt.Sprintf("  agent:        %-12s %s", a.Role, a.Label)
 		if a.Activity != "" {
 			line += "  [" + a.Activity + "]"
 		}

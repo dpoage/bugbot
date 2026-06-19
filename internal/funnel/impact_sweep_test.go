@@ -10,6 +10,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/treesitter"
 )
@@ -541,9 +542,23 @@ func TestImpactSweep_AtMostOneLLMCall(t *testing.T) {
 		{idx: 1, fi: store.Finding{ID: "id-b", Title: "finding B", File: "include/b.hpp", Severity: "medium"}},
 	}
 
-	results, err := adjudicateImpact(ctx, client, ambiguous)
+	var sink captureSink
+	results, err := adjudicateImpact(ctx, client, ambiguous, &sink)
 	if err != nil {
 		t.Fatalf("adjudicateImpact: %v", err)
+	}
+	// The batched re-assessment must surface as a "severity" agent: one
+	// started + one finished bracket, regardless of how many findings it
+	// processed in the single call.
+	if got := len(sink.byKind(progress.KindAgentStarted)); got != 1 {
+		t.Errorf("severity agent_started count = %d, want 1", got)
+	}
+	fin := sink.byKind(progress.KindAgentFinished)
+	if len(fin) != 1 {
+		t.Fatalf("severity agent_finished count = %d, want 1", len(fin))
+	}
+	if fin[0].Role != progress.RoleSeverity {
+		t.Errorf("agent_finished role = %q, want %q", fin[0].Role, progress.RoleSeverity)
 	}
 	if n := client.callCount(); n != 1 {
 		t.Errorf("expected exactly 1 LLM call regardless of count, got %d", n)

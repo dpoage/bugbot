@@ -107,7 +107,7 @@ func newDaemonCmd() *cobra.Command {
 			// reproduce stage. Sandbox availability is surfaced in the banner.
 			sandboxRuntime, sandboxOK := sandbox.Detect()
 			if doRepro && sandboxOK {
-				reproducer, rerr := buildReproducer(ctx, &cfg, st, repo.Root(), sandboxRuntime)
+				reproducer, rerr := buildReproducer(ctx, &cfg, st, repo.Root(), sandboxRuntime, progressSink)
 				if rerr != nil {
 					return rerr
 				}
@@ -199,7 +199,7 @@ type reproDeps struct {
 // buildReproducer constructs the reproducer-role LLM client, sandbox, and
 // Reproducer used by the daemon's post-cycle promotion step. It mirrors the
 // wiring in `scan --repro`.
-func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot, runtime string) (*reproDeps, error) {
+func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot, runtime string, prog progress.EventSink) (*reproDeps, error) {
 	// Ledger repro + patch-prover spend (bugbot-58c). The daemon retags the
 	// recorder with each cycle's scan-run id via Deps.ReproTagger.
 	rec := newLedgerRecorder(ctx, st)
@@ -223,6 +223,8 @@ func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 		SetupCmds:        cfg.Sandbox.SetupCmds,
 		LocalMounts:      localMountsFromConfig(*cfg),
 		Capabilities:     caps,
+		Progress:         prog,
+		StatusNotes:      cfg.Scan.StatusNotes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer: %w", err)

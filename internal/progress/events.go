@@ -132,10 +132,17 @@ const (
 	StagePersist     = "persist"
 )
 
-// Role names the agent role an Agent event belongs to.
+// Role names the agent role an Agent event belongs to. Finder and verifier are
+// the funnel's core stages; cartographer, reproducer, patch-prover, and
+// severity are the extra-feature agents that surface through the same
+// AgentScope observability seam.
 const (
-	RoleFinder   = "finder"
-	RoleVerifier = "verifier"
+	RoleFinder       = "finder"
+	RoleVerifier     = "verifier"
+	RoleCartographer = "cartographer"
+	RoleReproducer   = "reproducer"
+	RolePatchProver  = "patch-prover"
+	RoleSeverity     = "severity"
 )
 
 // Counts is the per-stage accounting carried on stage-finished events and the

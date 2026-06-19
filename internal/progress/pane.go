@@ -307,7 +307,7 @@ func (p *PaneRenderer) frame() []string {
 	for _, k := range keys {
 		a := p.agents[k]
 		run := p.now().Sub(a.started).Round(time.Second)
-		line := fmt.Sprintf("  %-8s %-40s %s", a.role, a.label, run)
+		line := fmt.Sprintf("  %-12s %-40s %s", a.role, a.label, run)
 		if a.activity != "" {
 			line += "  " + a.activity
 		}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -893,7 +894,7 @@ func TestNewRunner_IncludesCodeNavTools(t *testing.T) {
 	}
 
 	// newRunner must not fail — it will compose baseline + nav tools.
-	if _, err := r.newRunner(ingest.LangGo, nil); err != nil {
+	if _, err := r.newRunner(ingest.LangGo, nil, progress.AgentScope{}); err != nil {
 		t.Fatalf("newRunner: %v", err)
 	}
 }

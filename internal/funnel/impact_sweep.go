@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/treesitter"
 )
@@ -101,7 +103,7 @@ func (f *Funnel) impactSweep(
 		return
 	}
 
-	llmResults, err := adjudicateImpact(ctx, verifierClient, ambiguous)
+	llmResults, err := adjudicateImpact(ctx, verifierClient, ambiguous, f.opts.Progress)
 	if err != nil {
 		f.note(result, fmt.Sprintf("impact_sweep: LLM adjudication failed: %v", err))
 		return
@@ -432,11 +434,14 @@ Rules:
 
 // adjudicateImpact sends a single batched LLM call for ambiguous findings and
 // returns per-finding severity + rationale. At most one LLM call is made
-// regardless of input size.
+// regardless of input size. sink (the funnel's progress sink, possibly nil)
+// brackets the call as a "severity" agent so the re-assessment surfaces in
+// `bugbot status` and the live pane via the shared AgentScope seam.
 func adjudicateImpact(
 	ctx context.Context,
 	client llm.Client,
 	ambiguous []ambiguousEntry,
+	sink progress.EventSink,
 ) ([]adjResult, error) {
 	entries := make([]impactAdjEntry, 0, len(ambiguous))
 	idxByID := make(map[string]int, len(ambiguous))
@@ -460,10 +465,17 @@ func adjudicateImpact(
 	task := fmt.Sprintf("Re-assess the severity of these %d findings by reachability and impact.\n\nFindings:\n%s",
 		len(entries), string(inputJSON))
 
+	// One tool-less batched completion; the started/finished bracket is the
+	// observability (no per-turn tool-call activity to report).
+	label := fmt.Sprintf("%d findings", len(entries))
+	progress.NewAgentScope(sink, progress.RoleSeverity, label).Start()
 	runner := agent.NewRunner(client, nil, impactAdjSystemPrompt)
 	var resp impactAdjResponse
-	if _, err := runner.RunJSON(ctx, task, impactAdjSchema, &resp); err != nil {
-		return nil, fmt.Errorf("impact_sweep: LLM adjudication: %w", err)
+	start := time.Now()
+	outcome, rerr := runner.RunJSON(ctx, task, impactAdjSchema, &resp)
+	emitAgentFinished(sink, progress.RoleSeverity, label, outcome, start, rerr)
+	if rerr != nil {
+		return nil, fmt.Errorf("impact_sweep: LLM adjudication: %w", rerr)
 	}
 
 	results := make([]adjResult, 0, len(resp.Results))

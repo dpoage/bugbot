@@ -154,7 +154,7 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 	defer stopPane()
 
 	// Build the reproducer and wire it as an in-run hook when --repro is set.
-	reproHook, reproRec, r, reproAttempted, err := buildReproHookForScan(ctx, out, cfg, st, flags)
+	reproHook, reproRec, r, reproAttempted, err := buildReproHookForScan(ctx, out, cfg, st, flags, progressSink)
 	if err != nil {
 		return err
 	}
@@ -334,6 +334,7 @@ func buildReproHookForScan(
 	cfg config.Config,
 	st *store.Store,
 	flags ScanFlags,
+	prog progress.EventSink,
 ) (
 	hook func(ctx context.Context, scanRunID string, finding store.Finding) error,
 	rec *ledgerRecorder,
@@ -376,6 +377,8 @@ func buildReproHookForScan(
 		SetupCmds:        cfg.Sandbox.SetupCmds,
 		LocalMounts:      localMountsFromConfig(cfg),
 		Capabilities:     caps,
+		Progress:         prog,
+		StatusNotes:      cfg.Scan.StatusNotes,
 	})
 	if rNewErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer: %w", rNewErr)
