@@ -168,8 +168,8 @@ func TestHypothesize_DiffIntentGatedOnTargetedOnly(t *testing.T) {
 	// Funnel with ChangeContext set. On Sweep() the kind is ScanOneshot — even
 	// with ChangeContext, diff-intent must emit zero tasks.
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		MaxParallel:   1,
-		ChangeContext: cc,
+		Limits:    StageLimits{MaxParallel: 1},
+		Discovery: DiscoveryConfig{ChangeContext: cc},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +202,7 @@ func TestHypothesize_DiffIntentZeroOnSweep(t *testing.T) {
 	verifier := newScriptedClient()
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		MaxParallel: 1,
+		Limits: StageLimits{MaxParallel: 1},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -231,8 +231,8 @@ func TestHypothesize_DiffIntentNilCC(t *testing.T) {
 	verifier := newScriptedClient()
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		MaxParallel:   1,
-		ChangeContext: nil,
+		Limits:    StageLimits{MaxParallel: 1},
+		Discovery: DiscoveryConfig{ChangeContext: nil},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -265,14 +265,14 @@ func TestHypothesize_DiffIntentOneTaskOnTargeted(t *testing.T) {
 	verifier := newScriptedClient().onTaskContains("intent gap", notRefutedJSON)
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		MaxParallel: 1,
-		ChangeContext: &ChangeContext{
+		Limits: StageLimits{MaxParallel: 1},
+		Discovery: DiscoveryConfig{ChangeContext: &ChangeContext{
 			FromCommit:   "abc",
 			ToCommit:     "def",
 			Message:      "add validation before use",
 			Diff:         []byte("--- a/bug.go\n+++ b/bug.go\n@@ -1 +1 @@\n-validate(x)\n+noop()\n"),
 			ChangedFiles: []string{"bug.go"},
-		},
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -321,14 +321,14 @@ func TestHypothesize_DiffIntentTaskContent(t *testing.T) {
 	rec := newTaskRecordingClient()
 	verifier := newScriptedClient()
 	f, err := New(RoleClients{Finder: rec, Verifier: verifier}, st, repo, Options{
-		MaxParallel: 1,
-		ChangeContext: &ChangeContext{
+		Limits: StageLimits{MaxParallel: 1},
+		Discovery: DiscoveryConfig{ChangeContext: &ChangeContext{
 			FromCommit:   "a",
 			ToCommit:     "b",
 			Message:      "sentinel-message-12345",
 			Diff:         bigDiff,
 			ChangedFiles: []string{"bug.go"},
-		},
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -404,9 +404,8 @@ func TestDegradedLensNames_SweepKeepsTaxonomyTop2(t *testing.T) {
 	// goroutine scheduling order. Soft (70% of 1200 = 840) fires after 6 runs
 	// (900 > 840), leaving injection skipped — res.Degraded = true.
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		TokenBudget:           1200,
-		CacheReadBudgetWeight: 1.0,
-		MaxParallel:           1,
+		Budget: BudgetConfig{TokenBudget: 1200, CacheReadBudgetWeight: 1.0},
+		Limits: StageLimits{MaxParallel: 1},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -468,16 +467,15 @@ func TestDegradedLensNames_CommitRunKeepsDiffIntentAndNilSafety(t *testing.T) {
 		//     goroutine scheduling order, so diff-intent cannot be hard-stopped.
 		//   - soft threshold (70% of 1300 = 910) fires after 7 completions (1050 >
 		//     910), making res.Degraded=true so the test's assertions are exercised.
-		TokenBudget:           1300,
-		CacheReadBudgetWeight: 1.0,
-		MaxParallel:           1,
-		ChangeContext: &ChangeContext{
+		Budget: BudgetConfig{TokenBudget: 1300, CacheReadBudgetWeight: 1.0},
+		Limits: StageLimits{MaxParallel: 1},
+		Discovery: DiscoveryConfig{ChangeContext: &ChangeContext{
 			FromCommit:   "abc",
 			ToCommit:     "def",
 			Message:      "add validation",
 			Diff:         []byte("--- a/bug.go\n+++ b/bug.go\n@@ -1 +1 @@\n-validate(x)\n+noop()\n"),
 			ChangedFiles: []string{"bug.go"},
-		},
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -170,7 +170,7 @@ func applySweepOrder(targets []string, heat map[string]float64, fps map[string]s
 // finder-unit count depends on the post-ordering chunk packing, so any
 // divergence would make the estimate drift from the real run on polyglot repos.
 func (f *Funnel) orderSweepTargets(ctx context.Context, targets []string, fps map[string]string, fpsErr error) (heat map[string]float64, heatFiles, neverScanned, changedSinceScan int, heatOrdered bool) {
-	if f.opts.DisableHeatOrdering {
+	if f.opts.Features.DisableHeatOrdering {
 		return nil, 0, 0, 0, false
 	}
 	heat, heatErr := ingest.ChurnHeat(ctx, f.repo.Root(), 0)
@@ -277,7 +277,7 @@ func (f *Funnel) Targeted(ctx context.Context, changedFiles []string) (*Result, 
 // way: this used to pass an empty filter, so include/exclude globs were
 // silently ignored and a "scoped" calibration scan swept the whole repo.
 func (f *Funnel) snapshot(ctx context.Context) (*ingest.Snapshot, error) {
-	snap, err := f.repo.Snapshot(ctx, f.opts.Filter)
+	snap, err := f.repo.Snapshot(ctx, f.opts.Discovery.Filter)
 	if err != nil {
 		return nil, fmt.Errorf("funnel: snapshot: %w", err)
 	}
@@ -372,28 +372,25 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	if window := f.clients.Finder.Capabilities().ContextWindow; window > 0 {
 		f.opts = scaleFinderForContext(f.opts, window)
 	}
-	cacheWeight := f.opts.CacheReadBudgetWeight
-	if cacheWeight == 0 {
-		cacheWeight = DefaultCacheReadBudgetWeight
-	}
-	budget := newBudgetState(f.opts.TokenBudget, rec, cacheWeight)
+	cacheWeight := f.opts.Budget.CacheReadBudgetWeight
+	budget := newBudgetState(f.opts.Budget.TokenBudget, rec, cacheWeight)
 	// Per-task token claims: each finder / verifier agent run is capped at its
 	// role's claim so one breadth-heavy run cannot be granted a whole stage's
 	// reserve at launch; the unspent remainder of a claim stays in the pool for
 	// sibling runs (the claimant system, bugbot-8mj).
-	budget.finderClaim = f.opts.FinderTokenClaim
-	budget.verifyClaim = f.opts.VerifierTokenClaim
+	budget.finderClaim = f.opts.Budget.FinderTokenClaim
+	budget.verifyClaim = f.opts.Budget.VerifierTokenClaim
 	// Reserve a slice of the per-run budget for downstream verification so the
 	// breadth-heavy finder stage cannot drain the whole pool and orphan every
 	// candidate before it is verified (bugbot-8mj / bugbot-3lt). A no-op when the
 	// budget is unlimited or the share disables the reservation.
-	budget.reserveForDownstream(f.opts.FinderBudgetShare)
+	budget.reserveForDownstream(f.opts.Budget.FinderBudgetShare)
 
 	result := &Result{ScanRunID: scanRunID, Commit: snap.Commit}
 	// Persist whether the cartographer pass was active, on every exit path
 	// (set before the finalize defer below), so the valid-findings-per-token
 	// time series can be sliced by on/off.
-	result.Stats.CartographerEnabled = f.opts.Cartographer
+	result.Stats.CartographerEnabled = f.opts.Features.Cartographer
 
 	// Interrupt-safe finalization: seal the scan_runs row on every exit path.
 	var finalize = func(s *Stats) error {
@@ -547,7 +544,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		// byte-identical to the pre-cartographer build.
 		cart := f.cartograph(ctx, result, cartographerClient, snap, targets, fps, budget)
 		n, err := f.hypothesize(ctx, scanRunID, finderClient, persona, kind,
-			f.opts.ChangeContext, langs, targets, seams, budget, result, fps, touchCoverage, cart, emit)
+			f.opts.Discovery.ChangeContext, langs, targets, seams, budget, result, fps, touchCoverage, cart, emit)
 		hypothesizedCount = n
 		hypothesizeErr = err
 		close(candCh)

@@ -295,8 +295,8 @@ func TestAggregation_UnanimousRefuted_NoArbiter(t *testing.T) {
 	verifier.fallback = refutedJSON // all 3 refuters refute
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses:   []string{"nil-safety/error-handling"},
-		Refuters: 3,
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		Limits:    StageLimits{Refuters: 3},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -332,8 +332,8 @@ func TestAggregation_UnanimousSurvive_NoArbiter(t *testing.T) {
 	verifier.fallback = notRefutedJSON // all 3 refuters cannot refute
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses:   []string{"nil-safety/error-handling"},
-		Refuters: 3,
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		Limits:    StageLimits{Refuters: 3},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -383,8 +383,8 @@ func TestAggregation_SplitPanel_ArbiterSurvives(t *testing.T) {
 	verifier := makeCallCountVerifier(1, notRefutedJSON)
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses:   []string{"nil-safety/error-handling"},
-		Refuters: 2,
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		Limits:    StageLimits{Refuters: 2},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -417,8 +417,8 @@ func TestAggregation_SplitPanel_ArbiterKills(t *testing.T) {
 	verifier := makeCallCountVerifier(1, refutedJSON)
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses:   []string{"nil-safety/error-handling"},
-		Refuters: 2,
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		Limits:    StageLimits{Refuters: 2},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -456,8 +456,8 @@ func TestAggregation_ArbiterParseFailure_FallbackKills(t *testing.T) {
 	verifier := makeCallCountVerifier(2, `this is not valid json at all`)
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses:   []string{"nil-safety/error-handling"},
-		Refuters: 3,
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		Limits:    StageLimits{Refuters: 3},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -496,8 +496,8 @@ func TestAggregation_ArbiterParseFailure_FallbackSurvives(t *testing.T) {
 	verifier := makeCallCountVerifier(1, `this is not valid json at all`)
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses:   []string{"nil-safety/error-handling"},
-		Refuters: 3,
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		Limits:    StageLimits{Refuters: 3},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -551,7 +551,7 @@ func TestRunRefuters_N1_NoSeatClause(t *testing.T) {
 
 	f := &Funnel{
 		repo:   repo,
-		opts:   Options{Refuters: 1},
+		opts:   Options{Limits: StageLimits{Refuters: 1}},
 		lenses: selectLenses(nil),
 	}
 
@@ -589,7 +589,7 @@ func TestRunRefuters_N3_ThreeDistinctPrompts(t *testing.T) {
 
 	f := &Funnel{
 		repo:   repo,
-		opts:   Options{Refuters: 3},
+		opts:   Options{Limits: StageLimits{Refuters: 3}},
 		lenses: selectLenses(nil),
 	}
 
@@ -637,9 +637,8 @@ func TestStats_ArbiterCountsUnderParallel(t *testing.T) {
 	verifier := makeCallCountVerifier(1, notRefutedJSON)
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses:      []string{"nil-safety/error-handling"},
-		Refuters:    2,
-		MaxParallel: 4, // run with concurrency to exercise the atomic stat fold
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		Limits:    StageLimits{Refuters: 2, MaxParallel: 4}, // run with concurrency to exercise the atomic stat fold
 	})
 	if err != nil {
 		t.Fatal(err)

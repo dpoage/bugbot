@@ -248,8 +248,8 @@ func TestSweep_SandboxExec_StatsAggregated(t *testing.T) {
 		RoleClients{Finder: finder, Verifier: verifier},
 		st, repo,
 		Options{
-			Lenses:      []string{"nil-safety/error-handling"},
-			Refuters:    1, // one refuter so we can reason about exact counts
+			Discovery:   DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+			Limits:      StageLimits{Refuters: 1}, // one refuter so we can reason about exact counts
 			SandboxOpts: sandboxOpts,
 		},
 	)
@@ -306,7 +306,7 @@ func TestSweep_SandboxExec_AbsentForBelowThreshold(t *testing.T) {
 		RoleClients{Finder: finder, Verifier: verifier},
 		st, repo,
 		Options{
-			Lenses:      []string{"nil-safety/error-handling"},
+			Discovery:   DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
 			SandboxOpts: sandboxOpts,
 		},
 	)
@@ -415,7 +415,7 @@ func TestVerifyFinding_NoSandboxTool(t *testing.T) {
 		repo:    repo,
 		clients: RoleClients{Verifier: capture},
 		opts: Options{
-			Refuters: 1,
+			Limits: StageLimits{Refuters: 1},
 			SandboxOpts: SandboxOpts{
 				Enabled:     true,
 				Sandbox:     &funnelFakeSandbox{},

@@ -34,31 +34,31 @@ func TestScaleFinderForContext_DefaultsCoveredByZeroPin(t *testing.T) {
 	// at zero produces the resolved values below.
 	in := Options{}.resolve()
 	// Sanity: the resolved values match the package defaults.
-	if in.ChunkSize != DefaultChunkSize {
-		t.Fatalf("resolved ChunkSize = %d, want %d", in.ChunkSize, DefaultChunkSize)
+	if in.Limits.ChunkSize != DefaultChunkSize {
+		t.Fatalf("resolved ChunkSize = %d, want %d", in.Limits.ChunkSize, DefaultChunkSize)
 	}
-	if in.FinderReadLines != 0 || in.FinderReadBytes != 0 {
+	if in.Limits.FinderReadLines != 0 || in.Limits.FinderReadBytes != 0 {
 		t.Fatalf("resolved read caps should still be 0 (resolution is at consume time); got %+v", in)
 	}
-	if in.FinderLimits.HistoryTokenBudget != 0 {
-		t.Fatalf("resolved HistoryTokenBudget = %d, want 0 (compaction off by default)", in.FinderLimits.HistoryTokenBudget)
+	if in.Limits.FinderLimits.HistoryTokenBudget != 0 {
+		t.Fatalf("resolved HistoryTokenBudget = %d, want 0 (compaction off by default)", in.Limits.FinderLimits.HistoryTokenBudget)
 	}
 
 	got := scaleFinderForContext(in, 0)
-	if got.ChunkSize != DefaultChunkSize {
-		t.Errorf("ChunkSize = %d, want %d (default preserved)", got.ChunkSize, DefaultChunkSize)
+	if got.Limits.ChunkSize != DefaultChunkSize {
+		t.Errorf("ChunkSize = %d, want %d (default preserved)", got.Limits.ChunkSize, DefaultChunkSize)
 	}
-	if got.FinderReadLines != 0 {
-		t.Errorf("FinderReadLines = %d, want 0 (default sentinel preserved)", got.FinderReadLines)
+	if got.Limits.FinderReadLines != 0 {
+		t.Errorf("FinderReadLines = %d, want 0 (default sentinel preserved)", got.Limits.FinderReadLines)
 	}
-	if got.FinderReadBytes != 0 {
-		t.Errorf("FinderReadBytes = %d, want 0 (default sentinel preserved)", got.FinderReadBytes)
+	if got.Limits.FinderReadBytes != 0 {
+		t.Errorf("FinderReadBytes = %d, want 0 (default sentinel preserved)", got.Limits.FinderReadBytes)
 	}
-	if got.FinderLimits.HistoryTokenBudget != 0 {
-		t.Errorf("HistoryTokenBudget = %d, want 0 (compaction stays off)", got.FinderLimits.HistoryTokenBudget)
+	if got.Limits.FinderLimits.HistoryTokenBudget != 0 {
+		t.Errorf("HistoryTokenBudget = %d, want 0 (compaction stays off)", got.Limits.FinderLimits.HistoryTokenBudget)
 	}
-	if got.FinderHistoryTokens != 0 {
-		t.Errorf("FinderHistoryTokens = %d, want 0", got.FinderHistoryTokens)
+	if got.Limits.FinderHistoryTokens != 0 {
+		t.Errorf("FinderHistoryTokens = %d, want 0", got.Limits.FinderHistoryTokens)
 	}
 }
 
@@ -72,37 +72,37 @@ func TestScaleFinderForContext_SmallWindowScalesDown(t *testing.T) {
 	const win = 8_000 // 1/8th of the 64k baseline
 	got := scaleFinderForContext(in, win)
 
-	if got.ChunkSize >= DefaultChunkSize {
+	if got.Limits.ChunkSize >= DefaultChunkSize {
 		t.Errorf("ChunkSize = %d, want strictly less than default %d for 8k window",
-			got.ChunkSize, DefaultChunkSize)
+			got.Limits.ChunkSize, DefaultChunkSize)
 	}
-	if got.ChunkSize < 1 {
-		t.Errorf("ChunkSize = %d, want >= 1 (floor)", got.ChunkSize)
+	if got.Limits.ChunkSize < 1 {
+		t.Errorf("ChunkSize = %d, want >= 1 (floor)", got.Limits.ChunkSize)
 	}
 
 	// finderReadCaps substitutes defaults for the zero sentinel; we assert
 	// here on the raw Options values the helper produced, then re-resolve
 	// to verify the agent sees the scaled numbers.
-	if got.FinderReadLines >= DefaultFinderReadLines {
+	if got.Limits.FinderReadLines >= DefaultFinderReadLines {
 		t.Errorf("FinderReadLines = %d, want strictly less than default %d for 8k window",
-			got.FinderReadLines, DefaultFinderReadLines)
+			got.Limits.FinderReadLines, DefaultFinderReadLines)
 	}
-	if got.FinderReadLines < 100 {
-		t.Errorf("FinderReadLines = %d, want >= 100 (floor)", got.FinderReadLines)
+	if got.Limits.FinderReadLines < 100 {
+		t.Errorf("FinderReadLines = %d, want >= 100 (floor)", got.Limits.FinderReadLines)
 	}
-	if got.FinderReadBytes >= DefaultFinderReadBytes {
+	if got.Limits.FinderReadBytes >= DefaultFinderReadBytes {
 		t.Errorf("FinderReadBytes = %d, want strictly less than default %d for 8k window",
-			got.FinderReadBytes, DefaultFinderReadBytes)
+			got.Limits.FinderReadBytes, DefaultFinderReadBytes)
 	}
-	if got.FinderReadBytes < 8*1024 {
-		t.Errorf("FinderReadBytes = %d, want >= 8192 (floor)", got.FinderReadBytes)
+	if got.Limits.FinderReadBytes < 8*1024 {
+		t.Errorf("FinderReadBytes = %d, want >= 8192 (floor)", got.Limits.FinderReadBytes)
 	}
 
 	// Compaction is OFF by default: even on a small window, the helper
 	// must not enable it. The caller has to opt in.
-	if got.FinderHistoryTokens != 0 || got.FinderLimits.HistoryTokenBudget != 0 {
+	if got.Limits.FinderHistoryTokens != 0 || got.Limits.FinderLimits.HistoryTokenBudget != 0 {
 		t.Errorf("compaction must stay off (not opted in); got FinderHistoryTokens=%d HistoryTokenBudget=%d",
-			got.FinderHistoryTokens, got.FinderLimits.HistoryTokenBudget)
+			got.Limits.FinderHistoryTokens, got.Limits.FinderLimits.HistoryTokenBudget)
 	}
 }
 
@@ -114,14 +114,14 @@ func TestScaleFinderForContext_TinyWindowHonorsFloors(t *testing.T) {
 	in := Options{}.resolve()
 	got := scaleFinderForContext(in, 1_000)
 
-	if got.ChunkSize < 1 {
-		t.Errorf("ChunkSize = %d, want >= 1 (floor)", got.ChunkSize)
+	if got.Limits.ChunkSize < 1 {
+		t.Errorf("ChunkSize = %d, want >= 1 (floor)", got.Limits.ChunkSize)
 	}
-	if got.FinderReadLines < 100 {
-		t.Errorf("FinderReadLines = %d, want >= 100 (floor)", got.FinderReadLines)
+	if got.Limits.FinderReadLines < 100 {
+		t.Errorf("FinderReadLines = %d, want >= 100 (floor)", got.Limits.FinderReadLines)
 	}
-	if got.FinderReadBytes < 8*1024 {
-		t.Errorf("FinderReadBytes = %d, want >= 8192 (floor)", got.FinderReadBytes)
+	if got.Limits.FinderReadBytes < 8*1024 {
+		t.Errorf("FinderReadBytes = %d, want >= 8192 (floor)", got.Limits.FinderReadBytes)
 	}
 }
 
@@ -132,17 +132,17 @@ func TestScaleFinderForContext_LargeWindowNoChange(t *testing.T) {
 	in := Options{}.resolve()
 	for _, win := range []int{scaleBaselineContextWindow, 100_000, 200_000, 1_000_000} {
 		got := scaleFinderForContext(in, win)
-		if got.ChunkSize != DefaultChunkSize {
+		if got.Limits.ChunkSize != DefaultChunkSize {
 			t.Errorf("win=%d: ChunkSize = %d, want %d (large window should not inflate/shrink)",
-				win, got.ChunkSize, DefaultChunkSize)
+				win, got.Limits.ChunkSize, DefaultChunkSize)
 		}
-		if got.FinderReadLines != 0 {
+		if got.Limits.FinderReadLines != 0 {
 			t.Errorf("win=%d: FinderReadLines = %d, want 0 (sentinel preserved for large window)",
-				win, got.FinderReadLines)
+				win, got.Limits.FinderReadLines)
 		}
-		if got.FinderReadBytes != 0 {
+		if got.Limits.FinderReadBytes != 0 {
 			t.Errorf("win=%d: FinderReadBytes = %d, want 0 (sentinel preserved for large window)",
-				win, got.FinderReadBytes)
+				win, got.Limits.FinderReadBytes)
 		}
 	}
 }
@@ -156,34 +156,31 @@ func TestScaleFinderForContext_ExplicitValuesPreserved(t *testing.T) {
 	// FinderReadBytes=4096 (explicit, non-zero), FinderHistoryTokens=1234
 	// (explicit opt-in, positive).
 	in := Options{
-		ChunkSize:           2,
-		FinderReadLines:     300,
-		FinderReadBytes:     4096,
-		FinderHistoryTokens: 1234,
+		Limits: StageLimits{ChunkSize: 2, FinderReadLines: 300, FinderReadBytes: 4096, FinderHistoryTokens: 1234},
 	}.resolve()
 
 	got := scaleFinderForContext(in, 8_000)
 
-	if got.ChunkSize != 2 {
-		t.Errorf("explicit ChunkSize=2 was overridden to %d", got.ChunkSize)
+	if got.Limits.ChunkSize != 2 {
+		t.Errorf("explicit ChunkSize=2 was overridden to %d", got.Limits.ChunkSize)
 	}
-	if got.FinderReadLines != 300 {
-		t.Errorf("explicit FinderReadLines=300 was overridden to %d", got.FinderReadLines)
+	if got.Limits.FinderReadLines != 300 {
+		t.Errorf("explicit FinderReadLines=300 was overridden to %d", got.Limits.FinderReadLines)
 	}
-	if got.FinderReadBytes != 4096 {
-		t.Errorf("explicit FinderReadBytes=4096 was overridden to %d", got.FinderReadBytes)
+	if got.Limits.FinderReadBytes != 4096 {
+		t.Errorf("explicit FinderReadBytes=4096 was overridden to %d", got.Limits.FinderReadBytes)
 	}
 	// History: the caller opted in (positive). Scaling kicks in. The
 	// value must change, and HistoryTokenBudget must mirror it.
-	if got.FinderHistoryTokens == 1234 {
-		t.Errorf("explicit opt-in FinderHistoryTokens=1234 should have been scaled; got %d", got.FinderHistoryTokens)
+	if got.Limits.FinderHistoryTokens == 1234 {
+		t.Errorf("explicit opt-in FinderHistoryTokens=1234 should have been scaled; got %d", got.Limits.FinderHistoryTokens)
 	}
-	if got.FinderLimits.HistoryTokenBudget != got.FinderHistoryTokens {
+	if got.Limits.FinderLimits.HistoryTokenBudget != got.Limits.FinderHistoryTokens {
 		t.Errorf("HistoryTokenBudget = %d, FinderHistoryTokens = %d (limits must mirror the opt-in value)",
-			got.FinderLimits.HistoryTokenBudget, got.FinderHistoryTokens)
+			got.Limits.FinderLimits.HistoryTokenBudget, got.Limits.FinderHistoryTokens)
 	}
-	if got.FinderLimits.HistoryTokenBudget < scaleFloorHistoryTokens {
-		t.Errorf("HistoryTokenBudget = %d, want >= %d (floor)", got.FinderLimits.HistoryTokenBudget, scaleFloorHistoryTokens)
+	if got.Limits.FinderLimits.HistoryTokenBudget < scaleFloorHistoryTokens {
+		t.Errorf("HistoryTokenBudget = %d, want >= %d (floor)", got.Limits.FinderLimits.HistoryTokenBudget, scaleFloorHistoryTokens)
 	}
 }
 
@@ -194,17 +191,16 @@ func TestScaleFinderForContext_ExplicitValuesPreserved(t *testing.T) {
 // default" sentinel gets scaled.
 func TestScaleFinderForContext_ExplicitNegativeReadCapsPreserved(t *testing.T) {
 	in := Options{
-		FinderReadLines: -1,
-		FinderReadBytes: -1,
+		Limits: StageLimits{FinderReadLines: -1, FinderReadBytes: -1},
 	}.resolve()
 
 	got := scaleFinderForContext(in, 4_000)
 
-	if got.FinderReadLines != -1 {
-		t.Errorf("explicit FinderReadLines=-1 was overridden to %d", got.FinderReadLines)
+	if got.Limits.FinderReadLines != -1 {
+		t.Errorf("explicit FinderReadLines=-1 was overridden to %d", got.Limits.FinderReadLines)
 	}
-	if got.FinderReadBytes != -1 {
-		t.Errorf("explicit FinderReadBytes=-1 was overridden to %d", got.FinderReadBytes)
+	if got.Limits.FinderReadBytes != -1 {
+		t.Errorf("explicit FinderReadBytes=-1 was overridden to %d", got.Limits.FinderReadBytes)
 	}
 }
 
@@ -216,13 +212,13 @@ func TestScaleFinderForContext_HistoryCompactionOnlyWhenOptedIn(t *testing.T) {
 	in := Options{}.resolve() // FinderHistoryTokens = 0 (compaction off)
 	for _, win := range []int{1_000, 4_000, 8_000, 16_000, 32_000} {
 		got := scaleFinderForContext(in, win)
-		if got.FinderHistoryTokens != 0 {
+		if got.Limits.FinderHistoryTokens != 0 {
 			t.Errorf("win=%d: FinderHistoryTokens = %d, want 0 (compaction must not auto-enable)",
-				win, got.FinderHistoryTokens)
+				win, got.Limits.FinderHistoryTokens)
 		}
-		if got.FinderLimits.HistoryTokenBudget != 0 {
+		if got.Limits.FinderLimits.HistoryTokenBudget != 0 {
 			t.Errorf("win=%d: HistoryTokenBudget = %d, want 0 (compaction must not auto-enable)",
-				win, got.FinderLimits.HistoryTokenBudget)
+				win, got.Limits.FinderLimits.HistoryTokenBudget)
 		}
 	}
 }
@@ -232,20 +228,20 @@ func TestScaleFinderForContext_HistoryCompactionOnlyWhenOptedIn(t *testing.T) {
 // to a positive value, scaling kicks in and produces a threshold
 // proportional to the context window, with the floor.
 func TestScaleFinderForContext_HistoryCompactionScalesWhenOptedIn(t *testing.T) {
-	in := Options{FinderHistoryTokens: 60_000}.resolve()
+	in := Options{Limits: StageLimits{FinderHistoryTokens: 60_000}}.resolve()
 	got := scaleFinderForContext(in, 8_000)
 	// 25% of 8_000 = 2_000, which is above the 1_000 floor.
-	if got.FinderHistoryTokens != 2_000 {
-		t.Errorf("FinderHistoryTokens = %d, want 2000 (25%% of 8000)", got.FinderHistoryTokens)
+	if got.Limits.FinderHistoryTokens != 2_000 {
+		t.Errorf("FinderHistoryTokens = %d, want 2000 (25%% of 8000)", got.Limits.FinderHistoryTokens)
 	}
-	if got.FinderLimits.HistoryTokenBudget != 2_000 {
-		t.Errorf("HistoryTokenBudget = %d, want 2000", got.FinderLimits.HistoryTokenBudget)
+	if got.Limits.FinderLimits.HistoryTokenBudget != 2_000 {
+		t.Errorf("HistoryTokenBudget = %d, want 2000", got.Limits.FinderLimits.HistoryTokenBudget)
 	}
 
 	// On a tiny window, the floor wins.
 	got2 := scaleFinderForContext(in, 1_000)
 	// 25% of 1_000 = 250, clamped to 1_000.
-	if got2.FinderHistoryTokens != scaleFloorHistoryTokens {
-		t.Errorf("FinderHistoryTokens = %d, want %d (floor)", got2.FinderHistoryTokens, scaleFloorHistoryTokens)
+	if got2.Limits.FinderHistoryTokens != scaleFloorHistoryTokens {
+		t.Errorf("FinderHistoryTokens = %d, want %d (floor)", got2.Limits.FinderHistoryTokens, scaleFloorHistoryTokens)
 	}
 }

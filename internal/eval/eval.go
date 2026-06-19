@@ -285,8 +285,8 @@ func runWithClients(ctx context.Context, c Case, clients funnel.RoleClients) (*C
 	// Determinism: parallel agent runs make response ordering nondeterministic,
 	// which matters for recorded replay (sequence-matched) and for stable
 	// scripted call counts. Default to serial unless the case opts out.
-	if opts.MaxParallel == 0 {
-		opts.MaxParallel = 1
+	if opts.Limits.MaxParallel == 0 {
+		opts.Limits.MaxParallel = 1
 	}
 
 	f, err := funnel.New(clients, st, repo, opts)

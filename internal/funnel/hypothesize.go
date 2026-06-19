@@ -169,7 +169,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 		return 0, err
 	}
 
-	chunks := chunkByLanguage(targets, f.opts.ChunkSize)
+	chunks := chunkByLanguage(targets, f.opts.Limits.ChunkSize)
 
 	// Per-run lens priority: a lens's expected yield is language-dependent
 	// (lensYields), so the launch order — and therefore which lenses survive
@@ -321,7 +321,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	// inside a retry loop or waiting on the slot pool. The caller's ctx is never
 	// cancelled by us — only the derived child.
 	fo := f.newFanout(ctx, slotLow)
-	breakerThreshold := f.opts.MaxParallel
+	breakerThreshold := f.opts.Limits.MaxParallel
 	if breakerThreshold < 3 {
 		breakerThreshold = 3
 	}
@@ -845,7 +845,7 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 		Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: label,
 	})
 
-	runner := f.newAgentRunner(finder, tools, sysprompt, budget.finderRunnerLimits(f.opts.FinderLimits),
+	runner := f.newAgentRunner(finder, tools, sysprompt, budget.finderRunnerLimits(f.opts.Limits.FinderLimits),
 		f.activitySinkFor(progress.RoleFinder, label))
 
 	var out candidateList

@@ -177,7 +177,7 @@ func (c *cartography) QueryGraph(pkg, direction string) (importerList, importLis
 // by targets, reuse cached summaries whose stored fingerprint matches,
 // regenerate the rest with ONE bounded client.Complete each (no tool loop),
 // persist the regenerated set, and return the run's cartography. Returns
-// nil when f.opts.Cartographer is false. Degrades gracefully (returns
+// nil when f.opts.Features.Cartographer is false. Degrades gracefully (returns
 // whatever summaries it has, possibly nil) on store/LLM errors or when
 // budget.finderOverHard() flips to true mid-pass.
 //
@@ -188,7 +188,7 @@ func (c *cartography) QueryGraph(pkg, direction string) (importerList, importLis
 // does not compete with finders. The cost bound (DefaultCartographerMaxFiles
 // member files, head-capped, total bytes capped) keeps each completion cheap.
 func (f *Funnel) cartograph(ctx context.Context, result *Result, client llm.Client, snap *ingest.Snapshot, targets []string, fps map[string]string, budget *budgetState) *cartography {
-	if !f.opts.Cartographer {
+	if !f.opts.Features.Cartographer {
 		return nil
 	}
 	if client == nil || snap == nil || len(targets) == 0 {
@@ -459,12 +459,12 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, budget
 		}
 	}
 
-	limits := f.opts.FinderLimits
+	limits := f.opts.Limits.FinderLimits
 	if budget != nil {
 		// The cartographer shares the finder pool, so its per-run limits and
 		// per-turn budget check come from finderRunnerLimits — the same hook
 		// finders use to stop mid-run when the shared budget is exhausted.
-		limits = budget.finderRunnerLimits(f.opts.FinderLimits)
+		limits = budget.finderRunnerLimits(f.opts.Limits.FinderLimits)
 	}
 	runner := f.newAgentRunner(client, nil, cartographySystemPrompt, limits)
 	var out struct {
@@ -579,7 +579,7 @@ func (f *Funnel) RefreshCartography(ctx context.Context, client llm.Client) (Car
 	if client == nil {
 		return rep, errors.New("cartographer: nil client")
 	}
-	snap, err := f.repo.Snapshot(ctx, f.opts.Filter)
+	snap, err := f.repo.Snapshot(ctx, f.opts.Discovery.Filter)
 	if err != nil {
 		return rep, fmt.Errorf("cartographer: snapshot: %w", err)
 	}

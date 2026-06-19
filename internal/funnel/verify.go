@@ -60,7 +60,7 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 		if seat.clause != "" {
 			sysPrompt += "\n\n" + seat.clause
 		}
-		runner := f.newAgentRunner(verifier, tools, sysPrompt, budget.verifyRunnerLimits(f.opts.VerifierLimits),
+		runner := f.newAgentRunner(verifier, tools, sysPrompt, budget.verifyRunnerLimits(f.opts.Limits.VerifierLimits),
 			f.activitySinkFor(progress.RoleVerifier, c.Title))
 		var v refutation
 		outcome, err := runner.RunJSON(ctx, verifierTask(c), refutationSchema, &v)
@@ -103,7 +103,7 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 // independent).
 func (f *Funnel) runArbiter(ctx context.Context, verifier llm.Client, candTools []agent.Tool, persona string, c Candidate, verdicts []refutation, seatNames []string, budget *budgetState) (*refutation, int64, bool, error) {
 	hasSandbox := hasSandboxExec(candTools)
-	runner := f.newAgentRunner(verifier, candTools, arbiterSystemPrompt(persona, hasSandbox), budget.verifyRunnerLimits(f.opts.VerifierLimits),
+	runner := f.newAgentRunner(verifier, candTools, arbiterSystemPrompt(persona, hasSandbox), budget.verifyRunnerLimits(f.opts.Limits.VerifierLimits),
 		f.activitySinkFor(progress.RoleVerifier, c.Title))
 	var av refutation
 	outcome, err := runner.RunJSON(ctx, arbiterTask(c, verdicts, seatNames), refutationSchema, &av)

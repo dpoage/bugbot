@@ -83,7 +83,7 @@ func buildDaemon(t *testing.T, fr *fixtureRepo, st *store.Store, llmc *fakeLLM, 
 		Store:   st,
 		Clients: funnel.RoleClients{Finder: llmc, Verifier: llmc},
 		// One refuter keeps the verify stage to a single, deterministic vote.
-		FunnelOpts: funnel.Options{Refuters: 1, MaxParallel: 2},
+		FunnelOpts: funnel.Options{Limits: funnel.StageLimits{Refuters: 1, MaxParallel: 2}},
 		Sinks:      []report.Sink{sink},
 		Logger:     discardLogger(),
 	}, cfg)
@@ -529,7 +529,7 @@ func TestDaemonReproPromotionHandsT2Findings(t *testing.T) {
 		Store:      st,
 		Clients:    funnel.RoleClients{Finder: llmc, Verifier: llmc},
 		Reproducer: prom,
-		FunnelOpts: funnel.Options{Refuters: 1, MaxParallel: 2},
+		FunnelOpts: funnel.Options{Limits: funnel.StageLimits{Refuters: 1, MaxParallel: 2}},
 		Sinks:      []report.Sink{sink},
 		Logger:     discardLogger(),
 	}, cfg)

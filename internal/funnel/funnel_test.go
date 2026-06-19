@@ -761,9 +761,8 @@ func TestSweep_BudgetDegradation(t *testing.T) {
 	verifier.inUsage, verifier.outUsage, verifier.cachedUsage = 0, 0, 0
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		TokenBudget:           600, // ~4 completions before soft threshold (70% of 600 = 420)
-		CacheReadBudgetWeight: 1.0, // raw accounting: this test pins the degradation mechanism, not weighting
-		MaxParallel:           1,   // serialize so budget accrues deterministically
+		Budget: BudgetConfig{TokenBudget: 600, CacheReadBudgetWeight: 1.0}, // ~4 completions before soft threshold (70% of 600 = 420)
+		Limits: StageLimits{MaxParallel: 1},                                // serialize so budget accrues deterministically
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -821,12 +820,9 @@ func TestSweep_BudgetOrphanPersistsAsTier3(t *testing.T) {
 	verifier.fallback = notRefutedJSON
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses:                []string{"nil-safety/error-handling"},
-		TokenBudget:           300, // finder reserve 150, verify reserve 150
-		FinderBudgetShare:     0.5,
-		Refuters:              1, // one refuter (150 tokens) fills the verify reserve
-		CacheReadBudgetWeight: 1.0,
-		MaxParallel:           1, // serialize so the two verifications race deterministically
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		Budget:    BudgetConfig{TokenBudget: 300, FinderBudgetShare: 0.5, CacheReadBudgetWeight: 1.0}, // finder reserve 150, verify reserve 150
+		Limits:    StageLimits{Refuters: 1, MaxParallel: 1},                                           // one refuter (150 tokens) fills the verify reserve; serialize so the two verifications race deterministically
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -934,7 +930,7 @@ func TestHypothesize_MultiLens_NoRace(t *testing.T) {
 	verifier := newScriptedClient()
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		MaxParallel: nLenses + 1, // +1 ensures a slot for the extra deep unit
+		Limits: StageLimits{MaxParallel: nLenses + 1}, // +1 ensures a slot for the extra deep unit
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1010,9 +1006,8 @@ func TestVerify_MultiCandidate_NoRace(t *testing.T) {
 
 	sb := &funnelFakeSandbox{}
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Lenses:      []string{"nil-safety/error-handling"},
-		Refuters:    1,          // one refuter: fast, still exercises the append path
-		MaxParallel: nCands + 1, // enough slots to run all candidates concurrently
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		Limits:    StageLimits{Refuters: 1, MaxParallel: nCands + 1}, // one refuter: fast, still exercises the append path; enough slots to run all candidates concurrently
 		SandboxOpts: SandboxOpts{
 			Sandbox:     sb,
 			Enabled:     true,
@@ -1203,8 +1198,8 @@ func TestSweep_GlobalSlotPool_MaxParallelEnforced(t *testing.T) {
 	verifier.fallback = notRefutedJSON
 
 	f, err := New(RoleClients{Finder: wrapped, Verifier: verifier}, st, repo, Options{
-		MaxParallel:         maxP,
-		DisableHeatOrdering: true,
+		Limits:   StageLimits{MaxParallel: maxP},
+		Features: FeatureFlags{DisableHeatOrdering: true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1397,8 +1392,8 @@ func TestStreaming_MidDiscovery_VerifyStarts(t *testing.T) {
 	}
 
 	f, err := New(RoleClients{Finder: combinedFinder, Verifier: verifierClient}, st, repo, Options{
-		Lenses:      []string{"nil-safety/error-handling", "resource-leaks"},
-		MaxParallel: 2, // allow both finder units to run concurrently
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling", "resource-leaks"}},
+		Limits:    StageLimits{MaxParallel: 2}, // allow both finder units to run concurrently
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1477,8 +1472,8 @@ func TestStreaming_PersistenceBeforeHypothesizeComplete(t *testing.T) {
 	}
 
 	f, err := New(RoleClients{Finder: combinedFinder, Verifier: verifierClient}, st, repo, Options{
-		Lenses:      []string{"nil-safety/error-handling", "resource-leaks"},
-		MaxParallel: 2, // both units can run concurrently
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling", "resource-leaks"}},
+		Limits:    StageLimits{MaxParallel: 2}, // both units can run concurrently
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1613,8 +1608,8 @@ func TestStreaming_Interrupt_PersistedFindingSurvives(t *testing.T) {
 	}
 
 	f, err := New(RoleClients{Finder: combinedFinder, Verifier: verifierClient}, st, repo, Options{
-		Lenses:      []string{"nil-safety/error-handling", "resource-leaks"},
-		MaxParallel: 2,
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling", "resource-leaks"}},
+		Limits:    StageLimits{MaxParallel: 2},
 	})
 	if err != nil {
 		t.Fatal(err)

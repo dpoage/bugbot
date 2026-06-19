@@ -79,7 +79,7 @@ func TestSeam_SweepPopulatesStats(t *testing.T) {
 
 	finder := newScriptedClient()
 	verifier := newScriptedClient()
-	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{MaxParallel: 4})
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{Limits: StageLimits{MaxParallel: 4}})
 	if err != nil {
 		t.Fatal(err)
 	}

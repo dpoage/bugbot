@@ -34,7 +34,7 @@ package funnel
 // FinderReadLines / FinderReadBytes the default IS the zero value (the
 // Options struct does not resolve them; finderReadCaps substitutes
 // DefaultFinderReadLines/Bytes at consume time), so the check is
-// `o.FinderReadLines == 0`. For ChunkSize the resolved value is always
+// `o.Limits.FinderReadLines == 0`. For ChunkSize the resolved value is always
 // non-zero (resolve() fills in DefaultChunkSize when the caller leaves it
 // at zero), so the check is "still equal to DefaultChunkSize" — the
 // accepted-by-spec trade-off documented above. FinderHistoryTokens is
@@ -53,18 +53,18 @@ func scaleFinderForContext(o Options, contextWindow int) Options {
 	// ChunkSize: only override if the caller left it at the default. The
 	// resolved value is DefaultChunkSize, and any other positive value is
 	// treated as explicit.
-	if o.ChunkSize == DefaultChunkSize {
-		o.ChunkSize = clampChunk(int(float64(DefaultChunkSize) * ratio))
+	if o.Limits.ChunkSize == DefaultChunkSize {
+		o.Limits.ChunkSize = clampChunk(int(float64(DefaultChunkSize) * ratio))
 	}
 
 	// Per-read caps: 0 means "use DefaultFinderReadLines/Bytes"; any other
 	// value (positive = explicit, negative = "use looser agent defaults")
 	// is preserved.
-	if o.FinderReadLines == 0 {
-		o.FinderReadLines = clampReadLines(int(float64(DefaultFinderReadLines) * ratio))
+	if o.Limits.FinderReadLines == 0 {
+		o.Limits.FinderReadLines = clampReadLines(int(float64(DefaultFinderReadLines) * ratio))
 	}
-	if o.FinderReadBytes == 0 {
-		o.FinderReadBytes = clampReadBytes(int(float64(DefaultFinderReadBytes) * ratio))
+	if o.Limits.FinderReadBytes == 0 {
+		o.Limits.FinderReadBytes = clampReadBytes(int(float64(DefaultFinderReadBytes) * ratio))
 	}
 
 	// History compaction: ONLY scale when the caller already opted in with
@@ -74,13 +74,13 @@ func scaleFinderForContext(o Options, contextWindow int) Options {
 	// cache-safety profile. The scaled value tracks the context window
 	// (~25% of window) so a small-context model compacts at a small, sane
 	// threshold rather than the 60k reference that would never trip.
-	if o.FinderHistoryTokens > 0 {
+	if o.Limits.FinderHistoryTokens > 0 {
 		scaled := int64(float64(contextWindow) * scaleHistoryFraction)
 		if scaled < scaleFloorHistoryTokens {
 			scaled = scaleFloorHistoryTokens
 		}
-		o.FinderHistoryTokens = scaled
-		o.FinderLimits.HistoryTokenBudget = scaled
+		o.Limits.FinderHistoryTokens = scaled
+		o.Limits.FinderLimits.HistoryTokenBudget = scaled
 	}
 
 	return o

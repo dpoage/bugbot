@@ -98,7 +98,7 @@ func TestCartography_InjectIntoFinderTask(t *testing.T) {
 	finder := newScriptedClient()
 	verifier := newScriptedClient()
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Cartographer: true,
+		Features: FeatureFlags{Cartographer: true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +205,7 @@ func TestCartography_FingerprintCache(t *testing.T) {
 	finder.fallback = `{"summary":"A canned summary."}`
 	verifier := newScriptedClient()
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Cartographer: true,
+		Features: FeatureFlags{Cartographer: true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -245,7 +245,7 @@ func TestCartography_DegradesOnLLMError(t *testing.T) {
 	finder := newScriptedClient()
 	verifier := newScriptedClient()
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		Cartographer: true,
+		Features: FeatureFlags{Cartographer: true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -361,7 +361,7 @@ func TestCartography_StripsThinkBlock(t *testing.T) {
 	finder := newScriptedClient()
 	finder.fallback = "<think>\nThe user wants a summary. Let me reason about the package...\n</think>\n\n{\"summary\":\"Purpose: a helper package.\"}"
 	verifier := newScriptedClient()
-	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{Cartographer: true})
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{Features: FeatureFlags{Cartographer: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +413,7 @@ func TestCartography_RepairsMalformedSummary(t *testing.T) {
 	valid := `{"summary":"Repaired package summary."}`
 	finder := newScriptedSequenceClient(valid, "this is not json, only reasoning prose", valid)
 	verifier := newScriptedClient()
-	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{Cartographer: true})
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{Features: FeatureFlags{Cartographer: true}})
 	if err != nil {
 		t.Fatal(err)
 	}

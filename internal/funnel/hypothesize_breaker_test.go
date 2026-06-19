@@ -115,7 +115,7 @@ func TestHypothesize_TransportErrorBreaker(t *testing.T) {
 	verifier := newScriptedClient()
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		MaxParallel: maxParallel,
+		Limits: StageLimits{MaxParallel: maxParallel},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -279,7 +279,7 @@ func TestHypothesize_TransportErrorAfterSuccessBreakerStaysDisarmed(t *testing.T
 	verifier := verifierRouting(newScriptedClient())
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		MaxParallel: 1, // serialize so the first success disarms before any failure
+		Limits: StageLimits{MaxParallel: 1}, // serialize so the first success disarms before any failure
 	})
 	if err != nil {
 		t.Fatal(err)

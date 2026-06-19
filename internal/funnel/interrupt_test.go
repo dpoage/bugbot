@@ -82,10 +82,9 @@ func TestSweep_Interrupt_DurablePartialProgress(t *testing.T) {
 
 	const lens = "nil-safety/error-handling"
 	f, err := New(RoleClients{Finder: gf, Verifier: verifier}, st, repo, Options{
-		Lenses:              []string{lens},
-		ChunkSize:           1, // one file per unit → 5 units for 5 files
-		MaxParallel:         1, // sequential: only one goroutine active at a time
-		DisableHeatOrdering: true,
+		Discovery: DiscoveryConfig{Lenses: []string{lens}},
+		Limits:    StageLimits{ChunkSize: 1, MaxParallel: 1}, // one file per unit → 5 units for 5 files; sequential: only one goroutine active at a time
+		Features:  FeatureFlags{DisableHeatOrdering: true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -214,10 +213,9 @@ func TestSweep_InterruptThenResume_PendingCandidates(t *testing.T) {
 	}()
 
 	f1, err := New(RoleClients{Finder: finder1, Verifier: gv}, st, repo, Options{
-		Lenses:              []string{lens},
-		ChunkSize:           1,
-		MaxParallel:         1,
-		DisableHeatOrdering: true,
+		Discovery: DiscoveryConfig{Lenses: []string{lens}},
+		Limits:    StageLimits{ChunkSize: 1, MaxParallel: 1},
+		Features:  FeatureFlags{DisableHeatOrdering: true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -245,10 +243,9 @@ func TestSweep_InterruptThenResume_PendingCandidates(t *testing.T) {
 	verifier2.fallback = notRefutedJSON // allow → candidate survives
 
 	f2, err := New(RoleClients{Finder: finder2, Verifier: verifier2}, st, repo, Options{
-		Lenses:              []string{lens},
-		ChunkSize:           1,
-		MaxParallel:         1,
-		DisableHeatOrdering: true,
+		Discovery: DiscoveryConfig{Lenses: []string{lens}},
+		Limits:    StageLimits{ChunkSize: 1, MaxParallel: 1},
+		Features:  FeatureFlags{DisableHeatOrdering: true},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -139,8 +139,8 @@ func TestCartographer_PersistsOnTheFlyAcrossInterruption(t *testing.T) {
 	// and persisted, its completion cancels the run, and bravo/charlie are
 	// skipped before they summarize.
 	f, err := New(RoleClients{Finder: newScriptedClient(), Verifier: newScriptedClient()}, st, repo, Options{
-		Cartographer: true,
-		MaxParallel:  1,
+		Features: FeatureFlags{Cartographer: true},
+		Limits:   StageLimits{MaxParallel: 1},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -176,8 +176,8 @@ func TestCartographer_FullPassPersistsAll(t *testing.T) {
 	client := newScriptedClient()
 	client.fallback = `{"summary":"package summary"}` // valid summary JSON for every package
 	f, err := New(RoleClients{Finder: client, Verifier: newScriptedClient()}, st, repo, Options{
-		Cartographer: true,
-		MaxParallel:  4,
+		Features: FeatureFlags{Cartographer: true},
+		Limits:   StageLimits{MaxParallel: 4},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -238,8 +238,8 @@ func TestCartographer_GeneratesConcurrently(t *testing.T) {
 	snap, fps := snapAndFps(t, repo)
 
 	f, err := New(RoleClients{Finder: newScriptedClient(), Verifier: newScriptedClient()}, st, repo, Options{
-		Cartographer: true,
-		MaxParallel:  4, // >= 3 so all three can run at once
+		Features: FeatureFlags{Cartographer: true},
+		Limits:   StageLimits{MaxParallel: 4}, // >= 3 so all three can run at once
 	})
 	if err != nil {
 		t.Fatal(err)

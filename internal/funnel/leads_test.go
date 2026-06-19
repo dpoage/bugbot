@@ -133,7 +133,7 @@ func TestSweep_LeadsPosted_ThroughToolCall(t *testing.T) {
 	f, err := New(
 		RoleClients{Finder: nilSafetyPostClient, Verifier: verifier},
 		st, repo,
-		Options{Lenses: []string{"nil-safety/error-handling"}},
+		Options{Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}}},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +170,7 @@ func TestSweep_LeadsPosted_ThroughToolCall(t *testing.T) {
 	f2, err := New(
 		RoleClients{Finder: finder2, Verifier: newScriptedClient()},
 		st, repo,
-		Options{Lenses: []string{"concurrency"}},
+		Options{Discovery: DiscoveryConfig{Lenses: []string{"concurrency"}}},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +232,7 @@ func TestSweep_InactiveLens_LeadStaysPending(t *testing.T) {
 	f, err := New(
 		RoleClients{Finder: finder, Verifier: newScriptedClient()},
 		st, repo,
-		Options{Lenses: []string{"nil-safety/error-handling"}},
+		Options{Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}}},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -270,7 +270,7 @@ func TestVerify_RefuterToolset_NoPostLead(t *testing.T) {
 	f := &Funnel{
 		repo:    repo,
 		clients: RoleClients{Verifier: capture},
-		opts:    Options{Refuters: 1},
+		opts:    Options{Limits: StageLimits{Refuters: 1}},
 		lenses:  selectLenses(nil),
 	}
 

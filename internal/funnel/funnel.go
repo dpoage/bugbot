@@ -277,185 +277,156 @@ type ChangeContext struct {
 	// (run.go calls BlastRadius before hypothesize). Callers must not set it.
 }
 
-// Options configures a single funnel run. The zero value is valid: every field
-// resolves to a sensible default.
-type Options struct {
-	// Lenses, when non-empty, restricts the finder stage to the named built-in
-	// lenses (see BuiltinLenses). Empty means all lenses.
-	Lenses []string
-	// Filter scopes the snapshot to the configured include/exclude globs
-	// (config.Scan maps directly onto it). The zero value scans every tracked
-	// file.
-	Filter ingest.ScanFilter
-	// Refuters is the number of adversarial refuter agents per candidate. Zero
-	// uses DefaultRefuters.
-	Refuters int
-	// MaxParallel bounds concurrently-running agents across all roles (finder
-	// breadth, verifier candidate panels). Zero uses DefaultMaxParallel;
-	// negative is treated as 1. The global slot pool (slotPool) enforces this
-	// bound; per-stage local semaphores have been removed.
-	MaxParallel int
-	// ChunkSize is the number of files per finder invocation. Zero uses
-	// DefaultChunkSize.
-	ChunkSize int
+// BudgetConfig groups token-budget and per-role claim knobs. The zero value
+// resolves to sensible defaults via resolve(). Consumers always see the
+// resolved copy built in Options.resolve().
+type BudgetConfig struct {
 	// TokenBudget bounds cumulative input+output tokens for the whole run. Zero
-	// means unlimited (the funnel never degrades or stops on budget).
+	// or negative means unlimited (the funnel never degrades or stops).
 	TokenBudget int64
 	// CacheReadBudgetWeight discounts cache-read input tokens against
-	// TokenBudget (0..1). Cache reads bill at a fraction of full price, so
-	// counting them at full weight makes a cache-heavy run exhaust the budget
-	// long before its real cost warrants. Zero resolves to
-	// DefaultCacheReadBudgetWeight; set to 1.0 to restore raw-token accounting.
+	// TokenBudget (0..1). Zero resolves to DefaultCacheReadBudgetWeight (~0.1);
+	// set to 1.0 for raw-token accounting.
 	CacheReadBudgetWeight float64
 	// FinderBudgetShare is the fraction of TokenBudget (0..1) the finder stage
 	// may consume; the remainder is RESERVED for downstream verification so the
 	// breadth-heavy finder stage cannot drain the whole pool and orphan every
-	// candidate before it is verified (see DefaultFinderBudgetShare). Zero (or
-	// negative) resolves to DefaultFinderBudgetShare. A value >= 1 disables the
-	// reservation (finders may use the whole budget — the legacy single-pool
-	// behavior). Ignored when TokenBudget is unlimited.
+	// candidate before verification (see DefaultFinderBudgetShare). Zero resolves
+	// to DefaultFinderBudgetShare (0.7). 1.0 is a legitimate value meaning the
+	// finder may use the entire budget with no downstream reservation
+	// (single-pool behavior). Ignored when TokenBudget is unlimited.
 	FinderBudgetShare float64
 	// FinderTokenClaim / VerifierTokenClaim are the per-task token claims for the
 	// claimant budget system. Each finder/refuter/arbiter run is capped at its
-	// role's claim (bounding the run's per-run TokenBudget) so a single
-	// breadth-heavy run cannot be granted a whole stage's reserve at launch. The
-	// shared per-cycle pool is charged only for tokens actually spent, so a run
-	// that finishes under its claim leaves the remainder in the pool for its
-	// siblings — the claim is "returned to the pool" by never being removed.
-	// Zero resolves to DefaultTokenClaim (1M); a negative value removes the
-	// per-task cap (a run may use its sub-pool's full remainder, the pre-claimant
-	// behavior). Ignored when TokenBudget is unlimited (no pool to cap against).
+	// role's claim so a single breadth-heavy run cannot be granted a whole
+	// stage's reserve at launch. Zero resolves to DefaultTokenClaim (1M).
+	// A negative value removes the per-task cap (each run may use its sub-pool's
+	// full remainder). Ignored when TokenBudget is unlimited.
 	FinderTokenClaim   int64
 	VerifierTokenClaim int64
-	// FinderLimits / VerifierLimits bound each individual agent run (iterations
-	// and per-run token budget). Zero-value fields resolve to agent defaults.
+}
+
+// resolve fills in BudgetConfig defaults.
+func (b BudgetConfig) resolve() BudgetConfig {
+	if b.CacheReadBudgetWeight == 0 {
+		b.CacheReadBudgetWeight = DefaultCacheReadBudgetWeight
+	}
+	if b.FinderBudgetShare <= 0 {
+		b.FinderBudgetShare = DefaultFinderBudgetShare
+	}
+	if b.FinderTokenClaim == 0 {
+		b.FinderTokenClaim = DefaultTokenClaim
+	}
+	if b.VerifierTokenClaim == 0 {
+		b.VerifierTokenClaim = DefaultTokenClaim
+	}
+	return b
+}
+
+// StageLimits groups per-stage parallelism and per-run agent limits.
+// The zero value resolves to sensible defaults.
+type StageLimits struct {
+	// Refuters is the number of adversarial refuter agents per candidate.
+	// Zero uses DefaultRefuters.
+	Refuters int
+	// MaxParallel bounds concurrently-running agents across all roles.
+	// Zero uses DefaultMaxParallel; negative is treated as 1.
+	MaxParallel int
+	// ChunkSize is the number of files per finder invocation.
+	// Zero uses DefaultChunkSize.
+	ChunkSize int
+	// FinderLimits / VerifierLimits bound each individual agent run.
 	FinderLimits   agent.Limits
 	VerifierLimits agent.Limits
-	// FinderHistoryTokens controls opt-in finder history compaction (see
-	// agent.Limits.HistoryTokenBudget and DefaultFinderHistoryTokens for why it is
-	// OFF by default). Zero AND negative both leave compaction DISABLED — the
-	// cache-safe finder default is tighter per-read caps, not prefix-mutating
-	// compaction. A POSITIVE value opts in at that token threshold (a common
-	// choice on weak-/no-cache providers, where the raw-token reduction is the
-	// real-dollar reduction). It is folded into FinderLimits.HistoryTokenBudget at
-	// resolve time; set this field, not the nested limit, to control it.
+	// FinderHistoryTokens controls opt-in finder history compaction (OFF by
+	// default — see DefaultFinderHistoryTokens). Zero and negative leave it
+	// disabled. A positive value opts in at that token threshold.
+	// Folded into FinderLimits.HistoryTokenBudget at resolve time.
 	FinderHistoryTokens int64
-	// FinderReadLines / FinderReadBytes tighten the finder's per-read_file caps,
-	// the primary cache-safe lever for finder token burn (bugbot-3nf). Zero uses
-	// DefaultFinderReadLines / DefaultFinderReadBytes. A negative value restores
-	// the looser agent-package read defaults (2000 lines / 256 KB) for the finder.
+	// FinderReadLines / FinderReadBytes tighten the finder's per-read_file caps.
+	// Zero uses DefaultFinderReadLines / DefaultFinderReadBytes. Negative
+	// restores the looser agent-package defaults.
 	FinderReadLines int
 	FinderReadBytes int
-	// TranscriptDir, when non-empty, makes every agent auto-save its transcript
-	// there.
-	TranscriptDir string
-	// Progress, when non-nil, receives activity events as the run proceeds
-	// (stage boundaries, agent start/finish, spend ticks, budget degradation).
-	// Emission is best-effort and must never block or fail the run; a nil sink
-	// disables emission. See internal/progress for the contract.
-	Progress progress.Sink
-	// SandboxOpts configures the sandbox_exec tool offered to refuter agents.
-	// The zero value disables the feature.
-	SandboxOpts SandboxOpts
-	// DisableHeatOrdering suppresses churn-heat reordering in Sweep. By
-	// default (false) Sweep sorts targets by churn-weighted recency heat so
-	// finder budget flows to files that have changed recently and frequently —
-	// where bugs statistically cluster. Set to true to restore fully
-	// alphabetical Sweep ordering (e.g. for deterministic testing or when
-	// the repository has no git history). Targeted scans are always
-	// alphabetical regardless of this setting.
-	DisableHeatOrdering bool
-	// ChangeContext, when non-nil, provides commit-scoped information for a
-	// targeted (commit-triggered) run. It enables the diff-intent lens, which
-	// hunts for gaps between the commit's stated intent and its implementation
-	// and for existing callers whose assumptions the change breaks. Nil on
-	// sweep runs and targeted runs without a specific commit window.
-	//
-	// ChangeContext is only honoured on ScanTargeted runs. It is silently
-	// ignored on ScanOneshot (Sweep) and ScanSweep runs even if set.
-	ChangeContext *ChangeContext
+}
 
-	// Repro, when non-nil, is invoked in-run for each Tier-2 finding that
-	// survives verification. It is called from an IDLE-priority goroutine (one
-	// slot per finding) so reproduction runs concurrently with discovery. The
-	// funnel does NOT import internal/repro; callers (e.g. the CLI) build a
-	// Reproducer and pass a closure here.
-	//
-	// The hook must be safe for concurrent use (it may be called by multiple
-	// goroutines simultaneously). Errors are logged best-effort and never abort
-	// the scan. Nil disables in-run reproduction (default).
-	Repro func(ctx context.Context, scanRunID string, finding store.Finding) error
+// resolve fills in StageLimits defaults.
+func (l StageLimits) resolve() StageLimits {
+	if l.Refuters <= 0 {
+		l.Refuters = DefaultRefuters
+	}
+	if l.MaxParallel == 0 {
+		l.MaxParallel = DefaultMaxParallel
+	}
+	if l.MaxParallel < 0 {
+		l.MaxParallel = 1
+	}
+	if l.ChunkSize <= 0 {
+		l.ChunkSize = DefaultChunkSize
+	}
+	if l.FinderHistoryTokens > 0 {
+		l.FinderLimits.HistoryTokenBudget = l.FinderHistoryTokens
+	} else {
+		l.FinderLimits.HistoryTokenBudget = 0
+	}
+	return l
+}
 
+// FeatureFlags groups optional feature toggles. All default to off/false.
+type FeatureFlags struct {
 	// Cartographer enables the per-package summary pass (bugbot-mi5.7).
-	// When true, the funnel runs a one-shot LLM pass per uncached package
-	// before the finder stage, persists the results keyed by the package's
-	// content fingerprint, and injects the relevant summaries (the chunk's
-	// own packages plus their direct dependents) into every finder task
-	// message. When false (the default) the feature is OFF and behavior is
-	// BYTE-IDENTICAL to the pre-cartographer funnel: no summary-table
-	// reads, no summary-generation completions, no task-string changes.
-	//
-	// Any failure in the pass — store read/write error, LLM error, or hard
-	// budget exhaustion — degrades gracefully: the scan proceeds with the
-	// summaries it has (possibly none), and finder tasks receive no
-	// injection when nothing is available.
 	Cartographer bool
 	// StatusNotes enables the status_note tool for finder and verifier agents.
-	// When true, a status_note tool is added to each agent's tool set,
-	// allowing agents to surface hypothesis notes as live activity updates
-	// (visible in the pane and `bugbot status`). Off by default: zero behavior
-	// change, zero LLM cost, byte-identical tool set when false.
 	StatusNotes bool
+	// DisableHeatOrdering suppresses churn-heat reordering in Sweep.
+	// Set to true to restore alphabetical ordering (e.g. for deterministic testing).
+	DisableHeatOrdering bool
+}
+
+// DiscoveryConfig groups snapshot-scoping and change-context knobs.
+type DiscoveryConfig struct {
+	// Filter scopes the snapshot to the configured include/exclude globs.
+	Filter ingest.ScanFilter
+	// Lenses, when non-empty, restricts the finder stage to the named built-in lenses.
+	Lenses []string
+	// ChangeContext, when non-nil, provides commit-scoped information for a
+	// targeted run. Only honoured on ScanTargeted runs.
+	ChangeContext *ChangeContext
+}
+
+// Options configures a single funnel run. The zero value is valid: every field
+// resolves to a sensible default.
+//
+// Budget, Limits, Features, and Discovery are orthogonal single-concern groups.
+// The remaining fields (Progress, Repro, CodeNav, TranscriptDir, SandboxOpts)
+// are wiring/IO concerns kept at the top level.
+type Options struct {
+	// Budget groups token-budget and per-role claim knobs.
+	Budget BudgetConfig
+	// Limits groups per-stage parallelism and per-run agent limits.
+	Limits StageLimits
+	// Features groups optional feature toggles.
+	Features FeatureFlags
+	// Discovery groups snapshot-scoping and change-context knobs.
+	Discovery DiscoveryConfig
+	// SandboxOpts configures the sandbox_exec tool offered to refuter agents.
+	SandboxOpts SandboxOpts
+	// Progress, when non-nil, receives activity events as the run proceeds.
+	Progress progress.Sink
+	// Repro, when non-nil, is invoked in-run for each Tier-2 finding that
+	// survives verification. Must be safe for concurrent use.
+	Repro func(ctx context.Context, scanRunID string, finding store.Finding) error
 	// CodeNav, when non-nil, is a pre-constructed code-navigation bundle that the
-	// funnel BORROWS rather than owns. The daemon injects its long-lived CodeNav
-	// here so language-server indexes stay warm across cycles. When nil, the
-	// funnel constructs and owns its own CodeNav (the default for one-shot scans).
-	// The funnel NEVER closes an injected CodeNav; only daemon-lifetime teardown
-	// closes it.
+	// funnel BORROWS rather than owns. Nil causes the funnel to construct its own.
 	CodeNav *agent.CodeNav
+	// TranscriptDir, when non-empty, makes every agent auto-save its transcript.
+	TranscriptDir string
 }
 
 // resolve fills in defaults without mutating the caller's Options.
 func (o Options) resolve() Options {
-	// DisableHeatOrdering is intentionally NOT touched here: the zero value
-	// (false) already means "heat ordering enabled", which is the default.
-	// No resolution needed.
-	if o.Refuters <= 0 {
-		o.Refuters = DefaultRefuters
-	}
-	if o.MaxParallel == 0 {
-		o.MaxParallel = DefaultMaxParallel
-	}
-	if o.MaxParallel < 0 {
-		o.MaxParallel = 1
-	}
-	if o.ChunkSize <= 0 {
-		o.ChunkSize = DefaultChunkSize
-	}
-	// A non-positive share means "unset": apply the default downstream
-	// reservation. A value >= 1 is preserved as an explicit "no reservation"
-	// (legacy single-pool) request and handled by reserveForDownstream.
-	if o.FinderBudgetShare <= 0 {
-		o.FinderBudgetShare = DefaultFinderBudgetShare
-	}
-	// Per-task token claims: zero means "unset" → DefaultTokenClaim. A NEGATIVE
-	// value is preserved as an explicit "no per-task cap" request and honored by
-	// runnerLimitsForPool (the run may use its sub-pool's full remainder).
-	if o.FinderTokenClaim == 0 {
-		o.FinderTokenClaim = DefaultTokenClaim
-	}
-	if o.VerifierTokenClaim == 0 {
-		o.VerifierTokenClaim = DefaultTokenClaim
-	}
-	// Fold the (opt-in) history-compaction threshold into FinderLimits so the
-	// per-finder runner picks it up. Compaction is OFF by default because the
-	// bugbot-3nf measurement showed it raises cache-weighted cost: only a POSITIVE
-	// request arms it; zero and negative both leave it disabled.
-	if o.FinderHistoryTokens > 0 {
-		o.FinderLimits.HistoryTokenBudget = o.FinderHistoryTokens
-	} else {
-		o.FinderLimits.HistoryTokenBudget = 0
-	}
+	o.Budget = o.Budget.resolve()
+	o.Limits = o.Limits.resolve()
 	return o
 }
 
@@ -465,20 +436,20 @@ func (o Options) resolve() Options {
 func (o Options) finderReadCaps() agent.ReadCaps {
 	caps := agent.ReadCaps{}
 	switch {
-	case o.FinderReadLines < 0:
-		caps.MaxLines = 0 // 0 -> agent default (looser) at the tool layer
-	case o.FinderReadLines == 0:
+	case o.Limits.FinderReadLines < 0:
+		caps.MaxLines = 0
+	case o.Limits.FinderReadLines == 0:
 		caps.MaxLines = DefaultFinderReadLines
 	default:
-		caps.MaxLines = o.FinderReadLines
+		caps.MaxLines = o.Limits.FinderReadLines
 	}
 	switch {
-	case o.FinderReadBytes < 0:
+	case o.Limits.FinderReadBytes < 0:
 		caps.MaxBytes = 0
-	case o.FinderReadBytes == 0:
+	case o.Limits.FinderReadBytes == 0:
 		caps.MaxBytes = DefaultFinderReadBytes
 	default:
-		caps.MaxBytes = o.FinderReadBytes
+		caps.MaxBytes = o.Limits.FinderReadBytes
 	}
 	return caps
 }
@@ -562,9 +533,9 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 		store:   st,
 		repo:    repo,
 		opts:    resolved,
-		lenses:  selectLenses(resolved.Lenses),
+		lenses:  selectLenses(resolved.Discovery.Lenses),
 		deps:    deps,
-		slots:   newSlotPool(resolved.MaxParallel),
+		slots:   newSlotPool(resolved.Limits.MaxParallel),
 	}
 	if resolved.CodeNav != nil {
 		// Daemon-injected: borrow, never own.

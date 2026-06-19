@@ -162,8 +162,8 @@ func TestDiffIntentFixture_CatchesIntentGap(t *testing.T) {
 
 	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier}, st, repo,
 		funnel.Options{
-			MaxParallel:   1,
-			ChangeContext: cc,
+			Limits:    funnel.StageLimits{MaxParallel: 1},
+			Discovery: funnel.DiscoveryConfig{ChangeContext: cc},
 		})
 	if err != nil {
 		t.Fatalf("construct funnel: %v", err)

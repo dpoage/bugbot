@@ -16,7 +16,7 @@ func TestSnapshotHonorsFilter(t *testing.T) {
 	defer func() { _ = st.Close() }()
 
 	f, err := New(RoleClients{Finder: newScriptedClient(), Verifier: newScriptedClient()}, st, repo, Options{
-		Filter: ingest.ScanFilter{Include: []string{"bug.go"}},
+		Discovery: DiscoveryConfig{Filter: ingest.ScanFilter{Include: []string{"bug.go"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
