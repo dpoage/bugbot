@@ -185,6 +185,82 @@ func TestGitBlame_InjectedRunner(t *testing.T) {
 	}
 }
 
+// TestGitBlame_FlattensAttackerControlledAuthor verifies the prompt-injection
+// guard for untrusted commit metadata rendered by git_blame. The author in
+// the "(author date line)" prefix is attacker-controllable free text in
+// public repos; an injected newline must not be allowed to fabricate a new
+// tool-output line. We use an injected runner to deterministically feed an
+// author containing a literal newline and multiple internal spaces, then
+// assert the rendered output has the author flattened to a single line
+// with collapsed whitespace.
+func TestGitBlame_FlattensAttackerControlledAuthor(t *testing.T) {
+	dir := t.TempDir()
+	// Simulate git blame output where the author has an embedded newline
+	// and runs of internal whitespace. The author portion is the only
+	// attacker-controllable free text; the hash, date, and line number
+	// are structural and should pass through untouched.
+	raw := "abc1234 (Bad\nInjected\tAuthor   With\nNewline 2024-01-01 1) package main\n" +
+		"def5678 (Single Word 2024-01-02 2) func helper() {}\n"
+	runner := func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return []byte(raw), nil
+	}
+	if err := os.WriteFile(filepath.Join(dir, "foo.go"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewGitBlame(dir, runner)
+	if err != nil {
+		t.Fatalf("NewGitBlame: %v", err)
+	}
+	out, err := tool.Run(context.Background(), json.RawMessage(`{"path":"foo.go","line_start":1,"line_end":2}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// The injected newline in the author must not produce an extra output
+	// line. With the guard, the first rendered line collapses the author
+	// to a single line. The expected number of rendered output lines is
+	// 2 (one per blame entry), not 3+ (which would indicate a forged
+	// line from the injected newline).
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 blame lines after sanitization, got %d:\n%s", len(lines), out)
+	}
+	// First line: the embedded newline in the author must be gone, and
+	// internal whitespace must be collapsed to single spaces. The
+	// structural fields (hash, date, line number) must remain.
+	first := lines[0]
+	if !strings.HasPrefix(first, "abc1234 (") {
+		t.Errorf("expected first line to begin with hash prefix; got: %q", first)
+	}
+	if !strings.Contains(first, " 2024-01-01 1) package main") {
+		t.Errorf("expected date and line number to be preserved; got: %q", first)
+	}
+	// Extract the author region (between "(" and " <date> <line>)") and
+	// verify it is a single token with single-spaced words.
+	open := strings.Index(first, " (")
+	close := strings.Index(first, " 2024-01-01 1)")
+	if open < 0 || close < 0 || close <= open {
+		t.Fatalf("could not locate author region in %q", first)
+	}
+	author := first[open+2 : close]
+	if strings.ContainsAny(author, "\n\r\t") {
+		t.Errorf("author region still contains control whitespace: %q", author)
+	}
+	if strings.Contains(author, "  ") {
+		t.Errorf("author region still contains multi-space run: %q", author)
+	}
+	// The flattened author should preserve all the words from the input
+	// in order, just with whitespace normalized.
+	wantAuthor := "Bad Injected Author With Newline"
+	if author != wantAuthor {
+		t.Errorf("author region = %q, want %q", author, wantAuthor)
+	}
+	// Second line: a normal author with no newlines should pass through
+	// with single-spaced words (no double-spaces).
+	if !strings.Contains(lines[1], "(Single Word 2024-01-02 2)") {
+		t.Errorf("expected second line to be preserved verbatim; got: %q", lines[1])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // git_log tests
 // ---------------------------------------------------------------------------
@@ -207,6 +283,88 @@ func TestGitLog_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(out, "fix: use fmt.Println") {
 		t.Errorf("expected second commit subject; got:\n%s", out)
+	}
+}
+
+// TestGitLog_FlattensAttackerControlledAuthorAndSubject verifies the
+// prompt-injection guard for untrusted commit metadata rendered by
+// git_log. The author (%an) and subject (%s) fields of the
+// "%h %ad %an %s" format string are attacker-controllable free text in
+// public repos; an injected newline in either must not be allowed to
+// fabricate a new tool-output line. We use an injected runner to
+// deterministically feed a subject and author that contain literal
+// newlines and runs of internal whitespace, then assert the rendered
+// output has those fields flattened to a single line with collapsed
+// whitespace.
+func TestGitLog_FlattensAttackerControlledAuthorAndSubject(t *testing.T) {
+	dir := t.TempDir()
+	// Simulate `git log --format='%h %ad %an %s'` output. The second
+	// entry has a literal newline and a tab inside the author (a
+	// multi-word name with hostile whitespace); the third entry has
+	// a literal newline in the subject. Without the guard, the
+	// embedded newlines would split the line and forge new tool-output
+	// entries.
+	raw := "abc1234 2024-01-01 Tester innocent subject\n" +
+		"def5678 2024-01-02 Bad\nInjected\tAuthor clean subject\n" +
+		"abcdef0 2024-01-03 Tester subject with\ninjected newline\n"
+	runner := func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return []byte(raw), nil
+	}
+	tool, err := NewGitLog(dir, runner)
+	if err != nil {
+		t.Fatalf("NewGitLog: %v", err)
+	}
+	out, err := tool.Run(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// With sanitization, no extra lines are forged. The 3 original
+	// entries stay on their own line (3 lines out for 3 entries in).
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 log lines after sanitization, got %d:\n%s", len(lines), out)
+	}
+	// First line: a clean entry must round-trip exactly (sanity check
+	// that the guard doesn't disturb well-formed input).
+	if lines[0] != "abc1234 2024-01-01 Tester innocent subject" {
+		t.Errorf("first line = %q, want clean entry unchanged", lines[0])
+	}
+	// Second line: the author had an embedded newline and a tab. The
+	// hash and date are structural and must pass through untouched;
+	// the rest of the line (author + subject) must be flattened to
+	// single-spaced tokens with no embedded control whitespace.
+	second := lines[1]
+	if !strings.HasPrefix(second, "def5678 2024-01-02 ") {
+		t.Errorf("expected hash and date prefix; got: %q", second)
+	}
+	if strings.ContainsAny(second, "\n\r\t") {
+		t.Errorf("sanitized line still contains control whitespace: %q", second)
+	}
+	if strings.Contains(second, "  ") {
+		t.Errorf("sanitized line still contains a double-space run: %q", second)
+	}
+	// The flattened author/subject region must contain every word from
+	// the injected "Bad\nInjected\tAuthor clean subject" input — order
+	// preserved, just with whitespace normalized to single spaces.
+	want := "def5678 2024-01-02 Bad Injected Author clean subject"
+	if second != want {
+		t.Errorf("second line = %q, want %q", second, want)
+	}
+	// Third line: the subject had an embedded newline. The newline
+	// must be flattened, not propagated as a new output line.
+	third := lines[2]
+	if !strings.HasPrefix(third, "abcdef0 2024-01-03 ") {
+		t.Errorf("expected hash and date prefix; got: %q", third)
+	}
+	if strings.ContainsAny(third, "\n\r\t") {
+		t.Errorf("sanitized line still contains control whitespace: %q", third)
+	}
+	if strings.Contains(third, "  ") {
+		t.Errorf("sanitized line still contains a double-space run: %q", third)
+	}
+	wantThird := "abcdef0 2024-01-03 Tester subject with injected newline"
+	if third != wantThird {
+		t.Errorf("third line = %q, want %q", third, wantThird)
 	}
 }
 
