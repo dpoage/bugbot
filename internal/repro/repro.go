@@ -313,7 +313,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (*Attem
 			return att, nil
 		}
 
-		att.Reason = verdict.reason
+		att.Reason = string(verdict.reason)
 		feedback = verdict.feedback(plan)
 	}
 

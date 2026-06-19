@@ -84,9 +84,9 @@ func (r *Reproducer) PromoteOne(ctx context.Context, st *store.Store, finding st
 			if perr != nil {
 				outcome.Reason = "patch-prover error: " + perr.Error()
 			} else {
-				outcome.FixWitnessed = patchResult.FixWitnessed
-				outcome.NeedsHuman = patchResult.NeedsHuman
-				if patchResult.SkippedNoSuiteCmd {
+				outcome.FixWitnessed = patchResult.kind == patchOutcomeFixWitnessed
+				outcome.NeedsHuman = patchResult.kind == patchOutcomeNeedsHuman
+				if patchResult.kind == patchOutcomeSkipped {
 					outcome.Reason = "patch-prover skipped: toolchain not identified and repro.suite_cmd not configured"
 				}
 			}
@@ -183,9 +183,9 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 						// Infrastructure failure: record but do not block the T1 promotion.
 						outcome.Reason = "patch-prover error: " + perr.Error()
 					} else {
-						outcome.FixWitnessed = patchResult.FixWitnessed
-						outcome.NeedsHuman = patchResult.NeedsHuman
-						if patchResult.SkippedNoSuiteCmd {
+						outcome.FixWitnessed = patchResult.kind == patchOutcomeFixWitnessed
+						outcome.NeedsHuman = patchResult.kind == patchOutcomeNeedsHuman
+						if patchResult.kind == patchOutcomeSkipped {
 							outcome.Reason = "patch-prover skipped: toolchain not identified and repro.suite_cmd not configured"
 						}
 					}
@@ -219,14 +219,29 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 	return summary, nil
 }
 
+// patchOutcomeKind is the discriminant for a patch-prover run. Exactly one
+// state applies; contradictory combinations are unrepresentable.
+type patchOutcomeKind int
+
+const (
+	// iota 0 is reserved as a neutral/invalid zero value so a zero patchOutcome{}
+	// (e.g. returned alongside an error) is never mistaken for FixWitnessed and
+	// cannot drive a spurious Tier-0 promotion. Callers read kind only when err==nil.
+	_ patchOutcomeKind = iota
+	// patchOutcomeFixWitnessed: both targeted and suite runs passed with the
+	// fix applied — the finding is promoted to Tier-0.
+	patchOutcomeFixWitnessed
+	// patchOutcomeNeedsHuman: all fix-plan attempts were exhausted without a
+	// passing run — a human reviewer is required.
+	patchOutcomeNeedsHuman
+	// patchOutcomeSkipped: the repo's toolchain could not be identified and no
+	// repro.suite_cmd is configured — the prover declines rather than guesses.
+	patchOutcomeSkipped
+)
+
 // patchOutcome is the result of a patch-prover run on a single finding.
 type patchOutcome struct {
-	FixWitnessed bool
-	NeedsHuman   bool
-	// SkippedNoSuiteCmd is set when the repo's toolchain could not be
-	// identified and no repro.suite_cmd is configured: the suite-green half of
-	// the witness cannot be proven, so the prover declines rather than guesses.
-	SkippedNoSuiteCmd bool
+	kind patchOutcomeKind
 }
 
 // provePatch runs the patch-prover on a finding that was just promoted to T1.

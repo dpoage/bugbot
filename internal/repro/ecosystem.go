@@ -1,6 +1,10 @@
 package repro
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/dpoage/bugbot/internal/sandbox"
+)
 
 // ecosystemRules describes how to interpret a sandbox result for a given
 // testing ecosystem. The rules are intentionally positive: a non-zero exit
@@ -17,8 +21,8 @@ import "strings"
 // extending detectEcosystem to recognize its launcher. The interpretation
 // pipeline itself does not change.
 type ecosystemRules struct {
-	// name is the lowercase identifier (e.g. "go", "python", "unknown").
-	name string
+	// name is the ecosystem identifier; it mirrors sandbox.Ecosystem values.
+	name sandbox.Ecosystem
 	// ranMarkers are lowercase substrings whose presence on the combined
 	// output is positive evidence the test process actually RAN. At least
 	// one of these (or the legacy patterns below) must match for a non-zero
@@ -83,7 +87,7 @@ var runtimeFailureMarkers = []string{
 // first to keep the legacy Go verdicts bit-for-bit compatible.
 var ecosystemTable = []ecosystemRules{
 	{
-		name: "go",
+		name: sandbox.EcosystemGo,
 		ranMarkers: []string{
 			"--- fail", // --- FAIL: TestX
 			"fail\t",   // FAIL\tgithub.com/... — go test summary line
@@ -116,7 +120,7 @@ var ecosystemTable = []ecosystemRules{
 		},
 	},
 	{
-		name: "python",
+		name: sandbox.EcosystemPython,
 		ranMarkers: []string{
 			"failed ",                           // pytest's "FAILED tests/test_x.py::TestX"
 			"= failures =",                      // pytest's "= FAILURES =" section header
@@ -139,7 +143,7 @@ var ecosystemTable = []ecosystemRules{
 		},
 	},
 	{
-		name: "rust",
+		name: sandbox.EcosystemRust,
 		ranMarkers: []string{
 			"test result:",   // cargo test "test result: FAILED. N passed; M failed"
 			"failing tests:", // cargo test failure section header
@@ -161,7 +165,7 @@ var ecosystemTable = []ecosystemRules{
 		},
 	},
 	{
-		name: "js",
+		name: sandbox.EcosystemJS,
 		// jest / vitest / npm test. They all emit a "FAIL" line per
 		// failing suite and a final summary; vitest adds a "✗" glyph
 		// (kept as a fallback marker).
@@ -188,7 +192,7 @@ var ecosystemTable = []ecosystemRules{
 		},
 	},
 	{
-		name: "cpp",
+		name: sandbox.EcosystemCpp,
 		ranMarkers: []string{
 			"failed",
 			"fail",
@@ -206,7 +210,7 @@ var ecosystemTable = []ecosystemRules{
 		},
 	},
 	{
-		name: "bazel",
+		name: sandbox.EcosystemBazel,
 		// PRECISION-FIRST: ranMarkers is intentionally empty. A bazel
 		// non-zero exit on its own is NEVER enough to demonstrate a
 		// bug — bugbot does not support offline bazel repro (external
@@ -216,7 +220,7 @@ var ecosystemTable = []ecosystemRules{
 		// marker therefore falls through to not_demonstrated. The
 		// environment is surfaced via a bazel-specific summary in
 		// interpret.go's 125/126/127 and defaultEnvMarkers branches
-		// (distinctness comes from verdict.ecosystem=="bazel", not
+		// (distinctness comes from verdict.ecosystem==EcosystemBazel, not
 		// from a new reason category).
 		ranMarkers: []string{},
 		buildMarkers: []string{
@@ -236,7 +240,7 @@ var ecosystemTable = []ecosystemRules{
 	// arbitrary shell command with no known runner does not silently
 	// promote to T1.
 	{
-		name: "unknown",
+		name: sandbox.EcosystemUnknown,
 		ranMarkers: []string{
 			"failed",
 			"fail ",
@@ -268,7 +272,7 @@ func detectEcosystem(argv []string) ecosystemRules {
 	// Flatten a shell wrapper so we can pattern-match the inner command.
 	argv = unwrapShell(argv)
 	if len(argv) == 0 {
-		return ecosystemTable[ecosystemIndex("unknown")]
+		return ecosystemTable[ecosystemIndex(sandbox.EcosystemUnknown)]
 	}
 
 	// Heuristic: the first token that looks like a known test runner
@@ -281,16 +285,16 @@ func detectEcosystem(argv []string) ecosystemRules {
 		// Only classify as Go if "go test" or a related testing subcommand
 		// is invoked; `go build` is a build step, not a test step.
 		if len(argv) >= 2 && isGoTestSubcommand(argv[1]) {
-			return ecosystemTable[ecosystemIndex("go")]
+			return ecosystemTable[ecosystemIndex(sandbox.EcosystemGo)]
 		}
 		// `go vet`, `go run` of a *_test.go file, etc. are still Go
 		// output but not test runs. Treat as Go so unrecognized output
 		// does not promote under the unknown default.
 		if len(argv) >= 2 {
-			return ecosystemTable[ecosystemIndex("go")]
+			return ecosystemTable[ecosystemIndex(sandbox.EcosystemGo)]
 		}
 	case "pytest", "py.test":
-		return ecosystemTable[ecosystemIndex("python")]
+		return ecosystemTable[ecosystemIndex(sandbox.EcosystemPython)]
 	case "python", "python3":
 		// `python -m pytest ...` is the conventional cross-platform
 		// pytest launcher. We match "pytest" or "py.test" as the module
@@ -299,7 +303,7 @@ func detectEcosystem(argv []string) ecosystemRules {
 		if len(argv) >= 3 && argv[1] == "-m" {
 			mod := strings.ToLower(argv[2])
 			if mod == "pytest" || mod == "py.test" {
-				return ecosystemTable[ecosystemIndex("python")]
+				return ecosystemTable[ecosystemIndex(sandbox.EcosystemPython)]
 			}
 		}
 	case "cargo":
@@ -308,19 +312,19 @@ func detectEcosystem(argv []string) ecosystemRules {
 		// Rust-toolchain output we want to classify as rust so unknown
 		// stderr does not silently promote.
 		if len(argv) >= 2 && (argv[1] == "test" || argv[1] == "bench") {
-			return ecosystemTable[ecosystemIndex("rust")]
+			return ecosystemTable[ecosystemIndex(sandbox.EcosystemRust)]
 		}
 		if len(argv) >= 2 {
-			return ecosystemTable[ecosystemIndex("rust")]
+			return ecosystemTable[ecosystemIndex(sandbox.EcosystemRust)]
 		}
 	case "npm", "yarn", "pnpm", "npx":
 		// `npm test`, `yarn test`, `pnpm test`, `npx jest`, etc. All
 		// land on the JS test-runner path.
-		return ecosystemTable[ecosystemIndex("js")]
+		return ecosystemTable[ecosystemIndex(sandbox.EcosystemJS)]
 	case "jest", "vitest", "mocha":
-		return ecosystemTable[ecosystemIndex("js")]
+		return ecosystemTable[ecosystemIndex(sandbox.EcosystemJS)]
 	case "ctest":
-		return ecosystemTable[ecosystemIndex("cpp")]
+		return ecosystemTable[ecosystemIndex(sandbox.EcosystemCpp)]
 	case "bazel", "bazelisk":
 		// Bazel is a build/test launcher. Bugbot runs `bazel test //...`
 		// directly (see repro.patch.detectSuiteCmd) and classifies any
@@ -330,11 +334,11 @@ func detectEcosystem(argv []string) ecosystemRules {
 		// branch. unwrapShell in the caller already walks through
 		// `bash -c 'bazel test //...'` wrappers, so this case also
 		// matches that form.
-		return ecosystemTable[ecosystemIndex("bazel")]
+		return ecosystemTable[ecosystemIndex(sandbox.EcosystemBazel)]
 	}
 	// Fall through: unrecognized launcher. Pick the conservative
 	// "unknown" entry — it still requires positive ran-evidence.
-	return ecosystemTable[ecosystemIndex("unknown")]
+	return ecosystemTable[ecosystemIndex(sandbox.EcosystemUnknown)]
 }
 
 // unwrapShell peels off `bash -c '...'` / `sh -c '...'` style wrappers
@@ -354,8 +358,8 @@ func unwrapShell(argv []string) []string {
 
 // ecosystemIndex returns the position of the named entry in
 // ecosystemTable, or 0 if the name is unknown (a defensive default — the
-// "go" entry MUST be at index 0, see the table comment).
-func ecosystemIndex(name string) int {
+// go entry MUST be at index 0, see the table comment).
+func ecosystemIndex(name sandbox.Ecosystem) int {
 	for i, e := range ecosystemTable {
 		if e.name == name {
 			return i

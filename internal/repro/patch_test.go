@@ -121,11 +121,11 @@ func TestPatchProver_SuccessPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prove: %v", err)
 	}
-	if !outcome.FixWitnessed {
-		t.Errorf("outcome.FixWitnessed = false, want true")
+	if outcome.kind != patchOutcomeFixWitnessed {
+		t.Errorf("outcome.kind = %v, want patchOutcomeFixWitnessed", outcome.kind)
 	}
-	if outcome.NeedsHuman {
-		t.Errorf("outcome.NeedsHuman = true, want false")
+	if outcome.kind == patchOutcomeNeedsHuman {
+		t.Errorf("outcome.kind = NeedsHuman, want FixWitnessed")
 	}
 
 	// Exactly 2 sandbox calls: targeted + suite.
@@ -302,11 +302,11 @@ func TestPatchProver_SuiteFailLeadsToNeedsHuman(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prove: %v", err)
 	}
-	if outcome.FixWitnessed {
-		t.Errorf("FixWitnessed = true, want false")
+	if outcome.kind == patchOutcomeFixWitnessed {
+		t.Errorf("kind = FixWitnessed, want NeedsHuman")
 	}
-	if !outcome.NeedsHuman {
-		t.Errorf("NeedsHuman = false, want true")
+	if outcome.kind != patchOutcomeNeedsHuman {
+		t.Errorf("kind = %v, want patchOutcomeNeedsHuman", outcome.kind)
 	}
 
 	// Exactly 4 sandbox calls (2 per attempt).
@@ -377,7 +377,7 @@ func TestPatchProver_TestFileRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prove: %v", err)
 	}
-	if !outcome.FixWitnessed {
+	if outcome.kind != patchOutcomeFixWitnessed {
 		t.Errorf("FixWitnessed = false; valid plan after rejection should succeed")
 	}
 
@@ -434,7 +434,7 @@ func TestPatchProver_NonexistentPathRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prove: %v", err)
 	}
-	if !outcome.FixWitnessed {
+	if outcome.kind != patchOutcomeFixWitnessed {
 		t.Errorf("FixWitnessed = false; valid plan after rejection should succeed")
 	}
 	// No sandbox call for the rejected plan.
@@ -503,10 +503,10 @@ func TestPatchProver_EnvironmentFailureStops(t *testing.T) {
 
 func TestPatchVerdict_ExitZeroIsPass(t *testing.T) {
 	v := patchVerdict(sandbox.Result{ExitCode: 0, Stdout: "ok"}, []string{"go", "test", "./..."})
-	if !v.passed {
-		t.Errorf("exit 0 should be a PASS in patch context; got passed=%v", v.passed)
+	if v.kind != patchVerdictPassed {
+		t.Errorf("exit 0 should be a PASS in patch context; got kind=%v", v.kind)
 	}
-	if v.envFailure {
+	if v.kind == patchVerdictEnvFailure {
 		t.Errorf("exit 0 should not be an env failure")
 	}
 }
@@ -521,14 +521,14 @@ func TestPatchVerdict_NonZeroIsFail(t *testing.T) {
 	// to the default "non-zero, no env markers" branch, which
 	// is fixRejected (mutually exclusive with envFailure).
 	v := patchVerdict(sandbox.Result{ExitCode: 1, Stdout: "FAIL"}, []string{"go", "test", "./..."})
-	if v.passed {
+	if v.kind == patchVerdictPassed {
 		t.Errorf("exit 1 should be a FAIL in patch context")
 	}
-	if v.envFailure {
+	if v.kind == patchVerdictEnvFailure {
 		t.Errorf("exit 1 test failure should not be env failure")
 	}
-	if !v.fixRejected {
-		t.Errorf("exit 1 test failure should be classified as fixRejected; got %+v", v)
+	if v.kind != patchVerdictFixRejected {
+		t.Errorf("exit 1 test failure should be classified as fixRejected; got kind=%v", v.kind)
 	}
 }
 
@@ -546,11 +546,11 @@ func TestPatchVerdict_EnvironmentErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			v := patchVerdict(tc.res, []string{"go", "test", "./..."})
-			if !v.envFailure {
-				t.Errorf("patchVerdict(%+v).envFailure = false, want true", tc.res)
+			if v.kind != patchVerdictEnvFailure {
+				t.Errorf("patchVerdict(%+v).kind = %v, want patchVerdictEnvFailure", tc.res, v.kind)
 			}
-			if v.passed {
-				t.Errorf("patchVerdict(%+v).passed = true, want false", tc.res)
+			if v.kind == patchVerdictPassed {
+				t.Errorf("patchVerdict(%+v).kind = Passed, want EnvFailure", tc.res)
 			}
 		})
 	}
@@ -589,14 +589,14 @@ func TestPatchVerdict_EnvFailureTranscript_NotFixRejected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			v := patchVerdict(tc.res, tc.cmd)
-			if !v.envFailure {
-				t.Errorf("env-failure transcript must set envFailure=true; got %+v", v)
+			if v.kind != patchVerdictEnvFailure {
+				t.Errorf("env-failure transcript must have kind=EnvFailure; got kind=%v", v.kind)
 			}
-			if v.fixRejected {
-				t.Errorf("env-failure transcript must NOT set fixRejected; got %+v", v)
+			if v.kind == patchVerdictFixRejected {
+				t.Errorf("env-failure transcript must NOT be FixRejected; got kind=%v", v.kind)
 			}
-			if v.passed {
-				t.Errorf("env-failure transcript must not pass; got %+v", v)
+			if v.kind == patchVerdictPassed {
+				t.Errorf("env-failure transcript must not pass; got kind=%v", v.kind)
 			}
 		})
 	}
@@ -610,14 +610,14 @@ func TestPatchVerdict_EnvFailureTranscript_NotFixRejected(t *testing.T) {
 // env failure.
 func TestPatchVerdict_FixRejectedTranscript(t *testing.T) {
 	v := patchVerdict(sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestDivide (0.00s)\nFAIL"}, []string{"go", "test", "./..."})
-	if v.envFailure {
-		t.Errorf("fix-rejected transcript must not set envFailure; got %+v", v)
+	if v.kind == patchVerdictEnvFailure {
+		t.Errorf("fix-rejected transcript must not be EnvFailure; got kind=%v", v.kind)
 	}
-	if !v.fixRejected {
-		t.Errorf("fix-rejected transcript must set fixRejected; got %+v", v)
+	if v.kind != patchVerdictFixRejected {
+		t.Errorf("fix-rejected transcript must have kind=FixRejected; got kind=%v", v.kind)
 	}
-	if v.passed {
-		t.Errorf("fix-rejected transcript must not pass; got %+v", v)
+	if v.kind == patchVerdictPassed {
+		t.Errorf("fix-rejected transcript must not pass; got kind=%v", v.kind)
 	}
 }
 
@@ -1009,11 +1009,11 @@ func TestProve_SkipsWhenSuiteCmdUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prove: %v", err)
 	}
-	if !out.SkippedNoSuiteCmd {
-		t.Error("expected SkippedNoSuiteCmd")
+	if out.kind != patchOutcomeSkipped {
+		t.Errorf("expected patchOutcomeSkipped, got kind=%v", out.kind)
 	}
-	if out.NeedsHuman || out.FixWitnessed {
-		t.Errorf("skip must not flag needs-human or fix-witnessed: %+v", out)
+	if out.kind == patchOutcomeNeedsHuman || out.kind == patchOutcomeFixWitnessed {
+		t.Errorf("skip must not flag needs-human or fix-witnessed: kind=%v", out.kind)
 	}
 	if calls := len(sb.Calls()); calls != 0 {
 		t.Errorf("skip must not execute the sandbox, made %d calls", calls)

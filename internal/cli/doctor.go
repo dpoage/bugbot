@@ -738,13 +738,13 @@ func checkSandboxVerifier(ctx context.Context, env doctorEnv, cfg config.Config)
 		return []checkResult{{
 			Name:   "sandbox verifier",
 			Status: statusPass,
-			Detail: "toolchain smoke PASS (" + verdict.Category + "): " + verdict.Detail,
+			Detail: "toolchain smoke PASS (" + string(verdict.Category) + "): " + verdict.Detail,
 		}}
 	}
 	return []checkResult{{
 		Name:   "sandbox verifier",
 		Status: statusFail,
-		Detail: "toolchain smoke FAIL (" + verdict.Category + "): " + verdict.Detail,
+		Detail: "toolchain smoke FAIL (" + string(verdict.Category) + "): " + verdict.Detail,
 	}}
 }
 

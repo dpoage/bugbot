@@ -96,6 +96,12 @@ const (
 	// DepStrategyOff is the default: no dependency mounts or env are added.
 	// Vendored repos are still detected (that path is free and safe).
 	DepStrategyOff DepStrategy = "off"
+	// DepStrategyVendored is set automatically when a repo's dependencies are
+	// already materialized locally (vendor/modules.txt for Go, vendor/ +
+	// .cargo/config stanza for Rust, node_modules/ for JS). It is never
+	// selected by the user — it overrides any requested strategy when the
+	// vendored invariant is satisfied.
+	DepStrategyVendored DepStrategy = "vendored"
 	// DepStrategyHost mounts the host Go module cache read-only.
 	DepStrategyHost DepStrategy = "host"
 	// DepStrategyFetch performs a one-time online prefetch into a bugbot-managed
@@ -107,7 +113,7 @@ const (
 // is accepted and treated as DepStrategyOff by ResolveDeps.
 func ValidDepStrategy(s DepStrategy) bool {
 	switch s {
-	case "", DepStrategyOff, DepStrategyHost, DepStrategyFetch:
+	case "", DepStrategyOff, DepStrategyVendored, DepStrategyHost, DepStrategyFetch:
 		return true
 	default:
 		return false
@@ -276,7 +282,7 @@ func resolveGoDeps(repoDir string, opts DepOptions) (Resolution, error) {
 	if isVendored(repoDir) {
 		return Resolution{
 			Env:      []string{"GOFLAGS=-mod=vendor"},
-			Strategy: "vendored",
+			Strategy: DepStrategyVendored,
 		}, nil
 	}
 
@@ -485,25 +491,11 @@ func checkModcacheExists(dir string) (string, error) {
 }
 
 // fetchCacheDir returns the bugbot-managed module-cache directory for repoDir
-// under the user cache dir (e.g. ~/.cache/bugbot/modcache/<hash>). Using the
-// user cache dir rather than a dir inside the scanned repo keeps the repo tree
-// clean (copyTree copies the whole repo, so an in-repo cache would bloat every
-// workspace copy) and lets the cache survive across runs. The directory is
-// created if missing.
+// (e.g. ~/.cache/bugbot/modcache/<hash>). The directory is created if missing.
+// override, when non-empty, replaces the ~/.cache/bugbot/modcache base
+// (test seam).
 func fetchCacheDir(repoDir, override string) (string, error) {
-	base := override
-	if base == "" {
-		uc, err := os.UserCacheDir()
-		if err != nil {
-			return "", fmt.Errorf("sandbox: resolve user cache dir for fetch cache: %w", err)
-		}
-		base = filepath.Join(uc, "bugbot", "modcache")
-	}
-	dir := filepath.Join(base, repoHash(repoDir))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("sandbox: create fetch cache dir: %w", err)
-	}
-	return dir, nil
+	return fetchEcosystemCacheDir("modcache", repoDir, override)
 }
 
 // repoHash derives a stable directory name from the absolute repo path so two
@@ -517,20 +509,50 @@ func repoHash(repoDir string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// fetchEcosystemCacheDir returns the bugbot-managed cache directory for the
+// named ecosystem and repoDir under the user cache dir
+// (e.g. ~/.cache/bugbot/<ecosystem>/<hash>). Using the user cache dir rather
+// than a dir inside the scanned repo keeps the repo tree clean and lets the
+// cache survive across runs. override (when non-empty) replaces the
+// ~/.cache/bugbot/<ecosystem> base, allowing tests to redirect to a temp dir.
+// The directory is created if missing.
+func fetchEcosystemCacheDir(ecosystem, repoDir, override string) (string, error) {
+	base := override
+	if base == "" {
+		uc, err := os.UserCacheDir()
+		if err != nil {
+			return "", fmt.Errorf("sandbox: resolve user cache dir for %s fetch cache: %w", ecosystem, err)
+		}
+		base = filepath.Join(uc, "bugbot", ecosystem)
+	}
+	dir := filepath.Join(base, repoHash(repoDir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("sandbox: create %s fetch cache dir: %w", ecosystem, err)
+	}
+	return dir, nil
+}
+
+// newPrefetchOnce wraps run in a sync.Once so the returned function calls run
+// at most once per Resolution — all four ecosystem prefetch constructors share
+// this pattern.
+func newPrefetchOnce(run func(context.Context) error) func(context.Context) error {
+	var once sync.Once
+	var onceErr error
+	return func(ctx context.Context) error {
+		once.Do(func() { onceErr = run(ctx) })
+		return onceErr
+	}
+}
+
 // newPrefetch builds the one-time online prefetch hook for the FETCH strategy.
 // It runs `go mod download all` in the FetchSandbox with network enabled and
 // GOMODCACHE pointed at hostCache, and is keyed on the repo's go.sum hash so an
 // unchanged dependency set is not re-downloaded. The returned func is guarded by
 // a sync.Once so it runs at most once per Resolution even if called repeatedly.
 func newPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
-	var once sync.Once
-	var onceErr error
-	return func(ctx context.Context) error {
-		once.Do(func() {
-			onceErr = runPrefetch(ctx, repoDir, hostCache, opts)
-		})
-		return onceErr
-	}
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runPrefetch(ctx, repoDir, hostCache, opts)
+	})
 }
 
 // prefetchSentinel is the marker file written into the fetch cache recording the
@@ -751,24 +773,11 @@ func hasRequirementsTxt(repoDir string) bool {
 }
 
 // fetchPipCacheDir returns the bugbot-managed pip wheelhouse directory for
-// repoDir under the user cache dir (e.g. ~/.cache/bugbot/pipcache/<hash>).
-// Parallel to fetchCacheDir for Go (modcache); repoHash is reused so the
-// same repo gets the same hash regardless of ecosystem. The directory is
-// created if missing.
+// repoDir (e.g. ~/.cache/bugbot/pipcache/<hash>). Delegates to
+// fetchEcosystemCacheDir. override, when non-empty, overrides the base dir
+// (test seam).
 func fetchPipCacheDir(repoDir, override string) (string, error) {
-	base := override
-	if base == "" {
-		uc, err := os.UserCacheDir()
-		if err != nil {
-			return "", fmt.Errorf("sandbox: resolve user cache dir for pip fetch cache: %w", err)
-		}
-		base = filepath.Join(uc, "bugbot", "pipcache")
-	}
-	dir := filepath.Join(base, repoHash(repoDir))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("sandbox: create pip fetch cache dir: %w", err)
-	}
-	return dir, nil
+	return fetchEcosystemCacheDir("pipcache", repoDir, override)
 }
 
 // requirementsHash returns a hex hash of requirements.txt so the pip prefetch
@@ -788,14 +797,9 @@ func requirementsHash(repoDir string) (string, error) {
 // keyed on the sha256 of requirements.txt so an unchanged dep set is not
 // re-downloaded. Guarded by a sync.Once so it runs at most once per Resolution.
 func newPipPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
-	var once sync.Once
-	var onceErr error
-	return func(ctx context.Context) error {
-		once.Do(func() {
-			onceErr = runPipPrefetch(ctx, repoDir, hostCache, opts)
-		})
-		return onceErr
-	}
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runPipPrefetch(ctx, repoDir, hostCache, opts)
+	})
 }
 
 // runPipPrefetch performs the actual online pip download. It is a no-op when
@@ -918,7 +922,7 @@ func resolveCargo(repoDir string, opts DepOptions) (Resolution, error) {
 	if isCargoVendored(repoDir) {
 		return Resolution{
 			Env:      []string{"CARGO_NET_OFFLINE=true"},
-			Strategy: "vendored",
+			Strategy: DepStrategyVendored,
 		}, nil
 	}
 	// Note: if vendor/ exists without .cargo/config{.toml} containing
@@ -1087,24 +1091,11 @@ func checkCargoRegistryExists(dir string) (string, error) {
 }
 
 // fetchCargoCacheDir returns the bugbot-managed cargo registry cache directory
-// for repoDir under the user cache dir (e.g. ~/.cache/bugbot/cargocache/<hash>).
-// Parallel to fetchCacheDir for Go and fetchPipCacheDir for Python; repoHash is
-// reused so the same repo gets the same hash regardless of ecosystem. The
-// directory is created if missing.
+// for repoDir (e.g. ~/.cache/bugbot/cargocache/<hash>). Delegates to
+// fetchEcosystemCacheDir. override, when non-empty, overrides the base dir
+// (test seam).
 func fetchCargoCacheDir(repoDir, override string) (string, error) {
-	base := override
-	if base == "" {
-		uc, err := os.UserCacheDir()
-		if err != nil {
-			return "", fmt.Errorf("sandbox: resolve user cache dir for cargo fetch cache: %w", err)
-		}
-		base = filepath.Join(uc, "bugbot", "cargocache")
-	}
-	dir := filepath.Join(base, repoHash(repoDir))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("sandbox: create cargo fetch cache dir: %w", err)
-	}
-	return dir, nil
+	return fetchEcosystemCacheDir("cargocache", repoDir, override)
 }
 
 // cargoLockHash returns a hex hash of Cargo.lock (falling back to Cargo.toml
@@ -1128,14 +1119,9 @@ func cargoLockHash(repoDir string) (string, error) {
 // hostCache/registry), keyed on the sha256 of Cargo.lock (or Cargo.toml) so
 // an unchanged dependency set is not re-downloaded. Guarded by a sync.Once.
 func newCargoPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
-	var once sync.Once
-	var onceErr error
-	return func(ctx context.Context) error {
-		once.Do(func() {
-			onceErr = runCargoPrefetch(ctx, repoDir, hostCache, opts)
-		})
-		return onceErr
-	}
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runCargoPrefetch(ctx, repoDir, hostCache, opts)
+	})
 }
 
 // runCargoPrefetch performs the actual online cargo fetch. It is a no-op when
@@ -1279,7 +1265,7 @@ func resolveJS(repoDir string, opts DepOptions) (Resolution, error) {
 	// exists, dependencies are already materialized — no mount or install step
 	// is needed. This is the npm equivalent of Go's vendor/modules.txt detection.
 	if hasNodeModules(repoDir) {
-		return Resolution{Strategy: "vendored"}, nil
+		return Resolution{Strategy: DepStrategyVendored}, nil
 	}
 
 	strategy := opts.Strategy
@@ -1385,23 +1371,11 @@ func hasPackageLock(repoDir string) bool {
 }
 
 // fetchNPMCacheDir returns the bugbot-managed npm cache directory for repoDir
-// under the user cache dir (e.g. ~/.cache/bugbot/npmcache/<hash>). Parallel to
-// fetchCacheDir for Go, fetchPipCacheDir for Python, and fetchCargoCacheDir for
-// Rust; repoHash is reused. The directory is created if missing.
+// (e.g. ~/.cache/bugbot/npmcache/<hash>). Delegates to
+// fetchEcosystemCacheDir. override, when non-empty, overrides the base dir
+// (test seam).
 func fetchNPMCacheDir(repoDir, override string) (string, error) {
-	base := override
-	if base == "" {
-		uc, err := os.UserCacheDir()
-		if err != nil {
-			return "", fmt.Errorf("sandbox: resolve user cache dir for npm fetch cache: %w", err)
-		}
-		base = filepath.Join(uc, "bugbot", "npmcache")
-	}
-	dir := filepath.Join(base, repoHash(repoDir))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("sandbox: create npm fetch cache dir: %w", err)
-	}
-	return dir, nil
+	return fetchEcosystemCacheDir("npmcache", repoDir, override)
 }
 
 // packageLockHash returns a hex hash of package-lock.json so the npm prefetch
@@ -1429,14 +1403,9 @@ func packageLockHash(repoDir string) (string, error) {
 // data or contact external services. This is enforced in the Spec and asserted
 // in unit tests.
 func newNPMPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
-	var once sync.Once
-	var onceErr error
-	return func(ctx context.Context) error {
-		once.Do(func() {
-			onceErr = runNPMPrefetch(ctx, repoDir, hostCache, opts)
-		})
-		return onceErr
-	}
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runNPMPrefetch(ctx, repoDir, hostCache, opts)
+	})
 }
 
 // runNPMPrefetch performs the actual online npm ci prefetch. It is a no-op when

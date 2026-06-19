@@ -13,7 +13,7 @@ import (
 func TestClassifySmoke_OK(t *testing.T) {
 	res := sandbox.Result{ExitCode: 0, Stdout: "ok\n"}
 	v := classifySmoke(res, []string{"go", "vet", "./..."})
-	if !v.OK || v.Category != "ok" {
+	if !v.OK || v.Category != SmokeCategoryOK {
 		t.Errorf("clean exit: got ok=%v category=%q, want ok=true category=ok", v.OK, v.Category)
 	}
 }
@@ -22,7 +22,7 @@ func TestClassifySmoke_OK(t *testing.T) {
 func TestClassifySmoke_Timeout(t *testing.T) {
 	res := sandbox.Result{ExitCode: -1, TimedOut: true, Stderr: "killed"}
 	v := classifySmoke(res, []string{"go", "vet", "./..."})
-	if v.OK || v.Category != "timeout" {
+	if v.OK || v.Category != SmokeCategoryTimeout {
 		t.Errorf("timeout: got ok=%v category=%q, want ok=false category=timeout", v.OK, v.Category)
 	}
 }
@@ -31,7 +31,7 @@ func TestClassifySmoke_Timeout(t *testing.T) {
 func TestClassifySmoke_Exit125(t *testing.T) {
 	res := sandbox.Result{ExitCode: 125, Stderr: "setup cmd failed"}
 	v := classifySmoke(res, []string{"go", "vet", "./..."})
-	if v.OK || v.Category != "toolchain_missing" {
+	if v.OK || v.Category != SmokeCategoryToolchainMissing {
 		t.Errorf("exit 125: got ok=%v category=%q, want ok=false category=toolchain_missing", v.OK, v.Category)
 	}
 }
@@ -40,7 +40,7 @@ func TestClassifySmoke_Exit125(t *testing.T) {
 func TestClassifySmoke_Exit126(t *testing.T) {
 	res := sandbox.Result{ExitCode: 126, Stderr: "permission denied"}
 	v := classifySmoke(res, []string{"cargo", "metadata"})
-	if v.OK || v.Category != "toolchain_missing" {
+	if v.OK || v.Category != SmokeCategoryToolchainMissing {
 		t.Errorf("exit 126: got ok=%v category=%q, want ok=false category=toolchain_missing", v.OK, v.Category)
 	}
 }
@@ -49,7 +49,7 @@ func TestClassifySmoke_Exit126(t *testing.T) {
 func TestClassifySmoke_Exit127(t *testing.T) {
 	res := sandbox.Result{ExitCode: 127, Stderr: "go: command not found"}
 	v := classifySmoke(res, []string{"go", "vet", "./..."})
-	if v.OK || v.Category != "toolchain_missing" {
+	if v.OK || v.Category != SmokeCategoryToolchainMissing {
 		t.Errorf("exit 127: got ok=%v category=%q, want ok=false category=toolchain_missing", v.OK, v.Category)
 	}
 }
@@ -69,7 +69,7 @@ func TestClassifySmoke_EnvMarkers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			res := sandbox.Result{ExitCode: 1, Stderr: tc.output}
 			v := classifySmoke(res, []string{"go", "vet", "./..."})
-			if v.OK || v.Category != "env_error" {
+			if v.OK || v.Category != SmokeCategoryEnvError {
 				t.Errorf("%s: got ok=%v category=%q, want ok=false category=env_error", tc.name, v.OK, v.Category)
 			}
 		})
@@ -90,7 +90,7 @@ func TestClassifySmoke_ToolchainMissing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			res := sandbox.Result{ExitCode: 1, Stderr: tc.output}
 			v := classifySmoke(res, []string{"go", "vet", "./..."})
-			if v.OK || v.Category != "toolchain_missing" {
+			if v.OK || v.Category != SmokeCategoryToolchainMissing {
 				t.Errorf("%s: got ok=%v category=%q, want ok=false category=toolchain_missing", tc.name, v.OK, v.Category)
 			}
 		})
@@ -111,7 +111,7 @@ func TestClassifySmoke_DepMissing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			res := sandbox.Result{ExitCode: 1, Stderr: tc.output}
 			v := classifySmoke(res, []string{"go", "vet", "./..."})
-			if v.OK || v.Category != "dep_missing" {
+			if v.OK || v.Category != SmokeCategoryDepMissing {
 				t.Errorf("%s: got ok=%v category=%q, want ok=false category=dep_missing", tc.name, v.OK, v.Category)
 			}
 		})
@@ -156,7 +156,7 @@ func TestClassifySmoke_RealFailureNotMisread(t *testing.T) {
 			// The toolchain RAN and reported a real failure.
 			// We want ok=true ("toolchain is present") — we are NOT checking
 			// whether the project is green, only whether the toolchain exists.
-			if !v.OK || v.Category != "ok" {
+			if !v.OK || v.Category != SmokeCategoryOK {
 				t.Errorf("%s: got ok=%v category=%q, want ok=true category=ok\noutput: %s",
 					tc.name, v.OK, v.Category, tc.output)
 			}
@@ -182,7 +182,7 @@ func TestVerifySandbox_MockOK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !verdict.OK || verdict.Category != "ok" {
+	if !verdict.OK || verdict.Category != SmokeCategoryOK {
 		t.Errorf("got ok=%v category=%q, want ok=true category=ok", verdict.OK, verdict.Category)
 	}
 	if m.CallCount() != 1 {
@@ -210,7 +210,7 @@ func TestVerifySandbox_MockToolchainMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if verdict.OK || verdict.Category != "toolchain_missing" {
+	if verdict.OK || verdict.Category != SmokeCategoryToolchainMissing {
 		t.Errorf("got ok=%v category=%q, want ok=false category=toolchain_missing", verdict.OK, verdict.Category)
 	}
 }
@@ -291,7 +291,7 @@ func TestVerifySandbox_Timeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if verdict.OK || verdict.Category != "timeout" {
+	if verdict.OK || verdict.Category != SmokeCategoryTimeout {
 		t.Errorf("got ok=%v category=%q, want ok=false category=timeout", verdict.OK, verdict.Category)
 	}
 }
