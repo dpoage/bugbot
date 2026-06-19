@@ -246,13 +246,18 @@ func capabilityGuidance(caps sandbox.CapabilitySet) string {
 	return b.String()
 }
 
-// planSchema is the JSON schema for the reproducer agent's plan output.
+// planSchema is the JSON schema for the reproducer agent's plan output. Only
+// files and cmd are required: they are load-bearing for execution and mirror
+// validatePlan's structural gate. expect is descriptive-only (artifact README,
+// patch context, human review) so it is requested but not required — a model
+// that produces a runnable files+cmd plan must not have the whole attempt
+// aborted with a hard parse error merely for omitting the prose description.
 var planSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "files": {
       "type": "object",
-      "description": "Repro/test files to inject, keyed by workspace-relative path. For Go, typically one _test.go file.",
+      "description": "Repro/test files to inject, keyed by a workspace-relative path INSIDE the repo (e.g. \"repro_test.cpp\" or \"test/repro_test.cpp\"). Absolute or escaping paths like \"/tmp/foo.cpp\" are REJECTED — write injected sources into the repo tree. You MAY still emit build outputs to /tmp at run time via cmd (e.g. -o /tmp/repro). For Go, typically one _test.go file.",
       "additionalProperties": {"type": "string"},
       "minProperties": 1
     },
@@ -268,7 +273,7 @@ var planSchema = json.RawMessage(`{
       "description": "Short description of the expected failure (what assertion fails and why)."
     }
   },
-  "required": ["files", "cmd", "expect"],
+  "required": ["files", "cmd"],
   "additionalProperties": false
 }`)
 

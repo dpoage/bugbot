@@ -161,3 +161,16 @@ func sanitizeRelPath(name string) (string, error) {
 	}
 	return clean, nil
 }
+
+// ValidateWorkspacePath reports whether name is a legal WriteFiles key: a
+// non-empty, workspace-relative path that does not resolve to the root and does
+// not escape the workspace via an absolute prefix or "..". It is the exported
+// guard callers (e.g. the reproducer's plan validator) use to reject an
+// escaping injection path BEFORE a sandbox run, so the failure is a recoverable
+// "invalid plan" rather than a hard mid-run write error. It shares
+// sanitizeRelPath's rule verbatim, so the pre-flight check and the actual
+// applyWriteFiles write can never disagree.
+func ValidateWorkspacePath(name string) error {
+	_, err := sanitizeRelPath(name)
+	return err
+}

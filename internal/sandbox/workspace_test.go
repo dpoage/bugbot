@@ -94,6 +94,25 @@ func TestSanitizeRelPath(t *testing.T) {
 	}
 }
 
+// TestValidateWorkspacePath locks the exported guard to sanitizeRelPath's rule:
+// it must reject the exact keys applyWriteFiles would reject (absolute,
+// escaping, empty, root) and accept legal relative ones, so the reproducer's
+// pre-flight plan check can never diverge from the actual write.
+func TestValidateWorkspacePath(t *testing.T) {
+	reject := []string{"/tmp/repro_test.cpp", "/etc/passwd", "../outside", "a/../../outside", "", "."}
+	for _, in := range reject {
+		if err := ValidateWorkspacePath(in); err == nil {
+			t.Errorf("ValidateWorkspacePath(%q) = nil, want error", in)
+		}
+	}
+	accept := []string{"repro_test.cpp", "test/repro_test.cpp", "./a.txt"}
+	for _, in := range accept {
+		if err := ValidateWorkspacePath(in); err != nil {
+			t.Errorf("ValidateWorkspacePath(%q) = %v, want nil", in, err)
+		}
+	}
+}
+
 func TestApplyWriteFilesRejectsEscape(t *testing.T) {
 	ws := t.TempDir()
 	err := applyWriteFiles(ws, map[string][]byte{"../escape.txt": []byte("nope")})

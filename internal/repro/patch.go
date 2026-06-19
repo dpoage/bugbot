@@ -407,9 +407,11 @@ func buildPatchTask(f store.Finding, att *Attempt, feedback string) string {
 		b.WriteString("Command: ")
 		b.WriteString(strings.Join(att.Plan.Cmd, " "))
 		b.WriteString("\n")
-		b.WriteString("Expected failure: ")
-		b.WriteString(att.Plan.Expect)
-		b.WriteString("\n")
+		if att.Plan.Expect != "" {
+			b.WriteString("Expected failure: ")
+			b.WriteString(att.Plan.Expect)
+			b.WriteString("\n")
+		}
 		b.WriteString("Repro test files (do NOT modify these):\n")
 		for path := range att.Plan.Files {
 			fmt.Fprintf(&b, "  %s\n", path)

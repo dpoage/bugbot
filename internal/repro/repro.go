@@ -390,7 +390,8 @@ func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, e
 }
 
 // validatePlan rejects structurally unusable plans before spending a sandbox
-// run on them.
+// run on them. A failure here is recoverable: Attempt feeds the message back to
+// the agent and revises, so the checks below double as corrective guidance.
 func validatePlan(p *Plan) error {
 	if len(p.Files) == 0 {
 		return errors.New("no repro files")
@@ -399,8 +400,14 @@ func validatePlan(p *Plan) error {
 		return errors.New("no command")
 	}
 	for path := range p.Files {
-		if path == "" {
-			return errors.New("empty file path")
+		// Injected file keys must be workspace-relative: an absolute or
+		// escaping path (e.g. "/tmp/repro_test.cpp") is rejected by the sandbox
+		// at write time, which would otherwise abort the whole attempt with a
+		// hard infrastructure error instead of a recoverable revision. Catch it
+		// here using the sandbox's own rule so the agent is told to fix it.
+		if err := sandbox.ValidateWorkspacePath(path); err != nil {
+			return fmt.Errorf("file %q must be a workspace-relative path inside the repo "+
+				"(no leading %q, no %q), e.g. %q: %w", path, "/", "..", "repro_test.cpp", err)
 		}
 	}
 	return nil

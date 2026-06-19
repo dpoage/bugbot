@@ -159,6 +159,106 @@ func TestPromoteAll_Success(t *testing.T) {
 	}
 }
 
+// TestPromoteAll_PlanWithoutExpectPromotes proves that a plan omitting the
+// descriptive "expect" field still reproduces and promotes. expect is not in
+// planSchema's required set, so RunJSON must accept a runnable files+cmd plan
+// on the first pass with no repair round-trip. Regression: expect was formerly
+// required, so a model that produced a perfectly runnable plan but omitted the
+// prose description aborted the whole attempt with a hard "missing required
+// field expect" parse error, even though expect is never load-bearing for
+// execution (validatePlan never checked it; consumers guard on emptiness).
+func TestPromoteAll_PlanWithoutExpectPromotes(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	finding := seedFinding(t, st)
+	repoDir := newRepoDir(t)
+
+	// Plan body WITHOUT an "expect" key. planBody(goodPlan()) cannot express
+	// this: a Plan always marshals "expect":"", which a present field would trip
+	// against the schema's minLength:1. The omission is the case under test.
+	body := `{"files":{"bug_test.go":"package bug\n\nimport \"testing\"\n\nfunc TestBug(t *testing.T){ t.Fatal(\"boom\") }\n"},"cmd":["go","test","-run","TestBug","./..."]}`
+	client := newScriptedClient(body)
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "--- FAIL: TestBug\n    bug_test.go:1: boom\nFAIL",
+	}})
+
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	if err != nil {
+		t.Fatalf("PromoteAll: %v", err)
+	}
+	if summary.Promoted != 1 || summary.Failed != 0 {
+		t.Fatalf("summary = %+v, want 1 promoted / 0 failed", summary)
+	}
+	// Exactly one completion: the expect-less plan parsed on the first pass, so
+	// no repair round-trip fired. A second request would mean expect was still
+	// being enforced as required.
+	if n := len(client.allRequests()); n != 1 {
+		t.Fatalf("llm completions = %d, want 1 (no repair round-trip)", n)
+	}
+}
+
+// TestPromoteAll_AbsolutePathPlanRetries proves that a plan injecting an
+// ABSOLUTE/escaping file path (e.g. "/tmp/repro_test.cpp") is caught by
+// validatePlan and fed back as a recoverable revision — NOT executed and NOT
+// surfaced as a hard infrastructure error. Regression: such a path reached the
+// sandbox's applyWriteFiles, which rejected it with "path escapes workspace",
+// aborting the entire attempt with an `error:` instead of letting the agent
+// correct it. The first (bad) plan must never touch the sandbox; the corrected
+// plan promotes, and the revision request must carry actionable path guidance.
+func TestPromoteAll_AbsolutePathPlanRetries(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	finding := seedFinding(t, st)
+	repoDir := newRepoDir(t)
+
+	bad := Plan{
+		Files:  map[string]string{"/tmp/repro_test.cpp": "int main(){return 1;}\n"},
+		Cmd:    []string{"sh", "-c", "g++ /tmp/repro_test.cpp -o /tmp/r && /tmp/r"},
+		Expect: "leak", // non-empty so the plan clears the schema; the path is the defect
+	}
+	client := newScriptedClient(planBody(t, bad), planBody(t, goodPlan()))
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "--- FAIL: TestBug\nFAIL",
+	}})
+
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	if err != nil {
+		t.Fatalf("PromoteAll returned a hard error for a recoverable bad path: %v", err)
+	}
+	if summary.Promoted != 1 || summary.Failed != 0 {
+		t.Fatalf("summary = %+v, want 1 promoted / 0 failed (retry after bad path)", summary)
+	}
+	// The absolute-path plan must never reach the sandbox; only the corrected
+	// plan executes.
+	if n := len(sb.Calls()); n != 1 {
+		t.Fatalf("sandbox calls = %d, want 1 (bad-path plan must not execute)", n)
+	}
+	// Two completions: the rejected plan + the corrected one. The revision
+	// request must name the offending path and the workspace-relative rule.
+	reqs := client.allRequests()
+	if len(reqs) != 2 {
+		t.Fatalf("llm completions = %d, want 2 (reject + revise)", len(reqs))
+	}
+	task := client.taskText(1)
+	for _, want := range []string{"/tmp/repro_test.cpp", "workspace-relative"} {
+		if !strings.Contains(task, want) {
+			t.Errorf("revision task missing %q; got:\n%s", want, task)
+		}
+	}
+}
+
 // --- dependency strategy wiring --------------------------------------------
 
 // TestPromoteAll_VendoredSetsGoflags verifies a vendored repo run carries
