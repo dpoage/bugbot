@@ -308,6 +308,12 @@ func TestDisplayName(t *testing.T) {
 		{LangCPP, "C++"},
 		{LangCSharp, "C#"},
 		{LangElixir, "Elixir"},
+		{LangZig, "Zig"},
+		{LangGleam, "Gleam"},
+		{LangScala, "Scala"},
+		{LangDart, "Dart"},
+		{LangLua, "Lua"},
+		{LangObjC, "Objective-C"},
 		{LangOther, string(LangOther)}, // fallback: raw Language string
 	}
 	for _, tc := range cases {
@@ -326,5 +332,54 @@ func TestPersonaElixirDominant(t *testing.T) {
 	want := "senior Elixir engineer"
 	if got != want {
 		t.Errorf("Persona(Elixir-dominant) = %q, want %q", got, want)
+	}
+}
+
+// TestPersonaZigDominant verifies end-to-end that a snapshot dominated by
+// Zig files yields a persona mentioning Zig — confirming it is not excluded
+// as LangOther and that DominantLanguages and DisplayName agree.
+func TestPersonaZigDominant(t *testing.T) {
+	snap := snapFromLangs(LangZig, LangZig, LangZig, LangZig)
+	got := Persona(snap)
+	want := "senior Zig engineer"
+	if got != want {
+		t.Errorf("Persona(Zig-dominant) = %q, want %q", got, want)
+	}
+}
+
+// TestPersonaGleamDominant verifies that Gleam-dominant snapshots produce a
+// correctly named persona.
+func TestPersonaGleamDominant(t *testing.T) {
+	snap := snapFromLangs(LangGleam, LangGleam, LangGleam)
+	got := Persona(snap)
+	want := "senior Gleam engineer"
+	if got != want {
+		t.Errorf("Persona(Gleam-dominant) = %q, want %q", got, want)
+	}
+}
+
+// TestDominantLanguagesNewLangs verifies that the new minor languages are
+// counted by DominantLanguages (i.e. not silently dropped as LangOther).
+func TestDominantLanguagesNewLangs(t *testing.T) {
+	cases := []struct {
+		lang Language
+		name string
+	}{
+		{LangZig, "Zig"},
+		{LangGleam, "Gleam"},
+		{LangScala, "Scala"},
+		{LangDart, "Dart"},
+		{LangLua, "Lua"},
+		{LangObjC, "Objective-C"},
+	}
+	for _, tc := range cases {
+		snap := snapFromLangs(tc.lang, tc.lang, tc.lang)
+		langs := DominantLanguages(snap)
+		if len(langs) != 1 || langs[0] != tc.lang {
+			t.Errorf("DominantLanguages(%s): got %v, want [%s]", tc.name, langs, tc.lang)
+		}
+		if got := DisplayName(tc.lang); got != tc.name {
+			t.Errorf("DisplayName(%s) = %q, want %q", tc.lang, got, tc.name)
+		}
 	}
 }

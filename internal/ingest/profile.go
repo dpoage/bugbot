@@ -22,6 +22,12 @@ var displayName = map[Language]string{
 	LangSwift:      "Swift",
 	LangKotlin:     "Kotlin",
 	LangElixir:     "Elixir",
+	LangZig:        "Zig",
+	LangGleam:      "Gleam",
+	LangScala:      "Scala",
+	LangDart:       "Dart",
+	LangLua:        "Lua",
+	LangObjC:       "Objective-C",
 	LangShell:      "Shell",
 }
 
