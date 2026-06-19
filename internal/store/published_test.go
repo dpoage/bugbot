@@ -191,3 +191,48 @@ func TestListPublishedIssues_StableOrderAcrossCalls(t *testing.T) {
 		}
 	}
 }
+
+// TestDeletePublishedIssue covers the stale-row cleanup path used by the
+// publish reconciler when a GitHub issue returns 410/404: insert, delete,
+// confirm the row is gone (ErrNotFound) and confirm a second delete is
+// idempotent (no error).
+func TestDeletePublishedIssue(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	fp := "fp-stale"
+	if err := st.UpsertPublishedIssue(ctx, fp, 99, "open"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Pre-condition: row exists.
+	if _, err := st.GetPublishedIssue(ctx, fp); err != nil {
+		t.Fatalf("pre-delete get: %v", err)
+	}
+
+	// Delete the row.
+	if err := st.DeletePublishedIssue(ctx, fp); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	// Row is gone.
+	if _, err := st.GetPublishedIssue(ctx, fp); !errors.Is(err, ErrNotFound) {
+		t.Errorf("post-delete get err = %v, want ErrNotFound", err)
+	}
+
+	// Idempotent: deleting again is a no-op, not an error.
+	if err := st.DeletePublishedIssue(ctx, fp); err != nil {
+		t.Errorf("second delete err = %v, want nil (idempotent)", err)
+	}
+
+	// A different fingerprint is unaffected.
+	if err := st.UpsertPublishedIssue(ctx, "fp-fresh", 7, "open"); err != nil {
+		t.Fatalf("seed fresh: %v", err)
+	}
+	if err := st.DeletePublishedIssue(ctx, fp); err != nil {
+		t.Errorf("delete on non-existent fp err = %v, want nil", err)
+	}
+	if _, err := st.GetPublishedIssue(ctx, "fp-fresh"); err != nil {
+		t.Errorf("unrelated row was touched by delete: %v", err)
+	}
+}

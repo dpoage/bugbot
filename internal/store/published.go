@@ -39,6 +39,25 @@ func (s *Store) UpsertPublishedIssue(ctx context.Context, fingerprint string, is
 	return nil
 }
 
+// DeletePublishedIssue removes the published_issues row for fingerprint. It is
+// used by the publish reconciler when a GitHub issue has been deleted
+// (HTTP 410) or transferred/renamed (HTTP 404) and the local row is stale;
+// the caller recreates the issue with a fresh number in the same run. The
+// method is idempotent: deleting a row that does not exist is not an error,
+// so callers in the reconcile loop do not need a separate "is it there?"
+// check. Returns nil even when no row was deleted, mirroring the pattern
+// used by other delete methods in this package.
+func (s *Store) DeletePublishedIssue(ctx context.Context, fingerprint string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM published_issues WHERE fingerprint = ?`,
+		fingerprint,
+	)
+	if err != nil {
+		return annotateErr(s.path, "delete_published_issue", err)
+	}
+	return nil
+}
+
 // GetPublishedIssue returns the published_issues row for fingerprint, or
 // ErrNotFound if no issue has been filed for this finding.
 func (s *Store) GetPublishedIssue(ctx context.Context, fingerprint string) (PublishedIssue, error) {
