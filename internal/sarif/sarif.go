@@ -13,7 +13,8 @@ import (
 
 const (
 	// Schema is the canonical SARIF 2.1.0 JSON Schema URI.
-	Schema  = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+	Schema = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+	// Version is the SARIF format version.
 	Version = "2.1.0"
 
 	// InformationURI points at the Bugbot project.
@@ -42,26 +43,30 @@ type Tool struct {
 type Driver struct {
 	Name           string `json:"name"`
 	InformationURI string `json:"informationUri"`
+	Version        string `json:"version,omitempty"`
 	Rules          []Rule `json:"rules"`
 }
 
 // Rule describes one analysis rule (one per distinct lens).
 type Rule struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID               string         `json:"id"`
+	Name             string         `json:"name,omitempty"`
+	ShortDescription *MessageString `json:"shortDescription,omitempty"`
 }
 
 // Result is a single finding.
 type Result struct {
 	RuleID              string            `json:"ruleId"`
 	Level               string            `json:"level"`
-	Message             Message           `json:"message"`
+	Message             MessageString     `json:"message"`
 	Locations           []Location        `json:"locations"`
 	PartialFingerprints map[string]string `json:"partialFingerprints,omitempty"`
+	Properties          map[string]any    `json:"properties,omitempty"`
 }
 
-// Message holds the human-readable finding description.
-type Message struct {
+// MessageString holds a human-readable text value used for messages and
+// short descriptions.
+type MessageString struct {
 	Text string `json:"text"`
 }
 
@@ -73,7 +78,8 @@ type Location struct {
 // PhysicalLocation identifies the artifact and region within it.
 type PhysicalLocation struct {
 	ArtifactLocation ArtifactLocation `json:"artifactLocation"`
-	Region           Region           `json:"region"`
+	// Region is omitted (nil) when the finding has no line information (Line<=0).
+	Region *Region `json:"region,omitempty"`
 }
 
 // ArtifactLocation is the URI of the source file.
@@ -100,6 +106,9 @@ func messageText(f store.Finding) string {
 // Rules are collected from the unique set of finding.Lens values and sorted for
 // determinism. Results are sorted by (File, Line, RuleID, Fingerprint) so the
 // output is byte-stable across runs.
+//
+// Level is derived from the finding's Tier via domain.Tier.Level().
+// Region is omitted when Line <= 0.
 func FromFindings(findings []store.Finding) Document {
 	// Collect unique lenses preserving insertion order for rule dedup, then sort.
 	seen := make(map[string]struct{}, len(findings))
@@ -136,17 +145,21 @@ func FromFindings(findings []store.Finding) Document {
 
 	results := make([]Result, 0, len(sorted))
 	for _, f := range sorted {
+		var region *Region
+		if f.Line > 0 {
+			region = &Region{StartLine: f.Line}
+		}
 		r := Result{
 			RuleID: f.Lens,
 			Level:  f.Tier.Level(),
-			Message: Message{
+			Message: MessageString{
 				Text: messageText(f),
 			},
 			Locations: []Location{
 				{
 					PhysicalLocation: PhysicalLocation{
 						ArtifactLocation: ArtifactLocation{URI: f.File},
-						Region:           Region{StartLine: f.Line},
+						Region:           region,
 					},
 				},
 			},

@@ -187,8 +187,14 @@ func TestFromFindings_StructuralAssertions(t *testing.T) {
 		if pl.ArtifactLocation.URI != tc.file {
 			t.Errorf("results[%d].locations[0].uri = %q, want %q", i, pl.ArtifactLocation.URI, tc.file)
 		}
-		if pl.Region.StartLine != tc.line {
-			t.Errorf("results[%d].locations[0].startLine = %d, want %d", i, pl.Region.StartLine, tc.line)
+		if tc.line > 0 {
+			if pl.Region == nil {
+				t.Errorf("results[%d]: Region is nil, want startLine=%d", i, tc.line)
+			} else if pl.Region.StartLine != tc.line {
+				t.Errorf("results[%d].locations[0].startLine = %d, want %d", i, pl.Region.StartLine, tc.line)
+			}
+		} else if pl.Region != nil {
+			t.Errorf("results[%d]: Region should be nil when Line<=0, got startLine=%d", i, pl.Region.StartLine)
 		}
 		if fp, ok := r.PartialFingerprints["bugbotFingerprint/v1"]; !ok || fp != tc.fp {
 			t.Errorf("results[%d].partialFingerprints[bugbotFingerprint/v1] = %q, want %q", i, fp, tc.fp)

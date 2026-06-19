@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/config"
+	isarif "github.com/dpoage/bugbot/internal/sarif"
 )
 
 func TestFSSinkWritesTimestampedAndLatest(t *testing.T) {
@@ -52,7 +53,7 @@ func TestFSSinkWritesTimestampedAndLatest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var doc SARIFLog
+	var doc isarif.Document
 	if err := json.Unmarshal(sarifBytes, &doc); err != nil {
 		t.Fatalf("latest.sarif invalid: %v", err)
 	}

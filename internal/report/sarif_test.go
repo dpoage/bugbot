@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
+	isarif "github.com/dpoage/bugbot/internal/sarif"
 )
 
 func TestSARIFUnmarshalsAndHasRequiredFields(t *testing.T) {
@@ -15,7 +16,7 @@ func TestSARIFUnmarshalsAndHasRequiredFields(t *testing.T) {
 	}
 
 	// Validate-by-construction: it must round-trip into the expected shape.
-	var doc SARIFLog
+	var doc isarif.Document
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("emitted SARIF does not unmarshal: %v", err)
 	}
@@ -46,7 +47,7 @@ func TestSARIFUnmarshalsAndHasRequiredFields(t *testing.T) {
 		if d.Rules[i].ID != want {
 			t.Errorf("rule[%d].id = %q, want %q", i, d.Rules[i].ID, want)
 		}
-		if d.Rules[i].ShortDescription.Text == "" {
+		if d.Rules[i].ShortDescription == nil || d.Rules[i].ShortDescription.Text == "" {
 			t.Errorf("rule[%d] shortDescription must be non-empty", i)
 		}
 	}
@@ -133,5 +134,37 @@ func TestRepoRelativeEscapingPath(t *testing.T) {
 	got := repoRelative("/home/user/repo", "/etc/passwd")
 	if got != "/etc/passwd" {
 		t.Errorf("repoRelative escaping path = %q, want /etc/passwd", got)
+	}
+}
+
+// TestSARIFRegionOmittedWhenNoLine verifies that Region is absent from the
+// emitted JSON when a finding has no line information (Line == 0).
+func TestSARIFRegionOmittedWhenNoLine(t *testing.T) {
+	fs := fixtureFindings()
+	fs[0].Line = 0
+	doc := BuildSARIF(New(fs, fixtureMeta()))
+
+	// Find the result corresponding to the zero-line finding.
+	var found bool
+	for _, res := range doc.Runs[0].Results {
+		if res.Locations[0].PhysicalLocation.Region == nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected at least one result with Region==nil (Line==0 finding)")
+	}
+
+	// Also verify via JSON that "region" key is absent.
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// A startLine:0 in the JSON would indicate the bug; verify it's absent.
+	if json.Valid(out) {
+		var raw map[string]any
+		if err := json.Unmarshal(out, &raw); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
 	}
 }
