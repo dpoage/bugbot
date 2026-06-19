@@ -43,13 +43,33 @@ const mesonGuidance = "For C/C++ with Meson, set up and build first:\n" +
 	"  then run the specific test by name:\n" +
 	"  " + "`meson test -C build <TestName>`" + "."
 
+// mavenGuidance is the Java/Kotlin guidance for repos whose root carries a
+// pom.xml. Maven's Surefire plugin registers JUnit tests so the run command
+// is unambiguous: identify the class and method to minimise the test run.
+const mavenGuidance = "For Java/Kotlin with Maven, add a\n" +
+	"  " + "`@Test`" + " method (JUnit 5) in the relevant test class and run just that\n" +
+	"  test with\n" +
+	"  " + "`mvn test -Dtest=ClassName#method`" + "."
+
+// gradleGuidance is the Java/Kotlin guidance for repos whose root carries a
+// Gradle build file but no pom.xml. Gradle's test filter syntax routes to a
+// fully-qualified class-and-method pattern.
+const gradleGuidance = "For Java/Kotlin with Gradle, add a\n" +
+	"  " + "`@Test`" + " method (JUnit 5) in the relevant test class and run just that\n" +
+	"  test with\n" +
+	"  " + "`gradle test --tests <ClassName.method>`" + "."
+
 // specificGuidance is the per-language test-framework guidance spliced into
 // the reproducer system prompt. It is the single source of truth for which
-// non-C/C++ languages have specific guidance: langGuidance reads the text from
-// it and HasGuidance reports membership (with C/C++ handled separately via
-// cmakeGuidance/mesonGuidance), so the two cannot drift. The Go text is
-// verbatim from the original prompt; the others give the idiomatic test file +
-// run command for each ecosystem.
+// build-system-independent languages have specific guidance: langGuidance reads
+// the text from it and HasGuidance reports membership, so the two cannot drift.
+// The Go text is verbatim from the original prompt; the others give the
+// idiomatic test file + run command for each ecosystem.
+//
+// C/C++ and Java/Kotlin are build-system-dependent and are handled in the
+// langGuidance switch (like C/C++ with cmakeGuidance/mesonGuidance); they do
+// not appear here. C# uses `dotnet test` uniformly regardless of build system,
+// so it is build-system-independent and belongs in this map.
 var specificGuidance = map[ingest.Language]string{
 	ingest.LangGo: "For Go, write a\n" +
 		"  *_test.go file in the package that contains the bug and run it with\n" +
@@ -62,6 +82,10 @@ var specificGuidance = map[ingest.Language]string{
 	ingest.LangRust: "For Rust, add a\n" +
 		"  " + "`#[test]`" + " function (in the crate with the bug or a tests/ file) and run it\n" +
 		"  with " + "`cargo test <test_name>`" + ".",
+	ingest.LangCSharp: "For C#, add a\n" +
+		"  test method annotated with " + "`[Fact]`" + " (xUnit) or " + "`[Test]`" + " (NUnit) in the\n" +
+		"  relevant test project and run it with\n" +
+		"  " + "`dotnet test --filter <Name>`" + ".",
 }
 
 // HasGuidance reports whether lang has language-specific repro guidance in
@@ -71,7 +95,8 @@ var specificGuidance = map[ingest.Language]string{
 //
 // systems is variadic so callers that do not yet track build systems (e.g. the
 // existing doctor check) can pass nothing and still compile. When systems are
-// provided, C/C++ repos with CMake or Meson are considered to have guidance.
+// provided, C/C++ repos with CMake or Meson are considered to have guidance,
+// and Java/Kotlin repos with Maven or Gradle are considered to have guidance.
 func HasGuidance(lang ingest.Language, systems ...ingest.BuildSystem) bool {
 	return langGuidance(lang, systems) != genericGuidance
 }
@@ -79,8 +104,10 @@ func HasGuidance(lang ingest.Language, systems ...ingest.BuildSystem) bool {
 // langGuidance returns the test-framework guidance spliced into the reproducer
 // system prompt for the finding's language. For C/C++ the result depends on
 // which build systems were detected: cmake earns specific guidance, then meson,
-// then the generic fallback (raw make/ninja or nothing). For all other languages
-// the specificGuidance map is the sole source of truth; systems is ignored.
+// then the generic fallback (raw make/ninja or nothing). For Java/Kotlin the
+// result depends on build systems too: maven earns specific guidance, then
+// gradle, then the generic fallback. For all other languages the specificGuidance
+// map is the sole source of truth; systems is ignored for those.
 func langGuidance(lang ingest.Language, systems []ingest.BuildSystem) string {
 	switch lang {
 	case ingest.LangC, ingest.LangCPP:
@@ -92,6 +119,18 @@ func langGuidance(lang ingest.Language, systems []ingest.BuildSystem) string {
 		for _, s := range systems {
 			if s == ingest.BuildSystemMeson {
 				return mesonGuidance
+			}
+		}
+		return genericGuidance
+	case ingest.LangJava, ingest.LangKotlin:
+		for _, s := range systems {
+			if s == ingest.BuildSystemMaven {
+				return mavenGuidance
+			}
+		}
+		for _, s := range systems {
+			if s == ingest.BuildSystemGradle {
+				return gradleGuidance
 			}
 		}
 		return genericGuidance

@@ -287,6 +287,35 @@ func TestDefaultServersRustAnalyzer(t *testing.T) {
 	}
 }
 
+// TestDefaultServersCSharp asserts that the built-in registry contains exactly
+// one entry for ".cs" files, that it is csharp-ls, carries no extra arguments
+// (csharp-ls uses stdio by default), and maps the extension to the "csharp"
+// language identifier.
+func TestDefaultServersCSharp(t *testing.T) {
+	servers := DefaultServers()
+
+	var csConfigs []ServerConfig
+	for _, cfg := range servers {
+		if _, ok := cfg.LanguageIDs[".cs"]; ok {
+			csConfigs = append(csConfigs, cfg)
+		}
+	}
+
+	if len(csConfigs) != 1 {
+		t.Fatalf("expected exactly one config claiming .cs, got %d: %v", len(csConfigs), csConfigs)
+	}
+	cfg := csConfigs[0]
+	if cfg.Cmd != "csharp-ls" {
+		t.Errorf("config for .cs has Cmd %q, want %q", cfg.Cmd, "csharp-ls")
+	}
+	if got := cfg.LanguageIDs[".cs"]; got != "csharp" {
+		t.Errorf("languageId for .cs = %q, want %q", got, "csharp")
+	}
+	if len(cfg.Args) != 0 {
+		t.Errorf("csharp-ls config must have no Args, got %v", cfg.Args)
+	}
+}
+
 // TestManagerConcurrentQueriesAcrossCrash exercises a server crash in the
 // middle of several concurrent queries. The manager allows exactly one
 // restart (maxRestarts=1), and the first instance crashes on its first
