@@ -108,12 +108,17 @@ func (f *Funnel) runVerifyAndPersist(
 		return
 	}
 
-	// Sandbox tool (if enabled for this candidate).
+	// Sandbox tools (if enabled for this candidate).
 	candTools := tools
 	if prefErr := f.ensureDepPrefetch(ctx); prefErr != nil {
 		f.note(result, fmt.Sprintf("sandbox dependency prefetch failed: %v — sandbox_exec disabled", prefErr))
-	} else if sbTool := f.buildSandboxTool(c, sbExecs, sbMillis); sbTool != nil {
-		candTools = append(candTools, sbTool)
+	} else {
+		if sbTool := f.buildSandboxTool(c, sbExecs, sbMillis); sbTool != nil {
+			candTools = append(candTools, sbTool)
+		}
+		if rtTool := f.buildRunTestsTool(sbExecs, sbMillis); rtTool != nil {
+			candTools = append(candTools, rtTool)
+		}
 	}
 	if t := f.maybeStatusNoteTool(progress.RoleVerifier, c.Title); t != nil {
 		candTools = append(candTools, t)

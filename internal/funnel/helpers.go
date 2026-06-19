@@ -3,11 +3,14 @@ package funnel
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
 )
 
@@ -220,4 +223,81 @@ func normalizeConfidence(s string) string {
 	default:
 		return "low"
 	}
+}
+
+// detectTestCmd infers the full-suite test command from the repository's build
+// system marker files. It mirrors the logic in repro.detectSuiteCmd (repro/patch.go)
+// but lives here so funnel can derive the run_tests argv without importing the
+// heavyweight repro package. The two must stay in sync when new build systems
+// are added to ingest.DetectBuildSystems.
+//
+// Returns nil when the toolchain cannot be identified; buildRunTestsTool treats
+// a nil result as "feature unavailable" and returns nil so callers see no tool.
+func detectTestCmd(repoDir string) []string {
+	systems := ingest.DetectBuildSystems(repoDir)
+	for _, sys := range systems {
+		switch sys {
+		case ingest.BuildSystemBazel:
+			return []string{"bazel", "test", "//..."}
+		case ingest.BuildSystemGoWorkspace:
+			if _, err := os.Stat(filepath.Join(repoDir, "go.mod")); err == nil {
+				return []string{"go", "test", "./..."}
+			}
+		case ingest.BuildSystemJSWorkspace:
+			if _, err := os.Stat(filepath.Join(repoDir, "pnpm-workspace.yaml")); err == nil {
+				return []string{"pnpm", "test"}
+			}
+			return []string{"npm", "test"}
+		case ingest.BuildSystemGoModule:
+			return []string{"go", "test", "./..."}
+		case ingest.BuildSystemCargo:
+			return []string{"cargo", "test"}
+		case ingest.BuildSystemNPM:
+			return []string{"npm", "test"}
+		case ingest.BuildSystemPython:
+			return []string{"python", "-m", "pytest"}
+		}
+	}
+	return nil
+}
+
+// buildRunTestsTool builds the run_tests tool for a candidate if the sandbox
+// feature is enabled and the repository's build system can be identified.
+// Returns nil when the tool should not be offered (feature off, no sandbox,
+// unknown toolchain). sbExecs and sbMillis are run-spanning atomic counters
+// shared across all candidates; the per-call onExec callback increments them.
+func (f *Funnel) buildRunTestsTool(sbExecs *atomic.Int32, sbMillis *atomic.Int64) agent.Tool {
+	opts := f.opts.SandboxOpts
+	if !opts.Enabled || opts.Sandbox == nil {
+		return nil
+	}
+	baseCmd := detectTestCmd(f.repo.Root())
+	if len(baseCmd) == 0 {
+		return nil
+	}
+	maxExec := sandboxMaxExecs(opts.MaxExecs)
+	onExec := func(d time.Duration) {
+		sbExecs.Add(1)
+		sbMillis.Add(d.Milliseconds())
+	}
+	return agent.NewRunTestsTool(
+		opts.Sandbox,
+		f.repo.Root(),
+		baseCmd,
+		maxExec,
+		f.deps.ROMounts,
+		f.deps.Env,
+		f.deps.SetupCmds,
+		onExec,
+	)
+}
+
+// hasRunTests reports whether the tool set contains a run_tests tool.
+func hasRunTests(tools []agent.Tool) bool {
+	for _, t := range tools {
+		if t.Def().Name == "run_tests" {
+			return true
+		}
+	}
+	return false
 }
