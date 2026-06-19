@@ -74,10 +74,21 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 		return verdict{reason: "environment_error", summary: envSummary(eco.name, out), ecosystem: eco.name}
 	}
 
+	// 0. Runtime instrumentation report — dispositive across ALL ecosystems.
+	//    Sanitizer and valgrind output can only appear after the binary built
+	//    and ran, so matching any runtimeFailureMarker proves the test ran and
+	//    failed. This is checked before the per-ecosystem env/toolchain/build
+	//    markers so a sanitizer abort is never misclassified as a build error.
+	//    The ExitCode==0 short-circuit above still gates this: a PASSING
+	//    sanitizer run (exit 0) is not a demonstration.
+	lowOut := strings.ToLower(out)
+	if hasAnyMarker(lowOut, runtimeFailureMarkers) {
+		return verdict{demonstrated: true, summary: trunc(out, 400), ecosystem: eco.name}
+	}
+
 	// From here on we are dealing with a non-zero, non-timeout,
 	// non-runtime-error exit. Apply the per-ecosystem positive-evidence
 	// gate.
-	lowOut := strings.ToLower(out)
 
 	// 1. Environment failure — same markers across every ecosystem.
 	if hasAnyMarker(lowOut, defaultEnvMarkers) {

@@ -27,21 +27,40 @@ const genericGuidance = "Use the repository's standard test framework for its la
 // CMakeLists.txt. CMake+CTest is the only C/C++ toolchain with an unambiguous
 // test entry point (ctest --test-dir), so it is the only tier that earns
 // specific guidance; GoogleTest and Catch2 both register tests through CTest.
+//
+// For memory-safety findings (leaks, use-after-free, overflows): configure with
+// -fsanitize=address -g so the sanitizer report aborts non-zero — that report
+// IS the demonstration. For uninitialized-read findings: prefer
+// -fsanitize=memory (clang) or valgrind --error-exitcode=1.
 const cmakeGuidance = "For C/C++ with CMake, configure and build first:\n" +
 	"  " + "`cmake -B build -S . && cmake --build build`" + "\n" +
 	"  then run the new or relevant test via CTest:\n" +
 	"  " + "`ctest --test-dir build -R <TestName> --output-on-failure`" + "\n" +
 	"  or execute the test binary directly (e.g. " + "`./build/tests/<TestBinary>`" + ").\n" +
 	"  GoogleTest targets are conventionally under tests/ or test/; Catch2 targets\n" +
-	"  follow the same layout."
+	"  follow the same layout.\n" +
+	"  For memory-safety findings (leaks, use-after-free, overflows): add\n" +
+	"  `-DCMAKE_CXX_FLAGS=\"-fsanitize=address -g\"` to the cmake configure step\n" +
+	"  so AddressSanitizer/LeakSanitizer aborts non-zero — the sanitizer report\n" +
+	"  IS the demonstration. For uninitialized-read findings: use\n" +
+	"  `-DCMAKE_CXX_FLAGS=\"-fsanitize=memory\"` (clang) or run the binary under\n" +
+	"  `valgrind --error-exitcode=1`. TSan and ASan cannot be combined in one build."
 
 // mesonGuidance is the C/C++ guidance for repos whose root carries a
 // meson.build but no CMakeLists.txt. Meson exposes a single test entry point
 // (`meson test`) so repro is unambiguous.
+//
+// For memory-safety findings: use -Db_sanitize=address to enable
+// AddressSanitizer/LeakSanitizer so the sanitizer report aborts non-zero.
 const mesonGuidance = "For C/C++ with Meson, set up and build first:\n" +
 	"  " + "`meson setup build && meson compile -C build`" + "\n" +
 	"  then run the specific test by name:\n" +
-	"  " + "`meson test -C build <TestName>`" + "."
+	"  " + "`meson test -C build <TestName>`" + ".\n" +
+	"  For memory-safety findings (leaks, use-after-free, overflows): configure\n" +
+	"  with `-Db_sanitize=address` so AddressSanitizer/LeakSanitizer aborts\n" +
+	"  non-zero — the sanitizer report IS the demonstration. For uninitialized\n" +
+	"  reads: use `-Db_sanitize=memory` (clang) or valgrind --error-exitcode=1.\n" +
+	"  TSan and ASan cannot be combined in one build."
 
 // mavenGuidance is the Java/Kotlin guidance for repos whose root carries a
 // pom.xml. Maven's Surefire plugin registers JUnit tests so the run command
@@ -192,6 +211,35 @@ func capabilityGuidance(caps sandbox.CapabilitySet) string {
 		} else {
 			b.WriteString("- Go race detector: UNAVAILABLE (no cgo / C compiler in this image).\n")
 			b.WriteString("  Do NOT use `go test -race`. Use a deterministic assertion-based test instead.\n")
+		}
+	}
+
+	// C/C++ ecosystem capabilities.
+	if cppCaps, ok := caps["cpp"]; ok {
+		// TSan: ThreadSanitizer for data-race findings.
+		if cppCaps["tsan"] {
+			b.WriteString("- C++ ThreadSanitizer (TSan): AVAILABLE. You MAY use `-fsanitize=thread -g` to expose\n")
+			b.WriteString("  data-race bugs. Force concurrent entry points / repeat races; set\n")
+			b.WriteString("  TSAN_OPTIONS=halt_on_error=1 so the first race aborts non-zero. The line\n")
+			b.WriteString("  `WARNING: ThreadSanitizer: data race` in the output IS the demonstration.\n")
+			b.WriteString("  Note: TSan and ASan cannot be combined in one build.\n")
+		} else {
+			b.WriteString("- C++ ThreadSanitizer (TSan): UNAVAILABLE in this image.\n")
+			b.WriteString("  Do NOT use `-fsanitize=thread`. Use a deterministic assertion-based test\n")
+			b.WriteString("  that encodes the race condition via explicit ordering (e.g. mutexes or\n")
+			b.WriteString("  sequenced calls) to show the wrong result without a real race detector.\n")
+		}
+		// ASan: AddressSanitizer for memory leaks / use-after-free.
+		if cppCaps["asan"] {
+			b.WriteString("- C++ AddressSanitizer (ASan): AVAILABLE. You MAY use `-fsanitize=address` to expose\n")
+			b.WriteString("  memory leaks, use-after-free, and out-of-bounds access. The sanitizer report\n")
+			b.WriteString("  aborts non-zero and IS the demonstration.\n")
+			b.WriteString("  Note: TSan and ASan cannot be combined in one build.\n")
+		} else {
+			b.WriteString("- C++ AddressSanitizer (ASan): UNAVAILABLE in this image.\n")
+			b.WriteString("  Do NOT use `-fsanitize=address`. Use a deterministic assertion-based test\n")
+			b.WriteString("  (e.g. assert the returned pointer is non-null, or check a reference count)\n")
+			b.WriteString("  to show the memory-safety bug without a real sanitizer.\n")
 		}
 	}
 

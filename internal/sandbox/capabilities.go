@@ -77,6 +77,7 @@ const probeTimeout = 30 * time.Second
 // new ecosystem, append a new probeEntry here.
 var capabilityEcosystems = []probeEntry{
 	goCapabilityProbe,
+	cppCapabilityProbe,
 }
 
 // goCapabilityProbe probes whether the Go sandbox image has cgo + a C
@@ -112,6 +113,46 @@ var goCapabilityProbe = probeEntry{
 			return map[string]bool{"race": line == "1"}
 		}
 		return map[string]bool{"race": false}
+	},
+}
+
+// cppCapabilityProbe probes whether the sandbox image supports C++ sanitizers
+// (ASan, TSan, UBSan). The probe finds a C++ compiler then attempts to compile
+// a trivial program with each sanitizer flag, echoing a token per available
+// mode.
+//
+// Probe command (sh -c): finds c++/g++/clang++, writes a trivial program to a
+// temp dir, then loops over address/thread/undefined flags trying to compile;
+// each successful compile emits its token on stdout.
+//
+// interpret is called even on non-zero exit so partial availability is
+// captured — e.g. ASan available but TSan absent. The FULL key set
+// {asan, tsan, ubsan} is always returned so allFalse() works correctly.
+var cppCapabilityProbe = probeEntry{
+	name: "cpp",
+	probe: []string{"/bin/sh", "-c",
+		`CXX=$(command -v c++ || command -v g++ || command -v clang++); [ -n "$CXX" ] || exit 1; d=$(mktemp -d); echo 'int main(){return 0;}' > "$d/p.cpp"; for s in address thread undefined; do "$CXX" -fsanitize=$s -g -x c++ "$d/p.cpp" -o "$d/a" 2>/dev/null && echo $s; done`,
+	},
+	interpret: func(r Result) map[string]bool {
+		// Always return the full key set so allFalse() enumerates all modes.
+		// Parse stdout tokens: "address"→asan, "thread"→tsan, "undefined"→ubsan.
+		// interpret is called even on non-zero exit — parse whatever stdout contains.
+		modes := map[string]bool{
+			"asan":  false,
+			"tsan":  false,
+			"ubsan": false,
+		}
+		for _, line := range strings.Split(r.Stdout, "\n") {
+			switch strings.TrimSpace(line) {
+			case "address":
+				modes["asan"] = true
+			case "thread":
+				modes["tsan"] = true
+			case "undefined":
+				modes["ubsan"] = true
+			}
+		}
+		return modes
 	},
 }
 

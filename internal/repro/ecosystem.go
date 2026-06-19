@@ -47,6 +47,36 @@ var defaultEnvMarkers = []string{
 	"cannot create temporary",
 }
 
+// runtimeFailureMarkers are dispositive ran-and-failed signatures emitted ONLY
+// by runtime instrumentation (sanitizers or valgrind). They outrank every other
+// marker because such output can only appear AFTER the binary built and ran:
+// matching one of these proves the test ran and produced an instrumentation
+// report, so we can demonstrate the bug regardless of the detected ecosystem.
+//
+// This is the escape hatch for ecosystems whose positive ran-evidence table
+// does not include sanitizer/valgrind lines (e.g. direct binary invocations
+// classified as "unknown"). bugbot-vig still holds: a BARE non-zero exit with
+// none of these substrings still NEVER demonstrates.
+//
+// Entries are lowercase for case-insensitive comparison:
+//   - "sanitizer:" matches AddressSanitizer:/LeakSanitizer:/MemorySanitizer:/
+//     ThreadSanitizer:/UndefinedBehaviorSanitizer: headers from clang/gcc
+//     sanitizer runtimes.
+//   - "runtime error:" is UBSan's per-violation prefix.
+//   - "detected memory leaks" is LSan's final summary line.
+//   - "data race" is TSan's report header.
+//   - "definitely lost" / "invalid read of size" / "invalid write of size" are
+//     valgrind/memcheck lines that appear only when the process ran.
+var runtimeFailureMarkers = []string{
+	"sanitizer:",
+	"runtime error:",
+	"detected memory leaks",
+	"data race",
+	"definitely lost",
+	"invalid read of size",
+	"invalid write of size",
+}
+
 // ecosystemTable is the ordered registry of supported ecosystems. Order
 // matters only for tie-breaking in the (rare) case that the same argv
 // prefix matches two entries; the first match wins. Go is intentionally

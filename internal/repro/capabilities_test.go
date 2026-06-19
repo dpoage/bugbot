@@ -109,3 +109,88 @@ func TestCapabilityGuidanceOutput(t *testing.T) {
 		}
 	})
 }
+
+// TestCapabilityGuidance_Cpp covers the C++ capability rendering in
+// capabilityGuidance and systemPrompt. Mirrors the existing Go-race subtests.
+func TestCapabilityGuidance_Cpp(t *testing.T) {
+	t.Run("tsan_available_contains_AVAILABLE_and_fsanitize_thread", func(t *testing.T) {
+		caps := sandbox.CapabilitySet{"cpp": {"tsan": true, "asan": false, "ubsan": false}}
+		g := capabilityGuidance(caps)
+		if !strings.Contains(g, "AVAILABLE") {
+			t.Errorf("want AVAILABLE in guidance when tsan=true, got:\n%s", g)
+		}
+		if !strings.Contains(g, "fsanitize=thread") {
+			t.Errorf("want fsanitize=thread in guidance when tsan=true, got:\n%s", g)
+		}
+		// Should mention TSAN_OPTIONS and data race as demonstration signal.
+		if !strings.Contains(g, "TSAN_OPTIONS") {
+			t.Errorf("want TSAN_OPTIONS in guidance when tsan=true, got:\n%s", g)
+		}
+	})
+
+	t.Run("tsan_unavailable_contains_UNAVAILABLE_and_fsanitize_thread_and_deterministic_fallback", func(t *testing.T) {
+		caps := sandbox.CapabilitySet{"cpp": {"tsan": false, "asan": false, "ubsan": false}}
+		g := capabilityGuidance(caps)
+		if !strings.Contains(g, "UNAVAILABLE") {
+			t.Errorf("want UNAVAILABLE in guidance when tsan=false, got:\n%s", g)
+		}
+		if !strings.Contains(g, "fsanitize=thread") {
+			t.Errorf("want fsanitize=thread mentioned (to say do NOT use it) when tsan=false, got:\n%s", g)
+		}
+		// Must NOT offer TSan — "You MAY use" must be absent for tsan.
+		if strings.Contains(g, "You MAY use `-fsanitize=thread") {
+			t.Errorf("must not offer -fsanitize=thread when tsan=false, got:\n%s", g)
+		}
+		// Must mention deterministic fallback.
+		if !strings.Contains(g, "deterministic") {
+			t.Errorf("want deterministic fallback mentioned when tsan=false, got:\n%s", g)
+		}
+	})
+
+	t.Run("asan_available_contains_AVAILABLE_and_fsanitize_address", func(t *testing.T) {
+		caps := sandbox.CapabilitySet{"cpp": {"tsan": false, "asan": true, "ubsan": false}}
+		g := capabilityGuidance(caps)
+		// Offer phrasing uniquely distinguishes the available branch:
+		// a bare Contains("AVAILABLE") is weak because "UNAVAILABLE"
+		// contains it, and the deny line also mentions fsanitize=address.
+		if !strings.Contains(g, "You MAY use `-fsanitize=address`") {
+			t.Errorf("want ASan offered (\"You MAY use -fsanitize=address\") when asan=true, got:\n%s", g)
+		}
+	})
+
+	t.Run("asan_unavailable_contains_UNAVAILABLE", func(t *testing.T) {
+		caps := sandbox.CapabilitySet{"cpp": {"tsan": false, "asan": false, "ubsan": false}}
+		g := capabilityGuidance(caps)
+		if !strings.Contains(g, "UNAVAILABLE") {
+			t.Errorf("want UNAVAILABLE in guidance when asan=false, got:\n%s", g)
+		}
+		if !strings.Contains(g, "Do NOT use `-fsanitize=address`") {
+			t.Errorf("want ASan denied (\"Do NOT use -fsanitize=address\") when asan=false, got:\n%s", g)
+		}
+		if strings.Contains(g, "You MAY use `-fsanitize=address`") {
+			t.Errorf("must not offer -fsanitize=address when asan=false, got:\n%s", g)
+		}
+	})
+
+	t.Run("systemPrompt_cpp_tsan_true", func(t *testing.T) {
+		caps := sandbox.CapabilitySet{"cpp": {"tsan": true, "asan": false, "ubsan": false}}
+		p := systemPrompt(ingest.LangCPP, []ingest.BuildSystem{ingest.BuildSystemCMake}, caps)
+		if !strings.Contains(p, "AVAILABLE") {
+			t.Errorf("want AVAILABLE in system prompt when tsan=true")
+		}
+		if !strings.Contains(p, "fsanitize=thread") {
+			t.Errorf("want fsanitize=thread in system prompt when tsan=true")
+		}
+	})
+
+	t.Run("systemPrompt_cpp_tsan_false", func(t *testing.T) {
+		caps := sandbox.CapabilitySet{"cpp": {"tsan": false, "asan": false, "ubsan": false}}
+		p := systemPrompt(ingest.LangCPP, []ingest.BuildSystem{ingest.BuildSystemCMake}, caps)
+		if !strings.Contains(p, "UNAVAILABLE") {
+			t.Errorf("want UNAVAILABLE in system prompt when tsan=false")
+		}
+		if !strings.Contains(p, "fsanitize=thread") {
+			t.Errorf("want fsanitize=thread mentioned in system prompt when tsan=false")
+		}
+	})
+}

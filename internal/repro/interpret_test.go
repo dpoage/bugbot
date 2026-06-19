@@ -382,3 +382,76 @@ func TestFeedback_WrapsSandboxOutputInDataFence(t *testing.T) {
 		}
 	}
 }
+
+// TestInterpret_RuntimeFailureMarkers covers the runtimeFailureMarkers step 0
+// added in interpret.go: sanitizer and valgrind output proves the binary ran
+// and failed, regardless of detected ecosystem.
+func TestInterpret_RuntimeFailureMarkers(t *testing.T) {
+	// (1) LSan via ctest — ctest ecosystem, leak detected.
+	t.Run("lsan_via_ctest_demonstrated", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 1,
+			Stderr:   "==12==ERROR: LeakSanitizer: detected memory leaks\nDirect leak of 8 byte(s) in 1 object(s) allocated from:\n",
+		}
+		v := interpret(res, []string{"ctest", "--test-dir", "build", "-R", "TestFoo"})
+		if !v.demonstrated {
+			t.Errorf("want demonstrated=true for LSan output, got reason=%q", v.reason)
+		}
+	})
+
+	// (2) ASan via direct binary — "unknown" ecosystem, heap-use-after-free.
+	//     Covers Part B: direct binary invocations classified as "unknown"
+	//     still demonstrate when sanitizer output is present.
+	t.Run("asan_direct_binary_demonstrated", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 1,
+			Stderr:   "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x...\nREAD of size 4 at 0x...\n",
+		}
+		v := interpret(res, []string{"./build/tests/foo"})
+		if !v.demonstrated {
+			t.Errorf("want demonstrated=true for ASan direct binary output, got reason=%q", v.reason)
+		}
+	})
+
+	// (3) TSan — data race demonstrated.
+	t.Run("tsan_data_race_demonstrated", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 66,
+			Stderr:   "WARNING: ThreadSanitizer: data race (pid=12345)\n  Write of size 4 at ...\n",
+		}
+		v := interpret(res, []string{"./build/tests/race_test"})
+		if !v.demonstrated {
+			t.Errorf("want demonstrated=true for TSan data race output, got reason=%q", v.reason)
+		}
+	})
+
+	// (4) REGRESSION: compile error must still be build_error, NOT demonstrated.
+	t.Run("compile_error_not_demonstrated", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 1,
+			Stderr:   "foo.cc:10:5: error: 'x' was not declared in this scope\n1 error generated.\n",
+		}
+		v := interpret(res, []string{"ctest", "--test-dir", "build", "-R", "TestFoo"})
+		if v.demonstrated {
+			t.Errorf("want demonstrated=false for compile error, got demonstrated=true")
+		}
+		if v.reason != "build_error" {
+			t.Errorf("want reason=build_error for compile error, got reason=%q", v.reason)
+		}
+	})
+
+	// (5) REGRESSION: bare non-zero exit without any marker must be not_demonstrated.
+	t.Run("bare_nonzero_not_demonstrated", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 1,
+			Stdout:   "some generic output with no known markers\n",
+		}
+		v := interpret(res, []string{"./build/tests/foo"})
+		if v.demonstrated {
+			t.Errorf("want demonstrated=false for bare non-zero exit, got demonstrated=true")
+		}
+		if v.reason != "not_demonstrated" {
+			t.Errorf("want reason=not_demonstrated, got %q", v.reason)
+		}
+	})
+}

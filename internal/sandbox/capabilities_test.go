@@ -55,9 +55,9 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 		if !cs.Available("go", "race") {
 			t.Errorf("want race=true for cgo-present image, got %v", cs)
 		}
-		// Exactly one probe call per ecosystem.
-		if m.CallCount() != 1 {
-			t.Errorf("want 1 probe Exec call, got %d", m.CallCount())
+		// One probe call per registered ecosystem (go + cpp).
+		if m.CallCount() != 2 {
+			t.Errorf("want 2 probe Exec calls (one per ecosystem), got %d", m.CallCount())
 		}
 	})
 
@@ -88,9 +88,10 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 		if cs1["go"]["race"] != cs2["go"]["race"] {
 			t.Errorf("cache returned different results: %v vs %v", cs1, cs2)
 		}
-		// Only one Exec should have been called despite two ProbeCapabilities calls.
-		if m.CallCount() != 1 {
-			t.Errorf("want 1 Exec call (cache hit), got %d", m.CallCount())
+		// Only one round of Exec calls (2 probes) should have fired despite two
+		// ProbeCapabilities calls — the second call is a cache hit.
+		if m.CallCount() != 2 {
+			t.Errorf("want 2 Exec calls (one per ecosystem, cache hit on 2nd ProbeCapabilities), got %d", m.CallCount())
 		}
 	})
 
@@ -150,5 +151,77 @@ func TestGoCapabilityProbeSpec(t *testing.T) {
 	}
 	if goCapabilityProbe.name != "go" {
 		t.Errorf("probe name = %q, want go", goCapabilityProbe.name)
+	}
+}
+
+// TestCppProbeInterpret tests the C++ capability probe's interpret function
+// directly, covering full-available, partial-available, and probe-error cases.
+// Mirrors TestGoProbeInterpret.
+func TestCppProbeInterpret(t *testing.T) {
+	t.Run("asan_and_tsan_available_ubsan_absent", func(t *testing.T) {
+		r := Result{ExitCode: 0, Stdout: "address\nthread\n"}
+		modes := cppCapabilityProbe.interpret(r)
+		if !modes["asan"] {
+			t.Errorf("want asan=true, got false")
+		}
+		if !modes["tsan"] {
+			t.Errorf("want tsan=true, got false")
+		}
+		if modes["ubsan"] {
+			t.Errorf("want ubsan=false, got true")
+		}
+	})
+
+	t.Run("all_modes_unavailable_on_nonzero_empty_stdout", func(t *testing.T) {
+		r := Result{ExitCode: 1, Stdout: ""}
+		modes := cppCapabilityProbe.interpret(r)
+		if modes["asan"] || modes["tsan"] || modes["ubsan"] {
+			t.Errorf("want all false on non-zero exit with empty stdout, got %v", modes)
+		}
+		// Full key set must be present.
+		for _, k := range []string{"asan", "tsan", "ubsan"} {
+			if _, ok := modes[k]; !ok {
+				t.Errorf("key %q missing from interpret result", k)
+			}
+		}
+	})
+
+	t.Run("full_key_set_always_returned", func(t *testing.T) {
+		// allFalse calls interpret(Result{ExitCode:1}); the returned map must
+		// carry all three keys so allFalse can enumerate them.
+		r := Result{ExitCode: 1, Stdout: ""}
+		modes := cppCapabilityProbe.interpret(r)
+		for _, k := range []string{"asan", "tsan", "ubsan"} {
+			if _, ok := modes[k]; !ok {
+				t.Errorf("allFalse requires key %q but it is missing", k)
+			}
+		}
+	})
+
+	t.Run("ubsan_only", func(t *testing.T) {
+		r := Result{ExitCode: 0, Stdout: "undefined\n"}
+		modes := cppCapabilityProbe.interpret(r)
+		if modes["asan"] {
+			t.Errorf("want asan=false")
+		}
+		if modes["tsan"] {
+			t.Errorf("want tsan=false")
+		}
+		if !modes["ubsan"] {
+			t.Errorf("want ubsan=true")
+		}
+	})
+}
+
+// TestCppCapabilityProbeSpec verifies the probe uses /bin/sh and is named "cpp".
+func TestCppCapabilityProbeSpec(t *testing.T) {
+	if len(cppCapabilityProbe.probe) == 0 {
+		t.Fatal("cppCapabilityProbe.probe must be non-empty")
+	}
+	if cppCapabilityProbe.probe[0] != "/bin/sh" {
+		t.Errorf("probe[0] = %q, want /bin/sh", cppCapabilityProbe.probe[0])
+	}
+	if cppCapabilityProbe.name != "cpp" {
+		t.Errorf("probe name = %q, want cpp", cppCapabilityProbe.name)
 	}
 }
