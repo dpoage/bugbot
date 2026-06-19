@@ -92,3 +92,79 @@ func TestUnifiedDiff_DashDashFlagInjectionGuard(t *testing.T) {
 		t.Errorf("error should mention the dash-ref %q, got: %v", "-fake-flag", err)
 	}
 }
+
+// TestChangeValidate checks the OldPath invariant on Change.
+func TestChangeValidate(t *testing.T) {
+	// NewRename must have OldPath set and pass Validate.
+	r := NewRename("old/file.go", "new/file.go")
+	if r.OldPath == "" {
+		t.Error("NewRename: OldPath must not be empty")
+	}
+	if r.Kind != ChangeRenamed {
+		t.Errorf("NewRename: Kind=%v, want ChangeRenamed", r.Kind)
+	}
+	if err := r.Validate(); err != nil {
+		t.Errorf("NewRename.Validate() unexpected error: %v", err)
+	}
+
+	// NewChange for non-rename kinds must leave OldPath empty and pass Validate.
+	for _, kind := range []ChangeKind{ChangeAdded, ChangeModified, ChangeDeleted} {
+		c := NewChange(kind, "some/file.go")
+		if c.OldPath != "" {
+			t.Errorf("NewChange(%s): OldPath should be empty, got %q", kind, c.OldPath)
+		}
+		if err := c.Validate(); err != nil {
+			t.Errorf("NewChange(%s).Validate() unexpected error: %v", kind, err)
+		}
+	}
+
+	// A manually constructed non-rename Change with OldPath set must fail Validate.
+	bad := Change{Kind: ChangeAdded, Path: "a.go", OldPath: "b.go"}
+	if err := bad.Validate(); err == nil {
+		t.Error("Validate: expected error for non-rename with OldPath set, got nil")
+	}
+
+	// A manually constructed ChangeRenamed with no OldPath must fail Validate.
+	badRename := Change{Kind: ChangeRenamed, Path: "new.go"}
+	if err := badRename.Validate(); err == nil {
+		t.Error("Validate: expected error for ChangeRenamed without OldPath, got nil")
+	}
+}
+
+// TestParseNameStatusZ_RenameCarriesOldPath verifies that the parser produces
+// valid Changes (OldPath set IFF Kind==ChangeRenamed).
+func TestParseNameStatusZ_RenameCarriesOldPath(t *testing.T) {
+	// NUL-delimited: R100\x00old.go\x00new.go\x00A\x00added.go\x00
+	input := "R100\x00old.go\x00new.go\x00A\x00added.go\x00"
+	changes, err := parseNameStatusZ([]byte(input))
+	if err != nil {
+		t.Fatalf("parseNameStatusZ: %v", err)
+	}
+	for _, c := range changes {
+		if err := c.Validate(); err != nil {
+			t.Errorf("parseNameStatusZ produced invalid Change: %v", err)
+		}
+	}
+	// Confirm rename has OldPath and non-rename does not.
+	var foundRename, foundAdded bool
+	for _, c := range changes {
+		switch c.Kind {
+		case ChangeRenamed:
+			foundRename = true
+			if c.OldPath == "" {
+				t.Error("rename Change: OldPath is empty")
+			}
+		case ChangeAdded:
+			foundAdded = true
+			if c.OldPath != "" {
+				t.Errorf("added Change: OldPath should be empty, got %q", c.OldPath)
+			}
+		}
+	}
+	if !foundRename {
+		t.Error("expected a ChangeRenamed in output")
+	}
+	if !foundAdded {
+		t.Error("expected a ChangeAdded in output")
+	}
+}
