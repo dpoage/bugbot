@@ -9,6 +9,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // Estimate is a pre-scan projection of a single funnel run. It is produced by
@@ -224,7 +225,7 @@ func (f *Funnel) estimateCartographer(ctx context.Context, pkgMembers map[string
 	est.CartographerPackages = len(pkgFingerprints)
 	// A store read failure degrades to "all uncached" — the conservative
 	// (higher-cost) estimate, never a crash.
-	cached, err := f.store.GetPackageSummaries(ctx, sortedKeys(pkgFingerprints))
+	cached, err := f.store.GetPackageSummaries(ctx, util.SortedKeys(pkgFingerprints))
 	if err != nil {
 		est.CartographerUncached = len(pkgFingerprints)
 		return

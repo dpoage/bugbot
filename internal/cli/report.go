@@ -11,6 +11,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // newReportCmd groups the report subcommands (list, show, dismiss, emit).
@@ -35,13 +36,7 @@ func newReportCmd() *cobra.Command {
 	return cmd
 }
 
-// shortID returns the first 12 hex chars of an id for compact table display.
-func shortID(id string) string {
-	if len(id) > 12 {
-		return id[:12]
-	}
-	return id
-}
+
 
 // newReportListCmd lists stored findings as a table (or JSON with --json).
 func newReportListCmd() *cobra.Command {
@@ -102,7 +97,7 @@ func newReportListCmd() *cobra.Command {
 			_, _ = fmt.Fprintln(tw, "ID\tTIER\tSEVERITY\tLOCATION\tSTATUS\tTITLE")
 			for _, f := range findings {
 				_, _ = fmt.Fprintf(tw, "%s\tT%d\t%s\t%s:%d\t%s\t%s\n",
-					shortID(f.ID), f.Tier, f.Severity, f.File, f.Line, f.Status, f.Title)
+					util.Truncate(f.ID, 12), f.Tier, f.Severity, f.File, f.Line, f.Status, f.Title)
 			}
 			return tw.Flush()
 		},
@@ -191,7 +186,7 @@ func newReportDismissCmd() *cobra.Command {
 
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(),
 				"dismissed %s; fingerprint suppressed — bugbot will not re-report this finding.\n",
-				shortID(f.ID))
+			util.Truncate(f.ID, 12))
 			return nil
 		},
 	}

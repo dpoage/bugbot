@@ -17,6 +17,7 @@ import (
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // cartographySystemPrompt is the cartographer's terse system prompt. The
@@ -120,7 +121,7 @@ func (c *cartography) contextFor(files []string) string {
 		// consistent visual rhythm. Newlines in the summary are collapsed
 		// to spaces to keep the block single-line-per-package; multi-line
 		// summaries would confuse the truncation math.
-		line := "  " + label + ": " + collapseNewlines(c.summaries[pkg]) + "\n"
+		line := "  " + label + ": " + util.CollapseWhitespace(c.summaries[pkg]) + "\n"
 		if b.Len()+len(line) > cartographyInjectMaxBytes {
 			b.WriteString("  [truncated: byte limit reached]\n")
 			break
@@ -131,30 +132,7 @@ func (c *cartography) contextFor(files []string) string {
 	return b.String()
 }
 
-// collapseNewlines replaces every run of whitespace (including newlines and
-// tabs) in s with a single space. It is the same flatten-and-trim the lead
-// notes get (appendLeadsSection), applied here so a summary containing
-// embedded newlines cannot break the per-line byte accounting above.
-func collapseNewlines(s string) string {
-	if s == "" {
-		return s
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	inWS := false
-	for _, r := range s {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
-			if !inWS {
-				b.WriteByte(' ')
-				inWS = true
-			}
-			continue
-		}
-		inWS = false
-		b.WriteRune(r)
-	}
-	return strings.TrimSpace(b.String())
-}
+
 
 // cartograph runs the cartographer pass: fingerprint each package spanned
 // by targets, reuse cached summaries whose stored fingerprint matches,
@@ -198,7 +176,7 @@ func (f *Funnel) cartograph(ctx context.Context, result *Result, client llm.Clie
 	// Read whatever the store already has for these packages. Rows with a
 	// matching fingerprint are reused verbatim; mismatches and absentees
 	// go on the regen list.
-	cached, err := f.store.GetPackageSummaries(ctx, sortedKeys(pkgFingerprints))
+	cached, err := f.store.GetPackageSummaries(ctx, util.SortedKeys(pkgFingerprints))
 	if err != nil {
 		// Store read failure: degrade to empty cartography. The scan
 		// proceeds without injection — the byte-identical-off path is
@@ -539,16 +517,7 @@ func packageFingerprint(pkg string, members []string, fps map[string]string) str
 	return ingest.HashBytes([]byte(b.String()))
 }
 
-// sortedKeys returns the keys of m in ascending order. Used to make the
-// store-Get input order deterministic so the cache layer is reproducible.
-func sortedKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
+
 
 // CartographyReport summarizes an out-of-band cartographer refresh.
 type CartographyReport struct {
@@ -605,7 +574,7 @@ func (f *Funnel) RefreshCartography(ctx context.Context, client llm.Client) (Car
 	for pkg, members := range packages {
 		pkgFingerprints[pkg] = packageFingerprint(pkg, members, fps)
 	}
-	keys := sortedKeys(pkgFingerprints)
+	keys := util.SortedKeys(pkgFingerprints)
 	cached, cErr := f.store.GetPackageSummaries(ctx, keys)
 	if cErr != nil {
 		cached = nil // degrade: regenerate everything

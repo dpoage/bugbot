@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
+
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/store"
@@ -155,15 +155,7 @@ func TestRenderWorldState(t *testing.T) {
 	}
 }
 
-// TestTruncateNote_UTF8Safe pins rune-aware truncation: multibyte notes must
-// not be split mid-codepoint.
-func TestTruncateNote_UTF8Safe(t *testing.T) {
-	in := strings.Repeat("锁", 50) // 3 bytes per rune
-	got := truncateNote(in, 10)
-	if !utf8.ValidString(got) {
-		t.Fatalf("truncated note is invalid UTF-8: %q", got)
-	}
-	if r := []rune(got); len(r) != 11 { // 10 + ellipsis
-		t.Errorf("rune length = %d, want 11", len(r))
-	}
-}
+// TestTruncateNote_UTF8Safe moved to internal/util/util_test.go's
+// TestTruncateRunes/multibyte-rune-boundary after the helper was lifted
+// out of cli. The pinning coverage (50 runes truncated to 10 must remain
+// valid UTF-8 with 11 runes / ellipsis) is preserved there.

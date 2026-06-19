@@ -102,7 +102,7 @@ func renderWorldState(out io.Writer, ws worldState, now time.Time) {
 	} else {
 		_, _ = fmt.Fprintf(out, "  blackboard:   %d pending lead(s) for the next cycle (bugbot leads)\n", ws.PendingLeadsTotal)
 		for _, l := range ws.PendingLeads {
-			_, _ = fmt.Fprintf(out, "    -> %s: %s:%d — %s\n", l.TargetLens, l.File, l.Line, truncateNote(l.Note, 70))
+			_, _ = fmt.Fprintf(out, "    -> %s: %s:%d — %s\n", l.TargetLens, l.File, l.Line, util.TruncateRunes(util.CollapseWhitespace(l.Note), 70))
 		}
 	}
 

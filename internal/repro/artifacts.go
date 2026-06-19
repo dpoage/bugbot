@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // writeArtifacts writes a self-contained repro bundle for a demonstrated bug to
@@ -146,7 +146,7 @@ func readme(finding store.Finding, plan *Plan, res sandbox.Result) string {
 	b.WriteString("\n```\n\n")
 
 	b.WriteString("## Repro files\n\n")
-	for _, p := range sortedKeys(plan.Files) {
+	for _, p := range util.SortedKeys(plan.Files) {
 		fmt.Fprintf(&b, "- `%s`\n", p)
 	}
 	b.WriteByte('\n')
@@ -160,11 +160,4 @@ func readme(finding store.Finding, plan *Plan, res sandbox.Result) string {
 	return b.String()
 }
 
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
+

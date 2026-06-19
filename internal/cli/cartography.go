@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -13,6 +12,7 @@ import (
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // newCartographyCmd shows the cartographer's cached per-package summaries and,
@@ -94,34 +94,16 @@ func printCartography(out io.Writer, summaries []store.PackageSummary, full bool
 	if full {
 		for _, s := range summaries {
 			_, _ = fmt.Fprintf(out, "=== %s  (fingerprint %s, updated %s) ===\n%s\n\n",
-				s.Pkg, shortFingerprint(s.Fingerprint), s.UpdatedAt.Format("2006-01-02 15:04"), s.Summary)
+				s.Pkg, util.Truncate(s.Fingerprint, 12), s.UpdatedAt.Format("2006-01-02 15:04"), s.Summary)
 		}
 		return
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "PACKAGE\tUPDATED\tSUMMARY")
 	for _, s := range summaries {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", s.Pkg, s.UpdatedAt.Format("2006-01-02 15:04"), previewLine(s.Summary, 90))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", s.Pkg, s.UpdatedAt.Format("2006-01-02 15:04"), util.TruncateRunes(util.CollapseWhitespace(s.Summary), 90))
 	}
 	_ = tw.Flush()
 }
 
-// previewLine collapses a summary's whitespace to a single line and truncates it
-// to n runes for the table view.
-func previewLine(s string, n int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	r := []rune(s)
-	if len(r) > n {
-		return string(r[:n]) + "…"
-	}
-	return s
-}
 
-// shortFingerprint trims a content fingerprint to its first 12 hex chars for
-// display.
-func shortFingerprint(fp string) string {
-	if len(fp) > 12 {
-		return fp[:12]
-	}
-	return fp
-}

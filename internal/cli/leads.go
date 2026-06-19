@@ -3,12 +3,12 @@ package cli
 import (
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // newLeadsCmd implements `bugbot leads`: the drill-down view of the cross-lens
@@ -53,7 +53,7 @@ func renderLeads(out io.Writer, leads []store.Lead, now time.Time) {
 
 	for _, l := range leads {
 		_, _ = fmt.Fprintf(out, "  [PENDING] %s -> %s\n", l.PosterLens, l.TargetLens)
-		_, _ = fmt.Fprintf(out, "    %s:%d — %s\n", l.File, l.Line, truncateNote(l.Note, 100))
+		_, _ = fmt.Fprintf(out, "    %s:%d — %s\n", l.File, l.Line, util.TruncateRunes(util.CollapseWhitespace(l.Note), 100))
 		_, _ = fmt.Fprintf(out, "    posted %s\n", age(l.CreatedAt, now))
 	}
 }
@@ -76,14 +76,4 @@ func age(t time.Time, now time.Time) string {
 	}
 }
 
-// truncateNote bounds a note for single-screen rendering.
-func truncateNote(s string, max int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	// Rune-aware: notes are LLM-authored free text, so multibyte UTF-8 is
-	// expected; a byte slice could split a codepoint and garble the terminal.
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max]) + "…"
-}
+
