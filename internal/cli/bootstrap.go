@@ -125,6 +125,7 @@ func buildFunnelOptions(cfg config.Config, overrides FunnelOptionOverrides) (fun
 		FinderReadBytes:       cfg.Budgets.FinderReadBytes,
 		Cartographer:          cfg.Scan.Cartographer,
 		StatusNotes:           cfg.Scan.StatusNotes,
+		DisableHeatOrdering:   !cfg.Scan.HeatOrdering,
 		SandboxOpts:           sandboxOpts,
 		Lenses:                overrides.Lenses,
 		Refuters:              overrides.Refuters,

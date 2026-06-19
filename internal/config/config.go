@@ -158,6 +158,11 @@ type Scan struct {
 	// `bugbot status`. This is a Tier-2 feature gated here so it imposes zero
 	// LLM cost and zero behavior change when off (the default).
 	StatusNotes bool `yaml:"status_notes"`
+	// HeatOrdering enables churn-heat reordering in the sweep pass so finder
+	// budget flows to files that have changed recently and frequently — where
+	// bugs statistically cluster. On by default; set to false to restore
+	// alphabetical ordering (useful for deterministic sweeps in CI).
+	HeatOrdering bool `yaml:"heat_ordering"`
 }
 
 // Sandbox configures the isolated execution environment used for verification
@@ -379,6 +384,7 @@ func Default() Config {
 				"**/*_test.go",
 			},
 			Cartographer: true,
+			HeatOrdering: true,
 		},
 		Sandbox: Sandbox{
 			Backend:            "cli",
@@ -612,6 +618,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setBool("BUGBOT_REPRO_PATCH_PROVER", &cfg.Repro.PatchProver),
 		setBool("BUGBOT_SCAN_CARTOGRAPHER", &cfg.Scan.Cartographer),
 		setBool("BUGBOT_SCAN_STATUS_NOTES", &cfg.Scan.StatusNotes),
+		setBool("BUGBOT_SCAN_HEAT_ORDERING", &cfg.Scan.HeatOrdering),
 	} {
 		if err != nil {
 			return err

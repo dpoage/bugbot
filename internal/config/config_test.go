@@ -385,6 +385,17 @@ func TestApplyEnvOverrides(t *testing.T) {
 			},
 		},
 		{
+			name: "bool override (heat_ordering off)",
+			environ: []string{
+				"BUGBOT_SCAN_HEAT_ORDERING=false",
+			},
+			check: func(t *testing.T, c Config) {
+				if c.Scan.HeatOrdering {
+					t.Error("scan.heat_ordering = true, want false from env override")
+				}
+			},
+		},
+		{
 			name:    "invalid int override fails",
 			environ: []string{"BUGBOT_SANDBOX_CPUS=notanumber"},
 			wantErr: true,
@@ -963,6 +974,57 @@ func TestValidate_LocalMounts(t *testing.T) {
 		}
 		if cfg.Sandbox.LocalMounts[0].Container != "/sibling" {
 			t.Errorf("container = %q, want /sibling", cfg.Sandbox.LocalMounts[0].Container)
+		}
+	})
+}
+
+// TestScanHeatOrdering covers the three acceptance criteria for the
+// HeatOrdering config knob:
+//  1. Default is ON (true) when the field is absent from YAML.
+//  2. Explicit false in YAML loads correctly.
+//  3. Env override BUGBOT_SCAN_HEAT_ORDERING toggles it.
+func TestScanHeatOrdering(t *testing.T) {
+	t.Run("default ON when absent from YAML", func(t *testing.T) {
+		cfg, err := Load(writeTemp(t, validYAML))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if !cfg.Scan.HeatOrdering {
+			t.Error("scan.heat_ordering = false, want true (default ON)")
+		}
+	})
+
+	t.Run("false loads from YAML", func(t *testing.T) {
+		yaml := validYAML + "scan:\n  heat_ordering: false\n"
+		cfg, err := Load(writeTemp(t, yaml))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Scan.HeatOrdering {
+			t.Error("scan.heat_ordering = true, want false from YAML")
+		}
+	})
+
+	t.Run("env override false disables", func(t *testing.T) {
+		t.Setenv("BUGBOT_SCAN_HEAT_ORDERING", "false")
+		cfg, err := Load(writeTemp(t, validYAML))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Scan.HeatOrdering {
+			t.Error("scan.heat_ordering = true after env BUGBOT_SCAN_HEAT_ORDERING=false, want false")
+		}
+	})
+
+	t.Run("env override true enables", func(t *testing.T) {
+		yaml := validYAML + "scan:\n  heat_ordering: false\n"
+		t.Setenv("BUGBOT_SCAN_HEAT_ORDERING", "true")
+		cfg, err := Load(writeTemp(t, yaml))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if !cfg.Scan.HeatOrdering {
+			t.Error("scan.heat_ordering = false after env BUGBOT_SCAN_HEAT_ORDERING=true, want true")
 		}
 	})
 }
