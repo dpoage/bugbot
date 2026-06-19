@@ -223,6 +223,11 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 				}
 				return err
 			}
+			if err := st.UpsertPublishedIssue(ctx, a.finding.Fingerprint, a.issueNumber, "open"); err != nil {
+				return fmt.Errorf("publish: record updated issue: %w", err)
+			}
+			_, _ = fmt.Fprintf(w, "updated issue #%d for %s\n", a.issueNumber, a.finding.Fingerprint[:12])
+			updated++
 
 		case publishOpClose:
 			if dryRun {
@@ -982,11 +987,15 @@ func isGHGoneOrNotFound(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "410") || strings.Contains(msg, "404") {
+	// Match gh's HTTP status token, not a bare "404"/"410" substring: the
+	// wrapped error always embeds the issue number and API path, so a bare
+	// match misfires on issues numbered like #404/#410 for any unrelated
+	// failure (rate-limit, 5xx, validation).
+	if strings.Contains(msg, "HTTP 404") || strings.Contains(msg, "HTTP 410") {
 		return true
 	}
 	lower := strings.ToLower(msg)
-	if strings.Contains(lower, "was deleted") || strings.Contains(lower, "not found") || strings.Contains(lower, "gone") {
+	if strings.Contains(lower, "was deleted") {
 		return true
 	}
 	return false

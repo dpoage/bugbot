@@ -1505,8 +1505,12 @@ func TestApplyPublish_CloseStaleDrop(t *testing.T) {
 	}
 }
 
-// TestIsGHGoneOrNotFound pins the detector helper's signal list: 410, 404,
-// "was deleted", "Not Found", "Gone" all match; unrelated errors do not.
+// TestIsGHGoneOrNotFound guards the bugbot-09m stale-detection predicate. It
+// must key off gh's HTTP status token ("HTTP 404"/"HTTP 410") or the explicit
+// "was deleted" phrase — never a bare "404"/"410" substring, which the wrapped
+// error embeds via the issue number and API path. A real transient failure on
+// an issue numbered like #404 must NOT be read as "gone" (that would delete
+// the row and create a duplicate).
 func TestIsGHGoneOrNotFound(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1514,13 +1518,16 @@ func TestIsGHGoneOrNotFound(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		{"plain-410", fmt.Errorf("HTTP 410 Gone"), true},
-		{"plain-404", fmt.Errorf("HTTP 404 Not Found"), true},
-		{"was-deleted", fmt.Errorf("issue was deleted"), true},
-		{"not-found", fmt.Errorf("Not Found"), true},
-		{"gone-phrase", fmt.Errorf("the issue is Gone"), true},
-		{"unrelated-auth", fmt.Errorf("gh: 401 Unauthorized"), false},
+		{"410-deleted", fmt.Errorf("publish: update issue #50: gh api repos/{owner}/{repo}/issues/50: HTTP 410: This issue was deleted"), true},
+		{"404-not-found", fmt.Errorf("publish: update issue #77: gh api repos/{owner}/{repo}/issues/77: HTTP 404 Not Found"), true},
+		{"410-status", fmt.Errorf("HTTP 410 Gone"), true},
+		{"404-status", fmt.Errorf("HTTP 404 Not Found"), true},
+		{"was-deleted", fmt.Errorf("This issue was deleted"), true},
+		{"403-on-issue-404", fmt.Errorf("publish: update issue #404: gh api repos/{owner}/{repo}/issues/404: HTTP 403 rate limited"), false},
+		{"422-on-issue-410", fmt.Errorf("publish: update issue #410: gh api repos/{owner}/{repo}/issues/410: HTTP 422 validation failed"), false},
+		{"unrelated-auth", fmt.Errorf("gh: HTTP 401 Unauthorized"), false},
 		{"unrelated-network", fmt.Errorf("dial tcp: connection refused"), false},
+		{"generic", fmt.Errorf("boom"), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1528,5 +1535,47 @@ func TestIsGHGoneOrNotFound(t *testing.T) {
 				t.Errorf("isGHGoneOrNotFound(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestApplyPublish_UpdateRecordsSuccess pins the bugbot-09m success path: a
+// successful update must record the published row (UpsertPublishedIssue) and
+// count updated++, so the planner converges instead of re-PATCHing the same
+// issue every cycle. The merge briefly dropped these lines.
+func TestApplyPublish_UpdateRecordsSuccess(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 60, "open"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Make the finding newer than the published row so the planner updates.
+	findings, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	if err != nil || len(findings) == 0 {
+		t.Fatalf("list: %v", err)
+	}
+	findings[0].UpdatedAt = time.Now().Add(time.Hour)
+	if _, err := st.UpsertFinding(ctx, findings[0]); err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+	fake := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues/60 -X PATCH", []byte(``))
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, fake.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("runPublish: %v", err)
+	}
+	if n := len(fake.callsContaining("issues/60 -X PATCH")); n != 1 {
+		t.Errorf("expected 1 PATCH on #60, got %d", n)
+	}
+	if out := buf.String(); !strings.Contains(out, "updated=1") {
+		t.Errorf("summary must report updated=1 (success path records the update); got: %s", out)
+	}
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published: %v", err)
+	}
+	if pi.IssueNumber != 60 || pi.State != "open" {
+		t.Errorf("published row = #%d %q, want #60 open", pi.IssueNumber, pi.State)
 	}
 }

@@ -292,10 +292,10 @@ func renderBodyRange(abs string, startLine, endLine int) (string, int, error) {
 		// signal truncation with the marker.
 		if i == startLine && cost > byteBudget {
 			emit := byteBudget
-			if emit < 0 {
-				emit = 0
+			if emit > len(line) {
+				emit = len(line)
 			}
-			for emit > 0 && !utf8.RuneStart(line[emit]) {
+			for emit > 0 && emit < len(line) && !utf8.RuneStart(line[emit]) {
 				emit--
 			}
 			if emit > 0 {

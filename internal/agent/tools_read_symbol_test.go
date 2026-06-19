@@ -325,6 +325,26 @@ func TestRenderBodyRangeFirstLineOversized(t *testing.T) {
 	if !utf8.ValidString(out2) {
 		t.Errorf("multi-line output is not valid UTF-8:\n%s", lastLines(out2, 3))
 	}
+
+	// Exact-budget boundary: a first/only line of EXACTLY readSymbolMaxBytes
+	// bytes drives the truncation branch to emit == len(line), which indexed
+	// one byte past the end before the bounds guard (panic). It must truncate
+	// cleanly instead of crashing.
+	path3 := filepath.Join(dir, "exact.go")
+	src3 := "package main\n\n" + strings.Repeat("d", readSymbolMaxBytes) + "\n"
+	if err := os.WriteFile(path3, []byte(src3), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out3, _, err := renderBodyRange(path3, 3, 3)
+	if err != nil {
+		t.Fatalf("renderBodyRange exact-budget: %v", err)
+	}
+	if !strings.Contains(out3, "… [line truncated]") {
+		t.Errorf("exact-budget line missing truncation marker:\n%s", lastLines(out3, 3))
+	}
+	if !utf8.ValidString(out3) {
+		t.Errorf("exact-budget output is not valid UTF-8")
+	}
 }
 
 // lastLines returns the final n lines of s for compact failure messages.
