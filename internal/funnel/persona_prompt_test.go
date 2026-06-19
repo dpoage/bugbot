@@ -65,3 +65,42 @@ func TestVerifierSystemPrompt_NonGoPersona(t *testing.T) {
 		t.Error("verifier prompt body changed unexpectedly")
 	}
 }
+
+// TestVerifierPrompts_StdlibSourceDirective asserts that the stdlib/runtime
+// source-verification directive is present in all three verifier-side prompt
+// variants: refuter without sandbox, refuter with sandbox, and arbiter.
+// This guards against the directive being accidentally dropped from the shared
+// verifierRefutationCriteria constant that both agents compose.
+func TestVerifierPrompts_StdlibSourceDirective(t *testing.T) {
+	const persona = "senior Go engineer"
+
+	// Stable substrings from the directive added to verifierRefutationCriteria.
+	// If the wording changes these will catch regressions.
+	checks := []struct {
+		name   string
+		substr string
+	}{
+		{"reads actual source", "reading the actual source"},
+		{"GOROOT available", "GOROOT"},
+		{"not from memory", "NEVER assert it from memory"},
+		{"cite what was read", "cite what you read or ran"},
+		{"unverified claim rejected", "An unverified stdlib/runtime/library claim is not acceptable refutation evidence"},
+	}
+
+	prompts := []struct {
+		name string
+		p    string
+	}{
+		{"verifierSystemPrompt(no sandbox)", verifierSystemPrompt(persona, false)},
+		{"verifierSystemPrompt(sandbox)", verifierSystemPrompt(persona, true)},
+		{"arbiterSystemPrompt(sandbox)", arbiterSystemPrompt(persona, true)},
+	}
+
+	for _, pp := range prompts {
+		for _, c := range checks {
+			if !strings.Contains(pp.p, c.substr) {
+				t.Errorf("%s: missing stdlib directive substring %q", pp.name, c.substr)
+			}
+		}
+	}
+}

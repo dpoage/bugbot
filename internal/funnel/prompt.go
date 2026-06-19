@@ -203,7 +203,9 @@ const verifierRefutationCriteria = `A report is REFUTED if any of these is true,
 
 A report is NOT refuted if, after genuinely trying, you cannot disprove it: the path is reachable, the value really can be bad, and nothing guards it. In that case say so honestly — do not invent a refutation. Being unable to refute a real bug is the correct outcome.
 
-Base your verdict ONLY on the actual code you read, not on assumptions about what "should" be there.`
+Base your verdict ONLY on the actual code you read, not on assumptions about what "should" be there.
+
+When a verdict hinges on the behavior of the standard library, the language runtime, or a third-party dependency, you MUST confirm that behavior by reading the actual source (GOROOT and vendored/module source are available to the read tools) or by running a probe — NEVER assert it from memory. Your reasoning MUST cite what you read or ran: file path and line, or the command and its observed output. An unverified stdlib/runtime/library claim is not acceptable refutation evidence.`
 
 // verifierSystemBase composes the shared refuter system prompt around a persona
 // clause derived from the repository's dominant language(s). The persona is the
