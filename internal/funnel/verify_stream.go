@@ -14,10 +14,12 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
-// runVerifyAndPersist is the per-candidate goroutine body for the streaming
-// topology. It acquires a HIGH-priority slot, runs the refuter panel + arbiter
-// (reusing the existing runRefuters + runArbiter machinery), and immediately
-// persists the outcome (survivor → Tier 2, orphaned → Tier 3 suspected).
+// runVerifyAndPersist is the per-candidate unit body for the streaming
+// topology. The caller runs it inside a HIGH-priority slot that the verify
+// fanout holds for the whole sequential refuter panel + arbiter; it runs the
+// panel + arbiter (reusing the existing runRefuters + runArbiter machinery) and
+// immediately persists the outcome (survivor → Tier 2, orphaned → Tier 3
+// suspected).
 //
 // This function preserves EVERY path from the original verify.go goroutine:
 //   - unanimous kill/survive
@@ -55,13 +57,9 @@ func (f *Funnel) runVerifyAndPersist(
 	setErr func(error),
 	reproQ *reproQueue,
 ) {
-	// Acquire a global slot (HIGH priority: verifier is cheap, latency-sensitive,
-	// and gates everything downstream). One slot covers the whole sequential
-	// refuter panel + arbiter for this candidate.
-	if err := f.slots.acquire(ctx, slotHigh); err != nil {
-		return
-	}
-	defer f.slots.release()
+	// The verify fanout already holds this candidate's HIGH-priority slot
+	// (verifier is cheap, latency-sensitive, and gates everything downstream) for
+	// the whole sequential refuter panel + arbiter; ctx is the fanout's runCtx.
 
 	// Hard budget gate: orphan without verifying.
 	if budget.verifyOverHard() {

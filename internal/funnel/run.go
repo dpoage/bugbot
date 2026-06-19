@@ -469,7 +469,6 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	var (
 		findingsMu   sync.Mutex
 		allFindings  []store.Finding
-		verifyWg     sync.WaitGroup
 		verifyKilled int
 		verifyErr    error
 		verifyErrMu  sync.Mutex
@@ -624,12 +623,14 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	}
 
 	// ---- Stage C + D: Verify + immediate persist (dispatcher) ----
-	// Spawn a goroutine per forwarded primary. HIGH-priority slot acquisition
-	// means a candidate arriving mid-discovery can start verifying immediately.
+	// Fan out one verify unit per forwarded primary on the HIGH-priority slot
+	// class (verifyFanout owns the goroutine + slot + WaitGroup), so a candidate
+	// arriving mid-discovery can start verifying immediately.
 	var verifyStarted atomic.Bool
 	var verifyStartOnce sync.Once
 
 	var candIdx int
+	verifyFanout := f.newFanout(ctx, slotHigh)
 	for primary := range verCh {
 		verifyStartOnce.Do(func() {
 			progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageVerify})
@@ -639,19 +640,17 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		c := primary
 		idx := candIdx
 		candIdx++
-		verifyWg.Add(1)
-		go func() {
-			defer verifyWg.Done()
-			f.runVerifyAndPersist(ctx, verifierClient, persona, c, idx,
+		verifyFanout.spawn(func(runCtx context.Context) {
+			f.runVerifyAndPersist(runCtx, verifierClient, persona, c, idx,
 				snap.Commit, fps, budget, result, clusterReg,
 				&findingsMu, &allFindings, &verifyKilled,
 				&sbExecs, &sbMillis, setVerifyErr,
 				reproQ)
-		}()
+		})
 	}
 
 	// Wait for all verify goroutines to finish.
-	verifyWg.Wait()
+	verifyFanout.wait()
 
 	// Close reproQ.ch after all verify goroutines finish. The consumer goroutine
 	// exits its range loop and closes reproConsumerDone.
