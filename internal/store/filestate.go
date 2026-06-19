@@ -64,7 +64,7 @@ func (s *Store) GetFileState(ctx context.Context, path string) (FileState, error
 		return FileState{}, ErrNotFound
 	}
 	if err != nil {
-		return FileState{}, err
+		return FileState{}, annotateErr(s.path, "get_file_state", err)
 	}
 	if fs.LastScannedAt, err = parseTime(scannedAt); err != nil {
 		return FileState{}, err
@@ -88,7 +88,7 @@ func (s *Store) UpsertFileStates(ctx context.Context, states []FileState) error 
 			  last_scanned_commit = excluded.last_scanned_commit,
 			  last_scanned_at = excluded.last_scanned_at`)
 		if err != nil {
-			return err
+			return annotateErr(s.path, "upsert_file_states", err)
 		}
 		defer func() { _ = stmt.Close() }()
 
@@ -101,7 +101,7 @@ func (s *Store) UpsertFileStates(ctx context.Context, states []FileState) error 
 			if _, err := stmt.ExecContext(ctx,
 				st.Path, st.ContentHash, st.LastScannedCommit, scannedAt,
 			); err != nil {
-				return err
+				return annotateErr(s.path, "upsert_file_states", err)
 			}
 		}
 		return nil
@@ -133,7 +133,7 @@ func (s *Store) RefreshContentHashes(ctx context.Context, states []FileState) er
 		// Note: last_scanned_at is intentionally absent from the conflict UPDATE so
 		// existing rows keep their truthful scan timestamp.
 		if err != nil {
-			return err
+			return annotateErr(s.path, "refresh_content_hashes", err)
 		}
 		defer func() { _ = stmt.Close() }()
 
@@ -141,7 +141,7 @@ func (s *Store) RefreshContentHashes(ctx context.Context, states []FileState) er
 			if _, err := stmt.ExecContext(ctx,
 				st.Path, st.ContentHash, st.LastScannedCommit, epochSentinel,
 			); err != nil {
-				return err
+				return annotateErr(s.path, "refresh_content_hashes", err)
 			}
 		}
 		return nil
@@ -177,14 +177,14 @@ func (s *Store) TouchScanCoverage(ctx context.Context, paths []string, commit st
 			  last_scanned_commit = excluded.last_scanned_commit,
 			  last_scanned_at = excluded.last_scanned_at`)
 		if err != nil {
-			return err
+			return annotateErr(s.path, "touch_scan_coverage", err)
 		}
 		defer func() { _ = stmt.Close() }()
 
 		now := nowUTC().Format(timeLayout)
 		for _, p := range paths {
 			if _, err := stmt.ExecContext(ctx, p, hashes[p], commit, now); err != nil {
-				return err
+				return annotateErr(s.path, "touch_scan_coverage", err)
 			}
 		}
 		return nil
@@ -226,13 +226,18 @@ func (s *Store) scanWatermarksChunk(ctx context.Context, paths []string, out map
 	}
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return err
+		return annotateErr(s.path, "scan_watermarks", err)
 	}
 	defer func() { _ = rows.Close() }()
+	// Chunk-accumulation into a shared out map: scanRows returns a fresh slice
+	// per call and would force the caller to merge slices across chunks.
+	// The manual loop stays; annotateErr gives it the same error surface as
+	// the rest of the package. Same shape as cartographer.go's
+	// getPackageSummariesChunk.
 	for rows.Next() {
 		var p, hash, ts string
 		if err := rows.Scan(&p, &hash, &ts); err != nil {
-			return err
+			return annotateErr(s.path, "scan_watermarks", err)
 		}
 		t, err := parseTime(ts)
 		if err != nil {
@@ -278,20 +283,30 @@ func (s *Store) ChangedSince(ctx context.Context, current map[string]string) ([]
 
 	rows, err := s.db.QueryContext(ctx, `SELECT path, content_hash FROM file_state`)
 	if err != nil {
-		return nil, err
+		return nil, annotateErr(s.path, "changed_since", err)
 	}
 	defer func() { _ = rows.Close() }()
-
-	stored := make(map[string]string)
-	for rows.Next() {
-		var p, h string
-		if err := rows.Scan(&p, &h); err != nil {
-			return nil, err
-		}
-		stored[p] = h
+	// Full-table scan (no chunking), so the slice-returning scanRows fits
+	// cleanly: read all (path, hash) pairs, then build the lookup map in a
+	// single post-pass. This replaces the original manual loop and gives
+	// the same rows.Err() tail-check.
+	type pathHash struct {
+		path string
+		hash string
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	pairs, err := scanRows(rows, func(r *sql.Rows) (pathHash, error) {
+		var p, h string
+		if err := r.Scan(&p, &h); err != nil {
+			return pathHash{}, err
+		}
+		return pathHash{path: p, hash: h}, nil
+	})
+	if err != nil {
+		return nil, annotateErr(s.path, "changed_since", err)
+	}
+	stored := make(map[string]string, len(pairs))
+	for _, ph := range pairs {
+		stored[ph.path] = ph.hash
 	}
 
 	var changed []string
