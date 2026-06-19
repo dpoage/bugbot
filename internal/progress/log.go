@@ -5,6 +5,8 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // LogRenderer writes one plain line per significant event. It is the non-TTY
@@ -61,7 +63,7 @@ func (r *LogRenderer) Handle(ev Event) {
 func (r *LogRenderer) line(ev Event) string {
 	switch ev.Kind {
 	case KindScanStarted:
-		return fmt.Sprintf("scan started: kind=%s commit=%s", ev.ScanKind, shortSHA(ev.Commit))
+		return fmt.Sprintf("scan started: kind=%s commit=%s", ev.ScanKind, util.ShortSHA(ev.Commit))
 	case KindStageStarted:
 		return fmt.Sprintf("stage: %s", ev.Stage)
 	case KindStageFinished:
@@ -87,7 +89,7 @@ func (r *LogRenderer) line(ev Event) string {
 		return fmt.Sprintf("heat ordering applied: heat_files=%d top5=%s", ev.Count, ev.Label)
 	case KindScanFinished:
 		return fmt.Sprintf("scan finished: kind=%s commit=%s%s spend in=%d out=%d%s",
-			ev.ScanKind, shortSHA(ev.Commit), countsSuffix(ev.Counts),
+			ev.ScanKind, util.ShortSHA(ev.Commit), countsSuffix(ev.Counts),
 			ev.InputTokens, ev.OutputTokens, cachedSuffix(ev.CacheReadTokens))
 	case KindCycleScheduled:
 		line := fmt.Sprintf("schedule: next_poll=%s next_sweep=%s",

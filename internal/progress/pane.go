@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // ANSI control sequences used by the pane. Kept as named constants so the render
@@ -285,7 +287,7 @@ func (p *PaneRenderer) frame() []string {
 	var lines []string
 
 	header := fmt.Sprintf("bugbot %s  commit %s  elapsed %s",
-		dash(p.scanKind), shortSHA(dash(p.commit)), elapsed)
+		dash(p.scanKind), util.ShortSHA(dash(p.commit)), elapsed)
 	lines = append(lines, header)
 
 	// Active agents, sorted for stable output.
