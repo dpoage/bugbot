@@ -74,12 +74,19 @@ func (s *Store) AddAgentUnit(ctx context.Context, u AgentUnit) error {
 		u.Candidates, u.LeadsPosted, u.Detail,
 		u.CreatedAt.UTC().Format(timeLayout),
 	)
-	return err
+	if err != nil {
+		return annotateErr(s.path, "add_agent_unit", err)
+	}
+	return nil
 }
 
 // ListAgentUnits returns all agent_units rows for the given scan run, ordered
 // by launch_order then id (both ascending). Do NOT reorder by any timestamp
 // column: RFC3339Nano strings do not sort consistently (see filestate.go).
+//
+// launch_order is unique per scan_run (assigned at unit construction) and id
+// is the unique primary key, so the ordering is already total and
+// deterministic without a rowid tiebreak.
 func (s *Store) ListAgentUnits(ctx context.Context, scanRunID string) ([]AgentUnit, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, scan_run_id, role, lens, strategy, launch_order, files_json,
@@ -92,19 +99,10 @@ func (s *Store) ListAgentUnits(ctx context.Context, scanRunID string) ([]AgentUn
 		scanRunID,
 	)
 	if err != nil {
-		return nil, err
+		return nil, annotateErr(s.path, "list_agent_units", err)
 	}
 	defer func() { _ = rows.Close() }()
-
-	var out []AgentUnit
-	for rows.Next() {
-		u, err := scanAgentUnit(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, u)
-	}
-	return out, rows.Err()
+	return scanRows(rows, scanAgentUnit)
 }
 
 // PruneAgentUnits deletes agent_unit rows whose scan_run_id is NOT among the
@@ -131,9 +129,13 @@ func (s *Store) PruneAgentUnits(ctx context.Context, keepRuns int) (int64, error
 		)`, keepRuns,
 	)
 	if err != nil {
-		return 0, err
+		return 0, annotateErr(s.path, "prune_agent_units", err)
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, annotateErr(s.path, "prune_agent_units", err)
+	}
+	return n, nil
 }
 
 // scanAgentUnit reads one agent_units row from a *sql.Rows cursor.
