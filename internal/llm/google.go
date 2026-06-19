@@ -98,8 +98,17 @@ func (g *googleAdapter) Complete(ctx context.Context, req Request) (Response, er
 	// prompt-embedded schema, which is the same behavior the caller would
 	// have gotten before this field existed.
 	if len(req.ResponseSchema) > 0 && g.caps.StructuredOutput && len(req.Tools) == 0 {
-		var schema any
-		if err := json.Unmarshal(req.ResponseSchema, &schema); err != nil {
+		// parseResponseSchema unmarshals the JSON Schema; the returned name
+		// is unused on Google (ResponseJsonSchema has no name field) but the
+		// helper takes one for symmetry with the other adapters. We pass
+		// "response" as the default; callers can supply ResponseSchemaName
+		// to override if they want a name surfaced in logs.
+		defaultName := req.ResponseSchemaName
+		if defaultName == "" {
+			defaultName = "response"
+		}
+		schema, _, err := parseResponseSchema(req.ResponseSchema, defaultName)
+		if err != nil {
 			return Response{}, newAPIError("google", 0, 0, ErrInvalidRequest,
 				"ResponseSchema: invalid JSON", err)
 		}
@@ -250,14 +259,13 @@ func mapGoogleStop(reason genai.FinishReason, hasToolCalls bool) StopReason {
 }
 
 func (g *googleAdapter) normalizeErr(err error) error {
-	// genai returns APIError by value (not a pointer).
+	// genai returns APIError by value (not a pointer). It carries no
+	// *http.Response, so Retry-After is unavailable; the retry wrapper
+	// falls back to exponential backoff. We pass nil for resp, which the
+	// shared helper recognizes and skips Retry-After parsing for.
 	var apiErr genai.APIError
 	if errors.As(err, &apiErr) {
-		status := apiErr.Code
-		kind := classifyStatus(status, apiErr.Message)
-		// genai.APIError carries no *http.Response, so Retry-After is unavailable;
-		// the retry wrapper falls back to exponential backoff.
-		return newAPIError("google", status, 0, kind, apiErr.Message, err)
+		return normalizeSDKError("google", apiErr.Code, apiErr.Message, nil, err)
 	}
 	return newAPIError("google", 0, 0, ErrServer, err.Error(), err)
 }
