@@ -45,20 +45,59 @@ Findings carry a confidence tier:
 
 The sandbox runs untrusted, model-generated code with `--network=none`, all
 capabilities dropped, and a read-only root. That isolation means a build or test
-can only resolve external modules if their source is already inside the
-container. For Go repos the `sandbox.dep_strategy` setting selects how that
-happens (other ecosystems can grow their own strategy behind the same seam):
+can only resolve external packages if their source is already inside the
+container. The `sandbox.dep_strategy` setting controls how that happens; each
+ecosystem implements the same four strategies independently and the results are
+merged when a repo spans multiple ecosystems (e.g. a Go service with a JS
+frontend).
 
-| Strategy | When it applies | What it does | Security tradeoff |
-|---|---|---|---|
-| **vendored** (automatic) | repo has `vendor/modules.txt` | sets `GOFLAGS=-mod=vendor`; `go` ignores the network entirely | none — source is already in the repo |
-| **off** (default) | always | no dependency mounts; only vendored repos build offline | none |
-| **host** | `dep_strategy: host` | mounts the host Go module cache **read-only** at `/modcache`, sets `GOMODCACHE=/modcache` and `GOPROXY=off` (a cache miss fails fast instead of hanging) | exposes **public** module source to the sandbox — never put secrets in your module cache |
-| **fetch** | `dep_strategy: fetch` | runs **one** `go mod download` in a separate, still-hardened container **with network**, into a bugbot-managed cache under `os.UserCacheDir()`, then mounts that cache read-only exactly like `host` | the network is touched exactly once, in a hardened container; every subsequent run is `network=none`. The cache is keyed on `go.sum`, so an unchanged dependency set is never re-fetched |
+### Strategy overview
 
-Vendored detection runs in every mode (it is free and safe). Read-only mounts
-are never writable; the writable workspace copy remains the only writable
-surface for the untrusted run.
+| Strategy | Meaning |
+|---|---|
+| **vendored** (auto-detected) | dependencies are already present in the repo tree; no mount or network needed |
+| **off** (default) | no dependency mounts; builds that need external packages will fail offline |
+| **host** | mount a slice of the host package cache read-only; cache miss → hard error |
+| **fetch** | run ONE online prefetch in a hardened container, then mount the result read-only for all subsequent network-none runs |
+
+### Per-ecosystem matrix
+
+| Ecosystem | Detected by | Vendored means | `host` behavior | `fetch` prefetch command | Offline enforcement env | In-sandbox setup step |
+|---|---|---|---|---|---|---|
+| **Go** | `go.mod` | `vendor/modules.txt` exists → `GOFLAGS=-mod=vendor` | mount `$GOMODCACHE` at `/modcache` (read-only, `Shared=true`) | `go mod download all` into `/modcache` (writable) | `GOPROXY=off` | none |
+| **Python** | `requirements.txt` | n/a (no vendored detection) | → **off** (pip HTTP cache does not materialize packages) | `pip download -r requirements.txt -d /depcache` into `/depcache` (writable) | `PIP_NO_INDEX=1` | `pip install --user --no-index --find-links=/depcache -r requirements.txt` |
+| **Rust** | `Cargo.toml` | `vendor/` + `.cargo/config{.toml}` with `replace-with` stanza → `CARGO_NET_OFFLINE=true` | mount `$CARGO_HOME/registry` at `/cargo/registry` (read-only, `Shared=true`); `CARGO_HOME=/cargo` | `cargo fetch [--locked]` with `CARGO_HOME=/cargo` (writable); populates `/cargo/registry` | `CARGO_NET_OFFLINE=true` | none |
+| **JS/npm** | `package.json` | `node_modules/` exists → no mounts needed | → **off** (npm HTTP cache does not materialize `node_modules`) | `npm ci --ignore-scripts --cache /npmcache` into `/npmcache` (writable) | `npm_config_offline=true` | `cp -a /npmcache /tmp/npmcache && npm ci --cache /tmp/npmcache` |
+
+### Container mount paths (globally unique)
+
+Each ecosystem owns a distinct container path so multi-ecosystem repos never
+have mount collisions:
+
+| Ecosystem | Container path | Purpose |
+|---|---|---|
+| Go | `/modcache` | Go module cache (`GOMODCACHE`) |
+| Python | `/depcache` | pip wheelhouse |
+| Rust | `/cargo/registry` | Cargo registry index + crate sources (`CARGO_HOME=/cargo`) |
+| JS | `/npmcache` | npm HTTP cache (`--cache /npmcache`) |
+
+### Security notes
+
+- **Rust `host` strategy**: only `$CARGO_HOME/registry` is mounted — never all
+  of `~/.cargo`, which contains `credentials.toml` and `bin/`. This is enforced
+  in the resolver and asserted in unit tests.
+- **JS `fetch` prefetch**: `--ignore-scripts` is **mandatory** in the online
+  prefetch step. npm lifecycle scripts are arbitrary code; during the prefetch
+  the container has network access, so executing them could exfiltrate data or
+  contact external services. Scripts may run during the offline `npm ci` in the
+  setup step, where arbitrary code execution is already the sandbox's threat
+  model (network is none at that point).
+- **Vendored detection runs in every mode** (it is free and safe). Vendored
+  detection for Rust additionally requires a `.cargo/config{.toml}` source-
+  replacement stanza — a bare `vendor/` directory without the config is ignored
+  by cargo and falls through to the requested strategy.
+- Read-only mounts are never writable; the writable workspace copy remains the
+  only writable surface for the untrusted network-none run.
 
 ## Install
 

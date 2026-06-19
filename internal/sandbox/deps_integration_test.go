@@ -269,3 +269,307 @@ func TestIntegrationPythonNoWheelhouseFailsOffline(t *testing.T) {
 	}
 	t.Logf("correctly failed (exit=%d); stderr excerpt: %s", out.ExitCode, out.Stderr)
 }
+
+// ---- Rust integration tests -------------------------------------------------
+
+// rustTestImage is the Rust toolchain image used for the cargo integration tests.
+// rust:1-slim is the official slim image; it ships cargo and rustc.
+const rustTestImage = "docker.io/library/rust:1-slim"
+
+// newRustTestCLI builds a CLI backed by rust:1-slim, skipping when no runtime
+// is available or the image cannot be used.
+func newRustTestCLI(t *testing.T) *CLI {
+	t.Helper()
+	rt, ok := Detect()
+	if !ok {
+		t.Skip("no container runtime detected; skipping Rust deps integration test")
+	}
+	s, err := NewCLI(rt, rustTestImage,
+		WithCPUs(2),
+		WithMemoryMB(1024),
+		WithPidsLimit(512),
+		WithTimeout(180*time.Second),
+	)
+	if err != nil {
+		t.Skipf("NewCLI (rust): %v", err)
+	}
+	// Pull the image up front; skip if it cannot be pulled.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if _, err := s.Exec(ctx, Spec{RepoDir: t.TempDir(), Cmd: []string{"true"}, Network: "bridge"}); err != nil {
+		t.Skipf("cannot run Rust test image %q (pull failed?): %v", rustTestImage, err)
+	}
+	return s
+}
+
+// writeRustTestCrate writes a minimal Rust crate that depends on the `itoa`
+// crate (tiny, no transitive deps, pure Rust). The test verifies that `cargo
+// test` succeeds when the registry is pre-fetched and fails without it.
+func writeRustTestCrate(t *testing.T, dir string) {
+	t.Helper()
+	cargoToml := `[package]
+name = "deptest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+itoa = "1"
+`
+	mustWrite(t, filepath.Join(dir, "Cargo.toml"), cargoToml, 0o644)
+
+	src := `use itoa::Buffer;
+
+#[test]
+fn test_itoa() {
+    let mut buf = Buffer::new();
+    let s = buf.format(42u64);
+    assert_eq!(s, "42");
+}
+`
+	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(dir, "src", "lib.rs"), src, 0o644)
+}
+
+// TestIntegrationRustFetchBuildsOffline proves the full cargo FETCH round-trip:
+// prefetch downloads the registry online, then the network-none run builds and
+// tests with the registry mounted read-only. Exit 0 required.
+func TestIntegrationRustFetchBuildsOffline(t *testing.T) {
+	s := newRustTestCLI(t)
+
+	repo := t.TempDir()
+	writeRustTestCrate(t, repo)
+	cacheBase := t.TempDir()
+
+	res, err := ResolveDeps(repo, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: s,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps: %v", err)
+	}
+	if res.Prefetch == nil {
+		t.Fatal("expected non-nil Prefetch for Cargo FETCH strategy")
+	}
+
+	// Step 1: prefetch (network-enabled, populates the Cargo registry on the host).
+	prefetchCtx, prefetchCancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer prefetchCancel()
+	if err := res.Prefetch(prefetchCtx); err != nil {
+		t.Fatalf("Prefetch (cargo fetch): %v", err)
+	}
+
+	// Step 2: run cargo test network-none with the registry mount.
+	// CARGO_HOME=/cargo (from env) + /cargo/registry mount → cargo resolves
+	// crates offline.
+	out, err := s.Exec(context.Background(), Spec{
+		RepoDir:  repo,
+		Cmd:      []string{"cargo", "test"},
+		Network:  "none",
+		ROMounts: res.ROMounts,
+		Env:      res.Env,
+		Timeout:  120 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Exec (cargo test network-none): %v", err)
+	}
+	if out.ExitCode != 0 {
+		t.Fatalf("cargo test with registry mount should pass; exit=%d\nstdout:\n%s\nstderr:\n%s",
+			out.ExitCode, out.Stdout, out.Stderr)
+	}
+	t.Logf("cargo test stdout:\n%s", out.Stdout)
+}
+
+// TestIntegrationRustNoRegistryFailsOffline is the negative control: the same
+// cargo test WITHOUT the registry mount fails under --network=none (cargo cannot
+// reach crates.io, the crate cannot be resolved). This proves that
+// --network=none is enforced and that the registry mount is load-bearing.
+func TestIntegrationRustNoRegistryFailsOffline(t *testing.T) {
+	s := newRustTestCLI(t)
+
+	repo := t.TempDir()
+	writeRustTestCrate(t, repo)
+
+	// No mounts, no env — bare network-none run.
+	// cargo cannot reach crates.io, so the external dep cannot be resolved.
+	out, err := s.Exec(context.Background(), Spec{
+		RepoDir: repo,
+		Cmd:     []string{"cargo", "test"},
+		Network: "none",
+		Timeout: 60 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if out.ExitCode == 0 {
+		t.Fatalf("cargo test with NO registry under --network=none should fail, but exited 0;\nstdout:\n%s\nstderr:\n%s",
+			out.Stdout, out.Stderr)
+	}
+	t.Logf("correctly failed (exit=%d); stderr excerpt: %s", out.ExitCode, out.Stderr)
+}
+
+// ---- JS integration tests ---------------------------------------------------
+
+// jsTestImage is the Node.js image used for the npm integration tests.
+// node:20-slim ships npm and /bin/sh.
+const jsTestImage = "docker.io/library/node:20-slim"
+
+// newJSTestCLI builds a CLI backed by node:20-slim, skipping when no runtime
+// is available or the image cannot be used.
+func newJSTestCLI(t *testing.T) *CLI {
+	t.Helper()
+	rt, ok := Detect()
+	if !ok {
+		t.Skip("no container runtime detected; skipping JS deps integration test")
+	}
+	s, err := NewCLI(rt, jsTestImage,
+		WithCPUs(2),
+		WithMemoryMB(512),
+		WithPidsLimit(256),
+		WithTimeout(120*time.Second),
+	)
+	if err != nil {
+		t.Skipf("NewCLI (node): %v", err)
+	}
+	// Pull the image up front; skip if it cannot be pulled.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if _, err := s.Exec(ctx, Spec{RepoDir: t.TempDir(), Cmd: []string{"true"}, Network: "bridge"}); err != nil {
+		t.Skipf("cannot run JS test image %q (pull failed?): %v", jsTestImage, err)
+	}
+	return s
+}
+
+// writeJSTestRepo writes a minimal Node.js repo with package.json and
+// package-lock.json (depending on the `ms` package — tiny, stable, no transitive
+// deps) and a test file that uses Node's built-in test runner.
+func writeJSTestRepo(t *testing.T, dir string) {
+	t.Helper()
+	// ms@2.1.3 is a tiny, pure-JS time-string parser with no dependencies.
+	pkgJSON := `{
+  "name": "deptest",
+  "version": "1.0.0",
+  "dependencies": {
+    "ms": "2.1.3"
+  }
+}
+`
+	// package-lock.json for ms@2.1.3 (content-addressed, stable).
+	// Generated from `npm install ms@2.1.3` on Node 20.
+	pkgLock := `{
+  "name": "deptest",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "deptest",
+      "version": "1.0.0",
+      "dependencies": {
+        "ms": "2.1.3"
+      }
+    },
+    "node_modules/ms": {
+      "version": "2.1.3",
+      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",
+      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTg=="
+    }
+  }
+}
+`
+	mustWrite(t, filepath.Join(dir, "package.json"), pkgJSON, 0o644)
+	mustWrite(t, filepath.Join(dir, "package-lock.json"), pkgLock, 0o644)
+
+	// Test using Node's built-in test runner (node:test, available since Node 18).
+	testSrc := `const test = require('node:test');
+const assert = require('node:assert');
+const ms = require('ms');
+
+test('ms converts seconds', () => {
+    assert.strictEqual(ms(1000), '1s');
+});
+`
+	mustWrite(t, filepath.Join(dir, "test.mjs"), testSrc, 0o644)
+}
+
+// TestIntegrationJSFetchBuildsOffline proves the full npm FETCH round-trip:
+// prefetch downloads the npm cache online, then the network-none run copies the
+// cache to /tmp, installs from it via SetupCmds, and runs the test. Exit 0 required.
+func TestIntegrationJSFetchBuildsOffline(t *testing.T) {
+	s := newJSTestCLI(t)
+
+	repo := t.TempDir()
+	writeJSTestRepo(t, repo)
+	cacheBase := t.TempDir()
+
+	res, err := ResolveDeps(repo, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: s,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps: %v", err)
+	}
+	if res.Prefetch == nil {
+		t.Fatal("expected non-nil Prefetch for JS FETCH strategy")
+	}
+
+	// Step 1: prefetch (network-enabled, populates the npm cache on the host).
+	prefetchCtx, prefetchCancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer prefetchCancel()
+	if err := res.Prefetch(prefetchCtx); err != nil {
+		t.Fatalf("Prefetch (npm ci --ignore-scripts): %v", err)
+	}
+
+	// Step 2: run node test network-none with the npm cache mount + SetupCmds.
+	// The SetupCmd copies the RO /npmcache to /tmp/npmcache and runs
+	// npm ci --cache /tmp/npmcache (offline, npm_config_offline=true) before
+	// the test command runs.
+	out, err := s.Exec(context.Background(), Spec{
+		RepoDir:   repo,
+		Cmd:       []string{"node", "--test", "test.mjs"},
+		Network:   "none",
+		ROMounts:  res.ROMounts,
+		Env:       res.Env,
+		SetupCmds: res.SetupCmds,
+		Timeout:   90 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Exec (node --test network-none): %v", err)
+	}
+	if out.ExitCode != 0 {
+		t.Fatalf("node test with npm cache should pass; exit=%d\nstdout:\n%s\nstderr:\n%s",
+			out.ExitCode, out.Stdout, out.Stderr)
+	}
+	t.Logf("node test stdout:\n%s", out.Stdout)
+}
+
+// TestIntegrationJSNoCacheFailsOffline is the negative control: the same node
+// test WITHOUT the npm cache fails under --network=none (npm cannot reach the
+// registry, node_modules is not installed). This proves that --network=none is
+// enforced and that the npm cache mount + SetupCmds are load-bearing.
+func TestIntegrationJSNoCacheFailsOffline(t *testing.T) {
+	s := newJSTestCLI(t)
+
+	repo := t.TempDir()
+	writeJSTestRepo(t, repo)
+
+	// No mounts, no SetupCmds — bare network-none run.
+	// node_modules/ is not installed, so require('ms') should fail.
+	out, err := s.Exec(context.Background(), Spec{
+		RepoDir: repo,
+		Cmd:     []string{"node", "--test", "test.mjs"},
+		Network: "none",
+		Timeout: 60 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if out.ExitCode == 0 {
+		t.Fatalf("node test with NO npm cache under --network=none should fail, but exited 0;\nstdout:\n%s\nstderr:\n%s",
+			out.Stdout, out.Stderr)
+	}
+	t.Logf("correctly failed (exit=%d); stderr excerpt: %s", out.ExitCode, out.Stderr)
+}
