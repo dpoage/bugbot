@@ -36,12 +36,16 @@ type Change struct {
 // Output is parsed from `git diff --name-status -z -M`, whose NUL-delimited
 // framing keeps paths with spaces or newlines intact and disambiguates the
 // two-path records that renames and copies produce.
+//
+// "--end-of-options" is inserted before fromCommit so a ref that starts with
+// "-" cannot be parsed as a flag by git. See CommitMessage below for the
+// rationale.
 func (r *Repo) ChangedFiles(ctx context.Context, fromCommit, toCommit string) ([]Change, error) {
 	if fromCommit == "" || toCommit == "" {
 		return nil, fmt.Errorf("ingest: ChangedFiles requires both commits (from=%q to=%q)", fromCommit, toCommit)
 	}
 	raw, err := runGitRaw(ctx, r.root,
-		"diff", "--name-status", "-z", "-M", fromCommit, toCommit)
+		"diff", "--name-status", "-z", "-M", "--end-of-options", fromCommit, toCommit)
 	if err != nil {
 		return nil, fmt.Errorf("ingest: diff %s..%s: %w", fromCommit, toCommit, err)
 	}
@@ -123,11 +127,16 @@ func parseNameStatusZ(b []byte) ([]Change, error) {
 //
 // Rename detection is enabled (-M) so a moved-and-edited file's hunks carry its
 // new path in the "+++ b/<newpath>" header.
+//
+// "--end-of-options" is inserted before the joined from...to range so a
+// from-ref that starts with "-" cannot be parsed as a flag by git (the
+// leading character of the joined range follows `from` verbatim). See
+// CommitMessage below for the rationale.
 func (r *Repo) UnifiedDiff(ctx context.Context, from, to string) ([]byte, error) {
 	if from == "" || to == "" {
 		return nil, fmt.Errorf("ingest: UnifiedDiff requires both commits (from=%q to=%q)", from, to)
 	}
-	raw, err := runGitRaw(ctx, r.root, "diff", "-M", from+"..."+to)
+	raw, err := runGitRaw(ctx, r.root, "diff", "-M", "--end-of-options", from+"..."+to)
 	if err != nil {
 		return nil, fmt.Errorf("ingest: unified diff %s...%s: %w", from, to, err)
 	}
