@@ -365,3 +365,93 @@ func TestListLeads(t *testing.T) {
 		t.Errorf("surviving lead: got %q, want first", all[0].Note)
 	}
 }
+
+// TestLeads_ConfidenceOrdering verifies that PendingLeads returns leads ordered
+// by confidence DESC, then created_at ASC, then id ASC.
+func TestLeads_ConfidenceOrdering(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	leads := []Lead{
+		{PosterLens: "a", TargetLens: "concurrency", File: "low.go", Line: 1, Note: "low",
+			Confidence: 0.1, CreatedAt: base},
+		{PosterLens: "a", TargetLens: "concurrency", File: "high.go", Line: 2, Note: "high",
+			Confidence: 0.9, CreatedAt: base},
+		{PosterLens: "a", TargetLens: "concurrency", File: "mid.go", Line: 3, Note: "mid",
+			Confidence: 0.5, CreatedAt: base},
+		// Same confidence as "low", but created later — must come after "low".
+		{PosterLens: "a", TargetLens: "concurrency", File: "low2.go", Line: 4, Note: "low2",
+			Confidence: 0.1, CreatedAt: base.Add(time.Second)},
+	}
+	for _, l := range leads {
+		if err := st.AddLead(ctx, l); err != nil {
+			t.Fatalf("AddLead: %v", err)
+		}
+	}
+
+	got, err := st.PendingLeads(ctx, "concurrency")
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("want 4 leads, got %d", len(got))
+	}
+
+	wantFiles := []string{"high.go", "mid.go", "low.go", "low2.go"}
+	for i, want := range wantFiles {
+		if got[i].File != want {
+			t.Errorf("position %d: got file %q, want %q (full order: %v)",
+				i, got[i].File, want, func() []string {
+					files := make([]string, len(got))
+					for j, l := range got {
+						files[j] = l.File
+					}
+					return files
+				}())
+		}
+	}
+}
+
+// TestLeads_UpsertRefreshesConfidence verifies that upserting an existing lead
+// (same target_lens/file/line) updates the confidence field.
+func TestLeads_UpsertRefreshesConfidence(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	original := Lead{
+		PosterLens: "nil-safety/error-handling",
+		TargetLens: "concurrency",
+		File:       "pkg/foo.go",
+		Line:       7,
+		Note:       "note",
+		Confidence: 0.2,
+	}
+	if err := st.AddLead(ctx, original); err != nil {
+		t.Fatalf("AddLead: %v", err)
+	}
+
+	updated := Lead{
+		PosterLens: "nil-safety/error-handling",
+		TargetLens: "concurrency",
+		File:       "pkg/foo.go",
+		Line:       7,
+		Note:       "note updated",
+		Confidence: 0.85,
+	}
+	if err := st.AddLead(ctx, updated); err != nil {
+		t.Fatalf("AddLead upsert: %v", err)
+	}
+
+	got, err := st.PendingLeads(ctx, "concurrency")
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 lead after upsert, got %d", len(got))
+	}
+	if got[0].Confidence != 0.85 {
+		t.Errorf("confidence = %v, want 0.85", got[0].Confidence)
+	}
+}

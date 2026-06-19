@@ -37,7 +37,7 @@ type PostLeadTool struct {
 	posterLens  string
 	validLenses map[string]bool
 	sortedNames []string // for deterministic error messages
-	onPost      func(targetLens, file string, line int, note string) error
+	onPost      func(targetLens, file string, line int, note string, confidence float64) error
 }
 
 // NewPostLeadTool builds a post_lead tool instance for one finder agent.
@@ -46,7 +46,7 @@ type PostLeadTool struct {
 // returns a validation error listing the valid names. onPost is called on every
 // valid post; the funnel supplies the implementation (store write + counter
 // increment).
-func NewPostLeadTool(posterLens string, validLensNames []string, onPost func(targetLens, file string, line int, note string) error) *PostLeadTool {
+func NewPostLeadTool(posterLens string, validLensNames []string, onPost func(targetLens, file string, line int, note string, confidence float64) error) *PostLeadTool {
 	valid := make(map[string]bool, len(validLensNames))
 	sorted := make([]string, len(validLensNames))
 	for i, n := range validLensNames {
@@ -64,10 +64,11 @@ func NewPostLeadTool(posterLens string, validLensNames []string, onPost func(tar
 
 // postLeadArgs is the JSON schema for the tool arguments.
 type postLeadArgs struct {
-	TargetLens string `json:"target_lens"`
-	File       string `json:"file"`
-	Line       int    `json:"line"`
-	Note       string `json:"note"`
+	TargetLens string   `json:"target_lens"`
+	File       string   `json:"file"`
+	Line       int      `json:"line"`
+	Note       string   `json:"note"`
+	Confidence *float64 `json:"confidence,omitempty"` // optional 0..1; clamped, defaults to 0
 }
 
 // Def implements agent.Tool.
@@ -102,6 +103,12 @@ func (t *PostLeadTool) Def() llm.ToolDef {
       "type": "string",
       "maxLength": 500,
       "description": "Brief description of the suspicion for the target lens's finder agent (at most 500 characters)."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Poster's confidence in this tip (0..1). Omit to default to 0."
     }
   },
   "required": ["target_lens", "file", "line", "note"],
@@ -151,7 +158,17 @@ func (t *PostLeadTool) Run(_ context.Context, raw json.RawMessage) (string, erro
 		return "", fmt.Errorf("file must be a repo-relative path inside the repository, got %q", args.File)
 	}
 
-	if err := t.onPost(args.TargetLens, args.File, args.Line, args.Note); err != nil {
+	confidence := 0.0
+	if args.Confidence != nil {
+		confidence = *args.Confidence
+		if confidence < 0 {
+			confidence = 0
+		} else if confidence > 1 {
+			confidence = 1
+		}
+	}
+
+	if err := t.onPost(args.TargetLens, args.File, args.Line, args.Note, confidence); err != nil {
 		return "", fmt.Errorf("post lead: %w", err)
 	}
 

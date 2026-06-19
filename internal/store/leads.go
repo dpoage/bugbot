@@ -28,13 +28,14 @@ type Lead struct {
 	File       string
 	Line       int
 	Note       string
+	Confidence float64 // 0..1; higher means the poster is more certain
 	CreatedAt  time.Time
 }
 
 // AddLead upserts a lead. On conflict on (target_lens, file, line) it refreshes
-// the note, poster_lens, and scan_run_id. The original created_at is always
-// preserved. Because consumed leads are deleted, a conflict can only hit a row
-// that is still pending — there is no consumed->posted flip to perform.
+// the note, poster_lens, scan_run_id, and confidence. The original created_at is
+// always preserved. Because consumed leads are deleted, a conflict can only hit a
+// row that is still pending — there is no consumed->posted flip to perform.
 func (s *Store) AddLead(ctx context.Context, l Lead) error {
 	if l.ID == "" {
 		l.ID = newID()
@@ -43,13 +44,14 @@ func (s *Store) AddLead(ctx context.Context, l Lead) error {
 		l.CreatedAt = nowUTC()
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO leads (id, scan_run_id, poster_lens, target_lens, file, line, note, status, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'posted', ?)
+		INSERT INTO leads (id, scan_run_id, poster_lens, target_lens, file, line, note, confidence, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'posted', ?)
 		ON CONFLICT(target_lens, file, line) DO UPDATE SET
 			note        = excluded.note,
 			poster_lens = excluded.poster_lens,
-			scan_run_id = excluded.scan_run_id`,
-		l.ID, l.ScanRunID, l.PosterLens, l.TargetLens, l.File, l.Line, l.Note,
+			scan_run_id = excluded.scan_run_id,
+			confidence  = excluded.confidence`,
+		l.ID, l.ScanRunID, l.PosterLens, l.TargetLens, l.File, l.Line, l.Note, l.Confidence,
 		l.CreatedAt.Format(timeLayout),
 	)
 	if err != nil {
@@ -59,13 +61,13 @@ func (s *Store) AddLead(ctx context.Context, l Lead) error {
 }
 
 // PendingLeads returns all pending leads for the given target lens, ordered
-// by created_at then id for determinism.
+// by confidence DESC, then created_at ASC, then id ASC for determinism.
 func (s *Store) PendingLeads(ctx context.Context, targetLens string) ([]Lead, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, scan_run_id, poster_lens, target_lens, file, line, note, created_at
+		SELECT id, scan_run_id, poster_lens, target_lens, file, line, note, confidence, created_at
 		FROM leads
 		WHERE target_lens = ?
-		ORDER BY created_at, id`,
+		ORDER BY confidence DESC, created_at ASC, id ASC`,
 		targetLens,
 	)
 	if err != nil {
@@ -108,7 +110,7 @@ func scanLead(rows *sql.Rows) (Lead, error) {
 	var created string
 	if err := rows.Scan(
 		&l.ID, &l.ScanRunID, &l.PosterLens, &l.TargetLens,
-		&l.File, &l.Line, &l.Note, &created,
+		&l.File, &l.Line, &l.Note, &l.Confidence, &created,
 	); err != nil {
 		return Lead{}, err
 	}
@@ -123,7 +125,7 @@ func scanLead(rows *sql.Rows) (Lead, error) {
 // determinism). Every row in the table is pending, so no filter is needed.
 func (s *Store) ListLeads(ctx context.Context) ([]Lead, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, scan_run_id, poster_lens, target_lens, file, line, note, created_at
+		SELECT id, scan_run_id, poster_lens, target_lens, file, line, note, confidence, created_at
 		FROM leads
 		ORDER BY created_at DESC, id DESC`)
 	if err != nil {

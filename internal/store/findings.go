@@ -63,6 +63,7 @@ type Finding struct {
 	// comma-separated text column; it is a reporting signal only and does NOT
 	// affect the finding's tier or status.
 	CorroboratingLenses []string
+	Confidence          float64 // derived: findingConfidence(tier, severity, len(corroboratingLenses))
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
@@ -90,6 +91,56 @@ func decodeLenses(s string) []string {
 		return nil
 	}
 	return strings.Split(s, ",")
+}
+
+// findingConfidence derives a [0,1] confidence score from the evidence quality
+// of a finding. The score is monotonic in both axes:
+//
+//   - tier: 1 (reproduced) is strongest, 2 (verified) is middle, 3 (suspected)
+//     is weakest. Each tier step subtracts a fixed weight so the ordering is
+//     preserved regardless of corroboration.
+//
+//   - corroboratingLensCount: each additional corroborating lens adds a fixed
+//     increment, capped so the combined value never exceeds 1.
+//
+// severity contributes a small tie-breaking bonus (critical > high > medium >
+// everything else) so that among equally-tiered, equally-corroborated findings
+// the more severe ones surface first.
+func findingConfidence(tier int, severity string, corroboratingLensCount int) float64 {
+	// Tier base: tier 1 → 0.8, tier 2 → 0.5, tier 3 → 0.2.
+	// Out-of-range tiers (0 or >3) are treated as suspected.
+	var base float64
+	switch tier {
+	case 1:
+		base = 0.80
+	case 2:
+		base = 0.50
+	default:
+		base = 0.20
+	}
+
+	// Severity bonus: up to 0.08 so it never overrides a tier boundary.
+	var sevBonus float64
+	switch strings.ToLower(severity) {
+	case "critical":
+		sevBonus = 0.08
+	case "high":
+		sevBonus = 0.05
+	case "medium":
+		sevBonus = 0.02
+	}
+
+	// Corroboration: 0.04 per additional lens, capped at 0.12.
+	corrob := float64(corroboratingLensCount) * 0.04
+	if corrob > 0.12 {
+		corrob = 0.12
+	}
+
+	v := base + sevBonus + corrob
+	if v > 1.0 {
+		v = 1.0
+	}
+	return v
 }
 
 // Fingerprint computes the stable dedup key for a finding from the fields that
@@ -163,17 +214,18 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			}
 			f.CreatedAt = now
 			f.UpdatedAt = now
+			f.Confidence = findingConfidence(f.Tier, f.Severity, len(f.CorroboratingLenses))
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO findings
 				  (id, fingerprint, title, description, reasoning, severity, tier,
 				   status, lens, file, line, commit_sha, file_hash, repro_path,
 				   fix_patch, needs_human,
-				   corroborating_lenses, created_at, updated_at)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				   corroborating_lenses, confidence, created_at, updated_at)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.Severity,
 				f.Tier, string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA,
 				f.FileHash, nullStr(f.ReproPath), f.FixPatch, boolInt(f.NeedsHuman),
-				encodeLenses(f.CorroboratingLenses),
+				encodeLenses(f.CorroboratingLenses), f.Confidence,
 				f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout),
 			); err != nil {
 				return annotateErr(s.path, "upsert_finding", err)
@@ -229,6 +281,8 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				f.NeedsHuman = true
 			}
 
+			f.Confidence = findingConfidence(f.Tier, f.Severity, len(f.CorroboratingLenses))
+
 			// The CASE expressions mirror the Go logic above to guarantee atomicity —
 			// a concurrent writer cannot slip in between the SELECT and this UPDATE.
 			// Arg order matches the positional ? placeholders exactly:
@@ -244,7 +298,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				  repro_path = CASE WHEN ? IS NULL THEN repro_path ELSE ? END,
 				  fix_patch=?,
 				  needs_human = CASE WHEN needs_human = 1 THEN 1 ELSE ? END,
-				  corroborating_lenses=?, updated_at=?
+				  corroborating_lenses=?, confidence=?, updated_at=?
 				WHERE id=?`,
 				f.Title, f.Description, f.Reasoning, f.Severity,
 				f.Tier, f.Tier,
@@ -253,7 +307,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				nullStr(f.ReproPath), nullStr(f.ReproPath),
 				f.FixPatch,
 				boolInt(f.NeedsHuman),
-				encodeLenses(f.CorroboratingLenses),
+				encodeLenses(f.CorroboratingLenses), f.Confidence,
 				f.UpdatedAt.Format(timeLayout), f.ID,
 			); err != nil {
 				return annotateErr(s.path, "upsert_finding", err)
@@ -410,7 +464,7 @@ func (s *Store) AddCorroboratingLenses(ctx context.Context, fingerprint string, 
 const findingColumns = `SELECT id, fingerprint, title, description, reasoning,
 	severity, tier, status, lens, file, line, commit_sha, file_hash, repro_path,
 	fix_patch, needs_human,
-	corroborating_lenses, created_at, updated_at`
+	corroborating_lenses, confidence, created_at, updated_at`
 
 func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (Finding, error) {
 	row := s.db.QueryRowContext(ctx, findingColumns+" FROM findings "+whereClause, args...)
@@ -441,7 +495,7 @@ func scanFinding(sc rowScanner) (Finding, error) {
 	if err := sc.Scan(
 		&f.ID, &f.Fingerprint, &f.Title, &f.Description, &f.Reasoning,
 		&f.Severity, &f.Tier, &status, &f.Lens, &f.File, &f.Line, &f.CommitSHA,
-		&f.FileHash, &repro, &f.FixPatch, &needsHuman, &corrob, &createdAt, &updatedAt,
+		&f.FileHash, &repro, &f.FixPatch, &needsHuman, &corrob, &f.Confidence, &createdAt, &updatedAt,
 	); err != nil {
 		return Finding{}, err
 	}

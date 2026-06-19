@@ -606,3 +606,110 @@ func TestCountFindings(t *testing.T) {
 		t.Errorf("fixed=%d dismissed=%d, want 1/1", got.Fixed, got.Dismissed)
 	}
 }
+
+// TestFindingConfidence_Monotonic verifies the monotonicity and boundedness
+// properties of findingConfidence:
+//   - higher tier number (weaker evidence) => lower confidence
+//   - more corroborating lenses => higher confidence
+//   - all values in [0,1]
+func TestFindingConfidence_Monotonic(t *testing.T) {
+	// Tier monotonicity: tier 1 > tier 2 > tier 3.
+	c1 := findingConfidence(1, "high", 0)
+	c2 := findingConfidence(2, "high", 0)
+	c3 := findingConfidence(3, "high", 0)
+	if !(c1 > c2 && c2 > c3) {
+		t.Errorf("tier monotonicity violated: c1=%v c2=%v c3=%v", c1, c2, c3)
+	}
+
+	// Corroboration monotonicity: more lenses => higher confidence (same tier+severity).
+	c0 := findingConfidence(2, "medium", 0)
+	cA := findingConfidence(2, "medium", 1)
+	cB := findingConfidence(2, "medium", 2)
+	if !(cB > cA && cA > c0) {
+		t.Errorf("corroboration monotonicity violated: c0=%v cA=%v cB=%v", c0, cA, cB)
+	}
+
+	// Bounded [0,1] across a range of inputs.
+	for _, tier := range []int{0, 1, 2, 3, 99} {
+		for _, corrob := range []int{0, 1, 5, 100} {
+			v := findingConfidence(tier, "critical", corrob)
+			if v < 0 || v > 1 {
+				t.Errorf("out of range: findingConfidence(%d, critical, %d) = %v", tier, corrob, v)
+			}
+		}
+	}
+}
+
+// TestFindingConfidence_CorroborationIncreases verifies that otherwise-identical
+// findings have higher confidence when corroborating_lenses is non-empty.
+func TestFindingConfidence_CorroborationIncreases(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	base := sampleFinding()
+	base.CorroboratingLenses = nil
+	stored0, err := st.UpsertFinding(ctx, base)
+	if err != nil {
+		t.Fatalf("UpsertFinding (no corrob): %v", err)
+	}
+
+	// Same fingerprint but with corroborating lenses — triggers UPDATE path.
+	updated := base
+	updated.CorroboratingLenses = []string{"concurrency", "resource-leaks"}
+	stored2, err := st.UpsertFinding(ctx, updated)
+	if err != nil {
+		t.Fatalf("UpsertFinding (2 corrob): %v", err)
+	}
+
+	if stored2.Confidence <= stored0.Confidence {
+		t.Errorf("confidence did not increase with corroboration: before=%v after=%v",
+			stored0.Confidence, stored2.Confidence)
+	}
+}
+
+// TestFindingConfidence_RoundTrip verifies that Confidence is persisted and
+// returned correctly from all read paths.
+func TestFindingConfidence_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	f := sampleFinding()
+	f.Tier = 1
+	f.Severity = "critical"
+	f.CorroboratingLenses = []string{"concurrency"}
+
+	stored, err := st.UpsertFinding(ctx, f)
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	if stored.Confidence <= 0 {
+		t.Errorf("stored confidence should be > 0, got %v", stored.Confidence)
+	}
+
+	// Round-trip via GetFinding.
+	got, err := st.GetFinding(ctx, stored.ID)
+	if err != nil {
+		t.Fatalf("GetFinding: %v", err)
+	}
+	if got.Confidence != stored.Confidence {
+		t.Errorf("GetFinding confidence = %v, want %v", got.Confidence, stored.Confidence)
+	}
+
+	// Round-trip via GetFindingByFingerprint.
+	gotFP, err := st.GetFindingByFingerprint(ctx, stored.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint: %v", err)
+	}
+	if gotFP.Confidence != stored.Confidence {
+		t.Errorf("GetFindingByFingerprint confidence = %v, want %v", gotFP.Confidence, stored.Confidence)
+	}
+
+	// Round-trip via ListFindings.
+	list, err := st.ListFindings(ctx, FindingFilter{})
+	if err != nil {
+		t.Fatalf("ListFindings: %v", err)
+	}
+	if len(list) != 1 || list[0].Confidence != stored.Confidence {
+		t.Errorf("ListFindings confidence = %v, want %v", list[0].Confidence, stored.Confidence)
+	}
+}

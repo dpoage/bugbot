@@ -28,8 +28,8 @@ var testLensNames = []string{
 }
 
 func newTestPostLeadTool(posterLens string, posted *[]postLeadCapture) *PostLeadTool {
-	onPost := func(targetLens, file string, line int, note string) error {
-		*posted = append(*posted, postLeadCapture{targetLens, file, line, note})
+	onPost := func(targetLens, file string, line int, note string, confidence float64) error {
+		*posted = append(*posted, postLeadCapture{targetLens, file, line, note, confidence})
 		return nil
 	}
 	return NewPostLeadTool(posterLens, testLensNames, onPost)
@@ -40,12 +40,13 @@ type postLeadCapture struct {
 	file       string
 	line       int
 	note       string
+	confidence float64
 }
 
 // --- Tests ------------------------------------------------------------------
 
 func TestPostLeadTool_Def(t *testing.T) {
-	tool := NewPostLeadTool("concurrency", testLensNames, func(_, _ string, _ int, _ string) error { return nil })
+	tool := NewPostLeadTool("concurrency", testLensNames, func(_, _ string, _ int, _ string, _ float64) error { return nil })
 	def := tool.Def()
 	if def.Name != "post_lead" {
 		t.Errorf("name = %q, want post_lead", def.Name)
@@ -252,7 +253,7 @@ func TestPostLeadTool_AbsoluteFile_IsError(t *testing.T) {
 }
 
 func TestPostLeadTool_InvalidJSON_IsError(t *testing.T) {
-	tool := NewPostLeadTool("nil-safety/error-handling", testLensNames, func(_, _ string, _ int, _ string) error { return nil })
+	tool := NewPostLeadTool("nil-safety/error-handling", testLensNames, func(_, _ string, _ int, _ string, _ float64) error { return nil })
 	_, err := tool.Run(context.Background(), []byte(`not json`))
 	if err == nil {
 		t.Fatal("invalid JSON must return an error")
@@ -299,5 +300,93 @@ func TestPostLeadTool_OverlongNote_IsError(t *testing.T) {
 	}
 	if len(captured) != 0 {
 		t.Errorf("onPost must not fire for rejected note, fired %d times", len(captured))
+	}
+}
+
+// TestPostLeadTool_ConfidenceForwarded verifies that an explicit confidence
+// value is forwarded to the onPost callback unchanged.
+func TestPostLeadTool_ConfidenceForwarded(t *testing.T) {
+	var captured []postLeadCapture
+	tool := newTestPostLeadTool("nil-safety/error-handling", &captured)
+
+	out, err := runPostLeadTool(t, tool, map[string]interface{}{
+		"target_lens": "concurrency",
+		"file":        "pkg/cache.go",
+		"line":        10,
+		"note":        "suspicious locking",
+		"confidence":  0.75,
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !strings.Contains(out, "concurrency") {
+		t.Errorf("output missing target lens: %q", out)
+	}
+	if len(captured) != 1 {
+		t.Fatalf("want 1 callback, got %d", len(captured))
+	}
+	if captured[0].confidence != 0.75 {
+		t.Errorf("confidence = %v, want 0.75", captured[0].confidence)
+	}
+}
+
+// TestPostLeadTool_ConfidenceAbsent verifies that an absent confidence field
+// defaults to 0 in the callback.
+func TestPostLeadTool_ConfidenceAbsent(t *testing.T) {
+	var captured []postLeadCapture
+	tool := newTestPostLeadTool("nil-safety/error-handling", &captured)
+
+	_, err := runPostLeadTool(t, tool, map[string]interface{}{
+		"target_lens": "concurrency",
+		"file":        "pkg/cache.go",
+		"line":        1,
+		"note":        "suspicion",
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(captured) != 1 {
+		t.Fatalf("want 1 callback, got %d", len(captured))
+	}
+	if captured[0].confidence != 0.0 {
+		t.Errorf("confidence = %v, want 0.0", captured[0].confidence)
+	}
+}
+
+// TestPostLeadTool_ConfidenceClamped verifies that out-of-range confidence
+// values are clamped to [0,1].
+func TestPostLeadTool_ConfidenceClamped(t *testing.T) {
+	tests := []struct {
+		name  string
+		input float64
+		want  float64
+	}{
+		{"negative", -0.5, 0.0},
+		{"above one", 1.5, 1.0},
+		{"exactly zero", 0.0, 0.0},
+		{"exactly one", 1.0, 1.0},
+		{"midrange", 0.4, 0.4},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured []postLeadCapture
+			tool := newTestPostLeadTool("nil-safety/error-handling", &captured)
+			_, err := runPostLeadTool(t, tool, map[string]interface{}{
+				"target_lens": "concurrency",
+				"file":        "a.go",
+				"line":        1,
+				"note":        "note",
+				"confidence":  tc.input,
+			})
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			if len(captured) != 1 {
+				t.Fatalf("want 1 capture, got %d", len(captured))
+			}
+			if captured[0].confidence != tc.want {
+				t.Errorf("confidence = %v, want %v", captured[0].confidence, tc.want)
+			}
+		})
 	}
 }

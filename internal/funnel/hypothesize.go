@@ -435,7 +435,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			// callback writes through f.store and increments the shared atomic
 			// counter; f.store is concurrency-safe so multiple parallel units can
 			// post leads simultaneously.
-			postLeadTool := agent.NewPostLeadTool(u.lens.Name, allLensNames, func(targetLens, file string, line int, note string) error {
+			postLeadTool := agent.NewPostLeadTool(u.lens.Name, allLensNames, func(targetLens, file string, line int, note string, confidence float64) error {
 				if err := f.store.AddLead(ctx, store.Lead{
 					ScanRunID:  scanRunID,
 					PosterLens: u.lens.Name,
@@ -443,6 +443,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 					File:       file,
 					Line:       line,
 					Note:       note,
+					Confidence: confidence,
 				}); err != nil {
 					return err
 				}
