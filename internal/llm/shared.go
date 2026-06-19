@@ -12,6 +12,32 @@ import (
 // SDK actually want" knowledge here. No framework or shared base struct —
 // each adapter still owns its own buildParams / toResponse / normalizeErr;
 // the helpers are called from those methods and nothing more.
+//
+// ---------------------------------------------------------------------------
+// Provider capability matrix (deliberate, not a bug)
+// ---------------------------------------------------------------------------
+//
+// (a) Native structured output. Anthropic has no response_format, so the
+//     adapter injects a synthetic tool (see structuredOutputToolName) but
+//     drops injection when the caller also supplies user tools — Anthropic
+//     can combine tool_choice with user tools, but layering a synthetic
+//     tool on top is ambiguous. Google cannot combine structured output
+//     with function-calling at all, so the same drop applies. OpenAI
+//     honors response_format alongside tools and does NOT drop. When the
+//     caller wants native structured output AND user tools on Anthropic
+//     or Google, RunJSON's repair round-trip drops tools to restore
+//     native schema, then re-adds them on the next iteration.
+//
+// (b) CacheCreationInputTokens. Only Anthropic exposes a "cache write"
+//     primitive (cache_creation_input_tokens); OpenAI and Google charge
+//     cache writes implicitly with no separate counter, so this field
+//     is 0 on those providers' Usage.
+//
+// (c) Default MaxTokens. Anthropic's API requires max_tokens; the
+//     adapter applies a floor of 4096 when req.MaxTokens <= 0 (see
+//     anthropicAdapter.buildParams). OpenAI and Google accept a 0/omitted
+//     cap, so no default is applied there.
+// ---------------------------------------------------------------------------
 
 // parseToolParameters unmarshals a tool's JSON Schema and extracts the
 // JSON-Schema "properties" and "required" keys, returning them in the shape
