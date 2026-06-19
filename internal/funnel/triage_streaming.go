@@ -217,20 +217,29 @@ func newTriageState(snap *ingest.Snapshot) (*triageState, *clusterRegistry) {
 //
 // Fatal errors (store I/O, ctx cancel) are returned; stats are updated.
 func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stats, c Candidate) error {
+	// dropPending removes this candidate's write-ahead-log row when it reaches a
+	// triage terminal fate (dropped here, or merged in handleMember),
+	// best-effort. A lingering row self-heals on the next run (replayed, then
+	// re-dropped). On ctx cancellation the delete is a no-op, so an interrupted
+	// run keeps its in-flight rows for replay.
+	dropPending := func() { _ = st.DeletePendingCandidate(ctx, c.PendingID) }
 	// Step 1: low confidence.
 	if c.Confidence == "low" {
 		stats.DroppedLowConfidence++
+		dropPending()
 		return nil
 	}
 	// Step 2: out of scope.
 	if !ts.inScope[c.File] {
 		stats.DroppedOutOfScope++
+		dropPending()
 		return nil
 	}
 	// Step 3: exact fingerprint dedup.
 	fp := store.Fingerprint(c.Lens, c.File, c.Line, c.Title)
 	if ts.seen[fp] {
 		stats.DroppedDuplicate++
+		dropPending()
 		return nil
 	}
 	// Step 4: suppression check.
@@ -241,6 +250,7 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 	if suppressed {
 		stats.DroppedSuppressed++
 		ts.seen[fp] = true
+		dropPending()
 		return nil
 	}
 	ts.seen[fp] = true
@@ -300,6 +310,12 @@ func (ts *triageState) addClusterToBucket(key string, cluster *internalCluster) 
 
 // handleMember handles a corroborating member of an existing cluster.
 func (ts *triageState) handleMember(ctx context.Context, st *store.Store, cluster *internalCluster, c Candidate, stats *Stats) {
+	// This member is merged into an existing cluster (its lens may be recorded as
+	// corroboration, but its own claim does not proceed to verify): a triage
+	// terminal fate. Drop its write-ahead-log row, best-effort. The cluster
+	// primary carries the cluster forward and deletes its own row at its verify
+	// terminal fate.
+	_ = st.DeletePendingCandidate(ctx, c.PendingID)
 	if strings.EqualFold(c.Lens, cluster.members[0].c.Lens) {
 		// Same-lens merge: within-lens, no new corroborating lens.
 		stats.MergedWithinLens++

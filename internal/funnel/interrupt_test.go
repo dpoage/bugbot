@@ -175,6 +175,148 @@ func TestSweep_Interrupt_DurablePartialProgress(t *testing.T) {
 	}
 }
 
+// TestSweep_InterruptThenResume_PendingCandidates verifies the candidate
+// write-ahead log (bugbot-jmu): a candidate that a finder produced but that was
+// interrupted before verification completed is NOT lost — it is persisted to
+// pending_candidates, and the next run replays it straight into verify and
+// produces the finding.
+//
+// Mechanics: 1 file, 1 lens, ChunkSize=1 → exactly one finder unit → one
+// candidate. The finder is ungated (it completes and persists the candidate);
+// the VERIFIER is gated to block on its first refuter call. A watchdog cancels
+// the sweep once the verifier blocks, so the candidate is in-flight in verify
+// (forwarded by triage, refuter blocked) when the interrupt lands — its WAL row
+// survives. A second run on the SAME store, with an empty finder and an allowing
+// verifier, replays the row and verifies it.
+func TestSweep_InterruptThenResume_PendingCandidates(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t) // shared store + repo across both runs
+
+	const lens = "nil-safety/error-handling"
+
+	// --- Phase 1: interrupt mid-verification ---
+	finder1 := newScriptedClient().onSystemContains(lens, candJSON(realCand))
+	finder1.fallback = emptyCandidates
+
+	verifierInner := newScriptedClient()
+	verifierInner.fallback = notRefutedJSON
+	gv := newGatingClient(verifierInner, 0) // block on the first refuter call
+
+	sweepCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-gv.blockedCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	f1, err := New(RoleClients{Finder: finder1, Verifier: gv}, st, repo, Options{
+		Lenses:              []string{lens},
+		ChunkSize:           1,
+		MaxParallel:         1,
+		DisableHeatOrdering: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, serr := f1.Sweep(sweepCtx); serr == nil {
+		t.Fatal("phase 1 Sweep: expected interrupt error, got nil")
+	}
+
+	// The interrupted candidate must be durable in the WAL.
+	pending, err := st.ListPendingCandidates(ctx)
+	if err != nil {
+		t.Fatalf("ListPendingCandidates: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("after interrupt: %d pending candidates, want 1 (the un-verified hypothesis)", len(pending))
+	}
+	if pending[0].Title != "nil deref of cfg in Greeting" || pending[0].File != "bug.go" {
+		t.Errorf("pending candidate = %s @ %s, want the realCand hypothesis", pending[0].Title, pending[0].File)
+	}
+
+	// --- Phase 2: resume on the same store ---
+	finder2 := newScriptedClient()
+	finder2.fallback = emptyCandidates // no fresh candidates; resume must supply the work
+	verifier2 := newScriptedClient()
+	verifier2.fallback = notRefutedJSON // allow → candidate survives
+
+	f2, err := New(RoleClients{Finder: finder2, Verifier: verifier2}, st, repo, Options{
+		Lenses:              []string{lens},
+		ChunkSize:           1,
+		MaxParallel:         1,
+		DisableHeatOrdering: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res2, err := f2.Sweep(ctx)
+	if err != nil {
+		t.Fatalf("phase 2 Sweep: %v", err)
+	}
+
+	if res2.Stats.Resumed != 1 {
+		t.Errorf("Stats.Resumed = %d, want 1 (the replayed candidate)", res2.Stats.Resumed)
+	}
+	if len(res2.Findings) != 1 {
+		t.Fatalf("phase 2: %d findings, want 1 (the resumed candidate verified)", len(res2.Findings))
+	}
+	got := res2.Findings[0]
+	if got.Title != "nil deref of cfg in Greeting" {
+		t.Errorf("finding title = %q, want the resumed hypothesis", got.Title)
+	}
+	if got.Tier != tierVerified {
+		t.Errorf("finding tier = %d, want %d (verified)", got.Tier, tierVerified)
+	}
+
+	// The WAL must be drained: the replayed row was deleted at its verify
+	// terminal fate, and no fresh candidate was persisted.
+	pending2, err := st.ListPendingCandidates(ctx)
+	if err != nil {
+		t.Fatalf("ListPendingCandidates (post-resume): %v", err)
+	}
+	if len(pending2) != 0 {
+		t.Errorf("after resume: %d pending candidates, want 0 (WAL drained)", len(pending2))
+	}
+}
+
+// TestSweep_CleanRun_DrainsPendingWAL asserts the WAL invariant for an
+// uninterrupted run (bugbot-jmu acceptance #3): every candidate reaches a
+// terminal fate that deletes its pending_candidates row, so a clean run leaves
+// the table empty. It exercises both verify deletes — the real candidate
+// survives (T2) and the bogus one is killed.
+func TestSweep_CleanRun_DrainsPendingWAL(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	finder := finderOnNilLens(newScriptedClient())
+	verifier := verifierRouting(newScriptedClient())
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Findings) != 1 {
+		t.Fatalf("want 1 finding (real survives, bogus killed), got %d", len(res.Findings))
+	}
+	if res.Stats.Resumed != 0 {
+		t.Errorf("Stats.Resumed = %d, want 0 (no interrupted predecessor)", res.Stats.Resumed)
+	}
+	pending, err := st.ListPendingCandidates(ctx)
+	if err != nil {
+		t.Fatalf("ListPendingCandidates: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("clean run left %d pending candidates, want 0 (every terminal fate must delete its WAL row)", len(pending))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // gatingClient: allows a fixed number of LLM completions, then blocks
 // subsequent calls until the context is cancelled. Thread-safe.

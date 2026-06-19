@@ -116,6 +116,22 @@ func (f *Funnel) note(result *Result, msg string) {
 	noteMu.Unlock()
 }
 
+// deletePending removes a candidate's row from the pending_candidates
+// write-ahead log once it reaches a terminal fate (verified, killed,
+// budget-orphaned, or triage-dropped). An empty id is a no-op. Best-effort: a
+// failure is noted and never aborts the scan — a lingering row self-heals on the
+// next run (replayed, then deleted again at its terminal fate). It runs on the
+// run ctx by design: an interrupted run's in-flight candidates are NOT deleted
+// (their delete loses the race to cancellation), so they survive to be replayed.
+func (f *Funnel) deletePending(ctx context.Context, id string, result *Result) {
+	if id == "" {
+		return
+	}
+	if err := f.store.DeletePendingCandidate(ctx, id); err != nil {
+		f.note(result, fmt.Sprintf("pending: delete %s failed: %v", id, err))
+	}
+}
+
 // normalizeSeverity coerces a model-supplied severity to one of the four valid
 // values, defaulting unknown/empty to "medium" so ranking and reporting always
 // have a usable value.

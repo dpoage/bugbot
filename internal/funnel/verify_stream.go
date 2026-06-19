@@ -75,6 +75,10 @@ func (f *Funnel) runVerifyAndPersist(
 			findingsMu.Lock()
 			*allFindings = append(*allFindings, *suspected)
 			findingsMu.Unlock()
+			// Durably kept as T3 suspected: drop the WAL row. A failed or
+			// suppressed orphan (suspected == nil) leaves the row for the next
+			// run, where triage self-heals it (re-orphan or suppression drop).
+			f.deletePending(ctx, c.PendingID, result)
 		}
 		if late := reg.SignalPersisted(c.Fingerprint, suspected != nil); len(late) > 0 {
 			// Lenses staged between drain and persist (TOCTOU window): attach
@@ -224,6 +228,9 @@ func (f *Funnel) runVerifyAndPersist(
 			findingsMu.Lock()
 			*allFindings = append(*allFindings, *suspected)
 			findingsMu.Unlock()
+			// Durably kept as T3 suspected: drop the WAL row (see the hard-budget
+			// orphan above). A failed/suppressed orphan self-heals on the next run.
+			f.deletePending(ctx, c.PendingID, result)
 		}
 		if late := reg.SignalPersisted(c.Fingerprint, suspected != nil); len(late) > 0 {
 			// Lenses staged between drain and persist (TOCTOU window): attach
@@ -237,6 +244,10 @@ func (f *Funnel) runVerifyAndPersist(
 	if candKilled {
 		// Killed: signal so triage can discard any staged corroboration.
 		reg.SignalPersisted(c.Fingerprint, false)
+		// Killed: terminal, but nothing durable is persisted (only a Stats
+		// counter), so drop the WAL row or it would replay and be re-killed
+		// every run.
+		f.deletePending(ctx, c.PendingID, result)
 		return
 	}
 
@@ -271,12 +282,17 @@ func (f *Funnel) runVerifyAndPersist(
 	}
 	// Honor suppression memory: a forced-dismissed finding must not be reported.
 	if stored.Status != store.StatusOpen {
+		// Durably written as dismissed (suppression memory): terminal. Drop the
+		// WAL row so it does not replay.
+		f.deletePending(ctx, c.PendingID, result)
 		reg.SignalPersisted(c.Fingerprint, false)
 		return
 	}
 	findingsMu.Lock()
 	*allFindings = append(*allFindings, stored)
 	findingsMu.Unlock()
+	// Survived and durably persisted as T2: drop the WAL row.
+	f.deletePending(ctx, c.PendingID, result)
 	// Atomically mark persisted and collect any lenses staged since the drain
 	// above — the TOCTOU window where a triage member arrived after
 	// DrainStagedLenses but before this signal. Without this, such a lens is

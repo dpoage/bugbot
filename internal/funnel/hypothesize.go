@@ -673,6 +673,37 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			// Only emit on finderOK — error/parse-fail/budget-stop paths have no
 			// candidates to forward.
 			if recordStatus == "ok" {
+				// WAL: persist this unit's candidates to pending_candidates BEFORE
+				// they enter the volatile channel pipeline, so an interrupt does
+				// not lose the finder's (expensive) work. Batched per unit, same
+				// per-unit durability discipline as the coverage stamp below. The
+				// assigned row id is carried as PendingID so the terminal-fate
+				// handlers can delete it; a clean run leaves the WAL empty.
+				// Best-effort: a failed write degrades to pre-WAL volatility for
+				// these candidates rather than aborting the scan.
+				pcRows := make([]store.PendingCandidate, len(cands))
+				for i, c := range cands {
+					pcRows[i] = store.PendingCandidate{
+						ScanRunID:           scanRunID,
+						CommitSHA:           result.Commit,
+						Lens:                c.Lens,
+						File:                c.File,
+						Line:                c.Line,
+						Title:               c.Title,
+						Description:         c.Description,
+						Severity:            c.Severity,
+						Evidence:            c.Evidence,
+						Confidence:          c.Confidence,
+						CorroboratingLenses: c.CorroboratingLenses,
+					}
+				}
+				if perr := f.store.AddPendingCandidates(ctx, pcRows); perr != nil {
+					f.note(result, fmt.Sprintf("pending: AddPendingCandidates failed (unit %d, %s): %v", unitIdx, u.lens.Name, perr))
+				} else {
+					for i := range cands {
+						cands[i].PendingID = pcRows[i].ID
+					}
+				}
 				for _, c := range cands {
 					emit(c)
 				}

@@ -491,6 +491,18 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// hypothesizeErr captures a fatal hypothesize error.
 	var hypothesizeErr error
 
+	// Resume: load any candidates left pending by a prior interrupted run (the
+	// pending_candidates write-ahead log). They are replayed into THIS run's
+	// triage/verify pipeline below, before fresh hypothesize, so an interrupted
+	// scan's expensive finder work is not lost — it is picked up on the next run
+	// (daemon or oneshot). Best-effort: a load failure degrades to "no resume"
+	// (the rows stay for a later run) rather than aborting the scan.
+	resume, resumeErr := f.store.ListPendingCandidates(ctx)
+	if resumeErr != nil {
+		f.note(result, fmt.Sprintf("resume: ListPendingCandidates failed: %v", resumeErr))
+		resume = nil
+	}
+
 	// ---- Stage A: Hypothesize ----
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageHypothesize})
 
@@ -509,6 +521,17 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 				// Drop candidate on cancellation; triage will also exit.
 			}
 		}
+		// Replay resumed candidates FIRST so the prior run's unfinished work is
+		// verified before fresh discovery starts. They carry their original
+		// PendingID (from the WAL row), so the terminal-fate handlers delete that
+		// row; they are NOT re-inserted (the existing row IS their WAL entry).
+		// Triage re-anchors them to the current snapshot (scope/dedup/suppression
+		// checks) and the verifier re-judges them against current code, so a stale
+		// candidate is correctly dropped or killed — precision is preserved.
+		for _, pc := range resume {
+			emit(pendingToCandidate(pc))
+		}
+		result.Stats.Resumed = len(resume)
 		// Enumerate cross-language seams once per run: the boundary lens's
 		// unit of work is one seam, and the count populates Stats.SeamsFound
 		// for observability. Computation is O(files) over the snapshot and
@@ -828,4 +851,25 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	}
 
 	return result, nil
+}
+
+// pendingToCandidate rebuilds a funnel Candidate from a persisted
+// pending_candidates row for replay. Fingerprint is intentionally left unset:
+// the triage consumer recomputes it (store.Fingerprint) and re-runs the
+// scope/dedup/suppression checks, so a replayed candidate is re-anchored to the
+// current snapshot exactly like a fresh one. PendingID carries the WAL row's
+// primary key so the terminal-fate handlers delete it.
+func pendingToCandidate(pc store.PendingCandidate) Candidate {
+	return Candidate{
+		Lens:                pc.Lens,
+		File:                pc.File,
+		Line:                pc.Line,
+		Title:               pc.Title,
+		Description:         pc.Description,
+		Severity:            pc.Severity,
+		Evidence:            pc.Evidence,
+		Confidence:          pc.Confidence,
+		CorroboratingLenses: pc.CorroboratingLenses,
+		PendingID:           pc.ID,
+	}
 }

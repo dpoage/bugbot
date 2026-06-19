@@ -497,6 +497,9 @@ func printResult(out io.Writer, res *funnel.Result) {
 	s := res.Stats
 	_, _ = fmt.Fprintf(out, "\nStages: hypothesized=%d triaged=%d verified=%d killed=%d\n",
 		s.Hypothesized, s.Triaged, s.Verified, s.Killed)
+	if s.Resumed > 0 {
+		_, _ = fmt.Fprintf(out, "Resumed: %d candidate(s) from a prior interrupted run replayed into triage/verify\n", s.Resumed)
+	}
 	_, _ = fmt.Fprintf(out, "Triage drops: low_confidence=%d duplicate=%d suppressed=%d out_of_scope=%d\n",
 		s.DroppedLowConfidence, s.DroppedDuplicate, s.DroppedSuppressed, s.DroppedOutOfScope)
 	if s.MergedWithinLens > 0 || s.MergedCrossLens > 0 {

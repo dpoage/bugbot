@@ -598,12 +598,28 @@ type Candidate struct {
 	// lens corroborated the finding. It is recorded for reporting only — it does
 	// NOT raise the candidate's confidence.
 	CorroboratingLenses []string
+	// PendingID is the primary key of this candidate's row in the
+	// pending_candidates write-ahead log (store/pending.go). It is set when the
+	// finder unit persisted the candidate before emitting it, or carried from a
+	// replayed prior-run row. Empty for candidates that were never WAL-persisted
+	// (a persist failure, or a unit-test candidate built directly). Every
+	// terminal-fate handler (triage drop/merge, verify survived/killed/orphaned)
+	// deletes this row, so a clean run leaves the WAL empty and only an
+	// interrupt leaves rows for the next run to replay.
+	PendingID string
 }
 
 // Stats is the per-stage funnel accounting recorded on the scan run.
 type Stats struct {
 	// Hypothesized is the raw candidate count emitted by all finder agents.
 	Hypothesized int `json:"hypothesized"`
+	// Resumed is the count of pending candidates from prior interrupted runs
+	// that were replayed into this run's triage/verify pipeline (skipping
+	// re-hypothesize). These flow through the same triage and verify stages as
+	// fresh candidates, so they are also counted in Triaged/Verified/Killed.
+	// Zero on a run with no interrupted predecessor — the common case. See the
+	// pending_candidates write-ahead log (store/pending.go).
+	Resumed int `json:"resumed,omitempty"`
 	// Triaged is the candidate count surviving triage (the input to verify).
 	Triaged int `json:"triaged"`
 	// Verified is the count surviving adversarial verification (Tier 2).
