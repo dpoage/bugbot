@@ -3,6 +3,8 @@ package report
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 func TestSARIFUnmarshalsAndHasRequiredFields(t *testing.T) {
@@ -79,7 +81,7 @@ func TestSARIFSeverityToLevelMapping(t *testing.T) {
 		"weird":    "none",
 	}
 	for sev, want := range cases {
-		if got := levelForSeverity(sev); got != want {
+		if got := levelForSeverity(domain.Severity(sev)); got != want {
 			t.Errorf("levelForSeverity(%q) = %q, want %q", sev, got, want)
 		}
 	}

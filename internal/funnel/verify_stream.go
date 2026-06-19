@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
@@ -273,7 +274,7 @@ func (f *Funnel) runVerifyAndPersist(
 		Description:         c.Description,
 		Reasoning:           appendCorroboration(v.reasoning, c.CorroboratingLenses),
 		Severity:            c.Severity,
-		Tier:                tierVerified,
+		Tier:                domain.TierVerified,
 		Status:              store.StatusOpen,
 		Lens:                c.Lens,
 		File:                c.File,
@@ -328,7 +329,7 @@ func persistOrphan(ctx context.Context, f *Funnel, c Candidate, commit string, f
 		Description:         c.Description,
 		Reasoning:           appendCorroboration(budgetStoppedReasoning, c.CorroboratingLenses),
 		Severity:            c.Severity,
-		Tier:                tierSuspected,
+		Tier:                domain.TierSuspected,
 		Status:              store.StatusOpen,
 		Lens:                c.Lens,
 		File:                c.File,

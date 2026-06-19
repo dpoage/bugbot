@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -31,7 +32,7 @@ func OpenBacklog(ctx context.Context, st *store.Store) ([]store.Finding, error) 
 	}
 	out := make([]store.Finding, 0, len(all))
 	for _, f := range all {
-		if (f.Tier == 2 || f.Tier == 3) && f.ReproPath == "" && !f.NeedsHuman {
+		if (f.Tier == domain.TierVerified || f.Tier == domain.TierSuspected) && f.ReproPath == "" && !f.NeedsHuman {
 			out = append(out, f)
 		}
 	}

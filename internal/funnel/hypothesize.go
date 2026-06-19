@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
@@ -695,9 +696,9 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 						Line:                c.Line,
 						Title:               c.Title,
 						Description:         c.Description,
-						Severity:            c.Severity,
+						Severity:            string(c.Severity),
 						Evidence:            c.Evidence,
-						Confidence:          c.Confidence,
+						Confidence:          string(c.Confidence),
 						CorroboratingLenses: c.CorroboratingLenses,
 					}
 				}
@@ -893,9 +894,9 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 			Line:        rc.Line,
 			Title:       rc.Title,
 			Description: rc.Description,
-			Severity:    normalizeSeverity(rc.Severity),
+			Severity:    normalizeSeverity(domain.Severity(rc.Severity)),
 			Evidence:    rc.Evidence,
-			Confidence:  normalizeConfidence(rc.Confidence),
+			Confidence:  normalizeConfidence(domain.Confidence(rc.Confidence)),
 		})
 	}
 	return cands, finderOK, outcome, nil, nil

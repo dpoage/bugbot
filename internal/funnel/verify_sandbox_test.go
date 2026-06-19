@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
@@ -141,7 +142,7 @@ func TestSandboxGating_BelowMinSeverity(t *testing.T) {
 	}
 
 	// low and medium are below high.
-	for _, sev := range []string{"low", "medium"} {
+	for _, sev := range []domain.Severity{"low", "medium"} {
 		c := Candidate{Severity: sev}
 		var execs atomic.Int32
 		var millis atomic.Int64
@@ -168,7 +169,7 @@ func TestSandboxGating_AtOrAboveMinSeverity(t *testing.T) {
 	}
 
 	// high and critical meet or exceed the threshold.
-	for _, sev := range []string{"high", "critical"} {
+	for _, sev := range []domain.Severity{"high", "critical"} {
 		c := Candidate{Severity: sev}
 		var execs atomic.Int32
 		var millis atomic.Int64
@@ -338,7 +339,7 @@ func TestHelpers_SandboxMinSeverity(t *testing.T) {
 		{"garbage", "high"},
 	}
 	for _, tc := range cases {
-		if got := sandboxMinSeverity(tc.in); got != tc.want {
+		if got := sandboxMinSeverity(tc.in); string(got) != tc.want {
 			t.Errorf("sandboxMinSeverity(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}

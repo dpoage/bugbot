@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -224,7 +225,7 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 	// run keeps its in-flight rows for replay.
 	dropPending := func() { _ = st.DeletePendingCandidate(ctx, c.PendingID) }
 	// Step 1: low confidence.
-	if c.Confidence == "low" {
+	if c.Confidence == domain.ConfidenceLow {
 		stats.DroppedLowConfidence++
 		dropPending()
 		return nil

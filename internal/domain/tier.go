@@ -3,15 +3,12 @@ package domain
 // Tier is the confidence tier of a finding: how strongly the pipeline believes
 // the bug is real, set by how far it advanced through verification.
 //
-// IMPORTANT: evidence strength is not the same as the numeric value. Tier 0
-// (fix-witnessed) was added after the original 1..3 scale and is, semantically,
-// the STRONGEST evidence — a generated patch made a failing test pass. The
-// scores returned below are preserved verbatim from the pre-centralization code
-// (store.findingConfidence, report.tierName, sarif.tierLevel) so that adopting
-// this type changes no behavior. The known mismatch for tier 0 — it currently
-// scores the WEAKEST BaseConfidence (0.20) and the "note" SARIF level — is left
-// intact here on purpose; correcting it is a product decision tracked in
-// bugbot-0nc.2.
+// Evidence strength ordering (strongest first): TierFixWitnessed (0) is the
+// STRONGEST evidence — a generated patch made a failing test pass — followed by
+// TierReproduced (1), TierVerified (2), and TierSuspected (3). The numeric value
+// is NOT the evidence rank; lower numbers happen to be stronger for 0..3, but
+// callers MUST use the domain methods (BaseConfidence, Level) rather than
+// comparing numeric values for strength ordering.
 type Tier uint8
 
 const (
@@ -37,10 +34,13 @@ func (t Tier) Label() string {
 	}
 }
 
-// Level maps the tier to a SARIF result level. Preserved from sarif.tierLevel:
-// reproduced -> error, verified -> warning, everything else -> note.
+// Level maps the tier to a SARIF result level. Fix-witnessed and reproduced are
+// the two strongest tiers and both map to "error"; verified maps to "warning";
+// everything else (suspected, unknown) maps to "note".
 func (t Tier) Level() string {
 	switch t {
+	case TierFixWitnessed:
+		return "error"
 	case TierReproduced:
 		return "error"
 	case TierVerified:
@@ -51,11 +51,13 @@ func (t Tier) Level() string {
 }
 
 // BaseConfidence is the tier's contribution to a finding's confidence score in
-// [0,1], before any severity or corroboration adjustment. Preserved from
-// store.findingConfidence: reproduced -> 0.80, verified -> 0.50, everything
-// else (including fix-witnessed and suspected) -> 0.20.
+// [0,1], before any severity or corroboration adjustment. Fix-witnessed is the
+// strongest (0.90), then reproduced (0.80), verified (0.50), and suspected/unknown
+// (0.20).
 func (t Tier) BaseConfidence() float64 {
 	switch t {
+	case TierFixWitnessed:
+		return 0.90
 	case TierReproduced:
 		return 0.80
 	case TierVerified:

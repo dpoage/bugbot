@@ -18,7 +18,6 @@ package report
 
 import (
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/store"
@@ -70,29 +69,12 @@ func New(findings []store.Finding, meta Metadata) Report {
 	return Report{Findings: sorted, Meta: meta}
 }
 
-// severityRank orders severities for display: higher number sorts first. Unknown
-// severities sort last (rank 0) but before nothing, keeping output stable.
-func severityRank(sev string) int {
-	switch strings.ToLower(strings.TrimSpace(sev)) {
-	case "critical":
-		return 4
-	case "high":
-		return 3
-	case "medium":
-		return 2
-	case "low":
-		return 1
-	default:
-		return 0
-	}
-}
-
 // SortFindings sorts findings in place into the canonical report order:
 // severity descending, then file ascending, then line ascending, then id. The
 // id tiebreaker guarantees a total order so rendering is fully deterministic.
 func SortFindings(fs []store.Finding) {
 	sort.SliceStable(fs, func(i, j int) bool {
-		ri, rj := severityRank(fs[i].Severity), severityRank(fs[j].Severity)
+		ri, rj := fs[i].Severity.Rank(), fs[j].Severity.Rank()
 		if ri != rj {
 			return ri > rj
 		}
@@ -104,20 +86,4 @@ func SortFindings(fs []store.Finding) {
 		}
 		return fs[i].ID < fs[j].ID
 	})
-}
-
-// tierName maps the integer tier to its human label (see ARCHITECTURE.md).
-func tierName(tier int) string {
-	switch tier {
-	case 0:
-		return "T0 Fix-witnessed"
-	case 1:
-		return "T1 Reproduced"
-	case 2:
-		return "T2 Verified"
-	case 3:
-		return "T3 Suspected"
-	default:
-		return "T? Unknown"
-	}
 }

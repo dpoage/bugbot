@@ -86,20 +86,6 @@ type Region struct {
 	StartLine int `json:"startLine"`
 }
 
-// tierLevel maps a store tier integer to a SARIF level string.
-// Tier 1 = reproduced (error), 2 = verified (warning), 3 = suspected (note).
-// Any unrecognised tier defaults to "note".
-func tierLevel(tier int) string {
-	switch tier {
-	case 1:
-		return "error"
-	case 2:
-		return "warning"
-	default:
-		return "note"
-	}
-}
-
 // messageText returns the reasoning text when non-empty, falling back to the
 // title. SARIF requires a non-empty message.text.
 func messageText(f store.Finding) string {
@@ -152,7 +138,7 @@ func FromFindings(findings []store.Finding) Document {
 	for _, f := range sorted {
 		r := Result{
 			RuleID: f.Lens,
-			Level:  tierLevel(f.Tier),
+			Level:  f.Tier.Level(),
 			Message: Message{
 				Text: messageText(f),
 			},

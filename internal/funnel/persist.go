@@ -4,17 +4,6 @@ import (
 	"strings"
 )
 
-// tierVerified is the confidence tier assigned to candidates that survive
-// adversarial verification but have not been reproduced. Tier 1 requires a
-// sandboxed failing test (a later stage); this stage tops out at Tier 2.
-const tierVerified = 2
-
-// tierSuspected is the tier for candidates that passed triage but never
-// completed adversarial verification because the run hit its hard budget. They
-// are persisted (not dropped) so a human can review them, but at lower
-// confidence than a verified finding.
-const tierSuspected = 3
-
 // budgetStoppedReasoning is the verification trace recorded on a Tier 3
 // suspected finding, making clear why it was not verified.
 const budgetStoppedReasoning = "Verification skipped: the run reached its hard token budget before this candidate " +

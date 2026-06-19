@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
 )
@@ -138,24 +139,20 @@ func (f *Funnel) deletePending(ctx context.Context, id string, result *Result) {
 // normalizeSeverity coerces a model-supplied severity to one of the four valid
 // values, defaulting unknown/empty to "medium" so ranking and reporting always
 // have a usable value.
-func normalizeSeverity(s string) string {
-	switch s {
-	case "critical", "high", "medium", "low":
+func normalizeSeverity(x domain.Severity) domain.Severity {
+	if s, ok := domain.ParseSeverity(string(x)); ok {
 		return s
-	default:
-		return "medium"
 	}
+	return domain.SeverityMedium
 }
 
 // sandboxMinSeverity returns the effective minimum severity for sandbox
 // gating, defaulting to "high" when empty.
-func sandboxMinSeverity(s string) string {
-	switch s {
-	case "critical", "high", "medium", "low":
-		return s
-	default:
-		return "high"
+func sandboxMinSeverity(s string) domain.Severity {
+	if sev, ok := domain.ParseSeverity(s); ok {
+		return sev
 	}
+	return domain.SeverityHigh
 }
 
 // sandboxMaxExecs returns the effective per-candidate execution budget,
@@ -183,11 +180,10 @@ func (f *Funnel) buildSandboxTool(c Candidate, sbExecs *atomic.Int32, sbMillis *
 	// what allowed the parseSARIF-cap false positive (bugbot-aud, GH #64) to
 	// slip through. Environmental / I/O claims still pay the threshold cost;
 	// only isExecutableClaim(c) candidates opt in. The default min severity
-	// is unchanged — the bypass is per-claim, not per-config.
 	executable := isExecutableClaim(c)
 	minSev := sandboxMinSeverity(opts.MinSeverity)
-	if !executable && severityRank(c.Severity) > severityRank(minSev) {
-		// Candidate is BELOW the threshold (higher rank number = less severe).
+	if !executable && !c.Severity.AtLeast(minSev) {
+		// Candidate is below the threshold.
 		return nil
 	}
 	maxExec := sandboxMaxExecs(opts.MaxExecs)
@@ -216,13 +212,11 @@ func (f *Funnel) ensureDepPrefetch(ctx context.Context) error {
 // normalizeConfidence coerces a model-supplied confidence to one of the three
 // valid values. Unknown/empty maps to "low" so that ambiguous output is treated
 // conservatively (low-confidence candidates are dropped in triage).
-func normalizeConfidence(s string) string {
-	switch s {
-	case "high", "medium", "low":
-		return s
-	default:
-		return "low"
+func normalizeConfidence(x domain.Confidence) domain.Confidence {
+	if c, ok := domain.ParseConfidence(string(x)); ok {
+		return c
 	}
+	return domain.ConfidenceLow
 }
 
 // detectTestCmd infers the full-suite test command from the repository's build

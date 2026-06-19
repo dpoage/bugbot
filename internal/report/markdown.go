@@ -2,9 +2,9 @@ package report
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -65,60 +65,28 @@ func writeMetaLine(b *strings.Builder, key, value string) {
 
 // writeCounts renders the by-tier and by-severity tallies as a compact section.
 func writeCounts(b *strings.Builder, fs []store.Finding) {
-	byTier := map[int]int{}
-	bySev := map[string]int{}
+	byTier := map[domain.Tier]int{}
+	bySev := map[domain.Severity]int{}
 	for _, f := range fs {
 		byTier[f.Tier]++
-		bySev[strings.ToLower(strings.TrimSpace(f.Severity))]++
+		bySev[f.Severity]++
 	}
 
 	b.WriteString("## Summary\n\n")
 
 	b.WriteString("By tier:\n")
-	for _, t := range []int{0, 1, 2, 3} {
+	for _, t := range []domain.Tier{domain.TierFixWitnessed, domain.TierReproduced, domain.TierVerified, domain.TierSuspected} {
 		if byTier[t] > 0 {
-			fmt.Fprintf(b, "- %s: %d\n", tierName(t), byTier[t])
+			fmt.Fprintf(b, "- %s: %d\n", t.Label(), byTier[t])
 		}
-	}
-	// Surface any out-of-range tiers deterministically.
-	var otherTiers []int
-	for t := range byTier {
-		if t < 0 || t > 3 {
-			otherTiers = append(otherTiers, t)
-		}
-	}
-	sort.Ints(otherTiers)
-	for _, t := range otherTiers {
-		fmt.Fprintf(b, "- %s: %d\n", tierName(t), byTier[t])
 	}
 	b.WriteString("\n")
 
 	b.WriteString("By severity:\n")
-	for _, sev := range []string{"critical", "high", "medium", "low"} {
+	for _, sev := range []domain.Severity{domain.SeverityCritical, domain.SeverityHigh, domain.SeverityMedium, domain.SeverityLow} {
 		if bySev[sev] > 0 {
 			fmt.Fprintf(b, "- %s: %d\n", sev, bySev[sev])
 		}
-	}
-	// Unknown / empty severities, sorted for determinism.
-	var others []string
-	for sev := range bySev {
-		switch sev {
-		case "critical", "high", "medium", "low":
-		default:
-			label := sev
-			if label == "" {
-				label = "(unspecified)"
-			}
-			others = append(others, label)
-		}
-	}
-	sort.Strings(others)
-	for _, label := range others {
-		key := label
-		if label == "(unspecified)" {
-			key = ""
-		}
-		fmt.Fprintf(b, "- %s: %d\n", label, bySev[key])
 	}
 	b.WriteString("\n")
 }
@@ -128,8 +96,8 @@ func writeFinding(b *strings.Builder, n int, f store.Finding) {
 	fmt.Fprintf(b, "### %d. %s\n\n", n, orUnknown(f.Title))
 
 	writeMetaLine(b, "ID", orUnknown(f.ID))
-	writeMetaLine(b, "Tier", tierName(f.Tier))
-	writeMetaLine(b, "Severity", orUnknown(f.Severity))
+	writeMetaLine(b, "Tier", f.Tier.Label())
+	writeMetaLine(b, "Severity", orUnknown(string(f.Severity)))
 	writeMetaLine(b, "Lens", orUnknown(f.Lens))
 	if len(f.CorroboratingLenses) > 0 {
 		writeMetaLine(b, "Corroborated by", strings.Join(f.CorroboratingLenses, ", "))

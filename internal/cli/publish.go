@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -334,7 +335,7 @@ func planPublish(
 
 	// Create/recover/update/skip for open findings within tier.
 	for _, f := range open {
-		if f.Tier > tierMin {
+		if f.Tier > domain.Tier(tierMin) {
 			continue // outside publication window
 		}
 		pi, found := published[f.Fingerprint]
@@ -615,7 +616,7 @@ func renderIssueBody(f store.Finding, repoURL string, prov publishProvenance) st
 	if len(f.CorroboratingLenses) > 0 {
 		fmt.Fprintf(&b, "| Corroborating lenses | %s |\n", strings.Join(f.CorroboratingLenses, ", "))
 	}
-	fmt.Fprintf(&b, "| Tier | %s |\n", tierLabel(f.Tier))
+	fmt.Fprintf(&b, "| Tier | %s |\n", f.Tier.Label())
 	fmt.Fprintf(&b, "| Fingerprint | `%s` |\n", f.Fingerprint)
 	if prov.FinderModel != "" || prov.VerifierModel != "" {
 		fmt.Fprintf(&b, "| Model(s) | finder: %s · verifier: %s |\n", prov.FinderModel, prov.VerifierModel)

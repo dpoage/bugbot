@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
@@ -797,14 +798,14 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 
 	result.Stats.Verified = 0
 	for _, fi := range findings {
-		if fi.Tier == tierVerified {
+		if fi.Tier == domain.TierVerified {
 			result.Stats.Verified++
 		}
 	}
 	result.Stats.Killed = killed
 	result.Stats.Suspected = 0
 	for _, fi := range findings {
-		if fi.Tier == tierSuspected {
+		if fi.Tier == domain.TierSuspected {
 			result.Stats.Suspected++
 		}
 	}
@@ -866,9 +867,9 @@ func pendingToCandidate(pc store.PendingCandidate) Candidate {
 		Line:                pc.Line,
 		Title:               pc.Title,
 		Description:         pc.Description,
-		Severity:            pc.Severity,
+		Severity:            normalizeSeverity(domain.Severity(pc.Severity)),
 		Evidence:            pc.Evidence,
-		Confidence:          pc.Confidence,
+		Confidence:          normalizeConfidence(domain.Confidence(pc.Confidence)),
 		CorroboratingLenses: pc.CorroboratingLenses,
 		PendingID:           pc.ID,
 	}

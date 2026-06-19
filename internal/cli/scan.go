@@ -16,6 +16,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/analyzer"
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
@@ -500,7 +501,7 @@ func runReproCatchUp(ctx context.Context, out io.Writer, r *repro.Reproducer, st
 	// findings the in-run hook just failed on.
 	var pending []store.Finding
 	for _, f := range findings {
-		if f.Tier != 2 || f.ReproPath != "" || f.NeedsHuman {
+		if f.Tier != domain.TierVerified || f.ReproPath != "" || f.NeedsHuman {
 			continue
 		}
 		if attempted != nil {

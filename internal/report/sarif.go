@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -104,13 +105,13 @@ type SARIFRegion struct {
 }
 
 // levelForSeverity maps a Bugbot severity to a SARIF result level.
-func levelForSeverity(sev string) string {
-	switch strings.ToLower(strings.TrimSpace(sev)) {
-	case "critical", "high":
+func levelForSeverity(sev domain.Severity) string {
+	switch sev {
+	case domain.SeverityCritical, domain.SeverityHigh:
 		return "error"
-	case "medium":
+	case domain.SeverityMedium:
 		return "warning"
-	case "low":
+	case domain.SeverityLow:
 		return "note"
 	default:
 		return "none"
@@ -223,7 +224,7 @@ func resultForFinding(meta Metadata, f store.Finding) SARIFResult {
 
 	props := map[string]any{
 		"tier":     f.Tier,
-		"tierName": tierName(f.Tier),
+		"tierName": f.Tier.Label(),
 		"status":   string(f.Status),
 		"severity": f.Severity,
 	}

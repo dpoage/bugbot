@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"gopkg.in/yaml.v3"
 )
 
@@ -233,14 +234,6 @@ type LocalMount struct {
 type Report struct {
 	Dir   string   `yaml:"dir"`
 	Sinks []string `yaml:"sinks"`
-}
-
-// validSeverities is the set of accepted severity values.
-var validSeverities = map[string]bool{
-	"critical": true,
-	"high":     true,
-	"medium":   true,
-	"low":      true,
 }
 
 // Verify configures the empirical sandbox-execution capability offered to
@@ -785,8 +778,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: review.suspected %q invalid (want summary or withhold)", c.Review.Suspected)
 	}
 
-	if c.Verify.SandboxMinSeverity != "" && !validSeverities[c.Verify.SandboxMinSeverity] {
-		return fmt.Errorf("config: verify.sandbox_min_severity %q invalid (want critical, high, medium, or low)", c.Verify.SandboxMinSeverity)
+	if c.Verify.SandboxMinSeverity != "" {
+		if _, ok := domain.ParseSeverity(c.Verify.SandboxMinSeverity); !ok {
+			return fmt.Errorf("config: verify.sandbox_min_severity %q invalid (want critical, high, medium, or low)", c.Verify.SandboxMinSeverity)
+		}
 	}
 	if c.Verify.SandboxMaxExecs < 1 {
 		return fmt.Errorf("config: verify.sandbox_max_execs must be >= 1 (got %d)", c.Verify.SandboxMaxExecs)
