@@ -148,7 +148,7 @@ func startServer(ctx context.Context, cfg ServerConfig, rootDir string) (*server
 	}
 	go func() {
 		err := cmd.Wait()
-		s.conn.markDead(fmt.Errorf("%w: %s exited: %v (stderr: %s)",
+		s.conn.markDeadCause(fmt.Errorf("%w: %s exited: %v (stderr: %s)",
 			ErrConnDead, cfg.Cmd, err, stderr.String()))
 		close(s.exited)
 	}()

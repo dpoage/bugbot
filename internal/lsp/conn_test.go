@@ -273,3 +273,193 @@ func TestConnNotificationsAreDropped(t *testing.T) {
 		t.Errorf("n = %d", n)
 	}
 }
+
+// TestConnReplyWriteDoesNotStallReadLoop verifies FIX 1: a server that stops
+// reading our stdin while still sending us server->client requests must not
+// wedge the read loop. The reply write-backs block on the stalled output pipe,
+// but readLoop keeps draining incoming frames (replies are written off the read
+// loop), so an in-flight call's response is still delivered. A regression that
+// reintroduces an inline reply write under wmu in readLoop hangs here, caught
+// by the per-step timeouts.
+func TestConnReplyWriteDoesNotStallReadLoop(t *testing.T) {
+	// r: server->client frames (we script the server side).
+	clientR, serverW := io.Pipe()
+	// w: client->server frames. The fake server reads exactly the first client
+	// frame (our in-flight call's request) and then stops reading its stdin.
+	// io.Pipe is unbuffered, so every later client write — the server-reply
+	// write-backs — blocks indefinitely, modeling a peer wedged on stdin.
+	serverR, clientW := io.Pipe()
+	c := newConn(clientR, clientW)
+
+	stop := make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)         // unpark the fake server goroutine
+		_ = serverR.Close() // unblock replyWriter's stalled write
+		_ = serverW.Close() // EOF the read loop
+	})
+
+	gotCallReq := make(chan json.RawMessage, 1)
+	go func() {
+		br := bufio.NewReader(serverR)
+		req, err := readFrame(br)
+		if err != nil {
+			return
+		}
+		gotCallReq <- req.ID
+		<-stop // stop reading our stdin: every later client write blocks forever
+	}()
+
+	// Issue an in-flight call; its request write must get through before the
+	// peer wedges.
+	callErr := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() {
+		var n int
+		callErr <- c.call(ctx, "in/flight", nil, &n)
+	}()
+
+	var callID json.RawMessage
+	select {
+	case callID = <-gotCallReq:
+	case <-time.After(3 * time.Second):
+		t.Fatal("in-flight call request never reached the server")
+	}
+
+	// Flood the client with server->client requests it must answer. Each reply
+	// write-back blocks on the wedged output pipe; with FIX 1 the read loop
+	// keeps draining (serverReplies fills, then respondToServer drops), so all
+	// frames flow through. The flood (50) far exceeds the reply buffer (16),
+	// proving draining continues past buffer saturation.
+	const flood = 50
+	floodDone := make(chan struct{})
+	go func() {
+		for i := 0; i < flood; i++ {
+			req := &rpcMessage{
+				ID:     json.RawMessage(fmt.Sprintf("%d", 2000+i)),
+				Method: "window/workDoneProgress/create",
+			}
+			if err := writeFrame(serverW, req); err != nil {
+				return
+			}
+		}
+		// Finally, deliver the in-flight call's response behind the flood.
+		_ = writeFrame(serverW, &rpcMessage{ID: callID, Result: json.RawMessage(`7`)})
+		close(floodDone)
+	}()
+
+	select {
+	case <-floodDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("read loop wedged: server->client request flood not drained while the reply writer was blocked")
+	}
+
+	select {
+	case err := <-callErr:
+		if err != nil {
+			t.Fatalf("in-flight call failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight call response not delivered: read loop wedged behind a blocked reply write")
+	}
+}
+
+// newDrainedConn builds a conn whose outgoing frames are drained (so calls can
+// send successfully) and whose incoming side never reaches EOF on its own, so a
+// test drives connection death explicitly via markDeadTransport/markDeadCause.
+func newDrainedConn(t *testing.T) *conn {
+	t.Helper()
+	clientR, serverW := io.Pipe() // server->client; never written, so readLoop blocks (no spontaneous EOF)
+	drainR, clientW := io.Pipe()  // client->server; drained so sends succeed
+	go func() { _, _ = io.Copy(io.Discard, drainR) }()
+	c := newConn(clientR, clientW)
+	t.Cleanup(func() {
+		_ = serverW.Close()
+		_ = clientW.Close()
+	})
+	return c
+}
+
+// waitPending blocks until at least one outgoing call has registered in c's
+// pending table, so a test can kill the transport with a call genuinely blocked
+// on it rather than relying on a fixed sleep.
+func waitPending(t *testing.T, c *conn) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c.pmu.Lock()
+		n := len(c.pending)
+		c.pmu.Unlock()
+		if n > 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("call never registered in pending table")
+}
+
+// TestConnCrashCauseWinsOverTransportEOF verifies FIX 2: when a server crash
+// races a bare transport EOF (markDeadTransport, as the read loop records) and
+// the authoritative cause carrying the stderr tail (markDeadCause, as the
+// cmd.Wait goroutine records), callers deterministically observe the cause —
+// regardless of which signal fired first.
+func TestConnCrashCauseWinsOverTransportEOF(t *testing.T) {
+	const tail = "boom: language server panicked"
+	cause := fmt.Errorf("%w: fakelsp exited: exit status 3 (stderr: %s)", ErrConnDead, tail)
+	transport := fmt.Errorf("%w: %v", ErrConnDead, io.EOF)
+
+	assertCause := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("call returned nil; want the crash cause")
+		}
+		if !errors.Is(err, ErrConnDead) {
+			t.Errorf("error must wrap ErrConnDead: %v", err)
+		}
+		if !strings.Contains(err.Error(), tail) {
+			t.Fatalf("want error containing stderr tail %q, got %v", tail, err)
+		}
+	}
+
+	// Production ordering: pipe EOF observed first, cmd.Wait cause second. The
+	// bounded grace in terminalErr lets the cause supersede the bare EOF.
+	t.Run("transport then cause", func(t *testing.T) {
+		c := newDrainedConn(t)
+		errCh := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			errCh <- c.call(ctx, "test/blocked", nil, nil)
+		}()
+		waitPending(t, c)
+		c.markDeadTransport(transport)
+		c.markDeadCause(cause)
+		select {
+		case err := <-errCh:
+			assertCause(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("blocked call did not return after connection death")
+		}
+	})
+
+	// Reverse ordering: the cause is recorded first; a late transport EOF must
+	// not clobber it.
+	t.Run("cause then transport", func(t *testing.T) {
+		c := newDrainedConn(t)
+		errCh := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			errCh <- c.call(ctx, "test/blocked", nil, nil)
+		}()
+		waitPending(t, c)
+		c.markDeadCause(cause)
+		c.markDeadTransport(transport)
+		select {
+		case err := <-errCh:
+			assertCause(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("blocked call did not return after connection death")
+		}
+	})
+}
