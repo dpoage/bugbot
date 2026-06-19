@@ -1242,18 +1242,11 @@ func chunk(files []string, size int) [][]string {
 	return out
 }
 
-// diffIntentLens returns the Lens descriptor for the diff-intent lens. It is
-// defined in BuiltinLenses (lens.go) but fetched by name here so hypothesize
-// does not hard-code index offsets into the lens slice.
+// diffIntentLens returns the Lens descriptor for the diff-intent lens.
+// It is defined as a package-level var (builtinDiffIntentLens in lens.go)
+// so this lookup is zero-cost and cannot panic.
 func diffIntentLens() Lens {
-	for _, l := range BuiltinLenses() {
-		if l.Name == "diff-intent" {
-			return l
-		}
-	}
-	// Unreachable if BuiltinLenses is kept in sync with lens.go; panic loudly
-	// so a deletion is caught immediately rather than silently dropping the lens.
-	panic("funnel: diff-intent lens not found in BuiltinLenses; check lens.go")
+	return builtinDiffIntentLens
 }
 
 // buildDiffIntentTask constructs the finder task message for the diff-intent
@@ -1330,17 +1323,11 @@ func buildDiffIntentTask(cc *ChangeContext, targets []string) string {
 }
 
 // crossLanguageBoundaryLens returns the Lens descriptor for the
-// cross-language-boundary lens. Fetched by name from BuiltinLenses so the
-// helper does not hard-code an index offset (mirrors diffIntentLens above).
-// Panics if the lens is missing, since a deletion would silently drop the
-// entire seam-emission path.
+// cross-language-boundary lens. It is defined as a package-level var
+// (builtinCrossLanguageBoundaryLens in lens.go) so this lookup is
+// zero-cost and cannot panic.
 func crossLanguageBoundaryLens() Lens {
-	for _, l := range BuiltinLenses() {
-		if l.Name == "cross-language-boundary" {
-			return l
-		}
-	}
-	panic("funnel: cross-language-boundary lens not found in BuiltinLenses; check lens.go")
+	return builtinCrossLanguageBoundaryLens
 }
 
 // buildSeamTask constructs the finder task message for the cross-language-
