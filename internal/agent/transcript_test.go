@@ -1,6 +1,5 @@
 package agent
 
-
 import (
 	"bufio"
 	"bytes"
@@ -130,6 +129,7 @@ func TestReplayClient_FromResponses(t *testing.T) {
 		t.Error("expected exhaustion on second call")
 	}
 }
+
 // flakyWriter records every byte it accepts and returns an error once a
 // caller-supplied threshold is reached. The error is sticky: every subsequent
 // Write returns (0, err) without consuming any bytes. This lets the test
