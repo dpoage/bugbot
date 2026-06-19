@@ -45,6 +45,7 @@ reproduce, report) and tracks findings across confidence tiers:
 		newEvalCmd(),
 		newPublishCmd(),
 		newDesignSandboxCmd(),
+		newExportCmd(),
 	)
 
 	return root

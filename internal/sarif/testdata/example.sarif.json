@@ -1,0 +1,92 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "bugbot",
+          "informationUri": "https://github.com/dpoage/bugbot",
+          "rules": [
+            {
+              "id": "bounds",
+              "name": "bounds"
+            },
+            {
+              "id": "race",
+              "name": "race"
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "race",
+          "level": "error",
+          "message": {
+            "text": "pointer is never checked before use"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cmd/server/main.go"
+                },
+                "region": {
+                  "startLine": 42
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "bugbotFingerprint/v1": "fp-abc"
+          }
+        },
+        {
+          "ruleId": "race",
+          "level": "note",
+          "message": {
+            "text": "denominator may be zero when input is empty"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cmd/server/main.go"
+                },
+                "region": {
+                  "startLine": 99
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "bugbotFingerprint/v1": "fp-ghi"
+          }
+        },
+        {
+          "ruleId": "bounds",
+          "level": "warning",
+          "message": {
+            "text": "missing bounds check"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "internal/parser/parse.go"
+                },
+                "region": {
+                  "startLine": 10
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "bugbotFingerprint/v1": "fp-def"
+          }
+        }
+      ]
+    }
+  ]
+}
