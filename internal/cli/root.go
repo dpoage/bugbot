@@ -44,6 +44,7 @@ reproduce, report) and tracks findings across confidence tiers:
 		newLeadsCmd(),
 		newEvalCmd(),
 		newPublishCmd(),
+		newDesignSandboxCmd(),
 	)
 
 	return root
