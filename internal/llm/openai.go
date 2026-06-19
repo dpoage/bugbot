@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -121,14 +120,20 @@ func (o *openaiAdapter) buildParams(req Request) (openai.ChatCompletionNewParams
 	// openai-compatible endpoint without opt-in) does not get a schema it
 	// can't honor.
 	if len(req.ResponseSchema) > 0 && o.caps.StructuredOutput {
-		var schema any
-		if err := json.Unmarshal(req.ResponseSchema, &schema); err != nil {
+		// parseResponseSchema unmarshals the JSON Schema and returns the
+		// resolved name (caller's name, or "response" if unset). The OpenAI
+		// SDK expects the verbatim schema object, not the properties/required
+		// unwrap that Anthropic's ToolInputSchemaParam requires, so we
+		// deliberately do NOT call parseToolParameters here — the on-the-wire
+		// shape would change.
+		defaultName := req.ResponseSchemaName
+		if defaultName == "" {
+			defaultName = "response"
+		}
+		schema, name, err := parseResponseSchema(req.ResponseSchema, defaultName)
+		if err != nil {
 			return openai.ChatCompletionNewParams{}, newAPIError(o.provider, 0, 0,
 				ErrInvalidRequest, "ResponseSchema: invalid JSON", err)
-		}
-		name := req.ResponseSchemaName
-		if name == "" {
-			name = "response"
 		}
 		// strict=false: our schemas are not strict-mode-clean (extra fields,
 		// union types) and lenient mode still drives grammar-constrained
@@ -238,13 +243,7 @@ func mapOpenAIStop(reason string, hasToolCalls bool) StopReason {
 func (o *openaiAdapter) normalizeErr(err error) error {
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) {
-		status := apiErr.StatusCode
-		kind := classifyStatus(status, apiErr.Error())
-		ra := time.Duration(0)
-		if kind == ErrRateLimited || kind == ErrOverloaded {
-			ra = parseRetryAfter(apiErr.Response)
-		}
-		return newAPIError(o.provider, status, ra, kind, apiErr.Error(), err)
+		return normalizeSDKError(o.provider, apiErr.StatusCode, apiErr.Error(), apiErr.Response, err)
 	}
 	return newAPIError(o.provider, 0, 0, ErrServer, err.Error(), err)
 }
