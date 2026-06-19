@@ -14,7 +14,7 @@ var noSystems []ingest.BuildSystem
 // TestSystemPrompt_GoGuidance pins the verbatim Go guidance so it never drifts:
 // the Go path is the historically-validated wording.
 func TestSystemPrompt_GoGuidance(t *testing.T) {
-	p := systemPrompt(ingest.LangGo, noSystems)
+	p := systemPrompt(ingest.LangGo, noSystems, nil)
 	if !strings.Contains(p, "*_test.go file in the package that contains the bug") {
 		t.Error("Go repro prompt must keep the *_test.go guidance")
 	}
@@ -26,7 +26,7 @@ func TestSystemPrompt_GoGuidance(t *testing.T) {
 // TestSystemPrompt_PythonGuidance confirms a Python finding gets pytest guidance
 // and the Go-specific guidance is absent.
 func TestSystemPrompt_PythonGuidance(t *testing.T) {
-	p := systemPrompt(ingest.LangPython, noSystems)
+	p := systemPrompt(ingest.LangPython, noSystems, nil)
 	if !strings.Contains(p, "pytest") {
 		t.Error("Python repro prompt must mention pytest")
 	}
@@ -118,7 +118,7 @@ func TestSystemPrompt_PerLanguageGuidance(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := systemPrompt(tt.lang, noSystems)
+			p := systemPrompt(tt.lang, noSystems, nil)
 			if !strings.Contains(p, tt.want) {
 				t.Errorf("systemPrompt(%v) missing %q", tt.lang, tt.want)
 			}
@@ -134,7 +134,7 @@ func TestSystemPrompt_PerLanguageGuidance(t *testing.T) {
 // ctest guidance and does NOT contain invented make commands.
 func TestSystemPrompt_CppCMake(t *testing.T) {
 	cmakeSystems := []ingest.BuildSystem{ingest.BuildSystemCMake}
-	p := systemPrompt(ingest.LangCPP, cmakeSystems)
+	p := systemPrompt(ingest.LangCPP, cmakeSystems, nil)
 
 	if !strings.Contains(p, "ctest") {
 		t.Error("C++ + cmake prompt must mention ctest")
@@ -156,7 +156,7 @@ func TestSystemPrompt_CppCMake(t *testing.T) {
 // invented make or ctest commands.
 func TestSystemPrompt_CppMakeOnly(t *testing.T) {
 	makeSystems := []ingest.BuildSystem{ingest.BuildSystemMake}
-	p := systemPrompt(ingest.LangCPP, makeSystems)
+	p := systemPrompt(ingest.LangCPP, makeSystems, nil)
 
 	if !strings.Contains(p, "standard test framework for its language") {
 		t.Error("C++ + make-only prompt must use generic fallback text")
@@ -174,7 +174,7 @@ func TestSystemPrompt_CppMakeOnly(t *testing.T) {
 // meson test guidance.
 func TestSystemPrompt_CppMeson(t *testing.T) {
 	mesonSystems := []ingest.BuildSystem{ingest.BuildSystemMeson}
-	p := systemPrompt(ingest.LangCPP, mesonSystems)
+	p := systemPrompt(ingest.LangCPP, mesonSystems, nil)
 
 	if !strings.Contains(p, "meson test") {
 		t.Error("C++ + meson prompt must mention meson test")

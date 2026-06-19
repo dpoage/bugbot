@@ -153,6 +153,9 @@ func newScanCmd() *cobra.Command {
 					if rErr != nil {
 						return fmt.Errorf("build reproducer client: %w", rErr)
 					}
+					// Probe image capabilities once; result is cached per image so
+					// subsequent daemon cycles and parallel scan runs are free.
+					caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, target)
 					var rNewErr error
 					r, rNewErr = repro.New(reproClient, sb, target, repro.Options{
 						Image:            cfg.Sandbox.Image,
@@ -162,6 +165,7 @@ func newScanCmd() *cobra.Command {
 						DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 						SetupCmds:        cfg.Sandbox.SetupCmds,
 						LocalMounts:      localMountsFromConfig(cfg),
+						Capabilities:     caps,
 					})
 					if rNewErr != nil {
 						return fmt.Errorf("build reproducer: %w", rNewErr)

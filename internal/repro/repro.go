@@ -111,6 +111,12 @@ type Options struct {
 	// locally-checked-out path dependencies that fall outside the scanned repo.
 	// Mounts are read-only with Shared=true (no SELinux :Z relabel).
 	LocalMounts []sandbox.ROMount
+	// Capabilities is the pre-probed CapabilitySet for the sandbox image.
+	// When non-nil, the reproducer prompt enumerates available invocation
+	// modes and instructs the agent to avoid unavailable ones (e.g. -race
+	// when cgo is absent). A nil CapabilitySet is treated as "all unknown"
+	// and the prompt omits capability guidance.
+	Capabilities sandbox.CapabilitySet
 }
 
 // resolve returns a copy of o with defaults applied; it does not mutate the
@@ -155,6 +161,9 @@ type Reproducer struct {
 	// once in New and threaded into the system prompt so C/C++ findings get
 	// build-system-specific repro guidance without re-detecting per attempt.
 	buildSystems []ingest.BuildSystem
+	// capabilities is the probed CapabilitySet threaded from Options.Capabilities,
+	// passed to systemPrompt to constrain available invocation modes.
+	capabilities sandbox.CapabilitySet
 }
 
 // New constructs a Reproducer. client is the reproducer-role LLM client, sb is
@@ -196,6 +205,7 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 		opts:         resolved,
 		deps:         deps,
 		buildSystems: ingest.DetectBuildSystems(repoDir),
+		capabilities: resolved.Capabilities,
 	}, nil
 }
 
@@ -314,7 +324,7 @@ func (r *Reproducer) newRunner(lang ingest.Language, systems []ingest.BuildSyste
 	if r.opts.TranscriptDir != "" {
 		opts = append(opts, agent.WithTranscriptDir(r.opts.TranscriptDir))
 	}
-	return agent.NewRunner(r.client, tools, systemPrompt(lang, systems), opts...), nil
+	return agent.NewRunner(r.client, tools, systemPrompt(lang, systems, r.capabilities), opts...), nil
 }
 
 // readOnlyTools builds the read-only investigation tool set rooted at dir.
