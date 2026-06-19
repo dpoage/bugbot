@@ -528,8 +528,10 @@ func (r *Runner) autosave(tr *Transcript, task string) {
 		return
 	}
 	// autosave is best-effort: persistence failures must not break a run, so we
-	// deliberately discard both the write and close errors. Close still runs to
-	// flush buffered data even on the SaveJSONL error path.
+	// deliberately discard both the write and close errors. SaveJSONL itself
+	// best-effort Flushes any successfully-encoded prefix on encode error, so
+	// the file usually contains at least the events encoded before the failure;
+	// Close then runs to release the OS handle regardless of outcome.
 	defer func() { _ = f.Close() }()
 	_ = tr.SaveJSONL(f)
 }

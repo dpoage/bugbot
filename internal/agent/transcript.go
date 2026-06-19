@@ -128,6 +128,12 @@ func (t *Transcript) SaveJSONL(w io.Writer) error {
 	enc := json.NewEncoder(bw)
 	for i := range t.Events {
 		if err := enc.Encode(&t.Events[i]); err != nil {
+			// Best-effort: flush any successfully-encoded prefix to w so a
+			// partial transcript is at least recoverable on the next load.
+			// We discard the flush error — the encode error is the one to
+			// surface, and the trailing bw.Flush in the success path
+			// remains the authoritative one.
+			_ = bw.Flush()
 			return fmt.Errorf("agent: encode transcript event %d: %w", i, err)
 		}
 	}
