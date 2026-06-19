@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -148,31 +147,17 @@ func (a *anthropicAdapter) buildParams(req Request) (anthropic.MessageNewParams,
 	// JSON, which Complete surfaces as Response.Text. Only valid when the
 	// caller didn't supply user tools (structuredOutputToolName gates this).
 	if toolName, ok := structuredOutputToolName(req, a.caps); ok {
-		var props map[string]any
-		if err := json.Unmarshal(req.ResponseSchema, &props); err != nil {
+		// Mirror toAnthropicTool's schema unwrapping via the shared helper
+		// so the synthetic tool gets the same ToolInputSchemaParam shape
+		// the SDK would receive for a user tool.
+		properties, required, err := parseToolParameters(req.ResponseSchema)
+		if err != nil {
 			return anthropic.MessageNewParams{}, newAPIError("anthropic", 0, 0,
 				ErrInvalidRequest, "ResponseSchema: invalid JSON", err)
 		}
-		// Mirror toAnthropicTool's schema unwrapping so the SDK receives the
-		// same ToolInputSchemaParam shape it would for a user tool.
-		var schema anthropic.ToolInputSchemaParam
-		if p, ok := props["properties"]; ok {
-			if pm, ok := p.(map[string]any); ok {
-				schema.Properties = pm
-			}
-		} else {
-			schema.Properties = props
-		}
-		if r, ok := props["required"]; ok {
-			if rs, ok := r.([]any); ok {
-				required := make([]string, 0, len(rs))
-				for _, v := range rs {
-					if s, ok := v.(string); ok {
-						required = append(required, s)
-					}
-				}
-				schema.Required = required
-			}
+		schema := anthropic.ToolInputSchemaParam{
+			Properties: properties,
+			Required:   required,
 		}
 		params.Tools = append(params.Tools, anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{
 			Name:        toolName,
@@ -236,36 +221,14 @@ func markLastBlock(m *anthropic.MessageParam) bool {
 }
 
 func toAnthropicTool(t ToolDef) (*anthropic.ToolParam, error) {
-	var schema anthropic.ToolInputSchemaParam
-	if len(t.Parameters) > 0 {
-		var props map[string]any
-		if err := json.Unmarshal(t.Parameters, &props); err != nil {
-			return nil, newAPIError("anthropic", 0, 0, ErrInvalidRequest,
-				"tool "+t.Name+": invalid parameters JSON schema", err)
-		}
-		// The Anthropic schema param carries the JSON-schema "properties" and
-		// "required" within an object whose type is implicitly "object". The SDK
-		// marshals Properties as the schema body; pass the decoded properties
-		// (and required, if present) through.
-		if p, ok := props["properties"]; ok {
-			if pm, ok := p.(map[string]any); ok {
-				schema.Properties = pm
-			}
-		} else {
-			// Caller passed a bare properties object rather than a full schema.
-			schema.Properties = props
-		}
-		if r, ok := props["required"]; ok {
-			if rs, ok := r.([]any); ok {
-				req := make([]string, 0, len(rs))
-				for _, v := range rs {
-					if s, ok := v.(string); ok {
-						req = append(req, s)
-					}
-				}
-				schema.Required = req
-			}
-		}
+	properties, required, err := parseToolParameters(t.Parameters)
+	if err != nil {
+		return nil, newAPIError("anthropic", 0, 0, ErrInvalidRequest,
+			"tool "+t.Name+": invalid parameters JSON schema", err)
+	}
+	schema := anthropic.ToolInputSchemaParam{
+		Properties: properties,
+		Required:   required,
 	}
 	tp := &anthropic.ToolParam{
 		Name:        t.Name,
@@ -403,14 +366,7 @@ func mapAnthropicStop(sr anthropic.StopReason) StopReason {
 func (a *anthropicAdapter) normalizeErr(err error) error {
 	var apiErr *anthropic.Error
 	if errors.As(err, &apiErr) {
-		status := apiErr.StatusCode
-		resp := apiErr.Response
-		kind := classifyStatus(status, apiErr.Error())
-		ra := time.Duration(0)
-		if kind == ErrRateLimited || kind == ErrOverloaded {
-			ra = parseRetryAfter(resp)
-		}
-		return newAPIError("anthropic", status, ra, kind, apiErr.Error(), err)
+		return normalizeSDKError("anthropic", apiErr.StatusCode, apiErr.Error(), apiErr.Response, err)
 	}
 	// Transport/timeout error: leave status 0, mark as server-class so it is
 	// retried.
