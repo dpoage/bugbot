@@ -21,19 +21,19 @@ type schedule struct {
 // earliest returns the nearest active deadline and flags which timer fired.
 // When nextBacklog is nil it is excluded from the race.
 func (s schedule) earliest() (deadline time.Time, fireSweep, fireBacklog bool) {
-	// Start with poll as the default.
-	deadline = s.nextPoll
-	fireSweep = false
-	fireBacklog = false
-
-	if !s.nextSweep.After(deadline) {
+	// Preserve the original tie-break priority exactly: sweep wins ties over
+	// backlog, backlog over poll. A nil nextBacklog (disabled) never wins.
+	sweepLEPoll := !s.nextSweep.After(s.nextPoll)
+	sweepLEBacklog := s.nextBacklog == nil || !s.nextSweep.After(*s.nextBacklog)
+	fireSweep = sweepLEPoll && sweepLEBacklog
+	fireBacklog = !fireSweep && s.nextBacklog != nil && !s.nextBacklog.After(s.nextPoll)
+	switch {
+	case fireSweep:
 		deadline = s.nextSweep
-		fireSweep = true
-	}
-	if s.nextBacklog != nil && !s.nextBacklog.After(deadline) {
+	case fireBacklog:
 		deadline = *s.nextBacklog
-		fireSweep = false
-		fireBacklog = true
+	default:
+		deadline = s.nextPoll
 	}
 	return deadline, fireSweep, fireBacklog
 }
