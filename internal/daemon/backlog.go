@@ -25,7 +25,7 @@ import (
 //
 // Callers that want a bounded set should slice the result; the caller is
 // responsible for the batch-size cap so this helper stays reusable.
-func OpenBacklog(ctx context.Context, st *store.Store) ([]store.Finding, error) {
+func OpenBacklog(ctx context.Context, st store.StoreReader) ([]store.Finding, error) {
 	all, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
 	if err != nil {
 		return nil, err
