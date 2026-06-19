@@ -93,13 +93,13 @@ func newDaemonCmd() *cobra.Command {
 			}
 
 			deps := daemon.Deps{
-				Repo:      repo,
-				Store:     st,
-				Clients:   funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer},
+				Repo:       repo,
+				Store:      st,
+				Clients:    funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer},
 				FunnelOpts: funnelOpts,
-				Sinks:     sinks,
-				Logger:    logger,
-				Progress:  progressSink,
+				Sinks:      sinks,
+				Logger:     logger,
+				Progress:   progressSink,
 			}
 
 			// Reproduction is opt-in (--repro) and only wired when a container

@@ -35,7 +35,6 @@ func newReportCmd() *cobra.Command {
 	return cmd
 }
 
-
 // shortID returns the first 12 hex chars of an id for compact table display.
 func shortID(id string) string {
 	if len(id) > 12 {

@@ -233,19 +233,19 @@ type patchOutcome struct {
 // It either witnesses a fix (T0) or records needs-human on exhaustion.
 func (r *Reproducer) provePatch(ctx context.Context, st *store.Store, f store.Finding, att *Attempt) (patchOutcome, error) {
 	prover := &PatchProver{
-		client:      r.client,
-		sb:          r.sb,
-		repoDir:     r.repoDir,
-		maxAttempts: r.opts.PatchMaxAttempts,
-		timeout:     r.opts.Timeout,
-		image:       r.opts.Image,
-		artifactDir: r.opts.ArtifactDir,
+		client:        r.client,
+		sb:            r.sb,
+		repoDir:       r.repoDir,
+		maxAttempts:   r.opts.PatchMaxAttempts,
+		timeout:       r.opts.Timeout,
+		image:         r.opts.Image,
+		artifactDir:   r.opts.ArtifactDir,
 		agentLimits:   r.opts.AgentLimits,
 		transcriptDir: r.opts.TranscriptDir,
 		suiteCmd:      r.opts.PatchSuiteCmd,
-		depMounts:   r.deps.ROMounts,
-		depEnv:      r.deps.Env,
-		setupCmds:   r.deps.SetupCmds,
+		depMounts:     r.deps.ROMounts,
+		depEnv:        r.deps.Env,
+		setupCmds:     r.deps.SetupCmds,
 	}
 	return prover.Prove(ctx, st, f, att)
 }
