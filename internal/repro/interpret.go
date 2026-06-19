@@ -80,24 +80,38 @@ type verdict struct {
 func interpret(res sandbox.Result, cmd []string) verdict {
 	out := combinedOutput(res)
 	eco := detectEcosystem(cmd)
+	lowOut := strings.ToLower(out)
+
+	// A timeout is an infrastructure/quality problem, not a demonstration,
+	// regardless of any partial output captured before the kill.
+	if res.TimedOut {
+		return verdict{reason: VerdictReasonTimeout, summary: trunc(out, 400), ecosystem: eco.name}
+	}
+
+	// 0a. A sanitizer/valgrind violation report is dispositive ran-and-failed
+	//     evidence across ALL ecosystems — and it is checked BEFORE the
+	//     exit-code switch because reproducer agents routinely mask the real
+	//     exit code to 0 (piping the test through `| tail`/`| head`, or
+	//     appending `; echo EXIT=$?`). These report headers never appear on a
+	//     clean run, so trusting them independent of the (possibly-masked) exit
+	//     code cannot promote a genuinely passing test. Only the unambiguous
+	//     headers qualify here; looser phrases stay gated behind a non-zero
+	//     exit (step 0b).
+	if hasAnyMarker(lowOut, sanitizerReportMarkers) {
+		return verdict{demonstrated: true, summary: trunc(out, 400), ecosystem: eco.name}
+	}
 
 	switch {
-	case res.TimedOut:
-		return verdict{reason: VerdictReasonTimeout, summary: trunc(out, 400), ecosystem: eco.name}
 	case res.ExitCode == 0:
 		return verdict{reason: VerdictReasonExitZero, summary: trunc(out, 400), ecosystem: eco.name}
 	case res.ExitCode == 125 || res.ExitCode == 126 || res.ExitCode == 127:
 		return verdict{reason: VerdictReasonEnvironmentError, summary: envSummary(eco.name, out), ecosystem: eco.name}
 	}
 
-	// 0. Runtime instrumentation report — dispositive across ALL ecosystems.
-	//    Sanitizer and valgrind output can only appear after the binary built
-	//    and ran, so matching any runtimeFailureMarker proves the test ran and
-	//    failed. This is checked before the per-ecosystem env/toolchain/build
-	//    markers so a sanitizer abort is never misclassified as a build error.
-	//    The ExitCode==0 short-circuit above still gates this: a PASSING
-	//    sanitizer run (exit 0) is not a demonstration.
-	lowOut := strings.ToLower(out)
+	// 0b. Full runtime-instrumentation set (incl. the looser "runtime error:" /
+	//     "data race" phrases) for a non-zero exit, dispositive ahead of the
+	//     per-ecosystem env/toolchain/build markers so a sanitizer abort is
+	//     never misclassified as a build error.
 	if hasAnyMarker(lowOut, runtimeFailureMarkers) {
 		return verdict{demonstrated: true, summary: trunc(out, 400), ecosystem: eco.name}
 	}

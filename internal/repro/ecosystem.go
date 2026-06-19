@@ -51,35 +51,44 @@ var defaultEnvMarkers = []string{
 	"cannot create temporary",
 }
 
-// runtimeFailureMarkers are dispositive ran-and-failed signatures emitted ONLY
-// by runtime instrumentation (sanitizers or valgrind). They outrank every other
-// marker because such output can only appear AFTER the binary built and ran:
-// matching one of these proves the test ran and produced an instrumentation
-// report, so we can demonstrate the bug regardless of the detected ecosystem.
-//
-// This is the escape hatch for ecosystems whose positive ran-evidence table
-// does not include sanitizer/valgrind lines (e.g. direct binary invocations
-// classified as "unknown"). bugbot-vig still holds: a BARE non-zero exit with
-// none of these substrings still NEVER demonstrates.
+// sanitizerReportMarkers are the unambiguous report headers a sanitizer or
+// valgrind emits ONLY when it DETECTS a violation; they never appear in a clean
+// run's output. Their presence alone proves the instrumented binary ran and
+// failed, so interpret() trusts them INDEPENDENTLY of the recorded exit code —
+// which reproducer agents routinely clobber to 0 by piping the test through
+// `| tail`/`| head` (a pipeline's status is the last stage's) or appending
+// `; echo EXIT=$?` (a trailing echo always exits 0). Keep this list to
+// signatures that cannot occur on a successful run.
 //
 // Entries are lowercase for case-insensitive comparison:
 //   - "sanitizer:" matches AddressSanitizer:/LeakSanitizer:/MemorySanitizer:/
 //     ThreadSanitizer:/UndefinedBehaviorSanitizer: headers from clang/gcc
-//     sanitizer runtimes.
-//   - "runtime error:" is UBSan's per-violation prefix.
+//     sanitizer runtimes (a TSan "ThreadSanitizer: data race" report included).
 //   - "detected memory leaks" is LSan's final summary line.
-//   - "data race" is TSan's report header.
 //   - "definitely lost" / "invalid read of size" / "invalid write of size" are
 //     valgrind/memcheck lines that appear only when the process ran.
-var runtimeFailureMarkers = []string{
+var sanitizerReportMarkers = []string{
 	"sanitizer:",
-	"runtime error:",
 	"detected memory leaks",
-	"data race",
 	"definitely lost",
 	"invalid read of size",
 	"invalid write of size",
 }
+
+// runtimeFailureMarkers is the full dispositive ran-and-failed set: the
+// sanitizerReportMarkers headers PLUS looser runtime-failure phrases that can
+// also surface in benign program prose ("runtime error:" is UBSan's
+// per-violation prefix; bare "data race" covers non-sanitizer tools like
+// helgrind). The looser phrases are consulted ONLY behind a non-zero exit
+// (interpret()'s post-exit-switch check) so a passing test that merely mentions
+// them is never mistaken for a demonstration. They outrank the per-ecosystem
+// env/toolchain/build markers because such output can only appear after the
+// binary built and ran. bugbot-vig still holds: a BARE non-zero exit with none
+// of these substrings still NEVER demonstrates.
+var runtimeFailureMarkers = append([]string{
+	"runtime error:",
+	"data race",
+}, sanitizerReportMarkers...)
 
 // ecosystemTable is the ordered registry of supported ecosystems. Order
 // matters only for tie-breaking in the (rare) case that the same argv

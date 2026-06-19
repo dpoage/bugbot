@@ -43,9 +43,15 @@ const cmakeGuidance = "For C/C++ with CMake, configure and build first:\n" +
 	"  For memory-safety findings (leaks, use-after-free, overflows): add\n" +
 	"  `-DCMAKE_CXX_FLAGS=\"-fsanitize=address -g\"` to the cmake configure step\n" +
 	"  so AddressSanitizer/LeakSanitizer aborts non-zero — the sanitizer report\n" +
-	"  IS the demonstration. For uninitialized-read findings: use\n" +
+	"  IS the demonstration. For data-race / concurrency findings (a bug that\n" +
+	"  only manifests when threads run concurrently, e.g. a use-after-free that\n" +
+	"  races with cleanup): use `-DCMAKE_CXX_FLAGS=\"-fsanitize=thread -g\"`\n" +
+	"  instead — ThreadSanitizer reports the race deterministically, whereas a\n" +
+	"  single AddressSanitizer run only fails if the use-after-free window\n" +
+	"  happens to fire. For uninitialized-read findings: use\n" +
 	"  `-DCMAKE_CXX_FLAGS=\"-fsanitize=memory\"` (clang) or run the binary under\n" +
-	"  `valgrind --error-exitcode=1`. TSan and ASan cannot be combined in one build."
+	"  `valgrind --error-exitcode=1`. TSan, ASan and MSan cannot be combined in\n" +
+	"  one build — pick the one matching the bug class."
 
 // mesonGuidance is the C/C++ guidance for repos whose root carries a
 // meson.build but no CMakeLists.txt. Meson exposes a single test entry point
@@ -59,9 +65,13 @@ const mesonGuidance = "For C/C++ with Meson, set up and build first:\n" +
 	"  " + "`meson test -C build <TestName>`" + ".\n" +
 	"  For memory-safety findings (leaks, use-after-free, overflows): configure\n" +
 	"  with `-Db_sanitize=address` so AddressSanitizer/LeakSanitizer aborts\n" +
-	"  non-zero — the sanitizer report IS the demonstration. For uninitialized\n" +
+	"  non-zero — the sanitizer report IS the demonstration. For data-race /\n" +
+	"  concurrency findings (a bug that only manifests when threads run\n" +
+	"  concurrently): use `-Db_sanitize=thread` instead — ThreadSanitizer\n" +
+	"  reports the race deterministically, whereas a single AddressSanitizer run\n" +
+	"  only fails if the use-after-free window happens to fire. For uninitialized\n" +
 	"  reads: use `-Db_sanitize=memory` (clang) or valgrind --error-exitcode=1.\n" +
-	"  TSan and ASan cannot be combined in one build."
+	"  TSan, ASan and MSan cannot be combined in one build."
 
 // mavenGuidance is the Java/Kotlin guidance for repos whose root carries a
 // pom.xml. Maven's Surefire plugin registers JUnit tests so the run command
@@ -185,6 +195,12 @@ Hard requirements for the repro:
   behavior makes the assertion fail. Do NOT write a test that merely triggers a
   panic or crash without an assertion unless the panic itself is the bug being
   demonstrated and the test asserts it should not panic.
+- The repro command's real exit status and output must reach bugbot: make the
+  test (or sanitized binary) the FINAL command in cmd. Do NOT append a trailing
+  "| tail", "| head", or "; echo ..." after it — a pipeline's exit status is
+  its last stage's and a trailing echo always exits 0, so either silently masks
+  a real failure as a clean exit. Piping an EARLIER build step to trim its log
+  is fine.
 - Keep it minimal: the smallest test that exercises the bug. Do not add new
   dependencies. Use only the standard library and what the repository already
   imports. The test must COMPILE — a compile error or missing dependency is NOT

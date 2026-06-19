@@ -194,3 +194,76 @@ func TestInterpret_CppGenuineTestFailure_Demonstrated(t *testing.T) {
 		})
 	}
 }
+
+// TestInterpret_MaskedExitCode_SanitizerStillDemonstrates is the regression for
+// the services-runtime UAF round (#3): the reproducer built a deterministic
+// heap-use-after-free with -fsanitize=address and ran it, but appended a
+// trailing `; echo "EXIT_CODE=$?"` (and/or piped through `| tail`), which resets
+// the script's exit status to 0. The ASan report was right there in the output,
+// yet interpret()'s exit-0 short-circuit fired first and classified it
+// exit_zero — discarding a genuine reproduction. A sanitizer/valgrind report
+// must demonstrate INDEPENDENTLY of the (masked) exit code.
+func TestInterpret_MaskedExitCode_SanitizerStillDemonstrates(t *testing.T) {
+	// The exact masking the agent emitted: test piped to tail, trailing echo.
+	maskedCmd := []string{"bash", "-c",
+		"g++ -fsanitize=address -g repro_uaf.cpp -o /tmp/r && /tmp/r 2>&1 | tail -40; echo \"EXIT_CODE=$?\""}
+
+	t.Run("asan_uaf_exit0_masked_demonstrates", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 0, // masked by the trailing echo
+			Stdout: "Calling publish() on freed subscription...\n" +
+				"=================================================================\n" +
+				"==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010\n" +
+				"READ of size 8 at 0x602000000010 thread T0\n" +
+				"EXIT_CODE=0\n",
+		}
+		v := interpret(res, maskedCmd)
+		if !v.demonstrated {
+			t.Fatalf("masked-exit-0 ASan UAF report must demonstrate; got reason=%q", v.reason)
+		}
+	})
+
+	t.Run("valgrind_leak_exit0_demonstrates", func(t *testing.T) {
+		// valgrind run without --error-exitcode=1 exits with the program's own
+		// status (0), but the "definitely lost" report still proves the leak.
+		res := sandbox.Result{
+			ExitCode: 0,
+			Stderr:   "==12== LEAK SUMMARY:\n==12==    definitely lost: 4,096 bytes in 1 blocks\n",
+		}
+		v := interpret(res, []string{"bash", "-c", "valgrind ./repro | tail -5"})
+		if !v.demonstrated {
+			t.Fatalf("masked-exit-0 valgrind leak must demonstrate; got reason=%q", v.reason)
+		}
+	})
+
+	// SAFETY of the high-confidence/loose split: a genuinely PASSING test
+	// (exit 0) whose prose merely mentions a loose phrase ("data race",
+	// "runtime error:") must NOT be promoted. Those phrases are trusted only
+	// behind a non-zero exit, so a clean run stays exit_zero.
+	t.Run("exit0_loose_phrase_not_demonstrated", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 0,
+			Stdout:   "Checking for a data race... none found.\nNo runtime error: all good.\nPASS\n",
+		}
+		v := interpret(res, []string{"./build/bin/race_probe"})
+		if v.demonstrated {
+			t.Fatalf("clean exit-0 run mentioning loose phrases must NOT demonstrate")
+		}
+		if v.reason != VerdictReasonExitZero {
+			t.Errorf("reason = %q, want exit_zero", v.reason)
+		}
+	})
+
+	// A non-zero exit WITH a loose phrase still demonstrates via the full set,
+	// preserving the pre-split behavior for non-sanitizer race tools.
+	t.Run("nonzero_loose_data_race_demonstrates", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 1,
+			Stderr:   "==99== Possible data race during write of size 4\n",
+		}
+		v := interpret(res, []string{"bash", "-c", "valgrind --tool=helgrind ./t"})
+		if !v.demonstrated {
+			t.Fatalf("non-zero exit with a data-race report must demonstrate; got reason=%q", v.reason)
+		}
+	})
+}
