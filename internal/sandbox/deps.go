@@ -945,10 +945,20 @@ func resolveCargo(repoDir string, opts DepOptions) (Resolution, error) {
 			return Resolution{}, err
 		}
 		prefetch := newCargoPrefetch(repoDir, cache, opts)
+		// The prefetch runs `cargo fetch` with CARGO_HOME=cache (mounted at
+		// /cargo), so cargo populates the registry at cache/registry on the host.
+		// The network-none run must therefore mount cache/registry (NOT cache) at
+		// /cargo/registry, so CARGO_HOME=/cargo finds the registry at the standard
+		// $CARGO_HOME/registry path. Create the dir now so the bind-mount source
+		// exists even before the prefetch populates it.
+		registry := filepath.Join(cache, "registry")
+		if err := os.MkdirAll(registry, 0o755); err != nil {
+			return Resolution{}, fmt.Errorf("sandbox: create cargo fetch registry dir: %w", err)
+		}
 		// Shared=false: the cargo fetch cache is a bugbot-owned directory under
 		// the user cache dir. :Z SELinux isolation is appropriate (same rationale
 		// as the Go and Python FETCH caches).
-		return cargoRegistryResolution(cache, DepStrategyFetch, false, prefetch), nil
+		return cargoRegistryResolution(registry, DepStrategyFetch, false, prefetch), nil
 
 	default:
 		// Unreachable given ValidDepStrategy above, but keep it explicit.

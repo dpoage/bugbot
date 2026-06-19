@@ -443,21 +443,24 @@ func newJSTestCLI(t *testing.T) *CLI {
 }
 
 // writeJSTestRepo writes a minimal Node.js repo with package.json and
-// package-lock.json (depending on the `ms` package — tiny, stable, no transitive
-// deps) and a test file that uses Node's built-in test runner.
+// package-lock.json (depending on the `is-number` package — tiny, stable, zero
+// deps) and a CommonJS test file that uses Node's built-in test runner.
 func writeJSTestRepo(t *testing.T, dir string) {
 	t.Helper()
-	// ms@2.1.3 is a tiny, pure-JS time-string parser with no dependencies.
+	// is-number@7.0.0 is a tiny, pure-JS, zero-dependency predicate. It is used
+	// rather than a more famous package because some registry mirrors serve a
+	// corrupted ms-2.1.3 tarball (metadata + tarball both report a non-canonical
+	// integrity), which breaks a hard-coded lockfile; is-number's canonical,
+	// content-addressed integrity is stable across mirrors.
 	pkgJSON := `{
   "name": "deptest",
   "version": "1.0.0",
   "dependencies": {
-    "ms": "2.1.3"
+    "is-number": "7.0.0"
   }
 }
 `
-	// package-lock.json for ms@2.1.3 (content-addressed, stable).
-	// Generated from `npm install ms@2.1.3` on Node 20.
+	// package-lock.json for is-number@7.0.0 (content-addressed, stable).
 	pkgLock := `{
   "name": "deptest",
   "version": "1.0.0",
@@ -468,13 +471,16 @@ func writeJSTestRepo(t *testing.T, dir string) {
       "name": "deptest",
       "version": "1.0.0",
       "dependencies": {
-        "ms": "2.1.3"
+        "is-number": "7.0.0"
       }
     },
-    "node_modules/ms": {
-      "version": "2.1.3",
-      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",
-      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTg=="
+    "node_modules/is-number": {
+      "version": "7.0.0",
+      "resolved": "https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz",
+      "integrity": "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==",
+      "engines": {
+        "node": ">=0.12.0"
+      }
     }
   }
 }
@@ -482,16 +488,19 @@ func writeJSTestRepo(t *testing.T, dir string) {
 	mustWrite(t, filepath.Join(dir, "package.json"), pkgJSON, 0o644)
 	mustWrite(t, filepath.Join(dir, "package-lock.json"), pkgLock, 0o644)
 
-	// Test using Node's built-in test runner (node:test, available since Node 18).
+	// CommonJS test using Node's built-in test runner (node:test, available
+	// since Node 18). The file is .js (not .mjs) so require() is available —
+	// an .mjs file is ESM and has no require, which would fail regardless of deps.
 	testSrc := `const test = require('node:test');
 const assert = require('node:assert');
-const ms = require('ms');
+const isNumber = require('is-number');
 
-test('ms converts seconds', () => {
-    assert.strictEqual(ms(1000), '1s');
+test('is-number detects numbers', () => {
+    assert.strictEqual(isNumber(42), true);
+    assert.strictEqual(isNumber('foo'), false);
 });
 `
-	mustWrite(t, filepath.Join(dir, "test.mjs"), testSrc, 0o644)
+	mustWrite(t, filepath.Join(dir, "test.js"), testSrc, 0o644)
 }
 
 // TestIntegrationJSFetchBuildsOffline proves the full npm FETCH round-trip:
@@ -529,7 +538,7 @@ func TestIntegrationJSFetchBuildsOffline(t *testing.T) {
 	// the test command runs.
 	out, err := s.Exec(context.Background(), Spec{
 		RepoDir:   repo,
-		Cmd:       []string{"node", "--test", "test.mjs"},
+		Cmd:       []string{"node", "--test", "test.js"},
 		Network:   "none",
 		ROMounts:  res.ROMounts,
 		Env:       res.Env,
@@ -557,10 +566,10 @@ func TestIntegrationJSNoCacheFailsOffline(t *testing.T) {
 	writeJSTestRepo(t, repo)
 
 	// No mounts, no SetupCmds — bare network-none run.
-	// node_modules/ is not installed, so require('ms') should fail.
+	// node_modules/ is not installed, so require('is-number') should fail.
 	out, err := s.Exec(context.Background(), Spec{
 		RepoDir: repo,
-		Cmd:     []string{"node", "--test", "test.mjs"},
+		Cmd:     []string{"node", "--test", "test.js"},
 		Network: "none",
 		Timeout: 60 * time.Second,
 	})
