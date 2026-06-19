@@ -132,6 +132,49 @@ func (c *cartography) contextFor(files []string) string {
 	return b.String()
 }
 
+// QueryGraph returns the importers and/or imports of pkg from the importer
+// graph already held in the cartography struct. pkg must be a resolved
+// package directory (call packagesSpanned or path.Dir on a file path first).
+//
+// The importers field stores pkgDir -> []importerPkgDir (who imports pkgDir).
+// The "imports" direction is derived by inversion (find all Y where pkg ∈
+// importers[Y]). Both returned slices are sorted and capped at
+// packageGraphMaxEntries (defined in internal/agent — callers must cap
+// themselves; this method does NOT apply the cap so tests can inspect raw
+// counts; the funnel callback wraps this and the tool applies the cap via
+// writeList).
+//
+// A nil receiver (feature off) returns empty slices and no error.
+// An unknown package also returns empty slices and no error (the model gets
+// an "empty" result and should fall back to reading source).
+func (c *cartography) QueryGraph(pkg, direction string) (importerList, importList []string) {
+	if c == nil {
+		return nil, nil
+	}
+
+	if direction == "importers" || direction == "both" {
+		for _, imp := range c.importers[pkg] {
+			importerList = append(importerList, imp)
+		}
+		sort.Strings(importerList)
+	}
+
+	if direction == "imports" || direction == "both" {
+		// Invert the importers map: find every package Y where pkg ∈ importers[Y].
+		for candidate, imps := range c.importers {
+			for _, imp := range imps {
+				if imp == pkg {
+					importList = append(importList, candidate)
+					break
+				}
+			}
+		}
+		sort.Strings(importList)
+	}
+
+	return importerList, importList
+}
+
 // cartograph runs the cartographer pass: fingerprint each package spanned
 // by targets, reuse cached summaries whose stored fingerprint matches,
 // regenerate the rest with ONE bounded client.Complete each (no tool loop),

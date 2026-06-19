@@ -455,3 +455,106 @@ func TestPackagesSpanned_SkipsRoot(t *testing.T) {
 		t.Errorf("expected package %q in %v", "a/b", got)
 	}
 }
+
+// TestCartography_QueryGraph_Importers tests the importers direction: packages
+// that import the queried package.
+func TestCartography_QueryGraph_Importers(t *testing.T) {
+	c := &cartography{
+		summaries: map[string]string{},
+		importers: map[string][]string{
+			"internal/store": {"internal/funnel", "internal/cli"},
+		},
+	}
+	importerList, importList := c.QueryGraph("internal/store", "importers")
+	if len(importList) != 0 {
+		t.Fatalf("importers direction: expected empty importList, got %v", importList)
+	}
+	if len(importerList) != 2 {
+		t.Fatalf("expected 2 importers, got %v", importerList)
+	}
+	// Results must be sorted.
+	if importerList[0] != "internal/cli" || importerList[1] != "internal/funnel" {
+		t.Fatalf("expected sorted importers, got %v", importerList)
+	}
+}
+
+// TestCartography_QueryGraph_Imports tests the imports direction: packages that
+// the queried package imports (derived by inverting the importers map).
+func TestCartography_QueryGraph_Imports(t *testing.T) {
+	c := &cartography{
+		summaries: map[string]string{},
+		importers: map[string][]string{
+			"internal/store": {"internal/funnel"}, // funnel imports store
+		},
+	}
+	importerList, importList := c.QueryGraph("internal/funnel", "imports")
+	if len(importerList) != 0 {
+		t.Fatalf("imports direction: expected empty importerList, got %v", importerList)
+	}
+	if len(importList) != 1 || importList[0] != "internal/store" {
+		t.Fatalf("expected [internal/store] in imports, got %v", importList)
+	}
+}
+
+// TestCartography_QueryGraph_Both tests that direction "both" returns both
+// sides of the graph.
+func TestCartography_QueryGraph_Both(t *testing.T) {
+	c := &cartography{
+		summaries: map[string]string{},
+		importers: map[string][]string{
+			"internal/store":  {"internal/funnel"}, // funnel imports store
+			"internal/funnel": {"internal/cli"},    // cli imports funnel
+		},
+	}
+	// internal/funnel: importers=[internal/cli], imports=[internal/store]
+	importerList, importList := c.QueryGraph("internal/funnel", "both")
+	if len(importerList) != 1 || importerList[0] != "internal/cli" {
+		t.Fatalf("expected [internal/cli] as importers, got %v", importerList)
+	}
+	if len(importList) != 1 || importList[0] != "internal/store" {
+		t.Fatalf("expected [internal/store] as imports, got %v", importList)
+	}
+}
+
+// TestCartography_QueryGraph_UnknownPkg tests that an unknown package returns
+// empty slices (not an error).
+func TestCartography_QueryGraph_UnknownPkg(t *testing.T) {
+	c := &cartography{
+		summaries: map[string]string{},
+		importers: map[string][]string{},
+	}
+	importerList, importList := c.QueryGraph("internal/nonexistent", "both")
+	if importerList != nil {
+		t.Fatalf("expected nil importerList, got %v", importerList)
+	}
+	if importList != nil {
+		t.Fatalf("expected nil importList, got %v", importList)
+	}
+}
+
+// TestCartography_QueryGraph_NilReceiver tests that a nil cartography (feature
+// off) returns empty slices without panicking.
+func TestCartography_QueryGraph_NilReceiver(t *testing.T) {
+	var c *cartography
+	importerList, importList := c.QueryGraph("internal/store", "both")
+	if importerList != nil || importList != nil {
+		t.Fatalf("nil receiver must return nil slices, got %v / %v", importerList, importList)
+	}
+}
+
+// TestCartography_QueryGraph_Sorted tests that results are deterministically
+// sorted regardless of map iteration order.
+func TestCartography_QueryGraph_Sorted(t *testing.T) {
+	c := &cartography{
+		summaries: map[string]string{},
+		importers: map[string][]string{
+			"internal/store": {"internal/z", "internal/a", "internal/m"},
+		},
+	}
+	importerList, _ := c.QueryGraph("internal/store", "importers")
+	for i := 1; i < len(importerList); i++ {
+		if importerList[i] < importerList[i-1] {
+			t.Fatalf("importerList not sorted: %v", importerList)
+		}
+	}
+}

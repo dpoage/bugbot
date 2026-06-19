@@ -459,7 +459,32 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			// baseTools[:len(baseTools):len(baseTools)] sets cap==len, so every
 			// append allocates a fresh array and goroutines never share backing
 			// storage.
-			unitTools := append(baseTools[:len(baseTools):len(baseTools)], postLeadTool)
+			// get_package_context and package_graph are FINDER-ONLY pull-based
+			// cartography tools. See tools_package_context.go for the refuter-
+			// independence rationale. cart may be nil ("feature off") — the
+			// callbacks handle nil gracefully (clean miss / empty).
+			pkgContextTool := agent.NewPackageContextTool(func(pkg string) (string, bool, error) {
+				if cart == nil {
+					return "", false, nil
+				}
+				summaries, err := f.store.GetPackageSummaries(ctx, []string{pkg})
+				if err != nil {
+					return "", false, err
+				}
+				s, ok := summaries[pkg]
+				if !ok {
+					return "", false, nil
+				}
+				return s.Summary, true, nil
+			})
+			pkgGraphTool := agent.NewPackageGraphTool(func(pkg, direction string) ([]string, []string, error) {
+				if cart == nil {
+					return nil, nil, nil
+				}
+				imp, dep := cart.QueryGraph(pkg, direction)
+				return imp, dep, nil
+			})
+			unitTools := append(baseTools[:len(baseTools):len(baseTools)], postLeadTool, pkgContextTool, pkgGraphTool)
 
 			// Resolve the task content. customTask takes highest priority
 			// (diff-intent pre-built task). Then the strategy's BuildTask if
