@@ -172,7 +172,7 @@ func TestVerifySandbox_MockOK(t *testing.T) {
 
 	// Use a temp dir with a go.mod so detectSuiteCmd returns a Go command.
 	dir := t.TempDir()
-	if err := writeFile(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
+	if err := writeFileBytes(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -200,7 +200,7 @@ func TestVerifySandbox_MockToolchainMissing(t *testing.T) {
 	}})
 
 	dir := t.TempDir()
-	if err := writeFile(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
+	if err := writeFileBytes(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -227,7 +227,7 @@ func TestVerifySandbox_ResolutionMountsForwarded(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := writeFile(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
+	if err := writeFileBytes(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -283,7 +283,7 @@ func TestVerifySandbox_Timeout(t *testing.T) {
 	}})
 
 	dir := t.TempDir()
-	if err := writeFile(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
+	if err := writeFileBytes(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -317,7 +317,7 @@ func TestSmokeCmd_KnownEcosystems(t *testing.T) {
 			} else if tc.file == "Cargo.toml" {
 				content = []byte("[package]\nname = \"x\"\nversion = \"0.1.0\"\n")
 			}
-			if err := writeFile(dir+"/"+tc.file, content); err != nil {
+			if err := writeFileBytes(dir+"/"+tc.file, content); err != nil {
 				t.Fatal(err)
 			}
 			cmd := smokeCmd(dir)
@@ -332,7 +332,7 @@ func TestSmokeCmd_KnownEcosystems(t *testing.T) {
 }
 
 // writeFile writes content to path. Used in tests so they don't depend on os helpers.
-func writeFile(path string, content []byte) error {
+func writeFileBytes(path string, content []byte) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err

@@ -16,7 +16,7 @@ import (
 // Requires podman and the golang:1.21 image to be present locally.
 func TestVerifySandbox_Integration_GoImage(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeFile(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
+	if err := writeFileBytes(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -46,7 +46,7 @@ func TestVerifySandbox_Integration_GoImage(t *testing.T) {
 // Requires podman and the debian:bookworm-slim image to be present locally.
 func TestVerifySandbox_Integration_ToolchainlessImage(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeFile(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
+	if err := writeFileBytes(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
 		t.Fatal(err)
 	}
 
