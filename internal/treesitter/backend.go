@@ -39,6 +39,7 @@ package treesitter
 
 import (
 	"bytes"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -70,7 +71,7 @@ type Backend struct {
 	root string
 
 	mu      sync.Mutex
-	taggers map[string]*lockedTagger // keyed by "grammar.name/kind"
+	taggers map[taggerKey]*lockedTagger // keyed by grammar name + query kind
 
 	cacheMu sync.Mutex
 	cache   map[cacheKey]cacheEntry // keyed by grammar+kind+path
@@ -96,6 +97,13 @@ type lockedTagger struct {
 	tg *gts.Tagger
 }
 
+// taggerKey is the cache key for a compiled tagger. Using a struct avoids the
+// slash-concatenation collision risk of the previous "name/query" string key.
+type taggerKey struct {
+	grammar string
+	kind    queryKind
+}
+
 // cacheKey identifies a per-file tag set: the same file is tagged differently
 // for the definition vs reference query, so kind is part of the key.
 type cacheKey struct {
@@ -118,7 +126,7 @@ type cacheEntry struct {
 func New(root string) *Backend {
 	return &Backend{
 		root:    root,
-		taggers: make(map[string]*lockedTagger),
+		taggers: make(map[taggerKey]*lockedTagger),
 		cache:   make(map[cacheKey]cacheEntry),
 	}
 }
@@ -365,10 +373,12 @@ func (b *Backend) taggerFor(g *grammar, kind queryKind) (lt *lockedTagger, err e
 	switch kind {
 	case queryDef:
 		query = g.defQuery
-	default:
+	case queryRef:
 		query = g.refQuery
+	default:
+		panic(fmt.Sprintf("treesitter: unknown queryKind %d", kind))
 	}
-	cacheK := g.name + "/" + query
+	cacheK := taggerKey{grammar: g.name, kind: kind}
 
 	if existing := b.taggers[cacheK]; existing != nil {
 		return existing, nil

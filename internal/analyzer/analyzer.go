@@ -61,18 +61,26 @@ import (
 // it is always safe (more leads, no breaking changes).
 const maxResultsPerAnalyzer = 200
 
-// Lens name constants from internal/funnel/lens.go. Defined here to document
-// the coupling: these strings are stable across runs (they are part of the
-// fingerprint and dedup key). If lens names ever change in lens.go these must
-// be updated in lock-step. The tests exercise the mapping so a mismatch is
-// caught immediately.
+// LensName is the stable identifier of a funnel lens. Values must match the
+// Lens.Name strings in internal/funnel/lens.go; tests exercise the mapping so
+// a mismatch is caught immediately. Defined here (not imported from funnel) to
+// keep the analyzer package self-contained.
+type LensName string
+
+// Lens name constants from internal/funnel/lens.go. These strings are stable
+// across runs (they are part of the fingerprint and dedup key). If lens names
+// ever change in lens.go these must be updated in lock-step.
 const (
-	lensNilSafety   = "nil-safety/error-handling"
-	lensConcurrency = "concurrency"
-	lensResources   = "resource-leaks"
-	lensBoundary    = "boundary-conditions"
-	lensAPIContract = "api-contract-misuse"
-	lensInjection   = "injection/input-validation"
+	lensNilSafety   LensName = "nil-safety/error-handling"
+	lensConcurrency LensName = "concurrency"
+	lensResources   LensName = "resource-leaks"
+	lensBoundary    LensName = "boundary-conditions"
+	lensAPIContract LensName = "api-contract-misuse"
+	lensInjection   LensName = "injection/input-validation"
+
+	// lensSkip is the zero value; a rule mapped to lensSkip is excluded from
+	// the leads table. It is never stored.
+	lensSkip LensName = ""
 )
 
 // analyzerSpec describes one static analyzer in the registry.
@@ -89,10 +97,10 @@ type analyzerSpec struct {
 	// cmd is the full argv to execute inside the sandbox (working directory is
 	// the repo root). The command must write SARIF to stdout.
 	cmd []string
-	// ruleLens maps a SARIF ruleId to a lens name, or returns "" to skip the
-	// result. Called once per parsed result. Must be safe for concurrent use
-	// (it is a pure function in all current implementations).
-	ruleLens func(ruleID string) string
+	// ruleLens maps a SARIF ruleId to a LensName, or returns lensSkip ("") to
+	// exclude the result. Called once per parsed result. Must be safe for
+	// concurrent use (it is a pure function in all current implementations).
+	ruleLens func(ruleID string) LensName
 	// timeout bounds the sandbox execution. 0 falls back to defaultAnalyzerTimeout.
 	timeout time.Duration
 }
@@ -141,54 +149,50 @@ var staticcheckSpec = analyzerSpec{
 	timeout:  defaultAnalyzerTimeout,
 }
 
-// staticcheckRuleLens maps a staticcheck rule ID to a lens name.
-// See: https://staticcheck.dev/docs/checks for the full rule taxonomy.
-func staticcheckRuleLens(ruleID string) string {
-	switch {
-	// SA2* — concurrency issues (channel misuse, mutex mistakes, etc.)
-	case strings.HasPrefix(ruleID, "SA2"):
-		return lensConcurrency
+// prefixRule maps a rule-ID prefix to a LensName. An empty Lens means skip.
+// Rules are checked in order; the first matching prefix wins.
+type prefixRule struct {
+	prefix string
+	lens   LensName
+}
 
-	// SA5* — correctness: nil dereferences, incorrect API use, etc.
-	// These map to the nil-safety lens because SA5 covers the same failure
-	// modes: unchecked errors, nil interfaces, invalid conversions.
-	case strings.HasPrefix(ruleID, "SA5"):
-		return lensNilSafety
-
-	// SA1* — incorrect standard library / API use → api-contract-misuse
-	case strings.HasPrefix(ruleID, "SA1"):
-		return lensAPIContract
-
-	// SA4* — unnecessary / unreachable code → correctness, nil-safety proxy
-	case strings.HasPrefix(ruleID, "SA4"):
-		return lensNilSafety
-
-	// SA9* — dubious constructs that may indicate deeper bugs → nil-safety
-	case strings.HasPrefix(ruleID, "SA9"):
-		return lensNilSafety
-
-	// SA3* — test-related issues → api-contract-misuse (test API misuse)
-	case strings.HasPrefix(ruleID, "SA3"):
-		return lensAPIContract
-
-	// SA6* — performance issues; not a high-value lead for bug-finding lenses
-	case strings.HasPrefix(ruleID, "SA6"):
-		return lensAPIContract
-
-	// S1*, ST1* — code simplification / style. These are pure style signals
-	// and are explicitly excluded: they generate noise in the leads table
-	// without pointing at real defects.
-	case strings.HasPrefix(ruleID, "S1"), strings.HasPrefix(ruleID, "ST1"):
-		return "" // skip: style only
-
-	// QF* — quickfix suggestions, also style-adjacent → skip
-	case strings.HasPrefix(ruleID, "QF"):
-		return "" // skip: style / refactor only
-
-	// Default: unmapped staticcheck rule → treat as correctness
-	default:
-		return lensNilSafety
+// lensForPrefix returns the LensName for ruleID by checking exactOverrides first,
+// then prefixRules in order, then falling back to defaultLens.
+func lensForPrefix(ruleID string, exactOverrides map[string]LensName, prefixRules []prefixRule, defaultLens LensName) LensName {
+	if l, ok := exactOverrides[ruleID]; ok {
+		return l
 	}
+	for _, r := range prefixRules {
+		if strings.HasPrefix(ruleID, r.prefix) {
+			return r.lens
+		}
+	}
+	return defaultLens
+}
+
+// staticcheckRuleLens maps a staticcheck rule ID to a LensName.
+// See: https://staticcheck.dev/docs/checks for the full rule taxonomy.
+//
+// Prefix table (first match wins):
+//
+//	SA2* → concurrency; SA5*, SA4*, SA9* → nil-safety; SA1*, SA3*, SA6* → api-contract
+//	S1*, ST1*, QF* → skip (style/refactor)
+//	default → nil-safety
+var staticcheckPrefixRules = []prefixRule{
+	{"SA2", lensConcurrency},
+	{"SA5", lensNilSafety},
+	{"SA1", lensAPIContract},
+	{"SA4", lensNilSafety},
+	{"SA9", lensNilSafety},
+	{"SA3", lensAPIContract},
+	{"SA6", lensAPIContract},
+	{"S1", lensSkip},  // style only
+	{"ST1", lensSkip}, // style only
+	{"QF", lensSkip},  // refactor only
+}
+
+func staticcheckRuleLens(ruleID string) LensName {
+	return lensForPrefix(ruleID, nil, staticcheckPrefixRules, lensNilSafety)
 }
 
 // ruffSpec is the ruff Python linter entry.
@@ -221,62 +225,45 @@ var ruffSpec = analyzerSpec{
 	timeout:  defaultAnalyzerTimeout,
 }
 
-// ruffRuleLens maps a ruff rule ID to a lens name.
+// ruffRuleLens maps a ruff rule ID to a LensName.
 // See: https://docs.astral.sh/ruff/rules/ for the full rule taxonomy.
-func ruffRuleLens(ruleID string) string {
-	switch {
-	// E1*/E2*/E3*/E4*/E5*/E7* and W* — pycodestyle style rules. These are
-	// pure formatting/style signals; excluded to keep leads signal-dense.
-	case strings.HasPrefix(ruleID, "E1"),
-		strings.HasPrefix(ruleID, "E2"),
-		strings.HasPrefix(ruleID, "E3"),
-		strings.HasPrefix(ruleID, "E4"),
-		strings.HasPrefix(ruleID, "E5"),
-		strings.HasPrefix(ruleID, "E7"),
-		strings.HasPrefix(ruleID, "W"):
-		return "" // skip: pycodestyle style only
-
-	// E9* — runtime errors (SyntaxError, IOError, etc.) → real defects
-	case strings.HasPrefix(ruleID, "E9"):
-		return lensNilSafety
-
-	// B* — flake8-bugbear: actual potential bugs, not just style.
-	// Map by sub-family where semantics differ:
-	//   B0xx (general) → nil-safety (e.g. B006 mutable defaults, B007 unused loop var)
-	//   B023 (loop var capture) → concurrency (analogous to Go's loop capture)
-	case ruleID == "B023":
-		return lensConcurrency
-	case strings.HasPrefix(ruleID, "B"):
-		return lensNilSafety
-
-	// F4* — import issues (undefined names from star imports etc.) →
-	//   api-contract-misuse
-	case strings.HasPrefix(ruleID, "F4"):
-		return lensAPIContract
-
-	// F8* — undefined names / unused variables. F821 (undefined name) is a
-	//   real correctness bug; others are less critical but still correctness.
-	case strings.HasPrefix(ruleID, "F8"):
-		return lensNilSafety
-
-	// S* — flake8-bandit security rules: injection, path traversal, exec, etc.
-	case strings.HasPrefix(ruleID, "S"):
-		return lensInjection
-
-	// C9* — McCabe complexity: not a lead on its own → skip
-	case strings.HasPrefix(ruleID, "C9"):
-		return "" // skip: complexity metric only
-
-	// I* (isort), D* (pydocstyle), N* (naming) — all style/convention → skip
-	case strings.HasPrefix(ruleID, "I"),
-		strings.HasPrefix(ruleID, "D"),
-		strings.HasPrefix(ruleID, "N"):
-		return "" // skip: style / convention
-
-	// Default: unmapped rule → treat as correctness
-	default:
-		return lensNilSafety
+//
+// Exact overrides (checked before prefixes):
+//
+//	B023 → concurrency (loop variable capture, analogous to Go's loop capture)
+//
+// Prefix table (first match wins):
+//
+//	E1..E5, E7, W → skip (pycodestyle style); E9 → nil-safety
+//	B* → nil-safety; F4* → api-contract; F8* → nil-safety
+//	S* → injection; C9* → skip; I*, D*, N* → skip
+//	default → nil-safety
+var (
+	ruffExactOverrides = map[string]LensName{
+		"B023": lensConcurrency, // loop variable capture → concurrency
 	}
+	ruffPrefixRules = []prefixRule{
+		{"E1", lensSkip},        // pycodestyle style
+		{"E2", lensSkip},        // pycodestyle style
+		{"E3", lensSkip},        // pycodestyle style
+		{"E4", lensSkip},        // pycodestyle style
+		{"E5", lensSkip},        // pycodestyle style
+		{"E7", lensSkip},        // pycodestyle style
+		{"E9", lensNilSafety},   // runtime errors
+		{"W", lensSkip},         // pycodestyle style
+		{"B", lensNilSafety},    // flake8-bugbear (B023 already caught above)
+		{"F4", lensAPIContract}, // import issues
+		{"F8", lensNilSafety},   // undefined names / unused vars
+		{"S", lensInjection},    // flake8-bandit security
+		{"C9", lensSkip},        // McCabe complexity
+		{"I", lensSkip},         // isort
+		{"D", lensSkip},         // pydocstyle
+		{"N", lensSkip},         // naming convention
+	}
+)
+
+func ruffRuleLens(ruleID string) LensName {
+	return lensForPrefix(ruleID, ruffExactOverrides, ruffPrefixRules, lensNilSafety)
 }
 
 // gosecSpec is the gosec Go security analyzer entry.
@@ -311,61 +298,34 @@ var gosecSpec = analyzerSpec{
 	timeout:  defaultAnalyzerTimeout,
 }
 
-// gosecRuleLens maps a gosec rule ID to a lens name.
+// gosecRuleLens maps a gosec rule ID to a LensName.
 // See: https://github.com/securego/gosec#available-rules for the full taxonomy.
 //
-// Precision note: gosec G2xx/G4xx/G5xx rules are high-signal security rules
-// that map directly to the injection lens. G1xx credential rules are also
-// injection-class (hardcoded credentials feed injection paths). G3xx is split
-// by sub-rule: path-traversal rules (G304, G310) are injection-class because
-// the attacker-controlled path is the injection; permission bits (G301-G306,
-// G307) are resource-class because they represent improper access control on
-// resources. G6xx rules are boundary conditions (memory safety). The default
-// maps to nil-safety to match the staticcheck convention.
-func gosecRuleLens(ruleID string) string {
-	switch {
-	// G1xx — hardcoded credentials, insecure random, audit markers → injection
-	// G101: hardcoded credentials; G102: network binding; G106: SSH InsecureIgnoreHostKey;
-	// G107: URL from variable (SSRF precursor); G108-G115: various audit findings.
-	case strings.HasPrefix(ruleID, "G1"):
-		return lensInjection
-
-	// G2xx — injection rules: SQL injection (G201/G202), template injection
-	// (G203), command injection (G204), SSRF (G107 is G1 actually; G2 covers
-	// the injection sinks). All are injection/input-validation.
-	case strings.HasPrefix(ruleID, "G2"):
-		return lensInjection
-
-	// G3xx — file system / permission rules. Split by sub-rule:
-	//   G304 (file path from variable = path traversal) → injection
-	//   G310 (symlink follow = path traversal) → injection
-	//   G301-G303, G305-G309 (permission bits, tempfile, deferred close) → resources
-	case ruleID == "G304", ruleID == "G310":
-		return lensInjection
-	case strings.HasPrefix(ruleID, "G3"):
-		return lensResources
-
-	// G4xx — weak cryptographic primitives (weak rand, MD5/SHA1, DES, RC4,
-	// weak RSA, ECB mode). These feed injection-class exploitability.
-	case strings.HasPrefix(ruleID, "G4"):
-		return lensInjection
-
-	// G5xx — blocklisted imports (unsafe, CGO, net/http/cgi, etc.) → injection
-	case strings.HasPrefix(ruleID, "G5"):
-		return lensInjection
-
-	// G6xx — memory safety:
-	//   G601: implicit memory aliasing (loop variable address) → boundary
-	//   G602: slice access out of bounds → boundary
-	// Other G6xx rules default to boundary as well since they are all
-	// memory-safety / integer-safety concerns.
-	case strings.HasPrefix(ruleID, "G6"):
-		return lensBoundary
-
-	// Default: unknown gosec rule → treat as correctness (nil-safety proxy).
-	default:
-		return lensNilSafety
+// Exact overrides (checked before prefixes):
+//
+//	G304 (path traversal), G310 (symlink) → injection (not resources like other G3xx)
+//
+// Prefix table (first match wins):
+//
+//	G1*, G2*, G4*, G5* → injection; G3* → resource-leaks (except G304/G310 above)
+//	G6* → boundary-conditions; default → nil-safety
+var (
+	gosecExactOverrides = map[string]LensName{
+		"G304": lensInjection, // file path from variable = path traversal
+		"G310": lensInjection, // symlink follow = path traversal
 	}
+	gosecPrefixRules = []prefixRule{
+		{"G1", lensInjection}, // credentials, insecure random, audit markers
+		{"G2", lensInjection}, // injection sinks (SQL, template, command, SSRF)
+		{"G3", lensResources}, // file perms / tempfile (path-traversal overrides above)
+		{"G4", lensInjection}, // weak crypto
+		{"G5", lensInjection}, // blocklisted imports
+		{"G6", lensBoundary},  // memory safety
+	}
+)
+
+func gosecRuleLens(ruleID string) LensName {
+	return lensForPrefix(ruleID, gosecExactOverrides, gosecPrefixRules, lensNilSafety)
 }
 
 // hasGoModule reports whether repoDir contains a root go.mod, indicating a Go
@@ -465,7 +425,7 @@ type analyzerRun struct {
 
 // parsedResult holds the minimal fields extracted from one SARIF result entry.
 type parsedResult struct {
-	ruleID  string
+	ruleID  LensName
 	message string
 	file    string // repo-relative path
 	line    int
@@ -578,7 +538,7 @@ func postLeads(ctx context.Context, results []parsedResult, analyzerName string,
 		}
 		if err := st.AddLead(ctx, store.Lead{
 			PosterLens: poster,
-			TargetLens: r.ruleID, // set by parseSARIF to the lens name
+			TargetLens: string(r.ruleID), // set by parseSARIF to the lens name
 			File:       r.file,
 			Line:       r.line,
 			Note:       r.message,
@@ -637,7 +597,7 @@ type sarifRegMin struct {
 //
 // parsedResult.ruleID is set to the MAPPED LENS NAME (not the original SARIF
 // ruleId), so postLeads can use it directly as the TargetLens field.
-func parseSARIF(stdout string, ruleLens func(string) string) ([]parsedResult, error) {
+func parseSARIF(stdout string, ruleLens func(string) LensName) ([]parsedResult, error) {
 	stdout = strings.TrimSpace(stdout)
 	if stdout == "" {
 		return nil, fmt.Errorf("empty stdout")
@@ -679,7 +639,7 @@ func parseSARIF(stdout string, ruleLens func(string) string) ([]parsedResult, er
 				continue
 			}
 			out = append(out, parsedResult{
-				ruleID:  lens, // store the lens name, not the raw ruleID
+				ruleID:  lens, // store the mapped lens name, not the raw ruleID
 				message: r.Message.Text,
 				file:    file,
 				line:    line,
