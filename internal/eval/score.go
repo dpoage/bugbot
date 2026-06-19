@@ -17,8 +17,8 @@ type Match struct {
 type CaseResult struct {
 	// Name echoes the case name.
 	Name string
-	// Clean reports whether the case was a clean-code case (no seeded bugs).
-	Clean bool
+	// Seeded echoes the case's seeded bug set for downstream Clean() computation.
+	Seeded []SeededBug
 
 	// TruePositives are findings that matched a seeded bug (counted as one per
 	// matched seeded bug; a single finding cannot satisfy two seeded bugs).
@@ -48,6 +48,10 @@ type CaseResult struct {
 	// Findings is the full persisted finding set for the case (post-funnel).
 	Findings []store.Finding
 }
+
+// Clean reports whether the case was a clean-code case (no seeded bugs).
+// Any finding on a clean case is a false positive.
+func (r *CaseResult) Clean() bool { return len(r.Seeded) == 0 }
 
 // Precision is TP / (TP + FP). A case that reported nothing has no opinion to
 // be wrong about, so precision is defined as 1.0 there (vacuously perfect) —
@@ -81,7 +85,7 @@ func (r *CaseResult) Recall() float64 {
 func score(c Case, res *funnel.Result) *CaseResult {
 	out := &CaseResult{
 		Name:      c.Name,
-		Clean:     len(c.Seeded) == 0,
+		Seeded:    c.Seeded,
 		PerLensTP: map[string]int{},
 		PerLensFP: map[string]int{},
 		Stats:     res.Stats,

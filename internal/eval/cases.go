@@ -1,5 +1,7 @@
 package eval
 
+import "github.com/dpoage/bugbot/internal/funnel"
+
 // BuiltinCases returns the built-in scripted benchmark suite. Each case pairs a
 // real Go fixture with the scripted finder/verifier flow that exercises a
 // realistic detection path: finders report the seeded bug (and sometimes a
@@ -56,13 +58,13 @@ func nilDerefCase() Case {
 		realTitle  = "nil deref of cfg in Greeting"
 		decoyTitle = "Greeting allocates unnecessarily"
 	)
-	return Case{
-		Name: "nil-deref-seeded",
-		Repo: FixtureSpec{Files: map[string]string{"greet.go": nilDerefSrc}},
-		Seeded: []SeededBug{
+	return NewScriptedCase(
+		"nil-deref-seeded",
+		FixtureSpec{Files: map[string]string{"greet.go": nilDerefSrc}},
+		[]SeededBug{
 			{File: "greet.go", Line: 10, LineTolerance: 2, Kind: "nil-deref"},
 		},
-		Scripted: &ScriptedCase{
+		&ScriptedCase{
 			Finder: func(c *ScriptedClient) {
 				c.OnSystemContains(lensNil, Candidates(
 					CandidateJSON{
@@ -86,7 +88,9 @@ func nilDerefCase() Case {
 				c.OnTaskContains(decoyTitle, RefutedJSON)
 			},
 		},
-	}
+		funnel.Options{},
+		nil,
+	)
 }
 
 // --- 2. resource leak ----------------------------------------------------
@@ -116,13 +120,13 @@ func ReadFirst(path string, n int) ([]byte, error) {
 
 func resourceLeakCase() Case {
 	const title = "leaked file on short-read error path in ReadFirst"
-	return Case{
-		Name: "resource-leak-seeded",
-		Repo: FixtureSpec{Files: map[string]string{"read.go": resourceLeakSrc}},
-		Seeded: []SeededBug{
+	return NewScriptedCase(
+		"resource-leak-seeded",
+		FixtureSpec{Files: map[string]string{"read.go": resourceLeakSrc}},
+		[]SeededBug{
 			{File: "read.go", Line: 16, LineTolerance: 3, Kind: "resource-leak"},
 		},
-		Scripted: &ScriptedCase{
+		&ScriptedCase{
 			Finder: func(c *ScriptedClient) {
 				c.OnSystemContains(lensResource, Candidates(CandidateJSON{
 					File: "read.go", Line: 16, Title: title,
@@ -136,7 +140,9 @@ func resourceLeakCase() Case {
 				c.OnTaskContains(title, NotRefutedJSON)
 			},
 		},
-	}
+		funnel.Options{},
+		nil,
+	)
 }
 
 // --- 3. off-by-one -------------------------------------------------------
@@ -152,13 +158,13 @@ func Last(xs []int) int {
 
 func offByOneCase() Case {
 	const title = "off-by-one index in Last (xs[len(xs)])"
-	return Case{
-		Name: "off-by-one-seeded",
-		Repo: FixtureSpec{Files: map[string]string{"last.go": offByOneSrc}},
-		Seeded: []SeededBug{
+	return NewScriptedCase(
+		"off-by-one-seeded",
+		FixtureSpec{Files: map[string]string{"last.go": offByOneSrc}},
+		[]SeededBug{
 			{File: "last.go", Line: 6, LineTolerance: 2, Kind: "off-by-one"},
 		},
-		Scripted: &ScriptedCase{
+		&ScriptedCase{
 			Finder: func(c *ScriptedClient) {
 				c.OnSystemContains(lensBoundary, Candidates(CandidateJSON{
 					File: "last.go", Line: 6, Title: title,
@@ -172,7 +178,9 @@ func offByOneCase() Case {
 				c.OnTaskContains(title, NotRefutedJSON)
 			},
 		},
-	}
+		funnel.Options{},
+		nil,
+	)
 }
 
 // --- 4. clean code (FP canary) -------------------------------------------
@@ -200,11 +208,11 @@ func cleanCodeCase() Case {
 	// adversarial refuters are the line of defense, and the gate fails if any
 	// finding survives.
 	const decoy = "Add overflows on large inputs"
-	return Case{
-		Name:   "clean-code",
-		Repo:   FixtureSpec{Files: map[string]string{"math.go": cleanSrc}},
-		Seeded: nil, // clean: ANY finding is a false positive
-		Scripted: &ScriptedCase{
+	return NewScriptedCase(
+		"clean-code",
+		FixtureSpec{Files: map[string]string{"math.go": cleanSrc}},
+		nil, // clean: ANY finding is a false positive
+		&ScriptedCase{
 			Finder: func(c *ScriptedClient) {
 				c.OnSystemContains(lensBoundary, Candidates(CandidateJSON{
 					File: "math.go", Line: 6, Title: decoy,
@@ -219,7 +227,9 @@ func cleanCodeCase() Case {
 				c.OnTaskContains(decoy, RefutedJSON)
 			},
 		},
-	}
+		funnel.Options{},
+		nil,
+	)
 }
 
 // --- 5. multi-bug --------------------------------------------------------
@@ -258,14 +268,14 @@ func multiBugCase() Case {
 		bug1 = "nil deref of n.Next in Sum"
 		bug2 = "off-by-one loop bound in At"
 	)
-	return Case{
-		Name: "multi-bug",
-		Repo: FixtureSpec{Files: map[string]string{"list.go": multiBugSrc}},
-		Seeded: []SeededBug{
+	return NewScriptedCase(
+		"multi-bug",
+		FixtureSpec{Files: map[string]string{"list.go": multiBugSrc}},
+		[]SeededBug{
 			{File: "list.go", Line: 14, LineTolerance: 2, Kind: "nil-deref"},
 			{File: "list.go", Line: 23, LineTolerance: 2, Kind: "off-by-one"},
 		},
-		Scripted: &ScriptedCase{
+		&ScriptedCase{
 			Finder: func(c *ScriptedClient) {
 				c.OnSystemContains(lensNil, Candidates(CandidateJSON{
 					File: "list.go", Line: 14, Title: bug1,
@@ -287,7 +297,9 @@ func multiBugCase() Case {
 				c.OnTaskContains(bug2, NotRefutedJSON)
 			},
 		},
-	}
+		funnel.Options{},
+		nil,
+	)
 }
 
 // --- 6. suppressed finding -----------------------------------------------
@@ -299,17 +311,11 @@ func suppressedCase() Case {
 	// case from the scorer's perspective — no seeded bug to find — so any finding
 	// is a false positive and fails the gate.
 	const realTitle = "nil deref of cfg in Greeting"
-	return Case{
-		Name:   "suppressed-finding",
-		Repo:   FixtureSpec{Files: map[string]string{"greet.go": nilDerefSrc}},
-		Seeded: nil, // suppressed: expect zero findings, so treat as clean
-		Suppress: []Suppression{
-			{
-				Lens: lensNil, File: "greet.go", Line: 10, Title: realTitle,
-				Reason: "eval: maintainer-dismissed known non-bug",
-			},
-		},
-		Scripted: &ScriptedCase{
+	return NewScriptedCase(
+		"suppressed-finding",
+		FixtureSpec{Files: map[string]string{"greet.go": nilDerefSrc}},
+		nil, // suppressed: expect zero findings, so treat as clean
+		&ScriptedCase{
 			Finder: func(c *ScriptedClient) {
 				c.OnSystemContains(lensNil, Candidates(CandidateJSON{
 					File: "greet.go", Line: 10, Title: realTitle,
@@ -324,5 +330,12 @@ func suppressedCase() Case {
 				c.OnTaskContains(realTitle, NotRefutedJSON)
 			},
 		},
-	}
+		funnel.Options{},
+		[]Suppression{
+			{
+				Lens: lensNil, File: "greet.go", Line: 10, Title: realTitle,
+				Reason: "eval: maintainer-dismissed known non-bug",
+			},
+		},
+	)
 }

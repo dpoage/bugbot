@@ -9,6 +9,35 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
+// schedule groups the three independent timer deadlines for the scheduler loop.
+// nextBacklog is nil when the backlog-repro timer is disabled (EnableRepro is
+// false or repro is nil); nil means "never fire", not a magic far-future time.
+type schedule struct {
+	nextPoll    time.Time
+	nextSweep   time.Time
+	nextBacklog *time.Time // nil = disabled
+}
+
+// earliest returns the nearest active deadline and flags which timer fired.
+// When nextBacklog is nil it is excluded from the race.
+func (s schedule) earliest() (deadline time.Time, fireSweep, fireBacklog bool) {
+	// Preserve the original tie-break priority exactly: sweep wins ties over
+	// backlog, backlog over poll. A nil nextBacklog (disabled) never wins.
+	sweepLEPoll := !s.nextSweep.After(s.nextPoll)
+	sweepLEBacklog := s.nextBacklog == nil || !s.nextSweep.After(*s.nextBacklog)
+	fireSweep = sweepLEPoll && sweepLEBacklog
+	fireBacklog = !fireSweep && s.nextBacklog != nil && !s.nextBacklog.After(s.nextPoll)
+	switch {
+	case fireSweep:
+		deadline = s.nextSweep
+	case fireBacklog:
+		deadline = *s.nextBacklog
+	default:
+		deadline = s.nextPoll
+	}
+	return deadline, fireSweep, fireBacklog
+}
+
 // Run drives the scheduler until ctx is cancelled, at which point it returns
 // nil (graceful stop). A real error — one that means the loop can no longer make
 // progress, such as a failure to read the last-seen watermark — is returned so
@@ -20,7 +49,7 @@ import (
 // its persistence before Run returns — the daemon never kills work mid-write.
 //
 // The backlog-repro timer only fires when EnableRepro is set; otherwise it is
-// pushed infinitely far into the future so it never wins the deadline race.
+// disabled (nil) so it never wins the deadline race.
 func (d *Daemon) Run(ctx context.Context) error {
 	now := d.clock.now()
 	// Close the daemon-lifetime CodeNav (LSP manager) exactly once when Run exits,
@@ -31,10 +60,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}()
 
-	// Sweep fires once at startup if the store has no prior sweep run; otherwise
-	// it waits a full SweepInterval. Poll always starts one interval out.
-	nextPoll := now.Add(d.cfg.PollInterval)
-
 	hadSweep, err := hasSweepRun(ctx, d.store)
 	if err != nil {
 		// A cancellation racing startup is a graceful stop, not a failure.
@@ -43,20 +68,22 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 		return err
 	}
-	var nextSweep time.Time
-	if hadSweep {
-		nextSweep = now.Add(d.cfg.SweepInterval)
-	} else {
-		nextSweep = now // due immediately
-	}
 
-	// Backlog-repro timer: active only when repro is enabled. When disabled,
-	// push the deadline far into the future so it never wins the race.
-	var nextBacklog time.Time
-	if d.cfg.EnableRepro && d.repro != nil {
-		nextBacklog = now.Add(d.cfg.ReproBacklogInterval)
-	} else {
-		nextBacklog = now.Add(1<<62 - 1) // effectively never
+	// Build the initial schedule. Sweep fires immediately at startup if the
+	// store has no prior sweep run; otherwise it waits a full SweepInterval.
+	// Poll always starts one interval out. The backlog timer is only active
+	// when EnableRepro is set; otherwise nextBacklog is nil (disabled).
+	sched := schedule{
+		nextPoll:  now.Add(d.cfg.PollInterval),
+		nextSweep: now, // due immediately; overridden below if hadSweep
+	}
+	if hadSweep {
+		sched.nextSweep = now.Add(d.cfg.SweepInterval)
+	}
+	reproEnabled := d.cfg.EnableRepro && d.repro != nil
+	if reproEnabled {
+		t := now.Add(d.cfg.ReproBacklogInterval)
+		sched.nextBacklog = &t
 	}
 
 	d.log.Info("daemon: started",
@@ -67,36 +94,25 @@ func (d *Daemon) Run(ctx context.Context) error {
 		"per_day_tokens", d.cfg.PerDayTokens,
 		"startup_sweep", !hadSweep,
 		"sinks", len(d.sinks),
-		"repro", d.cfg.EnableRepro && d.repro != nil,
+		"repro", reproEnabled,
 		"repro_backlog_interval", d.cfg.ReproBacklogInterval.String(),
 	)
 
 	for {
 		now = d.clock.now()
-		// Emit the schedule event. NextBacklog is zero when the backlog timer is
-		// effectively-never (repro disabled), keeping the field absent from JSON
-		// and clean for consumers that only care about poll/sweep.
+		// Emit the schedule event. NextBacklog is zero when repro is disabled,
+		// keeping the field absent from JSON for consumers that only care about
+		// poll/sweep.
 		schedEv := progress.Event{
-			Kind: progress.KindCycleScheduled, NextPoll: nextPoll, NextSweep: nextSweep,
+			Kind: progress.KindCycleScheduled, NextPoll: sched.nextPoll, NextSweep: sched.nextSweep,
 		}
-		if d.cfg.EnableRepro && d.repro != nil {
-			schedEv.NextBacklog = nextBacklog
+		if sched.nextBacklog != nil {
+			schedEv.NextBacklog = *sched.nextBacklog
 		}
 		progress.Emit(d.prog, schedEv)
 
-		// Pick the nearest deadline; wait for it (or cancellation).
-		// Three-way: poll, sweep, backlog.
-		fireSweep := !nextSweep.After(nextPoll) && !nextSweep.After(nextBacklog)
-		fireBacklog := !fireSweep && !nextBacklog.After(nextPoll)
-		var deadline time.Time
-		switch {
-		case fireSweep:
-			deadline = nextSweep
-		case fireBacklog:
-			deadline = nextBacklog
-		default:
-			deadline = nextPoll
-		}
+		// Pick the nearest active deadline and wait for it (or cancellation).
+		deadline, fireSweep, fireBacklog := sched.earliest()
 		wait := deadline.Sub(now)
 		if wait < 0 {
 			wait = 0
@@ -121,7 +137,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		switch {
 		case fireSweep:
 			d.runSweep(ctx)
-			nextSweep = d.clock.now().Add(d.cfg.SweepInterval)
+			sched.nextSweep = d.clock.now().Add(d.cfg.SweepInterval)
 		case fireBacklog:
 			// Gate backlog on day budget: if the budget is exhausted we skip and
 			// reschedule — the backlog will be retried at the next interval.
@@ -129,15 +145,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 				sentinel := cycleResult{kind: store.ScanTargeted}
 				if d.dayBudgetExhausted(ctx, &sentinel) {
 					d.log.Info("daemon: repro backlog skipped: day budget exhausted")
-					nextBacklog = d.clock.now().Add(d.cfg.ReproBacklogInterval)
+					t := d.clock.now().Add(d.cfg.ReproBacklogInterval)
+					sched.nextBacklog = &t
 					break
 				}
 			}
 			d.runReproBacklog(ctx)
-			nextBacklog = d.clock.now().Add(d.cfg.ReproBacklogInterval)
+			t := d.clock.now().Add(d.cfg.ReproBacklogInterval)
+			sched.nextBacklog = &t
 		default:
 			d.runPoll(ctx)
-			nextPoll = d.clock.now().Add(d.nextPollDelay())
+			sched.nextPoll = d.clock.now().Add(d.nextPollDelay())
 		}
 	}
 }

@@ -102,9 +102,20 @@ type SeededBug struct {
 	Kind string
 }
 
+// CaseKind identifies which variant of Case is active.
+type CaseKind int
+
+const (
+	// CaseKindScripted drives the funnel with per-case ScriptedClients.
+	CaseKindScripted CaseKind = iota + 1
+	// CaseKindRecorded replays captured agent.Transcript recordings.
+	CaseKindRecorded
+)
+
 // Case is one evaluation scenario: a fixture repository plus the ground-truth
 // bugs seeded into it and the scripted/recorded behavior that drives the funnel
-// over it.
+// over it. Exactly one of Scripted or Recorded must be non-nil; use
+// NewScriptedCase or NewRecordedCase to construct.
 type Case struct {
 	// Name identifies the case in reports and test output. Must be unique within
 	// a suite.
@@ -120,6 +131,8 @@ type Case struct {
 	// zero (see RunCase).
 	Options funnel.Options
 
+	// kind is the active variant; set by constructors.
+	kind CaseKind
 	// Scripted supplies the finder/verifier behavior for ModeScripted. Required
 	// in scripted mode; ignored in recorded mode.
 	Scripted *ScriptedCase
@@ -131,6 +144,52 @@ type Case struct {
 	// before the run (the suppressed-finding scenario). Each entry is built with
 	// store.Fingerprint(lens, file, line, title).
 	Suppress []Suppression
+}
+
+// Kind returns the active variant of the Case.
+func (c Case) Kind() CaseKind { return c.kind }
+
+// NewScriptedCase returns a Case configured for scripted mode. sc may be nil
+// if the case needs no scripted routes (empty scripted behavior is valid).
+func NewScriptedCase(name string, repo FixtureSpec, seeded []SeededBug, sc *ScriptedCase, opts funnel.Options, suppress []Suppression) Case {
+	return Case{
+		Name:     name,
+		Repo:     repo,
+		Seeded:   seeded,
+		Options:  opts,
+		kind:     CaseKindScripted,
+		Scripted: sc,
+		Suppress: suppress,
+	}
+}
+
+// NewRecordedCase returns a Case configured for recorded-replay mode.
+func NewRecordedCase(name string, repo FixtureSpec, seeded []SeededBug, rc *RecordedCase, opts funnel.Options, suppress []Suppression) Case {
+	return Case{
+		Name:     name,
+		Repo:     repo,
+		Seeded:   seeded,
+		Options:  opts,
+		kind:     CaseKindRecorded,
+		Recorded: rc,
+		Suppress: suppress,
+	}
+}
+
+// Validate returns an error when exactly-one invariant is violated: both
+// Scripted and Recorded are set, or neither is set (and kind is unset).
+func (c Case) Validate() error {
+	switch {
+	case c.kind == CaseKindScripted && c.Recorded != nil:
+		return fmt.Errorf("eval: case %q: Recorded must be nil in scripted mode", c.Name)
+	case c.kind == CaseKindRecorded && c.Scripted != nil:
+		return fmt.Errorf("eval: case %q: Scripted must be nil in recorded mode", c.Name)
+	case c.kind == 0 && c.Scripted == nil && c.Recorded == nil:
+		return fmt.Errorf("eval: case %q: exactly one of Scripted or Recorded must be set; use NewScriptedCase or NewRecordedCase", c.Name)
+	case c.kind == 0 && c.Scripted != nil && c.Recorded != nil:
+		return fmt.Errorf("eval: case %q: both Scripted and Recorded are set; use NewScriptedCase or NewRecordedCase", c.Name)
+	}
+	return nil
 }
 
 // Suppression is a fingerprint to pre-load into the store's suppression memory
@@ -178,6 +237,9 @@ type RecordedCase struct {
 // "bad" detection score — a missed bug or a false positive is data, not an
 // error.
 func RunCase(ctx context.Context, c Case) (*CaseResult, error) {
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
 	clients, err := buildClients(c)
 	if err != nil {
 		return nil, fmt.Errorf("eval: build clients for %q: %w", c.Name, err)
@@ -244,8 +306,8 @@ func runWithClients(ctx context.Context, c Case, clients funnel.RoleClients) (*C
 
 // buildClients resolves the RoleClients for the case's mode.
 func buildClients(c Case) (funnel.RoleClients, error) {
-	switch {
-	case c.Recorded != nil:
+	switch c.kind {
+	case CaseKindRecorded:
 		if c.Recorded.Finder == nil || c.Recorded.Verifier == nil {
 			return funnel.RoleClients{}, fmt.Errorf("recorded case %q missing a role store", c.Name)
 		}
@@ -253,7 +315,7 @@ func buildClients(c Case) (funnel.RoleClients, error) {
 			Finder:   newReplayRoleClient(c.Recorded.Finder),
 			Verifier: newReplayRoleClient(c.Recorded.Verifier),
 		}, nil
-	default:
+	default: // CaseKindScripted or zero (legacy)
 		finder := NewScriptedClient()
 		verifier := NewScriptedClient()
 		if c.Scripted != nil {

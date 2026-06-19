@@ -12,19 +12,24 @@ import (
 	"github.com/dpoage/bugbot/internal/util"
 )
 
+// skipInfo carries the reason a cycle was skipped. Its presence (non-nil)
+// means the cycle was skipped; a nil pointer means it ran.
+type skipInfo struct {
+	reason string
+}
+
 // cycleResult captures the per-cycle accounting the daemon logs as a one-line
 // summary. It is also the natural assertion surface for tests.
 type cycleResult struct {
-	kind       store.ScanKind
-	skipped    bool   // day budget exhausted -> no LLM work
-	skipReason string // populated when skipped
-	scanRunID  string
-	newF       int // findings surfaced by this cycle's scan
-	closedF    int // findings auto-closed by re-verification
-	promoted   int // findings promoted to T1 this cycle
-	inTokens   int64
-	outTokens  int64
-	cacheRead  int64
+	kind      store.ScanKind
+	skip      *skipInfo // non-nil when skipped (e.g. day budget exhausted)
+	scanRunID string
+	newF      int // findings surfaced by this cycle's scan
+	closedF   int // findings auto-closed by re-verification
+	promoted  int // findings promoted to T1 this cycle
+	inTokens  int64
+	outTokens int64
+	cacheRead int64
 }
 
 // runPoll executes one poll cycle: detect new commits since the last-seen tip
@@ -265,8 +270,7 @@ func (d *Daemon) dayBudgetExhausted(ctx context.Context, res *cycleResult) bool 
 	if totals.Chargeable(d.cfg.CacheReadWeight) < d.cfg.PerDayTokens {
 		return false
 	}
-	res.skipped = true
-	res.skipReason = "per-day token budget exhausted"
+	res.skip = &skipInfo{reason: "per-day token budget exhausted"}
 	d.log.Warn("daemon: DAY BUDGET EXHAUSTED — skipping cycle (no LLM calls)",
 		"kind", string(res.kind),
 		"day_spend", totals.Chargeable(d.cfg.CacheReadWeight),
@@ -302,19 +306,23 @@ func (d *Daemon) emitReport(ctx context.Context, kind store.ScanKind) {
 
 // logCycle writes the one-line structured cycle summary.
 func (d *Daemon) logCycle(res cycleResult, dur time.Duration) {
+	var skipReason string
+	if res.skip != nil {
+		skipReason = res.skip.reason
+	}
 	progress.Emit(d.prog, progress.Event{
 		Kind: progress.KindCycleFinished, ScanKind: string(res.kind),
 		Count:           res.newF,
 		InputTokens:     res.inTokens,
 		OutputTokens:    res.outTokens,
 		CacheReadTokens: res.cacheRead,
-		Message:         res.skipReason,
+		Message:         skipReason,
 		Counts:          &progress.Counts{Verified: res.newF},
 	})
-	if res.skipped {
+	if res.skip != nil {
 		d.log.Info("daemon: cycle skipped",
 			"kind", string(res.kind),
-			"reason", res.skipReason,
+			"reason", res.skip.reason,
 			"duration", dur.String(),
 		)
 		return
