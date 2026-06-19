@@ -104,7 +104,7 @@ def load_data(path):
 		t.Fatal("expected at least one lead to be posted")
 	}
 
-	leads, err := st.PendingLeads(ctx, lensInjection)
+	leads, err := st.PendingLeads(ctx, string(lensInjection))
 	if err != nil {
 		t.Fatalf("PendingLeads(injection): %v", err)
 	}
@@ -117,7 +117,7 @@ def load_data(path):
 		if l.PosterLens != "analyzer:ruff" {
 			t.Errorf("PosterLens = %q, want 'analyzer:ruff'", l.PosterLens)
 		}
-		if l.TargetLens != lensInjection {
+		if l.TargetLens != string(lensInjection) {
 			t.Errorf("TargetLens = %q, want %q", l.TargetLens, lensInjection)
 		}
 	}
@@ -211,7 +211,7 @@ func main() {
 	}
 
 	// G101 and G404 both map to lensInjection; expect at least one injection lead.
-	leads, err := st.PendingLeads(ctx, lensInjection)
+	leads, err := st.PendingLeads(ctx, string(lensInjection))
 	if err != nil {
 		t.Fatalf("PendingLeads(injection): %v", err)
 	}
@@ -224,7 +224,7 @@ func main() {
 		if l.PosterLens != "analyzer:gosec" {
 			t.Errorf("PosterLens = %q, want 'analyzer:gosec'", l.PosterLens)
 		}
-		if l.TargetLens != lensInjection {
+		if l.TargetLens != string(lensInjection) {
 			t.Errorf("TargetLens = %q, want %q", l.TargetLens, lensInjection)
 		}
 	}
