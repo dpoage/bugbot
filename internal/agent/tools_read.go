@@ -119,11 +119,11 @@ func (t *readFileTool) Def() llm.ToolDef {
 
 func (t *readFileTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	var args readFileArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := unmarshalArgs(raw, &args); err != nil {
+		return "", err
 	}
-	if args.Path == "" {
-		return "", fmt.Errorf("path is required")
+	if err := requireField("path", args.Path); err != nil {
+		return "", err
 	}
 	if args.Offset < 0 {
 		return "", fmt.Errorf("offset must be >= 0")
@@ -255,8 +255,8 @@ func (t *listDirTool) Def() llm.ToolDef {
 func (t *listDirTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	var args listDirArgs
 	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &args); err != nil {
-			return "", fmt.Errorf("invalid arguments: %w", err)
+		if err := unmarshalArgs(raw, &args); err != nil {
+			return "", err
 		}
 	}
 

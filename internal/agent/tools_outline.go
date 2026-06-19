@@ -54,26 +54,27 @@ type outlineArgs struct {
 
 func (t *outlineTool) Run(_ context.Context, raw json.RawMessage) (string, error) {
 	var args outlineArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return toolError(fmt.Errorf("invalid arguments: %w", err)), nil
+	if err := unmarshalArgs(raw, &args); err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(args.File) == "" {
-		return toolError(fmt.Errorf("file is required")), nil
+	if err := requireField("file", args.File); err != nil {
+		return "", err
 	}
 
 	abs, err := t.nav.root.resolve(args.File)
 	if err != nil {
-		return toolError(err), nil
+		return "", err
 	}
 
 	if t.nav.outline == nil || !t.nav.outline.Supports(abs) {
-		return toolError(fmt.Errorf("outline: unsupported file type for %s; use grep to search instead", args.File)), nil
+		return "", fmt.Errorf("outline: unsupported file type for %s; use grep to search instead", args.File)
 	}
 
 	entries, err := t.nav.outline.Outline(abs)
 	if err != nil {
-		return toolError(fmt.Errorf("outline: %w", err)), nil
+		return "", fmt.Errorf("outline: %w", err)
 	}
+
 	// Sort by start line so the model sees symbols in top-to-bottom source order,
 	// regardless of what order the backend returned them.
 	sort.Slice(entries, func(i, j int) bool {

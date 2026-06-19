@@ -76,17 +76,17 @@ type findUsagesArgs struct {
 
 func (t *findUsagesTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	var args findUsagesArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return toolError(fmt.Errorf("invalid arguments: %w", err)), nil
+	if err := unmarshalArgs(raw, &args); err != nil {
+		return "", err
 	}
-	if args.File == "" {
-		return toolError(fmt.Errorf("file is required")), nil
+	if err := requireField("file", args.File); err != nil {
+		return "", err
 	}
-	if args.Line < 1 {
-		return toolError(fmt.Errorf("line must be a 1-based line number")), nil
+	if err := requireLineNumber(args.Line); err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(args.Symbol) == "" {
-		return toolError(fmt.Errorf("symbol is required")), nil
+	if err := requireField("symbol", args.Symbol); err != nil {
+		return "", err
 	}
 	n := args.TopN
 	if n <= 0 {
@@ -98,21 +98,21 @@ func (t *findUsagesTool) Run(ctx context.Context, raw json.RawMessage) (string, 
 
 	abs, err := t.nav.root.resolve(args.File)
 	if err != nil {
-		return toolError(err), nil
+		return "", err
 	}
 	lineText, err := readLine(abs, args.Line)
 	if err != nil {
-		return toolError(err), nil
+		return "", err
 	}
 	byteCol, err := symbolColumn(lineText, args.Symbol)
 	if err != nil {
-		return toolError(fmt.Errorf("%s:%d: %w (line is: %s)", args.File, args.Line, err, strings.TrimSpace(lineText))), nil
+		return "", fmt.Errorf("%s:%d: %w (line is: %s)", args.File, args.Line, err, strings.TrimSpace(lineText))
 	}
 	pos := lsp.Position{Line: args.Line - 1, Character: lsp.UTF16Col(lineText, byteCol)}
 
 	res, err := t.nav.nav.References(ctx, abs, pos)
 	if err != nil {
-		return toolError(err), nil
+		return "", err
 	}
 
 	locs := res.Locations

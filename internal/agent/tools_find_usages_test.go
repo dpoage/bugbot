@@ -154,14 +154,11 @@ func TestFindUsagesBadArgs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			raw, _ := json.Marshal(tc.args)
 			out, err := tool.Run(context.Background(), raw)
-			if err != nil {
-				t.Fatalf("Run returned hard error (should use toolError): %v", err)
+			if err == nil {
+				t.Fatalf("Run returned no error; got output: %s", out)
 			}
-			if !strings.HasPrefix(out, "ERROR:") {
-				t.Errorf("expected ERROR: prefix, got: %s", out)
-			}
-			if !strings.Contains(out, tc.want) {
-				t.Errorf("expected %q in error output, got: %s", tc.want, out)
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("expected %q in error, got: %v", tc.want, err)
 			}
 		})
 	}
@@ -170,12 +167,9 @@ func TestFindUsagesBadArgs(t *testing.T) {
 func TestFindUsagesInvalidJSON(t *testing.T) {
 	c, _ := newTestCodeNav(t, map[string]string{"main.go": "package main\n"}, &fakeNavigator{})
 	tool := &findUsagesTool{nav: c}
-	out, err := tool.Run(context.Background(), json.RawMessage(`{bad json`))
-	if err != nil {
-		t.Fatalf("Run returned hard error (should use toolError): %v", err)
-	}
-	if !strings.HasPrefix(out, "ERROR:") {
-		t.Errorf("expected ERROR: prefix for invalid JSON, got: %s", out)
+	_, err := tool.Run(context.Background(), json.RawMessage(`{bad json`))
+	if err == nil {
+		t.Fatalf("Run returned no error for invalid JSON")
 	}
 }
 

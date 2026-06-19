@@ -124,11 +124,11 @@ func (t *gitBlameTool) Def() llm.ToolDef {
 
 func (t *gitBlameTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	var args gitBlameArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := unmarshalArgs(raw, &args); err != nil {
+		return "", err
 	}
-	if args.Path == "" {
-		return "", fmt.Errorf("path is required")
+	if err := requireField("path", args.Path); err != nil {
+		return "", err
 	}
 	if args.LineStart <= 0 {
 		return "", fmt.Errorf("line_start must be >= 1")
@@ -333,8 +333,8 @@ func (t *gitLogTool) Def() llm.ToolDef {
 func (t *gitLogTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	var args gitLogArgs
 	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &args); err != nil {
-			return "", fmt.Errorf("invalid arguments: %w", err)
+		if err := unmarshalArgs(raw, &args); err != nil {
+			return "", err
 		}
 	}
 

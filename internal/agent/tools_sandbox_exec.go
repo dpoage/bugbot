@@ -109,8 +109,8 @@ func (t *SandboxExecTool) Run(ctx context.Context, raw json.RawMessage) (string,
 	}
 
 	var args sandboxExecArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := unmarshalArgs(raw, &args); err != nil {
+		return "", err
 	}
 	if len(args.Cmd) == 0 {
 		return "", fmt.Errorf("cmd is required and must be non-empty")

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
@@ -20,9 +19,6 @@ const (
 	// codeNavMaxResults caps the locations rendered for one query so a
 	// pathological reference list cannot blow the model's context.
 	codeNavMaxResults = 200
-	// codeNavMaxFileBytes bounds files we load to locate a symbol or render a
-	// snippet (matches the grep tool's ceiling for data/binary files).
-	codeNavMaxFileBytes = 5 * 1024 * 1024
 	// codeNavMaxLineBytes caps a rendered source line.
 	codeNavMaxLineBytes = 256
 )
@@ -217,17 +213,17 @@ func (t *codeNavTool) Def() llm.ToolDef {
 
 func (t *codeNavTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	var args codeNavArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := unmarshalArgs(raw, &args); err != nil {
+		return "", err
 	}
-	if args.File == "" {
-		return "", fmt.Errorf("file is required")
+	if err := requireField("file", args.File); err != nil {
+		return "", err
 	}
-	if args.Line < 1 {
-		return "", fmt.Errorf("line must be a 1-based line number")
+	if err := requireLineNumber(args.Line); err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(args.Symbol) == "" {
-		return "", fmt.Errorf("symbol is required")
+	if err := requireField("symbol", args.Symbol); err != nil {
+		return "", err
 	}
 
 	abs, err := t.nav.root.resolve(args.File)
@@ -363,72 +359,6 @@ func sourceLine(cache map[string][]string, path string, line int) string {
 		s = s[:codeNavMaxLineBytes] + "…"
 	}
 	return s
-}
-
-// readFileLines loads a file's lines, bounded by codeNavMaxFileBytes. Errors
-// and oversized files yield nil (snippets are best-effort decoration).
-func readFileLines(path string) []string {
-	info, err := os.Stat(path)
-	if err != nil || info.Size() > codeNavMaxFileBytes {
-		return nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	return strings.Split(string(data), "\n")
-}
-
-// readLine returns the 1-based line from the file at abs, with bounds and size
-// checks that produce model-actionable errors.
-func readLine(abs string, line int) (string, error) {
-	info, err := os.Stat(abs)
-	if err != nil {
-		return "", fmt.Errorf("cannot read file: %w", err)
-	}
-	if info.IsDir() {
-		return "", fmt.Errorf("path is a directory, not a file")
-	}
-	if info.Size() > codeNavMaxFileBytes {
-		return "", fmt.Errorf("file is too large for code navigation (%d bytes)", info.Size())
-	}
-	data, err := os.ReadFile(abs)
-	if err != nil {
-		return "", fmt.Errorf("cannot read file: %w", err)
-	}
-	lines := strings.Split(string(data), "\n")
-	if n := len(lines); n > 0 && lines[n-1] == "" {
-		lines = lines[:n-1]
-	}
-	if line > len(lines) {
-		return "", fmt.Errorf("line %d is past the end of the file (%d lines)", line, len(lines))
-	}
-	return strings.TrimRight(lines[line-1], "\r"), nil
-}
-
-// symbolColumn locates symbol on lineText and returns the byte offset of the
-// identifier the LSP query should target. A dotted symbol ("pkg.Hello",
-// "recv.method") matches as written but the returned offset points at its
-// final segment, since LSP positions must land inside a single identifier
-// token. When the full symbol is absent, the final segment alone is tried so
-// models that over-qualify still succeed.
-func symbolColumn(lineText, symbol string) (int, error) {
-	symbol = strings.TrimSpace(symbol)
-	symbol = strings.TrimSuffix(symbol, "()")
-
-	if off, ok := findIdentifier(lineText, symbol); ok {
-		// Point inside the last identifier segment of a qualified name.
-		if i := strings.LastIndexByte(symbol, '.'); i >= 0 {
-			return off + i + 1, nil
-		}
-		return off, nil
-	}
-	if i := strings.LastIndexByte(symbol, '.'); i >= 0 {
-		if off, ok := findIdentifier(lineText, symbol[i+1:]); ok {
-			return off, nil
-		}
-	}
-	return 0, fmt.Errorf("symbol %q not found on the line", symbol)
 }
 
 // findIdentifier finds the first occurrence of sym in lineText that is not
