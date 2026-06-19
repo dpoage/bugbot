@@ -180,7 +180,7 @@ func runChecks(ctx context.Context, env doctorEnv, runSandboxVerify bool) []chec
 	// repro is configured against a non-custom image. Advisory only — never
 	// affects the exit code (mirrors checkLangTier above).
 	if cfgOK {
-		results = append(results, checkImageToolchain(langs, buildSystems, cfg)...)
+		results = append(results, checkImageToolchain(ctx, env, langs, buildSystems, cfg)...)
 	}
 
 	// 6. Live sandbox toolchain smoke-test (--verify-sandbox only).
@@ -561,19 +561,79 @@ var langImageHints = map[ingest.Language][]string{
 	ingest.LangCPP:        {"gcc", "clang"},
 }
 
+// langToolchainBinaries maps each language that requires an explicit toolchain
+// to the binaries that must be resolvable via `command -v` inside the image.
+// Multiple slices represent "at least one of each group must be present" — here
+// each slice is a single logical requirement. We only probe languages where a
+// missing binary causes every repro/verify to fail in practice.
+var langToolchainBinaries = map[ingest.Language][]string{
+	ingest.LangGo:         {"go"},
+	ingest.LangPython:     {"pip", "pip3"},
+	ingest.LangTypeScript: {"node", "npm"},
+	ingest.LangJavaScript: {"node", "npm"},
+	ingest.LangRust:       {"cargo", "rustc"},
+	ingest.LangJava:       {"java", "javac"},
+	ingest.LangC:          {"gcc", "cc", "clang"},
+	ingest.LangCPP:        {"g++", "c++", "clang++", "cmake"},
+}
+
+// langToolchainSuggestions maps each language to a suggested image that is
+// known to carry its toolchain. Shown in WARN messages when binaries are absent.
+var langToolchainSuggestions = map[ingest.Language]string{
+	ingest.LangGo:         "golang:<ver>-alpine",
+	ingest.LangPython:     "python:3-slim",
+	ingest.LangTypeScript: "node:22-slim",
+	ingest.LangJavaScript: "node:22-slim",
+	ingest.LangRust:       "rust:1-slim",
+	ingest.LangJava:       "eclipse-temurin:21-jdk-alpine",
+	ingest.LangC:          "gcc:13",
+	ingest.LangCPP:        "gcc:13",
+}
+
+// probeImageBinaries checks whether the given binaries exist inside image by
+// running `<rt> run --rm <image> sh -c 'command -v bin1 bin2 ...'` bounded by
+// sandboxProbeTimeout. Returns the list of binaries that are absent. If the
+// image is not present locally the probe is skipped and (nil, true) is returned
+// (callers should emit an INFO skip). On other errors the probe is best-effort:
+// we return the error text as a single "absent" entry so the caller can warn.
+func probeImageBinaries(ctx context.Context, env doctorEnv, rt, image string, bins []string) (absent []string, imageNotLocal bool) {
+	// Check image presence first, same pattern as checkSandbox (image inspect).
+	imgCtx, imgCancel := context.WithTimeout(ctx, sandboxProbeTimeout)
+	defer imgCancel()
+	if _, err := env.runCommand(imgCtx, rt, "image", "inspect", image); err != nil {
+		return nil, true
+	}
+
+	// Image is present; probe each binary individually so we can report which
+	// ones are missing by name.
+	for _, bin := range bins {
+		probeCtx, probeCancel := context.WithTimeout(ctx, sandboxProbeTimeout)
+		_, err := env.runCommand(probeCtx, rt, "run", "--rm", image, "sh", "-c", "command -v "+bin)
+		probeCancel()
+		if err != nil {
+			absent = append(absent, bin)
+		}
+	}
+	return absent, false
+}
+
 // checkImageToolchain cross-checks the configured sandbox image against the
 // repo's detected dominant languages and emits one WARN per language whose
-// expected toolchain hint is absent from the image. It also emits a WARN
-// when a Bazel build is detected under network=none (offline bazel repro is
-// unsupported without a custom image carrying a prefetched repository
-// cache). These are advisory items only — they never affect the exit code
-// (mirrors checkLangTier above). An empty image string or empty langs slice
-// produces no warnings.
-func checkImageToolchain(langs []ingest.Language, buildSystems []ingest.BuildSystem, cfg config.Config) []checkResult {
-	image := strings.ToLower(cfg.Sandbox.Image)
+// expected toolchain hint is absent from the image name. For languages whose
+// image name DOES match a hint, it also runs a binary probe inside the image
+// (bounded by sandboxProbeTimeout) and warns if required binaries are missing.
+// If the image is not present locally the probe is skipped with an INFO result.
+// It also emits a WARN when a Bazel build is detected under network=none.
+// All results are advisory only — they never affect the exit code (mirrors
+// checkLangTier above). An empty image string or empty langs slice produces no
+// results.
+func checkImageToolchain(ctx context.Context, env doctorEnv, langs []ingest.Language, buildSystems []ingest.BuildSystem, cfg config.Config) []checkResult {
+	image := cfg.Sandbox.Image
+	imageLower := strings.ToLower(image)
 	if image == "" {
 		return nil
 	}
+	rt := cfg.Sandbox.Runtime
 	var out []checkResult
 	for _, lang := range langs {
 		hints, ok := langImageHints[lang]
@@ -582,16 +642,43 @@ func checkImageToolchain(langs []ingest.Language, buildSystems []ingest.BuildSys
 		}
 		covered := false
 		for _, h := range hints {
-			if strings.Contains(image, h) {
+			if strings.Contains(imageLower, h) {
 				covered = true
 				break
 			}
 		}
 		if !covered {
+			// Name-match failed: warn without probing (image is clearly wrong family).
 			out = append(out, checkResult{
 				Name:   "image toolchain " + string(lang),
 				Status: statusWarn,
-				Detail: string(lang) + " detected but sandbox image " + cfg.Sandbox.Image + " carries no expected toolchain (expected one of: " + strings.Join(hints, ", ") + ") — repro/verify of its findings will fail in this image",
+				Detail: string(lang) + " detected but sandbox image " + image + " carries no expected toolchain (expected one of: " + strings.Join(hints, ", ") + ") — repro/verify of its findings will fail in this image",
+			})
+			continue
+		}
+
+		// Name-match succeeded: run a binary probe to confirm the toolchain is
+		// actually present (a matching image name is no guarantee).
+		bins, ok := langToolchainBinaries[lang]
+		if !ok || len(bins) == 0 {
+			continue
+		}
+		absent, notLocal := probeImageBinaries(ctx, env, rt, image, bins)
+		if notLocal {
+			out = append(out, checkResult{
+				Name:   "image toolchain probe " + string(lang),
+				Status: statusInfo,
+				Detail: "image " + image + " not present locally; skipping binary probe for " + string(lang) + " toolchain (pull the image first to enable the probe)",
+			})
+			continue
+		}
+		if len(absent) > 0 {
+			suggest := langToolchainSuggestions[lang]
+			detail := string(lang) + " toolchain probe: image " + image + " is missing " + strings.Join(absent, ", ") + " — repro/verify will fail; consider using " + suggest
+			out = append(out, checkResult{
+				Name:   "image toolchain probe " + string(lang),
+				Status: statusWarn,
+				Detail: detail,
 			})
 		}
 	}

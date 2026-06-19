@@ -86,6 +86,10 @@ func allGreenEnv(t *testing.T, cfgPath string) doctorEnv {
 				return "podman info output", nil
 			case name == "podman" && len(args) >= 2 && args[0] == "image" && args[1] == "inspect":
 				return `[{"Id":"sha256:abc"}]`, nil
+			// Binary probe: podman run --rm <image> sh -c "command -v <bin>"
+			// Succeed unconditionally so name-match-passing images don't WARN.
+			case name == "podman" && len(args) >= 4 && args[0] == "run" && args[1] == "--rm":
+				return "/usr/bin/tool", nil
 			}
 			return "", fmt.Errorf("unexpected command: %s %v", name, args)
 		},
@@ -522,7 +526,10 @@ func TestDoctor_ImageToolchain_BazelOfflineWarns(t *testing.T) {
 
 // TestCheckImageToolchain_Direct exercises checkImageToolchain in isolation
 // across a small table of (image, langs, buildSystems) cases so the
-// advisory's exact behavior is locked in independently of runChecks.
+// advisory's exact behavior is locked in independently of runChecks. The
+// runCommand fake makes `image inspect` fail (image not local) so the binary
+// probe is skipped for all name-matched languages; probe-specific behaviour is
+// covered by TestCheckImageToolchainProbe_*.
 func TestCheckImageToolchain_Direct(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -540,11 +547,11 @@ func TestCheckImageToolchain_Direct(t *testing.T) {
 			wantWarn: []string{"image toolchain typescript", "image toolchain python"},
 		},
 		{
-			name:     "all-covering image suppresses warns",
+			name:     "all-covering image suppresses name-match warns",
 			image:    "example.com/stack:golang-node-python",
 			network:  "none",
 			langs:    []ingest.Language{ingest.LangGo, ingest.LangTypeScript, ingest.LangPython},
-			wantWarn: nil,
+			wantWarn: nil, // probe skipped (not local) → INFO only, no WARN
 		},
 		{
 			name:         "bazel + none network warns offline",
@@ -577,36 +584,176 @@ func TestCheckImageToolchain_Direct(t *testing.T) {
 			wantWarn: nil,
 		},
 	}
+	// notLocalRC is an injected runCommand that reports every image as not
+	// present locally (image inspect fails → probe skipped with INFO).
+	notLocalRC := func(_ context.Context, name string, args ...string) (string, error) {
+		if name == "podman" && len(args) >= 2 && args[0] == "image" && args[1] == "inspect" {
+			return "", errors.New("no such image")
+		}
+		return "", fmt.Errorf("unexpected: %s %v", name, args)
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := config.Config{Sandbox: config.Sandbox{Image: tc.image, Network: tc.network}}
-			got := checkImageToolchain(tc.langs, tc.buildSystems, cfg)
-			gotNames := make([]string, 0, len(got))
+			cfg := config.Config{Sandbox: config.Sandbox{Image: tc.image, Network: tc.network, Runtime: "podman"}}
+			env := doctorEnv{runCommand: notLocalRC}
+			got := checkImageToolchain(context.Background(), env, tc.langs, tc.buildSystems, cfg)
+			gotWarnNames := make([]string, 0, len(got))
 			for _, r := range got {
 				if r.hard {
 					t.Errorf("check %q must not be hard", r.Name)
 				}
-				if r.Status != statusWarn {
-					t.Errorf("check %q should be WARN; got %s", r.Name, r.Status)
+				if r.Status == statusWarn {
+					gotWarnNames = append(gotWarnNames, r.Name)
 				}
-				gotNames = append(gotNames, r.Name)
+				// INFO results (probe skipped) are fine and not checked here.
 			}
 			for _, w := range tc.wantWarn {
 				found := false
-				for _, n := range gotNames {
+				for _, n := range gotWarnNames {
 					if strings.Contains(n, w) {
 						found = true
 						break
 					}
 				}
 				if !found {
-					t.Errorf("expected a warn containing %q; got %v", w, gotNames)
+					t.Errorf("expected a warn containing %q; got warns %v", w, gotWarnNames)
 				}
 			}
-			if len(tc.wantWarn) == 0 && len(got) != 0 {
-				t.Errorf("expected no warns; got %v", gotNames)
+			if len(tc.wantWarn) == 0 && len(gotWarnNames) != 0 {
+				t.Errorf("expected no warns; got %v", gotWarnNames)
 			}
 		})
+	}
+}
+
+// makeProbeEnv constructs a minimal doctorEnv with a scripted runCommand for
+// binary-probe tests. imageLocal controls whether `image inspect` succeeds.
+// presentBins is the set of binaries that `command -v <bin>` will find.
+func makeProbeEnv(imageLocal bool, presentBins map[string]bool) doctorEnv {
+	return doctorEnv{
+		runCommand: func(_ context.Context, name string, args ...string) (string, error) {
+			if name == "podman" && len(args) >= 2 && args[0] == "image" && args[1] == "inspect" {
+				if imageLocal {
+					return `[{"Id":"sha256:abc"}]`, nil
+				}
+				return "", errors.New("no such image")
+			}
+			// podman run --rm <image> sh -c "command -v <bin>"
+			// args: [0]=run [1]=--rm [2]=image [3]=sh [4]=-c [5]="command -v <bin>"
+			if name == "podman" && len(args) >= 6 && args[0] == "run" && args[1] == "--rm" {
+				cmd := args[5]
+				bin := strings.TrimPrefix(cmd, "command -v ")
+				if presentBins[bin] {
+					return "/usr/bin/" + bin, nil
+				}
+				return "", errors.New("not found")
+			}
+			return "", fmt.Errorf("unexpected probe: %s %v", name, args)
+		},
+	}
+}
+
+// TestCheckImageToolchainProbe_ToolPresent verifies that when the image name
+// matches AND all required binaries are found inside the image, no WARN is emitted.
+func TestCheckImageToolchainProbe_ToolPresent(t *testing.T) {
+	// python:3-slim matches "python"; pip3 is present.
+	env := makeProbeEnv(true, map[string]bool{"pip": true, "pip3": true})
+	cfg := config.Config{Sandbox: config.Sandbox{Image: "python:3-slim", Runtime: "podman"}}
+	results := checkImageToolchain(context.Background(), env, []ingest.Language{ingest.LangPython}, nil, cfg)
+	for _, r := range results {
+		if r.Status == statusWarn {
+			t.Errorf("all tools present: unexpected WARN %q: %s", r.Name, r.Detail)
+		}
+		if r.hard {
+			t.Errorf("probe result must never be hard: %q", r.Name)
+		}
+	}
+}
+
+// TestCheckImageToolchainProbe_ToolAbsent verifies that when the image name
+// matches but a required binary is absent, a WARN is emitted naming the tool
+// and suggesting an image.
+func TestCheckImageToolchainProbe_ToolAbsent(t *testing.T) {
+	// gcc:13 matches "gcc" (LangCPP hints). cmake and g++ are absent.
+	env := makeProbeEnv(true, map[string]bool{"cc": false, "gcc": true})
+	cfg := config.Config{Sandbox: config.Sandbox{Image: "gcc:13", Runtime: "podman"}}
+	results := checkImageToolchain(context.Background(), env, []ingest.Language{ingest.LangCPP}, nil, cfg)
+	var gotWarn *checkResult
+	for i := range results {
+		r := &results[i]
+		if r.Status == statusWarn && strings.Contains(r.Name, "probe") {
+			gotWarn = r
+		}
+		if r.hard {
+			t.Errorf("probe result must never be hard: %q", r.Name)
+		}
+	}
+	if gotWarn == nil {
+		t.Fatal("expected a probe WARN for absent C++ toolchain binaries; got none")
+	}
+	if !strings.Contains(gotWarn.Detail, "gcc:13") {
+		t.Errorf("warn detail should name the image; got %q", gotWarn.Detail)
+	}
+}
+
+// TestCheckImageToolchainProbe_ImageNotLocal verifies that when the image is
+// not present locally the probe is skipped with an INFO result (not WARN).
+func TestCheckImageToolchainProbe_ImageNotLocal(t *testing.T) {
+	env := makeProbeEnv(false, nil)
+	cfg := config.Config{Sandbox: config.Sandbox{Image: "python:3-slim", Runtime: "podman"}}
+	results := checkImageToolchain(context.Background(), env, []ingest.Language{ingest.LangPython}, nil, cfg)
+	var gotInfo bool
+	for _, r := range results {
+		if r.Status == statusWarn {
+			t.Errorf("image not local: unexpected WARN %q: %s", r.Name, r.Detail)
+		}
+		if r.Status == statusInfo && strings.Contains(r.Name, "probe") {
+			gotInfo = true
+		}
+		if r.hard {
+			t.Errorf("probe result must never be hard: %q", r.Name)
+		}
+	}
+	if !gotInfo {
+		t.Error("expected an INFO skip result when image not local")
+	}
+}
+
+// TestCheckImageToolchainProbe_Timeout verifies that a wedged runCommand does
+// not hang checkImageToolchain beyond the probe timeout. The test must complete
+// well within 30 s (each probe is bounded by sandboxProbeTimeout = 5 s).
+func TestCheckImageToolchainProbe_Timeout(t *testing.T) {
+	env := doctorEnv{
+		runCommand: func(ctx context.Context, name string, args ...string) (string, error) {
+			// image inspect succeeds (image is local).
+			if name == "podman" && len(args) >= 2 && args[0] == "image" && args[1] == "inspect" {
+				return `[{"Id":"sha256:abc"}]`, nil
+			}
+			// All binary probes block until ctx is cancelled.
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	}
+	cfg := config.Config{Sandbox: config.Sandbox{Image: "python:3-slim", Runtime: "podman"}}
+	deadline := time.Now().Add(30 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	results := checkImageToolchain(ctx, env, []ingest.Language{ingest.LangPython}, nil, cfg)
+	if time.Now().After(deadline) {
+		t.Error("checkImageToolchain exceeded 30s — probe did not respect timeout")
+	}
+	// A timeout on the probe counts as the binary being absent → WARN expected.
+	var gotWarn bool
+	for _, r := range results {
+		if r.Status == statusWarn && strings.Contains(r.Name, "probe") {
+			gotWarn = true
+		}
+		if r.hard {
+			t.Errorf("probe result must never be hard: %q", r.Name)
+		}
+	}
+	if !gotWarn {
+		t.Error("expected a WARN after probe timeout (absent binary path)")
 	}
 }
 

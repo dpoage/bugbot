@@ -114,9 +114,18 @@ scan:
 # toolchain INSIDE this image under network=none. A toolchain-less image (such
 # as the debian:stable-slim default below) makes every repro/verify exit with
 # environment_error, so findings silently stay unreproduced. Set image to one
-# that carries the target language's toolchain (Go -> golang:<ver>-alpine,
-# Python -> python:3-slim, Node -> node:22-slim, Rust -> rust:1-slim,
-# C/C++ -> gcc:14). Run "bugbot prime" in the target repo for a tailored pick.
+# that carries the target language's toolchain. Per-language guidance:
+#
+#   Go         golang:<ver>-alpine          requires: go
+#   Python     python:3-slim                requires: pip / pip3
+#   Node/JS    node:22-slim                 requires: node, npm
+#   Rust       rust:1-slim                  requires: cargo, rustc
+#   C          gcc:13                       requires: gcc or cc or clang
+#   C++        gcc:13                       requires: g++/clang++, cmake
+#   Java       eclipse-temurin:21-jdk-alpine requires: java, javac
+#
+# "bugbot doctor" probes the configured image for these binaries and warns if
+# any are missing. Run "bugbot prime" in the target repo for a tailored pick.
 #
 # dep_strategy controls how a NON-vendored repo resolves its external
 # dependencies under network=none. It applies per detected ecosystem (Go
