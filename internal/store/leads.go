@@ -52,7 +52,10 @@ func (s *Store) AddLead(ctx context.Context, l Lead) error {
 		l.ID, l.ScanRunID, l.PosterLens, l.TargetLens, l.File, l.Line, l.Note,
 		l.CreatedAt.Format(timeLayout),
 	)
-	return err
+	if err != nil {
+		return annotateErr(s.path, "add_lead", err)
+	}
+	return nil
 }
 
 // PendingLeads returns all pending leads for the given target lens, ordered
@@ -66,19 +69,10 @@ func (s *Store) PendingLeads(ctx context.Context, targetLens string) ([]Lead, er
 		targetLens,
 	)
 	if err != nil {
-		return nil, err
+		return nil, annotateErr(s.path, "pending_leads", err)
 	}
 	defer func() { _ = rows.Close() }()
-
-	var out []Lead
-	for rows.Next() {
-		l, err := scanLead(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, l)
-	}
-	return out, rows.Err()
+	return scanRows(rows, scanLead)
 }
 
 // ConsumeLeads deletes the given lead IDs in a single transaction. The
@@ -133,17 +127,8 @@ func (s *Store) ListLeads(ctx context.Context) ([]Lead, error) {
 		FROM leads
 		ORDER BY created_at DESC, id DESC`)
 	if err != nil {
-		return nil, err
+		return nil, annotateErr(s.path, "list_leads", err)
 	}
 	defer func() { _ = rows.Close() }()
-
-	var out []Lead
-	for rows.Next() {
-		l, err := scanLead(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, l)
-	}
-	return out, rows.Err()
+	return scanRows(rows, scanLead)
 }

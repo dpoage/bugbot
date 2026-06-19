@@ -40,10 +40,9 @@ func TestUpsertAndGetPublishedIssue(t *testing.T) {
 func TestGetPublishedIssue_NotFound(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
-
-	_, err := st.GetPublishedIssue(ctx, "does-not-exist")
+	_, err := st.GetPublishedIssue(ctx, "missing")
 	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected ErrNotFound, got %v", err)
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
 
@@ -51,34 +50,34 @@ func TestUpsertPublishedIssue_PreservesCreatedAt(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
-	fp := "fp-preserve"
-	if err := st.UpsertPublishedIssue(ctx, fp, 10, "open"); err != nil {
+	fp := "fp-stable"
+	if err := st.UpsertPublishedIssue(ctx, fp, 1, "open"); err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
 	first, err := st.GetPublishedIssue(ctx, fp)
 	if err != nil {
-		t.Fatalf("get first: %v", err)
+		t.Fatalf("first get: %v", err)
 	}
 
-	// Upsert again with a new issue number and closed state.
-	if err := st.UpsertPublishedIssue(ctx, fp, 99, "closed"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, 2, "closed"); err != nil {
 		t.Fatalf("second upsert: %v", err)
 	}
 	second, err := st.GetPublishedIssue(ctx, fp)
 	if err != nil {
-		t.Fatalf("get second: %v", err)
+		t.Fatalf("second get: %v", err)
 	}
 
-	// created_at must not change.
 	if !second.CreatedAt.Equal(first.CreatedAt) {
-		t.Errorf("created_at changed: %v -> %v", first.CreatedAt, second.CreatedAt)
+		t.Errorf("created_at drifted: %s -> %s", first.CreatedAt, second.CreatedAt)
 	}
-	// issue_number and state must update.
-	if second.IssueNumber != 99 {
-		t.Errorf("issue_number = %d, want 99", second.IssueNumber)
+	if second.IssueNumber != 2 {
+		t.Errorf("issue_number = %d, want 2", second.IssueNumber)
 	}
 	if second.State != "closed" {
 		t.Errorf("state = %q, want closed", second.State)
+	}
+	if !second.UpdatedAt.After(first.UpdatedAt) {
+		t.Errorf("updated_at did not advance: %s -> %s", first.UpdatedAt, second.UpdatedAt)
 	}
 }
 
@@ -146,5 +145,49 @@ func TestCountPublishedIssues(t *testing.T) {
 	}
 	if got["open"] != 2 || got["closed"] != 1 || got["pending"] != 1 {
 		t.Errorf("counts = %v", got)
+	}
+}
+
+// TestListPublishedIssues_StableOrderAcrossCalls is a determinism guard for
+// the 89r.5 secondary sort. fingerprint is the primary key so two rows with
+// the same fingerprint cannot exist; the test instead pins the externally
+// observable contract that two consecutive calls return the rows in the
+// same order. Any future schema that removes the PK constraint (so duplicate
+// fingerprints become possible) gets the rowid tiebreak for free, and this
+// test will still pass.
+func TestListPublishedIssues_StableOrderAcrossCalls(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	// Insert a handful of rows in a non-sorted insertion order; with the
+	// fingerprint ASC primary, the list must always return them in
+	// fingerprint order, regardless of insertion order.
+	fps := []string{"zzz", "aaa", "mmm", "bbb", "yyy"}
+	for i, fp := range fps {
+		if err := st.UpsertPublishedIssue(ctx, fp, i+1, "open"); err != nil {
+			t.Fatalf("upsert %q: %v", fp, err)
+		}
+	}
+
+	first, err := st.ListPublishedIssues(ctx)
+	if err != nil {
+		t.Fatalf("list 1: %v", err)
+	}
+	second, err := st.ListPublishedIssues(ctx)
+	if err != nil {
+		t.Fatalf("list 2: %v", err)
+	}
+	if len(first) != len(fps) || len(second) != len(fps) {
+		t.Fatalf("lengths: first=%d second=%d want=%d", len(first), len(second), len(fps))
+	}
+
+	want := []string{"aaa", "bbb", "mmm", "yyy", "zzz"}
+	for i, w := range want {
+		if first[i].Fingerprint != w {
+			t.Errorf("first[%d] = %q, want %q", i, first[i].Fingerprint, w)
+		}
+		if second[i].Fingerprint != w {
+			t.Errorf("second[%d] = %q, want %q", i, second[i].Fingerprint, w)
+		}
 	}
 }

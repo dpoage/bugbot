@@ -33,7 +33,10 @@ func (s *Store) UpsertPublishedIssue(ctx context.Context, fingerprint string, is
 		  updated_at   = excluded.updated_at`,
 		fingerprint, issueNumber, state, now, now,
 	)
-	return err
+	if err != nil {
+		return annotateErr(s.path, "upsert_published_issue", err)
+	}
+	return nil
 }
 
 // GetPublishedIssue returns the published_issues row for fingerprint, or
@@ -50,7 +53,7 @@ func (s *Store) GetPublishedIssue(ctx context.Context, fingerprint string) (Publ
 		return PublishedIssue{}, ErrNotFound
 	}
 	if err != nil {
-		return PublishedIssue{}, err
+		return PublishedIssue{}, annotateErr(s.path, "get_published_issue", err)
 	}
 	var perr error
 	if pi.CreatedAt, perr = parseTime(createdAt); perr != nil {
@@ -63,34 +66,35 @@ func (s *Store) GetPublishedIssue(ctx context.Context, fingerprint string) (Publ
 }
 
 // ListPublishedIssues returns all published_issues rows ordered deterministically
-// by fingerprint (ascending). An empty store returns a nil slice without error.
+// by fingerprint (ascending), tiebroken by rowid so a future schema that
+// permits duplicate fingerprints (or a non-unique secondary key) still
+// returns a stable order. fingerprint is the PK today so the tiebreak is
+// theoretically inactive; the column reference costs nothing and keeps
+// the contract honest if a later migration ever changes the uniqueness.
 func (s *Store) ListPublishedIssues(ctx context.Context) ([]PublishedIssue, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT fingerprint, issue_number, state, created_at, updated_at
 		   FROM published_issues
-		  ORDER BY fingerprint ASC`,
+		  ORDER BY fingerprint ASC, rowid ASC`,
 	)
 	if err != nil {
-		return nil, err
+		return nil, annotateErr(s.path, "list_published_issues", err)
 	}
 	defer func() { _ = rows.Close() }()
-
-	var out []PublishedIssue
-	for rows.Next() {
+	return scanRows(rows, func(r *sql.Rows) (PublishedIssue, error) {
 		var pi PublishedIssue
 		var createdAt, updatedAt string
-		if err := rows.Scan(&pi.Fingerprint, &pi.IssueNumber, &pi.State, &createdAt, &updatedAt); err != nil {
-			return nil, err
+		if err := r.Scan(&pi.Fingerprint, &pi.IssueNumber, &pi.State, &createdAt, &updatedAt); err != nil {
+			return PublishedIssue{}, err
 		}
 		if pi.CreatedAt, err = parseTime(createdAt); err != nil {
-			return nil, err
+			return PublishedIssue{}, err
 		}
 		if pi.UpdatedAt, err = parseTime(updatedAt); err != nil {
-			return nil, err
+			return PublishedIssue{}, err
 		}
-		out = append(out, pi)
-	}
-	return out, rows.Err()
+		return pi, nil
+	})
 }
 
 // CountPublishedIssues tallies published_issues rows by state for the status
@@ -99,17 +103,18 @@ func (s *Store) CountPublishedIssues(ctx context.Context) (map[string]int, error
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT state, COUNT(*) FROM published_issues GROUP BY state`)
 	if err != nil {
-		return nil, err
+		return nil, annotateErr(s.path, "count_published_issues", err)
 	}
 	defer func() { _ = rows.Close() }()
 	out := map[string]int{}
-	for rows.Next() {
+	_, err = scanRows(rows, func(r *sql.Rows) (struct{}, error) {
 		var state string
 		var n int
-		if err := rows.Scan(&state, &n); err != nil {
-			return nil, err
+		if err := r.Scan(&state, &n); err != nil {
+			return struct{}{}, err
 		}
 		out[state] = n
-	}
-	return out, rows.Err()
+		return struct{}{}, nil
+	})
+	return out, err
 }

@@ -120,3 +120,61 @@ func TestIsSuppressed_Unknown(t *testing.T) {
 		t.Fatal("unknown fingerprint should not be suppressed")
 	}
 }
+
+// TestListSuppressions_DeterministicOrderUnderTiedCreatedAt verifies the
+// rowid tiebreak added in 89r.5: when many suppressions share a created_at
+// (e.g. one round of triage-dismissal fired within the same wall-clock tick),
+// ListSuppressions still returns them in a stable order across calls. Without
+// the secondary sort, two calls could legally return tied rows in different
+// orders and tests that snapshot the list would flake.
+func TestListSuppressions_DeterministicOrderUnderTiedCreatedAt(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	// Stamp a fixed wall-clock time on every insert so all created_at collide.
+	// We can't pin nowUTC() from this test (it would be a global hook), so
+	// instead insert via direct SQL and force a known, identical timestamp.
+	fps := []string{"fp-a", "fp-b", "fp-c", "fp-d", "fp-e"}
+	fixed := "2025-01-01T00:00:00Z"
+	for _, fp := range fps {
+		if _, err := st.DB().ExecContext(ctx,
+			`INSERT INTO suppressions (fingerprint, reason, created_at) VALUES (?, ?, ?)`,
+			fp, "tied", fixed); err != nil {
+			t.Fatalf("insert %q: %v", fp, err)
+		}
+	}
+
+	first, err := st.ListSuppressions(ctx)
+	if err != nil {
+		t.Fatalf("list 1: %v", err)
+	}
+	if len(first) != len(fps) {
+		t.Fatalf("first call: got %d rows, want %d", len(first), len(fps))
+	}
+
+	second, err := st.ListSuppressions(ctx)
+	if err != nil {
+		t.Fatalf("list 2: %v", err)
+	}
+	if len(second) != len(fps) {
+		t.Fatalf("second call: got %d rows, want %d", len(second), len(fps))
+	}
+
+	// Order must be stable across calls.
+	for i := range first {
+		if first[i].Fingerprint != second[i].Fingerprint {
+			t.Errorf("position %d: first=%q second=%q (unstable under tied created_at)",
+				i, first[i].Fingerprint, second[i].Fingerprint)
+		}
+	}
+
+	// And it must be deterministic per insertion order: the rowid tiebreak
+	// is DESC to match the primary created_at DESC, so the last-inserted
+	// fingerprint (fp-e) must come back first.
+	want := []string{"fp-e", "fp-d", "fp-c", "fp-b", "fp-a"}
+	for i, w := range want {
+		if first[i].Fingerprint != w {
+			t.Errorf("position %d: got %q, want %q (rowid tiebreak broken)", i, first[i].Fingerprint, w)
+		}
+	}
+}
