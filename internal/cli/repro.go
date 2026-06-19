@@ -26,8 +26,9 @@ import (
 // a large backlog.
 func newReproCmd() *cobra.Command {
 	var (
-		target string
-		maxN   int
+		target        string
+		maxN          int
+		transcriptDir string
 	)
 
 	cmd := &cobra.Command{
@@ -60,6 +61,14 @@ the command exits with a graceful message rather than an error.`,
 			batchSize := cfg.Repro.BacklogBatch
 			if maxN > 0 {
 				batchSize = maxN
+			}
+
+			// --transcript-dir overrides repro.transcript_dir from config. When
+			// set, every reproducer agent's JSONL transcript is auto-saved there
+			// (one file per finding per attempt), independent of target language —
+			// the seam for diagnosing why a finding did or did not reproduce.
+			if transcriptDir != "" {
+				cfg.Repro.TranscriptDir = transcriptDir
 			}
 
 			runtime, ok := sandbox.Detect()
@@ -101,6 +110,9 @@ the command exits with a graceful message rather than an error.`,
 				"\nRepro backlog: %d eligible, attempting %d (max=%d, runtime=%s)...\n",
 				len(backlog), len(batch), batchSize, runtime,
 			)
+			if cfg.Repro.TranscriptDir != "" {
+				_, _ = fmt.Fprintf(out, "Transcripts: %s\n", cfg.Repro.TranscriptDir)
+			}
 
 			summary, err := rd.repro.PromoteAll(ctx, st, batch)
 			if err != nil {
@@ -120,6 +132,9 @@ the command exits with a graceful message rather than an error.`,
 	addTargetFlag(cmd, &target)
 	cmd.Flags().IntVar(&maxN, "max", 0,
 		"maximum findings to attempt (0 = use repro.backlog_batch from config)")
+	cmd.Flags().StringVar(&transcriptDir, "transcript-dir", "",
+		"write each reproducer agent transcript (JSONL) to this directory for "+
+			"post-hoc diagnosis; overrides repro.transcript_dir (empty = use config / disabled)")
 
 	return cmd
 }

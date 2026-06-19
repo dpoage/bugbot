@@ -930,3 +930,44 @@ func TestReproducerClose_Idempotent(t *testing.T) {
 		t.Errorf("nil Close: %v", err)
 	}
 }
+
+// TestPromoteAll_WritesAgentTranscript proves the TranscriptDir option is
+// honored end-to-end: when set, the reproducer agent auto-saves its JSONL
+// transcript so an operator can later diagnose why a finding did or did not
+// reproduce. The mechanism is language-agnostic — the agent runner saves the
+// transcript around its own turns, independent of the plan's target ecosystem;
+// the plan fixture here is merely a convenient valid plan.
+func TestPromoteAll_WritesAgentTranscript(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	finding := seedFinding(t, st)
+	repoDir := newRepoDir(t)
+	client := newScriptedClient(planBody(t, goodPlan()))
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "--- FAIL: TestBug\nFAIL",
+	}})
+
+	trDir := t.TempDir()
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir(), TranscriptDir: trDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.PromoteAll(ctx, st, []store.Finding{finding}); err != nil {
+		t.Fatalf("PromoteAll: %v", err)
+	}
+
+	entries, err := os.ReadDir(trDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonl := 0
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+			jsonl++
+		}
+	}
+	if jsonl == 0 {
+		t.Fatalf("TranscriptDir set but no .jsonl transcript written to %s (entries: %v)", trDir, entries)
+	}
+}
