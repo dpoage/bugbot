@@ -192,3 +192,29 @@ func TestWithRetry_DefaultsRequestTimeout(t *testing.T) {
 		t.Errorf("RequestTimeout = %v, want default %v", rc.cfg.RequestTimeout, DefaultRequestTimeout)
 	}
 }
+
+// TestWithRetry_JitterClamped verifies that WithRetry clamps Jitter to [0,1].
+func TestWithRetry_JitterClamped(t *testing.T) {
+	tests := []struct {
+		name  string
+		input float64
+		want  float64
+	}{
+		{"negative clamped to 0", -0.5, 0},
+		{"above 1 clamped to 1", 1.5, 1},
+		{"zero preserved", 0, 0},
+		{"one preserved", 1, 1},
+		{"valid mid-range preserved", 0.2, 0.2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rc, ok := WithRetry(&fakeClient{}, RetryConfig{MaxAttempts: 1, Jitter: tc.input}).(*retryClient)
+			if !ok {
+				t.Fatal("WithRetry did not return a *retryClient")
+			}
+			if rc.cfg.Jitter != tc.want {
+				t.Errorf("Jitter = %v, want %v", rc.cfg.Jitter, tc.want)
+			}
+		})
+	}
+}

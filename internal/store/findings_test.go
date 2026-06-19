@@ -131,14 +131,33 @@ func TestUpsertFinding_CorroboratingLensesRoundTrip(t *testing.T) {
 	}
 }
 
-// A lens name containing a comma must not split into phantom entries on
-// read-back; encode sanitizes the comma to a semicolon so the list length is
-// preserved and the corruption is visible rather than silent.
-func TestEncodeLenses_CommaSanitized(t *testing.T) {
-	got := decodeLenses(encodeLenses([]string{"type-safety,bounds", "concurrency"}))
-	want := []string{"type-safety;bounds", "concurrency"}
+// JSON encoding preserves lens names verbatim, including commas — they no longer
+// need sanitization. Verify round-trip fidelity for a lens containing a comma.
+func TestEncodeLenses_JSONRoundTrip(t *testing.T) {
+	input := []string{"type-safety,bounds", "concurrency"}
+	got := decodeLenses(encodeLenses(input))
+	if !equalStrings(got, input) {
+		t.Errorf("JSON round-trip = %v, want %v", got, input)
+	}
+}
+
+// decodeLenses must fall back to comma-split for legacy rows (no leading '[').
+func TestDecodeLenses_LegacyCommaFallback(t *testing.T) {
+	legacy := "alpha,beta,gamma"
+	got := decodeLenses(legacy)
+	want := []string{"alpha", "beta", "gamma"}
 	if !equalStrings(got, want) {
-		t.Errorf("round-trip = %v, want %v", got, want)
+		t.Errorf("legacy decode = %v, want %v", got, want)
+	}
+}
+
+// decodeLenses must parse JSON-encoded rows produced by the new encoder.
+func TestDecodeLenses_JSONEncoded(t *testing.T) {
+	encoded := encodeLenses([]string{"foo", "bar,baz"})
+	got := decodeLenses(encoded)
+	want := []string{"foo", "bar,baz"}
+	if !equalStrings(got, want) {
+		t.Errorf("JSON decode = %v, want %v", got, want)
 	}
 }
 

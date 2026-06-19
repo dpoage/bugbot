@@ -136,7 +136,7 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 	snap := progress.NewSnapshotSink(storageDir(cfg))
 	var (
 		pane     *progress.PaneRenderer
-		liveSink progress.Sink
+		liveSink progress.EventSink
 	)
 	if progress.IsTerminal(out) {
 		pane = progress.NewPaneRenderer(out, 0)
@@ -816,7 +816,7 @@ func buildScanChangeContext(ctx context.Context, repo *ingest.Repo, fromSHA, toS
 //
 // The seed step is always-on (no config knob in v1) but requires a container
 // runtime: if no runtime is available the step is skipped silently.
-func runAnalyzerSeed(ctx context.Context, cfg config.Config, repoDir string, st *store.Store, sink progress.Sink) {
+func runAnalyzerSeed(ctx context.Context, cfg config.Config, repoDir string, st *store.Store, sink progress.EventSink) {
 	runtime, ok := sandbox.Detect()
 	if !ok {
 		// No container runtime: skip seeding silently. The scan still runs; it
@@ -860,7 +860,7 @@ func runAnalyzerSeed(ctx context.Context, cfg config.Config, repoDir string, st 
 // is a pure-Go, in-process pass over the repository snapshot, so it always
 // runs. All failure modes degrade to a logged skip — it never returns an error
 // and never blocks the scan.
-func runContradictionSeed(ctx context.Context, cfg config.Config, repo *ingest.Repo, st *store.Store, sink progress.Sink) {
+func runContradictionSeed(ctx context.Context, cfg config.Config, repo *ingest.Repo, st *store.Store, sink progress.EventSink) {
 	snap, err := repo.Snapshot(ctx, ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude})
 	if err != nil {
 		progress.Emit(sink, progress.Event{

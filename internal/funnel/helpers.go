@@ -18,7 +18,7 @@ import (
 // emitAgentFinished emits an agent-finished progress event with the run's token
 // usage, wall-clock duration, and error (if any). outcome may be nil when the
 // run failed before producing one; tokens then default to zero.
-func emitAgentFinished(sink progress.Sink, role, label string, outcome *agent.Outcome, start time.Time, err error) {
+func emitAgentFinished(sink progress.EventSink, role, label string, outcome *agent.Outcome, start time.Time, err error) {
 	if sink == nil {
 		return
 	}
@@ -40,7 +40,7 @@ func emitAgentFinished(sink progress.Sink, role, label string, outcome *agent.Ou
 // carrying the candidate count so live status counters can tick per-unit during
 // the hypothesize stage. candidates is non-zero only on a successful (finderOK)
 // run; callers pass zero for error/parse-fail/budget-stop paths.
-func emitFinderAgentFinished(sink progress.Sink, label string, outcome *agent.Outcome, start time.Time, err error, candidates int) {
+func emitFinderAgentFinished(sink progress.EventSink, label string, outcome *agent.Outcome, start time.Time, err error, candidates int) {
 	if sink == nil {
 		return
 	}

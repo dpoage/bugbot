@@ -37,7 +37,11 @@
 // which is the building block for the eval harness.
 package agent
 
-import "github.com/dpoage/bugbot/internal/llm"
+import (
+	"fmt"
+
+	"github.com/dpoage/bugbot/internal/llm"
+)
 
 // Default limits applied when a Runner is constructed with zero-value limits.
 const (
@@ -132,13 +136,19 @@ const (
 // Outcome is the result of a [Runner.Run]. A truncated run is still a valid
 // outcome: FinalText holds whatever the model produced last, and the Transcript
 // captures the full interaction.
+//
+// Invariant: Truncated == true implies TruncationReason != "". This is enforced
+// by [Runner.finishTruncated], the sole point that sets Truncated. Callers that
+// construct an Outcome directly (e.g. tests) should satisfy this or call
+// [Outcome.Validate] to surface a violation early.
 type Outcome struct {
 	// FinalText is the model's last assistant text. On a clean finish it is the
 	// model's answer; on truncation it is the most recent assistant text (which
 	// may be empty if the model only ever requested tools).
 	FinalText string
 	// Truncated reports whether the run stopped because it hit a limit rather
-	// than the model finishing its turn.
+	// than the model finishing its turn. When true, TruncationReason MUST be
+	// non-empty (one of the Trunc* constants).
 	Truncated bool
 	// TruncationReason is one of the Trunc* constants when Truncated is true,
 	// otherwise empty.
@@ -158,4 +168,14 @@ type Outcome struct {
 	LastStopReason llm.StopReason
 	// Transcript is the full ordered record of the run. Never nil.
 	Transcript *Transcript
+}
+
+// Validate checks the Outcome's internal invariants. It returns a non-nil error
+// when Truncated is true but TruncationReason is empty, which would leave
+// callers unable to distinguish stop causes.
+func (o *Outcome) Validate() error {
+	if o.Truncated && o.TruncationReason == "" {
+		return fmt.Errorf("agent: Outcome invariant violated: Truncated is true but TruncationReason is empty")
+	}
+	return nil
 }

@@ -84,6 +84,13 @@ func WithRetry(c Client, cfg RetryConfig) Client {
 	if cfg.RequestTimeout <= 0 {
 		cfg.RequestTimeout = DefaultRequestTimeout
 	}
+	// Clamp Jitter to [0,1]: values outside this range produce nonsensical
+	// backoff factors (negative delay or unbounded amplification).
+	if cfg.Jitter < 0 {
+		cfg.Jitter = 0
+	} else if cfg.Jitter > 1 {
+		cfg.Jitter = 1
+	}
 	return &retryClient{inner: c, cfg: cfg}
 }
 
