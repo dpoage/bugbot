@@ -60,14 +60,18 @@ func (s *Store) getPackageSummariesChunk(ctx context.Context, pkgs []string, out
 	}
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return err
+		return annotateErr(s.path, "get_package_summaries", err)
 	}
 	defer func() { _ = rows.Close() }()
+	// Chunk-accumulation into a shared out map: scanRows returns a fresh slice
+	// per call and would force the caller to merge slices across chunks.
+	// The manual loop stays; annotateErr gives it the same error surface as
+	// the rest of the package.
 	for rows.Next() {
 		var ps PackageSummary
 		var updatedAt string
 		if err := rows.Scan(&ps.Pkg, &ps.Fingerprint, &ps.Summary, &ps.Model, &updatedAt); err != nil {
-			return err
+			return annotateErr(s.path, "get_package_summaries", err)
 		}
 		ps.UpdatedAt, err = parseTime(updatedAt)
 		if err != nil {
@@ -108,7 +112,7 @@ func (s *Store) UpsertPackageSummaries(ctx context.Context, sums []PackageSummar
 			  model       = excluded.model,
 			  updated_at  = excluded.updated_at`)
 		if err != nil {
-			return err
+			return annotateErr(s.path, "upsert_package_summaries", err)
 		}
 		defer func() { _ = stmt.Close() }()
 
@@ -121,7 +125,7 @@ func (s *Store) UpsertPackageSummaries(ctx context.Context, sums []PackageSummar
 			if _, err := stmt.ExecContext(ctx,
 				ps.Pkg, ps.Fingerprint, ps.Summary, ps.Model, updatedAt,
 			); err != nil {
-				return err
+				return annotateErr(s.path, "upsert_package_summaries", err)
 			}
 		}
 		return nil
@@ -131,6 +135,9 @@ func (s *Store) UpsertPackageSummaries(ctx context.Context, sums []PackageSummar
 // ListPackageSummaries returns every persisted package summary, ordered by
 // package path. Used by `bugbot cartography` to surface the cartographer's
 // cached output; the scan pipeline reads by key via GetPackageSummaries.
+//
+// ORDER BY pkg is the unique primary key, so the ordering is already total
+// and deterministic without a rowid tiebreak.
 func (s *Store) ListPackageSummaries(ctx context.Context) ([]PackageSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT pkg, fingerprint, summary, model, updated_at
@@ -139,17 +146,16 @@ func (s *Store) ListPackageSummaries(ctx context.Context) ([]PackageSummary, err
 		return nil, annotateErr(s.path, "list_package_summaries", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var out []PackageSummary
-	for rows.Next() {
+	return scanRows(rows, func(r *sql.Rows) (PackageSummary, error) {
 		var ps PackageSummary
 		var updatedAt string
-		if err := rows.Scan(&ps.Pkg, &ps.Fingerprint, &ps.Summary, &ps.Model, &updatedAt); err != nil {
-			return nil, annotateErr(s.path, "list_package_summaries", err)
+		if err := r.Scan(&ps.Pkg, &ps.Fingerprint, &ps.Summary, &ps.Model, &updatedAt); err != nil {
+			return PackageSummary{}, err
 		}
+		var err error
 		if ps.UpdatedAt, err = parseTime(updatedAt); err != nil {
-			return nil, err
+			return PackageSummary{}, err
 		}
-		out = append(out, ps)
-	}
-	return out, rows.Err()
+		return ps, nil
+	})
 }
