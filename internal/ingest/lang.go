@@ -27,6 +27,12 @@ const (
 	LangSwift      Language = "swift"
 	LangKotlin     Language = "kotlin"
 	LangElixir     Language = "elixir"
+	LangZig        Language = "zig"
+	LangGleam      Language = "gleam"
+	LangScala      Language = "scala"
+	LangDart       Language = "dart"
+	LangLua        Language = "lua"
+	LangObjC       Language = "objc"
 	LangShell      Language = "shell"
 	LangOther      Language = "other"
 )
@@ -63,6 +69,14 @@ var extLang = map[string]Language{
 	".kts":   LangKotlin,
 	".ex":    LangElixir,
 	".exs":   LangElixir,
+	".zig":   LangZig,
+	".gleam": LangGleam,
+	".scala": LangScala,
+	".sc":    LangScala, // also SuperCollider — we accept Scala as the classification; content-sniffing is out of scope
+	".dart":  LangDart,
+	".lua":   LangLua,
+	".m":     LangObjC, // also MATLAB/Mathematica — we accept Objective-C as the classification; content-sniffing is out of scope
+	".mm":    LangObjC,
 	".sh":    LangShell,
 	".bash":  LangShell,
 }

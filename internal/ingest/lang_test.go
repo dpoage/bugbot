@@ -22,6 +22,12 @@ func TestExtensionsForLanguage(t *testing.T) {
 		{LangC, []string{".c", ".h"}, false},
 		{LangCPP, []string{".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}, false},
 		{LangElixir, []string{".ex", ".exs"}, false},
+		{LangZig, []string{".zig"}, false},
+		{LangGleam, []string{".gleam"}, false},
+		{LangScala, []string{".sc", ".scala"}, false},
+		{LangDart, []string{".dart"}, false},
+		{LangLua, []string{".lua"}, false},
+		{LangObjC, []string{".m", ".mm"}, false},
 		{LangOther, nil, true},
 	}
 
@@ -80,6 +86,15 @@ func TestDetectLanguage(t *testing.T) {
 		{"x.ex", LangElixir},
 		{"a/b/c.exs", LangElixir},
 		{"foo.rs", LangRust},
+		{"foo.h", LangC}, // .h stays LangC even though Obj-C also uses headers
+		{"foo.zig", LangZig},
+		{"foo.gleam", LangGleam},
+		{"foo.scala", LangScala},
+		{"foo.sc", LangScala},
+		{"foo.dart", LangDart},
+		{"foo.lua", LangLua},
+		{"foo.m", LangObjC},
+		{"foo.mm", LangObjC},
 		{"foo", LangOther},         // extensionless
 		{"foo.unknown", LangOther}, // unknown extension
 	}
