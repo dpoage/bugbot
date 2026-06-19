@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/dpoage/bugbot/internal/llm"
@@ -53,8 +52,8 @@ func (s statusNoteTool) Run(_ context.Context, args json.RawMessage) (string, er
 	var params struct {
 		Note string `json:"note"`
 	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return "", fmt.Errorf("status_note: parse args: %w", err)
+	if err := unmarshalArgs(args, &params); err != nil {
+		return "", err
 	}
 
 	// Sanitize: collapse whitespace to a single line, truncate to 120 runes.

@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/dpoage/bugbot/internal/llm"
 )
@@ -35,6 +37,35 @@ type Tool interface {
 // Tool returns.
 func toolError(err error) string {
 	return "ERROR: " + err.Error()
+}
+
+// unmarshalArgs decodes raw JSON tool arguments into dst. It returns a
+// well-formed error the runner will surface as "ERROR: invalid arguments: …"
+// when the model produced malformed JSON.
+func unmarshalArgs(raw json.RawMessage, dst any) error {
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return fmt.Errorf("invalid arguments: %w", err)
+	}
+	return nil
+}
+
+// requireField returns an error if val (trimmed) is empty. name is the
+// human-readable field name that appears in the error message.
+func requireField(name, val string) error {
+	if strings.TrimSpace(val) == "" {
+		return fmt.Errorf("%s is required", name)
+	}
+	return nil
+}
+
+// requireLineNumber returns an error if n is less than 1. The error message
+// follows the convention established by the existing tools ("line must be a
+// 1-based line number").
+func requireLineNumber(n int) error {
+	if n < 1 {
+		return fmt.Errorf("line must be a 1-based line number")
+	}
+	return nil
 }
 
 // toolSet indexes tools by name for dispatch and collects their defs for the

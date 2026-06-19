@@ -24,8 +24,6 @@ const (
 	// grepMaxLineBytes caps a single matched line's reported length so a
 	// minified/binary line can't blow up the result.
 	grepMaxLineBytes = 1024
-	// grepMaxFileBytes skips files larger than this (likely data/binaries).
-	grepMaxFileBytes = 5 * 1024 * 1024
 )
 
 // grepTool runs a Go regexp across files under a repository directory.
@@ -84,11 +82,11 @@ func (t *grepTool) Def() llm.ToolDef {
 
 func (t *grepTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	var args grepArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := unmarshalArgs(raw, &args); err != nil {
+		return "", err
 	}
-	if args.Pattern == "" {
-		return "", fmt.Errorf("pattern is required")
+	if err := requireField("pattern", args.Pattern); err != nil {
+		return "", err
 	}
 
 	re, err := regexp.Compile(args.Pattern)
@@ -174,7 +172,7 @@ func (t *grepTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 // the global cap was reached. Binary and oversized files are skipped.
 func (t *grepTool) searchFile(path, rel string, re *regexp.Regexp, b *strings.Builder, already, maxResults int) (int, bool) {
 	info, err := os.Stat(path)
-	if err != nil || info.Size() > grepMaxFileBytes {
+	if err != nil || info.Size() > navMaxFileBytes {
 		return 0, false
 	}
 
@@ -194,7 +192,7 @@ func (t *grepTool) searchFile(path, rel string, re *regexp.Regexp, b *strings.Bu
 	lineNo := 0
 	sc := bufio.NewScanner(br)
 	// Allow long lines without erroring; we cap the reported text ourselves.
-	sc.Buffer(make([]byte, 0, 64*1024), 2*grepMaxFileBytes)
+	sc.Buffer(make([]byte, 0, 64*1024), 2*navMaxFileBytes)
 	for sc.Scan() {
 		lineNo++
 		line := sc.Text()

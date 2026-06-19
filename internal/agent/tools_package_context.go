@@ -79,30 +79,35 @@ func (t *PackageContextTool) Def() llm.ToolDef {
 	}
 }
 
-// Run implements agent.Tool. Arg errors are returned as tool errors (recoverable).
-func (t *PackageContextTool) Run(_ context.Context, raw json.RawMessage) (string, error) {
-	var args packageContextArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
-	}
-
-	pkg := strings.TrimSpace(args.Pkg)
+// derivePkgDirectory resolves a model-supplied package argument (which may be
+// a file path or a directory path) to the directory form used as the cache key
+// by packagesSpanned. It mirrors the packagesSpanned rule: a "." result (repo
+// root) is rejected with a clear error so the model retries with a valid path.
+func derivePkgDirectory(pkg string) (string, error) {
+	pkg = strings.TrimSpace(pkg)
 	if pkg == "" {
 		return "", fmt.Errorf("pkg must be non-empty")
 	}
-
-	// Derive directory: if the argument looks like a file (has an extension or
-	// a recognisable file suffix), take its Dir — matching the packagesSpanned
-	// rule used to build the cache keys.
 	dir := pkg
 	if ext := path.Ext(pkg); ext != "" {
 		dir = path.Dir(pkg)
 	}
-
-	// packagesSpanned skips "." (repo-root files). Mirror that rejection so
-	// the model gets a clear error rather than a confusing miss.
 	if dir == "." || dir == "" {
 		return "", fmt.Errorf("pkg resolves to the repo root; supply a package directory such as \"internal/store\"")
+	}
+	return dir, nil
+}
+
+// Run implements agent.Tool. Arg errors are returned as tool errors (recoverable).
+func (t *PackageContextTool) Run(_ context.Context, raw json.RawMessage) (string, error) {
+	var args packageContextArgs
+	if err := unmarshalArgs(raw, &args); err != nil {
+		return "", err
+	}
+
+	dir, err := derivePkgDirectory(args.Pkg)
+	if err != nil {
+		return "", err
 	}
 
 	summary, found, err := t.onLookup(dir)
@@ -182,22 +187,13 @@ func (t *PackageGraphTool) Def() llm.ToolDef {
 // Run implements agent.Tool. Arg errors are returned as tool errors (recoverable).
 func (t *PackageGraphTool) Run(_ context.Context, raw json.RawMessage) (string, error) {
 	var args packageGraphArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := unmarshalArgs(raw, &args); err != nil {
+		return "", err
 	}
 
-	pkg := strings.TrimSpace(args.Pkg)
-	if pkg == "" {
-		return "", fmt.Errorf("pkg must be non-empty")
-	}
-
-	// Derive directory (mirrors packagesSpanned rule).
-	dir := pkg
-	if ext := path.Ext(pkg); ext != "" {
-		dir = path.Dir(pkg)
-	}
-	if dir == "." || dir == "" {
-		return "", fmt.Errorf("pkg resolves to the repo root; supply a package directory such as \"internal/store\"")
+	dir, err := derivePkgDirectory(args.Pkg)
+	if err != nil {
+		return "", err
 	}
 
 	// Default direction.

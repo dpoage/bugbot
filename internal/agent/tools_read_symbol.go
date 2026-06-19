@@ -65,17 +65,17 @@ func (t *readSymbolTool) Def() llm.ToolDef {
 
 func (t *readSymbolTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	var args codeNavArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := unmarshalArgs(raw, &args); err != nil {
+		return "", err
 	}
-	if args.File == "" {
-		return "", fmt.Errorf("file is required")
+	if err := requireField("file", args.File); err != nil {
+		return "", err
 	}
-	if args.Line < 1 {
-		return "", fmt.Errorf("line must be a 1-based line number")
+	if err := requireLineNumber(args.Line); err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(args.Symbol) == "" {
-		return "", fmt.Errorf("symbol is required")
+	if err := requireField("symbol", args.Symbol); err != nil {
+		return "", err
 	}
 
 	abs, err := t.nav.root.resolve(args.File)
@@ -245,7 +245,7 @@ func renderBodyRange(abs string, startLine, endLine int) (string, int, error) {
 	if err != nil {
 		return "", 0, fmt.Errorf("cannot read file: %w", err)
 	}
-	if info.Size() > codeNavMaxFileBytes {
+	if info.Size() > navMaxFileBytes {
 		return "", 0, fmt.Errorf("file is too large for read_symbol (%d bytes)", info.Size())
 	}
 	data, err := os.ReadFile(abs)

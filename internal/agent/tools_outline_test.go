@@ -115,16 +115,16 @@ func TestOutlineNoBodies(t *testing.T) {
 }
 
 func TestOutlineUnsupportedFileType(t *testing.T) {
-	// A .rb file has no grammar; the tool must return toolError, not a hard error.
+	// A .rb file has no grammar; the tool must return an error.
 	c, _ := newTestCodeNav(t, map[string]string{"script.rb": "def foo; end\n"}, nil)
 	tool := &outlineTool{nav: c}
 
-	out, err := runTool(t, tool, outlineArgs{File: "script.rb"})
-	if err != nil {
-		t.Fatalf("Run returned hard error (should use toolError): %v", err)
+	_, err := runTool(t, tool, outlineArgs{File: "script.rb"})
+	if err == nil {
+		t.Fatalf("Run returned no error for unsupported file type")
 	}
-	if !strings.HasPrefix(out, "ERROR:") {
-		t.Errorf("expected ERROR: prefix for unsupported type, got: %s", out)
+	if !strings.Contains(err.Error(), "unsupported file type") {
+		t.Errorf("expected 'unsupported file type' in error, got: %v", err)
 	}
 }
 
@@ -156,15 +156,12 @@ func TestOutlineBadArgs(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw, _ := json.Marshal(tc.args)
-			out, err := tool.Run(context.Background(), raw)
-			if err != nil {
-				t.Fatalf("Run returned hard error (should use toolError): %v", err)
+			_, err := tool.Run(context.Background(), raw)
+			if err == nil {
+				t.Fatalf("Run returned no error")
 			}
-			if !strings.HasPrefix(out, "ERROR:") {
-				t.Errorf("expected ERROR: prefix, got: %s", out)
-			}
-			if !strings.Contains(out, tc.want) {
-				t.Errorf("expected %q in error output, got: %s", tc.want, out)
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("expected %q in error, got: %v", tc.want, err)
 			}
 		})
 	}
@@ -173,12 +170,9 @@ func TestOutlineBadArgs(t *testing.T) {
 func TestOutlineInvalidJSON(t *testing.T) {
 	c, _ := newTestCodeNav(t, map[string]string{"main.go": "package main\n"}, nil)
 	tool := &outlineTool{nav: c}
-	out, err := tool.Run(context.Background(), json.RawMessage(`{bad`))
-	if err != nil {
-		t.Fatalf("Run returned hard error: %v", err)
-	}
-	if !strings.HasPrefix(out, "ERROR:") {
-		t.Errorf("expected ERROR: prefix for invalid JSON, got: %s", out)
+	_, err := tool.Run(context.Background(), json.RawMessage(`{bad`))
+	if err == nil {
+		t.Fatalf("Run returned no error for invalid JSON")
 	}
 }
 

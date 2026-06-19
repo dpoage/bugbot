@@ -122,8 +122,8 @@ func (t *PostLeadTool) Def() llm.ToolDef {
 // corrected arguments.
 func (t *PostLeadTool) Run(_ context.Context, raw json.RawMessage) (string, error) {
 	var args postLeadArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := unmarshalArgs(raw, &args); err != nil {
+		return "", err
 	}
 
 	// Validate target_lens.

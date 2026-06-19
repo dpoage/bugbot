@@ -111,8 +111,8 @@ func (t *RunTestsTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 	}
 
 	var args runTestsArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := unmarshalArgs(raw, &args); err != nil {
+		return "", err
 	}
 	if len(t.baseCmd) == 0 {
 		return "", fmt.Errorf("run_tests: no test command could be determined for this repository (unknown build system)")
