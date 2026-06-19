@@ -210,6 +210,9 @@ func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 	if err != nil {
 		return nil, fmt.Errorf("build sandbox: %w", err)
 	}
+	// Probe image capabilities once; result is cached per image so repeated
+	// daemon restarts or re-calls to buildReproducer are free.
+	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, repoRoot)
 	r, err := repro.New(client, sb, repoRoot, repro.Options{
 		Image:            cfg.Sandbox.Image,
 		PatchProver:      cfg.Repro.PatchProver,
@@ -218,6 +221,7 @@ func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 		SetupCmds:        cfg.Sandbox.SetupCmds,
 		LocalMounts:      localMountsFromConfig(*cfg),
+		Capabilities:     caps,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer: %w", err)

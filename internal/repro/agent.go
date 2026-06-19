@@ -8,6 +8,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -107,7 +108,9 @@ func langGuidance(lang ingest.Language, systems []ingest.BuildSystem) string {
 // not merely crash, and not fail to compile. The lang argument selects the
 // language-specific test-framework guidance (see langGuidance); systems
 // refines that selection for C/C++ (cmake > meson > generic fallback).
-func systemPrompt(lang ingest.Language, systems []ingest.BuildSystem) string {
+// caps enumerates the probed capability modes; the prompt instructs the agent
+// to avoid modes that are unavailable in the image.
+func systemPrompt(lang ingest.Language, systems []ingest.BuildSystem, caps sandbox.CapabilitySet) string {
 	return `You are Bugbot's reproducer agent. Your job is to write a MINIMAL test that
 demonstrates a specific, already-verified bug by FAILING because of it.
 
@@ -127,9 +130,33 @@ Hard requirements for the repro:
   dependencies. Use only the standard library and what the repository already
   imports. The test must COMPILE — a compile error or missing dependency is NOT
   a reproduction and will be rejected.
-
+` + capabilityGuidance(caps) + `
 Return a repro plan describing the files to inject, the command to run them,
 and a short description of the expected failure.`
+}
+
+// capabilityGuidance renders the capability-constraint section of the system
+// prompt. When caps is nil or empty, nothing is added. When capabilities are
+// known, the prompt enumerates available and unavailable modes so the agent
+// never proposes an invocation the image cannot run.
+func capabilityGuidance(caps sandbox.CapabilitySet) string {
+	if len(caps) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nSandbox capability constraints (probed for this image):\n")
+
+	// Go ecosystem capabilities.
+	if goCaps, ok := caps["go"]; ok {
+		if goCaps["race"] {
+			b.WriteString("- Go race detector: AVAILABLE. You MAY use `go test -race` to expose data-race bugs.\n")
+		} else {
+			b.WriteString("- Go race detector: UNAVAILABLE (no cgo / C compiler in this image).\n")
+			b.WriteString("  Do NOT use `go test -race`. Use a deterministic assertion-based test instead.\n")
+		}
+	}
+
+	return b.String()
 }
 
 // planSchema is the JSON schema for the reproducer agent's plan output.
