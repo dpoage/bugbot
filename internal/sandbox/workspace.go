@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -29,7 +30,7 @@ func prepareWorkspace(repoDir string, writeFiles map[string][]byte) (string, err
 		return "", fmt.Errorf("sandbox: create workspace: %w", err)
 	}
 
-	if err := copyTree(repoDir, ws); err != nil {
+	if err := copyWorkspace(repoDir, ws); err != nil {
 		_ = os.RemoveAll(ws)
 		return "", fmt.Errorf("sandbox: copy repo into workspace: %w", err)
 	}
@@ -50,6 +51,18 @@ func copyTree(src, dst string) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if d.Name() == ".git" {
+			// Never copy VCS metadata: it is large, unneeded for any build, and
+			// handing full history to untrusted sandbox commands is a footgun.
+			// (The git-files copy path already omits it; this guards the
+			// full-copy fallback.) A submodule/worktree .git is a FILE, not a
+			// dir; SkipDir on a non-dir would skip the rest of the PARENT dir, so
+			// only a directory uses SkipDir — a gitfile is skipped on its own.
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
 		rel, err := filepath.Rel(src, path)
@@ -90,6 +103,123 @@ func copyTree(src, dst string) error {
 			return nil
 		}
 	})
+}
+
+// copyWorkspace materializes the repo snapshot at src into dst. When src is a
+// git work tree and git is on PATH, it copies only what git considers part of
+// the work tree — tracked files plus untracked files that are NOT gitignored
+// (`git ls-files --cached --others --exclude-standard`). This omits generated,
+// gitignored content: most importantly a stale out-of-source build tree (e.g.
+// CMake's build/ whose CMakeCache.txt is pinned to a host-absolute path, which
+// otherwise poisons an in-sandbox rebuild), the .git directory, and built
+// vendor caches. When src is not a git repo (or git is unavailable) it falls
+// back to a full recursive copy so non-git checkouts still work.
+func copyWorkspace(src, dst string) error {
+	files, isRepo, err := gitWorktreeFiles(src)
+	if err != nil {
+		// src IS a git work tree but listing failed. Falling back to a full copy
+		// here would silently reintroduce the gitignored stale build tree this
+		// path exists to exclude (the RC2 poisoning), so surface the error
+		// rather than degrade to a poisoning copy.
+		return err
+	}
+	if isRepo {
+		return copyFileList(src, dst, files)
+	}
+	return copyTree(src, dst)
+}
+
+// gitWorktreeFiles returns the repo-relative paths git considers part of the
+// work tree at src: tracked files plus untracked files that are not gitignored.
+// isRepo is false (with a nil error) only when src is not a git work tree or
+// git is not on PATH — the caller then falls back to a full copy. When src IS a
+// git work tree but `git ls-files` fails, the error is returned so the caller
+// fails loudly rather than silently full-copying gitignored build artifacts.
+// Returned paths use the OS path separator.
+func gitWorktreeFiles(src string) (files []string, isRepo bool, err error) {
+	if _, statErr := os.Stat(filepath.Join(src, ".git")); statErr != nil {
+		return nil, false, nil // not a git work tree: caller does a full copy
+	}
+	if _, lookErr := exec.LookPath("git"); lookErr != nil {
+		return nil, false, nil // git unavailable: caller does a full copy
+	}
+	// -z NUL-separates entries so paths with spaces/newlines survive intact.
+	out, runErr := exec.Command("git", "-C", src, "ls-files", "-z",
+		"--cached", "--others", "--exclude-standard").Output()
+	if runErr != nil {
+		return nil, true, fmt.Errorf("sandbox: git ls-files in %q: %w%s", src, runErr, gitStderr(runErr))
+	}
+	for _, p := range strings.Split(string(out), "\x00") {
+		if p == "" {
+			continue
+		}
+		files = append(files, filepath.FromSlash(p))
+	}
+	return files, true, nil
+}
+
+// gitStderr extracts captured stderr from an *exec.ExitError for diagnostics.
+func gitStderr(err error) string {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+		return ": " + strings.TrimSpace(string(ee.Stderr))
+	}
+	return ""
+}
+
+// copyFileList copies the given repo-relative entries from src into dst,
+// creating parent directories as needed. Regular files preserve their
+// permission bits; symlinks are recreated (targets not followed). A directory
+// entry is a git submodule gitlink (ls-files emits the submodule path, which
+// resolves on disk to its checked-out working tree) and is recursively copied
+// so vendored-as-submodule dependencies reach the sandbox, matching the old
+// full-copy behavior. A listed path missing on disk (e.g. a tracked-but-deleted
+// file) is skipped rather than aborting the copy.
+func copyFileList(src, dst string, files []string) error {
+	for _, rel := range files {
+		srcPath := filepath.Join(src, rel)
+		info, err := os.Lstat(srcPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		// Parent dirs are created 0o755 (traversable/writable for the build)
+		// rather than mirroring source dir perms: the workspace is a throwaway
+		// per-run copy, so normalizing to a permissive-but-safe mode is fine.
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		switch {
+		case info.Mode()&fs.ModeSymlink != 0:
+			linkTarget, err := os.Readlink(srcPath)
+			if err != nil {
+				return err
+			}
+			if err := os.Symlink(linkTarget, target); err != nil {
+				return err
+			}
+		case info.IsDir():
+			// Submodule gitlink: copy its working tree (copyTree skips the
+			// submodule's own .git). MkdirAll the target first so copyTree's
+			// root-dir chmod has a directory to act on.
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+			if err := copyTree(srcPath, target); err != nil {
+				return err
+			}
+		case info.Mode().IsRegular():
+			if err := copyFile(srcPath, target, info.Mode().Perm()); err != nil {
+				return err
+			}
+		default:
+			// Skip irregular files (devices, sockets, fifos).
+		}
+	}
+	return nil
 }
 
 func copyFile(src, dst string, perm fs.FileMode) (err error) {

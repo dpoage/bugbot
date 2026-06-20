@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 
 	"github.com/dpoage/bugbot/internal/agent"
@@ -210,6 +211,59 @@ Return a repro plan describing the files to inject, the command to run them,
 and a short description of the expected failure.`
 }
 
+// pkgContextGuidance is appended to the reproducer system prompt when the
+// get_package_context tool is wired. It steers the agent to pull the repo's
+// test-package summary for build/test orientation before planning, so it does
+// not burn its whole tool budget rediscovering how the repo builds and runs
+// tests (the dominant failure mode on large C/C++ repos).
+const pkgContextGuidance = `
+
+You also have get_package_context: it returns a cached one-paragraph summary of
+any package (a repo-relative directory) describing its purpose, invariants, and
+build/test layout. Use it to orient FAST instead of reading many files. Before
+proposing your plan, look up the repository's TEST package (e.g. "test",
+"tests", or the directory that holds the existing test target) to learn how
+tests are built and run here: the test runner/binary, where to place a new test
+file, and whether the build fetches dependencies at configure time.`
+
+// reproSandboxGuidance renders the sandbox-environment + command-hygiene section
+// appended to every reproducer system prompt. It encodes the realities that
+// caused observed repro failures: the sandbox is a clean git checkout (gitignored
+// build/vendor artifacts the agent sees in its read-only host view are NOT
+// present), any operator bind mounts are listed so the agent uses them instead of
+// those absent paths, and the command-construction rules prevent the recurring
+// malformed-command failures (missing `bash -c`, a test filter passed to cmake,
+// a self-overwriting `-o`, the dependency step disabled, placeholder commands).
+func reproSandboxGuidance(mounts []sandbox.ROMount) string {
+	var b strings.Builder
+	b.WriteString(`
+
+Sandbox environment & command hygiene:
+- The sandbox holds the repository's git-tracked files (a clean checkout).
+  Generated, gitignored paths (build/, .vendor/, node_modules/, ...) are NOT
+  present — build or fetch what the test needs as part of cmd; never reference a
+  gitignored path you saw in your read-only view but that the checkout omits.
+- Prefer the repository's own build/test entrypoint (a Makefile target, CMake
+  preset, or test script — discover it via get_package_context or the build
+  files) over hand-rolled compiler/cmake flags. Do NOT disable the project's
+  dependency or vendor step (e.g. -DBUILD_VENDOR=OFF): the build needs it to
+  resolve dependencies.
+- Wrap any multi-step command (using &&, ||, |, or redirects) in bash -c "...":
+  a bare argv is run directly, so shell operators and later commands would be
+  passed as arguments to the first program.
+- Pass a test filter (e.g. --gtest_filter) to the TEST BINARY, never to cmake or
+  make.
+- A single-file compile's -o output path MUST differ from every input file.
+- Always return a real command that builds and runs the test; never a placeholder.`)
+	if len(mounts) > 0 {
+		b.WriteString("\n- These read-only host directories are bind-mounted into the sandbox;\n  reference them instead of gitignored paths:")
+		for _, m := range mounts {
+			fmt.Fprintf(&b, "\n    %s", m.ContainerPath)
+		}
+	}
+	return b.String()
+}
+
 // capabilityGuidance renders the capability-constraint section of the system
 // prompt. When caps is nil or empty, nothing is added. When capabilities are
 // known, the prompt enumerates available and unavailable modes so the agent
@@ -297,8 +351,8 @@ var planSchema = json.RawMessage(`{
 // planFor asks the agent for a repro plan for finding. feedback, when
 // non-empty, is appended to steer a revision after a prior non-demonstrating
 // attempt.
-func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding store.Finding, feedback string) (*Plan, llm.Usage, error) {
-	task := buildTask(finding, feedback)
+func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding store.Finding, pkgSummary, feedback string) (*Plan, llm.Usage, error) {
+	task := buildTask(finding, pkgSummary, feedback)
 	var plan Plan
 	outcome, err := runner.RunJSON(ctx, task, planSchema, &plan)
 	var usage llm.Usage
@@ -321,7 +375,7 @@ func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding 
 // fenced sandbox block, or the agent loses the explicit
 // "data, not instructions" framing that protects it from treating the
 // run output as system-level directives. No double-fencing.
-func buildTask(finding store.Finding, feedback string) string {
+func buildTask(finding store.Finding, pkgSummary, feedback string) string {
 	var b strings.Builder
 	b.WriteString("Reproduce the following verified bug with a minimal failing test.\n\n")
 	fmt.Fprintf(&b, "Title: %s\n", finding.Title)
@@ -336,6 +390,9 @@ func buildTask(finding store.Finding, feedback string) string {
 	}
 	if finding.Reasoning != "" {
 		fmt.Fprintf(&b, "\nVerification reasoning:\n%s\n", finding.Reasoning)
+	}
+	if strings.TrimSpace(pkgSummary) != "" {
+		fmt.Fprintf(&b, "\nPackage context for %s (cartographer summary — orient from it, confirm specifics by reading files):\n%s\n", path.Dir(finding.File), pkgSummary)
 	}
 	if strings.TrimSpace(feedback) != "" {
 		b.WriteString("\n--- Revision required ---\n")

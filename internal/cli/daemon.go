@@ -228,6 +228,8 @@ func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
 		TranscriptDir:    cfg.Repro.TranscriptDir,
+		PackageSummary:   packageSummaryProvider(st),
+		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer: %w", err)

@@ -111,14 +111,17 @@ func TestPromoteAll_Success(t *testing.T) {
 		t.Fatalf("summary = %+v, want 1 promoted", summary)
 	}
 
-	// Sandbox was asked with network none and the repro file injected.
+	// Repro must NOT force a network: it inherits the sandbox's configured
+	// default (sandbox.network) so a repo whose build fetches deps at configure
+	// time can resolve them. The mock applies no default, so the recorded spec
+	// carries the empty "inherit" value.
 	calls := sb.Calls()
 	if len(calls) != 1 {
 		t.Fatalf("sandbox calls = %d, want 1", len(calls))
 	}
 	spec := calls[0].Spec
-	if spec.Network != "none" {
-		t.Errorf("network = %q, want none", spec.Network)
+	if spec.Network != "" {
+		t.Errorf("network = %q, want empty (inherit sandbox default)", spec.Network)
 	}
 	if _, ok := spec.WriteFiles["bug_test.go"]; !ok {
 		t.Errorf("repro file not injected: %v", spec.WriteFiles)
@@ -974,7 +977,7 @@ func TestNewRunner_IncludesCodeNavTools(t *testing.T) {
 	}
 
 	// newRunner must not fail — it will compose baseline + nav tools.
-	if _, err := r.newRunner(ingest.LangGo, nil, progress.AgentScope{}); err != nil {
+	if _, err := r.newRunner(context.Background(), ingest.LangGo, nil, progress.AgentScope{}); err != nil {
 		t.Fatalf("newRunner: %v", err)
 	}
 }
@@ -1041,5 +1044,179 @@ func TestPromoteAll_WritesAgentTranscript(t *testing.T) {
 	}
 	if jsonl == 0 {
 		t.Fatalf("TranscriptDir set but no .jsonl transcript written to %s (entries: %v)", trDir, entries)
+	}
+}
+
+// TestBuildTask_IncludesPackageSummary verifies the reproducer task carries the
+// finding's package summary (the cartographer handoff) only when one is present,
+// labeled with the package directory.
+func TestBuildTask_IncludesPackageSummary(t *testing.T) {
+	f := store.Finding{Title: "T", File: "engine/common/memory/X.hpp", Line: 5, Description: "d"}
+
+	with := buildTask(f, "MEMORY-PKG-SUMMARY", "")
+	if !strings.Contains(with, "MEMORY-PKG-SUMMARY") {
+		t.Error("task must include the pushed package summary")
+	}
+	if !strings.Contains(with, "engine/common/memory") {
+		t.Error("task must label the package context with the package directory")
+	}
+
+	if without := buildTask(f, "", ""); strings.Contains(without, "Package context") {
+		t.Error("empty summary must not add a package context section")
+	}
+}
+
+// TestPromoteAll_PushesPackageSummary verifies the provider is consulted for the
+// finding's package directory and that the summary reaches the model's task
+// prompt through Attempt -> planFor -> buildTask.
+func TestPromoteAll_PushesPackageSummary(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	f, err := st.UpsertFinding(ctx, store.Finding{
+		Fingerprint: store.Fingerprint("logic", "pkg/calc.go", 12, "bug"),
+		Title:       "bug",
+		Severity:    "high",
+		Tier:        2,
+		Status:      store.StatusOpen,
+		Lens:        "logic",
+		File:        "pkg/calc.go",
+		Line:        12,
+		CommitSHA:   "abc",
+		FileHash:    "def",
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	repoDir := newRepoDir(t)
+
+	var gotPkg string
+	client := newScriptedClient(planBody(t, goodPlan()))
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "--- FAIL: TestBug\nFAIL",
+	}})
+	r, err := New(client, sb, repoDir, Options{
+		ArtifactDir: t.TempDir(),
+		PackageSummary: func(_ context.Context, pkg string) (string, bool) {
+			gotPkg = pkg
+			return "CALC-PKG-SUMMARY", true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.PromoteAll(ctx, st, []store.Finding{f}); err != nil {
+		t.Fatalf("PromoteAll: %v", err)
+	}
+	if gotPkg != "pkg" {
+		t.Errorf("provider queried pkg %q, want %q (dir of finding.File)", gotPkg, "pkg")
+	}
+	if task := client.taskText(0); !strings.Contains(task, "CALC-PKG-SUMMARY") {
+		t.Errorf("model task prompt missing pushed package summary; got:\n%s", task)
+	}
+
+	// The get_package_context tool and its guidance must also be wired when a
+	// provider is set (covers newRunner's pkgSummary != nil branch). The first
+	// recorded request (the plan turn, before any forced finalization) carries
+	// both the system prompt and the tool defs.
+	reqs := client.allRequests()
+	if len(reqs) == 0 {
+		t.Fatal("no requests recorded")
+	}
+	if !strings.Contains(reqs[0].System, "get_package_context") {
+		t.Error("system prompt missing package-context guidance")
+	}
+	hasTool := false
+	for _, td := range reqs[0].Tools {
+		if td.Name == "get_package_context" {
+			hasTool = true
+			break
+		}
+	}
+	if !hasTool {
+		t.Error("get_package_context tool not registered in the runner")
+	}
+	if !strings.Contains(reqs[0].System, "bash -c") {
+		t.Error("system prompt missing sandbox/command-hygiene guidance")
+	}
+}
+
+// TestPromoteAll_WiresTimeout verifies Options.Timeout reaches the sandbox Spec
+// (RC4). A regression dropping the field silently reverts to the 90s default.
+func TestPromoteAll_WiresTimeout(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	finding := seedFinding(t, st)
+	repoDir := newRepoDir(t)
+
+	client := newScriptedClient(planBody(t, goodPlan()))
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "--- FAIL: TestBug\nFAIL",
+	}})
+	want := 1234 * time.Second
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir(), Timeout: want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.PromoteAll(ctx, st, []store.Finding{finding}); err != nil {
+		t.Fatalf("PromoteAll: %v", err)
+	}
+	calls := sb.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("sandbox calls = %d, want 1", len(calls))
+	}
+	if got := calls[0].Spec.Timeout; got != want {
+		t.Errorf("Spec.Timeout = %v, want %v", got, want)
+	}
+}
+
+// TestReproSandboxGuidance covers the always-appended sandbox-environment and
+// command-hygiene section: the hygiene rules are present, configured bind mounts
+// are listed by container path, and no mount list appears when there are none.
+func TestReproSandboxGuidance(t *testing.T) {
+	withMount := reproSandboxGuidance([]sandbox.ROMount{{HostPath: "/h/vendor", ContainerPath: "/vendor"}})
+	if !strings.Contains(withMount, "bash -c") {
+		t.Error("guidance missing command-hygiene rules")
+	}
+	if !strings.Contains(withMount, "/vendor") {
+		t.Error("guidance must list bind-mount container paths")
+	}
+	if strings.Contains(reproSandboxGuidance(nil), "bind-mounted") {
+		t.Error("no mounts must produce no mount list")
+	}
+}
+
+// TestPromoteAll_SurfacesMountsInPrompt verifies an operator bind mount threads
+// through New -> newRunner -> reproSandboxGuidance(r.deps.ROMounts) into the
+// model's system prompt, so the agent is told the mount's container path. Guards
+// against passing the wrong slice (e.g. r.opts.LocalMounts) or dropping the call.
+func TestPromoteAll_SurfacesMountsInPrompt(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	finding := seedFinding(t, st)
+	repoDir := newRepoDir(t)
+
+	client := newScriptedClient(planBody(t, goodPlan()))
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "--- FAIL: TestBug\nFAIL",
+	}})
+	r, err := New(client, sb, repoDir, Options{
+		ArtifactDir: t.TempDir(),
+		LocalMounts: []sandbox.ROMount{{HostPath: t.TempDir(), ContainerPath: "/vendor-xyz", Shared: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.PromoteAll(ctx, st, []store.Finding{finding}); err != nil {
+		t.Fatalf("PromoteAll: %v", err)
+	}
+	reqs := client.allRequests()
+	if len(reqs) == 0 {
+		t.Fatal("no requests recorded")
+	}
+	if !strings.Contains(reqs[0].System, "/vendor-xyz") {
+		t.Errorf("system prompt missing bind-mount container path; got:\n%s", reqs[0].System)
 	}
 }

@@ -399,6 +399,8 @@ func buildReproHookForScan(
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
 		TranscriptDir:    cfg.Repro.TranscriptDir,
+		PackageSummary:   packageSummaryProvider(st),
+		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 	})
 	if rNewErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer: %w", rNewErr)
@@ -594,10 +596,51 @@ func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool
 // here so scan, verify, the analyzer seed, and the daemon stay consistent.
 func sandboxRunOpts(cfg config.Config) []sandbox.Option {
 	var opts []sandbox.Option
+	if cfg.Sandbox.Network != "" {
+		// Apply the operator's configured network as the sandbox DEFAULT for every
+		// stage (probe, verify, repro, patch). A Spec that leaves Network unset
+		// inherits this; stages no longer hardcode "none" and silently drop the
+		// config (which broke CMake FetchContent builds under network=host).
+		opts = append(opts, sandbox.WithNetwork(cfg.Sandbox.Network))
+	}
 	if cfg.Sandbox.IdleTimeoutSeconds > 0 {
 		opts = append(opts, sandbox.WithIdleTimeout(time.Duration(cfg.Sandbox.IdleTimeoutSeconds)*time.Second))
 	}
+	if cfg.Sandbox.TimeoutSeconds > 0 {
+		// Hard wall-clock ceiling for every sandbox run. Previously dropped: the
+		// backend kept its 10-minute default and the reproducer forced 90s, so a
+		// heavy build (vendored deps + engine + test) was killed long before it
+		// could finish. A Spec's own Timeout still wins; repro sets it from this
+		// same config value so both agree.
+		opts = append(opts, sandbox.WithTimeout(time.Duration(cfg.Sandbox.TimeoutSeconds)*time.Second))
+	}
 	return opts
+}
+
+// packageSummaryProvider returns the lookup the reproducer uses to fetch a
+// package's cached cartographer summary (store-backed). It powers the
+// reproducer's task-prompt orientation and its get_package_context tool, so the
+// agent reuses the finder's repo cartography instead of rediscovering the
+// build/test layout from scratch. A miss (no cached row, or a query error)
+// returns found=false and the reproducer degrades gracefully.
+//
+// Unlike the funnel's consumers (cartographer.go), this deliberately does NOT
+// gate on the row's Fingerprint: the summary is orientation-only (the prompt
+// tells the agent to "confirm specifics by reading files"), and within a scan
+// the funnel has just refreshed summaries for the snapshot. A slightly stale
+// summary at worst points the agent at the right package to read.
+func packageSummaryProvider(st *store.Store) func(ctx context.Context, pkg string) (string, bool) {
+	return func(ctx context.Context, pkg string) (string, bool) {
+		sums, err := st.GetPackageSummaries(ctx, []string{pkg})
+		if err != nil {
+			return "", false
+		}
+		s, ok := sums[pkg]
+		if !ok {
+			return "", false
+		}
+		return s.Summary, true
+	}
 }
 
 // localMountsFromConfig converts the operator's sandbox.local_mounts config

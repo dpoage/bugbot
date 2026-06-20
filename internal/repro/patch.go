@@ -512,10 +512,11 @@ func (p *PatchProver) execSandbox(ctx context.Context, cmd []string, writeFiles 
 		to = DefaultTimeout
 	}
 	spec := sandbox.Spec{
-		RepoDir:    p.repoDir,
-		Cmd:        cmd,
-		Image:      p.image,
-		Network:    "none",
+		RepoDir: p.repoDir,
+		Cmd:     cmd,
+		Image:   p.image,
+		// Network left unset: inherit the sandbox's configured default
+		// (sandbox.network), matching the reproducer. See repro.execute.
 		Timeout:    to,
 		WriteFiles: writeFiles,
 		ROMounts:   p.depMounts,

@@ -1,7 +1,9 @@
 package sandbox
 
 import (
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -148,5 +150,161 @@ func assertFileContent(t *testing.T, path, want string) {
 	}
 	if string(got) != want {
 		t.Errorf("%s = %q, want %q", path, got, want)
+	}
+}
+
+// TestPrepareWorkspaceSkipsGitignoredAndGit verifies the git-aware copy path:
+// for a git work tree, gitignored content (a stale build tree) and the .git
+// directory are NOT copied into the sandbox workspace, while tracked and
+// untracked-but-not-ignored files are. This is the guard against a host
+// CMakeCache.txt poisoning an in-sandbox rebuild.
+func TestPrepareWorkspaceSkipsGitignoredAndGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	src := t.TempDir()
+	mustWrite(t, filepath.Join(src, ".gitignore"), "/build\n", 0o644)
+	mustWrite(t, filepath.Join(src, "main.go"), "package main\n", 0o644)
+	mustMkdir(t, filepath.Join(src, "build"))
+	mustWrite(t, filepath.Join(src, "build", "CMakeCache.txt"), "stale-host-path\n", 0o644)
+	gitInit(t, src)
+	// Written AFTER the commit so it is untracked-but-not-ignored: it must still
+	// be copied (working-tree fidelity for uncommitted source).
+	mustWrite(t, filepath.Join(src, "untracked.go"), "package main\n", 0o644)
+
+	ws, err := prepareWorkspace(src, nil)
+	if err != nil {
+		t.Fatalf("prepareWorkspace: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(ws) }()
+
+	// Tracked + untracked-non-ignored are copied.
+	assertFileContent(t, filepath.Join(ws, "main.go"), "package main\n")
+	assertFileContent(t, filepath.Join(ws, "untracked.go"), "package main\n")
+	// The gitignored build tree must NOT be copied (it would poison a rebuild).
+	if _, err := os.Stat(filepath.Join(ws, "build")); !os.IsNotExist(err) {
+		t.Errorf("gitignored build/ was copied into the workspace (err=%v)", err)
+	}
+	// .git metadata must NOT be copied.
+	if _, err := os.Stat(filepath.Join(ws, ".git")); !os.IsNotExist(err) {
+		t.Errorf(".git was copied into the workspace (err=%v)", err)
+	}
+}
+
+// gitInit makes dir a git repo and commits its current tracked contents.
+func gitInit(t *testing.T, dir string) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "t@example.com"},
+		{"config", "user.name", "t"},
+		{"add", "-A"},
+		{"commit", "-q", "-m", "init"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		// Neutralize the user's/CI's global+system git config so a global
+		// commit.gpgsign, hooksPath hook, or credential prompt cannot make
+		// `git commit` fail or hang. The repo-local identity below suffices.
+		cmd.Env = append(os.Environ(),
+			"GIT_CONFIG_GLOBAL=/dev/null",
+			"GIT_CONFIG_SYSTEM=/dev/null",
+			"GIT_TERMINAL_PROMPT=0",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+// TestCopyWorkspaceRecreatesSymlink covers the git-aware copy's symlink branch:
+// a tracked symlink must be recreated as a symlink (target not followed).
+func TestCopyWorkspaceRecreatesSymlink(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	src := t.TempDir()
+	mustWrite(t, filepath.Join(src, "real.txt"), "hi\n", 0o644)
+	if err := os.Symlink("real.txt", filepath.Join(src, "link.txt")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	gitInit(t, src)
+	dst := t.TempDir()
+
+	if err := copyWorkspace(src, dst); err != nil {
+		t.Fatalf("copyWorkspace: %v", err)
+	}
+	fi, err := os.Lstat(filepath.Join(dst, "link.txt"))
+	if err != nil {
+		t.Fatalf("symlink not copied: %v", err)
+	}
+	if fi.Mode()&fs.ModeSymlink == 0 {
+		t.Errorf("link.txt copied as non-symlink: %v", fi.Mode())
+	}
+	if tgt, _ := os.Readlink(filepath.Join(dst, "link.txt")); tgt != "real.txt" {
+		t.Errorf("symlink target = %q, want real.txt", tgt)
+	}
+}
+
+// TestCopyFileList_RecursesSubmoduleDir covers the submodule path: git ls-files
+// emits a submodule by its gitlink path, which resolves on disk to a directory.
+// copyFileList must recurse-copy that working tree (so vendored-as-submodule
+// deps reach the sandbox) while skipping the submodule's own .git gitfile.
+func TestCopyFileList_RecursesSubmoduleDir(t *testing.T) {
+	src := t.TempDir()
+	mustMkdir(t, filepath.Join(src, "vendor", "gtest"))
+	mustWrite(t, filepath.Join(src, "vendor", "gtest", "gtest.h"), "#pragma once\n", 0o644)
+	// Submodules carry a .git FILE (a gitfile); copyTree must skip it.
+	mustWrite(t, filepath.Join(src, "vendor", "gtest", ".git"), "gitdir: ../../.git/modules/vendor/gtest\n", 0o644)
+	dst := t.TempDir()
+
+	if err := copyFileList(src, dst, []string{filepath.Join("vendor", "gtest")}); err != nil {
+		t.Fatalf("copyFileList: %v", err)
+	}
+	assertFileContent(t, filepath.Join(dst, "vendor", "gtest", "gtest.h"), "#pragma once\n")
+	if _, err := os.Stat(filepath.Join(dst, "vendor", "gtest", ".git")); !os.IsNotExist(err) {
+		t.Errorf("submodule .git gitfile was copied (err=%v)", err)
+	}
+}
+
+// TestCopyTreeSkipsNestedGitInFallback covers the full-copy fallback (non-git
+// src): a nested .git directory must be skipped so stale metadata never reaches
+// the workspace even when the git-aware path is not taken.
+func TestCopyTreeSkipsNestedGitInFallback(t *testing.T) {
+	src := t.TempDir() // no top-level .git -> copyWorkspace falls back to copyTree
+	mustWrite(t, filepath.Join(src, "main.go"), "package main\n", 0o644)
+	mustMkdir(t, filepath.Join(src, "sub", ".git"))
+	mustWrite(t, filepath.Join(src, "sub", ".git", "config"), "x\n", 0o644)
+	mustWrite(t, filepath.Join(src, "sub", "real.txt"), "keep\n", 0o644)
+	dst := t.TempDir()
+
+	if err := copyWorkspace(src, dst); err != nil {
+		t.Fatalf("copyWorkspace: %v", err)
+	}
+	assertFileContent(t, filepath.Join(dst, "main.go"), "package main\n")
+	assertFileContent(t, filepath.Join(dst, "sub", "real.txt"), "keep\n")
+	if _, err := os.Stat(filepath.Join(dst, "sub", ".git")); !os.IsNotExist(err) {
+		t.Errorf("nested .git dir was copied in fallback (err=%v)", err)
+	}
+}
+
+// TestCopyWorkspaceSurfacesGitError covers the RC2 safety invariant: when src is
+// a git work tree but `git ls-files` fails, copyWorkspace returns the error
+// rather than silently full-copying gitignored artifacts (which would reintroduce
+// the stale build-tree poisoning).
+func TestCopyWorkspaceSurfacesGitError(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	src := t.TempDir()
+	mustWrite(t, filepath.Join(src, "main.go"), "package main\n", 0o644)
+	// A .git GITFILE pointing at a nonexistent gitdir: os.Stat(.git) succeeds so
+	// the git-repo branch is taken, but `git ls-files` exits non-zero, driving
+	// the (nil, true, err) return that copyWorkspace must propagate.
+	mustWrite(t, filepath.Join(src, ".git"), "gitdir: /nonexistent-bugbot-gitdir\n", 0o644)
+	dst := t.TempDir()
+
+	if err := copyWorkspace(src, dst); err == nil {
+		t.Fatal("copyWorkspace must return an error when git ls-files fails on a work tree")
 	}
 }

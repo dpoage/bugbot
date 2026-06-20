@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
@@ -55,6 +56,13 @@ const (
 	// DefaultArtifactDir is the host directory under which per-finding repro
 	// bundles are written when Options.ArtifactDir is unset.
 	DefaultArtifactDir = ".bugbot/repro"
+	// DefaultMaxIterations bounds the reproducer agent's investigation turns per
+	// attempt. The agent package's default (20) is too tight for large repos: the
+	// agent spends every turn orienting (build system, test layout) and is forced
+	// to emit a blind plan before it can iterate. A higher cap, paired with the
+	// cartographer package summaries fed into the task, gives it room to plan and
+	// revise. Applied in resolve when AgentLimits.MaxIterations is zero.
+	DefaultMaxIterations = 40
 )
 
 // Options configures a Reproducer.
@@ -129,6 +137,13 @@ type Options struct {
 	// addition to the automatic tool-call activity. Mirrors the funnel's
 	// Scan.StatusNotes gate; off by default.
 	StatusNotes bool
+	// PackageSummary, when non-nil, returns the cached cartographer summary for a
+	// repo-relative package directory. The reproducer pushes the finding's own
+	// package summary into the task prompt AND exposes get_package_context, so the
+	// agent can pull other packages' summaries (e.g. the repo's test package) to
+	// learn the build/test layout without spending its tool budget rediscovering
+	// it. nil disables both. The CLI wires it to store.GetPackageSummaries.
+	PackageSummary func(ctx context.Context, pkg string) (summary string, found bool)
 }
 
 // resolve returns a copy of o with defaults applied; it does not mutate the
@@ -151,6 +166,9 @@ func (o Options) resolve() Options {
 	}
 	if o.MaxParallel < 0 {
 		o.MaxParallel = 1
+	}
+	if o.AgentLimits.MaxIterations == 0 {
+		o.AgentLimits.MaxIterations = DefaultMaxIterations
 	}
 	return o
 }
@@ -181,6 +199,10 @@ type Reproducer struct {
 	// rooted at repoDir. Constructed eagerly in New; no language-server process
 	// is started until the first query. Closed by Close.
 	nav *agent.CodeNav
+	// pkgSummary returns the cached cartographer summary for a package directory,
+	// or ok=false on a miss. Set from Options.PackageSummary; nil disables the
+	// task-prompt summary push and the get_package_context tool.
+	pkgSummary func(ctx context.Context, pkg string) (string, bool)
 }
 
 // New constructs a Reproducer. client is the reproducer-role LLM client, sb is
@@ -228,6 +250,7 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 		buildSystems: ingest.DetectBuildSystems(repoDir),
 		capabilities: resolved.Capabilities,
 		nav:          nav,
+		pkgSummary:   resolved.PackageSummary,
 	}, nil
 }
 
@@ -291,7 +314,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (_ *Att
 		scope.Finish(usage.InputTokens+usage.OutputTokens, time.Since(start), retErr)
 	}()
 
-	runner, err := r.newRunner(ingest.DetectLanguage(finding.File), r.buildSystems, scope)
+	runner, err := r.newRunner(ctx, ingest.DetectLanguage(finding.File), r.buildSystems, scope)
 	if err != nil {
 		return nil, fmt.Errorf("repro: build agent runner: %w", err)
 	}
@@ -302,10 +325,21 @@ func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (_ *Att
 	// the agent can correct a non-demonstrating repro. Empty on the first pass.
 	var feedback string
 
+	// Look up the finding's own package summary once and push it into every plan
+	// request so the agent starts oriented on the buggy code's package instead of
+	// rediscovering it from files. A miss (no cached summary, or a repo-root file)
+	// yields an empty string, which buildTask omits.
+	var pkgSummary string
+	if r.pkgSummary != nil && finding.File != "" {
+		if s, ok := r.pkgSummary(ctx, path.Dir(finding.File)); ok {
+			pkgSummary = s
+		}
+	}
+
 	for i := 0; i < r.opts.MaxAttempts; i++ {
 		att.Attempts = i + 1
 
-		plan, u, perr := r.planFor(ctx, runner, finding, feedback)
+		plan, u, perr := r.planFor(ctx, runner, finding, pkgSummary, feedback)
 		usage.InputTokens += u.InputTokens
 		usage.OutputTokens += u.OutputTokens
 		if perr != nil {
@@ -366,7 +400,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (_ *Att
 // the run's observability handle: its activity sink is wired so the agent's
 // per-turn tool calls surface live, and when StatusNotes is enabled the agent
 // also gets the status_note tool routed to the same sink.
-func (r *Reproducer) newRunner(lang ingest.Language, systems []ingest.BuildSystem, scope progress.AgentScope) (*agent.Runner, error) {
+func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, systems []ingest.BuildSystem, scope progress.AgentScope) (*agent.Runner, error) {
 	tools, err := readOnlyTools(r.repoDir)
 	if err != nil {
 		return nil, err
@@ -375,13 +409,28 @@ func (r *Reproducer) newRunner(lang ingest.Language, systems []ingest.BuildSyste
 	if r.opts.StatusNotes {
 		tools = append(tools, agent.NewStatusNoteTool(scope.ActivitySink()))
 	}
+	// get_package_context lets the agent pull any package's cartographer summary
+	// (e.g. the repo's test package) to learn the build/test layout cheaply,
+	// mirroring the finder. ctx is the per-attempt context — the runner lives only
+	// within this Attempt. Omitted when no summary provider is wired.
+	if r.pkgSummary != nil {
+		tools = append(tools, agent.NewPackageContextTool(func(pkg string) (string, bool, error) {
+			s, ok := r.pkgSummary(ctx, pkg)
+			return s, ok, nil
+		}))
+	}
 	var opts []agent.Option
 	opts = append(opts, agent.WithLimits(r.opts.AgentLimits))
 	if r.opts.TranscriptDir != "" {
 		opts = append(opts, agent.WithTranscriptDir(r.opts.TranscriptDir))
 	}
 	opts = append(opts, agent.WithActivitySink(scope.ActivitySink()))
-	return agent.NewRunner(r.client, tools, systemPrompt(lang, systems, r.capabilities), opts...), nil
+	prompt := systemPrompt(lang, systems, r.capabilities)
+	if r.pkgSummary != nil {
+		prompt += pkgContextGuidance
+	}
+	prompt += reproSandboxGuidance(r.deps.ROMounts)
+	return agent.NewRunner(r.client, tools, prompt, opts...), nil
 }
 
 // Close shuts down any language servers the code-navigation tools spawned.
@@ -419,10 +468,14 @@ func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, e
 		files[path] = []byte(content)
 	}
 	spec := sandbox.Spec{
-		RepoDir:    r.repoDir,
-		Cmd:        plan.Cmd,
-		Image:      r.opts.Image,
-		Network:    "none",
+		RepoDir: r.repoDir,
+		Cmd:     plan.Cmd,
+		Image:   r.opts.Image,
+		// Network is intentionally left unset so the run inherits the sandbox's
+		// configured default (sandbox.network in bugbot.yaml, applied via the CLI's
+		// sandboxRunOpts). Forcing "none" here defeated repos whose build must
+		// fetch dependencies at configure time (e.g. CMake FetchContent of
+		// googletest/SDL), which can only resolve when network=host is configured.
 		Timeout:    r.opts.Timeout,
 		WriteFiles: files,
 		// Dependency strategy: mount a module cache read-only and/or set GOFLAGS
