@@ -196,11 +196,22 @@ type PatchProver struct {
 //  5. Cargo → ["cargo", "test"]
 //  6. NPM → ["npm", "test"]
 //  7. Python (pyproject.toml / setup.py) → ["python", "-m", "pytest"]
+//  8. CMake (CMakeLists.txt) → bash -c compound configure+build+test; a fresh
+//     workspace is created per run so the non-idempotent -B build form is safe.
+//  9. Meson (meson.build) → bash -c compound setup+test; same fresh-workspace
+//     guarantee as cmake.
 //
 // The existing single-marker behaviour (go.mod, Cargo.toml, package.json,
 // pyproject.toml, setup.py) is preserved exactly for backward compatibility.
 func detectSuiteCmd(repoDir string) []string {
-	systems := ingest.DetectBuildSystems(repoDir)
+	return detectSuiteCmdFor(repoDir, ingest.DetectBuildSystems(repoDir))
+}
+
+// detectSuiteCmdFor is detectSuiteCmd with the build systems already resolved.
+// Callers holding a cached []ingest.BuildSystem (e.g. the reproducer, which
+// resolves them once in New) pass it here to avoid re-scanning the repo root on
+// every call.
+func detectSuiteCmdFor(repoDir string, systems []ingest.BuildSystem) []string {
 	for _, sys := range systems {
 		switch sys {
 		case ingest.BuildSystemBazel:
@@ -238,6 +249,12 @@ func detectSuiteCmd(repoDir string) []string {
 
 		case ingest.BuildSystemPython:
 			return []string{"python", "-m", "pytest"}
+
+		case ingest.BuildSystemCMake:
+			return []string{"bash", "-c", "cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build --parallel 4 && ctest --test-dir build --output-on-failure --no-tests=ignore"}
+
+		case ingest.BuildSystemMeson:
+			return []string{"bash", "-c", "meson setup build && meson test -C build --print-errorlogs"}
 		}
 	}
 	return nil

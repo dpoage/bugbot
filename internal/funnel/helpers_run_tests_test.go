@@ -70,6 +70,30 @@ func TestDetectTestCmd_EmptyDir_ReturnsNil(t *testing.T) {
 	}
 }
 
+func TestDetectTestCmd_CMake(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "CMakeLists.txt"), []byte("cmake_minimum_required(VERSION 3.20)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := detectTestCmd(dir)
+	want := []string{"bash", "-c", "cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build --parallel 4 && ctest --test-dir build --output-on-failure --no-tests=ignore"}
+	if !sliceEq(got, want) {
+		t.Errorf("detectTestCmd(CMakeLists.txt) = %v, want %v", got, want)
+	}
+}
+
+func TestDetectTestCmd_Meson(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "meson.build"), []byte("project('x', 'cpp')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := detectTestCmd(dir)
+	want := []string{"bash", "-c", "meson setup build && meson test -C build --print-errorlogs"}
+	if !sliceEq(got, want) {
+		t.Errorf("detectTestCmd(meson.build) = %v, want %v", got, want)
+	}
+}
+
 // --- buildRunTestsTool -------------------------------------------------------
 
 // fakeRunTestsSandbox is a minimal sandbox for buildRunTestsTool tests.

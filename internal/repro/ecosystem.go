@@ -353,15 +353,16 @@ func detectEcosystem(argv []string) ecosystemRules {
 		return ecosystemTable[ecosystemIndex(sandbox.EcosystemJS)]
 	case "jest", "vitest", "mocha":
 		return ecosystemTable[ecosystemIndex(sandbox.EcosystemJS)]
-	case "cmake", "gcc", "g++", "clang", "clang++", "cc", "c++", "ctest":
-		// The C/C++ build + compile + test launchers. Routing them to the cpp
-		// ecosystem means a broken build is classified against cpp's toolchain
-		// ("cmake error") and build ("error: ", "fatal error:", "undefined
-		// reference", "no such file") markers BEFORE ran-evidence, so a
-		// configure/compile/link failure is never mistaken for a demonstration.
-		// `make` is intentionally left on the unknown path: it is a generic
-		// build tool, and the not-demonstrated contract for a bare `make`
-		// non-zero exit is preserved by the tightened unknown ran-markers.
+	case "cmake", "gcc", "g++", "clang", "clang++", "cc", "c++", "ctest", "meson":
+		// The C/C++ build + compile + test launchers (CMake/CTest and Meson
+		// included). Routing them to the cpp ecosystem means a broken build is
+		// classified against cpp's toolchain ("cmake error") and build
+		// ("error: ", "fatal error:", "undefined reference", "no such file")
+		// markers BEFORE ran-evidence, so a configure/compile/link failure is
+		// never mistaken for a demonstration. `make` and `ninja` are left on the
+		// unknown path: they are generic build tools, and the not-demonstrated
+		// contract for a bare non-zero exit is preserved by the tightened unknown
+		// ran-markers.
 		return ecosystemTable[ecosystemIndex(sandbox.EcosystemCpp)]
 	case "bazel", "bazelisk":
 		// Bazel is a build/test launcher. Bugbot runs `bazel test //...`

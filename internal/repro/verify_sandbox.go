@@ -137,6 +137,18 @@ func smokeCmd(repoDir string) []string {
 	case "bazel":
 		// bazel version is the only thing that works offline without a workspace.
 		return []string{"bazel", "version"}
+	case "bash":
+		// C/C++ suites are compound `bash -c "cmake ... && ctest ..."` strings.
+		// Probe the toolchain version instead of running the full
+		// configure+build+test, which would defeat the smoke test's purpose.
+		if len(suite) >= 3 {
+			switch {
+			case strings.HasPrefix(suite[2], "cmake"):
+				return []string{"cmake", "--version"}
+			case strings.HasPrefix(suite[2], "meson"):
+				return []string{"meson", "--version"}
+			}
+		}
 	}
 
 	// Fallback: return the suite command as-is; better than nothing.

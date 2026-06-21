@@ -267,3 +267,26 @@ func TestInterpret_MaskedExitCode_SanitizerStillDemonstrates(t *testing.T) {
 		}
 	})
 }
+
+// TestDetectEcosystem_CmakeSuiteCmd asserts that the compound cmake+ctest
+// command produced by detectSuiteCmd is classified as the cpp ecosystem by
+// detectEcosystem. The command is wrapped in bash -c; unwrapShell must peel
+// the wrapper and recognise "cmake" as the first real token.
+func TestDetectEcosystem_CmakeSuiteCmd(t *testing.T) {
+	cmd := []string{"bash", "-c", "cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build --parallel 4 && ctest --test-dir build --output-on-failure --no-tests=ignore"}
+	got := detectEcosystem(cmd)
+	if got.name != sandbox.EcosystemCpp {
+		t.Errorf("detectEcosystem(cmake suite cmd) = %q, want %q", got.name, sandbox.EcosystemCpp)
+	}
+}
+
+// TestDetectEcosystem_MesonSuiteCmd asserts that the compound meson command
+// produced by detectSuiteCmd is classified as the cpp ecosystem. The command
+// is wrapped in bash -c; unwrapShell peels it and "meson" routes to cpp.
+func TestDetectEcosystem_MesonSuiteCmd(t *testing.T) {
+	cmd := []string{"bash", "-c", "meson setup build && meson test -C build --print-errorlogs"}
+	got := detectEcosystem(cmd)
+	if got.name != sandbox.EcosystemCpp {
+		t.Errorf("detectEcosystem(meson suite cmd) = %q, want %q", got.name, sandbox.EcosystemCpp)
+	}
+}

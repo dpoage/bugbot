@@ -962,6 +962,18 @@ func TestDetectSuiteCmdExtended(t *testing.T) {
 			markers: []string{"nx.json"},
 			want:    "npm test",
 		},
+		// CMakeLists.txt → compound cmake+ctest bash -c.
+		{
+			name:    "CMakeLists.txt",
+			markers: []string{"CMakeLists.txt"},
+			want:    "bash -c cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build --parallel 4 && ctest --test-dir build --output-on-failure --no-tests=ignore",
+		},
+		// meson.build → compound meson setup+test bash -c.
+		{
+			name:    "meson.build",
+			markers: []string{"meson.build"},
+			want:    "bash -c meson setup build && meson test -C build --print-errorlogs",
+		},
 	}
 
 	for _, tc := range cases {

@@ -216,6 +216,9 @@ func normalizeConfidence(x domain.Confidence) domain.Confidence {
 // heavyweight repro package. The two must stay in sync when new build systems
 // are added to ingest.DetectBuildSystems.
 //
+// Covered build systems (in priority order, matching DetectBuildSystems):
+// Bazel, GoWorkspace, JSWorkspace, GoModule, Cargo, NPM, Python, CMake, Meson.
+//
 // Returns nil when the toolchain cannot be identified; buildRunTestsTool treats
 // a nil result as "feature unavailable" and returns nil so callers see no tool.
 func detectTestCmd(repoDir string) []string {
@@ -241,6 +244,10 @@ func detectTestCmd(repoDir string) []string {
 			return []string{"npm", "test"}
 		case ingest.BuildSystemPython:
 			return []string{"python", "-m", "pytest"}
+		case ingest.BuildSystemCMake:
+			return []string{"bash", "-c", "cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build --parallel 4 && ctest --test-dir build --output-on-failure --no-tests=ignore"}
+		case ingest.BuildSystemMeson:
+			return []string{"bash", "-c", "meson setup build && meson test -C build --print-errorlogs"}
 		}
 	}
 	return nil
