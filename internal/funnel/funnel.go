@@ -695,9 +695,11 @@ type Stats struct {
 	// parse failure.
 	FinderRateLimited int `json:"finder_rate_limited,omitempty"`
 	// VerifierRuns / VerifierFailures mirror the above for refuter agents. A
-	// refuter that fails to parse is conservatively treated as "could not refute"
-	// (it cannot silently kill a candidate), but the failure is still counted so
-	// the verification result's reliability is visible.
+	// refuter that produces no parseable verdict is still "not refuted" so it can
+	// never silently kill a candidate, but it is EXCLUDED from the survive-trust
+	// quorum (genuineVerdicts) and counted here so the verification's reliability
+	// is visible. A panel where every seat fails (zero genuine verdicts) is
+	// orphaned as T3 suspected rather than promoted as verified (bugbot-8rd).
 	VerifierRuns     int `json:"verifier_runs"`
 	VerifierFailures int `json:"verifier_failures"`
 	// ArbiterRuns is the number of arbiter agents launched to decide split

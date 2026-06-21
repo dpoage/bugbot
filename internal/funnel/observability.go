@@ -79,13 +79,13 @@ func (f *Funnel) recordFinderUnitWithTimeDetail(
 // result.Skipped and never aborts the scan.
 //
 // tokens is the total input+output tokens for the panel (panel+arbiter
-// combined, as accumulated by verify.go). The status is one of:
-// survived, killed, orphaned_budget.
+// survived, killed, orphaned_budget, orphaned_verify_failed.
 //
 // seatNames are the refuter seat names; seatRefuted is a parallel slice
-// indicating which seats voted "refuted". survived reports the candidate's
-// final outcome. arbiterRan indicates whether an arbiter ran. arbiterRefuted
-// indicates the arbiter's verdict (meaningful only when arbiterRan is true).
+// indicating which seats voted "refuted". noVerdict counts seats that produced
+// no parseable verdict (infra/parse failures). arbiterRan indicates whether an
+// arbiter ran. arbiterRefuted indicates the arbiter's verdict (meaningful only
+// when arbiterRan is true).
 func (f *Funnel) recordVerifierUnit(
 	ctx context.Context,
 	scanRunID string,
@@ -97,6 +97,7 @@ func (f *Funnel) recordVerifierUnit(
 	status string,
 	seatNames []string,
 	seatRefuted []bool,
+	noVerdict int,
 	arbiterRan bool,
 	arbiterRefuted bool,
 	result *Result,
@@ -121,6 +122,9 @@ func (f *Funnel) recordVerifierUnit(
 			detail = fmt.Sprintf("seats=%s refuted=%d/%d arbiter=%s", seatsStr, refutedCount, len(seatNames), arbiterVerdict)
 		} else {
 			detail = fmt.Sprintf("seats=%s refuted=%d/%d", seatsStr, refutedCount, len(seatNames))
+		}
+		if noVerdict > 0 {
+			detail += fmt.Sprintf(" noverdict=%d", noVerdict)
 		}
 	}
 

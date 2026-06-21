@@ -79,10 +79,15 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 			if ctx.Err() != nil {
 				return nil, nil, tokens, failed, false, ctx.Err()
 			}
-			// Unparseable verdict => could not refute. Counted so the verification's
-			// reliability is visible, but it never silently kills a candidate.
+			// No genuine verdict: either an infrastructure failure (transport/
+			// provider error — outcome may be nil, zero tokens) or output that
+			// could not be parsed after one repair round-trip. Flagged NoVerdict
+			// so the survive-trust quorum (genuineVerdicts) excludes it, and
+			// counted so the verification's reliability is visible. It is still
+			// "not refuted" so a broken refuter can never silently kill a
+			// candidate (bugbot-8rd).
 			failed++
-			v = refutation{Refuted: false, Reasoning: "refuter produced no parseable verdict", Confidence: "low"}
+			v = refutation{Refuted: false, NoVerdict: true, Reasoning: "refuter produced no parseable verdict", Confidence: "low"}
 		}
 		verdicts = append(verdicts, v)
 		seatNames = append(seatNames, seat.name)
@@ -128,17 +133,38 @@ func (f *Funnel) runArbiter(ctx context.Context, verifier llm.Client, candTools 
 	return &av, tokens, false, nil
 }
 
-// examinedVerdicts returns the subset of verdicts from seats that actually
-// examined the code (CouldNotReadCode==false). An unparseable verdict
-// (Reasoning=="refuter produced no parseable verdict") counts as examined
-// because the runner tried; abstaining seats (CouldNotReadCode==true) are
-// excluded because they never saw the evidence.
+// examinedVerdicts returns the subset of verdicts used for the KILL decision
+// (majorityRefuted, isSplitVerdict): seats that did not abstain
+// (CouldNotReadCode==false). A no-verdict failure (NoVerdict==true) is KEPT
+// here as a "not refuted" vote so it can never CAUSE a kill — its presence only
+// makes the refuted-majority HARDER to reach. Abstaining seats are excluded
+// because they never saw the evidence. This is deliberately ASYMMETRIC with
+// genuineVerdicts: the kill side tolerates failures conservatively, while the
+// survive side (genuineVerdicts) refuses to count them.
 func examinedVerdicts(verdicts []refutation) []refutation {
 	out := make([]refutation, 0, len(verdicts))
 	for _, v := range verdicts {
 		if !v.CouldNotReadCode {
 			out = append(out, v)
 		}
+	}
+	return out
+}
+
+// genuineVerdicts returns the seats that produced a real, parseable verdict —
+// neither an abstention (CouldNotReadCode: the seat never saw the evidence) nor
+// a no-verdict failure (NoVerdict: the refuter run failed at the infra level or
+// its output could not be parsed). Only genuine verdicts justify TRUSTING a
+// survive outcome, so the survive quorum and the verification-failure orphan
+// decision count THESE, never the panel total (bugbot-8rd: a missing verdict is
+// evidence of nothing). genuineVerdicts is a subset of examinedVerdicts.
+func genuineVerdicts(verdicts []refutation) []refutation {
+	out := make([]refutation, 0, len(verdicts))
+	for _, v := range verdicts {
+		if v.CouldNotReadCode || v.NoVerdict {
+			continue
+		}
+		out = append(out, v)
 	}
 	return out
 }
@@ -240,24 +266,26 @@ func majorityRefuted(verdicts []refutation) bool {
 // arbiter's verdict is appended and the header changes to reflect arbitration.
 func buildReasoning(verdicts []refutation, seatNames []string, arbiterLine string, arbiterRan bool) string {
 	var b strings.Builder
-	examined := examinedVerdicts(verdicts)
+	genuine := genuineVerdicts(verdicts)
 	refuted := 0
-	for _, v := range examined {
+	for _, v := range genuine {
 		if v.Refuted {
 			refuted++
 		}
 	}
-	n := len(examined)
+	n := len(genuine)
 	if arbiterRan {
-		fmt.Fprintf(&b, "Survived adversarial verification (split panel decided by arbitration, %d/%d examined refuters could not disprove it):\n", n-refuted, n)
+		fmt.Fprintf(&b, "Survived adversarial verification (split panel decided by arbitration, %d/%d refuter verdicts could not disprove it):\n", n-refuted, n)
 	} else {
-		fmt.Fprintf(&b, "Survived adversarial verification (%d/%d examined refuters could not disprove it):\n", n-refuted, n)
+		fmt.Fprintf(&b, "Survived adversarial verification (%d/%d refuter verdicts could not disprove it):\n", n-refuted, n)
 	}
 	total := len(verdicts)
 	for i, v := range verdicts {
 		var verdict string
 		if v.CouldNotReadCode {
 			verdict = "abstained (could not read cited code)"
+		} else if v.NoVerdict {
+			verdict = "no verdict (verifier failed)"
 		} else if v.Refuted {
 			verdict = "refuted"
 		} else {

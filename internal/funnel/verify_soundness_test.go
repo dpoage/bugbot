@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/store"
 )
 
 // --- dox: abstention / quorum helpers ----------------------------------------
@@ -29,9 +31,12 @@ func TestExaminedVerdicts(t *testing.T) {
 			{CouldNotReadCode: true},
 		}, 0},
 		{
-			name: "unparseable is examined",
+			// A no-verdict (infra/parse failure) seat is STILL examined for the
+			// kill decision (it counts as "not refuted" so it can never cause a
+			// kill); only genuineVerdicts excludes it. See TestGenuineVerdicts.
+			name: "no-verdict seat is examined",
 			input: []refutation{
-				{Refuted: false, Reasoning: "refuter produced no parseable verdict", Confidence: "low"},
+				{Refuted: false, NoVerdict: true, Reasoning: "refuter produced no parseable verdict", Confidence: "low"},
 				{CouldNotReadCode: true, Refuted: false},
 			},
 			wantLen: 1,
@@ -44,6 +49,58 @@ func TestExaminedVerdicts(t *testing.T) {
 				t.Errorf("examinedVerdicts len = %d, want %d", len(got), tc.wantLen)
 			}
 		})
+	}
+}
+
+// TestGenuineVerdicts verifies that BOTH abstaining seats (CouldNotReadCode)
+// and no-verdict failures (NoVerdict) are excluded — only seats that produced a
+// real, parseable verdict are genuine. This is the survive-trust denominator
+// (bugbot-8rd): a missing verdict is evidence of nothing.
+func TestGenuineVerdicts(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   []refutation
+		wantLen int
+	}{
+		{"empty", nil, 0},
+		{"all genuine", []refutation{{Refuted: false}, {Refuted: true}}, 2},
+		{"abstain excluded", []refutation{{CouldNotReadCode: true}, {Refuted: true}}, 1},
+		{"no-verdict excluded", []refutation{{NoVerdict: true}, {Refuted: false}}, 1},
+		{"all failed/abstain excluded", []refutation{
+			{NoVerdict: true}, {NoVerdict: true}, {CouldNotReadCode: true},
+		}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := genuineVerdicts(tc.input); len(got) != tc.wantLen {
+				t.Errorf("genuineVerdicts len = %d, want %d", len(got), tc.wantLen)
+			}
+		})
+	}
+}
+
+// TestMajorityRefuted_NoVerdictCannotKill pins the kill-safety invariant: a
+// no-verdict failure counts as "not refuted" in the kill denominator, so it can
+// only make a refuted-majority HARDER to reach — a broken refuter must never be
+// able to CAUSE a kill (bugbot-8rd).
+func TestMajorityRefuted_NoVerdictCannotKill(t *testing.T) {
+	// 1 genuine refute + 2 no-verdict: 1/3 is not a majority → not killed.
+	oneRefuteTwoFailed := []refutation{
+		{Refuted: true},
+		{Refuted: false, NoVerdict: true},
+		{Refuted: false, NoVerdict: true},
+	}
+	if majorityRefuted(oneRefuteTwoFailed) {
+		t.Error("1 genuine refute + 2 no-verdict must NOT kill (a broken refuter cannot enable a kill)")
+	}
+	// 2 genuine refutes + 1 no-verdict: 2/3 is a genuine majority → killed.
+	twoRefuteOneFailed := []refutation{
+		{Refuted: true},
+		{Refuted: true},
+		{Refuted: false, NoVerdict: true},
+	}
+	if !majorityRefuted(twoRefuteOneFailed) {
+		t.Error("2 genuine refutes + 1 no-verdict must kill (genuine majority)")
 	}
 }
 
@@ -533,5 +590,109 @@ func TestNN3_UnanimousRefuted_SharedHallucination_PinnedBehavior(t *testing.T) {
 	// known gap: a future improvement would detect unanimous hallucination.
 	if res.Stats.Killed != 1 {
 		t.Errorf("pinned: killed=1 expected, got %d", res.Stats.Killed)
+	}
+}
+
+// --- bugbot-8rd: no-verdict failures must not fail-open ----------------------
+
+// TestBelowQuorum_NoVerdictDoesNotCount: a panel with 1 genuine verdict and 2
+// no-verdict failures is below the survive quorum (the failures do not count),
+// so a survivor must be flagged NeedsHuman. It is NOT zero-genuine, so it is not
+// orphaned — one seat genuinely judged it.
+func TestBelowQuorum_NoVerdictDoesNotCount(t *testing.T) {
+	panel := []refutation{
+		{Refuted: false},                  // genuine not-refuted
+		{Refuted: false, NoVerdict: true}, // failure
+		{Refuted: false, NoVerdict: true}, // failure
+	}
+	genuine := genuineVerdicts(panel)
+	if len(genuine) != 1 {
+		t.Fatalf("genuine = %d, want 1", len(genuine))
+	}
+	if !belowQuorum(len(genuine), len(panel)) {
+		t.Error("1 genuine of 3 must be below quorum (no-verdict seats do not count)")
+	}
+}
+
+// proseVerifier returns a scriptedClient whose every completion is prose that
+// can never parse as a refuter verdict, so RunJSON's parse + repair both fail
+// and every refuter seat is recorded as NoVerdict (an infrastructure/parse
+// failure). This models the live shimmy incident: the verifier provider erroring
+// out so no seat returns a usable verdict.
+func proseVerifier() *scriptedClient {
+	sc := newScriptedClient()
+	sc.fallback = "I analyzed the code, but I am returning prose, not JSON."
+	return sc
+}
+
+// TestSweep_AllRefutersFail_OrphanedAsT3Suspected is the bugbot-8rd regression:
+// when EVERY refuter produces no parseable verdict, the candidate must NOT be
+// promoted as a confident T2 survivor. It is orphaned as T3 suspected (so the
+// next scan re-verifies it) and the degraded panel is recorded in agent_units.
+func TestSweep_AllRefutersFail_OrphanedAsT3Suspected(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	finder := newScriptedClient().onSystemContains("nil-safety/error-handling", candJSON(realCand))
+	verifier := proseVerifier()
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		Limits:    StageLimits{Refuters: 3},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(res.Findings) != 1 {
+		t.Fatalf("want 1 finding (orphaned, not dropped), got %d", len(res.Findings))
+	}
+	got := res.Findings[0]
+	if got.Tier != domain.TierSuspected {
+		t.Errorf("tier = %d, want %d (T3 suspected): an all-failed panel must NOT promote to T2", got.Tier, domain.TierSuspected)
+	}
+	if got.Status != store.StatusOpen {
+		t.Errorf("status = %q, want open", got.Status)
+	}
+	if strings.Contains(got.Reasoning, "Survived adversarial verification") {
+		t.Errorf("orphaned finding must not claim it survived verification:\n%s", got.Reasoning)
+	}
+	if !strings.Contains(got.Reasoning, "Verification incomplete") {
+		t.Errorf("orphaned reasoning should explain the verification failure:\n%s", got.Reasoning)
+	}
+	if res.Stats.Verified != 0 || res.Stats.Killed != 0 {
+		t.Errorf("verified=%d killed=%d, want 0/0 (no genuine verdict)", res.Stats.Verified, res.Stats.Killed)
+	}
+	if res.Stats.Suspected != 1 {
+		t.Errorf("suspected = %d, want 1", res.Stats.Suspected)
+	}
+	if res.Stats.VerifierFailures != 3 {
+		t.Errorf("verifier_failures = %d, want 3 (every seat failed)", res.Stats.VerifierFailures)
+	}
+
+	// AC2: the degraded panel is recorded in the verifier agent_units row.
+	units, err := st.ListAgentUnits(ctx, res.ScanRunID)
+	if err != nil {
+		t.Fatalf("ListAgentUnits: %v", err)
+	}
+	var foundVerifier bool
+	for _, u := range units {
+		if u.Role != "verifier" {
+			continue
+		}
+		foundVerifier = true
+		if string(u.Status) != "orphaned_verify_failed" {
+			t.Errorf("verifier unit status = %q, want orphaned_verify_failed", u.Status)
+		}
+		if !strings.Contains(u.Detail, "noverdict=3") {
+			t.Errorf("verifier unit detail = %q, want it to record noverdict=3", u.Detail)
+		}
+	}
+	if !foundVerifier {
+		t.Error("no verifier agent_units row recorded for the orphaned candidate")
 	}
 }

@@ -69,9 +69,9 @@ func (f *Funnel) runVerifyAndPersist(
 		f.note(result, msg)
 		progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
 		f.recordVerifierUnit(ctx, result.ScanRunID, c.Lens, c.File, candIdx,
-			time.Time{}, time.Time{}, 0, "orphaned_budget", nil, nil, false, false, result)
+			time.Time{}, time.Time{}, 0, "orphaned_budget", nil, nil, 0, false, false, result)
 		// Persist as T3 suspected.
-		suspected := persistOrphan(ctx, f, c, commit, fps, result)
+		suspected := persistOrphan(ctx, f, c, commit, fps, budgetStoppedReasoning, result)
 		if suspected != nil {
 			findingsMu.Lock()
 			*allFindings = append(*allFindings, *suspected)
@@ -169,6 +169,8 @@ func (f *Funnel) runVerifyAndPersist(
 	recordStatus := ""
 	var candKilled bool
 	var wasStopped bool
+	var verifyFailed bool
+	var orphanReasoning string
 
 	if stopped || arbiterBudgetStopped {
 		// Budget stopped mid-verification.
@@ -177,6 +179,7 @@ func (f *Funnel) runVerifyAndPersist(
 		msg := fmt.Sprintf("budget stopped mid-verification of %q (%s:%d) — kept as T3 suspected", c.Title, c.File, c.Line)
 		f.note(result, msg)
 		progress.Emit(sink, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
+		orphanReasoning = budgetStoppedReasoning
 		recordStatus = "orphaned_budget"
 	} else {
 		// Fold verifier-side stats (under findingsMu to keep them consistent with
@@ -192,7 +195,7 @@ func (f *Funnel) runVerifyAndPersist(
 		if nFailed > 0 {
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindLensFailed, Role: progress.RoleVerifier, Label: c.Title,
-				Message: fmt.Sprintf("%d/%d refuter(s) produced no parseable verdict for %q — treated as 'could not refute'", nFailed, len(verdicts), c.Title),
+				Message: fmt.Sprintf("%d/%d refuter(s) produced no parseable verdict for %q", nFailed, len(verdicts), c.Title),
 			})
 		}
 
@@ -214,6 +217,20 @@ func (f *Funnel) runVerifyAndPersist(
 			progress.Emit(sink, progress.Event{
 				Kind: progress.KindFindingKilled, Title: c.Title, File: c.File, Line: c.Line,
 			})
+		} else if genuine := genuineVerdicts(verdicts); len(genuine) == 0 && nFailed > 0 {
+			// Verification reached NO genuine verdict: every seat abstained or
+			// failed, with at least one infrastructure/parse failure. The
+			// candidate was never actually challenged, so promoting it as a
+			// confident survivor would report a finding no refuter examined
+			// (bugbot-8rd). Orphan it as T3 suspected; the next scan re-verifies.
+			verifyFailed = true
+			orphanReasoning = verifyFailedReasoning
+			recordStatus = "orphaned_verify_failed"
+			msg := fmt.Sprintf("verification failed: %d/%d refuter(s) returned no verdict for %q (%s:%d) — kept as T3 suspected", nFailed, len(verdicts), c.Title, c.File, c.Line)
+			f.note(result, msg)
+			progress.Emit(sink, progress.Event{
+				Kind: progress.KindLensFailed, Role: progress.RoleVerifier, Label: c.Title, Message: msg,
+			})
 		} else {
 			recordStatus = "survived"
 			progress.Emit(sink, progress.Event{
@@ -226,12 +243,12 @@ func (f *Funnel) runVerifyAndPersist(
 	arbiterRan := localArbiterRuns > 0 && localArbiterFailed == 0 && !arbiterBudgetStopped
 	f.recordVerifierUnit(ctx, result.ScanRunID, c.Lens, c.File, candIdx,
 		startedAt, finishedAt, tokens, recordStatus, seatNames, seatRefutedSlice(verdicts),
-		arbiterRan, arbiterRefuted(arbiterVerdict), result)
+		nFailed, arbiterRan, arbiterRefuted(arbiterVerdict), result)
 
 	// Immediate persistence (Stage D in the streaming topology).
-	if wasStopped {
-		// Orphaned: persist as T3 suspected.
-		suspected := persistOrphan(ctx, f, c, commit, fps, result)
+	if wasStopped || verifyFailed {
+		// Orphaned (budget stop or verification failure): persist as T3 suspected.
+		suspected := persistOrphan(ctx, f, c, commit, fps, orphanReasoning, result)
 		if suspected != nil {
 			findingsMu.Lock()
 			*allFindings = append(*allFindings, *suspected)
@@ -264,24 +281,27 @@ func (f *Funnel) runVerifyAndPersist(
 	allLenses := dedupLenses(append(c.CorroboratingLenses, stagedLenses...))
 	c.CorroboratingLenses = allLenses
 
-	// Quorum check: require a strict majority of the panel to have examined the
-	// code. Abstaining seats (CouldNotReadCode) do not count toward quorum.
-	// Below floor: survivor is flagged NeedsHuman so a human confirms the result
-	// rather than silently promoting a finding examined by too few seats.
+	// Quorum check: require a strict majority of the panel to have produced a
+	// GENUINE verdict (genuineVerdicts: neither an abstention nor a no-verdict
+	// infra/parse failure). Below floor: survivor is flagged NeedsHuman so a
+	// human confirms the result rather than silently promoting a finding too few
+	// seats actually judged. (A panel with ZERO genuine verdicts and a failure
+	// was already orphaned above; reaching here means at least one seat judged.)
 	//
 	// NeedsHuman dual meaning: this field is also set by the repro/patch-prover
 	// when it exhausts its attempt budget (repro_hook.go). Both meanings cause
 	// the finding to be excluded from the repro backlog (daemon/backlog.go) and
 	// to render the 'needs human review' copy in CLI/report output. The verifier
-	// sets it here for a different reason (below-quorum abstentions) but accepts
-	// those downstream effects deliberately: a below-quorum survivor should not
-	// receive a repro attempt until a human has confirmed the finding. A separate
-	// bead tracks updating the downstream copy to distinguish the two causes.
-	examined := examinedVerdicts(verdicts)
-	needsHuman := belowQuorum(len(examined), len(verdicts))
+	// sets it here for a different reason (below-quorum genuine verdicts) but
+	// accepts those downstream effects deliberately: a below-quorum survivor
+	// should not receive a repro attempt until a human has confirmed the
+	// finding. A separate bead tracks updating the downstream copy to
+	// distinguish the two causes.
+	genuine := genuineVerdicts(verdicts)
+	needsHuman := belowQuorum(len(genuine), len(verdicts))
 	var quorumNote string
 	if needsHuman {
-		quorumNote = fmt.Sprintf("\nNOTE: only %d/%d panel seat(s) examined the code (below quorum floor); human review required.", len(examined), len(verdicts))
+		quorumNote = fmt.Sprintf("\nNOTE: only %d/%d panel seat(s) produced a verdict (below quorum floor); human review required.", len(genuine), len(verdicts))
 	}
 
 	reasoning := buildReasoning(verdicts, seatNames, arbiterReasoning, arbiterRan) + quorumNote
@@ -306,7 +326,7 @@ func (f *Funnel) runVerifyAndPersist(
 	} else if !arbiterRan {
 		// Unanimous-survive (or no-arbiter) path: fold the highest-confidence
 		// non-empty CorrectedDescription from an examined not-refuted seat.
-		description = bestRefuterCorrection(examined, c.Description)
+		description = bestRefuterCorrection(genuine, c.Description)
 	}
 
 	finding := store.Finding{
@@ -379,15 +399,17 @@ func (f *Funnel) runVerifyAndPersist(
 	}
 }
 
-// persistOrphan persists a budget-orphaned candidate as a Tier 3 suspected
-// finding. Returns a pointer to the stored finding on success, nil on failure
+// persistOrphan persists an unverified candidate as a Tier 3 suspected finding,
+// using reasoning as its recorded verification trace (budgetStoppedReasoning
+// for a budget stop, verifyFailedReasoning for a panel that produced no
+// verdict). Returns a pointer to the stored finding on success, nil on failure
 // or suppression. Best-effort: errors are noted but do not abort the run.
-func persistOrphan(ctx context.Context, f *Funnel, c Candidate, commit string, fps map[string]string, result *Result) *store.Finding {
+func persistOrphan(ctx context.Context, f *Funnel, c Candidate, commit string, fps map[string]string, reasoning string, result *Result) *store.Finding {
 	finding := store.Finding{
 		Fingerprint:         c.Fingerprint,
 		Title:               c.Title,
 		Description:         c.Description,
-		Reasoning:           appendCorroboration(budgetStoppedReasoning, c.CorroboratingLenses),
+		Reasoning:           appendCorroboration(reasoning, c.CorroboratingLenses),
 		Severity:            c.Severity,
 		Tier:                domain.TierSuspected,
 		Status:              store.StatusOpen,
@@ -407,7 +429,7 @@ func persistOrphan(ctx context.Context, f *Funnel, c Candidate, commit string, f
 	if stored.Status != store.StatusOpen {
 		return nil
 	}
-	msg := fmt.Sprintf("budget stop: %q (%s:%d) kept as T3 suspected", c.Title, c.File, c.Line)
+	msg := fmt.Sprintf("%q (%s:%d) kept as T3 suspected", c.Title, c.File, c.Line)
 	f.note(result, msg)
 	return &stored
 }

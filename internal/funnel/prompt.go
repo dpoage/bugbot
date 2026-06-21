@@ -277,6 +277,15 @@ type refutation struct {
 	CouldNotReadCode     bool   `json:"could_not_read_code"`
 	CorrectedDescription string `json:"corrected_description"`
 	HallucinatedRebuttal bool   `json:"hallucinated_rebuttal"`
+	// NoVerdict marks a seat that produced NO genuine verdict: the refuter run
+	// failed at the infrastructure level (transport/provider error — zero
+	// tokens) or its output could not be parsed even after one repair
+	// round-trip. It is set by runRefuters, never by the model (json:"-"). A
+	// NoVerdict seat is still "not refuted" for the KILL decision (a broken
+	// refuter must never CAUSE a kill) but is EXCLUDED from the survive-trust
+	// quorum (genuineVerdicts): a missing verdict is evidence of nothing, so it
+	// must never silently PROMOTE a candidate to verified (bugbot-8rd).
+	NoVerdict bool `json:"-"`
 }
 
 // verifierSandboxParagraph is appended to the verifier system prompt when the
@@ -367,6 +376,8 @@ func arbiterTask(c Candidate, verdicts []refutation, seatNames []string) string 
 		verdict := "could not refute"
 		if v.CouldNotReadCode {
 			verdict = "abstained (could not read cited code)"
+		} else if v.NoVerdict {
+			verdict = "no verdict (verifier failed to produce a parseable result)"
 		} else if v.Refuted {
 			verdict = "refuted"
 		}
