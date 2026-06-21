@@ -1106,3 +1106,48 @@ func TestScanHeatOrdering(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// New-field tests: repro.sandbox_max_execs (bugbot-ziq).
+// ---------------------------------------------------------------------------
+
+// TestDefault_ReproSandboxMaxExecs verifies the default value is 3.
+func TestDefault_ReproSandboxMaxExecs(t *testing.T) {
+	cfg := Default()
+	if cfg.Repro.SandboxMaxExecs != 3 {
+		t.Errorf("Repro.SandboxMaxExecs default = %d, want 3", cfg.Repro.SandboxMaxExecs)
+	}
+}
+
+// TestValidate_ReproSandboxMaxExecsMustBePositive verifies that Validate
+// rejects Repro.SandboxMaxExecs < 1 with a message containing "sandbox_max_execs".
+func TestValidate_ReproSandboxMaxExecsMustBePositive(t *testing.T) {
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+	cfg.Repro.SandboxMaxExecs = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "sandbox_max_execs") {
+		t.Errorf("SandboxMaxExecs=0 should be rejected with sandbox_max_execs in message, got %v", err)
+	}
+	cfg.Repro.SandboxMaxExecs = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "sandbox_max_execs") {
+		t.Errorf("SandboxMaxExecs=-1 should be rejected, got %v", err)
+	}
+	cfg.Repro.SandboxMaxExecs = 1
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("SandboxMaxExecs=1 should be valid, got %v", err)
+	}
+}
+
+// TestEnvOverride_ReproSandboxMaxExecs verifies that
+// BUGBOT_REPRO_SANDBOX_MAX_EXECS overrides Repro.SandboxMaxExecs.
+func TestEnvOverride_ReproSandboxMaxExecs(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_REPRO_SANDBOX_MAX_EXECS=7"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Repro.SandboxMaxExecs != 7 {
+		t.Errorf("SandboxMaxExecs = %d, want 7", cfg.Repro.SandboxMaxExecs)
+	}
+}

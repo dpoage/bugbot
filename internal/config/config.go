@@ -292,6 +292,10 @@ type Repro struct {
 	// daemon backlog, `bugbot scan --repro`, and `bugbot repro` (whose
 	// --transcript-dir flag overrides it).
 	TranscriptDir string `yaml:"transcript_dir"`
+	// SandboxMaxExecs is the per-attempt run_tests budget for the reproducer
+	// agent: the agent may call run_tests at most this many times per attempt to
+	// orient itself before proposing its repro plan. Must be >= 1. Default 3.
+	SandboxMaxExecs int `yaml:"sandbox_max_execs"`
 }
 
 // LLM tunes the shared LLM client wrapper applied to every role's client. The
@@ -418,6 +422,7 @@ func Default() Config {
 			PatchProver:      false,
 			PatchMaxAttempts: 3,
 			BacklogBatch:     3,
+			SandboxMaxExecs:  3,
 		},
 		Report: Report{
 			Dir:   ".bugbot/reports",
@@ -507,6 +512,7 @@ func Load(path string) (Config, error) {
 //	BUGBOT_REPRO_SUITE_CMD            (comma-separated argv)
 //	BUGBOT_REPRO_BACKLOG_BATCH        (integer >= 1)
 //	BUGBOT_REPRO_TRANSCRIPT_DIR      (directory for reproducer agent transcripts)
+//	BUGBOT_REPRO_SANDBOX_MAX_EXECS   (integer >= 1)
 func applyEnvOverrides(cfg *Config, environ []string) error {
 	env := make(map[string]string, len(environ))
 	for _, kv := range environ {
@@ -625,6 +631,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt("BUGBOT_PUBLISH_TIER_MIN", &cfg.Publish.TierMin),
 		setInt("BUGBOT_REPRO_PATCH_MAX_ATTEMPTS", &cfg.Repro.PatchMaxAttempts),
 		setInt("BUGBOT_REPRO_BACKLOG_BATCH", &cfg.Repro.BacklogBatch),
+		setInt("BUGBOT_REPRO_SANDBOX_MAX_EXECS", &cfg.Repro.SandboxMaxExecs),
 		setDur("BUGBOT_DAEMON_POLL_INTERVAL", &cfg.Daemon.PollInterval),
 		setDur("BUGBOT_DAEMON_SWEEP_INTERVAL", &cfg.Daemon.SweepInterval),
 		setDur("BUGBOT_DAEMON_IDLE_BACKOFF", &cfg.Daemon.IdleBackoff),
@@ -831,6 +838,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Repro.BacklogBatch < 1 {
 		return fmt.Errorf("config: repro.backlog_batch must be >= 1 (got %d)", c.Repro.BacklogBatch)
+	}
+	if c.Repro.SandboxMaxExecs < 1 {
+		return fmt.Errorf("config: repro.sandbox_max_execs must be >= 1 (got %d)", c.Repro.SandboxMaxExecs)
 	}
 	// ReproBacklogInterval is only consulted when repro is enabled, but we
 	// validate it unconditionally so a misconfiguration is caught at startup

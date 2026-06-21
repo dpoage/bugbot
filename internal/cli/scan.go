@@ -401,6 +401,7 @@ func buildReproHookForScan(
 		TranscriptDir:    cfg.Repro.TranscriptDir,
 		PackageSummary:   packageSummaryProvider(st),
 		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
+		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,
 	})
 	if rNewErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer: %w", rNewErr)

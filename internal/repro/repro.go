@@ -63,6 +63,11 @@ const (
 	// cartographer package summaries fed into the task, gives it room to plan and
 	// revise. Applied in resolve when AgentLimits.MaxIterations is zero.
 	DefaultMaxIterations = 40
+	// DefaultSandboxMaxExecs is the per-attempt budget of run_tests calls the
+	// reproducer agent may make. A value of 3 lets the agent verify the
+	// toolchain, inspect output, and confirm the suite layout without burning
+	// unreasonable sandbox capacity.
+	DefaultSandboxMaxExecs = 3
 )
 
 // Options configures a Reproducer.
@@ -88,6 +93,10 @@ type Options struct {
 	// TranscriptDir, when non-empty, makes each reproducer agent auto-save its
 	// transcript there.
 	TranscriptDir string
+	// SandboxMaxExecs is the per-attempt execution budget: the reproducer agent
+	// may call run_tests at most this many times per attempt to orient itself
+	// before proposing its repro plan. Zero uses DefaultSandboxMaxExecs.
+	SandboxMaxExecs int
 	// PatchProver enables the patch-prover stage: after a successful repro,
 	// attempt to produce a minimal fix and prove it with a sandboxed suite run.
 	PatchProver bool
@@ -169,6 +178,9 @@ func (o Options) resolve() Options {
 	}
 	if o.AgentLimits.MaxIterations == 0 {
 		o.AgentLimits.MaxIterations = DefaultMaxIterations
+	}
+	if o.SandboxMaxExecs <= 0 {
+		o.SandboxMaxExecs = DefaultSandboxMaxExecs
 	}
 	return o
 }
@@ -419,6 +431,16 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 			return s, ok, nil
 		}))
 	}
+	// run_tests lets the agent exercise the repo's EXISTING test suite in the
+	// sandbox to confirm the toolchain and learn the test layout before writing
+	// its repro plan. Omitted when no build system is detectable.
+	baseCmd := detectSuiteCmdFor(r.repoDir, r.buildSystems)
+	if len(baseCmd) > 0 {
+		// onExec is nil: per-turn run_tests activity already surfaces via the
+		// runner's activity sink; the reproducer keeps no aggregate sandbox-exec
+		// counters (unlike the funnel), so there is nothing to accumulate.
+		tools = append(tools, agent.NewRunTestsTool(r.sb, r.repoDir, baseCmd, r.opts.SandboxMaxExecs, r.deps.ROMounts, r.deps.Env, r.deps.SetupCmds, nil))
+	}
 	var opts []agent.Option
 	opts = append(opts, agent.WithLimits(r.opts.AgentLimits))
 	if r.opts.TranscriptDir != "" {
@@ -428,6 +450,9 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 	prompt := systemPrompt(lang, systems, r.capabilities)
 	if r.pkgSummary != nil {
 		prompt += pkgContextGuidance
+	}
+	if len(baseCmd) > 0 {
+		prompt += runTestsGuidance(r.opts.SandboxMaxExecs)
 	}
 	prompt += reproSandboxGuidance(r.deps.ROMounts)
 	return agent.NewRunner(r.client, tools, prompt, opts...), nil

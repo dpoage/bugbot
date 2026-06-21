@@ -226,6 +226,31 @@ proposing your plan, look up the repository's TEST package (e.g. "test",
 tests are built and run here: the test runner/binary, where to place a new test
 file, and whether the build fetches dependencies at configure time.`
 
+// runTestsGuidance is appended to the reproducer system prompt when the
+// run_tests tool is wired. It tells the agent it may call run_tests up to
+// maxExec times to verify the toolchain and learn the repo's test layout
+// before writing its repro plan — and that run_tests MUST NOT serve as the
+// demonstration itself (the repro must still be a new minimal failing test).
+func runTestsGuidance(maxExec int) string {
+	return fmt.Sprintf(`
+
+You also have run_tests: it runs the repository's EXISTING test suite inside
+the sandbox (network-none, offline). You MAY call it up to %d time(s) to
+confirm the toolchain is working and to learn the repo's test layout and build
+conventions BEFORE proposing your repro plan. Typical uses: verify the suite
+compiles and runs, inspect which tests exist, confirm a sanitizer flag works.
+
+NOTE: run_tests always runs OFFLINE (network-none). Your final repro plan runs
+with the configured network, so a run_tests failure at the dependency-fetch or
+configure step (e.g. cmake FetchContent) is EXPECTED offline and does NOT mean
+the repro path is broken — proceed with your plan.
+
+IMPORTANT: run_tests executes the repo's pre-existing tests — it is NOT a way
+to demonstrate the bug. Your repro plan MUST still inject a NEW minimal failing
+test (via the plan's files map) and run it with a targeted cmd. Do NOT use
+run_tests as the demonstration or include it in cmd.`, maxExec)
+}
+
 // reproSandboxGuidance renders the sandbox-environment + command-hygiene section
 // appended to every reproducer system prompt. It encodes the realities that
 // caused observed repro failures: the sandbox is a clean git checkout (gitignored
