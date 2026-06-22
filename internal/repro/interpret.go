@@ -101,10 +101,10 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 		return verdict{demonstrated: true, summary: trunc(out, 400), ecosystem: eco.name}
 	}
 
-	switch {
-	case res.ExitCode == 0:
+	switch res.ExitCode {
+	case 0:
 		return verdict{reason: VerdictReasonExitZero, summary: trunc(out, 400), ecosystem: eco.name}
-	case res.ExitCode == 125 || res.ExitCode == 126 || res.ExitCode == 127:
+	case 125, 126, 127:
 		return verdict{reason: VerdictReasonEnvironmentError, summary: envSummary(eco.name, out), ecosystem: eco.name}
 	}
 
