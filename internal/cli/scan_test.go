@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/funnel"
+	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -260,5 +262,37 @@ func TestApplyReranked(t *testing.T) {
 	}
 	if findings[2].Severity != "low" || findings[2].VerdictDetail != "untouched" {
 		t.Errorf("finding c (absent from re-ranked set) must be left untouched: %+v", findings[2])
+	}
+}
+
+// TestSandboxRunOpts_HonorsResourceCaps pins the contract that the configured
+// sandbox.cpus, sandbox.memory_mb, and sandbox.pids_limit actually reach the
+// container backend. Regression: sandboxRunOpts threaded network/timeout/idle
+// but dropped cpus/memory_mb, and pids_limit had no config knob at all — so
+// every run kept the backend defaults (2 CPUs / 2048 MB / 256 pids). The 256
+// pids cap crashed the Bazel JVM ("unable to create native thread") during
+// analysis, so every Bazel-repo reproduction failed as environment_error.
+// Distinct-from-default values prove the config — not the hardcoded backend
+// default — flows through.
+func TestSandboxRunOpts_HonorsResourceCaps(t *testing.T) {
+	cfg := config.Default()
+	cfg.Sandbox.CPUs = 4
+	cfg.Sandbox.MemoryMB = 8192
+	cfg.Sandbox.PidsLimit = 4096
+
+	sb := &sandbox.CLI{}
+	for _, o := range sandboxRunOpts(cfg) {
+		o(sb)
+	}
+
+	cpus, mem, pids := sb.Limits()
+	if cpus != 4 {
+		t.Errorf("cpus = %v, want 4 (sandbox.cpus dropped before reaching backend)", cpus)
+	}
+	if mem != 8192 {
+		t.Errorf("memoryMB = %d, want 8192 (sandbox.memory_mb dropped before reaching backend)", mem)
+	}
+	if pids != 4096 {
+		t.Errorf("pidsLimit = %d, want 4096 (sandbox.pids_limit dropped before reaching backend)", pids)
 	}
 }

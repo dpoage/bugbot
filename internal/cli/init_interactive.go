@@ -356,6 +356,7 @@ func renderConfig(cfg wizardConfig) (string, error) {
 	sb.WriteString("  image: docker.io/library/debian:stable-slim\n")
 	sb.WriteString("  cpus: 2\n")
 	sb.WriteString("  memory_mb: 2048\n")
+	sb.WriteString("  pids_limit: 4096\n")
 	sb.WriteString("  timeout_seconds: 600\n")
 	sb.WriteString("  idle_timeout_seconds: 120\n")
 	sb.WriteString("  network: none\n")

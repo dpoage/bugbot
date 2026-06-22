@@ -116,6 +116,14 @@ func NewCLI(runtime, image string, opts ...Option) (*CLI, error) {
 // Runtime returns the resolved runtime binary name (podman or docker).
 func (s *CLI) Runtime() string { return s.runtime }
 
+// Limits returns the effective resource caps the backend applies to a Spec that
+// does not override them: the default CPU count, memory ceiling (MB), and pids
+// limit. Exposed so status/doctor and tests can confirm the configured
+// sandbox.cpus / sandbox.memory_mb actually reached the backend.
+func (s *CLI) Limits() (cpus float64, memoryMB, pidsLimit int) {
+	return s.defaultCPUs, s.defaultMemory, s.pidsLimit
+}
+
 // randToken returns a 128-bit random hex string used to give each container a
 // unique, collision-resistant name (so it can be reaped by name on timeout).
 func randToken() string {

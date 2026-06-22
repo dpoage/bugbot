@@ -170,12 +170,18 @@ type Scan struct {
 // Sandbox configures the isolated execution environment used for verification
 // and reproduction.
 type Sandbox struct {
-	Backend        string `yaml:"backend"`
-	Runtime        string `yaml:"runtime"`
-	Image          string `yaml:"image"`
-	CPUs           int    `yaml:"cpus"`
-	MemoryMB       int    `yaml:"memory_mb"`
-	TimeoutSeconds int    `yaml:"timeout_seconds"`
+	Backend  string `yaml:"backend"`
+	Runtime  string `yaml:"runtime"`
+	Image    string `yaml:"image"`
+	CPUs     int    `yaml:"cpus"`
+	MemoryMB int    `yaml:"memory_mb"`
+	// PidsLimit caps the number of processes/threads (cgroup pids.max) a single
+	// sandbox run may create — fork-bomb defense-in-depth. It MUST be high enough
+	// for the target toolchain: build systems that spawn worker/virtual-thread
+	// pools (notably the Bazel JVM, which dies with "unable to create native
+	// thread" under a low cap) need thousands, not hundreds. Must be > 0.
+	PidsLimit      int `yaml:"pids_limit"`
+	TimeoutSeconds int `yaml:"timeout_seconds"`
 	// IdleTimeoutSeconds bounds time with NO sandbox progress (output or
 	// workspace filesystem activity). A run making progress continues up to
 	// TimeoutSeconds; one stalled this long is killed. 0 disables the watchdog.
@@ -408,6 +414,7 @@ func Default() Config {
 			Image:              "docker.io/library/debian:stable-slim",
 			CPUs:               2,
 			MemoryMB:           2048,
+			PidsLimit:          4096,
 			TimeoutSeconds:     600,
 			IdleTimeoutSeconds: 120,
 			Network:            "none",
@@ -625,6 +632,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt("BUGBOT_BUDGETS_FINDER_READ_BYTES", &cfg.Budgets.FinderReadBytes),
 		setInt("BUGBOT_SANDBOX_CPUS", &cfg.Sandbox.CPUs),
 		setInt("BUGBOT_SANDBOX_MEMORY_MB", &cfg.Sandbox.MemoryMB),
+		setInt("BUGBOT_SANDBOX_PIDS_LIMIT", &cfg.Sandbox.PidsLimit),
 		setInt("BUGBOT_SANDBOX_TIMEOUT_SECONDS", &cfg.Sandbox.TimeoutSeconds),
 		setInt("BUGBOT_SANDBOX_IDLE_TIMEOUT_SECONDS", &cfg.Sandbox.IdleTimeoutSeconds),
 		setInt("BUGBOT_VERIFY_SANDBOX_MAX_EXECS", &cfg.Verify.SandboxMaxExecs),
@@ -763,6 +771,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Sandbox.MemoryMB <= 0 {
 		return fmt.Errorf("config: sandbox.memory_mb must be > 0")
+	}
+	if c.Sandbox.PidsLimit <= 0 {
+		return fmt.Errorf("config: sandbox.pids_limit must be > 0")
 	}
 	if c.Sandbox.TimeoutSeconds <= 0 {
 		return fmt.Errorf("config: sandbox.timeout_seconds must be > 0")

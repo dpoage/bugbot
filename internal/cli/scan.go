@@ -604,6 +604,26 @@ func sandboxRunOpts(cfg config.Config) []sandbox.Option {
 		// config (which broke CMake FetchContent builds under network=host).
 		opts = append(opts, sandbox.WithNetwork(cfg.Sandbox.Network))
 	}
+	if cfg.Sandbox.CPUs > 0 {
+		// Operator-configured CPU cap. Without this every sandbox run kept the
+		// backend default (2 CPUs) and silently ignored sandbox.cpus.
+		opts = append(opts, sandbox.WithCPUs(float64(cfg.Sandbox.CPUs)))
+	}
+	if cfg.Sandbox.MemoryMB > 0 {
+		// Operator-configured memory cap. Without this every sandbox run kept the
+		// backend default (2048 MB) and silently ignored sandbox.memory_mb. A
+		// Spec's own MemoryMB still wins.
+		opts = append(opts, sandbox.WithMemoryMB(cfg.Sandbox.MemoryMB))
+	}
+	if cfg.Sandbox.PidsLimit > 0 {
+		// Operator-configured pids cap. Without this every sandbox run kept the
+		// backend default (256), which is far too low for build systems that spawn
+		// worker/virtual-thread pools: the Bazel JVM crashes at "unable to create
+		// native thread: ... process/resource limits reached" during analysis, so
+		// every Bazel-repo reproduction failed as environment_error and no finding
+		// was ever promoted to Tier-1.
+		opts = append(opts, sandbox.WithPidsLimit(cfg.Sandbox.PidsLimit))
+	}
 	if cfg.Sandbox.IdleTimeoutSeconds > 0 {
 		opts = append(opts, sandbox.WithIdleTimeout(time.Duration(cfg.Sandbox.IdleTimeoutSeconds)*time.Second))
 	}

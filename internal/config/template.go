@@ -149,6 +149,9 @@ sandbox:
   image: docker.io/library/debian:stable-slim   # see IMPORTANT note above; set a toolchain image for repro/verify
   cpus: 2
   memory_mb: 2048
+  pids_limit: 4096            # cgroup pids.max; fork-bomb guard. Build tools that
+                              # spawn worker pools (the Bazel JVM, Gradle) need
+                              # thousands — too low crashes them mid-analysis.
   timeout_seconds: 600         # HARD ceiling for one sandbox run
   idle_timeout_seconds: 120    # kill a run only after this long with NO progress
                                # (output or workspace writes); 0 disables. The

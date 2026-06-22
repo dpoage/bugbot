@@ -255,7 +255,14 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 		}, nil
 	}
 
-	sb, err := sandbox.NewCLI(rt, image)
+	var sbOpts []sandbox.Option
+	if cfg.Sandbox.PidsLimit > 0 {
+		// Honor the configured pids cap for the smoke run too, so doctor uses the
+		// same process/thread budget as real repro/verify runs (the backend
+		// default of 256 is too low for heavy toolchains like the Bazel JVM).
+		sbOpts = append(sbOpts, sandbox.WithPidsLimit(cfg.Sandbox.PidsLimit))
+	}
+	sb, err := sandbox.NewCLI(rt, image, sbOpts...)
 	if err != nil {
 		return SmokeVerdict{
 			OK:       false,

@@ -86,12 +86,13 @@ type candidateBlock struct {
 	Rationale string
 }
 
-// defaultCPUs / defaultMemoryMB / defaultTimeoutSecs are the sensible defaults
-// emitted by the deterministic tier when the existing config does not specify
-// resources.
+// defaultCPUs / defaultMemoryMB / defaultPidsLimit / defaultTimeoutSecs are the
+// sensible defaults emitted by the deterministic tier when the existing config
+// does not specify resources.
 const (
 	defaultCPUs        = 2
 	defaultMemoryMB    = 2048
+	defaultPidsLimit   = 4096
 	defaultTimeoutSecs = 120
 )
 
@@ -411,11 +412,16 @@ func buildAgentTask(c candidateBlock, mined minerOutput, verdict repro.SmokeVerd
 // YAML marshaling and merge.
 func candidateToSandboxConfig(c candidateBlock) config.Sandbox {
 	sb := config.Sandbox{
-		Image:          c.Image,
-		DepStrategy:    c.DepStrategy,
-		Network:        c.Network,
-		CPUs:           c.CPUs,
-		MemoryMB:       c.MemoryMB,
+		Image:       c.Image,
+		DepStrategy: c.DepStrategy,
+		Network:     c.Network,
+		CPUs:        c.CPUs,
+		MemoryMB:    c.MemoryMB,
+		// candidateBlock carries no pids field — the designed config must still
+		// emit a valid, toolchain-capable pids_limit so the merged YAML passes
+		// config.Validate (pids_limit > 0) and heavy build tools (Bazel) don't
+		// crash at the 256 backend default.
+		PidsLimit:      defaultPidsLimit,
 		TimeoutSeconds: c.TimeoutSecs,
 		SetupCmds:      c.SetupCmds,
 		LocalMounts:    c.LocalMounts,
