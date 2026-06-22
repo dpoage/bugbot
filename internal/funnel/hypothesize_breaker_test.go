@@ -94,10 +94,14 @@ func (c *transportErrorClient) releaseAll() {
 // Setup: the finder client returns the same *llm.APIError{StatusCode: 0,
 // Kind: ErrServer} on every call (the breaker-detection shape) and blocks
 // every call on a barrier that opens only AFTER the test has observed the
-// breaker trip. That ordering is what makes the test deterministic: the
-// dispatch loop can only have launched up to MaxParallel units when the
-// breaker trips, because further launches require the loop to drain those
-// in-flight units first.
+// breaker trip. That ordering gives the test a stable trip signal: the
+// dispatch loop blocks once MaxParallel units are in flight, guaranteeing the
+// breaker trips (threshold transport failures, zero successes) and aborts the
+// remaining sweep units. The exact number of units that recorded a failure is
+// scheduling-dependent: after the barrier opens, freed slots let the loop
+// launch a unit or two before the threshold-th failure trips the breaker, so
+// the test asserts the breaker's invariants rather than an exact in-flight
+// count.
 //
 // Threshold = max(3, MaxParallel); with the default MaxParallel=4 the
 // threshold is 4. The test asserts the breaker tripped, the stage reported
@@ -183,11 +187,22 @@ func TestHypothesize_TransportErrorBreaker(t *testing.T) {
 	if res.Stats.FinderRuns >= goSweepUnits() {
 		t.Errorf("FinderRuns = %d, want < %d (breaker should have aborted further launches)", res.Stats.FinderRuns, goSweepUnits())
 	}
-	if res.Stats.FinderRuns != maxParallel {
-		t.Errorf("FinderRuns = %d, want %d (the threshold / MaxParallel in-flight units)", res.Stats.FinderRuns, maxParallel)
+	// The breaker cannot trip below its threshold (max(3, MaxParallel) ==
+	// maxParallel here), so at least maxParallel units must have run. It can be
+	// slightly more: after releaseAll the in-flight units return and free their
+	// slots, and the dispatch loop may launch a unit or two in the narrow window
+	// before the threshold-th failure trips the breaker (those late units find
+	// the barrier already closed and fail too). The exact count is therefore
+	// scheduling-dependent; the breaker guarantees >= threshold and — via the
+	// FinderRuns < goSweepUnits() check above — far short of the full sweep.
+	if res.Stats.FinderRuns < maxParallel {
+		t.Errorf("FinderRuns = %d, want >= %d (at least the breaker threshold ran before the trip)", res.Stats.FinderRuns, maxParallel)
 	}
-	if res.Stats.FinderFailures != maxParallel {
-		t.Errorf("FinderFailures = %d, want %d (every in-flight unit recorded a parse failure)", res.Stats.FinderFailures, maxParallel)
+	// Every recorded run failed — no finderOK leaked in. This is the invariant
+	// the exact count was a proxy for; it holds regardless of how many late
+	// units the race window launched.
+	if res.Stats.FinderFailures != res.Stats.FinderRuns {
+		t.Errorf("FinderFailures = %d, want == FinderRuns (%d): every recorded run failed", res.Stats.FinderFailures, res.Stats.FinderRuns)
 	}
 	if res.Stats.FinderRateLimited != 0 {
 		t.Errorf("FinderRateLimited = %d, want 0 (transport errors are NOT rate-limit)", res.Stats.FinderRateLimited)
