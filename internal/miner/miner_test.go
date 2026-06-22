@@ -428,6 +428,16 @@ func collectGoFiles(root string) ([]ingest.File, error) {
 		if !strings.HasSuffix(path, ".go") {
 			return nil
 		}
+		// Mirror the production default scan filter
+		// (config.DefaultConfig().Scan.Exclude), which excludes **/*_test.go.
+		// The real `bugbot scan` contradiction-seed pass (cli.runContradictionSeed)
+		// hands miner.Seed a snapshot already filtered this way, so test files never
+		// reach the miner in production. Scanning them here would count leads from
+		// test fixtures and inline source snippets that bugbot would never post on a
+		// real run, defeating the precision intent of TestSeed_RealBugbotRepo.
+		if strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
