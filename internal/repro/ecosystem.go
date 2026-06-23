@@ -377,8 +377,9 @@ func detectEcosystem(argv []string) ecosystemRules {
 		// ran-markers.
 		return ecosystemTable[ecosystemIndex(sandbox.EcosystemCpp)]
 	case "bazel", "bazelisk":
-		// Bazel is a build/test launcher. Bugbot runs `bazel test //...`
-		// directly (see repro.patch.detectSuiteCmd) and classifies any
+		// Bazel is a build/test launcher. Bugbot runs `bazel test
+		// --build_tests_only --test_output=errors //...` directly (see
+		// repro.patch.detectSuiteCmd) and classifies any
 		// `bazel` / `bazelisk` invocation as the bazel ecosystem so
 		// non-zero exits surface the bazel-specific environment_error
 		// summary instead of falling through to the generic unknown

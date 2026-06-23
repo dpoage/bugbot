@@ -226,7 +226,7 @@ func detectTestCmd(repoDir string) []string {
 	for _, sys := range systems {
 		switch sys {
 		case ingest.BuildSystemBazel:
-			return []string{"bazel", "test", "//..."}
+			return []string{"bazel", "test", "--build_tests_only", "--test_output=errors", "//..."}
 		case ingest.BuildSystemGoWorkspace:
 			if _, err := os.Stat(filepath.Join(repoDir, "go.mod")); err == nil {
 				return []string{"go", "test", "./..."}

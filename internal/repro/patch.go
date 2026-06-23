@@ -184,7 +184,7 @@ type PatchProver struct {
 //
 // Priority order matches ingest.DetectBuildSystems:
 //
-//  1. Bazel → ["bazel", "test", "//..."]
+//  1. Bazel → ["bazel", "test", "--build_tests_only", "--test_output=errors", "//..."]
 //  2. GoWorkspace → ["go", "test", "./..."] only when a root go.mod also
 //     exists; without go.mod the workspace spans multiple modules and a single
 //     ./... invocation at the root is wrong (per-module invocations are out of
@@ -215,7 +215,7 @@ func detectSuiteCmdFor(repoDir string, systems []ingest.BuildSystem) []string {
 	for _, sys := range systems {
 		switch sys {
 		case ingest.BuildSystemBazel:
-			return []string{"bazel", "test", "//..."}
+			return []string{"bazel", "test", "--build_tests_only", "--test_output=errors", "//..."}
 
 		case ingest.BuildSystemGoWorkspace:
 			// A go.work-only repo spans multiple modules; `go test ./...` at
