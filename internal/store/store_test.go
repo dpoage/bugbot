@@ -108,22 +108,36 @@ func TestLoadMigrations_SortedAndWellFormed(t *testing.T) {
 }
 
 func TestFingerprint_StableAndNormalized(t *testing.T) {
-	a := Fingerprint("nil-deref", "pkg/foo/bar.go", 42, "Possible nil pointer dereference")
-	b := Fingerprint("nil-deref", "pkg/foo/bar.go", 42, "Possible nil pointer dereference")
+	a := Fingerprint("nil-deref", "pkg/foo/bar.go", "S:definition.function\x00Greeting")
+	b := Fingerprint("nil-deref", "pkg/foo/bar.go", "S:definition.function\x00Greeting")
 	if a != b {
 		t.Fatal("fingerprint should be deterministic")
 	}
 
-	// Backslashes, case, and extra whitespace in the title must normalize away.
-	c := Fingerprint("NIL-DEREF", "pkg\\foo\\bar.go", 42, "possible  nil   pointer dereference")
+	// Path case and Windows separators must normalize away; lens case too.
+	c := Fingerprint("NIL-DEREF", "pkg\\foo\\bar.go", "S:definition.function\x00Greeting")
 	if a != c {
-		t.Fatalf("fingerprint should normalize path/case/space:\n %s\n %s", a, c)
+		t.Fatalf("fingerprint should normalize path/lens case and separators:\n %s\n %s", a, c)
 	}
 
-	// A different line is a different fingerprint.
-	d := Fingerprint("nil-deref", "pkg/foo/bar.go", 43, "Possible nil pointer dereference")
+	// A different locus (a different enclosing symbol, or the line fallback) is a
+	// different fingerprint.
+	d := Fingerprint("nil-deref", "pkg/foo/bar.go", "S:definition.function\x00Other")
 	if a == d {
-		t.Fatal("different line must produce a different fingerprint")
+		t.Fatal("different locus must produce a different fingerprint")
+	}
+
+	// A different lens (defect family) is a different fingerprint, even at the same
+	// file and locus.
+	e := Fingerprint("resource-leak", "pkg/foo/bar.go", "S:definition.function\x00Greeting")
+	if a == e {
+		t.Fatal("different lens must produce a different fingerprint")
+	}
+
+	// A different file is a different fingerprint.
+	g := Fingerprint("nil-deref", "pkg/foo/baz.go", "S:definition.function\x00Greeting")
+	if a == g {
+		t.Fatal("different file must produce a different fingerprint")
 	}
 }
 

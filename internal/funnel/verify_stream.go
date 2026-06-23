@@ -321,8 +321,7 @@ func (f *Funnel) runVerifyAndPersist(
 	// Drain sites staged by root-cause-merged members that arrived in triage
 	// before this verify goroutine reached this point.
 	stagedSites := reg.DrainStagedSites(c.Fingerprint)
-	allSites := candidateSitesToStore(c.Sites)
-	allSites = append(allSites, stagedSites...)
+	allSites := dedupSites(append(candidateSitesToStore(c.Sites), stagedSites...))
 	v := verified{cand: c, reasoning: reasoning}
 
 	// nn3: fold mechanism corrections into the persisted description.
@@ -410,7 +409,7 @@ func (f *Funnel) runVerifyAndPersist(
 		if err := f.store.AppendFindingSites(ctx, c.Fingerprint, lateSites); err != nil {
 			f.note(result, fmt.Sprintf("sites: late attach to %q failed: %v", c.Title, err))
 		} else {
-			stored.Sites = append(stored.Sites, lateSites...)
+			stored.Sites = dedupSites(append(stored.Sites, lateSites...))
 		}
 	}
 	findingsMu.Lock()
@@ -467,6 +466,31 @@ func candidateSitesToStore(sites []Site) []store.Site {
 	out := make([]store.Site, len(sites))
 	for i, s := range sites {
 		out[i] = store.Site{File: s.File, Line: s.Line}
+	}
+	return out
+}
+
+// dedupSites removes duplicate (file,line) entries, preserving first-seen order.
+// The primary's own site and a step-3 same-line collision can coincide; without
+// this the finding would carry a duplicate site row (AppendFindingSites dedups
+// the post-persist path, but the in-memory merge here did not).
+func dedupSites(sites []store.Site) []store.Site {
+	if len(sites) <= 1 {
+		return sites
+	}
+	type key struct {
+		f string
+		l int
+	}
+	seen := make(map[key]bool, len(sites))
+	out := make([]store.Site, 0, len(sites))
+	for _, s := range sites {
+		k := key{s.File, s.Line}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, s)
 	}
 	return out
 }

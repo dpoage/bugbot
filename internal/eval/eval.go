@@ -141,8 +141,9 @@ type Case struct {
 	Recorded *RecordedCase
 
 	// Suppress, when non-empty, pre-suppresses these fingerprints in the store
-	// before the run (the suppressed-finding scenario). Each entry is built with
-	// store.Fingerprint(lens, file, line, title).
+	// before the run (the suppressed-finding scenario). Each fingerprint is
+	// resolved at run time from (lens, file, line) via the same enclosing-symbol
+	// locus the funnel uses, so the seeded suppression matches what triage computes.
 	Suppress []Suppression
 }
 
@@ -201,10 +202,6 @@ type Suppression struct {
 	Title string
 	// Reason is the human-readable dismissal note recorded with the suppression.
 	Reason string
-}
-
-func (s Suppression) fingerprint() string {
-	return store.Fingerprint(s.Lens, s.File, s.Line, s.Title)
 }
 
 // ScriptedCase carries the per-case scripted client behavior. The builder
@@ -270,15 +267,22 @@ func runWithClients(ctx context.Context, c Case, clients funnel.RoleClients) (*C
 	}
 	defer func() { _ = st.Close() }()
 
-	for _, s := range c.Suppress {
-		if err := st.AddSuppression(ctx, s.fingerprint(), s.Reason); err != nil {
-			return nil, fmt.Errorf("eval: pre-suppress %q in %q: %w", s.Title, c.Name, err)
-		}
-	}
-
 	repo, err := ingest.Open(ctx, dir)
 	if err != nil {
 		return nil, fmt.Errorf("eval: open repo for %q: %w", c.Name, err)
+	}
+
+	// Pre-suppress configured fingerprints, resolving the enclosing-symbol locus
+	// against the same repo root the funnel uses so the seeded fingerprint matches
+	// what triage computes for the bug at run time.
+	if len(c.Suppress) > 0 {
+		lr := funnel.NewLocusResolver(repo.Root())
+		for _, s := range c.Suppress {
+			fp := store.Fingerprint(s.Lens, s.File, lr.Resolve(s.File, s.Line))
+			if err := st.AddSuppression(ctx, fp, s.Reason); err != nil {
+				return nil, fmt.Errorf("eval: pre-suppress %q in %q: %w", s.Title, c.Name, err)
+			}
+		}
 	}
 
 	opts := c.Options

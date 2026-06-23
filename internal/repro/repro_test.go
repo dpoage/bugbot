@@ -3,6 +3,7 @@ package repro
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,7 +50,7 @@ func newRepoDir(t *testing.T) string {
 // seedFinding inserts a Tier-2 verified finding and returns it.
 func seedFinding(t *testing.T, st *store.Store) store.Finding {
 	t.Helper()
-	fp := store.Fingerprint("logic", "calc.go", 12, "Divide ignores zero divisor")
+	fp := store.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 12, "Divide ignores zero divisor"))
 	f := store.Finding{
 		Fingerprint: fp,
 		Title:       "Divide ignores zero divisor",
@@ -1073,7 +1074,7 @@ func TestPromoteAll_PushesPackageSummary(t *testing.T) {
 	ctx := context.Background()
 	st := openStore(t)
 	f, err := st.UpsertFinding(ctx, store.Finding{
-		Fingerprint: store.Fingerprint("logic", "pkg/calc.go", 12, "bug"),
+		Fingerprint: store.Fingerprint("logic", "pkg/calc.go", fmt.Sprintf("%d|%s", 12, "bug")),
 		Title:       "bug",
 		Severity:    "high",
 		Tier:        2,

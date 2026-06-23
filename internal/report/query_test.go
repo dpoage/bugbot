@@ -3,6 +3,7 @@ package report
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -22,7 +23,7 @@ func openStore(t *testing.T) (*store.Store, store.Finding, store.Finding) {
 
 	mk := func(lens, file string, line int, title string) store.Finding {
 		f := store.Finding{
-			Fingerprint: store.Fingerprint(lens, file, line, title),
+			Fingerprint: store.Fingerprint(lens, file, fmt.Sprintf("%d|%s", line, title)),
 			Title:       title,
 			Description: "d",
 			Reasoning:   "r",
@@ -95,7 +96,7 @@ func TestResolveID_Ambiguous(t *testing.T) {
 	// long common prefix; use a 1-char prefix which is essentially always shared.
 	for i := 0; i < 8; i++ {
 		f := store.Finding{
-			Fingerprint: store.Fingerprint("race", "f.go", i, "t"),
+			Fingerprint: store.Fingerprint("race", "f.go", fmt.Sprintf("%d|%s", i, "t")),
 			Title:       "t",
 			Severity:    "low",
 			Tier:        3,

@@ -3,13 +3,14 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
 )
 
 func sampleFinding() Finding {
-	fp := Fingerprint("race", "internal/x/y.go", 10, "data race on counter")
+	fp := Fingerprint("race", "internal/x/y.go", fmt.Sprintf("%d|%s", 10, "data race on counter"))
 	return Finding{
 		Fingerprint: fp,
 		Title:       "data race on counter",
@@ -195,7 +196,7 @@ func TestListFindings_Filters(t *testing.T) {
 
 	mk := func(lens, file string, line int, tier domain.Tier, status Status, commit string) {
 		f := Finding{
-			Fingerprint: Fingerprint(lens, file, line, "t"),
+			Fingerprint: Fingerprint(lens, file, fmt.Sprintf("%d|%s", line, "t")),
 			Title:       "t",
 			Tier:        tier,
 			Status:      status,
@@ -598,7 +599,7 @@ func TestCountFindings(t *testing.T) {
 	seed := func(file string, line int, tier domain.Tier, status Status, needsHuman bool) {
 		t.Helper()
 		f := Finding{
-			Fingerprint: Fingerprint("l", file, line, "t"),
+			Fingerprint: Fingerprint("l", file, fmt.Sprintf("%d|%s", line, "t")),
 			Title:       "t", Severity: "high", Tier: tier, Status: status,
 			Lens: "l", File: file, Line: line, NeedsHuman: needsHuman,
 		}
@@ -891,7 +892,7 @@ func TestMigration013_SitesColumn(t *testing.T) {
 		{File: "src/RenderSystem.hpp", Line: 15},
 	}
 	f := Finding{
-		Fingerprint: Fingerprint("boundary-conditions", "src/RenderSystem.cpp", 42, "buffer overflow"),
+		Fingerprint: Fingerprint("boundary-conditions", "src/RenderSystem.cpp", fmt.Sprintf("%d|%s", 42, "buffer overflow")),
 		Title:       "buffer overflow",
 		Description: "write past array end",
 		Severity:    domain.SeverityHigh,

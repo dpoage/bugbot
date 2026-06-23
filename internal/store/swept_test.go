@@ -2,13 +2,14 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
 // sampleFindingSwept returns a fresh Finding with a distinct fingerprint for
 // sweep tests so it does not collide with sampleFinding().
 func sampleFindingSwept(lens, file string, line int, title string) Finding {
-	fp := Fingerprint(lens, file, line, title)
+	fp := Fingerprint(lens, file, fmt.Sprintf("%d|%s", line, title))
 	return Finding{
 		Fingerprint: fp,
 		Title:       title,

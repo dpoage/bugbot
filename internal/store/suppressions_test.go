@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -91,7 +92,7 @@ func TestAddSuppression_PreemptiveBeforeFindingExists(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
-	fp := Fingerprint("x", "a.go", 1, "preempt")
+	fp := Fingerprint("x", "a.go", fmt.Sprintf("%d|%s", 1, "preempt"))
 	// Suppress before any finding exists.
 	if err := st.AddSuppression(ctx, fp, "known noise"); err != nil {
 		t.Fatalf("preemptive suppress: %v", err)

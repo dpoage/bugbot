@@ -3,6 +3,7 @@ package repro
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,7 +50,7 @@ func newRepoDirWithCalc(t *testing.T) string {
 // buildT1Finding seeds a Tier-1 (repro promoted) finding and a matching Attempt.
 func buildT1Finding(t *testing.T, st *store.Store) (store.Finding, *Attempt) {
 	t.Helper()
-	fp := store.Fingerprint("logic", "calc.go", 5, "Divide ignores zero divisor")
+	fp := store.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 5, "Divide ignores zero divisor"))
 	f := store.Finding{
 		Fingerprint: fp,
 		Title:       "Divide ignores zero divisor",
@@ -685,7 +686,7 @@ func TestPromoteAll_WithPatchProver_FixWitnessed(t *testing.T) {
 	artifactDir := t.TempDir()
 
 	// Seed a Tier-2 finding.
-	fp := store.Fingerprint("logic", "calc.go", 5, "Divide ignores zero divisor")
+	fp := store.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 5, "Divide ignores zero divisor"))
 	finding, err := st.UpsertFinding(ctx, store.Finding{
 		Fingerprint: fp,
 		Title:       "Divide ignores zero divisor",

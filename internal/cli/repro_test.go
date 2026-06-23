@@ -27,6 +27,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -125,7 +126,7 @@ func TestReproCmd_MaxSmaller(t *testing.T) {
 	}
 	// Seed 5 eligible T2 findings.
 	for i := 0; i < 5; i++ {
-		fp := store.Fingerprint("race", "z.go", i+1, strings.Repeat("x", i+1))
+		fp := store.Fingerprint("race", "z.go", fmt.Sprintf("%d|%s", i+1, strings.Repeat("x", i+1)))
 		f := store.Finding{
 			Fingerprint: fp,
 			Title:       strings.Repeat("x", i+1),

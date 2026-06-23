@@ -81,8 +81,8 @@ func TestExportSARIF_ToFile(t *testing.T) {
 	}
 
 	fps, _ := r["partialFingerprints"].(map[string]any)
-	if fp, _ := fps["bugbotFingerprint/v1"].(string); fp != f.Fingerprint {
-		t.Errorf("partialFingerprints[bugbotFingerprint/v1] = %q, want %q", fp, f.Fingerprint)
+	if fp, _ := fps["bugbotFingerprint/v2"].(string); fp != f.Fingerprint {
+		t.Errorf("partialFingerprints[bugbotFingerprint/v2] = %q, want %q", fp, f.Fingerprint)
 	}
 }
 

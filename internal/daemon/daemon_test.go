@@ -322,7 +322,7 @@ func TestDaemonAutoCloseOnFileRemoved(t *testing.T) {
 	}
 
 	// Seed an open finding anchored to the fixture file.
-	fp := store.Fingerprint("nil-deref", fixtureFile, fixtureLine, "possible nil dereference")
+	fp := store.Fingerprint("nil-deref", fixtureFile, funnel.NewLocusResolver(fr.dir).Resolve(fixtureFile, fixtureLine))
 	seeded, err := st.UpsertFinding(context.Background(), store.Finding{
 		Fingerprint: fp,
 		Title:       "possible nil dereference",
@@ -403,7 +403,7 @@ func TestDaemonReverifyPromotesSurvivingT3(t *testing.T) {
 
 	// Seed a tier-3 suspected finding (verification skipped at budget stop)
 	// anchored to a stale hash so the next change re-verifies it.
-	fp := store.Fingerprint("nil-deref", fixtureFile, fixtureLine, "possible nil dereference")
+	fp := store.Fingerprint("nil-deref", fixtureFile, funnel.NewLocusResolver(fr.dir).Resolve(fixtureFile, fixtureLine))
 	seeded, err := st.UpsertFinding(context.Background(), store.Finding{
 		Fingerprint: fp,
 		Title:       "possible nil dereference",

@@ -207,19 +207,24 @@ func findingConfidence(tier domain.Tier, severity domain.Severity, corroborating
 	return v
 }
 
-// Fingerprint computes the stable dedup key for a finding from the fields that
-// identify "the same bug" independent of incidental code movement: the lens
-// that found it, the file, a normalized location, and a hash of the title.
+// Fingerprint computes the stable, cross-scan dedup identity for a finding. It
+// is deliberately independent of the two inputs that drift between scans of the
+// same unchanged code: the model-authored title (reworded every run) and the
+// raw line (shifts when code above it changes). Drift in either silently minted
+// a fresh identity, so a re-discovered bug failed to dedup and was published as
+// a duplicate issue.
 //
-// The location is normalized to the file path (lowercased, slash-cleaned) plus
-// the line so small edits elsewhere in the file don't change the key; the title
-// is hashed so wording is captured but the key stays a fixed length. Two
-// findings with the same fingerprint are treated as the same bug and deduped.
-func Fingerprint(lens, file string, line int, title string) string {
+// The identity is the lens (the defect family), the normalized file path, and a
+// caller-supplied location anchor (locus): the enclosing symbol when the funnel
+// can resolve one, else a line-based fallback (see funnel.LocusResolver). The
+// "bugbotFingerprint/v2" version token namespaces the scheme so a future
+// algorithm change yields disjoint identities, and matches the SARIF
+// partialFingerprints key. Two findings with the same fingerprint are the same
+// bug and dedup/upsert onto one row.
+func Fingerprint(lens, file, locus string) string {
 	normFile := strings.ToLower(path.Clean(strings.ReplaceAll(file, "\\", "/")))
-	normTitle := strings.ToLower(strings.Join(strings.Fields(title), " "))
 	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "%s\x00%s\x00%d\x00%s", strings.ToLower(lens), normFile, line, normTitle)
+	_, _ = fmt.Fprintf(h, "bugbotFingerprint/v2\x00%s\x00%s\x00%s", strings.ToLower(lens), normFile, locus)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
