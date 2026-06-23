@@ -625,6 +625,11 @@ type Candidate struct {
 	// entries come from merged-away members. Empty when no root-cause merges
 	// occurred (single-site finding).
 	Sites []Site
+	// Reverify marks a candidate reconstructed from a durable OPEN Tier-3 suspected
+	// finding for re-verification (ReverifySuspected). Unlike a fresh or WAL-replayed
+	// candidate it has a durable open finding row and NO pending WAL row (PendingID==""),
+	// so the verify kill path must transition that row out of open when refuted.
+	Reverify bool
 }
 
 // Stats is the per-stage funnel accounting recorded on the scan run.

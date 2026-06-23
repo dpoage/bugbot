@@ -25,8 +25,9 @@ import (
 // conflicts during the epic.
 func newVerifyCmd() *cobra.Command {
 	var (
-		target string
-		force  bool
+		target    string
+		force     bool
+		suspected bool
 	)
 
 	cmd := &cobra.Command{
@@ -40,7 +41,14 @@ This is the same verify-drain logic the daemon runs on its periodic verify-drain
 timer, exposed as a one-shot command for manual operation or scripted workflows.
 
 The command is idempotent: a second run on a drained store is a no-op (single
-store query, no LLM calls).`,
+store query, no LLM calls).
+
+Pass --suspected to also re-verify every OPEN Tier-3 suspected finding: durable
+orphans from a hard-budget stop or no-verdict panel that have no pending_candidates
+WAL row. This is a second pass over the same funnel pipeline — finder/cartographer
+remain off — but re-judges the durable T3 rows against the current code so they
+can be promoted to Tier 2 or dismissed as refuted. Without --suspected the T3
+orphans are left untouched.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -107,15 +115,35 @@ store query, no LLM calls).`,
 				return fmt.Errorf("verify drain: %w", err)
 			}
 
-			if res == nil || (res.Stats.Resumed == 0 && len(res.Findings) == 0) {
+			didDrain := res != nil && (res.Stats.Resumed > 0 || len(res.Findings) > 0)
+			if didDrain {
+				_, _ = fmt.Fprintf(out,
+					"\nVerify drain: %d resumed, %d finding(s) persisted.\n",
+					res.Stats.Resumed, len(res.Findings),
+				)
+			} else {
 				_, _ = fmt.Fprintln(out, "Verify drain: no pending candidates.")
-				return nil
 			}
 
-			_, _ = fmt.Fprintf(out,
-				"\nVerify drain: %d resumed, %d finding(s) persisted.\n",
-				res.Stats.Resumed, len(res.Findings),
-			)
+			// --suspected: second pass over durable open T3 findings (orphans
+			// from a hard-budget stop or no-verdict panel). The finder stays
+			// off; the verifier re-judges each durable T3 against current code,
+			// promoting survivors to Tier 2 or dismissing refuted ones. Only
+			// run when the flag is set so the default behaviour is byte-
+			// identical to today.
+			if suspected {
+				rres, rerr := f.ReverifySuspected(ctx)
+				if rerr != nil {
+					return fmt.Errorf("reverify suspected: %w", rerr)
+				}
+				if rres == nil {
+					rres = &funnel.Result{}
+				}
+				_, _ = fmt.Fprintf(out,
+					"Re-verify suspected: %d re-judged, %d verified, %d killed.\n",
+					rres.Stats.Resumed, rres.Stats.Verified, rres.Stats.Killed,
+				)
+			}
 			return nil
 		},
 	}
@@ -123,6 +151,8 @@ store query, no LLM calls).`,
 	addTargetFlag(cmd, &target)
 	cmd.Flags().BoolVar(&force, "force", false,
 		"bypass the advisory single-scan lock and proceed even if another scan appears active")
+	cmd.Flags().BoolVar(&suspected, "suspected", false,
+		"also re-verify open Tier-3 suspected findings (re-runs the verifier without the finder)")
 
 	return cmd
 }
