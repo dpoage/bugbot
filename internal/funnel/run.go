@@ -35,6 +35,10 @@ const (
 	// carries only the replayed WAL candidates from ListPendingCandidates.
 	// This is the mode used by VerifyDrain.
 	modeVerifyDrain
+	// modeReverify skips the finder/cartographer like modeVerifyDrain, but
+	// replays candidates reconstructed from open Tier-3 suspected findings
+	// (ReverifySuspected) instead of pending_candidates.
+	modeReverify
 )
 
 // Sweep runs the funnel over the entire current snapshot of the repository. It
@@ -512,16 +516,41 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// hypothesizeErr captures a fatal hypothesize error.
 	var hypothesizeErr error
 
-	// Resume: load any candidates left pending by a prior interrupted run (the
-	// pending_candidates write-ahead log). They are replayed into THIS run's
-	// triage/verify pipeline below, before fresh hypothesize, so an interrupted
-	// scan's expensive finder work is not lost — it is picked up on the next run
-	// (daemon or oneshot). Best-effort: a load failure degrades to "no resume"
-	// (the rows stay for a later run) rather than aborting the scan.
-	resume, resumeErr := f.store.ListPendingCandidates(ctx)
-	if resumeErr != nil {
-		f.note(result, fmt.Sprintf("resume: ListPendingCandidates failed: %v", resumeErr))
-		resume = nil
+	// Resume: load the candidates to replay into THIS run's triage/verify
+	// pipeline, before fresh hypothesize, so prior work is not lost. The source
+	// depends on mode:
+	//
+	//   - modeVerifyDrain: ListPendingCandidates (the WAL of an interrupted run).
+	//   - modeReverify:    ListFindings open Tier-3 suspected (durable findings
+	//                      orphaned by a budget/verify-fail stop; the WAL row is
+	//                      already gone, so we replay from the findings table).
+	//   - modeFull:        ListPendingCandidates (same as VerifyDrain; the fresh
+	//                      hypothesize stage ALSO runs and produces new candidates).
+	//
+	// Best-effort: a load failure degrades to "no resume" (the rows stay for a
+	// later run) rather than aborting the scan.
+	var replay []Candidate
+	switch mode {
+	case modeReverify:
+		susp, listErr := f.store.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen, Tier: int(domain.TierSuspected)})
+		if listErr != nil {
+			f.note(result, fmt.Sprintf("resume: ListFindings(open T3) failed: %v", listErr))
+			susp = nil
+		}
+		replay = make([]Candidate, 0, len(susp))
+		for _, fi := range susp {
+			replay = append(replay, findingToCandidate(fi))
+		}
+	default:
+		pending, listErr := f.store.ListPendingCandidates(ctx)
+		if listErr != nil {
+			f.note(result, fmt.Sprintf("resume: ListPendingCandidates failed: %v", listErr))
+			pending = nil
+		}
+		replay = make([]Candidate, 0, len(pending))
+		for _, pc := range pending {
+			replay = append(replay, pendingToCandidate(pc))
+		}
 	}
 
 	// ---- Stage A: Hypothesize ----
@@ -545,18 +574,23 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			}
 		}
 		// Replay resumed candidates FIRST so the prior run's unfinished work is
-		// verified before fresh discovery starts. They carry their original
-		// PendingID (from the WAL row), so the terminal-fate handlers delete that
+		// verified before fresh discovery starts. WAL-replayed candidates carry
+		// their original PendingID, so the terminal-fate handlers delete that
 		// row; they are NOT re-inserted (the existing row IS their WAL entry).
-		// Triage re-anchors them to the current snapshot (scope/dedup/suppression
-		// checks) and the verifier re-judges them against current code, so a stale
-		// candidate is correctly dropped or killed — precision is preserved.
-		for _, pc := range resume {
-			emit(pendingToCandidate(pc))
+		// Reverify-replayed candidates have no WAL row (PendingID==""); the
+		// verify kill path detects Reverify==true and dismisses the durable
+		// finding instead of trying to delete a missing WAL row (deletePending
+		// is a no-op on ""). Triage re-anchors all replays to the current
+		// snapshot (scope/dedup/suppression checks) and the verifier re-judges
+		// them against current code, so a stale candidate is correctly dropped
+		// or killed — precision is preserved.
+		for _, c := range replay {
+			emit(c)
 		}
-		result.Stats.Resumed = len(resume)
-		// In modeVerifyDrain the finder/cartographer are skipped: candCh carries
-		// only the replayed WAL candidates. Everything downstream is identical.
+		result.Stats.Resumed = len(replay)
+		// In modeVerifyDrain / modeReverify the finder/cartographer are skipped:
+		// candCh carries only the replayed candidates. Everything downstream is
+		// identical.
 		if mode == modeFull {
 			// Enumerate cross-language seams once per run: the boundary lens's
 			// unit of work is one seam, and the count populates Stats.SeamsFound
@@ -930,5 +964,44 @@ func pendingToCandidate(pc store.PendingCandidate) Candidate {
 		Confidence:          normalizeConfidence(domain.Confidence(pc.Confidence)),
 		CorroboratingLenses: pc.CorroboratingLenses,
 		PendingID:           pc.ID,
+	}
+}
+
+// findingToCandidate rebuilds a funnel Candidate from a durable OPEN Tier-3
+// suspected finding for re-verification (ReverifySuspected). The candidate is
+// routed through the same triage + verify pipeline as a WAL-replayed one, but
+// is materially different: there is no pending_candidates WAL row (PendingID
+// is ""), and the durable open finding row is the unit of state that must be
+// transitioned when the verifier refutes the candidate (see Reverify and the
+// verify-stream KILL region). PendingID is intentionally left ""; the
+// triage consumer does not need to re-anchor the fingerprint (the finding
+// already carries it), so Fingerprint is set from the finding to keep the
+// verify-stage signals (e.g. SignalPersisted) consistent across the run.
+//
+// Confidence is forced to ConfidenceHigh: a low-confidence candidate is
+// dropped at triage step 1 (triage_streaming.go:305), and a Tier-3 finding
+// is by definition worth re-judging — its prior triage passed and only the
+// verify stage was halted, so we deliberately keep it out of the low band.
+// The Sites slice is converted from []store.Site to []Site to mirror the
+// pendingToCandidate shape (Candidate uses the funnel package's Site type,
+// pendingToCandidate's input already only carries locations as fields).
+func findingToCandidate(fi store.Finding) Candidate {
+	sites := make([]Site, len(fi.Sites))
+	for i, s := range fi.Sites {
+		sites[i] = Site{File: s.File, Line: s.Line}
+	}
+	return Candidate{
+		Lens:                fi.Lens,
+		File:                fi.File,
+		Line:                fi.Line,
+		Title:               fi.Title,
+		Description:         fi.Description,
+		Severity:            normalizeSeverity(fi.Severity),
+		Evidence:            fi.Reasoning,
+		Confidence:          domain.ConfidenceHigh,
+		Fingerprint:         fi.Fingerprint,
+		CorroboratingLenses: fi.CorroboratingLenses,
+		Sites:               sites,
+		Reverify:            true,
 	}
 }

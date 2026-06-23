@@ -269,9 +269,22 @@ func (f *Funnel) runVerifyAndPersist(
 	if candKilled {
 		// Killed: signal so triage can discard any staged corroboration.
 		reg.SignalPersisted(c.Fingerprint, false)
+		if c.Reverify {
+			// Reconstructed T3 finding refuted on re-verification: it has a
+			// durable open row the normal kill path (persists nothing) would
+			// leave open forever. Transition it to dismissed with a
+			// re-verification-specific reason so the suppression table records
+			// the event (UpdateStatus(StatusDismissed) doubles as a permanent
+			// suppression, so the same fingerprint will never resurface).
+			if err := f.store.UpdateStatus(ctx, c.Fingerprint, store.StatusDismissed,
+				"re-verification refuted this previously-suspected (Tier 3) finding"); err != nil {
+				f.note(result, fmt.Sprintf("reverify: dismiss refuted T3 %q failed: %v", c.Title, err))
+			}
+		}
 		// Killed: terminal, but nothing durable is persisted (only a Stats
 		// counter), so drop the WAL row or it would replay and be re-killed
-		// every run.
+		// every run. deletePending is a no-op when id=="" (reverify path has
+		// no WAL row), so the durable dismiss above is the only state change.
 		f.deletePending(ctx, c.PendingID, result)
 		return
 	}
