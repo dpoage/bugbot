@@ -539,3 +539,138 @@ func mergeSandboxBlockToPath(path string, proposed config.Sandbox) error {
 	}
 	return os.WriteFile(path, out, 0o644)
 }
+
+// ── outside-in guide tier (--guide) ───────────────────────────────────────────
+
+// TestRenderDesignGuide checks the brief adapts to each verify verdict and
+// always carries the invariant designer sections (candidate, rules, schema,
+// apply loop) plus the mined evidence in stable (sorted) label order.
+func TestRenderDesignGuide(t *testing.T) {
+	base := candidateBlock{
+		Image: "docker.io/library/golang:1.22-alpine", DepStrategy: "host",
+		Network: "none", CPUs: 2, MemoryMB: 2048, TimeoutSecs: 120,
+		Tier: "deterministic",
+	}
+	mined := minerOutput{RawArtifacts: map[string]string{
+		"Dockerfile":               "FROM golang:1.22-alpine\n",
+		".github/workflows/ci.yml": "jobs:\n",
+	}}
+
+	tests := []struct {
+		name    string
+		verdict repro.SmokeVerdict
+		want    []string
+	}{
+		{"not run", repro.SmokeVerdict{}, []string{"NOT RUN", "bugbot doctor"}},
+		{"passed", repro.SmokeVerdict{OK: true, Category: "ok", Detail: "go vet clean"},
+			[]string{"PASSED [ok]", "go vet clean", "already works"}},
+		{"failed", repro.SmokeVerdict{OK: false, Category: "env_error", Detail: "go: not found"},
+			[]string{"FAILED [env_error]", "go: not found", "corrected"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := base
+			c.Verdict = tt.verdict
+			got := renderDesignGuide("/repo", c, mined)
+
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("guide missing verdict-specific %q\n---\n%s", w, got)
+				}
+			}
+
+			// Invariants present in every brief regardless of verdict.
+			invariants := []string{
+				"guidance for the LLM driving bugbot",
+				"## Current candidate sandbox block",
+				"docker.io/library/golang:1.22-alpine", // candidate image
+				"## Rules you MUST honor",
+				"network=none", // a rule line
+				"## Output contract",
+				`"dep_strategy"`, // schema field
+				"## How to apply and converge",
+				"bugbot.yaml", // configPath
+				"cd /repo",    // repoDir in the doctor step
+				"bugbot doctor --verify-sandbox",
+			}
+			for _, w := range invariants {
+				if !strings.Contains(got, w) {
+					t.Errorf("guide missing invariant %q", w)
+				}
+			}
+
+			// Evidence rendered and label-sorted: ".github" < "Dockerfile".
+			i := strings.Index(got, "--- .github/workflows/ci.yml ---")
+			j := strings.Index(got, "--- Dockerfile ---")
+			if i < 0 || j < 0 {
+				t.Fatalf("evidence labels missing: i=%d j=%d", i, j)
+			}
+			if i > j {
+				t.Errorf("evidence not sorted: .github at %d after Dockerfile at %d", i, j)
+			}
+		})
+	}
+}
+
+// TestRenderDesignGuideNoEvidence checks the brief degrades gracefully when the
+// miner found nothing.
+func TestRenderDesignGuideNoEvidence(t *testing.T) {
+	c := candidateBlock{
+		Image: "img", DepStrategy: "off", Network: "none",
+		CPUs: 2, MemoryMB: 2048, TimeoutSecs: 120,
+	}
+	got := renderDesignGuide("/r", c, minerOutput{})
+	if !strings.Contains(got, "no CI/build/devcontainer artifacts were mined") {
+		t.Errorf("missing no-evidence note:\n%s", got)
+	}
+}
+
+// TestDesignGuideMutuallyExclusiveWithAgent proves --guide and --agent cannot
+// be combined (outside-in vs inside-out are alternative resolvers).
+func TestDesignGuideMutuallyExclusiveWithAgent(t *testing.T) {
+	cmd := newDesignSandboxCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--guide", "--agent"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error when both --guide and --agent are set, got nil")
+	}
+}
+
+// TestDesignGuideEmitsBriefOnVerifySkip exercises the real RunE control flow:
+// with --guide and verify skipped, the command prints the designer brief and
+// returns nil (no provider call, no error) — the outside-in path.
+func TestDesignGuideEmitsBriefOnVerifySkip(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "go.mod"),
+		[]byte("module guidefix\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "main.go"),
+		[]byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newDesignSandboxCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--guide", "--verify=false", "--target", repoDir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("design-sandbox --guide --verify=false: %v", err)
+	}
+
+	out := buf.String()
+	for _, w := range []string{
+		"guidance for the LLM driving bugbot",
+		"NOT RUN", // verify skipped
+		"## Output contract",
+		"bugbot doctor --verify-sandbox",
+	} {
+		if !strings.Contains(out, w) {
+			t.Errorf("brief missing %q\n---\n%s", w, out)
+		}
+	}
+}

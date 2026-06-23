@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -104,6 +106,7 @@ func newDesignSandboxCmd() *cobra.Command {
 	var (
 		target      string
 		enableAgent bool
+		guideMode   bool
 		doVerify    bool
 		doWrite     bool
 	)
@@ -117,10 +120,16 @@ synthesizes a concrete sandbox: block for bugbot.yaml.
 It runs in three tiers:
   1. Deterministic: artifact mining + gatherPrimeFacts → candidate sandbox block.
   2. Verify (default ON): smoke-test the candidate with the ftd.1 offline verifier.
-     On success, done. On failure: print actionable error (no --agent) or hand off
-     to the agent tier (--agent).
-  3. Agent (--agent): read-only LLM agent reads mined artifacts + smoke feedback,
-     proposes image/setup_cmds/local_mounts, re-verifies in a bounded loop (≤3).
+     On success, done. On failure, tier 3 resolves it (or prints an actionable
+     error when neither resolver is requested).
+  3. Resolve a verify failure one of two ways:
+     - Agent (--agent, inside-out): bugbot drives its OWN configured model — a
+       read-only LLM agent reads mined artifacts + smoke feedback, proposes
+       image/setup_cmds/local_mounts, re-verifies in a bounded loop (≤3).
+     - Guide (--guide, outside-in): bugbot calls NO provider; it prints the same
+       designer brief (verdict + candidate + mined artifacts + output schema +
+       constraints + convergence loop) for the LLM that is driving bugbot to act
+       on. Use this when no provider is wired but an agent is at the keyboard.
 
 The proposed sandbox: block is printed + diffed against the existing config.
 Pass --write to merge it into bugbot.yaml (preserving all other keys).
@@ -152,14 +161,15 @@ the hardened sandbox smoke test.`,
 						"⚠  verify skipped (infrastructure error): %v\n", verifyErr)
 				} else {
 					candidate.Verdict = verdict
-					if !verdict.OK {
+					if !verdict.OK && !guideMode {
 						if !enableAgent {
-							// Print actionable failure and return; no --agent.
+							// Print actionable failure and return; no resolver tier.
 							return fmt.Errorf("sandbox verify failed [%s]: %s\n"+
-								"Hint: re-run with --agent to let the LLM agent propose a fix",
+								"Hint: re-run with --agent (bugbot drives its own model) or "+
+								"--guide (emit a brief for the LLM driving bugbot) to propose a fix",
 								verdict.Category, verdict.Detail)
 						}
-						// Tier 3: hand off to agent.
+						// Tier 3 (inside-out): hand off to bugbot's own agent.
 						agentCand, agentErr := runAgentTier(ctx, cmd, repoDir, candidate, mined, verdict)
 						if agentErr != nil {
 							return fmt.Errorf("agent tier failed: %w", agentErr)
@@ -167,6 +177,16 @@ the hardened sandbox smoke test.`,
 						candidate = agentCand
 					}
 				}
+			}
+
+			// ── Tier 3 (outside-in): emit a brief for the LLM driving bugbot ───
+			// --guide replaces the inside-out agent tier: rather than calling a
+			// provider, print the designer brief (verdict + candidate + mined
+			// context + output schema + convergence loop) so the calling model
+			// supplies the reasoning. It carries whatever tier 2 produced — a
+			// passing, failing, or not-run verdict.
+			if guideMode {
+				return printDesignGuide(cmd.OutOrStdout(), repoDir, candidate, mined)
 			}
 
 			// ── Output ────────────────────────────────────────────────────────
@@ -201,6 +221,9 @@ the hardened sandbox smoke test.`,
 	cmd.Flags().BoolVar(&enableAgent, "agent", false, "enable the LLM agent tier for edge-case resolution")
 	cmd.Flags().BoolVar(&doVerify, "verify", true, "run the offline smoke-test verifier on the candidate")
 	cmd.Flags().BoolVar(&doWrite, "write", false, "merge the proposed sandbox block into bugbot.yaml")
+	cmd.Flags().BoolVar(&guideMode, "guide", false,
+		"outside-in: emit a guidance brief for the LLM driving bugbot instead of calling a provider (no provider required)")
+	cmd.MarkFlagsMutuallyExclusive("agent", "guide")
 
 	return cmd
 }
@@ -393,19 +416,122 @@ func buildAgentTask(c candidateBlock, mined minerOutput, verdict repro.SmokeVerd
 	}
 	sb.WriteString("\n")
 
-	if len(mined.RawArtifacts) > 0 {
-		sb.WriteString("Mined repository artifacts:\n")
-		for label, content := range mined.RawArtifacts {
-			// Truncate very large artifacts.
-			if len(content) > 4000 {
-				content = content[:4000] + "\n... (truncated)"
-			}
-			fmt.Fprintf(&sb, "\n--- %s ---\n%s\n", label, content)
-		}
-	}
+	writeMinedArtifacts(&sb, mined)
 
 	sb.WriteString("\nPropose a corrected sandbox configuration as JSON matching the schema.\n")
 	return sb.String()
+}
+
+// writeMinedArtifacts appends the raw mined repository artifacts (each truncated
+// to 4000 bytes) to sb in a stable label order. It is the single renderer of the
+// original repo context shared by the inside-out agent task (buildAgentTask) and
+// the outside-in guidance brief (renderDesignGuide), so both feed a model the
+// same evidence. No-op when nothing was mined.
+func writeMinedArtifacts(sb *strings.Builder, mined minerOutput) {
+	if len(mined.RawArtifacts) == 0 {
+		return
+	}
+	labels := make([]string, 0, len(mined.RawArtifacts))
+	for label := range mined.RawArtifacts {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+
+	sb.WriteString("Mined repository artifacts:\n")
+	for _, label := range labels {
+		content := mined.RawArtifacts[label]
+		if len(content) > 4000 {
+			content = content[:4000] + "\n... (truncated)"
+		}
+		fmt.Fprintf(sb, "\n--- %s ---\n%s\n", label, content)
+	}
+}
+
+// renderDesignGuide builds the outside-in guidance brief: the complete designer
+// context for the LLM driving bugbot. It is the externalized twin of the inside-
+// out agent tier — same rules (designSandboxSystemPrompt), same evidence
+// (writeMinedArtifacts), same output contract (sandboxProposalSchema) — except
+// the calling model, not a bugbot-configured provider, supplies the reasoning.
+// Pure function of its inputs so it is unit-testable without a runtime.
+func renderDesignGuide(repoDir string, c candidateBlock, mined minerOutput) string {
+	var b strings.Builder
+
+	b.WriteString("# bugbot design-sandbox — guidance for the LLM driving bugbot\n\n")
+	b.WriteString("You are the model operating bugbot. It synthesized a sandbox: block\n")
+	b.WriteString("deterministically and, where a container runtime was available, smoke-tested\n")
+	b.WriteString("it offline (network=none). bugbot is NOT calling its own provider here — YOU\n")
+	b.WriteString("supply the reasoning. Read the verdict, candidate, and evidence below, then\n")
+	b.WriteString("propose a corrected sandbox: block and apply it as described at the end.\n\n")
+
+	// ── Verify verdict ────────────────────────────────────────────────────
+	b.WriteString("## Verify verdict\n\n")
+	switch {
+	case c.Verdict.Category == "":
+		b.WriteString("NOT RUN — the offline smoke test did not execute (no container runtime,\n")
+		b.WriteString("or --verify=false). After editing the block, run `bugbot doctor\n")
+		b.WriteString("--verify-sandbox` to smoke-test it.\n\n")
+	case c.Verdict.OK:
+		fmt.Fprintf(&b, "PASSED [%s]: %s\n", c.Verdict.Category, c.Verdict.Detail)
+		b.WriteString("The candidate's toolchain ran offline. The block below already works —\n")
+		b.WriteString("apply it as-is, or refine it using the rules and contract below.\n\n")
+	default:
+		fmt.Fprintf(&b, "FAILED [%s]: %s\n", c.Verdict.Category, c.Verdict.Detail)
+		b.WriteString("The candidate could not run its toolchain offline. Propose a corrected\n")
+		b.WriteString("block per the rules and contract below.\n\n")
+	}
+
+	// ── Current candidate ─────────────────────────────────────────────────
+	b.WriteString("## Current candidate sandbox block\n\n")
+	b.WriteString("```yaml\n")
+	b.WriteString(renderSandboxBlock(candidateToSandboxConfig(c)))
+	b.WriteString("```\n\n")
+
+	// ── Rules / constraints ───────────────────────────────────────────────
+	b.WriteString("## Rules you MUST honor\n\n")
+	b.WriteString(designSandboxSystemPrompt())
+	b.WriteString("\n\n")
+
+	// ── Evidence ──────────────────────────────────────────────────────────
+	b.WriteString("## Repository evidence\n\n")
+	if len(mined.RawArtifacts) == 0 {
+		b.WriteString("(no CI/build/devcontainer artifacts were mined from this repo)\n\n")
+	} else {
+		writeMinedArtifacts(&b, mined)
+		b.WriteString("\n")
+	}
+
+	// ── Output contract ───────────────────────────────────────────────────
+	b.WriteString("## Output contract\n\n")
+	b.WriteString("Your proposal maps to these sandbox: keys — image, dep_strategy,\n")
+	b.WriteString("setup_cmds, local_mounts. network stays `none`; cpus, memory_mb, pids_limit,\n")
+	b.WriteString("and timeout_seconds are inherited. `rationale` explains your choice and is\n")
+	b.WriteString("NOT written to bugbot.yaml. A valid proposal matches:\n\n")
+	b.WriteString("```json\n")
+	b.WriteString(string(sandboxProposalSchema))
+	b.WriteString("\n```\n\n")
+
+	// ── Apply + converge ──────────────────────────────────────────────────
+	b.WriteString("## How to apply and converge\n\n")
+	b.WriteString("Work from the target repo so your edit and the verifier read one file:\n\n")
+	fmt.Fprintf(&b, "1. cd %s\n", repoDir)
+	b.WriteString("2. Edit the `sandbox:` block in ./bugbot.yaml with your proposal (keep\n")
+	b.WriteString("   network: none and a valid pids_limit/cpus/memory_mb/timeout_seconds).\n")
+	b.WriteString("   If the file does not exist yet, run `bugbot init` first.\n")
+	b.WriteString("3. Smoke-test your edit offline — reads ./bugbot.yaml and runs the same\n")
+	b.WriteString("   network=none verifier this command used:\n")
+	b.WriteString("       bugbot doctor --verify-sandbox\n")
+	b.WriteString("   NOTE: re-running `design-sandbox` will NOT see your edit — it always\n")
+	b.WriteString("   re-synthesizes the deterministic candidate from scratch.\n")
+	b.WriteString("4. Repeat until doctor reports the smoke-test PASS. The block is then live\n")
+	b.WriteString("   in ./bugbot.yaml — you are done.\n")
+
+	return b.String()
+}
+
+// printDesignGuide writes the outside-in guidance brief to w.
+func printDesignGuide(w io.Writer, repoDir string, c candidateBlock, mined minerOutput) error {
+	_, err := fmt.Fprintln(w, renderDesignGuide(repoDir, c, mined))
+	return err
 }
 
 // candidateToSandboxConfig converts a candidateBlock to a config.Sandbox for
