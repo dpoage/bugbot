@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dpoage/bugbot/internal/funnel"
+	"github.com/dpoage/bugbot/internal/progress"
 )
 
 // newVerifyCmd implements `bugbot verify`: a one-shot verify drain that picks
@@ -82,14 +83,21 @@ orphans are left untouched.`,
 				return err
 			}
 
-			// nil progress sink: the one-shot `bugbot verify` prints its summary
-			// to stdout and does not own a status.json snapshot. Writing one here
-			// would race a running daemon's single-writer snapshot.
+			// Default `bugbot verify` stays quiet and never writes a status.json
+			// snapshot (which would race a running daemon's single-writer
+			// snapshot). With --suspected the re-verify pass runs the verifier on
+			// every open Tier-3 finding and can take minutes, so attach a stdout
+			// LogRenderer — plain log lines only, no status.json — for live
+			// per-stage / per-finding feedback.
 			opts, _, sbErr := buildFunnelOptions(cfg, FunnelOptionOverrides{})
 			if sbErr != nil {
 				return sbErr
 			}
-			opts.Progress = nil
+			if suspected {
+				opts.Progress = progress.NewLogRenderer(cmd.OutOrStdout())
+			} else {
+				opts.Progress = nil
+			}
 
 			f, err := funnel.New(funnel.RoleClients{
 				Finder:       finder,
@@ -132,6 +140,8 @@ orphans are left untouched.`,
 			// run when the flag is set so the default behaviour is byte-
 			// identical to today.
 			if suspected {
+				_, _ = fmt.Fprintln(out,
+					"\nRe-verifying open Tier-3 suspected findings (verifier only, no finder; this can take a few minutes)…")
 				rres, rerr := f.ReverifySuspected(ctx)
 				if rerr != nil {
 					return fmt.Errorf("reverify suspected: %w", rerr)
