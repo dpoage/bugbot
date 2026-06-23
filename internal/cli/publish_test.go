@@ -1645,3 +1645,106 @@ func TestPlanPublish_AdoptsDriftedRediscovery(t *testing.T) {
 		t.Errorf("fp_anchor: want publishSkip, got %T", act["fp_anchor"])
 	}
 }
+
+// TestSanitizeControlChars verifies C0 control characters are stripped except
+// the meaningful Markdown whitespace (tab, newline, carriage return), and that
+// clean input is returned unchanged.
+func TestSanitizeControlChars(t *testing.T) {
+	clean := "hello\tworld\nsecond line\r\nthird"
+	if got := sanitizeControlChars(clean); got != clean {
+		t.Errorf("clean text mutated: got %q want %q", got, clean)
+	}
+
+	// NUL plus other C0 controls (bell, ESC, vertical tab, form feed) removed.
+	if got := sanitizeControlChars("a\x00b\x07c\x1bd\x0be\x0cf"); got != "abcdef" {
+		t.Errorf("control strip: got %q want %q", got, "abcdef")
+	}
+
+	// Whitespace controls survive even when other controls are present.
+	if got := sanitizeControlChars("x\x00\ty\n\rz"); got != "x\ty\n\rz" {
+		t.Errorf("whitespace not preserved: got %q", got)
+	}
+}
+
+// TestRenderIssueBody_StripsControlChars verifies model-authored content with a
+// NUL byte (the exec-killing case) and other C0 controls produces a body with
+// no such bytes — so the body can never crash gh's forkExec with EINVAL.
+func TestRenderIssueBody_StripsControlChars(t *testing.T) {
+	f := store.Finding{
+		Fingerprint: "abc123",
+		Title:       "title",
+		Description: "desc with NUL\x00 and bell\x07 here",
+		Reasoning:   "trace\x00line",
+		Severity:    "low",
+		Tier:        2,
+		Lens:        "x",
+		File:        "a.go",
+		Line:        1,
+	}
+	body := renderIssueBody(f, "", publishProvenance{})
+	if strings.IndexByte(body, 0) >= 0 {
+		t.Fatalf("body contains NUL after render")
+	}
+	for _, r := range body {
+		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+			t.Fatalf("body contains C0 control %#x after render", r)
+		}
+	}
+	if !strings.Contains(body, "desc with NUL and bell here") {
+		t.Errorf("description text not preserved: %q", body)
+	}
+}
+
+// TestApplyPublish_StripsNULFromModelText is the regression test for the
+// fork/exec EINVAL crash: a finding whose model-authored fields carry a NUL
+// byte must publish, and the gh create call's args (title + body) must contain
+// no NUL — which would otherwise make realGH's forkExec fail with "invalid
+// argument" and abort the whole run.
+func TestApplyPublish_StripsNULFromModelText(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	f := store.Finding{
+		Fingerprint: store.Fingerprint("race", "x.go", "7|boom"),
+		Title:       "boom\x00 title",
+		Description: "desc\x00ription",
+		Reasoning:   "trace with NUL\x00 byte",
+		Severity:    "high",
+		Tier:        2,
+		Status:      store.StatusOpen,
+		Lens:        "race",
+		File:        "x.go",
+		Line:        7,
+		CommitSHA:   "c1abc",
+	}
+	if _, err := st.UpsertFinding(ctx, f); err != nil {
+		t.Fatalf("seed finding: %v", err)
+	}
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":42}`))
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("runPublish: %v", err)
+	}
+
+	createCalls := gh.callsContaining("repos/{owner}/{repo}/issues -X POST")
+	if len(createCalls) != 1 {
+		t.Fatalf("expected 1 create call, got %d", len(createCalls))
+	}
+	for _, arg := range createCalls[0] {
+		if strings.IndexByte(arg, 0) >= 0 {
+			t.Errorf("create arg contains NUL (would crash forkExec): %q", arg)
+		}
+	}
+	if title, _ := argValue(createCalls[0], "title"); title != "boom title" {
+		t.Errorf("title = %q, want %q", title, "boom title")
+	}
+}

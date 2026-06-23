@@ -111,3 +111,37 @@ func TestResolvePR_MissingSHA(t *testing.T) {
 		t.Fatal("expected error for missing SHAs")
 	}
 }
+
+// TestScrubNUL verifies the exec-boundary guard: NUL bytes are removed from
+// every argument (a NUL makes forkExec fail with EINVAL), the input slice is
+// never mutated in place, and a clean slice is returned unchanged with the same
+// backing array (no allocation on the common path).
+func TestScrubNUL(t *testing.T) {
+	clean := []string{"api", "repos/{owner}/{repo}/issues", "-f", "body=hello world"}
+	got := scrubNUL(clean)
+	if len(got) == 0 || &got[0] != &clean[0] {
+		t.Errorf("scrubNUL reallocated a clean slice; want same backing array")
+	}
+	for i := range clean {
+		if got[i] != clean[i] {
+			t.Errorf("clean arg %d mutated: got %q want %q", i, got[i], clean[i])
+		}
+	}
+
+	dirty := []string{"-f", "body=ab\x00cd", "-f", "title=x\x00"}
+	out := scrubNUL(dirty)
+	if out[1] != "body=abcd" {
+		t.Errorf("body NUL not stripped: got %q", out[1])
+	}
+	if out[3] != "title=x" {
+		t.Errorf("title NUL not stripped: got %q", out[3])
+	}
+	if dirty[1] != "body=ab\x00cd" {
+		t.Errorf("scrubNUL mutated input slice element: %q", dirty[1])
+	}
+	for i, a := range out {
+		if strings.IndexByte(a, 0) >= 0 {
+			t.Errorf("arg %d still contains NUL: %q", i, a)
+		}
+	}
+}

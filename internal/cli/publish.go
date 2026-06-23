@@ -613,6 +613,35 @@ func sanitizeDetailsTag(s string) string {
 	return out.String()
 }
 
+// sanitizeControlChars strips C0 control characters (U+0000–U+001F) except tab,
+// newline, and carriage return. A NUL in particular makes exec reject the gh
+// argument with EINVAL ("invalid argument"); the rest have no place in a
+// Markdown issue body and render as replacement glyphs on GitHub. The sources
+// are model-authored fields (description, verification trace, title) and repro
+// source files. The no-control-char common case returns s unchanged with no
+// allocation.
+func sanitizeControlChars(s string) string {
+	if strings.IndexFunc(s, isStrippableControl) < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if isStrippableControl(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// isStrippableControl reports whether r is a C0 control character that should be
+// removed from issue text. Tab, newline, and carriage return are preserved
+// because they are meaningful Markdown whitespace.
+func isStrippableControl(r rune) bool {
+	return r < 0x20 && r != '\t' && r != '\n' && r != '\r'
+}
+
 // renderIssueBody renders the deterministic issue body for a finding.
 //
 // Section order:
@@ -744,7 +773,7 @@ func renderIssueBody(f store.Finding, repoURL string, prov publishProvenance) st
 	// Belt-and-braces: if the assembled body still exceeds the safe threshold,
 	// truncate at a safe byte boundary while preserving line 1 (fingerprint
 	// marker — load-bearing for issue recovery) and the attribution footer.
-	body := b.String()
+	body := sanitizeControlChars(b.String())
 	if len(body) > maxBody {
 		truncNote := "\n\n[... body truncated by bugbot: content exceeds GitHub's issue size limit ...]\n\n"
 		available := maxBody - len(firstLine) - len("\n\n") - len(truncNote) - len("\n") - len(footer)
@@ -954,6 +983,7 @@ func resolveRepoURL(ctx context.Context, gh ghRunner) string {
 
 // ghCreateIssue posts a new GitHub issue and returns the issue number.
 func ghCreateIssue(ctx context.Context, gh ghRunner, title, body string, labels []string) (int, error) {
+	title = sanitizeControlChars(title)
 	args := []string{
 		"api", "repos/{owner}/{repo}/issues",
 		"-X", "POST",
