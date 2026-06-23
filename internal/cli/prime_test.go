@@ -25,11 +25,12 @@ func TestRecommendImage(t *testing.T) {
 		{"cmake", []ingest.BuildSystem{ingest.BuildSystemCMake}, "", "docker.io/library/gcc:14", "cmake"},
 		// Language-specific system is preferred over the bazel/make meta entries
 		// even though DetectBuildSystems lists those first.
-		{"bazel wrapping go", []ingest.BuildSystem{ingest.BuildSystemBazel, ingest.BuildSystemGoModule}, "1.26", "gcr.io/bazel-public/bazel:latest", "toolchains"},
+		{"bazel wrapping go", []ingest.BuildSystem{ingest.BuildSystemBazel, ingest.BuildSystemGoModule}, "1.26", "gcr.io/bazel-public/bazel:latest", "bugbot sandbox build"},
 		{"go with convenience make", []ingest.BuildSystem{ingest.BuildSystemGoModule, ingest.BuildSystemMake}, "1.26", "docker.io/library/golang:1.26-alpine", "cgo"},
-		// Bazel with no other language toolchain: still pick the bazel image
-		// (we run `bazel test //...` for Bazel repos).
-		{"bazel only", []ingest.BuildSystem{ingest.BuildSystemBazel}, "", "gcr.io/bazel-public/bazel:latest", "prefetched"},
+		// Bazel with no other language toolchain: still pick the bazel base
+		// image (we run `bazel test --build_tests_only //...` for Bazel repos);
+		// the note must point at a purpose-built offline image.
+		{"bazel only", []ingest.BuildSystem{ingest.BuildSystemBazel}, "", "gcr.io/bazel-public/bazel:latest", "purpose-built offline image"},
 		{"make only", []ingest.BuildSystem{ingest.BuildSystemMake}, "", "docker.io/library/gcc:14", "make"},
 		{"nothing", nil, "", "docker.io/library/debian:stable-slim", "NO compiler"},
 	}
@@ -63,11 +64,10 @@ func TestRecommendDepStrategy(t *testing.T) {
 		{"reqs only no pyproject", nil, false, true, "fetch", ""},
 		{"rust", []ingest.BuildSystem{ingest.BuildSystemCargo}, false, false, "off", ""},
 		{"none", nil, false, false, "off", ""},
-		// Bazel: NO bazel dep strategy; the note must explicitly say so and
-		// point at a custom image with a prefetched bazel repository cache
-		// for offline repro.
-		{"bazel only", []ingest.BuildSystem{ingest.BuildSystemBazel}, false, false, "off", "NO bazel dep"},
-		{"bazel with go", []ingest.BuildSystem{ingest.BuildSystemBazel, ingest.BuildSystemGoModule}, false, false, "off", "prefetched bazel"},
+		// Bazel: dep_strategy stays "off" because deps are baked into the
+		// offline image; the note must point at `bugbot sandbox build`.
+		{"bazel only", []ingest.BuildSystem{ingest.BuildSystemBazel}, false, false, "off", "bugbot sandbox build"},
+		{"bazel with go", []ingest.BuildSystem{ingest.BuildSystemBazel, ingest.BuildSystemGoModule}, false, false, "off", "baked into the offline sandbox image"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,28 +171,40 @@ func TestRenderPrimeNoRuntimeWarns(t *testing.T) {
 	}
 }
 
-// TestRenderPrimeBazelCaveat confirms the bazel caveats (image AND
-// dep_strategy) are visible in the rendered output for a Bazel repo.
+// TestRenderPrimeBazelCaveat confirms the bazel guidance (image AND
+// dep_strategy) renders the SUPPORTED offline framing for a Bazel repo:
+// the recommended base image surfaces and the output points at
+// `bugbot sandbox build` for a purpose-built offline image. The old FALSE
+// "unsupported / disable repro" wording must be gone.
 func TestRenderPrimeBazelCaveat(t *testing.T) {
+	bs := []ingest.BuildSystem{ingest.BuildSystemBazel, ingest.BuildSystemGoModule}
+	img, imgNote := recommendImage(bs, "")
+	dep, depNote := recommendDepStrategy(bs, false, false)
 	f := primeFacts{
 		Target:       "/repo",
 		Runtime:      "podman",
 		RuntimeFound: true,
-		BuildSystems: []ingest.BuildSystem{ingest.BuildSystemBazel, ingest.BuildSystemGoModule},
-		Image:        "gcr.io/bazel-public/bazel:latest",
-		ImageNote:    "Bazel detected: bugbot runs `bazel test //...`...",
-		DepStrategy:  "off",
-		StrategyNote: "Bazel detected: Bugbot has NO bazel dependency strategy...",
+		BuildSystems: bs,
+		Image:        img,
+		ImageNote:    imgNote,
+		DepStrategy:  dep,
+		StrategyNote: depNote,
 	}
 	out := renderPrime(f)
 	for _, want := range []string{
-		"gcr.io/bazel-public/bazel:latest", // recommended image surfaces
+		"gcr.io/bazel-public/bazel:latest", // recommended base image surfaces
 		"Bazel",                            // image note surfaces
-		"NO bazel dep",                     // dep_strategy caveat surfaces
-		"prefetched",                       // offline caveat surfaces
+		"bugbot sandbox build",             // supported offline framing surfaces
+		"purpose-built offline image",      // offline image caveat surfaces
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered prime missing %q", want)
+		}
+	}
+	// The FALSE "unsupported / disable repro" framing must be gone.
+	for _, bad := range []string{"disable repro", "NO bazel dep", "unsupported"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("rendered prime still contains stale wording %q", bad)
 		}
 	}
 }
