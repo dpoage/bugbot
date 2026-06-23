@@ -613,6 +613,47 @@ func sanitizeDetailsTag(s string) string {
 	return out.String()
 }
 
+// sanitizeControlChars strips C0 control characters (U+0000–U+001F) except tab,
+// newline, and carriage return. A NUL in particular makes exec reject the gh
+// argument with EINVAL ("invalid argument"); the rest have no place in a
+// Markdown issue body and render as replacement glyphs on GitHub. The sources
+// are model-authored fields (description, verification trace, title) and repro
+// source files. The no-control-char common case returns s unchanged with no
+// allocation.
+//
+// The scan is byte-wise: every C0 control byte is < 0x80, so it can never be
+// part of a multi-byte UTF-8 sequence, and stripping it can never split a rune.
+// All other bytes (including multi-byte runes and any invalid UTF-8) are copied
+// through verbatim — so this never normalizes or rewrites valid content.
+func sanitizeControlChars(s string) string {
+	clean := true
+	for i := 0; i < len(s); i++ {
+		if isC0Control(s[i]) {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; isC0Control(c) {
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// isC0Control reports whether c is a C0 control byte that should be removed from
+// issue text. Tab, newline, and carriage return are preserved because they are
+// meaningful Markdown whitespace.
+func isC0Control(c byte) bool {
+	return c < 0x20 && c != '\t' && c != '\n' && c != '\r'
+}
+
 // renderIssueBody renders the deterministic issue body for a finding.
 //
 // Section order:
@@ -744,7 +785,13 @@ func renderIssueBody(f store.Finding, repoURL string, prov publishProvenance) st
 	// Belt-and-braces: if the assembled body still exceeds the safe threshold,
 	// truncate at a safe byte boundary while preserving line 1 (fingerprint
 	// marker — load-bearing for issue recovery) and the attribution footer.
-	body := b.String()
+	// sanitizeControlChars runs on the whole body before the size check. It is
+	// safe to slice the sanitized body at len(firstLine+"\n\n") below: firstLine
+	// is the fingerprint marker (literal text + sha256 hex, no control bytes)
+	// and "\n\n" is preserved whitespace, so the marker prefix is byte-identical
+	// after sanitizing and len(afterFirst) still names the exact post-marker
+	// offset.
+	body := sanitizeControlChars(b.String())
 	if len(body) > maxBody {
 		truncNote := "\n\n[... body truncated by bugbot: content exceeds GitHub's issue size limit ...]\n\n"
 		available := maxBody - len(firstLine) - len("\n\n") - len(truncNote) - len("\n") - len(footer)
@@ -954,6 +1001,7 @@ func resolveRepoURL(ctx context.Context, gh ghRunner) string {
 
 // ghCreateIssue posts a new GitHub issue and returns the issue number.
 func ghCreateIssue(ctx context.Context, gh ghRunner, title, body string, labels []string) (int, error) {
+	title = sanitizeControlChars(title)
 	args := []string{
 		"api", "repos/{owner}/{repo}/issues",
 		"-X", "POST",
