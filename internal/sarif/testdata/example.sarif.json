@@ -39,7 +39,7 @@
             }
           ],
           "partialFingerprints": {
-            "bugbotFingerprint/v1": "fp-abc"
+            "bugbotFingerprint/v2": "fp-abc"
           }
         },
         {
@@ -61,7 +61,7 @@
             }
           ],
           "partialFingerprints": {
-            "bugbotFingerprint/v1": "fp-ghi"
+            "bugbotFingerprint/v2": "fp-ghi"
           }
         },
         {
@@ -83,7 +83,7 @@
             }
           ],
           "partialFingerprints": {
-            "bugbotFingerprint/v1": "fp-def"
+            "bugbotFingerprint/v2": "fp-def"
           }
         }
       ]

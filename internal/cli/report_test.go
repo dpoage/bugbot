@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,9 +43,8 @@ func setup(t *testing.T) (cfgPath string, st *store.Store, f store.Finding) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-
 	f = store.Finding{
-		Fingerprint: store.Fingerprint("race", "x.go", 7, "boom"),
+		Fingerprint: store.Fingerprint("race", "x.go", fmt.Sprintf("%d|%s", 7, "boom")),
 		Title:       "boom",
 		Description: "desc",
 		Reasoning:   "trace",

@@ -58,7 +58,7 @@ func buildDaemonWithRepro(
 // needsHuman flag. Status is always StatusOpen. Returns the upserted finding.
 func seedFinding(t *testing.T, st *store.Store, title string, tier domain.Tier, reproPath string, needsHuman bool) store.Finding {
 	t.Helper()
-	fp := store.Fingerprint("nil-deref", fixtureFile, fixtureLine, title)
+	fp := store.Fingerprint("nil-deref", fixtureFile, fmt.Sprintf("%d|%s", fixtureLine, title))
 	f, err := st.UpsertFinding(context.Background(), store.Finding{
 		Fingerprint: fp,
 		Title:       title,
@@ -124,7 +124,7 @@ func TestOpenBacklog_Filter(t *testing.T) {
 func TestOpenBacklog_DismissedExcluded(t *testing.T) {
 	st := openStore(t)
 
-	fp := store.Fingerprint("nil-deref", fixtureFile, fixtureLine, "dismissed finding")
+	fp := store.Fingerprint("nil-deref", fixtureFile, fmt.Sprintf("%d|%s", fixtureLine, "dismissed finding"))
 	_, err := st.UpsertFinding(context.Background(), store.Finding{
 		Fingerprint: fp,
 		Title:       "dismissed finding",

@@ -4,6 +4,7 @@ package repro
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,7 +78,7 @@ func TestDivideByZeroReported(t *testing.T) {
 	}
 	defer func() { _ = st.Close() }()
 
-	fp := store.Fingerprint("logic", "calc.go", 7, "Divide ignores zero divisor")
+	fp := store.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 7, "Divide ignores zero divisor"))
 	finding, err := st.UpsertFinding(context.Background(), store.Finding{
 		Fingerprint: fp,
 		Title:       "Divide ignores zero divisor",

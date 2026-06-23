@@ -196,8 +196,8 @@ func TestFromFindings_StructuralAssertions(t *testing.T) {
 		} else if pl.Region != nil {
 			t.Errorf("results[%d]: Region should be nil when Line<=0, got startLine=%d", i, pl.Region.StartLine)
 		}
-		if fp, ok := r.PartialFingerprints["bugbotFingerprint/v1"]; !ok || fp != tc.fp {
-			t.Errorf("results[%d].partialFingerprints[bugbotFingerprint/v1] = %q, want %q", i, fp, tc.fp)
+		if fp, ok := r.PartialFingerprints["bugbotFingerprint/v2"]; !ok || fp != tc.fp {
+			t.Errorf("results[%d].partialFingerprints[bugbotFingerprint/v2] = %q, want %q", i, fp, tc.fp)
 		}
 	}
 }

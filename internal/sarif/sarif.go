@@ -166,7 +166,7 @@ func FromFindings(findings []store.Finding) Document {
 		}
 		if f.Fingerprint != "" {
 			r.PartialFingerprints = map[string]string{
-				"bugbotFingerprint/v1": f.Fingerprint,
+				"bugbotFingerprint/v2": f.Fingerprint,
 			}
 		}
 		results = append(results, r)

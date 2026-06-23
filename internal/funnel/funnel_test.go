@@ -234,7 +234,7 @@ func TestSweep_Suppression_NoFindings(t *testing.T) {
 	verifier := verifierRouting(newScriptedClient())
 
 	// Pre-suppress the real candidate's fingerprint.
-	fp := store.Fingerprint("nil-safety/error-handling", "bug.go", 10, "nil deref of cfg in Greeting")
+	fp := store.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10))
 	if err := st.AddSuppression(ctx, fp, "test: known non-bug"); err != nil {
 		t.Fatal(err)
 	}
@@ -1254,9 +1254,10 @@ func TestTriageState_BothOrdersCluster(t *testing.T) {
 		Severity:    "medium", Confidence: "high",
 	}
 
-	// assignFingerprints sets the Fingerprint field that store.Fingerprint() would compute.
+	// fp sets a placeholder Fingerprint; triage's process() recomputes the real
+	// identity from the enclosing-symbol locus, so this value only needs to compile.
 	fp := func(c Candidate) Candidate {
-		c.Fingerprint = store.Fingerprint(c.Lens, c.File, c.Line, c.Title)
+		c.Fingerprint = store.Fingerprint(c.Lens, c.File, "L:"+itoa(c.Line))
 		return c
 	}
 	candA = fp(candA)
@@ -1464,7 +1465,7 @@ func TestStreaming_PersistenceBeforeHypothesizeComplete(t *testing.T) {
 		fallback: newScriptedClient(),
 	}
 
-	fp := store.Fingerprint("nil-safety/error-handling", "bug.go", 10, "nil deref of cfg in Greeting")
+	fp := store.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10))
 	// Simple verifier: never refutes. The store polling loop below detects when
 	// the finding has been persisted by verify_stream.go's immediate-persist path.
 	verifierClient := &hookClient{
@@ -1576,7 +1577,7 @@ func TestStreaming_Interrupt_PersistedFindingSurvives(t *testing.T) {
 		fallback: newScriptedClient(),
 	}
 
-	fp := store.Fingerprint("nil-safety/error-handling", "bug.go", 10, "nil deref of cfg in Greeting")
+	fp := store.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10))
 	// Verifier signals persistedCh after the last refuter panel completes,
 	// then cancels ctx. We use a hookClient with a counter.
 	var verifierCalls atomic.Int32

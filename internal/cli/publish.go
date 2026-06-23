@@ -17,6 +17,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -139,7 +140,7 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 	// Resolve the repo URL once; tolerate failure (degrade: no permalinks).
 	repoURL := resolveRepoURL(ctx, gh)
 
-	created, updated, closed, skipped, stale := 0, 0, 0, 0, 0
+	created, updated, adopted, closed, skipped, stale := 0, 0, 0, 0, 0, 0
 
 	for _, a := range plan {
 		switch act := a.(type) {
@@ -166,6 +167,21 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 			}
 			_, _ = fmt.Fprintf(w, "created issue #%d for %s (%s)\n", n, act.finding.Fingerprint[:12], act.finding.Title)
 			created++
+
+		case publishAdopt:
+			// A re-discovered finding whose fingerprint drifted: adopt the existing
+			// issue (record the new fingerprint -> issue mapping) rather than file a
+			// duplicate. No gh write; the next cycle's update/skip path takes over.
+			if dryRun {
+				_, _ = fmt.Fprintf(w, "dry-run: adopt issue #%d for %s (re-discovered; fingerprint drifted)\n", act.issueNumber, act.finding.Fingerprint[:12])
+				adopted++
+				continue
+			}
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen); err != nil {
+				return fmt.Errorf("publish: record adopted issue: %w", err)
+			}
+			_, _ = fmt.Fprintf(w, "adopted issue #%d for %s (re-discovered; fingerprint drifted)\n", act.issueNumber, act.finding.Fingerprint[:12])
+			adopted++
 
 		case publishRecover:
 			if dryRun {
@@ -286,7 +302,7 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 		}
 	}
 
-	_, _ = fmt.Fprintf(w, "publish: created=%d updated=%d closed=%d skipped=%d stale=%d\n", created, updated, closed, skipped, stale)
+	_, _ = fmt.Fprintf(w, "publish: created=%d updated=%d adopted=%d closed=%d skipped=%d stale=%d\n", created, updated, adopted, closed, skipped, stale)
 	return nil
 }
 
@@ -326,11 +342,45 @@ type publishSkip struct {
 	issueNumber int
 }
 
+// publishAdopt plans adopting an existing open issue for a re-discovered finding
+// whose fingerprint drifted: instead of creating a duplicate, it records a
+// published_issues row mapping the new fingerprint to the existing issue number.
+type publishAdopt struct {
+	finding     store.Finding
+	issueNumber int
+}
+
 func (publishCreate) publishAction()  {}
 func (publishRecover) publishAction() {}
 func (publishUpdate) publishAction()  {}
 func (publishClose) publishAction()   {}
 func (publishSkip) publishAction()    {}
+func (publishAdopt) publishAction()   {}
+
+// pubAnchor is an open finding that already owns a published issue; adoptAnchor
+// matches a fingerprint-drifted re-discovery to one.
+type pubAnchor struct {
+	finding store.Finding
+	issue   int
+}
+
+// adoptAnchor returns the first already-published open finding that is the same
+// defect as f under the cross-scan similarity rule (same file, nearby line,
+// similar description), so the re-discovery adopts that issue instead of filing a
+// duplicate. Identical fingerprints are skipped: those are handled by the
+// published lookup, not by similarity.
+func adoptAnchor(f store.Finding, anchors []pubAnchor) (pubAnchor, bool) {
+	for _, a := range anchors {
+		if a.finding.Fingerprint == f.Fingerprint {
+			continue
+		}
+		if funnel.SimilarFinding(a.finding.File, a.finding.Line, a.finding.Description,
+			f.File, f.Line, f.Description) {
+			return a, true
+		}
+	}
+	return pubAnchor{}, false
+}
 
 // planPublish is the pure reconciler: given open/fixed/dismissed findings and
 // the current published_issues map, it decides what to do with each finding.
@@ -356,6 +406,18 @@ func planPublish(
 ) []publishAction {
 	var actions []publishAction
 
+	// anchors are open findings that already own an open/closing published issue.
+	// A re-discovered finding whose fingerprint drifted (symbol rename, or the
+	// one-time v1->v2 scheme change) adopts the matching anchor's issue instead of
+	// filing a duplicate. Built from the same `open` set, so it is order-stable.
+	var anchors []pubAnchor
+	for _, f := range open {
+		if pi, ok := published[f.Fingerprint]; ok &&
+			(pi.State == store.IssueStateOpen || pi.State == store.IssueStateClosing) {
+			anchors = append(anchors, pubAnchor{finding: f, issue: pi.IssueNumber})
+		}
+	}
+
 	// Create/recover/update/skip for open findings within tier.
 	for _, f := range open {
 		if f.Tier > domain.Tier(tierMin) {
@@ -364,7 +426,11 @@ func planPublish(
 		pi, found := published[f.Fingerprint]
 		switch {
 		case !found:
-			actions = append(actions, publishCreate{finding: f})
+			if a, ok := adoptAnchor(f, anchors); ok {
+				actions = append(actions, publishAdopt{finding: f, issueNumber: a.issue})
+			} else {
+				actions = append(actions, publishCreate{finding: f})
+			}
 		case pi.State == store.IssueStatePending:
 			// An earlier create was interrupted between the gh call and the
 			// store write; the issue may or may not exist on GitHub.

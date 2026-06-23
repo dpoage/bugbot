@@ -255,6 +255,10 @@ type triageState struct {
 	// registry is shared with verify goroutines for staged-lens coordination.
 	registry *clusterRegistry
 
+	// resolver maps (file, line) to the stable enclosing-symbol locus used by the
+	// durable finding fingerprint (store.Fingerprint). Built from snap.Root.
+	resolver *LocusResolver
+
 	// ready holds primaries to forward to verify. Drained by popReady().
 	ready []Candidate
 
@@ -285,6 +289,7 @@ func newTriageState(snap *ingest.Snapshot) (*triageState, *clusterRegistry) {
 		clusters:     make(map[string][]*internalCluster),
 		fileClusters: make(map[string][]*internalCluster),
 		registry:     reg,
+		resolver:     NewLocusResolver(snap.Root),
 	}, reg
 }
 
@@ -313,10 +318,23 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 		dropPending()
 		return nil
 	}
-	// Step 3: exact fingerprint dedup.
-	fp := store.Fingerprint(c.Lens, c.File, c.Line, c.Title)
+	// Step 3: exact fingerprint dedup. The fingerprint is the durable, cross-scan
+	// identity (lens + file + enclosing-symbol locus); see store.Fingerprint.
+	locus := ts.resolver.Resolve(c.File, c.Line)
+	fp := store.Fingerprint(c.Lens, c.File, locus)
 	if ts.seen[fp] {
 		stats.DroppedDuplicate++
+		// Same identity as an earlier survivor. The locus no longer carries the
+		// line or title, so a collision at a new line is a genuine extra site of
+		// the same bug, not a true no-op duplicate: stage it onto the primary so
+		// the finding reports every location. AddStagedSite is a no-op when fp has
+		// no live cluster (suppressed or never registered); AppendFindingSites
+		// dedups by (file,line) and returns ErrNotFound (ignored) when the primary
+		// has not yet persisted a row.
+		site := store.Site{File: c.File, Line: c.Line}
+		if staged, killed := ts.registry.AddStagedSite(fp, site); !staged && !killed {
+			_ = st.AppendFindingSites(ctx, fp, []store.Site{site})
+		}
 		dropPending()
 		return nil
 	}

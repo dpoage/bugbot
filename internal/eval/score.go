@@ -153,7 +153,7 @@ func score(c Case, res *funnel.Result) *CaseResult {
 // miss. The funnel persists findings with the file path the finder reported, so
 // this keeps matching robust to that path's exact spelling.
 func sameFile(a, b string) bool {
-	return store.Fingerprint("", a, 0, "") == store.Fingerprint("", b, 0, "")
+	return store.Fingerprint("", a, "") == store.Fingerprint("", b, "")
 }
 
 func abs(n int) int {

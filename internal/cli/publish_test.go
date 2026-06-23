@@ -208,7 +208,7 @@ func setupPublishStore(t *testing.T) (*store.Store, store.Finding) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	f := store.Finding{
-		Fingerprint: store.Fingerprint("race", "x.go", 7, "boom"),
+		Fingerprint: store.Fingerprint("race", "x.go", fmt.Sprintf("%d|%s", 7, "boom")),
 		Title:       "boom",
 		Description: "desc",
 		Reasoning:   "trace",
@@ -1586,5 +1586,62 @@ func TestApplyPublish_UpdateRecordsSuccess(t *testing.T) {
 	}
 	if pi.IssueNumber != 60 || pi.State != "open" {
 		t.Errorf("published row = #%d %q, want #60 open", pi.IssueNumber, pi.State)
+	}
+}
+
+// TestPlanPublish_AdoptsDriftedRediscovery verifies the cross-scan fuzzy dedup:
+// an open finding with no published row that is the same defect as an already-
+// published finding (same file, nearby line, similar description) adopts the
+// existing issue instead of creating a duplicate. Findings in a different file,
+// beyond the line window, or with an unrelated description still create.
+func TestPlanPublish_AdoptsDriftedRediscovery(t *testing.T) {
+	mkF := func(fp, file string, line int, desc string) store.Finding {
+		return store.Finding{
+			Fingerprint: fp, Title: "t-" + fp, Description: desc,
+			File: file, Line: line, Tier: domain.TierVerified, Status: store.StatusOpen,
+		}
+	}
+	const sharedDesc = "cfg pointer may be nil and is dereferenced without a guard in handler"
+	anchor := mkF("fp_anchor", "a.go", 10, sharedDesc)
+	drifted := mkF("fp_drift", "a.go", 12, "the cfg pointer is dereferenced without a nil guard in handler")
+	otherFile := mkF("fp_otherfile", "b.go", 10, sharedDesc)
+	farLine := mkF("fp_far", "a.go", 100, sharedDesc)
+	unrelated := mkF("fp_unrel", "a.go", 11, "memory leak when the parser fails to release the buffer handle")
+
+	published := map[string]store.PublishedIssue{
+		"fp_anchor": {Fingerprint: "fp_anchor", IssueNumber: 7, State: store.IssueStateOpen},
+	}
+	open := []store.Finding{anchor, drifted, otherFile, farLine, unrelated}
+
+	act := map[string]publishAction{}
+	for _, a := range planPublish(open, nil, nil, published, 2, false) {
+		switch v := a.(type) {
+		case publishAdopt:
+			act[v.finding.Fingerprint] = v
+		case publishCreate:
+			act[v.finding.Fingerprint] = v
+		case publishSkip:
+			act[v.finding.Fingerprint] = v
+		case publishUpdate:
+			act[v.finding.Fingerprint] = v
+		}
+	}
+
+	ad, ok := act["fp_drift"].(publishAdopt)
+	if !ok {
+		t.Fatalf("fp_drift: want publishAdopt, got %T", act["fp_drift"])
+	}
+	if ad.issueNumber != 7 {
+		t.Errorf("adopt issue = %d, want 7", ad.issueNumber)
+	}
+
+	for _, fp := range []string{"fp_otherfile", "fp_far", "fp_unrel"} {
+		if _, ok := act[fp].(publishCreate); !ok {
+			t.Errorf("%s: want publishCreate (no adopt), got %T", fp, act[fp])
+		}
+	}
+
+	if _, ok := act["fp_anchor"].(publishSkip); !ok {
+		t.Errorf("fp_anchor: want publishSkip, got %T", act["fp_anchor"])
 	}
 }

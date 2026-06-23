@@ -123,6 +123,24 @@ func abs(n int) int {
 	return n
 }
 
+// SimilarFinding reports whether two findings describe the same defect under the
+// cross-scan publish dedup rule: identical normalized file, lines within
+// DefaultMergeWindow, and description-token Jaccard at or above the in-scan
+// similarity threshold. It reuses the same machinery as the in-scan
+// location-based merge so both layers agree on "same bug". The publish planner
+// uses it to adopt an existing open issue for a re-discovered finding whose
+// fingerprint drifted (e.g. a symbol rename, or the one-time v1->v2 scheme
+// change) instead of filing a duplicate.
+func SimilarFinding(fileA string, lineA int, descA, fileB string, lineB int, descB string) bool {
+	if normPath(fileA) != normPath(fileB) {
+		return false
+	}
+	if abs(lineA-lineB) > DefaultMergeWindow {
+		return false
+	}
+	return jaccard(descTokens(descA), descTokens(descB)) >= mergeSimilarityThreshold
+}
+
 // sameRootCauseThreshold is the minimum Jaccard overlap for the broad same-file
 // and cross-file decl/def root-cause merge. Higher than mergeSimilarityThreshold
 // (0.18) to guard the wider merge window.

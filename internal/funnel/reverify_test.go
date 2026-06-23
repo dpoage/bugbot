@@ -5,18 +5,19 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
 // seedSuspectedFinding inserts a durable OPEN Tier-3 suspected finding against
 // bug.go (present in the fixture repo) so ReverifySuspected can pick it up.
-// The fingerprint matches store.Fingerprint(lens, file, line, title) so the
-// triage consumer's recompute dedups onto this exact row when the verifier
-// promotes (UpsertFinding fingerprint match) or dismisses (UpdateStatus).
-func seedSuspectedFinding(t *testing.T, st *store.Store) store.Finding {
+// The fingerprint is built from the enclosing-symbol locus (via NewLocusResolver,
+// the same path triage uses), so the triage consumer's recompute dedups onto this
+// exact row when the verifier promotes (UpsertFinding match) or dismisses.
+func seedSuspectedFinding(t *testing.T, st *store.Store, repo *ingest.Repo) store.Finding {
 	t.Helper()
 	fi := store.Finding{
-		Fingerprint: store.Fingerprint("nil-safety/error-handling", "bug.go", 10, "orphan T3 needs re-verification"),
+		Fingerprint: store.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10)),
 		Title:       "orphan T3 needs re-verification",
 		Description: "left orphaned by a prior hard-budget stop",
 		Severity:    domain.SeverityHigh,
@@ -38,7 +39,7 @@ func TestReverifySuspected_PromotesSurvivor(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)
 
-	seedSuspectedFinding(t, st)
+	seedSuspectedFinding(t, st, repo)
 
 	finder := newScriptedClient()
 	finder.fallback = candJSON(realCand) // if invoked, would return a candidate
@@ -65,7 +66,7 @@ func TestReverifySuspected_PromotesSurvivor(t *testing.T) {
 		t.Errorf("finder.callCount() = %d, want 0 (modeReverify must skip the finder)", n)
 	}
 
-	got, err := st.GetFindingByFingerprint(ctx, store.Fingerprint("nil-safety/error-handling", "bug.go", 10, "orphan T3 needs re-verification"))
+	got, err := st.GetFindingByFingerprint(ctx, store.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10)))
 	if err != nil {
 		t.Fatalf("GetFindingByFingerprint: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestReverifySuspected_DismissesRefuted(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)
 
-	seedSuspectedFinding(t, st)
+	seedSuspectedFinding(t, st, repo)
 
 	finder := newScriptedClient()
 	finder.fallback = candJSON(realCand)
@@ -108,7 +109,7 @@ func TestReverifySuspected_DismissesRefuted(t *testing.T) {
 	}
 
 	// The T3 row must be dismissed (not left open).
-	got, err := st.GetFindingByFingerprint(ctx, store.Fingerprint("nil-safety/error-handling", "bug.go", 10, "orphan T3 needs re-verification"))
+	got, err := st.GetFindingByFingerprint(ctx, store.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10)))
 	if err != nil {
 		t.Fatalf("GetFindingByFingerprint: %v", err)
 	}
