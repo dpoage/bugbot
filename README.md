@@ -69,6 +69,9 @@ frontend).
 | **Rust** | `Cargo.toml` | `vendor/` + `.cargo/config{.toml}` with `replace-with` stanza → `CARGO_NET_OFFLINE=true` | mount `$CARGO_HOME/registry` at `/cargo/registry` (read-only, `Shared=true`); `CARGO_HOME=/cargo` | `cargo fetch [--locked]` with `CARGO_HOME=/cargo` (writable); populates `/cargo/registry` | `CARGO_NET_OFFLINE=true` | none |
 | **JS/npm** | `package.json` | `node_modules/` exists → no mounts needed | → **off** (npm HTTP cache does not materialize `node_modules`) | `npm ci --ignore-scripts --cache /npmcache` into `/npmcache` (writable) | `npm_config_offline=true` | `cp -a /npmcache /tmp/npmcache && npm ci --cache /tmp/npmcache` |
 
+> **Bazel monorepos** use a custom image instead of dependency mounts — see
+> [Offline Bazel sandbox image](#offline-bazel-sandbox-image) below.
+
 ### Container mount paths (globally unique)
 
 Each ecosystem owns a distinct container path so multi-ecosystem repos never
@@ -98,6 +101,53 @@ have mount collisions:
   by cargo and falls through to the requested strategy.
 - Read-only mounts are never writable; the writable workspace copy remains the
   only writable surface for the untrusted network-none run.
+
+## Offline Bazel sandbox image
+
+Bazel monorepos do not fit the per-ecosystem dependency strategies above. Bugbot
+runs `bazel test --build_tests_only //...` inside the sandbox under
+`--network=none`, and Bazel needs three things present on disk to do that
+offline: the **vendored external deps** (`bazel vendor` tree), a **prefetched,
+content-addressed repository cache**, and a **warm disk cache**. `bugbot sandbox
+build` generates a purpose-built image that carries all three, generalizing a
+hand-built recipe into bugbot tooling.
+
+### Two-phase build
+
+1. **Base layer** — bake the `bazel vendor` tree and the repository cache into
+   the image. They are *baked*, not bind-mounted, because Bazel's vendor mode
+   writes a `bazel-external` symlink at run time and a read-only mount rejects
+   that write; an image layer is writable through the container overlay.
+2. **Warm layer** — run `bazel test --build_tests_only //...` once under
+   `--network=none` to (a) prove the image builds and tests fully offline and
+   (b) populate the disk cache, then `commit` the container as the final image.
+
+### Why warm-cache-as-layer
+
+Bugbot mounts everything read-only, and Bazel *disables* a read-only disk
+cache — so a cache mounted in would be ignored and every run would recompile
+from cold. Baking the warmed disk cache as an image layer sidesteps that: the
+layer is writable through the per-run container overlay, so each Bugbot run
+starts warm and its writes land in the throwaway overlay.
+
+### Workflow
+
+```sh
+cd /path/to/bazel/repo
+bugbot sandbox build            # scaffold bugbot-sandbox/{Dockerfile,build.sh}; print next steps
+bazel vendor --vendor_dir=$HOME/.cache/<repo>-bugbot/vendor //...   # vendor deps (online, once)
+./bugbot-sandbox/build.sh       # build base + warm offline + commit final image
+
+# or do it all in one shot:
+bugbot sandbox build --run      # vendor -> build -> warm run (network=none) -> commit
+```
+
+Either path commits `localhost/<repo>-bugbot-sandbox:latest` and refreshes
+`sandbox.image` in `bugbot.yaml` to that tag (other keys preserved). Flags
+override the output dir (`--out`), image tag (`--image`), Bazel version
+(`--bazel-version`, defaults to the repo's `.bazelversion`), and vendor dir
+(`--vendor-dir`). Without `--run` the command only scaffolds and prints — it
+never shells out.
 
 ## Install
 
