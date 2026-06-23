@@ -1748,3 +1748,52 @@ func TestApplyPublish_StripsNULFromModelText(t *testing.T) {
 		t.Errorf("title = %q, want %q", title, "boom title")
 	}
 }
+
+// TestRenderIssueBody_SanitizeAndTruncateJointly exercises the subtle
+// interaction between sanitizeControlChars (whole-body) and the maxBody
+// belt-and-braces truncation: an oversized body (> maxBody) that also contains
+// C0 control bytes must still (a) lose every control byte, (b) preserve the
+// line-1 fingerprint marker and the attribution footer, and (c) stay under
+// GitHub's 65 536-char hard limit. Sparse control bytes near the start of each
+// model field survive the per-field caps but are stripped by the whole-body
+// sanitize; enough plain content remains to keep the body over maxBody so the
+// truncation path runs jointly with the sanitize.
+func TestRenderIssueBody_SanitizeAndTruncateJointly(t *testing.T) {
+	f := store.Finding{
+		Fingerprint: "fp1234567890abcdef",
+		Title:       "oversized",
+		Description: "x\x00y\x07z" + strings.Repeat("d", 11000),
+		FixPatch:    "p\x00q" + strings.Repeat("P", 21000),
+		Reasoning:   "r\x00s\x1bt" + strings.Repeat("R", 31000),
+		Severity:    "low",
+		Tier:        2,
+		Lens:        "x",
+		File:        "a.go",
+		Line:        1,
+	}
+	body := renderIssueBody(f, "", publishProvenance{})
+
+	// Truncation must have run (oversized even after sanitize).
+	if !strings.Contains(body, "body truncated by bugbot") {
+		t.Fatalf("expected belt-and-braces truncation to run; body len=%d", len(body))
+	}
+	// No control bytes survive (the joint invariant).
+	for _, r := range body {
+		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+			t.Fatalf("body contains C0 control %#x after sanitize+truncate", r)
+		}
+	}
+	// Line-1 fingerprint marker preserved (load-bearing for recovery).
+	wantMarker := "<!-- bugbot:fp=" + f.Fingerprint + " -->"
+	if !strings.HasPrefix(body, wantMarker) {
+		t.Errorf("fingerprint marker not preserved after truncation")
+	}
+	// Attribution footer preserved.
+	if !strings.HasSuffix(body, "Filed by Bugbot — automated finding; verify before acting.") {
+		t.Errorf("attribution footer not preserved after truncation")
+	}
+	// Under GitHub's hard limit.
+	if len(body) >= 65536 {
+		t.Errorf("body length %d exceeds GitHub 65536 hard limit", len(body))
+	}
+}

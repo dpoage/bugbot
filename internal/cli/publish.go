@@ -620,26 +620,38 @@ func sanitizeDetailsTag(s string) string {
 // are model-authored fields (description, verification trace, title) and repro
 // source files. The no-control-char common case returns s unchanged with no
 // allocation.
+//
+// The scan is byte-wise: every C0 control byte is < 0x80, so it can never be
+// part of a multi-byte UTF-8 sequence, and stripping it can never split a rune.
+// All other bytes (including multi-byte runes and any invalid UTF-8) are copied
+// through verbatim — so this never normalizes or rewrites valid content.
 func sanitizeControlChars(s string) string {
-	if strings.IndexFunc(s, isStrippableControl) < 0 {
+	clean := true
+	for i := 0; i < len(s); i++ {
+		if isC0Control(s[i]) {
+			clean = false
+			break
+		}
+	}
+	if clean {
 		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s))
-	for _, r := range s {
-		if isStrippableControl(r) {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; isC0Control(c) {
 			continue
 		}
-		b.WriteRune(r)
+		b.WriteByte(s[i])
 	}
 	return b.String()
 }
 
-// isStrippableControl reports whether r is a C0 control character that should be
-// removed from issue text. Tab, newline, and carriage return are preserved
-// because they are meaningful Markdown whitespace.
-func isStrippableControl(r rune) bool {
-	return r < 0x20 && r != '\t' && r != '\n' && r != '\r'
+// isC0Control reports whether c is a C0 control byte that should be removed from
+// issue text. Tab, newline, and carriage return are preserved because they are
+// meaningful Markdown whitespace.
+func isC0Control(c byte) bool {
+	return c < 0x20 && c != '\t' && c != '\n' && c != '\r'
 }
 
 // renderIssueBody renders the deterministic issue body for a finding.
@@ -773,6 +785,12 @@ func renderIssueBody(f store.Finding, repoURL string, prov publishProvenance) st
 	// Belt-and-braces: if the assembled body still exceeds the safe threshold,
 	// truncate at a safe byte boundary while preserving line 1 (fingerprint
 	// marker — load-bearing for issue recovery) and the attribution footer.
+	// sanitizeControlChars runs on the whole body before the size check. It is
+	// safe to slice the sanitized body at len(firstLine+"\n\n") below: firstLine
+	// is the fingerprint marker (literal text + sha256 hex, no control bytes)
+	// and "\n\n" is preserved whitespace, so the marker prefix is byte-identical
+	// after sanitizing and len(afterFirst) still names the exact post-marker
+	// offset.
 	body := sanitizeControlChars(b.String())
 	if len(body) > maxBody {
 		truncNote := "\n\n[... body truncated by bugbot: content exceeds GitHub's issue size limit ...]\n\n"
