@@ -111,22 +111,29 @@ func toolchainImage(bs ingest.BuildSystem, goVersion string) (image string, ok b
 	return "", false
 }
 
+// bazelBaseImage is the BASE image recommended for Bazel repos. It is only a
+// starting point: offline (network=none) repro needs a purpose-built offline
+// image (vendored deps + prefetched bazel repository cache + warm disk-cache
+// layer) scaffolded by `bugbot sandbox build`.
+const bazelBaseImage = "gcr.io/bazel-public/bazel:latest"
+
 // recommendImage picks a sandbox image that carries the toolchain for the
 // repo's primary language. Bazel is checked FIRST: bugbot's repro pipeline
-// actually runs `bazel test //...` for Bazel repos, so a non-bazel image
+// actually runs `bazel test --build_tests_only --test_output=errors //...` for Bazel repos, so a non-bazel image
 // (e.g. golang:*-alpine) would silently fail every reproduce under
 // network=none — repro would exit 127 / `environment_error` and the
 // finding would stay unverified. Other language-specific tools are
 // preferred over bazel when no Bazel marker is present.
 func recommendImage(bs []ingest.BuildSystem, goVersion string) (image, note string) {
-	// Bazel detected: the image MUST be bazel-capable (we run `bazel test`),
-	// AND it must still carry the language toolchains the targets build, AND
-	// a prefetched bazel repository cache so offline (network=none) repro
-	// works. A plain `gcr.io/bazel-public/bazel:latest` may not be enough on
-	// its own — point users at a custom image in that case.
+	// Bazel detected: bugbot runs `bazel test --build_tests_only --test_output=errors //...`, so the image MUST be
+	// bazel-capable AND carry the language toolchains the targets build. For
+	// offline (network=none) repro the image must be a PURPOSE-BUILT offline
+	// image baking the three ingredients (vendored deps + prefetched bazel
+	// repository cache + warm disk-cache layer); `bugbot sandbox build`
+	// scaffolds it. The base below is only a starting point.
 	if containsBuildSystem(bs, ingest.BuildSystemBazel) {
-		return "gcr.io/bazel-public/bazel:latest",
-			"Bazel detected: bugbot runs `bazel test //...` for Bazel repos, so the image MUST be bazel-capable. The image must ALSO carry the target language toolchains (Go/Java/C++/...) your targets build, and for offline (network=none) repro it must include a prefetched bazel repository cache — a plain bazel image is usually not enough; consider a custom image, or disable repro for Bazel repos."
+		return bazelBaseImage,
+			"Bazel detected: bugbot runs `bazel test --build_tests_only --test_output=errors //...` for Bazel repos, so the image MUST be bazel-capable. " + bazelBaseImage + " is only a BASE — for offline (network=none) repro the image must be a purpose-built offline image that carries the three ingredients (vendored external deps + a prefetched bazel repository cache + a warm disk cache baked as a writable layer) PLUS the target language toolchains (Go/Java/C++/...) your targets build. Run `bugbot sandbox build` to scaffold that image."
 	}
 	for _, b := range bs {
 		if img, ok := toolchainImage(b, goVersion); ok {
@@ -163,18 +170,18 @@ func imageNoteFor(bs ingest.BuildSystem) string {
 }
 
 // recommendDepStrategy picks the network=none dependency strategy for the repo.
-// Go and Python have wired strategies; Bazel intentionally does NOT — bugbot
-// has no bazel dependency strategy today, and offline (network=none) bazel
-// repro requires a custom image with a prefetched bazel repository cache, or
-// disabling repro for bazel repos. Other ecosystems get "off" with a generic
-// note to vendor/commit deps.
+// Go and Python have wired strategies; Bazel intentionally stays "off" — its
+// deps are not resolved at run time but BAKED INTO the offline sandbox image
+// (vendored external deps + a prefetched bazel repository cache + a warm
+// disk-cache layer) built by `bugbot sandbox build`. Other ecosystems get
+// "off" with a generic note to vendor/commit deps.
 func recommendDepStrategy(bs []ingest.BuildSystem, vendored, hasReqs bool) (strategy, note string) {
 	isGo := containsBuildSystem(bs, ingest.BuildSystemGoModule) || containsBuildSystem(bs, ingest.BuildSystemGoWorkspace)
 	isPy := containsBuildSystem(bs, ingest.BuildSystemPython) || hasReqs
 	isBazel := containsBuildSystem(bs, ingest.BuildSystemBazel)
 	switch {
 	case isBazel:
-		return "off", "Bazel detected: Bugbot has NO bazel dependency strategy. Offline (network=none) bazel repro requires a custom sandbox image with a prefetched bazel repository cache (the default bazel image does not bundle one), or disable repro for this repo. 'off' is correct only if every bazel target you care about builds from sources already in the repo."
+		return "off", "Bazel detected: dep_strategy stays 'off' because Bugbot resolves no Bazel deps at run time — they are baked into the offline sandbox image. Build it with `bugbot sandbox build`: it vendors the external deps, prefetches the bazel repository cache, and bakes a warm disk-cache layer, so `bazel test --build_tests_only --test_output=errors //...` runs fully offline under network=none."
 	case isGo && vendored:
 		return "off", "Go modules are vendored (vendor/modules.txt) → the build resolves entirely from vendor/ under network=none. No mounts needed."
 	case isGo:
@@ -286,9 +293,10 @@ func renderPrime(f primeFacts) string {
 	b.WriteString("    Node/TS  docker.io/library/node:22-slim\n")
 	b.WriteString("    Rust     docker.io/library/rust:1-slim\n")
 	b.WriteString("    C/C++    docker.io/library/gcc:14  (add cmake/meson if your build needs them)\n")
-	b.WriteString("    Bazel    gcr.io/bazel-public/bazel:latest + language toolchains; offline\n")
-	b.WriteString("             (network=none) repro requires a custom image with a prefetched\n")
-	b.WriteString("             bazel repository cache (or disable repro for Bazel repos)\n")
+	b.WriteString("    Bazel    gcr.io/bazel-public/bazel:latest is only a BASE; offline\n")
+	b.WriteString("             (network=none) repro needs a purpose-built offline image with\n")
+	b.WriteString("             vendored deps + a prefetched bazel repository cache + a warm\n")
+	b.WriteString("             disk-cache layer — build it with `bugbot sandbox build`\n")
 	b.WriteString("    mixed    a custom image carrying every toolchain you need\n\n")
 
 	// --- dep_strategy -----------------------------------------------------
@@ -297,9 +305,9 @@ func renderPrime(f primeFacts) string {
 	b.WriteString("    vendored Go (vendor/)      off    builds offline from vendor/\n")
 	b.WriteString("    non-vendored Go            host   mount host module cache RO, or 'fetch'\n")
 	b.WriteString("    Python + requirements.txt  fetch  offline wheelhouse (one online step)\n")
-	b.WriteString("    Bazel                     off    NO bazel dep strategy; offline repro needs\n")
-	b.WriteString("                                   a custom image with a prefetched cache\n")
-	b.WriteString("                                   (or disable repro for Bazel repos)\n")
+	b.WriteString("    Bazel                     off    deps are baked into the offline image,\n")
+	b.WriteString("                                   not resolved at run time — build the image\n")
+	b.WriteString("                                   with `bugbot sandbox build`\n")
 	b.WriteString("    other ecosystems           off    vendor/commit deps or bake a custom image\n\n")
 
 	// --- Secrets ----------------------------------------------------------

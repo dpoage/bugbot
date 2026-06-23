@@ -512,6 +512,12 @@ func TestDoctor_ImageToolchain_BazelOfflineWarns(t *testing.T) {
 		if !strings.Contains(r.Detail, "prefetched") {
 			t.Errorf("bazel offline warn should mention prefetched cache; got %q", r.Detail)
 		}
+		if !strings.Contains(r.Detail, "bugbot sandbox build") {
+			t.Errorf("bazel offline warn should reference `bugbot sandbox build`; got %q", r.Detail)
+		}
+		if strings.Contains(r.Detail, "unsupported") {
+			t.Errorf("bazel offline warn must not say 'unsupported'; got %q", r.Detail)
+		}
 	}
 	if !saw {
 		t.Error("expected a WARN for image bazel offline (bazel + network=none)")
@@ -560,6 +566,17 @@ func TestCheckImageToolchain_Direct(t *testing.T) {
 			langs:        []ingest.Language{ingest.LangGo},
 			buildSystems: []ingest.BuildSystem{ingest.BuildSystemBazel, ingest.BuildSystemGoModule},
 			wantWarn:     []string{"image bazel offline"},
+		},
+		{
+			// Custom/local image: offline bazel repro IS supported against a
+			// purpose-built image, so this gets an advisory INFO (asserted in
+			// TestCheckImageToolchain_BazelOfflineCustomImageInfo), NOT a WARN.
+			name:         "bazel + none network custom image does not warn",
+			image:        "localhost/x-bugbot-sandbox:latest",
+			network:      "none",
+			langs:        nil,
+			buildSystems: []ingest.BuildSystem{ingest.BuildSystemBazel, ingest.BuildSystemGoModule},
+			wantWarn:     nil,
 		},
 		{
 			name:         "bazel + bridge network does not warn",
@@ -623,6 +640,46 @@ func TestCheckImageToolchain_Direct(t *testing.T) {
 				t.Errorf("expected no warns; got %v", gotWarnNames)
 			}
 		})
+	}
+}
+
+// TestCheckImageToolchain_BazelOfflineCustomImageInfo asserts that a Bazel repo
+// under network=none with a CUSTOM/local sandbox image (not a plain public
+// bazel base) gets an advisory INFO — not a WARN — because offline bazel repro
+// IS supported against a purpose-built offline image built by
+// `bugbot sandbox build`.
+func TestCheckImageToolchain_BazelOfflineCustomImageInfo(t *testing.T) {
+	notLocalRC := func(_ context.Context, name string, args ...string) (string, error) {
+		if name == "podman" && len(args) >= 2 && args[0] == "image" && args[1] == "inspect" {
+			return "", errors.New("no such image")
+		}
+		return "", fmt.Errorf("unexpected: %s %v", name, args)
+	}
+	cfg := config.Config{Sandbox: config.Sandbox{Image: "localhost/x-bugbot-sandbox:latest", Network: "none", Runtime: "podman"}}
+	env := doctorEnv{runCommand: notLocalRC}
+	results := checkImageToolchain(context.Background(), env, nil, []ingest.BuildSystem{ingest.BuildSystemBazel, ingest.BuildSystemGoModule}, cfg)
+
+	var saw bool
+	for _, r := range results {
+		if r.Name != "image bazel offline" {
+			continue
+		}
+		saw = true
+		if r.Status != statusInfo {
+			t.Errorf("custom image offline bazel result must be INFO; got %s", r.Status)
+		}
+		if r.hard {
+			t.Error("bazel offline advisory must NOT be hard")
+		}
+		if !strings.Contains(r.Detail, "bugbot sandbox build") {
+			t.Errorf("INFO detail should reference `bugbot sandbox build`; got %q", r.Detail)
+		}
+		if strings.Contains(r.Detail, "unsupported") {
+			t.Errorf("INFO detail must not say 'unsupported'; got %q", r.Detail)
+		}
+	}
+	if !saw {
+		t.Error("expected an INFO result named 'image bazel offline' for a custom image under network=none")
 	}
 }
 

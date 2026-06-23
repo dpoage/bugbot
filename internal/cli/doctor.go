@@ -623,7 +623,10 @@ func probeImageBinaries(ctx context.Context, env doctorEnv, rt, image string, bi
 // image name DOES match a hint, it also runs a binary probe inside the image
 // (bounded by sandboxProbeTimeout) and warns if required binaries are missing.
 // If the image is not present locally the probe is skipped with an INFO result.
-// It also emits a WARN when a Bazel build is detected under network=none.
+// When a Bazel build runs under network=none it emits one advisory result:
+// WARN if the image is a plain public bazel base (almost certainly not
+// purpose-built for offline repro), INFO otherwise — offline bazel repro IS
+// supported when the sandbox image is purpose-built.
 // All results are advisory only — they never affect the exit code (mirrors
 // checkLangTier above). An empty image string or empty langs slice produces no
 // results.
@@ -682,15 +685,31 @@ func checkImageToolchain(ctx context.Context, env doctorEnv, langs []ingest.Lang
 			})
 		}
 	}
-	// Offline bazel repro is unsupported without a custom image bundling a
-	// prefetched repository cache. Warn so the user knows the pipeline will
-	// produce environment_error for every Bazel finding under network=none.
+	// Offline (network=none) bazel repro IS supported — but only against a
+	// purpose-built offline image that bakes the three ingredients (vendored
+	// external deps + a prefetched bazel repository cache + a warm disk-cache
+	// layer; build it with `bugbot sandbox build`). We cannot prove the image
+	// carries them, so we use a name heuristic: a plain public bazel base
+	// (bazel-public, or the recommended default) is almost certainly NOT
+	// purpose-built → WARN; any custom/local image gets an advisory INFO. Both
+	// are advisory only and never affect the exit code.
 	if containsBuildSystemBazel(buildSystems) && strings.EqualFold(cfg.Sandbox.Network, "none") {
-		out = append(out, checkResult{
-			Name:   "image bazel offline",
-			Status: statusWarn,
-			Detail: "Bazel detected with sandbox.network=none: offline bazel repro is unsupported without a custom image carrying a prefetched bazel repository cache (the default bazel image does not bundle one), or disable repro for Bazel repos",
-		})
+		plainBazelBase := image == "" ||
+			strings.Contains(imageLower, "bazel-public") ||
+			imageLower == strings.ToLower(bazelBaseImage)
+		if plainBazelBase {
+			out = append(out, checkResult{
+				Name:   "image bazel offline",
+				Status: statusWarn,
+				Detail: "Bazel detected with sandbox.network=none and a plain bazel base image (" + image + "): offline bazel repro needs a purpose-built offline image carrying vendored external deps + a prefetched bazel repository cache + a warm disk-cache layer — build one with `bugbot sandbox build`",
+			})
+		} else {
+			out = append(out, checkResult{
+				Name:   "image bazel offline",
+				Status: statusInfo,
+				Detail: "Bazel detected with sandbox.network=none: offline bazel repro IS supported when the sandbox image is purpose-built — image " + image + " must carry vendored external deps + a prefetched bazel repository cache + a warm disk-cache layer (build it with `bugbot sandbox build`)",
+			})
+		}
 	}
 	return out
 }
