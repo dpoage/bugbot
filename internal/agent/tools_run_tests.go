@@ -210,16 +210,17 @@ func (t *RunTestsTool) buildArgv(args runTestsArgs) []string {
 		return out
 
 	case "bazel":
-		// baseCmd: ["bazel", "test", "//..."]
-		// Narrowing via pkg: replace //... with the supplied target.
-		cmd := make([]string, 0, 3)
-		cmd = append(cmd, "bazel", "test")
-		target := "//..."
+		// baseCmd: ["bazel", "test", "--build_tests_only", "--test_output=errors", "//..."]
+		// Narrowing via pkg: preserve every base-command token and replace
+		// only the final target token (the "//..." pattern) with args.Pkg.
+		// This keeps the canonical flags (--build_tests_only, --test_output)
+		// intact instead of rebuilding a bare ["bazel", "test", target].
+		out := make([]string, len(t.baseCmd))
+		copy(out, t.baseCmd)
 		if args.Pkg != "" {
-			target = args.Pkg
+			out[len(out)-1] = args.Pkg
 		}
-		cmd = append(cmd, target)
-		return cmd
+		return out
 
 	default:
 		// Unknown runner: return baseCmd verbatim. No filter injection.

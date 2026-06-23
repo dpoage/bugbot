@@ -911,27 +911,27 @@ func TestDetectSuiteCmdExtended(t *testing.T) {
 		markers []string // files to create
 		want    string   // "" means want nil
 	}{
-		// Bazel workspace → bazel test //...
+		// Bazel workspace → bazel test --build_tests_only --test_output=errors //...
 		{
 			name:    "MODULE.bazel",
 			markers: []string{"MODULE.bazel"},
-			want:    "bazel test //...",
+			want:    "bazel test --build_tests_only --test_output=errors //...",
 		},
 		{
 			name:    "WORKSPACE",
 			markers: []string{"WORKSPACE"},
-			want:    "bazel test //...",
+			want:    "bazel test --build_tests_only --test_output=errors //...",
 		},
 		{
 			name:    "WORKSPACE.bazel",
 			markers: []string{"WORKSPACE.bazel"},
-			want:    "bazel test //...",
+			want:    "bazel test --build_tests_only --test_output=errors //...",
 		},
 		// Bazel beats go.mod in priority.
 		{
 			name:    "Bazel+go.mod",
 			markers: []string{"MODULE.bazel", "go.mod"},
-			want:    "bazel test //...",
+			want:    "bazel test --build_tests_only --test_output=errors //...",
 		},
 		// go.work WITH root go.mod → go test ./...
 		{

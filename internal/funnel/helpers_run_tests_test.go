@@ -94,6 +94,18 @@ func TestDetectTestCmd_Meson(t *testing.T) {
 	}
 }
 
+func TestDetectTestCmd_Bazel(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "MODULE.bazel"), []byte("module(name = \"x\")\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := detectTestCmd(dir)
+	want := []string{"bazel", "test", "--build_tests_only", "--test_output=errors", "//..."}
+	if !sliceEq(got, want) {
+		t.Errorf("detectTestCmd(MODULE.bazel) = %v, want %v", got, want)
+	}
+}
+
 // --- buildRunTestsTool -------------------------------------------------------
 
 // fakeRunTestsSandbox is a minimal sandbox for buildRunTestsTool tests.

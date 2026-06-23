@@ -238,10 +238,26 @@ func TestRunTestsTool_NpmArgv_Unchanged(t *testing.T) {
 
 func TestRunTestsTool_BazelArgv_WithPkg(t *testing.T) {
 	fs := &fakeSandbox{}
-	tool := NewRunTestsTool(fs, "/repo", []string{"bazel", "test", "//..."}, 3, nil, nil, nil, nil)
+	base := []string{"bazel", "test", "--build_tests_only", "--test_output=errors", "//..."}
+	tool := NewRunTestsTool(fs, "/repo", base, 3, nil, nil, nil, nil)
 	_, _ = runTestsTool(t, tool, map[string]interface{}{"pkg": "//internal/store/..."})
 
-	want := []string{"bazel", "test", "//internal/store/..."}
+	// Narrowing preserves every base-command flag and only swaps the final
+	// target token for the supplied package pattern.
+	want := []string{"bazel", "test", "--build_tests_only", "--test_output=errors", "//internal/store/..."}
+	if !equalSlice(fs.calls[0].Cmd, want) {
+		t.Errorf("argv = %v, want %v", fs.calls[0].Cmd, want)
+	}
+}
+
+func TestRunTestsTool_BazelArgv_NoPkg_ReturnsBaseVerbatim(t *testing.T) {
+	fs := &fakeSandbox{}
+	base := []string{"bazel", "test", "--build_tests_only", "--test_output=errors", "//..."}
+	tool := NewRunTestsTool(fs, "/repo", base, 3, nil, nil, nil, nil)
+	_, _ = runTestsTool(t, tool, map[string]interface{}{})
+
+	// No pkg filter: the canonical base argv is returned verbatim.
+	want := []string{"bazel", "test", "--build_tests_only", "--test_output=errors", "//..."}
 	if !equalSlice(fs.calls[0].Cmd, want) {
 		t.Errorf("argv = %v, want %v", fs.calls[0].Cmd, want)
 	}
