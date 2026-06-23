@@ -488,3 +488,63 @@ func adjudicateImpact(
 	}
 	return results, nil
 }
+
+// validateSeverityInline classifies one survivor's reachability/impact at
+// persist time using the same deterministic ladder (and optional single-finding
+// LLM adjudication) as impactSweep. Returns (severity, rationale, swept):
+// swept=true means a verdict was applied (deterministic OR adjudicated) and
+// the caller should stamp SweptAt=now on the persisted finding; swept=false
+// means defer to the bulk SweepDrain (leave SweptAt zero / NULL).
+//
+// This is the inline counterpart of impactSweep's bulk pass: it runs on the
+// verify-and-persist path so a T2 survivor is stored with its validated
+// severity and a swept_at stamp, instead of carrying the raw finder severity
+// until the post-scan drainToFixpoint pass. SweepDrain then only needs to
+// reconcile stranded/interrupted findings.
+func (f *Funnel) validateSeverityInline(
+	ctx context.Context,
+	c Candidate,
+	verifier llm.Client,
+	budget *budgetState,
+	result *Result,
+) (domain.Severity, string, bool) {
+	repoRoot := f.repo.Root()
+	fi := store.Finding{
+		File:     c.File,
+		Line:     c.Line,
+		Severity: c.Severity,
+		Lens:     c.Lens,
+	}
+	ts := treesitter.New(repoRoot)
+	r := classifyReachability(&fi, repoRoot, ts)
+	switch r.class {
+	case reachKnownDownrank, reachKnownKeep:
+		return r.severity, r.rationale, true
+	case reachAmbiguous:
+		if verifier != nil && budget != nil && !budget.stopped.Load() {
+			llmResults, err := adjudicateImpact(ctx, verifier,
+				[]ambiguousEntry{{idx: 0, fi: fi, callerFacts: r.callerFacts}},
+				f.opts.Progress)
+			if err != nil {
+				f.note(result, fmt.Sprintf("impact_sweep: inline LLM adjudication failed: %v", err))
+				return c.Severity, "", false
+			}
+			if len(llmResults) == 0 {
+				return c.Severity, "", false
+			}
+			adj := llmResults[0]
+			sev, ok := domain.ParseSeverity(adj.severity)
+			if !ok {
+				sev = c.Severity // keep original on bad parse
+			}
+			rationale := adj.rationale
+			if rationale == "" {
+				rationale = fmt.Sprintf("LLM impact adjudication: %s", sev)
+			}
+			return sev, rationale, true
+		}
+		return c.Severity, "", false
+	default:
+		return c.Severity, "", false
+	}
+}

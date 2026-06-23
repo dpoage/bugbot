@@ -329,12 +329,23 @@ func (f *Funnel) runVerifyAndPersist(
 		description = bestRefuterCorrection(genuine, c.Description)
 	}
 
+	// Inline severity validation: run the reachability ladder now so a T2
+	// survivor is persisted with its validated severity and a swept_at stamp,
+	// instead of carrying the raw finder severity until the post-scan
+	// drainToFixpoint pass. SweepDrain then only needs to reconcile
+	// stranded/interrupted findings (bugbot-596).
+	sev, verdictDetail, swept := f.validateSeverityInline(ctx, c, verifier, budget, result)
+	var sweptAt time.Time
+	if swept {
+		sweptAt = time.Now().UTC()
+	}
 	finding := store.Finding{
 		Fingerprint:         c.Fingerprint,
 		Title:               c.Title,
 		Description:         description,
 		Reasoning:           appendCorroboration(v.reasoning, c.CorroboratingLenses),
-		Severity:            c.Severity,
+		VerdictDetail:       verdictDetail,
+		Severity:            sev,
 		Tier:                domain.TierVerified,
 		Status:              store.StatusOpen,
 		Lens:                c.Lens,
@@ -345,6 +356,7 @@ func (f *Funnel) runVerifyAndPersist(
 		CorroboratingLenses: c.CorroboratingLenses,
 		NeedsHuman:          needsHuman,
 		Sites:               allSites,
+		SweptAt:             sweptAt,
 	}
 	stored, err := f.store.UpsertFinding(ctx, finding)
 	if err != nil {
