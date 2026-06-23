@@ -20,9 +20,9 @@ const (
 	// EcosystemCpp is the C/C++ ecosystem (ctest, cmake, make).
 	EcosystemCpp Ecosystem = "cpp"
 	// EcosystemBazel is the Bazel build/test ecosystem.
-	// Bugbot does not support offline Bazel repro: the image must carry bazel
-	// AND a prefetched repository cache. Non-zero exits from bazel are never
-	// treated as demonstrations.
+	// Bazel reproduction IS supported when the sandbox image carries bazel plus
+	// vendored deps and a warm cache (offline). repro.interpret() classifies a
+	// bazel run by its exit code: 3 (build OK, tests ran, >=1 FAILED) demonstrates.
 	EcosystemBazel Ecosystem = "bazel"
 	// EcosystemUnknown is the fallback for unrecognized launchers. It still
 	// requires positive ran-evidence; a bare non-zero exit never demonstrates.

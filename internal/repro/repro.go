@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
@@ -453,6 +454,9 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 	}
 	if len(baseCmd) > 0 {
 		prompt += runTestsGuidance(r.opts.SandboxMaxExecs)
+	}
+	if slices.Contains(r.buildSystems, ingest.BuildSystemBazel) {
+		prompt += bazelGuidance()
 	}
 	prompt += reproSandboxGuidance(r.deps.ROMounts)
 	return agent.NewRunner(r.client, tools, prompt, opts...), nil

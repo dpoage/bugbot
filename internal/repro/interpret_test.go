@@ -53,32 +53,37 @@ func TestDetectEcosystem_Bazel(t *testing.T) {
 	}
 }
 
-// TestEcosystemTable_BazelEmptyRanMarkers pins the precision-first
-// invariant: a bazel non-zero exit on its own is NEVER enough to
-// demonstrate a bug. The bazel entry's ranMarkers list must stay
-// empty so a bare non-zero exit falls through to
-// not_demonstrated. If a future change adds a positive ran-marker
-// here, it would silently mint false T1s for bazel repros that did
-// not actually run a test — the original bugbot-vig regression.
-func TestEcosystemTable_BazelEmptyRanMarkers(t *testing.T) {
+// TestEcosystemTable_BazelRanMarkersFailureOnly pins the precision invariant in
+// its new form: bazel now classifies primarily by exit code (3 = demonstrated),
+// and the ranMarkers list is only a BACKSTOP for a lost exit code. Those markers
+// MUST be failure-only — they may match a real bazel test-failure summary but
+// must NEVER match a passing run, or we would mint false T1s (the bugbot-vig
+// regression).
+func TestEcosystemTable_BazelRanMarkersFailureOnly(t *testing.T) {
 	idx := ecosystemIndex("bazel")
 	if idx == 0 {
-		// ecosystemIndex returns 0 for unknown names; if "bazel" is
-		// missing entirely the table no longer knows about it.
 		t.Fatalf("ecosystemTable has no \"bazel\" entry")
 	}
 	rules := ecosystemTable[idx]
 	if rules.name != "bazel" {
 		t.Fatalf("ecosystemIndex(\"bazel\") = %d, but ecosystemTable[%d].name = %q", idx, idx, rules.name)
 	}
-	if len(rules.ranMarkers) != 0 {
-		t.Errorf("bazel ranMarkers must stay empty (precision-first): got %v", rules.ranMarkers)
+	// Matches a genuine bazel test-failure summary.
+	if !rules.hasRanEvidence(strings.ToLower("Executed 1 out of 1 test: 1 fails locally.")) {
+		t.Errorf("bazel ranMarkers must match a real test-failure summary")
+	}
+	if !rules.hasRanEvidence(strings.ToLower("//pkg:t                FAILED in 0.3s")) {
+		t.Errorf("bazel ranMarkers must match the FAILED-in test-result line")
+	}
+	// Must NOT match a passing run or unrelated chatter (precision-first).
+	if rules.hasRanEvidence(strings.ToLower("Executed 1 out of 1 test: 1 test passes.")) {
+		t.Errorf("bazel ranMarkers must NOT match a passing run")
+	}
+	if rules.hasRanEvidence(strings.ToLower("//pkg:t                PASSED in 0.3s")) {
+		t.Errorf("bazel ranMarkers must NOT match a PASSED test-result line")
 	}
 	if rules.hasRanEvidence("nothing matches anything here") {
-		// hasRanEvidence on a non-empty string with empty ranMarkers
-		// must return false. Belt-and-braces in case someone later
-		// relaxes the empty-list guard.
-		t.Errorf("bazel hasRanEvidence must return false for empty ranMarkers")
+		t.Errorf("bazel ranMarkers must NOT match arbitrary text")
 	}
 }
 
@@ -106,9 +111,9 @@ func TestInterpret_Bazel_Exit127_LoudSummary(t *testing.T) {
 	if !strings.Contains(v.summary, "bazel") {
 		t.Errorf("summary missing bazel mention: %q", v.summary)
 	}
-	for _, want := range []string{"unsupported", "network=none", "prefetched", "custom image"} {
+	for _, want := range []string{"could not start", "environment failure"} {
 		if !strings.Contains(v.summary, want) {
-			t.Errorf("summary missing %q remediation: %q", want, v.summary)
+			t.Errorf("summary missing %q: %q", want, v.summary)
 		}
 	}
 }
@@ -125,29 +130,33 @@ func TestInterpret_Bazel_Exit126(t *testing.T) {
 	if v.ecosystem != "bazel" {
 		t.Errorf("ecosystem = %q, want %q", v.ecosystem, "bazel")
 	}
-	if !strings.Contains(v.summary, "unsupported") {
-		t.Errorf("summary missing bazel remediation: %q", v.summary)
+	if !strings.Contains(v.summary, "could not start") {
+		t.Errorf("summary missing bazel env wording: %q", v.summary)
 	}
 }
 
-// TestInterpret_Bazel_EnvMarkerBranch_LoudSummary covers the second
-// environment_error site in interpret.go: a non-125/126/127 exit
-// whose output matches one of the default env markers (e.g. a
-// read-only filesystem error). The bazel ecosystem must still get
-// the targeted summary, not the generic truncated output.
-func TestInterpret_Bazel_EnvMarkerBranch_LoudSummary(t *testing.T) {
-	v := interpret(
-		sandbox.Result{ExitCode: 1, Stderr: "fatal: unable to access repository: read-only file system"},
-		[]string{"bazel", "test", "//..."},
-	)
+// TestInterpret_Bazel_GenuineEnvMarker covers the bazel env branch: a GENUINE
+// environment failure (disk full) still classifies as environment_error, while
+// the benign "(Read-only file system)" disk-cache warning bazel prints on EVERY
+// run must NOT — otherwise every bazel run would be misread as an env failure
+// (the bug this whole feature fixes). See bazelEnvMarkers.
+func TestInterpret_Bazel_GenuineEnvMarker(t *testing.T) {
+	cmd := []string{"bazel", "test", "//common/tests:x"}
+	// (a) disk full -> environment_error (genuine env signal preserved).
+	v := interpret(sandbox.Result{ExitCode: 1, Stderr: "ERROR: no space left on device"}, cmd)
 	if v.reason != "environment_error" {
-		t.Errorf("reason = %q, want %q", v.reason, "environment_error")
+		t.Errorf("disk-full: reason = %q, want environment_error", v.reason)
 	}
 	if v.ecosystem != "bazel" {
-		t.Errorf("ecosystem = %q, want %q", v.ecosystem, "bazel")
+		t.Errorf("ecosystem = %q, want bazel", v.ecosystem)
 	}
-	if !strings.Contains(v.summary, "unsupported") {
-		t.Errorf("summary missing bazel remediation: %q", v.summary)
+	// (b) read-only disk-cache warning alone -> NOT environment_error.
+	v = interpret(sandbox.Result{ExitCode: 1, Stderr: "WARNING: Remote Cache: /bazel-cache/ac/00 (Read-only file system)\nsome unrelated chatter"}, cmd)
+	if v.reason == "environment_error" {
+		t.Errorf("read-only cache warning must NOT be an env failure for bazel; got reason=environment_error")
+	}
+	if v.demonstrated {
+		t.Errorf("read-only cache warning with a bare exit 1 must not demonstrate")
 	}
 }
 
@@ -248,11 +257,10 @@ func TestFeedback_BazelEnvironmentError(t *testing.T) {
 
 	// The bazel-specific guidance is distinct and load-bearing.
 	for _, want := range []string{
-		"bazel",
-		"unsupported",
-		"network=none",
-		"prefetched",
-		"custom image",
+		"Bazel exit codes",
+		"bazel test //pkg:target",
+		"--test_output=errors",
+		"//...",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("feedback missing %q: %q", want, got)

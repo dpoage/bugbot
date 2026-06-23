@@ -51,6 +51,17 @@ var defaultEnvMarkers = []string{
 	"cannot create temporary",
 }
 
+// bazelEnvMarkers is defaultEnvMarkers WITHOUT "read-only file system". Every
+// bazel run in the read-only-root sandbox prints benign "(Read-only file
+// system)" disk-cache warnings, so that marker cannot signal a real environment
+// failure for bazel; the remaining markers (disk full, build-cache init, temp
+// failures) still do. Consulted by interpret()/patchVerdict()'s bazel branch.
+var bazelEnvMarkers = []string{
+	"failed to initialize build cache",
+	"no space left on device",
+	"cannot create temporary",
+}
+
 // sanitizerReportMarkers are the unambiguous report headers a sanitizer or
 // valgrind emits ONLY when it DETECTS a violation; they never appear in a clean
 // run's output. Their presence alone proves the instrumented binary ran and
@@ -235,18 +246,19 @@ var ecosystemTable = []ecosystemRules{
 	},
 	{
 		name: sandbox.EcosystemBazel,
-		// PRECISION-FIRST: ranMarkers is intentionally empty. A bazel
-		// non-zero exit on its own is NEVER enough to demonstrate a
-		// bug — bugbot does not support offline bazel repro (external
-		// repository fetching under network=none, sandboxes without
-		// bazel, etc.), so we refuse to guess from bazel output. A
-		// bazel non-zero exit with no recognized build/toolchain
-		// marker therefore falls through to not_demonstrated. The
-		// environment is surfaced via a bazel-specific summary in
-		// interpret.go's 125/126/127 and defaultEnvMarkers branches
-		// (distinctness comes from verdict.ecosystem==EcosystemBazel, not
-		// from a new reason category).
-		ranMarkers: []string{},
+		// Bazel reproduction IS supported: the sandbox image carries bazel,
+		// vendored deps and a warm cache and runs offline. interpret() classifies
+		// bazel by its authoritative EXIT CODE in a dedicated branch (exit 3 =
+		// build OK, tests ran, >=1 FAILED = demonstrated). These ranMarkers are
+		// only the BACKSTOP that branch consults when the exit code was lost (e.g.
+		// the agent piped the output): they are bazel's test-result lines, which
+		// appear ONLY on a real test failure — never on a passing run or a
+		// build/analysis abort. buildMarkers/toolchainMarkers below classify the
+		// non-demonstrating failures for agent feedback.
+		ranMarkers: []string{
+			"fails locally", // "Executed N out of M test: X fails locally."
+			"failed in ",    // "//pkg:target  FAILED in 0.3s" (test-result line)
+		},
 		buildMarkers: []string{
 			"no such target",
 			"no such package",

@@ -607,6 +607,25 @@ func patchVerdict(res sandbox.Result, cmd []string) patchVerdictResult {
 		return patchVerdictResult{kind: patchVerdictPassed, summary: trunc(out, 400), ecosystem: eco.name}
 	}
 
+	// Bazel: classify by exit code, skipping the generic defaultEnvMarkers — every
+	// bazel run prints benign "(Read-only file system)" disk-cache warnings that
+	// would otherwise be misread as an environment failure. Exit 0 (passed) and
+	// 125/126/127 (env) were handled above; exit 3 means the suite still FAILS,
+	// i.e. the fix did not work.
+	if eco.name == sandbox.EcosystemBazel {
+		low := strings.ToLower(out)
+		switch {
+		case hasAnyMarker(low, bazelEnvMarkers):
+			return patchVerdictResult{kind: patchVerdictEnvFailure, summary: trunc(out, 400), ecosystem: eco.name}
+		case hasAnyMarker(low, eco.toolchainMarkers):
+			return patchVerdictResult{kind: patchVerdictEnvFailure, summary: trunc(out, 400), ecosystem: eco.name}
+		case hasAnyMarker(low, eco.buildMarkers):
+			return patchVerdictResult{kind: patchVerdictEnvFailure, summary: trunc(out, 400), ecosystem: eco.name}
+		default:
+			return patchVerdictResult{kind: patchVerdictFixRejected, summary: trunc(out, 400), ecosystem: eco.name}
+		}
+	}
+
 	// Non-zero exit: classify against the detected ecosystem's
 	// blacklists. Order matches interpret() in the repro stage so
 	// the two stages agree on what counts as "env failure".

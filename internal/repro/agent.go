@@ -211,6 +211,32 @@ Return a repro plan describing the files to inject, the command to run them,
 and a short description of the expected failure.`
 }
 
+// bazelGuidance is appended to the reproducer system prompt when the repo is a
+// Bazel monorepo (BuildSystemBazel in r.buildSystems). It steers the agent to
+// a TARGETED or DIRECT strategy — never `bazel test //...` — and pre-commits
+// it to the bazel exit-code contract (exit 3 is the demonstration) so the
+// reproducer plans around it instead of treating exit 3 as a sandbox failure.
+//
+// The wrapped leading newline matches the other appended guidance sections
+// (pkgContextGuidance, reproSandboxGuidance): each section begins with one
+// blank line so the concatenated prompt reads as discrete paragraphs.
+func bazelGuidance() string {
+	return `
+
+BAZEL MONOREPO — reproduction strategy (this repo builds with Bazel):
+- PREFER A DIRECT RUN when the bug is in a directly-runnable entrypoint (a script or a built binary). Example: a Python CLI bug reproduces with ` + "`python3 path/to/tool.py <args>`" + ` — a traceback or non-zero exit is a clean demonstration and does NOT require Bazel at all.
+- OTHERWISE write a MINIMAL failing test (cc_test / py_test / rust_test) in the relevant package's BUILD file and run ONLY that one target. Pass run_tests a specific target via pkg, e.g. pkg="//common/tests:my_repro_test". NEVER run ` + "`//...`" + ` — it builds the whole repo and burns your limited run_tests budget.
+- Bazel exit codes you MUST plan around:
+    exit 0 = built and all tests PASSED → NOT a reproduction.
+    exit 3 = built and at least one TEST FAILED → THIS is a valid reproduction. Aim for exit 3.
+    exit 1 = build/analysis failed, or no such target → NOT a reproduction; fix your target or test.
+    exit 4 = no tests found → your target pattern is wrong.
+- Always add ` + "`--test_output=errors`" + ` so the failing test's output is captured.
+- Before spending a run on a ` + "`bazel test //pkg:target`" + `, confirm the target label exists by reading that package's BUILD file. The sandbox is offline (network=none) with vendored deps and bazel preinstalled, so targeted ` + "`bazel test //pkg:target`" + ` works.
+- Benign ` + "`WARNING: ... (Read-only file system)`" + ` lines about the bazel disk cache are EXPECTED noise; ignore them — they are not an environment failure.
+`
+}
+
 // pkgContextGuidance is appended to the reproducer system prompt when the
 // get_package_context tool is wired. It steers the agent to pull the repo's
 // test-package summary for build/test orientation before planning, so it does

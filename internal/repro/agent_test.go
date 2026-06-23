@@ -1,6 +1,7 @@
 package repro
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -280,5 +281,64 @@ func TestSystemPrompt_KotlinGradle(t *testing.T) {
 	// Must not contain maven commands.
 	if strings.Contains(p, "mvn test") {
 		t.Error("Kotlin + gradle prompt must not contain mvn invocations")
+	}
+}
+
+// TestBazelGuidance pins the bazel reproducer guidance: it must steer the
+// agent toward a TARGETED or DIRECT strategy (forbidding `bazel test //...`),
+// commit to the bazel exit-code contract (exit 3 is the demonstration), and
+// recommend --test_output=errors. The substrings checked below are the
+// load-bearing directives — if any drift, the reproducer stops being able to
+// plan around bazel's exit-code semantics.
+func TestBazelGuidance(t *testing.T) {
+	g := bazelGuidance()
+	if g == "" {
+		t.Fatal("bazelGuidance must not be empty")
+	}
+	for _, want := range []string{
+		"exit 3",               // the demonstration exit code — without this the agent treats exit 3 as a sandbox failure
+		"//...",                // the anti-pattern the agent must never run
+		"--test_output=errors", // required flag so the failing test's output is captured
+	} {
+		if !strings.Contains(g, want) {
+			t.Errorf("bazelGuidance must contain %q (load-bearing directive)", want)
+		}
+	}
+}
+
+// TestSystemPrompt_BazelBuildSystem mirrors newRunner's prompt-composition
+// branch (systemPrompt + ... + bazelGuidance iff BuildSystemBazel is present)
+// without standing up a full Reproducer (which would require an llm.Client,
+// sandbox, and CodeNav). It confirms the bazel block lands in the prompt when
+// the repo carries MODULE.bazel/WORKSPACE, and is absent when it doesn't — so
+// a future refactor that drops the conditional fails the gate, and a future
+// edit that bakes bazel wording into every prompt (even non-bazel repos)
+// fails the negative branch.
+func TestSystemPrompt_BazelBuildSystem(t *testing.T) {
+	bazelSystems := []ingest.BuildSystem{ingest.BuildSystemBazel}
+
+	// compose mirrors newRunner's prompt assembly: a single function under
+	// test (systemPrompt), the language-specific guidance that already rides
+	// along with it (spliced inside systemPrompt), and the build-system-
+	// conditional appended blocks.
+	compose := func(systems []ingest.BuildSystem) string {
+		p := systemPrompt(ingest.LangGo, systems, nil)
+		if slices.Contains(systems, ingest.BuildSystemBazel) {
+			p += bazelGuidance()
+		}
+		return p
+	}
+
+	withBazel := compose(bazelSystems)
+	if !strings.Contains(withBazel, "exit 3") {
+		t.Error("Bazel-build-system prompt must contain the bazel exit-code guidance (\"exit 3\")")
+	}
+	if !strings.Contains(withBazel, "--test_output=errors") {
+		t.Error("Bazel-build-system prompt must contain --test_output=errors")
+	}
+
+	withoutBazel := compose(noSystems)
+	if strings.Contains(withoutBazel, "BAZEL MONOREPO") {
+		t.Error("Non-bazel repo prompt must NOT include the BAZEL MONOREPO guidance block")
 	}
 }
