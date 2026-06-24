@@ -163,33 +163,33 @@ func runRepair(ctx context.Context, env doctorEnv) error {
 	}
 	path := cfg.Storage.Path
 	if _, statErr := os.Stat(path); statErr != nil {
-		fmt.Fprintf(env.out, "repair: no state database at %s; nothing to do\n", path)
+		_, _ = fmt.Fprintf(env.out, "repair: no state database at %s; nothing to do\n", path)
 		return nil
 	}
-	fmt.Fprintf(env.out, "repair: rebuilding %s …\n", path)
+	_, _ = fmt.Fprintf(env.out, "repair: rebuilding %s …\n", path)
 	rep, err := store.Recover(ctx, path)
 	if err != nil {
 		if rep != nil && rep.BackupPath != "" {
-			fmt.Fprintf(env.out, "repair: corrupt db backed up to %s\n", rep.BackupPath)
+			_, _ = fmt.Fprintf(env.out, "repair: corrupt db backed up to %s\n", rep.BackupPath)
 		}
 		return fmt.Errorf("repair failed: %w", err)
 	}
-	fmt.Fprintf(env.out, "repair: ok — corrupt db backed up to %s\n", rep.BackupPath)
-	fmt.Fprintf(env.out, "repair: salvaged %d rows across %d tables\n", rep.TotalSalvaged(), len(rep.Salvaged))
+	_, _ = fmt.Fprintf(env.out, "repair: ok — corrupt db backed up to %s\n", rep.BackupPath)
+	_, _ = fmt.Fprintf(env.out, "repair: salvaged %d rows across %d tables\n", rep.TotalSalvaged(), len(rep.Salvaged))
 	names := make([]string, 0, len(rep.Salvaged))
 	for t := range rep.Salvaged {
 		names = append(names, t)
 	}
 	sort.Strings(names)
 	for _, t := range names {
-		fmt.Fprintf(env.out, "  %-22s %d rows\n", t, rep.Salvaged[t])
+		_, _ = fmt.Fprintf(env.out, "  %-22s %d rows\n", t, rep.Salvaged[t])
 	}
 	if len(rep.Partial) > 0 {
 		sort.Strings(rep.Partial)
-		fmt.Fprintf(env.out, "repair: PARTIAL reads (corruption hit mid-table): %s\n", strings.Join(rep.Partial, ", "))
+		_, _ = fmt.Fprintf(env.out, "repair: PARTIAL reads (corruption hit mid-table): %s\n", strings.Join(rep.Partial, ", "))
 	}
 	if rep.SourceOpenErr != "" {
-		fmt.Fprintf(env.out, "repair: WARNING could not open the corrupt db to salvage (%s); installed a fresh empty database\n", rep.SourceOpenErr)
+		_, _ = fmt.Fprintf(env.out, "repair: WARNING could not open the corrupt db to salvage (%s); installed a fresh empty database\n", rep.SourceOpenErr)
 	}
 	return nil
 }
