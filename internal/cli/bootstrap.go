@@ -163,6 +163,7 @@ func buildFunnelOptions(cfg config.Config, overrides FunnelOptionOverrides) (fun
 		Features: funnel.FeatureFlags{
 			Cartographer:        cfg.Scan.Cartographer,
 			StatusNotes:         cfg.Scan.StatusNotes,
+			ToolComplaints:      cfg.Scan.ToolComplaints,
 			DisableHeatOrdering: !cfg.Scan.HeatOrdering,
 		},
 		Discovery: funnel.DiscoveryConfig{

@@ -131,6 +131,9 @@ func (f *Funnel) runVerifyAndPersist(
 	if t := f.maybeStatusNoteTool(progress.RoleVerifier, c.Title); t != nil {
 		extra = append(extra, t)
 	}
+	if t := f.maybeReportToolIssueTool(result, progress.RoleVerifier, c.Title); t != nil {
+		extra = append(extra, t)
+	}
 	// candTools is the refuter panel's tool set (repo-rooted read). The arbiter's
 	// dep-reach tool set is built lazily on a split (see below), reusing the same
 	// extra tool VALUES.
@@ -139,7 +142,7 @@ func (f *Funnel) runVerifyAndPersist(
 	sink := f.opts.Progress
 	startedAt := time.Now()
 	scope := progress.NewAgentScope(sink, progress.RoleVerifier, c.Title).Start()
-	verdicts, seatNames, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, candTools, persona, c, nRefuters, budget)
+	verdicts, seatNames, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, candTools, persona, c, nRefuters, budget, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title))
 
 	// Arbiter path.
 	var localArbiterRuns, localArbiterKills, localArbiterFailed int
@@ -158,7 +161,7 @@ func (f *Funnel) runVerifyAndPersist(
 			return
 		}
 		arbiterTools := append(arbiterReadTools, extra...)
-		av, aTokens, aStopped, aErr := f.runArbiter(ctx, verifier, arbiterTools, persona, c, verdicts, seatNames, budget)
+		av, aTokens, aStopped, aErr := f.runArbiter(ctx, verifier, arbiterTools, persona, c, verdicts, seatNames, budget, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title))
 		tokens += aTokens
 		localArbiterTokens = aTokens
 		if aStopped {

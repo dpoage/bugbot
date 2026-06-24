@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // StatusFileName is the file SnapshotSink writes (and `bugbot status` reads),
@@ -77,6 +79,14 @@ type Status struct {
 
 	// LastEvent is a short human description of the most recent activity.
 	LastEvent string `json:"last_event,omitempty"`
+
+	// UnhealthyTools is the per-tool aggregation of KindToolUnhealthy events:
+	// one entry per harness tool that has reported a failure, with the count of
+	// failures, the worst severity seen, the latest reason, and the most recent
+	// timestamp. Empty when the harness has been healthy. Materialized from the
+	// sink's internal map at write time (see refreshUnhealthyTools); serialized
+	// as part of Status automatically.
+	UnhealthyTools []ToolHealth `json:"unhealthy_tools,omitempty"`
 }
 
 // AgentStatus is one in-flight agent in the snapshot.
@@ -89,6 +99,19 @@ type AgentStatus struct {
 	// event arrives for this agent.
 	Activity   string    `json:"activity,omitempty"`
 	ActivityAt time.Time `json:"activity_at,omitempty"`
+}
+
+// ToolHealth is one entry in Status.UnhealthyTools, aggregating every
+// KindToolUnhealthy event for a given harness tool. Severity is the maximum
+// (most-severe) value seen across events for the tool; Count is the number of
+// failures aggregated; Reason is the latest failure message; LastAt is the
+// timestamp of the most recent failure.
+type ToolHealth struct {
+	Tool     string    `json:"tool"`
+	Severity string    `json:"severity"`
+	Reason   string    `json:"reason,omitempty"`
+	Count    int       `json:"count"`
+	LastAt   time.Time `json:"last_at"`
 }
 
 // SnapshotSink maintains status.json: it folds each event into an in-memory
@@ -104,6 +127,7 @@ type SnapshotSink struct {
 	mu        sync.Mutex
 	st        Status
 	agents    map[string]AgentStatus
+	unhealthy map[string]ToolHealth // tool -> aggregated health
 	lastWrite time.Time
 	now       func() time.Time // injectable for tests
 
@@ -118,9 +142,10 @@ type SnapshotSink struct {
 func NewSnapshotSink(storageDir string) *SnapshotSink {
 	now := time.Now()
 	return &SnapshotSink{
-		path:   filepath.Join(storageDir, StatusFileName),
-		agents: make(map[string]AgentStatus),
-		now:    time.Now,
+		path:      filepath.Join(storageDir, StatusFileName),
+		agents:    make(map[string]AgentStatus),
+		unhealthy: make(map[string]ToolHealth),
+		now:       time.Now,
 		st: Status{
 			PID:       os.Getpid(),
 			StartedAt: now,
@@ -154,6 +179,7 @@ func (s *SnapshotSink) Handle(ev Event) {
 		s.lastWrite = now
 		s.st.LastUpdated = now
 		s.refreshAgents()
+		s.refreshUnhealthyTools()
 		if s.daySpend != nil {
 			s.st.SpendTodayInput, s.st.SpendTodayOutput = s.daySpend()
 		}
@@ -236,6 +262,9 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 		s.st.LastEvent = "budget degraded"
 	case KindBudgetStopped:
 		s.st.LastEvent = "budget stopped"
+	case KindToolUnhealthy:
+		s.applyToolUnhealthy(ev)
+		s.st.LastEvent = "tool unhealthy: " + ev.Tool + " (" + ev.Severity + ")"
 	case KindCycleScheduled:
 		s.st.NextPoll = ev.NextPoll
 		s.st.NextSweep = ev.NextSweep
@@ -263,6 +292,37 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 	return false
 }
 
+// applyToolUnhealthy folds one KindToolUnhealthy event into the per-tool
+// aggregation map. Caller holds mu.
+//
+// Aggregation semantics: Count increments on every event for the same Tool;
+// Reason is overwritten with the latest Message; LastAt is overwritten with the
+// latest Time; Severity keeps the MAX rank seen across events for the tool. On
+// a severity parse failure the new value is dropped and the existing entry's
+// Severity is preserved (unrecognized strings cannot rank, so there is no
+// meaningful max to compute).
+func (s *SnapshotSink) applyToolUnhealthy(ev Event) {
+	cur, ok := s.unhealthy[ev.Tool]
+	if !ok {
+		cur = ToolHealth{Tool: ev.Tool}
+	}
+	cur.Count++
+	cur.Reason = ev.Message
+	cur.LastAt = ev.Time
+
+	if sev, parsed := domain.ParseSeverity(ev.Severity); parsed {
+		if !ok || sev.Rank() > domain.Severity(cur.Severity).Rank() {
+			cur.Severity = sev.String()
+		}
+	} else if !ok {
+		// First sighting AND unparseable: keep the raw token so the operator
+		// can still see what the runner reported. Subsequent unparseable
+		// events do not clobber an already-valid severity.
+		cur.Severity = ev.Severity
+	}
+	s.unhealthy[ev.Tool] = cur
+}
+
 // refreshAgents rebuilds the sorted ActiveAgents slice from the live map.
 func (s *SnapshotSink) refreshAgents() {
 	keys := make([]string, 0, len(s.agents))
@@ -275,6 +335,26 @@ func (s *SnapshotSink) refreshAgents() {
 		out = append(out, s.agents[k])
 	}
 	s.st.ActiveAgents = out
+}
+
+// refreshUnhealthyTools materializes the sorted Status.UnhealthyTools slice from
+// the live unhealthy map. Sorting by Tool keeps the JSON output stable so a
+// reader's diff against the previous snapshot shows only real changes.
+func (s *SnapshotSink) refreshUnhealthyTools() {
+	if len(s.unhealthy) == 0 {
+		s.st.UnhealthyTools = nil
+		return
+	}
+	keys := make([]string, 0, len(s.unhealthy))
+	for k := range s.unhealthy {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]ToolHealth, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, s.unhealthy[k])
+	}
+	s.st.UnhealthyTools = out
 }
 
 // writeStatusAtomic marshals st and writes it to path via a temp file + rename,

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/llm"
 )
 
@@ -504,5 +505,141 @@ func TestWithActivitySink_NilIsNoop(t *testing.T) {
 	_, err := r.Run(context.Background(), "task")
 	if err != nil {
 		t.Fatalf("Run without sink: %v", err)
+	}
+}
+
+// healthEchoTool is an echo-style tool whose Run returns a *ToolHealthError
+// when configured to. It is the test vehicle for the WithToolHealthSink
+// dispatch seam: a health error must reach the sink, a plain error must not.
+type healthEchoTool struct {
+	name   string
+	health *ToolHealthError // non-nil => Run returns this
+	plain  string           // non-empty => Run returns errors.New(plain)
+}
+
+func (e healthEchoTool) Def() llm.ToolDef {
+	return llm.ToolDef{
+		Name:        e.name,
+		Description: "health-echo",
+		Parameters:  json.RawMessage(`{"type":"object"}`),
+	}
+}
+
+func (e healthEchoTool) Run(ctx context.Context, args json.RawMessage) (string, error) {
+	if e.health != nil {
+		return "", e.health
+	}
+	if e.plain != "" {
+		return "", errors.New(e.plain)
+	}
+	return "ok", nil
+}
+
+// TestWithToolHealthSink_CalledOnHealthError verifies that a tool returning a
+// *ToolHealthError triggers the sink with the tool name and the
+// *ToolHealthError pointer (preserving Severity, Reason, Err).
+func TestWithToolHealthSink_CalledOnHealthError(t *testing.T) {
+	healthErr := &ToolHealthError{
+		Severity: domain.SeverityHigh,
+		Reason:   "sandbox runtime unavailable",
+		Err:      errors.New("podman not found"),
+	}
+	fc := newFakeClient(
+		toolResp("c1", "broken", `{}`, 10, 4),
+		textResp("done", 5, 2),
+	)
+
+	var sinkTool string
+	var sinkErr *ToolHealthError
+	sink := func(tool string, he *ToolHealthError) {
+		sinkTool = tool
+		sinkErr = he
+	}
+	r := NewRunner(fc, []Tool{healthEchoTool{name: "broken", health: healthErr}}, "sys", WithToolHealthSink(sink))
+	_, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sinkTool != "broken" {
+		t.Errorf("sink called with tool %q, want %q", sinkTool, "broken")
+	}
+	if sinkErr != healthErr {
+		t.Errorf("sink called with error %p, want the original %p", sinkErr, healthErr)
+	}
+	if sinkErr.Severity != domain.SeverityHigh {
+		t.Errorf("sink severity = %q, want high", sinkErr.Severity)
+	}
+	if sinkErr.Reason != "sandbox runtime unavailable" {
+		t.Errorf("sink reason = %q", sinkErr.Reason)
+	}
+}
+
+// TestWithToolHealthSink_NotCalledOnPlainError is the central infra-vs-
+// recoverable assertion: an ordinary model-recoverable tool error (e.g. bad
+// args, file-not-found) must NOT trigger the health sink. Only *ToolHealthError
+// reaches it.
+func TestWithToolHealthSink_NotCalledOnPlainError(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "plain", `{}`, 10, 4),
+		textResp("done", 5, 2),
+	)
+
+	called := false
+	sink := func(tool string, he *ToolHealthError) { called = true }
+	r := NewRunner(fc, []Tool{healthEchoTool{name: "plain", plain: "bad args"}}, "sys", WithToolHealthSink(sink))
+	_, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if called {
+		t.Error("sink was called for a plain errors.New — must only fire on *ToolHealthError")
+	}
+}
+
+// TestWithToolHealthSink_NilIsNoop verifies that a nil sink (or no
+// WithToolHealthSink option at all) runs cleanly with no overhead — no
+// panic, no extra state. Mirrors TestWithActivitySink_NilIsNoop.
+func TestWithToolHealthSink_NilIsNoop(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "broken", `{}`, 5, 2),
+		textResp("done", 3, 1),
+	)
+	// No WithToolHealthSink option at all.
+	r := NewRunner(fc, []Tool{healthEchoTool{name: "broken", health: &ToolHealthError{
+		Severity: domain.SeverityCritical,
+		Reason:   "container runtime missing",
+	}}}, "sys")
+	if _, err := r.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run without sink: %v", err)
+	}
+
+	// Nil sink is also a no-op.
+	r2 := NewRunner(fc, []Tool{healthEchoTool{name: "broken", health: &ToolHealthError{
+		Severity: domain.SeverityCritical,
+		Reason:   "container runtime missing",
+	}}}, "sys", WithToolHealthSink(nil))
+	if _, err := r2.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run with nil sink: %v", err)
+	}
+}
+
+// TestRunTool_ToolHealthSink_SkippedOnCancelledCtx verifies the dispatch seam
+// does NOT record a tool-health signal when ctx is already cancelled: a failure
+// caused by run teardown/cancellation is not a harness-tooling problem, even
+// when the tool returns a *ToolHealthError.
+func TestRunTool_ToolHealthSink_SkippedOnCancelledCtx(t *testing.T) {
+	called := false
+	sink := func(tool string, he *ToolHealthError) { called = true }
+	r := NewRunner(newFakeClient(), []Tool{healthEchoTool{name: "broken", health: &ToolHealthError{
+		Severity: domain.SeverityHigh, Reason: "sandbox runtime unavailable",
+	}}}, "sys", WithToolHealthSink(sink))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, isErr := r.runTool(ctx, llm.ToolCall{Name: "broken", Arguments: json.RawMessage("{}")})
+	if !isErr {
+		t.Fatal("a ToolHealthError must still be returned as an error result")
+	}
+	if called {
+		t.Error("health sink must NOT fire when ctx is already cancelled")
 	}
 }

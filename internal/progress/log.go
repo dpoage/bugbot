@@ -81,6 +81,8 @@ func (r *LogRenderer) line(ev Event) string {
 		return "budget stopped: " + ev.Message
 	case KindLensFailed:
 		return "LENS FAILED: " + ev.Message
+	case KindToolUnhealthy:
+		return "TOOL UNHEALTHY: " + ev.Tool + " (" + ev.Severity + "): " + ev.Message
 	case KindSpendTick:
 		// Spend ticks are noisy; suppressed in the plain log. Summary/agent lines
 		// carry the totals.
@@ -143,6 +145,8 @@ func (r *LogRenderer) handleSlog(ev Event) {
 		r.log.Warn("progress: budget stopped", "detail", ev.Message)
 	case KindLensFailed:
 		r.log.Warn("progress: lens failed", "role", ev.Role, "label", ev.Label, "detail", ev.Message)
+	case KindToolUnhealthy:
+		r.log.Warn("progress: tool unhealthy", "tool", ev.Tool, "severity", ev.Severity, "detail", ev.Message)
 	default:
 		// Cycle/scan/schedule events are already logged by the daemon's own cycle
 		// logging; agent_started/spend_tick are too noisy for slog. Drop them.

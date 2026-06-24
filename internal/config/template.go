@@ -104,6 +104,10 @@ scan:
   # false to disable. Optionally add a [roles.cartographer] block above to run
   # the summary pass on a cheaper model than the finder.
   cartographer: true
+  # tool_complaints: let tool-using agents (finder, verifier) flag a broken
+  # harness tool via report_tool_issue. Off by default; the always-on
+  # objective tool-health tracking is unaffected by this flag.
+  tool_complaints: false
 
 # ---------------------------------------------------------------------------
 # sandbox: isolated execution environment for verification and reproduction.

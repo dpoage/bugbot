@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/llm"
 )
 
@@ -94,4 +95,50 @@ func newToolSet(tools []Tool) toolSet {
 func (ts toolSet) lookup(name string) (Tool, bool) {
 	t, ok := ts.byName[name]
 	return t, ok
+}
+
+// ToolHealthError marks a tool failure as a GENUINE harness-tooling/infra
+// problem (missing container runtime, crashed language server) versus an
+// ordinary model-recoverable error (bad args, file-not-found). The runner
+// records it as a health signal IN ADDITION to feeding the error text back to
+// the model via the existing toolError path; plain tool errors do not surface
+// to the health sink.
+//
+// Severity reuses [domain.Severity] (critical/high/medium/low). Reason is a
+// short human-readable label suitable for a progress event; the original
+// underlying error (if any) is wrapped via [ToolHealthError.Unwrap] so callers
+// may still inspect it with [errors.As]/[errors.Is].
+type ToolHealthError struct {
+	// Severity classifies the impact of the failure.
+	Severity domain.Severity
+	// Reason is a short human-readable label (no leading "ERROR: "; the
+	// runner's toolError prefix is applied separately when the model is
+	// informed).
+	Reason string
+	// Err is the original underlying error, if any. When non-nil its message
+	// is appended to Reason in [ToolHealthError.Error]; it is also returned
+	// by [ToolHealthError.Unwrap].
+	Err error
+}
+
+// Error returns Reason; when Err is non-nil, ": " + Err.Error() is appended.
+// The format matches the convention used by [fmt.Errorf]("%s: %s", …) so a
+// %w-unwrapping caller sees the same text it would from a plain wrapped error.
+func (e *ToolHealthError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Err != nil {
+		return e.Reason + ": " + e.Err.Error()
+	}
+	return e.Reason
+}
+
+// Unwrap returns the original underlying error, if any, so [errors.Is] and
+// [errors.As] can traverse the chain.
+func (e *ToolHealthError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }

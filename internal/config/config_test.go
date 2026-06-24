@@ -1107,6 +1107,57 @@ func TestScanHeatOrdering(t *testing.T) {
 	})
 }
 
+// TestScanToolComplaints covers the three acceptance criteria for the
+// ToolComplaints config knob:
+//  1. Default is OFF (false) when the field is absent from YAML.
+//  2. Explicit true in YAML loads correctly.
+//  3. Env override BUGBOT_SCAN_TOOL_COMPLAINTS toggles it both ways.
+func TestScanToolComplaints(t *testing.T) {
+	t.Run("default OFF when absent from YAML", func(t *testing.T) {
+		cfg, err := Load(writeTemp(t, validYAML))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Scan.ToolComplaints {
+			t.Error("scan.tool_complaints = true, want false (default OFF)")
+		}
+	})
+
+	t.Run("true loads from YAML", func(t *testing.T) {
+		yaml := validYAML + "scan:\n  tool_complaints: true\n"
+		cfg, err := Load(writeTemp(t, yaml))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if !cfg.Scan.ToolComplaints {
+			t.Error("scan.tool_complaints = false, want true from YAML")
+		}
+	})
+
+	t.Run("env override true enables", func(t *testing.T) {
+		t.Setenv("BUGBOT_SCAN_TOOL_COMPLAINTS", "true")
+		cfg, err := Load(writeTemp(t, validYAML))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if !cfg.Scan.ToolComplaints {
+			t.Error("scan.tool_complaints = false after env BUGBOT_SCAN_TOOL_COMPLAINTS=true, want true")
+		}
+	})
+
+	t.Run("env override false disables", func(t *testing.T) {
+		yaml := validYAML + "scan:\n  tool_complaints: true\n"
+		t.Setenv("BUGBOT_SCAN_TOOL_COMPLAINTS", "false")
+		cfg, err := Load(writeTemp(t, yaml))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Scan.ToolComplaints {
+			t.Error("scan.tool_complaints = true after env BUGBOT_SCAN_TOOL_COMPLAINTS=false, want false")
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // New-field tests: repro.sandbox_max_execs (bugbot-ziq).
 // ---------------------------------------------------------------------------

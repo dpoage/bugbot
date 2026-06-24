@@ -41,7 +41,7 @@ type verified struct {
 // seats.go) so the panel attacks the report from different angles. When n==1
 // (budget-degraded path, degradedRefuters) no seat clause is added — the single
 // generalist produces today's prompt byte-identical.
-func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, persona string, c Candidate, n int, budget *budgetState) ([]refutation, []string, int64, int, bool, error) {
+func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, persona string, c Candidate, n int, budget *budgetState, extraOpts ...agent.Option) ([]refutation, []string, int64, int, bool, error) {
 	hasSandbox := hasSandboxExec(tools)
 
 	var tokens int64
@@ -61,7 +61,7 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 			sysPrompt += "\n\n" + seat.clause
 		}
 		runner := f.newAgentRunner(verifier, tools, sysPrompt, budget.verifyRunnerLimits(f.opts.Limits.VerifierLimits),
-			f.activitySinkFor(progress.RoleVerifier, c.Title))
+			append([]agent.Option{f.activitySinkFor(progress.RoleVerifier, c.Title)}, extraOpts...)...)
 		var v refutation
 		outcome, err := runner.RunJSON(ctx, verifierTask(c), refutationSchema, &v)
 		if outcome != nil {
@@ -106,10 +106,10 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 // post_lead is absent from candTools (same rationale as refuters: refuter
 // independence is the core false-positive killer; the arbiter must be equally
 // independent).
-func (f *Funnel) runArbiter(ctx context.Context, verifier llm.Client, candTools []agent.Tool, persona string, c Candidate, verdicts []refutation, seatNames []string, budget *budgetState) (*refutation, int64, bool, error) {
+func (f *Funnel) runArbiter(ctx context.Context, verifier llm.Client, candTools []agent.Tool, persona string, c Candidate, verdicts []refutation, seatNames []string, budget *budgetState, extraOpts ...agent.Option) (*refutation, int64, bool, error) {
 	hasSandbox := hasSandboxExec(candTools)
 	runner := f.newAgentRunner(verifier, candTools, arbiterSystemPrompt(persona, hasSandbox), budget.arbiterRunnerLimits(f.opts.Limits.ArbiterLimits),
-		f.activitySinkFor(progress.RoleVerifier, c.Title))
+		append([]agent.Option{f.activitySinkFor(progress.RoleVerifier, c.Title)}, extraOpts...)...)
 	var av refutation
 	outcome, err := runner.RunJSON(ctx, arbiterTask(c, verdicts, seatNames), arbiterSchema, &av)
 	var tokens int64

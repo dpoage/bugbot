@@ -1,7 +1,10 @@
 package funnel
 
 import (
+	"sync"
+
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 )
@@ -85,4 +88,62 @@ func (f *Funnel) maybeStatusNoteTool(role, label string) agent.Tool {
 		return nil
 	}
 	return agent.NewStatusNoteTool(progress.NewAgentScope(f.opts.Progress, role, label).ActivitySink())
+}
+
+// toolIssueMu guards Result.Stats.ToolIssues, which the finder and verify
+// stages append to concurrently via recordToolIssue.
+var toolIssueMu sync.Mutex
+
+// recordToolIssue folds one harness tool-health problem into result.Stats and
+// emits a KindToolUnhealthy progress event. It is the single chokepoint for
+// both the objective sink (source "infra") and the subjective report_tool_issue
+// tool (source "agent"), so both render identically in status.json and the scan
+// summary. Entries are deduplicated by (source, tool, severity) with a count.
+// Safe for concurrent use by parallel stage goroutines.
+func (f *Funnel) recordToolIssue(result *Result, source, tool, severity, reason, role, label string) {
+	toolIssueMu.Lock()
+	merged := false
+	for i := range result.Stats.ToolIssues {
+		if ti := &result.Stats.ToolIssues[i]; ti.Source == source && ti.Tool == tool && ti.Severity == severity {
+			ti.Count++
+			merged = true
+			break
+		}
+	}
+	if !merged {
+		result.Stats.ToolIssues = append(result.Stats.ToolIssues, ToolIssue{
+			Source: source, Tool: tool, Severity: severity, Count: 1,
+		})
+	}
+	toolIssueMu.Unlock()
+	progress.Emit(f.opts.Progress, progress.Event{
+		Kind: progress.KindToolUnhealthy, Role: role, Label: label,
+		Tool: tool, Severity: severity, Message: reason,
+	})
+}
+
+// toolHealthSinkFor returns a WithToolHealthSink option that routes a tool's
+// objective infra failure (a *agent.ToolHealthError surfaced at the runner
+// dispatch seam) to recordToolIssue as source "infra". Wired at every funnel
+// runner site beside activitySinkFor; today sandbox_exec (refuter-side) is the
+// sole producer, with codenav the natural finder-side producer next.
+func (f *Funnel) toolHealthSinkFor(result *Result, role, label string) agent.Option {
+	return agent.WithToolHealthSink(func(tool string, he *agent.ToolHealthError) {
+		f.recordToolIssue(result, "infra", tool, string(he.Severity), he.Reason, role, label)
+	})
+}
+
+// maybeReportToolIssueTool returns a report_tool_issue Tool when
+// f.opts.Features.ToolComplaints is true, or nil when the flag is off. The
+// agent-filed complaint is recorded as source "agent" through the same
+// recordToolIssue chokepoint as the objective sink, so manual and detected
+// issues surface identically.
+func (f *Funnel) maybeReportToolIssueTool(result *Result, role, label string) agent.Tool {
+	if !f.opts.Features.ToolComplaints {
+		return nil
+	}
+	return agent.NewReportToolIssueTool(func(tool string, sev domain.Severity, summary string) error {
+		f.recordToolIssue(result, "agent", tool, string(sev), summary, role, label)
+		return nil
+	})
 }

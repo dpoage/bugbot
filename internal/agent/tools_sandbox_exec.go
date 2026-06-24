@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
 )
@@ -116,13 +117,18 @@ func (t *SandboxExecTool) Run(ctx context.Context, raw json.RawMessage) (string,
 		return "", fmt.Errorf("cmd is required and must be non-empty")
 	}
 
-	// Build WriteFiles, converting string values to []byte. Path validation
-	// happens inside the sandbox backend (sandbox.Spec documents that paths
-	// escaping the workspace via absolute paths or ".." are rejected).
+	// Build WriteFiles, converting string values to []byte. Each path is
+	// pre-validated here so a model-supplied path that escapes the workspace
+	// (absolute or "..") is a recoverable argument error the model can retry —
+	// NOT a sandbox-infra failure. Without this pre-flight the escape would
+	// surface only from sb.Exec below and be misclassified as a ToolHealthError.
 	var writeFiles map[string][]byte
 	if len(args.Files) > 0 {
 		writeFiles = make(map[string][]byte, len(args.Files))
 		for path, content := range args.Files {
+			if err := sandbox.ValidateWorkspacePath(path); err != nil {
+				return "", fmt.Errorf("invalid files path %q: %w", path, err)
+			}
 			writeFiles[path] = []byte(content)
 		}
 	}
@@ -136,10 +142,13 @@ func (t *SandboxExecTool) Run(ctx context.Context, raw json.RawMessage) (string,
 		Env:        t.depEnv,
 		SetupCmds:  t.setupCmds,
 	}
-
 	res, err := t.sb.Exec(ctx, spec)
 	if err != nil {
-		return "", fmt.Errorf("sandbox execution failed: %w", err)
+		return "", &ToolHealthError{
+			Severity: domain.SeverityHigh,
+			Reason:   "sandbox runtime unavailable",
+			Err:      fmt.Errorf("sandbox execution failed: %w", err),
+		}
 	}
 
 	if t.onExec != nil {
