@@ -419,6 +419,10 @@ type FeatureFlags struct {
 	Cartographer bool
 	// StatusNotes enables the status_note tool for finder and verifier agents.
 	StatusNotes bool
+	// ToolComplaints enables the report_tool_issue tool for finder and verifier
+	// agents, letting them flag a broken harness tool with a severity. Off by
+	// default; the always-on objective tool-health sink is unaffected by this flag.
+	ToolComplaints bool
 	// DisableHeatOrdering suppresses churn-heat reordering in Sweep.
 	// Set to true to restore alphabetical ordering (e.g. for deterministic testing).
 	DisableHeatOrdering bool
@@ -686,6 +690,18 @@ type Candidate struct {
 	Reverify bool
 }
 
+// ToolIssue is one aggregated harness tool-health problem on Stats.ToolIssues,
+// deduplicated by (Source, Tool, Severity) with Count occurrences. Source is
+// "infra" (objective: a *agent.ToolHealthError surfaced at the runner dispatch
+// seam) or "agent" (subjective: an agent called report_tool_issue). Severity is
+// one of the domain.Severity values. This is harness-meta, never a finding.
+type ToolIssue struct {
+	Source   string `json:"source"`
+	Tool     string `json:"tool"`
+	Severity string `json:"severity"`
+	Count    int    `json:"count"`
+}
+
 // Stats is the per-stage funnel accounting recorded on the scan run.
 type Stats struct {
 	// Hypothesized is the raw candidate count emitted by all finder agents.
@@ -761,6 +777,13 @@ type Stats struct {
 	// orphaned as T3 suspected rather than promoted as verified (bugbot-8rd).
 	VerifierRuns     int `json:"verifier_runs"`
 	VerifierFailures int `json:"verifier_failures"`
+	// ToolIssues records harness TOOL-health problems observed this run: genuine
+	// tool-infra failures captured objectively at the dispatch seam (Source
+	// "infra") plus agent-filed report_tool_issue complaints (Source "agent").
+	// Non-empty means some tool misbehaved, so a low/empty finding count may be
+	// incomplete rather than clean. Surfaced in the scan summary and as
+	// KindToolUnhealthy progress events.
+	ToolIssues []ToolIssue `json:"tool_issues,omitempty"`
 	// ArbiterRuns is the number of COMPLETED arbiter agents launched to decide
 	// split (mixed refuted/not-refuted) panel verdicts. A run cut short by a
 	// budget stop is NOT counted here — it is counted in ArbiterBudgetStops

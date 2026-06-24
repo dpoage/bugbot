@@ -87,6 +87,30 @@ func TestPrintResult_NoFindersRanWarns(t *testing.T) {
 	}
 }
 
+// TestPrintResult_ToolHealthWarning confirms harness tool-health issues are
+// surfaced prominently in the scan summary, and absent on a clean run.
+func TestPrintResult_ToolHealthWarning(t *testing.T) {
+	var withIssues bytes.Buffer
+	res := &funnel.Result{
+		Commit: "abc123",
+		Stats: funnel.Stats{
+			FinderRuns: 6, FinderFailures: 0,
+			ToolIssues: []funnel.ToolIssue{{Source: "infra", Tool: "sandbox_exec", Severity: "high", Count: 2}},
+		},
+	}
+	printResult(&withIssues, res)
+	if out := withIssues.String(); !strings.Contains(out, "Tool health:") ||
+		!strings.Contains(out, "sandbox_exec") || !strings.Contains(out, "HIGH") {
+		t.Errorf("tool-health issue should be surfaced in the summary:\n%s", out)
+	}
+
+	var clean bytes.Buffer
+	printResult(&clean, &funnel.Result{Commit: "abc123", Stats: funnel.Stats{FinderRuns: 6}})
+	if strings.Contains(clean.String(), "Tool health:") {
+		t.Errorf("clean run must not print a tool-health line:\n%s", clean.String())
+	}
+}
+
 // TestStats_ReliabilityHelpers covers the boundary conditions of the helpers the
 // CLI and exit code rely on.
 func TestStats_ReliabilityHelpers(t *testing.T) {

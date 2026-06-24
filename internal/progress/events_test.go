@@ -50,6 +50,27 @@ func TestEventValidate(t *testing.T) {
 	if err := (Event{Kind: KindScanStarted}).Validate(); err != nil {
 		t.Errorf("Validate: KindScanStarted unexpected error: %v", err)
 	}
+
+	// KindToolUnhealthy requires Role, Label, Tool, and Severity. Each missing
+	// field must fail; the fully-populated event must pass.
+	if err := (Event{Kind: KindToolUnhealthy}).Validate(); err == nil {
+		t.Error("Validate: KindToolUnhealthy without any fields should fail")
+	}
+	if err := (Event{Kind: KindToolUnhealthy, Role: RoleFinder, Label: "lens", Tool: "sandbox", Severity: "high"}).Validate(); err != nil {
+		t.Errorf("Validate: KindToolUnhealthy fully populated unexpected error: %v", err)
+	}
+	if err := (Event{Kind: KindToolUnhealthy, Label: "lens", Tool: "sandbox", Severity: "high"}).Validate(); err == nil {
+		t.Error("Validate: KindToolUnhealthy without Role should fail")
+	}
+	if err := (Event{Kind: KindToolUnhealthy, Role: RoleFinder, Tool: "sandbox", Severity: "high"}).Validate(); err == nil {
+		t.Error("Validate: KindToolUnhealthy without Label should fail")
+	}
+	if err := (Event{Kind: KindToolUnhealthy, Role: RoleFinder, Label: "lens", Severity: "high"}).Validate(); err == nil {
+		t.Error("Validate: KindToolUnhealthy without Tool should fail")
+	}
+	if err := (Event{Kind: KindToolUnhealthy, Role: RoleFinder, Label: "lens", Tool: "sandbox"}).Validate(); err == nil {
+		t.Error("Validate: KindToolUnhealthy without Severity should fail")
+	}
 }
 
 // TestCountsNilSemantics documents and exercises the nil-vs-zero distinction.

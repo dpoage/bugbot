@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/sandbox"
 )
 
@@ -163,6 +164,12 @@ func TestSandboxExecTool_EmptyCmd_IsToolError(t *testing.T) {
 	if !strings.Contains(err.Error(), "cmd") {
 		t.Errorf("error should mention cmd: %v", err)
 	}
+	// Arg validation is a model-recoverable error, NOT a harness-infra
+	// failure; the runner must NOT route it to the toolHealthSink.
+	var he *ToolHealthError
+	if errors.As(err, &he) {
+		t.Errorf("arg-validation error must not be a *ToolHealthError, got %T: %v", err, err)
+	}
 }
 
 func TestSandboxExecTool_MissingCmd_IsToolError(t *testing.T) {
@@ -204,6 +211,23 @@ func TestSandboxExecTool_InfraError_IsToolError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "sandbox execution failed") {
 		t.Errorf("error should wrap infra error: %v", err)
+	}
+	// A genuine infra failure must surface as a *ToolHealthError so the
+	// runner's toolHealthSink fires. This is the central contract that
+	// distinguishes harness-tooling problems from ordinary model-recoverable
+	// errors.
+	var he *ToolHealthError
+	if !errors.As(err, &he) {
+		t.Fatalf("infra error must be a *ToolHealthError, got %T: %v", err, err)
+	}
+	if he.Severity != domain.SeverityHigh {
+		t.Errorf("severity = %q, want high", he.Severity)
+	}
+	if he.Reason != "sandbox runtime unavailable" {
+		t.Errorf("reason = %q, want %q", he.Reason, "sandbox runtime unavailable")
+	}
+	if he.Err == nil {
+		t.Error("wrapped Err should be non-nil")
 	}
 }
 
@@ -329,5 +353,23 @@ func TestRenderSandboxResult_EmptyStreams(t *testing.T) {
 	}
 	if !strings.Contains(out, "(empty)") {
 		t.Errorf("expected (empty) for blank streams: %q", out)
+	}
+}
+
+// TestSandboxExecTool_FilesPathEscape_IsRecoverable verifies that a model-
+// supplied files path escaping the workspace is a recoverable argument error,
+// NOT a *ToolHealthError — so the runner's health sink never fires for it.
+func TestSandboxExecTool_FilesPathEscape_IsRecoverable(t *testing.T) {
+	tool, _ := newToolWithFake(nil)
+	_, err := runSandboxExecTool(t, tool, map[string]interface{}{
+		"cmd":   []string{"go", "test", "./..."},
+		"files": map[string]string{"../escape.go": "package x"},
+	})
+	if err == nil {
+		t.Fatal("a files path escaping the workspace must return a tool error")
+	}
+	var he *ToolHealthError
+	if errors.As(err, &he) {
+		t.Errorf("workspace-escape path must not be a *ToolHealthError, got %T: %v", err, err)
 	}
 }

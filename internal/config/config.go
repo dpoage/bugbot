@@ -166,6 +166,11 @@ type Scan struct {
 	// `bugbot status`. This is a Tier-2 feature gated here so it imposes zero
 	// LLM cost and zero behavior change when off (the default).
 	StatusNotes bool `yaml:"status_notes"`
+	// ToolComplaints enables the report_tool_issue tool for the tool-using
+	// agents (finder, verifier) so they can flag a broken harness tool. Off
+	// by default; the always-on objective tool-health tracking is unaffected
+	// by this flag.
+	ToolComplaints bool `yaml:"tool_complaints"`
 	// HeatOrdering enables churn-heat reordering in the sweep pass so finder
 	// budget flows to files that have changed recently and frequently — where
 	// bugs statistically cluster. On by default; set to false to restore
@@ -660,6 +665,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setBool("BUGBOT_REPRO_PATCH_PROVER", &cfg.Repro.PatchProver),
 		setBool("BUGBOT_SCAN_CARTOGRAPHER", &cfg.Scan.Cartographer),
 		setBool("BUGBOT_SCAN_STATUS_NOTES", &cfg.Scan.StatusNotes),
+		setBool("BUGBOT_SCAN_TOOL_COMPLAINTS", &cfg.Scan.ToolComplaints),
 		setBool("BUGBOT_SCAN_HEAT_ORDERING", &cfg.Scan.HeatOrdering),
 	} {
 		if err != nil {
@@ -902,8 +908,8 @@ func (c *Config) APIKey(provider string) (string, error) {
 //
 //   - api_key mode (default): reads the env var named by api_key_env and returns
 //     the API key string.
-//   - oauth-token mode: reads the env var named by auth_token_env and returns the
-//     OAuth bearer token. If the env var is unset or empty the error mentions the
+//   - oauth-token mode: reads the env var named by auth_token_env and returns
+//     the OAuth bearer token. If the env var is unset or empty the error mentions the
 //     env var name and instructs the user to mint a fresh token with
 //     `claude setup-token` (the token may also be expired).
 //

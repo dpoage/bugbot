@@ -89,6 +89,14 @@ const (
 	// this prominently — it means an empty result is untrustworthy, not clean.
 	// Fields: Role, Label, Err.
 	KindLensFailed Kind = "lens_failed"
+	// KindToolUnhealthy reports a HARNESS-side tool that failed: a tool the
+	// Bugbot runner itself relies on (e.g. the sandbox runtime, a code-search
+	// helper, a test runner) is broken or unavailable. This is harness meta,
+	// NEVER a finding about the target repository — renderers must surface it
+	// PROMINENTLY so the operator can distinguish a clean empty result from one
+	// that could not be produced because a tool was down. Fields: Role, Label,
+	// Tool, Severity, Message (carries the human-readable reason).
+	KindToolUnhealthy Kind = "tool_unhealthy"
 	// KindScanFinished marks the end of a funnel run and carries the stats
 	// summary.
 	// Fields: Counts (non-nil on normal completion; nil only if abandoned before
@@ -242,6 +250,17 @@ type Event struct {
 
 	// Message is a free-form human note (budget degradation reason, skip reason).
 	Message string `json:"message,omitempty"`
+
+	// Tool names the harness-side tool that failed. Set only on
+	// KindToolUnhealthy events; zero/empty on every other kind. Sinks surface it
+	// prominently so the operator can tell which Bugbot tool was down.
+	Tool string `json:"tool,omitempty"`
+
+	// Severity classifies the tool-health failure (critical/high/medium/low).
+	// Set only on KindToolUnhealthy events; empty on every other kind.
+	// Sinks use it to choose how prominently to render the failure and to
+	// aggregate per-tool health by max-severity across events.
+	Severity string `json:"severity,omitempty"`
 }
 
 // Validate returns an error for clearly-invalid Kind/field combinations.
@@ -258,6 +277,8 @@ type Event struct {
 //   - KindAgentStarted/KindAgentFinished/KindAgentActivity require Role and Label.
 //   - KindFindingVerified/KindFindingKilled require File.
 //   - KindAgentActivity requires Activity.
+//   - KindToolUnhealthy requires Role, Label, Tool, and Severity (Message is the
+//     human-readable reason and is permitted but not required).
 func (e Event) Validate() error {
 	if e.Kind == "" {
 		return fmt.Errorf("progress: event has empty Kind")
@@ -280,6 +301,19 @@ func (e Event) Validate() error {
 	case KindFindingVerified, KindFindingKilled:
 		if e.File == "" {
 			return fmt.Errorf("progress: %s event missing File", e.Kind)
+		}
+	case KindToolUnhealthy:
+		if e.Role == "" {
+			return fmt.Errorf("progress: %s event missing Role", e.Kind)
+		}
+		if e.Label == "" {
+			return fmt.Errorf("progress: %s event missing Label", e.Kind)
+		}
+		if e.Tool == "" {
+			return fmt.Errorf("progress: %s event missing Tool", e.Kind)
+		}
+		if e.Severity == "" {
+			return fmt.Errorf("progress: %s event missing Severity", e.Kind)
 		}
 	}
 	return nil

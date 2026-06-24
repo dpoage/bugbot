@@ -523,3 +523,64 @@ func TestSnapshot_AgentActivity_SurvivesRefreshAgents(t *testing.T) {
 		t.Errorf("ActivityAt = %v, want %v", st2.ActiveAgents[0].ActivityAt, actAt2)
 	}
 }
+
+// TestSnapshot_ToolUnhealthy_AggregatesByMaxSeverity verifies that two
+// KindToolUnhealthy events for the SAME tool fold into a single
+// Status.UnhealthyTools entry: Count=2, Severity is the MAX rank (high beats
+// low), Reason/LastAt are the latest event's, and the entry survives the
+// refresh pass into the persisted snapshot.
+func TestSnapshot_ToolUnhealthy_AggregatesByMaxSeverity(t *testing.T) {
+	clock := time.Unix(60000, 0)
+	now := func() time.Time { return clock }
+	s, path := newTestSnapshot(t, now)
+
+	// Initial write (first event triggers write because lastWrite is zero).
+	lowAt := clock
+	s.Handle(Event{
+		Kind: KindToolUnhealthy, Role: RoleFinder, Label: "lensA",
+		Tool: "sandbox", Severity: "low",
+		Message: "transient timeout", Time: lowAt,
+	})
+
+	// Second event for the same tool, higher severity, later message. Force
+	// the write by advancing past the rate-limit window.
+	clock = clock.Add(2 * time.Second)
+	highAt := clock
+	s.Handle(Event{
+		Kind: KindToolUnhealthy, Role: RoleFinder, Label: "lensA",
+		Tool: "sandbox", Severity: "high",
+		Message: "runtime missing", Time: highAt,
+	})
+
+	// Force one more non-terminal write after the rate-limit window so the
+	// refresh pass materializes the aggregated slice.
+	clock = clock.Add(2 * time.Second)
+	s.Handle(Event{Kind: KindStageStarted, Stage: StagePersist, Time: clock})
+
+	st, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if len(st.UnhealthyTools) != 1 {
+		t.Fatalf("UnhealthyTools = %d entries, want 1; got %+v", len(st.UnhealthyTools), st.UnhealthyTools)
+	}
+	th := st.UnhealthyTools[0]
+	if th.Tool != "sandbox" {
+		t.Errorf("Tool = %q, want %q", th.Tool, "sandbox")
+	}
+	if th.Count != 2 {
+		t.Errorf("Count = %d, want 2", th.Count)
+	}
+	if th.Severity != "high" {
+		t.Errorf("Severity = %q, want %q (max of low+high)", th.Severity, "high")
+	}
+	if th.Reason != "runtime missing" {
+		t.Errorf("Reason = %q, want %q (latest message)", th.Reason, "runtime missing")
+	}
+	if !th.LastAt.Equal(highAt) {
+		t.Errorf("LastAt = %v, want %v (latest event time)", th.LastAt, highAt)
+	}
+	if !th.LastAt.After(lowAt) {
+		t.Errorf("LastAt should be after lowAt; got %v, lowAt %v", th.LastAt, lowAt)
+	}
+}

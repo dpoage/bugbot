@@ -497,6 +497,9 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			if t := f.maybeStatusNoteTool(progress.RoleFinder, u.lens.Name); t != nil {
 				unitTools = append(unitTools, t)
 			}
+			if t := f.maybeReportToolIssueTool(result, progress.RoleFinder, u.lens.Name); t != nil {
+				unitTools = append(unitTools, t)
+			}
 
 			// Resolve the task content. customTask takes highest priority
 			// (diff-intent pre-built task). Then the strategy's BuildTask if
@@ -517,7 +520,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			startedAt := time.Now()
 			// runCtx (not ctx) so a breaker trip unblocks the in-flight runner
 			// without disturbing the caller's context.
-			cands, status, outcome, pm, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt)
+			cands, status, outcome, pm, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt, f.toolHealthSinkFor(result, progress.RoleFinder, label))
 			finishedAt := time.Now()
 
 			// Emit KindAgentFinished here (not inside runFinderWithPrompt) so we
@@ -846,11 +849,11 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 // (hypothesize) can fold it into the Detail field of the
 // recordFinderUnitWithTimeDetail call. This keeps the recording at a single
 // site and avoids threading a store reference into this function.
-func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState, startedAt time.Time) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, error) {
+func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState, startedAt time.Time, extraOpts ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, error) {
 	progress.NewAgentScope(f.opts.Progress, progress.RoleFinder, label).Start()
 
 	runner := f.newAgentRunner(finder, tools, sysprompt, budget.finderRunnerLimits(f.opts.Limits.FinderLimits),
-		f.activitySinkFor(progress.RoleFinder, label))
+		append([]agent.Option{f.activitySinkFor(progress.RoleFinder, label)}, extraOpts...)...)
 
 	var out candidateList
 	outcome, err := runner.RunJSON(ctx, task, candidatesSchema, &out)

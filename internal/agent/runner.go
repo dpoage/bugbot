@@ -34,6 +34,11 @@ type Runner struct {
 	// single-line note about what the agent is doing (derived from tool calls).
 	// Nil by default; zero overhead when unset.
 	activitySink func(activity string)
+	// toolHealthSink, when non-nil, is called whenever a tool returns a
+	// *ToolHealthError (a genuine harness/infra failure, not an ordinary
+	// model-recoverable error). Plain tool errors do not trigger it. Nil by
+	// default; zero overhead when unset.
+	toolHealthSink func(tool string, he *ToolHealthError)
 }
 
 // Option configures a [Runner] at construction.
@@ -65,6 +70,16 @@ func WithMaxTokens(n int) Option {
 // incurs zero overhead.
 func WithActivitySink(fn func(activity string)) Option {
 	return func(r *Runner) { r.activitySink = fn }
+}
+
+// WithToolHealthSink registers a callback invoked when a tool returns a
+// *ToolHealthError — a genuine harness/infra failure (missing container
+// runtime, crashed language server) rather than an ordinary
+// model-recoverable error (bad args, file-not-found). The callback must be
+// safe for concurrent use. A nil fn is a no-op. When unset, the runner
+// records no health signals and incurs zero overhead.
+func WithToolHealthSink(fn func(tool string, he *ToolHealthError)) Option {
+	return func(r *Runner) { r.toolHealthSink = fn }
 }
 
 // NewRunner builds a Runner bound to client, the given tools, and a system
@@ -505,6 +520,13 @@ func (r *Runner) runTool(ctx context.Context, call llm.ToolCall) (result string,
 	}
 	out, err := tool.Run(ctx, call.Arguments)
 	if err != nil {
+		// Record a tool-health signal only for a genuine *ToolHealthError AND
+		// only when ctx is not already cancelled: a failure caused by run
+		// teardown/cancellation must never be counted as a tool-health problem.
+		var he *ToolHealthError
+		if ctx.Err() == nil && errors.As(err, &he) && r.toolHealthSink != nil {
+			r.toolHealthSink(call.Name, he)
+		}
 		return toolError(err), true
 	}
 	return out, false

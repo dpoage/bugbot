@@ -801,6 +801,10 @@ func printResult(out io.Writer, res *funnel.Result) {
 		_, _ = fmt.Fprintf(out, "Agent failures: finders=%d/%d verifiers=%d/%d produced no parseable output\n",
 			s.FinderFailures, s.FinderRuns, s.VerifierFailures, s.VerifierRuns)
 	}
+	for _, ti := range s.ToolIssues {
+		_, _ = fmt.Fprintf(out, "Tool health: %s reported %s x%d (%s) — results may be incomplete\n",
+			ti.Tool, strings.ToUpper(ti.Severity), ti.Count, ti.Source)
+	}
 	if s.FinderRateLimited > 0 {
 		_, _ = fmt.Fprintf(out, "Rate-limited finders: %d/%d (coverage incomplete; re-run at lower --concurrency)\n",
 			s.FinderRateLimited, s.FinderRuns)

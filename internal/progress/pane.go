@@ -188,6 +188,12 @@ func (p *PaneRenderer) apply(ev Event) {
 		p.degraded = true
 		p.budgetNote = ev.Message
 		p.lastEvent = "budget stopped"
+	case KindToolUnhealthy:
+		// Harness-side tool failure. Surface it via lastEvent so the operator can
+		// distinguish a clean empty result from one the harness could not produce
+		// because a tool was down. Per-tool aggregation lives in the snapshot sink;
+		// the pane only needs the most recent event visible.
+		p.lastEvent = fmt.Sprintf("tool unhealthy: %s (%s) %s", ev.Tool, ev.Severity, ev.Message)
 	case KindScanFinished, KindCycleFinished:
 		if ev.Counts != nil {
 			p.mergeCounts(*ev.Counts)
