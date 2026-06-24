@@ -376,8 +376,8 @@ func TestVerifierSystemPrompt_WithoutSandbox(t *testing.T) {
 	if strings.Contains(p, "sandbox_exec") {
 		t.Error("system prompt without sandbox must not mention sandbox_exec")
 	}
-	if p != verifierSystemBase(persona) {
-		t.Error("system prompt without sandbox must equal verifierSystemBase verbatim")
+	if p != verifierSystemBase(persona)+verifierNoSandboxParagraph {
+		t.Error("system prompt without sandbox must equal verifierSystemBase + the no-exec prohibition (bugbot-mi5.20)")
 	}
 }
 
