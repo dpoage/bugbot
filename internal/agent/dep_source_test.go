@@ -221,4 +221,3 @@ func TestNewReadFileWithDepRoots_RejectsEscapesFromDepRoot(t *testing.T) {
 		t.Errorf("escape err = %v, want it to mention escape", err)
 	}
 }
-

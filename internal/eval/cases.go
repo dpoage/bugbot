@@ -18,6 +18,11 @@ import "github.com/dpoage/bugbot/internal/funnel"
 //  5. multi-bug          — two seeded bugs in one file; both must survive.
 //  6. suppressed-finding — a real bug whose fingerprint is pre-suppressed;
 //     expect zero findings (suppression memory).
+//  7. split-arbiter-refutes — a split panel on CLEAN code; the agentic arbiter
+//     grounds the dissent and REFUTES, killing the false positive. Also a
+//     regression gate vs the pre-mi5.17 one-shot arbiter (bugbot-mi5.17).
+//  8. split-arbiter-keeps — a split panel on a REAL bug; the arbiter grounds and
+//     KEEPS it, so a true bug survives a 1-refute split.
 //
 // The lens names referenced below must match funnel.BuiltinLenses(); the
 // scripted finder routes on the lens name embedded in the finder system prompt.
@@ -29,6 +34,8 @@ func BuiltinCases() []Case {
 		cleanCodeCase(),
 		multiBugCase(),
 		suppressedCase(),
+		splitArbiterRefutesCase(),
+		splitArbiterKeepsCase(),
 	}
 }
 
@@ -337,5 +344,117 @@ func suppressedCase() Case {
 				Reason: "eval: maintainer-dismissed known non-bug",
 			},
 		},
+	)
+}
+
+// --- 7 & 8. split-verdict arbiter (bugbot-mi5.17) ------------------------
+
+// splitFPSrc is clean code: lookupID dereferences dev, but every caller passes a
+// freshly constructed (never-nil) Device, so the flagged nil-deref path is
+// unreachable.
+const splitFPSrc = `package fixture
+
+// Device is always constructed non-nil by its callers.
+type Device struct{ id int }
+
+func (d *Device) ID() int { return d.id }
+
+// lookupID dereferences dev; a finder flags a possible nil deref here, but every
+// caller passes a freshly constructed Device, so the path is unreachable.
+func lookupID(dev *Device) int {
+	return dev.ID()
+}
+
+func useLookup() int {
+	return lookupID(&Device{id: 7})
+}
+`
+
+// splitArbiterRefutesCase is the false-positive canary for the split-verdict
+// arbiter: a split panel on clean code where the arbiter must REFUTE. It is also
+// a regression gate against the pre-mi5.17 one-shot arbiter — the scripted
+// arbiter response carries the now-REQUIRED evidence field, which the old
+// arbiterSchema rejects, falling back to majorityRefuted (a 1-1 tie that
+// survives) and producing the false positive this case forbids.
+func splitArbiterRefutesCase() Case {
+	const title = "possible nil deref of dev in lookupID"
+	return NewScriptedCase(
+		"split-arbiter-refutes",
+		FixtureSpec{Files: map[string]string{"device.go": splitFPSrc}},
+		nil, // clean: ANY surviving finding is a false positive
+		&ScriptedCase{
+			Finder: func(c *ScriptedClient) {
+				c.OnSystemContains(lensNil, Candidates(CandidateJSON{
+					File: "device.go", Line: 11, Title: title,
+					Description: "dev is dereferenced without a nil guard",
+					Severity:    "high",
+					Evidence:    "lookupID returns dev.ID() with no nil check",
+					Confidence:  "high",
+				}))
+			},
+			Verifier: func(c *ScriptedClient) {
+				// Split: reachability seat refutes, semantics seat cannot.
+				c.OnSystemContains("(reachability)", RefutedJSON)
+				c.OnSystemContains("(semantics)", NotRefutedJSON)
+				// The arbiter grounds the caller set and refutes (evidence-backed).
+				c.OnTaskContains("PANEL VERDICTS", RefutedArbiterJSON)
+			},
+		},
+		funnel.Options{Limits: funnel.StageLimits{Refuters: 2}},
+		nil,
+	)
+}
+
+// splitRealSrc is a real, reachable nil deref: handleAnon calls resolve(nil), so
+// the deref panics on the anonymous path.
+const splitRealSrc = `package fixture
+
+type Session struct{ token string }
+
+func (s *Session) Token() string { return s.token }
+
+// resolve dereferences sess; handleAnon passes nil, so the deref panics on the
+// anonymous path — a real, reachable nil deref.
+func resolve(sess *Session) string {
+	return sess.Token()
+}
+
+func handleAnon() string {
+	return resolve(nil)
+}
+`
+
+// splitArbiterKeepsCase pins the other half of the split-verdict design: a split
+// panel on a REAL bug where the arbiter grounds the dissent and KEEPS the
+// finding, so a true bug survives a 1-refute split that a single refutation
+// would otherwise demote.
+func splitArbiterKeepsCase() Case {
+	const title = "nil deref of sess in resolve"
+	return NewScriptedCase(
+		"split-arbiter-keeps",
+		FixtureSpec{Files: map[string]string{"session.go": splitRealSrc}},
+		[]SeededBug{
+			{File: "session.go", Line: 10, LineTolerance: 2, Kind: "nil-deref"},
+		},
+		&ScriptedCase{
+			Finder: func(c *ScriptedClient) {
+				c.OnSystemContains(lensNil, Candidates(CandidateJSON{
+					File: "session.go", Line: 10, Title: title,
+					Description: "sess may be nil; handleAnon passes nil",
+					Severity:    "high",
+					Evidence:    "resolve returns sess.Token() and handleAnon calls resolve(nil)",
+					Confidence:  "high",
+				}))
+			},
+			Verifier: func(c *ScriptedClient) {
+				// Split: reachability seat refutes (wrongly), semantics seat keeps.
+				c.OnSystemContains("(reachability)", RefutedJSON)
+				c.OnSystemContains("(semantics)", NotRefutedJSON)
+				// The arbiter grounds the nil caller and KEEPS the bug.
+				c.OnTaskContains("PANEL VERDICTS", NotRefutedArbiterJSON)
+			},
+		},
+		funnel.Options{Limits: funnel.StageLimits{Refuters: 2}},
+		nil,
 	)
 }

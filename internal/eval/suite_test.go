@@ -51,12 +51,14 @@ func TestBuiltinCases_PerCaseExpectations(t *testing.T) {
 		tp, fp, fn int
 		clean      bool
 	}{
-		"nil-deref-seeded":     {tp: 1, fp: 0, fn: 0},
-		"resource-leak-seeded": {tp: 1, fp: 0, fn: 0},
-		"off-by-one-seeded":    {tp: 1, fp: 0, fn: 0},
-		"clean-code":           {tp: 0, fp: 0, fn: 0, clean: true},
-		"multi-bug":            {tp: 2, fp: 0, fn: 0},
-		"suppressed-finding":   {tp: 0, fp: 0, fn: 0, clean: true},
+		"nil-deref-seeded":      {tp: 1, fp: 0, fn: 0},
+		"resource-leak-seeded":  {tp: 1, fp: 0, fn: 0},
+		"off-by-one-seeded":     {tp: 1, fp: 0, fn: 0},
+		"clean-code":            {tp: 0, fp: 0, fn: 0, clean: true},
+		"multi-bug":             {tp: 2, fp: 0, fn: 0},
+		"suppressed-finding":    {tp: 0, fp: 0, fn: 0, clean: true},
+		"split-arbiter-refutes": {tp: 0, fp: 0, fn: 0, clean: true},
+		"split-arbiter-keeps":   {tp: 1, fp: 0, fn: 0},
 	}
 
 	for _, c := range BuiltinCases() {
