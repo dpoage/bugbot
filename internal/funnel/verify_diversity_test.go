@@ -380,7 +380,7 @@ func TestAggregation_SplitPanel_ArbiterSurvives(t *testing.T) {
 	finder := newScriptedClient().onSystemContains("nil-safety/error-handling", candJSON(realCand))
 	// Panel: first call refuted, second call not-refuted → split.
 	// Arbiter (contains "PANEL VERDICTS"): not-refuted.
-	verifier := makeCallCountVerifier(1, notRefutedJSON)
+	verifier := makeCallCountVerifier(1, notRefutedArbiterJSON)
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
 		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
@@ -403,6 +403,14 @@ func TestAggregation_SplitPanel_ArbiterSurvives(t *testing.T) {
 	if res.Stats.ArbiterKills != 0 {
 		t.Errorf("ArbiterKills = %d, want 0", res.Stats.ArbiterKills)
 	}
+	// AC2: the arbiter's confirmed evidence is surfaced in the published
+	// verification trace, not just "I read both sides".
+	if len(res.Findings) == 1 && !strings.Contains(res.Findings[0].Reasoning, "evidence") {
+		t.Errorf("survived split finding must record the arbiter's cited evidence in its trace; got:\n%s", res.Findings[0].Reasoning)
+	}
+	if res.Stats.ArbiterTokens == 0 {
+		t.Error("ArbiterTokens = 0, want > 0 (arbiter spend must be accounted; bugbot-mi5.17 AC6)")
+	}
 }
 
 // TestAggregation_SplitPanel_ArbiterKills tests the split-panel path where the
@@ -414,7 +422,7 @@ func TestAggregation_SplitPanel_ArbiterKills(t *testing.T) {
 	finder := newScriptedClient().onSystemContains("nil-safety/error-handling", candJSON(realCand))
 	// Panel: first call refuted, second not-refuted → split.
 	// Arbiter: refuted.
-	verifier := makeCallCountVerifier(1, refutedJSON)
+	verifier := makeCallCountVerifier(1, refutedArbiterJSON)
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
 		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
@@ -634,7 +642,7 @@ func TestStats_ArbiterCountsUnderParallel(t *testing.T) {
 
 	// One split candidate, 2 refuters. Arbiter says not-refuted.
 	finder := newScriptedClient().onSystemContains("nil-safety/error-handling", candJSON(realCand))
-	verifier := makeCallCountVerifier(1, notRefutedJSON)
+	verifier := makeCallCountVerifier(1, notRefutedArbiterJSON)
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
 		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},

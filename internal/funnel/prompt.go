@@ -213,7 +213,7 @@ PRIMARY — prefer these:
 
 FALLBACK — only when a primary tool cannot answer:
 - grep for free-text or non-symbol patterns, or when a code-navigation tool returns an ERROR (server unavailable or still indexing).
-- read_file for a whole file you need; list_dir to discover paths. The read_file tool is rooted at the repository and at any vendored dependencies under it; it does NOT see the Go module cache or GOROOT/src — for a stdlib or third-party symbol the refuter must run a probe (e.g. via sandbox_exec) or rely on the arbiter's broader reach.`
+- read_file for a whole file you need; list_dir to discover paths. The read_file tool is rooted at the repository and at any vendored dependencies under it; it does NOT see the Go module cache or GOROOT/src, so a stdlib or non-vendored third-party symbol must be confirmed with an executable probe (when one is available) or left to the arbiter's broader read reach.`
 
 // verifierRefutationCriteria is the shared REFUTED/NOT REFUTED criteria block
 // used by both refuters and the arbiter. Extracting it prevents the criteria
@@ -284,9 +284,10 @@ var arbiterSchema = json.RawMessage(`{
     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
     "could_not_read_code": {"type": "boolean", "description": "true if you could not locate or access the cited file(s)."},
     "corrected_description": {"type": "string", "description": "When the finding SURVIVES but a panel seat correctly identified an error in the mechanism or sub-claim, emit the accurate mechanism here. Leave absent when no correction is warranted."},
-    "hallucinated_rebuttal": {"type": "boolean", "description": "true if a panel seat's rebuttal asserted the existence of code NOT present in the cited files (a fabricated 'safe' path). Do not credit hallucinated rebuttals."}
+    "hallucinated_rebuttal": {"type": "boolean", "description": "true if a panel seat's rebuttal asserted the existence of code NOT present in the cited files (a fabricated 'safe' path). Do not credit hallucinated rebuttals."},
+    "evidence": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "description": "REQUIRED. The concrete file:line (or dep-source path:line) citations you PERSONALLY confirmed with your own tool calls in THIS run, e.g. ['src/foo.cc:42', 'GOROOT/src/encoding/json/decode.go:118']. The structured record of the decisive evidence you grounded; an arbiter verdict that cites nothing it verified is not acceptable."}
   },
-  "required": ["refuted", "reasoning", "confidence"],
+  "required": ["refuted", "reasoning", "confidence", "evidence"],
   "additionalProperties": false
 }`)
 
@@ -300,6 +301,12 @@ type refutation struct {
 	CouldNotReadCode     bool   `json:"could_not_read_code"`
 	CorrectedDescription string `json:"corrected_description"`
 	HallucinatedRebuttal bool   `json:"hallucinated_rebuttal"`
+	// Evidence is the arbiter's structured list of file:line / dep-source
+	// citations it PERSONALLY confirmed with its own tool calls (arbiterSchema
+	// REQUIRED field; refuters' refutationSchema omits it, so it stays nil for a
+	// refuter). Surfaced in the verification trace so a human triaging the
+	// finding sees exactly what the arbiter grounded (bugbot-mi5.17 AC2).
+	Evidence []string `json:"evidence,omitempty"`
 	// NoVerdict marks a seat that produced NO genuine verdict: the refuter run
 	// failed at the infrastructure level (transport/provider error — zero
 	// tokens) or its output could not be parsed even after one repair
@@ -380,7 +387,7 @@ Unlike the refuters, you have BROADER READ REACH: in addition to the repository,
 ` + verifierRefutationCriteria + `
 
 ARBITER ADDITIONAL RULES:
-1. ACTIVE GROUNDING. The split exists because the panel disagreed. You DO NOT just pick a side; you DRIVE the split to ground. Read the cited code, trace the actual call path the report depends on, and identify the SPECIFIC claim that decides the verdict (e.g. "operator>> throws on parse error" or "every caller passes make_shared/never-null"). Issue follow-up tool calls (read_file, read_symbol, find_references, outline, git_blame, sandbox_exec when available) to gather the evidence. You may need several turns — that is the design.
+1. ACTIVE GROUNDING. The split exists because the panel disagreed. You DO NOT just pick a side; you DRIVE the split to ground. Read the cited code, trace the actual call path the report depends on, and identify the SPECIFIC claim that decides the verdict (e.g. "operator>> throws on parse error" or "every caller passes make_shared/never-null"). Issue follow-up tool calls (read_file, read_symbol, find_references, outline, git_blame, and an executable probe when one is available) to gather the evidence. You may need several turns — that is the design.
 2. MANDATORY VERIFY-THE-DECISIVE-CLAIM. Before you vote, the single claim that determines the outcome must be backed by evidence YOU confirmed with a tool call in this run, not just an argument you read. Cite the concrete evidence in your reasoning as ` + "`file:line`" + ` (or ` + "`dep-source path:line`" + ` for an external dep). An "I read both sides and the dissent feels right" verdict is NOT acceptable — the bugbot-mi5.17 split failures were all grounding failures, not argument failures.
 3. MECHANISM CORRECTION: If the finding SURVIVES (refuted=false) but a panel seat correctly identified an error in the described mechanism or sub-claim, emit corrected_description with the accurate mechanism. The published bug report will use your corrected_description instead of the finder's. Leave corrected_description absent when no correction is needed or when you refute the finding.
 4. HALLUCINATED REBUTTAL: If a seat's rebuttal asserts the existence of code that is NOT actually present in the cited files (a fabricated 'safe' guard, function, or check), set hallucinated_rebuttal=true and do NOT credit that seat's rebuttal in your decision.

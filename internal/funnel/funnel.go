@@ -163,6 +163,23 @@ const (
 	// via budgets.finder_token_claim / budgets.verifier_token_claim.
 	DefaultTokenClaim int64 = 1_000_000
 
+	// DefaultArbiterTokenClaim is the per-task token claim for the
+	// arbiter, which runs only on split verdicts and does materially more
+	// work per run than a single refuter (bugbot-mi5.17). It is
+	// deliberately ~5x the default refuter claim so a single arbiter
+	// run can drive the split to ground without being clipped to a
+	// refuter's per-run budget. Splits are rare (a handful per few
+	// hundred findings), so the higher per-task cap is acceptable.
+	DefaultArbiterTokenClaim int64 = 5_000_000
+
+	// DefaultArbiterMaxIterations is the agent-loop iteration cap for an
+	// arbiter run. The arbiter is AGENTIC: it issues follow-up tool calls
+	// to ground the decisive claim before voting, so the loop must allow
+	// several rounds. 50 covers realistic grounding without making a
+	// single stuck arbiter run away with the budget. Overridable through
+	// StageLimits.ArbiterLimits.MaxIterations.
+	DefaultArbiterMaxIterations = 50
+
 	// DefaultCartographerMaxFiles bounds the number of member files in a
 	// package fed to the cartographer's per-package summary completion. The
 	// summary is cached by content fingerprint and regenerated only when the
@@ -170,10 +187,6 @@ const (
 	// package once; 64 covers all but the largest packages in full.
 	DefaultCartographerMaxFiles = 64
 	// DefaultCartographerHeadLines caps the lines read from each member file
-	// when building a package's summary input. The head carries the
-	// highest-signal material (package doc, imports, exported declarations),
-	// but a good summary often needs the bodies too, so the cap is generous;
-	// 400 covers most Go files in full.
 	DefaultCartographerHeadLines = 400
 	// DefaultCartographerInputBytes caps the total bytes of member-file
 	// content fed to a single summary completion — the hard ceiling that
@@ -304,6 +317,13 @@ type BudgetConfig struct {
 	// full remainder). Ignored when TokenBudget is unlimited.
 	FinderTokenClaim   int64
 	VerifierTokenClaim int64
+	// ArbiterTokenClaim is the per-task token claim for the split-verdict
+	// arbiter. Zero resolves to DefaultArbiterTokenClaim (~5x VerifierTokenClaim)
+	// so the arbiter can drive a split to ground without being clipped to a
+	// refuter's per-run budget; splits are rare so the higher cap is marginal
+	// (bugbot-mi5.17). A negative value removes the per-task cap. Ignored when
+	// TokenBudget is unlimited.
+	ArbiterTokenClaim int64
 }
 
 // resolve fills in BudgetConfig defaults.
@@ -319,6 +339,9 @@ func (b BudgetConfig) resolve() BudgetConfig {
 	}
 	if b.VerifierTokenClaim == 0 {
 		b.VerifierTokenClaim = DefaultTokenClaim
+	}
+	if b.ArbiterTokenClaim == 0 {
+		b.ArbiterTokenClaim = DefaultArbiterTokenClaim
 	}
 	return b
 }
@@ -338,6 +361,15 @@ type StageLimits struct {
 	// FinderLimits / VerifierLimits bound each individual agent run.
 	FinderLimits   agent.Limits
 	VerifierLimits agent.Limits
+	// ArbiterLimits bounds each individual arbiter run. The arbiter is
+	// invoked only on split verdicts (bugbot-mi5.17); its task is
+	// strictly harder than a refuter's, so the default gives it
+	// materially more MaxIterations and a higher per-run token budget
+	// than VerifierLimits. Zero fields defer to the per-stage default
+	// ([DefaultArbiterLimits]); a negative value disables that cap. A
+	// fully-zero ArbiterLimits is the safe opt-in: the arbiter always
+	// runs with a budget, never unbounded by default.
+	ArbiterLimits agent.Limits
 	// FinderHistoryTokens controls opt-in finder history compaction (OFF by
 	// default — see DefaultFinderHistoryTokens). Zero and negative leave it
 	// disabled. A positive value opts in at that token threshold.
@@ -368,6 +400,15 @@ func (l StageLimits) resolve() StageLimits {
 		l.FinderLimits.HistoryTokenBudget = l.FinderHistoryTokens
 	} else {
 		l.FinderLimits.HistoryTokenBudget = 0
+	}
+	// The arbiter is agentic and needs more model turns than a refuter to drive
+	// a split to ground, so a zero MaxIterations resolves to the larger
+	// DefaultArbiterMaxIterations here (the runner would otherwise apply the
+	// 20-turn refuter default). A negative value is preserved (cap disabled).
+	// The per-run token allowance is governed by arbiterClaim in
+	// arbiterRunnerLimits, so ArbiterLimits.TokenBudget is left untouched.
+	if l.ArbiterLimits.MaxIterations == 0 {
+		l.ArbiterLimits.MaxIterations = DefaultArbiterMaxIterations
 	}
 	return l
 }
@@ -486,6 +527,13 @@ type Funnel struct {
 	deps            sandbox.Resolution
 	depPrefetchOnce sync.Once
 	depPrefetchErr  error
+
+	// depRoots is the read-only dep-source root set (GOROOT/src + Go module
+	// cache) captured once at New. It backs the arbiter's broader read_file
+	// reach so a split arbiter can read the source of a cited stdlib/third-party
+	// symbol; refuters stay repo-rooted (bugbot-mi5.17/.18). Empty on a host
+	// without the relevant toolchain — the arbiter then behaves as before.
+	depRoots *agent.DepSourceRoots
 }
 
 // New constructs a Funnel. clients supplies the finder/verifier LLM clients,
@@ -529,13 +577,14 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 	}
 
 	f := &Funnel{
-		clients: clients,
-		store:   st,
-		repo:    repo,
-		opts:    resolved,
-		lenses:  selectLenses(resolved.Discovery.Lenses),
-		deps:    deps,
-		slots:   newSlotPool(resolved.Limits.MaxParallel),
+		clients:  clients,
+		store:    st,
+		repo:     repo,
+		opts:     resolved,
+		lenses:   selectLenses(resolved.Discovery.Lenses),
+		deps:     deps,
+		depRoots: agent.NewDepSourceRoots(),
+		slots:    newSlotPool(resolved.Limits.MaxParallel),
 	}
 	if resolved.CodeNav != nil {
 		// Daemon-injected: borrow, never own.
@@ -721,6 +770,14 @@ type Stats struct {
 	// ArbiterFailures is the number of arbiter agents that produced no parseable
 	// verdict; on failure the run falls back to majorityRefuted.
 	ArbiterFailures int `json:"arbiter_failures,omitempty"`
+	// ArbiterTokens is the total input+output tokens spent by arbiter runs (a
+	// subset of InputTokens+OutputTokens); ArbiterBudgetStops counts arbiter
+	// runs cut short by a budget stop (their own per-run claim or the shared
+	// pool). Together they make the arbiter's cost and starvation rate
+	// observable, so a too-small ArbiterTokenClaim surfaces as a high stop rate
+	// (bugbot-mi5.17 AC6).
+	ArbiterTokens      int64 `json:"arbiter_tokens,omitempty"`
+	ArbiterBudgetStops int   `json:"arbiter_budget_stops,omitempty"`
 	// InputTokens / OutputTokens is the run's total token spend. InputTokens
 	// includes cached tokens (the llm.Usage convention).
 	InputTokens  int64 `json:"input_tokens"`
@@ -986,6 +1043,13 @@ type budgetState struct {
 	finderClaim int64
 	verifyClaim int64
 
+	// arbiterClaim is the per-task token claim for the split-verdict arbiter
+	// (Options.ArbiterTokenClaim, default DefaultArbiterTokenClaim ~5x the
+	// refuter claim). The arbiter draws from verifyPool like a refuter but is
+	// capped at this larger claim so it can drive the split to ground; see
+	// arbiterRunnerLimits (bugbot-mi5.17).
+	arbiterClaim int64
+
 	degraded atomic.Bool
 	stopped  atomic.Bool
 }
@@ -1097,6 +1161,20 @@ func (b *budgetState) verifyRunnerLimits(base agent.Limits) agent.Limits {
 		return b.runnerLimitsForPool(base, b.verifyPool, b.verifyClaim)
 	}
 	return b.runnerLimitsForPool(base, b.pool, b.verifyClaim)
+}
+
+// arbiterRunnerLimits derives the per-run limits for the split-verdict arbiter.
+// The arbiter is a verify-stage agent, so it draws from the same verifyPool as
+// the refuters, but it is capped at arbiterClaim (DefaultArbiterTokenClaim, ~5x
+// the refuter claim) rather than verifyClaim: its task is strictly harder (it
+// drives the split to ground with its own tool calls), so it gets a materially
+// larger per-run allowance. Splits are rare, so the higher per-run cap barely
+// moves total scan spend (bugbot-mi5.17).
+func (b *budgetState) arbiterRunnerLimits(base agent.Limits) agent.Limits {
+	if b.verifyPool != nil {
+		return b.runnerLimitsForPool(base, b.verifyPool, b.arbiterClaim)
+	}
+	return b.runnerLimitsForPool(base, b.pool, b.arbiterClaim)
 }
 
 // overSoft reports whether cumulative spend has crossed the soft (degradation)

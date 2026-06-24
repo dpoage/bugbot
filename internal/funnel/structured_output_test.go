@@ -321,7 +321,7 @@ func TestStructuredOutput_ArbiterCarriesArbiterSchema(t *testing.T) {
 	// 2-seat panel: first seat refutes, second does not → split.
 	// 3rd call is the arbiter, also not-refuted.
 	verifier := newScriptedSequenceClient(notRefutedJSON,
-		refutedJSON, notRefutedJSON, notRefutedJSON)
+		refutedJSON, notRefutedJSON, notRefutedArbiterJSON)
 
 	c := Candidate{Lens: "l", File: "f.go", Line: 1, Title: "split candidate"}
 	budget := &budgetState{}
