@@ -604,6 +604,11 @@ type Candidate struct {
 	Confidence  domain.Confidence
 	// Fingerprint is the store dedup key (lens+file+line+title). Set in triage.
 	Fingerprint string
+	// LocusKey is the lens-independent location identity store.LocusKey(file, locus):
+	// the Fingerprint inputs minus the lens. Set in triage alongside Fingerprint and
+	// carried onto the persisted finding, so a later same-locus, different-lens
+	// candidate can be folded in via store.OpenFindingsByLocusKey.
+	LocusKey string
 	// CorroboratingLenses lists the OTHER lenses that independently reported the
 	// same underlying defect (same file, nearby line) and were collapsed into this
 	// candidate during triage's location-based cross-lens dedup. It excludes this

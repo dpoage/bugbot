@@ -365,6 +365,7 @@ func (f *Funnel) runVerifyAndPersist(
 		Line:                c.Line,
 		CommitSHA:           commit,
 		FileHash:            fps[c.File],
+		LocusKey:            c.LocusKey,
 		CorroboratingLenses: c.CorroboratingLenses,
 		NeedsHuman:          needsHuman,
 		Sites:               allSites,
@@ -442,6 +443,7 @@ func persistOrphan(ctx context.Context, f *Funnel, c Candidate, commit string, f
 		Line:                c.Line,
 		CommitSHA:           commit,
 		FileHash:            fps[c.File],
+		LocusKey:            c.LocusKey,
 		CorroboratingLenses: c.CorroboratingLenses,
 		Sites:               candidateSitesToStore(c.Sites),
 	}

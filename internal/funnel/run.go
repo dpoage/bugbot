@@ -1000,6 +1000,7 @@ func findingToCandidate(fi store.Finding) Candidate {
 		Evidence:            fi.Reasoning,
 		Confidence:          domain.ConfidenceHigh,
 		Fingerprint:         fi.Fingerprint,
+		LocusKey:            fi.LocusKey,
 		CorroboratingLenses: fi.CorroboratingLenses,
 		Sites:               sites,
 		Reverify:            true,

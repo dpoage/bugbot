@@ -46,8 +46,15 @@ var ErrNotFound = errors.New("store: not found")
 // version through CommitSHA and FileHash so the daemon can detect when the
 // underlying code has changed and re-verification is warranted.
 type Finding struct {
-	ID            string
-	Fingerprint   string
+	ID          string
+	Fingerprint string
+	// LocusKey is the lens-independent location identity sha256(normFile, locus):
+	// the Fingerprint inputs minus the lens. It backs the durable cross-lens fold
+	// (triage's OpenFindingsByLocusKey point-lookup) so a finding persisted by a
+	// prior run can absorb a later same-locus, different-lens candidate as
+	// corroboration instead of spawning a duplicate. Persisted + indexed; empty on
+	// pre-migration rows, which simply do not participate until re-upserted.
+	LocusKey      string
 	Title         string
 	Description   string
 	Reasoning     string // the adversarial verification trace
@@ -228,6 +235,19 @@ func Fingerprint(lens, file, locus string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// LocusKey computes the lens-independent location identity: the same normalized
+// file path and caller-supplied locus anchor that Fingerprint uses, but WITHOUT
+// the lens. Two findings with the same LocusKey sit at the same enclosing-symbol
+// (or line-fallback) anchor regardless of which lens reported them; triage's
+// durable cross-lens fold keys on it. The "bugbotLocus/v1" token namespaces the
+// scheme independently of the fingerprint version.
+func LocusKey(file, locus string) string {
+	normFile := strings.ToLower(path.Clean(strings.ReplaceAll(file, "\\", "/")))
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "bugbotLocus/v1\x00%s\x00%s", normFile, locus)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // FindingFilter narrows ListFindings. Zero-valued fields are not applied.
 type FindingFilter struct {
 	Status Status // exact status match
@@ -289,13 +309,13 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				  (id, fingerprint, title, description, reasoning, verdict_detail, severity, tier,
 				   status, lens, file, line, commit_sha, file_hash, repro_path,
 				   fix_patch, needs_human,
-				   corroborating_lenses, sites, confidence, created_at, updated_at, swept_at)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				   corroborating_lenses, sites, confidence, created_at, updated_at, swept_at, locus_key)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
 				f.Tier, string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA,
 				f.FileHash, nullStr(f.ReproPath), f.FixPatch, boolInt(f.NeedsHuman),
 				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
-				f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout), nullTime(f.SweptAt),
+				f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout), nullTime(f.SweptAt), f.LocusKey,
 			); err != nil {
 				return annotateErr(s.path, "upsert_finding", err)
 			}
@@ -376,7 +396,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				  repro_path = CASE WHEN ? IS NULL THEN repro_path ELSE ? END,
 				  fix_patch=?,
 				  needs_human = CASE WHEN needs_human = 1 THEN 1 ELSE ? END,
-				  corroborating_lenses=?, sites=?, confidence=?, updated_at=?,
+				  corroborating_lenses=?, sites=?, confidence=?, updated_at=?, locus_key=?,
 				  swept_at = CASE WHEN ? = file_hash THEN swept_at ELSE NULL END
 				WHERE id=?`,
 				f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
@@ -387,7 +407,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				f.FixPatch,
 				boolInt(f.NeedsHuman),
 				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
-				f.UpdatedAt.Format(timeLayout), f.FileHash, f.ID,
+				f.UpdatedAt.Format(timeLayout), f.LocusKey, f.FileHash, f.ID,
 			); err != nil {
 				return annotateErr(s.path, "upsert_finding", err)
 			}
@@ -409,6 +429,17 @@ func (s *Store) GetFinding(ctx context.Context, id string) (Finding, error) {
 // ErrNotFound.
 func (s *Store) GetFindingByFingerprint(ctx context.Context, fingerprint string) (Finding, error) {
 	return s.queryOne(ctx, `WHERE fingerprint = ?`, fingerprint)
+}
+
+// OpenFindingsByLocusKey returns every OPEN finding sharing the lens-independent
+// locus key, via the idx_findings_locus_key index. Triage's durable cross-lens
+// fold uses it as a per-candidate point-lookup: at a single enclosing-symbol (or
+// line-fallback) anchor there are at most a handful of findings, so this is a
+// bounded indexed read, not a table scan. An empty result is not an error.
+func (s *Store) OpenFindingsByLocusKey(ctx context.Context, locusKey string) ([]Finding, error) {
+	q := findingColumns + " FROM findings WHERE locus_key = ? AND status = ? ORDER BY created_at ASC, id ASC"
+	return queryRows(ctx, s, "open_findings_by_locus_key", q, []any{locusKey, string(StatusOpen)},
+		func(r *sql.Rows) (Finding, error) { return scanFinding(r) })
 }
 
 // ListFindings returns findings matching the filter, newest-updated first.
@@ -633,7 +664,7 @@ func (s *Store) AppendFindingSites(ctx context.Context, fingerprint string, site
 const findingColumns = `SELECT id, fingerprint, title, description, reasoning, verdict_detail,
 	severity, tier, status, lens, file, line, commit_sha, file_hash, repro_path,
 	fix_patch, needs_human,
-	corroborating_lenses, sites, confidence, created_at, updated_at, swept_at`
+	corroborating_lenses, sites, confidence, created_at, updated_at, swept_at, locus_key`
 
 func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (Finding, error) {
 	var f Finding
@@ -670,7 +701,7 @@ func scanFinding(sc rowScanner) (Finding, error) {
 	if err := sc.Scan(
 		&f.ID, &f.Fingerprint, &f.Title, &f.Description, &f.Reasoning, &f.VerdictDetail,
 		&f.Severity, &f.Tier, &status, &f.Lens, &f.File, &f.Line, &f.CommitSHA,
-		&f.FileHash, &repro, &f.FixPatch, &needsHuman, &corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt, &sweptAt,
+		&f.FileHash, &repro, &f.FixPatch, &needsHuman, &corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt, &sweptAt, &f.LocusKey,
 	); err != nil {
 		return Finding{}, err
 	}
