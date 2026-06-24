@@ -166,8 +166,12 @@ func TestCheck_DetectsCorruptionAsErrCorrupt(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Corrupt a data page past the 100-byte header / page 1 (schema) so the
-	// file still opens but quick_check trips on the garbled page.
+	// Corrupt the entire back half of the file: every page there is live table or
+	// index data (a freshly built, never-deleted db has no free pages), so this
+	// reliably trips quick_check regardless of the exact page count — which shifts
+	// as the schema gains columns/indexes. The 100-byte header, page 1 (schema),
+	// and any schema overflow stay intact (they live at the front), so the file
+	// still opens and Check, not open, does the detecting.
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
@@ -176,7 +180,7 @@ func TestCheck_DetectsCorruptionAsErrCorrupt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open for corruption: %v", err)
 	}
-	garbage := make([]byte, 2048)
+	garbage := make([]byte, int(info.Size()-info.Size()/2))
 	for i := range garbage {
 		garbage[i] = 0xFF
 	}

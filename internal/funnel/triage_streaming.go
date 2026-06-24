@@ -351,6 +351,7 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 	}
 	ts.seen[fp] = true
 	c.Fingerprint = fp
+	c.LocusKey = store.LocusKey(c.File, locus)
 
 	// Step 5: incremental clustering. Membership is ANY-MEMBER: the candidate
 	// joins a cluster if it is window-near AND token-similar to any existing
@@ -412,6 +413,22 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 		}
 	}
 
+	// Step 5d: durable cross-lens fold. In-memory clustering (5/5b/5c) only sees
+	// clusters from THIS triage pass — it cannot see a primary persisted by a
+	// prior (interrupted) run, whose cluster state was lost on restart. Point-
+	// lookup the findings table by the lens-independent locus key; if an OPEN
+	// finding from a DIFFERENT lens describes the same defect (SimilarFinding:
+	// the same line window + description jaccard the in-scan merge uses), fold
+	// this candidate in as corroboration instead of forwarding a duplicate
+	// primary. Same-lens hits are left to the fingerprint upsert. Idempotent:
+	// the lens and site sets dedup, so a replay converges.
+	if folded, ferr := ts.durableCrossLensFold(ctx, st, ic, stats); ferr != nil {
+		return ferr
+	} else if folded {
+		dropPending()
+		return nil
+	}
+
 	// New cluster: this candidate is the primary. A candidate bridging two
 	// existing clusters joins the first match above; full cluster MERGING is
 	// not attempted — both primaries were already forwarded, and forwarding is
@@ -426,6 +443,50 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 	ts.ready = append(ts.ready, c)
 	ts.survivorCount++
 	return nil
+}
+
+// durableCrossLensFold absorbs candidate ic into an already-persisted OPEN
+// finding at the same lens-independent locus when a DIFFERENT lens reported the
+// same defect. It exists because in-memory clustering is rebuilt from scratch
+// each run: a primary persisted by a prior interrupted run is invisible to it,
+// so a WAL-replayed cross-lens sibling would otherwise become a second finding.
+// OpenFindingsByLocusKey is an indexed point-lookup returning the handful of
+// findings at one enclosing-symbol anchor; SimilarFinding then applies the SAME
+// same-defect predicate (the tight line window + description jaccard) as in-scan
+// step 5 — the broader root-cause layers (5b/5c) are deliberately NOT mirrored,
+// so the durable path only ever under-merges, never more aggressively. Reverify
+// candidates are excluded: they own a durable row to re-judge and must not be
+// absorbed elsewhere. Returns true when the candidate was folded (a triage
+// terminal fate). The store writes dedup, so the fold is idempotent on replay.
+func (ts *triageState) durableCrossLensFold(ctx context.Context, st *store.Store, ic indexedCand, stats *Stats) (bool, error) {
+	c := ic.c
+	if c.Reverify || c.LocusKey == "" {
+		return false, nil
+	}
+	existing, err := st.OpenFindingsByLocusKey(ctx, c.LocusKey)
+	if err != nil {
+		return false, err
+	}
+	for _, f := range existing {
+		if strings.EqualFold(f.Lens, c.Lens) {
+			// Same lens means the same fingerprint; the upsert already dedups it.
+			continue
+		}
+		if !SimilarFinding(c.File, c.Line, c.Description, f.File, f.Line, f.Description) {
+			continue
+		}
+		// The row was just read under the single-writer lock, so a non-nil error
+		// here is a genuine I/O failure, not a benign race — propagate it.
+		if err := st.AddCorroboratingLenses(ctx, f.Fingerprint, []string{c.Lens}); err != nil {
+			return false, err
+		}
+		if err := st.AppendFindingSites(ctx, f.Fingerprint, []store.Site{{File: c.File, Line: c.Line}}); err != nil {
+			return false, err
+		}
+		stats.MergedCrossLens++
+		return true, nil
+	}
+	return false, nil
 }
 
 // addClusterToBucket registers cluster under the bucket key unless already

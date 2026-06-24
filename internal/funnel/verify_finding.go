@@ -92,5 +92,6 @@ func candidateFromFinding(fnd store.Finding) Candidate {
 		Severity:    fnd.Severity,
 		Evidence:    fnd.Reasoning,
 		Fingerprint: fnd.Fingerprint,
+		LocusKey:    fnd.LocusKey, // fidelity only; this candidate is not routed through triage process()
 	}
 }
