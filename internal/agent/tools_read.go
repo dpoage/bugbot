@@ -91,7 +91,10 @@ func (t *readFileTool) Def() llm.ToolDef {
 		Description: fmt.Sprintf(
 			"Read a UTF-8 text file from the repository and return it as "+
 				"numbered lines (1-based). Use offset/limit to read a window of a large "+
-				"file. Output is capped at ~%d lines / %dKB; truncation is noted.",
+				"file. Output is capped at ~%d lines / %dKB; truncation is noted. "+
+				"For a single function/method/type, prefer read_symbol, and use outline "+
+				"to map a file before reading; reach for read_file when you need a whole "+
+				"file or non-declaration text.",
 			t.caps.MaxLines, t.caps.MaxBytes/1024),
 		Parameters: json.RawMessage(`{
   "type": "object",

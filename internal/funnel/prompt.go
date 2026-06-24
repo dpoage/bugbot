@@ -22,7 +22,21 @@ import (
 func finderSystemBase(persona string) string {
 	return `You are a meticulous ` + persona + ` auditing a real codebase for genuine, concrete bugs.
 
-You have read-only tools (read_file, list_dir, grep) plus language-server code navigation (find_definition, find_references, find_implementations, read_symbol) rooted at the repository. USE THEM. Never report a bug you have not confirmed by reading the actual code with these tools. Read the target file in full, and read the callers, callees, and definitions you need to confirm a defect is real and reachable. Prefer find_references over grep to enumerate a function's actual callers, and find_definition to see what a call actually invokes; when you only need one function/method/type body, prefer read_symbol over read_file — it returns just that declaration. If a code-navigation tool returns an ERROR (server unavailable or still indexing), fall back to grep.
+You have a toolbox rooted at the repository. Read each assigned target file in full with read_file (use outline first to navigate a large one); bugs also live in package-level vars, const/init blocks, and cross-function interplay that a single-symbol read would skip. Then trace OUTWARD to the callers, callees, and definitions you need to prove a defect is real and reachable — reach for the most precise tool first, and treat raw text search and whole-file reads of OTHER files as fallbacks, not your default. Never report a bug you have not confirmed by reading the actual code.
+
+PRIMARY — prefer these:
+- outline maps a file's top-level symbols (signatures, line ranges) so you see its structure before reading; read_symbol then returns one full declaration (function/method/type) without the rest of the file.
+- find_definition resolves what a call actually invokes; find_references enumerates a symbol's real call sites — the reliable way to check whether every caller already guards against the bug; find_implementations lists what concretely runs behind an interface. These resolve imports, shadowing, and same-named symbols correctly, which text search cannot.
+- find_usages shows the top call sites with surrounding context when you need to see HOW callers use a symbol, not just where.
+
+Also reach for, when relevant:
+- get_package_context and package_graph orient you in a package you step into — its purpose and invariants, and who imports or is imported by it — without reading file after file.
+- git_blame and git_log show when and why a suspicious section last changed; recently introduced or churning code is higher-risk.
+- post_lead hands a suspicion that belongs to another lens's focus area off to that lens.
+
+FALLBACK — only when a primary tool cannot answer:
+- grep for free-text or non-symbol patterns, or when a code-navigation tool returns an ERROR (language server unavailable or still indexing).
+- read_file for another whole file you genuinely need; for a single declaration prefer read_symbol. list_dir to discover paths.
 
 Report ONLY concrete, confirmed bugs:
 - A bug is a way the code can produce wrong behavior, crash, corrupt data, leak resources, or violate a contract — on a code path that can actually execute.
@@ -190,7 +204,16 @@ func finderTask(files []string, leads []store.Lead, repoContext string) string {
 // verifierToolParagraph is the shared tool-usage paragraph for all verifier-side
 // agents (refuters and the arbiter). Keeping it in one place ensures they never
 // drift: any change here applies to both.
-const verifierToolParagraph = `You have read-only tools (read_file, list_dir, grep) plus language-server code navigation (find_definition, find_references, find_implementations, read_symbol) rooted at the repository. USE THEM to read the actual code the report points at, plus its callers and callees. When checking whether callers already guard against the claimed bug (nil checks, bounds checks, prior validation), prefer find_references on the implicated function or symbol: it enumerates the real call sites exactly, where grep misses qualified or aliased calls and matches unrelated identifiers. Use find_definition to confirm what a call resolves to, find_implementations to find what concretely runs behind an interface, and read_symbol to pull a single function/method/type body without reading the whole file. If a code-navigation tool returns an ERROR (server unavailable or still indexing), fall back to grep.`
+const verifierToolParagraph = `You have a toolbox rooted at the repository. Read the actual code the report points at, plus its callers and callees, before you rule on it. Reach for the most precise tool first; raw text search and whole-file reads are fallbacks, not your default.
+
+PRIMARY — prefer these:
+- find_references enumerates a symbol's real call sites: the reliable way to check whether callers already guard against the claimed bug (nil checks, bounds checks, prior validation), where text search misses qualified or aliased calls and matches unrelated identifiers. find_definition confirms what a call resolves to; find_implementations finds what concretely runs behind an interface. These resolve imports, shadowing, and same-named symbols correctly.
+- outline maps a file's structure; read_symbol pulls a single function/method/type body without reading the whole file; find_usages shows call sites with surrounding context.
+- git_blame and git_log show when and why the implicated code last changed.
+
+FALLBACK — only when a primary tool cannot answer:
+- grep for free-text or non-symbol patterns, or when a code-navigation tool returns an ERROR (server unavailable or still indexing).
+- read_file for a whole file you need; list_dir to discover paths.`
 
 // verifierRefutationCriteria is the shared REFUTED/NOT REFUTED criteria block
 // used by both refuters and the arbiter. Extracting it prevents the criteria
