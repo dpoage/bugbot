@@ -83,7 +83,7 @@ func TestVerifierPrompts_StdlibSourceDirective(t *testing.T) {
 		{"reads actual source", "reading the actual source"},
 		{"GOROOT available", "GOROOT"},
 		{"not from memory", "NEVER assert it from memory"},
-		{"cite what was read", "cite what you read or ran"},
+		{"cite what was read", "cite what you read"},
 		{"unverified claim rejected", "An unverified stdlib/runtime/library claim is not acceptable refutation evidence"},
 	}
 
@@ -93,6 +93,7 @@ func TestVerifierPrompts_StdlibSourceDirective(t *testing.T) {
 	}{
 		{"verifierSystemPrompt(no sandbox)", verifierSystemPrompt(persona, false)},
 		{"verifierSystemPrompt(sandbox)", verifierSystemPrompt(persona, true)},
+		{"arbiterSystemPrompt(no sandbox)", arbiterSystemPrompt(persona, false)},
 		{"arbiterSystemPrompt(sandbox)", arbiterSystemPrompt(persona, true)},
 	}
 
@@ -102,5 +103,38 @@ func TestVerifierPrompts_StdlibSourceDirective(t *testing.T) {
 				t.Errorf("%s: missing stdlib directive substring %q", pp.name, c.substr)
 			}
 		}
+	}
+}
+
+// TestArbiterPrompt_NoSandbox_ForbidsProbeFabrication pins bugbot-mi5.20 AC1/AC2:
+// when NO command-execution tool is wired, the arbiter prompt must not invite the
+// model to run a command/probe (the pressure that produced a fabricated executed
+// probe in the controller live replay) and must explicitly forbid claiming an
+// un-run execution. With a sandbox, the probe guidance returns.
+func TestArbiterPrompt_NoSandbox_ForbidsProbeFabrication(t *testing.T) {
+	const persona = "senior C++ engineer"
+	noSandbox := arbiterSystemPrompt(persona, false)
+	withSandbox := arbiterSystemPrompt(persona, true)
+
+	// No execution-inviting wording when the arbiter has no exec tool.
+	forbidden := []string{"executable probe", "running a probe", "run a probe", "consult a probe", "observed output", "sandbox_exec"}
+	for _, f := range forbidden {
+		if strings.Contains(noSandbox, f) {
+			t.Errorf("no-sandbox arbiter prompt must not invite/advertise execution; found %q", f)
+		}
+	}
+	// Explicit prohibition present.
+	if !strings.Contains(noSandbox, "never invent an execution result") {
+		t.Error("no-sandbox arbiter prompt must explicitly forbid inventing an execution result")
+	}
+	if !strings.Contains(noSandbox, "Do NOT claim to have executed anything") {
+		t.Error("no-sandbox arbiter prompt must forbid claiming to have executed anything")
+	}
+	// With a sandbox, probe/execution guidance returns.
+	if !strings.Contains(withSandbox, "sandbox_exec") {
+		t.Error("with-sandbox arbiter prompt must advertise sandbox_exec")
+	}
+	if strings.Contains(withSandbox, "never invent an execution result") {
+		t.Error("with-sandbox arbiter prompt must not carry the no-exec prohibition")
 	}
 }
