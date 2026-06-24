@@ -43,7 +43,7 @@ func (s *Store) AddLead(ctx context.Context, l Lead) error {
 	if l.CreatedAt.IsZero() {
 		l.CreatedAt = nowUTC()
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.exec(ctx, "add_lead", `
 		INSERT INTO leads (id, scan_run_id, poster_lens, target_lens, file, line, note, confidence, status, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'posted', ?)
 		ON CONFLICT(target_lens, file, line) DO UPDATE SET
@@ -55,7 +55,7 @@ func (s *Store) AddLead(ctx context.Context, l Lead) error {
 		l.CreatedAt.Format(timeLayout),
 	)
 	if err != nil {
-		return annotateErr(s.path, "add_lead", err)
+		return err
 	}
 	return nil
 }
@@ -63,18 +63,13 @@ func (s *Store) AddLead(ctx context.Context, l Lead) error {
 // PendingLeads returns all pending leads for the given target lens, ordered
 // by confidence DESC, then created_at ASC, then id ASC for determinism.
 func (s *Store) PendingLeads(ctx context.Context, targetLens string) ([]Lead, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return queryRows(ctx, s, "pending_leads", `
 		SELECT id, scan_run_id, poster_lens, target_lens, file, line, note, confidence, created_at
 		FROM leads
 		WHERE target_lens = ?
 		ORDER BY confidence DESC, created_at ASC, id ASC`,
-		targetLens,
+		[]any{targetLens}, scanLead,
 	)
-	if err != nil {
-		return nil, annotateErr(s.path, "pending_leads", err)
-	}
-	defer func() { _ = rows.Close() }()
-	return scanRows(rows, scanLead)
 }
 
 // ConsumeLeads deletes the given lead IDs in a single transaction. The
@@ -124,13 +119,10 @@ func scanLead(rows *sql.Rows) (Lead, error) {
 // ListLeads returns the blackboard, newest-first (created_at DESC, id DESC for
 // determinism). Every row in the table is pending, so no filter is needed.
 func (s *Store) ListLeads(ctx context.Context) ([]Lead, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return queryRows(ctx, s, "list_leads", `
 		SELECT id, scan_run_id, poster_lens, target_lens, file, line, note, confidence, created_at
 		FROM leads
-		ORDER BY created_at DESC, id DESC`)
-	if err != nil {
-		return nil, annotateErr(s.path, "list_leads", err)
-	}
-	defer func() { _ = rows.Close() }()
-	return scanRows(rows, scanLead)
+		ORDER BY created_at DESC, id DESC`,
+		nil, scanLead,
+	)
 }

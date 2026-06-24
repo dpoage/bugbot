@@ -442,14 +442,7 @@ func (s *Store) ListFindings(ctx context.Context, filter FindingFilter) ([]Findi
 	}
 	q += " ORDER BY updated_at DESC, id ASC"
 
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, annotateErr(s.path, "list_findings", err)
-	}
-	defer func() { _ = rows.Close() }()
-	// scanFinding takes a rowScanner (works for both *sql.Row and *sql.Rows).
-	// The closure adapts it to scanRows' *sql.Rows signature.
-	return scanRows(rows, func(r *sql.Rows) (Finding, error) { return scanFinding(r) })
+	return queryRows(ctx, s, "list_findings", q, args, func(r *sql.Rows) (Finding, error) { return scanFinding(r) })
 }
 
 // UpdateStatus sets the status of the finding with the given fingerprint. When
@@ -575,14 +568,9 @@ func (s *Store) UpdateFindingSeverity(ctx context.Context, id string, sev domain
 // impact-sweep pass: it drives SweepDrain and ensures rotation parity with
 // OpenBacklog (deferred items have their updated_at bumped and move to the back).
 func (s *Store) UnsweptOpenFindings(ctx context.Context) ([]Finding, error) {
-	rows, err := s.db.QueryContext(ctx,
+	return queryRows(ctx, s, "unswept_open_findings",
 		findingColumns+" FROM findings WHERE status = 'open' AND swept_at IS NULL ORDER BY updated_at ASC, id ASC",
-	)
-	if err != nil {
-		return nil, annotateErr(s.path, "unswept_open_findings", err)
-	}
-	defer func() { _ = rows.Close() }()
-	return scanRows(rows, func(r *sql.Rows) (Finding, error) { return scanFinding(r) })
+		nil, func(r *sql.Rows) (Finding, error) { return scanFinding(r) })
 }
 
 // AppendFindingSites appends sites to the sites column of the finding identified
@@ -648,13 +636,17 @@ const findingColumns = `SELECT id, fingerprint, title, description, reasoning, v
 	corroborating_lenses, sites, confidence, created_at, updated_at, swept_at`
 
 func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (Finding, error) {
-	row := s.db.QueryRowContext(ctx, findingColumns+" FROM findings "+whereClause, args...)
-	f, err := scanFinding(row)
+	var f Finding
+	err := s.queryRow(ctx, "query_finding", findingColumns+" FROM findings "+whereClause, args, func(row *sql.Row) error {
+		var e error
+		f, e = scanFinding(row)
+		return e
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Finding{}, ErrNotFound
 	}
 	if err != nil {
-		return Finding{}, annotateErr(s.path, "query_finding", err)
+		return Finding{}, err
 	}
 	return f, nil
 }
@@ -739,33 +731,36 @@ type FindingTallies struct {
 // status world-state block.
 func (s *Store) CountFindings(ctx context.Context) (FindingTallies, error) {
 	t := FindingTallies{OpenByTier: map[int]int{}}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT status, tier, COUNT(*), COALESCE(SUM(needs_human), 0)
-		FROM findings GROUP BY status, tier`)
-	if err != nil {
-		return FindingTallies{}, annotateErr(s.path, "count_findings", err)
+	type tally struct {
+		status         string
+		tier, n, needs int
 	}
-	defer func() { _ = rows.Close() }()
-	_, err = scanRows(rows, func(r *sql.Rows) (struct{}, error) {
-		var status string
-		var tier, n, needs int
-		if err := r.Scan(&status, &tier, &n, &needs); err != nil {
-			return struct{}{}, err
+	rows, err := queryRows(ctx, s, "count_findings", `
+		SELECT status, tier, COUNT(*), COALESCE(SUM(needs_human), 0)
+		FROM findings GROUP BY status, tier`, nil, func(r *sql.Rows) (tally, error) {
+		var v tally
+		if err := r.Scan(&v.status, &v.tier, &v.n, &v.needs); err != nil {
+			return tally{}, err
 		}
-		switch Status(status) {
+		return v, nil
+	})
+	if err != nil {
+		return FindingTallies{}, err
+	}
+	for _, v := range rows {
+		switch Status(v.status) {
 		case StatusOpen:
-			t.OpenByTier[tier] += n
-			t.NeedsHuman += needs
+			t.OpenByTier[v.tier] += v.n
+			t.NeedsHuman += v.needs
 		case StatusFixed:
-			t.Fixed += n
+			t.Fixed += v.n
 		case StatusDismissed:
-			t.Dismissed += n
+			t.Dismissed += v.n
 		default:
 			// StatusSuperseded (and any future states) intentionally omitted
 			// from the pane: nothing writes superseded today, and the tallies
 			// show actionable lifecycle states only.
 		}
-		return struct{}{}, nil
-	})
-	return t, err
+	}
+	return t, nil
 }

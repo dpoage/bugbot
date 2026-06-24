@@ -76,14 +76,7 @@ func (s *Store) RunMetrics(ctx context.Context, limit int) ([]RunMetric, error) 
 		q += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, annotateErr(s.path, "run_metrics", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []RunMetric
-	for rows.Next() {
+	return queryRows(ctx, s, "run_metrics", q, args, func(rows *sql.Rows) (RunMetric, error) {
 		var (
 			m             RunMetric
 			kind, started string
@@ -91,15 +84,16 @@ func (s *Store) RunMetrics(ctx context.Context, limit int) ([]RunMetric, error) 
 			statsJSON     string
 		)
 		if err := rows.Scan(&m.ScanRunID, &kind, &m.CommitSHA, &started, &finished, &statsJSON); err != nil {
-			return nil, annotateErr(s.path, "run_metrics", err)
+			return RunMetric{}, err
 		}
 		m.Kind = ScanKind(kind)
+		var err error
 		if m.StartedAt, err = parseTime(started); err != nil {
-			return nil, err
+			return RunMetric{}, err
 		}
 		if finished.Valid {
 			if m.FinishedAt, err = parseTime(finished.String); err != nil {
-				return nil, err
+				return RunMetric{}, err
 			}
 		}
 		if statsJSON != "" {
@@ -116,10 +110,6 @@ func (s *Store) RunMetrics(ctx context.Context, limit int) ([]RunMetric, error) 
 				m.CartographerEnabled = p.CartographerEnabled
 			}
 		}
-		out = append(out, m)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, annotateErr(s.path, "run_metrics", err)
-	}
-	return out, nil
+		return m, nil
+	})
 }

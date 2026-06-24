@@ -28,7 +28,7 @@ func newMetricsCmd() *cobra.Command {
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			_, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
+			_, st, err := cmdOpenStoreReadOnly(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}

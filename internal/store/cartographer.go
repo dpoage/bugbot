@@ -58,9 +58,9 @@ func (s *Store) getPackageSummariesChunk(ctx context.Context, pkgs []string, out
 	for i, p := range pkgs {
 		args[i] = p
 	}
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := s.query(ctx, "get_package_summaries", q, args...)
 	if err != nil {
-		return annotateErr(s.path, "get_package_summaries", err)
+		return err
 	}
 	defer func() { _ = rows.Close() }()
 	// Chunk-accumulation into a shared out map: scanRows returns a fresh slice
@@ -142,23 +142,19 @@ func (s *Store) UpsertPackageSummaries(ctx context.Context, sums []PackageSummar
 // ORDER BY pkg is the unique primary key, so the ordering is already total
 // and deterministic without a rowid tiebreak.
 func (s *Store) ListPackageSummaries(ctx context.Context) ([]PackageSummary, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return queryRows(ctx, s, "list_package_summaries", `
 		SELECT pkg, fingerprint, summary, model, updated_at
-		FROM package_summaries ORDER BY pkg`)
-	if err != nil {
-		return nil, annotateErr(s.path, "list_package_summaries", err)
-	}
-	defer func() { _ = rows.Close() }()
-	return scanRows(rows, func(r *sql.Rows) (PackageSummary, error) {
-		var ps PackageSummary
-		var updatedAt string
-		if err := r.Scan(&ps.Pkg, &ps.Fingerprint, &ps.Summary, &ps.Model, &updatedAt); err != nil {
-			return PackageSummary{}, err
-		}
-		var err error
-		if ps.UpdatedAt, err = parseTime(updatedAt); err != nil {
-			return PackageSummary{}, err
-		}
-		return ps, nil
-	})
+		FROM package_summaries ORDER BY pkg`, nil,
+		func(r *sql.Rows) (PackageSummary, error) {
+			var ps PackageSummary
+			var updatedAt string
+			if err := r.Scan(&ps.Pkg, &ps.Fingerprint, &ps.Summary, &ps.Model, &updatedAt); err != nil {
+				return PackageSummary{}, err
+			}
+			var err error
+			if ps.UpdatedAt, err = parseTime(updatedAt); err != nil {
+				return PackageSummary{}, err
+			}
+			return ps, nil
+		})
 }

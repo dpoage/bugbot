@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -43,13 +44,18 @@ func (s *Store) AddSuppression(ctx context.Context, fingerprint, reason string) 
 // this to skip candidates the maintainers have already rejected.
 func (s *Store) IsSuppressed(ctx context.Context, fingerprint string) (bool, error) {
 	var one int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT 1 FROM suppressions WHERE fingerprint = ?`, fingerprint).Scan(&one)
-	if err == sql.ErrNoRows {
+	err := s.queryRow(ctx, "is_suppressed",
+		`SELECT 1 FROM suppressions WHERE fingerprint = ?`,
+		[]any{fingerprint},
+		func(row *sql.Row) error {
+			return row.Scan(&one)
+		},
+	)
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
-		return false, annotateErr(s.path, "is_suppressed", err)
+		return false, err
 	}
 	return true, nil
 }
@@ -60,23 +66,21 @@ func (s *Store) IsSuppressed(ctx context.Context, fingerprint string) (bool, err
 // order across runs. Without the tiebreak, two calls could legitimately
 // return tied rows in different orders on different drivers/versions.
 func (s *Store) ListSuppressions(ctx context.Context) ([]Suppression, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT fingerprint, reason, created_at FROM suppressions ORDER BY created_at DESC, rowid DESC`)
-	if err != nil {
-		return nil, annotateErr(s.path, "list_suppressions", err)
-	}
-	defer func() { _ = rows.Close() }()
-	return scanRows(rows, func(r *sql.Rows) (Suppression, error) {
-		var sp Suppression
-		var created string
-		if err := r.Scan(&sp.Fingerprint, &sp.Reason, &created); err != nil {
-			return Suppression{}, err
-		}
-		if sp.CreatedAt, err = parseTime(created); err != nil {
-			return Suppression{}, err
-		}
-		return sp, nil
-	})
+	return queryRows(ctx, s, "list_suppressions",
+		`SELECT fingerprint, reason, created_at FROM suppressions ORDER BY created_at DESC, rowid DESC`,
+		nil,
+		func(r *sql.Rows) (Suppression, error) {
+			var sp Suppression
+			var created string
+			if err := r.Scan(&sp.Fingerprint, &sp.Reason, &created); err != nil {
+				return Suppression{}, err
+			}
+			var perr error
+			if sp.CreatedAt, perr = parseTime(created); perr != nil {
+				return Suppression{}, perr
+			}
+			return sp, nil
+		})
 }
 
 // addSuppressionTx upserts a suppression within an existing transaction. On

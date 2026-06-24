@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"time"
 )
 
@@ -66,7 +67,7 @@ func (s *Store) RecordSpend(ctx context.Context, sp Spend) (string, error) {
 	if ts.IsZero() {
 		ts = nowUTC()
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.exec(ctx, "record_spend", `
 		INSERT INTO spend
 		  (id, ts, scan_run_id, role, provider, model, input_tokens, output_tokens,
 		   cache_read_tokens, cache_creation_tokens)
@@ -76,7 +77,7 @@ func (s *Store) RecordSpend(ctx context.Context, sp Spend) (string, error) {
 		sp.CacheReadTokens, sp.CacheCreationTokens,
 	)
 	if err != nil {
-		return "", annotateErr(s.path, "record_spend", err)
+		return "", err
 	}
 	return sp.ID, nil
 }
@@ -85,13 +86,16 @@ func (s *Store) RecordSpend(ctx context.Context, sp Spend) (string, error) {
 // (pass the start of the current day) and any other time-windowed rollup.
 func (s *Store) TotalsSince(ctx context.Context, t time.Time) (SpendTotals, error) {
 	var tot SpendTotals
-	err := s.db.QueryRowContext(ctx, `
+	err := s.queryRow(ctx, "totals_since", `
 		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
 		       COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_creation_tokens), 0)
-		FROM spend WHERE ts >= ?`, t.UTC().Format(timeLayout),
-	).Scan(&tot.InputTokens, &tot.OutputTokens, &tot.CacheReadTokens, &tot.CacheCreationTokens)
+		FROM spend WHERE ts >= ?`, []any{t.UTC().Format(timeLayout)},
+		func(row *sql.Row) error {
+			return row.Scan(&tot.InputTokens, &tot.OutputTokens, &tot.CacheReadTokens, &tot.CacheCreationTokens)
+		},
+	)
 	if err != nil {
-		return SpendTotals{}, annotateErr(s.path, "totals_since", err)
+		return SpendTotals{}, err
 	}
 	return tot, nil
 }
@@ -100,13 +104,16 @@ func (s *Store) TotalsSince(ctx context.Context, t time.Time) (SpendTotals, erro
 // per-cycle budget checks, where one investigation cycle maps to one scan run.
 func (s *Store) TotalsForScanRun(ctx context.Context, scanRunID string) (SpendTotals, error) {
 	var tot SpendTotals
-	err := s.db.QueryRowContext(ctx, `
+	err := s.queryRow(ctx, "totals_for_scan_run", `
 		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
 		       COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_creation_tokens), 0)
-		FROM spend WHERE scan_run_id = ?`, scanRunID,
-	).Scan(&tot.InputTokens, &tot.OutputTokens, &tot.CacheReadTokens, &tot.CacheCreationTokens)
+		FROM spend WHERE scan_run_id = ?`, []any{scanRunID},
+		func(row *sql.Row) error {
+			return row.Scan(&tot.InputTokens, &tot.OutputTokens, &tot.CacheReadTokens, &tot.CacheCreationTokens)
+		},
+	)
 	if err != nil {
-		return SpendTotals{}, annotateErr(s.path, "totals_for_scan_run", err)
+		return SpendTotals{}, err
 	}
 	return tot, nil
 }

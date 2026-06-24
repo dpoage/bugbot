@@ -216,6 +216,16 @@ Open findings whose implicated code changes are automatically re-verified, and
 fixed bugs are auto-closed. State lives in an embedded SQLite database — no
 external services.
 
+The state database is single-writer: each writing command (`scan`, `daemon`,
+`review`, `repro`, `publish`, and `report dismiss`) takes an exclusive
+cross-process lock on it, so a second writer refuses rather than racing —
+concurrent writers were the cause of on-disk page corruption. Read-only
+commands (`report list`/`show`/`emit`/`units`, plus `leads`, `metrics`,
+`export`, `status`) run fine alongside a writer. The daemon runs a `PRAGMA
+quick_check` at the start of every cycle; `bugbot doctor` reports integrity, and
+`bugbot doctor --repair` (run with no writer active) backs up a corrupt database
+and rebuilds it, salvaging readable rows.
+
 ## Development
 
 ```sh

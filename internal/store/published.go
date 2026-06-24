@@ -41,7 +41,7 @@ type PublishedIssue struct {
 // records the new number without losing the original creation timestamp.
 func (s *Store) UpsertPublishedIssue(ctx context.Context, fingerprint string, issueNumber int, state IssueState) error {
 	now := nowUTC().Format(timeLayout)
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.exec(ctx, "upsert_published_issue", `
 		INSERT INTO published_issues (fingerprint, issue_number, state, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(fingerprint) DO UPDATE SET
@@ -51,7 +51,7 @@ func (s *Store) UpsertPublishedIssue(ctx context.Context, fingerprint string, is
 		fingerprint, issueNumber, string(state), now, now,
 	)
 	if err != nil {
-		return annotateErr(s.path, "upsert_published_issue", err)
+		return err
 	}
 	return nil
 }
@@ -65,12 +65,12 @@ func (s *Store) UpsertPublishedIssue(ctx context.Context, fingerprint string, is
 // check. Returns nil even when no row was deleted, mirroring the pattern
 // used by other delete methods in this package.
 func (s *Store) DeletePublishedIssue(ctx context.Context, fingerprint string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx, "delete_published_issue",
 		`DELETE FROM published_issues WHERE fingerprint = ?`,
 		fingerprint,
 	)
 	if err != nil {
-		return annotateErr(s.path, "delete_published_issue", err)
+		return err
 	}
 	return nil
 }
@@ -81,16 +81,20 @@ func (s *Store) GetPublishedIssue(ctx context.Context, fingerprint string) (Publ
 	var pi PublishedIssue
 	var state string
 	var createdAt, updatedAt string
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx, "get_published_issue",
 		`SELECT fingerprint, issue_number, state, created_at, updated_at
 		   FROM published_issues
-		  WHERE fingerprint = ?`, fingerprint,
-	).Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt)
+		  WHERE fingerprint = ?`,
+		[]any{fingerprint},
+		func(row *sql.Row) error {
+			return row.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt)
+		},
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PublishedIssue{}, ErrNotFound
 	}
 	if err != nil {
-		return PublishedIssue{}, annotateErr(s.path, "get_published_issue", err)
+		return PublishedIssue{}, err
 	}
 	pi.State = IssueState(state)
 	var perr error
@@ -110,40 +114,37 @@ func (s *Store) GetPublishedIssue(ctx context.Context, fingerprint string) (Publ
 // theoretically inactive; the column reference costs nothing and keeps
 // the contract honest if a later migration ever changes the uniqueness.
 func (s *Store) ListPublishedIssues(ctx context.Context) ([]PublishedIssue, error) {
-	rows, err := s.db.QueryContext(ctx,
+	return queryRows(ctx, s, "list_published_issues",
 		`SELECT fingerprint, issue_number, state, created_at, updated_at
 		   FROM published_issues
 		  ORDER BY fingerprint ASC, rowid ASC`,
-	)
-	if err != nil {
-		return nil, annotateErr(s.path, "list_published_issues", err)
-	}
-	defer func() { _ = rows.Close() }()
-	return scanRows(rows, func(r *sql.Rows) (PublishedIssue, error) {
-		var pi PublishedIssue
-		var state string
-		var createdAt, updatedAt string
-		if err := r.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt); err != nil {
-			return PublishedIssue{}, err
-		}
-		pi.State = IssueState(state)
-		if pi.CreatedAt, err = parseTime(createdAt); err != nil {
-			return PublishedIssue{}, err
-		}
-		if pi.UpdatedAt, err = parseTime(updatedAt); err != nil {
-			return PublishedIssue{}, err
-		}
-		return pi, nil
-	})
+		nil,
+		func(r *sql.Rows) (PublishedIssue, error) {
+			var pi PublishedIssue
+			var state string
+			var createdAt, updatedAt string
+			if err := r.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt); err != nil {
+				return PublishedIssue{}, err
+			}
+			pi.State = IssueState(state)
+			var perr error
+			if pi.CreatedAt, perr = parseTime(createdAt); perr != nil {
+				return PublishedIssue{}, perr
+			}
+			if pi.UpdatedAt, perr = parseTime(updatedAt); perr != nil {
+				return PublishedIssue{}, perr
+			}
+			return pi, nil
+		})
 }
 
 // CountPublishedIssues tallies published_issues rows by state for the status
 // world-state block. The zero map means nothing has ever been published.
 func (s *Store) CountPublishedIssues(ctx context.Context) (map[IssueState]int, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx, "count_published_issues",
 		`SELECT state, COUNT(*) FROM published_issues GROUP BY state`)
 	if err != nil {
-		return nil, annotateErr(s.path, "count_published_issues", err)
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 	out := map[IssueState]int{}

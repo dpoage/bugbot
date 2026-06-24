@@ -91,8 +91,9 @@ func (s *Store) DeletePendingCandidate(ctx context.Context, id string) error {
 	if id == "" {
 		return nil
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM pending_candidates WHERE id = ?`, id); err != nil {
-		return annotateErr(s.path, "delete_pending_candidate", err)
+	_, err := s.exec(ctx, "delete_pending_candidate", `DELETE FROM pending_candidates WHERE id = ?`, id)
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -107,18 +108,14 @@ func (s *Store) DeletePendingCandidate(ctx context.Context, id string) error {
 // sort by creation under ORDER BY id. rowid is monotonic with insertion, giving
 // a stable, creation-ordered replay.
 func (s *Store) ListPendingCandidates(ctx context.Context) ([]PendingCandidate, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return queryRows(ctx, s, "list_pending_candidates", `
 		SELECT id, scan_run_id, commit_sha, lens, file, line, title,
 		       description, severity, evidence, confidence,
 		       corroborating_lenses, created_at
 		FROM pending_candidates
 		ORDER BY rowid`,
+		nil, scanPendingCandidate,
 	)
-	if err != nil {
-		return nil, annotateErr(s.path, "list_pending_candidates", err)
-	}
-	defer func() { _ = rows.Close() }()
-	return scanRows(rows, scanPendingCandidate)
 }
 
 // scanPendingCandidate reads one pending_candidates row from a *sql.Rows cursor.

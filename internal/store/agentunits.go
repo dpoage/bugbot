@@ -96,7 +96,7 @@ func (s *Store) AddAgentUnit(ctx context.Context, u AgentUnit) error {
 		finishedAt = u.FinishedAt.UTC().Format(timeLayout)
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.exec(ctx, "add_agent_unit", `
 		INSERT INTO agent_units
 		  (id, scan_run_id, role, lens, strategy, launch_order, files_json,
 		   started_at, finished_at, status,
@@ -111,7 +111,7 @@ func (s *Store) AddAgentUnit(ctx context.Context, u AgentUnit) error {
 		u.CreatedAt.UTC().Format(timeLayout),
 	)
 	if err != nil {
-		return annotateErr(s.path, "add_agent_unit", err)
+		return err
 	}
 	return nil
 }
@@ -124,21 +124,14 @@ func (s *Store) AddAgentUnit(ctx context.Context, u AgentUnit) error {
 // is the unique primary key, so the ordering is already total and
 // deterministic without a rowid tiebreak.
 func (s *Store) ListAgentUnits(ctx context.Context, scanRunID string) ([]AgentUnit, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return queryRows(ctx, s, "list_agent_units", `
 		SELECT id, scan_run_id, role, lens, strategy, launch_order, files_json,
 		       started_at, finished_at, status,
 		       input_tokens, output_tokens, cache_read_tokens,
 		       candidates, leads_posted, detail, created_at
 		FROM agent_units
 		WHERE scan_run_id = ?
-		ORDER BY launch_order, id`,
-		scanRunID,
-	)
-	if err != nil {
-		return nil, annotateErr(s.path, "list_agent_units", err)
-	}
-	defer func() { _ = rows.Close() }()
-	return scanRows(rows, scanAgentUnit)
+		ORDER BY launch_order, id`, []any{scanRunID}, scanAgentUnit)
 }
 
 // PruneAgentUnits deletes agent_unit rows whose scan_run_id is NOT among the
@@ -156,7 +149,7 @@ func (s *Store) PruneAgentUnits(ctx context.Context, keepRuns int) (int64, error
 	// because 'Z' > '.'), so ORDER BY started_at silently keeps a wrong run
 	// whenever timestamps straddle a whole second — see the caution on
 	// filestate.go's epochSentinel.
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.exec(ctx, "prune_agent_units", `
 		DELETE FROM agent_units
 		WHERE scan_run_id NOT IN (
 			SELECT id FROM scan_runs
@@ -165,7 +158,7 @@ func (s *Store) PruneAgentUnits(ctx context.Context, keepRuns int) (int64, error
 		)`, keepRuns,
 	)
 	if err != nil {
-		return 0, annotateErr(s.path, "prune_agent_units", err)
+		return 0, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {

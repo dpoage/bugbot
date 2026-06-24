@@ -56,7 +56,7 @@ file instead.`,
 			}
 
 			ctx := cmd.Context()
-			_, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
+			_, st, err := cmdOpenStoreReadOnly(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}

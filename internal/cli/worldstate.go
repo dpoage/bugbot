@@ -52,7 +52,7 @@ func fetchWorldState(ctx context.Context, cfg config.Config) (worldState, bool) 
 	if _, err := os.Stat(cfg.Storage.Path); err != nil {
 		return worldState{}, false
 	}
-	st, err := store.Open(ctx, cfg.Storage.Path)
+	st, err := store.OpenReadOnly(ctx, cfg.Storage.Path)
 	if err != nil {
 		return worldState{}, false
 	}

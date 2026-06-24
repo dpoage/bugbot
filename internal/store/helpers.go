@@ -15,16 +15,25 @@ import (
 // four-line incantation and any subtle drift (forgetting the defer, calling
 // Commit after a partial failure, etc.) would silently leak transactions or
 // commit a half-applied state. One place to audit, one place to change.
+//
+// The whole transaction runs through the shared retry handler, so a transient
+// failure (SQLITE_BUSY or the IOERR_SHORT_READ checkpoint race) re-runs fn in a
+// fresh transaction rather than surfacing a spurious error. This is safe
+// because the failed attempt's deferred Rollback unwound any partial work
+// before the retry begins — fn must therefore be free of side effects outside
+// the transaction, which every store method already is.
 func (s *Store) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := fn(tx); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return s.retry(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := fn(tx); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
 }
 
 // buildPlaceholders returns a comma-separated string of n '?' placeholders,
