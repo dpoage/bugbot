@@ -452,8 +452,9 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 // so a WAL-replayed cross-lens sibling would otherwise become a second finding.
 // OpenFindingsByLocusKey is an indexed point-lookup returning the handful of
 // findings at one enclosing-symbol anchor; SimilarFinding then applies the SAME
-// same-defect predicate (line window + description jaccard) as the in-scan
-// merge, so the durable path is no more aggressive than the live one. Reverify
+// same-defect predicate (the tight line window + description jaccard) as in-scan
+// step 5 — the broader root-cause layers (5b/5c) are deliberately NOT mirrored,
+// so the durable path only ever under-merges, never more aggressively. Reverify
 // candidates are excluded: they own a durable row to re-judge and must not be
 // absorbed elsewhere. Returns true when the candidate was folded (a triage
 // terminal fate). The store writes dedup, so the fold is idempotent on replay.
