@@ -761,8 +761,11 @@ type Stats struct {
 	// orphaned as T3 suspected rather than promoted as verified (bugbot-8rd).
 	VerifierRuns     int `json:"verifier_runs"`
 	VerifierFailures int `json:"verifier_failures"`
-	// ArbiterRuns is the number of arbiter agents launched to decide split
-	// (mixed refuted/not-refuted) panel verdicts.
+	// ArbiterRuns is the number of COMPLETED arbiter agents launched to decide
+	// split (mixed refuted/not-refuted) panel verdicts. A run cut short by a
+	// budget stop is NOT counted here — it is counted in ArbiterBudgetStops
+	// instead, so ArbiterRuns + ArbiterBudgetStops partitions all arbiter
+	// invocations.
 	ArbiterRuns int `json:"arbiter_runs,omitempty"`
 	// ArbiterKills is the number of candidates the arbiter decided to kill
 	// (arbiter returned refuted=true).
@@ -771,11 +774,12 @@ type Stats struct {
 	// verdict; on failure the run falls back to majorityRefuted.
 	ArbiterFailures int `json:"arbiter_failures,omitempty"`
 	// ArbiterTokens is the total input+output tokens spent by arbiter runs (a
-	// subset of InputTokens+OutputTokens); ArbiterBudgetStops counts arbiter
-	// runs cut short by a budget stop (their own per-run claim or the shared
-	// pool). Together they make the arbiter's cost and starvation rate
-	// observable, so a too-small ArbiterTokenClaim surfaces as a high stop rate
-	// (bugbot-mi5.17 AC6).
+	// subset of InputTokens+OutputTokens), counted for COMPLETED and
+	// budget-stopped runs alike. ArbiterBudgetStops counts arbiter runs cut
+	// short by a budget stop (their own per-run claim or the shared pool).
+	// Together they make the arbiter's cost and starvation rate observable: the
+	// stop RATE is ArbiterBudgetStops / (ArbiterRuns + ArbiterBudgetStops), so a
+	// too-small ArbiterTokenClaim surfaces as a high stop rate (bugbot-mi5.17 AC6).
 	ArbiterTokens      int64 `json:"arbiter_tokens,omitempty"`
 	ArbiterBudgetStops int   `json:"arbiter_budget_stops,omitempty"`
 	// InputTokens / OutputTokens is the run's total token spend. InputTokens

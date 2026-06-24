@@ -221,3 +221,47 @@ func TestNewReadFileWithDepRoots_RejectsEscapesFromDepRoot(t *testing.T) {
 		t.Errorf("escape err = %v, want it to mention escape", err)
 	}
 }
+
+// TestDepSourceRoots_ExistenceAwareAcrossRoots is the regression guard for the
+// mi5.17-review MUST-FIX: every relative path is lexically contained in EVERY
+// root, so resolve must select the root where the file actually EXISTS — not
+// the first lexical match. Before the fix, root[0] (GOROOT/src) always won and
+// the module cache (root[1]) was unreachable, so third-party reads silently
+// failed.
+func TestDepSourceRoots_ExistenceAwareAcrossRoots(t *testing.T) {
+	rootA := t.TempDir() // analogue of GOROOT/src (first in priority)
+	rootB := t.TempDir() // analogue of the Go module cache (second)
+	const rel = "dep/pkg/file.go"
+	target := filepath.Join(rootB, "dep", "pkg", "file.go")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("package pkg\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &DepSourceRoots{roots: []string{rootA, rootB}}
+	got, err := d.resolve(rel)
+	if err != nil {
+		t.Fatalf("resolve(%q): %v", rel, err)
+	}
+	if got != target {
+		t.Errorf("resolve = %q, want %q (must pick the root where the file EXISTS, not the first lexical match)", got, target)
+	}
+
+	// A path present in NEITHER root resolves to the first lexically valid
+	// candidate (so the caller surfaces a normal read error), never an escape.
+	const missing = "dep/pkg/absent.go"
+	got2, err2 := d.resolve(missing)
+	if err2 != nil {
+		t.Fatalf("resolve(%q): unexpected error %v (want fallback to first root)", missing, err2)
+	}
+	if want := filepath.Join(rootA, "dep", "pkg", "absent.go"); got2 != want {
+		t.Errorf("resolve(missing) = %q, want fallback %q", got2, want)
+	}
+
+	// A traversal escape from both roots is still rejected.
+	if _, err := d.resolve("../../etc/passwd"); !errors.Is(err, errDepPathEscape) {
+		t.Errorf("resolve(escape) err = %v, want errDepPathEscape", err)
+	}
+}

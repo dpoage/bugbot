@@ -213,7 +213,7 @@ PRIMARY — prefer these:
 
 FALLBACK — only when a primary tool cannot answer:
 - grep for free-text or non-symbol patterns, or when a code-navigation tool returns an ERROR (server unavailable or still indexing).
-- read_file for a whole file you need; list_dir to discover paths. The read_file tool is rooted at the repository and at any vendored dependencies under it; it does NOT see the Go module cache or GOROOT/src, so a stdlib or non-vendored third-party symbol must be confirmed with an executable probe (when one is available) or left to the arbiter's broader read reach.`
+- read_file for a whole file you need; list_dir to discover paths. read_file always reaches the repository and its vendored dependencies. Whether it can ALSO read non-vendored external source (the Go module cache, GOROOT/src) depends on your role: if your role-specific instructions grant that broader reach, use it to read the actual stdlib/dependency source; otherwise confirm such behavior with an executable probe (when one is available).`
 
 // verifierRefutationCriteria is the shared REFUTED/NOT REFUTED criteria block
 // used by both refuters and the arbiter. Extracting it prevents the criteria
@@ -391,7 +391,7 @@ ARBITER ADDITIONAL RULES:
 2. MANDATORY VERIFY-THE-DECISIVE-CLAIM. Before you vote, the single claim that determines the outcome must be backed by evidence YOU confirmed with a tool call in this run, not just an argument you read. Cite the concrete evidence in your reasoning as ` + "`file:line`" + ` (or ` + "`dep-source path:line`" + ` for an external dep). An "I read both sides and the dissent feels right" verdict is NOT acceptable — the bugbot-mi5.17 split failures were all grounding failures, not argument failures.
 3. MECHANISM CORRECTION: If the finding SURVIVES (refuted=false) but a panel seat correctly identified an error in the described mechanism or sub-claim, emit corrected_description with the accurate mechanism. The published bug report will use your corrected_description instead of the finder's. Leave corrected_description absent when no correction is needed or when you refute the finding.
 4. HALLUCINATED REBUTTAL: If a seat's rebuttal asserts the existence of code that is NOT actually present in the cited files (a fabricated 'safe' guard, function, or check), set hallucinated_rebuttal=true and do NOT credit that seat's rebuttal in your decision.
-5. EVIDENCE FIELD: Set the ` + "`evidence`" + ` field to a short list of the file:line or dep-source citations you personally confirmed in this run (e.g. ` + "`[" + `"src/foo.cc:42", "` + `stdlib encoding/json/decode.go:118"]` + "`" + `). This is REQUIRED — it is the structured record of what you grounded, and it is the only way the post-run audit can confirm the arbiter actually verified the decisive claim.`
+5. EVIDENCE FIELD: Set the ` + "`evidence`" + ` field to a short list of the file:line or dep-source citations you personally confirmed in this run (e.g. ` + "`[" + `"src/foo.cc:42", "` + `stdlib encoding/json/decode.go:118"]` + "`" + `). This is REQUIRED — it is the structured record of what you grounded, and the only way the post-run audit can confirm you actually verified the decisive claim. If you must abstain (could_not_read_code=true), list the file(s) you could not read as the evidence (e.g. ` + "`[" + `"src/foo.cc: inaccessible"]` + "`" + `) so the record reflects exactly what you attempted.`
 	if hasSandbox {
 		p += verifierSandboxParagraph
 	}

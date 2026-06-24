@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // DepSourceRoots is a per-ecosystem set of read-only source roots. The verifier
@@ -55,6 +56,19 @@ var errDepPathEscape = errors.New("path escapes all dep-source roots")
 // Discovery is cheap (a few env reads + at most two exec calls) so the funnel
 // may call this at New and capture the snapshot on Funnel.
 func NewDepSourceRoots() *DepSourceRoots {
+	depRootsOnce.Do(func() { depRootsCached = discoverDepSourceRoots() })
+	return depRootsCached
+}
+
+var (
+	depRootsOnce   sync.Once
+	depRootsCached *DepSourceRoots
+)
+
+// discoverDepSourceRoots performs the actual host probe. NewDepSourceRoots
+// caches its result for the process: the roots are host-stable, so the `go env`
+// forks must not repeat on every Funnel.New (the daemon builds one per cycle).
+func discoverDepSourceRoots() *DepSourceRoots {
 	var roots []string
 	for _, p := range discoverGoRoots() {
 		if p == "" {
@@ -198,29 +212,36 @@ func (d *DepSourceRoots) resolve(rel string) (string, error) {
 	if filepath.IsAbs(rel) {
 		return "", fmt.Errorf("%w: absolute paths are not allowed (%q)", errDepPathEscape, rel)
 	}
-	// Try every configured root in turn. A path that exists in two roots
-	// (extremely unlikely — different ecosystems, different host paths)
-	// resolves to the first match; the order is discovery order, with
-	// GOROOT/src ahead of the module cache so a path cited by its stdlib
-	// name always resolves to the stdlib location.
+	// Every relative path is lexically contained in EVERY root, so root order
+	// alone cannot pick the right one: without an existence check the first root
+	// (GOROOT/src) would always win and the module cache would be dead. Prefer
+	// the root where the file actually EXISTS; remember the first lexically
+	// valid candidate as a fallback so a genuine not-found still surfaces as a
+	// read error at the call site rather than a misleading escape error.
+	var fallback string
 	for _, root := range d.roots {
-		joined := filepath.Join(root, rel)
-		cleaned := filepath.Clean(joined)
+		cleaned := filepath.Clean(filepath.Join(root, rel))
 		if !strings.HasPrefix(cleaned, root+string(filepath.Separator)) && cleaned != root {
-			// The lexical join already escaped the root (e.g. `..` in
-			// rel). Skip this root and let the next one try.
+			// The lexical join escaped the root (e.g. `..` in rel). Try the next.
 			continue
 		}
-		// Symlink containment: resolve the longest existing prefix of the
-		// path and ensure it still lands inside the root. This defeats
-		// symlinks that point outside the tree, matching the in-repo
-		// fsRoot contract.
+		// Symlink containment: resolve the longest existing prefix of the path
+		// and ensure it still lands inside the root. This defeats symlinks that
+		// point outside the tree, matching the in-repo fsRoot contract.
 		if resolved, err := evalExistingPrefix(cleaned); err == nil {
 			if !strings.HasPrefix(resolved, root+string(filepath.Separator)) && resolved != root {
 				continue
 			}
 		}
-		return cleaned, nil
+		if _, statErr := os.Stat(cleaned); statErr == nil {
+			return cleaned, nil
+		}
+		if fallback == "" {
+			fallback = cleaned
+		}
+	}
+	if fallback != "" {
+		return fallback, nil
 	}
 	return "", fmt.Errorf("%w: %q", errDepPathEscape, rel)
 }

@@ -193,24 +193,23 @@ func (t *readFileTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 			return "", err
 		}
 		abs = depAbs
-	} else {
-		// Path lexically under the repo root. If it does not exist in
-		// the repo, try the dep-source roots before giving up.
-		if _, statErr := os.Stat(abs); statErr != nil {
-			if t.extraRoots == nil {
-				return "", fmt.Errorf("cannot read %q: %w", args.Path, statErr)
-			}
-			depAbs, depErr := t.extraRoots.resolve(args.Path)
-			if depErr != nil {
-				return "", fmt.Errorf("cannot read %q: %w", args.Path, statErr)
-			}
-			abs = depAbs
-		}
 	}
 
-	info, err := os.Stat(abs)
-	if err != nil {
-		return "", fmt.Errorf("cannot read %q: %w", args.Path, err)
+	info, statErr := os.Stat(abs)
+	if statErr != nil {
+		// The resolved path is absent. A path that is lexically valid under the
+		// repo root may actually live in a dep-source root (the arbiter's broader
+		// reach), so try those before giving up.
+		if t.extraRoots != nil {
+			if depAbs, depErr := t.extraRoots.resolve(args.Path); depErr == nil {
+				if di, dErr := os.Stat(depAbs); dErr == nil {
+					abs, info, statErr = depAbs, di, nil
+				}
+			}
+		}
+		if statErr != nil {
+			return "", fmt.Errorf("cannot read %q: %w", args.Path, statErr)
+		}
 	}
 	if info.IsDir() {
 		return "", fmt.Errorf("%q is a directory, not a file", args.Path)

@@ -113,11 +113,6 @@ func (f *Funnel) runVerifyAndPersist(
 		setErr(err)
 		return
 	}
-	arbiterReadTools, err := f.readOnlyToolsWithDepRoots(agent.ReadCaps{})
-	if err != nil {
-		setErr(err)
-		return
-	}
 
 	// Sandbox / run_tests / status_note tools are shared verbatim by the refuter
 	// panel and the arbiter (so the per-candidate sandbox exec budget spans the
@@ -136,10 +131,10 @@ func (f *Funnel) runVerifyAndPersist(
 	if t := f.maybeStatusNoteTool(progress.RoleVerifier, c.Title); t != nil {
 		extra = append(extra, t)
 	}
-	// Two independent backing arrays (refuterReadTools / arbiterReadTools are
-	// separate allocations); only the shared extra tool VALUES are common.
+	// candTools is the refuter panel's tool set (repo-rooted read). The arbiter's
+	// dep-reach tool set is built lazily on a split (see below), reusing the same
+	// extra tool VALUES.
 	candTools := append(refuterReadTools, extra...)
-	arbiterTools := append(arbiterReadTools, extra...)
 
 	sink := f.opts.Progress
 	startedAt := time.Now()
@@ -154,6 +149,15 @@ func (f *Funnel) runVerifyAndPersist(
 	arbiterBudgetStopped := false
 	if err == nil && !stopped && isSplitVerdict(verdicts) {
 		localArbiterRuns = 1
+		// Build the arbiter's tool set lazily: it carries dep-source read reach
+		// and is only needed on the rare split, so we do not pay to construct it
+		// on every candidate. It reuses the same extra tool VALUES as the panel.
+		arbiterReadTools, atErr := f.readOnlyToolsWithDepRoots(agent.ReadCaps{})
+		if atErr != nil {
+			setErr(atErr)
+			return
+		}
+		arbiterTools := append(arbiterReadTools, extra...)
 		av, aTokens, aStopped, aErr := f.runArbiter(ctx, verifier, arbiterTools, persona, c, verdicts, seatNames, budget)
 		tokens += aTokens
 		localArbiterTokens = aTokens
