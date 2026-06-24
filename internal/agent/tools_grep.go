@@ -56,7 +56,12 @@ func (t *grepTool) Def() llm.ToolDef {
 		Description: "Search repository files for lines matching a Go (RE2) regular " +
 			"expression. Returns 'path:line:text' matches, bounded by max_results " +
 			"(default 100). Use path_glob (e.g. '**/*.go') to restrict which files are " +
-			"searched. Binary files and very large files are skipped.",
+			"searched. Binary files and very large files are skipped. This is a " +
+			"FALLBACK for symbol work: to resolve a definition, enumerate a symbol's " +
+			"callers, or read one declaration, prefer find_definition, find_references, " +
+			"read_symbol, and outline — they resolve imports, shadowing, and " +
+			"same-named identifiers that grep cannot. Use grep for free-text or " +
+			"non-symbol patterns, or when those tools are unavailable.",
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
