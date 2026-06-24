@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -56,15 +57,18 @@ type FileState struct {
 func (s *Store) GetFileState(ctx context.Context, path string) (FileState, error) {
 	var fs FileState
 	var scannedAt string
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx, "get_file_state",
 		`SELECT path, content_hash, last_scanned_commit, last_scanned_at
-		 FROM file_state WHERE path = ?`, path,
-	).Scan(&fs.Path, &fs.ContentHash, &fs.LastScannedCommit, &scannedAt)
-	if err == sql.ErrNoRows {
+		 FROM file_state WHERE path = ?`,
+		[]any{path},
+		func(row *sql.Row) error {
+			return row.Scan(&fs.Path, &fs.ContentHash, &fs.LastScannedCommit, &scannedAt)
+		})
+	if errors.Is(err, sql.ErrNoRows) {
 		return FileState{}, ErrNotFound
 	}
 	if err != nil {
-		return FileState{}, annotateErr(s.path, "get_file_state", err)
+		return FileState{}, err
 	}
 	if fs.LastScannedAt, err = parseTime(scannedAt); err != nil {
 		return FileState{}, err
@@ -224,16 +228,15 @@ func (s *Store) scanWatermarksChunk(ctx context.Context, paths []string, out map
 	for i, p := range paths {
 		args[i] = p
 	}
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := s.query(ctx, "scan_watermarks", q, args...)
 	if err != nil {
-		return annotateErr(s.path, "scan_watermarks", err)
+		return err
 	}
 	defer func() { _ = rows.Close() }()
 	// Chunk-accumulation into a shared out map: scanRows returns a fresh slice
 	// per call and would force the caller to merge slices across chunks.
-	// The manual loop stays; annotateErr gives it the same error surface as
-	// the rest of the package. Same shape as cartographer.go's
-	// getPackageSummariesChunk.
+	// The manual loop stays; s.query already annotates transient failures.
+	// Same shape as cartographer.go's getPackageSummariesChunk.
 	for rows.Next() {
 		var p, hash, ts string
 		if err := rows.Scan(&p, &hash, &ts); err != nil {
@@ -280,29 +283,28 @@ func (s *Store) ChangedSince(ctx context.Context, current map[string]string) ([]
 	if len(current) == 0 {
 		return nil, nil
 	}
-
-	rows, err := s.db.QueryContext(ctx, `SELECT path, content_hash FROM file_state`)
+	// Full-table scan (no chunking). queryRows retries the whole fetch on
+	// transient failures; we then build the lookup map in a single post-pass.
+	pairs, err := queryRows(ctx, s, "changed_since",
+		`SELECT path, content_hash FROM file_state`, nil,
+		func(r *sql.Rows) (struct {
+			path string
+			hash string
+		}, error) {
+			var p, h string
+			if err := r.Scan(&p, &h); err != nil {
+				return struct {
+					path string
+					hash string
+				}{}, err
+			}
+			return struct {
+				path string
+				hash string
+			}{path: p, hash: h}, nil
+		})
 	if err != nil {
-		return nil, annotateErr(s.path, "changed_since", err)
-	}
-	defer func() { _ = rows.Close() }()
-	// Full-table scan (no chunking), so the slice-returning scanRows fits
-	// cleanly: read all (path, hash) pairs, then build the lookup map in a
-	// single post-pass. This replaces the original manual loop and gives
-	// the same rows.Err() tail-check.
-	type pathHash struct {
-		path string
-		hash string
-	}
-	pairs, err := scanRows(rows, func(r *sql.Rows) (pathHash, error) {
-		var p, h string
-		if err := r.Scan(&p, &h); err != nil {
-			return pathHash{}, err
-		}
-		return pathHash{path: p, hash: h}, nil
-	})
-	if err != nil {
-		return nil, annotateErr(s.path, "changed_since", err)
+		return nil, err
 	}
 	stored := make(map[string]string, len(pairs))
 	for _, ph := range pairs {

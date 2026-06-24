@@ -17,6 +17,7 @@ import (
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/lsp"
 	"github.com/dpoage/bugbot/internal/repro"
+	"github.com/dpoage/bugbot/internal/store"
 )
 
 // checkStatus classifies the outcome of a single doctor check.
@@ -70,6 +71,7 @@ type doctorEnv struct {
 // environment and config probes and exits nonzero if any hard check fails.
 func newDoctorCmd() *cobra.Command {
 	var verifySandboxFlag bool
+	var repairFlag bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check environment and config for common setup problems",
@@ -107,6 +109,9 @@ never affect the exit code.`,
 				snapshot: nil, // nil triggers the real git path in runChecks
 				out:      cmd.OutOrStdout(),
 			}
+			if repairFlag {
+				return runRepair(ctx, env)
+			}
 			results := runChecks(ctx, env, verifySandboxFlag)
 			printResults(env.out, results)
 			for _, r := range results {
@@ -119,7 +124,74 @@ never affect the exit code.`,
 	}
 	cmd.Flags().BoolVar(&verifySandboxFlag, "verify-sandbox", false,
 		"run a live sandbox toolchain smoke-test (requires the container runtime and image pull; off by default)")
+	cmd.Flags().BoolVar(&repairFlag, "repair", false,
+		"back up and rebuild a corrupt state database (salvaging readable rows); refuses while a writer holds the lock")
 	return cmd
+}
+
+// checkStore probes the state database's integrity with PRAGMA quick_check. A
+// corrupt db is a hard failure — it blocks scans and risks further data loss —
+// and the detail points the operator at `bugbot doctor --repair`. A missing db
+// is fine (bugbot has not run here yet) and reported INFO. The probe opens
+// read-only so it never contends with a running writer's lock.
+func checkStore(ctx context.Context, cfg config.Config) checkResult {
+	path := cfg.Storage.Path
+	if _, err := os.Stat(path); err != nil {
+		return checkResult{Name: "state db", Status: statusInfo, Detail: "no state database yet (" + path + ")"}
+	}
+	st, err := store.OpenReadOnly(ctx, path)
+	if err != nil {
+		return checkResult{Name: "state db", Status: statusFail, hard: true,
+			Detail: fmt.Sprintf("cannot open %s: %v (stop any writer and run `bugbot doctor --repair`)", path, err)}
+	}
+	defer func() { _ = st.Close() }()
+	if err := st.Check(ctx); err != nil {
+		return checkResult{Name: "state db", Status: statusFail, hard: true,
+			Detail: fmt.Sprintf("integrity check failed: %v (stop any writer and run `bugbot doctor --repair`)", err)}
+	}
+	return checkResult{Name: "state db", Status: statusPass, Detail: "quick_check ok (" + path + ")"}
+}
+
+// runRepair backs up and rebuilds a corrupt state database via store.Recover,
+// printing a salvage summary. store.Recover takes the cross-process writer
+// lock, so this refuses (with *ErrLocked) when a scan or daemon is running —
+// the operator must stop writers first, which is the safe order anyway.
+func runRepair(ctx context.Context, env doctorEnv) error {
+	cfg, err := config.Load(env.configPath)
+	if err != nil {
+		return err
+	}
+	path := cfg.Storage.Path
+	if _, statErr := os.Stat(path); statErr != nil {
+		_, _ = fmt.Fprintf(env.out, "repair: no state database at %s; nothing to do\n", path)
+		return nil
+	}
+	_, _ = fmt.Fprintf(env.out, "repair: rebuilding %s …\n", path)
+	rep, err := store.Recover(ctx, path)
+	if err != nil {
+		if rep != nil && rep.BackupPath != "" {
+			_, _ = fmt.Fprintf(env.out, "repair: corrupt db backed up to %s\n", rep.BackupPath)
+		}
+		return fmt.Errorf("repair failed: %w", err)
+	}
+	_, _ = fmt.Fprintf(env.out, "repair: ok — corrupt db backed up to %s\n", rep.BackupPath)
+	_, _ = fmt.Fprintf(env.out, "repair: salvaged %d rows across %d tables\n", rep.TotalSalvaged(), len(rep.Salvaged))
+	names := make([]string, 0, len(rep.Salvaged))
+	for t := range rep.Salvaged {
+		names = append(names, t)
+	}
+	sort.Strings(names)
+	for _, t := range names {
+		_, _ = fmt.Fprintf(env.out, "  %-22s %d rows\n", t, rep.Salvaged[t])
+	}
+	if len(rep.Partial) > 0 {
+		sort.Strings(rep.Partial)
+		_, _ = fmt.Fprintf(env.out, "repair: PARTIAL reads (corruption hit mid-table): %s\n", strings.Join(rep.Partial, ", "))
+	}
+	if rep.SourceOpenErr != "" {
+		_, _ = fmt.Fprintf(env.out, "repair: WARNING could not open the corrupt db to salvage (%s); installed a fresh empty database\n", rep.SourceOpenErr)
+	}
+	return nil
 }
 
 // runChecks executes every doctor check in order and returns the full result
@@ -160,6 +232,11 @@ func runChecks(ctx context.Context, env doctorEnv, runSandboxVerify bool) []chec
 		})
 	} else {
 		results = append(results, checkSandbox(ctx, env, cfg)...)
+	}
+
+	// 3b. State db integrity — hard; requires a valid config for the db path.
+	if cfgOK {
+		results = append(results, checkStore(ctx, cfg))
 	}
 
 	// 4. Repo facts — informational, never hard.

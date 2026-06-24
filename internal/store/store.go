@@ -53,17 +53,44 @@ var nowUTC = func() time.Time { return time.Now().UTC() }
 type Store struct {
 	db   *sql.DB
 	path string
+	lock *dbLock // cross-process writer lock; nil for OpenReadOnly and ":memory:"
 }
 
 // Open opens (creating if necessary) the SQLite database at path, creates any
 // missing parent directories, applies pragmas (WAL, foreign keys, busy
-// timeout), and runs all pending migrations. Calling Open again on an
-// already-migrated database is a no-op for the schema, so it is safe to call on
-// every process start.
+// timeout), acquires the cross-process writer lock, and runs all pending
+// migrations. Calling Open again on an already-migrated database is a no-op for
+// the schema, so it is safe to call on every process start.
 //
-// The special path ":memory:" opens a private in-memory database, useful for
-// tests.
+// Open takes an exclusive advisory write lock on "<path>.lock" and returns
+// *ErrLocked if another process already holds it: at most one writer per state
+// db. This is what prevents the concurrent-writer page corruption that
+// MaxOpenConns(1) alone could not (the conn bound only serializes writers
+// within one process). Read-only consumers that must coexist with a running
+// writer use OpenReadOnly instead.
+//
+// The special path ":memory:" opens a private in-memory database (no lock,
+// since it is unshareable), useful for tests.
 func Open(ctx context.Context, path string) (*Store, error) {
+	return open(ctx, path, true)
+}
+
+// OpenReadOnly opens the store WITHOUT acquiring the writer lock, so it can run
+// concurrently with a writer in another process (WAL permits one writer and
+// many readers at once). Use it for read-only commands — report, leads,
+// metrics, export, status — and for internal diagnostics that reopen a live db
+// (see Diagnose). When the database is absent it creates and migrates it
+// (preserving the historical behavior that a read command against a
+// never-scanned repo reports empty rather than erroring); when it already
+// exists it opens WITHOUT running migrations, so a read-only open never issues
+// schema DDL outside the writer lock (the writer owns the schema).
+func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
+	return open(ctx, path, false)
+}
+
+// open is the shared constructor. writeLock selects whether the cross-process
+// exclusive writer lock is acquired (Open) or skipped (OpenReadOnly).
+func open(ctx context.Context, path string, writeLock bool) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("store: empty database path")
 	}
@@ -88,6 +115,28 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		}
 	}
 
+	// Whether the database file already exists, checked BEFORE sql.Open (which
+	// would create it). A read-only open of an existing db skips migrate() so it
+	// never issues DDL outside the writer lock; only the creating path migrates.
+	existed := false
+	if path != ":memory:" {
+		if _, statErr := os.Stat(path); statErr == nil {
+			existed = true
+		}
+	}
+
+	// Acquire the writer lock before opening the handle so two racing writers
+	// cannot both reach migrate() and interleave schema writes. ":memory:" is
+	// per-handle and unshareable, so it never contends.
+	var lock *dbLock
+	if writeLock && path != ":memory:" {
+		l, err := acquireWriteLock(path)
+		if err != nil {
+			return nil, err // *ErrLocked, or a real lock-file IO error
+		}
+		lock = l
+	}
+
 	// Pragmas are passed as DSN query params so they apply to every pooled
 	// connection. _txlock=immediate makes write transactions take the write
 	// lock up front, avoiding mid-transaction SQLITE_BUSY upgrade failures.
@@ -99,6 +148,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
+		_ = lock.release()
 		return nil, annotateErr(path, "open", fmt.Errorf("sql.Open: %w", err))
 	}
 
@@ -116,15 +166,21 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
+		_ = lock.release()
 		return nil, annotateErr(path, "ping", err)
 	}
 
-	if err := migrate(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, annotateErr(path, "migrate", err)
+	// Writers always reconcile the schema; a read-only open migrates only when
+	// it is the one creating the database (see existed above).
+	if writeLock || !existed {
+		if err := migrate(ctx, db); err != nil {
+			_ = db.Close()
+			_ = lock.release()
+			return nil, annotateErr(path, "migrate", err)
+		}
 	}
 
-	return &Store{db: db, path: path}, nil
+	return &Store{db: db, path: path, lock: lock}, nil
 }
 
 // MaxOpenConnections returns the configured ceiling on the writer pool. It
@@ -178,7 +234,7 @@ func (s *Store) Diagnose(ctx context.Context) error {
 	// observed by the OS but not yet by the live connection). The
 	// handle is closed before returning so we do not leak
 	// connections.
-	second, err := Open(ctx, s.path)
+	second, err := OpenReadOnly(ctx, s.path)
 	if err != nil {
 		return annotateErr(s.path, "diagnose.reopen", err)
 	}
@@ -198,12 +254,21 @@ func (s *Store) Diagnose(ctx context.Context) error {
 // advanced reporting queries). Most callers should prefer the typed methods.
 func (s *Store) DB() *sql.DB { return s.db }
 
-// Close releases the database handle.
+// Close releases the database handle and the cross-process writer lock (if
+// held). The lock is also released by the kernel on process exit, so a missed
+// Close cannot strand it.
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	return s.db.Close()
+	err := s.db.Close()
+	if s.lock != nil {
+		if lerr := s.lock.release(); lerr != nil && err == nil {
+			err = lerr
+		}
+		s.lock = nil
+	}
+	return err
 }
 
 // parseTime parses an on-disk timestamp string.

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"time"
 )
@@ -56,13 +57,13 @@ func (s *Store) BeginScanRun(ctx context.Context, kind ScanKind, commitSHA strin
 	id := newID()
 	now := nowUTC().Format(timeLayout)
 	pid := os.Getpid()
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.exec(ctx, "begin_scan_run", `
 		INSERT INTO scan_runs (id, kind, commit_sha, started_at, heartbeat, pid)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		id, string(kind), commitSHA, now, now, pid,
 	)
 	if err != nil {
-		return "", annotateErr(s.path, "begin_scan_run", err)
+		return "", err
 	}
 	return id, nil
 }
@@ -72,12 +73,12 @@ func (s *Store) BeginScanRun(ctx context.Context, kind ScanKind, commitSHA strin
 // is running so the advisory lock in ActiveScanRuns can distinguish live
 // processes from stale/crashed ones.
 func (s *Store) UpdateHeartbeat(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx, "update_heartbeat",
 		`UPDATE scan_runs SET heartbeat = ? WHERE id = ?`,
 		nowUTC().Format(timeLayout), id,
 	)
 	if err != nil {
-		return annotateErr(s.path, "update_heartbeat", err)
+		return err
 	}
 	return nil
 }
@@ -93,31 +94,24 @@ func (s *Store) ActiveScanRuns(ctx context.Context, staleAfter time.Duration) ([
 	// Cutoff: runs whose heartbeat is older than this are considered stale.
 	cutoff := nowUTC().Add(-staleAfter).Format(timeLayout)
 
-	rows, err := s.db.QueryContext(ctx, `
+	return queryRows(ctx, s, "active_scan_runs", `
 		SELECT id, kind, commit_sha, started_at, finished_at, stats_json, heartbeat, pid
 		FROM scan_runs
 		WHERE finished_at IS NULL
 		  AND heartbeat IS NOT NULL
 		  AND heartbeat >= ?`,
-		cutoff,
-	)
-	if err != nil {
-		return nil, annotateErr(s.path, "active_scan_runs", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	return scanRows(rows, scanScanRun)
+		[]any{cutoff}, scanScanRun)
 }
 
 // FinishScanRun marks the run finished at now and stores its stats blob.
 // Returns ErrNotFound if the id is unknown.
 func (s *Store) FinishScanRun(ctx context.Context, id, statsJSON string) error {
-	res, err := s.db.ExecContext(ctx,
+	res, err := s.exec(ctx, "finish_scan_run",
 		`UPDATE scan_runs SET finished_at = ?, stats_json = ? WHERE id = ?`,
 		nowUTC().Format(timeLayout), statsJSON, id,
 	)
 	if err != nil {
-		return annotateErr(s.path, "finish_scan_run", err)
+		return err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -135,15 +129,16 @@ func (s *Store) GetScanRun(ctx context.Context, id string) (ScanRun, error) {
 	var kind, started string
 	var finished, heartbeat sql.NullString
 	var pid sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `
+	err := s.queryRow(ctx, "get_scan_run", `
 		SELECT id, kind, commit_sha, started_at, finished_at, stats_json, heartbeat, pid
-		FROM scan_runs WHERE id = ?`, id,
-	).Scan(&r.ID, &kind, &r.CommitSHA, &started, &finished, &r.StatsJSON, &heartbeat, &pid)
-	if err == sql.ErrNoRows {
+		FROM scan_runs WHERE id = ?`, []any{id}, func(row *sql.Row) error {
+		return row.Scan(&r.ID, &kind, &r.CommitSHA, &started, &finished, &r.StatsJSON, &heartbeat, &pid)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
 		return ScanRun{}, ErrNotFound
 	}
 	if err != nil {
-		return ScanRun{}, annotateErr(s.path, "get_scan_run", err)
+		return ScanRun{}, err
 	}
 	r.Kind = ScanKind(kind)
 	if r.StartedAt, err = parseTime(started); err != nil {
@@ -209,13 +204,16 @@ func scanScanRun(rows *sql.Rows) (ScanRun, error) {
 // file, so the ORDER BY is intentionally left as-is.
 func (s *Store) LatestScanRun(ctx context.Context) (ScanRun, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id FROM scan_runs ORDER BY started_at DESC, id DESC LIMIT 1`).Scan(&id)
-	if err == sql.ErrNoRows {
+	err := s.queryRow(ctx, "latest_scan_run",
+		`SELECT id FROM scan_runs ORDER BY started_at DESC, id DESC LIMIT 1`,
+		nil, func(row *sql.Row) error {
+			return row.Scan(&id)
+		})
+	if errors.Is(err, sql.ErrNoRows) {
 		return ScanRun{}, ErrNotFound
 	}
 	if err != nil {
-		return ScanRun{}, annotateErr(s.path, "latest_scan_run", err)
+		return ScanRun{}, err
 	}
 	return s.GetScanRun(ctx, id)
 }

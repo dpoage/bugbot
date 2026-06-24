@@ -53,7 +53,7 @@ func newReportListCmd() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			_, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
+			_, st, err := cmdOpenStoreReadOnly(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
@@ -114,7 +114,7 @@ func newReportShowCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			_, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
+			_, st, err := cmdOpenStoreReadOnly(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
@@ -162,6 +162,9 @@ func newReportDismissCmd() *cobra.Command {
 			}
 
 			ctx := cmd.Context()
+			// dismiss WRITES (AddSuppression inserts a suppression row and flips
+			// the finding to dismissed inside a transaction), so it must take the
+			// cross-process writer lock — unlike the read-only report subcommands.
 			_, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
@@ -203,7 +206,7 @@ func newReportEmitCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			cfg, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
+			cfg, st, err := cmdOpenStoreReadOnly(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
@@ -265,7 +268,7 @@ skipped_* status. The footer shows coverage stats.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			_, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
+			_, st, err := cmdOpenStoreReadOnly(ctx, configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}

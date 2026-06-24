@@ -57,6 +57,24 @@ func cmdOpenStore(ctx context.Context, cfgPath string) (config.Config, *store.St
 	return cfg, st, nil
 }
 
+// cmdOpenStoreReadOnly is the read-only counterpart of cmdOpenStore: it opens
+// the store WITHOUT taking the cross-process writer lock, so read-only commands
+// (report, leads, metrics, export, status) run fine while a scan or daemon
+// holds the writer lock in another process. WAL permits one writer and many
+// concurrent readers, so these commands never block or corrupt. Callers MUST
+// close the store, typically via defer closeStore(st).
+func cmdOpenStoreReadOnly(ctx context.Context, cfgPath string) (config.Config, *store.Store, error) {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return config.Config{}, nil, err
+	}
+	st, err := store.OpenReadOnly(ctx, cfg.Storage.Path)
+	if err != nil {
+		return config.Config{}, nil, fmt.Errorf("open store: %w", err)
+	}
+	return cfg, st, nil
+}
+
 // closeStore closes a store and discards the error. Its sole purpose is to
 // replace the verbatim `defer func() { _ = st.Close() }()` pattern that
 // otherwise repeats at every store-using command site. Close failures on a

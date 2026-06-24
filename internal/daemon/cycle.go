@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/funnel"
@@ -40,6 +41,14 @@ type cycleResult struct {
 func (d *Daemon) runPoll(ctx context.Context) {
 	start := d.clock.now()
 	progress.Emit(d.prog, progress.Event{Kind: progress.KindCycleStarted, ScanKind: string(store.ScanTargeted)})
+
+	// Integrity gate FIRST, before the watermark write below and all funnel
+	// work: refuse to touch a corrupt state db this cycle (bugbot-4d2). This is
+	// also the periodic recurrence check. Only real corruption aborts; a
+	// transient race or shutdown cancellation falls through (see storeHealthy).
+	if !d.storeHealthy(ctx) {
+		return
+	}
 
 	lastSeen, err := d.loadLastSeen(ctx)
 	if err != nil {
@@ -169,6 +178,12 @@ func (d *Daemon) runSweep(ctx context.Context) {
 	progress.Emit(d.prog, progress.Event{Kind: progress.KindCycleStarted, ScanKind: string(store.ScanSweep)})
 	res := cycleResult{kind: store.ScanSweep}
 
+	// Integrity gate FIRST, before any write this cycle (bugbot-4d2). Only real
+	// corruption aborts; transient/cancel errors fall through (see storeHealthy).
+	if !d.storeHealthy(ctx) {
+		return
+	}
+
 	if d.dayBudgetExhausted(ctx, &res) {
 		d.logCycle(res, d.clock.now().Sub(start))
 		return
@@ -208,6 +223,29 @@ func (d *Daemon) runSweep(ctx context.Context) {
 
 	d.postCycle(ctx, fres, &res)
 	d.finishCycle(ctx, res, start)
+}
+
+// storeHealthy runs a fast PRAGMA quick_check on the state db and reports
+// whether the cycle may proceed. It returns false ONLY on real on-disk
+// corruption (store.ErrCorrupt): writing further into torn pages can only widen
+// the damage (bugbot-4d2), so the cycle is skipped and the operator pointed at
+// `bugbot doctor --repair`. A transient lock/checkpoint race or a shutdown
+// cancellation is NOT corruption — the per-statement retry handler already
+// absorbs transients, and mislabeling them would falsely steer the operator at
+// --repair (which rebuilds and can drop rows) — so those log a warning and the
+// cycle proceeds. quick_check is cheap on our control-plane store, so running
+// it each cycle is the periodic integrity check that catches a recurrence early.
+func (d *Daemon) storeHealthy(ctx context.Context) bool {
+	err := d.store.Check(ctx)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, store.ErrCorrupt) {
+		d.log.Error("daemon: state db is corrupt; skipping cycle (stop the daemon and run `bugbot doctor --repair`)", "err", err)
+		return false
+	}
+	d.log.Warn("daemon: state db quick_check did not complete (transient race or shutdown); proceeding", "err", err)
+	return true
 }
 
 // runVerifyDrain is the verify-drain timer step: it drains the

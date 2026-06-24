@@ -227,3 +227,25 @@ func TestOpen_PragmasAreEffective(t *testing.T) {
 		t.Fatalf("expected foreign_keys=1, got %d", foreignKeys)
 	}
 }
+
+// TestOpenReadOnly_CreatesAndMigratesWhenAbsent: a read-only open of a
+// never-created database still creates and migrates it, so a read command
+// (report/leads) against a fresh repo reports empty rather than erroring. An
+// existing database is opened without migrating (covered by the coexistence
+// test); this guards the create-when-absent branch.
+func TestOpenReadOnly_CreatesAndMigratesWhenAbsent(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fresh", "state.db")
+	st, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly on absent path: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	got, err := st.ListFindings(ctx, FindingFilter{})
+	if err != nil {
+		t.Fatalf("ListFindings on fresh read-only store: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("fresh store has %d findings; want 0", len(got))
+	}
+}
