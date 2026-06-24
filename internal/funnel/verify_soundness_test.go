@@ -339,7 +339,7 @@ func TestNN3_CorrectedDescription(t *testing.T) {
 
 	correctedDesc := "cfg is dereferenced via an interface wrapper, not a direct pointer; the nil check is bypassed through the indirect call path"
 	// Arbiter response with corrected_description (finding survives).
-	arbiterJSON := `{"refuted": false, "reasoning": "The bug is real but the mechanism involves an indirect call path", "confidence": "high", "corrected_description": "` + correctedDesc + `"}`
+	arbiterJSON := `{"refuted": false, "reasoning": "The bug is real but the mechanism involves an indirect call path", "confidence": "high", "evidence": ["f.go:1"], "corrected_description": "` + correctedDesc + `"}`
 
 	// Split: seat 1 refuted, seat 2 not-refuted → arbiter runs.
 	verifier := makeCallCountVerifier(1, arbiterJSON)
@@ -371,7 +371,7 @@ func TestNN3_NoCorrection(t *testing.T) {
 	finder := newScriptedClient().onSystemContains("nil-safety/error-handling", candJSON(realCand))
 
 	// Arbiter with no corrected_description field.
-	arbiterJSON := `{"refuted": false, "reasoning": "bug stands, no mechanism error", "confidence": "high"}`
+	arbiterJSON := `{"refuted": false, "reasoning": "bug stands, no mechanism error", "confidence": "high", "evidence": ["f.go:1"]}`
 	verifier := makeCallCountVerifier(1, arbiterJSON)
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}}, Limits: StageLimits{Refuters: 2}})
@@ -402,7 +402,7 @@ func TestNN3_HallucinatedRebuttal(t *testing.T) {
 	finder := newScriptedClient().onSystemContains("nil-safety/error-handling", candJSON(realCand))
 
 	// Arbiter detects a hallucinated rebuttal from a panel seat.
-	arbiterJSON := `{"refuted": false, "reasoning": "Seat 1 claimed a nil-check guard exists that is NOT present in the file", "confidence": "high", "hallucinated_rebuttal": true}`
+	arbiterJSON := `{"refuted": false, "reasoning": "Seat 1 claimed a nil-check guard exists that is NOT present in the file", "confidence": "high", "evidence": ["f.go:1"], "hallucinated_rebuttal": true}`
 	verifier := makeCallCountVerifier(1, arbiterJSON)
 
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}}, Limits: StageLimits{Refuters: 2}})

@@ -151,6 +151,7 @@ func buildFunnelOptions(cfg config.Config, overrides FunnelOptionOverrides) (fun
 			FinderBudgetShare:     cfg.Budgets.FinderBudgetShare,
 			FinderTokenClaim:      cfg.Budgets.FinderTokenClaim,
 			VerifierTokenClaim:    cfg.Budgets.VerifierTokenClaim,
+			ArbiterTokenClaim:     cfg.Budgets.ArbiterTokenClaim,
 		},
 		Limits: funnel.StageLimits{
 			FinderHistoryTokens: cfg.Budgets.FinderHistoryTokens,

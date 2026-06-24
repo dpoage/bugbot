@@ -63,8 +63,35 @@ func emitFinderAgentFinished(sink progress.EventSink, label string, outcome *age
 // agents; the code-navigation tools share the funnel's lazily-started
 // language-server manager, which Funnel.Close shuts down.
 func (f *Funnel) readOnlyTools(readCaps agent.ReadCaps) ([]agent.Tool, error) {
+	return f.readToolsWithRoots(readCaps, nil)
+}
+
+// readOnlyToolsWithDepRoots is readOnlyTools plus dep-source read reach on the
+// read_file tool: read_file additionally accepts paths under the funnel's
+// depRoots (GOROOT/src + Go module cache). This is the arbiter-only "broader
+// reach" (bugbot-mi5.17/.18) — refuters keep the repo-rooted readOnlyTools so
+// their per-seat read scope and token cost stay bounded; only the rare split
+// arbiter pays for dep-source reads. When depRoots is empty (a host without the
+// toolchain) the result is byte-identical to readOnlyTools.
+func (f *Funnel) readOnlyToolsWithDepRoots(readCaps agent.ReadCaps) ([]agent.Tool, error) {
+	return f.readToolsWithRoots(readCaps, f.depRoots)
+}
+
+// readToolsWithRoots is the shared body for readOnlyTools (depRoots nil) and
+// readOnlyToolsWithDepRoots (depRoots set). Only the read_file tool differs:
+// with non-empty depRoots it is built via NewReadFileWithDepRoots so a path
+// outside the repo resolves against the configured read-only source roots; the
+// rest of the set (list_dir, grep, git_blame, git_log, code-nav) is identical
+// and repo-rooted.
+func (f *Funnel) readToolsWithRoots(readCaps agent.ReadCaps, depRoots *agent.DepSourceRoots) ([]agent.Tool, error) {
 	root := f.repo.Root()
-	readFile, err := agent.NewReadFileWithCaps(root, readCaps)
+	var readFile agent.Tool
+	var err error
+	if depRoots != nil && depRoots.Len() > 0 {
+		readFile, err = agent.NewReadFileWithDepRoots(root, readCaps, depRoots)
+	} else {
+		readFile, err = agent.NewReadFileWithCaps(root, readCaps)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("funnel: read_file tool: %w", err)
 	}

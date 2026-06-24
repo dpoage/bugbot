@@ -132,13 +132,23 @@ func (c *ScriptedClient) CallCount() int {
 // default outcome.
 const EmptyCandidates = `{"candidates": []}`
 
-// Canned refuter verdicts.
+// Canned refuter verdicts (refutationSchema: no evidence field).
 const (
 	// NotRefutedJSON is a refuter that genuinely could not disprove the bug
 	// (the precision-conservative survival signal).
 	NotRefutedJSON = `{"refuted": false, "reasoning": "I read the code; the reported defect is reachable and unguarded.", "confidence": "high"}`
 	// RefutedJSON is a refuter that disproved the bug with concrete evidence.
 	RefutedJSON = `{"refuted": true, "reasoning": "A prior guard prevents the bad value before this point; the report misreads the path.", "confidence": "high"}`
+
+	// RefutedArbiterJSON / NotRefutedArbiterJSON are the arbiter counterparts:
+	// arbiterSchema REQUIRES the structured evidence field (bugbot-mi5.17), so an
+	// arbiter response must carry it. A refuter verdict reused as an arbiter
+	// response would fail to parse under arbiterSchema — which is exactly why a
+	// split-arbiter-refutes case is a regression gate against the pre-mi5.17
+	// one-shot arbiter (whose schema rejects the evidence field, falling back to
+	// majorityRefuted and letting the false positive survive).
+	RefutedArbiterJSON    = `{"refuted": true, "reasoning": "I read the cited code and traced every caller; the bad value cannot reach the line, so the report is refuted.", "confidence": "high", "evidence": ["fixture.go:10"]}`
+	NotRefutedArbiterJSON = `{"refuted": false, "reasoning": "I read the code and the call path; the dissent's refutation does not hold and the defect is reachable.", "confidence": "high", "evidence": ["fixture.go:10"]}`
 )
 
 // CandidateJSON is one finder-reported candidate, used to build finder

@@ -140,6 +140,12 @@ type Budgets struct {
 	// the per-task cap for that role (each run may use its sub-pool remainder).
 	FinderTokenClaim   int64 `yaml:"finder_token_claim"`
 	VerifierTokenClaim int64 `yaml:"verifier_token_claim"`
+	// ArbiterTokenClaim is the per-task token claim for the split-verdict arbiter
+	// (bugbot-mi5.17): the arbiter does materially more work per run than a single
+	// refuter, so it gets a larger per-run budget. Zero defers to the funnel
+	// default (funnel.DefaultArbiterTokenClaim = 5_000_000, ~5x the refuter
+	// claim). A negative value disables the per-task cap.
+	ArbiterTokenClaim int64 `yaml:"arbiter_token_claim"`
 }
 
 // Scan controls which files are considered during ingest/scan.
@@ -627,6 +633,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setFloat64("BUGBOT_BUDGETS_FINDER_BUDGET_SHARE", &cfg.Budgets.FinderBudgetShare),
 		setInt64("BUGBOT_BUDGETS_FINDER_TOKEN_CLAIM", &cfg.Budgets.FinderTokenClaim),
 		setInt64("BUGBOT_BUDGETS_VERIFIER_TOKEN_CLAIM", &cfg.Budgets.VerifierTokenClaim),
+		setInt64("BUGBOT_BUDGETS_ARBITER_TOKEN_CLAIM", &cfg.Budgets.ArbiterTokenClaim),
 		setInt64("BUGBOT_BUDGETS_FINDER_HISTORY_TOKENS", &cfg.Budgets.FinderHistoryTokens),
 		setInt("BUGBOT_BUDGETS_FINDER_READ_LINES", &cfg.Budgets.FinderReadLines),
 		setInt("BUGBOT_BUDGETS_FINDER_READ_BYTES", &cfg.Budgets.FinderReadBytes),

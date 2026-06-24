@@ -398,6 +398,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// sibling runs (the claimant system, bugbot-8mj).
 	budget.finderClaim = f.opts.Budget.FinderTokenClaim
 	budget.verifyClaim = f.opts.Budget.VerifierTokenClaim
+	budget.arbiterClaim = f.opts.Budget.ArbiterTokenClaim
 	// Reserve a slice of the per-run budget for downstream verification so the
 	// breadth-heavy finder stage cannot drain the whole pool and orphan every
 	// candidate before it is verified (bugbot-8mj / bugbot-3lt). A no-op when the

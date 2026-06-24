@@ -142,8 +142,15 @@ func (c *scriptedClient) allRequests() []llm.Request {
 // emptyCandidates is the finder JSON for "found nothing".
 const emptyCandidates = `{"candidates": []}`
 
-// notRefutedJSON / refutedJSON are canned refuter verdicts.
+// notRefutedJSON / refutedJSON are canned refuter verdicts (refutationSchema:
+// no evidence field). notRefutedArbiterJSON / refutedArbiterJSON are the
+// arbiter counterparts: arbiterSchema REQUIRES the evidence field
+// (bugbot-mi5.17), so a refuter verdict reused as an arbiter response would
+// fail to parse. Split-panel tests route the arbiter response to these.
 const (
 	notRefutedJSON = `{"refuted": false, "reasoning": "I read the code; the nil path is reachable and unguarded.", "confidence": "high"}`
 	refutedJSON    = `{"refuted": true, "reasoning": "The caller guards this with an explicit nil check before the call.", "confidence": "high"}`
+
+	notRefutedArbiterJSON = `{"refuted": false, "reasoning": "I read the cited code and traced the call path; the dissent's refutation does not hold and the bug stands.", "confidence": "high", "evidence": ["f.go:1"]}`
+	refutedArbiterJSON    = `{"refuted": true, "reasoning": "I confirmed every caller guards the value before the call, so the claimed bad state cannot reach the line.", "confidence": "high", "evidence": ["f.go:1"]}`
 )

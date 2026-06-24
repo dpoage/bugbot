@@ -213,7 +213,7 @@ PRIMARY — prefer these:
 
 FALLBACK — only when a primary tool cannot answer:
 - grep for free-text or non-symbol patterns, or when a code-navigation tool returns an ERROR (server unavailable or still indexing).
-- read_file for a whole file you need; list_dir to discover paths.`
+- read_file for a whole file you need; list_dir to discover paths. read_file always reaches the repository and its vendored dependencies. Whether it can ALSO read non-vendored external source (the Go module cache, GOROOT/src) depends on your role: if your role-specific instructions grant that broader reach, use it to read the actual stdlib/dependency source; otherwise confirm such behavior with an executable probe (when one is available).`
 
 // verifierRefutationCriteria is the shared REFUTED/NOT REFUTED criteria block
 // used by both refuters and the arbiter. Extracting it prevents the criteria
@@ -232,7 +232,7 @@ IMPORTANT — abstention rule: if you CANNOT LOCATE OR READ the cited file(s) (t
 
 Base your verdict ONLY on the actual code you read, not on assumptions about what "should" be there.
 
-When a verdict hinges on the behavior of the standard library, the language runtime, or a third-party dependency, you MUST confirm that behavior by reading the actual source (GOROOT and vendored/module source are available to the read tools) or by running a probe — NEVER assert it from memory. Your reasoning MUST cite what you read or ran: file path and line, or the command and its observed output. An unverified stdlib/runtime/library claim is not acceptable refutation evidence.`
+When a verdict hinges on the behavior of the standard library, the language runtime, or a third-party dependency, you MUST confirm that behavior by reading the actual source or by running a probe — NEVER assert it from memory. Your reasoning MUST cite what you read or ran: file path and line, or the command and its observed output. An unverified stdlib/runtime/library claim is not acceptable refutation evidence. In-repo code and the repository's vendored dependencies are always reachable via the read tools; reading non-vendored external source (e.g. GOROOT, the Go module cache) depends on your role's read reach — when your role does not grant it, consult a probe result instead.`
 
 // verifierSystemBase composes the shared refuter system prompt around a persona
 // clause derived from the repository's dominant language(s). The persona is the
@@ -284,9 +284,10 @@ var arbiterSchema = json.RawMessage(`{
     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
     "could_not_read_code": {"type": "boolean", "description": "true if you could not locate or access the cited file(s)."},
     "corrected_description": {"type": "string", "description": "When the finding SURVIVES but a panel seat correctly identified an error in the mechanism or sub-claim, emit the accurate mechanism here. Leave absent when no correction is warranted."},
-    "hallucinated_rebuttal": {"type": "boolean", "description": "true if a panel seat's rebuttal asserted the existence of code NOT present in the cited files (a fabricated 'safe' path). Do not credit hallucinated rebuttals."}
+    "hallucinated_rebuttal": {"type": "boolean", "description": "true if a panel seat's rebuttal asserted the existence of code NOT present in the cited files (a fabricated 'safe' path). Do not credit hallucinated rebuttals."},
+    "evidence": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "description": "REQUIRED. The concrete file:line (or dep-source path:line) citations you PERSONALLY confirmed with your own tool calls in THIS run, e.g. ['src/foo.cc:42', 'GOROOT/src/encoding/json/decode.go:118']. The structured record of the decisive evidence you grounded; an arbiter verdict that cites nothing it verified is not acceptable."}
   },
-  "required": ["refuted", "reasoning", "confidence"],
+  "required": ["refuted", "reasoning", "confidence", "evidence"],
   "additionalProperties": false
 }`)
 
@@ -300,6 +301,12 @@ type refutation struct {
 	CouldNotReadCode     bool   `json:"could_not_read_code"`
 	CorrectedDescription string `json:"corrected_description"`
 	HallucinatedRebuttal bool   `json:"hallucinated_rebuttal"`
+	// Evidence is the arbiter's structured list of file:line / dep-source
+	// citations it PERSONALLY confirmed with its own tool calls (arbiterSchema
+	// REQUIRED field; refuters' refutationSchema omits it, so it stays nil for a
+	// refuter). Surfaced in the verification trace so a human triaging the
+	// finding sees exactly what the arbiter grounded (bugbot-mi5.17 AC2).
+	Evidence []string `json:"evidence,omitempty"`
 	// NoVerdict marks a seat that produced NO genuine verdict: the refuter run
 	// failed at the infrastructure level (transport/provider error — zero
 	// tokens) or its output could not be parsed even after one repair
@@ -357,19 +364,34 @@ func verifierTask(c Candidate) string {
 
 // arbiterSystemPrompt builds the system prompt for the deciding arbiter agent.
 // The arbiter is invoked on a SPLIT panel verdict and must adjudicate between
-// the two sides by reading the actual code — not by averaging opinions.
-// It reuses verifierToolParagraph and verifierRefutationCriteria verbatim so
-// the arbiter's refutation standard never drifts from the panel's.
+// the two sides by reading the actual code — not by averaging opinions. It
+// reuses verifierToolParagraph and verifierRefutationCriteria verbatim so the
+// arbiter's refutation standard never drifts from the panel's (bugbot-mi5.17
+// AC3: refuter independence + no debate).
+//
+// The arbiter is AGENTIC and DRIVES the split to ground (bugbot-mi5.17 AC2):
+// it issues targeted follow-up probes that demand evidence in file:line /
+// dep-source form and verifies the decisive claim with its OWN tool calls
+// before voting. A panel verdict that hinges on an unverified stdlib or
+// third-party claim must be confirmed by reading the actual source (the
+// arbiter's read_file has dep-source reach; refuters' does not). The
+// recorded verdict must cite the concrete evidence (file:line or
+// dep-source path) the arbiter confirmed.
 func arbiterSystemPrompt(persona string, hasSandbox bool) string {
 	p := `You are a senior ` + persona + ` serving as the deciding arbiter on a disputed bug report. A panel of adversarial reviewers split on whether the report below is a real bug. You will be given the report and each reviewer's verdict and reasoning. Your ONLY job is to decide who is right, by reading the actual code with your tools — do not average the opinions, adjudicate them. Weigh a concrete code-backed demonstration over a plausible-sounding argument, whichever side it comes from.
+
+Unlike the refuters, you have BROADER READ REACH: in addition to the repository, your read_file tool can read files under the Go standard library (GOROOT/src) and the Go module cache ($GOPATH/pkg/mod or ` + "`go env GOMODCACHE`" + `). When a refuter's claim hinges on the behavior of a stdlib function or a third-party module, you can and should read the actual source to verify it — do not trust it from memory.
 
 ` + verifierToolParagraph + `
 
 ` + verifierRefutationCriteria + `
 
 ARBITER ADDITIONAL RULES:
-1. MECHANISM CORRECTION: If the finding SURVIVES (refuted=false) but a panel seat correctly identified an error in the described mechanism or sub-claim, emit corrected_description with the accurate mechanism. The published bug report will use your corrected_description instead of the finder's. Leave corrected_description absent when no correction is needed or when you refute the finding.
-2. HALLUCINATED REBUTTAL: If a seat's rebuttal asserts the existence of code that is NOT actually present in the cited files (a fabricated 'safe' guard, function, or check), set hallucinated_rebuttal=true and do NOT credit that seat's rebuttal in your decision.`
+1. ACTIVE GROUNDING. The split exists because the panel disagreed. You DO NOT just pick a side; you DRIVE the split to ground. Read the cited code, trace the actual call path the report depends on, and identify the SPECIFIC claim that decides the verdict (e.g. "operator>> throws on parse error" or "every caller passes make_shared/never-null"). Issue follow-up tool calls (read_file, read_symbol, find_references, outline, git_blame, and an executable probe when one is available) to gather the evidence. You may need several turns — that is the design.
+2. MANDATORY VERIFY-THE-DECISIVE-CLAIM. Before you vote, the single claim that determines the outcome must be backed by evidence YOU confirmed with a tool call in this run, not just an argument you read. Cite the concrete evidence in your reasoning as ` + "`file:line`" + ` (or ` + "`dep-source path:line`" + ` for an external dep). An "I read both sides and the dissent feels right" verdict is NOT acceptable — the bugbot-mi5.17 split failures were all grounding failures, not argument failures.
+3. MECHANISM CORRECTION: If the finding SURVIVES (refuted=false) but a panel seat correctly identified an error in the described mechanism or sub-claim, emit corrected_description with the accurate mechanism. The published bug report will use your corrected_description instead of the finder's. Leave corrected_description absent when no correction is needed or when you refute the finding.
+4. HALLUCINATED REBUTTAL: If a seat's rebuttal asserts the existence of code that is NOT actually present in the cited files (a fabricated 'safe' guard, function, or check), set hallucinated_rebuttal=true and do NOT credit that seat's rebuttal in your decision.
+5. EVIDENCE FIELD: Set the ` + "`evidence`" + ` field to a short list of the file:line or dep-source citations you personally confirmed in this run (e.g. ` + "`[" + `"src/foo.cc:42", "` + `stdlib encoding/json/decode.go:118"]` + "`" + `). This is REQUIRED — it is the structured record of what you grounded, and the only way the post-run audit can confirm you actually verified the decisive claim. If you must abstain (could_not_read_code=true), list the file(s) you could not read as the evidence (e.g. ` + "`[" + `"src/foo.cc: inaccessible"]` + "`" + `) so the record reflects exactly what you attempted.`
 	if hasSandbox {
 		p += verifierSandboxParagraph
 	}

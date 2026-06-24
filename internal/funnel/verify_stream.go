@@ -102,28 +102,39 @@ func (f *Funnel) runVerifyAndPersist(
 		}
 	}
 
-	// Verifier tools (no post_lead, looser read caps — same rationale as verify.go).
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	// Refuter tools: repo-rooted read_file (no post_lead, looser read caps — same
+	// rationale as verify.go). The arbiter gets the same toolbox but with the
+	// dep-source read reach (GOROOT/src + Go module cache) wired onto read_file,
+	// so a split arbiter can verify a cited stdlib/third-party claim by reading
+	// the actual source (bugbot-mi5.17/.18); refuters stay repo-rooted to keep
+	// their per-seat read scope and token cost bounded.
+	refuterReadTools, err := f.readOnlyTools(agent.ReadCaps{})
 	if err != nil {
 		setErr(err)
 		return
 	}
 
-	// Sandbox tools (if enabled for this candidate).
-	candTools := tools
+	// Sandbox / run_tests / status_note tools are shared verbatim by the refuter
+	// panel and the arbiter (so the per-candidate sandbox exec budget spans the
+	// whole panel + arbiter, exactly as before this split).
+	var extra []agent.Tool
 	if prefErr := f.ensureDepPrefetch(ctx); prefErr != nil {
 		f.note(result, fmt.Sprintf("sandbox dependency prefetch failed: %v — sandbox_exec disabled", prefErr))
 	} else {
 		if sbTool := f.buildSandboxTool(c, sbExecs, sbMillis); sbTool != nil {
-			candTools = append(candTools, sbTool)
+			extra = append(extra, sbTool)
 		}
 		if rtTool := f.buildRunTestsTool(sbExecs, sbMillis); rtTool != nil {
-			candTools = append(candTools, rtTool)
+			extra = append(extra, rtTool)
 		}
 	}
 	if t := f.maybeStatusNoteTool(progress.RoleVerifier, c.Title); t != nil {
-		candTools = append(candTools, t)
+		extra = append(extra, t)
 	}
+	// candTools is the refuter panel's tool set (repo-rooted read). The arbiter's
+	// dep-reach tool set is built lazily on a split (see below), reusing the same
+	// extra tool VALUES.
+	candTools := append(refuterReadTools, extra...)
 
 	sink := f.opts.Progress
 	startedAt := time.Now()
@@ -132,13 +143,24 @@ func (f *Funnel) runVerifyAndPersist(
 
 	// Arbiter path.
 	var localArbiterRuns, localArbiterKills, localArbiterFailed int
+	var localArbiterTokens int64
 	var arbiterReasoning string
 	var arbiterVerdict *refutation
 	arbiterBudgetStopped := false
 	if err == nil && !stopped && isSplitVerdict(verdicts) {
 		localArbiterRuns = 1
-		av, aTokens, aStopped, aErr := f.runArbiter(ctx, verifier, candTools, persona, c, verdicts, seatNames, budget)
+		// Build the arbiter's tool set lazily: it carries dep-source read reach
+		// and is only needed on the rare split, so we do not pay to construct it
+		// on every candidate. It reuses the same extra tool VALUES as the panel.
+		arbiterReadTools, atErr := f.readOnlyToolsWithDepRoots(agent.ReadCaps{})
+		if atErr != nil {
+			setErr(atErr)
+			return
+		}
+		arbiterTools := append(arbiterReadTools, extra...)
+		av, aTokens, aStopped, aErr := f.runArbiter(ctx, verifier, arbiterTools, persona, c, verdicts, seatNames, budget)
 		tokens += aTokens
+		localArbiterTokens = aTokens
 		if aStopped {
 			arbiterBudgetStopped = true
 		} else if aErr != nil && ctx.Err() == nil {
@@ -152,9 +174,25 @@ func (f *Funnel) runVerifyAndPersist(
 			if av != nil && av.HallucinatedRebuttal {
 				hallucinatedNote = " [hallucinated rebuttal detected]"
 			}
-			arbiterReasoning = fmt.Sprintf("arbiter [%s, confidence=%s]%s: %s",
-				verdictWord(av), av.Confidence, hallucinatedNote, strings.TrimSpace(av.Reasoning))
+			evidenceNote := ""
+			if av != nil && len(av.Evidence) > 0 {
+				evidenceNote = " [evidence: " + strings.Join(av.Evidence, "; ") + "]"
+			}
+			arbiterReasoning = fmt.Sprintf("arbiter [%s, confidence=%s]%s%s: %s",
+				verdictWord(av), av.Confidence, hallucinatedNote, evidenceNote, strings.TrimSpace(av.Reasoning))
 		}
+	}
+	if localArbiterRuns > 0 {
+		// Arbiter cost + starvation accounting (bugbot-mi5.17 AC6). Folded here,
+		// not in the survive/kill stats block below, so a budget-stopped arbiter
+		// — which orphans the candidate and never reaches that block — still has
+		// its spend and stop counted.
+		findingsMu.Lock()
+		result.Stats.ArbiterTokens += localArbiterTokens
+		if arbiterBudgetStopped {
+			result.Stats.ArbiterBudgetStops++
+		}
+		findingsMu.Unlock()
 	}
 
 	finishedAt := time.Now()

@@ -51,9 +51,16 @@ func (c ReadCaps) resolve() ReadCaps {
 }
 
 // readFileTool serves numbered file contents rooted at a repository directory.
+// When extraRoots is non-nil the tool also accepts paths under those
+// read-only roots, so a verifier can read the source of a cited stdlib or
+// third-party module in addition to the repository (bugbot-mi5.18). Both root
+// kinds share the same traversal protection (no `..`, no symlink escape) and
+// the same per-result caps; a tool constructed with extraRoots == nil is
+// byte-for-byte equivalent to one built with NewReadFileWithCaps.
 type readFileTool struct {
-	root *fsRoot
-	caps ReadCaps
+	root       *fsRoot
+	extraRoots *DepSourceRoots
+	caps       ReadCaps
 }
 
 // NewReadFile returns a read_file tool rooted at dir. It reads a UTF-8 text file
@@ -79,6 +86,22 @@ func NewReadFileWithCaps(dir string, caps ReadCaps) (Tool, error) {
 	return &readFileTool{root: root, caps: caps.resolve()}, nil
 }
 
+// NewReadFileWithDepRoots returns a read_file tool rooted at dir with the given
+// read-only dep-source roots. The in-repo behavior and caps are identical to
+// NewReadFileWithCaps; extraRoots (which may be nil, in which case the tool
+// behaves exactly as NewReadFileWithCaps) extends the set of accepted paths to
+// include any of its configured roots. A nil extraRoots is the safe default;
+// passing a populated roots is the explicit "verifier reach" opt-in used by
+// the arbiter (bugbot-mi5.17/.18). The tool description is also augmented
+// when extra roots are present so the LLM knows it can read outside the repo.
+func NewReadFileWithDepRoots(dir string, caps ReadCaps, extraRoots *DepSourceRoots) (Tool, error) {
+	root, err := newFSRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	return &readFileTool{root: root, extraRoots: extraRoots, caps: caps.resolve()}, nil
+}
+
 type readFileArgs struct {
 	Path   string `json:"path"`
 	Offset int    `json:"offset,omitempty"`
@@ -86,22 +109,38 @@ type readFileArgs struct {
 }
 
 func (t *readFileTool) Def() llm.ToolDef {
+	desc := fmt.Sprintf(
+		"Read a UTF-8 text file and return it as numbered lines (1-based). "+
+			"Use offset/limit to read a window of a large file. Output is capped "+
+			"at ~%d lines / %dKB; truncation is noted. "+
+			"For a single function/method/type, prefer read_symbol, and use outline "+
+			"to map a file before reading; reach for read_file when you need a whole "+
+			"file or non-declaration text. Paths are repo-relative (no leading slash, "+
+			"no ..) and traversal-protected.",
+		t.caps.MaxLines, t.caps.MaxBytes/1024)
+	pathDesc := "Repository-relative path to the file (no leading slash, no ..)."
+	if t.extraRoots != nil && t.extraRoots.Len() > 0 {
+		desc += " When the cited symbol lives OUTSIDE the repository (e.g. a " +
+			"standard-library function or a third-party module), you may also read " +
+			"it by its slash-relative path under one of the read-only dep-source " +
+			"roots (Go: GOROOT/src and the module cache). The same traversal " +
+			"protection applies; the tool accepts the path when it lives under any " +
+			"configured root."
+		pathDesc = "Path to the file. Repo-relative paths read the file in the " +
+			"repository. Paths that are not in the repository are resolved against " +
+			"the configured read-only dep-source roots (GOROOT/src for Go " +
+			"standard library, the Go module cache for third-party modules). " +
+			"Both kinds are traversal-protected (no leading slash, no ..)."
+	}
 	return llm.ToolDef{
-		Name: "read_file",
-		Description: fmt.Sprintf(
-			"Read a UTF-8 text file from the repository and return it as "+
-				"numbered lines (1-based). Use offset/limit to read a window of a large "+
-				"file. Output is capped at ~%d lines / %dKB; truncation is noted. "+
-				"For a single function/method/type, prefer read_symbol, and use outline "+
-				"to map a file before reading; reach for read_file when you need a whole "+
-				"file or non-declaration text.",
-			t.caps.MaxLines, t.caps.MaxBytes/1024),
+		Name:        "read_file",
+		Description: desc,
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
     "path": {
       "type": "string",
-      "description": "Repository-relative path to the file (no leading slash, no ..)."
+      "description": "` + pathDesc + `"
     },
     "offset": {
       "type": "integer",
@@ -135,14 +174,42 @@ func (t *readFileTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 		return "", fmt.Errorf("limit must be >= 0")
 	}
 
+	// resolve the path. Two-step lookup (bugbot-mi5.18):
+	//   1. The in-repo fsRoot. A path under the repo root is the
+	//      canonical case and never falls through to step 2.
+	//   2. The dep-source roots. A path that escapes the repo (or
+	//      lexically-resolves under the repo but does not exist there)
+	//      is then tried against every configured dep-source root. A
+	//      path that lives under the repo AND a dep-source root reads
+	//      from the repo (in-repo wins).
 	abs, err := t.root.resolve(args.Path)
 	if err != nil {
-		return "", err
+		// Path lexically escapes the repo root: try dep-source roots.
+		if t.extraRoots == nil {
+			return "", err
+		}
+		depAbs, depErr := t.extraRoots.resolve(args.Path)
+		if depErr != nil {
+			return "", err
+		}
+		abs = depAbs
 	}
 
-	info, err := os.Stat(abs)
-	if err != nil {
-		return "", fmt.Errorf("cannot read %q: %w", args.Path, err)
+	info, statErr := os.Stat(abs)
+	if statErr != nil {
+		// The resolved path is absent. A path that is lexically valid under the
+		// repo root may actually live in a dep-source root (the arbiter's broader
+		// reach), so try those before giving up.
+		if t.extraRoots != nil {
+			if depAbs, depErr := t.extraRoots.resolve(args.Path); depErr == nil {
+				if di, dErr := os.Stat(depAbs); dErr == nil {
+					abs, info, statErr = depAbs, di, nil
+				}
+			}
+		}
+		if statErr != nil {
+			return "", fmt.Errorf("cannot read %q: %w", args.Path, statErr)
+		}
 	}
 	if info.IsDir() {
 		return "", fmt.Errorf("%q is a directory, not a file", args.Path)
