@@ -186,15 +186,33 @@ var ecosystemTable = []ecosystemRules{
 	},
 	{
 		name: sandbox.EcosystemJS,
-		// jest / vitest / npm test. They all emit a "FAIL" line per
-		// failing suite and a final summary; vitest adds a "✗" glyph
-		// (kept as a fallback marker).
+		// Positive ran-evidence MUST be anchored to real test-runner output.
+		// Bare "failed"/"fail" are deliberately NOT used: webpack/tsc/babel/
+		// rollup/eslint build output is saturated with them ("Build failed",
+		// "Compilation failed", "Build step failed"), so a non-zero exit from
+		// a broken build would otherwise be minted as a demonstration (the
+		// same bug class as bugbot-dmy for C/C++; buildMarkers below still
+		// catch the toolchain refusals, but a build that simply prints
+		// 'failed' and exits 1 is the dangerous case). What IS dispositive:
+		//   - jest prints "● " (U+25CF) as the per-failure bullet and a
+		//     "Test Suites:" summary line — neither appears in build/tooling
+		//     output.
+		//   - jest prefixes each failing-test line with the "✕" (U+2715)
+		//     failing glyph.
+		//   - vitest prefixes failing-test lines with "×" (U+00D7) and frames
+		//     its "⎯⎯ Failed Tests" section with "⎯⎯" (U+23AF); webpack
+		//     tree-shaking stats also emit "×" but never in a context that
+		//     survives the JS-ecosystem launcher filter (jest/vitest/mocha).
+		// Mocha's "✗" and "AssertionError" anchors are NOT added yet —
+		// precision-first, such repros fall through to not_demonstrated and
+		// the agent revises (same policy as the C/C++ table for Catch2/
+		// doctest/Boost.Test).
 		ranMarkers: []string{
-			"fail ", // jest "FAIL src/foo.test.js"
-			"failed",
-			"✗",
-			"tests failed",
-			"×", // vitest failure glyph
+			"● ",           // jest per-failure bullet (U+25CF + space)
+			"✕",            // jest failing-test glyph (U+2715)
+			"×",            // vitest failing-test glyph (U+00D7)
+			"⎯⎯",           // vitest "⎯⎯ Failed Tests" section header (U+23AF)
+			"test suites:", // jest summary line: "Test Suites: N failed, M total"
 		},
 		buildMarkers: []string{
 			"cannot find module",
