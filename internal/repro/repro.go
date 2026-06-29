@@ -517,6 +517,37 @@ func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, e
 	return r.sb.Exec(ctx, spec)
 }
 
+// bareShellOps is the set of shell control tokens that mean nothing to a
+// sandbox that runs Cmd as raw argv. If any element of p.Cmd is exactly one of
+// these strings, the agent emitted shell syntax the sandbox cannot interpret
+// (e.g. ["cmake", "...", "&&", "cmake", "--build", "..."] passes "&&" as a
+// literal argument to the first cmake). The fix is to wrap the whole command
+// in `bash -c "..."` so the shell parses the operators — and a correctly
+// wrapped plan keeps these tokens INSIDE one quoted argv element, so it must
+// not be flagged. Match whole argv elements only; do not substring-scan.
+var bareShellOps = map[string]struct{}{
+	"&&":   {},
+	"||":   {},
+	"|":    {},
+	";":    {},
+	"2>&1": {},
+	">":    {},
+	">>":   {},
+	"<":    {},
+	"&":    {},
+	"cd":   {},
+}
+
+// isBareShellOp reports whether arg is a shell control token that must not
+// appear as a standalone element of plan.Cmd. Matching is exact-string only:
+// an arg like "&&&&" or "echo &&" is fine because the operator is not the whole
+// element. This keeps a properly bash-wrapped plan (with the operators inside
+// one quoted string) untouched.
+func isBareShellOp(arg string) bool {
+	_, ok := bareShellOps[arg]
+	return ok
+}
+
 // validatePlan rejects structurally unusable plans before spending a sandbox
 // run on them. A failure here is recoverable: Attempt feeds the message back to
 // the agent and revises, so the checks below double as corrective guidance.
@@ -536,6 +567,24 @@ func validatePlan(p *Plan) error {
 		if err := sandbox.ValidateWorkspacePath(path); err != nil {
 			return fmt.Errorf("file %q must be a workspace-relative path inside the repo "+
 				"(no leading %q, no %q), e.g. %q: %w", path, "/", "..", "repro_test.cpp", err)
+		}
+	}
+	for _, arg := range p.Cmd {
+		// Bare shell control operators are meaningless to a sandbox that runs
+		// Cmd as raw argv. A reproducer that emits, say,
+		// ["cmake", "...", "&&", "cmake", "--build", "..."] passes "&&" as a
+		// literal argument to the first cmake, which errors out without ever
+		// reaching the second command and wastes a sandbox run. The fix is
+		// structural: wrap the whole command in `bash -c "..."` so the shell
+		// parses the operators. A correctly wrapped plan
+		// ["bash","-c","cmake ... && cmake --build ..."] keeps the operators
+		// inside ONE quoted string, so it must NOT be flagged — we match whole
+		// argv elements only, never substrings.
+		if isBareShellOp(arg) {
+			return fmt.Errorf("cmd contains a bare shell operator %q as a separate argv element; "+
+				"the sandbox runs Cmd as raw argv (no shell), so %q is passed as a literal argument to the preceding command. "+
+				"Wrap the entire command in bash: set cmd to [\"bash\",\"-c\",\"<full command as a single string>\"] "+
+				"(e.g. [\"bash\",\"-c\",\"cmake ... && cmake --build ... && cd build && ./tests/x\"])", arg, arg)
 		}
 	}
 	return nil

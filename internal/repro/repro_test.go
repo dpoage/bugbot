@@ -1221,3 +1221,164 @@ func TestPromoteAll_SurfacesMountsInPrompt(t *testing.T) {
 		t.Errorf("system prompt missing bind-mount container path; got:\n%s", reqs[0].System)
 	}
 }
+
+// TestValidatePlan_ShellOps covers the structural gate that prevents the
+// reproducer agent from emitting shell syntax the sandbox cannot interpret.
+// Bare shell control operators as standalone argv elements (e.g. "&&", "|",
+// "cd") are passed as literal arguments to the preceding command by the
+// raw-argv sandbox runner, which both wastes a sandbox execution AND hides
+// the real syntax problem behind a confusing "Unknown argument" error.
+// validatePlan must reject these so the agent is fed corrective guidance
+// instead. A correctly bash-wrapped plan (operators live INSIDE one quoted
+// argv element) must NOT be flagged — we match whole argv elements only.
+func TestValidatePlan_ShellOps(t *testing.T) {
+	files := map[string]string{"repro_test.go": "package bug\n"}
+
+	// --- accepted: well-formed plans must NOT be flagged ---------------
+	accepted := []struct {
+		name string
+		cmd  []string
+	}{
+		{"plain go test", []string{"go", "test", "./..."}},
+		{"plain go test with -run", []string{"go", "test", "-run", "TestX", "./..."}},
+		{"plain ctest", []string{"ctest", "--output-on-failure"}},
+		{"plain cargo", []string{"cargo", "test"}},
+		// The shell-op example from the bug report, correctly wrapped: the
+		// operators live inside ONE quoted argv element, so the whole plan
+		// is just ["bash","-c","<... && ...>"] — no bare operators.
+		{"bash -c with && and cd", []string{
+			"bash", "-c",
+			"cmake -B build -S . && cmake --build build && cd build && ./tests/x",
+		}},
+		{"bash -lc with operators inside string", []string{
+			"bash", "-lc", "cmake -B build | tee log && cmake --build build",
+		}},
+		// Operators appearing inside a longer string argument that is NOT a
+		// bare operator itself must not trip the check.
+		{"arg contains && but is not bare", []string{"echo", "foo && bar"}},
+		{"arg contains ; but is not bare", []string{"echo", "a;b"}},
+		{"arg contains cd as substring", []string{"echo", "cd-build"}},
+	}
+	for _, tc := range accepted {
+		t.Run("accept/"+tc.name, func(t *testing.T) {
+			p := &Plan{Files: files, Cmd: tc.cmd, Expect: "x"}
+			if err := validatePlan(p); err != nil {
+				t.Errorf("validatePlan(%v) = %v, want nil (a correctly formed plan must not be rejected)", tc.cmd, err)
+			}
+		})
+	}
+
+	// --- rejected: each spec-listed bare operator must be flagged --------
+	rejected := []struct {
+		name      string
+		cmd       []string
+		wantOp    string
+		wantGuide string
+	}{
+		{
+			// The exact reproducer plan from the bug report.
+			name: "cmake && cmake --build && cd build && ./tests",
+			cmd: []string{
+				"cmake", "-B", "build", "-S", ".",
+				"&&", "cmake", "--build", "build",
+				"&&", "cd", "build",
+				"&&", "./tests/x",
+			},
+			wantOp:    "&&",
+			wantGuide: "bash",
+		},
+		{"bare &&", []string{"echo", "a", "&&", "echo", "b"}, "&&", "bash"},
+		{"bare ||", []string{"false", "||", "true"}, "||", "bash"},
+		{"bare |", []string{"echo", "a", "|", "cat"}, "|", "bash"},
+		{"bare ;", []string{"echo", "a", ";", "echo", "b"}, ";", "bash"},
+		{"bare 2>&1", []string{"echo", "a", "2>&1", "cat"}, "2>&1", "bash"},
+		{"bare >", []string{"echo", "a", ">", "out.txt"}, ">", "bash"},
+		{"bare >>", []string{"echo", "a", ">>", "out.txt"}, ">>", "bash"},
+		{"bare <", []string{"cat", "<", "in.txt"}, "<", "bash"},
+		{"bare &", []string{"echo", "a", "&", "echo", "b"}, "&", "bash"},
+		{"bare cd", []string{"cd", "build", "&&", "ctest"}, "cd", "bash"},
+	}
+	for _, tc := range rejected {
+		t.Run("reject/"+tc.name, func(t *testing.T) {
+			p := &Plan{Files: files, Cmd: tc.cmd, Expect: "x"}
+			err := validatePlan(p)
+			if err == nil {
+				t.Fatalf("validatePlan(%v) = nil, want error containing %q", tc.cmd, tc.wantOp)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tc.wantOp) {
+				t.Errorf("error %q does not name offending bare operator %q", msg, tc.wantOp)
+			}
+			if !strings.Contains(msg, tc.wantGuide) {
+				t.Errorf("error %q does not include wrapping guidance (%q)", msg, tc.wantGuide)
+			}
+			// The fix must be concrete: show the ["bash","-c","<...>"]
+			// argv shape the agent must emit.
+			if !strings.Contains(msg, `"bash"`) || !strings.Contains(msg, `"-c"`) {
+				t.Errorf("error %q does not show the bash -c argv shape", msg)
+			}
+		})
+	}
+}
+
+// TestPromoteAll_BareShellOpPlanRetries proves the recoverable-revision flow:
+// an agent that emits ["cmake", ..., "&&", "cmake", "--build", ..., "&&",
+// "cd", "build", "&&", "./tests/x"] is caught by validatePlan and fed back
+// to the model as actionable bash-wrapping guidance. The bad plan must never
+// reach the sandbox; the corrected plan promotes. Regression: such a plan
+// previously burned a sandbox execution on the first cmake and surfaced a
+// confusing "Unknown argument" error instead of a revision request.
+func TestPromoteAll_BareShellOpPlanRetries(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	finding := seedFinding(t, st)
+	repoDir := newRepoDir(t)
+
+	bad := Plan{
+		Files: map[string]string{"repro_test.go": "package bug\n"},
+		// Reproduces the JSON-finding command shape from the bug report.
+		Cmd: []string{
+			"cmake", "-B", "build", "-S", ".",
+			"&&", "cmake", "--build", "build",
+			"&&", "cd", "build",
+			"&&", "./tests/x",
+		},
+		Expect: "leak", // non-empty so the plan clears the schema; the cmd is the defect
+	}
+	client := newScriptedClient(planBody(t, bad), planBody(t, goodPlan()))
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "--- FAIL: TestBug\nFAIL",
+	}})
+
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	if err != nil {
+		t.Fatalf("PromoteAll returned a hard error for a recoverable bad cmd: %v", err)
+	}
+	if summary.Promoted != 1 || summary.Failed != 0 {
+		t.Fatalf("summary = %+v, want 1 promoted / 0 failed (retry after bare shell op)", summary)
+	}
+	// The bare-shell-op plan must never reach the sandbox; only the corrected
+	// (bash-wrapped) plan executes. Load-bearing: it proves the bad plan does
+	// not waste a sandbox run.
+	if n := len(sb.Calls()); n != 1 {
+		t.Fatalf("sandbox calls = %d, want 1 (bare-shell-op plan must not execute)", n)
+	}
+	// Two completions: the rejected plan + the corrected one. The revision
+	// request must name the offending operator and the bash-wrapping fix.
+	reqs := client.allRequests()
+	if len(reqs) != 2 {
+		t.Fatalf("llm completions = %d, want 2 (reject + revise)", len(reqs))
+	}
+	task := client.taskText(1)
+	for _, want := range []string{"&&", "bash", "-c"} {
+		if !strings.Contains(task, want) {
+			t.Errorf("revision task missing %q; got:\n%s", want, task)
+		}
+	}
+}
