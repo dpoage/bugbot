@@ -101,6 +101,26 @@ var runtimeFailureMarkers = append([]string{
 	"data race",
 }, sanitizerReportMarkers...)
 
+// reproSentinelDemonstrated is the exact literal token the reproducer agent
+// must print to stdout ONLY on the code path confirming the bug is present,
+// immediately before exiting non-zero. It is the trust bridge for bug classes
+// that have no standard test-framework runner (build-system/config,
+// shader/asset semantics) — see interpret() for the gate.
+const reproSentinelDemonstrated = "BUGBOT_REPRO_DEMONSTRATED"
+
+// reproSentinelMarkers is the marker slice wrapping reproSentinelDemonstrated
+// so it composes with the existing hasAnyMarker helper. Entries are lowercase
+// because hasAnyMarker compares against a lowercased copy of the run output.
+//
+// It is a trusted ran-evidence marker for non-runtime bug classes — the
+// interpreter checks it AFTER the env/toolchain/build gates, so a broken build
+// or env failure that happens to emit the token STILL classifies as the
+// failure (bugbot-vig preserved). The token is only meaningful paired with a
+// non-zero exit; the interpret() call-site guarantees that already.
+var reproSentinelMarkers = []string{
+	strings.ToLower(reproSentinelDemonstrated),
+}
+
 // ecosystemTable is the ordered registry of supported ecosystems. Order
 // matters only for tie-breaking in the (rare) case that the same argv
 // prefix matches two entries; the first match wins. Go is intentionally

@@ -463,3 +463,102 @@ func TestInterpret_RuntimeFailureMarkers(t *testing.T) {
 		}
 	})
 }
+
+// TestInterpret_Sentinel_* — bugbot-8hb — coverage for the
+// reproSentinelDemonstrated token. The reproducer agent prints it to stdout on
+// the bug-present branch for non-runtime bug classes (build-system/config,
+// shader/asset semantics) that have no standard test-framework runner. The
+// harness treats the token as positive ran-evidence AFTER the env/toolchain/
+// build gates so a broken build that happens to emit the token still classifies
+// as the failure (bugbot-vig preserved).
+
+// TestInterpret_Sentinel_ShellScript_Demonstrated: a bash wrapper script whose
+// non-zero exit carries the sentinel and no env/toolchain/build markers. Maps
+// to EcosystemUnknown (plain "bash script.sh" — no -c wrapper to unwrap).
+// Promotes via the new step 3.5 sentinel gate.
+func TestInterpret_Sentinel_ShellScript_Demonstrated(t *testing.T) {
+	res := sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "checking macOS toolchain feature flag…\nBUGBOT_REPRO_DEMONSTRATED\n",
+	}
+	v := interpret(res, []string{"bash", "repro_macos_toolchain.sh"})
+	if !v.demonstrated {
+		t.Errorf("sentinel + non-zero exit + no build markers must demonstrate; got reason=%q, summary=%q",
+			v.reason, v.summary)
+	}
+	if v.reason != "" {
+		t.Errorf("demonstrated verdict should leave reason empty; got reason=%q", v.reason)
+	}
+	if v.ecosystem != sandbox.EcosystemUnknown {
+		t.Errorf("want ecosystem=unknown (the bug scenario); got %q", v.ecosystem)
+	}
+}
+
+// TestInterpret_Sentinel_BareBinary_Demonstrated: a bare ./repro binary (no
+// wrapper) exits non-zero with the sentinel in stdout and no build markers.
+// Maps to EcosystemUnknown (./repro is not a recognized launcher).
+func TestInterpret_Sentinel_BareBinary_Demonstrated(t *testing.T) {
+	res := sandbox.Result{
+		ExitCode: 2,
+		Stdout:   "running assertion…\nBUGBOT_REPRO_DEMONSTRATED\n",
+	}
+	v := interpret(res, []string{"./repro"})
+	if !v.demonstrated {
+		t.Errorf("sentinel + non-zero exit + no build markers must demonstrate; got reason=%q",
+			v.reason)
+	}
+	if v.ecosystem != sandbox.EcosystemUnknown {
+		t.Errorf("want ecosystem=unknown (the bug scenario); got %q", v.ecosystem)
+	}
+}
+
+// TestInterpret_Sentinel_BuildFailureStillNotDemonstrated: GUARD for the
+// bugbot-vig invariant — a build failure whose output also contains the
+// sentinel MUST classify as build_error, NOT as demonstrated. This is the
+// late-ordering proof: step 3 (buildMarkers) wins over step 3.5 (sentinel).
+// Reuses a realistic g++ compile error so the Cpp buildMarkers ("error: ",
+// "fatal error:") match but the Cpp toolchainMarkers ("cmake error",
+// "ctest: not found") do NOT — toolchain wins over build when both match, so
+// we pick a fixture that lands on build_error directly. The sentinel is
+// appended to PROVE the late-ordering: even with the trusted token present,
+// the build_error gate wins.
+func TestInterpret_Sentinel_BuildFailureStillNotDemonstrated(t *testing.T) {
+	res := sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "BUGBOT_REPRO_DEMONSTRATED\n",
+		Stderr: "t.cpp:5:5: error: 'undeclared_identifier' was not declared in this scope\n" +
+			"t.cpp:7:1: fatal error: too many errors emitted, stopping now\n",
+	}
+	cmd := []string{"g++", "-std=c++17", "t.cpp", "-o", "/tmp/repro_t"}
+	v := interpret(res, cmd)
+	if v.demonstrated {
+		t.Fatalf("build failure must NOT demonstrate even when sentinel is present; got demonstrated=true (ecosystem=%q)",
+			v.ecosystem)
+	}
+	if v.reason != VerdictReasonBuildError {
+		t.Errorf("build failure with sentinel must classify as build_error (bugbot-vig preserved); got reason=%q",
+			v.reason)
+	}
+}
+
+// TestInterpret_Unknown_BareNonZero_NoSentinel_NotDemonstrated: the bugbot-vig
+// regression guard — a bare non-zero exit on the unknown ecosystem with NO
+// sentinel and NO other markers must stay not_demonstrated. The sentinel is the
+// ONLY escape hatch; without it the conservative contract holds. (Equivalent
+// coverage already lives in TestInterpret_RuntimeFailureMarkers/
+// bare_nonzero_not_demonstrated and TestInterpret_UnknownEcosystem_NotDemonstrated,
+// so this test pins the negative specifically against the sentinel — i.e.
+// the absence of the token is what keeps the verdict conservative.)
+func TestInterpret_Unknown_BareNonZero_NoSentinel_NotDemonstrated(t *testing.T) {
+	res := sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "some generic ad-hoc output with no known markers\n",
+	}
+	v := interpret(res, []string{"bash", "check.sh"})
+	if v.demonstrated {
+		t.Errorf("bare non-zero exit without sentinel must NOT demonstrate; got demonstrated=true")
+	}
+	if v.reason != VerdictReasonNotDemonstrated {
+		t.Errorf("want reason=not_demonstrated (bugbot-vig preserved); got reason=%q", v.reason)
+	}
+}

@@ -163,6 +163,17 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	if hasAnyMarker(lowOut, eco.buildMarkers) {
 		return verdict{reason: VerdictReasonBuildError, summary: trunc(out, 400), ecosystem: eco.name}
 	}
+	// 3.5. Trusted sentinel — the reproducer agent's escape hatch for
+	//      non-runtime bug classes (build-system/config, shader/asset
+	//      semantics) whose language lacks a standard test-framework runner.
+	//      Checked LATE — AFTER steps 1-3 — so a broken build or env failure
+	//      that happens to print the token still classifies as the failure
+	//      (bugbot-vig preserved; see bugbot-8hb). Step 4 (per-ecosystem
+	//      ran-evidence) stays the primary positive-evidence gate; the
+	//      sentinel only fires when the per-ecosystem markers had no match.
+	if hasAnyMarker(lowOut, reproSentinelMarkers) {
+		return verdict{demonstrated: true, summary: trunc(out, 400), ecosystem: eco.name}
+	}
 	// 4. Positive ran-evidence — the bug demonstrated. This is the GATE.
 	if eco.hasRanEvidence(lowOut) {
 		return verdict{demonstrated: true, summary: trunc(out, 400), ecosystem: eco.name}
