@@ -75,7 +75,14 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd store.Finding) (refuted 
 	// intentional: a re-check happens because the finding's code changed or went
 	// stale, where demoting and letting a future scan re-discover is the cheap,
 	// safe failure mode.
-	return majorityRefuted(verdicts), buildReasoning(verdicts, seatNames, "", false), nil
+	//
+	// The trace header MUST match the outcome: when refuted==true the trace
+	// records the kill with a 'Refuted by adversarial verification' header; when
+	// refuted==false it records the survive with the 'Survived ...' header.
+	// Mismatch would mislead a human reading the persisted reasoning into
+	// believing a now-dismissed finding survived (bugbot-wmqa).
+	refuted = majorityRefuted(verdicts)
+	return refuted, buildReasoning(verdicts, seatNames, "", false, refuted), nil
 }
 
 // candidateFromFinding reconstructs the verification Candidate from a stored

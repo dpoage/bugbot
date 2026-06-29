@@ -260,11 +260,18 @@ func majorityRefuted(verdicts []refutation) bool {
 }
 
 // buildReasoning concatenates the refuters' reasoning into a verification trace
-// recorded on the finding. It labels each refuter's verdict with its seat name
-// so the trace is legible to a human triaging the finding later. Abstaining
-// seats are labeled distinctly. When arbiterRan is true, a final line for the
-// arbiter's verdict is appended and the header changes to reflect arbitration.
-func buildReasoning(verdicts []refutation, seatNames []string, arbiterLine string, arbiterRan bool) string {
+// recorded on the finding (survivors) or the dead_hypotheses audit store (kills).
+// It labels each refuter's verdict with its seat name so the trace is legible to
+// a human triaging the finding later. Abstaining seats are labeled distinctly.
+// When arbiterRan is true, a final line for the arbiter's verdict is appended
+// and the header changes to reflect arbitration.
+//
+// The killed flag selects the HEADER wording only: the per-seat refuter lines
+// and arbiter line are unchanged. Survivors get a 'Survived' header; kills get
+// a 'Refuted' header. Without this distinction the kill trace (persisted to
+// dead_hypotheses for verifier-precision auditing) would mis-label a killed
+// hypothesis as having survived, defeating the audit's purpose (bugbot-wmqa).
+func buildReasoning(verdicts []refutation, seatNames []string, arbiterLine string, arbiterRan bool, killed bool) string {
 	var b strings.Builder
 	genuine := genuineVerdicts(verdicts)
 	refuted := 0
@@ -274,10 +281,18 @@ func buildReasoning(verdicts []refutation, seatNames []string, arbiterLine strin
 		}
 	}
 	n := len(genuine)
-	if arbiterRan {
-		fmt.Fprintf(&b, "Survived adversarial verification (split panel decided by arbitration, %d/%d refuter verdicts could not disprove it):\n", n-refuted, n)
+	if killed {
+		if arbiterRan {
+			fmt.Fprintf(&b, "Refuted by adversarial verification (split panel decided by arbitration, %d/%d refuter verdicts refuted it):\n", refuted, n)
+		} else {
+			fmt.Fprintf(&b, "Refuted by adversarial verification (%d/%d refuter verdicts refuted it):\n", refuted, n)
+		}
 	} else {
-		fmt.Fprintf(&b, "Survived adversarial verification (%d/%d refuter verdicts could not disprove it):\n", n-refuted, n)
+		if arbiterRan {
+			fmt.Fprintf(&b, "Survived adversarial verification (split panel decided by arbitration, %d/%d refuter verdicts could not disprove it):\n", n-refuted, n)
+		} else {
+			fmt.Fprintf(&b, "Survived adversarial verification (%d/%d refuter verdicts could not disprove it):\n", n-refuted, n)
+		}
 	}
 	total := len(verdicts)
 	for i, v := range verdicts {

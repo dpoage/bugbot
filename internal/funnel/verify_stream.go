@@ -328,7 +328,7 @@ func (f *Funnel) runVerifyAndPersist(
 		// Best-effort: failed insert is f.note-logged and never aborts the
 		// scan. The verdict breakdown columns are structured (counts + seat
 		// names + arbiter verdict); only reasoning_trace holds model prose.
-		killTrace := buildReasoning(verdicts, seatNames, arbiterReasoning, arbiterRan)
+		killTrace := buildReasoning(verdicts, seatNames, arbiterReasoning, arbiterRan, true)
 		refutedCount := 0
 		for _, r := range seatRefutedSlice(verdicts) {
 			if r {
@@ -371,7 +371,7 @@ func (f *Funnel) runVerifyAndPersist(
 		quorumNote = fmt.Sprintf("\nNOTE: only %d/%d panel seat(s) produced a verdict (below quorum floor); human review required.", len(genuine), len(verdicts))
 	}
 
-	reasoning := buildReasoning(verdicts, seatNames, arbiterReasoning, arbiterRan) + quorumNote
+	reasoning := buildReasoning(verdicts, seatNames, arbiterReasoning, arbiterRan, false) + quorumNote
 	// Drain sites staged by root-cause-merged members that arrived in triage
 	// before this verify goroutine reached this point.
 	stagedSites := reg.DrainStagedSites(c.Fingerprint)
@@ -517,9 +517,10 @@ func persistOrphan(ctx context.Context, f *Funnel, c Candidate, commit string, f
 // persistKilled records a verifier-killed candidate into the dead_hypotheses
 // audit table so a future operator can distinguish a good kill (false positive
 // removed) from a bad kill (real bug suppressed). The kill-reasoning trace is
-// the same buildReasoning output produced for survivors further below — the
-// killed branch used to discard it, leaving only a Stats counter and no way to
-// audit production kills post-hoc (bugbot-cvc).
+// produced by buildReasoning with killed=true: it shares the per-seat refuter
+// lines and arbiter line with the survivor trace but uses a 'Refuted by
+// adversarial verification' header so the dead_hypotheses row is never
+// mis-labeled as having survived (bugbot-wmqa).
 //
 // The agent_units.Detail invariant is preserved: the verdict breakdown is
 // stored as STRUCTURED columns (seat names + refuted count + arbiter verdict)
