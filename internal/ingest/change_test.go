@@ -168,3 +168,72 @@ func TestParseNameStatusZ_RenameCarriesOldPath(t *testing.T) {
 		t.Error("expected a ChangeAdded in output")
 	}
 }
+
+// TestReadFileAtRef exercises the three observable outcomes of ReadFileAtRef:
+// (1) a file present at the ref is returned verbatim, (2) a non-existent path
+// at the ref yields a non-nil error (callers treat this as "absent at ref"),
+// and (3) a file added in a later commit is absent (errors) when probed at an
+// earlier commit. This last case is the regress-attribution signal: a finding
+// anchored to a file that did not yet exist at --from is INTRODUCED.
+func TestReadFileAtRef(t *testing.T) {
+	r := newTestRepo(t)
+	// Commit A: a single tracked file with known content.
+	r.write("hello.txt", "line one\nline two\nline three\n")
+	base := r.commit("base: add hello.txt")
+
+	// Commit B: add a new file and modify the existing one.
+	r.write("hello.txt", "line one\nline two\nline three\nline four\n")
+	r.write("added.txt", "born in B\n")
+	head := r.commit("head: append + add added.txt")
+
+	repo := r.open()
+
+	// (1) The file's content at HEAD must match what we wrote verbatim.
+	got, err := repo.ReadFileAtRef(context.Background(), head, "hello.txt")
+	if err != nil {
+		t.Fatalf("ReadFileAtRef(HEAD, hello.txt): unexpected error: %v", err)
+	}
+	if string(got) != "line one\nline two\nline three\nline four\n" {
+		t.Errorf("ReadFileAtRef(HEAD, hello.txt) = %q; want the post-B content verbatim", got)
+	}
+
+	// (2) A path that was never tracked at HEAD must surface a non-nil error.
+	// The regress attribution helper treats that error as "absent at ref" =>
+	// INTRODUCED.
+	if _, err := repo.ReadFileAtRef(context.Background(), head, "does-not-exist.go"); err == nil {
+		t.Error("ReadFileAtRef(HEAD, does-not-exist.go): expected error, got nil")
+	}
+
+	// (3) A file added in commit B must be absent at the earlier commit A.
+	// This is the load-bearing case for `bugbot regress --from A --to B`:
+	// findings anchored to `added.txt` will be labeled INTRODUCED.
+	if _, err := repo.ReadFileAtRef(context.Background(), base, "added.txt"); err == nil {
+		t.Error("ReadFileAtRef(<base>, added.txt): expected error (file added in B), got nil")
+	}
+
+	// Sanity: hello.txt at base must still be the pre-B content.
+	got, err = repo.ReadFileAtRef(context.Background(), base, "hello.txt")
+	if err != nil {
+		t.Fatalf("ReadFileAtRef(<base>, hello.txt): unexpected error: %v", err)
+	}
+	if string(got) != "line one\nline two\nline three\n" {
+		t.Errorf("ReadFileAtRef(<base>, hello.txt) = %q; want pre-B content", got)
+	}
+}
+
+// TestReadFileAtRef_RequiresArgs verifies the guard clauses on the ref and
+// path arguments: both must be non-empty, matching the patterns used by
+// ChangedFiles / UnifiedDiff / CommitMessage.
+func TestReadFileAtRef_RequiresArgs(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.go", "package a\n")
+	r.commit("init")
+	repo := r.open()
+
+	if _, err := repo.ReadFileAtRef(context.Background(), "", "a.go"); err == nil {
+		t.Error("ReadFileAtRef with empty ref: expected error, got nil")
+	}
+	if _, err := repo.ReadFileAtRef(context.Background(), "HEAD", ""); err == nil {
+		t.Error("ReadFileAtRef with empty path: expected error, got nil")
+	}
+}

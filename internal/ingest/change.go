@@ -191,6 +191,32 @@ func (r *Repo) CommitMessage(ctx context.Context, commit string) (string, error)
 	return strings.TrimRight(out, "\n"), nil
 }
 
+// ReadFileAtRef returns the raw bytes of path as it appears at the given git
+// ref. ref may be any revision (SHA, branch, tag, HEAD~3). When the file does
+// not exist at ref — git exits non-zero with "fatal: path 'path' does not
+// exist (neither on disk nor in the index)" or "fatal: path 'path' exists on
+// disk, but not in '<ref>'" — the underlying error is returned unchanged so
+// callers can treat the absence as a normal outcome (the regress attribution
+// path labels a finding INTRODUCED when its anchored file is absent at the
+// range's base ref).
+//
+// "--end-of-options" is inserted before the joined ref:path argument so a ref
+// that starts with "-" cannot be parsed as a flag by git. This follows the
+// same defence-in-depth pattern as ChangedFiles / UnifiedDiff / CommitMessage.
+func (r *Repo) ReadFileAtRef(ctx context.Context, ref, path string) ([]byte, error) {
+	if ref == "" {
+		return nil, fmt.Errorf("ingest: ReadFileAtRef requires a non-empty ref")
+	}
+	if path == "" {
+		return nil, fmt.Errorf("ingest: ReadFileAtRef requires a non-empty path")
+	}
+	raw, err := runGitRaw(ctx, r.root, "show", "--end-of-options", ref+":"+path)
+	if err != nil {
+		return nil, fmt.Errorf("ingest: show %s:%s: %w", ref, path, err)
+	}
+	return raw, nil
+}
+
 // ChangedPaths is a convenience that flattens a Change slice to the set of
 // post-change paths plus any rename sources, which is the natural input to
 // BlastRadius (both the new and old locations of a renamed file are relevant).
