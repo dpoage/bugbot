@@ -943,6 +943,9 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	if _, err := f.store.PruneAgentUnits(ctx, keepRuns); err != nil {
 		f.note(result, fmt.Sprintf("observability: PruneAgentUnits failed: %v", err))
 	}
+	if _, err := f.store.PruneDeadHypotheses(ctx, keepRuns); err != nil {
+		f.note(result, fmt.Sprintf("observability: PruneDeadHypotheses failed: %v", err))
+	}
 
 	return result, nil
 }

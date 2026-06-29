@@ -322,8 +322,21 @@ func (f *Funnel) runVerifyAndPersist(
 				f.note(result, fmt.Sprintf("reverify: dismiss refuted T3 %q failed: %v", c.Title, err))
 			}
 		}
-		// Killed: terminal, but nothing durable is persisted (only a Stats
-		// counter), so drop the WAL row or it would replay and be re-killed
+		// Persist the kill trace into the dead_hypotheses audit store
+		// (bugbot-cvc) so a future operator can distinguish a good kill
+		// (false positive removed) from a bad kill (real bug suppressed).
+		// Best-effort: failed insert is f.note-logged and never aborts the
+		// scan. The verdict breakdown columns are structured (counts + seat
+		// names + arbiter verdict); only reasoning_trace holds model prose.
+		killTrace := buildReasoning(verdicts, seatNames, arbiterReasoning, arbiterRan)
+		refutedCount := 0
+		for _, r := range seatRefutedSlice(verdicts) {
+			if r {
+				refutedCount++
+			}
+		}
+		persistKilled(ctx, f, c, seatNames, refutedCount, arbiterRan, arbiterRefuted(arbiterVerdict), killTrace, result)
+		// Killed: terminal; drop the WAL row or it would replay and be re-killed
 		// every run. deletePending is a no-op when id=="" (reverify path has
 		// no WAL row), so the durable dismiss above is the only state change.
 		f.deletePending(ctx, c.PendingID, result)
@@ -499,6 +512,51 @@ func persistOrphan(ctx context.Context, f *Funnel, c Candidate, commit string, f
 	msg := fmt.Sprintf("%q (%s:%d) kept as T3 suspected", c.Title, c.File, c.Line)
 	f.note(result, msg)
 	return &stored
+}
+
+// persistKilled records a verifier-killed candidate into the dead_hypotheses
+// audit table so a future operator can distinguish a good kill (false positive
+// removed) from a bad kill (real bug suppressed). The kill-reasoning trace is
+// the same buildReasoning output produced for survivors further below — the
+// killed branch used to discard it, leaving only a Stats counter and no way to
+// audit production kills post-hoc (bugbot-cvc).
+//
+// The agent_units.Detail invariant is preserved: the verdict breakdown is
+// stored as STRUCTURED columns (seat names + refuted count + arbiter verdict)
+// and the model-authored prose is confined to reasoning_trace, which is a
+// deliberately-scoped audit column (not the free-text-free agent_units.Detail).
+//
+// Best-effort: a failed insert is f.note-logged and never aborts the scan.
+// Mirrors persistOrphan's contract. The caller still calls
+// reg.SignalPersisted(c.Fingerprint, false) and deletePending as before.
+func persistKilled(ctx context.Context, f *Funnel, c Candidate, seatNames []string, refutedCount int, arbiterRan bool, arbiterRefuted bool, reasoning string, result *Result) {
+	arbiterVerdict := ""
+	if arbiterRan {
+		if arbiterRefuted {
+			arbiterVerdict = "refuted"
+		} else {
+			arbiterVerdict = "survived"
+		}
+	}
+	row := store.DeadHypothesis{
+		ScanRunID:      result.ScanRunID,
+		Fingerprint:    c.Fingerprint,
+		Lens:           c.Lens,
+		File:           c.File,
+		Line:           c.Line,
+		Title:          c.Title,
+		Severity:       string(c.Severity),
+		SeatNames:      seatNames,
+		RefutedCount:   refutedCount,
+		TotalSeats:     len(seatNames),
+		ArbiterRan:     arbiterRan,
+		ArbiterRefuted: arbiterRefuted,
+		ArbiterVerdict: arbiterVerdict,
+		ReasoningTrace: reasoning,
+	}
+	if err := f.store.AddDeadHypothesis(ctx, row); err != nil {
+		f.note(result, fmt.Sprintf("funnel: persist killed hypothesis %q failed: %v", c.Title, err))
+	}
 }
 
 // candidateSitesToStore converts funnel.Site to store.Site.
