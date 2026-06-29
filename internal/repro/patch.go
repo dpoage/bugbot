@@ -201,6 +201,10 @@ type PatchProver struct {
 //  9. Meson (meson.build) → bash -c compound setup+test; same fresh-workspace
 //     guarantee as cmake.
 //
+// 10. Zig (build.zig) → `zig build test`.
+// 11. Gleam (gleam.toml) → `gleam test`.
+// 12. Elixir (mix.exs) → `mix test`.
+//
 // The existing single-marker behaviour (go.mod, Cargo.toml, package.json,
 // pyproject.toml, setup.py) is preserved exactly for backward compatibility.
 func detectSuiteCmd(repoDir string) []string {
@@ -255,6 +259,15 @@ func detectSuiteCmdFor(repoDir string, systems []ingest.BuildSystem) []string {
 
 		case ingest.BuildSystemMeson:
 			return []string{"bash", "-c", "meson setup build && meson test -C build --print-errorlogs"}
+
+		case ingest.BuildSystemZig:
+			return []string{"zig", "build", "test"}
+
+		case ingest.BuildSystemGleam:
+			return []string{"gleam", "test"}
+
+		case ingest.BuildSystemElixir:
+			return []string{"mix", "test"}
 		}
 	}
 	return nil

@@ -244,7 +244,8 @@ func normalizeConfidence(x domain.Confidence) domain.Confidence {
 // are added to ingest.DetectBuildSystems.
 //
 // Covered build systems (in priority order, matching DetectBuildSystems):
-// Bazel, GoWorkspace, JSWorkspace, GoModule, Cargo, NPM, Python, CMake, Meson.
+// Bazel, GoWorkspace, JSWorkspace, GoModule, Cargo, NPM, Python, CMake, Meson,
+// Zig, Gleam, Elixir.
 //
 // Returns nil when the toolchain cannot be identified; buildRunTestsTool treats
 // a nil result as "feature unavailable" and returns nil so callers see no tool.
@@ -275,6 +276,12 @@ func detectTestCmd(repoDir string) []string {
 			return []string{"bash", "-c", "cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build --parallel 4 && ctest --test-dir build --output-on-failure --no-tests=ignore"}
 		case ingest.BuildSystemMeson:
 			return []string{"bash", "-c", "meson setup build && meson test -C build --print-errorlogs"}
+		case ingest.BuildSystemZig:
+			return []string{"zig", "build", "test"}
+		case ingest.BuildSystemGleam:
+			return []string{"gleam", "test"}
+		case ingest.BuildSystemElixir:
+			return []string{"mix", "test"}
 		}
 	}
 	return nil

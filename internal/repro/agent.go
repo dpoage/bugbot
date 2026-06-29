@@ -117,6 +117,13 @@ var specificGuidance = map[ingest.Language]string{
 		"  test method annotated with " + "`[Fact]`" + " (xUnit) or " + "`[Test]`" + " (NUnit) in the\n" +
 		"  relevant test project and run it with\n" +
 		"  " + "`dotnet test --filter <Name>`" + ".",
+	ingest.LangZig: "For Zig, add a\n" +
+		"  test block in the file with the bug and run it with\n" +
+		"  " + "`zig build test`" + ".",
+	ingest.LangGleam: "For Gleam, add a\n" +
+		"  test function under test/ and run it with " + "`gleam test`" + ".",
+	ingest.LangElixir: "For Elixir, add an\n" +
+		"  ExUnit test under test/ and run it with " + "`mix test`" + ".",
 }
 
 // HasGuidance reports whether lang has language-specific repro guidance in
