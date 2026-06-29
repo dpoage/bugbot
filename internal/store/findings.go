@@ -68,6 +68,15 @@ type Finding struct {
 	CommitSHA     string
 	FileHash      string
 	ReproPath     string // empty when no reproduction exists
+	// ReproWitness is the bundle path for a non-promoting repro attempt on a
+	// below-quorum (NeedsHuman) finding. It mirrors ReproPath in shape (a
+	// self-contained artifact directory) but does NOT promote the finding:
+	// Tier, ReproPath, and NeedsHuman are all left untouched, and no
+	// patch-prover / publish cascade follows. The human reviewer can run the
+	// bundle but downstream automation does not — the human gate is preserved.
+	// Empty when no witness was recorded. See repro/promote.go::witnessFinding
+	// and funnel/repro_hook.go claim-check split. bugbot-w1bh.
+	ReproWitness string // empty when no witness repro was attempted
 	// FixPatch is the unified diff text produced by the patch-prover stage when a
 	// minimal fix candidate was witnessed by the sandbox.  Empty when the prover
 	// was not run or found no plausible fix.
@@ -295,11 +304,11 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 		// Does a row already exist for this fingerprint?
 		var existingID, existingCreated, existingFileHash string
 		var existingTier domain.Tier
-		var existingRepro, existingSweptAt sql.NullString
+		var existingRepro, existingReproWitness, existingSweptAt sql.NullString
 		var existingNeedsHuman int
 		err = tx.QueryRowContext(ctx,
-			`SELECT id, created_at, tier, repro_path, needs_human, file_hash, swept_at FROM findings WHERE fingerprint = ?`, f.Fingerprint,
-		).Scan(&existingID, &existingCreated, &existingTier, &existingRepro, &existingNeedsHuman, &existingFileHash, &existingSweptAt)
+			`SELECT id, created_at, tier, repro_path, repro_witness, needs_human, file_hash, swept_at FROM findings WHERE fingerprint = ?`, f.Fingerprint,
+		).Scan(&existingID, &existingCreated, &existingTier, &existingRepro, &existingReproWitness, &existingNeedsHuman, &existingFileHash, &existingSweptAt)
 
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -312,13 +321,13 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO findings
 				  (id, fingerprint, title, description, reasoning, verdict_detail, severity, tier,
-				   status, lens, file, line, commit_sha, file_hash, repro_path,
+				   status, lens, file, line, commit_sha, file_hash, repro_path, repro_witness,
 				   fix_patch, needs_human,
 				   corroborating_lenses, sites, confidence, created_at, updated_at, swept_at, locus_key)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
 				f.Tier, string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA,
-				f.FileHash, nullStr(f.ReproPath), f.FixPatch, boolInt(f.NeedsHuman),
+				f.FileHash, nullStr(f.ReproPath), f.ReproWitness, f.FixPatch, boolInt(f.NeedsHuman),
 				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
 				f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout), nullTime(f.SweptAt), f.LocusKey,
 			); err != nil {
@@ -345,6 +354,12 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			//                updates it normally.  nullStr converts "" to NULL so the
 			//                IS NULL check is sufficient; no separate ''='' check needed.
 			//
+			//   repro_witness — same preservation rule as repro_path: never clear a
+			//                  non-empty stored value with an empty incoming one. The
+			//                  witness is a non-promoting repro artifact (bugbot-w1bh)
+			//                  and carries the same "earned by a prior attempt" meaning
+			//                  re-scans must not regress.
+			//
 			//   needs_human — once the patch-prover exhausts its budget and sets this
 			//                 flag, implicit re-scans (which do not run the patch-prover)
 			//                 must not clear it.  A re-scan always produces
@@ -370,6 +385,10 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				// Incoming has no repro; preserve the stored artifact path.
 				f.ReproPath = existingRepro.String
 			}
+			if f.ReproWitness == "" && existingReproWitness.Valid && existingReproWitness.String != "" {
+				// Incoming has no witness; preserve the stored artifact path.
+				f.ReproWitness = existingReproWitness.String
+			}
 			if existingNeedsHuman != 0 {
 				// Stored needs_human=true; do not let a re-scan clear it.
 				f.NeedsHuman = true
@@ -387,18 +406,20 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			// The CASE expressions mirror the Go logic above to guarantee atomicity —
 			// a concurrent writer cannot slip in between the SELECT and this UPDATE.
 			// Arg order matches the positional ? placeholders exactly:
-			//   tier        : ?, ?  → f.Tier (compare), f.Tier (THEN value)
-			//   repro_path  : ?, ?  → nullStr(f.ReproPath) × 2
-			//   needs_human : ?     → boolInt(f.NeedsHuman)
-			//   swept_at    : ?     → f.FileHash (compare to stored file_hash;
-			//                         preserve stored swept_at if unchanged, else NULL)
+			//   tier         : ?, ?  → f.Tier (compare), f.Tier (THEN value)
+			//   repro_path   : ?, ?  → nullStr(f.ReproPath) × 2 (nullable column — NULL check)
+			//   repro_witness: ?, ?  → f.ReproWitness × 2 (NOT NULL '' — empty-string check)
+			//   needs_human  : ?     → boolInt(f.NeedsHuman)
+			//   swept_at     : ?     → f.FileHash (compare to stored file_hash;
+			//                          preserve stored swept_at if unchanged, else NULL)
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE findings SET
 				  title=?, description=?, reasoning=?, verdict_detail=?, severity=?,
 				  tier       = CASE WHEN ? < tier THEN ? ELSE tier END,
 				  status=?,
 				  lens=?, file=?, line=?, commit_sha=?, file_hash=?,
-				  repro_path = CASE WHEN ? IS NULL THEN repro_path ELSE ? END,
+				  repro_path    = CASE WHEN ? IS NULL THEN repro_path    ELSE ? END,
+				  repro_witness = CASE WHEN ? = ''  THEN repro_witness ELSE ? END,
 				  fix_patch=?,
 				  needs_human = CASE WHEN needs_human = 1 THEN 1 ELSE ? END,
 				  corroborating_lenses=?, sites=?, confidence=?, updated_at=?, locus_key=?,
@@ -409,6 +430,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				string(f.Status),
 				f.Lens, f.File, f.Line, f.CommitSHA, f.FileHash,
 				nullStr(f.ReproPath), nullStr(f.ReproPath),
+				f.ReproWitness, f.ReproWitness,
 				f.FixPatch,
 				boolInt(f.NeedsHuman),
 				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
@@ -667,7 +689,7 @@ func (s *Store) AppendFindingSites(ctx context.Context, fingerprint string, site
 
 // findingColumns is the SELECT column list shared by single- and multi-row reads.
 const findingColumns = `SELECT id, fingerprint, title, description, reasoning, verdict_detail,
-	severity, tier, status, lens, file, line, commit_sha, file_hash, repro_path,
+	severity, tier, status, lens, file, line, commit_sha, file_hash, repro_path, repro_witness,
 	fix_patch, needs_human,
 	corroborating_lenses, sites, confidence, created_at, updated_at, swept_at, locus_key`
 
@@ -687,16 +709,12 @@ func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (
 	return f, nil
 }
 
-// rowScanner is satisfied by both *sql.Row and *sql.Rows.
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
 func scanFinding(sc rowScanner) (Finding, error) {
 	var (
 		f                    Finding
 		status               string
 		repro                sql.NullString
+		reproWitness         sql.NullString
 		needsHuman           int
 		corrob               string
 		sitesStr             string
@@ -706,12 +724,13 @@ func scanFinding(sc rowScanner) (Finding, error) {
 	if err := sc.Scan(
 		&f.ID, &f.Fingerprint, &f.Title, &f.Description, &f.Reasoning, &f.VerdictDetail,
 		&f.Severity, &f.Tier, &status, &f.Lens, &f.File, &f.Line, &f.CommitSHA,
-		&f.FileHash, &repro, &f.FixPatch, &needsHuman, &corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt, &sweptAt, &f.LocusKey,
+		&f.FileHash, &repro, &reproWitness, &f.FixPatch, &needsHuman, &corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt, &sweptAt, &f.LocusKey,
 	); err != nil {
 		return Finding{}, err
 	}
 	f.Status = Status(status)
 	f.ReproPath = repro.String
+	f.ReproWitness = reproWitness.String
 	f.NeedsHuman = needsHuman != 0
 	f.CorroboratingLenses = decodeLenses(corrob)
 	f.Sites = decodeSites(sitesStr)
@@ -728,6 +747,11 @@ func scanFinding(sc rowScanner) (Finding, error) {
 		}
 	}
 	return f, nil
+}
+
+// rowScanner is satisfied by both *sql.Row and *sql.Rows.
+type rowScanner interface {
+	Scan(dest ...any) error
 }
 
 func nullStr(s string) any {

@@ -1,0 +1,23 @@
+-- 017_finding_repro_witness.sql — non-promoting repro witness artifact for
+-- below-quorum (NeedsHuman) findings.
+--
+-- A Finding's NeedsHuman flag has TWO causes (see funnel/verify_stream.go and
+-- repro/patch.go): (1) patch-prover exhaustion — these are already Tier-1 with
+-- ReproPath set; (2) below-quorum verifier survivors — these have NO ReproPath
+-- and previously never received a repro attempt at all. Before this column,
+-- a below-quorum finding produced no repro artifact, leaving the human
+-- reviewer without a concrete demonstration.
+--
+-- repro_witness holds the SAME artifact bundle shape as repro_path (a
+-- self-contained directory under ArtifactDir/<finding-id>/, see
+-- repro/artifacts.go), but it is recorded WITHOUT triggering promotion:
+-- the finding's Tier, ReproPath, and NeedsHuman are all left untouched, and
+-- no patch-prover / publish cascade follows. The human reviewer can run the
+-- bundle but downstream automation does not — the human gate is preserved.
+--
+-- Patch-prover-exhausted findings (ReproPath already set) keep their current
+-- behavior: this column is for the SECOND NeedsHuman cause (below-quorum).
+--
+-- Decision / mechanism reference: bugbot-w1bh (this migration), bugbot-sw7
+-- (the NeedsHuman dual-meaning note).
+ALTER TABLE findings ADD COLUMN repro_witness TEXT NOT NULL DEFAULT '';

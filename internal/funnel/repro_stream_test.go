@@ -572,3 +572,72 @@ func TestRepro_Burst_ExactlyOncePerFinding(t *testing.T) {
 		}
 	}
 }
+
+// TestRepro_BelowQuorumWitness_OneAttempt covers bugbot-w1bh: a below-quorum
+// (NeedsHuman) finding is eligible for exactly ONE repro witness attempt — the
+// hook fires while ReproWitness is empty and is skipped once a witness has been
+// recorded. (Patch-prover-exhausted findings carry a ReproPath and stay skipped
+// by the existing claim check; this exercises the new witness branch.)
+func TestRepro_BelowQuorumWitness_OneAttempt(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// Seed a below-quorum survivor directly: Tier-2, NeedsHuman, no repro yet.
+	seed := store.Finding{
+		Fingerprint: store.Fingerprint("nil-safety", "bug.go", "10|below-quorum nil deref"),
+		Title:       "below-quorum nil deref",
+		Severity:    "high",
+		Tier:        2,
+		Status:      store.StatusOpen,
+		Lens:        "nil-safety",
+		File:        "bug.go",
+		Line:        10,
+		NeedsHuman:  true,
+	}
+	seeded, err := st.UpsertFinding(ctx, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var invCount atomic.Int32
+	// Hook simulates the witness path: record ReproWitness without promoting.
+	hook := func(hCtx context.Context, _ string, finding store.Finding) error {
+		invCount.Add(1)
+		current, err := st.GetFindingByFingerprint(hCtx, finding.Fingerprint)
+		if err != nil {
+			return err
+		}
+		current.ReproWitness = "/fake/witness/path"
+		_, err = st.UpsertFinding(hCtx, current)
+		return err
+	}
+
+	f, err := New(RoleClients{Finder: newScriptedClient(), Verifier: newScriptedClient()}, st, repo, Options{Repro: hook})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First attempt: NeedsHuman && ReproWitness=="" → hook fires, writes witness.
+	f.runReproAttempt(ctx, seeded, "scan-1")
+	if got := invCount.Load(); got != 1 {
+		t.Fatalf("after first attempt: hook fired %d times, want 1 (a below-quorum finding gets one witness attempt)", got)
+	}
+
+	// Second attempt: NeedsHuman && ReproWitness!="" → claim check skips.
+	f.runReproAttempt(ctx, seeded, "scan-1")
+	if got := invCount.Load(); got != 1 {
+		t.Errorf("after second attempt: hook fired %d times, want 1 (a witnessed finding must not re-attempt)", got)
+	}
+
+	// The witness was recorded WITHOUT promotion.
+	got, err := st.GetFindingByFingerprint(ctx, seeded.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ReproWitness == "" {
+		t.Errorf("repro_witness not recorded")
+	}
+	if got.Tier != 2 || got.ReproPath != "" {
+		t.Errorf("witness promoted the finding: tier=%d repro_path=%q, want tier=2 + empty repro_path", got.Tier, got.ReproPath)
+	}
+}

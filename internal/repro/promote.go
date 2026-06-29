@@ -12,9 +12,13 @@ import (
 type Summary struct {
 	// Attempted is the number of findings a reproduction was attempted on.
 	Attempted int
-	// Promoted is the number promoted to Tier-1.
+	// Promoted is the number promoted to Tier-1 (full repro-pathing + patch-prover).
 	Promoted int
-	// Failed is the number that could not be reproduced (stayed Tier-2).
+	// Witnessed is the number of below-quorum NeedsHuman findings whose repro
+	// hook fired and wrote a witness bundle (ReproWitness) without promoting.
+	// bugbot-w1bh.
+	Witnessed int
+	// Failed is the number that could not be reproduced (stayed at their prior tier).
 	Failed int
 	// FixWitnessed is the number promoted to Tier-0 (fix witnessed by patch-prover).
 	FixWitnessed int
@@ -26,9 +30,13 @@ type Summary struct {
 
 // FindingOutcome records one finding's reproduction result for the Summary.
 type FindingOutcome struct {
-	FindingID    string
-	Title        string
-	Promoted     bool
+	FindingID string
+	Title     string
+	Promoted  bool
+	// Witnessed is true when a below-quorum NeedsHuman finding received a
+	// non-promoting repro attempt that wrote ReproWitness. Mutually
+	// exclusive with Promoted: the hook either promotes OR witnesses.
+	Witnessed    bool
 	ArtifactPath string
 	Attempts     int
 	// Reason is the non-promotion category, or an infrastructure error message.
@@ -44,14 +52,21 @@ type FindingOutcome struct {
 }
 
 // PromoteOne attempts to reproduce a single finding and updates the store row
-// on success (Tier-1 + repro_path). It is the single-finding entry point used
-// by the funnel's in-run hook (the funnel's consumer goroutine is the
-// parallelism bound; calling PromoteAll per finding would multiply slots).
-// PromoteAll's internal semaphore is intentionally NOT used here.
+// on success. It is the single-finding entry point used by the funnel's
+// in-run hook (the funnel's consumer goroutine is the parallelism bound;
+// calling PromoteAll per finding would multiply slots). PromoteAll's internal
+// semaphore is intentionally NOT used here.
+//
+// Two outcomes on a demonstrated bug (Attempt.Promoted):
+//   - non-NeedsHuman finding → promoteFinding (Tier-1 + ReproPath) and
+//     optionally the patch-prover cascade.
+//   - NeedsHuman finding (below-quorum verifier survivor) → witnessFinding
+//     (ReproWitness only; Tier, ReproPath, NeedsHuman all untouched; no
+//     patch-prover). bugbot-w1bh split: repro-as-evidence vs repro-as-promotion.
 //
 // Infrastructure errors (agent/LLM failure, sandbox launch failure) are
 // returned; a finding that simply could not be reproduced is reported via a
-// nil error with the outcome recorded in the store (tier stays 2).
+// nil error with the outcome recorded in the store.
 //
 // scanRunID may be empty when called from the daemon backlog drain (cross-run
 // context); the agent_units row will carry an empty scan_run_id in that case.
@@ -71,23 +86,36 @@ func (r *Reproducer) PromoteOne(ctx context.Context, st *store.Store, finding st
 
 	outcome.Attempts = att.Attempts
 	if att.Promoted {
-		if perr := promoteFinding(ctx, st, finding, att.ArtifactPath); perr != nil {
-			outcome.Reason = "promotion persist failed: " + perr.Error()
-			outcome.Err = perr
-			return outcome, perr
-		}
-		outcome.Promoted = true
-		outcome.ArtifactPath = att.ArtifactPath
+		if finding.NeedsHuman {
+			// Below-quorum verifier survivor: witness, do not promote.
+			// Tier, ReproPath, and NeedsHuman all stay as-is; only ReproWitness
+			// is set. No patch-prover cascade: the human gate stands.
+			if werr := witnessFinding(ctx, st, finding, att.ArtifactPath); werr != nil {
+				outcome.Reason = "witness persist failed: " + werr.Error()
+				outcome.Err = werr
+				return outcome, werr
+			}
+			outcome.Witnessed = true
+			outcome.ArtifactPath = att.ArtifactPath
+		} else {
+			if perr := promoteFinding(ctx, st, finding, att.ArtifactPath); perr != nil {
+				outcome.Reason = "promotion persist failed: " + perr.Error()
+				outcome.Err = perr
+				return outcome, perr
+			}
+			outcome.Promoted = true
+			outcome.ArtifactPath = att.ArtifactPath
 
-		if r.opts.PatchProver {
-			patchResult, perr := r.provePatch(ctx, st, finding, att)
-			if perr != nil {
-				outcome.Reason = "patch-prover error: " + perr.Error()
-			} else {
-				outcome.FixWitnessed = patchResult.kind == patchOutcomeFixWitnessed
-				outcome.NeedsHuman = patchResult.kind == patchOutcomeNeedsHuman
-				if patchResult.kind == patchOutcomeSkipped {
-					outcome.Reason = "patch-prover skipped: toolchain not identified and repro.suite_cmd not configured"
+			if r.opts.PatchProver {
+				patchResult, perr := r.provePatch(ctx, st, finding, att)
+				if perr != nil {
+					outcome.Reason = "patch-prover error: " + perr.Error()
+				} else {
+					outcome.FixWitnessed = patchResult.kind == patchOutcomeFixWitnessed
+					outcome.NeedsHuman = patchResult.kind == patchOutcomeNeedsHuman
+					if patchResult.kind == patchOutcomeSkipped {
+						outcome.Reason = "patch-prover skipped: toolchain not identified and repro.suite_cmd not configured"
+					}
 				}
 			}
 		}
@@ -165,28 +193,40 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 
 			outcome.Attempts = att.Attempts
 			if att.Promoted {
-				if perr := promoteFinding(ctx, st, f, att.ArtifactPath); perr != nil {
-					// The bug WAS demonstrated; only persistence failed. Surface it
-					// as an error outcome rather than silently dropping the result.
-					outcome.Reason = "promotion persist failed: " + perr.Error()
-					outcome.Err = perr
-					summary.PerFinding[idx] = outcome
-					return
-				}
-				outcome.Promoted = true
-				outcome.ArtifactPath = att.ArtifactPath
+				if f.NeedsHuman {
+					// Below-quorum verifier survivor: witness, do not promote.
+					if werr := witnessFinding(ctx, st, f, att.ArtifactPath); werr != nil {
+						outcome.Reason = "witness persist failed: " + werr.Error()
+						outcome.Err = werr
+						summary.PerFinding[idx] = outcome
+						return
+					}
+					outcome.Witnessed = true
+					outcome.ArtifactPath = att.ArtifactPath
+				} else {
+					if perr := promoteFinding(ctx, st, f, att.ArtifactPath); perr != nil {
+						// The bug WAS demonstrated; only persistence failed. Surface it
+						// as an error outcome rather than silently dropping the result.
+						outcome.Reason = "promotion persist failed: " + perr.Error()
+						outcome.Err = perr
+						summary.PerFinding[idx] = outcome
+						return
+					}
+					outcome.Promoted = true
+					outcome.ArtifactPath = att.ArtifactPath
 
-				// Patch-prover: if enabled, attempt to find and witness a minimal fix.
-				if r.opts.PatchProver {
-					patchResult, perr := r.provePatch(ctx, st, f, att)
-					if perr != nil {
-						// Infrastructure failure: record but do not block the T1 promotion.
-						outcome.Reason = "patch-prover error: " + perr.Error()
-					} else {
-						outcome.FixWitnessed = patchResult.kind == patchOutcomeFixWitnessed
-						outcome.NeedsHuman = patchResult.kind == patchOutcomeNeedsHuman
-						if patchResult.kind == patchOutcomeSkipped {
-							outcome.Reason = "patch-prover skipped: toolchain not identified and repro.suite_cmd not configured"
+					// Patch-prover: if enabled, attempt to find and witness a minimal fix.
+					if r.opts.PatchProver {
+						patchResult, perr := r.provePatch(ctx, st, f, att)
+						if perr != nil {
+							// Infrastructure failure: record but do not block the T1 promotion.
+							outcome.Reason = "patch-prover error: " + perr.Error()
+						} else {
+							outcome.FixWitnessed = patchResult.kind == patchOutcomeFixWitnessed
+							outcome.NeedsHuman = patchResult.kind == patchOutcomeNeedsHuman
+							if patchResult.kind == patchOutcomeSkipped {
+								outcome.Reason = "patch-prover skipped: toolchain not identified and repro.suite_cmd not configured"
+							}
 						}
 					}
 				}
@@ -204,9 +244,14 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 	}
 
 	for _, o := range summary.PerFinding {
-		if o.Promoted {
+		switch {
+		case o.Promoted:
 			summary.Promoted++
-		} else {
+		case o.Witnessed:
+			// Witnessed is mutually exclusive with Promoted; a NeedsHuman finding
+			// that demonstrated its bug contributes to Witnessed, not Failed.
+			summary.Witnessed++
+		default:
 			summary.Failed++
 		}
 		if o.FixWitnessed {
@@ -281,6 +326,28 @@ func promoteFinding(ctx context.Context, st *store.Store, f store.Finding, repro
 	}
 	current.Tier = 1
 	current.ReproPath = reproPath
+	if _, err := st.UpsertFinding(ctx, current); err != nil {
+		return err
+	}
+	return nil
+}
+
+// witnessFinding records a non-promoting repro artifact for a below-quorum
+// (NeedsHuman) finding. It mirrors promoteFinding but writes ONLY repro_witness;
+// Tier, ReproPath, and NeedsHuman are left untouched and the patch-prover
+// cascade is intentionally NOT triggered. The human reviewer gets a concrete
+// repro bundle to run; downstream automation continues to honor the human gate
+// because OpenBacklog and the patch-prover still skip NeedsHuman findings.
+//
+// bugbot-w1bh: this is the witness half of the repro-as-evidence vs
+// repro-as-promotion split. PromoteOne branches to it whenever the
+// demonstrated finding has NeedsHuman set.
+func witnessFinding(ctx context.Context, st *store.Store, f store.Finding, reproPath string) error {
+	current, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	if err != nil {
+		return err
+	}
+	current.ReproWitness = reproPath
 	if _, err := st.UpsertFinding(ctx, current); err != nil {
 		return err
 	}

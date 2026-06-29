@@ -13,14 +13,24 @@ import (
 // IDLE-priority slot. It is the per-finding body for the in-run repro dispatcher.
 //
 // Claim check (no-double-attempt): before invoking the hook, the finding is
-// re-read from the store. If ReproPath is non-empty (already promoted, possibly
-// by the daemon drain) or NeedsHuman is true, the attempt is skipped. NeedsHuman
-// has two causes — patch-prover exhaustion (repro/patch.go) and below-quorum
-// verifier survivors (verify_stream.go) — and both are deliberately excluded
-// from a repro attempt until a human confirms (see the dual-meaning note in
-// verify_stream.go, bugbot-sw7). This mirrors the OpenBacklog eligibility check
-// that the daemon backlog drain uses, ensuring an in-run attempt and a
-// concurrent daemon drain never both attempt the same finding.
+// re-read from the store. The attempt is skipped when ANY of:
+//   - ReproPath is non-empty — the finding has already been promoted (Tier-1+
+//     repro_path), whether by an earlier in-run attempt, the daemon drain, or
+//     an explicit mutation. Patch-prover-exhausted findings fall here once
+//     the prover wrote the path.
+//   - NeedsHuman AND ReproWitness is non-empty — the below-quorum verifier
+//     survivor has already received its witness artifact; do not re-attempt.
+//   - NeedsHuman alone does NOT skip in-run repros anymore (bugbot-w1bh):
+//     a below-quorum finding (NeedsHuman, no ReproPath) gets exactly ONE
+//     witness attempt via this path. The repro hook writes ReproWitness,
+//     not ReproPath, so the finding stays excluded from the daemon backlog
+//     (OpenBacklog's !NeedsHuman filter) and from the patch-prover cascade.
+//     Repro-as-evidence is now decoupled from repro-as-promotion.
+//
+// This mirrors OpenBacklog in spirit (no concurrent in-run + daemon-drain
+// attempt on the same finding) but is NOT identical: OpenBacklog filters out
+// ALL NeedsHuman because the daemon backlog is a promotion path, while this
+// gate admits a below-quorum finding exactly once to record the witness.
 //
 // The IDLE slot is the lowest-priority class (slotIdle): a waiting repro
 // goroutine is served AFTER any pending high (verifier) or low (finder)
@@ -34,15 +44,19 @@ import (
 // overflowMu/overflowFindings may be nil (e.g. when called from the overflow
 // drain path itself); in that case no overflow tracking is performed.
 func (f *Funnel) runReproAttempt(ctx context.Context, finding store.Finding, scanRunID string) {
-	// Claim check: re-read from store to detect a concurrent promotion or
-	// patch-prover exhaustion before occupying a slot.
+	// Claim check: re-read from store to detect a concurrent promotion,
+	// patch-prover exhaustion, or prior witness before occupying a slot.
 	current, err := f.store.GetFindingByFingerprint(ctx, finding.Fingerprint)
 	if err != nil {
 		// Best-effort: store read failed (ctx cancelled, etc.). Skip silently.
 		return
 	}
-	if current.ReproPath != "" || current.NeedsHuman {
-		// Already promoted or marked needs-human: no-op.
+	if current.ReproPath != "" || (current.NeedsHuman && current.ReproWitness != "") {
+		// Already promoted, or already witnessed (below-quorum with ReproWitness):
+		// no-op. Patch-prover-exhausted findings hit the first clause once the
+		// prover wrote ReproPath; below-quorum survivors hit the second clause
+		// after their one witness attempt. A NeedsHuman finding without a
+		// ReproWitness falls through (this is the witness path).
 		return
 	}
 
@@ -58,9 +72,9 @@ func (f *Funnel) runReproAttempt(ctx context.Context, finding store.Finding, sca
 	defer f.slots.release()
 
 	// Re-check after slot acquisition: another goroutine may have promoted or
-	// marked needs-human while we were waiting.
+	// witnessed while we were waiting.
 	current2, err := f.store.GetFindingByFingerprint(ctx, finding.Fingerprint)
-	if err == nil && (current2.ReproPath != "" || current2.NeedsHuman) {
+	if err == nil && (current2.ReproPath != "" || (current2.NeedsHuman && current2.ReproWitness != "")) {
 		return
 	}
 
@@ -69,12 +83,16 @@ func (f *Funnel) runReproAttempt(ctx context.Context, finding store.Finding, sca
 	finishedAt := time.Now()
 
 	// Record agent_units row: role='reproducer'. The hook owns the actual
-	// promotion and patch-prover; we derive the outcome status by re-reading
+	// promotion or witness; we derive the outcome status by re-reading
 	// the store after the hook returns.
 	//
 	// Status vocabulary (reproducer role, documented in store/agentunits.go):
 	//   reproduced    — finding promoted to Tier-1 (ReproPath now set)
-	//   exhausted     — all attempts failed; finding stays Tier-2
+	//   witnessed     — below-quorum (NeedsHuman) finding's repro hook fired and
+	//                   wrote ReproWitness. Tier is unchanged; this is repro
+	//                   evidence only, no promotion and no patch-prover
+	//                   cascade. Newly added in bugbot-w1bh.
+	//   exhausted     — all attempts failed; finding stays at its prior tier
 	//  — hook returned an error before any sandbox run
 	//   infra_error   — hook returned a non-nil error (infrastructure failure)
 	//
@@ -97,6 +115,11 @@ func (f *Funnel) runReproAttempt(ctx context.Context, finding store.Finding, sca
 		} else if after.ReproPath != "" {
 			status = "reproduced"
 			detail = fmt.Sprintf("tier=%d elapsed_ms=%d", after.Tier, finishedAt.Sub(startedAt).Milliseconds())
+		} else if after.NeedsHuman && after.ReproWitness != "" {
+			// Below-quorum witness recorded: hook wrote ReproWitness but did NOT
+			// promote. Tier is preserved (NeedsHuman path, no Tier-1 promotion).
+			status = "witnessed"
+			detail = fmt.Sprintf("tier=%d needs_human=true elapsed_ms=%d", after.Tier, finishedAt.Sub(startedAt).Milliseconds())
 		} else if after.NeedsHuman {
 			status = "exhausted"
 			detail = fmt.Sprintf("needs_human=true elapsed_ms=%d", finishedAt.Sub(startedAt).Milliseconds())
