@@ -221,6 +221,11 @@ Hard requirements for the repro:
   dependencies. Use only the standard library and what the repository already
   imports. The test must COMPILE — a compile error or missing dependency is NOT
   a reproduction and will be rejected.
+- Self-terminating: the test/cmd MUST finish on its own within seconds. Never
+  read from stdin, sleep unboundedly, wait on the network or a port, or
+  deadlock — a hung test is idle-killed and the attempt is wasted with no real
+  verdict. Pass the runner's own timeout flag in cmd: go test -timeout 60s;
+  pytest --timeout=60; jest/vitest --testTimeout 60000.
 ` + capabilityGuidance(caps) + `
 Return a repro plan describing the files to inject, the command to run them,
 and a short description of the expected failure.`

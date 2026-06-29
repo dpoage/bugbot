@@ -30,7 +30,7 @@ func planBody(t *testing.T, p Plan) string {
 func goodPlan() Plan {
 	return Plan{
 		Files:  map[string]string{"bug_test.go": "package bug\n\nimport \"testing\"\n\nfunc TestBug(t *testing.T){ t.Fatal(\"boom\") }\n"},
-		Cmd:    []string{"go", "test", "-run", "TestBug", "./..."},
+		Cmd:    []string{"go", "test", "-timeout", "60s", "-run", "TestBug", "./..."},
 		Expect: "TestBug fails because Divide(1,0) returns 0 instead of erroring",
 	}
 }
@@ -181,7 +181,7 @@ func TestPromoteAll_PlanWithoutExpectPromotes(t *testing.T) {
 	// Plan body WITHOUT an "expect" key. planBody(goodPlan()) cannot express
 	// this: a Plan always marshals "expect":"", which a present field would trip
 	// against the schema's minLength:1. The omission is the case under test.
-	body := `{"files":{"bug_test.go":"package bug\n\nimport \"testing\"\n\nfunc TestBug(t *testing.T){ t.Fatal(\"boom\") }\n"},"cmd":["go","test","-run","TestBug","./..."]}`
+	body := `{"files":{"bug_test.go":"package bug\n\nimport \"testing\"\n\nfunc TestBug(t *testing.T){ t.Fatal(\"boom\") }\n"},"cmd":["go","test","-timeout","60s","-run","TestBug","./..."]}`
 	client := newScriptedClient(body)
 	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
 		ExitCode: 1,
@@ -1239,8 +1239,8 @@ func TestValidatePlan_ShellOps(t *testing.T) {
 		name string
 		cmd  []string
 	}{
-		{"plain go test", []string{"go", "test", "./..."}},
-		{"plain go test with -run", []string{"go", "test", "-run", "TestX", "./..."}},
+		{"plain go test", []string{"go", "test", "-timeout", "60s", "./..."}},
+		{"plain go test with -run", []string{"go", "test", "-timeout", "60s", "-run", "TestX", "./..."}},
 		{"plain ctest", []string{"ctest", "--output-on-failure"}},
 		{"plain cargo", []string{"cargo", "test"}},
 		// The shell-op example from the bug report, correctly wrapped: the
@@ -1316,6 +1316,55 @@ func TestValidatePlan_ShellOps(t *testing.T) {
 			// argv shape the agent must emit.
 			if !strings.Contains(msg, `"bash"`) || !strings.Contains(msg, `"-c"`) {
 				t.Errorf("error %q does not show the bash -c argv shape", msg)
+			}
+		})
+	}
+}
+
+// TestValidatePlan_GoTestRequiresTimeout covers the bugbot-opq guardrail: a
+// go test repro must carry a -timeout flag so a hung test self-terminates
+// before the sandbox idle watchdog kills it. The rule is scoped to go test;
+// other commands (and the bash -c wrapped form) are handled too.
+func TestValidatePlan_GoTestRequiresTimeout(t *testing.T) {
+	files := map[string]string{"bug_test.go": "package bug\n"}
+
+	accepted := []struct {
+		name string
+		cmd  []string
+	}{
+		{"go test with -timeout", []string{"go", "test", "-timeout", "60s", "-run", "TestX", "./..."}},
+		{"go test with -timeout=val", []string{"go", "test", "-timeout=30s", "./..."}},
+		{"bash -c wrapped go test with -timeout", []string{"bash", "-c", "go test -timeout 60s -run TestX ./..."}},
+		{"non-go pytest needs no -timeout", []string{"pytest", "-k", "test_x"}},
+		{"bare binary needs no -timeout", []string{"./repro"}},
+		{"go build is not a test run", []string{"go", "build", "./..."}},
+	}
+	for _, tc := range accepted {
+		t.Run("accept/"+tc.name, func(t *testing.T) {
+			p := &Plan{Files: files, Cmd: tc.cmd, Expect: "x"}
+			if err := validatePlan(p); err != nil {
+				t.Errorf("validatePlan(%v) = %v, want nil", tc.cmd, err)
+			}
+		})
+	}
+
+	rejected := []struct {
+		name string
+		cmd  []string
+	}{
+		{"go test missing -timeout", []string{"go", "test", "-run", "TestX", "./..."}},
+		{"plain go test missing -timeout", []string{"go", "test", "./..."}},
+		{"bash -c wrapped go test missing -timeout", []string{"bash", "-c", "go test -run TestX ./..."}},
+	}
+	for _, tc := range rejected {
+		t.Run("reject/"+tc.name, func(t *testing.T) {
+			p := &Plan{Files: files, Cmd: tc.cmd, Expect: "x"}
+			err := validatePlan(p)
+			if err == nil {
+				t.Fatalf("validatePlan(%v) = nil, want a -timeout error", tc.cmd)
+			}
+			if !strings.Contains(err.Error(), "-timeout") {
+				t.Errorf("error %q does not mention -timeout", err.Error())
 			}
 		})
 	}

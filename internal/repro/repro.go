@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"path"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
@@ -587,5 +588,28 @@ func validatePlan(p *Plan) error {
 				"(e.g. [\"bash\",\"-c\",\"cmake ... && cmake --build ... && cd build && ./tests/x\"])", arg, arg)
 		}
 	}
+	// A go test repro must self-terminate: without -timeout a hung test blocks
+	// until the sandbox idle watchdog kills it, wasting the attempt on a useless
+	// "timeout" verdict (bugbot-opq). Require the flag so the test binary kills
+	// itself first. Scoped to "go test" (the demonstrated failure class);
+	// unwrapShell handles a bash -c wrapper.
+	if eff := unwrapShell(p.Cmd); len(eff) >= 2 &&
+		strings.ToLower(eff[0]) == "go" && strings.ToLower(eff[1]) == "test" &&
+		!hasCmdFlag(eff, "-timeout") {
+		return fmt.Errorf("go test repro must include a -timeout flag so a hung test self-terminates " +
+			"before the sandbox idle watchdog kills it (which yields a useless timeout verdict); " +
+			"add e.g. -timeout 60s: [\"go\",\"test\",\"-timeout\",\"60s\",\"-run\",\"TestX\",\"./...\"]")
+	}
 	return nil
+}
+
+// hasCmdFlag reports whether argv contains the flag name in either the
+// "-flag" / "-flag value" form or the "-flag=value" form.
+func hasCmdFlag(argv []string, name string) bool {
+	for _, a := range argv {
+		if a == name || strings.HasPrefix(a, name+"=") {
+			return true
+		}
+	}
+	return false
 }
