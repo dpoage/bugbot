@@ -709,3 +709,78 @@ func TestCppFileDefsAndRefs(t *testing.T) {
 		t.Errorf("cpp value ref = %v, want app.cpp:13", got)
 	}
 }
+
+// TestCSharpFileDefsAndRefs proves the C# grammar (csharpGrammar) is registered
+// and functional across the declaration and call-site shapes it claims to
+// support. A non-compiling query would panic at tagger construction and surface
+// as an error here, so this also serves as a compile-time check of the query
+// text — mirroring TestCppFileDefsAndRefs. The fixture is multi-line so each
+// shape resolves to a distinct line, catching a "compiles-but-stops-matching"
+// regression (e.g. a future grammar bump that reshapes a node), not just an
+// unknown-node/field error.
+func TestCSharpFileDefsAndRefs(t *testing.T) {
+	const src = `// Greeter Format Hello Wrap — these names in a comment must not be references.
+namespace N {
+    interface IGreeter { string Hello(string who); }
+    struct Point { public int X; }
+    enum Color { Red, Green }
+    record Person(string Name);
+    class Greeter : IGreeter {
+        public Greeter() { }
+        public string Hello(string who) { return Format(who); }
+        string Format(string s) { int Wrap(string x) { return x; } return Wrap(s); }
+        public string Shout(string who) { return this.Hello(who); }
+    }
+}
+`
+	root := writeRepo(t, map[string]string{"app.cs": src})
+	b := New(root)
+	abs := filepath.Join(root, "app.cs")
+
+	// Each definition shape must resolve to the line that declares it. Where a
+	// name has two declarations (Greeter: class+ctor; Hello: interface+class),
+	// contains() asserts the listed line is among the ranked candidates.
+	def := func(name, wantLine string) {
+		t.Helper()
+		res, err := b.Definition(abs, name)
+		if err != nil {
+			t.Fatalf("csharp Definition(%s): %v (C# grammar failed to parse?)", name, err)
+		}
+		if got := locLines(t, root, res); !contains(got, wantLine) {
+			t.Errorf("csharp Definition(%s) = %v, want %s", name, got, wantLine)
+		}
+	}
+	def("IGreeter", "app.cs:3") // interface_declaration
+	def("Point", "app.cs:4")    // struct_declaration
+	def("Color", "app.cs:5")    // enum_declaration
+	def("Person", "app.cs:6")   // record_declaration
+	def("Greeter", "app.cs:7")  // class_declaration (ctor also on line 8)
+	def("Hello", "app.cs:9")    // method_declaration (interface decl also on line 3)
+	def("Format", "app.cs:10")  // method_declaration
+	def("Wrap", "app.cs:10")    // local_function_statement
+	def("Shout", "app.cs:11")   // method_declaration
+
+	// Identifier-callee reference: Format(who) inside Hello (line 9).
+	refFmt, err := b.References(abs, "Format")
+	if err != nil {
+		t.Fatalf("csharp References(Format): %v", err)
+	}
+	gotFmt := locLines(t, root, refFmt)
+	if !contains(gotFmt, "app.cs:9") {
+		t.Errorf("csharp References(Format) = %v, want app.cs:9 (call in Hello)", gotFmt)
+	}
+	// The line-1 comment mentions Format textually; an AST-based tier must NOT
+	// report it as a reference.
+	if contains(gotFmt, "app.cs:1") {
+		t.Errorf("csharp References(Format) wrongly includes the line-1 comment mention: %v", gotFmt)
+	}
+
+	// Member-access-callee reference: this.Hello(who) inside Shout (line 11).
+	refHello, err := b.References(abs, "Hello")
+	if err != nil {
+		t.Fatalf("csharp References(Hello): %v", err)
+	}
+	if got := locLines(t, root, refHello); !contains(got, "app.cs:11") {
+		t.Errorf("csharp References(Hello) = %v, want app.cs:11 (this.Hello member-access call)", got)
+	}
+}

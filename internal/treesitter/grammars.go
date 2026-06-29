@@ -216,6 +216,60 @@ var grammarTable = func() map[string]*grammar {
     name: (identifier) @name)) @reference.call
 `,
 	}
+	// csharpGrammar covers C# (registry name `c_sharp`, extension `.cs`). The
+	// grammar follows the conventional node shapes for definitions and the
+	// C-style invocation_expression for references. Probed via the C# grammar's
+	// own highlight query (which uses the same node names) and confirmed
+	// against a real parse of the test fixture below.
+	//
+	// Captured by csharpGrammar:
+	//   - class_declaration name (e.g. `class Greeter { ... }`)
+	//   - interface_declaration name (`interface IFoo { ... }`)
+	//   - struct_declaration name (`struct Point { ... }`)
+	//   - enum_declaration name (`enum Color { ... }`)
+	//   - record_declaration name (both `record R(...);` and `record R { }`)
+	//   - method_declaration name (the conventional `name:` field shape)
+	//   - local_function_statement name (e.g. `int Add(int a, int b) { ... }`
+	//     inside a method body)
+	//   - constructor_declaration name (e.g. `public Greeter() { ... }`)
+	//   - invocation_expression on an identifier callee (e.g. `Format(who)`)
+	//   - invocation_expression on a member-access callee (e.g. `obj.Format(who)`)
+	//
+	// class/interface/struct/enum/record all expose the type name via a `name:`
+	// field, used here for precision (a bare `(identifier)` would match any
+	// direct identifier child).
+	//
+	// Known limitations (acceptable for a syntactic fallback tier):
+	//   - Properties, fields, events, indexers, operators, destructors are not
+	//     captured as definitions — the C# grammar models them with distinct
+	//     node types (property_declaration, field_declaration, etc.) that
+	//     would each need their own probe. The bead scopes this change to the
+	//     load-bearing C# shapes (class/interface/struct/enum/record/method/
+	//     ctor/local function + identifier/member-access call refs).
+	//   - Generic methods/classes: the type parameter list appears before the
+	//     name identifier, but the `name:` field still captures the identifier
+	//     itself.
+	//   - Member-access calls capture the FINAL segment, so `obj.Method()`,
+	//     `A.B.Method()`, and `System.Console.WriteLine()` all resolve to the
+	//     trailing identifier (the outer member_access_expression's `name:`).
+	csharpGrammar := &grammar{
+		name:   "c_sharp",
+		sample: "x.cs",
+		defQuery: `
+(class_declaration name: (identifier) @name) @definition.class
+(interface_declaration name: (identifier) @name) @definition.interface
+(struct_declaration name: (identifier) @name) @definition.type
+(enum_declaration name: (identifier) @name) @definition.type
+(record_declaration name: (identifier) @name) @definition.type
+(method_declaration name: (identifier) @name) @definition.method
+(local_function_statement name: (identifier) @name) @definition.function
+(constructor_declaration name: (identifier) @name) @definition.method
+`,
+		refQuery: `
+(invocation_expression function: (identifier) @name) @reference.call
+(invocation_expression function: (member_access_expression name: (identifier) @name)) @reference.call
+`,
+	}
 
 	m := map[string]*grammar{
 		".go":  goGrammar,
@@ -240,6 +294,9 @@ var grammarTable = func() map[string]*grammar {
 		".hpp": cppGrammar,
 		".hh":  cppGrammar,
 		".hxx": cppGrammar,
+		// C# uses csharpGrammar. .cs is classified as C# by extLang
+		// (internal/ingest/lang.go) and by the LSP server config.
+		".cs": csharpGrammar,
 	}
 	return m
 }()
