@@ -32,8 +32,17 @@ import (
 // per-command overrides pattern used by FunnelOptionOverrides so scan-specific
 // configuration is grouped and independently testable.
 type ScanFlags struct {
-	Target      string
-	Since       string
+	Target string
+	Since  string
+	// From is the inclusive lower bound of a commit range scan (regress).
+	// When set, the scan scopes its blast radius to the diff from..to and
+	// labels each finding INTRODUCED vs PRE-EXISTING after the run. It is
+	// mutually exclusive with --since at the CLI surface (only one is ever
+	// set per command).
+	From string
+	// To is the upper bound of a commit range scan; defaults to HEAD when
+	// empty. It is only consulted when From is also set.
+	To          string
 	IncludeT3   bool
 	Concurrency int
 	Refuters    int
@@ -179,27 +188,52 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 	// Shut down any language servers the code-navigation tools spawned.
 	defer func() { _ = f.Close() }()
 
-	// Resolve the scan scope: a Targeted blast-radius run when --since is
-	// given, otherwise a whole-snapshot Sweep. Targeted runs populate
-	// ChangeContext (for the diff-intent lens) and rebuild the funnel so
-	// hypothesize sees it. Computed before seeding and the estimate
-	// short-circuit so every path agrees on scope.
+	// Resolve the scan scope: a Targeted blast-radius run when --since or the
+	// (--from[,--to]) regress range is given, otherwise a whole-snapshot Sweep.
+	// Targeted runs populate ChangeContext (for the diff-intent lens) and rebuild
+	// the funnel so hypothesize sees it. Computed before seeding and the
+	// estimate short-circuit so every path agrees on scope.
 	var changed []string
 	kind := store.ScanOneshot
-	if flags.Since != "" {
+	var (
+		fromRef string // empty for whole-snapshot sweeps
+		toRef   string // always populated when fromRef is set (defaults to HEAD)
+	)
+	switch {
+	case flags.Since != "":
+		fromRef = flags.Since
 		head, herr := repo.HeadCommit(ctx)
 		if herr != nil {
 			return fmt.Errorf("resolve HEAD: %w", herr)
 		}
-		changes, cerr := repo.ChangedFiles(ctx, flags.Since, head)
+		toRef = head
+		changes, cerr := repo.ChangedFiles(ctx, fromRef, toRef)
 		if cerr != nil {
-			return fmt.Errorf("diff %s..HEAD: %w", flags.Since, cerr)
+			return fmt.Errorf("diff %s..%s: %w", fromRef, toRef, cerr)
 		}
 		changed = ingest.ChangedPaths(changes)
-		_, _ = fmt.Fprintf(out, "Targeted scan: %d changed file(s) since %s\n", len(changed), flags.Since)
+		_, _ = fmt.Fprintf(out, "Targeted scan: %d changed file(s) since %s\n", len(changed), fromRef)
+	case flags.From != "":
+		fromRef = flags.From
+		toRef = flags.To
+		if toRef == "" {
+			head, herr := repo.HeadCommit(ctx)
+			if herr != nil {
+				return fmt.Errorf("resolve HEAD: %w", herr)
+			}
+			toRef = head
+		}
+		changes, cerr := repo.ChangedFiles(ctx, fromRef, toRef)
+		if cerr != nil {
+			return fmt.Errorf("diff %s..%s: %w", fromRef, toRef, cerr)
+		}
+		changed = ingest.ChangedPaths(changes)
+		_, _ = fmt.Fprintf(out, "Regress scan: %d changed file(s) in %s..%s\n", len(changed), fromRef, toRef)
+	}
+	if fromRef != "" {
 		// Populate ChangeContext for the diff-intent lens. Failures are
 		// non-fatal: the scan still runs without diff-intent context.
-		cc := buildScanChangeContext(ctx, repo, flags.Since, head, changed)
+		cc := buildScanChangeContext(ctx, repo, fromRef, toRef, changed)
 		if cc != nil {
 			opts.Discovery.ChangeContext = cc
 			// Rebuild the funnel with the updated options so ChangeContext is
@@ -293,6 +327,13 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 
 	_ = flags.IncludeT3 // reserved: this stage emits T2 only; T3 filtering arrives with the report stage
 	printResult(out, res)
+
+	if flags.From != "" {
+		// Regress: label each finding INTRODUCED (anchor absent at --from) vs
+		// PRE-EXISTING (anchor present at --from). Errors per anchor are
+		// swallowed so a transient repo issue cannot abort the summary.
+		printRegressAttribution(ctx, out, repo, res.Findings, flags.From)
+	}
 
 	if flags.DoRepro && r != nil {
 		// Wire spend to this scan run now that we have the ID. In-run hook

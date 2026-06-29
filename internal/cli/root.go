@@ -31,6 +31,7 @@ reproduce, report) and tracks findings across confidence tiers:
 		newInitCmd(),
 		newPrimeCmd(),
 		newScanCmd(),
+		newRegressCmd(),
 		newReproCmd(),
 		newVerifyCmd(),
 		newSweepCmd(),
