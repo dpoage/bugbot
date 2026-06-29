@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -142,10 +143,10 @@ func (t *RunTestsTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 }
 
 // buildArgv constructs the test command argv from the base command and the
-// caller-supplied filters. It understands Go, cargo, pytest, npm/yarn/pnpm,
-// ctest, and bazel command shapes; unknown base commands receive no filter
-// injection so the tool degrades gracefully rather than producing broken
-// invocations.
+// caller-supplied filters. It understands Go, cargo, python/pytest,
+// npm/yarn/pnpm/npx (verbatim), bazel, and bash-wrapped ctest/meson command
+// shapes; unknown base commands receive no filter injection so the tool
+// degrades gracefully rather than producing broken invocations.
 func (t *RunTestsTool) buildArgv(args runTestsArgs) []string {
 	if len(t.baseCmd) == 0 {
 		return nil
@@ -222,12 +223,130 @@ func (t *RunTestsTool) buildArgv(args runTestsArgs) []string {
 		}
 		return out
 
+	case "bash":
+		// Compound baseCmd shape: ["bash", "-c", script]. Some build systems
+		// (cmake/ctest, meson) are invoked through a single shell string; we
+		// narrow a runner-anchored filter into the script.
+		//
+		// The script is shell-parsed by bash, so args.Run MUST be safely
+		// single-quoted before splicing — see shellSingleQuote. A malicious
+		// or careless value can otherwise break out of the quoted region
+		// and inject arbitrary shell.
+		if len(t.baseCmd) != 3 || t.baseCmd[1] != "-c" || args.Run == "" {
+			// Unexpected shape or no filter to apply: graceful degradation.
+			break
+		}
+		if rewritten, ok := injectBashRunnerFilter(t.baseCmd[2], shellSingleQuote(args.Run)); ok {
+			return []string{"bash", "-c", rewritten}
+		}
+		// Recognizable ctest/meson invocation not found in the script: fall
+		// through to the default verbatim behavior so we never produce a
+		// broken argv.
+		break
+
 	default:
 		// Unknown runner: return baseCmd verbatim. No filter injection.
 		out := make([]string, len(t.baseCmd))
 		copy(out, t.baseCmd)
 		return out
 	}
+	// `case "bash":` reaches here when the shape is unexpected or the script
+	// lacks a recognizable ctest/meson invocation. Return baseCmd verbatim
+	// (graceful degradation, matching the default path).
+	out := make([]string, len(t.baseCmd))
+	copy(out, t.baseCmd)
+	return out
+}
+
+// shellSingleQuote returns s wrapped in POSIX single quotes with any
+// embedded single quote escaped via the standard `'\”` sequence. The
+// result is safe to splice into a `bash -c` script string: the shell
+// will parse it as a single literal token regardless of the contents.
+//
+// This MUST be used whenever caller-supplied data is concatenated into
+// a shell string — relying on bare interpolation lets a value like
+// `'; rm -rf / #` break out of the quoted region.
+func shellSingleQuote(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('\'')
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\'' {
+			b.WriteString(`'\''`)
+		} else {
+			b.WriteByte(s[i])
+		}
+	}
+	b.WriteByte('\'')
+	return b.String()
+}
+
+// isIdentByte reports whether b may appear in a shell identifier
+// (alphanumeric or underscore). Used to require word boundaries when
+// looking for command names like `ctest` inside a script.
+func isIdentByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9') || b == '_'
+}
+
+// injectBashRunnerFilter rewrites script so that the first ctest or
+// meson-test invocation it finds is narrowed by quoted (which is assumed
+// to be a pre-quoted filter value, e.g. from shellSingleQuote). Returns
+// (rewritten, true) on success; (script, false) when no recognizable
+// ctest/meson invocation is present.
+//
+// Rewriting rules:
+//   - `ctest`      -> `ctest -R <quoted>`
+//   - `meson test` -> `meson test <quoted>`
+//
+// Matching is word-boundary aware so identifiers like `myctest_helper`
+// or `ctest_does_not_exist` are not falsely rewritten — we keep scanning
+// past them until we find a real command boundary.
+//
+// Matching is purely lexical: it does not parse shell quoting, so it assumes
+// the script does not contain `ctest`/`meson test` inside a quoted string or
+// comment (build-system-derived baseCmd scripts do not). Even if it did, the
+// spliced value is always single-quoted, so this can never inject a command —
+// at worst the filter lands in the wrong place and the suite runs unfiltered.
+func injectBashRunnerFilter(script, quoted string) (string, bool) {
+	const ctest = "ctest"
+	const mesonTest = "meson test"
+
+	// Walk the script looking for the first ctest token at a word
+	// boundary. A naive strings.Index may land inside an identifier
+	// (e.g. "ctest_helper" or "ctest_does_not_exist"), which we must
+	// skip past to reach the real ctest command later in the script.
+	for i := 0; i < len(script); {
+		j := strings.Index(script[i:], ctest)
+		if j < 0 {
+			break
+		}
+		i += j
+		prevOK := i == 0 || !isIdentByte(script[i-1])
+		nextOK := i+len(ctest) == len(script) || !isIdentByte(script[i+len(ctest)])
+		if prevOK && nextOK {
+			// Insert " -R <quoted>" right after the ctest token.
+			return script[:i+len(ctest)] + " -R " + quoted + script[i+len(ctest):], true
+		}
+		i += len(ctest) // not a boundary match — keep searching past it
+	}
+	// Mirror the ctest scan for `meson test`: require word boundaries on BOTH
+	// sides so "my_meson test" / "meson testing" do not match, and keep
+	// scanning past a non-boundary hit to reach a real later invocation.
+	for i := 0; i < len(script); {
+		j := strings.Index(script[i:], mesonTest)
+		if j < 0 {
+			break
+		}
+		i += j
+		prevOK := i == 0 || !isIdentByte(script[i-1])
+		nextOK := i+len(mesonTest) == len(script) || !isIdentByte(script[i+len(mesonTest)])
+		if prevOK && nextOK {
+			return script[:i+len(mesonTest)] + " " + quoted + script[i+len(mesonTest):], true
+		}
+		i += len(mesonTest)
+	}
+	return script, false
 }
 
 // ExecCount returns the number of Run calls made so far (including

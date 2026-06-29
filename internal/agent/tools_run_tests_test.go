@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -260,6 +261,188 @@ func TestRunTestsTool_BazelArgv_NoPkg_ReturnsBaseVerbatim(t *testing.T) {
 	want := []string{"bazel", "test", "--build_tests_only", "--test_output=errors", "//..."}
 	if !equalSlice(fs.calls[0].Cmd, want) {
 		t.Errorf("argv = %v, want %v", fs.calls[0].Cmd, want)
+	}
+}
+
+// --- Bash-wrapped ctest/meson (compound `bash -c` baseCmd) ------------------
+
+func TestRunTestsTool_BashCtestArgv_WithRun(t *testing.T) {
+	fs := &fakeSandbox{}
+	base := []string{"bash", "-c", "cmake --build build && ctest --test-dir build"}
+	tool := NewRunTestsTool(fs, "/repo", base, 3, nil, nil, nil, nil)
+	_, _ = runTestsTool(t, tool, map[string]interface{}{"run": "TestFoo"})
+
+	// The -R filter is injected immediately after the ctest token; the rest
+	// of the script (cmake invocation, --test-dir flag) is preserved.
+	want := []string{"bash", "-c", "cmake --build build && ctest -R 'TestFoo' --test-dir build"}
+	if !equalSlice(fs.calls[0].Cmd, want) {
+		t.Errorf("argv = %v, want %v", fs.calls[0].Cmd, want)
+	}
+}
+
+func TestRunTestsTool_BashMesonArgv_WithRun(t *testing.T) {
+	fs := &fakeSandbox{}
+	base := []string{"bash", "-c", "meson test -C build"}
+	tool := NewRunTestsTool(fs, "/repo", base, 3, nil, nil, nil, nil)
+	_, _ = runTestsTool(t, tool, map[string]interface{}{"run": "suite_a"})
+
+	// meson test takes the test name as a positional arg, not a flag.
+	want := []string{"bash", "-c", "meson test 'suite_a' -C build"}
+	if !equalSlice(fs.calls[0].Cmd, want) {
+		t.Errorf("argv = %v, want %v", fs.calls[0].Cmd, want)
+	}
+}
+
+func TestRunTestsTool_BashArgv_NoRun_ReturnsBaseVerbatim(t *testing.T) {
+	fs := &fakeSandbox{}
+	base := []string{"bash", "-c", "cmake --build build && ctest"}
+	tool := NewRunTestsTool(fs, "/repo", base, 3, nil, nil, nil, nil)
+	_, _ = runTestsTool(t, tool, map[string]interface{}{})
+
+	// No run filter supplied: leave the compound command alone.
+	want := base
+	if !equalSlice(fs.calls[0].Cmd, want) {
+		t.Errorf("argv = %v, want %v", fs.calls[0].Cmd, want)
+	}
+}
+
+func TestRunTestsTool_BashArgv_UnexpectedShape_ReturnsBaseVerbatim(t *testing.T) {
+	fs := &fakeSandbox{}
+	// baseCmd is not the ["bash", "-c", script] shape we recognize.
+	base := []string{"bash", "echo", "hello"}
+	tool := NewRunTestsTool(fs, "/repo", base, 3, nil, nil, nil, nil)
+	_, _ = runTestsTool(t, tool, map[string]interface{}{"run": "TestFoo"})
+
+	// Shape mismatch: graceful degradation, base cmd returned verbatim.
+	if !equalSlice(fs.calls[0].Cmd, base) {
+		t.Errorf("argv = %v, want %v", fs.calls[0].Cmd, base)
+	}
+}
+
+func TestRunTestsTool_BashArgv_UnrecognizedScript_ReturnsBaseVerbatim(t *testing.T) {
+	fs := &fakeSandbox{}
+	// Valid ["bash", "-c", script] shape but the script invokes neither
+	// ctest nor `meson test`. Narrowing would risk producing a broken argv.
+	base := []string{"bash", "-c", "cmake --build build && ./run_tests.sh"}
+	tool := NewRunTestsTool(fs, "/repo", base, 3, nil, nil, nil, nil)
+	_, _ = runTestsTool(t, tool, map[string]interface{}{"run": "TestFoo"})
+
+	if !equalSlice(fs.calls[0].Cmd, base) {
+		t.Errorf("argv = %v, want %v", fs.calls[0].Cmd, base)
+	}
+}
+
+func TestRunTestsTool_BashMesonArgv_NotMatchedInWord_ReturnsBaseVerbatim(t *testing.T) {
+	fs := &fakeSandbox{}
+	// "meson testing" is not a "meson test" invocation: the right-hand word
+	// boundary check rejects it, so the script is returned verbatim rather
+	// than spliced mid-word into "meson test 'suite_a'ing".
+	base := []string{"bash", "-c", "meson testing --foo"}
+	tool := NewRunTestsTool(fs, "/repo", base, 3, nil, nil, nil, nil)
+	_, _ = runTestsTool(t, tool, map[string]interface{}{"run": "suite_a"})
+	if !equalSlice(fs.calls[0].Cmd, base) {
+		t.Errorf("argv = %v, want verbatim %v", fs.calls[0].Cmd, base)
+	}
+}
+
+func TestRunTestsTool_BashArgv_CtestInIdentifier_NotInjected(t *testing.T) {
+	fs := &fakeSandbox{}
+	// `ctest_helper` is an identifier that contains "ctest" as a substring.
+	// We must NOT inject `-R` into it.
+	base := []string{"bash", "-c", "./ctest_helper build && echo done"}
+	tool := NewRunTestsTool(fs, "/repo", base, 3, nil, nil, nil, nil)
+	_, _ = runTestsTool(t, tool, map[string]interface{}{"run": "TestFoo"})
+
+	// No recognizable ctest invocation -> base cmd verbatim.
+	if !equalSlice(fs.calls[0].Cmd, base) {
+		t.Errorf("argv = %v, want %v", fs.calls[0].Cmd, base)
+	}
+}
+
+func TestRunTestsTool_BashArgv_MaliciousRun_QuotedSafely(t *testing.T) {
+	fs := &fakeSandbox{}
+	// baseCmd has a recognizable bare `ctest` invocation followed by a
+	// fake flag. The point of the test is the single-quoting: if we ever
+	// splice the unquoted run value into the script, bash would see the
+	// `;` as a command terminator and run `echo PWNED`.
+	base := []string{"bash", "-c", "ctest_does_not_exist_xyz ; ctest --no-such-flag-xyz"}
+	tool := NewRunTestsTool(fs, "/repo", base, 3, nil, nil, nil, nil)
+
+	// Classic single-quote-escape payload. If we accidentally splat the
+	// unquoted value into the script, bash will see the `;` as a command
+	// separator and execute `echo PWNED`.
+	malicious := "INJECTED; echo PWNED; #"
+	_, _ = runTestsTool(t, tool, map[string]interface{}{"run": malicious})
+
+	if len(fs.calls) != 1 {
+		t.Fatalf("expected 1 sandbox call, got %d", len(fs.calls))
+	}
+	script := fs.calls[0].Cmd[2]
+
+	// Structural check: the produced script is exactly the expected
+	// single-quoted form. If shellSingleQuote is bypassed, the literal
+	// payload would appear unquoted and this string equality fails.
+	wantScript := "ctest_does_not_exist_xyz ; ctest -R 'INJECTED; echo PWNED; #' --no-such-flag-xyz"
+	if script != wantScript {
+		t.Errorf("script = %q, want %q", script, wantScript)
+	}
+
+	// Functional check: when bash executes the produced script, the
+	// injected `echo PWNED` must not run. The ctest binary may or may
+	// not be installed; in either case, the literal string "PWNED" must
+	// not appear in the script's stdout or stderr. (ctest, even if
+	// present, only sees `INJECTED; echo PWNED; #` as a single argument
+	// passed via `-R` — it cannot execute it as a shell command.)
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available on this host")
+	}
+	out, _ := exec.Command("bash", "-c", script).CombinedOutput()
+	if strings.Contains(string(out), "PWNED") {
+		t.Errorf("malicious run value escaped single-quoting; bash output:\n%s", out)
+	}
+}
+
+// --- shellSingleQuote --------------------------------------------------------
+
+func TestShellSingleQuote_PosixSafe(t *testing.T) {
+	// Direct unit test of the helper. The contract: for any input, the
+	// result, when embedded in a single-quoted shell context, parses to
+	// exactly the input. We verify by having bash print the result back
+	// via `printf %s`. If the quoting is sound, what bash prints equals
+	// the input. If not, the printed string diverges.
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"empty", ""},
+		{"plain", "TestFoo"},
+		{"spaces", "a b c"},
+		{"single_quote", "it's"},
+		{"two_single_quotes", "a'b'c"},
+		{"double_quote", `say "hi"`},
+		{"dollar", "$HOME"},
+		{"backtick", "`uname`"},
+		{"backslash", `a\b`},
+		{"semicolon_breakout_attempt", "INJECTED; echo PWNED; #"},
+		{"embedded_newline", "line1\nline2"},
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available on this host")
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			quoted := shellSingleQuote(tc.input)
+			// Run bash and have it echo the single-quoted value back to us.
+			// If the quoting is sound, the bytes printed equal tc.input.
+			cmd := exec.Command("bash", "-c", "printf %s "+quoted)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("bash failed: %v (output: %q)", err, out)
+			}
+			if string(out) != tc.input {
+				t.Errorf("roundtrip: got %q, want %q", out, tc.input)
+			}
+		})
 	}
 }
 
