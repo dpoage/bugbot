@@ -189,13 +189,28 @@ repository. Investigate the finding's file, line, and reasoning first, then
 produce a repro plan.
 
 Hard requirements for the repro:
-- Prefer a standard test for the repository's language. ` + langGuidance(lang, systems) + `
+- STRONGLY PREFER a test wrapped in the repo's standard test framework run
+  through its standard runner (gtest, ` + "`go test`" + `, pytest, cargo test,
+  jest/vitest). The harness recognizes those runs via existing ran-markers
+  (--- FAIL, FAILED, [  FAILED  ], etc.) and promotes them automatically; this
+  is the default and should be your first choice whenever the bug class
+  supports it. ` + langGuidance(lang, systems) + `
 - The test MUST FAIL (exit non-zero) on the CURRENT, buggy code, and MUST PASS
   once the bug is fixed. Encode the bug as an explicit assertion: call the
   buggy code and assert the CORRECT expected result, so the wrong current
   behavior makes the assertion fail. Do NOT write a test that merely triggers a
   panic or crash without an assertion unless the panic itself is the bug being
   demonstrated and the test asserts it should not panic.
+- ESCAPE HATCH (FALLBACK ONLY) for non-runtime bug classes that genuinely have
+  no standard test-framework runner — e.g. build-system/config bugs, shader /
+  asset semantics, header-only or macro-only changes — wrap the assertion in a
+  short bash script or a bare compiled binary (` + "`cmake/g++/clang++`" + `). Make the
+  script/binary print the literal token ` + "`" + reproSentinelDemonstrated + "`" + ` to
+  stdout ONLY on the code path that confirms the bug is present, immediately
+  before exiting non-zero; print nothing (and exit 0) when the bug is absent.
+  The harness treats that token as positive ran-evidence after the build/env
+  gates, so a broken build that prints it is still classified as build_error.
+  Use this ONLY when there is no realistic test framework; do NOT default to it.
 - The repro command's real exit status and output must reach bugbot: make the
   test (or sanitized binary) the FINAL command in cmd. Do NOT append a trailing
   "| tail", "| head", or "; echo ..." after it — a pipeline's exit status is
