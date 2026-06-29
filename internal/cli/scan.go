@@ -786,9 +786,9 @@ func printResult(out io.Writer, res *funnel.Result) {
 	}
 	_, _ = fmt.Fprintf(out, "Triage drops: low_confidence=%d duplicate=%d suppressed=%d out_of_scope=%d\n",
 		s.DroppedLowConfidence, s.DroppedDuplicate, s.DroppedSuppressed, s.DroppedOutOfScope)
-	if s.MergedWithinLens > 0 || s.MergedCrossLens > 0 {
-		_, _ = fmt.Fprintf(out, "Location merges: within_lens=%d cross_lens=%d (collapsed to cluster primaries)\n",
-			s.MergedWithinLens, s.MergedCrossLens)
+	if s.MergedWithinLens > 0 || s.MergedCrossLens > 0 || s.MergedRootCause > 0 {
+		_, _ = fmt.Fprintf(out, "Location merges: within_lens=%d cross_lens=%d root_cause=%d (collapsed to cluster primaries)\n",
+			s.MergedWithinLens, s.MergedCrossLens, s.MergedRootCause)
 	}
 	_, _ = fmt.Fprintf(out, "Spend: input=%d output=%d total=%d tokens\n",
 		s.InputTokens, s.OutputTokens, s.InputTokens+s.OutputTokens)

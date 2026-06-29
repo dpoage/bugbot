@@ -111,6 +111,25 @@ func TestPrintResult_ToolHealthWarning(t *testing.T) {
 	}
 }
 
+// TestPrintResult_MergeRootCauseOnly is the bugbot-g13 regression: a run whose
+// only merges came from the same-root-cause pass (within=0, cross=0, root=N)
+// must still report the merge to the operator on the "Location merges" line.
+func TestPrintResult_MergeRootCauseOnly(t *testing.T) {
+	var buf bytes.Buffer
+	res := &funnel.Result{
+		Commit: "abc123",
+		Stats:  funnel.Stats{FinderRuns: 6, MergedRootCause: 3},
+	}
+	printResult(&buf, res)
+	out := buf.String()
+	if !strings.Contains(out, "Location merges:") {
+		t.Errorf("a root-cause-only merge run must print the Location merges line:\n%s", out)
+	}
+	if !strings.Contains(out, "root_cause=3") {
+		t.Errorf("merge line must surface root_cause=3:\n%s", out)
+	}
+}
+
 // TestStats_ReliabilityHelpers covers the boundary conditions of the helpers the
 // CLI and exit code rely on.
 func TestStats_ReliabilityHelpers(t *testing.T) {
