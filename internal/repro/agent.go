@@ -392,6 +392,55 @@ func capabilityGuidance(caps sandbox.CapabilitySet) string {
 		}
 	}
 
+	// Rust ecosystem capabilities.
+	if rustCaps, ok := caps["rust"]; ok {
+		if rustCaps["cargo"] {
+			b.WriteString("- Rust cargo test: AVAILABLE. You MAY use `cargo test`.\n")
+		} else {
+			b.WriteString("- Rust cargo test: UNAVAILABLE (no cargo/rustc in this image).\n")
+			b.WriteString("  Do NOT propose `cargo` invocations.\n")
+		}
+		if rustCaps["miri"] {
+			b.WriteString("- Rust Miri: AVAILABLE. You MAY use `cargo miri test` to expose UB/data races;\n")
+			b.WriteString("  a Miri abort IS the demonstration.\n")
+		} else if rustCaps["cargo"] {
+			b.WriteString("- Rust Miri: UNAVAILABLE in this image.\n")
+			b.WriteString("  Do NOT use `cargo miri`; use a deterministic assertion-based `cargo test`.\n")
+		}
+	}
+
+	// JavaScript ecosystem capabilities.
+	if jsCaps, ok := caps["js"]; ok {
+		if jsCaps["node"] {
+			b.WriteString("- Node.js runtime: AVAILABLE. You MAY run JS/TS repros with node.\n")
+		} else {
+			b.WriteString("- Node.js runtime: UNAVAILABLE in this image.\n")
+			b.WriteString("  Do NOT propose node/jest/vitest invocations.\n")
+		}
+		if jsCaps["node_test"] {
+			b.WriteString("- Node built-in test runner (`node --test`): AVAILABLE (node >= 18).\n")
+			b.WriteString("  You MAY use `node --test` for a dependency-free repro.\n")
+		} else if jsCaps["node"] {
+			b.WriteString("- Node built-in test runner (`node --test`): UNAVAILABLE (node < 18).\n")
+			b.WriteString("  Use an assert-based script via `node script.js` (non-zero exit on failure).\n")
+		}
+	}
+
+	// Python ecosystem capabilities.
+	if pyCaps, ok := caps["python"]; ok {
+		if pyCaps["pytest"] {
+			b.WriteString("- Python pytest: AVAILABLE. You MAY use `pytest` (add `--timeout` if available).\n")
+		} else {
+			b.WriteString("- Python pytest: UNAVAILABLE in this image.\n")
+			if pyCaps["python"] {
+				b.WriteString("  Use `python3 -m unittest` or an assert-based script via `python3`\n")
+				b.WriteString("  (non-zero exit on failure).\n")
+			} else {
+				b.WriteString("  No Python interpreter detected; do NOT propose Python invocations.\n")
+			}
+		}
+	}
+
 	return b.String()
 }
 
