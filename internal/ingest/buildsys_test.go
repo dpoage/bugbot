@@ -219,6 +219,22 @@ func TestDetectBuildSystems(t *testing.T) {
 			markers: []string{"pom.xml", "build.gradle"},
 			want:    []BuildSystem{BuildSystemMaven, BuildSystemGradle},
 		},
+		// --- Zig/Gleam/Elixir single-marker cases (bugbot-93z.18) ---
+		{
+			name:    "zig via build.zig",
+			markers: []string{"build.zig"},
+			want:    []BuildSystem{BuildSystemZig},
+		},
+		{
+			name:    "gleam via gleam.toml",
+			markers: []string{"gleam.toml"},
+			want:    []BuildSystem{BuildSystemGleam},
+		},
+		{
+			name:    "elixir via mix.exs",
+			markers: []string{"mix.exs"},
+			want:    []BuildSystem{BuildSystemElixir},
+		},
 	}
 
 	for _, tc := range cases {

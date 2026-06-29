@@ -61,6 +61,7 @@ func TestHasGuidance(t *testing.T) {
 		ingest.LangC, ingest.LangCPP, ingest.LangRuby, ingest.LangCSharp,
 		ingest.LangPHP, ingest.LangSwift, ingest.LangKotlin,
 		ingest.LangShell, ingest.LangOther,
+		ingest.LangZig, ingest.LangGleam, ingest.LangElixir,
 	}
 
 	// Parity check: HasGuidance (no systems) agrees with langGuidance (no systems).
@@ -78,6 +79,7 @@ func TestHasGuidance(t *testing.T) {
 	wantNoSystems := map[ingest.Language]bool{
 		ingest.LangGo: true, ingest.LangPython: true, ingest.LangJavaScript: true,
 		ingest.LangTypeScript: true, ingest.LangRust: true, ingest.LangCSharp: true,
+		ingest.LangZig: true, ingest.LangGleam: true, ingest.LangElixir: true,
 	}
 	for _, lang := range all {
 		if got := HasGuidance(lang); got != wantNoSystems[lang] {
@@ -136,6 +138,9 @@ func TestSystemPrompt_PerLanguageGuidance(t *testing.T) {
 		{"rust -> cargo test", ingest.LangRust, "cargo test <test_name>"},
 		{"unknown -> generic fallback", ingest.LangJava, "standard test framework for its language"},
 		{"other -> generic fallback", ingest.LangOther, "standard test framework for its language"},
+		{"zig -> zig build test", ingest.LangZig, "zig build test"},
+		{"gleam -> gleam test", ingest.LangGleam, "gleam test"},
+		{"elixir -> mix test", ingest.LangElixir, "mix test"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

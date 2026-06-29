@@ -48,6 +48,15 @@ const (
 	// BuildSystemNinja is detected from a root-level build.ninja.
 	// Like make, ninja targets are not introspectable; detection is informational.
 	BuildSystemNinja BuildSystem = "ninja"
+	// BuildSystemZig is detected from a root-level build.zig.
+	// `zig build test` is the canonical test entry point for a Zig package.
+	BuildSystemZig BuildSystem = "zig"
+	// BuildSystemGleam is detected from a root-level gleam.toml.
+	// `gleam test` is the canonical test entry point for a Gleam project.
+	BuildSystemGleam BuildSystem = "gleam"
+	// BuildSystemElixir is detected from a root-level mix.exs.
+	// `mix test` is the canonical test entry point for an Elixir project.
+	BuildSystemElixir BuildSystem = "elixir"
 )
 
 // DetectBuildSystems scans the root-level marker files in repoDir and returns
@@ -71,10 +80,14 @@ const (
 //  13. Make (Makefile / GNUmakefile) — detected but heterogeneous; no specific
 //     repro guidance is generated (targets are not introspectable).
 //  14. Ninja (build.ninja) — same constraint as make.
+//  15. Zig (build.zig) — `zig build test`.
+//  16. Gleam (gleam.toml) — `gleam test`.
+//  17. Elixir (mix.exs) — `mix test`.
 //
-// C/C++ markers (11-14) are placed after all language-specific entries so that
-// a Go repo with a convenience Makefile keeps go_module as primary, and a Bazel
-// C++ repo keeps bazel first — both fall out of the existing priority positions.
+// CMake/Meson/Make/Ninja (11-14) precede the single-marker language ecosystems
+// (15-17), so a Go repo with a convenience Makefile keeps go_module primary and a
+// Bazel C++ repo keeps bazel first; a repo pairing build.zig/gleam.toml/mix.exs
+// with a root CMakeLists.txt/meson.build resolves to the C/C++ suite command.
 //
 // Multiple entries may be returned when markers coexist (e.g. Bazel + go.mod
 // is common in mixed repos). The slice is always ordered as above; callers that
@@ -167,6 +180,21 @@ func DetectBuildSystems(repoDir string) []BuildSystem {
 	// 14. Ninja — heterogeneous; detect-and-record only.
 	if has("build.ninja") {
 		out = append(out, BuildSystemNinja)
+	}
+
+	// 15. Zig — `zig build test` is the canonical test entry point.
+	if has("build.zig") {
+		out = append(out, BuildSystemZig)
+	}
+
+	// 16. Gleam — `gleam test` is the canonical test entry point.
+	if has("gleam.toml") {
+		out = append(out, BuildSystemGleam)
+	}
+
+	// 17. Elixir — `mix test` is the canonical test entry point.
+	if has("mix.exs") {
+		out = append(out, BuildSystemElixir)
 	}
 
 	return out
