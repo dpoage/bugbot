@@ -326,8 +326,9 @@ func TestSweep_CleanRun_DrainsPendingWAL(t *testing.T) {
 // funnel-level wiring of persistKilled at the candKilled branch of
 // runVerifyAndPersist: when a candidate reaches the verifier-KILLED outcome
 // (bugbot-cvc), the funnel must insert exactly one dead_hypotheses row with
-// the structured verdict breakdown and the same buildReasoning trace survivors
-// receive. The store round-trip is covered by internal/store/dead_hypotheses_test.go;
+// 'Refuted by adversarial verification' trace header (distinct from survivors'
+// 'Survived ...' header; bugbot-wmqa). The store round-trip is covered by
+// internal/store/dead_hypotheses_test.go;
 // this test pins the field-mapping and reasoning-trace wiring at the call site,
 // which only a Sweep can exercise (no direct unit entry for persistKilled
 // exists, and the persisted row's reasoning_trace depends on the same
@@ -342,9 +343,11 @@ func TestSweep_CleanRun_DrainsPendingWAL(t *testing.T) {
 //   - The structured columns mirror the bogusCand fields and the panel's
 //     verdict breakdown (3 seats, all refuted, no arbiter).
 //   - reasoning_trace is byte-identical to buildReasoning(verdicts, seatNames,
-//     "", false) constructed with the exact inputs the kill site uses, so a
-//     future refactor that drops the trace or swaps the verdict breakdown
-//     for a different shape fails this test.
+//     "", false, true) constructed with the exact inputs the kill site uses
+//     (killed=true -> 'Refuted by adversarial verification' header), so a
+//     future refactor that drops the trace, swaps the kill header back to
+//     'Survived', or swaps the verdict breakdown for a different shape fails
+//     this test.
 func TestSweep_KilledCandidate_PersistsDeadHypothesis(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)
@@ -455,7 +458,7 @@ func TestSweep_KilledCandidate_PersistsDeadHypothesis(t *testing.T) {
 		{Refuted: true, Reasoning: "The caller guards this with an explicit nil check before the call.", Confidence: "high"},
 	}
 	killSeatNames := []string{"reachability", "semantics", "guards"}
-	wantTrace := buildReasoning(killVerdicts, killSeatNames, "", false)
+	wantTrace := buildReasoning(killVerdicts, killSeatNames, "", false, true)
 	if got.ReasoningTrace != wantTrace {
 		t.Errorf("ReasoningTrace mismatch:\n got: %q\nwant: %q", got.ReasoningTrace, wantTrace)
 	}

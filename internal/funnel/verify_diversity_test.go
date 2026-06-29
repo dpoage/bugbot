@@ -214,7 +214,7 @@ func TestTrace_SeatLabels_N2(t *testing.T) {
 		{Refuted: false, Reasoning: "path is reachable", Confidence: "medium"},
 	}
 	seats := []string{"reachability", "semantics"}
-	trace := buildReasoning(verdicts, seats, "", false)
+	trace := buildReasoning(verdicts, seats, "", false, false)
 
 	if !strings.Contains(trace, "[reachability,") {
 		t.Errorf("trace missing reachability label:\n%s", trace)
@@ -231,7 +231,7 @@ func TestTrace_NoSeatLabels_N1(t *testing.T) {
 		{Refuted: false, Reasoning: "could not disprove", Confidence: "high"},
 	}
 	seats := []string{""} // n==1 produces empty seat name
-	trace := buildReasoning(verdicts, seats, "", false)
+	trace := buildReasoning(verdicts, seats, "", false, false)
 
 	// Must NOT contain seat-specialty names.
 	for _, name := range []string{"reachability", "semantics", "guards"} {
@@ -254,13 +254,47 @@ func TestTrace_ArbiterLineAppended(t *testing.T) {
 	}
 	seats := []string{"reachability", "semantics"}
 	arbiterLine := "arbiter [not-refuted, confidence=high]: I read the code and the path is real"
-	trace := buildReasoning(verdicts, seats, arbiterLine, true)
+	trace := buildReasoning(verdicts, seats, arbiterLine, true, false)
 
 	if !strings.Contains(trace, "arbiter [not-refuted") {
 		t.Errorf("trace missing arbiter line:\n%s", trace)
 	}
 	if !strings.Contains(trace, "arbitration") {
 		t.Errorf("trace header should mention arbitration when arbiter ran:\n%s", trace)
+	}
+}
+
+// TestTrace_KilledHeader verifies that buildReasoning with killed=true emits
+// the 'Refuted by adversarial verification' header (bugbot-wmqa). The kill
+// trace persisted to dead_hypotheses MUST be self-describing: a future
+// operator auditing the row should see a Refuted header, not a Survived one.
+func TestTrace_KilledHeader(t *testing.T) {
+	verdicts := []refutation{
+		{Refuted: true, Reasoning: "no guard before deref", Confidence: "high"},
+		{Refuted: true, Reasoning: "null cfg reachable", Confidence: "high"},
+	}
+	seats := []string{"reachability", "semantics"}
+
+	// No arbiter case
+	trace := buildReasoning(verdicts, seats, "", false, true)
+	if !strings.Contains(trace, "Refuted by adversarial verification") {
+		t.Errorf("kill trace missing 'Refuted by adversarial verification' header:\n%s", trace)
+	}
+	if strings.Contains(trace, "Survived adversarial verification") {
+		t.Errorf("kill trace must not contain 'Survived' header:\n%s", trace)
+	}
+
+	// With arbiter case (header should mention arbitration)
+	arbiterLine := "arbiter [refuted, confidence=high]: I read the code and the path is real"
+	trace2 := buildReasoning(verdicts, seats, arbiterLine, true, true)
+	if !strings.Contains(trace2, "Refuted by adversarial verification") {
+		t.Errorf("kill trace (arbiter) missing 'Refuted by adversarial verification' header:\n%s", trace2)
+	}
+	if !strings.Contains(trace2, "arbitration") {
+		t.Errorf("kill trace (arbiter) header should mention arbitration:\n%s", trace2)
+	}
+	if strings.Contains(trace2, "Survived adversarial verification") {
+		t.Errorf("kill trace (arbiter) must not contain 'Survived' header:\n%s", trace2)
 	}
 }
 
@@ -272,7 +306,7 @@ func TestTrace_NoArbiterLine_WhenNotRan(t *testing.T) {
 		{Refuted: false, Reasoning: "also could not disprove", Confidence: "high"},
 	}
 	seats := []string{"reachability", "semantics"}
-	trace := buildReasoning(verdicts, seats, "", false)
+	trace := buildReasoning(verdicts, seats, "", false, false)
 
 	if strings.Contains(trace, "arbiter") {
 		t.Errorf("trace must not contain 'arbiter' when no arbiter ran:\n%s", trace)

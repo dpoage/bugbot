@@ -220,7 +220,7 @@ func TestBuildReasoning_AbstainerLabel(t *testing.T) {
 		{Refuted: false, Reasoning: "path is reachable, no guard", Confidence: "high"},
 	}
 	seatNames := []string{"reachability", "semantics"}
-	out := buildReasoning(verdicts, seatNames, "", false)
+	out := buildReasoning(verdicts, seatNames, "", false, false)
 	if !strings.Contains(out, "abstained (could not read cited code)") {
 		t.Errorf("abstaining seat not labeled distinctly; trace:\n%s", out)
 	}
