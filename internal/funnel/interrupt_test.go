@@ -322,6 +322,145 @@ func TestSweep_CleanRun_DrainsPendingWAL(t *testing.T) {
 	}
 }
 
+// TestSweep_KilledCandidate_PersistsDeadHypothesis (bugbot-fg9a) verifies the
+// funnel-level wiring of persistKilled at the candKilled branch of
+// runVerifyAndPersist: when a candidate reaches the verifier-KILLED outcome
+// (bugbot-cvc), the funnel must insert exactly one dead_hypotheses row with
+// the structured verdict breakdown and the same buildReasoning trace survivors
+// receive. The store round-trip is covered by internal/store/dead_hypotheses_test.go;
+// this test pins the field-mapping and reasoning-trace wiring at the call site,
+// which only a Sweep can exercise (no direct unit entry for persistKilled
+// exists, and the persisted row's reasoning_trace depends on the same
+// runRefuters output survivors consume).
+//
+// Setup mirrors TestSweep_CleanRun_DrainsPendingWAL: finderOnNilLens emits the
+// realCand (survives) + bogusCand (killed) pair, verifierRouting drives
+// realCand's panel to not-refuted and bogusCand's panel to unanimous-refuted.
+// After Sweep completes (no interrupt):
+//   - Exactly ONE dead_hypotheses row exists, and it is bogusCand (the killed
+//     one). The surviving realCand must NOT produce a dead_hypotheses row.
+//   - The structured columns mirror the bogusCand fields and the panel's
+//     verdict breakdown (3 seats, all refuted, no arbiter).
+//   - reasoning_trace is byte-identical to buildReasoning(verdicts, seatNames,
+//     "", false) constructed with the exact inputs the kill site uses, so a
+//     future refactor that drops the trace or swaps the verdict breakdown
+//     for a different shape fails this test.
+func TestSweep_KilledCandidate_PersistsDeadHypothesis(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	finder := finderOnNilLens(newScriptedClient())
+	verifier := verifierRouting(newScriptedClient())
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if res.ScanRunID == "" {
+		t.Fatal("res.ScanRunID is empty; ListDeadHypotheses needs it")
+	}
+
+	// Sanity: realCand survived (tier-2 finding); bogusCand was killed by the
+	// unanimous-refuted panel. The dead_hypotheses row should be exactly the
+	// killed one — the survivor must NOT produce a dead_hypotheses row.
+	if len(res.Findings) != 1 {
+		t.Fatalf("want 1 finding (realCand survives), got %d", len(res.Findings))
+	}
+	survived := res.Findings[0]
+	if survived.Title != "nil deref of cfg in Greeting" {
+		t.Fatalf("survivor title = %q, want %q", survived.Title, "nil deref of cfg in Greeting")
+	}
+
+	rows, err := st.ListDeadHypotheses(ctx, res.ScanRunID)
+	if err != nil {
+		t.Fatalf("ListDeadHypotheses: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("ListDeadHypotheses returned %d rows, want 1 (only bogusCand is killed; realCand survives and must NOT produce a dead_hypotheses row)", len(rows))
+	}
+	got := rows[0]
+
+	// BogusCand's persisted fields — the candidate's own lens+file+line+title+severity
+	// are copied verbatim into the dead_hypotheses row.
+	if got.Title != "Add overflows on large ints" {
+		t.Errorf("Title = %q, want %q", got.Title, "Add overflows on large ints")
+	}
+	if got.File != "clean.go" {
+		t.Errorf("File = %q, want clean.go", got.File)
+	}
+	if got.Line != 5 {
+		t.Errorf("Line = %d, want 5", got.Line)
+	}
+	if got.Severity != "low" {
+		t.Errorf("Severity = %q, want low", got.Severity)
+	}
+	if got.Lens == "" {
+		t.Error("Lens is empty (should carry the candidate's lens name)")
+	}
+	if got.Fingerprint == "" {
+		t.Error("Fingerprint is empty (should be set in triage before verify)")
+	}
+	if got.ScanRunID != res.ScanRunID {
+		t.Errorf("ScanRunID = %q, want %q", got.ScanRunID, res.ScanRunID)
+	}
+
+	// Structured verdict breakdown: 3-seat panel, unanimous refuted, no arbiter.
+	// The seats are the default round-robin from builtinSeats
+	// (seats.go: reachability/semantics/guards); refutedCount is computed by
+	// the kill site via seatRefutedSlice(verdicts) and counts every refuted
+	// verdict in the panel (no arbiter case: arbiterRan/Refuted/Verdict all
+	// zero-value).
+	wantSeats := []string{"reachability", "semantics", "guards"}
+	if len(got.SeatNames) != len(wantSeats) {
+		t.Errorf("SeatNames = %v, want %v (3-seat default panel)", got.SeatNames, wantSeats)
+	} else {
+		for i, want := range wantSeats {
+			if got.SeatNames[i] != want {
+				t.Errorf("SeatNames[%d] = %q, want %q", i, got.SeatNames[i], want)
+			}
+		}
+	}
+	if got.RefutedCount != 3 {
+		t.Errorf("RefutedCount = %d, want 3 (all 3 refuters refute bogusCand)", got.RefutedCount)
+	}
+	if got.TotalSeats != 3 {
+		t.Errorf("TotalSeats = %d, want 3", got.TotalSeats)
+	}
+	if got.ArbiterRan {
+		t.Errorf("ArbiterRan = true, want false (unanimous kill — no split, no arbiter)")
+	}
+	if got.ArbiterRefuted {
+		t.Errorf("ArbiterRefuted = true, want false (no arbiter ran)")
+	}
+	if got.ArbiterVerdict != "" {
+		t.Errorf("ArbiterVerdict = %q, want \"\" (no arbiter ran)", got.ArbiterVerdict)
+	}
+
+	// Reasoning trace: byte-equal to buildReasoning with the EXACT inputs the
+	// kill site uses. The 3 verdicts come from scriptedClient routing
+	// refutedJSON to every refuter seat on the "Add overflows on large ints"
+	// task; arbiterRan=false because the panel is unanimous (no split); the
+	// arbiterLine is therefore the zero string. Reconstructing the expected
+	// trace here (rather than asserting containment) pins the field-mapping
+	// wiring at the kill site: if a future edit drops the reasoning_trace,
+	// swaps the kill site to a different verdict breakdown, or re-routes the
+	// arbiter branch on a unanimous kill, this equality fails.
+	killVerdicts := []refutation{
+		{Refuted: true, Reasoning: "The caller guards this with an explicit nil check before the call.", Confidence: "high"},
+		{Refuted: true, Reasoning: "The caller guards this with an explicit nil check before the call.", Confidence: "high"},
+		{Refuted: true, Reasoning: "The caller guards this with an explicit nil check before the call.", Confidence: "high"},
+	}
+	killSeatNames := []string{"reachability", "semantics", "guards"}
+	wantTrace := buildReasoning(killVerdicts, killSeatNames, "", false)
+	if got.ReasoningTrace != wantTrace {
+		t.Errorf("ReasoningTrace mismatch:\n got: %q\nwant: %q", got.ReasoningTrace, wantTrace)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // gatingClient: allows a fixed number of LLM completions, then blocks
 // subsequent calls until the context is cancelled. Thread-safe.
