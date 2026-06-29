@@ -231,8 +231,8 @@ func (r *Repo) ReadFileAtRef(ctx context.Context, ref, path string) ([]byte, err
 //     failure biases toward the investigate-first INTRODUCED bucket rather than
 //     a spurious PRE-EXISTING label.
 //
-// A nil receiver, an empty file, or an empty ref also return true (the same
-// conservative default).
+// A nil receiver, an empty file path, or an empty ref also return true (the
+// same conservative default).
 func (r *Repo) AnchorAbsentAtRef(ctx context.Context, ref, file string, line int) bool {
 	if r == nil || file == "" || ref == "" {
 		return true
