@@ -923,3 +923,83 @@ func TestMigration013_SitesColumn(t *testing.T) {
 		t.Errorf("Sites[1] = %+v", got.Sites[1])
 	}
 }
+
+// TestUpsertFinding_PreservesWitnessOnRescan covers bugbot-w1bh: a below-quorum
+// (NeedsHuman) finding can carry a non-promoting repro witness (ReproWitness),
+// and a later re-scan with an empty incoming witness must NOT clear the stored
+// one — the same preservation rule as ReproPath. Tier and ReproPath stay empty
+// (a witness never promotes).
+func TestUpsertFinding_PreservesWitnessOnRescan(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	// 1. Initial upsert: a below-quorum survivor (tier 2, NeedsHuman, no repro).
+	f := sampleFinding()
+	f.Tier = 2
+	f.NeedsHuman = true
+	f.ReproPath = ""
+	f.ReproWitness = ""
+	stored, err := st.UpsertFinding(ctx, f)
+	if err != nil {
+		t.Fatalf("initial upsert: %v", err)
+	}
+
+	// 2. Witness: simulate witnessFinding — set ReproWitness only, leaving Tier,
+	// ReproPath, and NeedsHuman as-is.
+	witnessed := stored
+	witnessed.ReproWitness = "/artifacts/witness/repro_test.go"
+	after, err := st.UpsertFinding(ctx, witnessed)
+	if err != nil {
+		t.Fatalf("witness upsert: %v", err)
+	}
+	if after.ReproWitness != "/artifacts/witness/repro_test.go" {
+		t.Fatalf("after witness: repro_witness=%q, want the bundle path", after.ReproWitness)
+	}
+	if after.Tier != 2 {
+		t.Errorf("witness changed tier: got %d, want 2 (a witness must not promote)", after.Tier)
+	}
+	if after.ReproPath != "" {
+		t.Errorf("witness set repro_path=%q, want empty (a witness must not promote)", after.ReproPath)
+	}
+	if !after.NeedsHuman {
+		t.Errorf("witness cleared needs_human, want still true")
+	}
+
+	// 3. Re-scan: a fresh T2 finding with an EMPTY witness for the same
+	// fingerprint. The stored witness must survive.
+	rescan := Finding{
+		Fingerprint:  f.Fingerprint,
+		Title:        f.Title,
+		Description:  f.Description,
+		Reasoning:    "updated reasoning from re-scan",
+		Severity:     "critical", // changed
+		Tier:         2,
+		Status:       StatusOpen,
+		Lens:         f.Lens,
+		File:         f.File,
+		Line:         f.Line,
+		CommitSHA:    "newcommit",
+		FileHash:     "hash-v3",
+		NeedsHuman:   true,
+		ReproWitness: "", // empty — must NOT clobber the stored witness
+	}
+	rescanned, err := st.UpsertFinding(ctx, rescan)
+	if err != nil {
+		t.Fatalf("rescan upsert: %v", err)
+	}
+	if rescanned.ReproWitness != "/artifacts/witness/repro_test.go" {
+		t.Errorf("rescan CLEARED repro_witness: got %q, want preserved", rescanned.ReproWitness)
+	}
+	if rescanned.Severity != "critical" {
+		t.Errorf("severity not updated: %q", rescanned.Severity)
+	}
+
+	// Read back from DB to confirm persistence.
+	dbRow, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint: %v", err)
+	}
+	if dbRow.ReproWitness != "/artifacts/witness/repro_test.go" {
+		t.Errorf("DB repro_witness=%q after rescan, want preserved", dbRow.ReproWitness)
+	}
+}
