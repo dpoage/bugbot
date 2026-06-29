@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -24,11 +25,14 @@ import (
 
 // cartographySystemPrompt is the cartographer's terse system prompt. The
 // model is asked to summarize one package in <=120 words covering purpose,
-// invariants, and assumptions about callers. Specific, terse, no preamble —
-// the cartographer's value is in the FINDER having a one-shot context for
-// unfamiliar code, not in a flowery intro. The wording is intentionally
-// short so the model allocates its budget to the actual summary.
-const cartographySystemPrompt = `Summarize this package in <=120 words: purpose, key invariants it maintains, what it assumes of callers. Specific, terse, no preamble.`
+// invariants, and assumptions about callers. The prompt explicitly forbids
+// the format patterns the cartographer's model has historically drifted
+// into: markdown heading lines, bold "**Purpose:**"-style labels, and any
+// other preamble. Those shapes were once tolerated (the old free-form
+// prompt let them appear nondeterministically); the post-processor
+// (normalizeSummary) is the byte-uniform guarantee, and the prompt forbids
+// the same shapes as cheap belt-and-suspenders.
+const cartographySystemPrompt = `Summarize this package in <=120 words covering purpose, key invariants it maintains, and what it assumes of callers. Output requirements: a single paragraph, no markdown heading, no bold label, no preamble, no list. Plain prose only.`
 
 // cartography holds the per-run package summaries and the package-importer
 // graph used to inject "this package + its direct dependents" context into
@@ -542,14 +546,91 @@ func (f *Funnel) regenSummaries(
 // not silently dropped), and think-block stripping via stripBody.
 var cartographySummarySchema = json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","minLength":1,"description":"<=120 word package summary"}},"required":["summary"],"additionalProperties":false}`)
 
+// cartographySummaryMaxWords is the post-processed word cap applied to every
+// package summary before it is persisted or returned. It matches the 120-word
+// limit the system prompt requests. The normalizer enforces it
+// deterministically (truncating to the cap and appending a single ellipsis
+// character when the model overshoots), independent of model behavior.
+const cartographySummaryMaxWords = 120
+
+// cartographySummaryHeadingRE matches ONE leading markdown heading line and any
+// optional label it carries, e.g. "# Package Summary", "## Summary", "#
+// Package: <name>", "### Anything". normalizeSummary applies it in a loop to
+// strip a stacked heading block. Anchored at the start (no multiline flag) so
+// it only ever strips the leading line, never a mid-text '#'. A summary that is
+// nothing but a hash line collapses to "" and the package is dropped from the
+// regen batch — acceptable since the prompt forbids markdown headings.
+var cartographySummaryHeadingRE = regexp.MustCompile(`^\s*(?:#+\s*).*?(?:\n|$)`)
+
+// cartographySummaryLabelRE matches a leading bold-label preamble, e.g.
+// "**Purpose:**", "**Package Purpose:**", "**Purpose**:", "**Goal** -",
+// "**Overview**:". The label word(s) and the optional colon (inside or
+// outside the bold) are stripped; the remainder of the line is discarded so
+// the first real sentence stands on its own.
+var cartographySummaryLabelRE = regexp.MustCompile(`(?ims)^\s*\*\*[^*\n]*\*\*\s*[:\-]?\s*\n?`)
+
+// normalizeSummary deterministically cleans a model-produced package summary
+// into a single bounded paragraph regardless of the model's output shape.
+// Steps, in order:
+//
+//  1. Strip every leading markdown heading line (a stacked "# X\n## Y" block
+//     included), each with any optional label like "Package Summary" or
+//     "Package: <name>". A heading must have whitespace after the hashes.
+//  2. Strip a leading bold-label preamble ("**Purpose:**",
+//     "**Package Purpose:**", "**Purpose**:", case-insensitive, with the
+//     colon either inside or outside the bold).
+//  3. Collapse every run of whitespace (spaces, tabs, newlines) into a
+//     single space and trim the result.
+//  4. Enforce a word cap (cartographySummaryMaxWords). If the model
+//     overshoots, keep the first cap words and append a single ellipsis
+//     character. Words are counted with strings.Fields, which already
+//     operates on runes (so multibyte CJK / accented text is never split
+//     mid-character and the resulting count matches what a human reader
+//     would call "words").
+//
+// The two leading-shape regexes are precompiled at package scope: this
+// function is called once per package per regen pass, so the cost is
+// negligible, and a regex is both clearer and safer than hand-rolled byte
+// scanning for the multi-character heading/label shapes we tolerate. All
+// other work is plain strings (TrimSpace, Fields, Join) — no extra
+// allocations from scanning once the regexes have matched.
+func normalizeSummary(s string) string {
+	// 1. Strip every leading markdown heading line. Looped because the regex
+	//    is start-anchored: one ReplaceAllString removes only the first
+	//    heading; re-running re-anchors ^ at the reduced string so a stacked
+	//    "# Title\n## Subtitle" block is fully removed.
+	for cartographySummaryHeadingRE.MatchString(s) {
+		s = cartographySummaryHeadingRE.ReplaceAllString(s, "")
+	}
+	// 2. Bold-label preamble.
+	s = cartographySummaryLabelRE.ReplaceAllString(s, "")
+	// 3. Collapse whitespace. fields + Join is the idiomatic,
+	//    allocation-light "split on any unicode whitespace, rejoin with
+	//    single spaces" combo used elsewhere in this package (e.g.
+	//    prompt.go, strategy.go).
+	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+	if s == "" {
+		return ""
+	}
+	// 4. Word cap.
+	words := strings.Fields(s)
+	if len(words) > cartographySummaryMaxWords {
+		words = words[:cartographySummaryMaxWords]
+		return strings.Join(words, " ") + " …"
+	}
+	return s
+}
+
 // summarizePackage builds the bounded input for one package's summary and runs
 // a zero-tool agent.Runner via RunJSON to produce it. The input is the
 // package's member files head-truncated to DefaultCartographerHeadLines, the
 // whole package capped at DefaultCartographerInputBytes. The runner shares the
 // finder budget pool (via budget.finderRunnerLimits) so an in-flight summary
 // respects the run-wide token budget; budget may be nil (no pool gating). The
-// output is the schema's "summary" field trimmed of whitespace; an empty result
-// is reported as an error so the caller drops the package from the regen batch.
+// output is the schema's "summary" field, deterministically normalized to a
+// single bounded paragraph (see normalizeSummary) before being returned; an
+// empty result is reported as an error so the caller drops the package from
+// the regen batch.
 func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, budget *budgetState, pkg string, members []string, fps map[string]string) (string, error) {
 	if len(members) == 0 {
 		return "", errors.New("cartograph: empty members for package")
@@ -623,7 +704,12 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, budget
 	if err != nil {
 		return "", err
 	}
-	summary := strings.TrimSpace(out.Summary)
+	// Deterministic post-process: strip any leading heading/label the
+	// model added, collapse to one paragraph, enforce the word cap. This
+	// is the byte-uniform guarantee on the summary regardless of model
+	// behavior; the system prompt forbids the same shapes as cheap
+	// belt-and-suspenders but cannot enforce them.
+	summary := normalizeSummary(out.Summary)
 	if summary == "" {
 		return "", errors.New("cartograph: empty summary from LLM")
 	}
