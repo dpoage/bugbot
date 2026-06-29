@@ -54,7 +54,7 @@ type Config struct {
 	Name string
 }
 
-// Greeting dereferences cfg without a nil check; a caller passing nil panics.
+// Greeting builds a greeting string from cfg.
 func Greeting(cfg *Config) string {
 	return "hello " + cfg.Name
 }
@@ -109,14 +109,14 @@ import (
 	"os"
 )
 
-// ReadFirst opens path and returns its first n bytes. On the short-read error
-// path it returns without closing f: a leaked file descriptor.
+// ReadFirst opens path and returns its first n bytes.
+// The returned slice holds the file's first n bytes.
 func ReadFirst(path string, n int) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	buf := make([]byte, n)
+	buf := make([]byte, max(n, 0))
 	if _, err := io.ReadFull(f, buf); err != nil {
 		return nil, err
 	}
@@ -156,8 +156,8 @@ func resourceLeakCase() Case {
 
 const offByOneSrc = `package fixture
 
-// Last returns the last element of xs. It indexes xs[len(xs)] instead of
-// xs[len(xs)-1]: an out-of-range panic on every non-empty slice.
+// Last returns the last element of xs.
+// It walks the slice to find the trailing value.
 func Last(xs []int) int {
 	return xs[len(xs)]
 }
@@ -194,8 +194,8 @@ func offByOneCase() Case {
 
 const cleanSrc = `package fixture
 
-// Add returns the sum of a and b. There is no bug here; this file is the
-// false-positive canary for the eval suite.
+// Add returns the sum of a and b.
+// Inputs are added directly without further processing.
 func Add(a, b int) int {
 	return a + b
 }
@@ -249,8 +249,8 @@ type Node struct {
 	Val  int
 }
 
-// Sum walks the list summing values. It dereferences n.Next.Val without
-// checking n.Next for nil: panics at the tail.
+// Sum walks the list summing values.
+// It accumulates the total during traversal.
 func Sum(n *Node) int {
 	total := 0
 	for n != nil {
@@ -260,8 +260,8 @@ func Sum(n *Node) int {
 	return total
 }
 
-// At returns the i-th value. It uses <= so the final iteration dereferences a
-// nil Next: an off-by-one that panics for i == length.
+// At returns the i-th value.
+// It advances the cursor until the index is reached.
 func At(n *Node, i int) int {
 	for k := 0; k <= i; k++ {
 		n = n.Next
@@ -359,8 +359,8 @@ type Device struct{ id int }
 
 func (d *Device) ID() int { return d.id }
 
-// lookupID dereferences dev; a finder flags a possible nil deref here, but every
-// caller passes a freshly constructed Device, so the path is unreachable.
+// lookupID returns the id of the given device. Its only caller, useLookup
+// below, constructs the Device inline before calling it.
 func lookupID(dev *Device) int {
 	return dev.ID()
 }
@@ -413,8 +413,8 @@ type Session struct{ token string }
 
 func (s *Session) Token() string { return s.token }
 
-// resolve dereferences sess; handleAnon passes nil, so the deref panics on the
-// anonymous path — a real, reachable nil deref.
+// resolve returns the token associated with the session.
+// It is the access path used by the other entry points.
 func resolve(sess *Session) string {
 	return sess.Token()
 }
