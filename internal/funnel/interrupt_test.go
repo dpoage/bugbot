@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -181,13 +182,16 @@ func TestSweep_Interrupt_DurablePartialProgress(t *testing.T) {
 // pending_candidates, and the next run replays it straight into verify and
 // produces the finding.
 //
-// Mechanics: 1 file, 1 lens, ChunkSize=1 → exactly one finder unit → one
-// candidate. The finder is ungated (it completes and persists the candidate);
-// the VERIFIER is gated to block on its first refuter call. A watchdog cancels
-// the sweep once the verifier blocks, so the candidate is in-flight in verify
-// (forwarded by triage, refuter blocked) when the interrupt lands — its WAL row
-// survives. A second run on the SAME store, with an empty finder and an allowing
-// verifier, replays the row and verifies it.
+// Mechanics: 1 lens, ChunkSize=1, on the fixture repo (bug.go + clean.go) → two
+// finder chunks. The test anchors realCand's emit to the chunk whose task lists
+// bug.go, so exactly ONE candidate-emitting finder unit runs (see
+// finderOneChunkEmitsRealCand); the other emits emptyCandidates. The finder is
+// ungated (it completes and persists the candidate); the VERIFIER is gated to
+// block on its first refuter call. A watchdog cancels the sweep once the
+// verifier blocks, so the candidate is in-flight in verify (forwarded by
+// triage, refuter blocked) when the interrupt lands — its WAL row survives. A
+// second run on the SAME store, with an empty finder and an allowing verifier,
+// replays the row and verifies it.
 func TestSweep_InterruptThenResume_PendingCandidates(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t) // shared store + repo across both runs
@@ -195,8 +199,11 @@ func TestSweep_InterruptThenResume_PendingCandidates(t *testing.T) {
 	const lens = "nil-safety/error-handling"
 
 	// --- Phase 1: interrupt mid-verification ---
-	finder1 := newScriptedClient().onSystemContains(lens, candJSON(realCand))
-	finder1.fallback = emptyCandidates
+	// Only the unit scanning bug.go emits realCand; the unit scanning clean.go
+	// falls through to the emptyCandidates fallback. Without this gating, both
+	// chunks would persist identical WAL rows for the same candidate and the
+	// mid-interrupt snapshot would race the dedup window (see bugbot-303).
+	finder1 := finderOneChunkEmitsRealCand(newScriptedClient())
 
 	verifierInner := newScriptedClient()
 	verifierInner.fallback = notRefutedJSON
@@ -405,9 +412,12 @@ func testB1InterruptedBeforeVerify(t *testing.T) {
 	const lens = "nil-safety/error-handling"
 
 	// Phase 1: finder runs (emits candidate to WAL); verifier is blocked from
-	// the very first call → interrupt lands while verify is waiting.
-	finder1 := newScriptedClient().onSystemContains(lens, candJSON(realCand))
-	finder1.fallback = emptyCandidates
+	// the very first call → interrupt lands while verify is waiting. Only the
+	// unit scanning bug.go emits realCand; the unit scanning clean.go falls
+	// through to the emptyCandidates fallback. Without this gating, both chunks
+	// would persist identical WAL rows for the same candidate and the
+	// mid-interrupt snapshot would race the dedup window (see bugbot-303).
+	finder1 := finderOneChunkEmitsRealCand(newScriptedClient())
 
 	verifierInner := newScriptedClient()
 	verifierInner.fallback = notRefutedJSON
@@ -1013,4 +1023,36 @@ func TestInterruptMatrix_DoubleDrain_SweepDrain_Idempotent(t *testing.T) {
 	if len(unswept) != 0 {
 		t.Errorf("UnsweptOpenFindings = %d after double SweepDrain, want 0", len(unswept))
 	}
+}
+
+// finderOneChunkEmitsRealCand configures c to emit realCand for the one finder
+// unit whose chunk contains the candidate's target file (bug.go) and
+// emptyCandidates for every other chunk.
+//
+// Why this exists: openFixture's repo has TWO files (bug.go, clean.go), so
+// buildUnits(..., ChunkSize=1) yields two chunks for a single lens. A naive
+// lens-only substring match (onSystemContains) would fire on BOTH chunks, and
+// since realCand's JSON is hard-coded to point at bug.go:10, both units would
+// persist identical WAL rows for the same candidate. The triage dedup later
+// folds the duplicates back to one, but the mid-interrupt snapshot in the
+// interrupt tests can land while a duplicate is transiently present and
+// observe len(pending) == 2 instead of 1 — the bugbot-303 flake. Anchoring
+// the match to the chunk that lists the candidate's file picks exactly the
+// unit that is semantically allowed to emit realCand, so the WAL has exactly
+// one row at any interrupt point regardless of scheduling.
+func finderOneChunkEmitsRealCand(c *scriptedClient) *scriptedClient {
+	const lens = "nil-safety/error-handling"
+	c.on(func(req llm.Request) bool {
+		if !strings.Contains(req.System, lens) {
+			return false
+		}
+		for _, m := range req.Messages {
+			if m.Role == llm.RoleUser && strings.Contains(m.Content, "bug.go") {
+				return true
+			}
+		}
+		return false
+	}, candJSON(realCand))
+	c.fallback = emptyCandidates
+	return c
 }
