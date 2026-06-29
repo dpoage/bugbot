@@ -78,6 +78,9 @@ const probeTimeout = 30 * time.Second
 var capabilityEcosystems = []probeEntry{
 	goCapabilityProbe,
 	cppCapabilityProbe,
+	rustCapabilityProbe,
+	jsCapabilityProbe,
+	pythonCapabilityProbe,
 }
 
 // goCapabilityProbe probes whether the Go sandbox image has cgo + a C
@@ -150,6 +153,120 @@ var cppCapabilityProbe = probeEntry{
 				modes["tsan"] = true
 			case "undefined":
 				modes["ubsan"] = true
+			}
+		}
+		return modes
+	},
+}
+
+// rustCapabilityProbe probes whether the sandbox image has the Rust toolchain
+// (cargo) and the Miri interpreter (used to expose undefined behavior and data
+// races in safe Rust code). The probe finds `cargo` on PATH then attempts
+// `cargo miri --version`, echoing a token per available mode.
+//
+// Probe command (sh -c): checks `command -v cargo` and `cargo miri --version`,
+// emitting "cargo" and "miri" tokens on stdout respectively. Both commands
+// are silenced; only the echo tokens appear.
+//
+// interpret is called even on non-zero exit so partial availability is
+// captured — e.g. cargo present but miri absent. The FULL key set
+// {cargo, miri} is always returned so allFalse() works correctly.
+var rustCapabilityProbe = probeEntry{
+	name: "rust",
+	probe: []string{"/bin/sh", "-c",
+		`command -v cargo >/dev/null 2>&1 && echo cargo; cargo miri --version >/dev/null 2>&1 && echo miri`,
+	},
+	interpret: func(r Result) map[string]bool {
+		// Always return the full key set so allFalse() enumerates all modes.
+		// Parse stdout tokens: "cargo"→cargo, "miri"→miri. interpret is called
+		// even on non-zero exit — parse whatever stdout contains.
+		modes := map[string]bool{
+			"cargo": false,
+			"miri":  false,
+		}
+		for _, line := range strings.Split(r.Stdout, "\n") {
+			switch strings.TrimSpace(line) {
+			case "cargo":
+				modes["cargo"] = true
+			case "miri":
+				modes["miri"] = true
+			}
+		}
+		return modes
+	},
+}
+
+// jsCapabilityProbe probes whether the sandbox image has the Node.js runtime
+// (mode "node") and a recent enough version to expose the built-in test runner
+// `node --test` (mode "node_test", requires node >= 18). The probe finds
+// `node` on PATH then runs an inline `-e` script that exits 0 only when the
+// parsed major version is 18 or newer, echoing a token per available mode.
+//
+// Probe command (sh -c): checks `command -v node` and runs
+// `node -e 'process.exit(...)'`, emitting "node" and "node_test" tokens on
+// stdout respectively. Both commands are silenced; only the echo tokens
+// appear.
+//
+// interpret is called even on non-zero exit so partial availability is
+// captured — e.g. node present but older than 18. The FULL key set
+// {node, node_test} is always returned so allFalse() works correctly.
+var jsCapabilityProbe = probeEntry{
+	name: "js",
+	probe: []string{"/bin/sh", "-c",
+		`command -v node >/dev/null 2>&1 && echo node; node -e 'process.exit(parseInt(process.versions.node)>=18?0:1)' >/dev/null 2>&1 && echo node_test`,
+	},
+	interpret: func(r Result) map[string]bool {
+		// Always return the full key set so allFalse() enumerates all modes.
+		// Parse stdout tokens: "node"→node, "node_test"→node_test. interpret is
+		// called even on non-zero exit — parse whatever stdout contains.
+		modes := map[string]bool{
+			"node":      false,
+			"node_test": false,
+		}
+		for _, line := range strings.Split(r.Stdout, "\n") {
+			switch strings.TrimSpace(line) {
+			case "node":
+				modes["node"] = true
+			case "node_test":
+				modes["node_test"] = true
+			}
+		}
+		return modes
+	},
+}
+
+// pythonCapabilityProbe probes whether the sandbox image has a Python
+// interpreter (mode "python", accepts `python3` or `python` on PATH) and the
+// pytest test runner (mode "pytest", either via `python3 -m pytest`,
+// `python -m pytest`, or `pytest` on PATH). The probe echoes a token per
+// available mode; missing tools simply contribute no token.
+//
+// Probe command (sh -c): a grouped check for the interpreter then a grouped
+// check for pytest, emitting "python" and "pytest" tokens on stdout
+// respectively. Both checks are silenced; only the echo tokens appear.
+//
+// interpret is called even on non-zero exit so partial availability is
+// captured — e.g. python present but pytest absent. The FULL key set
+// {python, pytest} is always returned so allFalse() works correctly.
+var pythonCapabilityProbe = probeEntry{
+	name: "python",
+	probe: []string{"/bin/sh", "-c",
+		`{ command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; } && echo python; { python3 -m pytest --version >/dev/null 2>&1 || python -m pytest --version >/dev/null 2>&1 || command -v pytest >/dev/null 2>&1; } && echo pytest`,
+	},
+	interpret: func(r Result) map[string]bool {
+		// Always return the full key set so allFalse() enumerates all modes.
+		// Parse stdout tokens: "python"→python, "pytest"→pytest. interpret is
+		// called even on non-zero exit — parse whatever stdout contains.
+		modes := map[string]bool{
+			"python": false,
+			"pytest": false,
+		}
+		for _, line := range strings.Split(r.Stdout, "\n") {
+			switch strings.TrimSpace(line) {
+			case "python":
+				modes["python"] = true
+			case "pytest":
+				modes["pytest"] = true
 			}
 		}
 		return modes
