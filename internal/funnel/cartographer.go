@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/ingest"
@@ -39,16 +40,25 @@ const cartographySystemPrompt = `Summarize this package in <=120 words covering 
 // finder tasks. A nil cartography represents "feature off" — every
 // downstream caller (contextFor, the hypothesize plumbing) handles a nil
 // receiver and injects nothing.
-// cartography holds the per-run package summaries and the package-importer
-// graph used to inject "this package + its direct dependents" context into
-// finder tasks. A nil cartography represents "feature off" — every
-// downstream caller (ensureContextFor, the hypothesize plumbing) handles a nil
-// receiver and injects nothing.
 //
 // In lazy mode (newCartographer path), summaries is populated on demand by
 // ensureContextFor rather than up-front. The mu guard + sf singleflight group
 // ensure concurrent finder units spanning the same un-summarized package
 // generate the summary exactly once and share the result.
+//
+// Lazy-mode transport breaker (bugbot-1r9): against an unreachable provider
+// every summarizePackage call exhausts the retry policy (~3.5s,
+// llm.APIError with StatusCode==0) and there are many packages, so the
+// scan would grind through cartography burning the retry budget
+// package-by-package. The breaker mirrors the finder breaker (bugbot-2uz):
+// transportFailures counts transport-class generation failures observed
+// while anySuccess is still false; once it reaches breakerThreshold and
+// anySuccess has never been set, the breaker trips and every subsequent
+// lazy generation short-circuits to ("", false). anySuccess is set ONLY on
+// a successful GENERATION — never on a memo/store hit — so a cached
+// summary from a prior run does not disarm the breaker for the current
+// one (the provider may be unreachable NOW). Concurrency: atomics +
+// CompareAndSwap only; c.mu still guards ONLY the summaries map.
 type cartography struct {
 	summaries map[string]string   // pkgDir -> summary text (memo; guarded by mu)
 	importers map[string][]string // pkgDir -> direct importer pkgDirs (built eagerly, pure-Go)
@@ -62,7 +72,13 @@ type cartography struct {
 	pkgFps   map[string]string   // pkgDir -> fingerprint
 	fps      map[string]string   // file -> content fingerprint
 	budget   *budgetState
-	enabled  bool // mirrors f.opts.Features.Cartographer; false -> nil behavior
+	enabled  bool    // mirrors f.opts.Features.Cartographer; false -> nil behavior
+	result   *Result // run Result; used solely by the breaker to append a trip note (bugbot-1r9)
+
+	// Transport breaker (bugbot-1r9). See struct doc above.
+	transportFailures atomic.Int32 // transport-class generation failures while !anySuccess
+	anySuccess        atomic.Bool  // true once any generate() produced a summary; permanent disarm
+	breakerTripped    atomic.Bool  // true after the breaker stopped new generations
 }
 
 // contextFor renders the injection block for a finder unit's files using the
@@ -80,14 +96,99 @@ func (c *cartography) contextFor(files []string) string {
 	return c.renderContext(files, sums)
 }
 
+// breakerThreshold returns the lazy-mode transport breaker's trip threshold:
+// max(3, MaxParallel). At least 3 so a single transient blip never trips it,
+// and at least the configured concurrency so a parallel batch of transport
+// failures trips within one generation. Mirrors the finder breaker
+// (bugbot-2uz). Nil-safe (used only on enabled, non-nil cartography).
+func (c *cartography) breakerThreshold() int32 {
+	t := c.funnel.opts.Limits.MaxParallel
+	if t < 3 {
+		t = 3
+	}
+	return int32(t)
+}
+
+// generate is the shared lazy-mode generation path used by BOTH
+// ensureContextFor and getSummary. It is the single place that owns
+// singleflight + summarizePackage + persist so the two call sites cannot
+// diverge, and the single place that owns the lazy-mode transport
+// breaker. Callers must have already filtered memo hits, store hits,
+// and the budget-gate before invoking generate; only NEW LLM generations
+// flow through here, and only those are subject to the breaker. The
+// breaker short-circuit returns ("", false) without invoking summarizePackage,
+// so a confirmed-unreachable provider does not burn the retry budget
+// package-by-package.
+//
+// Outcome classification inside the singleflight closure mirrors the
+// finder breaker (bugbot-2uz):
+//
+//   - summarizePackage success: set anySuccess (permanent disarm), persist
+//     with a cancel-detached context, memoize, return (summary, true).
+//   - transport-class failure (isTransportError) while !anySuccess: count
+//     toward breakerThreshold; on the threshold-th failure
+//     CompareAndSwap breakerTripped false→true so exactly one goroutine
+//     trips. Non-transport failures and empty summaries do NOT arm the
+//     counter — those have their own classification (rate-limit, parse
+//     failure) and must not be conflated with a systemic outage.
+//
+// Concurrency: the singleflight serialises one closure per pkg; multiple
+// packages run concurrently. Atomically-counted transport failures and a
+// CompareAndSwap trip guarantee the breaker fires exactly once regardless
+// of how many goroutines reach the threshold simultaneously.
+func (c *cartography) generate(ctx context.Context, pkg string, members []string, fp string) (string, bool) {
+	if c.breakerTripped.Load() {
+		return "", false
+	}
+	result, _, _ := c.sf.Do(pkg, func() (interface{}, error) {
+		summary, err := c.funnel.summarizePackage(ctx, c.client, c.budget, pkg, members, c.fps)
+		if err != nil || summary == "" {
+			// Transport-class failure while the breaker is still armed.
+			// Mirror the finder breaker: count transport failures toward
+			// the threshold; non-transport failures and empty summaries
+			// do NOT arm the counter. CompareAndSwap guarantees exactly
+			// one goroutine trips regardless of how many reach the
+			// threshold concurrently. The trip-note is best-effort; a
+			// missing c.result (e.g. a degenerate newCartographer call)
+			// simply skips the note.
+			if !c.anySuccess.Load() && isTransportError(err) {
+				thresh := c.breakerThreshold()
+				if n := c.transportFailures.Add(1); n >= thresh && c.breakerTripped.CompareAndSwap(false, true) {
+					if c.result != nil {
+						c.funnel.note(c.result, fmt.Sprintf("cartographer circuit breaker tripped: %d transport failures with zero successes (threshold %d) — aborting further cartographer generations", n, thresh))
+					}
+				}
+			}
+			return "", nil // degrade silently (same as eager pass)
+		}
+		// Successful generation — disarm permanently.
+		c.anySuccess.Store(true)
+		// Persist immediately with a cancel-detached context so an
+		// interruption does not discard an already-produced summary.
+		pCtx, pCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		_ = c.funnel.store.UpsertPackageSummaries(pCtx, []store.PackageSummary{
+			{Pkg: pkg, Fingerprint: fp, Summary: summary},
+		})
+		pCancel()
+		return summary, nil
+	})
+	if s, ok := result.(string); ok && s != "" {
+		c.mu.Lock()
+		c.summaries[pkg] = s
+		c.mu.Unlock()
+		return s, true
+	}
+	return "", false
+}
+
 // ensureContextFor is the lazy entry point used by the scan path. For each
 // package spanned by files (own packages + their direct dependents from
 // importers), it materialises the summary on demand:
 //
 //  1. Memo hit (mu-protected in-memory map) → use immediately.
 //  2. Store hit (GetPackageSummaries, fingerprint match) → populate memo, use.
-//  3. Miss → generate via singleflight.Do (one LLM call per pkg across all
-//     concurrent finder units) → UpsertPackageSummaries immediately → memo.
+//  3. Miss → generate() (singleflight.Do + summarizePackage + persist +
+//     transport breaker) → memo.
 //
 // Budget gate: if budget.finderOverHard() skip generation and render only
 // cached/memoized (same degradation as the old eager pass when budget trips
@@ -162,27 +263,11 @@ func (c *cartography) ensureContextFor(ctx context.Context, files []string) stri
 				continue
 			}
 
-			// Generate via singleflight: concurrent units sharing this pkg produce
-			// exactly one LLM call; the result is shared to all waiters.
-			result, _, _ := c.sf.Do(pkg, func() (interface{}, error) {
-				summary, err := c.funnel.summarizePackage(ctx, c.client, c.budget, pkg, members, c.fps)
-				if err != nil || summary == "" {
-					return "", nil // degrade silently (same as eager pass)
-				}
-				// Persist immediately with a cancel-detached context so an
-				// interruption does not discard an already-produced summary.
-				pCtx, pCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-				_ = c.funnel.store.UpsertPackageSummaries(pCtx, []store.PackageSummary{
-					{Pkg: pkg, Fingerprint: fp, Summary: summary},
-				})
-				pCancel()
-				return summary, nil
-			})
-			if s, ok := result.(string); ok && s != "" {
-				c.mu.Lock()
-				c.summaries[pkg] = s
-				c.mu.Unlock()
-			}
+			// Generate via the shared lazy-mode path. generate() owns the
+			// singleflight + persist + transport breaker; memo hits, store
+			// hits, and the budget-gate have already been handled above so a
+			// tripped breaker only short-circuits fresh LLM generations here.
+			_, _ = c.generate(ctx, pkg, members, fp)
 		}
 	}
 
@@ -326,7 +411,7 @@ func (c *cartography) QueryGraph(pkg, direction string) (importerList, importLis
 // path). Returns a non-nil cartography with an empty summaries memo and a
 // pre-built importers graph when enabled — even when client/snap/targets are
 // nil/empty (same degenerate-but-non-nil contract as cartograph).
-func (f *Funnel) newCartographer(ctx context.Context, _ *Result, client llm.Client, snap *ingest.Snapshot, targets []string, fps map[string]string, budget *budgetState) *cartography {
+func (f *Funnel) newCartographer(ctx context.Context, result *Result, client llm.Client, snap *ingest.Snapshot, targets []string, fps map[string]string, budget *budgetState) *cartography {
 	if !f.opts.Features.Cartographer {
 		return nil
 	}
@@ -341,6 +426,7 @@ func (f *Funnel) newCartographer(ctx context.Context, _ *Result, client llm.Clie
 			pkgFps:    map[string]string{},
 			fps:       fps,
 			budget:    budget,
+			result:    result,
 		}
 	}
 
@@ -376,6 +462,7 @@ func (f *Funnel) newCartographer(ctx context.Context, _ *Result, client llm.Clie
 		pkgFps:    pkgFps,
 		fps:       fps,
 		budget:    budget,
+		result:    result,
 	}
 }
 
@@ -409,33 +496,18 @@ func (c *cartography) getSummary(ctx context.Context, pkg string) (string, bool)
 			}
 		}
 	}
-
 	members := c.packages[pkg]
+
 	if len(members) == 0 || budgetHard {
 		return "", false
 	}
 	fp := c.pkgFps[pkg]
 
-	// Generate via singleflight.
-	result, _, _ := c.sf.Do(pkg, func() (interface{}, error) {
-		summary, err := c.funnel.summarizePackage(ctx, c.client, c.budget, pkg, members, c.fps)
-		if err != nil || summary == "" {
-			return "", nil
-		}
-		pCtx, pCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		_ = c.funnel.store.UpsertPackageSummaries(pCtx, []store.PackageSummary{
-			{Pkg: pkg, Fingerprint: fp, Summary: summary},
-		})
-		pCancel()
-		return summary, nil
-	})
-	if s, ok := result.(string); ok && s != "" {
-		c.mu.Lock()
-		c.summaries[pkg] = s
-		c.mu.Unlock()
-		return s, true
-	}
-	return "", false
+	// Generate via the shared lazy-mode path. generate() owns the
+	// singleflight + persist + transport breaker; memo hits, store hits,
+	// and the budget-gate have already been handled above so a tripped
+	// breaker only short-circuits fresh LLM generations here.
+	return c.generate(ctx, pkg, members, fp)
 }
 
 // regenResult is one package's outcome from regenSummaries. err == nil means the
