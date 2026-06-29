@@ -237,3 +237,74 @@ func TestReadFileAtRef_RequiresArgs(t *testing.T) {
 		t.Error("ReadFileAtRef with empty path: expected error, got nil")
 	}
 }
+
+// TestAnchorAbsentAtRef builds a two-commit fixture:
+//
+//	commit A: introduces old.go (3 lines)
+//	commit B: adds new.go (3 lines) AND appends 2 lines to old.go (5 lines)
+//
+// then asserts the absent-file / pre-existing-line / appended-line matrix that
+// `bugbot regress` and the daemon regress digest depend on.
+func TestAnchorAbsentAtRef(t *testing.T) {
+	r := newTestRepo(t)
+
+	r.write("old.go", "line one\nline two\nline three\n")
+	a := r.commit("A: introduce old.go (3 lines)")
+
+	r.write("old.go", "line one\nline two\nline three\nline four\nline five\n")
+	r.write("new.go", "alpha\nbeta\ngamma\n")
+	b := r.commit("B: extend old.go + add new.go")
+
+	if a == b {
+		t.Fatalf("fixture invalid: A and B are the same SHA %s", a)
+	}
+	repo := r.open()
+	ctx := context.Background()
+
+	if !repo.AnchorAbsentAtRef(ctx, a, "new.go", 1) {
+		t.Errorf("AnchorAbsentAtRef(A, new.go, 1) = false; want true (file added in B)")
+	}
+	if repo.AnchorAbsentAtRef(ctx, a, "old.go", 1) {
+		t.Errorf("AnchorAbsentAtRef(A, old.go, 1) = true; want false (line existed at A)")
+	}
+	if repo.AnchorAbsentAtRef(ctx, a, "old.go", 3) {
+		t.Errorf("AnchorAbsentAtRef(A, old.go, 3) = true; want false (line existed at A)")
+	}
+	if !repo.AnchorAbsentAtRef(ctx, a, "old.go", 4) {
+		t.Errorf("AnchorAbsentAtRef(A, old.go, 4) = false; want true (line added in B)")
+	}
+	if !repo.AnchorAbsentAtRef(ctx, a, "old.go", 5) {
+		t.Errorf("AnchorAbsentAtRef(A, old.go, 5) = false; want true (line added in B)")
+	}
+	// At B (HEAD), all anchors are present.
+	if repo.AnchorAbsentAtRef(ctx, b, "old.go", 5) {
+		t.Errorf("AnchorAbsentAtRef(B, old.go, 5) = true; want false (present at B)")
+	}
+	if repo.AnchorAbsentAtRef(ctx, b, "new.go", 3) {
+		t.Errorf("AnchorAbsentAtRef(B, new.go, 3) = true; want false (present at B)")
+	}
+}
+
+// TestAnchorAbsentAtRef_DefensiveGuards covers the conservative-empty-input
+// behavior: a nil receiver, an empty file, an empty ref, or line<1 all return
+// true so attribution falls on the investigate-first INTRODUCED side.
+func TestAnchorAbsentAtRef_DefensiveGuards(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.go", "package a\n")
+	r.commit("init")
+	repo := r.open()
+	ctx := context.Background()
+
+	if !(*Repo)(nil).AnchorAbsentAtRef(ctx, "HEAD", "a.go", 1) {
+		t.Error("nil receiver should be treated as absent-at-ref (true)")
+	}
+	if !repo.AnchorAbsentAtRef(ctx, "HEAD", "", 1) {
+		t.Error("empty file should be treated as absent-at-ref (true)")
+	}
+	if !repo.AnchorAbsentAtRef(ctx, "", "a.go", 1) {
+		t.Error("empty ref should be treated as absent-at-ref (true)")
+	}
+	if !repo.AnchorAbsentAtRef(ctx, "HEAD", "a.go", 0) {
+		t.Error("line=0 should be treated as absent-at-ref (true; <1)")
+	}
+}

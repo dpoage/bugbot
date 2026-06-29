@@ -217,3 +217,32 @@ func (s *Store) LatestScanRun(ctx context.Context) (ScanRun, error) {
 	}
 	return s.GetScanRun(ctx, id)
 }
+
+// LastFinishedSweepCommit returns the commit SHA of the most recently finished
+// Sweep scan run, excluding excludeID (the in-flight run, so a sweep cycle does
+// not pick itself as its own baseline). It is the 'last green' baseline for the
+// daemon's regress digest: findings whose anchor is absent at this commit were
+// introduced since the last full snapshot. Returns ErrNotFound when no prior
+// finished sweep exists (e.g. the first sweep ever).
+//
+// CAVEAT: ORDER BY finished_at DESC tiebreaks on id DESC; finished_at is an
+// RFC3339 TEXT written by nowUTC() at sub-second resolution, so the same
+// string-sort caveat as LatestScanRun applies and is likewise rarely exercised.
+func (s *Store) LastFinishedSweepCommit(ctx context.Context, excludeID string) (string, error) {
+	var sha string
+	err := s.queryRow(ctx, "last_finished_sweep_commit", `
+		SELECT commit_sha FROM scan_runs
+		WHERE kind = ? AND finished_at IS NOT NULL AND id != ?
+		ORDER BY finished_at DESC, id DESC
+		LIMIT 1`,
+		[]any{string(ScanSweep), excludeID}, func(row *sql.Row) error {
+			return row.Scan(&sha)
+		})
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return sha, nil
+}

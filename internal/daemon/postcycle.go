@@ -47,6 +47,11 @@ func (d *Daemon) postCycle(ctx context.Context, fres *funnel.Result, res *cycleR
 		res.promoted += promoted
 		progress.Emit(d.prog, progress.Event{Kind: progress.KindPromote, Count: promoted})
 	}
+
+	// Regress digest: log this cycle's findings introduced since the last
+	// finished-sweep baseline ('last green'), so an operator sees what is
+	// genuinely new this period vs pre-existing background. Best-effort.
+	d.emitRegressDigest(ctx, fres)
 }
 
 // runPostCycleDrains reconciles stranded work after the main cycle: it verifies
@@ -285,4 +290,55 @@ func countLines(b []byte) int {
 		n--
 	}
 	return n
+}
+
+// introducedSince returns the subset of findings whose anchor did not exist at
+// the baseline commit — i.e. findings introduced after that commit. A per-finding
+// git error biases toward INTRODUCED (see ingest.Repo.AnchorAbsentAtRef). It
+// stops early on context cancellation, returning what it has gathered.
+func introducedSince(ctx context.Context, repo *ingest.Repo, baseline string, findings []store.Finding) []store.Finding {
+	var introduced []store.Finding
+	for _, fnd := range findings {
+		if ctx.Err() != nil {
+			break
+		}
+		if repo.AnchorAbsentAtRef(ctx, baseline, fnd.File, fnd.Line) {
+			introduced = append(introduced, fnd)
+		}
+	}
+	return introduced
+}
+
+// emitRegressDigest logs a per-cycle "new since last green" digest: this cycle's
+// findings whose anchor did not exist at the most recent finished sweep's commit
+// (the 'last green' baseline) are reported as introduced-this-period, so an
+// operator watching the daemon sees genuine regressions separated from
+// pre-existing background. Best-effort and read-only: an empty finding set, a
+// missing baseline (no prior sweep), or any store error logs and returns without
+// affecting the cycle.
+func (d *Daemon) emitRegressDigest(ctx context.Context, fres *funnel.Result) {
+	if fres == nil || len(fres.Findings) == 0 {
+		return
+	}
+	baseline, err := d.store.LastFinishedSweepCommit(ctx, fres.ScanRunID)
+	if errors.Is(err, store.ErrNotFound) {
+		return // no prior sweep to compare against (first sweep ever)
+	}
+	if err != nil {
+		d.log.Error("daemon: regress digest: baseline lookup failed", "err", err)
+		return
+	}
+	introduced := introducedSince(ctx, d.repo, baseline, fres.Findings)
+	if len(introduced) == 0 {
+		return
+	}
+	d.log.Info("daemon: regress digest: findings introduced since last green sweep",
+		"baseline", util.ShortSHA(baseline),
+		"introduced", len(introduced),
+		"total", len(fres.Findings))
+	for _, fnd := range introduced {
+		d.log.Info("daemon: regress digest: introduced finding",
+			"file", fnd.File, "line", fnd.Line,
+			"severity", fnd.Severity, "title", fnd.Title)
+	}
 }
