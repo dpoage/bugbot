@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sort"
@@ -215,6 +216,42 @@ func (r *Repo) ReadFileAtRef(ctx context.Context, ref, path string) ([]byte, err
 		return nil, fmt.Errorf("ingest: show %s:%s: %w", ref, path, err)
 	}
 	return raw, nil
+}
+
+// AnchorAbsentAtRef reports whether the file:line anchor did not exist at the
+// given git ref. It is the attribution primitive behind `bugbot regress` and
+// the daemon's regress digest: an anchor absent at a base ref was introduced
+// after it. It returns true ("absent at ref") in these cases:
+//
+//  1. The file is absent at ref (ReadFileAtRef errors for a path untracked at
+//     ref).
+//  2. The anchored line is past the file's EOF at ref (line < 1 or
+//     line > number-of-lines at ref).
+//  3. Any other git error, treated conservatively as "absent" so a transient
+//     failure biases toward the investigate-first INTRODUCED bucket rather than
+//     a spurious PRE-EXISTING label.
+//
+// A nil receiver, an empty file, or an empty ref also return true (the same
+// conservative default).
+func (r *Repo) AnchorAbsentAtRef(ctx context.Context, ref, file string, line int) bool {
+	if r == nil || file == "" || ref == "" {
+		return true
+	}
+	content, err := r.ReadFileAtRef(ctx, ref, file)
+	if err != nil {
+		return true
+	}
+	if line < 1 {
+		return true
+	}
+	// 1-indexed line count. Split on '\n' so a file without a trailing newline
+	// still has its last line present ("a\nb" => 2 lines); a trailing newline
+	// adds a spurious empty final element, which we drop ("a\nb\n" => 2 lines).
+	lines := bytes.Split(content, []byte("\n"))
+	if n := len(lines); n > 0 && len(lines[n-1]) == 0 {
+		lines = lines[:n-1]
+	}
+	return line > len(lines)
 }
 
 // ChangedPaths is a convenience that flattens a Change slice to the set of

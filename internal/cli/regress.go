@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -91,8 +90,8 @@ range.
 // count line. The block is empty (no section header) when there are no
 // findings, so a clean regress run stays terse.
 //
-// The label for each finding is computed by anchorAbsentAtRef: a file absent
-// at --from, OR an anchored line beyond the file's EOF at --from, is
+// The label for each finding is computed by repo.AnchorAbsentAtRef: a file
+// absent at --from, OR an anchored line beyond the file's EOF at --from, is
 // INTRODUCED. Otherwise it is PRE-EXISTING.
 //
 // Errors while probing individual anchors are swallowed (a transient repo
@@ -112,7 +111,7 @@ func printRegressAttribution(ctx context.Context, out io.Writer, repo *ingest.Re
 	labeledFindings := make([]labeled, 0, len(findings))
 	introCount := 0
 	for _, fnd := range findings {
-		intro := anchorAbsentAtRef(ctx, repo, fnd.File, fnd.Line, fromRef)
+		intro := repo.AnchorAbsentAtRef(ctx, fromRef, fnd.File, fnd.Line)
 		if intro {
 			introCount++
 		}
@@ -139,59 +138,4 @@ func printRegressAttribution(ctx context.Context, out io.Writer, repo *ingest.Re
 
 	_, _ = fmt.Fprintf(out, "\n%d introduced, %d pre-existing since %s\n",
 		introCount, len(findings)-introCount, fromRef)
-}
-
-// anchorAbsentAtRef reports whether the given file:line anchor did not exist
-// at the given git ref. The regress attribution pass labels such anchors
-// INTRODUCED (the file was added or the line was added by something in the
-// range). The function returns true (i.e. "absent at ref") in three cases:
-//
-//  1. The file is absent at ref (git exits non-zero on "show <ref>:<path>"
-//     for a path that was never tracked at <ref>).
-//  2. The anchored line is past the file's EOF at ref (line < 1 or
-//     line > number-of-lines at ref).
-//  3. Any other transient git error (treat conservatively as "absent" so
-//     attribution does not produce spurious PRE-EXISTING labels when the
-//     repo is briefly unwritable). The summary still shows the finding in
-//     the INTRODUCED bucket alongside genuinely-introduced findings, which
-//     matches what an operator wants: "things to investigate first".
-//
-// The "absent" reading is the load-bearing case for `bugbot regress`:
-// findings the funnel produces for a file that did not yet exist at the
-// range's base commit are, by definition, regressions introduced within the
-// range. A finding anchored to a line that did not yet exist at the base
-// commit but whose file did is the same story at finer granularity — code
-// past EOF at base is code that was added in the range.
-func anchorAbsentAtRef(ctx context.Context, repo *ingest.Repo, file string, line int, ref string) bool {
-	if repo == nil || file == "" || ref == "" {
-		// Defensive: a nil repo or empty anchor is treated as "absent at ref"
-		// so the caller's labelling is conservative (prefer false-positive
-		// INTRODUCED over false-positive PRE-EXISTING).
-		return true
-	}
-	content, err := repo.ReadFileAtRef(ctx, ref, file)
-	if err != nil {
-		// File absent at ref (or any other git error). Either way, label as
-		// INTRODUCED — the regress attribution deliberately swallows errors
-		// so a transient git problem cannot flip a finding into the
-		// PRE-EXISTING bucket by accident.
-		return true
-	}
-	if line < 1 {
-		return true
-	}
-	// Split on newline. The line-count convention used by editors and bug
-	// reporters is 1-indexed: line 1 is the first line of the file. We split
-	// on '\n' so a file without a trailing newline still has its last line
-	// present (e.g. "a\nb" splits to ["a", "b"], len=2, line 2 is valid). A
-	// trailing newline adds a spurious empty element to the split; we drop it
-	// so "a\nb\n" splits to ["a", "b"] (2 lines), not ["a", "b", ""] (3).
-	lines := bytes.Split(content, []byte("\n"))
-	if n := len(lines); n > 0 && len(lines[n-1]) == 0 {
-		lines = lines[:n-1]
-	}
-	if line > len(lines) {
-		return true
-	}
-	return false
 }

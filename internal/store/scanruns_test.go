@@ -205,3 +205,67 @@ func TestActiveScanRuns_NullHeartbeatExcluded(t *testing.T) {
 		t.Errorf("ActiveScanRuns with NULL heartbeat: got %d runs, want 0", len(runs))
 	}
 }
+
+// TestLastFinishedSweepCommit covers the 'last green' baseline query: only
+// FINISHED SWEEP runs are candidates, the most recent wins, excludeID drops the
+// in-flight run, and non-sweep runs are ignored.
+func TestLastFinishedSweepCommit(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	// No runs at all -> ErrNotFound.
+	if _, err := st.LastFinishedSweepCommit(ctx, ""); err != ErrNotFound {
+		t.Fatalf("empty store: err = %v, want ErrNotFound", err)
+	}
+
+	// An unfinished sweep is not a candidate.
+	cur, err := st.BeginScanRun(ctx, ScanSweep, "head-sha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.LastFinishedSweepCommit(ctx, cur); err != ErrNotFound {
+		t.Fatalf("only-unfinished sweep: err = %v, want ErrNotFound", err)
+	}
+
+	// A finished sweep at commit A becomes the baseline.
+	s1, err := st.BeginScanRun(ctx, ScanSweep, "sha-A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishScanRun(ctx, s1, "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := st.LastFinishedSweepCommit(ctx, cur); err != nil || got != "sha-A" {
+		t.Fatalf("after one finished sweep: got %q, err %v; want sha-A", got, err)
+	}
+
+	// A later finished sweep at commit B supersedes A (RFC3339Nano finished_at
+	// is distinct; the id tiebreak also favors the later run).
+	s2, err := st.BeginScanRun(ctx, ScanSweep, "sha-B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishScanRun(ctx, s2, "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := st.LastFinishedSweepCommit(ctx, cur); err != nil || got != "sha-B" {
+		t.Fatalf("after two finished sweeps: got %q, err %v; want sha-B", got, err)
+	}
+
+	// excludeID drops the in-flight run: excluding B's run falls back to A.
+	if got, err := st.LastFinishedSweepCommit(ctx, s2); err != nil || got != "sha-A" {
+		t.Fatalf("excluding B's run: got %q, err %v; want sha-A", got, err)
+	}
+
+	// A finished NON-sweep run (targeted) is never a baseline.
+	tg, err := st.BeginScanRun(ctx, ScanTargeted, "sha-T")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishScanRun(ctx, tg, "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := st.LastFinishedSweepCommit(ctx, cur); err != nil || got != "sha-B" {
+		t.Fatalf("after a targeted run: got %q, err %v; want sha-B (targeted ignored)", got, err)
+	}
+}
