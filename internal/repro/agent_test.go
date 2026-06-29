@@ -342,3 +342,17 @@ func TestSystemPrompt_BazelBuildSystem(t *testing.T) {
 		t.Error("Non-bazel repo prompt must NOT include the BAZEL MONOREPO guidance block")
 	}
 }
+
+// TestSystemPrompt_TerminationGuidance pins the bugbot-opq guardrail in the
+// reproducer prompt: tests must be self-terminating and name the per-runner
+// timeout flag, so the agent stops emitting tests that hang until the sandbox
+// idle watchdog kills them.
+func TestSystemPrompt_TerminationGuidance(t *testing.T) {
+	p := systemPrompt(ingest.LangGo, noSystems, nil)
+	if !strings.Contains(p, "Self-terminating") {
+		t.Error("repro prompt must require self-terminating tests")
+	}
+	if !strings.Contains(p, "-timeout") {
+		t.Error("repro prompt must name the go test -timeout flag")
+	}
+}

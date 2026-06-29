@@ -66,7 +66,7 @@ func TestDivideByZeroReported(t *testing.T) {
 }
 `,
 		},
-		Cmd:    []string{"go", "test", "-run", "TestDivideByZeroReported", "./..."},
+		Cmd:    []string{"go", "test", "-timeout", "60s", "-run", "TestDivideByZeroReported", "./..."},
 		Expect: "TestDivideByZeroReported fails because Divide(1,0) returns ok=true",
 	}
 
