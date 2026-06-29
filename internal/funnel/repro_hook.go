@@ -14,10 +14,13 @@ import (
 //
 // Claim check (no-double-attempt): before invoking the hook, the finding is
 // re-read from the store. If ReproPath is non-empty (already promoted, possibly
-// by the daemon drain) or NeedsHuman is true (patch-prover exhausted), the
-// attempt is skipped. This mirrors the OpenBacklog eligibility check that the
-// daemon backlog drain uses, ensuring an in-run attempt and a concurrent daemon
-// drain never both attempt the same finding.
+// by the daemon drain) or NeedsHuman is true, the attempt is skipped. NeedsHuman
+// has two causes — patch-prover exhaustion (repro/patch.go) and below-quorum
+// verifier survivors (verify_stream.go) — and both are deliberately excluded
+// from a repro attempt until a human confirms (see the dual-meaning note in
+// verify_stream.go, bugbot-sw7). This mirrors the OpenBacklog eligibility check
+// that the daemon backlog drain uses, ensuring an in-run attempt and a
+// concurrent daemon drain never both attempt the same finding.
 //
 // The IDLE slot is the lowest-priority class (slotIdle): a waiting repro
 // goroutine is served AFTER any pending high (verifier) or low (finder)

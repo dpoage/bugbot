@@ -72,9 +72,14 @@ type Finding struct {
 	// minimal fix candidate was witnessed by the sandbox.  Empty when the prover
 	// was not run or found no plausible fix.
 	FixPatch string
-	// NeedsHuman is set when the patch-prover exhausted its attempt budget without
-	// finding a minimal fix.  A fix-refusing bug is often misdiagnosed; human
-	// review is the appropriate escalation.
+	// NeedsHuman flags a finding for human review and is set for TWO distinct
+	// reasons: (1) the patch-prover exhausted its attempt budget without finding
+	// a minimal fix (repro/patch.go) — a fix-refusing bug is often misdiagnosed;
+	// and (2) a verifier survivor fell below the genuine-verdict quorum floor
+	// (funnel/verify_stream.go) — too few seats actually judged it. Both causes
+	// mean a human must confirm before downstream automation (repro/patch-
+	// proving) acts on the finding, which is why both are excluded from the repro
+	// backlog. User-facing copy MUST stay reason-neutral (see bugbot-sw7).
 	NeedsHuman bool
 	// CorroboratingLenses are the OTHER lenses that independently reported this
 	// same defect and were collapsed into this finding by triage's location-based

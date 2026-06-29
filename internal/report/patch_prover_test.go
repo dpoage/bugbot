@@ -120,6 +120,33 @@ func TestMarkdown_NeedsHumanRendered(t *testing.T) {
 	}
 }
 
+// TestMarkdown_NeedsHumanCopyReasonNeutral is the bugbot-sw7 regression:
+// NeedsHuman is set both by the patch-prover (no minimal fix) and by a
+// below-quorum verifier survivor, so the rendered copy must NOT assert the
+// patch-prover specifically for what may be a verifier-flagged finding.
+func TestMarkdown_NeedsHumanCopyReasonNeutral(t *testing.T) {
+	f := store.Finding{
+		ID:          "fp-below-quorum",
+		Fingerprint: "fp-below-quorum",
+		Title:       "Below-quorum survivor",
+		Severity:    "high",
+		Tier:        2,
+		Status:      store.StatusOpen,
+		File:        "queue.go",
+		Line:        7,
+		NeedsHuman:  true,
+	}
+	got := Markdown(New([]store.Finding{f}, fixtureMeta()))
+	if !strings.Contains(got, "Needs human review") {
+		t.Errorf("markdown should still render the needs-human label:\n%s", got)
+	}
+	for _, bad := range []string{"fix-prover", "patch-prover", "minimal fix", "misdiagnosed"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("needs-human copy must be reason-neutral; found patch-prover-specific %q:\n%s", bad, got)
+		}
+	}
+}
+
 // TestMarkdown_NoFixPatch confirms the fix-patch block is absent when
 // FixPatch is empty.
 func TestMarkdown_NoFixPatch(t *testing.T) {

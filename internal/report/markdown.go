@@ -130,7 +130,12 @@ func writeFinding(b *strings.Builder, n int, f store.Finding) {
 	}
 
 	if f.NeedsHuman {
-		b.WriteString("**Needs human review:** fix-prover could not find a minimal fix.\n\n")
+		// Reason-neutral copy: NeedsHuman is set for two unrelated reasons —
+		// the patch-prover exhausting its fix-attempt budget (repro/patch.go)
+		// and a verifier survivor falling below the genuine-verdict quorum
+		// floor (funnel/verify_stream.go). The old text asserted the
+		// patch-prover specifically, which is false for below-quorum findings.
+		b.WriteString("**Needs human review:** automated analysis could not conclusively resolve this finding.\n\n")
 	}
 }
 

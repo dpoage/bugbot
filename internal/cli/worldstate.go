@@ -98,7 +98,10 @@ func renderWorldState(out io.Writer, ws worldState, now time.Time) {
 	if ws.HasTallies {
 		_, _ = fmt.Fprintf(out, "  findings:     %s\n", findingsLine(ws.Tallies))
 		if ws.Tallies.NeedsHuman > 0 {
-			_, _ = fmt.Fprintf(out, "  needs human:  %d finding(s) the patch-prover could not fix — possibly misdiagnosed (bugbot report list)\n",
+			// Reason-neutral copy: NeedsHuman covers both patch-prover
+			// exhaustion and below-quorum verifier survivors (see
+			// funnel/verify_stream.go), so do not blame the patch-prover here.
+			_, _ = fmt.Fprintf(out, "  needs human:  %d finding(s) flagged for human review (bugbot report list)\n",
 				ws.Tallies.NeedsHuman)
 		}
 	}

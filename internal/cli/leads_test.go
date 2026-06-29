@@ -152,6 +152,13 @@ func TestRenderWorldState(t *testing.T) {
 			t.Errorf("world state missing %q\n---\n%s", want, out)
 		}
 	}
+	// Reason-neutral: the needs-human copy must not blame the patch-prover
+	// (the flag is also set for below-quorum verifier survivors). bugbot-sw7.
+	for _, bad := range []string{"patch-prover", "misdiagnosed"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("world state needs-human copy must be reason-neutral; found %q\n---\n%s", bad, out)
+		}
+	}
 }
 
 // TestRenderWorldState_DayBudgetUsesChargeable pins the fix for the day-cap

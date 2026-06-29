@@ -11,7 +11,9 @@ import (
 // OpenBacklog returns open findings that have not yet had a reproduction
 // attempt: Tier 2 or 3, ReproPath empty, NeedsHuman false. It queries all open
 // findings from the store (the store filter does not support ReproPath or
-// NeedsHuman predicates) and filters in Go.
+// NeedsHuman predicates) and filters in Go. NeedsHuman excludes both
+// patch-prover-exhausted and below-quorum verifier findings deliberately (see
+// the dual-meaning note in funnel/verify_stream.go, bugbot-sw7).
 //
 // Rotation design: findings are returned oldest-updated-first (updated_at ASC).
 // When a repro attempt fails, the caller "touches" the finding via UpsertFinding
