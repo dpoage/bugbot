@@ -68,6 +68,7 @@ frontend).
 | **Python** | `requirements.txt` | n/a (no vendored detection) | → **off** (pip HTTP cache does not materialize packages) | `pip download -r requirements.txt -d /depcache` into `/depcache` (writable) | `PIP_NO_INDEX=1` | `pip install --user --no-index --find-links=/depcache -r requirements.txt` |
 | **Rust** | `Cargo.toml` | `vendor/` + `.cargo/config{.toml}` with `replace-with` stanza → `CARGO_NET_OFFLINE=true` | mount `$CARGO_HOME/registry` at `/cargo/registry` (read-only, `Shared=true`); `CARGO_HOME=/cargo` | `cargo fetch [--locked]` with `CARGO_HOME=/cargo` (writable); populates `/cargo/registry` | `CARGO_NET_OFFLINE=true` | none |
 | **JS/npm** | `package.json` | `node_modules/` exists → no mounts needed | → **off** (npm HTTP cache does not materialize `node_modules`) | `npm ci --ignore-scripts --cache /npmcache` into `/npmcache` (writable) | `npm_config_offline=true` | `cp -a /npmcache /tmp/npmcache && npm ci --cache /tmp/npmcache` |
+| **C#/NuGet** | root `*.csproj` / `*.sln` / `*.fsproj` | n/a (no vendored detection in v1) | mount `$NUGET_PACKAGES` (default `~/.nuget/packages`) at `/nugetcache` (read-only, `Shared=true`); `NUGET_PACKAGES=/nugetcache` | `dotnet restore [--locked-mode]` into `/nugetcache` (writable) | none — `--network=none` is the enforcement | none |
 
 > **Bazel monorepos** use a custom image instead of dependency mounts — see
 > [Offline Bazel sandbox image](#offline-bazel-sandbox-image) below.
@@ -83,6 +84,7 @@ have mount collisions:
 | Python | `/depcache` | pip wheelhouse |
 | Rust | `/cargo/registry` | Cargo registry index + crate sources (`CARGO_HOME=/cargo`) |
 | JS | `/npmcache` | npm HTTP cache (`--cache /npmcache`) |
+| C#/NuGet | `/nugetcache` | NuGet global packages folder (`NUGET_PACKAGES`) |
 
 ### Security notes
 

@@ -1711,3 +1711,347 @@ func TestJSFetchRequiresSandbox(t *testing.T) {
 		t.Errorf("error = %v, want mention of fetch sandbox", err)
 	}
 }
+
+// ---- C#/NuGet ecosystem unit tests -----------------------------------------
+
+// TestNuGetDetectOnOff: detect fires on any root-level C#/F# project file
+// (*.csproj, *.sln, or *.fsproj), not without.
+func TestNuGetDetectOnOff(t *testing.T) {
+	dirNo := t.TempDir()
+	if hasCSharpProject(dirNo) {
+		t.Error("hasCSharpProject: want false for bare dir")
+	}
+	dirYes := t.TempDir()
+	writeFile(t, filepath.Join(dirYes, "hello.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
+	if !hasCSharpProject(dirYes) {
+		t.Error("hasCSharpProject: want true for dir with .csproj")
+	}
+	dirSln := t.TempDir()
+	writeFile(t, filepath.Join(dirSln, "hello.sln"), "\n")
+	if !hasCSharpProject(dirSln) {
+		t.Error("hasCSharpProject: want true for dir with .sln")
+	}
+	dirFs := t.TempDir()
+	writeFile(t, filepath.Join(dirFs, "hello.fsproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
+	if !hasCSharpProject(dirFs) {
+		t.Error("hasCSharpProject: want true for dir with .fsproj")
+	}
+}
+
+// TestNuGetResolveOff: OFF strategy returns empty Resolution.
+func TestNuGetResolveOff(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hello.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
+
+	res, err := resolveNuGet(dir, DepOptions{Strategy: DepStrategyOff})
+	if err != nil {
+		t.Fatalf("resolveNuGet OFF: %v", err)
+	}
+	if len(res.ROMounts) != 0 || len(res.Env) != 0 || len(res.SetupCmds) != 0 || res.Prefetch != nil {
+		t.Errorf("NuGet OFF: want empty resolution, got %+v", res)
+	}
+	if res.Strategy != DepStrategyOff {
+		t.Errorf("NuGet OFF: Strategy=%q want off", res.Strategy)
+	}
+}
+
+// TestNuGetResolveHostMount: HOST strategy mounts the host NuGet packages
+// directory at /nugetcache, Shared=true (host-owned), NUGET_PACKAGES=/nugetcache.
+func TestNuGetResolveHostMount(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hello.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
+
+	// Provide a fake packages directory (must exist for checkNuGetPackagesExists).
+	fakePackages := t.TempDir()
+
+	res, err := resolveNuGet(dir, DepOptions{
+		Strategy:          DepStrategyHost,
+		hostNuGetPackages: fakePackages,
+	})
+	if err != nil {
+		t.Fatalf("resolveNuGet HOST: %v", err)
+	}
+
+	// Must have exactly one RO mount.
+	if len(res.ROMounts) != 1 {
+		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+	}
+	m := res.ROMounts[0]
+
+	if m.ContainerPath != nugetCacheMount {
+		t.Errorf("ContainerPath = %q, want %q", m.ContainerPath, nugetCacheMount)
+	}
+	if m.HostPath != fakePackages {
+		t.Errorf("HostPath = %q, want %q", m.HostPath, fakePackages)
+	}
+
+	// Shared=true: host-owned dir must NOT receive :Z relabel.
+	if !m.Shared {
+		t.Errorf("host strategy ROMount.Shared = false; want true to suppress :Z relabel on shared host NuGet packages dir")
+	}
+
+	// Required env var.
+	if !envHas(res.Env, "NUGET_PACKAGES="+nugetCacheMount) {
+		t.Errorf("host env missing %q; got %v", "NUGET_PACKAGES="+nugetCacheMount, res.Env)
+	}
+
+	if res.Prefetch != nil {
+		t.Error("host strategy must not set a prefetch hook")
+	}
+	if res.Strategy != DepStrategyHost {
+		t.Errorf("Strategy=%q want host", res.Strategy)
+	}
+}
+
+// TestNuGetResolveHostMissingPackagesErrors: HOST with a nonexistent packages
+// path must return an error before podman gets to try the bind mount.
+func TestNuGetResolveHostMissingPackagesErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hello.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
+	missing := filepath.Join(t.TempDir(), "does", "not", "exist")
+
+	_, err := resolveNuGet(dir, DepOptions{Strategy: DepStrategyHost, hostNuGetPackages: missing})
+	if err == nil {
+		t.Fatal("expected error for missing host NuGet packages dir, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error %q should mention 'does not exist'", err)
+	}
+}
+
+// TestNuGetResolveFetchShape: FETCH strategy returns correct mount, env,
+// no SetupCmds, non-nil Prefetch hook, Shared=false.
+func TestNuGetResolveFetchShape(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hello.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolveNuGet(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolveNuGet FETCH: %v", err)
+	}
+
+	// Must have exactly one RO mount at /nugetcache, bugbot-owned.
+	if len(res.ROMounts) != 1 {
+		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+	}
+	m := res.ROMounts[0]
+	if m.ContainerPath != nugetCacheMount {
+		t.Errorf("ContainerPath = %q, want %q", m.ContainerPath, nugetCacheMount)
+	}
+	if !strings.HasPrefix(m.HostPath, cacheBase) {
+		t.Errorf("nuget cache %q should live under user cache base %q", m.HostPath, cacheBase)
+	}
+	// Fetch cache is bugbot-owned: Shared=false (:Z isolation correct).
+	if m.Shared {
+		t.Error("NuGet FETCH ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
+	}
+
+	if !envHas(res.Env, "NUGET_PACKAGES="+nugetCacheMount) {
+		t.Errorf("fetch env missing %q; got %v", "NUGET_PACKAGES="+nugetCacheMount, res.Env)
+	}
+	if len(res.SetupCmds) != 0 {
+		t.Errorf("NuGet FETCH must have no SetupCmds, got %v", res.SetupCmds)
+	}
+	if res.Prefetch == nil {
+		t.Fatal("NuGet FETCH must set a prefetch hook")
+	}
+	if res.Strategy != DepStrategyFetch {
+		t.Errorf("Strategy = %q, want fetch", res.Strategy)
+	}
+}
+
+// TestNuGetResolveFetchPrefetchSpec: Running the prefetch hook invokes the
+// sandbox with a network-enabled, writable-cache `dotnet restore` spec.
+func TestNuGetResolveFetchPrefetchSpec(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hello.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
+	// No packages.lock.json → restore without --locked-mode.
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolveNuGet(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolveNuGet: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("prefetch: %v", err)
+	}
+	calls := mock.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("prefetch should run exactly one container, got %d", len(calls))
+	}
+	spec := calls[0].Spec
+	if spec.Network == "" || spec.Network == "none" {
+		t.Errorf("prefetch network = %q, want a real network (not none/empty)", spec.Network)
+	}
+	// No packages.lock.json → no --locked-mode flag.
+	wantCmd := []string{"dotnet", "restore"}
+	if !slices.Equal(spec.Cmd, wantCmd) {
+		t.Errorf("prefetch cmd = %v, want %v", spec.Cmd, wantCmd)
+	}
+	// Cache mounted WRITABLE at /nugetcache.
+	if len(spec.RWMounts) != 1 || spec.RWMounts[0].ContainerPath != nugetCacheMount {
+		t.Errorf("prefetch must bind the cache WRITABLE at %s; got %+v", nugetCacheMount, spec.RWMounts)
+	}
+	if len(spec.ROMounts) != 0 {
+		t.Errorf("prefetch should not use read-only mounts; got %+v", spec.ROMounts)
+	}
+	// Env must point NUGET_PACKAGES at the cache mount.
+	if !envHas(spec.Env, "NUGET_PACKAGES="+nugetCacheMount) {
+		t.Errorf("prefetch env missing NUGET_PACKAGES=%s; got %v", nugetCacheMount, spec.Env)
+	}
+}
+
+// TestNuGetResolveFetchWithLockfile: when packages.lock.json exists, prefetch
+// adds --locked-mode (mirrors Cargo's --locked behavior).
+func TestNuGetResolveFetchWithLockfile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hello.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
+	writeFile(t, filepath.Join(dir, "packages.lock.json"), "{}\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolveNuGet(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolveNuGet: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("prefetch: %v", err)
+	}
+	calls := mock.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("want 1 container call, got %d", len(calls))
+	}
+	wantCmd := []string{"dotnet", "restore", "--locked-mode"}
+	if !slices.Equal(calls[0].Spec.Cmd, wantCmd) {
+		t.Errorf("prefetch cmd = %v, want %v", calls[0].Spec.Cmd, wantCmd)
+	}
+}
+
+// TestNuGetFetchSentinelKeyedOnLock: sentinel is keyed on packages.lock.json
+// hash; changing packages.lock.json invalidates the cache (different sentinel
+// → re-fetch). The no-lockfile *.csproj/*.fsproj fallback key is covered
+// separately by TestNuGetFetchSentinelKeyedOnProjectFiles.
+func TestNuGetFetchSentinelKeyedOnLock(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hello.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
+	writeFile(t, filepath.Join(dir, "packages.lock.json"), "v1\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	// First fetch — populates sentinel keyed on "v1" lockfile.
+	res, err := resolveNuGet(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("first resolveNuGet: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("first prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Fatalf("first prefetch: want 1 container, got %d", mock.CallCount())
+	}
+
+	// Warm cache: same packages.lock.json → second Resolution skips the download.
+	res2, err := resolveNuGet(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("second resolveNuGet: %v", err)
+	}
+	if err := res2.Prefetch(context.Background()); err != nil {
+		t.Fatalf("second prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Errorf("warm sentinel should skip download; container ran %d times, want 1", mock.CallCount())
+	}
+
+	// Changed packages.lock.json → sentinel miss → re-fetch.
+	writeFile(t, filepath.Join(dir, "packages.lock.json"), "v2-changed\n")
+	res3, err := resolveNuGet(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("third resolveNuGet: %v", err)
+	}
+	if err := res3.Prefetch(context.Background()); err != nil {
+		t.Fatalf("third prefetch: %v", err)
+	}
+	if mock.CallCount() != 2 {
+		t.Errorf("changed packages.lock.json should trigger re-fetch; container ran %d times, want 2", mock.CallCount())
+	}
+}
+
+// TestNuGetFetchSentinelKeyedOnProjectFiles pins the FALLBACK cache key used
+// when there is NO packages.lock.json: the sentinel is keyed on the sha256 of
+// the root *.csproj/*.fsproj contents (sort+concat+sha256), so an unchanged
+// project set warm-skips the download and an edited project file re-fetches.
+// Uses a root *.fsproj (no *.csproj, no lockfile) to also pin that *.fsproj —
+// which the detector accepts — contributes to the key; before that fix an
+// .fsproj-only repo produced no key and re-fetched every cycle.
+func TestNuGetFetchSentinelKeyedOnProjectFiles(t *testing.T) {
+	dir := t.TempDir()
+	proj := filepath.Join(dir, "app.fsproj")
+	writeFile(t, proj, "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><PackageReference Include=\"Foo\" Version=\"1.0.0\"/></ItemGroup></Project>\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	// First fetch — populates the sentinel keyed on the .fsproj hash.
+	res, err := resolveNuGet(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("first resolveNuGet: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("first prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Fatalf("first prefetch: want 1 container, got %d", mock.CallCount())
+	}
+
+	// Warm cache: unchanged .fsproj → second Resolution skips the download.
+	res2, err := resolveNuGet(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("second resolveNuGet: %v", err)
+	}
+	if err := res2.Prefetch(context.Background()); err != nil {
+		t.Fatalf("second prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Errorf("warm sentinel (fsproj fallback) should skip download; container ran %d times, want 1", mock.CallCount())
+	}
+
+	// Edited .fsproj → fallback hash changes → sentinel miss → re-fetch.
+	writeFile(t, proj, "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><PackageReference Include=\"Foo\" Version=\"2.0.0\"/></ItemGroup></Project>\n")
+	res3, err := resolveNuGet(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("third resolveNuGet: %v", err)
+	}
+	if err := res3.Prefetch(context.Background()); err != nil {
+		t.Fatalf("third prefetch: %v", err)
+	}
+	if mock.CallCount() != 2 {
+		t.Errorf("edited .fsproj should trigger re-fetch; container ran %d times, want 2", mock.CallCount())
+	}
+}
+
+// TestNuGetFetchRequiresSandbox: FETCH with nil FetchSandbox must error.
+func TestNuGetFetchRequiresSandbox(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hello.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
+	_, err := resolveNuGet(dir, DepOptions{Strategy: DepStrategyFetch}) // nil sandbox
+	if err == nil {
+		t.Fatal("NuGet FETCH with nil sandbox should error")
+	}
+	if !strings.Contains(err.Error(), "fetch sandbox") {
+		t.Errorf("error = %v, want mention of fetch sandbox", err)
+	}
+}
