@@ -209,26 +209,35 @@ const (
 
 // RoleClients holds the per-role LLM clients the funnel drives. Tests inject
 // fakes; the CLI builds these via llm.ResolveRole. Finder and Verifier are
-// required (New rejects nil). Cartographer is optional: when nil, the
-// package-summary pass reuses Finder. Reproducer is not used by this stage
-// (Tier 1 reproduction is a later stage) and is intentionally absent.
+// required (New rejects nil). Cartographer and Arbiter are optional: when nil,
+// the package-summary pass reuses Finder and the split-verdict arbiter reuses
+// Verifier respectively. Reproducer is not used by this stage (Tier 1
+// reproduction is a later stage) and is intentionally absent.
 type RoleClients struct {
 	Finder   llm.Client
 	Verifier llm.Client
 	// Cartographer is the client for the package-summary pass (optional; nil
 	// reuses Finder). Configured via the [roles.cartographer] mapping.
 	Cartographer llm.Client
+	// Arbiter is the client for the split-verdict arbiter (optional; nil
+	// reuses Verifier). Configured via the [roles.arbiter] mapping. The
+	// arbiter only runs on the rare SPLIT refuter panel (~5%), so pointing
+	// it at a stronger model sharpens the toughest calls without paying the
+	// cost on every candidate.
+	Arbiter llm.Client
 }
 
-// roleFinder / roleVerifier / roleCartographer are the spend-ledger role tags
-// wired into the per-role recorder clients (see run.go). The recorder routes
-// finder AND cartographer spend to the finder sub-pool and everything else to
-// the verify sub-pool under a downstream-budget reservation, so these MUST
-// match the strings passed to llm.WithRecorder.
+// roleFinder / roleVerifier / roleCartographer / roleArbiter are the
+// spend-ledger role tags wired into the per-role recorder clients (see run.go).
+// The recorder routes finder AND cartographer spend to the finder sub-pool and
+// everything else (including arbiter) to the verify sub-pool under a downstream
+// budget reservation, so these MUST match the strings passed to
+// llm.WithRecorder.
 const (
 	roleFinder       = "finder"
 	roleVerifier     = "verifier"
 	roleCartographer = "cartographer"
+	roleArbiter      = "arbiter"
 )
 
 // SandboxOpts bundles the sandbox-execution knobs that gate and bound the

@@ -805,6 +805,41 @@ func TestValidate_CartographerRoleOptional(t *testing.T) {
 	}
 }
 
+// TestValidate_ArbiterRoleOptional pins the optional arbiter role: unset is
+// valid (the split-verdict arbiter falls back to the verifier); a partially-
+// specified or unknown-provider mapping is rejected; a complete one is accepted.
+// Mirrors TestValidate_CartographerRoleOptional — the two optional roles share
+// the same validation shape.
+func TestValidate_ArbiterRoleOptional(t *testing.T) {
+	base := func(t *testing.T) Config {
+		t.Helper()
+		cfg, err := Load(writeTemp(t, validYAML))
+		if err != nil {
+			t.Fatalf("load baseline: %v", err)
+		}
+		return cfg
+	}
+	cfg := base(t)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("baseline (no arbiter) should be valid: %v", err)
+	}
+	cfg = base(t)
+	cfg.Roles.Arbiter = cfg.Roles.Verifier
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("complete arbiter role should be valid: %v", err)
+	}
+	cfg = base(t)
+	cfg.Roles.Arbiter = RoleModel{Provider: cfg.Roles.Verifier.Provider}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "arbiter") {
+		t.Errorf("partial arbiter role should be rejected, got %v", err)
+	}
+	cfg = base(t)
+	cfg.Roles.Arbiter = RoleModel{Provider: "does-not-exist", Model: "m"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "unknown provider") {
+		t.Errorf("arbiter with unknown provider should be rejected, got %v", err)
+	}
+}
+
 func TestValidate_SandboxIdleTimeout(t *testing.T) {
 	load := func(t *testing.T) Config {
 		t.Helper()

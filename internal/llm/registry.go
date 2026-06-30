@@ -135,7 +135,7 @@ func NewClient(ctx context.Context, provider config.Provider, providerName, mode
 func ResolveRole(ctx context.Context, cfg *config.Config, role string, opts Options) (Client, error) {
 	rm, ok := roleModel(cfg, role)
 	if !ok {
-		return nil, fmt.Errorf("llm: unknown role %q (want finder, verifier, reproducer, or cartographer)", role)
+		return nil, fmt.Errorf("llm: unknown role %q (want finder, verifier, reproducer, cartographer, or arbiter)", role)
 	}
 
 	provider, ok := cfg.Providers[rm.Provider]
@@ -180,6 +180,15 @@ func roleModel(cfg *config.Config, role string) (config.RoleModel, bool) {
 			return cfg.Roles.Cartographer, true
 		}
 		return cfg.Roles.Finder, true
+	case "arbiter":
+		// Optional role: fall back to the verifier's mapping when no
+		// [roles.arbiter] block is configured, so the split-verdict
+		// arbiter resolves a client without forcing every config to
+		// declare one (preserves the pre-role single-model behavior).
+		if cfg.Roles.Arbiter.Provider != "" {
+			return cfg.Roles.Arbiter, true
+		}
+		return cfg.Roles.Verifier, true
 	default:
 		return config.RoleModel{}, false
 	}

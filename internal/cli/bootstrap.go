@@ -85,26 +85,30 @@ func closeStore(st *store.Store) {
 
 // buildRoleClients constructs the finder, verifier, and (when cartographer
 // is enabled in cfg.Scan.Cartographer) cartographer LLM clients via
-// llm.ResolveRole. Each role's error is wrapped with the role name so a
-// failure identifies the missing piece ("build finder client: ...") —
-// this matches the wrapping every caller had pre-consolidation and is the
-// single source of that wording.
-func buildRoleClients(ctx context.Context, cfg *config.Config) (finder, verifier, cartographer llm.Client, err error) {
+// llm.ResolveRole. The arbiter client is always built: when [roles.arbiter] is
+// unset, roleModel returns the verifier mapping, so the unconfigured-arbiter =
+// verifier fallback costs nothing. Each role's error is wrapped with the role
+// name so a failure identifies the missing piece ("build finder client: ...").
+func buildRoleClients(ctx context.Context, cfg *config.Config) (finder, verifier, cartographer, arbiter llm.Client, err error) {
 	finder, err = llm.ResolveRole(ctx, cfg, "finder", llm.Options{})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("build finder client: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("build finder client: %w", err)
 	}
 	verifier, err = llm.ResolveRole(ctx, cfg, "verifier", llm.Options{})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("build verifier client: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("build verifier client: %w", err)
+	}
+	arbiter, err = llm.ResolveRole(ctx, cfg, "arbiter", llm.Options{})
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("build arbiter client: %w", err)
 	}
 	if cfg.Scan.Cartographer {
 		cartographer, err = llm.ResolveRole(ctx, cfg, "cartographer", llm.Options{})
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("build cartographer client: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("build cartographer client: %w", err)
 		}
 	}
-	return finder, verifier, cartographer, nil
+	return finder, verifier, cartographer, arbiter, nil
 }
 
 // FunnelOptionOverrides carries the per-command fields that vary across

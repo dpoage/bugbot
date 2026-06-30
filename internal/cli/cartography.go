@@ -54,7 +54,7 @@ func newCartographyCmd() *cobra.Command {
 				}
 				// funnel.New requires non-nil finder/verifier; a cartography-only
 				// refresh never invokes them, so the single client fills all slots.
-				f, err := funnel.New(funnel.RoleClients{Finder: client, Verifier: client, Cartographer: client}, st, repo, funnel.Options{
+				f, err := funnel.New(funnel.RoleClients{Finder: client, Verifier: client, Cartographer: client, Arbiter: client}, st, repo, funnel.Options{
 					Features:  funnel.FeatureFlags{Cartographer: true},
 					Discovery: funnel.DiscoveryConfig{Filter: ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude}},
 				})
