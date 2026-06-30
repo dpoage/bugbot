@@ -57,7 +57,7 @@ func newDaemonCmd() *cobra.Command {
 				return fmt.Errorf("open target: %w", err)
 			}
 
-			finder, verifier, cartographer, err := buildRoleClients(ctx, &cfg)
+			finder, verifier, cartographer, arbiter, err := buildRoleClients(ctx, &cfg)
 			if err != nil {
 				return err
 			}
@@ -95,7 +95,7 @@ func newDaemonCmd() *cobra.Command {
 			deps := daemon.Deps{
 				Repo:       repo,
 				Store:      st,
-				Clients:    funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer},
+				Clients:    funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer, Arbiter: arbiter},
 				FunnelOpts: funnelOpts,
 				Sinks:      sinks,
 				Logger:     logger,

@@ -78,7 +78,7 @@ orphans are left untouched.`,
 				return err
 			}
 
-			finder, verifier, cartographer, err := buildRoleClients(ctx, &cfg)
+			finder, verifier, cartographer, arbiter, err := buildRoleClients(ctx, &cfg)
 			if err != nil {
 				return err
 			}
@@ -103,6 +103,7 @@ orphans are left untouched.`,
 				Finder:       finder,
 				Verifier:     verifier,
 				Cartographer: cartographer,
+				Arbiter:      arbiter,
 			}, st, repo, opts)
 			if err != nil {
 				return err

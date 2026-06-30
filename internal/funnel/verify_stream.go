@@ -42,6 +42,7 @@ import (
 func (f *Funnel) runVerifyAndPersist(
 	ctx context.Context,
 	verifier llm.Client,
+	arbiter llm.Client,
 	persona string,
 	c Candidate,
 	candIdx int,
@@ -161,7 +162,7 @@ func (f *Funnel) runVerifyAndPersist(
 			return
 		}
 		arbiterTools := append(arbiterReadTools, extra...)
-		av, aTokens, aStopped, aErr := f.runArbiter(ctx, verifier, arbiterTools, persona, c, verdicts, seatNames, budget, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title))
+		av, aTokens, aStopped, aErr := f.runArbiter(ctx, arbiter, arbiterTools, persona, c, verdicts, seatNames, budget, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title))
 		tokens += aTokens
 		localArbiterTokens = aTokens
 		if aStopped {

@@ -63,7 +63,7 @@ exposed as a one-shot command for manual operation or scripted workflows.`,
 				return fmt.Errorf("open target: %w", err)
 			}
 
-			finder, verifier, cartographer, err := buildRoleClients(ctx, &cfg)
+			finder, verifier, cartographer, arbiter, err := buildRoleClients(ctx, &cfg)
 			if err != nil {
 				return err
 			}
@@ -84,6 +84,7 @@ exposed as a one-shot command for manual operation or scripted workflows.`,
 				Finder:       finder,
 				Verifier:     verifier,
 				Cartographer: cartographer,
+				Arbiter:      arbiter,
 			}, st, repo, opts)
 			if err != nil {
 				return err

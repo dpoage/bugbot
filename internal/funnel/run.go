@@ -379,6 +379,18 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		cartographerBase = f.clients.Finder
 	}
 	cartographerClient := llm.WithRecorder(cartographerBase, rec, roleCartographer, "", "")
+	// Arbiter client: configurable via the optional [roles.arbiter] mapping
+	// (falls back to the verifier's client when unset — preserve today's
+	// behavior where the split-verdict arbiter reuses the verifier provider).
+	// Tagged roleArbiter so its spend is its own ledger line; the recorder's
+	// default branch in Record routes anything-not-finder-or-cartographer (i.e.
+	// arbiter) to the VERIFY sub-pool — which is correct because the arbiter is
+	// a verify-stage agent that draws from the verify pool on split verdicts.
+	arbiterBase := f.clients.Arbiter
+	if arbiterBase == nil {
+		arbiterBase = f.clients.Verifier
+	}
+	arbiterClient := llm.WithRecorder(arbiterBase, rec, roleArbiter, "", "")
 
 	// Capability-driven scaling: a small-context model (e.g. 8k local LLM
 	// behind an openai-compatible endpoint) silently overflows with one-size
@@ -726,7 +738,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		idx := candIdx
 		candIdx++
 		verifyFanout.spawn(func(runCtx context.Context) {
-			f.runVerifyAndPersist(runCtx, verifierClient, persona, c, idx,
+			f.runVerifyAndPersist(runCtx, verifierClient, arbiterClient, persona, c, idx,
 				snap.Commit, fps, budget, result, clusterReg,
 				&findingsMu, &allFindings, &verifyKilled,
 				&sbExecs, &sbMillis, setVerifyErr,

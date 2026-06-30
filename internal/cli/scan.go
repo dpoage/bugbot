@@ -131,7 +131,7 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 		return err
 	}
 
-	finder, verifier, cartographer, err := buildRoleClients(ctx, &cfg)
+	finder, verifier, cartographer, arbiter, err := buildRoleClients(ctx, &cfg)
 	if err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 	if sandboxDegraded {
 		printSandboxDegradedWarning(cmd.OutOrStdout())
 	}
-	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer}, st, repo, opts)
+	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer, Arbiter: arbiter}, st, repo, opts)
 	if err != nil {
 		return err
 	}
@@ -242,7 +242,7 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 			// successful rebuild so a failure here cannot leave f nil and
 			// cause the deferred f.Close() to panic ((*Funnel).Close has a
 			// nil-receiver guard, but we still prefer not to lose f).
-			f2, buildErr := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer}, st, repo, opts)
+			f2, buildErr := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer, Arbiter: arbiter}, st, repo, opts)
 			if buildErr != nil {
 				return buildErr
 			}

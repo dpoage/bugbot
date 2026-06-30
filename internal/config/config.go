@@ -78,8 +78,8 @@ type RoleModel struct {
 }
 
 // Roles maps the pipeline roles to their provider/model selection. Finder,
-// Verifier, and Reproducer are required; Cartographer is optional and falls
-// back to the finder's mapping when unset.
+// Verifier, and Reproducer are required; Cartographer and Arbiter are optional
+// and fall back to the finder's / verifier's mapping respectively when unset.
 type Roles struct {
 	Finder     RoleModel `yaml:"finder"`
 	Verifier   RoleModel `yaml:"verifier"`
@@ -89,6 +89,12 @@ type Roles struct {
 	// at a cheaper/faster model to summarize packages off the finder's model
 	// without changing what finds bugs.
 	Cartographer RoleModel `yaml:"cartographer"`
+	// Arbiter optionally selects the model that resolves the SPLIT panel
+	// verdict (the single deciding agent invoked when refuters disagree).
+	// Unset = reuse the verifier's provider/model. Point it at a STRONGER
+	// model so only the ~5% of candidates that split pay the expensive-model
+	// bill, while routine verification keeps using Verifier's mapping.
+	Arbiter RoleModel `yaml:"arbiter"`
 }
 
 // Budgets caps token spend per investigation cycle and per day. Each cap is
@@ -759,6 +765,20 @@ func (c *Config) Validate() error {
 		}
 		if _, ok := c.Providers[c.Roles.Cartographer.Provider]; !ok {
 			return fmt.Errorf("config: role \"cartographer\" references unknown provider %q", c.Roles.Cartographer.Provider)
+		}
+	}
+
+	// The arbiter role is OPTIONAL for the same reason as cartographer: when
+	// [roles.arbiter] is omitted the split-verdict arbiter reuses the verifier's
+	// provider/model (llm.roleModel falls back). Validate it only when the user
+	// explicitly set one -- but then require it to be complete and resolvable,
+	// mirroring cartographer's check exactly.
+	if c.Roles.Arbiter.Provider != "" || c.Roles.Arbiter.Model != "" {
+		if c.Roles.Arbiter.Provider == "" || c.Roles.Arbiter.Model == "" {
+			return fmt.Errorf("config: role \"arbiter\" must set both `provider` and `model` when configured")
+		}
+		if _, ok := c.Providers[c.Roles.Arbiter.Provider]; !ok {
+			return fmt.Errorf("config: role \"arbiter\" references unknown provider %q", c.Roles.Arbiter.Provider)
 		}
 	}
 

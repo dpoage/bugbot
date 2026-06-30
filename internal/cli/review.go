@@ -247,7 +247,7 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 	}
 	defer closeStore(st)
 
-	finder, verifier, cartographer, err := buildRoleClients(ctx, &p.cfg)
+	finder, verifier, cartographer, arbiter, err := buildRoleClients(ctx, &p.cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +274,7 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 	if sbDegraded {
 		printSandboxDegradedWarning(p.out)
 	}
-	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer}, st, repo, opts)
+	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer, Arbiter: arbiter}, st, repo, opts)
 	if err != nil {
 		return nil, err
 	}

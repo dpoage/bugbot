@@ -60,6 +60,15 @@ roles:
   reproducer:
     provider: anthropic
     model: claude-sonnet-4-5
+  # Optional: point the split-verdict ARBITER at a stronger model than the
+  # verifier. The arbiter only runs when the refuter panel disagrees (~5% of
+  # candidates), so a powerful model here costs little while sharpening the
+  # toughest calls. Unset = reuse the verifier's provider/model (today's
+  # behavior). This template's verifier is already opus-4-8 (the top tier), so
+  # the example below merely shows the override syntax.
+  # arbiter:
+  #   provider: anthropic
+  #   model: claude-opus-4-8
 
 # ---------------------------------------------------------------------------
 # budgets: token spend caps. per_cycle bounds a single investigation;
