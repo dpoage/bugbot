@@ -582,3 +582,167 @@ func TestIntegrationJSNoCacheFailsOffline(t *testing.T) {
 	}
 	t.Logf("correctly failed (exit=%d); stderr excerpt: %s", out.ExitCode, out.Stderr)
 }
+
+// ---- C#/NuGet integration tests --------------------------------------------
+
+// dotnetTestImage is the .NET SDK image used to actually build/test a C#
+// project. mcr.microsoft.com/dotnet/sdk:8.0 ships dotnet (CLI + test runner)
+// and the full reference assemblies for net8.0; it is the official image.
+const dotnetTestImage = "mcr.microsoft.com/dotnet/sdk:8.0"
+
+// newNuGetTestCLI builds a CLI backed by the .NET SDK image, skipping when no
+// runtime is available or the image cannot be used. The first invocation
+// (`true` over bridge) is what actually fails when no docker/podman is around
+// or the SDK image cannot be pulled — the integration test must therefore
+// skip cleanly here, not block CI.
+func newNuGetTestCLI(t *testing.T) *CLI {
+	t.Helper()
+	rt, ok := Detect()
+	if !ok {
+		t.Skip("no container runtime detected; skipping C#/NuGet deps integration test")
+	}
+	s, err := NewCLI(rt, dotnetTestImage,
+		WithCPUs(2),
+		WithMemoryMB(1024),
+		WithPidsLimit(512),
+		WithTimeout(240*time.Second),
+	)
+	if err != nil {
+		t.Skipf("NewCLI (dotnet): %v", err)
+	}
+	// Pull the image up front; skip if it cannot be pulled. dotnet SDK images
+	// are ~700 MB compressed, so this can take a while on first run.
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	if _, err := s.Exec(ctx, Spec{RepoDir: t.TempDir(), Cmd: []string{"true"}, Network: "bridge"}); err != nil {
+		t.Skipf("cannot run dotnet test image %q (pull failed?): %v", dotnetTestImage, err)
+	}
+	return s
+}
+
+// writeNuGetTestRepo writes a minimal xUnit test project that depends on the
+// widely-cached Newtonsoft.Json package. xUnit + Microsoft.NET.Test.Sdk are
+// the standard test-framework triple (transitive deps are well-known and
+// pinned). The single test calls JsonConvert.SerializeObject — proving the
+// external package resolves at restore time.
+func writeNuGetTestRepo(t *testing.T, dir string) {
+	t.Helper()
+	csproj := `<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+</Project>
+`
+	// Newtonsoft.Json@13.0.3 is a tiny, zero-transitive-dependency package —
+	// chosen so the offline restore has a known, bounded dependency set.
+	testSrc := `using Newtonsoft.Json;
+using Xunit;
+
+public class Tests
+{
+    [Fact]
+    public void JsonRoundtrip()
+    {
+        var s = JsonConvert.SerializeObject(42);
+        Assert.Equal("42", s);
+    }
+}
+`
+	mustWrite(t, filepath.Join(dir, "deptest.csproj"), csproj, 0o644)
+	mustWrite(t, filepath.Join(dir, "Tests.cs"), testSrc, 0o644)
+}
+
+// TestIntegrationNuGetFetchBuildsOffline proves the full NuGet FETCH round-trip:
+// prefetch runs `dotnet restore` online to populate the global packages cache,
+// then the network-none run uses NUGET_PACKAGES=/nugetcache (mounted read-only
+// from the populated cache) to restore + test the project. Exit 0 required.
+func TestIntegrationNuGetFetchBuildsOffline(t *testing.T) {
+	s := newNuGetTestCLI(t)
+
+	repo := t.TempDir()
+	writeNuGetTestRepo(t, repo)
+	cacheBase := t.TempDir()
+
+	res, err := ResolveDeps(repo, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: s,
+		userCacheDir: cacheBase,
+		// FetchNetwork=host: this test environment's podman bridge network has no
+		// working DNS resolver for nuget.org; the host network reaches it directly.
+		// Production deployments should configure podman's bridge network DNS.
+		FetchNetwork: "host",
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps: %v", err)
+	}
+	if res.Prefetch == nil {
+		t.Fatal("expected non-nil Prefetch for C#/NuGet FETCH strategy")
+	}
+
+	// Step 1: prefetch (network-enabled, populates the NuGet global packages
+	// cache on the host).
+	prefetchCtx, prefetchCancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer prefetchCancel()
+	if err := res.Prefetch(prefetchCtx); err != nil {
+		t.Fatalf("Prefetch (dotnet restore): %v", err)
+	}
+
+	// Step 2: run dotnet test network-none with the packages cache mounted.
+	// NUGET_PACKAGES=/nugetcache (from env) + /nugetcache mount → dotnet
+	// resolves packages offline.
+	out, err := s.Exec(context.Background(), Spec{
+		RepoDir: repo,
+		Cmd:     []string{"dotnet", "test"},
+		Network: "none",
+		// Packages come from the cache mount; the SDK compiles, restore runs
+		// offline (NUGET_PACKAGES points at the populated cache), and the test
+		// runs entirely offline.
+		ROMounts: res.ROMounts,
+		Env:      res.Env,
+		Timeout:  180 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Exec (dotnet test network-none): %v", err)
+	}
+	if out.ExitCode != 0 {
+		t.Fatalf("dotnet test with NuGet packages mount should pass; exit=%d\nstdout:\n%s\nstderr:\n%s",
+			out.ExitCode, out.Stdout, out.Stderr)
+	}
+	t.Logf("dotnet test stdout:\n%s", out.Stdout)
+}
+
+// TestIntegrationNuGetNoCacheFailsOffline is the negative control: the same
+// dotnet test WITHOUT the packages cache fails under --network=none (dotnet
+// cannot reach nuget.org, the external dep cannot be resolved). This proves
+// that --network=none is enforced and that the packages cache mount is
+// load-bearing.
+func TestIntegrationNuGetNoCacheFailsOffline(t *testing.T) {
+	s := newNuGetTestCLI(t)
+
+	repo := t.TempDir()
+	writeNuGetTestRepo(t, repo)
+
+	// No mounts, no env — bare network-none run.
+	// dotnet cannot reach nuget.org, so the external dep cannot be resolved.
+	out, err := s.Exec(context.Background(), Spec{
+		RepoDir: repo,
+		Cmd:     []string{"dotnet", "test"},
+		Network: "none",
+		Timeout: 120 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if out.ExitCode == 0 {
+		t.Fatalf("dotnet test with NO NuGet cache under --network=none should fail, but exited 0;\nstdout:\n%s\nstderr:\n%s",
+			out.Stdout, out.Stderr)
+	}
+	t.Logf("correctly failed (exit=%d); stderr excerpt: %s", out.ExitCode, out.Stderr)
+}

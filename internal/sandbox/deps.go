@@ -51,11 +51,12 @@ package sandbox
 //	Python  requirements.txt  off · fetch          (host→off; no vendored convention)
 //	Rust    Cargo.toml        vendored(vendor/ + .cargo/config replace-with) · off · host · fetch
 //	JS/npm  package.json      vendored(node_modules/) · off · fetch   (host→off)
+//	C#/Nug  *.csproj/*.sln    off · host · fetch   (no v1 vendored convention)
 //
 // Each ecosystem owns a unique container mount path: /modcache (Go),
-// /depcache (Python), /cargo/registry (Rust), /npmcache (JS). See the README
-// section "Sandbox dependency strategies" for the full per-ecosystem matrix
-// (prefetch commands, offline-enforcement env, in-sandbox setup, security).
+// /depcache (Python), /cargo/registry (Rust), /npmcache (JS), /nugetcache (C#/NuGet).
+// See the README section "Sandbox dependency strategies" for the full per-ecosystem
+// matrix (prefetch commands, offline-enforcement env, in-sandbox setup, security).
 //
 // # Security posture (per-mount Shared semantics)
 //
@@ -83,6 +84,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -170,6 +172,11 @@ type DepOptions struct {
 	// then ~/.cargo/registry.
 	hostCargoRegistry string
 
+	// hostNuGetPackages, when set, overrides the resolved host NuGet global
+	// packages directory for the HOST strategy (test seam). Empty resolves via
+	// $NUGET_PACKAGES then ~/.nuget/packages.
+	hostNuGetPackages string
+
 	// userCacheDir, when set, overrides the base directory for bugbot-managed
 	// fetch caches (test seam). Empty uses os.UserCacheDir.
 	userCacheDir string
@@ -229,15 +236,14 @@ type ecosystem struct {
 
 // ecosystems is the ordered registry of per-ecosystem resolvers. resolveWith
 // iterates this table in order, merging every matching ecosystem's Resolution.
-// To add a new ecosystem (Rust, JS, ...), append a new entry here;
+// To add a new ecosystem (C#/NuGet, ...), append a new entry here;
 // the merge semantics in resolveWith handle the rest. ContainerPaths across
-// all ecosystems must be globally unique — each ecosystem owns its own mount
-// points (e.g. /modcache for Go, /depcache for Python).
 var ecosystems = []ecosystem{
 	goEcosystem,
 	pythonEcosystem,
 	cargoEcosystem,
 	jsEcosystem,
+	nugetEcosystem,
 }
 
 // goEcosystem is the Go dependency resolver. It detects repos with a go.mod
@@ -1449,6 +1455,347 @@ func runNPMPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOpti
 	}
 	if res.ExitCode != 0 {
 		return fmt.Errorf("sandbox: npm prefetch `npm ci --ignore-scripts` exited %d: %s", res.ExitCode, lastLines(res.Stderr, 20))
+	}
+
+	if hashErr == nil {
+		// Record the warm-cache sentinel. A write failure only costs a redundant
+		// future fetch, so it is non-fatal.
+		_ = os.WriteFile(sentinel, []byte(lockHash), 0o644)
+	}
+	return nil
+}
+
+// ---- C#/NuGet ecosystem ----------------------------------------------------
+//
+// v1 strategy: NuGet global packages cache HOST + FETCH, driven by root C#
+// project files (*.csproj, *.sln, or *.fsproj).
+//
+// Scope decisions (final; do not change silently — flag any deviation):
+//
+//   - DETECT: any root-level *.csproj, *.sln, or *.fsproj exists. Root-level
+//     only — matching every other ecosystem's detector scope. F#/VB.NET
+//     project files are accepted because they consume the same NuGet package
+//     cache and benefit from identical handling.
+//
+//   - VENDORED: NOT supported in v1. NuGet has no widely-adopted, standard
+//     committed-packages convention equivalent to Go's vendor/modules.txt or
+//     Cargo's vendor/ + .cargo/config stanza. Repositories that commit
+//     packages under a project-local folder (e.g. a manual `packages/` tree)
+//     are not treated as vendored and fall through to the requested strategy.
+//     NuGet RestorePackagesPath / a future "RestorePackages" hook could be a
+//     later-bead addition.
+//
+//   - OFF: empty Resolution{Strategy: DepStrategyOff}.
+//
+//   - HOST: mount the host NuGet global packages directory READ-ONLY at
+//     /nugetcache. NUGET_PACKAGES=/nugetcache tells dotnet to use that mount
+//     as the global packages folder (the standard $NUGET_PACKAGES convention).
+//     The default path is $NUGET_PACKAGES (env) then ~/.nuget/packages; a test
+//     seam (hostNuGetPackages on DepOptions) overrides it. Shared=true
+//     (host-owned dir, no :Z relabel). There is no clean NuGet equivalent of
+//     GOPROXY=off / CARGO_NET_OFFLINE=true / npm_config_offline / PIP_NO_INDEX=1;
+//     offline enforcement IS the network=none run itself: a NuGet package
+//     missing from the cache hits the unreachable nuget.org source and fails
+//     fast (the dotnet restore call exits non-zero with a clear "package not
+//     found" diagnostic).
+//
+//   - FETCH: run ONE online `dotnet restore` (plus --locked-mode when
+//     packages.lock.json exists) in opts.FetchSandbox into a bugbot-owned cache
+//     dir (fetchNuGetCacheDir under userCacheDir/.../nugetcache/<hash>), keyed
+//     on sha256(packages.lock.json) falling back to the sha256 of the
+//     concatenated sorted contents of the root *.csproj files (so the key
+//     reflects the dependency set when no lockfile is present). Mount the
+//     populated cache dir read-only at /nugetcache with NUGET_PACKAGES=
+//     /nugetcache. Shared=false (bugbot-owned dir, gets :Z isolation). Same
+//     offline-enforcement caveat as HOST: no GOPROXY=off analog is invented.
+//
+//   - Container path /nugetcache is distinct from /modcache, /depcache,
+//     /cargo/registry, and /npmcache so the mount registry's ContainerPath
+//     uniqueness constraint is satisfied for multi-ecosystem repos.
+
+// nugetCacheMount is where the NuGet global packages cache is mounted inside
+// the container (HOST and FETCH strategies). NUGET_PACKAGES is set to this path
+// so dotnet resolves packages at the standard $NUGET_PACKAGES location.
+// Distinct from /modcache, /depcache, /cargo/registry, and /npmcache per the
+// mount registry's uniqueness obligation.
+const nugetCacheMount = "/nugetcache"
+
+// nugetEcosystem is the C#/NuGet dependency resolver. It detects repos with a
+// root *.csproj, *.sln, or *.fsproj and applies HOST / FETCH / OFF strategy.
+// v1 has no vendored convention for NuGet; see the file-level comment.
+var nugetEcosystem = ecosystem{
+	name:    "nuget",
+	detect:  hasCSharpProject,
+	resolve: resolveNuGet,
+}
+
+// resolveNuGet is the C#/NuGet resolver function. Strategy validation has
+// already run in resolveWith; invalid strategies are unreachable here.
+func resolveNuGet(repoDir string, opts DepOptions) (Resolution, error) {
+	// No vendored detection in v1: NuGet has no standard committed-packages
+	// convention. See the file-level scope-decisions comment.
+
+	strategy := opts.Strategy
+	if strategy == "" {
+		strategy = DepStrategyOff
+	}
+
+	switch strategy {
+	case DepStrategyOff:
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyHost:
+		packages, err := resolveHostNuGetPackages(opts.hostNuGetPackages)
+		if err != nil {
+			return Resolution{}, err
+		}
+		// Shared=true: the host NuGet packages cache is NOT owned by bugbot.
+		// SELinux :Z would relabel the entire cache to a container-private MCS
+		// label, which may break the host dotnet toolchain and any other
+		// container sharing the same directory. :ro without a label suffix is
+		// correct here.
+		return nugetResolution(packages, DepStrategyHost, true, nil), nil
+
+	case DepStrategyFetch:
+		if opts.FetchSandbox == nil {
+			return Resolution{}, fmt.Errorf("sandbox: C#/NuGet dependency strategy %q requires a fetch sandbox", strategy)
+		}
+		cache, err := fetchNuGetCacheDir(repoDir, opts.userCacheDir)
+		if err != nil {
+			return Resolution{}, err
+		}
+		prefetch := newNuGetPrefetch(repoDir, cache, opts)
+		// Shared=false: the NuGet fetch cache is a bugbot-owned directory under
+		// the user cache dir. :Z SELinux isolation is appropriate (same rationale
+		// as the Go, Python, Rust, and JS FETCH caches).
+		return nugetResolution(cache, DepStrategyFetch, false, prefetch), nil
+
+	default:
+		// Unreachable given ValidDepStrategy above, but keep it explicit.
+		return Resolution{}, fmt.Errorf("sandbox: unhandled C#/NuGet dependency strategy %q", strategy)
+	}
+}
+
+// nugetResolution builds the Resolution shared by HOST and FETCH for C#/NuGet:
+// a single read-only mount at /nugetcache plus NUGET_PACKAGES=/nugetcache so
+// dotnet resolves packages at the standard $NUGET_PACKAGES location.
+//
+// shared controls ROMount.Shared: true for HOST (user's real NuGet packages
+// cache — must not be SELinux-relabeled), false for FETCH (bugbot-owned cache
+// dir — :Z isolation correct). See ROMount.Shared for the full rationale.
+//
+// Offline enforcement: NuGet has no clean GOPROXY=off / CARGO_NET_OFFLINE=
+// analog. The --network=none run itself enforces offline operation: any NuGet
+// call that would resolve a missing package hits the unreachable nuget.org
+// source and fails fast with a clear diagnostic. We deliberately do NOT invent
+// a fake env flag here — the OS-level network=none is the enforcement point.
+func nugetResolution(hostPackages string, strategy DepStrategy, shared bool, prefetch func(context.Context) error) Resolution {
+	return Resolution{
+		ROMounts: []ROMount{{
+			HostPath:      hostPackages,
+			ContainerPath: nugetCacheMount,
+			Shared:        shared,
+		}},
+		Env: []string{
+			// NUGET_PACKAGES=/nugetcache so dotnet resolves the global packages
+			// folder at the standard $NUGET_PACKAGES location (the only mount we
+			// provide).
+			"NUGET_PACKAGES=" + nugetCacheMount,
+		},
+		Prefetch: prefetch,
+		Strategy: strategy,
+	}
+}
+
+// hasCSharpProject reports whether repoDir contains any root-level C#/F#
+// project file (*.csproj, *.sln, or *.fsproj). Root-level only, matching the
+// scope of every other ecosystem's detector. Only stdlib (os.ReadDir) — the
+// sandbox package must remain stdlib-only.
+func hasCSharpProject(repoDir string) bool {
+	entries, err := os.ReadDir(repoDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".csproj") ||
+			strings.HasSuffix(name, ".sln") ||
+			strings.HasSuffix(name, ".fsproj") {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveHostNuGetPackages resolves the host NuGet global packages directory.
+// It prefers the override, then $NUGET_PACKAGES, then ~/.nuget/packages.
+// Returns an error when no path can be determined (HOME unset AND env unset) or
+// when the resolved path does not exist on the host (catches a misconfigured
+// or unpopulated cache early, before podman emits an opaque bind-mount error).
+func resolveHostNuGetPackages(override string) (string, error) {
+	if override != "" {
+		return checkNuGetPackagesExists(override)
+	}
+
+	// $NUGET_PACKAGES takes precedence over the ~/.nuget/packages default.
+	if env := os.Getenv("NUGET_PACKAGES"); env != "" {
+		return checkNuGetPackagesExists(env)
+	}
+
+	// Standard default: ~/.nuget/packages.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", fmt.Errorf("sandbox: cannot resolve host NuGet packages (NUGET_PACKAGES unset and HOME unset); use dep_strategy: off|fetch")
+	}
+	return checkNuGetPackagesExists(filepath.Join(home, ".nuget", "packages"))
+}
+
+// checkNuGetPackagesExists verifies that dir exists on the host and returns it.
+// When the directory is missing it returns a clear, actionable error instead of
+// letting podman fail with an opaque bind-mount message at run time.
+func checkNuGetPackagesExists(dir string) (string, error) {
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("sandbox: host NuGet packages %q does not exist; run `dotnet restore` on the host first, or use dep_strategy: off|fetch", dir)
+		}
+		return "", fmt.Errorf("sandbox: stat host NuGet packages %q: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// fetchNuGetCacheDir returns the bugbot-managed NuGet global packages cache
+// directory for repoDir (e.g. ~/.cache/bugbot/nugetcache/<hash>). Delegates to
+// fetchEcosystemCacheDir. override, when non-empty, overrides the base dir
+// (test seam).
+func fetchNuGetCacheDir(repoDir, override string) (string, error) {
+	return fetchEcosystemCacheDir("nugetcache", repoDir, override)
+}
+
+// nugetLockHash returns a hex hash of packages.lock.json (falling back to the
+// sha256 of the concatenated sorted contents of the root *.csproj/*.fsproj
+// files when packages.lock.json is absent, e.g. a project without a committed
+// lockfile) so the NuGet fetch cache can be keyed on the dependency set.
+// Analogous to cargoLockHash for Rust.
+func nugetLockHash(repoDir string) (string, error) {
+	if data, err := os.ReadFile(filepath.Join(repoDir, "packages.lock.json")); err == nil {
+		sum := sha256.Sum256(data)
+		return hex.EncodeToString(sum[:]), nil
+	}
+	// Fallback: hash the concatenated sorted contents of every root-level
+	// *.csproj/*.fsproj file so the key reflects the declared dependency set.
+	// Both are MSBuild PackageReference sources. *.sln is NOT parsed — it only
+	// references projects, not packages — so a root-.sln-only repo (projects in
+	// subdirs) yields no key and re-fetches each cycle (safe, never stale);
+	// recursive subdir walking is a documented v1 limitation.
+	entries, err := os.ReadDir(repoDir)
+	if err != nil {
+		return "", fmt.Errorf("sandbox: cannot read %q for nuget lock hash: %w", repoDir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".csproj") || strings.HasSuffix(name, ".fsproj") {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return "", fmt.Errorf("sandbox: no packages.lock.json or *.csproj/*.fsproj in %q", repoDir)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, n := range names {
+		data, err := os.ReadFile(filepath.Join(repoDir, n))
+		if err != nil {
+			return "", fmt.Errorf("sandbox: read %s for nuget lock hash: %w", n, err)
+		}
+		h.Write([]byte(n))
+		h.Write([]byte{'\n'})
+		h.Write(data)
+		if !strings.HasSuffix(string(data), "\n") {
+			h.Write([]byte{'\n'})
+		}
+	}
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// newNuGetPrefetch builds the one-time online dotnet-restore hook for the
+// C#/NuGet FETCH strategy. It runs `dotnet restore` in the FetchSandbox with
+// network enabled and NUGET_PACKAGES pointed at hostCache (mounted at
+// /nugetcache), keyed on the sha256 of packages.lock.json (or the *.csproj
+// fallback hash) so an unchanged dependency set is not re-downloaded. Guarded
+// by a sync.Once so it runs at most once per Resolution.
+func newNuGetPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runNuGetPrefetch(ctx, repoDir, hostCache, opts)
+	})
+}
+
+// runNuGetPrefetch performs the actual online dotnet restore. It is a no-op
+// when the cache is already warm for the repo's current packages.lock.json
+// (or *.csproj fallback hash).
+func runNuGetPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions) error {
+	lockHash, hashErr := nugetLockHash(repoDir)
+	sentinel := filepath.Join(hostCache, prefetchSentinel) // reuse same constant
+
+	if hashErr == nil {
+		if prev, err := os.ReadFile(sentinel); err == nil && strings.TrimSpace(string(prev)) == lockHash {
+			// Cache already populated for this exact packages.lock.json (or
+			// *.csproj set).
+			return nil
+		}
+	}
+
+	network := opts.FetchNetwork
+	if network == "" {
+		// "bridge" is the standard NAT network both podman and docker accept;
+		// this is the ONLY NuGet run ever allowed network access.
+		network = "bridge"
+	}
+
+	// Build the dotnet restore command. Add --locked-mode when
+	// packages.lock.json exists so the prefetch is deterministic and dotnet
+	// does not update the lockfile during the online step. Mirrors Cargo's
+	// --locked behavior.
+	cmd := []string{"dotnet", "restore"}
+	if _, err := os.Stat(filepath.Join(repoDir, "packages.lock.json")); err == nil {
+		cmd = append(cmd, "--locked-mode")
+	}
+
+	// The prefetch container is fully hardened (read-only root, cap-drop,
+	// no-new-privileges, limits — all from buildRunArgs); only the network
+	// differs and the cache is mounted WRITABLE so `dotnet restore` can
+	// populate NUGET_PACKAGES inside the container. The later network-none run
+	// mounts the same dir read-only.
+	spec := Spec{
+		RepoDir: repoDir,
+		Image:   opts.FetchImage,
+		Network: network,
+		Cmd:     cmd,
+		// Mount the cache dir WRITABLE as NUGET_PACKAGES so dotnet restore
+		// populates hostCache on the host. The RO mount in the final Resolution
+		// points at hostCache (which IS hostCache for the fetch strategy —
+		// see fetchNuGetCacheDir and nugetResolution).
+		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: nugetCacheMount}},
+		Env: []string{
+			"NUGET_PACKAGES=" + nugetCacheMount,
+		},
+	}
+	res, err := opts.FetchSandbox.Exec(ctx, spec)
+	if err != nil {
+		return fmt.Errorf("sandbox: NuGet prefetch `dotnet restore` failed to launch: %w", err)
+	}
+	if res.TimedOut {
+		return fmt.Errorf("sandbox: NuGet prefetch `dotnet restore` timed out")
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("sandbox: NuGet prefetch `dotnet restore` exited %d: %s", res.ExitCode, lastLines(res.Stderr, 20))
 	}
 
 	if hashErr == nil {
