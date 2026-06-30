@@ -17,13 +17,14 @@ import (
 // downstream.
 //
 // The table covers the exact shapes the bead captured from the live corpus:
-//  - "# Package Summary\n\nFoo bar."
-//  - "## Summary\nFoo."
-//  - "# Package: x\nFoo."
-//  - "**Purpose:** Foo."
-//  - "**Purpose**: Foo."
-//  - a multi-line body (asserts the result is one line)
-//  - an over-cap body (asserts the word cap + ellipsis)
+//   - "# Package Summary\n\nFoo bar."
+//   - "## Summary\nFoo."
+//   - "# Package: x\nFoo."
+//   - "**Purpose:** Foo."
+//   - "**Purpose**: Foo."
+//   - a multi-line body (asserts the result is one line)
+//   - an over-cap body (asserts the word cap + ellipsis)
+//
 // plus a few extra guards (leading whitespace, multiple lines, multibyte
 // text, the "…" token vs a trailing sentence that legitimately ends in a
 // period).

@@ -852,61 +852,107 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState, startedAt time.Time, extraOpts ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, error) {
 	progress.NewAgentScope(f.opts.Progress, progress.RoleFinder, label).Start()
 
-	runner := f.newAgentRunner(finder, tools, sysprompt, budget.finderRunnerLimits(f.opts.Limits.FinderLimits),
-		append([]agent.Option{f.activitySinkFor(progress.RoleFinder, label)}, extraOpts...)...)
+	// attempt runs one finder pass: it builds the runner (layering any
+	// per-attempt options on top of the standard finder set), runs RunJSON, and
+	// maps the result into candidates or a classified failure + postmortem. It
+	// is invoked once normally and, on a max-tokens-truncation parse failure,
+	// once more at a doubled output cap (bugbot-rwe).
+	attempt := func(extra ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, error) {
+		opts := append([]agent.Option{f.activitySinkFor(progress.RoleFinder, label)}, extraOpts...)
+		opts = append(opts, extra...)
+		runner := f.newAgentRunner(finder, tools, sysprompt, budget.finderRunnerLimits(f.opts.Limits.FinderLimits), opts...)
 
-	var out candidateList
-	outcome, err := runner.RunJSON(ctx, task, candidatesSchema, &out)
-	if err != nil {
-		// A finder that fails to produce parseable JSON yields no candidates
-		// rather than aborting the whole scan: one lens/chunk failing must not
-		// sink the others. Context cancellation is the exception — propagate it.
-		if ctx.Err() != nil {
-			return nil, finderOK, outcome, nil, ctx.Err()
+		var out candidateList
+		outcome, err := runner.RunJSON(ctx, task, candidatesSchema, &out)
+		if err != nil {
+			// A finder that fails to produce parseable JSON yields no candidates
+			// rather than aborting the whole scan: one lens/chunk failing must not
+			// sink the others. Context cancellation is the exception — propagate it.
+			if ctx.Err() != nil {
+				return nil, finderOK, outcome, nil, ctx.Err()
+			}
+			// Distinguish a genuine parse failure from a budget stop. If the run was
+			// truncated by the shared budget pool or its own token budget, an
+			// unparseable partial is the expected consequence of stopping early, not a
+			// reliability problem — classify it as a budget stop so it does not inflate
+			// the finder-failure count. Otherwise its findings are LOST: report a parse
+			// failure so a scan never silently prints "No findings" when a lens broke.
+			//
+			// In both cases, build a postmortem capturing the classification, the
+			// underlying err (which carries the classified provider error — e.g. 429 +
+			// Retry-After from llm.APIError — or the parse error message), and the raw
+			// model output head. err is intentionally NOT discarded here; it flows into
+			// the postmortem so the next real failure is diagnosable from stored data.
+			pm := buildFinderPostmortem(outcome, err)
+			if budgetStopped(outcome) {
+				return nil, finderBudgetStopped, outcome, &pm, nil
+			}
+			// Rate-limit exhaustion is not a lost-finding failure: the provider
+			// throttled us after the retry budget was spent. Coverage is incomplete
+			// but recoverable (lower --concurrency / re-run) and the retry client
+			// already honored Retry-After. Classify distinctly so it never
+			// inflates FinderFailures or trips the SCAN RELIABILITY WARNING; the
+			// postmortem already carries Class=finderClassRateLimited via
+			// classifyFinderErr.
+			if errors.Is(err, llm.ErrRateLimited) {
+				return nil, finderRateLimited, outcome, &pm, nil
+			}
+			return nil, finderParseFailed, outcome, &pm, nil
 		}
-		// Distinguish a genuine parse failure from a budget stop. If the run was
-		// truncated by the shared budget pool or its own token budget, an
-		// unparseable partial is the expected consequence of stopping early, not a
-		// reliability problem — classify it as a budget stop so it does not inflate
-		// the finder-failure count. Otherwise its findings are LOST: report a parse
-		// failure so a scan never silently prints "No findings" when a lens broke.
-		//
-		// In both cases, build a postmortem capturing the classification, the
-		// underlying err (which carries the classified provider error — e.g. 429 +
-		// Retry-After from llm.APIError — or the parse error message), and the raw
-		// model output head. err is intentionally NOT discarded here; it flows into
-		// the postmortem so the next real failure is diagnosable from stored data.
-		pm := buildFinderPostmortem(outcome, err)
-		if budgetStopped(outcome) {
-			return nil, finderBudgetStopped, outcome, &pm, nil
+
+		cands := make([]Candidate, 0, len(out.Candidates))
+		for _, rc := range out.Candidates {
+			cands = append(cands, Candidate{
+				Lens:        l.Name,
+				File:        rc.File,
+				Line:        rc.Line,
+				Title:       rc.Title,
+				Description: rc.Description,
+				Severity:    normalizeSeverity(domain.Severity(rc.Severity)),
+				Evidence:    rc.Evidence,
+				Confidence:  normalizeConfidence(domain.Confidence(rc.Confidence)),
+			})
 		}
-		// Rate-limit exhaustion is not a lost-finding failure: the provider
-		// throttled us after the retry budget was spent. Coverage is incomplete
-		// but recoverable (lower --concurrency / re-run) and the retry client
-		// already honored Retry-After. Classify distinctly so it never
-		// inflates FinderFailures or trips the SCAN RELIABILITY WARNING; the
-		// postmortem already carries Class=finderClassRateLimited via
-		// classifyFinderErr.
-		if errors.Is(err, llm.ErrRateLimited) {
-			return nil, finderRateLimited, outcome, &pm, nil
-		}
-		return nil, finderParseFailed, outcome, &pm, nil
+		return cands, finderOK, outcome, nil, nil
 	}
 
-	cands := make([]Candidate, 0, len(out.Candidates))
-	for _, rc := range out.Candidates {
-		cands = append(cands, Candidate{
-			Lens:        l.Name,
-			File:        rc.File,
-			Line:        rc.Line,
-			Title:       rc.Title,
-			Description: rc.Description,
-			Severity:    normalizeSeverity(domain.Severity(rc.Severity)),
-			Evidence:    rc.Evidence,
-			Confidence:  normalizeConfidence(domain.Confidence(rc.Confidence)),
-		})
+	cands, status, outcome, pm, err := attempt()
+	// bugbot-rwe: a finder unit lost to per-completion max-tokens truncation — a
+	// reasoning model (e.g. MiniMax-M3) that spent the DefaultMaxOutputTokens cap
+	// inside <think> blocks before emitting JSON — is recoverable. Retry ONCE at a
+	// doubled per-completion cap so the model has room for think + JSON. The
+	// doubled WithMaxTokens is layered last and so overrides newAgentRunner's
+	// default. shouldRetryFinderCap gates this tightly (see its doc).
+	if shouldRetryFinderCap(status, outcome, err) {
+		cands, status, outcome, pm, err = attempt(agent.WithMaxTokens(finderRetryMaxOutputTokens))
 	}
-	return cands, finderOK, outcome, nil, nil
+	return cands, status, outcome, pm, err
+}
+
+// finderRetryMaxOutputTokens is the doubled per-completion output cap used on the
+// single retry of a finder unit lost to max-tokens truncation (bugbot-rwe). A
+// reasoning model that spent the DefaultMaxOutputTokens cap inside <think> blocks
+// before emitting JSON gets room for think + JSON on the retry.
+const finderRetryMaxOutputTokens = 2 * DefaultMaxOutputTokens
+
+// shouldRetryFinderCap reports whether a finder pass that produced no candidates
+// should be retried once at the doubled per-completion output cap. It fires only
+// for the bugbot-rwe failure mode: a parse failure whose proximate cause was the
+// per-completion max-tokens cap — Outcome.LastStopReason == llm.StopMaxTokens, the
+// canonical cap-truncation signal also used by truncationNote. It rejects budget
+// stops (no headroom to retry), rate limits (recover by lowering concurrency),
+// non-truncated malformed JSON (a bigger cap would not help), and a nil outcome.
+func shouldRetryFinderCap(status finderStatus, outcome *agent.Outcome, err error) bool {
+	if status != finderParseFailed {
+		return false
+	}
+	if outcome == nil || outcome.LastStopReason != llm.StopMaxTokens {
+		return false
+	}
+	if budgetStopped(outcome) {
+		return false
+	}
+	return !errors.Is(err, llm.ErrRateLimited)
 }
 
 // finderFailureClass is a coarse classification of why a finder failed to
