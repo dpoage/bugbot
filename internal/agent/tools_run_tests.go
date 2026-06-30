@@ -242,7 +242,6 @@ func (t *RunTestsTool) buildArgv(args runTestsArgs) []string {
 		// Recognizable ctest/meson invocation not found in the script: fall
 		// through to the default verbatim behavior so we never produce a
 		// broken argv.
-		break
 
 	default:
 		// Unknown runner: return baseCmd verbatim. No filter injection.

@@ -66,23 +66,23 @@ func TestEcosystemTable_JSRanMarkersTightened(t *testing.T) {
 	}{
 		{
 			name: "jest per-failure bullet ●",
-			out: "FAIL src/add.test.js\n  ✕ sums numbers (3 ms)\n  ● sums numbers\n    expect(received).toBe(expected)\n",
+			out:  "FAIL src/add.test.js\n  ✕ sums numbers (3 ms)\n  ● sums numbers\n    expect(received).toBe(expected)\n",
 		},
 		{
 			name: "jest summary line 'Tests:' combined with 'failed'",
-			out: "Tests:       1 failed, 2 passed, 3 total\nTest Suites: 1 failed, 1 total\n",
+			out:  "Tests:       1 failed, 2 passed, 3 total\nTest Suites: 1 failed, 1 total\n",
 		},
 		{
 			name: "jest summary line 'Test Suites:' (case-insensitive anchor)",
-			out: "test suites: 1 failed, 1 total\n",
+			out:  "test suites: 1 failed, 1 total\n",
 		},
 		{
 			name: "jest failing-test glyph ✕",
-			out: "FAIL src/x.test.ts\n  ✕ my failing test\n",
+			out:  "FAIL src/x.test.ts\n  ✕ my failing test\n",
 		},
 		{
 			name: "jest bullet + failing glyph together",
-			out: "● my test\n  ✕ my test",
+			out:  "● my test\n  ✕ my test",
 		},
 	}
 	for _, tc := range jestCases {
@@ -100,15 +100,15 @@ func TestEcosystemTable_JSRanMarkersTightened(t *testing.T) {
 	}{
 		{
 			name: "vitest failing-test glyph ×",
-			out: " × src/foo.test.ts > my test (3 ms)\n",
+			out:  " × src/foo.test.ts > my test (3 ms)\n",
 		},
 		{
 			name: "vitest Failed Tests section header ⎯⎯",
-			out: "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n FAIL  src/foo.test.ts > my test\n",
+			out:  "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n FAIL  src/foo.test.ts > my test\n",
 		},
 		{
 			name: "vitest full failure transcript",
-			out: " × src/foo.test.ts > group > test\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n FAIL  src/foo.test.ts > group > test\nAssertionError: expected 1 to equal 2\n",
+			out:  " × src/foo.test.ts > group > test\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n FAIL  src/foo.test.ts > group > test\nAssertionError: expected 1 to equal 2\n",
 		},
 	}
 	for _, tc := range vitestCases {
