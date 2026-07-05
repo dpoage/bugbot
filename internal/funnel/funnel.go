@@ -547,6 +547,40 @@ type Funnel struct {
 	// symbol; refuters stay repo-rooted (bugbot-mi5.17/.18). Empty on a host
 	// without the relevant toolchain — the arbiter then behaves as before.
 	depRoots *agent.DepSourceRoots
+
+	// hasGoDepSource gates the stdlib/dep source-reading obligation in refuter
+	// and arbiter prompts. It is true only when BOTH conditions hold:
+	//   (1) dep-source roots are available on the host (depRoots.Len() > 0), AND
+	//   (2) the repo's dominant languages include Go.
+	// Condition (2) is required because dep-source reach is Go-only today
+	// (internal/agent/dep_source.go): on a Python/C++/JS repo the host may have
+	// a Go toolchain installed, making depRoots non-empty, but the verifier's
+	// tools cannot reach Python site-packages or C++ system headers. Hardcoding
+	// GOROOT/GOMODCACHE text in prompts for such repos is a fabrication trigger.
+	// Written only from run.go (once, before verify goroutines start) and
+	// VerifyFinding (the daemon's strictly sequential re-verify loop on a
+	// dedicated Funnel); never written concurrently with reads. Always assign
+	// goDepSourceFor's result — a conditional set would latch a stale true
+	// across mixed-language re-verifications.
+	hasGoDepSource bool
+}
+
+// goDepSourceFor reports whether refuter and arbiter prompts should include
+// the unconditional MUST-read-source obligation for stdlib/dep behavior, given
+// the languages in scope (the repo's dominant languages for a scan; the
+// finding's file language for a re-verification). True only when BOTH hold:
+// dep-source roots exist on the host AND Go is among langs (dep-source reach
+// is Go-only today). Pure: callers assign the result to f.hasGoDepSource.
+func (f *Funnel) goDepSourceFor(langs []ingest.Language) bool {
+	if f.depRoots.Len() == 0 {
+		return false // no roots wired
+	}
+	for _, l := range langs {
+		if l == ingest.LangGo {
+			return true
+		}
+	}
+	return false
 }
 
 // New constructs a Funnel. clients supplies the finder/verifier LLM clients,

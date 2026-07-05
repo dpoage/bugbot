@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dpoage/bugbot/internal/daemon"
+	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/sandbox"
 )
 
@@ -85,6 +86,17 @@ the command exits with a graceful message rather than an error.`,
 			if len(backlog) == 0 {
 				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Repro backlog: no eligible findings.")
 				return nil
+			}
+
+			// Preflight: reproduction is this command's entire purpose, so a
+			// sandbox image that cannot run the target ecosystem is a hard
+			// error, not a silent per-finding environment_error burn
+			// (bugbot-u6td). Runs after the empty-backlog exit: no work means
+			// no probe.
+			if verdict, vErr := repro.VerifySandboxOnce(ctx, target, cfg); vErr == nil && verdict.BlocksRepro() {
+				return fmt.Errorf(
+					"sandbox toolchain check failed (%s): %s — run `bugbot doctor` and set sandbox.image to a toolchain-capable image",
+					verdict.Category, verdict.Detail)
 			}
 
 			batch := backlog

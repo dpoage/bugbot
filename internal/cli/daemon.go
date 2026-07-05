@@ -107,6 +107,18 @@ func newDaemonCmd() *cobra.Command {
 			// reproduce stage. Sandbox availability is surfaced in the banner.
 			sandboxRuntime, sandboxOK := sandbox.Detect()
 			if doRepro && sandboxOK {
+				// Preflight: probe the sandbox toolchain once before wiring the
+				// reproduce stage; a toolchain-less image would turn every backlog
+				// drain into per-finding environment_error burn (bugbot-u6td).
+				if verdict, vErr := repro.VerifySandboxOnce(ctx, repo.Root(), cfg); vErr == nil && verdict.BlocksRepro() {
+					diag := fmt.Sprintf("repro stage disabled: sandbox toolchain check failed (%s): %s — run `bugbot doctor` and set sandbox.image to a toolchain-capable image",
+						verdict.Category, verdict.Detail)
+					logger.Error(diag)
+					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), diag)
+					doRepro = false
+				}
+			}
+			if doRepro && sandboxOK {
 				reproducer, rerr := buildReproducer(ctx, &cfg, st, repo.Root(), sandboxRuntime, progressSink)
 				if rerr != nil {
 					return rerr
@@ -217,6 +229,7 @@ func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 	// daemon restarts or re-calls to buildReproducer are free.
 	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, repoRoot)
 	r, err := repro.New(client, sb, repoRoot, repro.Options{
+		MaxAttempts:      cfg.Repro.MaxAttempts,
 		Image:            cfg.Sandbox.Image,
 		PatchProver:      cfg.Repro.PatchProver,
 		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,

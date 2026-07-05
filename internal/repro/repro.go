@@ -29,7 +29,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -372,10 +374,10 @@ func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (_ *Att
 			}
 			return nil, fmt.Errorf("repro: plan finding %s: %w", finding.ID, perr)
 		}
-		if verr := validatePlan(plan); verr != nil {
+		if verr := validatePlan(plan, r.repoDir); verr != nil {
 			// A structurally invalid plan is treated like a non-demonstrating
 			// attempt: feed the problem back and try again.
-			feedback = fmt.Sprintf("Your previous plan was invalid: %s. Provide files, a cmd, and an expect description.", verr)
+			feedback = fmt.Sprintf("Your previous plan was invalid: %s. Provide files and a cmd (expect is optional but recommended).", verr)
 			att.Reason = "invalid plan: " + verr.Error()
 			continue
 		}
@@ -552,22 +554,38 @@ func isBareShellOp(arg string) bool {
 // validatePlan rejects structurally unusable plans before spending a sandbox
 // run on them. A failure here is recoverable: Attempt feeds the message back to
 // the agent and revises, so the checks below double as corrective guidance.
-func validatePlan(p *Plan) error {
+//
+// repoDir is the host path to the target repository. When non-empty, each
+// Files key is stat-checked against repoDir: a plan that would overwrite an
+// existing file is rejected as a recoverable revision before any sandbox run
+// (bugbot-ndlw). New files — keys that do not yet exist on disk — are allowed
+// anywhere workspace-relative.
+func validatePlan(p *Plan, repoDir string) error {
 	if len(p.Files) == 0 {
 		return errors.New("no repro files")
 	}
 	if len(p.Cmd) == 0 {
 		return errors.New("no command")
 	}
-	for path := range p.Files {
+	for fpath := range p.Files {
 		// Injected file keys must be workspace-relative: an absolute or
 		// escaping path (e.g. "/tmp/repro_test.cpp") is rejected by the sandbox
 		// at write time, which would otherwise abort the whole attempt with a
 		// hard infrastructure error instead of a recoverable revision. Catch it
 		// here using the sandbox's own rule so the agent is told to fix it.
-		if err := sandbox.ValidateWorkspacePath(path); err != nil {
+		if err := sandbox.ValidateWorkspacePath(fpath); err != nil {
 			return fmt.Errorf("file %q must be a workspace-relative path inside the repo "+
-				"(no leading %q, no %q), e.g. %q: %w", path, "/", "..", "repro_test.cpp", err)
+				"(no leading %q, no %q), e.g. %q: %w", fpath, "/", "..", "repro_test.cpp", err)
+		}
+		// Reject plans that would overwrite an existing repo file. The agent
+		// must only write NEW files; overwriting production sources, go.mod,
+		// fixtures, or existing tests causes the subsequent run to demonstrate
+		// a self-inflicted change rather than the claimed bug (bugbot-ndlw).
+		if repoDir != "" {
+			if _, err := os.Stat(filepath.Join(repoDir, fpath)); err == nil {
+				return fmt.Errorf("file %q already exists in the repository; "+
+					"write NEW files only; modify nothing that exists in the repo", fpath)
+			}
 		}
 	}
 	for _, arg := range p.Cmd {

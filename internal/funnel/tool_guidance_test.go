@@ -16,7 +16,7 @@ import (
 func TestToolGuidance_PrimaryBeforeFallback(t *testing.T) {
 	prompts := map[string]string{
 		"finder":   finderSystemPrompt("senior Go engineer", aLens, nil),
-		"verifier": verifierSystemPrompt("senior Go engineer", false),
+		"verifier": verifierSystemPrompt("senior Go engineer", false, true),
 	}
 	for name, p := range prompts {
 		primary := strings.Index(p, "PRIMARY")
@@ -58,7 +58,7 @@ func TestToolGuidance_PrimaryBeforeFallback(t *testing.T) {
 // sides share the read-only navigation, git, and structural tools.
 func TestToolGuidance_FinderOnlyVsShared(t *testing.T) {
 	finder := finderSystemPrompt("senior Go engineer", aLens, nil)
-	verifier := verifierSystemPrompt("senior Go engineer", false)
+	verifier := verifierSystemPrompt("senior Go engineer", false, true)
 
 	for _, finderOnly := range []string{"post_lead", "get_package_context", "package_graph"} {
 		if !strings.Contains(finder, finderOnly) {
@@ -145,7 +145,7 @@ func TestToolGuidance_PromptNamesMatchWiredTools(t *testing.T) {
 		wired  map[string]bool
 	}{
 		{"finder", finderSystemPrompt("senior Go engineer", aLens, nil), wiredFinder},
-		{"verifier", verifierSystemPrompt("senior Go engineer", false), wiredVerifier},
+		{"verifier", verifierSystemPrompt("senior Go engineer", false, true), wiredVerifier},
 	}
 	for _, tc := range cases {
 		for _, tool := range universe {

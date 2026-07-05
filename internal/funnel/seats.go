@@ -72,7 +72,11 @@ var executorSeat = refuterSeat{
 		" Prefer running an EXISTING test or guard over hand-rolling one when one exists; reach" +
 		" for hand-rolled probes only when no test covers the claimed scenario. If your first" +
 		" run is inconclusive, tighten the input (more runs, harder boundary) and try again —" +
-		" but stop after the per-candidate exec budget and decide on what you have.",
+		" but stop after the per-candidate exec budget and decide on what you have." +
+		" FALLBACK: if the claimed scenario is nondeterministic or IO-bound (timing-dependent," +
+		" network-dependent, file-system-dependent) such that a deterministic probe is infeasible," +
+		" fall back to code reading — trace the actual code path and call sites to evaluate the" +
+		" claim statically, just as the other seats would.",
 }
 
 // seatForCandidate returns the seat assigned to panel position i (0-based)

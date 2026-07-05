@@ -381,8 +381,13 @@ func TestCapabilityGuidance_Python(t *testing.T) {
 		if !strings.Contains(g, "Python pytest: AVAILABLE") {
 			t.Errorf("want Python pytest: AVAILABLE when pytest=true, got:\n%s", g)
 		}
-		if !strings.Contains(g, "You MAY use `pytest`") {
-			t.Errorf("want pytest offered when pytest=true, got:\n%s", g)
+		// Without the pytest-timeout plugin confirmed, guidance offers the
+		// coreutils timeout wrapper — never `pytest --timeout` (bugbot-v9d6).
+		if !strings.Contains(g, "timeout 60 pytest") {
+			t.Errorf("want coreutils timeout pytest wrapper when pytest=true, got:\n%s", g)
+		}
+		if strings.Contains(g, "pytest --timeout") {
+			t.Errorf("must not suggest pytest --timeout without plugin confirmation, got:\n%s", g)
 		}
 	})
 
@@ -395,7 +400,7 @@ func TestCapabilityGuidance_Python(t *testing.T) {
 		if !strings.Contains(g, "python3 -m unittest") {
 			t.Errorf("want python3 -m unittest fallback when python=true, pytest=false, got:\n%s", g)
 		}
-		if strings.Contains(g, "You MAY use `pytest`") {
+		if strings.Contains(g, "timeout 60 pytest") || strings.Contains(g, "pytest --timeout") {
 			t.Errorf("must not offer pytest when pytest=false, got:\n%s", g)
 		}
 	})

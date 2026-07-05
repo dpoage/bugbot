@@ -360,7 +360,7 @@ func TestHelpers_SandboxMaxExecs(t *testing.T) {
 
 // TestVerifierSystemPrompt_WithSandbox confirms the sandbox paragraph appears.
 func TestVerifierSystemPrompt_WithSandbox(t *testing.T) {
-	p := verifierSystemPrompt("senior Go engineer", true)
+	p := verifierSystemPrompt("senior Go engineer", true, true)
 	if !strings.Contains(p, "sandbox_exec") {
 		t.Error("system prompt with sandbox should mention sandbox_exec")
 	}
@@ -372,11 +372,11 @@ func TestVerifierSystemPrompt_WithSandbox(t *testing.T) {
 // TestVerifierSystemPrompt_WithoutSandbox confirms no sandbox paragraph when false.
 func TestVerifierSystemPrompt_WithoutSandbox(t *testing.T) {
 	const persona = "senior Go engineer"
-	p := verifierSystemPrompt(persona, false)
+	p := verifierSystemPrompt(persona, false, true)
 	if strings.Contains(p, "sandbox_exec") {
 		t.Error("system prompt without sandbox must not mention sandbox_exec")
 	}
-	if p != verifierSystemBase(persona)+verifierNoSandboxParagraph {
+	if p != verifierSystemBase(persona, true)+verifierNoSandboxParagraph {
 		t.Error("system prompt without sandbox must equal verifierSystemBase + the no-exec prohibition (bugbot-mi5.20)")
 	}
 }

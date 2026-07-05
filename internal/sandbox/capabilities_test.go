@@ -370,6 +370,17 @@ func TestPythonProbeInterpret(t *testing.T) {
 		if !modes["pytest"] {
 			t.Errorf("want pytest=true, got false")
 		}
+		if modes["pytest_timeout"] {
+			t.Errorf("want pytest_timeout=false without its token, got true")
+		}
+	})
+
+	t.Run("pytest_timeout_plugin_available", func(t *testing.T) {
+		r := Result{ExitCode: 0, Stdout: "python\npytest\npytest_timeout\n"}
+		modes := pythonCapabilityProbe.interpret(r)
+		if !modes["pytest_timeout"] {
+			t.Errorf("want pytest_timeout=true when its token is emitted, got false")
+		}
 	})
 
 	t.Run("python_only_pytest_absent", func(t *testing.T) {
@@ -390,7 +401,7 @@ func TestPythonProbeInterpret(t *testing.T) {
 			t.Errorf("want all false on non-zero exit with empty stdout, got %v", modes)
 		}
 		// Full key set must be present.
-		for _, k := range []string{"python", "pytest"} {
+		for _, k := range []string{"python", "pytest", "pytest_timeout"} {
 			if _, ok := modes[k]; !ok {
 				t.Errorf("key %q missing from interpret result", k)
 			}
@@ -402,7 +413,7 @@ func TestPythonProbeInterpret(t *testing.T) {
 		// carry both keys so allFalse can enumerate them.
 		r := Result{ExitCode: 1, Stdout: ""}
 		modes := pythonCapabilityProbe.interpret(r)
-		for _, k := range []string{"python", "pytest"} {
+		for _, k := range []string{"python", "pytest", "pytest_timeout"} {
 			if _, ok := modes[k]; !ok {
 				t.Errorf("allFalse requires key %q but it is missing", k)
 			}

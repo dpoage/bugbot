@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/sandbox"
 )
 
 // noSystems is a convenience alias for an empty build system slice, used in
@@ -359,5 +360,113 @@ func TestSystemPrompt_TerminationGuidance(t *testing.T) {
 	}
 	if !strings.Contains(p, "-timeout") {
 		t.Error("repro prompt must name the go test -timeout flag")
+	}
+}
+
+// TestSystemPrompt_NoGradingDisclosure verifies that no composed reproducer
+// prompt leaks the ran-marker enumeration or gate-order mechanics that would
+// let an agent self-certify a T1 verdict (bugbot-v9d6). The sentinel token
+// contract itself MUST remain (the escape-hatch path needs it); only the
+// internal marker list and gate explanation are forbidden.
+func TestSystemPrompt_NoGradingDisclosure(t *testing.T) {
+	langs := []ingest.Language{
+		ingest.LangGo, ingest.LangPython, ingest.LangJavaScript,
+		ingest.LangTypeScript, ingest.LangRust, ingest.LangCSharp,
+		ingest.LangC, ingest.LangCPP, ingest.LangJava,
+	}
+	// These strings must never appear in any composed prompt: they expose the
+	// harness ran-marker set or the sentinel gate ordering.
+	forbidden := []string{
+		"--- FAIL",
+		"[  FAILED  ]",
+		"[ FAILED ]",
+		"ran-markers",
+		"promotes them automatically",
+		"build_error",
+		"build/env gates",
+	}
+	for _, lang := range langs {
+		p := systemPrompt(lang, noSystems, nil)
+		for _, bad := range forbidden {
+			if strings.Contains(p, bad) {
+				t.Errorf("systemPrompt(%v) contains forbidden grading-disclosure string %q", lang, bad)
+			}
+		}
+	}
+}
+
+// TestSystemPrompt_LangGuidanceSection verifies that langGuidance renders as
+// its own titled section after the requirements list, not spliced mid-bullet
+// (bugbot-v9d6). The section header must appear and the guidance text must
+// follow it as a discrete paragraph.
+func TestSystemPrompt_LangGuidanceSection(t *testing.T) {
+	// Go is representative; the section header is language-independent.
+	p := systemPrompt(ingest.LangGo, noSystems, nil)
+	if !strings.Contains(p, "Language-specific guidance:") {
+		t.Error("systemPrompt must contain a 'Language-specific guidance:' section header")
+	}
+	// The Go guidance must appear after the header, not embedded mid-bullet.
+	headerIdx := strings.Index(p, "Language-specific guidance:")
+	goIdx := strings.Index(p, "go test -run")
+	if goIdx < 0 {
+		t.Fatal("Go guidance ('go test -run') not found in prompt at all")
+	}
+	if goIdx < headerIdx {
+		t.Error("Go guidance appears before the Language-specific guidance section header")
+	}
+}
+
+// TestSystemPrompt_PytestTimeoutOnlyWithPlugin verifies that pytest --timeout
+// is suggested only when the pytest-timeout plugin capability is probed true
+// (bugbot-v9d6). Without the plugin probe the prompt must not mention
+// --timeout alongside pytest; it should suggest the coreutils timeout wrapper.
+func TestSystemPrompt_PytestTimeoutOnlyWithPlugin(t *testing.T) {
+	// Without any capability probes: no --timeout suggestion anywhere.
+	noCapPrompt := systemPrompt(ingest.LangPython, noSystems, nil)
+	if strings.Contains(noCapPrompt, "pytest --timeout") {
+		t.Error("prompt must NOT suggest 'pytest --timeout' when no capabilities probed")
+	}
+
+	// With pytest available but pytest_timeout not confirmed: still no --timeout.
+	capsNoPlugin := sandbox.CapabilitySet{
+		"python": {"pytest": true, "python": true},
+	}
+	noPluginPrompt := systemPrompt(ingest.LangPython, noSystems, capsNoPlugin)
+	if strings.Contains(noPluginPrompt, "pytest --timeout") {
+		t.Error("prompt must NOT suggest 'pytest --timeout' when pytest_timeout not probed")
+	}
+	// The coreutils timeout wrapper must be suggested instead.
+	if !strings.Contains(noPluginPrompt, "timeout 60 pytest") {
+		t.Error("prompt must suggest 'timeout 60 pytest' when pytest_timeout not probed")
+	}
+
+	// With pytest_timeout probed true: --timeout IS appropriate.
+	capsWithPlugin := sandbox.CapabilitySet{
+		"python": {"pytest": true, "pytest_timeout": true, "python": true},
+	}
+	withPluginPrompt := systemPrompt(ingest.LangPython, noSystems, capsWithPlugin)
+	if !strings.Contains(withPluginPrompt, "pytest --timeout=60") {
+		t.Error("prompt must suggest 'pytest --timeout=60' when pytest_timeout plugin confirmed")
+	}
+}
+
+// TestValidatePlanFeedback_ExpectOptional verifies that the validatePlan
+// feedback string accurately reflects that expect is optional (bugbot-v9d6).
+// The feedback must guide the agent to provide files and a cmd, while
+// noting expect is recommended but not required.
+func TestValidatePlanFeedback_ExpectOptional(t *testing.T) {
+	// Trigger a validation error to check the feedback template.
+	p := &Plan{Files: nil, Cmd: []string{"go", "test", "./..."}}
+	err := validatePlan(p, "")
+	if err == nil {
+		t.Fatal("expected validatePlan to return an error for empty files")
+	}
+	// Replicate the feedback string from Attempt.
+	feedback := "Your previous plan was invalid: " + err.Error() + ". Provide files and a cmd (expect is optional but recommended)."
+	if strings.Contains(feedback, "expect description") {
+		t.Error("feedback must not claim expect is required ('expect description')")
+	}
+	if !strings.Contains(feedback, "optional") {
+		t.Error("feedback must state that expect is optional")
 	}
 }

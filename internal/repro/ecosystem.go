@@ -28,6 +28,11 @@ type ecosystemRules struct {
 	// one of these (or the legacy patterns below) must match for a non-zero
 	// exit to be classified as a demonstration.
 	ranMarkers []string
+	// notRanMarkers are lowercase substrings that, when present, prove the
+	// test collection / setup FAILED before any test ran — even if ranMarkers
+	// are also present (e.g. pytest's "failed " appears in collection errors).
+	// notRanMarkers take precedence over ranMarkers in hasRanEvidence.
+	notRanMarkers []string
 	// buildMarkers are lowercase substrings that, when present, classify
 	// the failure as a build/compile/import error. This is the
 	// false-reproduction guard: a repro that never compiled has not
@@ -39,6 +44,12 @@ type ecosystemRules struct {
 	// buildMarkers when both could match, since toolchain refusals are
 	// a subclass of "did not run".
 	toolchainMarkers []string
+	// lineAnchoredToolchainMarkers are toolchain-refusal patterns that must
+	// match at the START of a line (not as arbitrary substrings). Used for
+	// markers whose prefix is too short to be safe as a free substring — e.g.
+	// Go's "go: " (4 chars) which would false-positive on "ergo: " or
+	// "cargo: " in mixed output.
+	lineAnchoredToolchainMarkers []string
 }
 
 // defaultEnvMarkers are environment markers common to every ecosystem —
@@ -154,8 +165,11 @@ var ecosystemTable = []ecosystemRules{
 		},
 		// Go's toolchain refusal: "go: -race requires cgo",
 		// "go: command not found", "go: cannot find main module", etc.
-		// "go: " is the universal Go toolchain error prefix.
-		toolchainMarkers: []string{
+		// "go: " is the universal Go toolchain error prefix and MUST be anchored
+		// to the start of a line — the 4-char prefix is too short for a safe
+		// free-substring match ("ergo: ", "cargo: " in mixed output would
+		// false-positive). lineAnchoredToolchainMarkers uses hasAnyMarkerAtLineStart.
+		lineAnchoredToolchainMarkers: []string{
 			"go: ",
 		},
 	},
@@ -167,6 +181,21 @@ var ecosystemTable = []ecosystemRules{
 			"short test summary",                // pytest summary block
 			"assertionerror",                    // pytest AssertionError per-test
 			"traceback (most recent call last)", // Python exception = test ran
+		},
+		// notRanMarkers: pytest collection/fixture-setup errors — the test
+		// process aborted before any test item ran. These override ranMarkers
+		// BUT ONLY when the exit code confirms a collection/usage error (pytest
+		// exit 2 or 4). On exit 1 a mixed run — one module collected cleanly and
+		// failed, another had a collection error — must still classify as
+		// demonstrated. interpret() gates these on exit code; hasRanEvidence does
+		// not check them directly so the mixed-run case is never masked.
+		notRanMarkers: []string{
+			"errors during collection", // pytest collection-error section banner
+			"error during collection",  // singular form used by some pytest versions
+			"error collecting",         // "ERROR collecting tests/foo.py"
+			"= no tests ran =",         // pytest --collect-only or all-collection-fail
+			"no tests ran",             // bare form
+			"collected 0 items",        // zero items collected → nothing ran
 		},
 		buildMarkers: []string{
 			"syntaxerror",
@@ -482,12 +511,33 @@ func isGoTestSubcommand(s string) bool {
 // ranMarkers) returns false — unknown ecosystems therefore NEVER
 // demonstrate on a bare non-zero exit, satisfying the central
 // invariant of bugbot-vig.
+//
+// Note: notRanMarkers are intentionally NOT checked here — their application
+// is exit-code-aware and handled by interpret() directly (e.g. pytest
+// collection errors only suppress on exit 2/4, not exit 1).
 func (e *ecosystemRules) hasRanEvidence(out string) bool {
 	if e == nil {
 		return false
 	}
 	low := strings.ToLower(out)
 	for _, m := range e.ranMarkers {
+		if strings.Contains(low, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasNotRanEvidence reports whether out contains any of the ecosystem's
+// notRanMarkers — banners that prove the test process aborted before any
+// test item ran. Callers are responsible for gating this on the appropriate
+// exit codes (e.g. pytest exit 2/4 only; exit 1 may be a mixed run).
+func (e *ecosystemRules) hasNotRanEvidence(out string) bool {
+	if e == nil {
+		return false
+	}
+	low := strings.ToLower(out)
+	for _, m := range e.notRanMarkers {
 		if strings.Contains(low, m) {
 			return true
 		}
@@ -506,4 +556,45 @@ func hasAnyMarker(out string, markers []string) bool {
 		}
 	}
 	return false
+}
+
+// hasAnyMarkerAtLineStart reports whether any of the given (lowercase) markers
+// appears at the beginning of a line (after '\n' or at the very start of out).
+// Used for toolchain markers whose prefix is too short for a safe free-substring
+// match — e.g. Go's "go: " (4 chars) would false-positive on "ergo: " or
+// "cargo: " in mixed output.
+func hasAnyMarkerAtLineStart(out string, markers []string) bool {
+	low := strings.ToLower(out)
+	for _, m := range markers {
+		// Check at the very start of the output.
+		if strings.HasPrefix(low, m) {
+			return true
+		}
+		// Check after each newline.
+		idx := 0
+		for {
+			nl := strings.Index(low[idx:], "\n")
+			if nl < 0 {
+				break
+			}
+			lineStart := idx + nl + 1
+			if lineStart >= len(low) {
+				break
+			}
+			if strings.HasPrefix(low[lineStart:], m) {
+				return true
+			}
+			idx = lineStart
+		}
+	}
+	return false
+}
+
+// hasLineAnchoredToolchainMarker checks both the free toolchainMarkers (substring)
+// AND the lineAnchoredToolchainMarkers (line-start anchored) for a match.
+func (e *ecosystemRules) hasLineAnchoredToolchainMarker(out string) bool {
+	if hasAnyMarker(out, e.toolchainMarkers) {
+		return true
+	}
+	return hasAnyMarkerAtLineStart(out, e.lineAnchoredToolchainMarkers)
 }

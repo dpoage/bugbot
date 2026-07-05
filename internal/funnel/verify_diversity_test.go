@@ -20,7 +20,7 @@ func TestSeatAssignment_N3_ThreeDistinctPrompts(t *testing.T) {
 	prompts := make([]string, 3)
 	for i := 0; i < 3; i++ {
 		seat := seatForIndex(i, 3)
-		base := verifierSystemPrompt(persona, hasSandbox)
+		base := verifierSystemPrompt(persona, hasSandbox, true)
 		if seat.clause != "" {
 			prompts[i] = base + "\n\n" + seat.clause
 		} else {
@@ -113,7 +113,7 @@ func TestIsSplitVerdict(t *testing.T) {
 // contains the shared tool paragraph and refutation criteria. These must never
 // drift between refuter and arbiter — they live in the extracted constants.
 func TestArbiterSystemPrompt_ContainsSharedBlocks(t *testing.T) {
-	p := arbiterSystemPrompt("senior Go engineer", false)
+	p := arbiterSystemPrompt("senior Go engineer", false, true)
 
 	if !strings.Contains(p, verifierToolParagraph) {
 		t.Error("arbiter system prompt must contain the shared verifier tool paragraph")
@@ -133,7 +133,7 @@ func TestArbiterSystemPrompt_ContainsSharedBlocks(t *testing.T) {
 // TestArbiterSystemPrompt_WithSandbox verifies the sandbox paragraph is
 // present when hasSandbox=true.
 func TestArbiterSystemPrompt_WithSandbox(t *testing.T) {
-	p := arbiterSystemPrompt("senior Go engineer", true)
+	p := arbiterSystemPrompt("senior Go engineer", true, true)
 	if !strings.Contains(p, "sandbox_exec") {
 		t.Error("arbiter system prompt with sandbox must mention sandbox_exec")
 	}
@@ -614,7 +614,9 @@ func TestRunRefuters_N1_NoSeatClause(t *testing.T) {
 	if len(capture.captured) != 1 {
 		t.Fatalf("expected 1 system prompt captured, got %d", len(capture.captured))
 	}
-	want := verifierSystemPrompt("senior Go engineer", false)
+	// hasDepSource mirrors runRefuters' production path: f.hasGoDepSource,
+	// which is false on the fixture Funnel (no depRoots, no Go language set).
+	want := verifierSystemPrompt("senior Go engineer", false, f.hasGoDepSource)
 	if capture.captured[0] != want {
 		t.Errorf("n=1 system prompt not byte-identical to verifierSystemPrompt\ngot:  %.100q\nwant: %.100q",
 			capture.captured[0], want)

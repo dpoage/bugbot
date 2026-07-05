@@ -7,6 +7,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // finderSystemBase composes the shared finder system prompt around a persona
@@ -215,10 +216,25 @@ FALLBACK — only when a primary tool cannot answer:
 - grep for free-text or non-symbol patterns, or when a code-navigation tool returns an ERROR (server unavailable or still indexing).
 - read_file for a whole file you need; list_dir to discover paths. read_file always reaches the repository and its vendored dependencies. Whether it can ALSO read non-vendored external source (the Go module cache, GOROOT/src) depends on your role: if your role-specific instructions grant that broader reach, use it to read the actual stdlib/dependency source.`
 
-// verifierRefutationCriteria is the shared REFUTED/NOT REFUTED criteria block
-// used by both refuters and the arbiter. Extracting it prevents the criteria
-// from drifting between the two agents.
-const verifierRefutationCriteria = `A report is REFUTED if any of these is true, and you can show it with concrete evidence from the code:
+// verifierRefutationCriteriaFor returns the shared REFUTED/NOT REFUTED criteria
+// block used by both refuters and the arbiter. The stdlib/dep source-reading
+// obligation is conditional on hasDepSource: when dep-source roots are wired
+// for this repo (Go only today), the agent MUST confirm by reading actual
+// source. When not wired, it is given explicit permission to skip that check
+// and instructed to label the claim UNCONFIRMED rather than fabricate a
+// citation — mirroring the verifierNoSandboxParagraph pattern for exec reach.
+//
+// A backward-compatible var alias (verifierRefutationCriteria) is kept for
+// existing tests that assert the Go-path wording verbatim; it uses
+// hasDepSource=true.
+func verifierRefutationCriteriaFor(hasDepSource bool) string {
+	depSourceClause := ""
+	if hasDepSource {
+		depSourceClause = `When a verdict hinges on the behavior of the standard library, the language runtime, or a third-party dependency, you MUST confirm that behavior by reading the actual source — NEVER assert it from memory. Your reasoning MUST cite what you read: file path and line. An unverified stdlib/runtime/library claim is not acceptable refutation evidence. In-repo code and the repository's vendored dependencies are always reachable via the read tools; reading non-vendored external source (e.g. GOROOT, the Go module cache) depends on your role's read reach.`
+	} else {
+		depSourceClause = `When a verdict hinges on the behavior of the standard library, the language runtime, or a third-party dependency: you CANNOT read that external source in this run — your tools only reach the repository and its vendored dependencies. Treat any claim that hinges on non-vendored external library behavior as UNCONFIRMED, say so plainly in your reasoning, and NEVER invent a citation or assert stdlib/runtime behavior from memory. In-repo code and vendored dependencies are always reachable.`
+	}
+	return `A report is REFUTED if any of these is true, and you can show it with concrete evidence from the code:
 - The claimed code path is unreachable (dead code, a guard returns first, the condition can never hold).
 - A caller, the type system, or a prior check already prevents the bad value or state.
 - The claimed behavior is actually correct — the reporter misread the code or the language/library semantics.
@@ -232,7 +248,14 @@ IMPORTANT — abstention rule: if you CANNOT LOCATE OR READ the cited file(s) (t
 
 Base your verdict ONLY on the actual code you read, not on assumptions about what "should" be there.
 
-When a verdict hinges on the behavior of the standard library, the language runtime, or a third-party dependency, you MUST confirm that behavior by reading the actual source — NEVER assert it from memory. Your reasoning MUST cite what you read: file path and line. An unverified stdlib/runtime/library claim is not acceptable refutation evidence. In-repo code and the repository's vendored dependencies are always reachable via the read tools; reading non-vendored external source (e.g. GOROOT, the Go module cache) depends on your role's read reach.`
+` + depSourceClause
+}
+
+// verifierRefutationCriteria is the Go-repo (dep-source reachable) form of the
+// criteria block. Kept for existing tests and callers that compose the Go-path
+// prompt. New callers that know whether dep-source is wired should call
+// verifierRefutationCriteriaFor directly.
+var verifierRefutationCriteria = verifierRefutationCriteriaFor(true)
 
 // verifierSystemBase composes the shared refuter system prompt around a persona
 // clause derived from the repository's dominant language(s). The persona is the
@@ -240,12 +263,12 @@ When a verdict hinges on the behavior of the standard library, the language runt
 // goal is to PROVE the report wrong; this adversarial framing is the core of
 // the precision-over-recall design. A refuter that cannot disprove a real bug
 // is the signal that the bug survives.
-func verifierSystemBase(persona string) string {
+func verifierSystemBase(persona string, hasDepSource bool) string {
 	return `You are a skeptical, exacting ` + persona + `. Your ONLY job is to PROVE that the bug report below is WRONG. You are not here to agree; you are here to refute.
 
 ` + verifierToolParagraph + `
 
-` + verifierRefutationCriteria
+` + verifierRefutationCriteriaFor(hasDepSource)
 }
 
 // refutationSchema constrains the refuter's verdict. Optional fields:
@@ -347,16 +370,22 @@ You have NO tool that executes commands, scripts, or tests — your tools only R
 
 // verifierSystemPrompt returns the verifier system prompt seeded with persona
 // (the language-derived engineer description; see ingest.Persona), optionally
-// appending the sandbox paragraph when the sandbox_exec tool is available to the
-// agent. The sandbox paragraph and all other wording are language-independent.
-func verifierSystemPrompt(persona string, hasSandbox bool) string {
+// appending the sandbox paragraph when the sandbox_exec tool is available to
+// the agent. hasDepSource controls the stdlib/dep source-reading clause: true
+// on Go repos where dep-source roots are wired; false on all others.
+func verifierSystemPrompt(persona string, hasSandbox, hasDepSource bool) string {
 	if hasSandbox {
-		return verifierSystemBase(persona) + verifierSandboxParagraph
+		return verifierSystemBase(persona, hasDepSource) + verifierSandboxParagraph
 	}
-	return verifierSystemBase(persona) + verifierNoSandboxParagraph
+	return verifierSystemBase(persona, hasDepSource) + verifierNoSandboxParagraph
 }
 
 // verifierTask builds the refuter task message embedding the candidate.
+// SANITIZATION (bugbot-nzki): model-authored multi-line fields (description,
+// evidence) are wrapped in unique delimiter fences so embedded newlines and
+// fake section headers cannot break the BUG REPORT block framing or inject
+// structural directives. Single-line fields (severity, title) are flattened
+// to one line, matching the arbiterTask/appendLeadsSection pattern.
 func verifierTask(c Candidate) string {
 	var b strings.Builder
 	b.WriteString("Try to refute this bug report. Read the actual code before deciding.\n\n")
@@ -364,36 +393,36 @@ func verifierTask(c Candidate) string {
 	fmt.Fprintf(&b, "  file: %s\n", c.File)
 	fmt.Fprintf(&b, "  line: %d\n", c.Line)
 	fmt.Fprintf(&b, "  lens: %s\n", c.Lens)
-	fmt.Fprintf(&b, "  severity: %s\n", c.Severity)
-	fmt.Fprintf(&b, "  title: %s\n", c.Title)
-	fmt.Fprintf(&b, "  description: %s\n", c.Description)
-	fmt.Fprintf(&b, "  reporter's evidence: %s\n", c.Evidence)
+	fmt.Fprintf(&b, "  severity: %s\n", util.FlattenField(string(c.Severity)))
+	fmt.Fprintf(&b, "  title: %s\n", util.FlattenField(c.Title))
+	fmt.Fprintf(&b, "  description:\n%s\n", util.FenceBlock("DESCRIPTION", c.Description))
+	fmt.Fprintf(&b, "  reporter's evidence:\n%s\n", util.FenceBlock("EVIDENCE", c.Evidence))
 	return b.String()
 }
 
 // arbiterSystemPrompt builds the system prompt for the deciding arbiter agent.
 // The arbiter is invoked on a SPLIT panel verdict and must adjudicate between
 // the two sides by reading the actual code — not by averaging opinions. It
-// reuses verifierToolParagraph and verifierRefutationCriteria verbatim so the
-// arbiter's refutation standard never drifts from the panel's (bugbot-mi5.17
-// AC3: refuter independence + no debate).
+// reuses verifierToolParagraph and verifierRefutationCriteriaFor verbatim so
+// the arbiter's refutation standard never drifts from the panel's
+// (bugbot-mi5.17 AC3: refuter independence + no debate).
 //
-// The arbiter is AGENTIC and DRIVES the split to ground (bugbot-mi5.17 AC2):
-// it issues targeted follow-up probes that demand evidence in file:line /
-// dep-source form and verifies the decisive claim with its OWN tool calls
-// before voting. A panel verdict that hinges on an unverified stdlib or
-// third-party claim must be confirmed by reading the actual source (the
-// arbiter's read_file has dep-source reach; refuters' does not). The
-// recorded verdict must cite the concrete evidence (file:line or
-// dep-source path) the arbiter confirmed.
-func arbiterSystemPrompt(persona string, hasSandbox bool) string {
+// hasDepSource controls the read-reach paragraph: when true (Go repos with
+// dep-source roots wired), the arbiter is told it has broader reach and MUST
+// read external source. When false, the paragraph is omitted so no hardcoded
+// Go/GOROOT text appears on a non-Go repo (bugbot-mi3v).
+//
+// The arbiter is AGENTIC and DRIVES the split to ground (bugbot-mi5.17 AC2).
+func arbiterSystemPrompt(persona string, hasSandbox, hasDepSource bool) string {
+	readReachParagraph := ""
+	if hasDepSource {
+		readReachParagraph = "\nUnlike the refuters, you have BROADER READ REACH: in addition to the repository, your read_file tool can read files under the configured dep-source roots (e.g. the Go standard library and Go module cache on a Go repo). When a refuter's claim hinges on the behavior of a stdlib function or a third-party module, you can and should read the actual source to verify it — do not trust it from memory.\n"
+	}
 	p := `You are a senior ` + persona + ` serving as the deciding arbiter on a disputed bug report. A panel of adversarial reviewers split on whether the report below is a real bug. You will be given the report and each reviewer's verdict and reasoning. Your ONLY job is to decide who is right, by reading the actual code with your tools — do not average the opinions, adjudicate them. Weigh a concrete code-backed demonstration over a plausible-sounding argument, whichever side it comes from.
-
-Unlike the refuters, you have BROADER READ REACH: in addition to the repository, your read_file tool can read files under the Go standard library (GOROOT/src) and the Go module cache ($GOPATH/pkg/mod or ` + "`go env GOMODCACHE`" + `). When a refuter's claim hinges on the behavior of a stdlib function or a third-party module, you can and should read the actual source to verify it — do not trust it from memory.
-
+` + readReachParagraph + `
 ` + verifierToolParagraph + `
 
-` + verifierRefutationCriteria + `
+` + verifierRefutationCriteriaFor(hasDepSource) + `
 
 ARBITER ADDITIONAL RULES:
 1. ACTIVE GROUNDING. The split exists because the panel disagreed. You DO NOT just pick a side; you DRIVE the split to ground. Read the cited code, trace the actual call path the report depends on, and identify the SPECIFIC claim that decides the verdict (e.g. "operator>> throws on parse error" or "every caller passes make_shared/never-null"). Issue follow-up tool calls (read_file, read_symbol, find_references, outline, git_blame) to gather the evidence. You may need several turns — that is the design.

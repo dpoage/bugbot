@@ -247,19 +247,24 @@ var jsCapabilityProbe = probeEntry{
 //
 // interpret is called even on non-zero exit so partial availability is
 // captured — e.g. python present but pytest absent. The FULL key set
-// {python, pytest} is always returned so allFalse() works correctly.
+// {python, pytest, pytest_timeout} is always returned so allFalse() works
+// correctly. pytest_timeout reports the pytest-timeout PLUGIN (importable as
+// the pytest_timeout module): repro guidance suggests `pytest --timeout` only
+// when this probed true, since passing the flag without the plugin fails with
+// "unrecognized arguments" and wastes the attempt (bugbot-v9d6).
 var pythonCapabilityProbe = probeEntry{
 	name: "python",
 	probe: []string{"/bin/sh", "-c",
-		`{ command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; } && echo python; { python3 -m pytest --version >/dev/null 2>&1 || python -m pytest --version >/dev/null 2>&1 || command -v pytest >/dev/null 2>&1; } && echo pytest`,
+		`{ command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; } && echo python; { python3 -m pytest --version >/dev/null 2>&1 || python -m pytest --version >/dev/null 2>&1 || command -v pytest >/dev/null 2>&1; } && echo pytest; { python3 -c 'import pytest_timeout' >/dev/null 2>&1 || python -c 'import pytest_timeout' >/dev/null 2>&1; } && echo pytest_timeout`,
 	},
 	interpret: func(r Result) map[string]bool {
 		// Always return the full key set so allFalse() enumerates all modes.
-		// Parse stdout tokens: "python"→python, "pytest"→pytest. interpret is
-		// called even on non-zero exit — parse whatever stdout contains.
+		// Parse stdout tokens; interpret is called even on non-zero exit —
+		// parse whatever stdout contains.
 		modes := map[string]bool{
-			"python": false,
-			"pytest": false,
+			"python":         false,
+			"pytest":         false,
+			"pytest_timeout": false,
 		}
 		for _, line := range strings.Split(r.Stdout, "\n") {
 			switch strings.TrimSpace(line) {
@@ -267,6 +272,8 @@ var pythonCapabilityProbe = probeEntry{
 				modes["python"] = true
 			case "pytest":
 				modes["pytest"] = true
+			case "pytest_timeout":
+				modes["pytest_timeout"] = true
 			}
 		}
 		return modes

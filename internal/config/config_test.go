@@ -1237,3 +1237,120 @@ func TestEnvOverride_ReproSandboxMaxExecs(t *testing.T) {
 		t.Errorf("SandboxMaxExecs = %d, want 7", cfg.Repro.SandboxMaxExecs)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// New-field tests: repro.max_attempts (bugbot-r2hw).
+// ---------------------------------------------------------------------------
+
+// TestDefault_ReproMaxAttempts verifies the default value is 2.
+func TestDefault_ReproMaxAttempts(t *testing.T) {
+	cfg := Default()
+	if cfg.Repro.MaxAttempts != 2 {
+		t.Errorf("Repro.MaxAttempts default = %d, want 2", cfg.Repro.MaxAttempts)
+	}
+}
+
+// TestLoad_ReproMaxAttemptsFromYAML verifies repro.max_attempts=3 in bugbot.yaml
+// yields MaxAttempts 3 through config load (acceptance criterion for bugbot-r2hw).
+func TestLoad_ReproMaxAttemptsFromYAML(t *testing.T) {
+	y := validYAML + `
+repro:
+  max_attempts: 3
+`
+	cfg, err := Load(writeTemp(t, y))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Repro.MaxAttempts != 3 {
+		t.Errorf("MaxAttempts = %d, want 3", cfg.Repro.MaxAttempts)
+	}
+}
+
+// TestValidate_ReproMaxAttemptsMustBePositive verifies that Validate rejects
+// Repro.MaxAttempts < 1 with a message containing "max_attempts".
+func TestValidate_ReproMaxAttemptsMustBePositive(t *testing.T) {
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+	cfg.Repro.MaxAttempts = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_attempts") {
+		t.Errorf("MaxAttempts=0 should be rejected with max_attempts in message, got %v", err)
+	}
+	cfg.Repro.MaxAttempts = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_attempts") {
+		t.Errorf("MaxAttempts=-1 should be rejected, got %v", err)
+	}
+	cfg.Repro.MaxAttempts = 1
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("MaxAttempts=1 should be valid, got %v", err)
+	}
+}
+
+// TestEnvOverride_ReproMaxAttempts verifies that BUGBOT_REPRO_MAX_ATTEMPTS
+// overrides Repro.MaxAttempts.
+func TestEnvOverride_ReproMaxAttempts(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_REPRO_MAX_ATTEMPTS=5"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Repro.MaxAttempts != 5 {
+		t.Errorf("MaxAttempts = %d, want 5", cfg.Repro.MaxAttempts)
+	}
+}
+
+// TestLoad_UnknownKeyIsRejected verifies that an unknown/typoed key in
+// bugbot.yaml produces an error rather than being silently ignored
+// (acceptance criterion for bugbot-r2hw KnownFields check).
+func TestLoad_UnknownKeyIsRejected(t *testing.T) {
+	y := validYAML + `
+repro:
+  max_attemtps: 3
+`
+	_, err := Load(writeTemp(t, y))
+	if err == nil {
+		t.Error("Load() with unknown key max_attemtps should return error, got nil")
+	}
+}
+
+// TestLoad_UnknownTopLevelKeyIsRejected verifies that an unknown top-level key
+// is rejected by the strict YAML decoder.
+func TestLoad_UnknownTopLevelKeyIsRejected(t *testing.T) {
+	y := validYAML + `
+repro_settings:
+  max_attempts: 3
+`
+	_, err := Load(writeTemp(t, y))
+	if err == nil {
+		t.Error("Load() with unknown top-level key should return error, got nil")
+	}
+}
+
+// TestStarterYAML_CommentedExampleBlocksMatchStructs uncomments the verify:
+// and repro: example blocks from the starter template and loads the result
+// under the strict (KnownFields) decoder. A documented key that does not
+// exist in the structs was the silent-no-op class of bugbot-r2hw; with the
+// strict decoder it would now be a HARD load failure for any user who
+// uncomments the example — so the examples must stay 1:1 with the structs.
+func TestStarterYAML_CommentedExampleBlocksMatchStructs(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(validYAML)
+	inBlock := false
+	for _, ln := range strings.Split(StarterYAML, "\n") {
+		switch {
+		case ln == "# verify:" || ln == "# repro:":
+			inBlock = true
+			b.WriteString(strings.TrimPrefix(ln, "# ") + "\n")
+		case inBlock && strings.HasPrefix(ln, "#   "):
+			b.WriteString(strings.TrimPrefix(ln, "# ") + "\n")
+		default:
+			inBlock = false
+		}
+	}
+	if !strings.Contains(b.String(), "\nverify:\n") || !strings.Contains(b.String(), "\nrepro:\n") {
+		t.Fatal("template drift: expected commented `# verify:` and `# repro:` example blocks in StarterYAML")
+	}
+	if _, err := Load(writeTemp(t, b.String())); err != nil {
+		t.Errorf("uncommented template example keys failed strict load: %v", err)
+	}
+}

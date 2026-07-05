@@ -455,6 +455,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 
 	persona := ingest.Persona(snap)
 	langs := ingest.DominantLanguages(snap)
+	f.hasGoDepSource = f.goDepSourceFor(langs)
 
 	if fps == nil {
 		var fpsErr error

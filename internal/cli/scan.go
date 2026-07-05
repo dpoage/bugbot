@@ -417,6 +417,16 @@ func buildReproHookForScan(
 	if sbErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build sandbox: %w", sbErr)
 	}
+	// Preflight: probe the sandbox toolchain once per process before burning
+	// per-finding repro attempts on an image that cannot run the target
+	// ecosystem (bugbot-u6td). A probe infrastructure error does not gate:
+	// repro attempts remain meaningful evidence when the probe itself failed.
+	if verdict, vErr := repro.VerifySandboxOnce(ctx, flags.Target, cfg); vErr == nil && verdict.BlocksRepro() {
+		_, _ = fmt.Fprintf(out,
+			"Reproduce stage skipped: sandbox toolchain check failed (%s): %s\n  Run `bugbot doctor` and set sandbox.image to a toolchain-capable image.\n",
+			verdict.Category, verdict.Detail)
+		return nil, nil, nil, attempted, nil
+	}
 	// Ledger repro + patch-prover spend; the scan run id is pinned by the
 	// hook on first use (the funnel supplies it), and again after the sweep
 	// for the catch-up drain.
@@ -429,6 +439,7 @@ func buildReproHookForScan(
 	// subsequent daemon cycles and parallel scan runs are free.
 	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, flags.Target)
 	r, rNewErr := repro.New(reproClient, sb, flags.Target, repro.Options{
+		MaxAttempts:      cfg.Repro.MaxAttempts,
 		Image:            cfg.Sandbox.Image,
 		PatchProver:      cfg.Repro.PatchProver,
 		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,

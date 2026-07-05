@@ -44,6 +44,7 @@ import (
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // patchMaxDiffBytes is the maximum size of the unified diff text stored in
@@ -450,21 +451,29 @@ func (p *PatchProver) planFor(ctx context.Context, runner *agent.Runner, f store
 }
 
 // buildPatchTask renders the per-finding patch-prover task prompt.
+//
+// SANITIZATION (bugbot-nzki): model-authored multi-line fields (Description,
+// Reasoning) are wrapped in unique delimiter fences (util.FenceBlock) so
+// embedded newlines and fake section headers cannot inject structural
+// directives. Single-line fields (Title, Severity) are flattened to one line
+// (util.FlattenField). The repro output is already length-truncated by trunc;
+// it is agent-visible feedback data and left unstructured here (the sandbox
+// output fencing in interpret.go handles the cross-run feedback case).
 func buildPatchTask(f store.Finding, att *Attempt, feedback string) string {
 	var b strings.Builder
 	b.WriteString("A bug has been confirmed by a failing sandboxed test. Produce a MINIMAL fix.\n\n")
-	fmt.Fprintf(&b, "Title: %s\n", f.Title)
+	fmt.Fprintf(&b, "Title: %s\n", util.FlattenField(f.Title))
 	if f.Severity != "" {
-		fmt.Fprintf(&b, "Severity: %s\n", f.Severity)
+		fmt.Fprintf(&b, "Severity: %s\n", util.FlattenField(string(f.Severity)))
 	}
 	if f.File != "" {
 		fmt.Fprintf(&b, "Location: %s:%d\n", f.File, f.Line)
 	}
 	if f.Description != "" {
-		fmt.Fprintf(&b, "\nDescription:\n%s\n", f.Description)
+		fmt.Fprintf(&b, "\nDescription:\n%s\n", util.FenceBlock("DESCRIPTION", f.Description))
 	}
 	if f.Reasoning != "" {
-		fmt.Fprintf(&b, "\nVerification reasoning:\n%s\n", f.Reasoning)
+		fmt.Fprintf(&b, "\nVerification reasoning:\n%s\n", util.FenceBlock("REASONING", f.Reasoning))
 	}
 	if att != nil && att.Plan != nil {
 		b.WriteString("\n--- Repro plan ---\n")
@@ -630,7 +639,7 @@ func patchVerdict(res sandbox.Result, cmd []string) patchVerdictResult {
 		switch {
 		case hasAnyMarker(low, bazelEnvMarkers):
 			return patchVerdictResult{kind: patchVerdictEnvFailure, summary: trunc(out, 400), ecosystem: eco.name}
-		case hasAnyMarker(low, eco.toolchainMarkers):
+		case eco.hasLineAnchoredToolchainMarker(low):
 			return patchVerdictResult{kind: patchVerdictEnvFailure, summary: trunc(out, 400), ecosystem: eco.name}
 		case hasAnyMarker(low, eco.buildMarkers):
 			return patchVerdictResult{kind: patchVerdictEnvFailure, summary: trunc(out, 400), ecosystem: eco.name}
@@ -646,7 +655,7 @@ func patchVerdict(res sandbox.Result, cmd []string) patchVerdictResult {
 	switch {
 	case hasAnyMarker(lowOut, defaultEnvMarkers):
 		return patchVerdictResult{kind: patchVerdictEnvFailure, summary: trunc(out, 400), ecosystem: eco.name}
-	case hasAnyMarker(lowOut, eco.toolchainMarkers):
+	case eco.hasLineAnchoredToolchainMarker(lowOut):
 		return patchVerdictResult{kind: patchVerdictEnvFailure, summary: trunc(out, 400), ecosystem: eco.name}
 	case hasAnyMarker(lowOut, eco.buildMarkers):
 		return patchVerdictResult{kind: patchVerdictEnvFailure, summary: trunc(out, 400), ecosystem: eco.name}

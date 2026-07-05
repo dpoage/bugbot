@@ -643,3 +643,101 @@ func TestRunTool_ToolHealthSink_SkippedOnCancelledCtx(t *testing.T) {
 		t.Error("health sink must NOT fire when ctx is already cancelled")
 	}
 }
+
+// stopErrorResp builds a response with StopReason == StopError (refusal,
+// safety filter, recitation) and no tool calls.
+func stopErrorResp(text string, in, out int64) scriptStep {
+	return scriptStep{resp: llm.Response{
+		Text:       text,
+		StopReason: llm.StopError,
+		Usage:      llm.Usage{InputTokens: in, OutputTokens: out},
+	}}
+}
+
+// TestRun_StopErrorYieldsTypedError verifies bugbot-wm2m: a final turn that
+// ends with StopError and no tool calls must surface *ErrStopReason, never a
+// clean Outcome that records refusal prose as the answer.
+func TestRun_StopErrorYieldsTypedError(t *testing.T) {
+	fc := newFakeClient(stopErrorResp("I cannot help with that.", 10, 5))
+	r := NewRunner(fc, nil, "sys")
+
+	out, err := r.Run(context.Background(), "task")
+	var stopErr *ErrStopReason
+	if !errors.As(err, &stopErr) {
+		t.Fatalf("Run error = %v, want *ErrStopReason", err)
+	}
+	if stopErr.StopReason != llm.StopError {
+		t.Errorf("StopReason = %q, want %q", stopErr.StopReason, llm.StopError)
+	}
+	if stopErr.Text != "I cannot help with that." {
+		t.Errorf("Text = %q, want refusal prose", stopErr.Text)
+	}
+	if stopErr.Outcome == nil || out == nil {
+		t.Fatal("partial Outcome must be attached and returned")
+	}
+	if stopErr.Outcome.Usage.InputTokens != 10 {
+		t.Errorf("partial Outcome usage lost: %+v", stopErr.Outcome.Usage)
+	}
+}
+
+// TestRun_StopErrorAfterToolsYieldsTypedError covers the multi-turn case: tool
+// turns succeed, then the model refuses. The stale text from earlier turns
+// must not be presented as a clean answer.
+func TestRun_StopErrorAfterToolsYieldsTypedError(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "ghost", `{}`, 5, 2),
+		stopErrorResp("", 5, 2),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	_, err := r.Run(context.Background(), "task")
+	var stopErr *ErrStopReason
+	if !errors.As(err, &stopErr) {
+		t.Fatalf("Run error = %v, want *ErrStopReason", err)
+	}
+	if stopErr.Outcome.Iterations != 2 {
+		t.Errorf("Iterations = %d, want 2", stopErr.Outcome.Iterations)
+	}
+}
+
+// TestRun_EmptyFinalTurnFinalTextSet verifies that a final turn with no text
+// leaves FinalTextSet false even when an earlier turn produced text, so
+// callers can tell stale FinalText from a genuine final answer.
+func TestRun_EmptyFinalTurnFinalTextSet(t *testing.T) {
+	withText := toolResp("c1", "ghost", `{}`, 5, 2)
+	withText.resp.Text = "thinking out loud"
+	fc := newFakeClient(
+		withText,
+		scriptStep{resp: llm.Response{StopReason: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 5, OutputTokens: 1}}},
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.FinalTextSet {
+		t.Error("FinalTextSet = true, want false: final turn emitted no text")
+	}
+	if out.FinalText != "thinking out loud" {
+		t.Errorf("FinalText = %q, want stale text preserved for transparency", out.FinalText)
+	}
+}
+
+// TestRun_NonEmptyFinalTurnFinalTextSet is the positive counterpart: a final
+// turn that emits text sets FinalTextSet.
+func TestRun_NonEmptyFinalTurnFinalTextSet(t *testing.T) {
+	fc := newFakeClient(textResp("the answer", 10, 5))
+	r := NewRunner(fc, nil, "sys")
+
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !out.FinalTextSet {
+		t.Error("FinalTextSet = false, want true")
+	}
+	if out.FinalText != "the answer" {
+		t.Errorf("FinalText = %q, want 'the answer'", out.FinalText)
+	}
+}

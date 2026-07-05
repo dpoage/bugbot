@@ -94,7 +94,7 @@ func TestArbiterSchema_RequiresEvidence(t *testing.T) {
 // of the decisive claim plus evidence citation, advertises its broader read
 // reach, and does NOT place the seats in a multi-agent debate.
 func TestArbiterPrompt_DrivesToGroundNoDebate(t *testing.T) {
-	p := arbiterSystemPrompt("senior Go engineer", false)
+	p := arbiterSystemPrompt("senior Go engineer", false, true)
 	for _, must := range []string{"ACTIVE GROUNDING", "DRIVE", "MANDATORY", "evidence", "BROADER READ REACH"} {
 		if !strings.Contains(p, must) {
 			t.Errorf("arbiter prompt missing required directive %q (bugbot-mi5.17 AC2)", must)

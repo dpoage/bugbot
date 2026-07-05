@@ -7,6 +7,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -293,6 +294,9 @@ type Repro struct {
 	// repro triggers a follow-on agent that attempts to produce a minimal fix
 	// and proves it with a sandboxed suite run.  Default false.
 	PatchProver bool `yaml:"patch_prover"`
+	// MaxAttempts is the maximum number of repro plans tried per finding
+	// (initial plan + revision rounds) before giving up. Must be >= 1. Default 2.
+	MaxAttempts int `yaml:"max_attempts"`
 	// PatchMaxAttempts is the maximum number of fix plans tried per finding
 	// before giving up and flagging the finding needs-human.  Must be >= 1.
 	// Default 3.
@@ -444,6 +448,7 @@ func Default() Config {
 		},
 		Repro: Repro{
 			PatchProver:      false,
+			MaxAttempts:      2,
 			PatchMaxAttempts: 3,
 			BacklogBatch:     3,
 			SandboxMaxExecs:  3,
@@ -486,8 +491,12 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("read config %q: %w", path, err)
 	}
 
-	// Unmarshal directly onto the defaults so unspecified fields are retained.
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	// Decode with KnownFields so any unknown or typoed key produces an error
+	// rather than a silent no-op.  We use a Decoder rather than Unmarshal so
+	// KnownFields can be toggled; the Decoder is overlaid onto the defaults.
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 	}
 
@@ -656,6 +665,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt("BUGBOT_VERIFY_SANDBOX_MAX_EXECS", &cfg.Verify.SandboxMaxExecs),
 		setInt("BUGBOT_PUBLISH_TIER_MIN", &cfg.Publish.TierMin),
 		setInt("BUGBOT_REPRO_PATCH_MAX_ATTEMPTS", &cfg.Repro.PatchMaxAttempts),
+		setInt("BUGBOT_REPRO_MAX_ATTEMPTS", &cfg.Repro.MaxAttempts),
 		setInt("BUGBOT_REPRO_BACKLOG_BATCH", &cfg.Repro.BacklogBatch),
 		setInt("BUGBOT_REPRO_SANDBOX_MAX_EXECS", &cfg.Repro.SandboxMaxExecs),
 		setDur("BUGBOT_DAEMON_POLL_INTERVAL", &cfg.Daemon.PollInterval),
@@ -876,6 +886,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Publish.TierMin < 0 || c.Publish.TierMin > 3 {
 		return fmt.Errorf("config: publish.tier_min %d invalid (want 0..3)", c.Publish.TierMin)
+	}
+	if c.Repro.MaxAttempts < 1 {
+		return fmt.Errorf("config: repro.max_attempts must be >= 1 (got %d)", c.Repro.MaxAttempts)
 	}
 	if c.Repro.PatchMaxAttempts < 1 {
 		return fmt.Errorf("config: repro.patch_max_attempts must be >= 1 (got %d)", c.Repro.PatchMaxAttempts)

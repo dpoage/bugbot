@@ -45,7 +45,7 @@ func TestFinderSystemPrompt_NonGoPersona(t *testing.T) {
 
 // TestVerifierSystemPrompt_GoPersona pins the Go persona clause for the verifier.
 func TestVerifierSystemPrompt_GoPersona(t *testing.T) {
-	p := verifierSystemPrompt("senior Go engineer", false)
+	p := verifierSystemPrompt("senior Go engineer", false, true)
 	if !strings.HasPrefix(p, "You are a skeptical, exacting senior Go engineer.") {
 		t.Errorf("Go verifier prompt lost its persona clause; got prefix:\n%.80q", p)
 	}
@@ -54,7 +54,7 @@ func TestVerifierSystemPrompt_GoPersona(t *testing.T) {
 // TestVerifierSystemPrompt_NonGoPersona confirms the verifier adapts and drops
 // the hardcoded "Go engineer" framing.
 func TestVerifierSystemPrompt_NonGoPersona(t *testing.T) {
-	p := verifierSystemPrompt("senior software engineer with deep Python and JavaScript expertise", false)
+	p := verifierSystemPrompt("senior software engineer with deep Python and JavaScript expertise", false, true)
 	if !strings.Contains(p, "You are a skeptical, exacting senior software engineer with deep Python and JavaScript expertise.") {
 		t.Errorf("non-Go verifier prompt missing adapted persona; got prefix:\n%.120q", p)
 	}
@@ -91,10 +91,10 @@ func TestVerifierPrompts_StdlibSourceDirective(t *testing.T) {
 		name string
 		p    string
 	}{
-		{"verifierSystemPrompt(no sandbox)", verifierSystemPrompt(persona, false)},
-		{"verifierSystemPrompt(sandbox)", verifierSystemPrompt(persona, true)},
-		{"arbiterSystemPrompt(no sandbox)", arbiterSystemPrompt(persona, false)},
-		{"arbiterSystemPrompt(sandbox)", arbiterSystemPrompt(persona, true)},
+		{"verifierSystemPrompt(no sandbox)", verifierSystemPrompt(persona, false, true)},
+		{"verifierSystemPrompt(sandbox)", verifierSystemPrompt(persona, true, true)},
+		{"arbiterSystemPrompt(no sandbox)", arbiterSystemPrompt(persona, false, true)},
+		{"arbiterSystemPrompt(sandbox)", arbiterSystemPrompt(persona, true, true)},
 	}
 
 	for _, pp := range prompts {
@@ -113,8 +113,8 @@ func TestVerifierPrompts_StdlibSourceDirective(t *testing.T) {
 // un-run execution. With a sandbox, the probe guidance returns.
 func TestArbiterPrompt_NoSandbox_ForbidsProbeFabrication(t *testing.T) {
 	const persona = "senior C++ engineer"
-	noSandbox := arbiterSystemPrompt(persona, false)
-	withSandbox := arbiterSystemPrompt(persona, true)
+	noSandbox := arbiterSystemPrompt(persona, false, true)
+	withSandbox := arbiterSystemPrompt(persona, true, true)
 
 	// No execution-inviting wording when the arbiter has no exec tool.
 	forbidden := []string{"executable probe", "running a probe", "run a probe", "consult a probe", "observed output", "sandbox_exec"}

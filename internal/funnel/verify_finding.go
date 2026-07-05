@@ -54,7 +54,14 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd store.Finding) (refuted 
 	// for a single-finding refute (matches the repro stage's per-finding choice).
 	// No qualifiers here: re-verification operates on a single stored finding
 	// without a repo root, so dialect detection (e.g. C++ standard) is skipped.
-	persona := ingest.PersonaLanguages([]ingest.Language{ingest.DetectLanguage(fnd.File)}, nil)
+	fileLang := ingest.DetectLanguage(fnd.File)
+	persona := ingest.PersonaLanguages([]ingest.Language{fileLang}, nil)
+	// Gate dep-source reach on the finding's file language (dep-source roots
+	// are Go-only today, so the MUST-read-source obligation is valid only for
+	// Go findings). Plain assignment, not a conditional set: the daemon's
+	// sequential re-verify loop crosses languages, and a latched true from an
+	// earlier Go finding must not leak into a Python finding's prompts.
+	f.hasGoDepSource = f.goDepSourceFor([]ingest.Language{fileLang})
 
 	verdicts, seatNames, _, _, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, persona, c, n, &budgetState{})
 	if err != nil {

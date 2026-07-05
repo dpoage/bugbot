@@ -1262,7 +1262,7 @@ func TestValidatePlan_ShellOps(t *testing.T) {
 	for _, tc := range accepted {
 		t.Run("accept/"+tc.name, func(t *testing.T) {
 			p := &Plan{Files: files, Cmd: tc.cmd, Expect: "x"}
-			if err := validatePlan(p); err != nil {
+			if err := validatePlan(p, ""); err != nil {
 				t.Errorf("validatePlan(%v) = %v, want nil (a correctly formed plan must not be rejected)", tc.cmd, err)
 			}
 		})
@@ -1301,7 +1301,7 @@ func TestValidatePlan_ShellOps(t *testing.T) {
 	for _, tc := range rejected {
 		t.Run("reject/"+tc.name, func(t *testing.T) {
 			p := &Plan{Files: files, Cmd: tc.cmd, Expect: "x"}
-			err := validatePlan(p)
+			err := validatePlan(p, "")
 			if err == nil {
 				t.Fatalf("validatePlan(%v) = nil, want error containing %q", tc.cmd, tc.wantOp)
 			}
@@ -1342,7 +1342,7 @@ func TestValidatePlan_GoTestRequiresTimeout(t *testing.T) {
 	for _, tc := range accepted {
 		t.Run("accept/"+tc.name, func(t *testing.T) {
 			p := &Plan{Files: files, Cmd: tc.cmd, Expect: "x"}
-			if err := validatePlan(p); err != nil {
+			if err := validatePlan(p, ""); err != nil {
 				t.Errorf("validatePlan(%v) = %v, want nil", tc.cmd, err)
 			}
 		})
@@ -1359,7 +1359,7 @@ func TestValidatePlan_GoTestRequiresTimeout(t *testing.T) {
 	for _, tc := range rejected {
 		t.Run("reject/"+tc.name, func(t *testing.T) {
 			p := &Plan{Files: files, Cmd: tc.cmd, Expect: "x"}
-			err := validatePlan(p)
+			err := validatePlan(p, "")
 			if err == nil {
 				t.Fatalf("validatePlan(%v) = nil, want a -timeout error", tc.cmd)
 			}
@@ -1430,4 +1430,88 @@ func TestPromoteAll_BareShellOpPlanRetries(t *testing.T) {
 			t.Errorf("revision task missing %q; got:\n%s", want, task)
 		}
 	}
+}
+
+// TestValidatePlan_FilesCollisionCheck verifies the bugbot-ndlw guard: a plan
+// whose Files key matches an existing file in repoDir is rejected before any
+// sandbox run with corrective feedback naming the colliding path. Plans that
+// only add new files are unaffected.
+func TestValidatePlan_FilesCollisionCheck(t *testing.T) {
+	// Set up a real directory that mimics a repo with a few existing files.
+	repoDir := t.TempDir()
+	existingFiles := []string{
+		"go.mod",
+		"pkg/calc.go",
+		"internal/helper/util.go",
+	}
+	for _, f := range existingFiles {
+		full := filepath.Join(repoDir, f)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(full), err)
+		}
+		if err := os.WriteFile(full, []byte("// existing\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", full, err)
+		}
+	}
+
+	validCmd := []string{"go", "test", "-timeout", "60s", "-run", "TestBug", "./..."}
+
+	t.Run("reject/overwrites go.mod", func(t *testing.T) {
+		p := &Plan{
+			Files: map[string]string{"go.mod": "module evil\n"},
+			Cmd:   validCmd,
+		}
+		err := validatePlan(p, repoDir)
+		if err == nil {
+			t.Fatal("validatePlan must reject a plan that overwrites go.mod")
+		}
+		if !strings.Contains(err.Error(), "go.mod") {
+			t.Errorf("error %q must name the colliding path 'go.mod'", err.Error())
+		}
+		if !strings.Contains(err.Error(), "NEW files only") {
+			t.Errorf("error %q must say 'NEW files only'", err.Error())
+		}
+	})
+
+	t.Run("reject/overwrites existing source", func(t *testing.T) {
+		p := &Plan{
+			Files: map[string]string{
+				"repro_test.go":           "package bug\n",
+				"internal/helper/util.go": "// overwrite\n",
+			},
+			Cmd: validCmd,
+		}
+		err := validatePlan(p, repoDir)
+		if err == nil {
+			t.Fatal("validatePlan must reject a plan overwriting an existing source file")
+		}
+		if !strings.Contains(err.Error(), "internal/helper/util.go") {
+			t.Errorf("error %q must name the colliding path", err.Error())
+		}
+	})
+
+	t.Run("accept/all new files", func(t *testing.T) {
+		p := &Plan{
+			Files: map[string]string{
+				"repro_test.go":    "package bug\n",
+				"testdata/in.json": `{"x":1}`,
+			},
+			Cmd: validCmd,
+		}
+		if err := validatePlan(p, repoDir); err != nil {
+			t.Errorf("validatePlan rejected a plan with only new files: %v", err)
+		}
+	})
+
+	t.Run("accept/empty repoDir skips check", func(t *testing.T) {
+		// When repoDir is empty the collision check must be skipped entirely,
+		// so existing unit tests that pass "" are unaffected.
+		p := &Plan{
+			Files: map[string]string{"go.mod": "module x\n"},
+			Cmd:   validCmd,
+		}
+		if err := validatePlan(p, ""); err != nil {
+			t.Errorf("validatePlan with empty repoDir must not check collisions: %v", err)
+		}
+	})
 }
