@@ -146,6 +146,11 @@ type Outcome struct {
 	// model's answer; on truncation it is the most recent assistant text (which
 	// may be empty if the model only ever requested tools).
 	FinalText string
+	// FinalTextSet reports whether the final turn of the run produced any text.
+	// When false, FinalText is either empty (model only used tools) or stale
+	// text carried over from an earlier turn — callers must not present it as
+	// the model's answer.
+	FinalTextSet bool
 	// Truncated reports whether the run stopped because it hit a limit rather
 	// than the model finishing its turn. When true, TruncationReason MUST be
 	// non-empty (one of the Trunc* constants).
@@ -178,4 +183,23 @@ func (o *Outcome) Validate() error {
 		return fmt.Errorf("agent: Outcome invariant violated: Truncated is true but TruncationReason is empty")
 	}
 	return nil
+}
+
+// ErrStopReason is returned by [Runner.Run] when the model's final turn ended
+// with [llm.StopError] (refusal, safety filter, recitation) and no tool calls.
+// Before this error existed the loop treated such turns as clean completions,
+// recording refusal prose — or stale text from an earlier turn — as the answer
+// (bugbot-wm2m). The partial Outcome is attached so callers can still inspect
+// usage and the transcript.
+type ErrStopReason struct {
+	// StopReason is the provider stop reason that ended the run.
+	StopReason llm.StopReason
+	// Text is whatever text the refusing turn carried (often refusal prose).
+	Text string
+	// Outcome is the partial outcome at the point the run stopped. Never nil.
+	Outcome *Outcome
+}
+
+func (e *ErrStopReason) Error() string {
+	return fmt.Sprintf("agent: model stopped without tool calls: stop reason %q", e.StopReason)
 }

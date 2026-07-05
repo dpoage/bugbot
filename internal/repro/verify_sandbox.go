@@ -3,6 +3,7 @@ package repro
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/config"
@@ -30,6 +31,11 @@ const (
 	// SmokeCategoryDepMissing: the toolchain is present but required
 	// dependencies are missing (missing module, missing package, etc.).
 	SmokeCategoryDepMissing SmokeCategory = "dep_missing"
+	// SmokeCategoryUnprobeable: no toolchain smoke command could be derived
+	// for this repo (unknown ecosystem — no suite command, no version probe).
+	// Absence of evidence, not evidence of a broken sandbox: the repro stage
+	// is NOT gated on it (BlocksRepro reports false).
+	SmokeCategoryUnprobeable SmokeCategory = "unprobeable"
 )
 
 // SmokeVerdict is the result of a toolchain smoke-test inside a sandbox.
@@ -46,6 +52,16 @@ type SmokeVerdict struct {
 	Detail string
 }
 
+// BlocksRepro reports whether this verdict should gate the repro stage off
+// entirely: the image demonstrably cannot run the target ecosystem, so every
+// per-finding attempt would burn budget on environment_error (bugbot-u6td).
+// Timeout, dep_missing, and unprobeable do NOT block — the first two mean the
+// toolchain responded; unprobeable means we simply had no probe to run, which
+// is no evidence the sandbox is broken.
+func (v SmokeVerdict) BlocksRepro() bool {
+	return v.Category == SmokeCategoryToolchainMissing || v.Category == SmokeCategoryEnvError
+}
+
 // smokeTimeout is the ceiling for a single smoke-test run.  We keep it
 // shorter than the full repro timeout (90 s) because the smoke command is
 // chosen specifically to be cheap.
@@ -59,7 +75,7 @@ const smokeTimeout = 45 * time.Second
 // cheaper liveness probe per ecosystem.  When detectSuiteCmd returns nil
 // (unknown toolchain) a bare version probe ("go version" / "python --version"
 // etc.) is attempted; if we cannot derive any probe the verdict is
-// env_error with a helpful message.
+// unprobeable with a helpful message.
 //
 // Classification re-uses the same defaultEnvMarkers / hasAnyMarker /
 // exit-125-126-127 logic from ecosystem.go that interpret() uses, so the
@@ -73,7 +89,7 @@ func VerifySandbox(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec
 	if len(cmd) == 0 {
 		return SmokeVerdict{
 			OK:       false,
-			Category: SmokeCategoryEnvError,
+			Category: SmokeCategoryUnprobeable,
 			Detail:   "could not derive a toolchain smoke command for this repo",
 		}, nil
 	}
@@ -293,4 +309,43 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 	}
 
 	return VerifySandbox(ctx, sb, repoDir, spec, res)
+}
+
+// smokeCache holds per-(repoDir, image) cached smoke verdicts so each probe
+// runs at most once per process invocation even when multiple callers race at
+// startup. Keyed rather than global: a process probing a second repo or a
+// reconfigured image must not inherit the first probe's verdict.
+var smokeCache = struct {
+	mu sync.Mutex
+	m  map[string]*smokeEntry
+}{m: make(map[string]*smokeEntry)}
+
+type smokeEntry struct {
+	once    sync.Once
+	verdict SmokeVerdict
+	err     error
+}
+
+// VerifySandboxOnce runs the sandbox toolchain smoke probe exactly once per
+// (repoDir, sandbox image) pair per process lifetime. Subsequent calls with
+// the same pair return the cached result without re-running the probe. Safe
+// for concurrent callers.
+//
+// Callers should check verdict.BlocksRepro():
+//   - true (toolchain_missing / env_error) → skip the repro stage.
+//   - false (ok / dep_missing / timeout) → proceed (deps may be absent but
+//     the toolchain ran, so repro attempts are meaningful).
+func VerifySandboxOnce(ctx context.Context, repoDir string, cfg config.Config) (SmokeVerdict, error) {
+	key := repoDir + "\x00" + cfg.Sandbox.Image
+	smokeCache.mu.Lock()
+	e, ok := smokeCache.m[key]
+	if !ok {
+		e = &smokeEntry{}
+		smokeCache.m[key] = e
+	}
+	smokeCache.mu.Unlock()
+	e.once.Do(func() {
+		e.verdict, e.err = RunSandboxVerify(ctx, repoDir, cfg)
+	})
+	return e.verdict, e.err
 }

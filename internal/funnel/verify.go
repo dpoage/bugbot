@@ -43,6 +43,7 @@ type verified struct {
 // generalist produces today's prompt byte-identical.
 func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, persona string, c Candidate, n int, budget *budgetState, extraOpts ...agent.Option) ([]refutation, []string, int64, int, bool, error) {
 	hasSandbox := hasSandboxExec(tools)
+	hasDepSource := f.hasGoDepSource
 
 	var tokens int64
 	var failed int
@@ -56,7 +57,7 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 		// Build the per-seat system prompt: base + optional sandbox paragraph +
 		// optional seat clause. When n==1 the seat is empty (no clause appended)
 		// so the single-refuter path is byte-identical to the pre-diversity code.
-		sysPrompt := verifierSystemPrompt(persona, hasSandbox)
+		sysPrompt := verifierSystemPrompt(persona, hasSandbox, hasDepSource)
 		if seat.clause != "" {
 			sysPrompt += "\n\n" + seat.clause
 		}
@@ -108,7 +109,8 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 // independent).
 func (f *Funnel) runArbiter(ctx context.Context, arbiter llm.Client, candTools []agent.Tool, persona string, c Candidate, verdicts []refutation, seatNames []string, budget *budgetState, extraOpts ...agent.Option) (*refutation, int64, bool, error) {
 	hasSandbox := hasSandboxExec(candTools)
-	runner := f.newAgentRunner(arbiter, candTools, arbiterSystemPrompt(persona, hasSandbox), budget.arbiterRunnerLimits(f.opts.Limits.ArbiterLimits),
+	hasDepSource := f.hasGoDepSource
+	runner := f.newAgentRunner(arbiter, candTools, arbiterSystemPrompt(persona, hasSandbox, hasDepSource), budget.arbiterRunnerLimits(f.opts.Limits.ArbiterLimits),
 		append([]agent.Option{f.activitySinkFor(progress.RoleVerifier, c.Title)}, extraOpts...)...)
 	var av refutation
 	outcome, err := runner.RunJSON(ctx, arbiterTask(c, verdicts, seatNames), arbiterSchema, &av)

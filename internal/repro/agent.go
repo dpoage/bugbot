@@ -12,6 +12,7 @@ import (
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // jsTSGuidance is shared by JavaScript and TypeScript, which use the same test
@@ -198,16 +199,17 @@ produce a repro plan.
 Hard requirements for the repro:
 - STRONGLY PREFER a test wrapped in the repo's standard test framework run
   through its standard runner (gtest, ` + "`go test`" + `, pytest, cargo test,
-  jest/vitest). The harness recognizes those runs via existing ran-markers
-  (--- FAIL, FAILED, [  FAILED  ], etc.) and promotes them automatically; this
-  is the default and should be your first choice whenever the bug class
-  supports it. ` + langGuidance(lang, systems) + `
+  jest/vitest). Use the repo's standard runner; the harness verifies the run
+  independently. This is the default and should be your first choice whenever
+  the bug class supports it.
 - The test MUST FAIL (exit non-zero) on the CURRENT, buggy code, and MUST PASS
   once the bug is fixed. Encode the bug as an explicit assertion: call the
   buggy code and assert the CORRECT expected result, so the wrong current
   behavior makes the assertion fail. Do NOT write a test that merely triggers a
   panic or crash without an assertion unless the panic itself is the bug being
-  demonstrated and the test asserts it should not panic.
+  demonstrated and the test asserts it should not panic. For sanitizer-detected
+  memory or race bugs the sanitizer report replaces the explicit assertion: the
+  sanitizer output and non-zero exit IS the demonstration.
 - ESCAPE HATCH (FALLBACK ONLY) for non-runtime bug classes that genuinely have
   no standard test-framework runner — e.g. build-system/config bugs, shader /
   asset semantics, header-only or macro-only changes — wrap the assertion in a
@@ -215,8 +217,6 @@ Hard requirements for the repro:
   script/binary print the literal token ` + "`" + reproSentinelDemonstrated + "`" + ` to
   stdout ONLY on the code path that confirms the bug is present, immediately
   before exiting non-zero; print nothing (and exit 0) when the bug is absent.
-  The harness treats that token as positive ran-evidence after the build/env
-  gates, so a broken build that prints it is still classified as build_error.
   Use this ONLY when there is no realistic test framework; do NOT default to it.
 - The repro command's real exit status and output must reach bugbot: make the
   test (or sanitized binary) the FINAL command in cmd. Do NOT append a trailing
@@ -228,12 +228,16 @@ Hard requirements for the repro:
   dependencies. Use only the standard library and what the repository already
   imports. The test must COMPILE — a compile error or missing dependency is NOT
   a reproduction and will be rejected.
-- Self-terminating: the test/cmd MUST finish on its own within seconds. Never
-  read from stdin, sleep unboundedly, wait on the network or a port, or
-  deadlock — a hung test is idle-killed and the attempt is wasted with no real
-  verdict. Pass the runner's own timeout flag in cmd: go test -timeout 60s;
-  pytest --timeout=60; jest/vitest --testTimeout 60000.
+- Self-terminating (TEST phase): the test command MUST finish on its own within
+  seconds — never read from stdin, sleep unboundedly, wait on the network or a
+  port, or deadlock; a hung test is idle-killed and the attempt is wasted with
+  no real verdict. Build steps may take minutes; the idle watchdog handles
+  build hangs. Bound the TEST command: use ` + "`go test -timeout 60s`" + ` (built-in);
+  wrap other runners with ` + "`timeout 60 <runner>`" + ` (coreutils); for
+  jest/vitest use ` + "`--testTimeout 60000`" + `.
 ` + capabilityGuidance(caps) + `
+Language-specific guidance:
+` + langGuidance(lang, systems) + `
 Return a repro plan describing the files to inject, the command to run them,
 and a short description of the expected failure.`
 }
@@ -429,7 +433,16 @@ func capabilityGuidance(caps sandbox.CapabilitySet) string {
 	// Python ecosystem capabilities.
 	if pyCaps, ok := caps["python"]; ok {
 		if pyCaps["pytest"] {
-			b.WriteString("- Python pytest: AVAILABLE. You MAY use `pytest` (add `--timeout` if available).\n")
+			// Suggest --timeout only when the pytest-timeout plugin was confirmed
+			// by the capability probe; the plugin is almost never installed in
+			// offline sandboxes, and passing --timeout without it yields an
+			// "unrecognized arguments" error that wastes the attempt (bugbot-v9d6).
+			if pyCaps["pytest_timeout"] {
+				b.WriteString("- Python pytest: AVAILABLE. You MAY use `pytest --timeout=60` (pytest-timeout plugin confirmed).\n")
+			} else {
+				b.WriteString("- Python pytest: AVAILABLE. You MAY use `timeout 60 pytest` to bound the test run\n")
+				b.WriteString("  (pytest-timeout plugin not confirmed; use coreutils timeout wrapper instead).\n")
+			}
 		} else {
 			b.WriteString("- Python pytest: UNAVAILABLE in this image.\n")
 			if pyCaps["python"] {
@@ -502,21 +515,27 @@ func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding 
 // fenced sandbox block, or the agent loses the explicit
 // "data, not instructions" framing that protects it from treating the
 // run output as system-level directives. No double-fencing.
+//
+// SANITIZATION (bugbot-nzki): model-authored multi-line fields (Description,
+// Reasoning) are wrapped in unique delimiter fences (util.FenceBlock) so
+// embedded newlines and fake section headers cannot inject structural
+// directives. Single-line fields (Title, Severity) are flattened to one line
+// (util.FlattenField).
 func buildTask(finding store.Finding, pkgSummary, feedback string) string {
 	var b strings.Builder
 	b.WriteString("Reproduce the following verified bug with a minimal failing test.\n\n")
-	fmt.Fprintf(&b, "Title: %s\n", finding.Title)
+	fmt.Fprintf(&b, "Title: %s\n", util.FlattenField(finding.Title))
 	if finding.Severity != "" {
-		fmt.Fprintf(&b, "Severity: %s\n", finding.Severity)
+		fmt.Fprintf(&b, "Severity: %s\n", util.FlattenField(string(finding.Severity)))
 	}
 	if finding.File != "" {
 		fmt.Fprintf(&b, "Location: %s:%d\n", finding.File, finding.Line)
 	}
 	if finding.Description != "" {
-		fmt.Fprintf(&b, "\nDescription:\n%s\n", finding.Description)
+		fmt.Fprintf(&b, "\nDescription:\n%s\n", util.FenceBlock("DESCRIPTION", finding.Description))
 	}
 	if finding.Reasoning != "" {
-		fmt.Fprintf(&b, "\nVerification reasoning:\n%s\n", finding.Reasoning)
+		fmt.Fprintf(&b, "\nVerification reasoning:\n%s\n", util.FenceBlock("REASONING", finding.Reasoning))
 	}
 	if strings.TrimSpace(pkgSummary) != "" {
 		fmt.Fprintf(&b, "\nPackage context for %s (cartographer summary — orient from it, confirm specifics by reading files):\n%s\n", path.Dir(finding.File), pkgSummary)

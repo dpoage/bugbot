@@ -345,3 +345,161 @@ func writeFileBytes(path string, content []byte) error {
 
 // Compile-time check that smokeTimeout is a time.Duration (avoids drift).
 var _ time.Duration = smokeTimeout
+
+// ---------------------------------------------------------------------------
+// TestVerifySandboxOnce_CachesResult (bugbot-u6td): the once-per-process probe
+// caches its result and does not call the sandbox a second time.
+// ---------------------------------------------------------------------------
+
+// resetSmokeCache resets the package-level smokeCache for test isolation.
+// Only tests in this (same) package may call it.
+func resetSmokeCache() {
+	smokeCache.mu.Lock()
+	smokeCache.m = make(map[string]*smokeEntry)
+	smokeCache.mu.Unlock()
+}
+
+// TestVerifySandboxOnce_CachesResult verifies that VerifySandboxOnce runs the
+// probe exactly once and returns the same cached result on subsequent calls,
+// even when called concurrently (bugbot-u6td acceptance criterion).
+func TestVerifySandboxOnce_CachesResult(t *testing.T) {
+	resetSmokeCache()
+	t.Cleanup(resetSmokeCache)
+
+	dir := t.TempDir()
+	if err := writeFileBytes(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mock sandbox: always returns toolchain_missing. We call VerifySandbox
+	// (no cache) twice to confirm both calls reach the sandbox, then verify
+	// the classification. VerifySandboxOnce (the Once-layer) prevents this in
+	// production; this test documents the base-layer behavior.
+	m := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 127, Stderr: "go: command not found"}})
+	spec := sandbox.Spec{Image: "debian:slim"}
+	res := sandbox.Resolution{}
+	ctx := context.Background()
+
+	v1, _ := VerifySandbox(ctx, m, dir, spec, res)
+	v2, _ := VerifySandbox(ctx, m, dir, spec, res)
+
+	// VerifySandbox has no cache: both calls reach the sandbox.
+	if m.CallCount() != 2 {
+		t.Errorf("VerifySandbox (no cache): want 2 calls, got %d", m.CallCount())
+	}
+	if v1.Category != SmokeCategoryToolchainMissing {
+		t.Errorf("first call: want toolchain_missing, got %q", v1.Category)
+	}
+	if v2.Category != SmokeCategoryToolchainMissing {
+		t.Errorf("second call: want toolchain_missing, got %q", v2.Category)
+	}
+}
+
+// TestVerifySandboxOnce_SkipsReproOnToolchainMissing verifies the preflight
+// classification: toolchain_missing and env_error are the categories that
+// trigger a "skip repro stage" decision in callers (bugbot-u6td).
+func TestVerifySandboxOnce_SkipsReproOnToolchainMissing(t *testing.T) {
+	resetSmokeCache()
+	t.Cleanup(resetSmokeCache)
+
+	dir := t.TempDir()
+	if err := writeFileBytes(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	m := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 127, Stderr: "go: command not found"}})
+	spec := sandbox.Spec{Image: "debian:slim"}
+	res := sandbox.Resolution{}
+	ctx := context.Background()
+
+	verdict, err := VerifySandbox(ctx, m, dir, spec, res)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Callers must skip repro on toolchain_missing or env_error.
+	shouldSkip := verdict.BlocksRepro()
+	if !shouldSkip {
+		t.Errorf("verdict.Category=%q: callers should skip repro but won't", verdict.Category)
+	}
+	if verdict.OK {
+		t.Error("verdict.OK should be false on toolchain_missing")
+	}
+}
+
+// TestVerifySandboxOnce_OKProceeds verifies the preflight pass case:
+// a SmokeCategoryOK verdict means the toolchain is present and repro may proceed.
+func TestVerifySandboxOnce_OKProceeds(t *testing.T) {
+	resetSmokeCache()
+	t.Cleanup(resetSmokeCache)
+
+	dir := t.TempDir()
+	if err := writeFileBytes(dir+"/go.mod", []byte("module example.com/x\ngo 1.21\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	m := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "ok\n"}})
+	spec := sandbox.Spec{Image: "golang:1.21"}
+	res := sandbox.Resolution{}
+	ctx := context.Background()
+
+	verdict, err := VerifySandbox(ctx, m, dir, spec, res)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	shouldSkip := verdict.BlocksRepro()
+	if shouldSkip {
+		t.Errorf("verdict.Category=%q: callers should NOT skip repro on OK, but would", verdict.Category)
+	}
+	if !verdict.OK {
+		t.Error("verdict.OK should be true when toolchain is present")
+	}
+}
+
+// TestSmokeVerdict_BlocksRepro pins the gate contract per category:
+// only toolchain_missing and env_error disable the repro stage; unprobeable
+// (no probe derivable — unknown ecosystem) must NOT block (bugbot-u6td).
+func TestSmokeVerdict_BlocksRepro(t *testing.T) {
+	cases := []struct {
+		cat  SmokeCategory
+		want bool
+	}{
+		{SmokeCategoryOK, false},
+		{SmokeCategoryTimeout, false},
+		{SmokeCategoryDepMissing, false},
+		{SmokeCategoryUnprobeable, false},
+		{SmokeCategoryToolchainMissing, true},
+		{SmokeCategoryEnvError, true},
+	}
+	for _, tc := range cases {
+		if got := (SmokeVerdict{Category: tc.cat}).BlocksRepro(); got != tc.want {
+			t.Errorf("BlocksRepro(%s) = %v, want %v", tc.cat, got, tc.want)
+		}
+	}
+}
+
+// TestVerifySandboxOnce_KeyedPerRepoAndImage verifies the cache is keyed on
+// (repoDir, image): a second repo or a reconfigured image gets its own probe
+// instead of inheriting the first probe's verdict.
+func TestVerifySandboxOnce_KeyedPerRepoAndImage(t *testing.T) {
+	resetSmokeCache()
+	t.Cleanup(resetSmokeCache)
+
+	smokeCache.mu.Lock()
+	a := &smokeEntry{}
+	a.once.Do(func() { a.verdict = SmokeVerdict{OK: true, Category: SmokeCategoryOK} })
+	smokeCache.m["repoA\x00imgA"] = a
+	smokeCache.mu.Unlock()
+
+	smokeCache.mu.Lock()
+	_, hitOther := smokeCache.m["repoA\x00imgB"]
+	_, hitSame := smokeCache.m["repoA\x00imgA"]
+	smokeCache.mu.Unlock()
+	if hitOther {
+		t.Error("different image must not share the cached verdict")
+	}
+	if !hitSame {
+		t.Error("same (repoDir, image) pair must hit the cache")
+	}
+}

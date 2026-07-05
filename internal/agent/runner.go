@@ -210,8 +210,16 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 			return outcome, err
 		}
 
-		// No tool calls => the model finished its turn. Clean completion.
+		// No tool calls => the model finished its turn.
 		if len(resp.ToolCalls) == 0 {
+			// StopError means the model stopped for a provider-specific error
+			// reason (refusal, safety filter, recitation). Breaking cleanly here
+			// would record refusal prose — or stale FinalText from an earlier
+			// turn — as the answer (bugbot-wm2m). Surface a typed error instead.
+			if resp.StopReason == llm.StopError {
+				r.autosave(tr, task)
+				return outcome, &ErrStopReason{StopReason: resp.StopReason, Text: resp.Text, Outcome: outcome}
+			}
 			break
 		}
 
@@ -505,6 +513,9 @@ func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llm.Me
 
 	if resp.Text != "" {
 		outcome.FinalText = resp.Text
+		outcome.FinalTextSet = true
+	} else {
+		outcome.FinalTextSet = false
 	}
 	return resp, nil
 }

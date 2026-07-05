@@ -196,8 +196,9 @@ sandbox:
 # above (or be stricter) because the verify run is also network-none.
 # ---------------------------------------------------------------------------
 # verify:
-#   enabled: true
-#   timeout_seconds: 300       # per-run wall-clock cap for the verify sandbox
+#   sandbox_exec: false        # allow refuter agents to execute probes in the sandbox
+#   sandbox_min_severity: high # minimum candidate severity that receives sandbox_exec
+#   sandbox_max_execs: 3       # per-candidate execution budget for a refuter panel
 
 # ---------------------------------------------------------------------------
 # repro: configuration for the reproduction-test generation stage.
@@ -207,9 +208,15 @@ sandbox:
 # not vendored and the repro test imports them.
 # ---------------------------------------------------------------------------
 # repro:
-#   enabled: true
-#   max_attempts: 3            # how many patch-and-retry cycles before giving up
-#   timeout_seconds: 600       # per-attempt wall-clock cap
+#   max_attempts: 2            # repro plans tried per finding (initial + revisions)
+#   patch_prover: false        # follow a successful repro with a proven minimal fix
+#   patch_max_attempts: 3      # fix plans tried per finding before needs-human
+#   backlog_batch: 3           # backlog findings per daemon backlog-timer firing
+#   sandbox_max_execs: 3       # per-attempt run_tests budget for the reproducer agent
+#   transcript_dir: ""         # save agent JSONL transcripts here (empty = off)
+#
+# Enablement is the --repro flag (scan) or the daemon setting; the per-run
+# sandbox time cap is sandbox.timeout_seconds above.
 
 # ---------------------------------------------------------------------------
 # report: where findings are emitted and through which sinks.
