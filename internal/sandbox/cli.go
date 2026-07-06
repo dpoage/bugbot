@@ -228,6 +228,10 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	if err := validateMounts(spec.ROMounts, spec.RWMounts); err != nil {
 		return Result{}, err
 	}
+	capturePaths, err := sanitizeCapturePaths(spec.CaptureFiles)
+	if err != nil {
+		return Result{}, err
+	}
 
 	prepStart := time.Now()
 	ws, cacheHit, err := s.prepareWorkspace(spec.RepoDir, spec.WriteFiles)
@@ -294,6 +298,7 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	res := Result{Duration: duration, PrepDuration: prepDuration, WorkspaceCacheHit: cacheHit}
 	res.Stdout, res.StdoutTruncated = stdout.result()
 	res.Stderr, res.StderrTruncated = stderr.result()
+	res.Captured = captureWorkspaceFiles(ws, capturePaths, s.maxOutputBytes)
 
 	// Outcome precedence. A process that returned its OWN status — a clean exit
 	// or a real non-zero code — was not killed by us, so those win first: a

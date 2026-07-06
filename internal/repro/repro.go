@@ -531,9 +531,17 @@ func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, e
 	for path, content := range plan.Files {
 		files[path] = []byte(content)
 	}
+	// normalizeCmdForStructuredOutput rewrites a direct `go test`/`pytest`
+	// invocation to ask the runner for machine-readable output (see
+	// runnerevents.go), so interpret() can classify off positive test-level
+	// evidence instead of scanning free-form text. plan.Cmd itself is left
+	// untouched: it is still what ecosystem detection and agent-facing
+	// feedback use, and the rewrite is a harness-owned implementation detail
+	// the agent never needs to see.
+	cmd, captures := normalizeCmdForStructuredOutput(plan.Cmd)
 	spec := sandbox.Spec{
 		RepoDir: r.repoDir,
-		Cmd:     plan.Cmd,
+		Cmd:     cmd,
 		Image:   r.opts.Image,
 		// Network is intentionally left unset so the run inherits the sandbox's
 		// configured default (sandbox.network in bugbot.yaml, applied via the CLI's
@@ -545,9 +553,10 @@ func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, e
 		// Dependency strategy: mount a module cache read-only and/or set GOFLAGS
 		// so the network-none run can resolve external modules. SetupCmds installs
 		// non-Go ecosystem packages from the mounted cache before Cmd runs.
-		ROMounts:  r.deps.ROMounts,
-		Env:       r.deps.Env,
-		SetupCmds: r.deps.SetupCmds,
+		ROMounts:     r.deps.ROMounts,
+		Env:          r.deps.Env,
+		SetupCmds:    r.deps.SetupCmds,
+		CaptureFiles: captures,
 	}
 	return r.sb.Exec(ctx, spec)
 }
