@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dpoage/bugbot/internal/daemon"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/sandbox"
 )
@@ -108,10 +109,36 @@ the command exits with a graceful message rather than an error.`,
 			// Ledger spend with an empty scan-run id: backlog findings span
 			// multiple past runs, so there is no single run to attribute to.
 			// This matches the daemon's backlog attribution choice.
-			// nil progress sink: the one-shot `bugbot repro` prints its summary to
-			// stdout and does not own a status.json snapshot (the daemon/scan do).
-			// Writing one here would race a running daemon's single-writer snapshot.
-			rd, err := buildReproducer(ctx, &cfg, st, target, runtime, nil)
+			//
+			// Live activity, no snapshot: `bugbot repro` wires the same
+			// pane-or-log renderer scan.go uses (TTY -> in-place ANSI pane,
+			// otherwise plain log lines) so an operator watching this terminal
+			// sees repro attempts as they happen. It deliberately does NOT add a
+			// SnapshotSink: status.json has a single writer, and this one-shot
+			// command may run alongside a live daemon that already owns that
+			// file — a second writer here would race it. The live renderer has
+			// no such contention (it only writes to this process's own
+			// stderr), so it is safe to attach.
+			errOut := cmd.ErrOrStderr()
+			var (
+				pane     *progress.PaneRenderer
+				liveSink progress.EventSink
+			)
+			if progress.IsTerminal(errOut) {
+				pane = progress.NewPaneRenderer(errOut, 0)
+				liveSink = pane
+			} else {
+				liveSink = progress.NewLogRenderer(errOut)
+			}
+			stopPane := func() {
+				if pane != nil {
+					pane.Stop()
+					pane = nil
+				}
+			}
+			defer stopPane()
+
+			rd, err := buildReproducer(ctx, &cfg, st, target, runtime, liveSink)
 			if err != nil {
 				return err
 			}
@@ -130,6 +157,9 @@ the command exits with a graceful message rather than an error.`,
 			if err != nil {
 				return fmt.Errorf("reproduce: %w", err)
 			}
+			// Stop the pane before printing the summary so the terminal is
+			// clean (no leftover in-place status lines above the final report).
+			stopPane()
 			printReproSummary(out, summary)
 
 			// Touch attempted-but-not-promoted findings to bump updated_at so that
