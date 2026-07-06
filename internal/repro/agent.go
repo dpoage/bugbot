@@ -105,10 +105,14 @@ const gradleGuidance = "For Java/Kotlin with Gradle, add a\n" +
 var specificGuidance = map[ingest.Language]string{
 	ingest.LangGo: "For Go, write a\n" +
 		"  *_test.go file in the package that contains the bug and run it with\n" +
-		"  " + "`go test -run <TestName> ./<pkg>`" + " (or the module path that targets it).",
+		"  " + "`go test -run <TestName> ./<pkg>`" + " (or the module path that targets it).\n" +
+		"  The harness appends -json to a direct `go test` argv automatically; do not\n" +
+		"  rely on any particular human-readable console output shape.",
 	ingest.LangPython: "For Python, write a\n" +
 		"  test_*.py file (pytest style) next to or under the package with the bug\n" +
-		"  and run it with " + "`pytest -k <test_name> <path>`" + ".",
+		"  and run it with " + "`pytest -k <test_name> <path>`" + ".\n" +
+		"  The harness appends --junitxml to a direct pytest argv automatically; do not\n" +
+		"  rely on any particular human-readable console output shape.",
 	ingest.LangJavaScript: jsTSGuidance,
 	ingest.LangTypeScript: jsTSGuidance,
 	ingest.LangRust: "For Rust, add a\n" +

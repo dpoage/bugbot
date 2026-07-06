@@ -103,6 +103,33 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 		return verdict{reason: VerdictReasonEnvironmentError, summary: envSummary(eco.name, out), ecosystem: eco.name}
 	}
 
+	// Structured-output path: dispositive when it yields a confident answer,
+	// checked BEFORE any marker table (sanitizer, env, toolchain, build,
+	// ran-evidence) so a machine-readable test-result record always wins over
+	// text heuristics for the ecosystems that have one. Markers remain the
+	// ONLY path for cargo/bazel/JS/unknown, whose stable toolchains lack a
+	// structured-output flag bugbot can rely on across versions.
+	switch eco.name {
+	case sandbox.EcosystemGo:
+		if events, parsedOK := parseGoTestEvents(res.Stdout); parsedOK {
+			if demonstrated, reason, ok := classifyGoEvents(events, res.ExitCode); ok {
+				if demonstrated {
+					return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+				}
+				return verdict{reason: reason, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+			}
+		}
+	case sandbox.EcosystemPython:
+		if junit, present := res.Captured[structuredJUnitXMLPath]; present {
+			if demonstrated, reason, ok := parseJUnitXML(junit); ok {
+				if demonstrated {
+					return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+				}
+				return verdict{reason: reason, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+			}
+		}
+	}
+
 	// From here: non-zero, non-timeout exit.
 
 	// 0a. Sanitizer/valgrind violation report — dispositive ran-and-failed
