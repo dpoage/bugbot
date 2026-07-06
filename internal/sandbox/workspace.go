@@ -679,7 +679,7 @@ func readCaptureFile(resolvedWs, rel string, maxBytes int) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read-only handle: a Close error cannot lose data
 
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
