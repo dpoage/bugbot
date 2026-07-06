@@ -178,7 +178,11 @@ func newDaemonCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&repoPath, "repo", ".", "path to the target repository")
+	addTargetFlag(cmd, &repoPath)
+	// --repo is a deprecated alias for --target; kept hidden for backward compat.
+	cmd.Flags().StringVar(&repoPath, "repo", ".", "")
+	_ = cmd.Flags().MarkHidden("repo")
+	_ = cmd.Flags().MarkDeprecated("repo", "use --target instead")
 	cmd.Flags().BoolVar(&doRepro, "repro", false, "enable the Reproduce stage (promote verified findings to Tier-1 via sandboxed failing tests; requires podman/docker)")
 
 	return cmd
@@ -254,7 +258,7 @@ func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 // printDaemonBanner prints the startup banner: intervals, budgets, sinks, and
 // sandbox availability, so an operator can confirm the configuration at a glance.
 func printDaemonBanner(cmd *cobra.Command, cfg config.Config, dcfg daemon.DaemonConfig, sinks []report.Sink, runtime string, sandboxOK bool) {
-	out := cmd.OutOrStdout()
+	out := cmd.ErrOrStderr()
 	_, _ = fmt.Fprintln(out, "bugbot daemon starting")
 	_, _ = fmt.Fprintf(out, "  poll interval:    %s\n", dcfg.PollInterval)
 	_, _ = fmt.Fprintf(out, "  sweep interval:   %s\n", dcfg.SweepInterval)

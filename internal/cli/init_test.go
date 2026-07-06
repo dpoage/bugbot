@@ -444,9 +444,6 @@ func TestRenderConfig_NoDriftFromStarterYAML(t *testing.T) {
 	}
 
 	// Sandbox: all fields except Runtime (wizard auto-detects).
-	if got, want := wizCfg.Sandbox.Backend, starterCfg.Sandbox.Backend; got != want {
-		t.Errorf("Sandbox.Backend: wizard=%q starter=%q", got, want)
-	}
 	if got, want := wizCfg.Sandbox.Image, starterCfg.Sandbox.Image; got != want {
 		t.Errorf("Sandbox.Image: wizard=%q starter=%q", got, want)
 	}

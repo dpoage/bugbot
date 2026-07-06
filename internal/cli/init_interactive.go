@@ -351,7 +351,6 @@ func renderConfig(cfg wizardConfig) (string, error) {
 	sb.WriteString("# sandbox: isolated execution environment.\n")
 	sb.WriteString("# ---------------------------------------------------------------------------\n")
 	sb.WriteString("sandbox:\n")
-	sb.WriteString("  backend: cli\n")
 	fmt.Fprintf(&sb, "  runtime: %s\n", cfg.SandboxRuntime)
 	sb.WriteString("  image: docker.io/library/debian:stable-slim\n")
 	sb.WriteString("  cpus: 2\n")

@@ -1354,3 +1354,31 @@ func TestStarterYAML_CommentedExampleBlocksMatchStructs(t *testing.T) {
 		t.Errorf("uncommented template example keys failed strict load: %v", err)
 	}
 }
+
+// TestValidate_NetworkIsOpenEnded verifies that sandbox.network is not
+// restricted by Config.Validate — the runtime (podman/docker) owns network
+// validation, and the set of legal values (none, host, bridge, slirp4netns,
+// pasta, container:<id>, named networks) is open-ended. Any string is accepted.
+func TestValidate_NetworkIsOpenEnded(t *testing.T) {
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+	for _, v := range []string{"", "none", "host", "bridge", "slirp4netns", "pasta", "container:abc123", "mynet"} {
+		cfg.Sandbox.Network = v
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("network=%q should be accepted (open-ended), got %v", v, err)
+		}
+	}
+}
+
+// TestLoad_BackwardCompatSandboxBackend verifies that a config written by an
+// older bugbot init wizard (which emitted `backend: cli`) still parses cleanly.
+// Config.Load uses KnownFields(true), so the Backend field must exist in the
+// struct even though its value is ignored at runtime.
+func TestLoad_BackwardCompatSandboxBackend(t *testing.T) {
+	oldStyleYAML := validYAML + "\nsandbox:\n  backend: cli\n"
+	if _, err := Load(writeTemp(t, oldStyleYAML)); err != nil {
+		t.Errorf("config with backend: cli should parse cleanly (backward compat): %v", err)
+	}
+}

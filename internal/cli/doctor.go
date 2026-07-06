@@ -299,9 +299,28 @@ func checkConfig(env doctorEnv) (checkResult, config.Config, bool) {
 // checkProviders checks that each provider's credential env var is set and
 // non-empty. The check is mode-aware: api_key providers check api_key_env;
 // oauth-token providers check auth_token_env instead. Results are returned in
-// sorted provider name order so output is deterministic. Each missing credential
-// is a hard failure. Secrets are never printed — only the env var name.
+// sorted provider name order so output is deterministic.
+//
+// Providers referenced by at least one role (finder, verifier, reproducer,
+// cartographer, arbiter) are checked as hard failures — a missing credential
+// means the scan cannot run. Providers not referenced by any role are checked
+// as warnings only, because they may be future roles or test providers.
+// Secrets are never printed — only the env var name.
 func checkProviders(env doctorEnv, cfg config.Config) []checkResult {
+	// Collect the set of provider names actually referenced by the role config.
+	referenced := make(map[string]bool)
+	for _, p := range []string{
+		cfg.Roles.Finder.Provider,
+		cfg.Roles.Verifier.Provider,
+		cfg.Roles.Reproducer.Provider,
+		cfg.Roles.Cartographer.Provider,
+		cfg.Roles.Arbiter.Provider,
+	} {
+		if p != "" {
+			referenced[p] = true
+		}
+	}
+
 	names := make([]string, 0, len(cfg.Providers))
 	for n := range cfg.Providers {
 		names = append(names, n)
@@ -311,6 +330,7 @@ func checkProviders(env doctorEnv, cfg config.Config) []checkResult {
 	var out []checkResult
 	for _, name := range names {
 		p := cfg.Providers[name]
+		isReferenced := referenced[name]
 
 		var envName, modeLabel string
 		if p.Auth == "oauth-token" {
@@ -323,13 +343,21 @@ func checkProviders(env doctorEnv, cfg config.Config) []checkResult {
 
 		val := env.lookupEnv(envName)
 		if val == "" {
-			out = append(out, checkResult{
-				Name:   "provider " + name,
-				Status: statusFail,
-				// Print only the env var name — NEVER the value (secret).
-				Detail: "$" + envName + " is not set" + modeLabel,
-				hard:   true,
-			})
+			if isReferenced {
+				out = append(out, checkResult{
+					Name:   "provider " + name,
+					Status: statusFail,
+					// Print only the env var name — NEVER the value (secret).
+					Detail: "$" + envName + " is not set" + modeLabel,
+					hard:   true,
+				})
+			} else {
+				out = append(out, checkResult{
+					Name:   "provider " + name,
+					Status: statusWarn,
+					Detail: "$" + envName + " is not set" + modeLabel + " (provider not referenced by any role)",
+				})
+			}
 		} else {
 			out = append(out, checkResult{
 				Name:   "provider " + name,

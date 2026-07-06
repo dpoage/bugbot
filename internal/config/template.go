@@ -157,7 +157,6 @@ scan:
 # See the README "Sandbox dependency strategies" matrix for per-ecosystem detail.
 # ---------------------------------------------------------------------------
 sandbox:
-  backend: cli
   runtime: podman              # podman | docker
   image: docker.io/library/debian:stable-slim   # see IMPORTANT note above; set a toolchain image for repro/verify
   cpus: 2

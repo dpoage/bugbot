@@ -1018,3 +1018,59 @@ func TestDoctor_SecretsNeverInOutput_ConfigError(t *testing.T) {
 		t.Errorf("expected config FAIL result on bad config, got: %v", results)
 	}
 }
+
+// TestCheckProviders_UnreferencedProviderIsWarnNotFail verifies that a provider
+// not referenced by any role whose credential env var is missing produces a WARN
+// (not a hard FAIL). It also asserts the complementary path: the referenced
+// provider (testprovider, used by finder/verifier/reproducer) passes because its
+// credential IS set in the env stub.
+func TestCheckProviders_UnreferencedProviderIsWarnNotFail(t *testing.T) {
+	cfgPath := writeDoctorConfig(t)
+	// allGreenEnv sets FAKE_API_KEY_ENV; we add a second provider not referenced
+	// by any role and leave its env var unset.
+	env := allGreenEnv(t, cfgPath)
+	baseEnv := env.lookupEnv
+	env.lookupEnv = func(name string) string {
+		if name == "FAKE_API_KEY_ENV" {
+			return baseEnv(name)
+		}
+		return "" // everything else (including UNREFERENCED_KEY_ENV) is unset
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	// Inject an extra provider not used by any role.
+	cfg.Providers["unreferenced"] = config.Provider{
+		Type:      config.ProviderAnthropic,
+		APIKeyEnv: "UNREFERENCED_KEY_ENV",
+	}
+
+	results := checkProviders(env, cfg)
+
+	var sawUnreferenced, sawReferenced bool
+	for _, r := range results {
+		switch r.Name {
+		case "provider unreferenced":
+			sawUnreferenced = true
+			if r.Status != statusWarn {
+				t.Errorf("unreferenced provider with missing cred: want WARN, got %s", r.Status)
+			}
+			if r.hard {
+				t.Errorf("unreferenced provider result must not be hard")
+			}
+		case "provider testprovider":
+			sawReferenced = true
+			if r.Status != statusPass {
+				t.Errorf("referenced provider with cred set: want PASS, got %s (detail: %s)", r.Status, r.Detail)
+			}
+		}
+	}
+	if !sawUnreferenced {
+		t.Error("expected a result for 'provider unreferenced', got none")
+	}
+	if !sawReferenced {
+		t.Error("expected a result for 'provider testprovider', got none")
+	}
+}

@@ -188,6 +188,9 @@ type Scan struct {
 // Sandbox configures the isolated execution environment used for verification
 // and reproduction.
 type Sandbox struct {
+	// Deprecated: ignored; sandbox backend selection was never implemented.
+	// The field is retained so configs written by older bugbot init wizards
+	// (which emitted `backend: cli`) still parse cleanly under KnownFields mode.
 	Backend  string `yaml:"backend"`
 	Runtime  string `yaml:"runtime"`
 	Image    string `yaml:"image"`
@@ -430,7 +433,6 @@ func Default() Config {
 			HeatOrdering: true,
 		},
 		Sandbox: Sandbox{
-			Backend:            "cli",
 			Runtime:            "podman",
 			Image:              "docker.io/library/debian:stable-slim",
 			CPUs:               2,
@@ -516,36 +518,52 @@ func Load(path string) (Config, error) {
 //
 //	BUGBOT_STORAGE_PATH
 //	BUGBOT_REPORT_DIR
-//	BUGBOT_BUDGETS_PER_CYCLE_TOKENS
-//	BUGBOT_BUDGETS_CACHE_READ_WEIGHT
-//	BUGBOT_BUDGETS_PER_DAY_TOKENS
+//	BUGBOT_REVIEW_FAIL_ON              (verified|none)
+//	BUGBOT_REVIEW_SUSPECTED            (summary|withhold)
+//	BUGBOT_BUDGETS_PER_CYCLE_TOKENS    (integer; 0 = unlimited)
+//	BUGBOT_BUDGETS_PER_DAY_TOKENS      (integer; 0 = unlimited)
+//	BUGBOT_BUDGETS_CACHE_READ_WEIGHT   (float 0..1)
+//	BUGBOT_BUDGETS_FINDER_BUDGET_SHARE (float 0..1)
+//	BUGBOT_BUDGETS_FINDER_TOKEN_CLAIM  (integer)
+//	BUGBOT_BUDGETS_VERIFIER_TOKEN_CLAIM (integer)
+//	BUGBOT_BUDGETS_ARBITER_TOKEN_CLAIM  (integer)
+//	BUGBOT_BUDGETS_FINDER_HISTORY_TOKENS (integer)
+//	BUGBOT_BUDGETS_FINDER_READ_LINES   (integer)
+//	BUGBOT_BUDGETS_FINDER_READ_BYTES   (integer)
 //	BUGBOT_SANDBOX_RUNTIME
 //	BUGBOT_SANDBOX_IMAGE
 //	BUGBOT_SANDBOX_NETWORK
-//	BUGBOT_SANDBOX_DEP_STRATEGY      (off|host|fetch)
-//	BUGBOT_SANDBOX_CPUS
-//	BUGBOT_SANDBOX_MEMORY_MB
-//	BUGBOT_SANDBOX_TIMEOUT_SECONDS
-//	BUGBOT_DAEMON_POLL_INTERVAL
-//	BUGBOT_DAEMON_SWEEP_INTERVAL
-//	BUGBOT_DAEMON_IDLE_BACKOFF
-//	BUGBOT_DAEMON_REPRO_BACKLOG_INTERVAL
-//	BUGBOT_DAEMON_VERIFY_DRAIN_INTERVAL
-//	BUGBOT_DAEMON_IMPACT_SWEEP_INTERVAL
-//	BUGBOT_LLM_REQUEST_TIMEOUT
-//	BUGBOT_VERIFY_SANDBOX_EXEC        ("true" or "false")
+//	BUGBOT_SANDBOX_DEP_STRATEGY        (off|host|fetch)
+//	BUGBOT_SANDBOX_CPUS                (integer > 0)
+//	BUGBOT_SANDBOX_MEMORY_MB           (integer > 0)
+//	BUGBOT_SANDBOX_PIDS_LIMIT          (integer > 0)
+//	BUGBOT_SANDBOX_TIMEOUT_SECONDS     (integer > 0)
+//	BUGBOT_SANDBOX_IDLE_TIMEOUT_SECONDS (integer >= 0; 0 disables idle watchdog)
+//	BUGBOT_SCAN_CARTOGRAPHER           ("true" or "false")
+//	BUGBOT_SCAN_STATUS_NOTES           ("true" or "false")
+//	BUGBOT_SCAN_TOOL_COMPLAINTS        ("true" or "false")
+//	BUGBOT_SCAN_HEAT_ORDERING          ("true" or "false")
+//	BUGBOT_DAEMON_POLL_INTERVAL        (duration, e.g. "60s")
+//	BUGBOT_DAEMON_SWEEP_INTERVAL       (duration)
+//	BUGBOT_DAEMON_IDLE_BACKOFF         (duration)
+//	BUGBOT_DAEMON_REPRO_BACKLOG_INTERVAL (duration)
+//	BUGBOT_DAEMON_VERIFY_DRAIN_INTERVAL  (duration)
+//	BUGBOT_DAEMON_IMPACT_SWEEP_INTERVAL  (duration)
+//	BUGBOT_LLM_REQUEST_TIMEOUT         (duration; 0 uses LLM package default)
+//	BUGBOT_VERIFY_SANDBOX_EXEC         ("true" or "false")
 //	BUGBOT_VERIFY_SANDBOX_MIN_SEVERITY (critical|high|medium|low)
-//	BUGBOT_VERIFY_SANDBOX_MAX_EXECS   (integer >= 1)
-//	BUGBOT_PUBLISH_ENABLED            ("true" or "false")
-//	BUGBOT_PUBLISH_TIER_MIN           (integer 0..3)
-//	BUGBOT_PUBLISH_LABELS             (comma-separated label names)
-//	BUGBOT_PUBLISH_CLOSE_ON_FIXED     ("true" or "false")
-//	BUGBOT_REPRO_PATCH_PROVER         ("true" or "false")
-//	BUGBOT_REPRO_PATCH_MAX_ATTEMPTS   (integer >= 1)
-//	BUGBOT_REPRO_SUITE_CMD            (comma-separated argv)
-//	BUGBOT_REPRO_BACKLOG_BATCH        (integer >= 1)
-//	BUGBOT_REPRO_TRANSCRIPT_DIR      (directory for reproducer agent transcripts)
-//	BUGBOT_REPRO_SANDBOX_MAX_EXECS   (integer >= 1)
+//	BUGBOT_VERIFY_SANDBOX_MAX_EXECS    (integer >= 1)
+//	BUGBOT_PUBLISH_ENABLED             ("true" or "false")
+//	BUGBOT_PUBLISH_TIER_MIN            (integer 0..3)
+//	BUGBOT_PUBLISH_LABELS              (comma-separated label names)
+//	BUGBOT_PUBLISH_CLOSE_ON_FIXED      ("true" or "false")
+//	BUGBOT_REPRO_PATCH_PROVER          ("true" or "false")
+//	BUGBOT_REPRO_PATCH_MAX_ATTEMPTS    (integer >= 1)
+//	BUGBOT_REPRO_MAX_ATTEMPTS          (integer >= 1)
+//	BUGBOT_REPRO_SUITE_CMD             (comma-separated argv)
+//	BUGBOT_REPRO_BACKLOG_BATCH         (integer >= 1)
+//	BUGBOT_REPRO_SANDBOX_MAX_EXECS     (integer >= 1)
+//	BUGBOT_REPRO_TRANSCRIPT_DIR        (directory for reproducer agent transcripts)
 func applyEnvOverrides(cfg *Config, environ []string) error {
 	env := make(map[string]string, len(environ))
 	for _, kv := range environ {

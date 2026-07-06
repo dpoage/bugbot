@@ -77,7 +77,7 @@ exposed as a one-shot command for manual operation or scripted workflows.`,
 				return err
 			}
 			if sandboxDegraded {
-				printSandboxDegradedWarning(cmd.OutOrStdout())
+				printSandboxDegradedWarning(cmd.ErrOrStderr())
 			}
 
 			f, err := funnel.New(funnel.RoleClients{

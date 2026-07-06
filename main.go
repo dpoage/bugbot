@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -11,6 +12,10 @@ import (
 func main() {
 	if err := cli.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "bugbot:", err)
-		os.Exit(1)
+		var gateErr *cli.GateError
+		if errors.As(err, &gateErr) {
+			os.Exit(cli.ExitGateFailure)
+		}
+		os.Exit(cli.ExitError)
 	}
 }

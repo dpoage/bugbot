@@ -43,7 +43,6 @@ type ScanFlags struct {
 	// To is the upper bound of a commit range scan; defaults to HEAD when
 	// empty. It is only consulted when From is also set.
 	To          string
-	IncludeT3   bool
 	Concurrency int
 	Refuters    int
 	Lenses      []string
@@ -98,7 +97,6 @@ func newScanCmd() *cobra.Command {
 
 	addTargetFlag(cmd, &flags.Target)
 	cmd.Flags().StringVar(&flags.Since, "since", "", "scan only the blast radius of changes since this commit (targeted scan)")
-	cmd.Flags().BoolVar(&flags.IncludeT3, "include-suspected", false, "include T3 (suspected) findings in output (reserved; this stage emits T2)")
 	cmd.Flags().IntVar(&flags.Concurrency, "concurrency", funnel.DefaultMaxParallel, "number of parallel agents")
 	cmd.Flags().IntVar(&flags.Refuters, "refuters", funnel.DefaultRefuters, "number of adversarial refuter agents per candidate")
 	cmd.Flags().StringSliceVar(&flags.Lenses, "lens", nil, "restrict finder lenses (repeatable); default is all built-in lenses")
@@ -137,6 +135,7 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 	}
 
 	out := cmd.OutOrStdout()
+	errOut := cmd.ErrOrStderr()
 
 	// Activity visibility: a snapshot sink (so `bugbot status` can read this
 	// run from another terminal) plus a live renderer — an in-place ANSI pane
@@ -147,11 +146,11 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 		pane     *progress.PaneRenderer
 		liveSink progress.EventSink
 	)
-	if progress.IsTerminal(out) {
-		pane = progress.NewPaneRenderer(out, 0)
+	if progress.IsTerminal(errOut) {
+		pane = progress.NewPaneRenderer(errOut, 0)
 		liveSink = pane
 	} else {
-		liveSink = progress.NewLogRenderer(out)
+		liveSink = progress.NewLogRenderer(errOut)
 	}
 	progressSink := progress.NewMulti(liveSink, snap)
 	stopPane := func() {
@@ -163,7 +162,7 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 	defer stopPane()
 
 	// Build the reproducer and wire it as an in-run hook when --repro is set.
-	reproHook, reproRec, r, reproAttempted, err := buildReproHookForScan(ctx, out, cfg, st, flags, progressSink)
+	reproHook, reproRec, r, reproAttempted, err := buildReproHookForScan(ctx, errOut, cfg, st, flags, progressSink)
 	if err != nil {
 		return err
 	}
@@ -179,7 +178,7 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 		return sbErr
 	}
 	if sandboxDegraded {
-		printSandboxDegradedWarning(cmd.OutOrStdout())
+		printSandboxDegradedWarning(errOut)
 	}
 	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer, Arbiter: arbiter}, st, repo, opts)
 	if err != nil {
@@ -212,7 +211,7 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 			return fmt.Errorf("diff %s..%s: %w", fromRef, toRef, cerr)
 		}
 		changed = ingest.ChangedPaths(changes)
-		_, _ = fmt.Fprintf(out, "Targeted scan: %d changed file(s) since %s\n", len(changed), fromRef)
+		_, _ = fmt.Fprintf(errOut, "Targeted scan: %d changed file(s) since %s\n", len(changed), fromRef)
 	case flags.From != "":
 		fromRef = flags.From
 		toRef = flags.To
@@ -228,7 +227,7 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 			return fmt.Errorf("diff %s..%s: %w", fromRef, toRef, cerr)
 		}
 		changed = ingest.ChangedPaths(changes)
-		_, _ = fmt.Fprintf(out, "Regress scan: %d changed file(s) in %s..%s\n", len(changed), fromRef, toRef)
+		_, _ = fmt.Fprintf(errOut, "Regress scan: %d changed file(s) in %s..%s\n", len(changed), fromRef, toRef)
 	}
 	if fromRef != "" {
 		// Populate ChangeContext for the diff-intent lens. Failures are
@@ -322,10 +321,9 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 	stopPane()
 
 	if drainErr != nil && ctx.Err() == nil {
-		_, _ = fmt.Fprintf(out, "\nWarning: post-scan drain incomplete (finding severities may be stale): %v\n", drainErr)
+		_, _ = fmt.Fprintf(errOut, "\nWarning: post-scan drain incomplete (finding severities may be stale): %v\n", drainErr)
 	}
 
-	_ = flags.IncludeT3 // reserved: this stage emits T2 only; T3 filtering arrives with the report stage
 	printResult(out, res)
 
 	if flags.From != "" {
@@ -349,7 +347,7 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 		// by a very fast scan with a slow sandbox. Using the same
 		// PromoteAll path here means the daemon drain's rotation logic (touch
 		// failed findings) also runs for any catch-up attempts.
-		if err := runReproCatchUp(ctx, out, r, st, res.Findings, reproAttempted); err != nil {
+		if err := runReproCatchUp(ctx, errOut, r, st, res.Findings, reproAttempted); err != nil {
 			return err
 		}
 	}
@@ -361,8 +359,8 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 	if res.Stats.MostFindersFailed() {
 		cmd.SilenceUsage = true
 		cmd.SilenceErrors = true
-		return fmt.Errorf("scan unreliable: %d of %d finder agents produced no parseable output",
-			res.Stats.FinderFailures, res.Stats.FinderRuns)
+		return newGateError(fmt.Sprintf("scan unreliable: %d of %d finder agents produced no parseable output",
+			res.Stats.FinderFailures, res.Stats.FinderRuns))
 	}
 	return nil
 }

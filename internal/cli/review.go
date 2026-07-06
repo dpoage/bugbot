@@ -67,6 +67,7 @@ func newReviewCmd() *cobra.Command {
 			}
 
 			out := cmd.OutOrStdout()
+			errOut := cmd.ErrOrStderr()
 			gh := realGH
 
 			run, err := executeReview(ctx, reviewParams{
@@ -80,6 +81,7 @@ func newReviewCmd() *cobra.Command {
 				dryRun:      dryRun,
 				gh:          gh,
 				out:         out,
+				errOut:      errOut,
 			})
 			if err != nil {
 				cmd.SilenceUsage = true
@@ -159,6 +161,7 @@ type reviewParams struct {
 	dryRun      bool
 	gh          ghRunner
 	out         io.Writer
+	errOut      io.Writer
 }
 
 // reviewRun is the outcome executeReview reports to the gate logic.
@@ -229,11 +232,11 @@ func executeReview(ctx context.Context, p reviewParams) (reviewRun, error) {
 // new bugs; re-posts of already-known findings and failOn=="none" return nil.
 func reviewGateError(run reviewRun, failOn string, prNumber int) error {
 	if run.result.Stats.MostFindersFailed() {
-		return fmt.Errorf("review unreliable: %d of %d finder agents produced no parseable output",
-			run.result.Stats.FinderFailures, run.result.Stats.FinderRuns)
+		return newGateError(fmt.Sprintf("review unreliable: %d of %d finder agents produced no parseable output",
+			run.result.Stats.FinderFailures, run.result.Stats.FinderRuns))
 	}
 	if failOn == "verified" && run.newVerifiedCount > 0 {
-		return fmt.Errorf("PR review gate: %d new verified finding(s) on PR #%d", run.newVerifiedCount, prNumber)
+		return newGateError(fmt.Sprintf("PR review gate: %d new verified finding(s) on PR #%d", run.newVerifiedCount, prNumber))
 	}
 	return nil
 }
@@ -266,13 +269,13 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 		Lenses:      p.lenses,
 		Refuters:    p.refuters,
 		MaxParallel: p.concurrency,
-		Progress:    progress.NewLogRenderer(p.out),
+		Progress:    progress.NewLogRenderer(p.errOut),
 	})
 	if sbErr != nil {
 		return nil, sbErr
 	}
 	if sbDegraded {
-		printSandboxDegradedWarning(p.out)
+		printSandboxDegradedWarning(p.errOut)
 	}
 	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer, Arbiter: arbiter}, st, repo, opts)
 	if err != nil {
