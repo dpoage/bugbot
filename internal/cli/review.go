@@ -8,10 +8,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/engine"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
-	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
 )
 
@@ -70,9 +70,14 @@ func newReviewCmd() *cobra.Command {
 			errOut := cmd.ErrOrStderr()
 			gh := realGH
 
+			d, err := engine.Open(ctx, cfg, progress.NewLogRenderer(errOut))
+			if err != nil {
+				return err
+			}
+			defer func() { _ = d.Close() }()
+
 			run, err := executeReview(ctx, reviewParams{
-				cfg:         cfg,
-				reviewCfg:   reviewCfg,
+				d:           d,
 				target:      target,
 				prNumber:    prNumber,
 				concurrency: concurrency,
@@ -82,6 +87,7 @@ func newReviewCmd() *cobra.Command {
 				gh:          gh,
 				out:         out,
 				errOut:      errOut,
+				reviewCfg:   reviewCfg,
 			})
 			if err != nil {
 				cmd.SilenceUsage = true
@@ -151,7 +157,7 @@ func validateReviewFlags(rc reviewConfig) error {
 // reviewParams bundles everything executeReview needs, so the RunE closure stays
 // thin and the orchestration is testable with a fake gh.
 type reviewParams struct {
-	cfg         config.Config
+	d           *engine.Dispatcher
 	reviewCfg   reviewConfig
 	target      string
 	prNumber    int
@@ -241,20 +247,10 @@ func reviewGateError(run reviewRun, failOn string, prNumber int) error {
 	return nil
 }
 
-// runReviewScan wires the funnel exactly like scan.go and runs a Targeted scan
-// over the PR's changed files (blast radius applied internally by the funnel).
+// runReviewScan delegates to engine.Dispatcher.Review, which wires the
+// funnel exactly like scan.go and runs a Targeted scan over the PR's changed
+// files (blast radius applied internally by the funnel).
 func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr prInfo) (*funnel.Result, error) {
-	st, err := store.Open(ctx, p.cfg.Storage.Path)
-	if err != nil {
-		return nil, fmt.Errorf("open store: %w", err)
-	}
-	defer closeStore(st)
-
-	finder, verifier, cartographer, arbiter, err := buildRoleClients(ctx, &p.cfg)
-	if err != nil {
-		return nil, err
-	}
-
 	// PR base..head changed files drive the targeted scan; the funnel expands the
 	// blast radius and intersects with scan scope internally.
 	changes, err := repo.ChangedFiles(ctx, pr.BaseSHA, pr.HeadSHA)
@@ -262,28 +258,19 @@ func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr pr
 		return nil, fmt.Errorf("diff %s..%s: %w", util.ShortSHA(pr.BaseSHA), util.ShortSHA(pr.HeadSHA), err)
 	}
 	changed := ingest.ChangedPaths(changes)
-	_, _ = fmt.Fprintf(p.out, "Reviewing PR #%d: %d changed file(s) (%s..%s)\n",
-		p.prNumber, len(changed), util.ShortSHA(pr.BaseSHA), util.ShortSHA(pr.HeadSHA))
 
-	opts, sbDegraded, sbErr := buildFunnelOptions(p.cfg, FunnelOptionOverrides{
-		Lenses:      p.lenses,
+	return p.d.Review(ctx, engine.ReviewOpts{
+		Repo:        repo,
+		PRNumber:    p.prNumber,
+		BaseSHA:     pr.BaseSHA,
+		HeadSHA:     pr.HeadSHA,
+		Changed:     changed,
+		Concurrency: p.concurrency,
 		Refuters:    p.refuters,
-		MaxParallel: p.concurrency,
-		Progress:    progress.NewLogRenderer(p.errOut),
+		Lenses:      p.lenses,
+		Out:         p.out,
+		ErrOut:      p.errOut,
 	})
-	if sbErr != nil {
-		return nil, sbErr
-	}
-	if sbDegraded {
-		printSandboxDegradedWarning(p.errOut)
-	}
-	f, err := funnel.New(funnel.RoleClients{Finder: finder, Verifier: verifier, Cartographer: cartographer, Arbiter: arbiter}, st, repo, opts)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	return f.Targeted(ctx, changed)
 }
 
 // applyPlan executes the decided sync actions against gh, unless dryRun. Skips
