@@ -116,16 +116,26 @@ func isLocked(err error) bool {
 	return errors.As(err, &locked)
 }
 
+// dispatcherOf converts disp to the tui-local dispatcher interface, taking
+// care NOT to produce the classic Go footgun: assigning a nil *T to an
+// interface variable makes the interface itself non-nil (it holds a nil
+// pointer but a concrete type), so a naive `var d dispatcher = disp` would
+// make confirmPaletteRow's `m.disp == nil` gate check always false even for
+// a nil *engine.Dispatcher. Returning the untyped nil interface value here
+// when disp == nil keeps that comparison meaningful.
+func dispatcherOf(disp *engine.Dispatcher) dispatcher {
+	if disp == nil {
+		return nil
+	}
+	return disp
+}
+
 // runProgram drives a full-screen bubbletea program over feed until the user
 // quits. Shared by every mode: Model needs zero changes to render either
 // feed's Frames. disp is nil outside Owner mode, disabling the dispatch
 // palette.
 func runProgram(ctx context.Context, feed Feed, disp *engine.Dispatcher) error {
-	var d dispatcher
-	if disp != nil {
-		d = disp
-	}
-	p := tea.NewProgram(NewModel(ctx, feed, d), tea.WithAltScreen(), tea.WithContext(ctx))
+	p := tea.NewProgram(NewModel(ctx, feed, dispatcherOf(disp)), tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()
 	return err
 }

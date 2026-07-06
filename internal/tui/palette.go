@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -123,9 +124,11 @@ func (m Model) paletteRowLabel(row paletteRow) string {
 
 // capBuffer is a bounded io.Writer: it retains only the last capBufferMax
 // bytes written, so routing a dispatch verb's Out/ErrOut through it can
-// never grow Model's memory unboundedly across a long scan. Safe for
-// concurrent use — dispatchCmd's goroutine writes to it while the Update
-// thread may read Tail() concurrently via View().
+// never grow Model's memory unboundedly across a long scan. Its mutex is
+// defensive rather than load-bearing today (dispatchCmd's goroutine only
+// ever finishes writing before its dispatchDoneMsg is delivered to Update,
+// which is the only place Tail() is read — see Model's lastOut), but keeps
+// capBuffer itself safe to read from at any point without relying on that.
 type capBuffer struct {
 	mu  sync.Mutex
 	buf []byte
@@ -169,8 +172,13 @@ type dispatchDoneMsg struct {
 // its progress sink, live agent/stage/spend updates already flow through
 // there with no extra wiring — out only backstops the small amount of
 // incidental text these verbs also print.
-func dispatchCmd(ctx context.Context, disp dispatcher, row paletteRow, since string, maxNText string, suspected bool, out *capBuffer) tea.Cmd {
+func dispatchCmd(ctx context.Context, cancel context.CancelFunc, disp dispatcher, row paletteRow, since string, maxNText string, suspected bool, out *capBuffer) tea.Cmd {
 	return func() tea.Msg {
+		// Always release runCtx's resources once the verb returns, on every
+		// path (success, error, or an already-cancelled ctx) — cancelRun
+		// only calls this on ctrl+x/esc, so without this defer a dispatch
+		// that runs to completion on its own would leak its cancelCtx.
+		defer cancel()
 		switch row {
 		case rowScanSweep:
 			res, err := disp.Scan(ctx, engine.ScanOpts{Out: out, ErrOut: out})
@@ -334,7 +342,7 @@ func (m Model) confirmPaletteRow() (Model, tea.Cmd) {
 	m.runOut = &capBuffer{}
 	m.palette.open = false
 
-	return m, dispatchCmd(runCtx, m.disp, row, since, maxNText, suspected, m.runOut)
+	return m, dispatchCmd(runCtx, cancel, m.disp, row, since, maxNText, suspected, m.runOut)
 }
 
 // cancelRun stops the active dispatch's context, if one is running. The
@@ -396,6 +404,10 @@ func (m Model) viewPalette() string {
 		b = append(b, sectionStyle.Render("last dispatch")...)
 		b = append(b, '\n')
 		b = append(b, dispatchResultLine(m.lastVerb, m.lastErr, m.lastResult)...)
+		if tail := lastOutTail(m.lastOut); tail != "" {
+			b = append(b, '\n')
+			b = append(b, dimStyle.Render(tail)...)
+		}
 	}
 
 	return string(b)
@@ -428,4 +440,23 @@ func (m Model) dispatchStatusLine() (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// lastOutTailLines bounds how much of a completed dispatch's own Out/ErrOut
+// text the palette shows underneath its typed *Result summary — a raw dump
+// of capBuffer's full retained tail would overwhelm the overlay.
+const lastOutTailLines = 5
+
+// lastOutTail returns the last lastOutTailLines non-empty lines of out,
+// trimmed, joined back with newlines — "" when out is blank.
+func lastOutTail(out string) string {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return ""
+	}
+	lines := strings.Split(out, "\n")
+	if len(lines) > lastOutTailLines {
+		lines = lines[len(lines)-lastOutTailLines:]
+	}
+	return strings.Join(lines, "\n")
 }

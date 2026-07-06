@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/engine"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -186,5 +187,54 @@ func TestSelectFeed_ErrLockedFallsBackToObserver(t *testing.T) {
 	}
 	if disp != nil {
 		t.Errorf("selectFeed() Dispatcher = %v, want nil (ErrLocked fallback)", disp)
+	}
+}
+
+// TestDispatcherOf_NilPointerYieldsNilInterface is a regression test for the
+// classic Go typed-nil footgun: assigning a nil *engine.Dispatcher directly
+// to a dispatcher interface variable produces a NON-nil interface (it holds
+// a nil pointer but a concrete type), which would make
+// confirmPaletteRow's/handlePaletteKey's `m.disp == nil` gate silently
+// always false — i.e. dispatch would look "enabled" even in Observer mode
+// or against a never-run repo. dispatcherOf must return the untyped nil
+// interface value for a nil pointer so that comparison stays meaningful,
+// end to end from selectFeed's nil Dispatcher through to Model.disp.
+func TestDispatcherOf_NilPointerYieldsNilInterface(t *testing.T) {
+	var nilDisp *engine.Dispatcher // the exact value selectFeed returns outside Owner mode
+
+	d := dispatcherOf(nilDisp)
+	if d != nil {
+		t.Fatalf("dispatcherOf(nil *engine.Dispatcher) = %#v, want a genuine nil interface", d)
+	}
+
+	// Threaded all the way into Model, the gate a real palette keypress
+	// relies on must see nil too.
+	m := NewModel(context.Background(), &fakeFeed{}, d)
+	if m.disp != nil {
+		t.Fatalf("Model.disp = %#v after dispatcherOf(nil), want nil", m.disp)
+	}
+}
+
+// TestDispatcherOf_NonNilPointerYieldsUsableInterface is
+// TestDispatcherOf_NilPointerYieldsNilInterface's counterpart: a real
+// *engine.Dispatcher must convert to a non-nil dispatcher whose Mode() is
+// reachable through the interface, so Owner mode's dispatch stays enabled.
+func TestDispatcherOf_NonNilPointerYieldsUsableInterface(t *testing.T) {
+	ctx := context.Background()
+	cfg := runTestConfig(t)
+	seedExistingStore(t, ctx, cfg)
+
+	disp, err := engine.Open(ctx, cfg, nil)
+	if err != nil {
+		t.Fatalf("engine.Open() error = %v", err)
+	}
+	defer func() { _ = disp.Close() }()
+
+	d := dispatcherOf(disp)
+	if d == nil {
+		t.Fatal("dispatcherOf(non-nil *engine.Dispatcher) = nil, want a usable dispatcher")
+	}
+	if d.Mode() != engine.Owner {
+		t.Errorf("Mode() through the interface = %v, want Owner", d.Mode())
 	}
 }

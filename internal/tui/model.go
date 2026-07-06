@@ -105,10 +105,15 @@ type Model struct {
 	// lastVerb/lastErr/lastResult describe the most recently COMPLETED
 	// dispatch (success, error, or cancelled), rendered on the Cockpit
 	// status line and in the palette overlay until superseded by the next
-	// run.
+	// run. lastOut is the tail of that run's own Out/ErrOut text (see
+	// capBuffer) — surfaced in the palette's "last dispatch" detail
+	// alongside lastResult's typed *Result summary, since a verb can also
+	// print incidental status text a typed summary does not capture (e.g.
+	// Verify's "no pending candidates" line, a sandbox-degraded warning).
 	lastVerb   string
 	lastErr    error
 	lastResult string
+	lastOut    string
 }
 
 // NewModel builds the initial Model for feed. disp is the dispatch
@@ -191,9 +196,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, repaintTick()
 
 	case dispatchDoneMsg:
+		// runCancel is idempotent (context.CancelFunc): calling it here even
+		// though dispatchCmd's own defer already released runCtx on every
+		// path keeps the invariant simple ("Model never forgets to call a
+		// cancel it created") regardless of which path got here first.
+		if m.runCancel != nil {
+			m.runCancel()
+		}
 		m.running = false
 		m.runCancel = nil
 		m.runVerb = ""
+		// Capture the verb's own captured Out/ErrOut text before dropping
+		// the buffer — this is the only place runOut's contents are ever
+		// read (dispatchCmd only writes it), so a run whose funnel prints
+		// something beyond its typed *Result (e.g. Verify's "no pending
+		// candidates" line, or a sandbox-degraded warning) is not silently
+		// discarded.
+		if m.runOut != nil {
+			m.lastOut = m.runOut.Tail()
+		}
+		m.runOut = nil
 		m.lastVerb = msg.verb
 		m.lastErr = msg.err
 		m.lastResult = msg.summary
@@ -225,6 +247,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.filtering {
 		switch msg.Type {
 		case tea.KeyCtrlC:
+			if m.running {
+				m = m.cancelRun()
+			}
 			m.quitting = true
 			return m, tea.Quit
 		case tea.KeyEsc:
@@ -252,6 +277,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.screen == screenAgentDetail {
 		switch msg.String() {
 		case "ctrl+c", "q":
+			if m.running {
+				m = m.cancelRun()
+			}
 			m.quitting = true
 			return m, tea.Quit
 		case "tab":
@@ -270,6 +298,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "ctrl+c", "q":
+		if m.running {
+			m = m.cancelRun()
+		}
 		m.quitting = true
 		return m, tea.Quit
 
