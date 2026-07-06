@@ -84,3 +84,66 @@ func (c *scriptedClient) taskText(n int) string {
 }
 
 var _ llm.Client = (*scriptedClient)(nil)
+
+// toolScriptStep is one programmed turn of a toolScriptedClient: either a
+// tool-use response (built via toolCallStep) or a plain end-turn text
+// response (built via textStep).
+type toolScriptStep struct {
+	resp llm.Response
+}
+
+// toolCallStep builds a tool-use step requesting a single call to name with
+// the given raw JSON args string.
+func toolCallStep(id, name, args string) toolScriptStep {
+	return toolScriptStep{resp: llm.Response{
+		StopReason: llm.StopToolUse,
+		ToolCalls:  []llm.ToolCall{{ID: id, Name: name, Arguments: []byte(args)}},
+		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5},
+	}}
+}
+
+// textStep builds an end-turn text response, e.g. the final JSON plan a
+// RunJSON caller parses once the model stops requesting tools.
+func textStep(text string) toolScriptStep {
+	return toolScriptStep{resp: llm.Response{
+		Text:       text,
+		StopReason: llm.StopEndTurn,
+		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5},
+	}}
+}
+
+// toolScriptedClient is a sequential fake llm.Client that can request tool
+// calls, unlike scriptedClient (which only ever returns final text). It
+// exists to exercise the reproducer's tool loop (try_repro) end-to-end: each
+// call to Complete returns the next scripted step in order; once exhausted it
+// returns a benign end-turn so an over-running test fails on assertions
+// rather than panicking on an out-of-range index.
+type toolScriptedClient struct {
+	mu       sync.Mutex
+	steps    []toolScriptStep
+	idx      int
+	requests []llm.Request
+}
+
+func newToolScriptedClient(steps ...toolScriptStep) *toolScriptedClient {
+	return &toolScriptedClient{steps: steps}
+}
+
+func (c *toolScriptedClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+
+func (c *toolScriptedClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+	if err := ctx.Err(); err != nil {
+		return llm.Response{}, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.requests = append(c.requests, req)
+	if c.idx >= len(c.steps) {
+		return llm.Response{Text: "(unscripted)", StopReason: llm.StopEndTurn}, nil
+	}
+	step := c.steps[c.idx]
+	c.idx++
+	return step.resp, nil
+}
+
+var _ llm.Client = (*toolScriptedClient)(nil)
