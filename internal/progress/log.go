@@ -81,6 +81,19 @@ func (r *LogRenderer) line(ev Event) string {
 		return "budget stopped: " + ev.Message
 	case KindLensFailed:
 		return "LENS FAILED: " + ev.Message
+	case KindAgentActivity:
+		// Low-volume roles only: the funnel's finder/verifier agents run in
+		// large parallel batches and would flood the log with one line per
+		// tool-call turn. Reproducer and patch-prover run at most a couple at a
+		// time (one per finding, bounded parallelism), so their activity is
+		// worth a line.
+		if ev.Role != RoleReproducer && ev.Role != RolePatchProver {
+			return ""
+		}
+		return fmt.Sprintf("agent: %s [%s] %s", ev.Role, ev.Label, ev.Activity)
+	case KindReproAttempt:
+		return fmt.Sprintf("repro attempt %d/%d: %s dur=%s — %s",
+			ev.Attempt, ev.MaxAttempts, ev.Verdict, ev.Duration.Round(timeRound), ev.Label)
 	case KindToolUnhealthy:
 		return "TOOL UNHEALTHY: " + ev.Tool + " (" + ev.Severity + "): " + ev.Message
 	case KindSpendTick:
@@ -145,6 +158,14 @@ func (r *LogRenderer) handleSlog(ev Event) {
 		r.log.Warn("progress: budget stopped", "detail", ev.Message)
 	case KindLensFailed:
 		r.log.Warn("progress: lens failed", "role", ev.Role, "label", ev.Label, "detail", ev.Message)
+	case KindAgentActivity:
+		if ev.Role != RoleReproducer && ev.Role != RolePatchProver {
+			return
+		}
+		r.log.Info("progress: agent activity", "role", ev.Role, "label", ev.Label, "activity", ev.Activity)
+	case KindReproAttempt:
+		r.log.Info("progress: repro attempt", "attempt", ev.Attempt, "max_attempts", ev.MaxAttempts,
+			"verdict", ev.Verdict, "duration", ev.Duration.String(), "label", ev.Label)
 	case KindToolUnhealthy:
 		r.log.Warn("progress: tool unhealthy", "tool", ev.Tool, "severity", ev.Severity, "detail", ev.Message)
 	default:

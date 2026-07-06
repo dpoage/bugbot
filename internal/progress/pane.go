@@ -168,6 +168,17 @@ func (p *PaneRenderer) apply(ev Event) {
 		if a, ok := p.agents[agentKey(ev.Role, ev.Label)]; ok {
 			a.activity = ev.Activity
 		}
+	case KindReproAttempt:
+		// Fold into the matching active agent's activity note so the pane's
+		// per-agent line shows round progress (the same slot KindAgentActivity
+		// updates for tool-call notes); also surface it as the last event so a
+		// single-line tail of the pane still shows repro progress even for a
+		// viewer not watching the per-agent rows.
+		note := fmt.Sprintf("attempt %d/%d: %s", ev.Attempt, ev.MaxAttempts, ev.Verdict)
+		if a, ok := p.agents[agentKey(ev.Role, ev.Label)]; ok {
+			a.activity = note
+		}
+		p.lastEvent = fmt.Sprintf("repro %s — %s", note, ev.Label)
 	case KindSpendTick:
 		p.inTokens = ev.InputTokens
 		p.outTokens = ev.OutputTokens

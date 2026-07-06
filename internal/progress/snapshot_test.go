@@ -2,6 +2,7 @@ package progress
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -521,6 +522,74 @@ func TestSnapshot_AgentActivity_SurvivesRefreshAgents(t *testing.T) {
 	}
 	if !st2.ActiveAgents[0].ActivityAt.Equal(actAt2) {
 		t.Errorf("ActivityAt = %v, want %v", st2.ActiveAgents[0].ActivityAt, actAt2)
+	}
+}
+
+// TestSnapshot_ReproAttempt_UpdatesTrackedAgentAndLastEvent verifies that a
+// KindReproAttempt event folds into the matching tracked agent's Activity
+// (same slot as KindAgentActivity) and always sets Status.LastEvent, so
+// `bugbot status` surfaces repro round progress.
+func TestSnapshot_ReproAttempt_UpdatesTrackedAgentAndLastEvent(t *testing.T) {
+	clock := time.Unix(53000, 0)
+	now := func() time.Time { return clock }
+	s, path := newTestSnapshot(t, now)
+
+	s.Handle(Event{Kind: KindAgentStarted, Role: RoleReproducer, Label: "nil deref", Time: clock})
+
+	clock = clock.Add(2 * time.Second)
+	attemptAt := clock
+	s.Handle(Event{
+		Kind: KindReproAttempt, Role: RoleReproducer, Label: "nil deref",
+		Attempt: 1, MaxAttempts: 2, Verdict: "exit_zero", Time: attemptAt,
+	})
+
+	// Force a write past the rate-limit window with an event that does not
+	// itself set LastEvent (spend ticks are silent on that field), so the
+	// assertion below observes the repro attempt's own LastEvent untouched.
+	clock = clock.Add(2 * time.Second)
+	s.Handle(Event{Kind: KindSpendTick, InputTokens: 1, Time: clock})
+
+	st, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if len(st.ActiveAgents) != 1 {
+		t.Fatalf("ActiveAgents = %d, want 1", len(st.ActiveAgents))
+	}
+	a := st.ActiveAgents[0]
+	if a.Activity != "attempt 1/2: exit_zero" {
+		t.Errorf("Activity = %q, want %q", a.Activity, "attempt 1/2: exit_zero")
+	}
+	if !a.ActivityAt.Equal(attemptAt) {
+		t.Errorf("ActivityAt = %v, want %v", a.ActivityAt, attemptAt)
+	}
+	if !strings.Contains(st.LastEvent, "nil deref") || !strings.Contains(st.LastEvent, "attempt 1/2: exit_zero") {
+		t.Errorf("LastEvent = %q, want it to mention the attempt and label", st.LastEvent)
+	}
+}
+
+// TestSnapshot_ReproAttempt_IgnoresUntracked verifies a KindReproAttempt for
+// an agent not in the tracked map still updates LastEvent but does not
+// resurrect/create an agent entry.
+func TestSnapshot_ReproAttempt_IgnoresUntracked(t *testing.T) {
+	clock := time.Unix(54000, 0)
+	now := func() time.Time { return clock }
+	s, path := newTestSnapshot(t, now)
+
+	s.Handle(Event{
+		Kind: KindReproAttempt, Role: RoleReproducer, Label: "ghost",
+		Attempt: 1, MaxAttempts: 2, Verdict: "timeout", Time: clock,
+	})
+
+	st, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if len(st.ActiveAgents) != 0 {
+		t.Errorf("untracked repro attempt must not create an agent entry; got %+v", st.ActiveAgents)
+	}
+	if !strings.Contains(st.LastEvent, "ghost") {
+		t.Errorf("LastEvent = %q, want it to still mention the finding", st.LastEvent)
 	}
 }
 

@@ -2,6 +2,7 @@ package progress
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -244,6 +245,18 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 			a.ActivityAt = ev.Time
 			s.agents[agentKey(ev.Role, ev.Label)] = a
 		}
+	case KindReproAttempt:
+		// Same fold as KindAgentActivity: surface the round as the tracked
+		// agent's activity note (a reader of `bugbot status` sees round
+		// progress the same way it sees tool-call activity), plus LastEvent so
+		// it's visible even once the agent has finished and been removed.
+		note := fmt.Sprintf("attempt %d/%d: %s", ev.Attempt, ev.MaxAttempts, ev.Verdict)
+		if a, ok := s.agents[agentKey(ev.Role, ev.Label)]; ok {
+			a.Activity = note
+			a.ActivityAt = ev.Time
+			s.agents[agentKey(ev.Role, ev.Label)] = a
+		}
+		s.st.LastEvent = "repro " + note + " — " + ev.Label
 	case KindSpendTick:
 		s.st.SpendInput = ev.InputTokens
 		s.st.SpendOutput = ev.OutputTokens
