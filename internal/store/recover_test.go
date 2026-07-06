@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // TestCheck_CleanStore: Check returns nil on a freshly-migrated store.
@@ -94,7 +96,7 @@ func TestRecover_DamagedSourceProducesCleanDB(t *testing.T) {
 	// Several rows across pages so corruption has something to bite.
 	for i := 0; i < 40; i++ {
 		f := sampleFinding()
-		f.Fingerprint = Fingerprint("race", "internal/x/y.go", string(rune('a'+i%26))+string(rune('0'+i/26)))
+		f.Fingerprint = domain.Fingerprint("race", "internal/x/y.go", string(rune('a'+i%26))+string(rune('0'+i/26)))
 		if _, err := st.UpsertFinding(ctx, f); err != nil {
 			t.Fatalf("seed finding %d: %v", i, err)
 		}
@@ -157,7 +159,7 @@ func TestCheck_DetectsCorruptionAsErrCorrupt(t *testing.T) {
 	}
 	for i := 0; i < 60; i++ {
 		f := sampleFinding()
-		f.Fingerprint = Fingerprint("race", "f.go", fmt.Sprintf("%d", i))
+		f.Fingerprint = domain.Fingerprint("race", "f.go", fmt.Sprintf("%d", i))
 		if _, err := st.UpsertFinding(ctx, f); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
 		}

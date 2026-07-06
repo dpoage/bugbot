@@ -111,17 +111,17 @@ func provenanceFromConfig(cfg config.Config) publishProvenance {
 func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, cfg config.Publish, prov publishProvenance, tierMin int, dryRun bool) error {
 
 	// Gather inputs for the pure planner.
-	openFindings, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	openFindings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil {
 		return fmt.Errorf("publish: list open findings: %w", err)
 	}
 
 	// Also load fixed+dismissed to drive close actions.
-	fixedFindings, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusFixed})
+	fixedFindings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusFixed})
 	if err != nil {
 		return fmt.Errorf("publish: list fixed findings: %w", err)
 	}
-	dismissedFindings, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusDismissed})
+	dismissedFindings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusDismissed})
 	if err != nil {
 		return fmt.Errorf("publish: list dismissed findings: %w", err)
 	}
@@ -313,16 +313,16 @@ func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, 
 type publishAction interface{ publishAction() }
 
 // publishCreate plans a new GitHub issue for a finding with no published row.
-type publishCreate struct{ finding store.Finding }
+type publishCreate struct{ finding domain.Finding }
 
 // publishRecover plans a marker search + adopt-or-create for a finding whose
 // published row is stuck in "pending" (interrupted create).
-type publishRecover struct{ finding store.Finding }
+type publishRecover struct{ finding domain.Finding }
 
 // publishUpdate plans a body re-push for a finding updated after its last
 // publish. issueNumber is the existing GitHub issue to PATCH.
 type publishUpdate struct {
-	finding     store.Finding
+	finding     domain.Finding
 	issueNumber int
 }
 
@@ -330,7 +330,7 @@ type publishUpdate struct {
 // resumes an interrupted close: the auto-close comment already landed, only
 // the state PATCH remains.
 type publishClose struct {
-	finding     store.Finding
+	finding     domain.Finding
 	issueNumber int
 	skipComment bool
 }
@@ -338,7 +338,7 @@ type publishClose struct {
 // publishSkip records that a finding already has an up-to-date published row.
 // issueNumber is carried for logging.
 type publishSkip struct {
-	finding     store.Finding
+	finding     domain.Finding
 	issueNumber int
 }
 
@@ -346,7 +346,7 @@ type publishSkip struct {
 // whose fingerprint drifted: instead of creating a duplicate, it records a
 // published_issues row mapping the new fingerprint to the existing issue number.
 type publishAdopt struct {
-	finding     store.Finding
+	finding     domain.Finding
 	issueNumber int
 }
 
@@ -360,7 +360,7 @@ func (publishAdopt) publishAction()   {}
 // pubAnchor is an open finding that already owns a published issue; adoptAnchor
 // matches a fingerprint-drifted re-discovery to one.
 type pubAnchor struct {
-	finding store.Finding
+	finding domain.Finding
 	issue   int
 }
 
@@ -369,7 +369,7 @@ type pubAnchor struct {
 // similar description), so the re-discovery adopts that issue instead of filing a
 // duplicate. Identical fingerprints are skipped: those are handled by the
 // published lookup, not by similarity.
-func adoptAnchor(f store.Finding, anchors []pubAnchor) (pubAnchor, bool) {
+func adoptAnchor(f domain.Finding, anchors []pubAnchor) (pubAnchor, bool) {
 	for _, a := range anchors {
 		if a.finding.Fingerprint == f.Fingerprint {
 			continue
@@ -399,7 +399,7 @@ func adoptAnchor(f store.Finding, anchors []pubAnchor) (pubAnchor, bool) {
 // Close rule: if close_on_fixed is true, any finding with status fixed or
 // dismissed whose published row state is "open" gets a close action.
 func planPublish(
-	open, fixed, dismissed []store.Finding,
+	open, fixed, dismissed []domain.Finding,
 	published map[string]store.PublishedIssue,
 	tierMin int,
 	closeOnFixed bool,
@@ -683,7 +683,7 @@ func isC0Control(c byte) bool {
 //   - Non-fenced model content placed inside <details> blocks (Reasoning) is
 //     passed through sanitizeDetailsTag() so a literal </details> sequence
 //     cannot close the block early.
-func renderIssueBody(f store.Finding, repoURL string, prov publishProvenance) string {
+func renderIssueBody(f domain.Finding, repoURL string, prov publishProvenance) string {
 	const (
 		maxDescription = 10 * 1024 // 10 KB cap on model-authored description
 		maxFixPatch    = 20 * 1024 // 20 KB cap on model-authored patch

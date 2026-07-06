@@ -47,19 +47,19 @@ func seedPriorRunFinding(t *testing.T, st *store.Store, file, lensA, desc string
 	if got := resolver.Resolve(file, candLine); got != locus {
 		t.Fatalf("precondition: lines %d and %d resolve to different loci (%q vs %q)", seedLine, candLine, locus, got)
 	}
-	seedFP = store.Fingerprint(lensA, file, locus)
-	if _, err := st.UpsertFinding(context.Background(), store.Finding{
+	seedFP = domain.Fingerprint(lensA, file, locus)
+	if _, err := st.UpsertFinding(context.Background(), domain.Finding{
 		Fingerprint: seedFP,
-		LocusKey:    store.LocusKey(file, locus),
+		LocusKey:    domain.LocusKey(file, locus),
 		Title:       "Leak leaks handle on error path",
 		Description: desc,
 		Severity:    "high",
 		Tier:        domain.TierVerified,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        lensA,
 		File:        file,
 		Line:        seedLine,
-		Sites:       []store.Site{{File: file, Line: seedLine}},
+		Sites:       []domain.Site{{File: file, Line: seedLine}},
 	}); err != nil {
 		t.Fatalf("seed prior-run finding: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestTriageState_DurableCrossLensFold(t *testing.T) {
 		t.Errorf("MergedCrossLens = %d, want 1", stats.MergedCrossLens)
 	}
 
-	all, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	all, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatalf("ListFindings: %v", err)
 	}

@@ -34,6 +34,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
@@ -99,7 +100,7 @@ func TestArbiterLive_ReplaySplits(t *testing.T) {
 	t.Logf("arbiter dep-source roots discovered (Go-only): %v", f.depRoots.Roots())
 	t.Logf("transcripts -> %s", transcriptDir)
 
-	open, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	open, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatalf("list findings: %v", err)
 	}
@@ -220,13 +221,13 @@ func envOr(key, def string) string {
 	return def
 }
 
-func findTarget(findings []store.Finding, tgt liveTarget) (store.Finding, bool) {
+func findTarget(findings []domain.Finding, tgt liveTarget) (domain.Finding, bool) {
 	for _, fnd := range findings {
 		if fnd.Line == tgt.line && strings.HasSuffix(fnd.File, tgt.fileSuffix) {
 			return fnd, true
 		}
 	}
-	return store.Finding{}, false
+	return domain.Finding{}, false
 }
 
 func truncate(s string, n int) string {

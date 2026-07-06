@@ -3,14 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
-)
 
-// ReproContradictionThreshold is the number of exit-zero (bug-did-not-manifest)
-// repro attempts required to set the repro-contradicted signal. Two independent
-// attempts, typically across code revisions of the same fingerprint, is the
-// minimum meaningful disconfirmation: a single pass could be a transient
-// environment issue; two passes suggest the bug is not reliably reproducible.
-const ReproContradictionThreshold = 2
+	"github.com/dpoage/bugbot/internal/domain"
+)
 
 // RecordExitZeroAttempt increments the exit_zero_count on the repro_attempts
 // row for the given fingerprint. It is called by promote.go's promoteOne
@@ -42,7 +37,7 @@ func (s *Store) RecordExitZeroAttempt(ctx context.Context, fingerprint string) e
 }
 
 // IsReproContradicted reports whether the finding identified by fingerprint has
-// accumulated at least ReproContradictionThreshold exit-zero attempts, meaning
+// accumulated at least domain.ReproContradictionThreshold exit-zero attempts, meaning
 // independent attempts (across code revisions) did not see the bug manifest.
 // Returns false when no repro_attempts row exists for the fingerprint.
 func (s *Store) IsReproContradicted(ctx context.Context, fingerprint string) (bool, error) {
@@ -60,11 +55,11 @@ func (s *Store) IsReproContradicted(ctx context.Context, fingerprint string) (bo
 	if err != nil {
 		return false, err
 	}
-	return count >= ReproContradictionThreshold, nil
+	return count >= domain.ReproContradictionThreshold, nil
 }
 
 // ReproContradictedFingerprints returns the fingerprints of all findings that
-// have accumulated at least ReproContradictionThreshold exit-zero repro
+// have accumulated at least domain.ReproContradictionThreshold exit-zero repro
 // attempts. This is the accessor for re-verify prioritization: the caller can
 // use the returned set to deprioritize or flag these findings for re-examination.
 func (s *Store) ReproContradictedFingerprints(ctx context.Context) ([]string, error) {
@@ -72,7 +67,7 @@ func (s *Store) ReproContradictedFingerprints(ctx context.Context) ([]string, er
 		SELECT fingerprint FROM repro_attempts
 		WHERE exit_zero_count >= ?
 		ORDER BY exit_zero_count DESC, updated_at ASC`,
-		[]any{ReproContradictionThreshold},
+		[]any{domain.ReproContradictionThreshold},
 		func(r *sql.Rows) (string, error) {
 			var fp string
 			return fp, r.Scan(&fp)

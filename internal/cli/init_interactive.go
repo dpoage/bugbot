@@ -4,11 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"io"
 	"os"
 	"strings"
+
+	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/sandbox"
 )
 
 // wizardConfig holds every answer gathered during the interactive flow.

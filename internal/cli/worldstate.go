@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
 )
@@ -18,7 +19,7 @@ import (
 // the blackboard holds for the next cycle, what is synced to GitHub, and what
 // today cost. Every field is best-effort; render what was fetched.
 type worldState struct {
-	Tallies    store.FindingTallies
+	Tallies    domain.FindingTallies
 	HasTallies bool
 
 	PendingLeads      []store.Lead // newest-first; render at most leadPreviewMax
@@ -155,7 +156,7 @@ func renderWorldState(out io.Writer, ws worldState, now time.Time) {
 
 // findingsLine renders "open: T0=1 T1=2 T2=3 | fixed=4 dismissed=1", omitting
 // zero tiers and showing "none" for an empty open set.
-func findingsLine(t store.FindingTallies) string {
+func findingsLine(t domain.FindingTallies) string {
 	tiers := make([]int, 0, len(t.OpenByTier))
 	for tier := range t.OpenByTier {
 		tiers = append(tiers, tier)

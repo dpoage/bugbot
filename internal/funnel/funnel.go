@@ -468,7 +468,7 @@ type Options struct {
 	Progress progress.EventSink
 	// Repro, when non-nil, is invoked in-run for each Tier-2 finding that
 	// survives verification. Must be safe for concurrent use.
-	Repro func(ctx context.Context, scanRunID string, finding store.Finding) error
+	Repro func(ctx context.Context, scanRunID string, finding domain.Finding) error
 	// CodeNav, when non-nil, is a pre-constructed code-navigation bundle that the
 	// funnel BORROWS rather than owns. Nil causes the funnel to construct its own.
 	CodeNav *agent.CodeNav
@@ -699,7 +699,7 @@ type Candidate struct {
 	Confidence  domain.Confidence
 	// Fingerprint is the store dedup key (lens+file+line+title). Set in triage.
 	Fingerprint string
-	// LocusKey is the lens-independent location identity store.LocusKey(file, locus):
+	// LocusKey is the lens-independent location identity domain.LocusKey(file, locus):
 	// the Fingerprint inputs minus the lens. Set in triage alongside Fingerprint and
 	// carried onto the persisted finding, so a later same-locus, different-lens
 	// candidate can be folded in via store.OpenFindingsByLocusKey.
@@ -951,7 +951,7 @@ type Result struct {
 	// Commit is the snapshot commit the scan ran against.
 	Commit string
 	// Findings are the persisted Tier 2 survivors, sorted critical-first.
-	Findings []store.Finding
+	Findings []domain.Finding
 	// Stats is the per-stage accounting.
 	Stats Stats
 	// Degraded reports whether the run crossed the soft budget and reduced its
@@ -973,7 +973,7 @@ type Result struct {
 // sortFindings orders findings critical-first (highest Rank first), then by
 // file/line for stable output. domain.Severity.Rank() uses higher=more-severe
 // (critical=4, low=1), so critical-first means si > sj.
-func sortFindings(fs []store.Finding) {
+func sortFindings(fs []domain.Finding) {
 	sort.SliceStable(fs, func(i, j int) bool {
 		si, sj := fs[i].Severity.Rank(), fs[j].Severity.Rank()
 		if si != sj {

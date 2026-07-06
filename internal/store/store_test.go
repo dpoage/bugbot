@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // openTemp opens a fresh on-disk store in a temp dir. Using a real file (not
@@ -108,34 +110,34 @@ func TestLoadMigrations_SortedAndWellFormed(t *testing.T) {
 }
 
 func TestFingerprint_StableAndNormalized(t *testing.T) {
-	a := Fingerprint("nil-deref", "pkg/foo/bar.go", "S:definition.function\x00Greeting")
-	b := Fingerprint("nil-deref", "pkg/foo/bar.go", "S:definition.function\x00Greeting")
+	a := domain.Fingerprint("nil-deref", "pkg/foo/bar.go", "S:definition.function\x00Greeting")
+	b := domain.Fingerprint("nil-deref", "pkg/foo/bar.go", "S:definition.function\x00Greeting")
 	if a != b {
 		t.Fatal("fingerprint should be deterministic")
 	}
 
 	// Path case and Windows separators must normalize away; lens case too.
-	c := Fingerprint("NIL-DEREF", "pkg\\foo\\bar.go", "S:definition.function\x00Greeting")
+	c := domain.Fingerprint("NIL-DEREF", "pkg\\foo\\bar.go", "S:definition.function\x00Greeting")
 	if a != c {
 		t.Fatalf("fingerprint should normalize path/lens case and separators:\n %s\n %s", a, c)
 	}
 
 	// A different locus (a different enclosing symbol, or the line fallback) is a
 	// different fingerprint.
-	d := Fingerprint("nil-deref", "pkg/foo/bar.go", "S:definition.function\x00Other")
+	d := domain.Fingerprint("nil-deref", "pkg/foo/bar.go", "S:definition.function\x00Other")
 	if a == d {
 		t.Fatal("different locus must produce a different fingerprint")
 	}
 
 	// A different lens (defect family) is a different fingerprint, even at the same
 	// file and locus.
-	e := Fingerprint("resource-leak", "pkg/foo/bar.go", "S:definition.function\x00Greeting")
+	e := domain.Fingerprint("resource-leak", "pkg/foo/bar.go", "S:definition.function\x00Greeting")
 	if a == e {
 		t.Fatal("different lens must produce a different fingerprint")
 	}
 
 	// A different file is a different fingerprint.
-	g := Fingerprint("nil-deref", "pkg/foo/baz.go", "S:definition.function\x00Greeting")
+	g := domain.Fingerprint("nil-deref", "pkg/foo/baz.go", "S:definition.function\x00Greeting")
 	if a == g {
 		t.Fatal("different file must produce a different fingerprint")
 	}
@@ -241,7 +243,7 @@ func TestOpenReadOnly_CreatesAndMigratesWhenAbsent(t *testing.T) {
 		t.Fatalf("OpenReadOnly on absent path: %v", err)
 	}
 	defer func() { _ = st.Close() }()
-	got, err := st.ListFindings(ctx, FindingFilter{})
+	got, err := st.ListFindings(ctx, domain.FindingFilter{})
 	if err != nil {
 		t.Fatalf("ListFindings on fresh read-only store: %v", err)
 	}

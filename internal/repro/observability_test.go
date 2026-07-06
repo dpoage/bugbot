@@ -7,9 +7,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/sandbox"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // reproRecordingSink captures progress events for assertions. Safe for the
@@ -56,7 +56,7 @@ func TestAttempt_EmitsAgentBracket(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	finding := store.Finding{ID: "f-1", Title: "Divide ignores zero divisor", File: "calc.go", Line: 12}
+	finding := domain.Finding{ID: "f-1", Title: "Divide ignores zero divisor", File: "calc.go", Line: 12}
 	if _, err := r.Attempt(context.Background(), finding); err != nil {
 		t.Fatalf("Attempt: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestReproducer_StatusNoteToolGating(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			finding := store.Finding{ID: "f-1", Title: "t", File: "calc.go", Line: 1}
+			finding := domain.Finding{ID: "f-1", Title: "t", File: "calc.go", Line: 1}
 			if _, err := r.Attempt(context.Background(), finding); err != nil {
 				t.Fatalf("Attempt: %v", err)
 			}

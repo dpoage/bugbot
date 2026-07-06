@@ -12,7 +12,6 @@ import (
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // --- Fake sandbox for funnel tests ----------------------------------------
@@ -426,7 +425,7 @@ func TestVerifyFinding_NoSandboxTool(t *testing.T) {
 		lenses: selectLenses(nil),
 	}
 
-	fnd := store.Finding{
+	fnd := domain.Finding{
 		Fingerprint: "fp-test",
 		Title:       "nil deref",
 		Severity:    "critical",

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -48,17 +49,17 @@ func newRepoDirWithCalc(t *testing.T) string {
 }
 
 // buildT1Finding seeds a Tier-1 (repro promoted) finding and a matching Attempt.
-func buildT1Finding(t *testing.T, st *store.Store) (store.Finding, *Attempt) {
+func buildT1Finding(t *testing.T, st *store.Store) (domain.Finding, *Attempt) {
 	t.Helper()
-	fp := store.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 5, "Divide ignores zero divisor"))
-	f := store.Finding{
+	fp := domain.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 5, "Divide ignores zero divisor"))
+	f := domain.Finding{
 		Fingerprint: fp,
 		Title:       "Divide ignores zero divisor",
 		Description: "Divide returns ok=true for a zero divisor.",
 		Reasoning:   "Verified: no zero check before the division.",
 		Severity:    "high",
 		Tier:        1, // already repro-promoted
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "logic",
 		File:        "calc.go",
 		Line:        5,
@@ -687,15 +688,15 @@ func TestPromoteAll_WithPatchProver_FixWitnessed(t *testing.T) {
 	artifactDir := t.TempDir()
 
 	// Seed a Tier-2 finding.
-	fp := store.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 5, "Divide ignores zero divisor"))
-	finding, err := st.UpsertFinding(ctx, store.Finding{
+	fp := domain.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 5, "Divide ignores zero divisor"))
+	finding, err := st.UpsertFinding(ctx, domain.Finding{
 		Fingerprint: fp,
 		Title:       "Divide ignores zero divisor",
 		Description: "Divide returns ok=true for a zero divisor.",
 		Reasoning:   "Verified: no zero check before the division.",
 		Severity:    "high",
 		Tier:        2,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "logic",
 		File:        "calc.go",
 		Line:        5,
@@ -742,7 +743,7 @@ func TestPromoteAll_WithPatchProver_FixWitnessed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
 	if err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}

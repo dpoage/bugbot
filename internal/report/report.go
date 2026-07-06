@@ -20,7 +20,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // Metadata carries the scan context that frames a set of findings. All fields
@@ -45,15 +45,15 @@ type Metadata struct {
 // Rendered Markdown/SARIF are produced on demand by the emitters; a Report does
 // not cache them, keeping the type a plain value the daemon can pass around.
 type Report struct {
-	Findings []store.Finding
+	Findings []domain.Finding
 	Meta     Metadata
 }
 
 // New builds a Report, copying and sorting the findings into the canonical
 // order (severity desc, then file, line, id) so every emitter and sink sees the
 // same ordering. The input slice is not mutated.
-func New(findings []store.Finding, meta Metadata) Report {
-	sorted := make([]store.Finding, len(findings))
+func New(findings []domain.Finding, meta Metadata) Report {
+	sorted := make([]domain.Finding, len(findings))
 	copy(sorted, findings)
 	SortFindings(sorted)
 	return Report{Findings: sorted, Meta: meta}
@@ -62,7 +62,7 @@ func New(findings []store.Finding, meta Metadata) Report {
 // SortFindings sorts findings in place into the canonical report order:
 // severity descending, then file ascending, then line ascending, then id. The
 // id tiebreaker guarantees a total order so rendering is fully deterministic.
-func SortFindings(fs []store.Finding) {
+func SortFindings(fs []domain.Finding) {
 	sort.SliceStable(fs, func(i, j int) bool {
 		ri, rj := fs[i].Severity.Rank(), fs[j].Severity.Rank()
 		if ri != rj {

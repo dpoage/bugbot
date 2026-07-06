@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // LensStat is the aggregate survival/refutation/repro picture for one lens
@@ -98,7 +100,7 @@ func (s *Store) LensMetrics(ctx context.Context) ([]LensStat, error) {
 		ORDER BY (survived + killed) DESC, lens ASC`
 
 	return queryRows(ctx, s, "lens_metrics", qCompat,
-		[]any{ReproContradictionThreshold, string(StatusOpen)},
+		[]any{domain.ReproContradictionThreshold, string(domain.StatusOpen)},
 		func(r *sql.Rows) (LensStat, error) {
 			var ls LensStat
 			return ls, r.Scan(&ls.Lens, &ls.Survived, &ls.Reprod, &ls.ContradictedCount, &ls.Killed)

@@ -27,12 +27,12 @@ import (
 //
 // Callers that want a bounded set should slice the result; the caller is
 // responsible for the batch-size cap so this helper stays reusable.
-func OpenBacklog(ctx context.Context, st store.StoreReader) ([]store.Finding, error) {
-	all, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+func OpenBacklog(ctx context.Context, st store.StoreReader) ([]domain.Finding, error) {
+	all, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]store.Finding, 0, len(all))
+	out := make([]domain.Finding, 0, len(all))
 	for _, f := range all {
 		if (f.Tier == domain.TierVerified || f.Tier == domain.TierSuspected) && f.ReproPath == "" && !f.NeedsHuman {
 			out = append(out, f)
@@ -129,7 +129,7 @@ func (d *Daemon) runReproBacklog(ctx context.Context) {
 func TouchBacklogFailures(ctx context.Context, st *store.Store, log interface {
 	Info(string, ...any)
 	Error(string, ...any)
-}, batch []store.Finding) {
+}, batch []domain.Finding) {
 	if ctx.Err() != nil {
 		return
 	}

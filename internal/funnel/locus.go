@@ -7,7 +7,7 @@ import (
 )
 
 // LocusResolver maps a (file, line) to the stable location anchor used by the
-// finding fingerprint (store.Fingerprint): the name of the enclosing top-level
+// finding fingerprint (domain.Fingerprint): the name of the enclosing top-level
 // declaration when tree-sitter can resolve one, else a line-based fallback.
 //
 // Anchoring identity to the enclosing symbol makes a finding's fingerprint

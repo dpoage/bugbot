@@ -14,15 +14,15 @@ import (
 // The fingerprint is built from the enclosing-symbol locus (via NewLocusResolver,
 // the same path triage uses), so the triage consumer's recompute dedups onto this
 // exact row when the verifier promotes (UpsertFinding match) or dismisses.
-func seedSuspectedFinding(t *testing.T, st *store.Store, repo *ingest.Repo) store.Finding {
+func seedSuspectedFinding(t *testing.T, st *store.Store, repo *ingest.Repo) domain.Finding {
 	t.Helper()
-	fi := store.Finding{
-		Fingerprint: store.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10)),
+	fi := domain.Finding{
+		Fingerprint: domain.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10)),
 		Title:       "orphan T3 needs re-verification",
 		Description: "left orphaned by a prior hard-budget stop",
 		Severity:    domain.SeverityHigh,
 		Tier:        domain.TierSuspected,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "nil-safety/error-handling",
 		File:        "bug.go",
 		Line:        10,
@@ -66,15 +66,15 @@ func TestReverifySuspected_PromotesSurvivor(t *testing.T) {
 		t.Errorf("finder.callCount() = %d, want 0 (modeReverify must skip the finder)", n)
 	}
 
-	got, err := st.GetFindingByFingerprint(ctx, store.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10)))
+	got, err := st.GetFindingByFingerprint(ctx, domain.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10)))
 	if err != nil {
 		t.Fatalf("GetFindingByFingerprint: %v", err)
 	}
 	if got.Tier != domain.TierVerified {
 		t.Errorf("after ReverifySurvivor: Tier=%v, want TierVerified", got.Tier)
 	}
-	if got.Status != store.StatusOpen {
-		t.Errorf("after ReverifySurvivor: Status=%q, want %q", got.Status, store.StatusOpen)
+	if got.Status != domain.StatusOpen {
+		t.Errorf("after ReverifySurvivor: Status=%q, want %q", got.Status, domain.StatusOpen)
 	}
 }
 
@@ -109,12 +109,12 @@ func TestReverifySuspected_DismissesRefuted(t *testing.T) {
 	}
 
 	// The T3 row must be dismissed (not left open).
-	got, err := st.GetFindingByFingerprint(ctx, store.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10)))
+	got, err := st.GetFindingByFingerprint(ctx, domain.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10)))
 	if err != nil {
 		t.Fatalf("GetFindingByFingerprint: %v", err)
 	}
-	if got.Status != store.StatusDismissed {
-		t.Errorf("after ReverifySurvivor refuted: Status=%q, want %q", got.Status, store.StatusDismissed)
+	if got.Status != domain.StatusDismissed {
+		t.Errorf("after ReverifySurvivor refuted: Status=%q, want %q", got.Status, domain.StatusDismissed)
 	}
 }
 

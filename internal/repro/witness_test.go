@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // TestPromoteOne_NeedsHuman_WitnessesNotPromotes covers bugbot-w1bh: a
@@ -20,7 +20,7 @@ func TestPromoteOne_NeedsHuman_WitnessesNotPromotes(t *testing.T) {
 	// A below-quorum survivor: seeded Tier-2, then flagged NeedsHuman.
 	finding := seedFinding(t, st)
 	finding.NeedsHuman = true
-	finding.NeedsHumanReason = store.NeedsHumanReasonBelowQuorum
+	finding.NeedsHumanReason = domain.NeedsHumanReasonBelowQuorum
 	finding, err := st.UpsertFinding(ctx, finding)
 	if err != nil {
 		t.Fatalf("flag needs_human: %v", err)

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
@@ -162,7 +163,7 @@ func TestSweep_E2E_OneVerifiedFinding(t *testing.T) {
 	if got.Tier != 2 {
 		t.Errorf("tier = %d, want 2", got.Tier)
 	}
-	if got.Status != store.StatusOpen {
+	if got.Status != domain.StatusOpen {
 		t.Errorf("status = %q, want open", got.Status)
 	}
 	if got.File != "bug.go" || got.Line != 10 {
@@ -234,7 +235,7 @@ func TestSweep_Suppression_NoFindings(t *testing.T) {
 	verifier := verifierRouting(newScriptedClient())
 
 	// Pre-suppress the real candidate's fingerprint.
-	fp := store.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10))
+	fp := domain.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10))
 	if err := st.AddSuppression(ctx, fp, "test: known non-bug"); err != nil {
 		t.Fatal(err)
 	}
@@ -862,7 +863,7 @@ func TestSweep_BudgetOrphanPersistsAsTier3(t *testing.T) {
 			t2++
 		case 3:
 			t3++
-			if fnd.Status != store.StatusOpen {
+			if fnd.Status != domain.StatusOpen {
 				t.Errorf("orphan status = %q, want open", fnd.Status)
 			}
 			if !strings.Contains(fnd.Reasoning, "Verification skipped") {
@@ -886,7 +887,7 @@ func TestSweep_BudgetOrphanPersistsAsTier3(t *testing.T) {
 	}
 
 	// It must be durable in the store, queryable as a Tier 3 open finding.
-	stored, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen, HasTier: true, Tier: 3})
+	stored, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen, HasTier: true, Tier: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1257,7 +1258,7 @@ func TestTriageState_BothOrdersCluster(t *testing.T) {
 	// fp sets a placeholder Fingerprint; triage's process() recomputes the real
 	// identity from the enclosing-symbol locus, so this value only needs to compile.
 	fp := func(c Candidate) Candidate {
-		c.Fingerprint = store.Fingerprint(c.Lens, c.File, "L:"+itoa(c.Line))
+		c.Fingerprint = domain.Fingerprint(c.Lens, c.File, "L:"+itoa(c.Line))
 		return c
 	}
 	candA = fp(candA)
@@ -1465,7 +1466,7 @@ func TestStreaming_PersistenceBeforeHypothesizeComplete(t *testing.T) {
 		fallback: newScriptedClient(),
 	}
 
-	fp := store.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10))
+	fp := domain.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10))
 	// Simple verifier: never refutes. The store polling loop below detects when
 	// the finding has been persisted by verify_stream.go's immediate-persist path.
 	verifierClient := &hookClient{
@@ -1577,7 +1578,7 @@ func TestStreaming_Interrupt_PersistedFindingSurvives(t *testing.T) {
 		fallback: newScriptedClient(),
 	}
 
-	fp := store.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10))
+	fp := domain.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10))
 	// Verifier signals persistedCh after the last refuter panel completes,
 	// then cancels ctx. We use a hookClient with a counter.
 	var verifierCalls atomic.Int32
@@ -1639,7 +1640,7 @@ func TestStreaming_Interrupt_PersistedFindingSurvives(t *testing.T) {
 	if stored.Tier != 2 {
 		t.Errorf("finding tier = %d, want 2 (verified)", stored.Tier)
 	}
-	if stored.Status != store.StatusOpen {
+	if stored.Status != domain.StatusOpen {
 		t.Errorf("finding status = %q, want open", stored.Status)
 	}
 }

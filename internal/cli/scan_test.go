@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
@@ -283,12 +284,12 @@ func TestCheckScanLock_EmptyStore(t *testing.T) {
 // carries PRE-sweep severities, and the oneshot summary must reflect the
 // re-ranked store state instead.
 func TestApplyReranked(t *testing.T) {
-	findings := []store.Finding{
+	findings := []domain.Finding{
 		{ID: "a", Severity: "high", VerdictDetail: "pre-a"},
 		{ID: "b", Severity: "medium", VerdictDetail: "pre-b"},
 		{ID: "c", Severity: "low", VerdictDetail: "untouched"},
 	}
-	reranked := map[string]store.Finding{
+	reranked := map[string]domain.Finding{
 		"a": {ID: "a", Severity: "low", VerdictDetail: "downranked: zero non-test callers"},
 		"b": {ID: "b", Severity: "critical", VerdictDetail: "escalated"},
 		// "c" intentionally absent: nothing re-ranked it this pass.

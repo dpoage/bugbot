@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	isarif "github.com/dpoage/bugbot/internal/sarif"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 func TestSARIFUnmarshalsAndHasRequiredFields(t *testing.T) {
@@ -177,7 +177,7 @@ func TestSARIFRegionOmittedWhenNoLine(t *testing.T) {
 // identical level, fingerprint key, and driver identity for the same finding.
 // If the two paths ever diverge again this test will fail.
 func TestBothPathsEmitIdenticalLevelAndFingerprint(t *testing.T) {
-	findings := []store.Finding{
+	findings := []domain.Finding{
 		{
 			ID:          "parity-1",
 			Fingerprint: "fp-parity",
@@ -185,7 +185,7 @@ func TestBothPathsEmitIdenticalLevelAndFingerprint(t *testing.T) {
 			Reasoning:   "parity reasoning",
 			Severity:    "high",
 			Tier:        1, // T1 reproduced -> error
-			Status:      store.StatusOpen,
+			Status:      domain.StatusOpen,
 			Lens:        "paritycheck",
 			File:        "pkg/foo/bar.go",
 			Line:        7,
@@ -237,13 +237,13 @@ func TestBothPathsEmitIdenticalLevelAndFingerprint(t *testing.T) {
 //  2. reasoning empty, description non-empty → "Title: Description"
 //  3. all empty            → "(no description)"
 func TestSARIFMessagePrecedence(t *testing.T) {
-	base := store.Finding{
+	base := domain.Finding{
 		Fingerprint: "fp",
 		Lens:        "l",
 		File:        "f.go",
 		Line:        1,
 		Tier:        2,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 	}
 
 	cases := []struct {
@@ -282,7 +282,7 @@ func TestSARIFMessagePrecedence(t *testing.T) {
 			f.Title = tc.title
 			f.Description = tc.desc
 			f.Reasoning = tc.reasoning
-			doc := BuildSARIF(New([]store.Finding{f}, Metadata{}))
+			doc := BuildSARIF(New([]domain.Finding{f}, Metadata{}))
 			got := doc.Runs[0].Results[0].Message.Text
 			if got != tc.want {
 				t.Errorf("message.text = %q, want %q", got, tc.want)

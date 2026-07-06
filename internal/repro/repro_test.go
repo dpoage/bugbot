@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/sandbox"
@@ -48,17 +49,17 @@ func newRepoDir(t *testing.T) string {
 }
 
 // seedFinding inserts a Tier-2 verified finding and returns it.
-func seedFinding(t *testing.T, st *store.Store) store.Finding {
+func seedFinding(t *testing.T, st *store.Store) domain.Finding {
 	t.Helper()
-	fp := store.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 12, "Divide ignores zero divisor"))
-	f := store.Finding{
+	fp := domain.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 12, "Divide ignores zero divisor"))
+	f := domain.Finding{
 		Fingerprint: fp,
 		Title:       "Divide ignores zero divisor",
 		Description: "Divide returns 0 for a zero divisor instead of an error.",
 		Reasoning:   "Verified: no zero check before the division.",
 		Severity:    "high",
 		Tier:        2,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "logic",
 		File:        "calc.go",
 		Line:        12,
@@ -103,7 +104,7 @@ func TestPromoteAll_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
 	if err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
@@ -193,7 +194,7 @@ func TestPromoteAll_PlanWithoutExpectPromotes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
 	if err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
@@ -238,7 +239,7 @@ func TestPromoteAll_AbsolutePathPlanRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
 	if err != nil {
 		t.Fatalf("PromoteAll returned a hard error for a recoverable bad path: %v", err)
 	}
@@ -296,7 +297,7 @@ func TestPromoteAll_UnparseablePlanDoesNotAbort(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
 	if err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
@@ -360,7 +361,7 @@ func TestPromoteAll_VendoredSetsGoflags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.PromoteAll(ctx, st, []store.Finding{finding}); err != nil {
+	if _, err := r.PromoteAll(ctx, st, []domain.Finding{finding}); err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
 
@@ -396,7 +397,7 @@ func TestPromoteAll_HostStrategyMountsCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.PromoteAll(ctx, st, []store.Finding{finding}); err != nil {
+	if _, err := r.PromoteAll(ctx, st, []domain.Finding{finding}); err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
 
@@ -450,7 +451,7 @@ func TestExecute_SetupCmdsPropagate(t *testing.T) {
 		},
 	}
 
-	if _, err := r.PromoteAll(ctx, st, []store.Finding{finding}); err != nil {
+	if _, err := r.PromoteAll(ctx, st, []domain.Finding{finding}); err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
 	calls := sb.Calls()
@@ -491,7 +492,7 @@ func TestPromoteAll_ZeroExitThenRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
 	if err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
@@ -533,7 +534,7 @@ func TestPromoteAll_CompileErrorGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
 	if err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
@@ -585,7 +586,7 @@ func TestPromoteAll_Exhaustion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
 	if err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
@@ -1029,7 +1030,7 @@ func TestPromoteAll_WritesAgentTranscript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.PromoteAll(ctx, st, []store.Finding{finding}); err != nil {
+	if _, err := r.PromoteAll(ctx, st, []domain.Finding{finding}); err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
 
@@ -1052,7 +1053,7 @@ func TestPromoteAll_WritesAgentTranscript(t *testing.T) {
 // finding's package summary (the cartographer handoff) only when one is present,
 // labeled with the package directory.
 func TestBuildTask_IncludesPackageSummary(t *testing.T) {
-	f := store.Finding{Title: "T", File: "engine/common/memory/X.hpp", Line: 5, Description: "d"}
+	f := domain.Finding{Title: "T", File: "engine/common/memory/X.hpp", Line: 5, Description: "d"}
 
 	with := buildTask(f, "MEMORY-PKG-SUMMARY", "")
 	if !strings.Contains(with, "MEMORY-PKG-SUMMARY") {
@@ -1073,12 +1074,12 @@ func TestBuildTask_IncludesPackageSummary(t *testing.T) {
 func TestPromoteAll_PushesPackageSummary(t *testing.T) {
 	ctx := context.Background()
 	st := openStore(t)
-	f, err := st.UpsertFinding(ctx, store.Finding{
-		Fingerprint: store.Fingerprint("logic", "pkg/calc.go", fmt.Sprintf("%d|%s", 12, "bug")),
+	f, err := st.UpsertFinding(ctx, domain.Finding{
+		Fingerprint: domain.Fingerprint("logic", "pkg/calc.go", fmt.Sprintf("%d|%s", 12, "bug")),
 		Title:       "bug",
 		Severity:    "high",
 		Tier:        2,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "logic",
 		File:        "pkg/calc.go",
 		Line:        12,
@@ -1106,7 +1107,7 @@ func TestPromoteAll_PushesPackageSummary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.PromoteAll(ctx, st, []store.Finding{f}); err != nil {
+	if _, err := r.PromoteAll(ctx, st, []domain.Finding{f}); err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
 	if gotPkg != "pkg" {
@@ -1160,7 +1161,7 @@ func TestPromoteAll_WiresTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.PromoteAll(ctx, st, []store.Finding{finding}); err != nil {
+	if _, err := r.PromoteAll(ctx, st, []domain.Finding{finding}); err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
 	calls := sb.Calls()
@@ -1210,7 +1211,7 @@ func TestPromoteAll_SurfacesMountsInPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.PromoteAll(ctx, st, []store.Finding{finding}); err != nil {
+	if _, err := r.PromoteAll(ctx, st, []domain.Finding{finding}); err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
 	reqs := client.allRequests()
@@ -1405,7 +1406,7 @@ func TestPromoteAll_BareShellOpPlanRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
 	if err != nil {
 		t.Fatalf("PromoteAll returned a hard error for a recoverable bad cmd: %v", err)
 	}

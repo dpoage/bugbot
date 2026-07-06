@@ -91,7 +91,7 @@ func TestAgentUnits_InsertListRoundTrip(t *testing.T) {
 		t.Errorf("FinishedAt = %v, want %v", got.FinishedAt, now.Add(5*time.Second))
 	}
 	if got.Status != "ok" {
-		t.Errorf("Status = %q, want ok", got.Status)
+		t.Errorf("domain.Status = %q, want ok", got.Status)
 	}
 	if got.InputTokens != 1000 {
 		t.Errorf("InputTokens = %d, want 1000", got.InputTokens)
@@ -163,7 +163,7 @@ func TestAgentUnits_SkippedUnitZeroTokens(t *testing.T) {
 			got.InputTokens, got.OutputTokens, got.CacheReadTokens)
 	}
 	if got.Status != "skipped_hard_budget" {
-		t.Errorf("Status = %q, want skipped_hard_budget", got.Status)
+		t.Errorf("domain.Status = %q, want skipped_hard_budget", got.Status)
 	}
 }
 

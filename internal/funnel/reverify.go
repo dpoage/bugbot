@@ -33,8 +33,8 @@ import (
 // "verify-only pass, no finder" and is the closest existing bucket. No new
 // ScanKind is introduced.
 func (f *Funnel) ReverifySuspected(ctx context.Context) (*Result, error) {
-	susp, err := f.store.ListFindings(ctx, store.FindingFilter{
-		Status:  store.StatusOpen,
+	susp, err := f.store.ListFindings(ctx, domain.FindingFilter{
+		Status:  domain.StatusOpen,
 		HasTier: true,
 		Tier:    domain.TierSuspected,
 	})

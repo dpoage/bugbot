@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/sarif"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // ExportFormat is the set of interchange formats supported by `bugbot export`.
@@ -62,7 +62,7 @@ file instead.`,
 			}
 			defer closeStore(st)
 
-			findings, err := st.ListFindings(ctx, store.FindingFilter{})
+			findings, err := st.ListFindings(ctx, domain.FindingFilter{})
 			if err != nil {
 				return fmt.Errorf("list findings: %w", err)
 			}

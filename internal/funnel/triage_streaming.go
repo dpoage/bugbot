@@ -40,11 +40,11 @@ type registryEntry struct {
 	// finding. Exactly mirrors the stagedLenses mechanism: DrainStagedSites is
 	// called in runVerifyAndPersist before UpsertFinding; the TOCTOU window is
 	// closed by SignalPersisted's late-site return.
-	stagedSites []store.Site
+	stagedSites []domain.Site
 	// lateSites are sites appended AFTER the finding persisted. The store row
 	// is updated via AppendFindingSites; run() folds these into the in-memory
 	// finding after all consumers drain.
-	lateSites []store.Site
+	lateSites []domain.Site
 	// persisted is true once the verify goroutine calls SignalPersisted.
 	// Subsequent triage corroborating members use AddCorroboratingLenses instead
 	// of staging.
@@ -151,7 +151,7 @@ func (r *clusterRegistry) SignalPersisted(fingerprint string, persisted bool) []
 // Returns staged=true if queued for DrainStagedSites; killed=true if the
 // primary is dead (site can be discarded); false,false if already persisted
 // (caller must call AppendFindingSites on the store directly).
-func (r *clusterRegistry) AddStagedSite(fingerprint string, s store.Site) (staged bool, killed bool) {
+func (r *clusterRegistry) AddStagedSite(fingerprint string, s domain.Site) (staged bool, killed bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, ok := r.entries[fingerprint]
@@ -174,7 +174,7 @@ func (r *clusterRegistry) AddStagedSite(fingerprint string, s store.Site) (stage
 // DrainStagedSites retrieves and clears the staged sites for a primary.
 // Called from the verify goroutine just before UpsertFinding, alongside
 // DrainStagedLenses. Returns nil when no sites were staged.
-func (r *clusterRegistry) DrainStagedSites(fingerprint string) []store.Site {
+func (r *clusterRegistry) DrainStagedSites(fingerprint string) []domain.Site {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, ok := r.entries[fingerprint]
@@ -189,7 +189,7 @@ func (r *clusterRegistry) DrainStagedSites(fingerprint string) []store.Site {
 // DrainLateSites returns sites that were added after the primary persisted
 // (both the TOCTOU window and genuine post-persist arrivals). Called by run()
 // after all consumers have drained, so no further additions can race the read.
-func (r *clusterRegistry) DrainLateSites(fingerprint string) []store.Site {
+func (r *clusterRegistry) DrainLateSites(fingerprint string) []domain.Site {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, ok := r.entries[fingerprint]
@@ -256,7 +256,7 @@ type triageState struct {
 	registry *clusterRegistry
 
 	// resolver maps (file, line) to the stable enclosing-symbol locus used by the
-	// durable finding fingerprint (store.Fingerprint). Built from snap.Root.
+	// durable finding fingerprint (domain.Fingerprint). Built from snap.Root.
 	resolver *LocusResolver
 
 	// ready holds primaries to forward to verify. Drained by popReady().
@@ -319,9 +319,9 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 		return nil
 	}
 	// Step 3: exact fingerprint dedup. The fingerprint is the durable, cross-scan
-	// identity (lens + file + enclosing-symbol locus); see store.Fingerprint.
+	// identity (lens + file + enclosing-symbol locus); see domain.Fingerprint.
 	locus := ts.resolver.Resolve(c.File, c.Line)
-	fp := store.Fingerprint(c.Lens, c.File, locus)
+	fp := domain.Fingerprint(c.Lens, c.File, locus)
 	if ts.seen[fp] {
 		stats.DroppedDuplicate++
 		// Same identity as an earlier survivor. The locus no longer carries the
@@ -331,9 +331,9 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 		// no live cluster (suppressed or never registered); AppendFindingSites
 		// dedups by (file,line) and returns ErrNotFound (ignored) when the primary
 		// has not yet persisted a row.
-		site := store.Site{File: c.File, Line: c.Line}
+		site := domain.Site{File: c.File, Line: c.Line}
 		if staged, killed := ts.registry.AddStagedSite(fp, site); !staged && !killed {
-			_ = st.AppendFindingSites(ctx, fp, []store.Site{site})
+			_ = st.AppendFindingSites(ctx, fp, []domain.Site{site})
 		}
 		dropPending()
 		return nil
@@ -351,7 +351,7 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 	}
 	ts.seen[fp] = true
 	c.Fingerprint = fp
-	c.LocusKey = store.LocusKey(c.File, locus)
+	c.LocusKey = domain.LocusKey(c.File, locus)
 
 	// Step 5: incremental clustering. Membership is ANY-MEMBER: the candidate
 	// joins a cluster if it is window-near AND token-similar to any existing
@@ -480,7 +480,7 @@ func (ts *triageState) durableCrossLensFold(ctx context.Context, st *store.Store
 		if err := st.AddCorroboratingLenses(ctx, f.Fingerprint, []string{c.Lens}); err != nil {
 			return false, err
 		}
-		if err := st.AppendFindingSites(ctx, f.Fingerprint, []store.Site{{File: c.File, Line: c.Line}}); err != nil {
+		if err := st.AppendFindingSites(ctx, f.Fingerprint, []domain.Site{{File: c.File, Line: c.Line}}); err != nil {
 			return false, err
 		}
 		stats.MergedCrossLens++
@@ -517,11 +517,11 @@ func (ts *triageState) handleMember(ctx context.Context, st *store.Store, cluste
 	// the corroborating-lens mechanism: stage in the registry for
 	// DrainStagedSites to pick up at persist time, or update the store directly
 	// when the primary is already persisted.
-	site := store.Site{File: c.File, Line: c.Line}
+	site := domain.Site{File: c.File, Line: c.Line}
 	siteStaged, siteKilled := ts.registry.AddStagedSite(cluster.fingerprint, site)
 	if !siteStaged && !siteKilled {
 		// Primary already persisted; update the store row directly. Best-effort.
-		_ = st.AppendFindingSites(ctx, cluster.fingerprint, []store.Site{site})
+		_ = st.AppendFindingSites(ctx, cluster.fingerprint, []domain.Site{site})
 	}
 
 	if rootCause {

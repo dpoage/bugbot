@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/sandbox"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // TestNewRunner_RunTestsToolWiredWithGoMod verifies that when the repo
@@ -26,7 +26,7 @@ func TestNewRunner_RunTestsToolWiredWithGoMod(t *testing.T) {
 	}
 	defer func() { _ = r.Close() }()
 
-	finding := store.Finding{ID: "rt-1", Title: "run_tests wiring", File: "calc.go", Line: 1}
+	finding := domain.Finding{ID: "rt-1", Title: "run_tests wiring", File: "calc.go", Line: 1}
 	if _, err := r.Attempt(context.Background(), finding); err != nil {
 		t.Fatalf("Attempt: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestNewRunner_RunTestsToolAbsentWithoutBuildSystem(t *testing.T) {
 	}
 	defer func() { _ = r.Close() }()
 
-	finding := store.Finding{ID: "rt-2", Title: "no build system", File: "calc.go", Line: 1}
+	finding := domain.Finding{ID: "rt-2", Title: "no build system", File: "calc.go", Line: 1}
 	if _, err := r.Attempt(context.Background(), finding); err != nil {
 		t.Fatalf("Attempt: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestNewRunner_RunTestsGuidanceInPrompt(t *testing.T) {
 		}
 		defer func() { _ = r.Close() }()
 
-		finding := store.Finding{ID: "rt-3", Title: "prompt check", File: "calc.go", Line: 1}
+		finding := domain.Finding{ID: "rt-3", Title: "prompt check", File: "calc.go", Line: 1}
 		if _, err := r.Attempt(context.Background(), finding); err != nil {
 			t.Fatalf("Attempt: %v", err)
 		}
@@ -131,7 +131,7 @@ func TestNewRunner_RunTestsGuidanceInPrompt(t *testing.T) {
 		}
 		defer func() { _ = r.Close() }()
 
-		finding := store.Finding{ID: "rt-4", Title: "no build system prompt check", File: "calc.go", Line: 1}
+		finding := domain.Finding{ID: "rt-4", Title: "no build system prompt check", File: "calc.go", Line: 1}
 		if _, err := r.Attempt(context.Background(), finding); err != nil {
 			t.Fatalf("Attempt: %v", err)
 		}

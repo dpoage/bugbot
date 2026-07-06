@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -30,7 +31,7 @@ report:
 
 // setup writes a config file pointing at a fresh store seeded with one open
 // finding, and returns the config path, store, and the seeded finding.
-func setup(t *testing.T) (cfgPath string, st *store.Store, f store.Finding) {
+func setup(t *testing.T) (cfgPath string, st *store.Store, f domain.Finding) {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "state.db")
@@ -43,14 +44,14 @@ func setup(t *testing.T) (cfgPath string, st *store.Store, f store.Finding) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	f = store.Finding{
-		Fingerprint: store.Fingerprint("race", "x.go", fmt.Sprintf("%d|%s", 7, "boom")),
+	f = domain.Finding{
+		Fingerprint: domain.Fingerprint("race", "x.go", fmt.Sprintf("%d|%s", 7, "boom")),
 		Title:       "boom",
 		Description: "desc",
 		Reasoning:   "trace",
 		Severity:    "high",
 		Tier:        2,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "race",
 		File:        "x.go",
 		Line:        7,

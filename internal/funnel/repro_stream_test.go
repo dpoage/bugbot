@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -15,15 +16,15 @@ import (
 // It records invocations and optionally returns an error.
 type fakeReproHook struct {
 	mu        sync.Mutex
-	invoked   []store.Finding // findings the hook was called with, in order
-	returnErr error           // error to return from the hook
+	invoked   []domain.Finding // findings the hook was called with, in order
+	returnErr error            // error to return from the hook
 }
 
 func newFakeReproHook() *fakeReproHook {
 	return &fakeReproHook{}
 }
 
-func (h *fakeReproHook) hook(_ context.Context, _ string, finding store.Finding) error {
+func (h *fakeReproHook) hook(_ context.Context, _ string, finding domain.Finding) error {
 	h.mu.Lock()
 	h.invoked = append(h.invoked, finding)
 	h.mu.Unlock()
@@ -36,10 +37,10 @@ func (h *fakeReproHook) count() int {
 	return len(h.invoked)
 }
 
-func (h *fakeReproHook) findings() []store.Finding {
+func (h *fakeReproHook) findings() []domain.Finding {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	out := make([]store.Finding, len(h.invoked))
+	out := make([]domain.Finding, len(h.invoked))
 	copy(out, h.invoked)
 	return out
 }
@@ -102,7 +103,7 @@ func TestRepro_InRun_Streaming(t *testing.T) {
 	hookFiredCh := make(chan struct{})
 	var hookFiredOnce sync.Once
 
-	hook := func(hCtx context.Context, _ string, finding store.Finding) error {
+	hook := func(hCtx context.Context, _ string, finding domain.Finding) error {
 		hookFiredOnce.Do(func() { close(hookFiredCh) })
 		return nil
 	}
@@ -255,8 +256,8 @@ func TestRepro_NoDoubleAttempt(t *testing.T) {
 
 	var invCount atomic.Int32
 	// Hook that simulates promotion by setting ReproPath.
-	var capturedFinding store.Finding
-	hook := func(hCtx context.Context, _ string, finding store.Finding) error {
+	var capturedFinding domain.Finding
+	hook := func(hCtx context.Context, _ string, finding domain.Finding) error {
 		invCount.Add(1)
 		capturedFinding = finding
 		// Promote the finding.
@@ -311,7 +312,7 @@ func TestRepro_AgentUnits(t *testing.T) {
 	st, repo := openFixture(t)
 
 	// Hook that simulates a successful promotion.
-	hook := func(hCtx context.Context, _ string, finding store.Finding) error {
+	hook := func(hCtx context.Context, _ string, finding domain.Finding) error {
 		// Simulate promotion: set ReproPath.
 		current, err := st.GetFindingByFingerprint(hCtx, finding.Fingerprint)
 		if err != nil {
@@ -447,7 +448,7 @@ func TestRepro_HookErrorBestEffort(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)
 
-	hook := func(ctx context.Context, _ string, finding store.Finding) error {
+	hook := func(ctx context.Context, _ string, finding domain.Finding) error {
 		return context.DeadlineExceeded // simulate an infra error
 	}
 
@@ -500,7 +501,7 @@ func TestRepro_HookErrorBestEffort(t *testing.T) {
 func TestReproQueue_OverflowExactlyOnce(t *testing.T) {
 	q := newReproQueue(2)
 	for i := 0; i < 5; i++ {
-		q.enqueue(store.Finding{Fingerprint: itoa(i)})
+		q.enqueue(domain.Finding{Fingerprint: itoa(i)})
 	}
 	got := make(map[string]int)
 	for len(q.ch) > 0 {
@@ -583,17 +584,17 @@ func TestRepro_BelowQuorumWitness_OneAttempt(t *testing.T) {
 	st, repo := openFixture(t)
 
 	// Seed a below-quorum survivor directly: Tier-2, NeedsHuman, no repro yet.
-	seed := store.Finding{
-		Fingerprint:      store.Fingerprint("nil-safety", "bug.go", "10|below-quorum nil deref"),
+	seed := domain.Finding{
+		Fingerprint:      domain.Fingerprint("nil-safety", "bug.go", "10|below-quorum nil deref"),
 		Title:            "below-quorum nil deref",
 		Severity:         "high",
 		Tier:             2,
-		Status:           store.StatusOpen,
+		Status:           domain.StatusOpen,
 		Lens:             "nil-safety",
 		File:             "bug.go",
 		Line:             10,
 		NeedsHuman:       true,
-		NeedsHumanReason: store.NeedsHumanReasonBelowQuorum,
+		NeedsHumanReason: domain.NeedsHumanReasonBelowQuorum,
 	}
 	seeded, err := st.UpsertFinding(ctx, seed)
 	if err != nil {
@@ -602,7 +603,7 @@ func TestRepro_BelowQuorumWitness_OneAttempt(t *testing.T) {
 
 	var invCount atomic.Int32
 	// Hook simulates the witness path: record ReproWitness without promoting.
-	hook := func(hCtx context.Context, _ string, finding store.Finding) error {
+	hook := func(hCtx context.Context, _ string, finding domain.Finding) error {
 		invCount.Add(1)
 		current, err := st.GetFindingByFingerprint(hCtx, finding.Fingerprint)
 		if err != nil {

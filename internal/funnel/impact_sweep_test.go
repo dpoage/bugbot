@@ -91,7 +91,7 @@ func makeImpactFunnel(t *testing.T, st *store.Store, repoDir string, client *scr
 }
 
 // seedFinding inserts a finding into the store and returns the stored copy (with ID set).
-func seedFinding(t *testing.T, st *store.Store, f store.Finding) store.Finding {
+func seedFinding(t *testing.T, st *store.Store, f domain.Finding) domain.Finding {
 	t.Helper()
 	ctx := context.Background()
 	got, err := st.UpsertFinding(ctx, f)
@@ -102,8 +102,8 @@ func seedFinding(t *testing.T, st *store.Store, f store.Finding) store.Finding {
 }
 
 // makeImpactFinding returns a minimal Finding for impact-sweep tests.
-func makeImpactFinding(id, file string, line int, sev domain.Severity) store.Finding {
-	return store.Finding{
+func makeImpactFinding(id, file string, line int, sev domain.Severity) domain.Finding {
+	return domain.Finding{
 		ID:          id,
 		Fingerprint: "fp-" + id,
 		Title:       "prose title: some defect description",
@@ -111,7 +111,7 @@ func makeImpactFinding(id, file string, line int, sev domain.Severity) store.Fin
 		Line:        line,
 		Severity:    sev,
 		Tier:        domain.TierVerified,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 	}
 }
 
@@ -346,7 +346,7 @@ func TestImpactSweep_DeadCodeDownrank(t *testing.T) {
 	f := makeImpactFunnel(t, st, repoDir, client)
 
 	fi := seedFinding(t, st, makeImpactFinding("dead1", "src/dead.cpp", 1, domain.SeverityHigh))
-	findings := []store.Finding{fi}
+	findings := []domain.Finding{fi}
 	result := &Result{}
 	f.impactSweep(ctx, findings, repoDir, client, false, result)
 
@@ -388,7 +388,7 @@ func TestImpactSweep_ExportedGoKeptWithRationale(t *testing.T) {
 	f := makeImpactFunnel(t, st, repoDir, client)
 
 	fi := seedFinding(t, st, makeImpactFinding("exp1", "internal/api/parse.go", 3, domain.SeverityHigh))
-	findings := []store.Finding{fi}
+	findings := []domain.Finding{fi}
 	result := &Result{}
 	f.impactSweep(ctx, findings, repoDir, client, false, result)
 
@@ -433,7 +433,7 @@ func TestImpactSweep_HeaderMemberDownranked(t *testing.T) {
 	f := makeImpactFunnel(t, st, repoDir, client)
 
 	fi := seedFinding(t, st, makeImpactFinding("hm1", "include/registry.hpp", 3, domain.SeverityHigh))
-	findings := []store.Finding{fi}
+	findings := []domain.Finding{fi}
 	result := &Result{}
 	f.impactSweep(ctx, findings, repoDir, client, false, result)
 
@@ -477,7 +477,7 @@ func TestImpactSweep_HeaderMemberKeptByAdjudicator(t *testing.T) {
 	f := makeImpactFunnel(t, st, repoDir, client)
 
 	fi := seedFinding(t, st, makeImpactFinding("pk1", "include/api.hpp", 3, domain.SeverityHigh))
-	findings := []store.Finding{fi}
+	findings := []domain.Finding{fi}
 	result := &Result{}
 	f.impactSweep(ctx, findings, repoDir, client, false, result)
 
@@ -512,7 +512,7 @@ func TestImpactSweep_NilClientSkipsAmbiguous(t *testing.T) {
 	f := makeImpactFunnel(t, st, repoDir, buildClient)
 
 	fi := seedFinding(t, st, makeImpactFinding("nilc1", "include/registry.hpp", 3, domain.SeverityHigh))
-	findings := []store.Finding{fi}
+	findings := []domain.Finding{fi}
 	result := &Result{}
 	// nil client: header is ambiguous → nil-client guard fires → note recorded.
 	f.impactSweep(ctx, findings, repoDir, nil, false, result)
@@ -538,8 +538,8 @@ func TestImpactSweep_AtMostOneLLMCall(t *testing.T) {
 	]}`
 
 	ambiguous := []ambiguousEntry{
-		{idx: 0, fi: store.Finding{ID: "id-a", Title: "finding A", File: "include/a.hpp", Severity: "high"}},
-		{idx: 1, fi: store.Finding{ID: "id-b", Title: "finding B", File: "include/b.hpp", Severity: "medium"}},
+		{idx: 0, fi: domain.Finding{ID: "id-a", Title: "finding A", File: "include/a.hpp", Severity: "high"}},
+		{idx: 1, fi: domain.Finding{ID: "id-b", Title: "finding B", File: "include/b.hpp", Severity: "medium"}},
 	}
 
 	var sink captureSink

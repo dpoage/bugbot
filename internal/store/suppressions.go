@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // Suppression records that a fingerprint was dismissed by a maintainer. Its
@@ -32,7 +34,7 @@ func (s *Store) AddSuppression(ctx context.Context, fingerprint, reason string) 
 		// Flip any existing finding to dismissed so it stops being reported.
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE findings SET status = ?, updated_at = ? WHERE fingerprint = ?`,
-			string(StatusDismissed), nowUTC().Format(timeLayout), fingerprint,
+			string(domain.StatusDismissed), nowUTC().Format(timeLayout), fingerprint,
 		); err != nil {
 			return annotateErr(s.path, "add_suppression", err)
 		}

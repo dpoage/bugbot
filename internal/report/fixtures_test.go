@@ -3,7 +3,7 @@ package report
 import (
 	"time"
 
-	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // fixedTime is a pinned timestamp so rendered output is deterministic.
@@ -12,8 +12,8 @@ var fixedTime = time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
 // fixtureFindings returns a stable set of findings exercising the renderers:
 // a T1 with a repro path, a T2 without, and a low-severity entry to check
 // severity ordering. IDs and timestamps are fixed for golden comparisons.
-func fixtureFindings() []store.Finding {
-	return []store.Finding{
+func fixtureFindings() []domain.Finding {
+	return []domain.Finding{
 		{
 			ID:          "aaaa111122223333",
 			Fingerprint: "fp-t2-nil-deref",
@@ -22,7 +22,7 @@ func fixtureFindings() []store.Finding {
 			Reasoning:   "Finder flagged unchecked deref; verifier confirmed the skip path leaves User nil.",
 			Severity:    "high",
 			Tier:        2,
-			Status:      store.StatusOpen,
+			Status:      domain.StatusOpen,
 			Lens:        "nilcheck",
 			File:        "internal/api/handler.go",
 			Line:        42,
@@ -37,7 +37,7 @@ func fixtureFindings() []store.Finding {
 			Reasoning:   "Reproducer generated a -race test that fails deterministically.",
 			Severity:    "critical",
 			Tier:        1,
-			Status:      store.StatusOpen,
+			Status:      domain.StatusOpen,
 			Lens:        "race",
 			File:        "internal/worker/pool.go",
 			Line:        108,
@@ -53,7 +53,7 @@ func fixtureFindings() []store.Finding {
 			Reasoning:   "verifier agreed it is low impact.",
 			Severity:    "low",
 			Tier:        2,
-			Status:      store.StatusOpen,
+			Status:      domain.StatusOpen,
 			Lens:        "errcheck",
 			File:        "internal/worker/pool.go",
 			Line:        50,

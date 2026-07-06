@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/sandbox"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // TestPromoteOne_ExitZeroIncrementsContradiction verifies that an exit-zero
@@ -43,7 +43,7 @@ func TestPromoteOne_ExitZeroIncrementsContradiction(t *testing.T) {
 
 	f1, _ := st.GetFindingByFingerprint(ctx, finding.Fingerprint)
 	if f1.ReproContradicted {
-		t.Errorf("ReproContradicted = true after 1 exit-zero attempt, want false (threshold = %d)", store.ReproContradictionThreshold)
+		t.Errorf("ReproContradicted = true after 1 exit-zero attempt, want false (threshold = %d)", domain.ReproContradictionThreshold)
 	}
 
 	// Second attempt: exit zero — now contradicted.
@@ -60,7 +60,7 @@ func TestPromoteOne_ExitZeroIncrementsContradiction(t *testing.T) {
 
 	f2, _ := st.GetFindingByFingerprint(ctx, finding.Fingerprint)
 	if !f2.ReproContradicted {
-		t.Errorf("ReproContradicted = false after %d exit-zero attempts, want true", store.ReproContradictionThreshold)
+		t.Errorf("ReproContradicted = false after %d exit-zero attempts, want true", domain.ReproContradictionThreshold)
 	}
 }
 

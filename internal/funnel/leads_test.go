@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -274,7 +275,7 @@ func TestVerify_RefuterToolset_NoPostLead(t *testing.T) {
 		lenses:  selectLenses(nil),
 	}
 
-	fnd := store.Finding{
+	fnd := domain.Finding{
 		Fingerprint: "fp-no-post-lead",
 		Title:       "test finding",
 		Severity:    "high",

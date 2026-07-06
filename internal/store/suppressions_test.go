@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // TestSuppressionFlow is the headline behaviour: a dismissed fingerprint must
@@ -18,7 +20,7 @@ func TestSuppressionFlow_DismissedNeverResurfaces(t *testing.T) {
 	}
 
 	// Maintainer dismisses it via UpdateStatus, which records the suppression.
-	if err := st.UpdateStatus(ctx, f.Fingerprint, StatusDismissed, "false positive"); err != nil {
+	if err := st.UpdateStatus(ctx, f.Fingerprint, domain.StatusDismissed, "false positive"); err != nil {
 		t.Fatalf("dismiss: %v", err)
 	}
 
@@ -32,18 +34,18 @@ func TestSuppressionFlow_DismissedNeverResurfaces(t *testing.T) {
 
 	// A later scan re-discovers the same bug and upserts it as OPEN.
 	f2 := f
-	f2.Status = StatusOpen
+	f2.Status = domain.StatusOpen
 	f2.CommitSHA = "newcommit"
 	got, err := st.UpsertFinding(ctx, f2)
 	if err != nil {
 		t.Fatalf("re-upsert: %v", err)
 	}
 	// Suppression memory must force it back to dismissed.
-	if got.Status != StatusDismissed {
+	if got.Status != domain.StatusDismissed {
 		t.Fatalf("re-discovered suppressed finding resurfaced as %q; want dismissed", got.Status)
 	}
 
-	open, err := st.ListFindings(ctx, FindingFilter{Status: StatusOpen})
+	open, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatalf("list open: %v", err)
 	}
@@ -68,7 +70,7 @@ func TestAddSuppression_FlipsExistingFindingAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Status != StatusDismissed {
+	if got.Status != domain.StatusDismissed {
 		t.Fatalf("AddSuppression should flip finding to dismissed, got %q", got.Status)
 	}
 
@@ -92,21 +94,21 @@ func TestAddSuppression_PreemptiveBeforeFindingExists(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
-	fp := Fingerprint("x", "a.go", fmt.Sprintf("%d|%s", 1, "preempt"))
+	fp := domain.Fingerprint("x", "a.go", fmt.Sprintf("%d|%s", 1, "preempt"))
 	// Suppress before any finding exists.
 	if err := st.AddSuppression(ctx, fp, "known noise"); err != nil {
 		t.Fatalf("preemptive suppress: %v", err)
 	}
 
 	// A scan later discovers it as open; it must land dismissed.
-	got, err := st.UpsertFinding(ctx, Finding{
-		Fingerprint: fp, Title: "preempt", Tier: 3, Status: StatusOpen,
+	got, err := st.UpsertFinding(ctx, domain.Finding{
+		Fingerprint: fp, Title: "preempt", Tier: 3, Status: domain.StatusOpen,
 		Lens: "x", File: "a.go", Line: 1,
 	})
 	if err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
-	if got.Status != StatusDismissed {
+	if got.Status != domain.StatusDismissed {
 		t.Fatalf("pre-suppressed finding should be dismissed, got %q", got.Status)
 	}
 }

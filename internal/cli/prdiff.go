@@ -110,7 +110,7 @@ func record(out commentableLines, path string, line int) {
 
 // normalizeDiffPath strips the conventional "b/" prefix git puts on post-image
 // paths and trims any trailing tab-delimited metadata, yielding a repo-relative
-// path that matches store.Finding.File. "/dev/null" is returned as-is.
+// path that matches domain.Finding.File. "/dev/null" is returned as-is.
 func normalizeDiffPath(p string) string {
 	// git appends a tab + metadata to header paths when they contain spaces.
 	if i := strings.IndexByte(p, '\t'); i >= 0 {

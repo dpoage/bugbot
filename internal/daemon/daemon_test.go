@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/repro"
@@ -48,13 +49,13 @@ func (s *captureSink) last() (report.Report, bool) {
 // assert the daemon offered the right inputs without a sandbox.
 type fakePromoter struct {
 	mu       sync.Mutex
-	attempts [][]store.Finding
+	attempts [][]domain.Finding
 }
 
-func (p *fakePromoter) PromoteAll(_ context.Context, _ *store.Store, findings []store.Finding) (*repro.Summary, error) {
+func (p *fakePromoter) PromoteAll(_ context.Context, _ *store.Store, findings []domain.Finding) (*repro.Summary, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	cp := make([]store.Finding, len(findings))
+	cp := make([]domain.Finding, len(findings))
 	copy(cp, findings)
 	p.attempts = append(p.attempts, cp)
 	return &repro.Summary{Attempted: len(findings)}, nil
@@ -322,13 +323,13 @@ func TestDaemonAutoCloseOnFileRemoved(t *testing.T) {
 	}
 
 	// Seed an open finding anchored to the fixture file.
-	fp := store.Fingerprint("nil-deref", fixtureFile, funnel.NewLocusResolver(fr.dir).Resolve(fixtureFile, fixtureLine))
-	seeded, err := st.UpsertFinding(context.Background(), store.Finding{
+	fp := domain.Fingerprint("nil-deref", fixtureFile, funnel.NewLocusResolver(fr.dir).Resolve(fixtureFile, fixtureLine))
+	seeded, err := st.UpsertFinding(context.Background(), domain.Finding{
 		Fingerprint: fp,
 		Title:       "possible nil dereference",
 		Severity:    "high",
 		Tier:        2,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "nil-deref",
 		File:        fixtureFile,
 		Line:        fixtureLine,
@@ -364,7 +365,7 @@ func TestDaemonAutoCloseOnFileRemoved(t *testing.T) {
 
 	waitFor(t, func() bool {
 		f, gerr := st.GetFinding(context.Background(), seeded.ID)
-		return gerr == nil && f.Status == store.StatusFixed
+		return gerr == nil && f.Status == domain.StatusFixed
 	})
 
 	cancel()
@@ -376,8 +377,8 @@ func TestDaemonAutoCloseOnFileRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.Status != store.StatusFixed {
-		t.Fatalf("expected finding auto-closed to %q, got %q", store.StatusFixed, f.Status)
+	if f.Status != domain.StatusFixed {
+		t.Fatalf("expected finding auto-closed to %q, got %q", domain.StatusFixed, f.Status)
 	}
 }
 
@@ -403,13 +404,13 @@ func TestDaemonReverifyPromotesSurvivingT3(t *testing.T) {
 
 	// Seed a tier-3 suspected finding (verification skipped at budget stop)
 	// anchored to a stale hash so the next change re-verifies it.
-	fp := store.Fingerprint("nil-deref", fixtureFile, funnel.NewLocusResolver(fr.dir).Resolve(fixtureFile, fixtureLine))
-	seeded, err := st.UpsertFinding(context.Background(), store.Finding{
+	fp := domain.Fingerprint("nil-deref", fixtureFile, funnel.NewLocusResolver(fr.dir).Resolve(fixtureFile, fixtureLine))
+	seeded, err := st.UpsertFinding(context.Background(), domain.Finding{
 		Fingerprint: fp,
 		Title:       "possible nil dereference",
 		Severity:    "high",
 		Tier:        3,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "nil-deref",
 		File:        fixtureFile,
 		Line:        fixtureLine,
@@ -452,7 +453,7 @@ func TestDaemonReverifyPromotesSurvivingT3(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.Tier != 2 || f.Status != store.StatusOpen {
+	if f.Tier != 2 || f.Status != domain.StatusOpen {
 		t.Fatalf("expected open tier-2 after surviving re-verification, got tier=%d status=%q", f.Tier, f.Status)
 	}
 

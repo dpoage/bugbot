@@ -12,9 +12,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // newRegressCmd implements `bugbot regress --from A [--to B]`: it scopes a
@@ -100,12 +100,12 @@ range.
 // evidence as "we proved it was present at --from" — putting them in the
 // same bucket as genuinely-introduced findings matches what an operator
 // wants: "things to investigate first".
-func printRegressAttribution(ctx context.Context, out io.Writer, repo *ingest.Repo, findings []store.Finding, fromRef string) {
+func printRegressAttribution(ctx context.Context, out io.Writer, repo *ingest.Repo, findings []domain.Finding, fromRef string) {
 	if len(findings) == 0 {
 		return
 	}
 	type labeled struct {
-		f     store.Finding
+		f     domain.Finding
 		intro bool
 	}
 	labeledFindings := make([]labeled, 0, len(findings))

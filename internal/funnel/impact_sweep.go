@@ -13,7 +13,6 @@ import (
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
-	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/treesitter"
 )
 
@@ -39,7 +38,7 @@ type reachResult struct {
 // ambiguous (used in the LLM prompt).
 type ambiguousEntry struct {
 	idx         int
-	fi          store.Finding
+	fi          domain.Finding
 	callerFacts string
 }
 
@@ -58,7 +57,7 @@ type adjResult struct {
 // A sweep failure never aborts the run; errors are recorded via f.note.
 func (f *Funnel) impactSweep(
 	ctx context.Context,
-	findings []store.Finding,
+	findings []domain.Finding,
 	repoRoot string,
 	verifierClient llm.Client,
 	budgetStopped bool,
@@ -153,7 +152,7 @@ func (f *Funnel) impactSweep(
 //  7. C/C++ header declaration with zero callers → ambiguous (LLM). Headers are
 //     the primary dead-code locus in the corpus; the LLM can distinguish a
 //     genuinely-dead application header member from an intended public-library API.
-func classifyReachability(fi *store.Finding, repoRoot string, ts *treesitter.Backend) reachResult {
+func classifyReachability(fi *domain.Finding, repoRoot string, ts *treesitter.Backend) reachResult {
 	keep := func(rat string) reachResult {
 		return reachResult{class: reachKnownKeep, severity: fi.Severity, rationale: rat}
 	}
@@ -509,7 +508,7 @@ func (f *Funnel) validateSeverityInline(
 	result *Result,
 ) (domain.Severity, string, bool) {
 	repoRoot := f.repo.Root()
-	fi := store.Finding{
+	fi := domain.Finding{
 		File:     c.File,
 		Line:     c.Line,
 		Severity: c.Severity,

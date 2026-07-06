@@ -3,13 +3,13 @@ package eval
 import (
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // finding is a tiny constructor for a persisted finding in scoring tests.
-func finding(file string, line int, lens, title string) store.Finding {
-	return store.Finding{File: file, Line: line, Lens: lens, Title: title}
+func finding(file string, line int, lens, title string) domain.Finding {
+	return domain.Finding{File: file, Line: line, Lens: lens, Title: title}
 }
 
 func TestScore_Match_WithinTolerance(t *testing.T) {
@@ -17,7 +17,7 @@ func TestScore_Match_WithinTolerance(t *testing.T) {
 		Name:   "tol",
 		Seeded: []SeededBug{{File: "a.go", Line: 10, LineTolerance: 2, Kind: "nil"}},
 	}
-	res := &funnel.Result{Findings: []store.Finding{
+	res := &funnel.Result{Findings: []domain.Finding{
 		finding("a.go", 12, "nil-safety/error-handling", "bug"), // |12-10| = 2 <= 2: match
 	}}
 	cr := score(c, res)
@@ -34,7 +34,7 @@ func TestScore_Miss_OutsideTolerance(t *testing.T) {
 		Name:   "tol",
 		Seeded: []SeededBug{{File: "a.go", Line: 10, LineTolerance: 1}},
 	}
-	res := &funnel.Result{Findings: []store.Finding{
+	res := &funnel.Result{Findings: []domain.Finding{
 		finding("a.go", 12, "lens", "bug"), // |12-10| = 2 > 1: no match
 	}}
 	cr := score(c, res)
@@ -46,11 +46,11 @@ func TestScore_Miss_OutsideTolerance(t *testing.T) {
 
 func TestScore_ZeroTolerance_ExactLine(t *testing.T) {
 	c := Case{Name: "exact", Seeded: []SeededBug{{File: "a.go", Line: 10, LineTolerance: 0}}}
-	exact := score(c, &funnel.Result{Findings: []store.Finding{finding("a.go", 10, "l", "b")}})
+	exact := score(c, &funnel.Result{Findings: []domain.Finding{finding("a.go", 10, "l", "b")}})
 	if exact.TruePositives != 1 {
 		t.Errorf("exact line should match with zero tolerance: tp=%d", exact.TruePositives)
 	}
-	off := score(c, &funnel.Result{Findings: []store.Finding{finding("a.go", 11, "l", "b")}})
+	off := score(c, &funnel.Result{Findings: []domain.Finding{finding("a.go", 11, "l", "b")}})
 	if off.TruePositives != 0 || off.FalsePositives != 1 {
 		t.Errorf("off-by-one with zero tolerance must miss: tp=%d fp=%d", off.TruePositives, off.FalsePositives)
 	}
@@ -58,7 +58,7 @@ func TestScore_ZeroTolerance_ExactLine(t *testing.T) {
 
 func TestScore_WrongFile_NoMatch(t *testing.T) {
 	c := Case{Name: "file", Seeded: []SeededBug{{File: "a.go", Line: 10, LineTolerance: 5}}}
-	cr := score(c, &funnel.Result{Findings: []store.Finding{finding("b.go", 10, "l", "b")}})
+	cr := score(c, &funnel.Result{Findings: []domain.Finding{finding("b.go", 10, "l", "b")}})
 	if cr.TruePositives != 0 || cr.FalsePositives != 1 || cr.FalseNegatives != 1 {
 		t.Errorf("different file must not match: tp/fp/fn = %d/%d/%d", cr.TruePositives, cr.FalsePositives, cr.FalseNegatives)
 	}
@@ -67,7 +67,7 @@ func TestScore_WrongFile_NoMatch(t *testing.T) {
 func TestScore_FilePathNormalization(t *testing.T) {
 	c := Case{Name: "norm", Seeded: []SeededBug{{File: "dir/a.go", Line: 10, LineTolerance: 0}}}
 	// Differently-spelled but equivalent path (./ prefix) must still match.
-	cr := score(c, &funnel.Result{Findings: []store.Finding{finding("./dir/a.go", 10, "l", "b")}})
+	cr := score(c, &funnel.Result{Findings: []domain.Finding{finding("./dir/a.go", 10, "l", "b")}})
 	if cr.TruePositives != 1 {
 		t.Errorf("normalized path should match: tp=%d", cr.TruePositives)
 	}
@@ -77,7 +77,7 @@ func TestScore_DuplicateFindings_DoNotInflateTP(t *testing.T) {
 	c := Case{Name: "dup", Seeded: []SeededBug{{File: "a.go", Line: 10, LineTolerance: 3}}}
 	// Two findings near the same seeded bug: only one can match it; the other is
 	// a false positive.
-	res := &funnel.Result{Findings: []store.Finding{
+	res := &funnel.Result{Findings: []domain.Finding{
 		finding("a.go", 10, "l", "b1"),
 		finding("a.go", 11, "l", "b2"),
 	}}
@@ -97,7 +97,7 @@ func TestScore_GreedyClosestLine(t *testing.T) {
 		{File: "a.go", Line: 10, LineTolerance: 5},
 		{File: "a.go", Line: 20, LineTolerance: 5},
 	}}
-	res := &funnel.Result{Findings: []store.Finding{
+	res := &funnel.Result{Findings: []domain.Finding{
 		finding("a.go", 11, "l", "near10"),
 		finding("a.go", 21, "l", "near20"),
 	}}
@@ -109,7 +109,7 @@ func TestScore_GreedyClosestLine(t *testing.T) {
 
 func TestScore_CleanCase_AnyFindingIsFP(t *testing.T) {
 	c := Case{Name: "clean", Seeded: nil}
-	cr := score(c, &funnel.Result{Findings: []store.Finding{
+	cr := score(c, &funnel.Result{Findings: []domain.Finding{
 		finding("a.go", 1, "lens-x", "spurious"),
 	}})
 	if !cr.Clean() {

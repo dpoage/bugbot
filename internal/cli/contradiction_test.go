@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -26,14 +27,14 @@ func setupContradicted(t *testing.T) (cfgPath string, shortID string) {
 	}
 	defer func() { _ = st.Close() }()
 
-	f := store.Finding{
-		Fingerprint: store.Fingerprint("uaf", "alloc.go", fmt.Sprintf("%d|%s", 77, "uaf-in-alloc")),
+	f := domain.Finding{
+		Fingerprint: domain.Fingerprint("uaf", "alloc.go", fmt.Sprintf("%d|%s", 77, "uaf-in-alloc")),
 		Title:       "heap use after free in allocator",
 		Description: "allocator reuses freed memory.",
 		Reasoning:   "verifier confirmed; repro exited 0 twice.",
 		Severity:    "high",
 		Tier:        2,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "uaf",
 		File:        "alloc.go",
 		Line:        77,
@@ -48,7 +49,7 @@ func setupContradicted(t *testing.T) (cfgPath string, shortID string) {
 	if _, err := st.EnqueueRepro(ctx, stored.Fingerprint); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	for i := 0; i < store.ReproContradictionThreshold; i++ {
+	for i := 0; i < domain.ReproContradictionThreshold; i++ {
 		if err := st.RecordExitZeroAttempt(ctx, stored.Fingerprint); err != nil {
 			t.Fatalf("record exit zero #%d: %v", i+1, err)
 		}

@@ -37,7 +37,7 @@ const DefaultMergeWindow = 10
 // refuter panel), never a lost finding.
 const mergeSimilarityThreshold = 0.18
 
-// normPath normalizes a file path the same way store.Fingerprint does, so two
+// normPath normalizes a file path the same way domain.Fingerprint does, so two
 // spellings of the same file cluster together.
 func normPath(file string) string {
 	return strings.ToLower(path.Clean(strings.ReplaceAll(file, "\\", "/")))

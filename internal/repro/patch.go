@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
@@ -198,7 +199,7 @@ func detectSuiteCmdFor(repoDir string, systems []ingest.BuildSystem) []string {
 
 // Prove runs the patch-prover loop for a finding that was just promoted to T1.
 // It either promotes to T0 (FixWitnessed) or records NeedsHuman on exhaustion.
-func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f store.Finding, att *Attempt) (_ patchOutcome, retErr error) {
+func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f domain.Finding, att *Attempt) (_ patchOutcome, retErr error) {
 	maxAtt := p.maxAttempts
 	if maxAtt <= 0 {
 		maxAtt = patchDefaultMaxAttempts
@@ -358,7 +359,7 @@ func (p *PatchProver) newRunner(scope progress.AgentScope) (*agent.Runner, error
 
 // planFor asks the patch-prover agent for a fix plan, returning the run's token
 // usage so Prove can settle the agent-finished bracket with an accurate total.
-func (p *PatchProver) planFor(ctx context.Context, runner *agent.Runner, f store.Finding, att *Attempt, feedback string) (*PatchPlan, llm.Usage, error) {
+func (p *PatchProver) planFor(ctx context.Context, runner *agent.Runner, f domain.Finding, att *Attempt, feedback string) (*PatchPlan, llm.Usage, error) {
 	task := buildPatchTask(f, att, feedback)
 	var plan PatchPlan
 	outcome, err := runner.RunJSON(ctx, task, patchSchema, &plan)
@@ -381,7 +382,7 @@ func (p *PatchProver) planFor(ctx context.Context, runner *agent.Runner, f store
 // (util.FlattenField). The repro output is already length-truncated by trunc;
 // it is agent-visible feedback data and left unstructured here (the sandbox
 // output fencing in interpret.go handles the cross-run feedback case).
-func buildPatchTask(f store.Finding, att *Attempt, feedback string) string {
+func buildPatchTask(f domain.Finding, att *Attempt, feedback string) string {
 	var b strings.Builder
 	b.WriteString("A bug has been confirmed by a failing sandboxed test. Produce a MINIMAL fix.\n\n")
 	fmt.Fprintf(&b, "Title: %s\n", util.FlattenField(f.Title))
@@ -775,7 +776,7 @@ func writePatchArtifacts(artifactDir, findingID string, plan *PatchPlan, diffTex
 }
 
 // promoteToT0 updates the finding to Tier-0 with the fix-patch diff text.
-func promoteToT0(ctx context.Context, st *store.Store, f store.Finding, diffText string) error {
+func promoteToT0(ctx context.Context, st *store.Store, f domain.Finding, diffText string) error {
 	current, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
 	if err != nil {
 		return err
@@ -790,13 +791,13 @@ func promoteToT0(ctx context.Context, st *store.Store, f store.Finding, diffText
 
 // flagNeedsHuman marks the finding as needing human review and appends a
 // summary to its Reasoning.  Tier stays 1.
-func flagNeedsHuman(ctx context.Context, st *store.Store, f store.Finding, attempts int, lastFailure string) error {
+func flagNeedsHuman(ctx context.Context, st *store.Store, f domain.Finding, attempts int, lastFailure string) error {
 	current, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
 	if err != nil {
 		return err
 	}
 	current.NeedsHuman = true
-	current.NeedsHumanReason = store.NeedsHumanReasonProverExhausted
+	current.NeedsHumanReason = domain.NeedsHumanReasonProverExhausted
 	// Idempotence: re-running repro+patch over an already-flagged finding must
 	// not grow Reasoning with duplicate appends.
 	if strings.Contains(current.Reasoning, "PATCH-PROVER:") {

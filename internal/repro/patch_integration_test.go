@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -93,14 +94,14 @@ func Divide(a, b int) (int, bool) {
 	}
 	defer func() { _ = st.Close() }()
 
-	fp := store.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 7, "Divide ignores zero divisor"))
-	finding, err := st.UpsertFinding(context.Background(), store.Finding{
+	fp := domain.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 7, "Divide ignores zero divisor"))
+	finding, err := st.UpsertFinding(context.Background(), domain.Finding{
 		Fingerprint: fp,
 		Title:       "Divide ignores zero divisor",
 		Description: "Divide returns ok=true for a zero divisor.",
 		Severity:    "high",
 		Tier:        2,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "logic",
 		File:        "calc.go",
 		Line:        7,
@@ -134,7 +135,7 @@ func Divide(a, b int) (int, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	summary, err := r.PromoteAll(ctx, st, []store.Finding{finding})
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
 	if err != nil {
 		// Image pull failure: skip rather than fail.
 		if strings.Contains(err.Error(), "pull") || strings.Contains(err.Error(), "manifest") || strings.Contains(err.Error(), "image") {

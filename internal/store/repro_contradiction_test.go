@@ -3,11 +3,13 @@ package store
 import (
 	"context"
 	"testing"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // TestReproContradiction_SignalFromExitZeroAttempts verifies acceptance criterion 1:
-// a finding with >= ReproContradictionThreshold exit-zero repro attempts carries
-// a visible repro-contradicted signal in its Finding struct (via report list/show
+// a finding with >= domain.ReproContradictionThreshold exit-zero repro attempts carries
+// a visible repro-contradicted signal in its domain.Finding struct (via report list/show
 // data path: ListFindings and GetFindingByFingerprint both read ReproContradicted).
 func TestReproContradiction_SignalFromExitZeroAttempts(t *testing.T) {
 	ctx := context.Background()
@@ -32,7 +34,7 @@ func TestReproContradiction_SignalFromExitZeroAttempts(t *testing.T) {
 		t.Fatalf("GetFindingByFingerprint after 1 exit-zero: %v", err)
 	}
 	if got.ReproContradicted {
-		t.Errorf("ReproContradicted = true after 1 exit-zero attempt, want false (threshold = %d)", ReproContradictionThreshold)
+		t.Errorf("ReproContradicted = true after 1 exit-zero attempt, want false (threshold = %d)", domain.ReproContradictionThreshold)
 	}
 
 	// Second exit-zero attempt: now contradicted.
@@ -45,11 +47,11 @@ func TestReproContradiction_SignalFromExitZeroAttempts(t *testing.T) {
 		t.Fatalf("GetFindingByFingerprint after 2 exit-zeros: %v", err)
 	}
 	if !got2.ReproContradicted {
-		t.Errorf("ReproContradicted = false after %d exit-zero attempts, want true", ReproContradictionThreshold)
+		t.Errorf("ReproContradicted = false after %d exit-zero attempts, want true", domain.ReproContradictionThreshold)
 	}
 
 	// Also visible via ListFindings.
-	all, err := st.ListFindings(ctx, FindingFilter{Status: StatusOpen})
+	all, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatalf("ListFindings: %v", err)
 	}
@@ -57,7 +59,7 @@ func TestReproContradiction_SignalFromExitZeroAttempts(t *testing.T) {
 		t.Fatalf("expected 1 finding, got %d", len(all))
 	}
 	if !all[0].ReproContradicted {
-		t.Errorf("ListFindings: ReproContradicted = false, want true after %d exit-zeros", ReproContradictionThreshold)
+		t.Errorf("ListFindings: ReproContradicted = false, want true after %d exit-zeros", domain.ReproContradictionThreshold)
 	}
 }
 
@@ -165,7 +167,7 @@ func TestReproContradiction_NoQueueRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.ReproContradicted {
-		t.Error("Finding with no repro_attempts row: ReproContradicted = true, want false")
+		t.Error("domain.Finding with no repro_attempts row: ReproContradicted = true, want false")
 	}
 }
 
@@ -184,7 +186,7 @@ func TestReproContradiction_ContradictedFingerprintsAccessor(t *testing.T) {
 
 	// f2 gets 1 exit-zero attempt (not contradicted).
 	f2 := sampleFinding()
-	f2.Fingerprint = Fingerprint("nil-deref", "pkg/foo.go", "42|nil deref")
+	f2.Fingerprint = domain.Fingerprint("nil-deref", "pkg/foo.go", "42|nil deref")
 	f2.Lens = "nil-deref"
 	f2.File = "pkg/foo.go"
 	s2, _ := st.UpsertFinding(ctx, f2)

@@ -5,149 +5,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
-
-// ---------------------------------------------------------------------------
-// FSM transition guard: illegal state tests (acceptance criterion 4)
-// ---------------------------------------------------------------------------
-
-func TestValidateFindingState_IllegalTransitions(t *testing.T) {
-	base := func() Finding {
-		return Finding{
-			Fingerprint: "fp",
-			Tier:        2,
-			Status:      StatusOpen,
-		}
-	}
-
-	cases := []struct {
-		name    string
-		mutate  func(*Finding)
-		wantErr bool
-	}{
-		{
-			name:    "valid T2 open",
-			mutate:  func(f *Finding) {},
-			wantErr: false,
-		},
-		{
-			name: "valid T1 with ReproPath",
-			mutate: func(f *Finding) {
-				f.Tier = 1
-				f.ReproPath = "/artifacts/repro"
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid T0 with ReproPath",
-			mutate: func(f *Finding) {
-				f.Tier = 0
-				f.ReproPath = "/artifacts/fix"
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid NeedsHuman BelowQuorum",
-			mutate: func(f *Finding) {
-				f.NeedsHuman = true
-				f.NeedsHumanReason = NeedsHumanReasonBelowQuorum
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid NeedsHuman ProverExhausted with ReproPath",
-			mutate: func(f *Finding) {
-				f.Tier = 1
-				f.ReproPath = "/artifacts/repro"
-				f.NeedsHuman = true
-				f.NeedsHumanReason = NeedsHumanReasonProverExhausted
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid ReproWitness with NeedsHuman",
-			mutate: func(f *Finding) {
-				f.NeedsHuman = true
-				f.NeedsHumanReason = NeedsHumanReasonBelowQuorum
-				f.ReproWitness = "/artifacts/witness"
-			},
-			wantErr: false,
-		},
-		// --- illegal ---
-		{
-			name: "ILLEGAL: T0 without ReproPath",
-			mutate: func(f *Finding) {
-				f.Tier = 0
-			},
-			wantErr: true,
-		},
-		{
-			name: "ILLEGAL: T1 without ReproPath",
-			mutate: func(f *Finding) {
-				f.Tier = 1
-			},
-			wantErr: true,
-		},
-		{
-			name: "ILLEGAL: T0 + NeedsHuman (Witnessed+Promoted conflict)",
-			mutate: func(f *Finding) {
-				f.Tier = 0
-				f.ReproPath = "/artifacts/fix"
-				f.NeedsHuman = true
-				f.NeedsHumanReason = NeedsHumanReasonBelowQuorum
-			},
-			wantErr: true,
-		},
-		{
-			name: "ILLEGAL: ReproWitness without NeedsHuman",
-			mutate: func(f *Finding) {
-				f.ReproWitness = "/artifacts/witness"
-			},
-			wantErr: true,
-		},
-		{
-			name: "ILLEGAL: NeedsHuman without reason",
-			mutate: func(f *Finding) {
-				f.NeedsHuman = true
-				// NeedsHumanReason stays None
-			},
-			wantErr: true,
-		},
-		{
-			name: "ILLEGAL: reason set but NeedsHuman false",
-			mutate: func(f *Finding) {
-				f.NeedsHumanReason = NeedsHumanReasonBelowQuorum
-			},
-			wantErr: true,
-		},
-		{
-			name: "ILLEGAL: ProverExhausted without ReproPath",
-			mutate: func(f *Finding) {
-				f.NeedsHuman = true
-				f.NeedsHumanReason = NeedsHumanReasonProverExhausted
-				// ReproPath empty
-			},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f := base()
-			tc.mutate(&f)
-			err := ValidateFindingState(f)
-			if tc.wantErr && err == nil {
-				t.Errorf("expected illegal-transition error, got nil")
-			}
-			if !tc.wantErr && err != nil {
-				t.Errorf("expected nil error, got %v", err)
-			}
-			if tc.wantErr && err != nil && !errors.Is(err, ErrIllegalTransition) {
-				t.Errorf("expected ErrIllegalTransition, got %v", err)
-			}
-		})
-	}
-}
 
 // ---------------------------------------------------------------------------
 // repro_attempts queue: claim/skip semantics and infra-retry (acceptance 2+3)
@@ -264,7 +124,7 @@ func TestReproQueue_InfraRetryBounded(t *testing.T) {
 
 // TestUpsertFinding_PreMigrationNeedsHumanReason is a regression test for the
 // migration-018 backfill blocker: a pre-migration row with needs_human=1 and
-// needs_human_reason=” (the default before the backfill) must NOT cause
+// needs_human_reason=" (the default before the backfill) must NOT cause
 // UpsertFinding to reject the row on its next UPDATE. The migration backfill
 // assigns a non-empty reason to every such row; this test verifies that a row
 // with an empty reason (simulating a missed backfill or direct-SQL write) is
@@ -277,7 +137,7 @@ func TestUpsertFinding_PreMigrationNeedsHumanRow(t *testing.T) {
 	// Seed a "below_quorum" finding through the normal path so the row exists.
 	base := sampleFinding()
 	base.NeedsHuman = true
-	base.NeedsHumanReason = NeedsHumanReasonBelowQuorum
+	base.NeedsHumanReason = domain.NeedsHumanReasonBelowQuorum
 	stored, err := st.UpsertFinding(ctx, base)
 	if err != nil {
 		t.Fatalf("initial upsert: %v", err)
@@ -292,12 +152,12 @@ func TestUpsertFinding_PreMigrationNeedsHumanRow(t *testing.T) {
 		t.Fatalf("raw SQL wipe: %v", err)
 	}
 
-	// Re-upsert: incoming re-scan carries NeedsHuman=true, NeedsHumanReason=None
+	// Re-upsert: incoming re-scan carries NeedsHuman=true, domain.NeedsHumanReason=None
 	// (as a verifier re-run would). The recovery branch must synthesise a
 	// non-None reason so ValidateFindingState does not reject the UPDATE.
 	rescan := base
 	rescan.NeedsHuman = true
-	rescan.NeedsHumanReason = NeedsHumanReasonNone // incoming has no reason
+	rescan.NeedsHumanReason = domain.NeedsHumanReasonNone // incoming has no reason
 	rescan.Reasoning = "updated reasoning"
 	got, err := st.UpsertFinding(ctx, rescan)
 	if err != nil {
@@ -306,8 +166,8 @@ func TestUpsertFinding_PreMigrationNeedsHumanRow(t *testing.T) {
 	if !got.NeedsHuman {
 		t.Errorf("NeedsHuman cleared; want still true")
 	}
-	if got.NeedsHumanReason == NeedsHumanReasonNone {
-		t.Errorf("NeedsHumanReason empty after re-upsert; want a non-None reason to be synthesised")
+	if got.NeedsHumanReason == domain.NeedsHumanReasonNone {
+		t.Errorf("domain.NeedsHumanReason empty after re-upsert; want a non-None reason to be synthesised")
 	}
 }
 

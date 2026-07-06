@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -43,7 +44,7 @@ import (
 //
 // The hook takes no overflow parameters; overflow draining is handled by the
 // caller (Funnel) after runReproAttempt returns.
-func (f *Funnel) runReproAttempt(ctx context.Context, finding store.Finding, scanRunID string) {
+func (f *Funnel) runReproAttempt(ctx context.Context, finding domain.Finding, scanRunID string) {
 	// Register this finding in the durable repro queue (idempotent). The queue
 	// provides the authoritative claim/skip gate across all three dispatch paths
 	// (in-run hook, daemon backlog drain, `bugbot repro` CLI). The Repro hook
@@ -189,18 +190,18 @@ func reproSucceededInt(status string) int {
 // starvation — it is defensive machinery, tested directly below rather than
 // through contrived integration timing.
 type reproQueue struct {
-	ch       chan store.Finding
+	ch       chan domain.Finding
 	mu       sync.Mutex
-	overflow []store.Finding
+	overflow []domain.Finding
 }
 
 func newReproQueue(buffer int) *reproQueue {
-	return &reproQueue{ch: make(chan store.Finding, buffer)}
+	return &reproQueue{ch: make(chan domain.Finding, buffer)}
 }
 
 // enqueue delivers f to the channel when there is room, else stages it in the
 // overflow slice. Never blocks.
-func (q *reproQueue) enqueue(f store.Finding) {
+func (q *reproQueue) enqueue(f domain.Finding) {
 	select {
 	case q.ch <- f:
 	default:
@@ -212,7 +213,7 @@ func (q *reproQueue) enqueue(f store.Finding) {
 
 // drainOverflow returns the staged overflow findings exactly once: a second
 // call returns nil unless new findings were staged in between.
-func (q *reproQueue) drainOverflow() []store.Finding {
+func (q *reproQueue) drainOverflow() []domain.Finding {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	out := q.overflow

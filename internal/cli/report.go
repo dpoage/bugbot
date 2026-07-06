@@ -11,7 +11,6 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/report"
-	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
 )
 
@@ -60,16 +59,16 @@ func newReportListCmd() *cobra.Command {
 			}
 			defer closeStore(st)
 
-			filter := store.FindingFilter{HasTier: tier != 0, Tier: domain.Tier(tier)}
+			filter := domain.FindingFilter{HasTier: tier != 0, Tier: domain.Tier(tier)}
 			switch strings.ToLower(strings.TrimSpace(status)) {
 			case "", "open":
-				filter.Status = store.StatusOpen
+				filter.Status = domain.StatusOpen
 			case "all":
 				// no status filter
 			case "dismissed":
-				filter.Status = store.StatusDismissed
+				filter.Status = domain.StatusDismissed
 			case "fixed":
-				filter.Status = store.StatusFixed
+				filter.Status = domain.StatusFixed
 			default:
 				return fmt.Errorf("invalid --status %q (want open, dismissed, fixed, or all)", status)
 			}
@@ -144,7 +143,7 @@ func newReportShowCmd() *cobra.Command {
 				_, _ = fmt.Fprintf(out, "Repro:       %s\n", f.ReproPath)
 			}
 			if f.ReproContradicted {
-				_, _ = fmt.Fprintf(out, "Repro-contradicted: yes (test ran >= %d times, bug did not manifest)\n", store.ReproContradictionThreshold)
+				_, _ = fmt.Fprintf(out, "Repro-contradicted: yes (test ran >= %d times, bug did not manifest)\n", domain.ReproContradictionThreshold)
 			}
 			_, _ = fmt.Fprintf(out, "Created:     %s\n", f.CreatedAt.Format("2006-01-02 15:04:05 MST"))
 			_, _ = fmt.Fprintf(out, "Updated:     %s\n", f.UpdatedAt.Format("2006-01-02 15:04:05 MST"))

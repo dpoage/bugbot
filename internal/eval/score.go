@@ -3,14 +3,14 @@ package eval
 import (
 	"sort"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // Match records that a persisted finding matched a seeded bug.
 type Match struct {
 	Seeded  SeededBug
-	Finding store.Finding
+	Finding domain.Finding
 }
 
 // CaseResult is the scored outcome of one Case run.
@@ -32,7 +32,7 @@ type CaseResult struct {
 	// Matches lists each (seeded bug, finding) pair that matched, for reporting.
 	Matches []Match
 	// UnmatchedFindings are the findings counted as false positives.
-	UnmatchedFindings []store.Finding
+	UnmatchedFindings []domain.Finding
 	// UnmatchedSeeded are the seeded bugs counted as false negatives.
 	UnmatchedSeeded []SeededBug
 
@@ -46,7 +46,7 @@ type CaseResult struct {
 	// and the drop breakdown).
 	Stats funnel.Stats
 	// Findings is the full persisted finding set for the case (post-funnel).
-	Findings []store.Finding
+	Findings []domain.Finding
 }
 
 // Clean reports whether the case was a clean-code case (no seeded bugs).
@@ -153,7 +153,7 @@ func score(c Case, res *funnel.Result) *CaseResult {
 // miss. The funnel persists findings with the file path the finder reported, so
 // this keeps matching robust to that path's exact spelling.
 func sameFile(a, b string) bool {
-	return store.Fingerprint("", a, "") == store.Fingerprint("", b, "")
+	return domain.Fingerprint("", a, "") == domain.Fingerprint("", b, "")
 }
 
 func abs(n int) int {

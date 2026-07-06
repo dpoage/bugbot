@@ -2,13 +2,10 @@ package store
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path"
 	"sort"
 	"strings"
 	"time"
@@ -16,109 +13,8 @@ import (
 	"github.com/dpoage/bugbot/internal/domain"
 )
 
-// Site is one code location (file + line) contributing to a finding. The
-// primary's own location is always Sites[0]; additional entries come from
-// same-root-cause members collapsed into the primary during triage.
-type Site struct {
-	File string
-	Line int
-}
-
-// Status enumerates the lifecycle states of a finding.
-type Status string
-
-const (
-	// StatusOpen means the finding is active and may be reported.
-	StatusOpen Status = "open"
-	// StatusDismissed means a maintainer rejected it; it is suppressed forever.
-	StatusDismissed Status = "dismissed"
-	// StatusFixed means the underlying bug has been resolved.
-	StatusFixed Status = "fixed"
-	// StatusSuperseded means a newer finding replaced this one (e.g. the code
-	// moved and a new fingerprint was generated).
-	StatusSuperseded Status = "superseded"
-)
-
 // ErrNotFound is returned by Get-style methods when no row matches.
 var ErrNotFound = errors.New("store: not found")
-
-// Finding is a single candidate (or confirmed) bug. It is anchored to a code
-// version through CommitSHA and FileHash so the daemon can detect when the
-// underlying code has changed and re-verification is warranted.
-type Finding struct {
-	ID          string
-	Fingerprint string
-	// LocusKey is the lens-independent location identity sha256(normFile, locus):
-	// the Fingerprint inputs minus the lens. It backs the durable cross-lens fold
-	// (triage's OpenFindingsByLocusKey point-lookup) so a finding persisted by a
-	// prior run can absorb a later same-locus, different-lens candidate as
-	// corroboration instead of spawning a duplicate. Persisted + indexed; empty on
-	// pre-migration rows, which simply do not participate until re-upserted.
-	LocusKey      string
-	Title         string
-	Description   string
-	Reasoning     string // the adversarial verification trace
-	VerdictDetail string // impact-sweep rationale for severity re-rank (empty = not re-ranked)
-	Severity      domain.Severity
-	Tier          domain.Tier // T0 fix-witnessed, T1 reproduced, T2 verified, T3 suspected
-	Status        Status
-	Lens          string
-	File          string
-	Line          int
-	CommitSHA     string
-	FileHash      string
-	ReproPath     string // empty when no reproduction exists
-	// ReproWitness is the bundle path for a non-promoting repro attempt on a
-	// below-quorum (NeedsHuman) finding. It mirrors ReproPath in shape (a
-	// self-contained artifact directory) but does NOT promote the finding:
-	// Tier, ReproPath, and NeedsHuman are all left untouched, and no
-	// patch-prover / publish cascade follows. The human reviewer can run the
-	// bundle but downstream automation does not — the human gate is preserved.
-	// Empty when no witness was recorded. See repro/promote.go::witnessFinding
-	// and funnel/repro_hook.go claim-check split. bugbot-w1bh.
-	ReproWitness string // empty when no witness repro was attempted
-	// FixPatch is the unified diff text produced by the patch-prover stage when a
-	// minimal fix candidate was witnessed by the sandbox.  Empty when the prover
-	// was not run or found no plausible fix.
-	FixPatch string
-	// NeedsHuman flags a finding for human review. The cause is recorded
-	// explicitly in NeedsHumanReason; use that field instead of flag-combination
-	// inference. Both causes exclude the finding from the repro backlog and the
-	// patch-prover cascade until a human confirms (bugbot-sw7).
-	NeedsHuman bool
-	// NeedsHumanReason is the explicit cause for NeedsHuman. Always set when
-	// NeedsHuman is true; NeedsHumanReasonNone when NeedsHuman is false.
-	// See NeedsHumanReason constants in findings_fsm.go.
-	NeedsHumanReason NeedsHumanReason
-	// CorroboratingLenses are the OTHER lenses that independently reported this
-	// same defect and were collapsed into this finding by triage's location-based
-	// cross-lens dedup. It excludes the finding's own Lens. Persisted as a
-	// comma-separated text column; it is a reporting signal only and does NOT
-	// affect the finding's tier or status.
-	CorroboratingLenses []string
-	// Sites records every code location this finding represents. Sites[0] is the
-	// primary's (File, Line). Additional entries are same-root-cause merge sites.
-	// Stored as a pipe-separated "file:line" list; empty when no merge occurred.
-	Sites []Site
-	// Confidence is derived from tier, severity, and corroborating-lens count at
-	// read time. It is also written to the DB column for backward compatibility
-	// with direct SQL queries, but callers should treat the struct field as the
-	// authoritative value — it is always consistent with the other fields.
-	Confidence float64
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
-	// SweptAt is the timestamp when UpdateFindingSeverity last recorded a sweep
-	// verdict. Zero = not swept (impact-sweep marker; set by UpdateFindingSeverity,
-	// preserved across re-upsert when file_hash is unchanged, reset on file_hash change).
-	SweptAt time.Time
-	// ReproContradicted is true when this finding's repro test has been run
-	// >= ReproContradictionThreshold times and exited 0 each time, meaning the
-	// bug did not manifest on repeated attempts. This is disconfirming evidence:
-	// the automated test cannot reproduce the bug. Derived from
-	// repro_attempts.exit_zero_count via a LEFT JOIN at read time; false when
-	// no repro_attempts row exists for this fingerprint.
-	ReproContradicted bool
-}
 
 // encodeLenses encodes the lens list as a JSON array for storage in the
 // corroborating_lenses column. Nil/empty yields the empty string.
@@ -152,7 +48,7 @@ func decodeLenses(s string) []string {
 	return strings.Split(s, ",")
 }
 
-// encodeSites encodes a slice of Site into a newline-separated list of
+// encodeSites encodes a slice of domain.Site into a newline-separated list of
 // "file|line" entries. Format: "file|line\nfile|line\n..."
 // Empty/nil yields "".
 //
@@ -163,7 +59,7 @@ func decodeLenses(s string) []string {
 //   - Newline characters ('\n') in file paths are not escaped; they would
 //     split into bogus entries on decode. Source-file paths do not contain
 //     newlines in practice.
-func encodeSites(sites []Site) string {
+func encodeSites(sites []domain.Site) string {
 	if len(sites) == 0 {
 		return ""
 	}
@@ -176,12 +72,12 @@ func encodeSites(sites []Site) string {
 }
 
 // decodeSites parses the pipe/newline encoded sites column. Empty string yields nil.
-func decodeSites(s string) []Site {
+func decodeSites(s string) []domain.Site {
 	if s == "" {
 		return nil
 	}
 	entries := strings.Split(s, "\n")
-	out := make([]Site, 0, len(entries))
+	out := make([]domain.Site, 0, len(entries))
 	for _, e := range entries {
 		idx := strings.LastIndex(e, "|")
 		if idx < 0 {
@@ -192,7 +88,7 @@ func decodeSites(s string) []Site {
 		if _, err := fmt.Sscanf(e[idx+1:], "%d", &line); err != nil {
 			continue // malformed line number; skip entry
 		}
-		out = append(out, Site{File: file, Line: line})
+		out = append(out, domain.Site{File: file, Line: line})
 	}
 	if len(out) == 0 {
 		return nil
@@ -239,53 +135,6 @@ func findingConfidence(tier domain.Tier, severity domain.Severity, corroborating
 	return v
 }
 
-// Fingerprint computes the stable, cross-scan dedup identity for a finding. It
-// is deliberately independent of the two inputs that drift between scans of the
-// same unchanged code: the model-authored title (reworded every run) and the
-// raw line (shifts when code above it changes). Drift in either silently minted
-// a fresh identity, so a re-discovered bug failed to dedup and was published as
-// a duplicate issue.
-//
-// The identity is the lens (the defect family), the normalized file path, and a
-// caller-supplied location anchor (locus): the enclosing symbol when the funnel
-// can resolve one, else a line-based fallback (see funnel.LocusResolver). The
-// "bugbotFingerprint/v2" version token namespaces the scheme so a future
-// algorithm change yields disjoint identities, and matches the SARIF
-// partialFingerprints key. Two findings with the same fingerprint are the same
-// bug and dedup/upsert onto one row.
-func Fingerprint(lens, file, locus string) string {
-	normFile := strings.ToLower(path.Clean(strings.ReplaceAll(file, "\\", "/")))
-	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "bugbotFingerprint/v2\x00%s\x00%s\x00%s", strings.ToLower(lens), normFile, locus)
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// LocusKey computes the lens-independent location identity: the same normalized
-// file path and caller-supplied locus anchor that Fingerprint uses, but WITHOUT
-// the lens. Two findings with the same LocusKey sit at the same enclosing-symbol
-// (or line-fallback) anchor regardless of which lens reported them; triage's
-// durable cross-lens fold keys on it. The "bugbotLocus/v1" token namespaces the
-// scheme independently of the fingerprint version.
-func LocusKey(file, locus string) string {
-	normFile := strings.ToLower(path.Clean(strings.ReplaceAll(file, "\\", "/")))
-	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "bugbotLocus/v1\x00%s\x00%s", normFile, locus)
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// FindingFilter narrows ListFindings. Zero-valued fields are not applied.
-type FindingFilter struct {
-	Status Status // exact status match
-	// HasTier, when true, restricts results to the exact Tier value below.
-	// When false, Tier is ignored and all tiers are returned. This replaces the
-	// prior zero-sentinel convention (Tier==0 meaning "any tier"), which could
-	// not express a T0-only query.
-	HasTier   bool
-	Tier      domain.Tier // effective only when HasTier is true
-	CommitSHA string      // findings anchored to a specific commit
-	Lens      string
-}
-
 // UpsertFinding inserts the finding or, if one with the same fingerprint exists,
 // updates its mutable fields and bumps updated_at while preserving id and
 // created_at. It returns the stored row.
@@ -294,12 +143,12 @@ type FindingFilter struct {
 // suppressed, the stored status is forced to StatusDismissed regardless of the
 // requested status, so a re-discovered bug never resurfaces as open. The caller
 // may pass any status; this method owns the final decision.
-func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
+func (s *Store) UpsertFinding(ctx context.Context, f domain.Finding) (domain.Finding, error) {
 	if f.Fingerprint == "" {
-		return Finding{}, fmt.Errorf("store: UpsertFinding requires a fingerprint")
+		return domain.Finding{}, fmt.Errorf("store: UpsertFinding requires a fingerprint")
 	}
 	if f.Status == "" {
-		f.Status = StatusOpen
+		f.Status = domain.StatusOpen
 	}
 	// Confidence is always derived, never trusted from the caller.
 	f.Confidence = findingConfidence(f.Tier, f.Severity, len(f.CorroboratingLenses))
@@ -310,7 +159,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			return annotateErr(s.path, "upsert_finding", err)
 		}
 		if suppressed {
-			f.Status = StatusDismissed
+			f.Status = domain.StatusDismissed
 		}
 
 		now := nowUTC()
@@ -333,7 +182,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			f.CreatedAt = now
 			f.UpdatedAt = now
 			// Validate FSM invariants for new findings (no stored state to preserve).
-			if verr := ValidateFindingState(f); verr != nil {
+			if verr := domain.ValidateFindingState(f); verr != nil {
 				return verr
 			}
 			if _, err := tx.ExecContext(ctx, `
@@ -402,14 +251,14 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			if existingNeedsHuman != 0 {
 				f.NeedsHuman = true
 				// Preserve the stored reason; incoming re-scan never has a reason.
-				if f.NeedsHumanReason == NeedsHumanReasonNone {
-					f.NeedsHumanReason = NeedsHumanReason(existingNeedsHumanReason)
+				if f.NeedsHumanReason == domain.NeedsHumanReasonNone {
+					f.NeedsHumanReason = domain.NeedsHumanReason(existingNeedsHumanReason)
 				}
 				// Pre-migration rows: stored reason is '' (migration backfill missed or
 				// direct-SQL write). Synthesise a plausible reason so ValidateFindingState
 				// invariant (d) does not reject this UPDATE.
-				if f.NeedsHumanReason == NeedsHumanReasonNone {
-					f.NeedsHumanReason = NeedsHumanReasonBelowQuorum
+				if f.NeedsHumanReason == domain.NeedsHumanReasonNone {
+					f.NeedsHumanReason = domain.NeedsHumanReasonBelowQuorum
 				}
 			}
 			// swept_at: preserve across idempotent re-discovery; reset when the
@@ -444,7 +293,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			// Validate FSM invariants after promotion-guard resolution: stored values
 			// for NeedsHuman/NeedsHumanReason and ReproPath have been applied, so
 			// the struct now reflects the final state that will be written.
-			if verr := ValidateFindingState(f); verr != nil {
+			if verr := domain.ValidateFindingState(f); verr != nil {
 				return verr
 			}
 			if _, err := tx.ExecContext(ctx, `
@@ -479,19 +328,19 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 		return nil
 	})
 	if err != nil {
-		return Finding{}, err
+		return domain.Finding{}, err
 	}
 	return f, nil
 }
 
 // GetFinding returns the finding with the given id, or ErrNotFound.
-func (s *Store) GetFinding(ctx context.Context, id string) (Finding, error) {
+func (s *Store) GetFinding(ctx context.Context, id string) (domain.Finding, error) {
 	return s.queryOne(ctx, `WHERE f.id = ?`, id)
 }
 
 // GetFindingByFingerprint returns the finding with the given fingerprint, or
 // ErrNotFound.
-func (s *Store) GetFindingByFingerprint(ctx context.Context, fingerprint string) (Finding, error) {
+func (s *Store) GetFindingByFingerprint(ctx context.Context, fingerprint string) (domain.Finding, error) {
 	return s.queryOne(ctx, `WHERE f.fingerprint = ?`, fingerprint)
 }
 
@@ -500,10 +349,10 @@ func (s *Store) GetFindingByFingerprint(ctx context.Context, fingerprint string)
 // fold uses it as a per-candidate point-lookup: at a single enclosing-symbol (or
 // line-fallback) anchor there are at most a handful of findings, so this is a
 // bounded indexed read, not a table scan. An empty result is not an error.
-func (s *Store) OpenFindingsByLocusKey(ctx context.Context, locusKey string) ([]Finding, error) {
-	q := findingColumns + findingFrom + " WHERE f.locus_key = ? AND f.status = ? ORDER BY f.created_at ASC, f.id ASC"
-	return queryRows(ctx, s, "open_findings_by_locus_key", q, []any{locusKey, string(StatusOpen)},
-		func(r *sql.Rows) (Finding, error) { return scanFinding(r) })
+func (s *Store) OpenFindingsByLocusKey(ctx context.Context, locusKey string) ([]domain.Finding, error) {
+	return queryRows(ctx, s, "open_findings_by_locus_key",
+		findingColumns+findingFrom+` WHERE f.status = 'open' AND f.locus_key = ?`,
+		[]any{locusKey}, func(r *sql.Rows) (domain.Finding, error) { return scanFinding(r) })
 }
 
 // ListFindings returns findings matching the filter, newest-updated first.
@@ -511,7 +360,7 @@ func (s *Store) OpenFindingsByLocusKey(ctx context.Context, locusKey string) ([]
 // ORDER BY updated_at DESC, id ASC: updated_at is the primary key for "newest";
 // id (the unique primary key) is the tiebreaker for findings that share an
 // updated_at down to the nanosecond.
-func (s *Store) ListFindings(ctx context.Context, filter FindingFilter) ([]Finding, error) {
+func (s *Store) ListFindings(ctx context.Context, filter domain.FindingFilter) ([]domain.Finding, error) {
 	var where []string
 	var args []any
 	if filter.Status != "" {
@@ -537,7 +386,7 @@ func (s *Store) ListFindings(ctx context.Context, filter FindingFilter) ([]Findi
 	}
 	q += " ORDER BY f.updated_at DESC, f.id ASC"
 
-	return queryRows(ctx, s, "list_findings", q, args, func(r *sql.Rows) (Finding, error) { return scanFinding(r) })
+	return queryRows(ctx, s, "list_findings", q, args, func(r *sql.Rows) (domain.Finding, error) { return scanFinding(r) })
 }
 
 // UpdateStatus sets the status of the finding with the given fingerprint. When
@@ -546,7 +395,7 @@ func (s *Store) ListFindings(ctx context.Context, filter FindingFilter) ([]Findi
 // ErrNotFound if no finding has that fingerprint.
 //
 // reason is only consulted for dismissals; pass "" otherwise.
-func (s *Store) UpdateStatus(ctx context.Context, fingerprint string, status Status, reason string) error {
+func (s *Store) UpdateStatus(ctx context.Context, fingerprint string, status domain.Status, reason string) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE findings SET status = ?, updated_at = ? WHERE fingerprint = ?`,
@@ -563,7 +412,7 @@ func (s *Store) UpdateStatus(ctx context.Context, fingerprint string, status Sta
 			return ErrNotFound
 		}
 
-		if status == StatusDismissed {
+		if status == domain.StatusDismissed {
 			if err := addSuppressionTx(ctx, tx, fingerprint, reason); err != nil {
 				return annotateErr(s.path, "update_status", err)
 			}
@@ -574,7 +423,7 @@ func (s *Store) UpdateStatus(ctx context.Context, fingerprint string, status Sta
 
 // MarkFixed sets the finding's status to StatusFixed.
 func (s *Store) MarkFixed(ctx context.Context, fingerprint string) error {
-	return s.UpdateStatus(ctx, fingerprint, StatusFixed, "")
+	return s.UpdateStatus(ctx, fingerprint, domain.StatusFixed, "")
 }
 
 // AddCorroboratingLenses appends lenses to the corroborating_lenses column of
@@ -667,10 +516,10 @@ func (s *Store) UpdateFindingSeverity(ctx context.Context, id string, sev domain
 // ordered oldest-updated-first. This is the WorkRemaining query for the
 // impact-sweep pass: it drives SweepDrain and ensures rotation parity with
 // OpenBacklog (deferred items have their updated_at bumped and move to the back).
-func (s *Store) UnsweptOpenFindings(ctx context.Context) ([]Finding, error) {
+func (s *Store) UnsweptOpenFindings(ctx context.Context) ([]domain.Finding, error) {
 	return queryRows(ctx, s, "unswept_open_findings",
 		findingColumns+findingFrom+" WHERE f.status = 'open' AND f.swept_at IS NULL ORDER BY f.updated_at ASC, f.id ASC",
-		nil, func(r *sql.Rows) (Finding, error) { return scanFinding(r) })
+		nil, func(r *sql.Rows) (domain.Finding, error) { return scanFinding(r) })
 }
 
 // AppendFindingSites appends sites to the sites column of the finding identified
@@ -679,7 +528,7 @@ func (s *Store) UnsweptOpenFindings(ctx context.Context) ([]Finding, error) {
 // been persisted before the member arrived. Returns ErrNotFound when no finding
 // with that fingerprint exists; callers treat this as a no-op (primary killed).
 // No-op when sites is empty.
-func (s *Store) AppendFindingSites(ctx context.Context, fingerprint string, sites []Site) error {
+func (s *Store) AppendFindingSites(ctx context.Context, fingerprint string, sites []domain.Site) error {
 	if len(sites) == 0 {
 		return nil
 	}
@@ -702,7 +551,7 @@ func (s *Store) AppendFindingSites(ctx context.Context, fingerprint string, site
 			l int
 		}
 		seen := make(map[key]bool, len(existing)+len(sites))
-		merged := make([]Site, 0, len(existing)+len(sites))
+		merged := make([]domain.Site, 0, len(existing)+len(sites))
 		for _, s := range existing {
 			k := key{s.File, s.Line}
 			if !seen[k] {
@@ -746,25 +595,25 @@ const findingColumns = `SELECT f.id, f.fingerprint, f.title, f.description, f.re
 // a given fingerprint; the COALESCE above handles the NULL.
 const findingFrom = ` FROM findings f LEFT JOIN repro_attempts ra ON ra.fingerprint = f.fingerprint`
 
-func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (Finding, error) {
-	var f Finding
+func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (domain.Finding, error) {
+	var f domain.Finding
 	err := s.queryRow(ctx, "query_finding", findingColumns+findingFrom+" "+whereClause, args, func(row *sql.Row) error {
 		var e error
 		f, e = scanFinding(row)
 		return e
 	})
 	if errors.Is(err, sql.ErrNoRows) {
-		return Finding{}, ErrNotFound
+		return domain.Finding{}, ErrNotFound
 	}
 	if err != nil {
-		return Finding{}, err
+		return domain.Finding{}, err
 	}
 	return f, nil
 }
 
-func scanFinding(sc rowScanner) (Finding, error) {
+func scanFinding(sc rowScanner) (domain.Finding, error) {
 	var (
-		f                    Finding
+		f                    domain.Finding
 		status               string
 		repro                sql.NullString
 		reproWitness         sql.NullString
@@ -783,14 +632,14 @@ func scanFinding(sc rowScanner) (Finding, error) {
 		&corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt, &sweptAt, &f.LocusKey,
 		&exitZeroCount,
 	); err != nil {
-		return Finding{}, err
+		return domain.Finding{}, err
 	}
-	f.Status = Status(status)
+	f.Status = domain.Status(status)
 	f.ReproPath = repro.String
 	f.ReproWitness = reproWitness.String
 	f.NeedsHuman = needsHuman != 0
-	f.NeedsHumanReason = NeedsHumanReason(needsHumanReason)
-	f.ReproContradicted = exitZeroCount >= ReproContradictionThreshold
+	f.NeedsHumanReason = domain.NeedsHumanReason(needsHumanReason)
+	f.ReproContradicted = exitZeroCount >= domain.ReproContradictionThreshold
 	f.CorroboratingLenses = decodeLenses(corrob)
 	f.Sites = decodeSites(sitesStr)
 	// Confidence: always recompute at read time so it is consistent with the
@@ -798,14 +647,14 @@ func scanFinding(sc rowScanner) (Finding, error) {
 	f.Confidence = findingConfidence(f.Tier, f.Severity, len(f.CorroboratingLenses))
 	var err error
 	if f.CreatedAt, err = parseTime(createdAt); err != nil {
-		return Finding{}, err
+		return domain.Finding{}, err
 	}
 	if f.UpdatedAt, err = parseTime(updatedAt); err != nil {
-		return Finding{}, err
+		return domain.Finding{}, err
 	}
 	if sweptAt.Valid && sweptAt.String != "" {
 		if f.SweptAt, err = parseTime(sweptAt.String); err != nil {
-			return Finding{}, err
+			return domain.Finding{}, err
 		}
 	}
 	return f, nil
@@ -838,21 +687,10 @@ func boolInt(b bool) int {
 	return 0
 }
 
-// FindingTallies is the aggregate finding picture for the status pane.
-type FindingTallies struct {
-	// OpenByTier counts StatusOpen findings keyed by tier (0..3).
-	OpenByTier map[int]int
-	// NeedsHuman counts open findings flagged by the patch-prover for review.
-	NeedsHuman int
-	// Fixed and Dismissed count terminal-state findings.
-	Fixed     int
-	Dismissed int
-}
-
 // CountFindings aggregates findings by status and tier in one query for the
 // status world-state block.
-func (s *Store) CountFindings(ctx context.Context) (FindingTallies, error) {
-	t := FindingTallies{OpenByTier: map[int]int{}}
+func (s *Store) CountFindings(ctx context.Context) (domain.FindingTallies, error) {
+	t := domain.FindingTallies{OpenByTier: map[int]int{}}
 	type tally struct {
 		status         string
 		tier, n, needs int
@@ -867,16 +705,16 @@ func (s *Store) CountFindings(ctx context.Context) (FindingTallies, error) {
 		return v, nil
 	})
 	if err != nil {
-		return FindingTallies{}, err
+		return domain.FindingTallies{}, err
 	}
 	for _, v := range rows {
-		switch Status(v.status) {
-		case StatusOpen:
+		switch domain.Status(v.status) {
+		case domain.StatusOpen:
 			t.OpenByTier[v.tier] += v.n
 			t.NeedsHuman += v.needs
-		case StatusFixed:
+		case domain.StatusFixed:
 			t.Fixed += v.n
-		case StatusDismissed:
+		case domain.StatusDismissed:
 			t.Dismissed += v.n
 		default:
 			// StatusSuperseded (and any future states) intentionally omitted

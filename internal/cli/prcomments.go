@@ -10,7 +10,6 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
-	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
 )
 
@@ -53,7 +52,7 @@ func isSummaryBody(body string) bool {
 // anchored to a finding's file:line. The fingerprint marker leads so the comment
 // is recoverable on re-run; the location is implicit (GitHub renders it from the
 // anchor) so it is omitted from the prose.
-func renderInlineBody(f store.Finding) string {
+func renderInlineBody(f domain.Finding) string {
 	var b strings.Builder
 	b.WriteString(markerFor(f.Fingerprint))
 	b.WriteString("\n\n")
@@ -246,7 +245,7 @@ type planResult struct {
 
 // renderedFinding pairs a finding with whether it is commentable inline.
 type renderedFinding struct {
-	finding     store.Finding
+	finding     domain.Finding
 	commentable bool
 }
 
@@ -267,7 +266,7 @@ func planSync(
 	// Partition findings: inline-eligible (tier<=2, commentable line) vs
 	// summary-only (everything else surfaced).
 	var inline []renderedFinding
-	var summaryFindings []store.Finding
+	var summaryFindings []domain.Finding
 	current := map[string]bool{} // fingerprints reported this run
 
 	for _, f := range res.Findings {
@@ -357,7 +356,7 @@ func planSync(
 // renderSummaryBody renders the deterministic summary comment: a verdict line, a
 // table of all surfaced findings (file:line, tier, severity, inline marker), the
 // degraded/skip warnings, and a stats footer with the same numbers scan prints.
-func renderSummaryBody(res *funnel.Result, findings []store.Finding, inlineFP map[string]bool, headShort, suspectedMode string) string {
+func renderSummaryBody(res *funnel.Result, findings []domain.Finding, inlineFP map[string]bool, headShort, suspectedMode string) string {
 	var b strings.Builder
 	b.WriteString(markerSummary)
 	b.WriteString("\n\n## Bugbot review\n\n")

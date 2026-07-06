@@ -4,13 +4,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // contradictedFinding returns a Finding with ReproContradicted=true for use in
 // rendering tests. All other fields are minimal to keep the test focused.
-func contradictedFinding() store.Finding {
-	return store.Finding{
+func contradictedFinding() domain.Finding {
+	return domain.Finding{
 		ID:                "dddd000011112222",
 		Fingerprint:       "fp-contradicted",
 		Title:             "heap use after free in allocator",
@@ -18,7 +18,7 @@ func contradictedFinding() store.Finding {
 		Reasoning:         "verifier confirmed; repro ran twice, bug did not manifest.",
 		Severity:          "high",
 		Tier:              2,
-		Status:            store.StatusOpen,
+		Status:            domain.StatusOpen,
 		Lens:              "uaf",
 		File:              "internal/alloc/alloc.go",
 		Line:              77,
@@ -31,7 +31,7 @@ func contradictedFinding() store.Finding {
 // TestMarkdown_ContradictedSignalPresent pins that the Markdown renderer
 // includes the repro-contradicted notice when Finding.ReproContradicted is true.
 func TestMarkdown_ContradictedSignalPresent(t *testing.T) {
-	r := New([]store.Finding{contradictedFinding()}, fixtureMeta())
+	r := New([]domain.Finding{contradictedFinding()}, fixtureMeta())
 	got := Markdown(r)
 
 	// The notice must reference the threshold so it tracks the constant.
@@ -51,7 +51,7 @@ func TestMarkdown_ContradictedSignalPresent(t *testing.T) {
 func TestMarkdown_NoContradictedSignalWhenFalse(t *testing.T) {
 	f := contradictedFinding()
 	f.ReproContradicted = false
-	r := New([]store.Finding{f}, fixtureMeta())
+	r := New([]domain.Finding{f}, fixtureMeta())
 	got := Markdown(r)
 
 	if strings.Contains(got, "Repro-contradicted") {

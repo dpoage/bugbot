@@ -52,7 +52,7 @@ func (f *Funnel) runVerifyAndPersist(
 	result *Result,
 	reg *clusterRegistry,
 	findingsMu *sync.Mutex,
-	allFindings *[]store.Finding,
+	allFindings *[]domain.Finding,
 	killedPtr *int,
 	sbExecs *atomic.Int32,
 	sbMillis *atomic.Int64,
@@ -318,7 +318,7 @@ func (f *Funnel) runVerifyAndPersist(
 			// re-verification-specific reason so the suppression table records
 			// the event (UpdateStatus(StatusDismissed) doubles as a permanent
 			// suppression, so the same fingerprint will never resurface).
-			if err := f.store.UpdateStatus(ctx, c.Fingerprint, store.StatusDismissed,
+			if err := f.store.UpdateStatus(ctx, c.Fingerprint, domain.StatusDismissed,
 				"re-verification refuted this previously-suspected (Tier 3) finding"); err != nil {
 				f.note(result, fmt.Sprintf("reverify: dismiss refuted T3 %q failed: %v", c.Title, err))
 			}
@@ -406,7 +406,7 @@ func (f *Funnel) runVerifyAndPersist(
 	if swept {
 		sweptAt = time.Now().UTC()
 	}
-	finding := store.Finding{
+	finding := domain.Finding{
 		Fingerprint:         c.Fingerprint,
 		Title:               c.Title,
 		Description:         description,
@@ -414,7 +414,7 @@ func (f *Funnel) runVerifyAndPersist(
 		VerdictDetail:       verdictDetail,
 		Severity:            sev,
 		Tier:                domain.TierVerified,
-		Status:              store.StatusOpen,
+		Status:              domain.StatusOpen,
 		Lens:                c.Lens,
 		File:                c.File,
 		Line:                c.Line,
@@ -423,11 +423,11 @@ func (f *Funnel) runVerifyAndPersist(
 		LocusKey:            c.LocusKey,
 		CorroboratingLenses: c.CorroboratingLenses,
 		NeedsHuman:          needsHuman,
-		NeedsHumanReason: func() store.NeedsHumanReason {
+		NeedsHumanReason: func() domain.NeedsHumanReason {
 			if needsHuman {
-				return store.NeedsHumanReasonBelowQuorum
+				return domain.NeedsHumanReasonBelowQuorum
 			}
-			return store.NeedsHumanReasonNone
+			return domain.NeedsHumanReasonNone
 		}(),
 		Sites:   allSites,
 		SweptAt: sweptAt,
@@ -439,7 +439,7 @@ func (f *Funnel) runVerifyAndPersist(
 		return
 	}
 	// Honor suppression memory: a forced-dismissed finding must not be reported.
-	if stored.Status != store.StatusOpen {
+	if stored.Status != domain.StatusOpen {
 		// Durably written as dismissed (suppression memory): terminal. Drop the
 		// WAL row so it does not replay.
 		f.deletePending(ctx, c.PendingID, result)
@@ -490,15 +490,15 @@ func (f *Funnel) runVerifyAndPersist(
 // for a budget stop, verifyFailedReasoning for a panel that produced no
 // verdict). Returns a pointer to the stored finding on success, nil on failure
 // or suppression. Best-effort: errors are noted but do not abort the run.
-func persistOrphan(ctx context.Context, f *Funnel, c Candidate, commit string, fps map[string]string, reasoning string, result *Result) *store.Finding {
-	finding := store.Finding{
+func persistOrphan(ctx context.Context, f *Funnel, c Candidate, commit string, fps map[string]string, reasoning string, result *Result) *domain.Finding {
+	finding := domain.Finding{
 		Fingerprint:         c.Fingerprint,
 		Title:               c.Title,
 		Description:         c.Description,
 		Reasoning:           appendCorroboration(reasoning, c.CorroboratingLenses),
 		Severity:            c.Severity,
 		Tier:                domain.TierSuspected,
-		Status:              store.StatusOpen,
+		Status:              domain.StatusOpen,
 		Lens:                c.Lens,
 		File:                c.File,
 		Line:                c.Line,
@@ -513,7 +513,7 @@ func persistOrphan(ctx context.Context, f *Funnel, c Candidate, commit string, f
 		f.note(result, fmt.Sprintf("funnel: upsert suspected finding %q: %v", c.Title, err))
 		return nil
 	}
-	if stored.Status != store.StatusOpen {
+	if stored.Status != domain.StatusOpen {
 		return nil
 	}
 	msg := fmt.Sprintf("%q (%s:%d) kept as T3 suspected", c.Title, c.File, c.Line)
@@ -567,14 +567,14 @@ func persistKilled(ctx context.Context, f *Funnel, c Candidate, seatNames []stri
 	}
 }
 
-// candidateSitesToStore converts funnel.Site to store.Site.
-func candidateSitesToStore(sites []Site) []store.Site {
+// candidateSitesToStore converts funnel.Site to domain.Site.
+func candidateSitesToStore(sites []Site) []domain.Site {
 	if len(sites) == 0 {
 		return nil
 	}
-	out := make([]store.Site, len(sites))
+	out := make([]domain.Site, len(sites))
 	for i, s := range sites {
-		out[i] = store.Site{File: s.File, Line: s.Line}
+		out[i] = domain.Site{File: s.File, Line: s.Line}
 	}
 	return out
 }
@@ -583,7 +583,7 @@ func candidateSitesToStore(sites []Site) []store.Site {
 // The primary's own site and a step-3 same-line collision can coincide; without
 // this the finding would carry a duplicate site row (AppendFindingSites dedups
 // the post-persist path, but the in-memory merge here did not).
-func dedupSites(sites []store.Site) []store.Site {
+func dedupSites(sites []domain.Site) []domain.Site {
 	if len(sites) <= 1 {
 		return sites
 	}
@@ -592,7 +592,7 @@ func dedupSites(sites []store.Site) []store.Site {
 		l int
 	}
 	seen := make(map[key]bool, len(sites))
-	out := make([]store.Site, 0, len(sites))
+	out := make([]domain.Site, 0, len(sites))
 	for _, s := range sites {
 		k := key{s.File, s.Line}
 		if seen[k] {

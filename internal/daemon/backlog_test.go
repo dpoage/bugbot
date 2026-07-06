@@ -56,15 +56,15 @@ func buildDaemonWithRepro(
 
 // seedFinding inserts a finding into st with the given tier, reproPath, and
 // needsHuman flag. Status is always StatusOpen. Returns the upserted finding.
-func seedFinding(t *testing.T, st *store.Store, title string, tier domain.Tier, reproPath string, needsHuman bool) store.Finding {
+func seedFinding(t *testing.T, st *store.Store, title string, tier domain.Tier, reproPath string, needsHuman bool) domain.Finding {
 	t.Helper()
-	fp := store.Fingerprint("nil-deref", fixtureFile, fmt.Sprintf("%d|%s", fixtureLine, title))
-	f, err := st.UpsertFinding(context.Background(), store.Finding{
+	fp := domain.Fingerprint("nil-deref", fixtureFile, fmt.Sprintf("%d|%s", fixtureLine, title))
+	f, err := st.UpsertFinding(context.Background(), domain.Finding{
 		Fingerprint: fp,
 		Title:       title,
 		Severity:    "high",
 		Tier:        tier,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "nil-deref",
 		File:        fixtureFile,
 		Line:        fixtureLine,
@@ -72,11 +72,11 @@ func seedFinding(t *testing.T, st *store.Store, title string, tier domain.Tier, 
 		FileHash:    "deadbeef",
 		ReproPath:   reproPath,
 		NeedsHuman:  needsHuman,
-		NeedsHumanReason: func() store.NeedsHumanReason {
+		NeedsHumanReason: func() domain.NeedsHumanReason {
 			if needsHuman {
-				return store.NeedsHumanReasonBelowQuorum
+				return domain.NeedsHumanReasonBelowQuorum
 			}
-			return store.NeedsHumanReasonNone
+			return domain.NeedsHumanReasonNone
 		}(),
 	})
 	if err != nil {
@@ -130,12 +130,12 @@ func TestOpenBacklog_Filter(t *testing.T) {
 func TestOpenBacklog_DismissedExcluded(t *testing.T) {
 	st := openStore(t)
 
-	fp := store.Fingerprint("nil-deref", fixtureFile, fmt.Sprintf("%d|%s", fixtureLine, "dismissed finding"))
-	_, err := st.UpsertFinding(context.Background(), store.Finding{
+	fp := domain.Fingerprint("nil-deref", fixtureFile, fmt.Sprintf("%d|%s", fixtureLine, "dismissed finding"))
+	_, err := st.UpsertFinding(context.Background(), domain.Finding{
 		Fingerprint: fp,
 		Title:       "dismissed finding",
 		Tier:        2,
-		Status:      store.StatusDismissed,
+		Status:      domain.StatusDismissed,
 		File:        fixtureFile,
 		Line:        fixtureLine,
 	})
@@ -547,7 +547,7 @@ func TestDaemonReproBacklogRotation(t *testing.T) {
 }
 
 // idsOf extracts the ID slice from a finding slice for test error messages.
-func idsOf(findings []store.Finding) []string {
+func idsOf(findings []domain.Finding) []string {
 	ids := make([]string, len(findings))
 	for i, f := range findings {
 		ids[i] = f.ID

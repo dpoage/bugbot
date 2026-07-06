@@ -7,7 +7,6 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/llm"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // --- dox: abstention / quorum helpers ----------------------------------------
@@ -655,7 +654,7 @@ func TestSweep_AllRefutersFail_OrphanedAsT3Suspected(t *testing.T) {
 	if got.Tier != domain.TierSuspected {
 		t.Errorf("tier = %d, want %d (T3 suspected): an all-failed panel must NOT promote to T2", got.Tier, domain.TierSuspected)
 	}
-	if got.Status != store.StatusOpen {
+	if got.Status != domain.StatusOpen {
 		t.Errorf("status = %q, want open", got.Status)
 	}
 	if strings.Contains(got.Reasoning, "Survived adversarial verification") {

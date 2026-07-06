@@ -8,10 +8,10 @@ import (
 	"strings"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
-	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
 )
 
@@ -491,7 +491,7 @@ var planSchema = json.RawMessage(`{
 // planFor asks the agent for a repro plan for finding. feedback, when
 // non-empty, is appended to steer a revision after a prior non-demonstrating
 // attempt.
-func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding store.Finding, pkgSummary, feedback string) (*Plan, llm.Usage, error) {
+func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding domain.Finding, pkgSummary, feedback string) (*Plan, llm.Usage, error) {
 	task := buildTask(finding, pkgSummary, feedback)
 	var plan Plan
 	outcome, err := runner.RunJSON(ctx, task, planSchema, &plan)
@@ -521,7 +521,7 @@ func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding 
 // embedded newlines and fake section headers cannot inject structural
 // directives. Single-line fields (Title, Severity) are flattened to one line
 // (util.FlattenField).
-func buildTask(finding store.Finding, pkgSummary, feedback string) string {
+func buildTask(finding domain.Finding, pkgSummary, feedback string) string {
 	var b strings.Builder
 	b.WriteString("Reproduce the following verified bug with a minimal failing test.\n\n")
 	fmt.Fprintf(&b, "Title: %s\n", util.FlattenField(finding.Title))

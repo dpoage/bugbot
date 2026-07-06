@@ -394,7 +394,7 @@ func buildReproHookForScan(
 	flags ScanFlags,
 	prog progress.EventSink,
 ) (
-	hook func(ctx context.Context, scanRunID string, finding store.Finding) error,
+	hook func(ctx context.Context, scanRunID string, finding domain.Finding) error,
 	rec *ledgerRecorder,
 	r *repro.Reproducer,
 	attempted *sync.Map,
@@ -464,7 +464,7 @@ func buildReproHookForScan(
 	// consumer goroutine is the parallelism bound). The hook calls
 	// PromoteOne which calls Attempt internally.
 	var runOnce sync.Once
-	hook = func(hCtx context.Context, scanRunID string, finding store.Finding) error {
+	hook = func(hCtx context.Context, scanRunID string, finding domain.Finding) error {
 		runOnce.Do(func() { rec.SetScanRun(scanRunID) })
 		attempted.Store(finding.Fingerprint, true)
 		_, hErr := r.PromoteOne(hCtx, st, finding)
@@ -496,8 +496,8 @@ const maxFixpointRounds = 3
 // Result carries, plus the first drain/query error encountered (nil on clean
 // convergence). The order matches the daemon: verify→sweep, so a candidate
 // verified into a finding in a round is swept in the same round.
-func drainToFixpoint(ctx context.Context, f *funnel.Funnel, st *store.Store) (map[string]store.Finding, error) {
-	reranked := make(map[string]store.Finding)
+func drainToFixpoint(ctx context.Context, f *funnel.Funnel, st *store.Store) (map[string]domain.Finding, error) {
+	reranked := make(map[string]domain.Finding)
 	for round := 0; round < maxFixpointRounds; round++ {
 		if err := ctx.Err(); err != nil {
 			return reranked, err
@@ -534,7 +534,7 @@ func drainToFixpoint(ctx context.Context, f *funnel.Funnel, st *store.Store) (ma
 // severities; this brings the oneshot summary in line with the store and any
 // published issues (oracle #3). Findings absent from the set (e.g. nothing
 // unswept to re-rank) are left untouched.
-func applyReranked(findings []store.Finding, reranked map[string]store.Finding) {
+func applyReranked(findings []domain.Finding, reranked map[string]domain.Finding) {
 	for i := range findings {
 		if rr, ok := reranked[findings[i].ID]; ok {
 			findings[i].Severity = rr.Severity
@@ -736,13 +736,13 @@ func localMountsFromConfig(cfg config.Config) []sandbox.ROMount {
 // is a cheap no-op when the in-run hook covered everything; it acts as a safety
 // net for findings that overflowed the reproCh buffer. It uses PromoteAll (the
 // daemon's batch path) so the rotation logic (touch failed findings) also runs.
-func runReproCatchUp(ctx context.Context, out io.Writer, r *repro.Reproducer, st *store.Store, findings []store.Finding, attempted *sync.Map) error {
+func runReproCatchUp(ctx context.Context, out io.Writer, r *repro.Reproducer, st *store.Store, findings []domain.Finding, attempted *sync.Map) error {
 	// Filter to T2 findings with no prior attempt. "Prior attempt" includes
 	// in-run attempts that EXHAUSTED: a failed repro leaves no store-visible
 	// marker (ReproPath stays empty, NeedsHuman stays false), so without the
 	// attempted set this drain would re-burn sandbox time on exactly the
 	// findings the in-run hook just failed on.
-	var pending []store.Finding
+	var pending []domain.Finding
 	for _, f := range findings {
 		if f.Tier != domain.TierVerified || f.ReproPath != "" || f.NeedsHuman {
 			continue

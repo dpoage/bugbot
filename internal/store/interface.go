@@ -1,6 +1,10 @@
 package store
 
-import "context"
+import (
+	"context"
+
+	"github.com/dpoage/bugbot/internal/domain"
+)
 
 // StoreReader is the read-only face of *Store. Consumers that only need to
 // query findings (e.g. backlog selectors, summary helpers) accept this narrow
@@ -12,14 +16,14 @@ import "context"
 // assertion below ensures *Store stays in sync.
 type StoreReader interface {
 	// GetFinding returns the finding with the given id, or ErrNotFound.
-	GetFinding(ctx context.Context, id string) (Finding, error)
+	GetFinding(ctx context.Context, id string) (domain.Finding, error)
 
 	// GetFindingByFingerprint returns the finding with the given fingerprint,
 	// or ErrNotFound.
-	GetFindingByFingerprint(ctx context.Context, fingerprint string) (Finding, error)
+	GetFindingByFingerprint(ctx context.Context, fingerprint string) (domain.Finding, error)
 
 	// ListFindings returns findings matching the filter, newest-updated first.
-	ListFindings(ctx context.Context, filter FindingFilter) ([]Finding, error)
+	ListFindings(ctx context.Context, filter domain.FindingFilter) ([]domain.Finding, error)
 }
 
 // StoreWriter is the write face of *Store. Consumers that only mutate findings
@@ -31,7 +35,7 @@ type StoreReader interface {
 type StoreWriter interface {
 	// UpsertFinding inserts the finding or, if one with the same fingerprint
 	// exists, updates its mutable fields and returns the stored row.
-	UpsertFinding(ctx context.Context, f Finding) (Finding, error)
+	UpsertFinding(ctx context.Context, f domain.Finding) (domain.Finding, error)
 }
 
 // Compile-time assertions: *Store must satisfy both interfaces. If a method

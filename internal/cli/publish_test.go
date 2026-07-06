@@ -22,28 +22,28 @@ import (
 // ---- planPublish unit tests (pure; no gh calls) ----
 
 // makeOpenFinding builds a minimal open finding for plan tests.
-func makeOpenFinding(fp string, tier domain.Tier, updatedAt time.Time) store.Finding {
-	return store.Finding{
+func makeOpenFinding(fp string, tier domain.Tier, updatedAt time.Time) domain.Finding {
+	return domain.Finding{
 		ID:          fp,
 		Fingerprint: fp,
 		Title:       "title for " + fp,
 		Tier:        tier,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		File:        "x.go",
 		Line:        1,
 		UpdatedAt:   updatedAt,
 	}
 }
 
-func makeFixedFinding(fp string) store.Finding {
+func makeFixedFinding(fp string) domain.Finding {
 	f := makeOpenFinding(fp, 2, time.Now())
-	f.Status = store.StatusFixed
+	f.Status = domain.StatusFixed
 	return f
 }
 
-func makeDismissedFinding(fp string) store.Finding {
+func makeDismissedFinding(fp string) domain.Finding {
 	f := makeOpenFinding(fp, 2, time.Now())
-	f.Status = store.StatusDismissed
+	f.Status = domain.StatusDismissed
 	return f
 }
 
@@ -60,7 +60,7 @@ func makePublishedIssue(fp string, issueNumber int, state store.IssueState, upda
 // TestPlanPublish_Create: an open finding with no published row -> create.
 func TestPlanPublish_Create(t *testing.T) {
 	now := time.Now()
-	open := []store.Finding{makeOpenFinding("fp1", 2, now)}
+	open := []domain.Finding{makeOpenFinding("fp1", 2, now)}
 	actions := planPublish(open, nil, nil, nil, 2, true)
 
 	if len(actions) != 1 {
@@ -73,7 +73,7 @@ func TestPlanPublish_Create(t *testing.T) {
 // TestPlanPublish_Skip: open finding with published row and UpdatedAt <= published.UpdatedAt -> skip.
 func TestPlanPublish_Skip(t *testing.T) {
 	t0 := time.Now().Add(-time.Hour)
-	open := []store.Finding{makeOpenFinding("fp1", 2, t0)}
+	open := []domain.Finding{makeOpenFinding("fp1", 2, t0)}
 	published := map[string]store.PublishedIssue{
 		"fp1": makePublishedIssue("fp1", 10, store.IssueStateOpen, t0.Add(time.Second)),
 	}
@@ -90,7 +90,7 @@ func TestPlanPublish_Skip(t *testing.T) {
 func TestPlanPublish_Update(t *testing.T) {
 	t0 := time.Now().Add(-time.Hour)
 	t1 := t0.Add(2 * time.Hour) // finding updated after published.UpdatedAt
-	open := []store.Finding{makeOpenFinding("fp1", 2, t1)}
+	open := []domain.Finding{makeOpenFinding("fp1", 2, t1)}
 	published := map[string]store.PublishedIssue{
 		"fp1": makePublishedIssue("fp1", 10, store.IssueStateOpen, t0),
 	}
@@ -108,7 +108,7 @@ func TestPlanPublish_Update(t *testing.T) {
 // TestPlanPublish_TierFiltering: T3 finding excluded at tierMin=2; T0,T1,T2 included.
 func TestPlanPublish_TierFiltering(t *testing.T) {
 	now := time.Now()
-	open := []store.Finding{
+	open := []domain.Finding{
 		makeOpenFinding("fp0", 0, now),
 		makeOpenFinding("fp1", 1, now),
 		makeOpenFinding("fp2", 2, now),
@@ -133,7 +133,7 @@ func TestPlanPublish_TierFiltering(t *testing.T) {
 
 // TestPlanPublish_Close: fixed finding with open published row -> close.
 func TestPlanPublish_Close(t *testing.T) {
-	fixed := []store.Finding{makeFixedFinding("fp1")}
+	fixed := []domain.Finding{makeFixedFinding("fp1")}
 	published := map[string]store.PublishedIssue{
 		"fp1": makePublishedIssue("fp1", 5, store.IssueStateOpen, time.Now()),
 	}
@@ -151,7 +151,7 @@ func TestPlanPublish_Close(t *testing.T) {
 // TestPlanPublish_DismissedClose: dismissed finding with open row and
 // close_on_fixed=true -> close.
 func TestPlanPublish_DismissedClose(t *testing.T) {
-	dismissed := []store.Finding{makeDismissedFinding("fp1")}
+	dismissed := []domain.Finding{makeDismissedFinding("fp1")}
 	published := map[string]store.PublishedIssue{
 		"fp1": makePublishedIssue("fp1", 7, store.IssueStateOpen, time.Now()),
 	}
@@ -166,7 +166,7 @@ func TestPlanPublish_DismissedClose(t *testing.T) {
 
 // TestPlanPublish_CloseOnFixedFalse: fixed finding -> NO close action when close_on_fixed=false.
 func TestPlanPublish_CloseOnFixedFalse(t *testing.T) {
-	fixed := []store.Finding{makeFixedFinding("fp1")}
+	fixed := []domain.Finding{makeFixedFinding("fp1")}
 	published := map[string]store.PublishedIssue{
 		"fp1": makePublishedIssue("fp1", 5, store.IssueStateOpen, time.Now()),
 	}
@@ -181,7 +181,7 @@ func TestPlanPublish_CloseOnFixedFalse(t *testing.T) {
 
 // TestPlanPublish_AlreadyClosed: fixed finding with already-closed published row -> skip (no action).
 func TestPlanPublish_AlreadyClosed(t *testing.T) {
-	fixed := []store.Finding{makeFixedFinding("fp1")}
+	fixed := []domain.Finding{makeFixedFinding("fp1")}
 	published := map[string]store.PublishedIssue{
 		"fp1": makePublishedIssue("fp1", 5, store.IssueStateClosed, time.Now()),
 	}
@@ -198,7 +198,7 @@ func TestPlanPublish_AlreadyClosed(t *testing.T) {
 
 // setupPublishStore opens a fresh store, seeds one open T2 finding, and
 // returns the store, the finding, and the DB path for re-open.
-func setupPublishStore(t *testing.T) (*store.Store, store.Finding) {
+func setupPublishStore(t *testing.T) (*store.Store, domain.Finding) {
 	t.Helper()
 	ctx := context.Background()
 	st, err := store.Open(ctx, ":memory:")
@@ -207,14 +207,14 @@ func setupPublishStore(t *testing.T) (*store.Store, store.Finding) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	f := store.Finding{
-		Fingerprint: store.Fingerprint("race", "x.go", fmt.Sprintf("%d|%s", 7, "boom")),
+	f := domain.Finding{
+		Fingerprint: domain.Fingerprint("race", "x.go", fmt.Sprintf("%d|%s", 7, "boom")),
 		Title:       "boom",
 		Description: "desc",
 		Reasoning:   "trace",
 		Severity:    "high",
 		Tier:        2,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "race",
 		File:        "x.go",
 		Line:        7,
@@ -649,7 +649,7 @@ func TestApplyPublish_PendingRecovery(t *testing.T) {
 // TestRenderIssueBody_ReasoningCapped pins the GitHub 65536-char body limit
 // mitigation: an oversized reasoning trace is truncated with a marker.
 func TestRenderIssueBody_ReasoningCapped(t *testing.T) {
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint: "fp",
 		Title:       "t",
 		Reasoning:   strings.Repeat("x", 40*1024),
@@ -736,7 +736,7 @@ func TestRaceCondition(t *testing.T) {
 func TestRenderIssueBody_Structure(t *testing.T) {
 	reproDir := makeReproDir(t)
 
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint:         "abcdef1234567890",
 		Title:               "race condition in store",
 		Description:         "Two goroutines write to the cache without synchronization.",
@@ -868,7 +868,7 @@ func TestRenderIssueBody_Structure(t *testing.T) {
 // TestRenderIssueBody_ReproMissing confirms that a missing repro dir produces
 // a path-mention fallback and does not error the publish.
 func TestRenderIssueBody_ReproMissing(t *testing.T) {
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint: "fp123",
 		Title:       "t",
 		ReproPath:   "/nonexistent/repro/dir",
@@ -892,7 +892,7 @@ func TestRenderIssueBody_ReproMissing(t *testing.T) {
 	ctx := context.Background()
 	st, _ := setupPublishStore(t)
 	// Update the seeded finding to set ReproPath.
-	findings, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	findings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil || len(findings) == 0 {
 		t.Fatal("could not list findings")
 	}
@@ -927,7 +927,7 @@ func TestRenderIssueBody_ReproTruncation(t *testing.T) {
 		t.Fatalf("write big_test.go: %v", err)
 	}
 
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint: "fp",
 		Title:       "t",
 		ReproPath:   dir,
@@ -944,7 +944,7 @@ func TestRenderIssueBody_ReproTruncation(t *testing.T) {
 
 // TestRenderIssueBody_NoFixPatch confirms fix patch section is absent when FixPatch is empty.
 func TestRenderIssueBody_NoFixPatch(t *testing.T) {
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint: "fp",
 		Title:       "t",
 		FixPatch:    "",
@@ -1003,7 +1003,7 @@ func TestFencedBlock_PreventBreakout(t *testing.T) {
 func TestRenderIssueBody_FencedPatchBreakout(t *testing.T) {
 	// A diff that contains a triple-backtick and a quad-backtick on separate lines.
 	maliciousPatch := "--- a/foo.go\n+++ b/foo.go\n```\n````\n+fix\n"
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint: "fp",
 		Title:       "t",
 		FixPatch:    maliciousPatch,
@@ -1053,7 +1053,7 @@ func TestRenderIssueBody_FencedReproBreakout(t *testing.T) {
 		t.Fatalf("write foo_test.go: %v", err)
 	}
 
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint: "fp",
 		Title:       "t",
 		ReproPath:   dir,
@@ -1121,7 +1121,7 @@ func TestSanitizeDetailsTag(t *testing.T) {
 // only need to prevent the </details> breakout.
 func TestRenderIssueBody_DetailsBreakout(t *testing.T) {
 	maliciousReasoning := "step 1\n</details><script>x</script>\nstep 2"
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint: "fp",
 		Title:       "t",
 		Reasoning:   maliciousReasoning,
@@ -1153,7 +1153,7 @@ func TestRenderIssueBody_DetailsBreakout(t *testing.T) {
 // TestRenderIssueBody_OversizedFixPatch confirms that a very large FixPatch is
 // capped at ~20 KB with the truncation marker.
 func TestRenderIssueBody_OversizedFixPatch(t *testing.T) {
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint: "fp",
 		Title:       "t",
 		FixPatch:    strings.Repeat("x", 30*1024), // 30 KB, over the 20 KB cap
@@ -1167,7 +1167,7 @@ func TestRenderIssueBody_OversizedFixPatch(t *testing.T) {
 // TestRenderIssueBody_OversizedDescription confirms that a very large
 // Description is capped at ~10 KB with the truncation marker.
 func TestRenderIssueBody_OversizedDescription(t *testing.T) {
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint: "fp",
 		Title:       "t",
 		Description: strings.Repeat("d", 15*1024), // 15 KB, over the 10 KB cap
@@ -1184,7 +1184,7 @@ func TestRenderIssueBody_OversizedDescription(t *testing.T) {
 // attribution footer as the last non-empty line.
 func TestRenderIssueBody_TotalBodyGuard(t *testing.T) {
 	fp := "abcdef1234567890abcdef1234567890"
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint: fp,
 		Title:       strings.Repeat("T", 1000),
 		Description: strings.Repeat("D", 20*1024),
@@ -1378,7 +1378,7 @@ func TestApplyPublish_UpdateStaleRecreate(t *testing.T) {
 
 	// Bump the finding's UpdatedAt so the planner produces an update action
 	// (it only updates when the finding is newer than the published row).
-	findings, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	findings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil || len(findings) == 0 {
 		t.Fatalf("list: %v", err)
 	}
@@ -1441,7 +1441,7 @@ func TestApplyPublish_UpdateStaleRecreate_404(t *testing.T) {
 	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open"); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	findings, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	findings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil || len(findings) == 0 {
 		t.Fatalf("list: %v", err)
 	}
@@ -1558,7 +1558,7 @@ func TestApplyPublish_UpdateRecordsSuccess(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	// Make the finding newer than the published row so the planner updates.
-	findings, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	findings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil || len(findings) == 0 {
 		t.Fatalf("list: %v", err)
 	}
@@ -1595,10 +1595,10 @@ func TestApplyPublish_UpdateRecordsSuccess(t *testing.T) {
 // existing issue instead of creating a duplicate. Findings in a different file,
 // beyond the line window, or with an unrelated description still create.
 func TestPlanPublish_AdoptsDriftedRediscovery(t *testing.T) {
-	mkF := func(fp, file string, line int, desc string) store.Finding {
-		return store.Finding{
+	mkF := func(fp, file string, line int, desc string) domain.Finding {
+		return domain.Finding{
 			Fingerprint: fp, Title: "t-" + fp, Description: desc,
-			File: file, Line: line, Tier: domain.TierVerified, Status: store.StatusOpen,
+			File: file, Line: line, Tier: domain.TierVerified, Status: domain.StatusOpen,
 		}
 	}
 	const sharedDesc = "cfg pointer may be nil and is dereferenced without a guard in handler"
@@ -1611,7 +1611,7 @@ func TestPlanPublish_AdoptsDriftedRediscovery(t *testing.T) {
 	published := map[string]store.PublishedIssue{
 		"fp_anchor": {Fingerprint: "fp_anchor", IssueNumber: 7, State: store.IssueStateOpen},
 	}
-	open := []store.Finding{anchor, drifted, otherFile, farLine, unrelated}
+	open := []domain.Finding{anchor, drifted, otherFile, farLine, unrelated}
 
 	act := map[string]publishAction{}
 	for _, a := range planPublish(open, nil, nil, published, 2, false) {
@@ -1670,7 +1670,7 @@ func TestSanitizeControlChars(t *testing.T) {
 // NUL byte (the exec-killing case) and other C0 controls produces a body with
 // no such bytes — so the body can never crash gh's forkExec with EINVAL.
 func TestRenderIssueBody_StripsControlChars(t *testing.T) {
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint: "abc123",
 		Title:       "title",
 		Description: "desc with NUL\x00 and bell\x07 here",
@@ -1708,14 +1708,14 @@ func TestApplyPublish_StripsNULFromModelText(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	f := store.Finding{
-		Fingerprint: store.Fingerprint("race", "x.go", "7|boom"),
+	f := domain.Finding{
+		Fingerprint: domain.Fingerprint("race", "x.go", "7|boom"),
 		Title:       "boom\x00 title",
 		Description: "desc\x00ription",
 		Reasoning:   "trace with NUL\x00 byte",
 		Severity:    "high",
 		Tier:        2,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "race",
 		File:        "x.go",
 		Line:        7,
@@ -1759,7 +1759,7 @@ func TestApplyPublish_StripsNULFromModelText(t *testing.T) {
 // sanitize; enough plain content remains to keep the body over maxBody so the
 // truncation path runs jointly with the sanitize.
 func TestRenderIssueBody_SanitizeAndTruncateJointly(t *testing.T) {
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint: "fp1234567890abcdef",
 		Title:       "oversized",
 		Description: "x\x00y\x07z" + strings.Repeat("d", 11000),

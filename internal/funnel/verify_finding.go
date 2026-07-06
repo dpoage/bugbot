@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // VerifyFinding re-runs adversarial verification against a single already-stored
@@ -23,7 +23,7 @@ import (
 // refuted == true means the refuters now agree the reported bug is wrong against
 // the current code (the daemon treats that as "auto-close: fixed"). reasoning is
 // the human-legible refuter trace, suitable for recording on the finding.
-func (f *Funnel) VerifyFinding(ctx context.Context, fnd store.Finding) (refuted bool, reasoning string, err error) {
+func (f *Funnel) VerifyFinding(ctx context.Context, fnd domain.Finding) (refuted bool, reasoning string, err error) {
 	// Deliberately read-only: re-verification never gets the sandbox_exec tool
 	// even when SandboxOpts is enabled. The daemon re-verifies every open
 	// finding on every code change, so sandbox runs here would multiply
@@ -96,7 +96,7 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd store.Finding) (refuted 
 // finding so the refuter prompt sees the same shape the Verify stage produced.
 // Evidence is sourced from the finding's reasoning (its prior verification
 // trace), which is the closest stored analogue to a finder's evidence.
-func candidateFromFinding(fnd store.Finding) Candidate {
+func candidateFromFinding(fnd domain.Finding) Candidate {
 	return Candidate{
 		Lens:        fnd.Lens,
 		File:        fnd.File,

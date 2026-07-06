@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -63,7 +64,7 @@ func TestVerifyDrain_NoFinderInvocation(t *testing.T) {
 	}
 
 	// At least one finding must be persisted.
-	findings, lerr := st.ListFindings(ctx, store.FindingFilter{})
+	findings, lerr := st.ListFindings(ctx, domain.FindingFilter{})
 	if lerr != nil {
 		t.Fatalf("ListFindings: %v", lerr)
 	}
@@ -112,7 +113,7 @@ func TestVerifyDrain_Idempotent(t *testing.T) {
 		t.Fatalf("first VerifyDrain: %v", err)
 	}
 
-	findingsAfterFirst, _ := st.ListFindings(ctx, store.FindingFilter{})
+	findingsAfterFirst, _ := st.ListFindings(ctx, domain.FindingFilter{})
 	firstCount := len(findingsAfterFirst)
 
 	// Second drain: WAL is empty → pre-check returns early, no LLM calls.
@@ -125,7 +126,7 @@ func TestVerifyDrain_Idempotent(t *testing.T) {
 	}
 
 	// No new findings added.
-	findingsAfterSecond, _ := st.ListFindings(ctx, store.FindingFilter{})
+	findingsAfterSecond, _ := st.ListFindings(ctx, domain.FindingFilter{})
 	if len(findingsAfterSecond) != firstCount {
 		t.Errorf("findings after second drain = %d, want %d (idempotent)", len(findingsAfterSecond), firstCount)
 	}
@@ -181,7 +182,7 @@ func TestVerifyDrain_ReanchorDropsOutOfScope(t *testing.T) {
 	}
 
 	// No finding should be persisted for the out-of-scope candidate.
-	findings, lerr := st.ListFindings(ctx, store.FindingFilter{})
+	findings, lerr := st.ListFindings(ctx, domain.FindingFilter{})
 	if lerr != nil {
 		t.Fatalf("ListFindings: %v", lerr)
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -93,7 +94,7 @@ type FindingOutcome struct {
 //
 // scanRunID may be empty when called from the daemon backlog drain (cross-run
 // context); the agent_units row will carry an empty scan_run_id in that case.
-func (r *Reproducer) PromoteOne(ctx context.Context, st *store.Store, finding store.Finding) (*FindingOutcome, error) {
+func (r *Reproducer) PromoteOne(ctx context.Context, st *store.Store, finding domain.Finding) (*FindingOutcome, error) {
 	if st == nil {
 		return nil, fmt.Errorf("repro: nil store")
 	}
@@ -114,7 +115,7 @@ func (r *Reproducer) PromoteOne(ctx context.Context, st *store.Store, finding st
 // before attempting; already-claimed or exhausted findings are skipped. This
 // provides claim/skip semantics across all three dispatch paths (in-run hook,
 // daemon drain, `bugbot repro` CLI) without any of them duplicating the logic.
-func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings []store.Finding) (*Summary, error) {
+func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings []domain.Finding) (*Summary, error) {
 	if st == nil {
 		return nil, fmt.Errorf("repro: nil store")
 	}
@@ -205,7 +206,7 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 // dispatch path got there first), promoteOne returns a skipped outcome with nil
 // error. This is the single implementation of claim/skip for all three dispatch
 // paths.
-func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding store.Finding) (*FindingOutcome, error) {
+func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding domain.Finding) (*FindingOutcome, error) {
 	outcome := &FindingOutcome{FindingID: finding.ID, Title: finding.Title}
 
 	// Ensure the queue row exists, then claim it.
@@ -324,7 +325,7 @@ type patchOutcome struct {
 
 // provePatch runs the patch-prover on a finding that was just promoted to T1.
 // It either witnesses a fix (T0) or records needs-human on exhaustion.
-func (r *Reproducer) provePatch(ctx context.Context, st *store.Store, f store.Finding, att *Attempt) (patchOutcome, error) {
+func (r *Reproducer) provePatch(ctx context.Context, st *store.Store, f domain.Finding, att *Attempt) (patchOutcome, error) {
 	prover := &PatchProver{
 		client:        r.client,
 		sb:            r.sb,
@@ -352,7 +353,7 @@ func (r *Reproducer) provePatch(ctx context.Context, st *store.Store, f store.Fi
 //
 // We read the current row back first so we never clobber fields that may have
 // changed since the finding was loaded; only tier and repro_path are mutated.
-func promoteFinding(ctx context.Context, st *store.Store, f store.Finding, reproPath string) error {
+func promoteFinding(ctx context.Context, st *store.Store, f domain.Finding, reproPath string) error {
 	current, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
 	if err != nil {
 		return err
@@ -375,7 +376,7 @@ func promoteFinding(ctx context.Context, st *store.Store, f store.Finding, repro
 // bugbot-w1bh: this is the witness half of the repro-as-evidence vs
 // repro-as-promotion split. PromoteOne branches to it whenever the
 // demonstrated finding has NeedsHuman set.
-func witnessFinding(ctx context.Context, st *store.Store, f store.Finding, reproPath string) error {
+func witnessFinding(ctx context.Context, st *store.Store, f domain.Finding, reproPath string) error {
 	current, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
 	if err != nil {
 		return err

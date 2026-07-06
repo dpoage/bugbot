@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"testing"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // TestLensMetrics verifies acceptance criterion 2: per-lens survival rates are
@@ -16,22 +18,22 @@ func TestLensMetrics_SurvivalAndReproRates(t *testing.T) {
 	//     1 finding reproduced (T1), 0 contradicted ---
 	race1 := sampleFinding()
 	race1.Tier = 2
-	race1.Status = StatusOpen
+	race1.Status = domain.StatusOpen
 	r1, _ := st.UpsertFinding(ctx, race1)
 
 	race2 := sampleFinding()
-	race2.Fingerprint = Fingerprint("race", "internal/x/y.go", "99|race on map")
+	race2.Fingerprint = domain.Fingerprint("race", "internal/x/y.go", "99|race on map")
 	race2.Line = 99
 	race2.Tier = 1
 	race2.ReproPath = "/repro/race2"
-	race2.Status = StatusOpen
+	race2.Status = domain.StatusOpen
 	_, _ = st.UpsertFinding(ctx, race2)
 
 	scanID, _ := st.BeginScanRun(ctx, ScanOneshot, "abc")
 	for i := 0; i < 3; i++ {
 		_ = st.AddDeadHypothesis(ctx, DeadHypothesis{
 			ScanRunID:    scanID,
-			Fingerprint:  Fingerprint("race", "internal/x/y.go", "k"+string(rune('A'+i))),
+			Fingerprint:  domain.Fingerprint("race", "internal/x/y.go", "k"+string(rune('A'+i))),
 			Lens:         "race",
 			File:         "internal/x/y.go",
 			Title:        "killed race candidate",
@@ -41,11 +43,11 @@ func TestLensMetrics_SurvivalAndReproRates(t *testing.T) {
 
 	// --- seed "nil-deref" lens: 1 survived finding, 1 killed, 1 contradicted ---
 	nilF := sampleFinding()
-	nilF.Fingerprint = Fingerprint("nil-deref", "pkg/foo.go", "10|nil ptr")
+	nilF.Fingerprint = domain.Fingerprint("nil-deref", "pkg/foo.go", "10|nil ptr")
 	nilF.Lens = "nil-deref"
 	nilF.File = "pkg/foo.go"
 	nilF.Tier = 2
-	nilF.Status = StatusOpen
+	nilF.Status = domain.StatusOpen
 	nilStored, _ := st.UpsertFinding(ctx, nilF)
 	_, _ = st.EnqueueRepro(ctx, nilStored.Fingerprint)
 	_ = st.RecordExitZeroAttempt(ctx, nilStored.Fingerprint)
@@ -53,7 +55,7 @@ func TestLensMetrics_SurvivalAndReproRates(t *testing.T) {
 
 	_ = st.AddDeadHypothesis(ctx, DeadHypothesis{
 		ScanRunID:    scanID,
-		Fingerprint:  Fingerprint("nil-deref", "pkg/foo.go", "killed-nil"),
+		Fingerprint:  domain.Fingerprint("nil-deref", "pkg/foo.go", "killed-nil"),
 		Lens:         "nil-deref",
 		File:         "pkg/foo.go",
 		Title:        "killed nil candidate",
@@ -135,7 +137,7 @@ func TestLensMetrics_LensOnlyInDeadHypotheses(t *testing.T) {
 	scanID, _ := st.BeginScanRun(ctx, ScanOneshot, "sha1")
 	_ = st.AddDeadHypothesis(ctx, DeadHypothesis{
 		ScanRunID:    scanID,
-		Fingerprint:  Fingerprint("ghost-lens", "foo.go", "ghost"),
+		Fingerprint:  domain.Fingerprint("ghost-lens", "foo.go", "ghost"),
 		Lens:         "ghost-lens",
 		File:         "foo.go",
 		Title:        "always killed",
@@ -143,7 +145,7 @@ func TestLensMetrics_LensOnlyInDeadHypotheses(t *testing.T) {
 	})
 	_ = st.AddDeadHypothesis(ctx, DeadHypothesis{
 		ScanRunID:    scanID,
-		Fingerprint:  Fingerprint("ghost-lens", "foo.go", "ghost2"),
+		Fingerprint:  domain.Fingerprint("ghost-lens", "foo.go", "ghost2"),
 		Lens:         "ghost-lens",
 		File:         "foo.go",
 		Title:        "also killed",
@@ -196,16 +198,16 @@ func TestLensMetrics_NonOpenFindingsExcluded(t *testing.T) {
 	st := openTemp(t)
 
 	open := sampleFinding()
-	open.Status = StatusOpen
+	open.Status = domain.StatusOpen
 	open.Lens = "race"
 	_, _ = st.UpsertFinding(ctx, open)
 
 	dismissed := sampleFinding()
-	dismissed.Fingerprint = Fingerprint("race", "internal/x/y.go", "d1|dismissed")
+	dismissed.Fingerprint = domain.Fingerprint("race", "internal/x/y.go", "d1|dismissed")
 	dismissed.Lens = "race"
-	dismissed.Status = StatusOpen // start open, dismiss below
+	dismissed.Status = domain.StatusOpen // start open, dismiss below
 	ds, _ := st.UpsertFinding(ctx, dismissed)
-	_ = st.UpdateStatus(ctx, ds.Fingerprint, StatusDismissed, "false positive")
+	_ = st.UpdateStatus(ctx, ds.Fingerprint, domain.StatusDismissed, "false positive")
 
 	stats, err := st.LensMetrics(ctx)
 	if err != nil {
@@ -219,7 +221,7 @@ func TestLensMetrics_NonOpenFindingsExcluded(t *testing.T) {
 }
 
 // TestLensMetrics_FixedFindingExcluded is a companion to the dismissed test for
-// the StatusFixed path.
+// the domain.StatusFixed path.
 func TestLensMetrics_FixedFindingExcluded(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
@@ -233,9 +235,9 @@ func TestLensMetrics_FixedFindingExcluded(t *testing.T) {
 
 	// Another finding, still open: should be Survived=1.
 	f2 := sampleFinding()
-	f2.Fingerprint = Fingerprint("race", "internal/x/y.go", "f2|race")
+	f2.Fingerprint = domain.Fingerprint("race", "internal/x/y.go", "f2|race")
 	f2.Lens = "race"
-	f2.Status = StatusOpen
+	f2.Status = domain.StatusOpen
 	_, _ = st.UpsertFinding(ctx, f2)
 
 	stats, err := st.LensMetrics(ctx)
@@ -262,7 +264,7 @@ func TestLensMetrics_ReproducedFindingNotContradicted(t *testing.T) {
 	f.Lens = "race"
 	f.Tier = 1
 	f.ReproPath = "/repro/race"
-	f.Status = StatusOpen
+	f.Status = domain.StatusOpen
 	stored, _ := st.UpsertFinding(ctx, f)
 
 	// Accumulate 2 exit-zero attempts (contradiction threshold reached).

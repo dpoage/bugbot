@@ -9,7 +9,6 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/sarif"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // fixedTime is the epoch used in fixture findings so the golden file is stable.
@@ -17,8 +16,8 @@ var fixedTime = time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
 
 // fixtureFindings returns a small, fixed set of findings used in the golden
 // test. Field values are deliberately varied to exercise all level mappings.
-func fixtureFindings() []store.Finding {
-	return []store.Finding{
+func fixtureFindings() []domain.Finding {
+	return []domain.Finding{
 		{
 			ID:          "id-1",
 			Fingerprint: "fp-abc",
@@ -26,7 +25,7 @@ func fixtureFindings() []store.Finding {
 			Reasoning:   "pointer is never checked before use",
 			Severity:    "high",
 			Tier:        1, // reproduced -> error
-			Status:      store.StatusOpen,
+			Status:      domain.StatusOpen,
 			Lens:        "race",
 			File:        "cmd/server/main.go",
 			Line:        42,
@@ -41,7 +40,7 @@ func fixtureFindings() []store.Finding {
 			Reasoning:   "",
 			Severity:    "medium",
 			Tier:        2, // verified -> warning
-			Status:      store.StatusOpen,
+			Status:      domain.StatusOpen,
 			Lens:        "bounds",
 			File:        "internal/parser/parse.go",
 			Line:        10,
@@ -56,7 +55,7 @@ func fixtureFindings() []store.Finding {
 			Reasoning:   "denominator may be zero when input is empty",
 			Severity:    "low",
 			Tier:        3, // suspected -> note
-			Status:      store.StatusOpen,
+			Status:      domain.StatusOpen,
 			Lens:        "race",
 			File:        "cmd/server/main.go",
 			Line:        99,
@@ -225,7 +224,7 @@ func TestFromFindings_Deterministic(t *testing.T) {
 
 // TestFromFindings_TierLevel exercises all tier->level branches.
 func TestFromFindings_TierLevel(t *testing.T) {
-	base := store.Finding{
+	base := domain.Finding{
 		Fingerprint: "x",
 		Title:       "t",
 		Lens:        "l",
@@ -246,7 +245,7 @@ func TestFromFindings_TierLevel(t *testing.T) {
 		f := base
 		f.Tier = domain.Tier(tc.tier)
 		f.Fingerprint = "fp" + string(rune('0'+tc.tier))
-		doc := sarif.FromFindings([]store.Finding{f})
+		doc := sarif.FromFindings([]domain.Finding{f})
 		got := doc.Runs[0].Results[0].Level
 		if got != tc.level {
 			t.Errorf("tier %d: level = %q, want %q", tc.tier, got, tc.level)
@@ -275,7 +274,7 @@ func TestFromFindings_EmptyFindings(t *testing.T) {
 // TestFromFindings_ReasoningFallback checks that an empty Reasoning falls back
 // to the Title for message.text.
 func TestFromFindings_ReasoningFallback(t *testing.T) {
-	f := store.Finding{
+	f := domain.Finding{
 		Fingerprint: "fp",
 		Title:       "the title",
 		Reasoning:   "", // empty -> fallback
@@ -284,7 +283,7 @@ func TestFromFindings_ReasoningFallback(t *testing.T) {
 		Line:        1,
 		Tier:        2,
 	}
-	doc := sarif.FromFindings([]store.Finding{f})
+	doc := sarif.FromFindings([]domain.Finding{f})
 	got := doc.Runs[0].Results[0].Message.Text
 	if got != "the title" {
 		t.Errorf("message.text = %q, want %q", got, "the title")

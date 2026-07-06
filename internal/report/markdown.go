@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // Markdown renders the report as a readable Markdown document. The output is
@@ -64,7 +63,7 @@ func writeMetaLine(b *strings.Builder, key, value string) {
 }
 
 // writeCounts renders the by-tier and by-severity tallies as a compact section.
-func writeCounts(b *strings.Builder, fs []store.Finding) {
+func writeCounts(b *strings.Builder, fs []domain.Finding) {
 	byTier := map[domain.Tier]int{}
 	bySev := map[domain.Severity]int{}
 	for _, f := range fs {
@@ -92,7 +91,7 @@ func writeCounts(b *strings.Builder, fs []store.Finding) {
 }
 
 // writeFinding renders a single finding section.
-func writeFinding(b *strings.Builder, n int, f store.Finding) {
+func writeFinding(b *strings.Builder, n int, f domain.Finding) {
 	fmt.Fprintf(b, "### %d. %s\n\n", n, orUnknown(f.Title))
 
 	writeMetaLine(b, "ID", orUnknown(f.ID))
@@ -138,7 +137,7 @@ func writeFinding(b *strings.Builder, n int, f store.Finding) {
 		b.WriteString("**Needs human review:** automated analysis could not conclusively resolve this finding.\n\n")
 	}
 	if f.ReproContradicted {
-		fmt.Fprintf(b, "**Repro-contradicted:** the reproduction test ran >= %d times and exited 0 each time — the bug did not manifest on independent attempts. This is disconfirming evidence; consider re-examining the finding.\n\n", store.ReproContradictionThreshold)
+		fmt.Fprintf(b, "**Repro-contradicted:** the reproduction test ran >= %d times and exited 0 each time — the bug did not manifest on independent attempts. This is disconfirming evidence; consider re-examining the finding.\n\n", domain.ReproContradictionThreshold)
 	}
 }
 

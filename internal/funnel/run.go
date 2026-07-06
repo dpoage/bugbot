@@ -507,7 +507,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// fields on result.Stats that the concurrent verify goroutines update.
 	var (
 		findingsMu   sync.Mutex
-		allFindings  []store.Finding
+		allFindings  []domain.Finding
 		verifyKilled int
 		verifyErr    error
 		verifyErrMu  sync.Mutex
@@ -546,7 +546,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	var replay []Candidate
 	switch mode {
 	case modeReverify:
-		susp, listErr := f.store.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen, HasTier: true, Tier: domain.TierSuspected})
+		susp, listErr := f.store.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen, HasTier: true, Tier: domain.TierSuspected})
 		if listErr != nil {
 			f.note(result, fmt.Sprintf("resume: ListFindings(open T3) failed: %v", listErr))
 			susp = nil
@@ -965,7 +965,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 
 // pendingToCandidate rebuilds a funnel Candidate from a persisted
 // pending_candidates row for replay. Fingerprint is intentionally left unset:
-// the triage consumer recomputes it (store.Fingerprint) and re-runs the
+// the triage consumer recomputes it (domain.Fingerprint) and re-runs the
 // scope/dedup/suppression checks, so a replayed candidate is re-anchored to the
 // current snapshot exactly like a fresh one. PendingID carries the WAL row's
 // primary key so the terminal-fate handlers delete it.
@@ -999,10 +999,10 @@ func pendingToCandidate(pc store.PendingCandidate) Candidate {
 // dropped at triage step 1 (triage_streaming.go:305), and a Tier-3 finding
 // is by definition worth re-judging — its prior triage passed and only the
 // verify stage was halted, so we deliberately keep it out of the low band.
-// The Sites slice is converted from []store.Site to []Site to mirror the
+// The Sites slice is converted from []domain.Site to []Site to mirror the
 // pendingToCandidate shape (Candidate uses the funnel package's Site type,
 // pendingToCandidate's input already only carries locations as fields).
-func findingToCandidate(fi store.Finding) Candidate {
+func findingToCandidate(fi domain.Finding) Candidate {
 	sites := make([]Site, len(fi.Sites))
 	for i, s := range fi.Sites {
 		sites[i] = Site{File: s.File, Line: s.Line}

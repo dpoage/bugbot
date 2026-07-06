@@ -4,20 +4,22 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
-// sampleFindingSwept returns a fresh Finding with a distinct fingerprint for
+// sampleFindingSwept returns a fresh domain.Finding with a distinct fingerprint for
 // sweep tests so it does not collide with sampleFinding().
-func sampleFindingSwept(lens, file string, line int, title string) Finding {
-	fp := Fingerprint(lens, file, fmt.Sprintf("%d|%s", line, title))
-	return Finding{
+func sampleFindingSwept(lens, file string, line int, title string) domain.Finding {
+	fp := domain.Fingerprint(lens, file, fmt.Sprintf("%d|%s", line, title))
+	return domain.Finding{
 		Fingerprint: fp,
 		Title:       title,
 		Description: "test finding for swept_at",
 		Reasoning:   "test reasoning",
 		Severity:    "high",
 		Tier:        2,
-		Status:      StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        lens,
 		File:        file,
 		Line:        line,
@@ -186,7 +188,7 @@ func TestSweptAt_ClosedFindingExcluded(t *testing.T) {
 	st := openTemp(t)
 
 	f := sampleFindingSwept("race", "pkg/e.go", 5, "closed finding")
-	f.Status = StatusFixed
+	f.Status = domain.StatusFixed
 	got, err := st.UpsertFinding(ctx, f)
 	if err != nil {
 		t.Fatalf("upsert: %v", err)

@@ -127,7 +127,7 @@ func (d *Daemon) runPublisher(ctx context.Context) {
 // are logged and skip only the offending finding; one bad finding never aborts
 // the pass or the loop.
 func (d *Daemon) reverifyOpenFindings(ctx context.Context) int {
-	open, err := d.store.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	open, err := d.store.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil {
 		d.log.Error("daemon: list open findings failed", "err", err)
 		return 0
@@ -220,7 +220,7 @@ func (d *Daemon) reverifyOpenFindings(ctx context.Context) int {
 // the decision. MarkFixed records "fixed" status; we deliberately do NOT add a
 // suppression (the bug was resolved, not dismissed as a false positive), so the
 // same fingerprint could legitimately reopen if the bug is reintroduced.
-func (d *Daemon) autoClose(ctx context.Context, fnd store.Finding, reason string, closed *int) {
+func (d *Daemon) autoClose(ctx context.Context, fnd domain.Finding, reason string, closed *int) {
 	if err := d.store.MarkFixed(ctx, fnd.Fingerprint); err != nil {
 		d.log.Error("daemon: auto-close failed", "fingerprint", fnd.Fingerprint, "err", err)
 		return
@@ -241,7 +241,7 @@ func (d *Daemon) promoteNewFindings(ctx context.Context, fres *funnel.Result) in
 	if !d.cfg.EnableRepro || d.repro == nil {
 		return 0
 	}
-	t2 := make([]store.Finding, 0, len(fres.Findings))
+	t2 := make([]domain.Finding, 0, len(fres.Findings))
 	for _, fnd := range fres.Findings {
 		if fnd.Tier == domain.TierVerified {
 			t2 = append(t2, fnd)
@@ -296,8 +296,8 @@ func countLines(b []byte) int {
 // the baseline commit — i.e. findings introduced after that commit. A per-finding
 // git error biases toward INTRODUCED (see ingest.Repo.AnchorAbsentAtRef). It
 // stops early on context cancellation, returning what it has gathered.
-func introducedSince(ctx context.Context, repo *ingest.Repo, baseline string, findings []store.Finding) []store.Finding {
-	var introduced []store.Finding
+func introducedSince(ctx context.Context, repo *ingest.Repo, baseline string, findings []domain.Finding) []domain.Finding {
+	var introduced []domain.Finding
 	for _, fnd := range findings {
 		if ctx.Err() != nil {
 			break

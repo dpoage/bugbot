@@ -51,6 +51,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
@@ -278,7 +279,7 @@ func runWithClients(ctx context.Context, c Case, clients funnel.RoleClients) (*C
 	if len(c.Suppress) > 0 {
 		lr := funnel.NewLocusResolver(repo.Root())
 		for _, s := range c.Suppress {
-			fp := store.Fingerprint(s.Lens, s.File, lr.Resolve(s.File, s.Line))
+			fp := domain.Fingerprint(s.Lens, s.File, lr.Resolve(s.File, s.Line))
 			if err := st.AddSuppression(ctx, fp, s.Reason); err != nil {
 				return nil, fmt.Errorf("eval: pre-suppress %q in %q: %w", s.Title, c.Name, err)
 			}

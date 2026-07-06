@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // TestWriterLock_RefusesSecondWriter is the core single-writer guarantee: a
@@ -82,7 +84,7 @@ func TestOpenReadOnly_CoexistsWithWriter(t *testing.T) {
 		t.Fatalf("OpenReadOnly while writer holds lock: %v", err)
 	}
 	defer func() { _ = reader.Close() }()
-	got, err := reader.ListFindings(ctx, FindingFilter{})
+	got, err := reader.ListFindings(ctx, domain.FindingFilter{})
 	if err != nil {
 		t.Fatalf("reader ListFindings: %v", err)
 	}

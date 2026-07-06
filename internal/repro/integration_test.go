@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -78,14 +79,14 @@ func TestDivideByZeroReported(t *testing.T) {
 	}
 	defer func() { _ = st.Close() }()
 
-	fp := store.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 7, "Divide ignores zero divisor"))
-	finding, err := st.UpsertFinding(context.Background(), store.Finding{
+	fp := domain.Fingerprint("logic", "calc.go", fmt.Sprintf("%d|%s", 7, "Divide ignores zero divisor"))
+	finding, err := st.UpsertFinding(context.Background(), domain.Finding{
 		Fingerprint: fp,
 		Title:       "Divide ignores zero divisor",
 		Description: "Divide returns ok=true for a zero divisor.",
 		Severity:    "high",
 		Tier:        2,
-		Status:      store.StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "logic",
 		File:        "calc.go",
 		Line:        7,

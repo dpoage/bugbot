@@ -9,16 +9,16 @@ import (
 	"github.com/dpoage/bugbot/internal/domain"
 )
 
-func sampleFinding() Finding {
-	fp := Fingerprint("race", "internal/x/y.go", fmt.Sprintf("%d|%s", 10, "data race on counter"))
-	return Finding{
+func sampleFinding() domain.Finding {
+	fp := domain.Fingerprint("race", "internal/x/y.go", fmt.Sprintf("%d|%s", 10, "data race on counter"))
+	return domain.Finding{
 		Fingerprint: fp,
 		Title:       "data race on counter",
 		Description: "counter incremented without a lock",
 		Reasoning:   "verifier confirmed concurrent writes",
 		Severity:    "high",
 		Tier:        2,
-		Status:      StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "race",
 		File:        "internal/x/y.go",
 		Line:        10,
@@ -70,7 +70,7 @@ func TestUpsertFinding_InsertThenDedupUpdate(t *testing.T) {
 		t.Fatalf("repro_path not stored: %q", got2.ReproPath)
 	}
 
-	all, err := st.ListFindings(ctx, FindingFilter{})
+	all, err := st.ListFindings(ctx, domain.FindingFilter{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestUpsertFinding_CorroboratingLensesRoundTrip(t *testing.T) {
 	}
 
 	// And via ListFindings (uses the same scan path).
-	all, err := st.ListFindings(ctx, FindingFilter{})
+	all, err := st.ListFindings(ctx, domain.FindingFilter{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -176,7 +176,7 @@ func equalStrings(a, b []string) bool {
 
 func TestUpsertFinding_RequiresFingerprint(t *testing.T) {
 	st := openTemp(t)
-	_, err := st.UpsertFinding(context.Background(), Finding{Title: "x"})
+	_, err := st.UpsertFinding(context.Background(), domain.Finding{Title: "x"})
 	if err == nil {
 		t.Fatal("expected error for missing fingerprint")
 	}
@@ -194,9 +194,9 @@ func TestListFindings_Filters(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
-	mk := func(lens, file string, line int, tier domain.Tier, status Status, commit string) {
-		f := Finding{
-			Fingerprint: Fingerprint(lens, file, fmt.Sprintf("%d|%s", line, "t")),
+	mk := func(lens, file string, line int, tier domain.Tier, status domain.Status, commit string) {
+		f := domain.Finding{
+			Fingerprint: domain.Fingerprint(lens, file, fmt.Sprintf("%d|%s", line, "t")),
 			Title:       "t",
 			Tier:        tier,
 			Status:      status,
@@ -209,11 +209,11 @@ func TestListFindings_Filters(t *testing.T) {
 			t.Fatalf("upsert: %v", err)
 		}
 	}
-	mk("a", "f1.go", 1, 2, StatusOpen, "c1") // was tier=1; tests filter/sort, not tier
-	mk("a", "f2.go", 2, 2, StatusOpen, "c1")
-	mk("b", "f3.go", 3, 2, StatusFixed, "c2")
+	mk("a", "f1.go", 1, 2, domain.StatusOpen, "c1") // was tier=1; tests filter/sort, not tier
+	mk("a", "f2.go", 2, 2, domain.StatusOpen, "c1")
+	mk("b", "f3.go", 3, 2, domain.StatusFixed, "c2")
 
-	open, err := st.ListFindings(ctx, FindingFilter{Status: StatusOpen})
+	open, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatalf("list open: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestListFindings_Filters(t *testing.T) {
 		t.Fatalf("expected 2 open, got %d", len(open))
 	}
 
-	tier2, err := st.ListFindings(ctx, FindingFilter{HasTier: true, Tier: 2})
+	tier2, err := st.ListFindings(ctx, domain.FindingFilter{HasTier: true, Tier: 2})
 	if err != nil {
 		t.Fatalf("list tier2: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestListFindings_Filters(t *testing.T) {
 	}
 
 	// Code-version scoping: only findings anchored to commit c1.
-	c1, err := st.ListFindings(ctx, FindingFilter{CommitSHA: "c1"})
+	c1, err := st.ListFindings(ctx, domain.FindingFilter{CommitSHA: "c1"})
 	if err != nil {
 		t.Fatalf("list c1: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestListFindings_Filters(t *testing.T) {
 		t.Fatalf("expected 2 findings at commit c1, got %d", len(c1))
 	}
 
-	lensB, err := st.ListFindings(ctx, FindingFilter{Lens: "b"})
+	lensB, err := st.ListFindings(ctx, domain.FindingFilter{Lens: "b"})
 	if err != nil {
 		t.Fatalf("list lens b: %v", err)
 	}
@@ -262,14 +262,14 @@ func TestMarkFixed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Status != StatusFixed {
+	if got.Status != domain.StatusFixed {
 		t.Fatalf("expected fixed, got %q", got.Status)
 	}
 }
 
 func TestUpdateStatus_NotFound(t *testing.T) {
 	st := openTemp(t)
-	err := st.UpdateStatus(context.Background(), "missing", StatusFixed, "")
+	err := st.UpdateStatus(context.Background(), "missing", domain.StatusFixed, "")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
@@ -311,7 +311,7 @@ func TestFixPatchNeedsHuman_RoundTrip(t *testing.T) {
 	// Update: set NeedsHuman=true, clear FixPatch.
 	f2 := stored
 	f2.NeedsHuman = true
-	f2.NeedsHumanReason = NeedsHumanReasonBelowQuorum
+	f2.NeedsHumanReason = domain.NeedsHumanReasonBelowQuorum
 	f2.FixPatch = ""
 	updated, err := st.UpsertFinding(ctx, f2)
 	if err != nil {
@@ -337,7 +337,7 @@ func TestFixPatchNeedsHuman_RoundTrip(t *testing.T) {
 	}
 
 	// ListFindings must also return the updated values.
-	all, err := st.ListFindings(ctx, FindingFilter{})
+	all, err := st.ListFindings(ctx, domain.FindingFilter{})
 	if err != nil {
 		t.Fatalf("ListFindings: %v", err)
 	}
@@ -352,7 +352,7 @@ func TestFixPatchNeedsHuman_RoundTrip(t *testing.T) {
 	// stored row above has NeedsHuman=true which the UPDATE path preserves, and
 	// T0+NeedsHuman is an illegal state).
 	f3 := sampleFinding()
-	f3.Fingerprint = Fingerprint("race", "internal/x/z.go", "10|t0-test")
+	f3.Fingerprint = domain.Fingerprint("race", "internal/x/z.go", "10|t0-test")
 	f3.Tier = 0
 	f3.ReproPath = "/artifacts/fix.go"
 	f3.FixPatch = "--- a/x.go\n+++ b/x.go\n@@ -1 +1 @@\n-bad\n+good\n"
@@ -386,11 +386,11 @@ func TestReVerificationFlow_DetectsChangedFindings(t *testing.T) {
 	// Daemon's incremental scan computes current hashes for files on disk.
 	currentHashes := map[string]string{"internal/x/y.go": "hash-v2"}
 
-	open, err := st.ListFindings(ctx, FindingFilter{Status: StatusOpen})
+	open, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	var needsReverify []Finding
+	var needsReverify []domain.Finding
 	for _, fnd := range open {
 		if h, ok := currentHashes[fnd.File]; ok && h != fnd.FileHash {
 			needsReverify = append(needsReverify, fnd)
@@ -435,14 +435,14 @@ func TestUpsertFinding_PreservesPromotionOnRescan(t *testing.T) {
 
 	// 3. Re-scan: a fresh T2 finding with empty ReproPath and updated freshness
 	// fields arrives for the same fingerprint.
-	rescan := Finding{
+	rescan := domain.Finding{
 		Fingerprint: f.Fingerprint,
 		Title:       f.Title,
 		Description: f.Description,
 		Reasoning:   "updated reasoning from re-scan",
 		Severity:    "critical", // changed
 		Tier:        2,
-		Status:      StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        f.Lens,
 		File:        f.File,
 		Line:        f.Line,
@@ -508,8 +508,8 @@ func TestUpsertFinding_ExplicitDemotionStillWorks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetFindingByFingerprint: %v", err)
 	}
-	if got.Status != StatusFixed {
-		t.Errorf("after MarkFixed: status=%q, want %q", got.Status, StatusFixed)
+	if got.Status != domain.StatusFixed {
+		t.Errorf("after MarkFixed: status=%q, want %q", got.Status, domain.StatusFixed)
 	}
 	// Tier is unchanged by MarkFixed — it operates only on status.
 	if got.Tier != f.Tier {
@@ -517,15 +517,15 @@ func TestUpsertFinding_ExplicitDemotionStillWorks(t *testing.T) {
 	}
 
 	// UpdateStatus to dismissed also works.
-	if err := st.UpdateStatus(ctx, f.Fingerprint, StatusDismissed, "test dismissal"); err != nil {
+	if err := st.UpdateStatus(ctx, f.Fingerprint, domain.StatusDismissed, "test dismissal"); err != nil {
 		t.Fatalf("UpdateStatus dismissed: %v", err)
 	}
 	got2, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
 	if err != nil {
 		t.Fatalf("GetFindingByFingerprint after dismiss: %v", err)
 	}
-	if got2.Status != StatusDismissed {
-		t.Errorf("after UpdateStatus dismissed: status=%q, want %q", got2.Status, StatusDismissed)
+	if got2.Status != domain.StatusDismissed {
+		t.Errorf("after UpdateStatus dismissed: status=%q, want %q", got2.Status, domain.StatusDismissed)
 	}
 }
 
@@ -572,7 +572,7 @@ func TestUpsertFinding_TierEdgeCases(t *testing.T) {
 	setNH.Tier = 1
 	setNH.ReproPath = "/artifacts/second.go"
 	setNH.NeedsHuman = true
-	setNH.NeedsHumanReason = NeedsHumanReasonProverExhausted
+	setNH.NeedsHumanReason = domain.NeedsHumanReasonProverExhausted
 	if _, err := st.UpsertFinding(ctx, setNH); err != nil {
 		t.Fatalf("set needs_human: %v", err)
 	}
@@ -602,15 +602,15 @@ func TestCountFindings(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
-	seed := func(file string, line int, tier domain.Tier, status Status, needsHuman bool) {
+	seed := func(file string, line int, tier domain.Tier, status domain.Status, needsHuman bool) {
 		t.Helper()
-		f := Finding{
-			Fingerprint: Fingerprint("l", file, fmt.Sprintf("%d|%s", line, "t")),
+		f := domain.Finding{
+			Fingerprint: domain.Fingerprint("l", file, fmt.Sprintf("%d|%s", line, "t")),
 			Title:       "t", Severity: "high", Tier: tier, Status: status,
 			Lens: "l", File: file, Line: line, NeedsHuman: needsHuman,
 		}
 		if needsHuman {
-			f.NeedsHumanReason = NeedsHumanReasonBelowQuorum
+			f.NeedsHumanReason = domain.NeedsHumanReasonBelowQuorum
 		}
 		// T0/T1 require ReproPath; supply a placeholder so FSM guard passes.
 		if tier <= 1 {
@@ -620,12 +620,12 @@ func TestCountFindings(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	seed("a.go", 1, 0, StatusOpen, false)
-	seed("a.go", 2, 2, StatusOpen, true) // was tier=1; NeedsHuman+T2 = below-quorum
-	seed("a.go", 3, 2, StatusOpen, false)
-	seed("a.go", 4, 2, StatusOpen, false)
-	seed("b.go", 1, 2, StatusFixed, false)
-	seed("b.go", 2, 3, StatusDismissed, false)
+	seed("a.go", 1, 0, domain.StatusOpen, false)
+	seed("a.go", 2, 2, domain.StatusOpen, true) // was tier=1; NeedsHuman+T2 = below-quorum
+	seed("a.go", 3, 2, domain.StatusOpen, false)
+	seed("a.go", 4, 2, domain.StatusOpen, false)
+	seed("b.go", 1, 2, domain.StatusFixed, false)
+	seed("b.go", 2, 3, domain.StatusDismissed, false)
 
 	got, err := st.CountFindings(ctx)
 	if err != nil {
@@ -750,7 +750,7 @@ func TestFindingConfidence_RoundTrip(t *testing.T) {
 	}
 
 	// Round-trip via ListFindings.
-	list, err := st.ListFindings(ctx, FindingFilter{})
+	list, err := st.ListFindings(ctx, domain.FindingFilter{})
 	if err != nil {
 		t.Fatalf("ListFindings: %v", err)
 	}
@@ -813,17 +813,17 @@ func TestUpdateFindingSeverity(t *testing.T) {
 func TestFindingSites_EncodeDecode(t *testing.T) {
 	cases := []struct {
 		name  string
-		sites []Site
+		sites []domain.Site
 	}{
 		{"nil", nil},
-		{"empty", []Site{}},
-		{"single", []Site{{File: "internal/cli/publish.go", Line: 45}}},
-		{"multi", []Site{
+		{"empty", []domain.Site{}},
+		{"single", []domain.Site{{File: "internal/cli/publish.go", Line: 45}}},
+		{"multi", []domain.Site{
 			{File: "internal/cli/publish.go", Line: 45},
 			{File: "internal/cli/publish.go", Line: 78},
 			{File: "internal/cli/publish.go", Line: 112},
 		}},
-		{"with pipe in path", []Site{
+		{"with pipe in path", []domain.Site{
 			{File: "src/foo|bar.go", Line: 1},
 			{File: "src/baz.go", Line: 2},
 		}},
@@ -857,7 +857,7 @@ func TestUpsertFinding_SitesRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
-	sites := []Site{
+	sites := []domain.Site{
 		{File: "internal/cli/publish.go", Line: 45},
 		{File: "internal/cli/publish.go", Line: 78},
 		{File: "internal/cli/publish.go", Line: 112},
@@ -900,17 +900,17 @@ func TestMigration013_SitesColumn(t *testing.T) {
 	// openTemp applies all migrations including 013.
 	st := openTemp(t)
 
-	sites := []Site{
+	sites := []domain.Site{
 		{File: "src/RenderSystem.cpp", Line: 42},
 		{File: "src/RenderSystem.hpp", Line: 15},
 	}
-	f := Finding{
-		Fingerprint: Fingerprint("boundary-conditions", "src/RenderSystem.cpp", fmt.Sprintf("%d|%s", 42, "buffer overflow")),
+	f := domain.Finding{
+		Fingerprint: domain.Fingerprint("boundary-conditions", "src/RenderSystem.cpp", fmt.Sprintf("%d|%s", 42, "buffer overflow")),
 		Title:       "buffer overflow",
 		Description: "write past array end",
 		Severity:    domain.SeverityHigh,
 		Tier:        domain.TierVerified,
-		Status:      StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        "boundary-conditions",
 		File:        "src/RenderSystem.cpp",
 		Line:        42,
@@ -950,7 +950,7 @@ func TestUpsertFinding_PreservesWitnessOnRescan(t *testing.T) {
 	f := sampleFinding()
 	f.Tier = 2
 	f.NeedsHuman = true
-	f.NeedsHumanReason = NeedsHumanReasonBelowQuorum
+	f.NeedsHumanReason = domain.NeedsHumanReasonBelowQuorum
 	f.ReproPath = ""
 	f.ReproWitness = ""
 	stored, err := st.UpsertFinding(ctx, f)
@@ -981,21 +981,21 @@ func TestUpsertFinding_PreservesWitnessOnRescan(t *testing.T) {
 
 	// 3. Re-scan: a fresh T2 finding with an EMPTY witness for the same
 	// fingerprint. The stored witness must survive.
-	rescan := Finding{
+	rescan := domain.Finding{
 		Fingerprint: f.Fingerprint,
 		Title:       f.Title,
 		Description: f.Description,
 		Reasoning:   "updated reasoning from re-scan",
 		Severity:    "critical", // changed
 		Tier:        2,
-		Status:      StatusOpen,
+		Status:      domain.StatusOpen,
 		Lens:        f.Lens,
 		File:        f.File,
 		Line:        f.Line,
 		CommitSHA:   "newcommit",
 		FileHash:    "hash-v3",
 		NeedsHuman:  true,
-		// NeedsHumanReason not set: UpsertFinding preserves stored reason on update.
+		// domain.NeedsHumanReason not set: UpsertFinding preserves stored reason on update.
 		ReproWitness: "", // empty — must NOT clobber the stored witness
 	}
 	rescanned, err := st.UpsertFinding(ctx, rescan)

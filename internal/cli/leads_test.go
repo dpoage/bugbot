@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -116,7 +117,7 @@ func TestRenderWorldState(t *testing.T) {
 	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
 	ws := worldState{
 		HasTallies: true,
-		Tallies: store.FindingTallies{
+		Tallies: domain.FindingTallies{
 			OpenByTier: map[int]int{0: 1, 2: 3},
 			NeedsHuman: 2, Fixed: 4, Dismissed: 1,
 		},

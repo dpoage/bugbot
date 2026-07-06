@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -23,7 +24,7 @@ func TestIntroducedSince(t *testing.T) {
 	fr.commit("B: add new.go")
 	repo := fr.open()
 
-	findings := []store.Finding{
+	findings := []domain.Finding{
 		{File: "new.go", Line: 3, Title: "bug in new code"}, // absent at A -> introduced
 		{File: "old.go", Line: 3, Title: "bug in old code"}, // present at A -> pre-existing
 	}
@@ -78,7 +79,7 @@ func TestEmitRegressDigest(t *testing.T) {
 	}
 	fres := &funnel.Result{
 		ScanRunID: cur,
-		Findings: []store.Finding{
+		Findings: []domain.Finding{
 			{File: "new.go", Line: 3, Title: "introduced-bug", Severity: "high"},
 			{File: "old.go", Line: 3, Title: "preexisting-bug", Severity: "low"},
 		},
@@ -127,7 +128,7 @@ func TestEmitRegressDigest_NoBaseline(t *testing.T) {
 	}
 	fres := &funnel.Result{
 		ScanRunID: cur,
-		Findings:  []store.Finding{{File: "a.go", Line: 1, Title: "bug"}},
+		Findings:  []domain.Finding{{File: "a.go", Line: 1, Title: "bug"}},
 	}
 	d.emitRegressDigest(ctx, fres)
 

@@ -7,12 +7,13 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
 // openStore opens a fresh on-disk store seeded with two findings whose ids share
 // a common prefix so ambiguity can be exercised.
-func openStore(t *testing.T) (*store.Store, store.Finding, store.Finding) {
+func openStore(t *testing.T) (*store.Store, domain.Finding, domain.Finding) {
 	t.Helper()
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
@@ -21,15 +22,15 @@ func openStore(t *testing.T) (*store.Store, store.Finding, store.Finding) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	mk := func(lens, file string, line int, title string) store.Finding {
-		f := store.Finding{
-			Fingerprint: store.Fingerprint(lens, file, fmt.Sprintf("%d|%s", line, title)),
+	mk := func(lens, file string, line int, title string) domain.Finding {
+		f := domain.Finding{
+			Fingerprint: domain.Fingerprint(lens, file, fmt.Sprintf("%d|%s", line, title)),
 			Title:       title,
 			Description: "d",
 			Reasoning:   "r",
 			Severity:    "high",
 			Tier:        2,
-			Status:      store.StatusOpen,
+			Status:      domain.StatusOpen,
 			Lens:        lens,
 			File:        file,
 			Line:        line,
@@ -78,7 +79,7 @@ func TestResolveID_UniquePrefix(t *testing.T) {
 func TestResolveID_NotFound(t *testing.T) {
 	st, _, _ := openStore(t)
 	_, err := ResolveID(context.Background(), st, "ffffffffffffffff")
-	if !errors.Is(err, store.ErrNotFound) {
+	if !errors.Is(err, domain.ErrNotFound) {
 		t.Errorf("want ErrNotFound, got %v", err)
 	}
 }
@@ -95,12 +96,12 @@ func TestResolveID_Ambiguous(t *testing.T) {
 	// 8-byte ms timestamp, so findings created in the same millisecond share a
 	// long common prefix; use a 1-char prefix which is essentially always shared.
 	for i := 0; i < 8; i++ {
-		f := store.Finding{
-			Fingerprint: store.Fingerprint("race", "f.go", fmt.Sprintf("%d|%s", i, "t")),
+		f := domain.Finding{
+			Fingerprint: domain.Fingerprint("race", "f.go", fmt.Sprintf("%d|%s", i, "t")),
 			Title:       "t",
 			Severity:    "low",
 			Tier:        3,
-			Status:      store.StatusOpen,
+			Status:      domain.StatusOpen,
 			Lens:        "race",
 			File:        "f.go",
 			Line:        i,
@@ -110,7 +111,7 @@ func TestResolveID_Ambiguous(t *testing.T) {
 		}
 	}
 
-	all, err := st.ListFindings(ctx, store.FindingFilter{})
+	all, err := st.ListFindings(ctx, domain.FindingFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +185,7 @@ func TestDismissFlow(t *testing.T) {
 		t.Fatal("fingerprint should be suppressed after dismiss")
 	}
 
-	open, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	open, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +195,7 @@ func TestDismissFlow(t *testing.T) {
 		}
 	}
 
-	dismissed, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusDismissed})
+	dismissed, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusDismissed})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // regressTestRepo is a minimal git fixture for the regress tests. It mirrors
@@ -100,7 +100,7 @@ func TestRegressAttribution(t *testing.T) {
 	r.commit("B: add new.go")
 	repo := r.open()
 
-	findings := []store.Finding{
+	findings := []domain.Finding{
 		// Anchored to a line beyond old.go's EOF at A (old.go has 3 lines at
 		// both A and B). The file existed at A, but the anchored line did not.
 		// This is the INTRODUCED-at-finer-granularity case.

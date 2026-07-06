@@ -7,7 +7,6 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // TestVerifyStream_InlineSeverityDownrank proves bugbot-596: a Tier-2 survivor
@@ -54,7 +53,7 @@ func TestVerifyStream_InlineSeverityDownrank(t *testing.T) {
 		t.Fatalf("Sweep: %v", err)
 	}
 
-	var got *store.Finding
+	var got *domain.Finding
 	for i := range res.Findings {
 		if strings.Contains(res.Findings[i].Title, "deadHelper") {
 			got = &res.Findings[i]

@@ -37,11 +37,11 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/sandbox"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // Defaults for Options. Reproduction is deliberately conservative: each
@@ -317,7 +317,7 @@ type Plan struct {
 // Attempt does NOT update the store; PromoteAll owns persistence so that the
 // promotion (tier + repro_path) and the Summary stay consistent. Callers using
 // Attempt directly are responsible for any store updates.
-func (r *Reproducer) Attempt(ctx context.Context, finding store.Finding) (_ *Attempt, retErr error) {
+func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *Attempt, retErr error) {
 	// Bracket the whole per-finding reproduce run (all revision attempts) as a
 	// single "reproducer" agent in `bugbot status` / the live pane. The scope's
 	// activity sink is wired into the runner so each turn's tool call (and any

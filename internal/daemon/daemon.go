@@ -46,6 +46,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
@@ -134,7 +135,7 @@ type ScanRunTagger interface {
 // Tier-1 promotion. Keeping it an interface lets tests inject a fake without a
 // sandbox or container runtime. *repro.Reproducer satisfies it.
 type Promoter interface {
-	PromoteAll(ctx context.Context, st *store.Store, findings []store.Finding) (*repro.Summary, error)
+	PromoteAll(ctx context.Context, st *store.Store, findings []domain.Finding) (*repro.Summary, error)
 }
 
 // Publisher is the post-cycle GitHub issue reconciler. The daemon calls it

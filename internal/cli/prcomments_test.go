@@ -7,12 +7,11 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 // finding is a small constructor for test findings.
-func finding(fp, file string, line int, tier domain.Tier) store.Finding {
-	return store.Finding{
+func finding(fp, file string, line int, tier domain.Tier) domain.Finding {
+	return domain.Finding{
 		Fingerprint: fp,
 		Title:       "Title " + fp,
 		Description: "Desc " + fp,
@@ -36,7 +35,7 @@ func commentableAt(pairs ...struct {
 	return c
 }
 
-func result(findings ...store.Finding) *funnel.Result {
+func result(findings ...domain.Finding) *funnel.Result {
 	return &funnel.Result{
 		Commit:   "headSHA",
 		Findings: findings,

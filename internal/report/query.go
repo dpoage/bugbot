@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // findingLister is the slice of the store API this package needs. Keeping it as
 // a small interface (rather than *store.Store) keeps report decoupled and lets
 // the daemon, CLI, and tests pass any equivalent provider.
 type findingLister interface {
-	ListFindings(ctx context.Context, filter store.FindingFilter) ([]store.Finding, error)
+	ListFindings(ctx context.Context, filter domain.FindingFilter) ([]domain.Finding, error)
 }
 
 // CollectOpen loads all open findings from the store and wraps them in a Report
@@ -20,7 +20,7 @@ type findingLister interface {
 // reuse point for `bugbot report emit`, scan, and the daemon: emit current open
 // findings through configured sinks.
 func CollectOpen(ctx context.Context, l findingLister, meta Metadata) (Report, error) {
-	fs, err := l.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	fs, err := l.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil {
 		return Report{}, fmt.Errorf("report: list open findings: %w", err)
 	}
@@ -47,20 +47,20 @@ func (e *ErrAmbiguousID) Error() string {
 //
 //  1. An exact id match wins immediately, even if it is also a prefix of others.
 //  2. Otherwise, a unique prefix match is returned.
-//  3. Zero prefix matches -> store.ErrNotFound.
+//  3. Zero prefix matches -> domain.ErrNotFound.
 //  4. Multiple prefix matches -> *ErrAmbiguousID.
-func ResolveID(ctx context.Context, l findingLister, idOrPrefix string) (store.Finding, error) {
+func ResolveID(ctx context.Context, l findingLister, idOrPrefix string) (domain.Finding, error) {
 	idOrPrefix = strings.TrimSpace(idOrPrefix)
 	if idOrPrefix == "" {
-		return store.Finding{}, fmt.Errorf("report: empty id")
+		return domain.Finding{}, fmt.Errorf("report: empty id")
 	}
 
-	all, err := l.ListFindings(ctx, store.FindingFilter{})
+	all, err := l.ListFindings(ctx, domain.FindingFilter{})
 	if err != nil {
-		return store.Finding{}, fmt.Errorf("report: list findings: %w", err)
+		return domain.Finding{}, fmt.Errorf("report: list findings: %w", err)
 	}
 
-	var matches []store.Finding
+	var matches []domain.Finding
 	for _, f := range all {
 		if f.ID == idOrPrefix {
 			return f, nil // exact match short-circuits ambiguity
@@ -72,7 +72,7 @@ func ResolveID(ctx context.Context, l findingLister, idOrPrefix string) (store.F
 
 	switch len(matches) {
 	case 0:
-		return store.Finding{}, store.ErrNotFound
+		return domain.Finding{}, domain.ErrNotFound
 	case 1:
 		return matches[0], nil
 	default:
@@ -80,6 +80,6 @@ func ResolveID(ctx context.Context, l findingLister, idOrPrefix string) (store.F
 		for i, m := range matches {
 			ids[i] = m.ID
 		}
-		return store.Finding{}, &ErrAmbiguousID{Prefix: idOrPrefix, Matches: ids}
+		return domain.Finding{}, &ErrAmbiguousID{Prefix: idOrPrefix, Matches: ids}
 	}
 }

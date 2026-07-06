@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 const (
@@ -139,7 +139,7 @@ func RepoRelative(repoPath, file string) string {
 
 // messageText returns the reasoning text when non-empty, falling back to the
 // title + description. SARIF requires a non-empty message.text.
-func messageText(f store.Finding) string {
+func messageText(f domain.Finding) string {
 	if f.Reasoning != "" {
 		return f.Reasoning
 	}
@@ -160,7 +160,7 @@ func messageText(f store.Finding) string {
 // FromFindings converts a slice of store findings into a SARIF Document using
 // the package-level defaults (no repo-relative URI rewriting, ToolVersion for
 // driver.version). Equivalent to FromFindingsWithOptions(findings, Options{}).
-func FromFindings(findings []store.Finding) Document {
+func FromFindings(findings []domain.Finding) Document {
 	return FromFindingsWithOptions(findings, Options{})
 }
 
@@ -173,7 +173,7 @@ func FromFindings(findings []store.Finding) Document {
 // Rules include a ShortDescription per lens.
 // Results carry a properties bag with tier, status, severity, and optional fields.
 // File URIs are made repo-relative when opts.RepoPath is non-empty.
-func FromFindingsWithOptions(findings []store.Finding, opts Options) Document {
+func FromFindingsWithOptions(findings []domain.Finding, opts Options) Document {
 	// Collect unique lenses preserving insertion order for rule dedup, then sort.
 	seen := make(map[string]struct{}, len(findings))
 	var lenses []string
@@ -199,7 +199,7 @@ func FromFindingsWithOptions(findings []store.Finding, opts Options) Document {
 	}
 
 	// Sort findings deterministically before building results.
-	sorted := make([]store.Finding, len(findings))
+	sorted := make([]domain.Finding, len(findings))
 	copy(sorted, findings)
 	sort.Slice(sorted, func(i, j int) bool {
 		a, b := sorted[i], sorted[j]

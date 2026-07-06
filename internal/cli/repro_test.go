@@ -31,6 +31,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -52,14 +53,14 @@ func TestReproCmd_EmptyBacklog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	all, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	all, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil {
 		_ = st.Close()
 		t.Fatal(err)
 	}
 	for _, f := range all {
 		f.NeedsHuman = true
-		f.NeedsHumanReason = store.NeedsHumanReasonBelowQuorum
+		f.NeedsHumanReason = domain.NeedsHumanReasonBelowQuorum
 		if _, err := st.UpsertFinding(ctx, f); err != nil {
 			_ = st.Close()
 			t.Fatalf("mark needs-human: %v", err)
@@ -113,7 +114,7 @@ func TestReproCmd_MaxSmaller(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	// Mark setup()'s finding as already-reproduced so only our seeds are eligible.
-	all, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen})
+	all, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
 	if err != nil {
 		_ = st.Close()
 		t.Fatal(err)
@@ -127,13 +128,13 @@ func TestReproCmd_MaxSmaller(t *testing.T) {
 	}
 	// Seed 5 eligible T2 findings.
 	for i := 0; i < 5; i++ {
-		fp := store.Fingerprint("race", "z.go", fmt.Sprintf("%d|%s", i+1, strings.Repeat("x", i+1)))
-		f := store.Finding{
+		fp := domain.Fingerprint("race", "z.go", fmt.Sprintf("%d|%s", i+1, strings.Repeat("x", i+1)))
+		f := domain.Finding{
 			Fingerprint: fp,
 			Title:       strings.Repeat("x", i+1),
 			Severity:    "high",
 			Tier:        2,
-			Status:      store.StatusOpen,
+			Status:      domain.StatusOpen,
 			Lens:        "race",
 			File:        "z.go",
 			Line:        i + 1,

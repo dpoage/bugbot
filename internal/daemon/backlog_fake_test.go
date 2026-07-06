@@ -13,29 +13,29 @@ import (
 // It exists solely for testing OpenBacklog without a real SQLite database. It
 // only implements ListFindings because that is the only method OpenBacklog calls.
 type fakeReader struct {
-	findings []store.Finding
+	findings []domain.Finding
 }
 
-func (f *fakeReader) GetFinding(_ context.Context, id string) (store.Finding, error) {
+func (f *fakeReader) GetFinding(_ context.Context, id string) (domain.Finding, error) {
 	for _, fi := range f.findings {
 		if fi.ID == id {
 			return fi, nil
 		}
 	}
-	return store.Finding{}, store.ErrNotFound
+	return domain.Finding{}, store.ErrNotFound
 }
 
-func (f *fakeReader) GetFindingByFingerprint(_ context.Context, fp string) (store.Finding, error) {
+func (f *fakeReader) GetFindingByFingerprint(_ context.Context, fp string) (domain.Finding, error) {
 	for _, fi := range f.findings {
 		if fi.Fingerprint == fp {
 			return fi, nil
 		}
 	}
-	return store.Finding{}, store.ErrNotFound
+	return domain.Finding{}, store.ErrNotFound
 }
 
-func (f *fakeReader) ListFindings(_ context.Context, filter store.FindingFilter) ([]store.Finding, error) {
-	var out []store.Finding
+func (f *fakeReader) ListFindings(_ context.Context, filter domain.FindingFilter) ([]domain.Finding, error) {
+	var out []domain.Finding
 	for _, fi := range f.findings {
 		if filter.Status != "" && fi.Status != filter.Status {
 			continue
@@ -54,19 +54,19 @@ func TestOpenBacklog_FakeReader(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-	fr := &fakeReader{findings: []store.Finding{
+	fr := &fakeReader{findings: []domain.Finding{
 		// eligible: Tier3/Suspected, no ReproPath, no NeedsHuman — oldest
-		{ID: "a", Fingerprint: "fp-a", Status: store.StatusOpen, Tier: domain.TierSuspected, UpdatedAt: now.Add(-2 * time.Hour)},
+		{ID: "a", Fingerprint: "fp-a", Status: domain.StatusOpen, Tier: domain.TierSuspected, UpdatedAt: now.Add(-2 * time.Hour)},
 		// eligible: Tier2/Verified, no ReproPath, no NeedsHuman — newest
-		{ID: "b", Fingerprint: "fp-b", Status: store.StatusOpen, Tier: domain.TierVerified, UpdatedAt: now.Add(-1 * time.Hour)},
+		{ID: "b", Fingerprint: "fp-b", Status: domain.StatusOpen, Tier: domain.TierVerified, UpdatedAt: now.Add(-1 * time.Hour)},
 		// ineligible: dismissed
-		{ID: "c", Fingerprint: "fp-c", Status: store.StatusDismissed, Tier: domain.TierSuspected, UpdatedAt: now},
+		{ID: "c", Fingerprint: "fp-c", Status: domain.StatusDismissed, Tier: domain.TierSuspected, UpdatedAt: now},
 		// ineligible: NeedsHuman
-		{ID: "d", Fingerprint: "fp-d", Status: store.StatusOpen, Tier: domain.TierSuspected, NeedsHuman: true, UpdatedAt: now.Add(-3 * time.Hour)},
+		{ID: "d", Fingerprint: "fp-d", Status: domain.StatusOpen, Tier: domain.TierSuspected, NeedsHuman: true, UpdatedAt: now.Add(-3 * time.Hour)},
 		// ineligible: already has ReproPath
-		{ID: "e", Fingerprint: "fp-e", Status: store.StatusOpen, Tier: domain.TierSuspected, ReproPath: "/some/path", UpdatedAt: now.Add(-4 * time.Hour)},
+		{ID: "e", Fingerprint: "fp-e", Status: domain.StatusOpen, Tier: domain.TierSuspected, ReproPath: "/some/path", UpdatedAt: now.Add(-4 * time.Hour)},
 		// ineligible: Tier0 (fix-witnessed) — not T2/T3
-		{ID: "f", Fingerprint: "fp-f", Status: store.StatusOpen, Tier: domain.TierFixWitnessed, UpdatedAt: now.Add(-5 * time.Hour)},
+		{ID: "f", Fingerprint: "fp-f", Status: domain.StatusOpen, Tier: domain.TierFixWitnessed, UpdatedAt: now.Add(-5 * time.Hour)},
 	}}
 
 	got, err := OpenBacklog(context.Background(), fr)

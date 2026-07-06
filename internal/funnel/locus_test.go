@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 const locusFixture = `package p
@@ -51,8 +51,8 @@ func TestLocusResolver_SymbolAnchoredAndLineStable(t *testing.T) {
 
 	// The fingerprint is stable across the line drift (the headline fix); the
 	// model-authored title plays no part in identity at all.
-	fpA := store.Fingerprint("nil-safety/error-handling", "p.go", l4)
-	fpB := store.Fingerprint("nil-safety/error-handling", "p.go", l6)
+	fpA := domain.Fingerprint("nil-safety/error-handling", "p.go", l4)
+	fpB := domain.Fingerprint("nil-safety/error-handling", "p.go", l6)
 	if fpA != fpB {
 		t.Errorf("fingerprint must be stable across line drift within a symbol")
 	}

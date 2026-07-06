@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
@@ -122,7 +123,7 @@ type FunnelOptionOverrides struct {
 	Progress    progress.EventSink
 	// Repro is the in-run reproducer hook (scan-only); nil disables in-run
 	// reproduction. The hook signature matches funnel.Options.Repro.
-	Repro func(ctx context.Context, scanRunID string, finding store.Finding) error
+	Repro func(ctx context.Context, scanRunID string, finding domain.Finding) error
 }
 
 // buildFunnelOptions returns a fully-populated funnel.Options whose

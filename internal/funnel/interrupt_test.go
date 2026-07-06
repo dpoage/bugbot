@@ -623,7 +623,7 @@ func testB1InterruptedBeforeVerify(t *testing.T) {
 	}
 
 	// Finding must be persisted.
-	findings, err := st.ListFindings(ctx, store.FindingFilter{})
+	findings, err := st.ListFindings(ctx, domain.FindingFilter{})
 	if err != nil {
 		t.Fatalf("B1 ListFindings: %v", err)
 	}
@@ -728,7 +728,7 @@ func testB2InterruptedMidVerify(t *testing.T) {
 	}
 
 	// Total findings must be exactly 1 (realCand survives, bogus refuted). No dup.
-	allFindings, err := st.ListFindings(ctx, store.FindingFilter{})
+	allFindings, err := st.ListFindings(ctx, domain.FindingFilter{})
 	if err != nil {
 		t.Fatalf("B2 ListFindings: %v", err)
 	}
@@ -804,7 +804,7 @@ func testB3VerifyCompleteNoSweep(t *testing.T) {
 		t.Error("B3: swept_at is zero after SweepDrain — finding not swept")
 	}
 	// No finding dropped: it still exists and is open.
-	if got.Status != store.StatusOpen {
+	if got.Status != domain.StatusOpen {
 		t.Errorf("B3: finding status = %q, want open (no drop)", got.Status)
 	}
 
@@ -905,7 +905,7 @@ func testB4CombinedFixpoint(t *testing.T) {
 	}
 
 	// Newly verified finding now exists (the WAL candidate was persisted).
-	allFindings1, err := st.ListFindings(ctx, store.FindingFilter{})
+	allFindings1, err := st.ListFindings(ctx, domain.FindingFilter{})
 	if err != nil {
 		t.Fatalf("B4 ListFindings after VerifyDrain: %v", err)
 	}
@@ -953,7 +953,7 @@ func testB4CombinedFixpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("B4 GetFinding(prior): %v", err)
 	}
-	if gotPrior.Status != store.StatusOpen {
+	if gotPrior.Status != domain.StatusOpen {
 		t.Errorf("B4 prior finding status = %q, want open (no drop)", gotPrior.Status)
 	}
 	if gotPrior.SweptAt.IsZero() {
@@ -961,7 +961,7 @@ func testB4CombinedFixpoint(t *testing.T) {
 	}
 
 	// No duplicate fingerprints across all findings.
-	allFinal, err := st.ListFindings(ctx, store.FindingFilter{})
+	allFinal, err := st.ListFindings(ctx, domain.FindingFilter{})
 	if err != nil {
 		t.Fatalf("B4 ListFindings final: %v", err)
 	}
@@ -1047,7 +1047,7 @@ func TestInterruptMatrix_VerifyDrainNoFinder_EndToEnd(t *testing.T) {
 	}
 
 	// Exactly 1 finding (realCand survives, bogus refuted).
-	allFindings, err := st.ListFindings(ctx, store.FindingFilter{})
+	allFindings, err := st.ListFindings(ctx, domain.FindingFilter{})
 	if err != nil {
 		t.Fatalf("ListFindings: %v", err)
 	}
@@ -1092,7 +1092,7 @@ func TestInterruptMatrix_DoubleDrain_VerifyDrain_Idempotent(t *testing.T) {
 	if _, err := f.VerifyDrain(ctx); err != nil {
 		t.Fatalf("first VerifyDrain: %v", err)
 	}
-	findingsAfter1, _ := st.ListFindings(ctx, store.FindingFilter{})
+	findingsAfter1, _ := st.ListFindings(ctx, domain.FindingFilter{})
 	countAfter1 := len(findingsAfter1)
 
 	// Second drain — must be a no-op.
@@ -1101,7 +1101,7 @@ func TestInterruptMatrix_DoubleDrain_VerifyDrain_Idempotent(t *testing.T) {
 	}
 
 	// No new findings.
-	findingsAfter2, _ := st.ListFindings(ctx, store.FindingFilter{})
+	findingsAfter2, _ := st.ListFindings(ctx, domain.FindingFilter{})
 	if len(findingsAfter2) != countAfter1 {
 		t.Errorf("findings after second drain = %d, want %d (idempotent)", len(findingsAfter2), countAfter1)
 	}

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/sandbox"
-	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
 )
 
@@ -19,7 +19,7 @@ import (
 //
 // On any error the partially-written bundle directory is removed so a failed
 // promotion never leaves stale artifacts behind.
-func writeArtifacts(artifactDir string, finding store.Finding, plan *Plan, res sandbox.Result) (dir string, err error) {
+func writeArtifacts(artifactDir string, finding domain.Finding, plan *Plan, res sandbox.Result) (dir string, err error) {
 	id := finding.ID
 	if id == "" {
 		id = "unknown"
@@ -100,7 +100,7 @@ func shellQuote(s string) string {
 
 // readme renders README.md describing the finding, the expected-vs-actual
 // failure, and how to run the repro.
-func readme(finding store.Finding, plan *Plan, res sandbox.Result) string {
+func readme(finding domain.Finding, plan *Plan, res sandbox.Result) string {
 	var b strings.Builder
 	title := finding.Title
 	if title == "" {
