@@ -2,15 +2,12 @@ package cli
 
 import (
 	"context"
-	"fmt"
-	"log/slog"
 
 	"github.com/spf13/cobra"
 
-	"github.com/dpoage/bugbot/internal/daemon"
+	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/engine"
 	"github.com/dpoage/bugbot/internal/progress"
-	"github.com/dpoage/bugbot/internal/repro"
-	"github.com/dpoage/bugbot/internal/sandbox"
 )
 
 // newReproCmd implements `bugbot repro`: a one-shot backlog drain that queries
@@ -53,72 +50,17 @@ the command exits with a graceful message rather than an error.`,
 				ctx = context.Background()
 			}
 
-			cfg, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
+			cfg, err := config.Load(configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
-			defer closeStore(st)
 
-			// --max overrides the config default; 0 means "use config".
-			batchSize := cfg.Repro.BacklogBatch
-			if maxN > 0 {
-				batchSize = maxN
-			}
-
-			// --transcript-dir overrides repro.transcript_dir from config. When
-			// set, every reproducer agent's JSONL transcript is auto-saved there
-			// (one file per finding per attempt), independent of target language —
-			// the seam for diagnosing why a finding did or did not reproduce.
-			if transcriptDir != "" {
-				cfg.Repro.TranscriptDir = transcriptDir
-			}
-
-			runtime, ok := sandbox.Detect()
-			if !ok {
-				_, _ = fmt.Fprintln(cmd.OutOrStdout(),
-					"Repro backlog skipped: no container runtime (podman/docker) found on PATH.")
-				return nil
-			}
-
-			backlog, err := daemon.OpenBacklog(ctx, st)
-			if err != nil {
-				return fmt.Errorf("query backlog: %w", err)
-			}
-			if len(backlog) == 0 {
-				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Repro backlog: no eligible findings.")
-				return nil
-			}
-
-			// Preflight: reproduction is this command's entire purpose, so a
-			// sandbox image that cannot run the target ecosystem is a hard
-			// error, not a silent per-finding environment_error burn
-			// (bugbot-u6td). Runs after the empty-backlog exit: no work means
-			// no probe.
-			if verdict, vErr := repro.VerifySandboxOnce(ctx, target, cfg); vErr == nil && verdict.BlocksRepro() {
-				return fmt.Errorf(
-					"sandbox toolchain check failed (%s): %s — run `bugbot doctor` and set sandbox.image to a toolchain-capable image",
-					verdict.Category, verdict.Detail)
-			}
-
-			batch := backlog
-			if len(batch) > batchSize {
-				batch = batch[:batchSize]
-			}
-
-			// Build the reproducer using the same helper as the daemon command.
-			// Ledger spend with an empty scan-run id: backlog findings span
-			// multiple past runs, so there is no single run to attribute to.
-			// This matches the daemon's backlog attribution choice.
-			//
 			// Live activity, no snapshot: `bugbot repro` wires the same
-			// pane-or-log renderer scan.go uses (TTY -> in-place ANSI pane,
-			// otherwise plain log lines) so an operator watching this terminal
-			// sees repro attempts as they happen. It deliberately does NOT add a
+			// pane-or-log renderer scan uses (TTY -> in-place ANSI pane, else
+			// plain log lines) so an operator watching this terminal sees repro
+			// attempts as they happen. It deliberately does NOT add a
 			// SnapshotSink: status.json has a single writer, and this one-shot
-			// command may run alongside a live daemon that already owns that
-			// file — a second writer here would race it. The live renderer has
-			// no such contention (it only writes to this process's own
-			// stderr), so it is safe to attach.
+			// command may run alongside a live daemon that already owns it.
 			errOut := cmd.ErrOrStderr()
 			var (
 				pane     *progress.PaneRenderer
@@ -138,37 +80,20 @@ the command exits with a graceful message rather than an error.`,
 			}
 			defer stopPane()
 
-			rd, err := buildReproducer(ctx, &cfg, st, target, runtime, liveSink)
+			d, err := engine.Open(ctx, cfg, liveSink)
 			if err != nil {
 				return err
 			}
-			defer rd.repro.Close() //nolint:errcheck
-			defer func() { _ = rd.sb.Close() }()
+			defer func() { _ = d.Close() }()
 
-			out := cmd.OutOrStdout()
-			_, _ = fmt.Fprintf(out,
-				"\nRepro backlog: %d eligible, attempting %d (max=%d, runtime=%s)...\n",
-				len(backlog), len(batch), batchSize, runtime,
-			)
-			if cfg.Repro.TranscriptDir != "" {
-				_, _ = fmt.Fprintf(out, "Transcripts: %s\n", cfg.Repro.TranscriptDir)
-			}
-
-			summary, err := rd.repro.PromoteAll(ctx, st, batch)
-			if err != nil {
-				return fmt.Errorf("reproduce: %w", err)
-			}
-			// Stop the pane before printing the summary so the terminal is
-			// clean (no leftover in-place status lines above the final report).
-			stopPane()
-			printReproSummary(out, summary)
-
-			// Touch attempted-but-not-promoted findings to bump updated_at so that
-			// OpenBacklog's oldest-first ordering rotates them to the back of the
-			// queue on the next run, preventing unbounded retries on the same
-			// unreproducible findings.
-			daemon.TouchBacklogFailures(ctx, st, slog.Default(), batch)
-			return nil
+			_, err = d.Repro(ctx, engine.ReproOpts{
+				Target:        target,
+				MaxN:          maxN,
+				TranscriptDir: transcriptDir,
+				Out:           cmd.OutOrStdout(),
+				StopProgress:  stopPane,
+			})
+			return err
 		},
 	}
 

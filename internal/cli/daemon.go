@@ -13,9 +13,9 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/daemon"
+	"github.com/dpoage/bugbot/internal/engine"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/repro"
@@ -57,7 +57,7 @@ func newDaemonCmd() *cobra.Command {
 				return fmt.Errorf("open target: %w", err)
 			}
 
-			finder, verifier, cartographer, arbiter, err := buildRoleClients(ctx, &cfg)
+			finder, verifier, cartographer, arbiter, err := engine.BuildRoleClients(ctx, &cfg)
 			if err != nil {
 				return err
 			}
@@ -84,12 +84,12 @@ func newDaemonCmd() *cobra.Command {
 				WithDaySpend(daySpendGetter(ctx, st))
 			progressSink := progress.NewMulti(progress.NewSlogRenderer(logger), snap)
 
-			funnelOpts, sbDegraded, sbErr := buildFunnelOptions(cfg, FunnelOptionOverrides{})
+			funnelOpts, sbDegraded, sbErr := engine.BuildFunnelOptions(cfg, engine.FunnelOptionOverrides{})
 			if sbErr != nil {
 				return sbErr
 			}
 			if sbDegraded {
-				logger.Warn(sandboxDegradedWarning)
+				logger.Warn(engine.SandboxDegradedWarning)
 			}
 
 			deps := daemon.Deps{
@@ -119,15 +119,15 @@ func newDaemonCmd() *cobra.Command {
 				}
 			}
 			if doRepro && sandboxOK {
-				reproducer, rerr := buildReproducer(ctx, &cfg, st, repo.Root(), sandboxRuntime, progressSink)
+				reproducer, rerr := engine.BuildReproducer(ctx, &cfg, st, repo.Root(), sandboxRuntime, progressSink)
 				if rerr != nil {
 					return rerr
 				}
-				defer reproducer.repro.Close() //nolint:errcheck
-				defer func() { _ = reproducer.sb.Close() }()
-				deps.ReproClient = reproducer.client
-				deps.Reproducer = reproducer.repro
-				deps.ReproTagger = reproducer.spend
+				defer reproducer.Repro.Close() //nolint:errcheck
+				defer func() { _ = reproducer.Sb.Close() }()
+				deps.ReproClient = reproducer.Client
+				deps.Reproducer = reproducer.Repro
+				deps.ReproTagger = reproducer.Spend
 			}
 
 			// Analyzer seeding hook: build once and close over it. Like the
@@ -136,7 +136,7 @@ func newDaemonCmd() *cobra.Command {
 			if sandboxOK {
 				repoRoot := repo.Root()
 				deps.SeedAnalyzers = func(seedCtx context.Context) {
-					runAnalyzerSeed(seedCtx, cfg, repoRoot, st, progressSink)
+					engine.RunAnalyzerSeed(seedCtx, cfg, repoRoot, st, progressSink)
 				}
 			}
 
@@ -144,7 +144,7 @@ func newDaemonCmd() *cobra.Command {
 			// needs no container runtime, so it is wired UNCONDITIONALLY (unlike
 			// analyzer seeding above). Degrades gracefully on any failure.
 			deps.SeedContradictions = func(seedCtx context.Context) {
-				runContradictionSeed(seedCtx, cfg, repo, st, progressSink)
+				engine.RunContradictionSeed(seedCtx, cfg, repo, st, progressSink)
 			}
 
 			// Publish hook: wire in when cfg.Publish.Enabled. We do not
@@ -205,61 +205,6 @@ func daySpendGetter(ctx context.Context, st *store.Store) func() (int64, int64) 
 	}
 }
 
-// reproDeps bundles a constructed reproducer with its LLM client so the daemon
-// can record both.
-type reproDeps struct {
-	client llm.Client
-	repro  *repro.Reproducer
-	// sb is the sandbox backing repro. Callers defer sb.Close() alongside
-	// repro.Close() to release the reproducer's pristine-workspace cache
-	// (internal/sandbox's wsCache) when this reproDeps' natural scope ends.
-	sb *sandbox.CLI
-	// spend ledgers reproducer/patch-prover usage; the daemon retags it with
-	// each cycle's scan-run id (bugbot-58c).
-	spend *ledgerRecorder
-}
-
-// buildReproducer constructs the reproducer-role LLM client, sandbox, and
-// Reproducer used by the daemon's post-cycle promotion step. It mirrors the
-// wiring in `scan --repro`.
-func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot, runtime string, prog progress.EventSink) (*reproDeps, error) {
-	// Ledger repro + patch-prover spend (bugbot-58c). The daemon retags the
-	// recorder with each cycle's scan-run id via Deps.ReproTagger.
-	rec := newLedgerRecorder(ctx, st)
-	client, err := config.ResolveRole(ctx, cfg, "reproducer", llm.Options{Recorder: rec})
-	if err != nil {
-		return nil, fmt.Errorf("build reproducer client: %w", err)
-	}
-	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(*cfg)...)
-	if err != nil {
-		return nil, fmt.Errorf("build sandbox: %w", err)
-	}
-	// Probe image capabilities once; result is cached per image so repeated
-	// daemon restarts or re-calls to buildReproducer are free.
-	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, repoRoot)
-	r, err := repro.New(client, sb, repoRoot, repro.Options{
-		MaxAttempts:      cfg.Repro.MaxAttempts,
-		Image:            cfg.Sandbox.Image,
-		PatchProver:      cfg.Repro.PatchProver,
-		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
-		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
-		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
-		SetupCmds:        cfg.Sandbox.SetupCmds,
-		LocalMounts:      localMountsFromConfig(*cfg),
-		Capabilities:     caps,
-		Progress:         prog,
-		StatusNotes:      cfg.Scan.StatusNotes,
-		TranscriptDir:    cfg.Repro.TranscriptDir,
-		PackageSummary:   packageSummaryProvider(st),
-		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
-		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,
-		MaxParallel:      cfg.Repro.MaxParallel,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("build reproducer: %w", err)
-	}
-	return &reproDeps{client: client, repro: r, sb: sb, spend: rec}, nil
-}
 
 // printDaemonBanner prints the startup banner: intervals, budgets, sinks, and
 // sandbox availability, so an operator can confirm the configuration at a glance.

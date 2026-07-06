@@ -2,14 +2,14 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
-	"github.com/dpoage/bugbot/internal/funnel"
+	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/engine"
 	"github.com/dpoage/bugbot/internal/progress"
 )
 
@@ -61,101 +61,34 @@ orphans are left untouched.`,
 			ctx, stopSignal := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 			defer stopSignal()
 
-			cfg, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
+			cfg, err := config.Load(configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
-			defer closeStore(st)
-
-			// Advisory scan-lock: mirrors bugbot scan's checkScanLock so a
-			// manual verify does not race the daemon or a concurrent scan.
-			if lockErr := checkScanLock(ctx, st, force, os.Getpid()); lockErr != nil {
-				return lockErr
-			}
-
-			repo, err := openRepoForScan(ctx, target)
-			if err != nil {
-				return err
-			}
-
-			finder, verifier, cartographer, arbiter, err := buildRoleClients(ctx, &cfg)
-			if err != nil {
-				return err
-			}
-
 			// Default `bugbot verify` stays quiet and never writes a status.json
 			// snapshot (which would race a running daemon's single-writer
 			// snapshot). With --suspected the re-verify pass runs the verifier on
 			// every open Tier-3 finding and can take minutes, so attach a stdout
 			// LogRenderer — plain log lines only, no status.json — for live
 			// per-stage / per-finding feedback.
-			opts, _, sbErr := buildFunnelOptions(cfg, FunnelOptionOverrides{})
-			if sbErr != nil {
-				return sbErr
-			}
+			var sink progress.EventSink
 			if suspected {
-				opts.Progress = progress.NewLogRenderer(cmd.OutOrStdout())
-			} else {
-				opts.Progress = nil
+				sink = progress.NewLogRenderer(cmd.OutOrStdout())
 			}
 
-			f, err := funnel.New(funnel.RoleClients{
-				Finder:       finder,
-				Verifier:     verifier,
-				Cartographer: cartographer,
-				Arbiter:      arbiter,
-			}, st, repo, opts)
+			d, err := engine.Open(ctx, cfg, sink)
 			if err != nil {
 				return err
 			}
-			defer func() { _ = f.Close() }()
+			defer func() { _ = d.Close() }()
 
-			// Heartbeat goroutine: periodically refreshes our scan_run row so
-			// ActiveScanRuns can distinguish us from a crashed/stale process.
-			// Mirrors the pattern in runScanCmd (scan.go).
-			hbCtx, hbCancel := context.WithCancel(ctx)
-			defer hbCancel()
-			go runHeartbeat(hbCtx, st, os.Getpid())
-
-			out := cmd.OutOrStdout()
-
-			res, err := f.VerifyDrain(ctx)
-			if err != nil {
-				return fmt.Errorf("verify drain: %w", err)
-			}
-
-			didDrain := res != nil && (res.Stats.Resumed > 0 || len(res.Findings) > 0)
-			if didDrain {
-				_, _ = fmt.Fprintf(out,
-					"\nVerify drain: %d resumed, %d finding(s) persisted.\n",
-					res.Stats.Resumed, len(res.Findings),
-				)
-			} else {
-				_, _ = fmt.Fprintln(out, "Verify drain: no pending candidates.")
-			}
-
-			// --suspected: second pass over durable open T3 findings (orphans
-			// from a hard-budget stop or no-verdict panel). The finder stays
-			// off; the verifier re-judges each durable T3 against current code,
-			// promoting survivors to Tier 2 or dismissing refuted ones. Only
-			// run when the flag is set so the default behaviour is byte-
-			// identical to today.
-			if suspected {
-				_, _ = fmt.Fprintln(out,
-					"\nRe-verifying open Tier-3 suspected findings (verifier only, no finder; this can take a few minutes)…")
-				rres, rerr := f.ReverifySuspected(ctx)
-				if rerr != nil {
-					return fmt.Errorf("reverify suspected: %w", rerr)
-				}
-				if rres == nil {
-					rres = &funnel.Result{}
-				}
-				_, _ = fmt.Fprintf(out,
-					"Re-verify suspected: %d re-judged, %d verified, %d killed.\n",
-					rres.Stats.Resumed, rres.Stats.Verified, rres.Stats.Killed,
-				)
-			}
-			return nil
+			_, err = d.Verify(ctx, engine.VerifyOpts{
+				Target:    target,
+				Force:     force,
+				Suspected: suspected,
+				Out:       cmd.OutOrStdout(),
+			})
+			return err
 		},
 	}
 

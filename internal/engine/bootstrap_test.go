@@ -1,4 +1,4 @@
-package cli
+package engine
 
 import (
 	"testing"
@@ -6,7 +6,7 @@ import (
 	"github.com/dpoage/bugbot/internal/config"
 )
 
-// TestBuildFunnelOptions_HeatOrdering verifies that buildFunnelOptions maps
+// TestBuildFunnelOptions_HeatOrdering verifies that BuildFunnelOptions maps
 // cfg.Scan.HeatOrdering to funnel.Options.DisableHeatOrdering with the correct
 // inversion: HeatOrdering true → DisableHeatOrdering false, and vice-versa.
 func TestBuildFunnelOptions_HeatOrdering(t *testing.T) {
@@ -31,9 +31,9 @@ func TestBuildFunnelOptions_HeatOrdering(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.Default()
 			cfg.Scan.HeatOrdering = tt.heatOrdering
-			opts, _, err := buildFunnelOptions(cfg, FunnelOptionOverrides{})
+			opts, _, err := BuildFunnelOptions(cfg, FunnelOptionOverrides{})
 			if err != nil {
-				t.Fatalf("buildFunnelOptions() error = %v", err)
+				t.Fatalf("BuildFunnelOptions() error = %v", err)
 			}
 			if opts.Features.DisableHeatOrdering != tt.wantDisableHeat {
 				t.Errorf("DisableHeatOrdering = %v, want %v", opts.Features.DisableHeatOrdering, tt.wantDisableHeat)

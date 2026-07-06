@@ -2,13 +2,11 @@ package cli
 
 import (
 	"context"
-	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
-	"github.com/dpoage/bugbot/internal/funnel"
-	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/engine"
 )
 
 // newSweepCmd implements `bugbot sweep`: a one-shot impact-sweep drain that
@@ -40,70 +38,26 @@ exposed as a one-shot command for manual operation or scripted workflows.`,
 				ctx = context.Background()
 			}
 
-			cfg, st, err := cmdOpenStore(ctx, configPathFromCmd(cmd))
-			if err != nil {
-				return err
-			}
-			defer closeStore(st)
-
-			// Advisory scan lock: mirror bugbot scan's behaviour so concurrent
-			// drains and scans are detected and reported gracefully.
-			selfPID := os.Getpid()
-			if err := checkScanLock(ctx, st, force, selfPID); err != nil {
-				return err
-			}
-			// Heartbeat goroutine: keeps the scan-run row alive so the advisory
-			// lock in checkScanLock can distinguish live from stale processes.
-			hbCtx, hbCancel := context.WithCancel(ctx)
-			defer hbCancel()
-			go runHeartbeat(hbCtx, st, selfPID)
-
-			repo, err := ingest.Open(ctx, target)
-			if err != nil {
-				return fmt.Errorf("open target: %w", err)
-			}
-
-			finder, verifier, cartographer, arbiter, err := buildRoleClients(ctx, &cfg)
+			cfg, err := config.Load(configPathFromCmd(cmd))
 			if err != nil {
 				return err
 			}
 
-			// nil progress sink: one-shot sweep prints its summary to stdout and
-			// does not own a status.json snapshot (the daemon/scan do).
-			opts, sandboxDegraded, err := buildFunnelOptions(cfg, FunnelOptionOverrides{
-				Progress: nil,
+			// nil progress sink: one-shot sweep prints its summary to stdout
+			// and does not own a status.json snapshot (the daemon/scan do).
+			d, err := engine.Open(ctx, cfg, nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = d.Close() }()
+
+			_, err = d.Sweep(ctx, engine.SweepOpts{
+				Target: target,
+				Force:  force,
+				Out:    cmd.OutOrStdout(),
+				ErrOut: cmd.ErrOrStderr(),
 			})
-			if err != nil {
-				return err
-			}
-			if sandboxDegraded {
-				printSandboxDegradedWarning(cmd.ErrOrStderr())
-			}
-
-			f, err := funnel.New(funnel.RoleClients{
-				Finder:       finder,
-				Verifier:     verifier,
-				Cartographer: cartographer,
-				Arbiter:      arbiter,
-			}, st, repo, opts)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = f.Close() }()
-
-			result, err := f.SweepDrain(ctx)
-			if err != nil {
-				return fmt.Errorf("sweep drain: %w", err)
-			}
-
-			out := cmd.OutOrStdout()
-			if len(result.Findings) == 0 {
-				_, _ = fmt.Fprintln(out, "Impact sweep: no unswept open findings.")
-				return nil
-			}
-			_, _ = fmt.Fprintf(out, "Impact sweep: %d finding(s) swept (scan_run_id=%s).\n",
-				len(result.Findings), result.ScanRunID)
-			return nil
+			return err
 		},
 	}
 
