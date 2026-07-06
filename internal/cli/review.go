@@ -248,23 +248,14 @@ func reviewGateError(run reviewRun, failOn string, prNumber int) error {
 }
 
 // runReviewScan delegates to engine.Dispatcher.Review, which wires the
-// funnel exactly like scan.go and runs a Targeted scan over the PR's changed
-// files (blast radius applied internally by the funnel).
+// funnel exactly like scan.go, computes the PR's changed files, and runs a
+// Targeted scan over them (blast radius applied internally by the funnel).
 func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr prInfo) (*funnel.Result, error) {
-	// PR base..head changed files drive the targeted scan; the funnel expands the
-	// blast radius and intersects with scan scope internally.
-	changes, err := repo.ChangedFiles(ctx, pr.BaseSHA, pr.HeadSHA)
-	if err != nil {
-		return nil, fmt.Errorf("diff %s..%s: %w", util.ShortSHA(pr.BaseSHA), util.ShortSHA(pr.HeadSHA), err)
-	}
-	changed := ingest.ChangedPaths(changes)
-
 	return p.d.Review(ctx, engine.ReviewOpts{
 		Repo:        repo,
 		PRNumber:    p.prNumber,
 		BaseSHA:     pr.BaseSHA,
 		HeadSHA:     pr.HeadSHA,
-		Changed:     changed,
 		Concurrency: p.concurrency,
 		Refuters:    p.refuters,
 		Lenses:      p.lenses,

@@ -15,13 +15,16 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
+	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -53,13 +56,24 @@ func (m Mode) String() string {
 	}
 }
 
-// ErrObserver is returned (via errors.Is) by every dispatch verb when the
-// Dispatcher is in Observer mode and the call did not carry a Force override
-// that resolved the contention. Wrapped errors from ensureOwner carry the
-// same conflict detail checkScanLock has always produced (run id + pid) so
-// CLI output is unchanged; callers that only care about the mode should use
-// errors.Is(err, ErrObserver).
-var ErrObserver = fmt.Errorf("engine: dispatch refused in observer mode (another scan appears active)")
+// ErrObserver is the sentinel dispatch-refusal error: use errors.Is(err,
+// ErrObserver) to detect it. In Owner mode, or when Force resolves the
+// contention, dispatch verbs never return it. When a real conflict is found
+// (Observer mode, no/failed Force escalation), the returned error is an
+// *observerConflictError whose Error() text is checkScanLock's verbatim
+// message (run id + pid + "pass --force") — CLI output for scan/verify/sweep
+// stays byte-identical to the pre-refactor checkScanLock passthrough, while
+// errors.Is(err, ErrObserver) still reports true via observerConflictError's
+// Is method.
+var ErrObserver = errors.New("engine: dispatch refused in observer mode (another scan appears active)")
+
+// observerConflictError wraps checkScanLock's conflict message so ensureOwner
+// can report errors.Is(err, ErrObserver) without prefixing (and thereby
+// changing) the message text CLI commands print verbatim.
+type observerConflictError struct{ msg string }
+
+func (e *observerConflictError) Error() string        { return e.msg }
+func (e *observerConflictError) Is(target error) bool { return target == ErrObserver }
 
 // Dispatcher is the cobra-free orchestration core for one CLI-command
 // invocation (or, for the future Observer TUI, one long-lived read-only
@@ -79,6 +93,12 @@ type Dispatcher struct {
 	// single verb call's internal helpers can share it without re-opening.
 	// It is NOT preserved across separate verb calls with different targets.
 	repo *ingest.Repo
+
+	// scanRepro/scanReproAttempted are set by a Scan call with DoRepro=true
+	// (nil otherwise) so a subsequent ReproCatchUp call can run the post-scan
+	// catch-up drain the CLI triggers after rendering the scan result.
+	scanRepro          *repro.Reproducer
+	scanReproAttempted *sync.Map
 
 	hbCancel context.CancelFunc
 }
@@ -126,7 +146,18 @@ func openStoreForMode(ctx context.Context, cfg config.Config) (*store.Store, Mod
 	if activeErr != nil {
 		return nil, Owner, fmt.Errorf("scan lock check: %w", activeErr)
 	}
-	if len(active) == 0 {
+	// Exclude our own pid, mirroring checkScanLock: a long-lived process that
+	// already owns an active/heartbeating scan_runs row (e.g. a re-Opening
+	// owner) must not misclassify itself as Observer.
+	selfPID := os.Getpid()
+	foreign := false
+	for _, r := range active {
+		if r.PID != selfPID {
+			foreign = true
+			break
+		}
+	}
+	if !foreign {
 		st, err := store.Open(ctx, cfg.Storage.Path)
 		if err != nil {
 			return nil, Owner, fmt.Errorf("open store: %w", err)
@@ -173,8 +204,9 @@ func (d *Dispatcher) ensureRoleClients(ctx context.Context) error {
 // ensureOwner is the shared gate every dispatch verb calls first. In Owner
 // mode it is a no-op. In Observer mode it runs the same heuristic
 // checkScanLock has always run (fresh-heartbeat run belonging to another
-// pid): with force=false a conflict yields an error wrapping ErrObserver with
-// the original "another scan is already running ... pass --force" detail; with
+// pid): with force=false a real conflict yields an *observerConflictError
+// (errors.Is(err, ErrObserver) is true; Error() is checkScanLock's verbatim
+// "another scan is already running ... pass --force" message); with
 // force=true (or no real conflict found), the Dispatcher escalates to a
 // writable store and Owner mode so the verb can proceed.
 func (d *Dispatcher) ensureOwner(ctx context.Context, force bool) error {
@@ -182,7 +214,7 @@ func (d *Dispatcher) ensureOwner(ctx context.Context, force bool) error {
 		return nil
 	}
 	if err := checkScanLock(ctx, d.store, force, os.Getpid()); err != nil {
-		return fmt.Errorf("%w: %s", ErrObserver, err)
+		return &observerConflictError{msg: err.Error()}
 	}
 	return d.escalateToOwner(ctx)
 }

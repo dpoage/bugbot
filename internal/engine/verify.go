@@ -40,16 +40,18 @@ func (d *Dispatcher) Verify(ctx context.Context, opts VerifyOpts) (*VerifyResult
 	if err := d.ensureOwner(ctx, opts.Force); err != nil {
 		return nil, err
 	}
-	if err := d.ensureRoleClients(ctx); err != nil {
-		return nil, err
-	}
 
 	cfg := d.cfg
 	st := d.store
 	out := opts.Out
 
+	// Repo opens before role-client resolution, matching main's order.
 	repo, err := d.openRepo(ctx, opts.Target)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := d.ensureRoleClients(ctx); err != nil {
 		return nil, err
 	}
 

@@ -175,6 +175,9 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 		printRegressAttribution(ctx, out, res.Repo, res.Result.Findings, flags.From)
 	}
 
+	if err := d.ReproCatchUp(ctx, res, errOut); err != nil {
+		return err
+	}
 	// Exit nonzero when most finders failed to parse: automation must not
 	// treat such a run as a clean pass. The summary (with its prominent
 	// reliability warning) is already printed; we suppress cobra's usage and

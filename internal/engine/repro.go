@@ -258,7 +258,13 @@ type ReproResult struct {
 // findings to Tier-1 (or Tier-0 when the patch-prover witnesses a fix). This
 // is the same backlog logic the daemon runs on its periodic backlog timer.
 func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, error) {
-	if err := d.ensureOwner(ctx, false); err != nil {
+	// main's `bugbot repro` had no advisory-lock gate at all — it opened the
+	// store (flock) and proceeded unconditionally. force=true here is the
+	// faithful translation: checkScanLock's heuristic never refuses, so a
+	// fresh Observer (heartbeat-only, flock free after a crash) escalates and
+	// proceeds exactly like main; a genuinely live writer still refuses via
+	// escalateToOwner's store.Open ErrLocked, matching main's ErrLocked too.
+	if err := d.ensureOwner(ctx, true); err != nil {
 		return nil, err
 	}
 	cfg := d.cfg

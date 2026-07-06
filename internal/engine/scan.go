@@ -85,21 +85,24 @@ func (d *Dispatcher) Scan(ctx context.Context, opts ScanOpts) (*ScanResult, erro
 	if err := d.ensureOwner(ctx, opts.Force); err != nil {
 		return nil, err
 	}
-	if err := d.ensureRoleClients(ctx); err != nil {
-		return nil, err
-	}
 
 	cfg := d.cfg
 	st := d.store
-	out := opts.Out
 	errOut := opts.ErrOut
 	stopProgress := opts.StopProgress
 	if stopProgress == nil {
 		stopProgress = func() {}
 	}
 
+	// Repo opens before role-client resolution, matching main's
+	// openRepoForScan-then-buildRoleClients order (openStoreForScan already
+	// happened via engine.Open before Scan was called).
 	repo, err := d.openRepo(ctx, opts.Target)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := d.ensureRoleClients(ctx); err != nil {
 		return nil, err
 	}
 
@@ -259,23 +262,39 @@ func (d *Dispatcher) Scan(ctx context.Context, opts ScanOpts) (*ScanResult, erro
 	if opts.DoRepro && r != nil {
 		// Wire spend to this scan run now that we have the ID. In-run hook
 		// calls already used this recorder; setting the run ID here ensures
-		// any catch-up drain spend is also attributed correctly.
+		// any catch-up drain spend is also attributed correctly. The actual
+		// catch-up drain (backlog-style PromoteAll over findings the in-run
+		// hook missed) runs from ReproCatchUp, called by the CLI AFTER it
+		// prints the result — main ran this drain on stderr, after the
+		// findings summary and regress attribution, right before the
+		// reliability gate; keeping it out of Scan preserves that ordering
+		// and stream.
 		if reproRec != nil {
 			reproRec.SetScanRun(res.ScanRunID)
 		}
-		// Catch-up drain: run a backlog-style drain over open T2 findings
-		// from this scan that have no prior repro attempt. This is a cheap
-		// no-op when the in-run hook covered everything; it ensures coverage
-		// for findings that overflowed the reproCh buffer or were produced
-		// by a very fast scan with a slow sandbox. Using the same PromoteAll
-		// path here means the daemon drain's rotation logic (touch failed
-		// findings) also runs for any catch-up attempts.
-		if err := runReproCatchUp(ctx, out, r, st, res.Findings, reproAttempted); err != nil {
-			return nil, err
-		}
+		d.scanRepro = r
+		d.scanReproAttempted = reproAttempted
 	}
 
 	return &ScanResult{Result: res, Repo: repo}, nil
+}
+
+// ReproCatchUp runs the post-scan repro catch-up drain a prior Scan call (with
+// DoRepro set) queued: a backlog-style drain over open T2 findings from that
+// scan with no prior repro attempt. This is a cheap no-op when the in-run
+// hook covered everything; it exists as a safety net for findings that
+// overflowed the reproCh buffer or were produced by a very fast scan with a
+// slow sandbox. It is a no-op (nil error) if the preceding Scan call did not
+// request DoRepro or had no reproducer available (no container runtime, etc).
+//
+// Callers should invoke this AFTER rendering the scan result — matching
+// main's ordering — and errOut should be the same stderr stream Scan's other
+// diagnostics go to.
+func (d *Dispatcher) ReproCatchUp(ctx context.Context, res *ScanResult, errOut io.Writer) error {
+	if d.scanRepro == nil || res == nil || res.Result == nil {
+		return nil
+	}
+	return runReproCatchUp(ctx, errOut, d.scanRepro, d.store, res.Result.Findings, d.scanReproAttempted)
 }
 
 // executeScan runs the funnel: Targeted when changed files are provided,

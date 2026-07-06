@@ -72,8 +72,10 @@ func TestOpen_OwnerWhenLockFree(t *testing.T) {
 }
 
 // TestOpen_ObserverWhenScanActive verifies that Open selects Observer mode
-// when a live scan_run heartbeat exists, and that dispatch verbs refuse with
-// ErrObserver.
+// when a live scan_run heartbeat exists, and that dispatch verbs gated by the
+// advisory lock (Sweep/Verify, which had --force in main) refuse with
+// ErrObserver, while Repro (which had NO lock gate in main) escalates to
+// Owner unconditionally and proceeds instead of refusing.
 func TestOpen_ObserverWhenScanActive(t *testing.T) {
 	ctx := context.Background()
 	cfg := testConfig(t)
@@ -95,8 +97,32 @@ func TestOpen_ObserverWhenScanActive(t *testing.T) {
 	if _, err := d.Verify(ctx, VerifyOpts{Target: t.TempDir(), Out: io.Discard}); !errors.Is(err, ErrObserver) {
 		t.Errorf("Verify() in Observer mode error = %v, want ErrObserver", err)
 	}
-	if _, err := d.Repro(ctx, ReproOpts{Target: t.TempDir(), Out: io.Discard}); !errors.Is(err, ErrObserver) {
-		t.Errorf("Repro() in Observer mode error = %v, want ErrObserver", err)
+}
+
+// TestRepro_EscalatesUnconditionally verifies that Dispatcher.Repro never
+// refuses with ErrObserver: main's `bugbot repro` had no advisory-lock gate
+// at all, so Repro must escalate Observer -> Owner unconditionally (like a
+// bare store.Open) rather than honoring the ActiveScanRuns heuristic.
+func TestRepro_EscalatesUnconditionally(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+	seedActiveForeignRun(t, ctx, cfg)
+
+	d, err := Open(ctx, cfg, nil)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	if d.Mode() != Observer {
+		t.Fatalf("Mode() = %v, want Observer", d.Mode())
+	}
+
+	if _, err := d.Repro(ctx, ReproOpts{Target: t.TempDir(), Out: io.Discard}); errors.Is(err, ErrObserver) {
+		t.Errorf("Repro() returned ErrObserver, want unconditional escalation (main had no lock gate): %v", err)
+	}
+	if d.Mode() != Owner {
+		t.Errorf("Mode() after Repro() = %v, want Owner (Repro must escalate unconditionally)", d.Mode())
 	}
 }
 

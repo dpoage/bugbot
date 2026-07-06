@@ -62,7 +62,9 @@ orphans are left untouched.`,
 			defer stopSignal()
 
 			cfg, err := config.Load(configPathFromCmd(cmd))
-
+			if err != nil {
+				return err
+			}
 			// Default `bugbot verify` stays quiet and never writes a status.json
 			// snapshot (which would race a running daemon's single-writer
 			// snapshot). With --suspected the re-verify pass runs the verifier on
