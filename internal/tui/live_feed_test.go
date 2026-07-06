@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -100,6 +102,54 @@ func TestLiveFeed_HandleNeverBlocksAndCoalescesWakeups(t *testing.T) {
 	snap := f.acc.Snapshot()
 	if len(snap.ActiveAgents) != 0 {
 		t.Fatalf("ActiveAgents = %+v, want empty (every agent finished)", snap.ActiveAgents)
+	}
+}
+
+// TestLiveFeed_HandleConcurrentProducersNeverBlockOrLoseEvents is the
+// multi-goroutine variant of the test above: the progress.EventSink
+// contract explicitly requires safety against PARALLEL finder/verifier
+// agents emitting from separate goroutines, not just a single fast
+// producer. Each goroutine drives its own uniquely-labeled agent through
+// start/activity/finish, so a correct implementation ends with an empty
+// live-agent set regardless of how the accumulator's mutex and the wakeup
+// channel interleave across goroutines. Run with -race to also catch any
+// data race the mutex might have missed.
+func TestLiveFeed_HandleConcurrentProducersNeverBlockOrLoseEvents(t *testing.T) {
+	f := testLiveFeed(time.Hour)
+	now := time.Unix(2500, 0)
+
+	const goroutines = 8
+	const perGoroutine = 25
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				label := fmt.Sprintf("g%d-lens%d", g, i)
+				f.Handle(progress.Event{Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: label, Time: now})
+				f.Handle(progress.Event{Kind: progress.KindAgentActivity, Role: progress.RoleFinder, Label: label, Activity: "working", Time: now})
+				f.Handle(progress.Event{Kind: progress.KindAgentFinished, Role: progress.RoleFinder, Label: label, Time: now})
+			}
+		}(g)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Handle appears to have blocked: %d concurrent producers did not finish in 5s", goroutines)
+	}
+
+	snap := f.acc.Snapshot()
+	if len(snap.ActiveAgents) != 0 {
+		t.Fatalf("ActiveAgents = %+v, want empty (every concurrently-started agent finished)", snap.ActiveAgents)
 	}
 }
 

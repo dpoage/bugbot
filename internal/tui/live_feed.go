@@ -158,9 +158,13 @@ func (f *LiveFeed) buildFrame(ctx context.Context) Frame {
 	fr.HasSnapshot = true
 	fr.Stale = false
 
+	// Hold stMu across the store reads themselves, not just the pointer
+	// fetch: Close() takes the same lock to nil f.st and close the handle,
+	// so this prevents a benign-but-avoidable use-after-close window where a
+	// Next() cmd still mid-query races a concurrent Close() during quit.
 	f.stMu.Lock()
+	defer f.stMu.Unlock()
 	st := f.st
-	f.stMu.Unlock()
 
 	var hist []store.AgentUnit
 	if st != nil {

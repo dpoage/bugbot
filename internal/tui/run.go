@@ -29,25 +29,44 @@ func Run(ctx context.Context, cfg config.Config) error {
 // is exercised directly in tests without spinning up a real tea.Program.
 //
 // Mode selection mirrors every other Bugbot command's advisory-lock
-// behavior (internal/engine.Open):
+// behavior (internal/engine.Open), gated by the same no-create-on-launch
+// contract SnapshotFeed's storeExists check has always enforced: a missing
+// state DB means bugbot has never run here, and merely launching the TUI
+// must not scaffold a .bugbot directory or take the writer lock as a side
+// effect.
 //
-//   - Owner (the writer lock is free, or already ours): a LiveFeed is built
-//     and handed to engine.Open as its progress sink, so the SAME
-//     Dispatcher that decided Owner mode is also the one whose events the
-//     cockpit renders. The returned cleanup closes the LiveFeed's own store
-//     handle AND the Dispatcher, releasing the writer lock promptly. Until
-//     cleanup runs, the Dispatcher stays reachable to a future dispatch
-//     palette (bugbot-2p8z.3) via the same call frame — see Run.
-//   - Observer (another process holds the lock and looks actively alive):
-//     the Dispatcher is closed immediately (Owner-only concerns like the
-//     heartbeat never started) and the cockpit falls back to SnapshotFeed,
-//     the pre-existing read-only path. Dispatch is disabled in this mode.
+//   - No store yet (storeExists is false): always Observer/SnapshotFeed,
+//     regardless of lock availability — engine.Open is never called, so
+//     nothing is created. Dispatch-from-a-fresh-repo is a future dispatch
+//     action's concern (bugbot-2p8z.3); it can create the store itself when
+//     the operator actually asks it to do something.
+//   - Owner (a store exists AND the writer lock is free, or already ours):
+//     a LiveFeed is built and handed to engine.Open as its progress sink,
+//     so the SAME Dispatcher that decided Owner mode is also the one whose
+//     events the cockpit renders. The returned cleanup closes the
+//     LiveFeed's own store handle AND the Dispatcher, releasing the writer
+//     lock promptly. The Dispatcher is retained only so cleanup can close
+//     it — nothing yet reaches it for dispatch; a future dispatch palette
+//     (bugbot-2p8z.3) will need selectFeed to also return it and thread it
+//     into Model.
+//   - Observer (a store exists but another process holds the lock and
+//     looks actively alive): the Dispatcher is closed immediately
+//     (Owner-only concerns like the heartbeat never started) and the
+//     cockpit falls back to SnapshotFeed, the pre-existing read-only path.
+//     Dispatch is disabled in this mode.
 //   - ErrLocked (the writer lock is held but by an Owner cockpit sitting
 //     idle with no active scan_runs row — see engine.Dispatcher's
 //     heartbeat, which no-ops until a verb runs): engine.Open cannot open
 //     the store writable, so this process falls back to SnapshotFeed
 //     exactly as in the Observer case, rather than crashing.
 func selectFeed(ctx context.Context, cfg config.Config) (Feed, func(), error) {
+	// A missing state DB means bugbot has never run here: never engage Owner
+	// mode (which would create it via engine.Open's store.Open) just because
+	// the operator glanced at the TUI. See worldstate.go's storeExists doc.
+	if !storeExists(cfg) {
+		return newObserverFeed(ctx, cfg)
+	}
+
 	liveFeed := NewLiveFeed(cfg)
 
 	d, err := engine.Open(ctx, cfg, liveFeed)
