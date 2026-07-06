@@ -411,6 +411,10 @@ func buildReproHookForScan(
 		// the caller still runs (with r == nil) so no catch-up is attempted.
 		return nil, nil, nil, attempted, nil
 	}
+	// sb outlives this function (embedded in the Reproducer returned below and
+	// used for the rest of the scan run, including the catch-up drain), so
+	// there is no natural defer-Close scope here for its workspace cache
+	// (wsCache); NewCLI's 24h stale-cache purge is the backstop.
 	sb, sbErr := sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(cfg)...)
 	if sbErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build sandbox: %w", sbErr)
@@ -452,6 +456,7 @@ func buildReproHookForScan(
 		PackageSummary:   packageSummaryProvider(st),
 		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,
+		MaxParallel:      cfg.Repro.MaxParallel,
 	})
 	if rNewErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer: %w", rNewErr)
@@ -626,6 +631,10 @@ func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool
 	if !ok {
 		return funnel.SandboxOpts{}, true, nil
 	}
+	// sb is handed off inside funnel.SandboxOpts and lives for the whole
+	// funnel run across five call sites (scan, daemon, review, sweep,
+	// verify) with no single natural defer-Close scope here; NewCLI's 24h
+	// stale-cache purge is the backstop for its workspace cache (wsCache).
 	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(cfg)...)
 	if err != nil {
 		return funnel.SandboxOpts{}, false, fmt.Errorf("build verify sandbox: %w", err)
@@ -1035,6 +1044,9 @@ func runAnalyzerSeed(ctx context.Context, cfg config.Config, repoDir string, st 
 		})
 		return
 	}
+	// Natural defer scope: sb is used only within this function, so its
+	// workspace cache (wsCache) can be closed unconditionally on return.
+	defer func() { _ = sb.Close() }()
 
 	sum, err := analyzer.Seed(ctx, sb, repoDir, st, cfg.Sandbox.Image)
 	if err != nil {

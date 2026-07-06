@@ -187,12 +187,31 @@ type Result struct {
 	StdoutTruncated bool
 	StderrTruncated bool
 
-	// Duration is the measured wall-clock time of the execution.
+	// Duration is the measured wall-clock time of the execution: process
+	// launch through exit. It covers container create + the command itself;
+	// a single `podman run` invocation does not expose a way to separate
+	// container-create time from command time, so this stays one number. See
+	// PrepDuration for the (separable) pre-container workspace-preparation
+	// cost.
 	Duration time.Duration
 
 	// TimedOut is true when the execution was killed because it exceeded the
 	// effective timeout.
 	TimedOut bool
+
+	// PrepDuration is the wall-clock time spent preparing the workspace
+	// BEFORE the container ran: resolving the pristine-cache key, ensuring
+	// the pristine (materializing on a cache miss, reusing it on a hit),
+	// cloning it into a fresh per-run workspace, and applying WriteFiles. It
+	// is disjoint from Duration.
+	PrepDuration time.Duration
+
+	// WorkspaceCacheHit reports whether the pristine-workspace cache
+	// (internal/sandbox/workspace.go's wsCache) already held a pristine
+	// matching this repo's current HEAD + working-tree state, so this Exec
+	// skipped materialization and only cloned it. Always false when RepoDir
+	// is not a git work tree, since the cache is bypassed entirely there.
+	WorkspaceCacheHit bool
 }
 
 // Sandbox is an isolated command executor. Implementations must be safe for
