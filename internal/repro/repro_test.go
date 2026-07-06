@@ -979,7 +979,7 @@ func TestNewRunner_IncludesCodeNavTools(t *testing.T) {
 	}
 
 	// newRunner must not fail — it will compose baseline + nav tools.
-	if _, err := r.newRunner(context.Background(), ingest.LangGo, nil, progress.AgentScope{}); err != nil {
+	if _, err := r.newRunner(context.Background(), ingest.LangGo, nil, progress.AgentScope{}, &iterationWorkspace{}); err != nil {
 		t.Fatalf("newRunner: %v", err)
 	}
 }

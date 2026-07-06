@@ -334,6 +334,14 @@ type Repro struct {
 	// agent: the agent may call run_tests at most this many times per attempt to
 	// orient itself before proposing its repro plan. Must be >= 1. Default 3.
 	SandboxMaxExecs int `yaml:"sandbox_max_execs"`
+	// TryMaxExecs is the per-attempt try_repro budget for the reproducer agent:
+	// the agent may call try_repro at most this many times per attempt to
+	// write, run, and observe candidate repro files/commands INTERACTIVELY
+	// before committing to its final plan. Unlike SandboxMaxExecs (read-only
+	// orientation against the repo's existing suite), try_repro lets the agent
+	// iterate on its own candidate — the mirror-image write/run/observe loop a
+	// human debugging a flaky repro would use. Must be >= 1. Default 4.
+	TryMaxExecs int `yaml:"try_max_execs"`
 }
 
 // LLM tunes the shared LLM client wrapper applied to every role's client. The
@@ -463,6 +471,7 @@ func Default() Config {
 			BacklogBatch:     3,
 			MaxParallel:      2,
 			SandboxMaxExecs:  3,
+			TryMaxExecs:      4,
 		},
 		Report: Report{
 			Dir:   ".bugbot/reports",
@@ -572,6 +581,7 @@ func Load(path string) (Config, error) {
 //	BUGBOT_REPRO_SUITE_CMD             (comma-separated argv)
 //	BUGBOT_REPRO_BACKLOG_BATCH         (integer >= 1)
 //	BUGBOT_REPRO_SANDBOX_MAX_EXECS     (integer >= 1)
+//	BUGBOT_REPRO_TRY_MAX_EXECS         (integer >= 1)
 //	BUGBOT_REPRO_TRANSCRIPT_DIR        (directory for reproducer agent transcripts)
 func applyEnvOverrides(cfg *Config, environ []string) error {
 	env := make(map[string]string, len(environ))
@@ -696,6 +706,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt("BUGBOT_REPRO_BACKLOG_BATCH", &cfg.Repro.BacklogBatch),
 		setInt("BUGBOT_REPRO_MAX_PARALLEL", &cfg.Repro.MaxParallel),
 		setInt("BUGBOT_REPRO_SANDBOX_MAX_EXECS", &cfg.Repro.SandboxMaxExecs),
+		setInt("BUGBOT_REPRO_TRY_MAX_EXECS", &cfg.Repro.TryMaxExecs),
 		setDur("BUGBOT_DAEMON_POLL_INTERVAL", &cfg.Daemon.PollInterval),
 		setDur("BUGBOT_DAEMON_SWEEP_INTERVAL", &cfg.Daemon.SweepInterval),
 		setDur("BUGBOT_DAEMON_IDLE_BACKOFF", &cfg.Daemon.IdleBackoff),
@@ -929,6 +940,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Repro.SandboxMaxExecs < 1 {
 		return fmt.Errorf("config: repro.sandbox_max_execs must be >= 1 (got %d)", c.Repro.SandboxMaxExecs)
+	}
+	if c.Repro.TryMaxExecs < 1 {
+		return fmt.Errorf("config: repro.try_max_execs must be >= 1 (got %d)", c.Repro.TryMaxExecs)
 	}
 	// ReproBacklogInterval is only consulted when repro is enabled, but we
 	// validate it unconditionally so a misconfiguration is caught at startup

@@ -170,6 +170,67 @@ func TestIntegrationCaptureFilesSymlinkEscapeRejected(t *testing.T) {
 	}
 }
 
+// TestIntegrationApplyWriteFilesSymlinkEscapeRejected — bugbot-6nqd — proves
+// the WRITE-side symlink hardening against a REAL container and a REAL
+// workspace REUSE across two Execs, exactly the try_repro shape (bugbot-bkz1):
+// call 1's containerized command plants a symlink pointing at an absolute
+// HOST path outside the workspace; call 2 asks WriteFiles to write to that
+// same relative path. Without the fix, applyWriteFiles (running on the HOST,
+// after call 1's container has already exited) would follow the symlink and
+// overwrite the host file as the bugbot user — a full sandbox escape, strictly
+// worse than the read-side bugbot-ym09 finding above since it is a HOST WRITE.
+func TestIntegrationApplyWriteFilesSymlinkEscapeRejected(t *testing.T) {
+	s := newTestCLI(t)
+
+	repoDir := t.TempDir()
+	ws, err := s.MaterializeWorkspace(repoDir)
+	if err != nil {
+		t.Fatalf("MaterializeWorkspace: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(ws) }()
+
+	hostDir := t.TempDir()
+	hostTarget := filepath.Join(hostDir, "authorized_keys")
+	if err := os.WriteFile(hostTarget, []byte("original\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Call 1 (try_repro iteration #1): the container plants a symlink named
+	// "leak" pointing at an absolute host path outside the workspace — all
+	// `ln -s` needs is write access to its own workspace.
+	res1, err := s.Exec(context.Background(), Spec{
+		RepoDir:   repoDir,
+		Workspace: ws,
+		Cmd:       []string{"sh", "-c", "ln -s " + hostTarget + " leak"},
+	})
+	if err != nil {
+		t.Fatalf("Exec (plant symlink): %v", err)
+	}
+	if res1.ExitCode != 0 {
+		t.Fatalf("plant symlink ExitCode = %d, stderr=%q", res1.ExitCode, res1.Stderr)
+	}
+
+	// Call 2 (try_repro iteration #2, SAME workspace): a WriteFiles entry
+	// targets the exact relative path the container just planted a symlink at.
+	_, err = s.Exec(context.Background(), Spec{
+		RepoDir:    repoDir,
+		Workspace:  ws,
+		Cmd:        []string{"true"},
+		WriteFiles: map[string][]byte{"leak": []byte("pwned\n")},
+	})
+	if err == nil {
+		t.Fatal("Exec should have refused to write through the planted symlink")
+	}
+
+	got, readErr := os.ReadFile(hostTarget)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "original\n" {
+		t.Errorf("host file must not have been overwritten through the symlink: got %q (sandbox escape)", got)
+	}
+}
+
 func TestIntegrationTimeoutReapsContainer(t *testing.T) {
 	s := newTestCLI(t)
 	res, err := s.Exec(context.Background(), Spec{

@@ -191,7 +191,6 @@ func runScanCmd(ctx context.Context, cmd *cobra.Command, flags ScanFlags) error 
 	return nil
 }
 
-
 // printResult writes a human-readable summary of a funnel run: a findings table
 // (tier, severity, file:line, title), per-stage counts, token spend, and any
 // degradation/skip notes.
@@ -377,4 +376,3 @@ func reliabilityWarning(s funnel.Stats) string {
 	}
 	return b.String()
 }
-

@@ -201,6 +201,15 @@ func isGitWorkTree(src string) bool {
 // entirely, matching gitWorktreeFiles' fallback contract. When repoDir IS a
 // git work tree but a git command fails, the error is returned rather than
 // silently treated as a cache miss.
+//
+// CAVEAT: the key is content-derived, not identity-derived — it changes only
+// when HEAD or the working-tree status changes, not on every call. A repo
+// that is re-edited back to a PRIOR content state within one long-lived CLI
+// (e.g. a test harness that dirties, then `git checkout`s back to the same
+// tree) can therefore reuse a pristine that is stale relative to intervening
+// history it never saw. This is accepted: repos are static within a single
+// bugbot run, and CLI instances are not held across runs, so the caller-visible
+// content is always exactly what was hashed.
 func workspaceCacheKey(repoDir string) (key string, isRepo bool, err error) {
 	if !isGitWorkTree(repoDir) {
 		return "", false, nil
@@ -450,22 +459,92 @@ func copyFile(src, dst string, perm fs.FileMode) (err error) {
 // applyWriteFiles writes the supplied files into the workspace. Each key is a
 // path relative to the workspace root. Paths that escape the workspace are
 // rejected.
+//
+// SECURITY (bugbot-6nqd): the workspace is populated by an UNTRUSTED command
+// (the container runs model-authored code with full read/write access to it),
+// and — since bugbot-bkz1 — a workspace can be REUSED across several Execs
+// within one attempt (try_repro's iteration workspace). That means content
+// left behind by an earlier call is adversarial input to a later call's
+// write, not merely to a later call's read (readCaptureFile's existing
+// concern): a planted symlink, leaf OR intermediate directory, would
+// otherwise let a later WriteFiles entry redirect straight out of the
+// workspace onto the host filesystem (e.g. overwriting an SSH authorized_keys
+// file or a git hook) as the bugbot user. sanitizeRelPath alone cannot catch
+// this — it is purely lexical and never touches the filesystem — so every
+// write additionally resolves the workspace root once via EvalSymlinks,
+// walks each parent directory component with Lstat refusing any symlink
+// (secureJoinForWrite), and opens the leaf with O_NOFOLLOW on unix
+// (secureCreateFile) so an existing symlinked leaf fails closed instead of
+// being followed. This hardening applies unconditionally — including the
+// default fresh-copy-per-Exec path — because a git-tracked or agent-injected
+// symlink already present in RepoDir is exactly the same escape shape.
 func applyWriteFiles(ws string, files map[string][]byte) error {
+	if len(files) == 0 {
+		return nil
+	}
+	resolvedWs, err := filepath.EvalSymlinks(ws)
+	if err != nil {
+		return fmt.Errorf("sandbox: resolve workspace: %w", err)
+	}
 	for name, content := range files {
 		rel, err := sanitizeRelPath(name)
 		if err != nil {
 			return fmt.Errorf("sandbox: write file %q: %w", name, err)
 		}
-		dst := filepath.Join(ws, rel)
-
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return fmt.Errorf("sandbox: write file %q: mkdir: %w", name, err)
-		}
-		if err := os.WriteFile(dst, content, 0o644); err != nil {
+		dst, err := secureJoinForWrite(resolvedWs, rel)
+		if err != nil {
 			return fmt.Errorf("sandbox: write file %q: %w", name, err)
+		}
+		f, err := secureCreateFile(dst, 0o644)
+		if err != nil {
+			return fmt.Errorf("sandbox: write file %q: %w", name, err)
+		}
+		if _, werr := f.Write(content); werr != nil {
+			_ = f.Close()
+			return fmt.Errorf("sandbox: write file %q: %w", name, werr)
+		}
+		if cerr := f.Close(); cerr != nil {
+			return fmt.Errorf("sandbox: write file %q: %w", name, cerr)
 		}
 	}
 	return nil
+}
+
+// secureJoinForWrite validates that every directory component between
+// resolvedWs and the write target rel is a REAL directory — never a symlink
+// — creating any missing ones along the way (os.Mkdir, never MkdirAll, so a
+// symlinked component can never be silently walked through), and returns the
+// resulting destination path. See applyWriteFiles' SECURITY note for why this
+// matters: resolvedWs was already fully resolved by the caller, so any
+// symlink encountered while walking rel is necessarily something written
+// INTO the workspace (by an untrusted prior command or the checked-out repo),
+// not part of the trusted root itself.
+//
+// This runs strictly after the untrusted command that could have planted the
+// symlink has already exited (applyWriteFiles is called between sandbox runs,
+// never concurrently with one), so there is no live adversary racing the
+// Lstat-then-Mkdir/Open sequence below — the content being inspected is
+// static by the time this code executes.
+func secureJoinForWrite(resolvedWs, rel string) (string, error) {
+	dir := resolvedWs
+	parts := strings.Split(rel, string(filepath.Separator))
+	for _, part := range parts[:len(parts)-1] {
+		dir = filepath.Join(dir, part)
+		info, err := os.Lstat(dir)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			if mkErr := os.Mkdir(dir, 0o755); mkErr != nil {
+				return "", mkErr
+			}
+		case err != nil:
+			return "", err
+		case info.Mode()&os.ModeSymlink != 0:
+			return "", errPathEscape
+		case !info.IsDir():
+			return "", errPathEscape
+		}
+	}
+	return filepath.Join(dir, parts[len(parts)-1]), nil
 }
 
 // errPathEscape is returned when a WriteFiles key would resolve outside the
@@ -600,7 +679,7 @@ func readCaptureFile(resolvedWs, rel string, maxBytes int) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read-only handle: a Close error cannot lose data
 
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {

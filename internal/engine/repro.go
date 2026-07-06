@@ -71,6 +71,7 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,
 		MaxParallel:      cfg.Repro.MaxParallel,
+		TryMaxExecs:      cfg.Repro.TryMaxExecs,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer: %w", err)
@@ -150,6 +151,7 @@ func buildReproHookForScan(
 		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,
 		MaxParallel:      cfg.Repro.MaxParallel,
+		TryMaxExecs:      cfg.Repro.TryMaxExecs,
 	})
 	if rNewErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer: %w", rNewErr)
@@ -251,7 +253,7 @@ type ReproOpts struct {
 	// StopProgress, if non-nil, is called right before the summary prints so a
 	// CLI-owned live pane can clear its in-place status lines first. Safe to
 	// call multiple times.
-	StopProgress  func()
+	StopProgress func()
 }
 
 // ReproResult is the outcome of a Dispatcher.Repro call.
