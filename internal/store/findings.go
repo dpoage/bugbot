@@ -81,15 +81,15 @@ type Finding struct {
 	// minimal fix candidate was witnessed by the sandbox.  Empty when the prover
 	// was not run or found no plausible fix.
 	FixPatch string
-	// NeedsHuman flags a finding for human review and is set for TWO distinct
-	// reasons: (1) the patch-prover exhausted its attempt budget without finding
-	// a minimal fix (repro/patch.go) — a fix-refusing bug is often misdiagnosed;
-	// and (2) a verifier survivor fell below the genuine-verdict quorum floor
-	// (funnel/verify_stream.go) — too few seats actually judged it. Both causes
-	// mean a human must confirm before downstream automation (repro/patch-
-	// proving) acts on the finding, which is why both are excluded from the repro
-	// backlog. User-facing copy MUST stay reason-neutral (see bugbot-sw7).
+	// NeedsHuman flags a finding for human review. The cause is recorded
+	// explicitly in NeedsHumanReason; use that field instead of flag-combination
+	// inference. Both causes exclude the finding from the repro backlog and the
+	// patch-prover cascade until a human confirms (bugbot-sw7).
 	NeedsHuman bool
+	// NeedsHumanReason is the explicit cause for NeedsHuman. Always set when
+	// NeedsHuman is true; NeedsHumanReasonNone when NeedsHuman is false.
+	// See NeedsHumanReason constants in findings_fsm.go.
+	NeedsHumanReason NeedsHumanReason
 	// CorroboratingLenses are the OTHER lenses that independently reported this
 	// same defect and were collapsed into this finding by triage's location-based
 	// cross-lens dedup. It excludes the finding's own Lens. Persisted as a
@@ -99,8 +99,12 @@ type Finding struct {
 	// Sites records every code location this finding represents. Sites[0] is the
 	// primary's (File, Line). Additional entries are same-root-cause merge sites.
 	// Stored as a pipe-separated "file:line" list; empty when no merge occurred.
-	Sites      []Site
-	Confidence float64 // derived: findingConfidence(tier, severity, len(corroboratingLenses))
+	Sites []Site
+	// Confidence is derived from tier, severity, and corroborating-lens count at
+	// read time. It is also written to the DB column for backward compatibility
+	// with direct SQL queries, but callers should treat the struct field as the
+	// authoritative value — it is always consistent with the other fields.
+	Confidence float64
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 	// SweptAt is the timestamp when UpdateFindingSeverity last recorded a sweep
@@ -265,12 +269,13 @@ func LocusKey(file, locus string) string {
 // FindingFilter narrows ListFindings. Zero-valued fields are not applied.
 type FindingFilter struct {
 	Status Status // exact status match
-	// Tier is an exact tier match for 1..3. 0 is the "any tier" SENTINEL — it
-	// cannot select T0 (fix-witnessed) rows alone; those appear in unfiltered
-	// queries. Changing the sentinel would break existing callers; revisit if
-	// T0-only queries are ever needed.
-	Tier      int
-	CommitSHA string // findings anchored to a specific commit
+	// HasTier, when true, restricts results to the exact Tier value below.
+	// When false, Tier is ignored and all tiers are returned. This replaces the
+	// prior zero-sentinel convention (Tier==0 meaning "any tier"), which could
+	// not express a T0-only query.
+	HasTier   bool
+	Tier      domain.Tier // effective only when HasTier is true
+	CommitSHA string      // findings anchored to a specific commit
 	Lens      string
 }
 
@@ -289,6 +294,8 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 	if f.Status == "" {
 		f.Status = StatusOpen
 	}
+	// Confidence is always derived, never trusted from the caller.
+	f.Confidence = findingConfidence(f.Tier, f.Severity, len(f.CorroboratingLenses))
 
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		suppressed, err := isSuppressedTx(ctx, tx, f.Fingerprint)
@@ -306,9 +313,10 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 		var existingTier domain.Tier
 		var existingRepro, existingReproWitness, existingSweptAt sql.NullString
 		var existingNeedsHuman int
+		var existingNeedsHumanReason string
 		err = tx.QueryRowContext(ctx,
-			`SELECT id, created_at, tier, repro_path, repro_witness, needs_human, file_hash, swept_at FROM findings WHERE fingerprint = ?`, f.Fingerprint,
-		).Scan(&existingID, &existingCreated, &existingTier, &existingRepro, &existingReproWitness, &existingNeedsHuman, &existingFileHash, &existingSweptAt)
+			`SELECT id, created_at, tier, repro_path, repro_witness, needs_human, needs_human_reason, file_hash, swept_at FROM findings WHERE fingerprint = ?`, f.Fingerprint,
+		).Scan(&existingID, &existingCreated, &existingTier, &existingRepro, &existingReproWitness, &existingNeedsHuman, &existingNeedsHumanReason, &existingFileHash, &existingSweptAt)
 
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -317,17 +325,21 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			}
 			f.CreatedAt = now
 			f.UpdatedAt = now
-			f.Confidence = findingConfidence(f.Tier, f.Severity, len(f.CorroboratingLenses))
+			// Validate FSM invariants for new findings (no stored state to preserve).
+			if verr := ValidateFindingState(f); verr != nil {
+				return verr
+			}
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO findings
 				  (id, fingerprint, title, description, reasoning, verdict_detail, severity, tier,
 				   status, lens, file, line, commit_sha, file_hash, repro_path, repro_witness,
-				   fix_patch, needs_human,
+				   fix_patch, needs_human, needs_human_reason,
 				   corroborating_lenses, sites, confidence, created_at, updated_at, swept_at, locus_key)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
 				f.Tier, string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA,
 				f.FileHash, nullStr(f.ReproPath), f.ReproWitness, f.FixPatch, boolInt(f.NeedsHuman),
+				string(f.NeedsHumanReason),
 				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
 				f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout), nullTime(f.SweptAt), f.LocusKey,
 			); err != nil {
@@ -355,18 +367,12 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			//                IS NULL check is sufficient; no separate ''='' check needed.
 			//
 			//   repro_witness — same preservation rule as repro_path: never clear a
-			//                  non-empty stored value with an empty incoming one. The
-			//                  witness is a non-promoting repro artifact (bugbot-w1bh)
-			//                  and carries the same "earned by a prior attempt" meaning
-			//                  re-scans must not regress.
+			//                  non-empty stored value with an empty incoming one.
 			//
-			//   needs_human — once the patch-prover exhausts its budget and sets this
-			//                 flag, implicit re-scans (which do not run the patch-prover)
-			//                 must not clear it.  A re-scan always produces
-			//                 NeedsHuman=false; without preservation the flag would be
-			//                 cleared on every sweep.  Explicit mutation paths (promoteFinding,
-			//                 patch.go) read-then-upsert with the current row, so they carry
-			//                 the stored value and are unaffected by this guard.
+			//   needs_human / needs_human_reason — once set, implicit re-scans must not
+			//                 clear them. Explicit mutation paths (promoteFinding,
+			//                 patch.go) read-then-upsert with the current row so they
+			//                 carry the stored values and are unaffected by this guard.
 			f.ID = existingID
 			created, perr := parseTime(existingCreated)
 			if perr != nil {
@@ -378,40 +384,62 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 			// Resolve the promotion-guarded values before executing the UPDATE so that
 			// the returned Finding struct accurately reflects what was actually written.
 			if f.Tier > existingTier {
-				// Incoming tier is weaker (higher number); keep the stored stronger tier.
 				f.Tier = existingTier
 			}
 			if f.ReproPath == "" && existingRepro.Valid && existingRepro.String != "" {
-				// Incoming has no repro; preserve the stored artifact path.
 				f.ReproPath = existingRepro.String
 			}
 			if f.ReproWitness == "" && existingReproWitness.Valid && existingReproWitness.String != "" {
-				// Incoming has no witness; preserve the stored artifact path.
 				f.ReproWitness = existingReproWitness.String
 			}
 			if existingNeedsHuman != 0 {
-				// Stored needs_human=true; do not let a re-scan clear it.
 				f.NeedsHuman = true
+				// Preserve the stored reason; incoming re-scan never has a reason.
+				if f.NeedsHumanReason == NeedsHumanReasonNone {
+					f.NeedsHumanReason = NeedsHumanReason(existingNeedsHumanReason)
+				}
+				// Pre-migration rows: stored reason is '' (migration backfill missed or
+				// direct-SQL write). Synthesise a plausible reason so ValidateFindingState
+				// invariant (d) does not reject this UPDATE.
+				if f.NeedsHumanReason == NeedsHumanReasonNone {
+					f.NeedsHumanReason = NeedsHumanReasonBelowQuorum
+				}
 			}
 			// swept_at: preserve across idempotent re-discovery; reset when the
 			// anchored code (file_hash) changed so the sweep re-evaluates reachability.
-			if f.FileHash == existingFileHash && existingSweptAt.Valid && existingSweptAt.String != "" {
-				f.SweptAt, _ = parseTime(existingSweptAt.String) // preserve stored marker
+			codeChanged := f.FileHash != existingFileHash
+			if !codeChanged && existingSweptAt.Valid && existingSweptAt.String != "" {
+				f.SweptAt, _ = parseTime(existingSweptAt.String)
 			} else {
-				f.SweptAt = time.Time{} // new code version (or never swept) → re-sweep eligible
+				f.SweptAt = time.Time{}
+			}
+			// repro_attempts: mirror the swept_at reset. A done/abandoned queue row
+			// is reset to pending when the anchored code changes so the finding is
+			// re-eligible for reproduction (code may now be reproducible).
+			// Use tx directly (not s.ResetReproAttemptOnCodeChange) to avoid a
+			// deadlock: MaxOpenConns(1) means the outer withTx holds the sole
+			// connection; a nested s.db.ExecContext would wait for it forever.
+			if codeChanged {
+				if _, rerr := tx.ExecContext(ctx, `
+					UPDATE repro_attempts
+					SET state = 'pending', attempt_count = 0, last_error = '', updated_at = ?
+					WHERE fingerprint = ? AND state IN ('done', 'abandoned')`,
+					now.Format(timeLayout), f.Fingerprint,
+				); rerr != nil {
+					// Best-effort: a failed reset is not fatal.
+					_ = rerr
+				}
 			}
 
+			// Recompute confidence after promotion-guard resolution (tier may have changed).
 			f.Confidence = findingConfidence(f.Tier, f.Severity, len(f.CorroboratingLenses))
 
-			// The CASE expressions mirror the Go logic above to guarantee atomicity —
-			// a concurrent writer cannot slip in between the SELECT and this UPDATE.
-			// Arg order matches the positional ? placeholders exactly:
-			//   tier         : ?, ?  → f.Tier (compare), f.Tier (THEN value)
-			//   repro_path   : ?, ?  → nullStr(f.ReproPath) × 2 (nullable column — NULL check)
-			//   repro_witness: ?, ?  → f.ReproWitness × 2 (NOT NULL '' — empty-string check)
-			//   needs_human  : ?     → boolInt(f.NeedsHuman)
-			//   swept_at     : ?     → f.FileHash (compare to stored file_hash;
-			//                          preserve stored swept_at if unchanged, else NULL)
+			// Validate FSM invariants after promotion-guard resolution: stored values
+			// for NeedsHuman/NeedsHumanReason and ReproPath have been applied, so
+			// the struct now reflects the final state that will be written.
+			if verr := ValidateFindingState(f); verr != nil {
+				return verr
+			}
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE findings SET
 				  title=?, description=?, reasoning=?, verdict_detail=?, severity=?,
@@ -422,6 +450,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				  repro_witness = CASE WHEN ? = ''  THEN repro_witness ELSE ? END,
 				  fix_patch=?,
 				  needs_human = CASE WHEN needs_human = 1 THEN 1 ELSE ? END,
+				  needs_human_reason = CASE WHEN needs_human = 1 THEN needs_human_reason ELSE ? END,
 				  corroborating_lenses=?, sites=?, confidence=?, updated_at=?, locus_key=?,
 				  swept_at = CASE WHEN ? = file_hash THEN swept_at ELSE NULL END
 				WHERE id=?`,
@@ -433,6 +462,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 				f.ReproWitness, f.ReproWitness,
 				f.FixPatch,
 				boolInt(f.NeedsHuman),
+				string(f.NeedsHumanReason),
 				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
 				f.UpdatedAt.Format(timeLayout), f.LocusKey, f.FileHash, f.ID,
 			); err != nil {
@@ -481,9 +511,9 @@ func (s *Store) ListFindings(ctx context.Context, filter FindingFilter) ([]Findi
 		where = append(where, "status = ?")
 		args = append(args, string(filter.Status))
 	}
-	if filter.Tier != 0 {
+	if filter.HasTier {
 		where = append(where, "tier = ?")
-		args = append(args, filter.Tier)
+		args = append(args, int(filter.Tier))
 	}
 	if filter.CommitSHA != "" {
 		where = append(where, "commit_sha = ?")
@@ -553,10 +583,11 @@ func (s *Store) AddCorroboratingLenses(ctx context.Context, fingerprint string, 
 		return nil
 	}
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		var corrob string
+		var corrob, severity string
+		var tier domain.Tier
 		err := tx.QueryRowContext(ctx,
-			`SELECT corroborating_lenses FROM findings WHERE fingerprint = ?`, fingerprint,
-		).Scan(&corrob)
+			`SELECT corroborating_lenses, tier, severity FROM findings WHERE fingerprint = ?`, fingerprint,
+		).Scan(&corrob, &tier, &severity)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -579,10 +610,14 @@ func (s *Store) AddCorroboratingLenses(ctx context.Context, fingerprint string, 
 		}
 		sort.Strings(merged)
 
+		// Recompute confidence so the stored column reflects the updated corroboration
+		// count — direct SQL consumers read the stored value.
+		conf := findingConfidence(tier, domain.Severity(severity), len(merged))
+
 		now := nowUTC()
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE findings SET corroborating_lenses = ?, updated_at = ? WHERE fingerprint = ?`,
-			encodeLenses(merged), now.Format(timeLayout), fingerprint,
+			`UPDATE findings SET corroborating_lenses = ?, confidence = ?, updated_at = ? WHERE fingerprint = ?`,
+			encodeLenses(merged), conf, now.Format(timeLayout), fingerprint,
 		); err != nil {
 			return annotateErr(s.path, "add_corroborating_lenses", err)
 		}
@@ -690,7 +725,7 @@ func (s *Store) AppendFindingSites(ctx context.Context, fingerprint string, site
 // findingColumns is the SELECT column list shared by single- and multi-row reads.
 const findingColumns = `SELECT id, fingerprint, title, description, reasoning, verdict_detail,
 	severity, tier, status, lens, file, line, commit_sha, file_hash, repro_path, repro_witness,
-	fix_patch, needs_human,
+	fix_patch, needs_human, needs_human_reason,
 	corroborating_lenses, sites, confidence, created_at, updated_at, swept_at, locus_key`
 
 func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (Finding, error) {
@@ -716,6 +751,7 @@ func scanFinding(sc rowScanner) (Finding, error) {
 		repro                sql.NullString
 		reproWitness         sql.NullString
 		needsHuman           int
+		needsHumanReason     string
 		corrob               string
 		sitesStr             string
 		createdAt, updatedAt string
@@ -724,7 +760,8 @@ func scanFinding(sc rowScanner) (Finding, error) {
 	if err := sc.Scan(
 		&f.ID, &f.Fingerprint, &f.Title, &f.Description, &f.Reasoning, &f.VerdictDetail,
 		&f.Severity, &f.Tier, &status, &f.Lens, &f.File, &f.Line, &f.CommitSHA,
-		&f.FileHash, &repro, &reproWitness, &f.FixPatch, &needsHuman, &corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt, &sweptAt, &f.LocusKey,
+		&f.FileHash, &repro, &reproWitness, &f.FixPatch, &needsHuman, &needsHumanReason,
+		&corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt, &sweptAt, &f.LocusKey,
 	); err != nil {
 		return Finding{}, err
 	}
@@ -732,8 +769,12 @@ func scanFinding(sc rowScanner) (Finding, error) {
 	f.ReproPath = repro.String
 	f.ReproWitness = reproWitness.String
 	f.NeedsHuman = needsHuman != 0
+	f.NeedsHumanReason = NeedsHumanReason(needsHumanReason)
 	f.CorroboratingLenses = decodeLenses(corrob)
 	f.Sites = decodeSites(sitesStr)
+	// Confidence: always recompute at read time so it is consistent with the
+	// other fields even for rows written before this bead or by direct SQL.
+	f.Confidence = findingConfidence(f.Tier, f.Severity, len(f.CorroboratingLenses))
 	var err error
 	if f.CreatedAt, err = parseTime(createdAt); err != nil {
 		return Finding{}, err

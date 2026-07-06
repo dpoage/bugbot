@@ -72,6 +72,12 @@ func seedFinding(t *testing.T, st *store.Store, title string, tier domain.Tier, 
 		FileHash:    "deadbeef",
 		ReproPath:   reproPath,
 		NeedsHuman:  needsHuman,
+		NeedsHumanReason: func() store.NeedsHumanReason {
+			if needsHuman {
+				return store.NeedsHumanReasonBelowQuorum
+			}
+			return store.NeedsHumanReasonNone
+		}(),
 	})
 	if err != nil {
 		t.Fatalf("seedFinding %q: %v", title, err)

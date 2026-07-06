@@ -796,6 +796,7 @@ func flagNeedsHuman(ctx context.Context, st *store.Store, f store.Finding, attem
 		return err
 	}
 	current.NeedsHuman = true
+	current.NeedsHumanReason = store.NeedsHumanReasonProverExhausted
 	// Idempotence: re-running repro+patch over an already-flagged finding must
 	// not grow Reasoning with duplicate appends.
 	if strings.Contains(current.Reasoning, "PATCH-PROVER:") {

@@ -546,7 +546,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	var replay []Candidate
 	switch mode {
 	case modeReverify:
-		susp, listErr := f.store.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen, Tier: int(domain.TierSuspected)})
+		susp, listErr := f.store.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen, HasTier: true, Tier: domain.TierSuspected})
 		if listErr != nil {
 			f.note(result, fmt.Sprintf("resume: ListFindings(open T3) failed: %v", listErr))
 			susp = nil

@@ -886,7 +886,7 @@ func TestSweep_BudgetOrphanPersistsAsTier3(t *testing.T) {
 	}
 
 	// It must be durable in the store, queryable as a Tier 3 open finding.
-	stored, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen, Tier: 3})
+	stored, err := st.ListFindings(ctx, store.FindingFilter{Status: store.StatusOpen, HasTier: true, Tier: 3})
 	if err != nil {
 		t.Fatal(err)
 	}

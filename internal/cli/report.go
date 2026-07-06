@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
@@ -59,7 +60,7 @@ func newReportListCmd() *cobra.Command {
 			}
 			defer closeStore(st)
 
-			filter := store.FindingFilter{Tier: tier}
+			filter := store.FindingFilter{HasTier: tier != 0, Tier: domain.Tier(tier)}
 			switch strings.ToLower(strings.TrimSpace(status)) {
 			case "", "open":
 				filter.Status = store.StatusOpen

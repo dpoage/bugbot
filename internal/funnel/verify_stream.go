@@ -423,8 +423,14 @@ func (f *Funnel) runVerifyAndPersist(
 		LocusKey:            c.LocusKey,
 		CorroboratingLenses: c.CorroboratingLenses,
 		NeedsHuman:          needsHuman,
-		Sites:               allSites,
-		SweptAt:             sweptAt,
+		NeedsHumanReason: func() store.NeedsHumanReason {
+			if needsHuman {
+				return store.NeedsHumanReasonBelowQuorum
+			}
+			return store.NeedsHumanReasonNone
+		}(),
+		Sites:   allSites,
+		SweptAt: sweptAt,
 	}
 	stored, err := f.store.UpsertFinding(ctx, finding)
 	if err != nil {

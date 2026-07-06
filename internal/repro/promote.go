@@ -10,8 +10,13 @@ import (
 
 // Summary aggregates the outcome of a PromoteAll run.
 type Summary struct {
-	// Attempted is the number of findings a reproduction was attempted on.
+	// Attempted is the number of findings where reproduction was genuinely
+	// attempted (not skipped because the queue row was already claimed/done).
 	Attempted int
+	// Skipped is the number of findings bypassed because their repro_attempts
+	// row was already running, done, or abandoned (claim/skip semantics).
+	// These are excluded from Attempted and Failed.
+	Skipped int
 	// Promoted is the number promoted to Tier-1 (full repro-pathing + patch-prover).
 	Promoted int
 	// Witnessed is the number of below-quorum NeedsHuman findings whose repro
@@ -49,6 +54,10 @@ type FindingOutcome struct {
 	// NeedsHuman is true when the patch-prover exhausted attempts without
 	// finding a minimal fix.
 	NeedsHuman bool
+	// Skipped is true when the repro_attempts queue row was already claimed,
+	// done, or abandoned — no reproduction work was performed. Skipped outcomes
+	// are excluded from Summary.Attempted and Summary.Failed.
+	Skipped bool
 }
 
 // PromoteOne attempts to reproduce a single finding and updates the store row
@@ -56,6 +65,11 @@ type FindingOutcome struct {
 // in-run hook (the funnel's consumer goroutine is the parallelism bound;
 // calling PromoteAll per finding would multiply slots). PromoteAll's internal
 // semaphore is intentionally NOT used here.
+//
+// Queue integration: if the finding has a repro_attempts row, PromoteOne claims
+// it before attempting and marks it done or infra_retry on return. If EnqueueRepro
+// or ClaimReproAttempt fails with ErrReproAlreadyClaimed, the attempt is skipped
+// (another worker already owns it).
 //
 // Two outcomes on a demonstrated bug (Attempt.Promoted):
 //   - non-NeedsHuman finding → promoteFinding (Tier-1 + ReproPath) and
@@ -74,15 +88,144 @@ func (r *Reproducer) PromoteOne(ctx context.Context, st *store.Store, finding st
 	if st == nil {
 		return nil, fmt.Errorf("repro: nil store")
 	}
+	return promoteOne(ctx, r, st, finding)
+}
 
+// PromoteAll attempts to reproduce each finding (expected to be Tier-2
+// "verified" findings) with bounded parallelism, and on success updates the
+// finding's store row to Tier-1 with its repro_path. Findings that cannot be
+// reproduced are left untouched (they stay Tier-2): failure demotes nothing.
+//
+// Bounded parallelism defaults to Options.MaxParallel (deliberately small —
+// each sandbox run copies the whole repo workspace). An infrastructure error
+// on one finding is recorded in that finding's outcome and does not abort the
+// others; PromoteAll returns a nil error unless ctx is cancelled.
+//
+// Queue integration: each finding is claimed from the repro_attempts table
+// before attempting; already-claimed or exhausted findings are skipped. This
+// provides claim/skip semantics across all three dispatch paths (in-run hook,
+// daemon drain, `bugbot repro` CLI) without any of them duplicating the logic.
+func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings []store.Finding) (*Summary, error) {
+	if st == nil {
+		return nil, fmt.Errorf("repro: nil store")
+	}
+
+	// One-time online dependency prefetch (DepStrategyFetch only). Runs once per
+	// PromoteAll before any network-none run; the hook is itself sync.Once-guarded
+	// so repeated calls across a Reproducer's lifetime do not re-download. A
+	// prefetch failure aborts the run: the network-none attempts that follow
+	// would all fail to resolve modules, so failing fast with a clear error is
+	// better than a wave of confusing per-finding module errors.
+	if r.deps.Prefetch != nil {
+		if err := r.deps.Prefetch(ctx); err != nil {
+			return nil, fmt.Errorf("repro: dependency prefetch: %w", err)
+		}
+	}
+
+	summary := &Summary{
+		PerFinding: make([]FindingOutcome, len(findings)),
+	}
+
+	sem := make(chan struct{}, r.opts.MaxParallel)
+	var wg sync.WaitGroup
+
+	for i := range findings {
+		select {
+		case <-ctx.Done():
+			summary.PerFinding[i] = FindingOutcome{
+				FindingID: findings[i].ID,
+				Title:     findings[i].Title,
+				Reason:    "cancelled",
+				Err:       ctx.Err(),
+			}
+			continue
+		case sem <- struct{}{}:
+		}
+
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			// promoteOne always returns a non-nil outcome.
+			outcome, _ := promoteOne(ctx, r, st, findings[idx])
+			summary.PerFinding[idx] = *outcome
+		}(i)
+	}
+
+	wg.Wait()
+
+	if err := ctx.Err(); err != nil {
+		return summary, err
+	}
+
+	for _, o := range summary.PerFinding {
+		if o.Skipped {
+			summary.Skipped++
+			continue
+		}
+		summary.Attempted++
+		switch {
+		case o.Promoted:
+			summary.Promoted++
+		case o.Witnessed:
+			summary.Witnessed++
+		default:
+			summary.Failed++
+		}
+		if o.FixWitnessed {
+			summary.FixWitnessed++
+		}
+		if o.NeedsHuman {
+			summary.NeedsHuman++
+		}
+	}
+	return summary, nil
+}
+
+// promoteOne is the shared single-finding body for both PromoteOne and PromoteAll.
+// It claims the repro_attempts queue row (creating it if absent), runs the
+// reproducer, writes the outcome to the store, and marks the queue row done or
+// infra_retry. Callers own concurrency control; this function does not acquire
+// any semaphores.
+//
+// Queue claim semantics: if the finding's queue row is already claimed (another
+// dispatch path got there first), promoteOne returns a skipped outcome with nil
+// error. This is the single implementation of claim/skip for all three dispatch
+// paths.
+func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding store.Finding) (*FindingOutcome, error) {
 	outcome := &FindingOutcome{FindingID: finding.ID, Title: finding.Title}
+
+	// Ensure the queue row exists, then claim it.
+	if _, err := st.EnqueueRepro(ctx, finding.Fingerprint); err != nil {
+		// Enqueue failure is an infrastructure error; surface it.
+		outcome.Reason = "enqueue error: " + err.Error()
+		outcome.Err = err
+		return outcome, err
+	}
+	if _, err := st.ClaimReproAttempt(ctx, finding.Fingerprint); err != nil {
+		if err == store.ErrReproAlreadyClaimed {
+			// Another dispatch path already owns this attempt; skip.
+			outcome.Reason = "skipped: already claimed"
+			outcome.Skipped = true
+			return outcome, nil
+		}
+		outcome.Reason = "claim error: " + err.Error()
+		outcome.Err = err
+		return outcome, err
+	}
 
 	att, err := r.Attempt(ctx, finding)
 	if err != nil {
+		// Infrastructure error: requeue for bounded retry.
+		_ = st.RequeueReproAttemptOnInfraError(ctx, finding.Fingerprint, err.Error())
 		outcome.Reason = "error: " + err.Error()
 		outcome.Err = err
 		return outcome, err
 	}
+
+	// Attempt completed (success or definitive failure): mark done.
+	_ = st.FinishReproAttempt(ctx, finding.Fingerprint)
 
 	outcome.Attempts = att.Attempts
 	if att.Promoted {
@@ -124,144 +267,6 @@ func (r *Reproducer) PromoteOne(ctx context.Context, st *store.Store, finding st
 	}
 
 	return outcome, nil
-}
-
-// PromoteAll attempts to reproduce each finding (expected to be Tier-2
-// "verified" findings) with bounded parallelism, and on success updates the
-// finding's store row to Tier-1 with its repro_path. Findings that cannot be
-// reproduced are left untouched (they stay Tier-2): failure demotes nothing.
-//
-// Bounded parallelism defaults to Options.MaxParallel (deliberately small —
-// each sandbox run copies the whole repo workspace). An infrastructure error
-// on one finding is recorded in that finding's outcome and does not abort the
-// others; PromoteAll returns a nil error unless ctx is cancelled.
-func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings []store.Finding) (*Summary, error) {
-	if st == nil {
-		return nil, fmt.Errorf("repro: nil store")
-	}
-
-	// One-time online dependency prefetch (DepStrategyFetch only). Runs once per
-	// PromoteAll before any network-none run; the hook is itself sync.Once-guarded
-	// so repeated calls across a Reproducer's lifetime do not re-download. A
-	// prefetch failure aborts the run: the network-none attempts that follow
-	// would all fail to resolve modules, so failing fast with a clear error is
-	// better than a wave of confusing per-finding module errors.
-	if r.deps.Prefetch != nil {
-		if err := r.deps.Prefetch(ctx); err != nil {
-			return nil, fmt.Errorf("repro: dependency prefetch: %w", err)
-		}
-	}
-
-	summary := &Summary{
-		Attempted:  len(findings),
-		PerFinding: make([]FindingOutcome, len(findings)),
-	}
-
-	sem := make(chan struct{}, r.opts.MaxParallel)
-	var wg sync.WaitGroup
-
-	for i := range findings {
-		select {
-		case <-ctx.Done():
-			// Record remaining findings as not attempted-to-completion and stop
-			// launching new work; in-flight goroutines observe ctx too.
-			summary.PerFinding[i] = FindingOutcome{
-				FindingID: findings[i].ID,
-				Title:     findings[i].Title,
-				Reason:    "cancelled",
-				Err:       ctx.Err(),
-			}
-			continue
-		case sem <- struct{}{}:
-		}
-
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			f := findings[idx]
-			outcome := FindingOutcome{FindingID: f.ID, Title: f.Title}
-
-			att, err := r.Attempt(ctx, f)
-			if err != nil {
-				outcome.Reason = "error: " + err.Error()
-				outcome.Err = err
-				summary.PerFinding[idx] = outcome
-				return
-			}
-
-			outcome.Attempts = att.Attempts
-			if att.Promoted {
-				if f.NeedsHuman {
-					// Below-quorum verifier survivor: witness, do not promote.
-					if werr := witnessFinding(ctx, st, f, att.ArtifactPath); werr != nil {
-						outcome.Reason = "witness persist failed: " + werr.Error()
-						outcome.Err = werr
-						summary.PerFinding[idx] = outcome
-						return
-					}
-					outcome.Witnessed = true
-					outcome.ArtifactPath = att.ArtifactPath
-				} else {
-					if perr := promoteFinding(ctx, st, f, att.ArtifactPath); perr != nil {
-						// The bug WAS demonstrated; only persistence failed. Surface it
-						// as an error outcome rather than silently dropping the result.
-						outcome.Reason = "promotion persist failed: " + perr.Error()
-						outcome.Err = perr
-						summary.PerFinding[idx] = outcome
-						return
-					}
-					outcome.Promoted = true
-					outcome.ArtifactPath = att.ArtifactPath
-
-					// Patch-prover: if enabled, attempt to find and witness a minimal fix.
-					if r.opts.PatchProver {
-						patchResult, perr := r.provePatch(ctx, st, f, att)
-						if perr != nil {
-							// Infrastructure failure: record but do not block the T1 promotion.
-							outcome.Reason = "patch-prover error: " + perr.Error()
-						} else {
-							outcome.FixWitnessed = patchResult.kind == patchOutcomeFixWitnessed
-							outcome.NeedsHuman = patchResult.kind == patchOutcomeNeedsHuman
-							if patchResult.kind == patchOutcomeSkipped {
-								outcome.Reason = "patch-prover skipped: toolchain not identified and repro.suite_cmd not configured"
-							}
-						}
-					}
-				}
-			} else {
-				outcome.Reason = att.Reason
-			}
-			summary.PerFinding[idx] = outcome
-		}(i)
-	}
-
-	wg.Wait()
-
-	if err := ctx.Err(); err != nil {
-		return summary, err
-	}
-
-	for _, o := range summary.PerFinding {
-		switch {
-		case o.Promoted:
-			summary.Promoted++
-		case o.Witnessed:
-			// Witnessed is mutually exclusive with Promoted; a NeedsHuman finding
-			// that demonstrated its bug contributes to Witnessed, not Failed.
-			summary.Witnessed++
-		default:
-			summary.Failed++
-		}
-		if o.FixWitnessed {
-			summary.FixWitnessed++
-		}
-		if o.NeedsHuman {
-			summary.NeedsHuman++
-		}
-	}
-	return summary, nil
 }
 
 // patchOutcomeKind is the discriminant for a patch-prover run. Exactly one

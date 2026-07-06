@@ -44,20 +44,39 @@ import (
 // The hook takes no overflow parameters; overflow draining is handled by the
 // caller (Funnel) after runReproAttempt returns.
 func (f *Funnel) runReproAttempt(ctx context.Context, finding store.Finding, scanRunID string) {
-	// Claim check: re-read from store to detect a concurrent promotion,
-	// patch-prover exhaustion, or prior witness before occupying a slot.
-	current, err := f.store.GetFindingByFingerprint(ctx, finding.Fingerprint)
-	if err != nil {
-		// Best-effort: store read failed (ctx cancelled, etc.). Skip silently.
-		return
+	// Register this finding in the durable repro queue (idempotent). The queue
+	// provides the authoritative claim/skip gate across all three dispatch paths
+	// (in-run hook, daemon backlog drain, `bugbot repro` CLI). The Repro hook
+	// (PromoteOne) will claim and mark the row; here we only ensure it exists.
+	if _, err := f.store.EnqueueRepro(ctx, finding.Fingerprint); err != nil {
+		// Best-effort: queue insert failed (ctx cancelled, etc.). Fall through to
+		// the fast-path claim check below; the hook will attempt claim itself.
+		if ctx.Err() != nil {
+			return
+		}
 	}
-	if current.ReproPath != "" || (current.NeedsHuman && current.ReproWitness != "") {
-		// Already promoted, or already witnessed (below-quorum with ReproWitness):
-		// no-op. Patch-prover-exhausted findings hit the first clause once the
-		// prover wrote ReproPath; below-quorum survivors hit the second clause
-		// after their one witness attempt. A NeedsHuman finding without a
-		// ReproWitness falls through (this is the witness path).
-		return
+
+	// Fast-path claim check using the queue: skip if the row is already running,
+	// done, or abandoned, OR if the old finding-field guards fire (backward
+	// compatibility with findings that predate the queue table).
+	if ra, err := f.store.GetReproAttempt(ctx, finding.Fingerprint); err == nil {
+		switch ra.State {
+		case store.ReproStateDone, store.ReproStateRunning, store.ReproStateAbandoned:
+			return
+		}
+	} else {
+		// Queue row missing or DB error: fall back to the finding-field check.
+		// TODO: remove this fallback once every in-flight finding is guaranteed
+		// to have a repro_attempts row (i.e. after the 018 migration has been
+		// live for at least one scan cycle). At that point the queue is the sole
+		// claim gate and the old flag-combination inference can be deleted.
+		current, ferr := f.store.GetFindingByFingerprint(ctx, finding.Fingerprint)
+		if ferr != nil {
+			return
+		}
+		if current.ReproPath != "" || (current.NeedsHuman && current.ReproWitness != "") {
+			return
+		}
 	}
 
 	// Acquire an IDLE-priority slot. This blocks if all slots are held but

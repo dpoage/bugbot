@@ -64,6 +64,7 @@ func buildT1Finding(t *testing.T, st *store.Store) (store.Finding, *Attempt) {
 		Line:        5,
 		CommitSHA:   "abc123",
 		FileHash:    "deadbeef",
+		ReproPath:   "/artifacts/repro", // required by FSM: T1 requires ReproPath
 	}
 	stored, err := st.UpsertFinding(context.Background(), f)
 	if err != nil {
@@ -1071,6 +1072,10 @@ func TestFlagNeedsHuman_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	st := openStore(t)
 	f := seedFinding(t, st)
+	// flagNeedsHuman (prover_exhausted) requires T1 + ReproPath; seed those.
+	f.Tier = 1
+	f.ReproPath = "/artifacts/repro"
+	f, _ = st.UpsertFinding(ctx, f)
 
 	for i := 0; i < 3; i++ {
 		if err := flagNeedsHuman(ctx, st, f, 3, "no fix found"); err != nil {

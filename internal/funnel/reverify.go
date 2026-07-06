@@ -34,8 +34,9 @@ import (
 // ScanKind is introduced.
 func (f *Funnel) ReverifySuspected(ctx context.Context) (*Result, error) {
 	susp, err := f.store.ListFindings(ctx, store.FindingFilter{
-		Status: store.StatusOpen,
-		Tier:   int(domain.TierSuspected),
+		Status:  store.StatusOpen,
+		HasTier: true,
+		Tier:    domain.TierSuspected,
 	})
 	if err != nil {
 		return nil, err

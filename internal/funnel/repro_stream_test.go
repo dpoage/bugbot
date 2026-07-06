@@ -584,15 +584,16 @@ func TestRepro_BelowQuorumWitness_OneAttempt(t *testing.T) {
 
 	// Seed a below-quorum survivor directly: Tier-2, NeedsHuman, no repro yet.
 	seed := store.Finding{
-		Fingerprint: store.Fingerprint("nil-safety", "bug.go", "10|below-quorum nil deref"),
-		Title:       "below-quorum nil deref",
-		Severity:    "high",
-		Tier:        2,
-		Status:      store.StatusOpen,
-		Lens:        "nil-safety",
-		File:        "bug.go",
-		Line:        10,
-		NeedsHuman:  true,
+		Fingerprint:      store.Fingerprint("nil-safety", "bug.go", "10|below-quorum nil deref"),
+		Title:            "below-quorum nil deref",
+		Severity:         "high",
+		Tier:             2,
+		Status:           store.StatusOpen,
+		Lens:             "nil-safety",
+		File:             "bug.go",
+		Line:             10,
+		NeedsHuman:       true,
+		NeedsHumanReason: store.NeedsHumanReasonBelowQuorum,
 	}
 	seeded, err := st.UpsertFinding(ctx, seed)
 	if err != nil {

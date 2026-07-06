@@ -59,6 +59,7 @@ func TestReproCmd_EmptyBacklog(t *testing.T) {
 	}
 	for _, f := range all {
 		f.NeedsHuman = true
+		f.NeedsHumanReason = store.NeedsHumanReasonBelowQuorum
 		if _, err := st.UpsertFinding(ctx, f); err != nil {
 			_ = st.Close()
 			t.Fatalf("mark needs-human: %v", err)

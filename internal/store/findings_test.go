@@ -209,7 +209,7 @@ func TestListFindings_Filters(t *testing.T) {
 			t.Fatalf("upsert: %v", err)
 		}
 	}
-	mk("a", "f1.go", 1, 1, StatusOpen, "c1")
+	mk("a", "f1.go", 1, 2, StatusOpen, "c1") // was tier=1; tests filter/sort, not tier
 	mk("a", "f2.go", 2, 2, StatusOpen, "c1")
 	mk("b", "f3.go", 3, 2, StatusFixed, "c2")
 
@@ -221,12 +221,12 @@ func TestListFindings_Filters(t *testing.T) {
 		t.Fatalf("expected 2 open, got %d", len(open))
 	}
 
-	tier2, err := st.ListFindings(ctx, FindingFilter{Tier: 2})
+	tier2, err := st.ListFindings(ctx, FindingFilter{HasTier: true, Tier: 2})
 	if err != nil {
 		t.Fatalf("list tier2: %v", err)
 	}
-	if len(tier2) != 2 {
-		t.Fatalf("expected 2 tier-2, got %d", len(tier2))
+	if len(tier2) != 3 {
+		t.Fatalf("expected 3 tier-2, got %d", len(tier2))
 	}
 
 	// Code-version scoping: only findings anchored to commit c1.
@@ -311,6 +311,7 @@ func TestFixPatchNeedsHuman_RoundTrip(t *testing.T) {
 	// Update: set NeedsHuman=true, clear FixPatch.
 	f2 := stored
 	f2.NeedsHuman = true
+	f2.NeedsHumanReason = NeedsHumanReasonBelowQuorum
 	f2.FixPatch = ""
 	updated, err := st.UpsertFinding(ctx, f2)
 	if err != nil {
@@ -347,14 +348,18 @@ func TestFixPatchNeedsHuman_RoundTrip(t *testing.T) {
 		t.Errorf("ListFindings needs_human = false, want true")
 	}
 
-	// Tier-0 round-trip: the tier column stores 0 correctly.
-	f3 := stored
+	// Tier-0 round-trip: use a fresh finding (no NeedsHuman history, since the
+	// stored row above has NeedsHuman=true which the UPDATE path preserves, and
+	// T0+NeedsHuman is an illegal state).
+	f3 := sampleFinding()
+	f3.Fingerprint = Fingerprint("race", "internal/x/z.go", "10|t0-test")
 	f3.Tier = 0
+	f3.ReproPath = "/artifacts/fix.go"
 	f3.FixPatch = "--- a/x.go\n+++ b/x.go\n@@ -1 +1 @@\n-bad\n+good\n"
 	if _, err := st.UpsertFinding(ctx, f3); err != nil {
 		t.Fatalf("tier-0 upsert: %v", err)
 	}
-	got3, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	got3, err := st.GetFindingByFingerprint(ctx, f3.Fingerprint)
 	if err != nil {
 		t.Fatalf("tier-0 get: %v", err)
 	}
@@ -567,6 +572,7 @@ func TestUpsertFinding_TierEdgeCases(t *testing.T) {
 	setNH.Tier = 1
 	setNH.ReproPath = "/artifacts/second.go"
 	setNH.NeedsHuman = true
+	setNH.NeedsHumanReason = NeedsHumanReasonProverExhausted
 	if _, err := st.UpsertFinding(ctx, setNH); err != nil {
 		t.Fatalf("set needs_human: %v", err)
 	}
@@ -603,12 +609,19 @@ func TestCountFindings(t *testing.T) {
 			Title:       "t", Severity: "high", Tier: tier, Status: status,
 			Lens: "l", File: file, Line: line, NeedsHuman: needsHuman,
 		}
+		if needsHuman {
+			f.NeedsHumanReason = NeedsHumanReasonBelowQuorum
+		}
+		// T0/T1 require ReproPath; supply a placeholder so FSM guard passes.
+		if tier <= 1 {
+			f.ReproPath = "/artifacts/placeholder"
+		}
 		if _, err := st.UpsertFinding(ctx, f); err != nil {
 			t.Fatal(err)
 		}
 	}
 	seed("a.go", 1, 0, StatusOpen, false)
-	seed("a.go", 2, 1, StatusOpen, true)
+	seed("a.go", 2, 2, StatusOpen, true) // was tier=1; NeedsHuman+T2 = below-quorum
 	seed("a.go", 3, 2, StatusOpen, false)
 	seed("a.go", 4, 2, StatusOpen, false)
 	seed("b.go", 1, 2, StatusFixed, false)
@@ -618,7 +631,7 @@ func TestCountFindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.OpenByTier[0] != 1 || got.OpenByTier[1] != 1 || got.OpenByTier[2] != 2 {
+	if got.OpenByTier[0] != 1 || got.OpenByTier[1] != 0 || got.OpenByTier[2] != 3 {
 		t.Errorf("OpenByTier = %v", got.OpenByTier)
 	}
 	if got.NeedsHuman != 1 {
@@ -704,9 +717,9 @@ func TestFindingConfidence_CorroborationIncreases(t *testing.T) {
 func TestFindingConfidence_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
-
 	f := sampleFinding()
 	f.Tier = 1
+	f.ReproPath = "/artifacts/repro.go"
 	f.Severity = "critical"
 	f.CorroboratingLenses = []string{"concurrency"}
 
@@ -937,6 +950,7 @@ func TestUpsertFinding_PreservesWitnessOnRescan(t *testing.T) {
 	f := sampleFinding()
 	f.Tier = 2
 	f.NeedsHuman = true
+	f.NeedsHumanReason = NeedsHumanReasonBelowQuorum
 	f.ReproPath = ""
 	f.ReproWitness = ""
 	stored, err := st.UpsertFinding(ctx, f)
@@ -968,19 +982,20 @@ func TestUpsertFinding_PreservesWitnessOnRescan(t *testing.T) {
 	// 3. Re-scan: a fresh T2 finding with an EMPTY witness for the same
 	// fingerprint. The stored witness must survive.
 	rescan := Finding{
-		Fingerprint:  f.Fingerprint,
-		Title:        f.Title,
-		Description:  f.Description,
-		Reasoning:    "updated reasoning from re-scan",
-		Severity:     "critical", // changed
-		Tier:         2,
-		Status:       StatusOpen,
-		Lens:         f.Lens,
-		File:         f.File,
-		Line:         f.Line,
-		CommitSHA:    "newcommit",
-		FileHash:     "hash-v3",
-		NeedsHuman:   true,
+		Fingerprint: f.Fingerprint,
+		Title:       f.Title,
+		Description: f.Description,
+		Reasoning:   "updated reasoning from re-scan",
+		Severity:    "critical", // changed
+		Tier:        2,
+		Status:      StatusOpen,
+		Lens:        f.Lens,
+		File:        f.File,
+		Line:        f.Line,
+		CommitSHA:   "newcommit",
+		FileHash:    "hash-v3",
+		NeedsHuman:  true,
+		// NeedsHumanReason not set: UpsertFinding preserves stored reason on update.
 		ReproWitness: "", // empty — must NOT clobber the stored witness
 	}
 	rescanned, err := st.UpsertFinding(ctx, rescan)
