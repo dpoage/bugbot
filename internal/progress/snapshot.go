@@ -114,20 +114,72 @@ type ToolHealth struct {
 	LastAt   time.Time `json:"last_at"`
 }
 
-// SnapshotSink maintains status.json: it folds each event into an in-memory
-// Status and writes it (atomically, temp+rename) on a rate-limited cadence and
-// always on terminal events. Writes are best-effort — a failed write is dropped,
-// never surfaced — so the sink honors the non-blocking, never-fail contract.
+// StatusAccumulator folds progress Events into an in-memory Status. It holds
+// exactly the state SnapshotSink used to keep private (the live-agent map,
+// the per-tool health aggregation, and the running Status) so any consumer
+// that needs the identical fold — not only the status.json writer — can
+// reuse it verbatim instead of re-implementing apply()'s event/field matrix.
+// internal/tui's Owner-mode LiveFeed is the other caller: it applies the
+// same events SnapshotSink would and reads Snapshot() to build Frames,
+// guaranteeing the cockpit and status.json never disagree about what an
+// event means.
 //
 // Safe for concurrent use: parallel agents and the daemon emit from multiple
 // goroutines; all state is guarded by mu.
-type SnapshotSink struct {
-	path string
-
+type StatusAccumulator struct {
 	mu        sync.Mutex
 	st        Status
 	agents    map[string]AgentStatus
 	unhealthy map[string]ToolHealth // tool -> aggregated health
+}
+
+// NewStatusAccumulator builds an empty accumulator, stamping the resulting
+// Status with the current PID and start time so a reader can detect a
+// dead/stale writer (mirrors NewSnapshotSink's stamp).
+func NewStatusAccumulator() *StatusAccumulator {
+	return &StatusAccumulator{
+		agents:    make(map[string]AgentStatus),
+		unhealthy: make(map[string]ToolHealth),
+		st: Status{
+			PID:       os.Getpid(),
+			StartedAt: time.Now(),
+		},
+	}
+}
+
+// Apply folds ev into the accumulated status and reports whether it is a
+// terminal event (scan/cycle finished). Safe for concurrent use.
+func (a *StatusAccumulator) Apply(ev Event) (terminal bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.apply(ev)
+}
+
+// Snapshot returns the current folded Status with ActiveAgents and
+// UnhealthyTools materialized from the live maps. Safe for concurrent use;
+// the returned value is a copy, so the caller may hold onto it freely.
+func (a *StatusAccumulator) Snapshot() Status {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.refreshAgents()
+	a.refreshUnhealthyTools()
+	return a.st
+}
+
+// SnapshotSink maintains status.json: it folds each event into a
+// StatusAccumulator and writes the result (atomically, temp+rename) on a
+// rate-limited cadence and always on terminal events. Writes are
+// best-effort — a failed write is dropped, never surfaced — so the sink
+// honors the non-blocking, never-fail contract.
+//
+// Safe for concurrent use: parallel agents and the daemon emit from multiple
+// goroutines; all state is guarded by acc (accumulation) and mu (write
+// scheduling).
+type SnapshotSink struct {
+	path string
+	acc  *StatusAccumulator
+
+	mu        sync.Mutex
 	lastWrite time.Time
 	now       func() time.Time // injectable for tests
 
@@ -140,16 +192,10 @@ type SnapshotSink struct {
 // state.db). It stamps the snapshot with the current PID and start time so a
 // reader can detect a dead/stale writer.
 func NewSnapshotSink(storageDir string) *SnapshotSink {
-	now := time.Now()
 	return &SnapshotSink{
-		path:      filepath.Join(storageDir, StatusFileName),
-		agents:    make(map[string]AgentStatus),
-		unhealthy: make(map[string]ToolHealth),
-		now:       time.Now,
-		st: Status{
-			PID:       os.Getpid(),
-			StartedAt: now,
-		},
+		path: filepath.Join(storageDir, StatusFileName),
+		acc:  NewStatusAccumulator(),
+		now:  time.Now,
 	}
 }
 
@@ -171,36 +217,38 @@ func (s *SnapshotSink) WithDaySpend(fn func() (in, out int64)) *SnapshotSink {
 
 // Handle implements Sink.
 func (s *SnapshotSink) Handle(ev Event) {
+	terminal := s.acc.Apply(ev)
+
 	s.mu.Lock()
-	terminal := s.apply(ev)
 	now := s.now()
 	due := terminal || s.lastWrite.IsZero() || now.Sub(s.lastWrite) >= snapshotInterval
-	if due {
-		s.lastWrite = now
-		s.st.LastUpdated = now
-		s.refreshAgents()
-		s.refreshUnhealthyTools()
-		if s.daySpend != nil {
-			s.st.SpendTodayInput, s.st.SpendTodayOutput = s.daySpend()
-		}
-		snap := s.st // copy under lock
+	if !due {
 		s.mu.Unlock()
-		writeStatusAtomic(s.path, snap)
 		return
 	}
+	s.lastWrite = now
+	daySpend := s.daySpend
 	s.mu.Unlock()
+
+	snap := s.acc.Snapshot()
+	snap.LastUpdated = now
+	if daySpend != nil {
+		snap.SpendTodayInput, snap.SpendTodayOutput = daySpend()
+	}
+	writeStatusAtomic(s.path, snap)
 }
 
 // apply folds an event into the in-memory status and reports whether it is a
 // terminal event that must force an immediate write. Caller holds mu.
-func (s *SnapshotSink) apply(ev Event) (terminal bool) {
+func (a *StatusAccumulator) apply(ev Event) (terminal bool) {
+	s := a
 	switch ev.Kind {
 	case KindScanStarted, KindCycleStarted:
 		s.st.ScanKind = ev.ScanKind
 		s.st.Commit = ev.Commit
 		// Reset live counters at scan start, not only at stage finish: an
 		// aborted scan returns without emitting StageFinished, and the daemon
-		// reuses one SnapshotSink across cycles — without this reset the next
+		// reuses one accumulator across cycles — without this reset the next
 		// cycle's status would show the dead run's "candidates so far" until
 		// its own stage completes.
 		s.st.LiveCandidates = 0
@@ -301,7 +349,7 @@ func (s *SnapshotSink) apply(ev Event) (terminal bool) {
 // a severity parse failure the new value is dropped and the existing entry's
 // Severity is preserved (unrecognized strings cannot rank, so there is no
 // meaningful max to compute).
-func (s *SnapshotSink) applyToolUnhealthy(ev Event) {
+func (s *StatusAccumulator) applyToolUnhealthy(ev Event) {
 	cur, ok := s.unhealthy[ev.Tool]
 	if !ok {
 		cur = ToolHealth{Tool: ev.Tool}
@@ -324,7 +372,7 @@ func (s *SnapshotSink) applyToolUnhealthy(ev Event) {
 }
 
 // refreshAgents rebuilds the sorted ActiveAgents slice from the live map.
-func (s *SnapshotSink) refreshAgents() {
+func (s *StatusAccumulator) refreshAgents() {
 	keys := make([]string, 0, len(s.agents))
 	for k := range s.agents {
 		keys = append(keys, k)
@@ -340,7 +388,7 @@ func (s *SnapshotSink) refreshAgents() {
 // refreshUnhealthyTools materializes the sorted Status.UnhealthyTools slice from
 // the live unhealthy map. Sorting by Tool keeps the JSON output stable so a
 // reader's diff against the previous snapshot shows only real changes.
-func (s *SnapshotSink) refreshUnhealthyTools() {
+func (s *StatusAccumulator) refreshUnhealthyTools() {
 	if len(s.unhealthy) == 0 {
 		s.st.UnhealthyTools = nil
 		return
