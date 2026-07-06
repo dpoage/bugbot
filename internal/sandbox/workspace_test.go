@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -307,4 +308,158 @@ func TestCopyWorkspaceSurfacesGitError(t *testing.T) {
 	if err := copyWorkspace(src, dst); err == nil {
 		t.Fatal("copyWorkspace must return an error when git ls-files fails on a work tree")
 	}
+}
+
+// TestSanitizeCapturePaths mirrors the sanitizeRelPath contract that
+// applyWriteFiles already relies on: escaping paths are rejected up front
+// (before a sandbox run is spent), well-formed relative paths are cleaned and
+// returned in order.
+func TestSanitizeCapturePaths(t *testing.T) {
+	t.Run("empty input", func(t *testing.T) {
+		got, err := sanitizeCapturePaths(nil)
+		if err != nil || got != nil {
+			t.Fatalf("sanitizeCapturePaths(nil) = (%v, %v), want (nil, nil)", got, err)
+		}
+	})
+
+	t.Run("valid relative paths are cleaned and ordered", func(t *testing.T) {
+		got, err := sanitizeCapturePaths([]string{".bugbot-repro-junit.xml", "./sub/../report.json"})
+		if err != nil {
+			t.Fatalf("sanitizeCapturePaths: %v", err)
+		}
+		want := []string{".bugbot-repro-junit.xml", "report.json"}
+		if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+			t.Fatalf("sanitizeCapturePaths = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("absolute path rejected", func(t *testing.T) {
+		if _, err := sanitizeCapturePaths([]string{"/etc/passwd"}); err == nil {
+			t.Fatal("expected error for absolute capture path")
+		}
+	})
+
+	t.Run("escaping .. path rejected", func(t *testing.T) {
+		if _, err := sanitizeCapturePaths([]string{"../outside.txt"}); err == nil {
+			t.Fatal("expected error for escaping capture path")
+		}
+	})
+}
+
+// TestCaptureWorkspaceFiles covers the post-run read-back: present files are
+// returned (capped at maxBytes), missing files are silently absent, and an
+// empty paths list yields a nil map.
+func TestCaptureWorkspaceFiles(t *testing.T) {
+	ws := t.TempDir()
+	mustWrite(t, filepath.Join(ws, "report.xml"), "<testsuites></testsuites>", 0o644)
+	mustWrite(t, filepath.Join(ws, "big.txt"), "0123456789", 0o644)
+
+	t.Run("nil paths yields nil", func(t *testing.T) {
+		if got := captureWorkspaceFiles(ws, nil, 0); got != nil {
+			t.Fatalf("captureWorkspaceFiles(nil paths) = %v, want nil", got)
+		}
+	})
+
+	t.Run("present file captured, missing file silently absent", func(t *testing.T) {
+		got := captureWorkspaceFiles(ws, []string{"report.xml", "does-not-exist.xml"}, 0)
+		if string(got["report.xml"]) != "<testsuites></testsuites>" {
+			t.Fatalf("got[report.xml] = %q", got["report.xml"])
+		}
+		if _, present := got["does-not-exist.xml"]; present {
+			t.Fatal("missing file must be absent from the map, not present with empty/zero value")
+		}
+	})
+
+	t.Run("capped at maxBytes", func(t *testing.T) {
+		got := captureWorkspaceFiles(ws, []string{"big.txt"}, 4)
+		if string(got["big.txt"]) != "0123" {
+			t.Fatalf("got[big.txt] = %q, want capped to 4 bytes", got["big.txt"])
+		}
+	})
+
+	t.Run("no captures found yields nil map", func(t *testing.T) {
+		got := captureWorkspaceFiles(ws, []string{"nope.txt"}, 0)
+		if got != nil {
+			t.Fatalf("captureWorkspaceFiles with no hits = %v, want nil", got)
+		}
+	})
+
+	t.Run("directory at the capture path is refused, not read as a file", func(t *testing.T) {
+		mustMkdir(t, filepath.Join(ws, "a-directory"))
+		got := captureWorkspaceFiles(ws, []string{"a-directory"}, 0)
+		if _, present := got["a-directory"]; present {
+			t.Fatal("a directory must be refused like a missing file, not captured")
+		}
+	})
+}
+
+// TestCaptureWorkspaceFiles_SymlinkEscapeRejected — bugbot-ym09 review
+// finding: the sandboxed command has full write access to the workspace, so
+// it is untrusted with respect to what it leaves behind. A symlink planted
+// at the capture path pointing outside the workspace (a host path, or a
+// device like /dev/zero) must be refused exactly like a missing file, never
+// followed — this mirrors the write-side symlink-escape class tracked by
+// bugbot-6nqd, applied here to the read-back path (captureWorkspaceFiles /
+// readCaptureFile).
+func TestCaptureWorkspaceFiles_SymlinkEscapeRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows")
+	}
+
+	t.Run("symlink to an absolute host path outside the workspace", func(t *testing.T) {
+		ws := t.TempDir()
+		outside := t.TempDir()
+		secret := filepath.Join(outside, "secret.txt")
+		mustWrite(t, secret, "host-only content", 0o644)
+		if err := os.Symlink(secret, filepath.Join(ws, "report.xml")); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+
+		got := captureWorkspaceFiles(ws, []string{"report.xml"}, 0)
+		if _, present := got["report.xml"]; present {
+			t.Fatal("a symlink escaping the workspace must be refused, not followed")
+		}
+	})
+
+	t.Run("symlink to a device node is refused, not read unbounded", func(t *testing.T) {
+		if _, err := os.Stat("/dev/zero"); err != nil {
+			t.Skip("/dev/zero not available")
+		}
+		ws := t.TempDir()
+		if err := os.Symlink("/dev/zero", filepath.Join(ws, "report.xml")); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+
+		got := captureWorkspaceFiles(ws, []string{"report.xml"}, 1<<20)
+		if _, present := got["report.xml"]; present {
+			t.Fatal("a symlink to a device node must be refused, not read")
+		}
+	})
+
+	t.Run("symlinked intermediate directory escaping the workspace", func(t *testing.T) {
+		ws := t.TempDir()
+		outside := t.TempDir()
+		mustWrite(t, filepath.Join(outside, "report.xml"), "outside content", 0o644)
+		if err := os.Symlink(outside, filepath.Join(ws, "sub")); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+
+		got := captureWorkspaceFiles(ws, []string{"sub/report.xml"}, 0)
+		if _, present := got["sub/report.xml"]; present {
+			t.Fatal("a symlinked intermediate directory escaping the workspace must be refused")
+		}
+	})
+
+	t.Run("symlink that stays inside the workspace is followed normally", func(t *testing.T) {
+		ws := t.TempDir()
+		mustWrite(t, filepath.Join(ws, "actual.xml"), "<testsuites></testsuites>", 0o644)
+		if err := os.Symlink(filepath.Join(ws, "actual.xml"), filepath.Join(ws, "report.xml")); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+
+		got := captureWorkspaceFiles(ws, []string{"report.xml"}, 0)
+		if string(got["report.xml"]) != "<testsuites></testsuites>" {
+			t.Fatalf("in-workspace symlink target must be captured normally, got %q", got["report.xml"])
+		}
+	})
 }

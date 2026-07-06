@@ -11,6 +11,7 @@ package sandbox
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +101,72 @@ func TestIntegrationWriteFilesInjected(t *testing.T) {
 	}
 	if strings.TrimSpace(res.Stdout) != "INJECTED" {
 		t.Errorf("Stdout = %q, want INJECTED", res.Stdout)
+	}
+}
+
+// TestIntegrationCaptureFilesReadBack — bugbot-ym09 — the structured-output
+// capture seam: a file the containerized command writes into the workspace is
+// read back into Result.Captured before the workspace is torn down. Also
+// covers the missing-file case in the same real-podman run: CaptureFiles asks
+// for a second path the command never writes, and it must be silently absent
+// rather than causing an error.
+func TestIntegrationCaptureFilesReadBack(t *testing.T) {
+	s := newTestCLI(t)
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:      t.TempDir(),
+		Cmd:          []string{"sh", "-c", "echo '<testsuites></testsuites>' > report.xml"},
+		CaptureFiles: []string{"report.xml", "never-written.xml"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, stderr=%q", res.ExitCode, res.Stderr)
+	}
+	got, present := res.Captured["report.xml"]
+	if !present {
+		t.Fatal("Captured[report.xml] absent, want the file the container wrote")
+	}
+	if strings.TrimSpace(string(got)) != "<testsuites></testsuites>" {
+		t.Errorf("Captured[report.xml] = %q", got)
+	}
+	if _, present := res.Captured["never-written.xml"]; present {
+		t.Error("Captured[never-written.xml] present, want silently absent")
+	}
+}
+
+// TestIntegrationCaptureFilesSymlinkEscapeRejected — bugbot-ym09 review
+// finding — proves the fix against a REAL container, not just the host-side
+// unit tests: the sandboxed command plants a symlink at the capture path
+// whose target is an absolute HOST path outside the workspace (created with
+// full write access to its own workspace, which is all `ln -s` needs — the
+// target need not even resolve inside the container's own mount namespace).
+// After the container exits, readCaptureFile runs on the HOST and must
+// refuse to follow that symlink: without the fix this would let a
+// container-controlled repro plan read arbitrary host files back through
+// Result.Captured.
+func TestIntegrationCaptureFilesSymlinkEscapeRejected(t *testing.T) {
+	s := newTestCLI(t)
+
+	hostSecretDir := t.TempDir()
+	hostSecret := filepath.Join(hostSecretDir, "secret.txt")
+	if err := os.WriteFile(hostSecret, []byte("host-only-secret"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:      t.TempDir(),
+		Cmd:          []string{"sh", "-c", "ln -s " + hostSecret + " report.xml"},
+		CaptureFiles: []string{"report.xml"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, stderr=%q", res.ExitCode, res.Stderr)
+	}
+	if got, present := res.Captured["report.xml"]; present {
+		t.Fatalf("a symlink escaping the workspace to a host path must be refused, got %q (host secret leaked)", got)
 	}
 }
 

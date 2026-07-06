@@ -129,6 +129,16 @@ const (
 	// context about the upcoming sweep without waiting for it to finish.
 	// Fields: Count (total targets), Message.
 	KindSweepSummary Kind = "sweep_summary"
+	// KindReproAttempt reports one repro round (initial plan or a revision) for
+	// a single finding: the reproducer agent proposed a plan, it ran in the
+	// sandbox, and the round was interpreted to a verdict. Emitted once per
+	// round from repro.Reproducer.Attempt, in addition to (not instead of) the
+	// bracketing KindAgentStarted/KindAgentFinished pair for the whole
+	// multi-round attempt. Low-volume (bounded by MaxAttempts, default 2), so
+	// renderers can surface every round rather than suppressing it as noise.
+	// Fields: Role (RoleReproducer), Label (finding title), Attempt,
+	// MaxAttempts, Verdict, Duration.
+	KindReproAttempt Kind = "repro_attempt"
 )
 
 // Stage names the pipeline stage an event belongs to. Kept as plain strings so
@@ -261,6 +271,21 @@ type Event struct {
 	// Sinks use it to choose how prominently to render the failure and to
 	// aggregate per-tool health by max-severity across events.
 	Severity string `json:"severity,omitempty"`
+
+	// Attempt / MaxAttempts / Verdict describe a KindReproAttempt round: the
+	// 1-based round number, the configured cap (repro.Options.MaxAttempts,
+	// resolved), and the round's outcome. Verdict is "demonstrated" on
+	// success; a repro.VerdictReason string ("exit_zero", "timeout", …) when
+	// the sandbox ran but did not demonstrate the bug; or one of two synthetic
+	// literals — "unparseable_plan", "invalid_plan" — for a round that never
+	// reached the sandbox at all (the agent's plan failed to parse, or failed
+	// repro's own structural validation). Those two are NOT repro.VerdictReason
+	// constants; they are ad hoc tokens defined at the repro.go emit sites.
+	// Role/Label/Duration are reused from the agent-run fields above (Role is
+	// always RoleReproducer; Label is the finding title).
+	Attempt     int    `json:"attempt,omitempty"`
+	MaxAttempts int    `json:"max_attempts,omitempty"`
+	Verdict     string `json:"verdict,omitempty"`
 }
 
 // Validate returns an error for clearly-invalid Kind/field combinations.
@@ -276,9 +301,9 @@ type Event struct {
 //     as a warning (use &Counts{} to signal "ran but produced nothing").
 //   - KindAgentStarted/KindAgentFinished/KindAgentActivity require Role and Label.
 //   - KindFindingVerified/KindFindingKilled require File.
-//   - KindAgentActivity requires Activity.
 //   - KindToolUnhealthy requires Role, Label, Tool, and Severity (Message is the
 //     human-readable reason and is permitted but not required).
+//   - KindReproAttempt requires Role, Label, and Verdict.
 func (e Event) Validate() error {
 	if e.Kind == "" {
 		return fmt.Errorf("progress: event has empty Kind")
@@ -314,6 +339,16 @@ func (e Event) Validate() error {
 		}
 		if e.Severity == "" {
 			return fmt.Errorf("progress: %s event missing Severity", e.Kind)
+		}
+	case KindReproAttempt:
+		if e.Role == "" {
+			return fmt.Errorf("progress: %s event missing Role", e.Kind)
+		}
+		if e.Label == "" {
+			return fmt.Errorf("progress: %s event missing Label", e.Kind)
+		}
+		if e.Verdict == "" {
+			return fmt.Errorf("progress: %s event missing Verdict", e.Kind)
 		}
 	}
 	return nil

@@ -379,6 +379,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 	}
 
 	for i := 0; i < r.opts.MaxAttempts; i++ {
+		roundStart := time.Now()
 		att.Attempts = i + 1
 
 		plan, u, perr := r.planFor(ctx, runner, finding, pkgSummary, feedback)
@@ -396,8 +397,16 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 				feedback = fmt.Sprintf("Your previous response was not a usable repro plan: %s. "+
 					"Return ONLY a JSON object with the repro files and the cmd to run them.", perr)
 				att.Reason = "unparseable plan: " + perr.Error()
+				progress.Emit(r.opts.Progress, progress.Event{
+					Kind: progress.KindReproAttempt, Role: progress.RoleReproducer, Label: finding.Title,
+					Attempt: att.Attempts, MaxAttempts: r.opts.MaxAttempts,
+					Verdict: "unparseable_plan", Duration: time.Since(roundStart),
+				})
 				continue
 			}
+			// Genuine infra failure (not recoverable): abort without a
+			// KindReproAttempt — the round never reached a verdict, so there is
+			// nothing to report as a round outcome.
 			return nil, fmt.Errorf("repro: plan finding %s: %w", finding.ID, perr)
 		}
 		if verr := validatePlan(plan, r.repoDir); verr != nil {
@@ -405,16 +414,39 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			// attempt: feed the problem back and try again.
 			feedback = fmt.Sprintf("Your previous plan was invalid: %s. Provide files and a cmd (expect is optional but recommended).", verr)
 			att.Reason = "invalid plan: " + verr.Error()
+			progress.Emit(r.opts.Progress, progress.Event{
+				Kind: progress.KindReproAttempt, Role: progress.RoleReproducer, Label: finding.Title,
+				Attempt: att.Attempts, MaxAttempts: r.opts.MaxAttempts,
+				Verdict: "invalid_plan", Duration: time.Since(roundStart),
+			})
 			continue
 		}
 
 		res, serr := r.execute(ctx, plan)
 		if serr != nil {
+			// Same rule as the planFor infra-failure above: a sandbox launch
+			// failure aborts the whole attempt with no KindReproAttempt for
+			// this round.
 			return nil, fmt.Errorf("repro: execute finding %s: %w", finding.ID, serr)
 		}
 
 		verdict := interpret(res, plan.Cmd)
 		att.Output = verdict.summary
+
+		roundVerdict := string(verdict.reason)
+		if verdict.demonstrated {
+			roundVerdict = "demonstrated"
+		}
+		// Emitted before writeArtifacts by design: the round's verdict is
+		// final at this point (interpret() already ran), and artifact writing
+		// is a side effect of a "demonstrated" verdict, not part of it — a
+		// failure below aborts the whole Attempt with an error, independent of
+		// whether this event was observed.
+		progress.Emit(r.opts.Progress, progress.Event{
+			Kind: progress.KindReproAttempt, Role: progress.RoleReproducer, Label: finding.Title,
+			Attempt: att.Attempts, MaxAttempts: r.opts.MaxAttempts,
+			Verdict: roundVerdict, Duration: time.Since(roundStart),
+		})
 
 		if verdict.demonstrated {
 			path, werr := writeArtifacts(r.opts.ArtifactDir, finding, plan, res)
@@ -540,9 +572,17 @@ func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, e
 	for path, content := range plan.Files {
 		files[path] = []byte(content)
 	}
+	// normalizeCmdForStructuredOutput rewrites a direct `go test`/`pytest`
+	// invocation to ask the runner for machine-readable output (see
+	// runnerevents.go), so interpret() can classify off positive test-level
+	// evidence instead of scanning free-form text. plan.Cmd itself is left
+	// untouched: it is still what ecosystem detection and agent-facing
+	// feedback use, and the rewrite is a harness-owned implementation detail
+	// the agent never needs to see.
+	cmd, captures := normalizeCmdForStructuredOutput(plan.Cmd)
 	spec := sandbox.Spec{
 		RepoDir: r.repoDir,
-		Cmd:     plan.Cmd,
+		Cmd:     cmd,
 		Image:   r.opts.Image,
 		// Network is intentionally left unset so the run inherits the sandbox's
 		// configured default (sandbox.network in bugbot.yaml, applied via the CLI's
@@ -554,9 +594,10 @@ func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, e
 		// Dependency strategy: mount a module cache read-only and/or set GOFLAGS
 		// so the network-none run can resolve external modules. SetupCmds installs
 		// non-Go ecosystem packages from the mounted cache before Cmd runs.
-		ROMounts:  r.deps.ROMounts,
-		Env:       r.deps.Env,
-		SetupCmds: r.deps.SetupCmds,
+		ROMounts:     r.deps.ROMounts,
+		Env:          r.deps.Env,
+		SetupCmds:    r.deps.SetupCmds,
+		CaptureFiles: captures,
 	}
 	return r.sb.Exec(ctx, spec)
 }

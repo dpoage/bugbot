@@ -144,6 +144,17 @@ type Spec struct {
 	// Requires /bin/sh in the container image. Images used only for Go (the
 	// default) set no SetupCmds, so existing images and behavior are untouched.
 	SetupCmds [][]string
+
+	// CaptureFiles are workspace-relative paths to read back from the
+	// workspace after the command finishes, in addition to stdout/stderr.
+	// This is the seam structured-output ecosystems use: e.g. a pytest run
+	// asked to emit `--junitxml=.bugbot-repro-junit.xml` writes machine-
+	// readable results to a file rather than (only) stdout, and the caller
+	// needs that file's bytes, not just the exit code. Each path is validated
+	// with the same sanitizeRelPath rule as WriteFiles (no escaping the
+	// workspace); a path the command never wrote is silently absent from
+	// Result.Captured rather than failing the run.
+	CaptureFiles []string
 }
 
 // ROMount is a single read-only bind mount of a host directory into the
@@ -226,6 +237,14 @@ type Result struct {
 	// skipped materialization and only cloned it. Always false when RepoDir
 	// is not a git work tree, since the cache is bypassed entirely there.
 	WorkspaceCacheHit bool
+
+	// Captured holds the workspace-relative files named in Spec.CaptureFiles,
+	// keyed by their (cleaned) relative path, each capped at the backend's max
+	// output size like Stdout/Stderr. A key is absent when the command never
+	// wrote that file — CaptureFiles is a best-effort "grab it if the tool
+	// produced it" contract, not a manifest every run must satisfy. Nil when
+	// Spec.CaptureFiles was empty or nothing was captured.
+	Captured map[string][]byte
 }
 
 // Sandbox is an isolated command executor. Implementations must be safe for

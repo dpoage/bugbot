@@ -562,3 +562,128 @@ func TestInterpret_Unknown_BareNonZero_NoSentinel_NotDemonstrated(t *testing.T) 
 		t.Errorf("want reason=not_demonstrated (bugbot-vig preserved); got reason=%q", v.reason)
 	}
 }
+
+// TestInterpret_StructuredOutput — bugbot-ym09 — the structured-output
+// verdict path takes priority over the marker cascade when it yields a
+// confident answer, and falls through to markers unchanged when it doesn't.
+// Fixtures (a)-(c)/(d) are real tool output (see runnerevents_test.go's
+// realGoTestJSONFailing/realJUnitFailing/realJUnitCollectionError for
+// provenance); (b)/(e) exercise the fallback path explicitly; (f) pins that
+// the exit-0 gate in interpret() runs BEFORE the structured path is ever
+// consulted.
+func TestInterpret_StructuredOutput(t *testing.T) {
+	// (a) go test -json failing-test stdout -> demonstrated via the
+	//     structured path (no markers needed at all).
+	t.Run("go_json_failing_test_demonstrated", func(t *testing.T) {
+		res := sandbox.Result{ExitCode: 1, Stdout: realGoTestJSONFailing}
+		v := interpret(res, []string{"go", "test", "-json", "./..."})
+		if !v.demonstrated {
+			t.Errorf("want demonstrated=true, got reason=%q", v.reason)
+		}
+		if v.ecosystem != sandbox.EcosystemGo {
+			t.Errorf("want ecosystem=go, got %q", v.ecosystem)
+		}
+	})
+
+	// (b) go build-failure output that is NOT JSON (e.g. a bash -c wrapped
+	//     `go test` normalizeCmdForStructuredOutput declined to rewrite):
+	//     parseGoTestEvents yields ok=false, so interpret() falls through to
+	//     the pre-existing "[build failed]" build marker.
+	t.Run("go_plaintext_build_failure_falls_back_to_markers", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 1,
+			Stdout:   "FAIL\tfixture2 [build failed]\nFAIL\n",
+			Stderr:   "# fixture2 [fixture2.test]\n./fixture_test.go:6:2: undefined: undefinedFunc\n",
+		}
+		v := interpret(res, []string{"bash", "-c", "go test ./..."})
+		if v.demonstrated {
+			t.Fatalf("want demonstrated=false for a build failure, got true")
+		}
+		if v.reason != VerdictReasonBuildError {
+			t.Errorf("want reason=build_error (via marker fallback), got %q", v.reason)
+		}
+	})
+
+	// (b2) real `go test -json` output for a "fatal error: concurrent map
+	//      writes" crash — the structured path parses cleanly (ok=true from
+	//      parseGoTestEvents) but classifyGoEvents must decline to be
+	//      dispositive for the "test ran, only a package-level fail"
+	//      shape (see runnerevents_test.go), so interpret() falls through
+	//      to the marker cascade, whose "fatal error:" ran-marker demonstrates
+	//      it. Regression guard for the bugbot-ym09 review finding: an
+	//      earlier version of classifyGoEvents misclassified this exact
+	//      shape as a confident not_demonstrated, making the crash
+	//      unreachable as a T1.
+	t.Run("go_json_fatal_runtime_error_demonstrated_via_markers", func(t *testing.T) {
+		res := sandbox.Result{ExitCode: 2, Stdout: realGoTestJSONFatalError}
+		v := interpret(res, []string{"go", "test", "-json", "./..."})
+		if !v.demonstrated {
+			t.Errorf("want demonstrated=true via marker fallback, got reason=%q", v.reason)
+		}
+	})
+
+	// (c) pytest junitxml with a failing testcase -> demonstrated via the
+	//     structured path.
+	t.Run("pytest_junit_failing_testcase_demonstrated", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 1,
+			Captured: map[string][]byte{structuredJUnitXMLPath: []byte(realJUnitFailing)},
+		}
+		v := interpret(res, []string{"pytest", "--junitxml=" + structuredJUnitXMLPath, "test_fail.py"})
+		if !v.demonstrated {
+			t.Errorf("want demonstrated=true, got reason=%q", v.reason)
+		}
+		if v.ecosystem != sandbox.EcosystemPython {
+			t.Errorf("want ecosystem=python, got %q", v.ecosystem)
+		}
+	})
+
+	// (d) pytest junitxml with a collection error -> build_error, NOT
+	//     demonstrated, via the structured path directly (not the marker
+	//     fallback: the structured path is dispositive here).
+	t.Run("pytest_junit_collection_error_build_error", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 2,
+			Captured: map[string][]byte{structuredJUnitXMLPath: []byte(realJUnitCollectionError)},
+		}
+		v := interpret(res, []string{"pytest", "--junitxml=" + structuredJUnitXMLPath, "test_broken_import.py"})
+		if v.demonstrated {
+			t.Fatalf("want demonstrated=false for a collection error, got true")
+		}
+		if v.reason != VerdictReasonBuildError {
+			t.Errorf("want reason=build_error, got %q", v.reason)
+		}
+	})
+
+	// (e) junitxml absent (res.Captured has no entry, e.g. pytest crashed
+	//     before writing the report) -> falls back to markers. Stdout carries
+	//     a plain pytest FAILED banner so the fallback still demonstrates.
+	t.Run("junit_absent_falls_back_to_markers", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 1,
+			Stdout:   "test_fail.py::test_addition FAILED\n1 failed in 0.01s\n",
+		}
+		v := interpret(res, []string{"pytest", "--junitxml=" + structuredJUnitXMLPath, "test_fail.py"})
+		if !v.demonstrated {
+			t.Errorf("want demonstrated=true via marker fallback, got reason=%q", v.reason)
+		}
+	})
+
+	// (f) exit 0 with a failing junit testcase still in the file (e.g. a
+	//     stale report from a prior run) -> exit_zero. The exit-code gate at
+	//     the top of interpret() returns before the structured path — or any
+	//     marker — is ever consulted.
+	t.Run("exit_zero_wins_over_failing_junit", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 0,
+			Captured: map[string][]byte{structuredJUnitXMLPath: []byte(realJUnitFailing)},
+		}
+		v := interpret(res, []string{"pytest", "--junitxml=" + structuredJUnitXMLPath, "test_fail.py"})
+		if v.demonstrated {
+			t.Fatalf("want demonstrated=false at exit 0, got true")
+		}
+		if v.reason != VerdictReasonExitZero {
+			t.Errorf("want reason=exit_zero (exit-code gate wins), got %q", v.reason)
+		}
+	})
+}
