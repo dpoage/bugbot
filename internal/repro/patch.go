@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
@@ -179,37 +180,12 @@ type PatchProver struct {
 	statusNotes bool
 }
 
-// detectSuiteCmd infers the full-suite test command from well-known repo
-// marker files. Returns nil when the toolchain cannot be identified — callers
-// must skip rather than guess when nil is returned.
-//
-// Priority order matches ingest.DetectBuildSystems:
-//
-//  1. Bazel → ["bazel", "test", "--build_tests_only", "--test_output=errors", "//..."]
-//  2. GoWorkspace → ["go", "test", "./..."] only when a root go.mod also
-//     exists; without go.mod the workspace spans multiple modules and a single
-//     ./... invocation at the root is wrong (per-module invocations are out of
-//     scope).
-//  3. JSWorkspace (pnpm-workspace.yaml) → ["pnpm", "test"]; turbo/nx →
-//     ["npm", "test"] (closest sensible default; project-specific config can
-//     override via suite_cmd).
-//  4. GoModule → ["go", "test", "./..."]
-//  5. Cargo → ["cargo", "test"]
-//  6. NPM → ["npm", "test"]
-//  7. Python (pyproject.toml / setup.py) → ["python", "-m", "pytest"]
-//  8. CMake (CMakeLists.txt) → bash -c compound configure+build+test; a fresh
-//     workspace is created per run so the non-idempotent -B build form is safe.
-//  9. Meson (meson.build) → bash -c compound setup+test; same fresh-workspace
-//     guarantee as cmake.
-//
-// 10. Zig (build.zig) → `zig build test`.
-// 11. Gleam (gleam.toml) → `gleam test`.
-// 12. Elixir (mix.exs) → `mix test`.
-//
-// The existing single-marker behaviour (go.mod, Cargo.toml, package.json,
-// pyproject.toml, setup.py) is preserved exactly for backward compatibility.
+// detectSuiteCmd infers the full-suite test command from the repository's
+// build system marker files. Delegates to the shared ecosystem registry so
+// the mapping is defined exactly once. Returns nil when the toolchain cannot
+// be identified — callers must skip rather than guess when nil is returned.
 func detectSuiteCmd(repoDir string) []string {
-	return detectSuiteCmdFor(repoDir, ingest.DetectBuildSystems(repoDir))
+	return ecosystem.TestCmdFor(repoDir, ingest.DetectBuildSystems(repoDir))
 }
 
 // detectSuiteCmdFor is detectSuiteCmd with the build systems already resolved.
@@ -217,61 +193,7 @@ func detectSuiteCmd(repoDir string) []string {
 // resolves them once in New) pass it here to avoid re-scanning the repo root on
 // every call.
 func detectSuiteCmdFor(repoDir string, systems []ingest.BuildSystem) []string {
-	for _, sys := range systems {
-		switch sys {
-		case ingest.BuildSystemBazel:
-			return []string{"bazel", "test", "--build_tests_only", "--test_output=errors", "//..."}
-
-		case ingest.BuildSystemGoWorkspace:
-			// A go.work-only repo spans multiple modules; `go test ./...` at
-			// the workspace root only works when there is also a root go.mod
-			// (i.e. there is a package in the root module). Without a root
-			// go.mod the correct approach is per-module invocations, which is
-			// out of scope — fall through to let a lower-priority system match.
-			if _, err := os.Stat(filepath.Join(repoDir, "go.mod")); err == nil {
-				return []string{"go", "test", "./..."}
-			}
-			// No root go.mod: skip; lower-priority systems may still match.
-
-		case ingest.BuildSystemJSWorkspace:
-			// pnpm workspaces have a canonical `pnpm test` command.
-			if _, err := os.Stat(filepath.Join(repoDir, "pnpm-workspace.yaml")); err == nil {
-				return []string{"pnpm", "test"}
-			}
-			// turbo.json / nx.json: fall back to npm test as the closest
-			// portable default; projects that need `turbo run test` or
-			// `nx run-many` should configure suite_cmd explicitly.
-			return []string{"npm", "test"}
-
-		case ingest.BuildSystemGoModule:
-			return []string{"go", "test", "./..."}
-
-		case ingest.BuildSystemCargo:
-			return []string{"cargo", "test"}
-
-		case ingest.BuildSystemNPM:
-			return []string{"npm", "test"}
-
-		case ingest.BuildSystemPython:
-			return []string{"python", "-m", "pytest"}
-
-		case ingest.BuildSystemCMake:
-			return []string{"bash", "-c", "cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build --parallel 4 && ctest --test-dir build --output-on-failure --no-tests=ignore"}
-
-		case ingest.BuildSystemMeson:
-			return []string{"bash", "-c", "meson setup build && meson test -C build --print-errorlogs"}
-
-		case ingest.BuildSystemZig:
-			return []string{"zig", "build", "test"}
-
-		case ingest.BuildSystemGleam:
-			return []string{"gleam", "test"}
-
-		case ingest.BuildSystemElixir:
-			return []string{"mix", "test"}
-		}
-	}
-	return nil
+	return ecosystem.TestCmdFor(repoDir, systems)
 }
 
 // Prove runs the patch-prover loop for a finding that was just promoted to T1.

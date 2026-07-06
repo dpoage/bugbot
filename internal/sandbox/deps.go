@@ -1254,19 +1254,40 @@ func runCargoPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOp
 // mount registry's uniqueness obligation.
 const npmCacheMount = "/npmcache"
 
+// jsPrefetchFlags is the single declared source of the npm prefetch security
+// flags. --ignore-scripts is MANDATORY: npm lifecycle scripts are arbitrary
+// code and must not execute during the network-enabled prefetch container.
+// To change the posture (bugbot-gu0o) or extend flags for a future ecosystem,
+// edit ONLY this var — resolveJS and newNPMPrefetch read it at call time.
+var jsPrefetchFlags = []string{"--ignore-scripts"}
+
 // jsEcosystem is the JS/npm dependency resolver. It detects repos with a root
 // package.json and applies COMMITTED-node_modules (vendored) / FETCH / OFF.
 // HOST maps to OFF (npm HTTP cache does not materialize node_modules; see
 // file-level comment). pnpm and yarn are explicitly deferred to a future bead.
+//
+// resolve is set directly to resolveJS (not via init) so the value copied into
+// the global ecosystems slice has a non-nil resolver. resolveJS reads
+// jsPrefetchFlags at call time — no init() ordering dependency.
 var jsEcosystem = ecosystem{
 	name:    "js",
 	detect:  hasPackageJSON,
 	resolve: resolveJS,
 }
 
-// resolveJS is the JS/npm resolver function. Strategy validation has already
-// run in resolveWith; invalid strategies are unreachable here.
+// resolveJS is the JS/npm resolver function. It reads jsPrefetchFlags at
+// call time so the declared security flags are always in effect regardless
+// of struct copy order. Tests that call resolveJS directly exercise the same
+// path as production dispatch (resolveWith → eco.resolve → resolveJS).
 func resolveJS(repoDir string, opts DepOptions) (Resolution, error) {
+	return resolveJSWithFlags(repoDir, opts, jsPrefetchFlags)
+}
+
+// resolveJSWithFlags is the parameterized JS/npm resolver. prefetchFlags are
+// appended to the npm ci prefetch command (after "npm", "ci"). This separates
+// the registry declaration from the function body: the ecosystem entry declares
+// the flags; the resolver uses them without needing to know their values.
+func resolveJSWithFlags(repoDir string, opts DepOptions, prefetchFlags []string) (Resolution, error) {
 	// Committed node_modules detection wins in every mode: if node_modules/
 	// exists, dependencies are already materialized — no mount or install step
 	// is needed. This is the npm equivalent of Go's vendor/modules.txt detection.
@@ -1306,7 +1327,7 @@ func resolveJS(repoDir string, opts DepOptions) (Resolution, error) {
 		if err != nil {
 			return Resolution{}, err
 		}
-		prefetch := newNPMPrefetch(repoDir, cache, opts)
+		prefetch := newNPMPrefetch(repoDir, cache, opts, prefetchFlags)
 		// Shared=false: the npm cache is a bugbot-owned directory under the user
 		// cache dir. :Z SELinux isolation is appropriate (same rationale as the
 		// Go and Python FETCH caches).
@@ -1397,28 +1418,32 @@ func packageLockHash(repoDir string) (string, error) {
 }
 
 // newNPMPrefetch builds the one-time online npm prefetch hook for the JS FETCH
-// strategy. It runs `npm ci --ignore-scripts --cache /npmcache` in the
+// strategy. It runs `npm ci <prefetchFlags> --cache /npmcache` in the
 // FetchSandbox with network enabled and the cache dir mounted WRITABLE at
 // /npmcache, keyed on the sha256 of package-lock.json so an unchanged dep set
 // is not re-downloaded. Guarded by a sync.Once so it runs at most once per
 // Resolution even if called repeatedly.
 //
-// SECURITY: --ignore-scripts is MANDATORY in the prefetch step. npm lifecycle
-// scripts are arbitrary code; during the online prefetch the container has
-// network access, so executing them would allow a malicious package to exfiltrate
-// data or contact external services. This is enforced in the Spec and asserted
-// in unit tests.
-func newNPMPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
+// prefetchFlags are the ecosystem-declared security flags (e.g. ["--ignore-scripts"])
+// read from the ecosystem registry entry rather than hardcoded here. This makes
+// the security posture declarative: correcting or extending a flag for a new
+// ecosystem is a one-line registry edit (bugbot-gu0o).
+//
+// SECURITY: --ignore-scripts MUST be present in prefetchFlags for npm. npm
+// lifecycle scripts are arbitrary code; during the online prefetch the container
+// has network access, so executing them would allow a malicious package to
+// exfiltrate data. This is asserted in tests (TestJSResolveFetchPrefetchSpec).
+func newNPMPrefetch(repoDir, hostCache string, opts DepOptions, prefetchFlags []string) func(context.Context) error {
 	return newPrefetchOnce(func(ctx context.Context) error {
-		return runNPMPrefetch(ctx, repoDir, hostCache, opts)
+		return runNPMPrefetch(ctx, repoDir, hostCache, opts, prefetchFlags)
 	})
 }
 
 // runNPMPrefetch performs the actual online npm ci prefetch. It is a no-op when
 // the cache is already warm for the repo's current package-lock.json.
 //
-// SECURITY: --ignore-scripts is mandatory here; see newNPMPrefetch.
-func runNPMPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions) error {
+// SECURITY: prefetchFlags must include --ignore-scripts; see newNPMPrefetch.
+func runNPMPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions, prefetchFlags []string) error {
 	lockHash, hashErr := packageLockHash(repoDir)
 	sentinel := filepath.Join(hostCache, prefetchSentinel) // reuse same constant
 
@@ -1436,25 +1461,35 @@ func runNPMPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOpti
 		network = "bridge"
 	}
 
-	// SECURITY: --ignore-scripts is mandatory. npm lifecycle scripts are
-	// arbitrary code; the prefetch container has network access, so we must not
-	// execute them. The cache dir is mounted WRITABLE so npm can populate it.
+	// Build the prefetch command: "npm ci <prefetchFlags> --cache /npmcache".
+	// prefetchFlags come from the ecosystem registry entry (e.g. ["--ignore-scripts"])
+	// rather than being hardcoded here — making per-ecosystem security adjustments
+	// a one-line registry edit (bugbot-gu0o).
+	//
+	// SECURITY: npm lifecycle scripts are arbitrary code; the prefetch container
+	// has network access, so we must not execute them. The cache dir is mounted
+	// WRITABLE so npm can populate it.
+	cmd := make([]string, 0, 2+len(prefetchFlags)+2)
+	cmd = append(cmd, "npm", "ci")
+	cmd = append(cmd, prefetchFlags...)
+	cmd = append(cmd, "--cache", npmCacheMount)
 	spec := Spec{
 		RepoDir:  repoDir,
 		Image:    opts.FetchImage,
 		Network:  network,
-		Cmd:      []string{"npm", "ci", "--ignore-scripts", "--cache", npmCacheMount},
+		Cmd:      cmd,
 		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: npmCacheMount}},
 	}
+	cmdStr := strings.Join(cmd, " ")
 	res, err := opts.FetchSandbox.Exec(ctx, spec)
 	if err != nil {
-		return fmt.Errorf("sandbox: npm prefetch `npm ci --ignore-scripts` failed to launch: %w", err)
+		return fmt.Errorf("sandbox: npm prefetch `%s` failed to launch: %w", cmdStr, err)
 	}
 	if res.TimedOut {
-		return fmt.Errorf("sandbox: npm prefetch `npm ci --ignore-scripts` timed out")
+		return fmt.Errorf("sandbox: npm prefetch `%s` timed out", cmdStr)
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("sandbox: npm prefetch `npm ci --ignore-scripts` exited %d: %s", res.ExitCode, lastLines(res.Stderr, 20))
+		return fmt.Errorf("sandbox: npm prefetch `%s` exited %d: %s", cmdStr, res.ExitCode, lastLines(res.Stderr, 20))
 	}
 
 	if hashErr == nil {

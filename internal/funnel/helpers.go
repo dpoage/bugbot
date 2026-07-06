@@ -3,14 +3,13 @@ package funnel
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
 )
@@ -238,53 +237,13 @@ func normalizeConfidence(x domain.Confidence) domain.Confidence {
 }
 
 // detectTestCmd infers the full-suite test command from the repository's build
-// system marker files. It mirrors the logic in repro.detectSuiteCmd (repro/patch.go)
-// but lives here so funnel can derive the run_tests argv without importing the
-// heavyweight repro package. The two must stay in sync when new build systems
-// are added to ingest.DetectBuildSystems.
-//
-// Covered build systems (in priority order, matching DetectBuildSystems):
-// Bazel, GoWorkspace, JSWorkspace, GoModule, Cargo, NPM, Python, CMake, Meson,
-// Zig, Gleam, Elixir.
-//
-// Returns nil when the toolchain cannot be identified; buildRunTestsTool treats
-// a nil result as "feature unavailable" and returns nil so callers see no tool.
+// system marker files. It delegates to the shared ecosystem registry so the
+// mapping is defined exactly once; both funnel and repro read from the same
+// table. Returns nil when the toolchain cannot be identified; buildRunTestsTool
+// treats a nil result as "feature unavailable" and returns nil so callers see
+// no tool.
 func detectTestCmd(repoDir string) []string {
-	systems := ingest.DetectBuildSystems(repoDir)
-	for _, sys := range systems {
-		switch sys {
-		case ingest.BuildSystemBazel:
-			return []string{"bazel", "test", "--build_tests_only", "--test_output=errors", "//..."}
-		case ingest.BuildSystemGoWorkspace:
-			if _, err := os.Stat(filepath.Join(repoDir, "go.mod")); err == nil {
-				return []string{"go", "test", "./..."}
-			}
-		case ingest.BuildSystemJSWorkspace:
-			if _, err := os.Stat(filepath.Join(repoDir, "pnpm-workspace.yaml")); err == nil {
-				return []string{"pnpm", "test"}
-			}
-			return []string{"npm", "test"}
-		case ingest.BuildSystemGoModule:
-			return []string{"go", "test", "./..."}
-		case ingest.BuildSystemCargo:
-			return []string{"cargo", "test"}
-		case ingest.BuildSystemNPM:
-			return []string{"npm", "test"}
-		case ingest.BuildSystemPython:
-			return []string{"python", "-m", "pytest"}
-		case ingest.BuildSystemCMake:
-			return []string{"bash", "-c", "cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build --parallel 4 && ctest --test-dir build --output-on-failure --no-tests=ignore"}
-		case ingest.BuildSystemMeson:
-			return []string{"bash", "-c", "meson setup build && meson test -C build --print-errorlogs"}
-		case ingest.BuildSystemZig:
-			return []string{"zig", "build", "test"}
-		case ingest.BuildSystemGleam:
-			return []string{"gleam", "test"}
-		case ingest.BuildSystemElixir:
-			return []string{"mix", "test"}
-		}
-	}
-	return nil
+	return ecosystem.TestCmdFor(repoDir, ingest.DetectBuildSystems(repoDir))
 }
 
 // buildRunTestsTool builds the run_tests tool for a candidate if the sandbox

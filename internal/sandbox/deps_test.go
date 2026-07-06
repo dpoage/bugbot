@@ -1712,6 +1712,56 @@ func TestJSFetchRequiresSandbox(t *testing.T) {
 	}
 }
 
+// TestResolveDeps_JS_GlobalTable is the coverage gate for the nil-panic blocker
+// (bugbot-fxrg): it calls ResolveDeps through the GLOBAL ecosystems table (not
+// resolveJS directly) so if jsEcosystem.resolve is nil in the copy stored in
+// that slice, this test panics with an immediately-obvious nil-pointer
+// dereference. Previously this was only covered by a build-tagged integration
+// test, letting the bug slip through the default suite.
+//
+// It also asserts the SECURITY invariant: --ignore-scripts MUST be present in
+// the prefetch Cmd for the npm FETCH strategy (same check as
+// TestJSResolveFetchPrefetchSpec, but through the production dispatch path).
+func TestResolveDeps_JS_GlobalTable(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"lockfileVersion":2}`+"\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	// ResolveDeps → resolveWith(ecosystems, ...) → ecosystems[3].resolve(...)
+	// If ecosystems[3].resolve is nil this panics; if --ignore-scripts is absent
+	// the SECURITY assertion below fails.
+	res, err := ResolveDeps(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps (global table, JS FETCH): %v", err)
+	}
+	if res.Prefetch == nil {
+		t.Fatal("JS FETCH via global table: want non-nil Prefetch hook")
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("prefetch: %v", err)
+	}
+	calls := mock.Calls()
+	if len(calls) == 0 {
+		t.Fatal("prefetch should have run a container")
+	}
+	spec := calls[0].Spec
+	// SECURITY: --ignore-scripts is mandatory (reads jsPrefetchFlags through
+	// the production dispatch path resolveWith → jsEcosystem.resolve →
+	// resolveJS → resolveJSWithFlags → newNPMPrefetch → runNPMPrefetch).
+	if !slices.Contains(spec.Cmd, "--ignore-scripts") {
+		t.Errorf("SECURITY: prefetch Cmd %v missing --ignore-scripts; production dispatch path is broken", spec.Cmd)
+	}
+	if res.Strategy != DepStrategyFetch {
+		t.Errorf("Strategy = %q, want fetch", res.Strategy)
+	}
+}
+
 // ---- C#/NuGet ecosystem unit tests -----------------------------------------
 
 // TestNuGetDetectOnOff: detect fires on any root-level C#/F# project file
