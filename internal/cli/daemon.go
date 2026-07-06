@@ -124,6 +124,7 @@ func newDaemonCmd() *cobra.Command {
 					return rerr
 				}
 				defer reproducer.repro.Close() //nolint:errcheck
+				defer func() { _ = reproducer.sb.Close() }()
 				deps.ReproClient = reproducer.client
 				deps.Reproducer = reproducer.repro
 				deps.ReproTagger = reproducer.spend
@@ -209,6 +210,10 @@ func daySpendGetter(ctx context.Context, st *store.Store) func() (int64, int64) 
 type reproDeps struct {
 	client llm.Client
 	repro  *repro.Reproducer
+	// sb is the sandbox backing repro. Callers defer sb.Close() alongside
+	// repro.Close() to release the reproducer's pristine-workspace cache
+	// (internal/sandbox's wsCache) when this reproDeps' natural scope ends.
+	sb *sandbox.CLI
 	// spend ledgers reproducer/patch-prover usage; the daemon retags it with
 	// each cycle's scan-run id (bugbot-58c).
 	spend *ledgerRecorder
@@ -248,11 +253,12 @@ func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 		PackageSummary:   packageSummaryProvider(st),
 		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,
+		MaxParallel:      cfg.Repro.MaxParallel,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer: %w", err)
 	}
-	return &reproDeps{client: client, repro: r, spend: rec}, nil
+	return &reproDeps{client: client, repro: r, sb: sb, spend: rec}, nil
 }
 
 // printDaemonBanner prints the startup banner: intervals, budgets, sinks, and
