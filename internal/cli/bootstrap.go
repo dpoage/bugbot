@@ -85,25 +85,25 @@ func closeStore(st *store.Store) {
 
 // buildRoleClients constructs the finder, verifier, and (when cartographer
 // is enabled in cfg.Scan.Cartographer) cartographer LLM clients via
-// llm.ResolveRole. The arbiter client is always built: when [roles.arbiter] is
+// config.ResolveRole. The arbiter client is always built: when [roles.arbiter] is
 // unset, roleModel returns the verifier mapping, so the unconfigured-arbiter =
 // verifier fallback costs nothing. Each role's error is wrapped with the role
 // name so a failure identifies the missing piece ("build finder client: ...").
 func buildRoleClients(ctx context.Context, cfg *config.Config) (finder, verifier, cartographer, arbiter llm.Client, err error) {
-	finder, err = llm.ResolveRole(ctx, cfg, "finder", llm.Options{})
+	finder, err = config.ResolveRole(ctx, cfg, "finder", llm.Options{})
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build finder client: %w", err)
 	}
-	verifier, err = llm.ResolveRole(ctx, cfg, "verifier", llm.Options{})
+	verifier, err = config.ResolveRole(ctx, cfg, "verifier", llm.Options{})
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build verifier client: %w", err)
 	}
-	arbiter, err = llm.ResolveRole(ctx, cfg, "arbiter", llm.Options{})
+	arbiter, err = config.ResolveRole(ctx, cfg, "arbiter", llm.Options{})
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build arbiter client: %w", err)
 	}
 	if cfg.Scan.Cartographer {
-		cartographer, err = llm.ResolveRole(ctx, cfg, "cartographer", llm.Options{})
+		cartographer, err = config.ResolveRole(ctx, cfg, "cartographer", llm.Options{})
 		if err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("build cartographer client: %w", err)
 		}

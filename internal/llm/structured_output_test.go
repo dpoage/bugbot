@@ -6,8 +6,6 @@ import (
 	"io"
 	"net/http"
 	"testing"
-
-	"github.com/dpoage/bugbot/internal/config"
 )
 
 // schemaForTest is a small, valid JSON Schema used across the
@@ -127,7 +125,7 @@ func TestStructuredOutput_OpenAICompatible_AttachesResponseFormat(t *testing.T) 
 		apiKey:   "k",
 		baseURL:  base,
 		provider: "openai-compatible",
-		caps:     withCaps(openAICompatibleCapabilities(), true),
+		caps:     withCaps(openAICompatibleCapabilities("llama-test"), true),
 	})
 	req := simpleRequest()
 	req.ResponseSchema = schemaForTest
@@ -479,7 +477,7 @@ func TestStructuredOutput_AllGatedByCapability(t *testing.T) {
 		runOne(t, "openai-compatible", func(base string) Client {
 			return newOpenAIAdapter("llama-test", openaiOptions{
 				apiKey: "k", baseURL: base, provider: "openai-compatible",
-				caps: withCaps(openAICompatibleCapabilities(), false),
+				caps: withCaps(openAICompatibleCapabilities("llama-test"), false),
 			})
 		}, hasNestedField("response_format"))
 	})
@@ -515,10 +513,9 @@ func TestStructuredOutput_AllGatedByCapability(t *testing.T) {
 // client whose capabilities report StructuredOutput=true.
 func TestStructuredOutput_ConfigOverride_FlipsOpenAICompatibleCapabilities(t *testing.T) {
 	tr := true
-	provider := config.Provider{
-		Type:             config.ProviderOpenAICompatible,
+	provider := ProviderSpec{
+		Type:             ProviderOpenAICompatible,
 		BaseURL:          "http://example.invalid",
-		APIKeyEnv:        "X",
 		StructuredOutput: &tr,
 	}
 	client, err := NewClient(context.Background(), provider, "test", "llama3", "k", Options{})
@@ -535,9 +532,8 @@ func TestStructuredOutput_ConfigOverride_FlipsOpenAICompatibleCapabilities(t *te
 // provider that would default to true.
 func TestStructuredOutput_ConfigOverride_OffUnaffected(t *testing.T) {
 	f := false
-	provider := config.Provider{
-		Type:             config.ProviderOpenAI,
-		APIKeyEnv:        "X",
+	provider := ProviderSpec{
+		Type:             ProviderOpenAI,
 		StructuredOutput: &f,
 	}
 	client, err := NewClient(context.Background(), provider, "test", "gpt-test", "k", Options{})
@@ -554,7 +550,7 @@ func TestStructuredOutput_ConfigOverride_OffUnaffected(t *testing.T) {
 // (true for first-party, false for openai-compatible).
 func TestStructuredOutput_ConfigOverride_UnaffectedWhenUnset(t *testing.T) {
 	t.Run("first-party default true", func(t *testing.T) {
-		provider := config.Provider{Type: config.ProviderOpenAI, APIKeyEnv: "X"}
+		provider := ProviderSpec{Type: ProviderOpenAI}
 		client, err := NewClient(context.Background(), provider, "t", "gpt-x", "k", Options{})
 		if err != nil {
 			t.Fatalf("NewClient: %v", err)
@@ -564,7 +560,7 @@ func TestStructuredOutput_ConfigOverride_UnaffectedWhenUnset(t *testing.T) {
 		}
 	})
 	t.Run("openai-compatible default false", func(t *testing.T) {
-		provider := config.Provider{Type: config.ProviderOpenAICompatible, BaseURL: "http://x", APIKeyEnv: "X"}
+		provider := ProviderSpec{Type: ProviderOpenAICompatible, BaseURL: "http://x"}
 		client, err := NewClient(context.Background(), provider, "t", "llama", "k", Options{})
 		if err != nil {
 			t.Fatalf("NewClient: %v", err)

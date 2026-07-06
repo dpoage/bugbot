@@ -108,7 +108,7 @@ func TestOpenAICompatible_NoCachedTokensField(t *testing.T) {
 	})
 	client := newOpenAIAdapter("llama-test", openaiOptions{
 		apiKey: "test-key", baseURL: base,
-		provider: "openai-compatible", caps: openAICompatibleCapabilities(),
+		provider: "openai-compatible", caps: openAICompatibleCapabilities("llama-test"),
 	})
 
 	resp, err := client.Complete(context.Background(), simpleRequest())

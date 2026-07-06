@@ -6,8 +6,6 @@ import (
 	"io"
 	"net/http"
 	"testing"
-
-	"github.com/dpoage/bugbot/internal/config"
 )
 
 // mapSchemaForTest mirrors the real reproducer/patch "files" contract: a
@@ -153,7 +151,7 @@ func TestSchemaCompat_OpenAICompatible_DowngradesResponseFormat(t *testing.T) {
 		apiKey:                     "k",
 		baseURL:                    base,
 		provider:                   "openai-compatible",
-		caps:                       withCaps(openAICompatibleCapabilities(), true),
+		caps:                       withCaps(openAICompatibleCapabilities("llama-test"), true),
 		requireBoolAdditionalProps: true,
 	})
 	req := simpleRequest()
@@ -181,7 +179,7 @@ func TestSchemaCompat_OpenAICompatible_DowngradesToolParameters(t *testing.T) {
 		apiKey:                     "k",
 		baseURL:                    base,
 		provider:                   "openai-compatible",
-		caps:                       withCaps(openAICompatibleCapabilities(), true),
+		caps:                       withCaps(openAICompatibleCapabilities("llama-test"), true),
 		requireBoolAdditionalProps: true,
 	})
 	req := simpleRequest()
@@ -233,8 +231,8 @@ func TestSchemaCompat_Registry_OpenAICompatibleEnablesDowngrade(t *testing.T) {
 	var captured map[string]any
 	base := captureBody(t, &captured)
 	on := true
-	client, err := NewClient(context.Background(), config.Provider{
-		Type:             config.ProviderOpenAICompatible,
+	client, err := NewClient(context.Background(), ProviderSpec{
+		Type:             ProviderOpenAICompatible,
 		BaseURL:          base,
 		StructuredOutput: &on,
 	}, "minimax", "MiniMax-M3", "k", Options{})

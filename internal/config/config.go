@@ -767,7 +767,7 @@ func (c *Config) Validate() error {
 
 	// The cartographer role is OPTIONAL: when [roles.cartographer] is omitted,
 	// the package-summary pass (scan.cartographer) reuses the finder's
-	// provider/model (llm.roleModel falls back). Validate it only when the user
+	// provider/model (config.roleModel falls back). Validate it only when the user
 	// set one — but then require it to be complete and resolvable.
 	if c.Roles.Cartographer.Provider != "" || c.Roles.Cartographer.Model != "" {
 		if c.Roles.Cartographer.Provider == "" || c.Roles.Cartographer.Model == "" {
@@ -780,7 +780,7 @@ func (c *Config) Validate() error {
 
 	// The arbiter role is OPTIONAL for the same reason as cartographer: when
 	// [roles.arbiter] is omitted the split-verdict arbiter reuses the verifier's
-	// provider/model (llm.roleModel falls back). Validate it only when the user
+	// provider/model (config.roleModel falls back). Validate it only when the user
 	// explicitly set one -- but then require it to be complete and resolvable,
 	// mirroring cartographer's check exactly.
 	if c.Roles.Arbiter.Provider != "" || c.Roles.Arbiter.Model != "" {

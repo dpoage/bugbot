@@ -431,7 +431,7 @@ func buildReproHookForScan(
 	// hook on first use (the funnel supplies it), and again after the sweep
 	// for the catch-up drain.
 	rec = newLedgerRecorder(ctx, st)
-	reproClient, rErr := llm.ResolveRole(ctx, &cfg, "reproducer", llm.Options{Recorder: rec})
+	reproClient, rErr := config.ResolveRole(ctx, &cfg, "reproducer", llm.Options{Recorder: rec})
 	if rErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer client: %w", rErr)
 	}

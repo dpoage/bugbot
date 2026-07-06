@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-
-	"github.com/dpoage/bugbot/internal/config"
 )
 
 // Options tunes client construction. The zero value is valid: it uses default
@@ -24,7 +22,7 @@ type Options struct {
 	HTTPClient *http.Client
 }
 
-// NewClient builds a fully-wrapped Client for the given provider config and
+// NewClient builds a fully-wrapped Client for the given provider spec and
 // model. The returned client is decorated, outer-to-inner, with:
 //
 //	serialize -> recorder -> retry -> adapter
@@ -43,65 +41,65 @@ type Options struct {
 // apiKey is the resolved secret (caller obtains it via config.Config.APIKey).
 // Passing it explicitly keeps this constructor free of environment lookups and
 // testable without real keys.
-func NewClient(ctx context.Context, provider config.Provider, providerName, model, apiKey string, opts Options) (Client, error) {
+func NewClient(ctx context.Context, spec ProviderSpec, providerName, model, apiKey string, opts Options) (Client, error) {
 	if model == "" {
 		return nil, fmt.Errorf("llm: model must not be empty for provider %q", providerName)
 	}
 
 	var adapter Client
-	switch provider.Type {
-	case config.ProviderAnthropic:
+	switch spec.Type {
+	case ProviderAnthropic:
 		aopts := anthropicOptions{
-			baseURL:    provider.BaseURL,
+			baseURL:    spec.BaseURL,
 			httpClient: opts.HTTPClient,
 		}
 		// The secret parameter carries either an API key or an OAuth bearer token
 		// depending on the provider's auth mode. Route it to the right field so
 		// newAnthropicAdapter can select the correct authentication path.
-		if provider.Auth == "oauth-token" {
+		if spec.Auth == "oauth-token" {
 			aopts.authToken = apiKey
 		} else {
 			aopts.apiKey = apiKey
 		}
 		adapter = newAnthropicAdapter(model, aopts)
-	case config.ProviderOpenAI:
+	case ProviderOpenAI:
 		caps := openAICapabilities(model)
-		if provider.StructuredOutput != nil {
-			caps.StructuredOutput = *provider.StructuredOutput
+		if spec.StructuredOutput != nil {
+			caps.StructuredOutput = *spec.StructuredOutput
 		}
 		adapter = newOpenAIAdapter(model, openaiOptions{
 			apiKey:     apiKey,
-			baseURL:    provider.BaseURL,
+			baseURL:    spec.BaseURL,
 			httpClient: opts.HTTPClient,
-			provider:   string(config.ProviderOpenAI),
+			provider:   string(ProviderOpenAI),
 			caps:       caps,
 		})
-	case config.ProviderOpenAICompatible:
-		caps := openAICompatibleCapabilities()
+	case ProviderOpenAICompatible:
+		caps := openAICompatibleCapabilities(model)
 		// The conservative default for openai-compatible endpoints is
 		// StructuredOutput=false; let the config flip it on (e.g. for a
 		// MiniMax-style endpoint that supports it). The override is also
 		// applied to other providers for symmetry — first-party defaults
 		// are already true, so flipping them off is the only meaningful
 		// change, and that flows through the same code path.
-		if provider.StructuredOutput != nil {
-			caps.StructuredOutput = *provider.StructuredOutput
+		if spec.StructuredOutput != nil {
+			caps.StructuredOutput = *spec.StructuredOutput
 		}
 		adapter = newOpenAIAdapter(model, openaiOptions{
 			apiKey:     apiKey,
-			baseURL:    provider.BaseURL,
+			baseURL:    spec.BaseURL,
 			httpClient: opts.HTTPClient,
-			provider:   string(config.ProviderOpenAICompatible),
+			provider:   string(ProviderOpenAICompatible),
 			caps:       caps,
 			// Strict openai-compatible validators (MiniMax) reject object-valued
 			// additionalProperties; downgrade it to a boolean on the wire. See
 			// coerceBoolAdditionalProperties. First-party OpenAI keeps the subschema.
 			requireBoolAdditionalProps: true,
 		})
-	case config.ProviderGoogle:
+	case ProviderGoogle:
 		ga, err := newGoogleAdapter(ctx, model, googleOptions{
 			apiKey:     apiKey,
-			baseURL:    provider.BaseURL,
+			baseURL:    spec.BaseURL,
 			httpClient: opts.HTTPClient,
 		})
 		if err != nil {
@@ -109,7 +107,7 @@ func NewClient(ctx context.Context, provider config.Provider, providerName, mode
 		}
 		adapter = ga
 	default:
-		return nil, fmt.Errorf("llm: unsupported provider type %q", provider.Type)
+		return nil, fmt.Errorf("llm: unsupported provider type %q", spec.Type)
 	}
 
 	retryCfg := opts.Retry
@@ -125,80 +123,12 @@ func NewClient(ctx context.Context, provider config.Provider, providerName, mode
 	return WithSerializedToolCalls(client), nil
 }
 
-// ResolveRole builds a Client for a pipeline role (finder/verifier/reproducer)
-// by mapping the role to its provider+model via config, resolving the provider
-// API key from the environment, and constructing the adapter. Roles may map to
-// different providers, so a single config can mix Anthropic finders with OpenAI
-// verifiers, etc.
-//
-// The role name tags emitted UsageEvents for per-role spend accounting.
-func ResolveRole(ctx context.Context, cfg *config.Config, role string, opts Options) (Client, error) {
-	rm, ok := roleModel(cfg, role)
-	if !ok {
-		return nil, fmt.Errorf("llm: unknown role %q (want finder, verifier, reproducer, cartographer, or arbiter)", role)
-	}
-
-	provider, ok := cfg.Providers[rm.Provider]
-	if !ok {
-		return nil, fmt.Errorf("llm: role %q references unknown provider %q", role, rm.Provider)
-	}
-
-	// Credential resolves the active secret for this provider's auth mode:
-	// an API key in api_key mode, or an OAuth bearer token in oauth-token mode.
-	apiKey, err := cfg.Credential(rm.Provider)
-	if err != nil {
-		return nil, err
-	}
-
-	// Apply the per-attempt request timeout from config when set. NewClient
-	// resets opts.Retry to defaults whenever MaxAttempts==0, which would
-	// silently drop a RequestTimeout set alone on opts.Retry; start from
-	// DefaultRetryConfig so MaxAttempts is non-zero (the reset is skipped)
-	// and the user's RequestTimeout is the only field overridden.
-	opts.Retry = DefaultRetryConfig()
-	if cfg.LLM.RequestTimeout > 0 {
-		opts.Retry.RequestTimeout = cfg.LLM.RequestTimeout
-	}
-	opts.Role = role
-	return NewClient(ctx, provider, rm.Provider, rm.Model, apiKey, opts)
-}
-
-// roleModel returns the RoleModel mapping for the named role.
-func roleModel(cfg *config.Config, role string) (config.RoleModel, bool) {
-	switch role {
-	case "finder":
-		return cfg.Roles.Finder, true
-	case "verifier":
-		return cfg.Roles.Verifier, true
-	case "reproducer":
-		return cfg.Roles.Reproducer, true
-	case "cartographer":
-		// Optional role: fall back to the finder's mapping when no
-		// [roles.cartographer] block is configured, so the summary pass
-		// resolves a client without forcing every config to declare one.
-		if cfg.Roles.Cartographer.Provider != "" {
-			return cfg.Roles.Cartographer, true
-		}
-		return cfg.Roles.Finder, true
-	case "arbiter":
-		// Optional role: fall back to the verifier's mapping when no
-		// [roles.arbiter] block is configured, so the split-verdict
-		// arbiter resolves a client without forcing every config to
-		// declare one (preserves the pre-role single-model behavior).
-		if cfg.Roles.Arbiter.Provider != "" {
-			return cfg.Roles.Arbiter, true
-		}
-		return cfg.Roles.Verifier, true
-	default:
-		return config.RoleModel{}, false
-	}
-}
-
 // openAICapabilities returns the capability profile for first-party OpenAI
-// models.
+// models. Context window is per-model where known, with a 128k default for
+// unrecognized models.
 func openAICapabilities(model string) Capabilities {
 	return Capabilities{
-		ContextWindow:     128_000,
+		ContextWindow:     openAIContextWindow(model),
 		ParallelToolCalls: true,
 		PromptCaching:     true,
 		StructuredOutput:  true,
@@ -212,11 +142,58 @@ func openAICapabilities(model string) Capabilities {
 // usage.prompt_tokens_details.cached_tokens opportunistically when the
 // endpoint reports it (e.g. MiniMax), so cache hits are ledgered even with
 // PromptCaching=false. Callers can override.
-func openAICompatibleCapabilities() Capabilities {
+//
+// The model parameter is accepted for symmetry with other capability
+// constructors; no per-model lookup is available for arbitrary endpoints,
+// so ContextWindow is left at 0 (unknown).
+func openAICompatibleCapabilities(model string) Capabilities {
 	return Capabilities{
-		ContextWindow:     0, // unknown
+		ContextWindow:     0, // unknown for arbitrary endpoints
 		ParallelToolCalls: false,
 		PromptCaching:     false,
 		StructuredOutput:  false,
+	}
+}
+
+// openAIContextWindow returns the known context-window size for a first-party
+// OpenAI model. Unrecognized models get the 128k default which covers the
+// current GPT-4o family. scaleFinderForContext uses this to avoid context
+// overflow on small models.
+func openAIContextWindow(model string) int {
+	switch model {
+	case "gpt-3.5-turbo", "gpt-3.5-turbo-0125":
+		return 16_385
+	case "gpt-3.5-turbo-16k":
+		return 16_385
+	case "gpt-4", "gpt-4-0613":
+		return 8_192
+	case "gpt-4-32k", "gpt-4-32k-0613":
+		return 32_768
+	case "gpt-4-turbo", "gpt-4-turbo-2024-04-09", "gpt-4-turbo-preview":
+		return 128_000
+	case "gpt-4o", "gpt-4o-2024-05-13", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20":
+		return 128_000
+	case "gpt-4o-mini", "gpt-4o-mini-2024-07-18":
+		return 128_000
+	case "o1", "o1-2024-12-17":
+		return 200_000
+	case "o1-mini", "o1-mini-2024-09-12":
+		return 128_000
+	case "o1-preview", "o1-preview-2024-09-12":
+		return 128_000
+	case "o3", "o3-2025-04-16":
+		return 200_000
+	case "o3-mini", "o3-mini-2025-01-31":
+		return 200_000
+	case "o4-mini", "o4-mini-2025-04-16":
+		return 200_000
+	case "gpt-4.1", "gpt-4.1-2025-04-14":
+		return 1_047_576
+	case "gpt-4.1-mini", "gpt-4.1-mini-2025-04-14":
+		return 1_047_576
+	case "gpt-4.1-nano", "gpt-4.1-nano-2025-04-14":
+		return 1_047_576
+	default:
+		return 128_000
 	}
 }

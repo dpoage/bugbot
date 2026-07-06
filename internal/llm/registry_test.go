@@ -5,104 +5,7 @@ import (
 	"net/http"
 	"testing"
 	"time"
-
-	"github.com/dpoage/bugbot/internal/config"
 )
-
-func TestResolveRole_MixedProviders(t *testing.T) {
-	// Two servers: an Anthropic-shaped one for finder, an OpenAI-shaped one for
-	// verifier. This proves roles resolve across different providers from one
-	// config.
-	anthropicBase := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(mockTextBody("anthropic", "finder-says-hi", 10, 4)))
-	})
-	openaiBase := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(mockTextBody("openai", "verifier-says-hi", 20, 8)))
-	})
-
-	cfg := &config.Config{
-		Providers: map[string]config.Provider{
-			"claude": {Type: config.ProviderAnthropic, BaseURL: anthropicBase, APIKeyEnv: "TEST_ANTHROPIC_KEY"},
-			"oai":    {Type: config.ProviderOpenAI, BaseURL: openaiBase, APIKeyEnv: "TEST_OPENAI_KEY"},
-		},
-		Roles: config.Roles{
-			Finder:     config.RoleModel{Provider: "claude", Model: "claude-test"},
-			Verifier:   config.RoleModel{Provider: "oai", Model: "gpt-test"},
-			Reproducer: config.RoleModel{Provider: "claude", Model: "claude-test"},
-		},
-	}
-	t.Setenv("TEST_ANTHROPIC_KEY", "sk-ant-xxx")
-	t.Setenv("TEST_OPENAI_KEY", "sk-oai-xxx")
-
-	var recorded []UsageEvent
-	rec := RecorderFunc(func(ev UsageEvent) { recorded = append(recorded, ev) })
-	opts := Options{Recorder: rec}
-
-	finder, err := ResolveRole(context.Background(), cfg, "finder", opts)
-	if err != nil {
-		t.Fatalf("ResolveRole finder: %v", err)
-	}
-	verifier, err := ResolveRole(context.Background(), cfg, "verifier", opts)
-	if err != nil {
-		t.Fatalf("ResolveRole verifier: %v", err)
-	}
-
-	fResp, err := finder.Complete(context.Background(), simpleRequest())
-	if err != nil {
-		t.Fatalf("finder.Complete: %v", err)
-	}
-	if fResp.Text != "finder-says-hi" {
-		t.Errorf("finder text = %q", fResp.Text)
-	}
-
-	vResp, err := verifier.Complete(context.Background(), simpleRequest())
-	if err != nil {
-		t.Fatalf("verifier.Complete: %v", err)
-	}
-	if vResp.Text != "verifier-says-hi" {
-		t.Errorf("verifier text = %q", vResp.Text)
-	}
-
-	// Usage was recorded per role/provider/model.
-	if len(recorded) != 2 {
-		t.Fatalf("recorded %d events, want 2", len(recorded))
-	}
-	byRole := map[string]UsageEvent{}
-	for _, ev := range recorded {
-		byRole[ev.Role] = ev
-	}
-	if byRole["finder"].Provider != "claude" || byRole["finder"].Usage.InputTokens != 10 {
-		t.Errorf("finder event = %+v", byRole["finder"])
-	}
-	if byRole["verifier"].Provider != "oai" || byRole["verifier"].Usage.OutputTokens != 8 {
-		t.Errorf("verifier event = %+v", byRole["verifier"])
-	}
-}
-
-func TestResolveRole_UnknownRole(t *testing.T) {
-	cfg := &config.Config{}
-	_, err := ResolveRole(context.Background(), cfg, "nonsense", Options{})
-	if err == nil {
-		t.Fatal("expected error for unknown role")
-	}
-}
-
-func TestResolveRole_MissingAPIKey(t *testing.T) {
-	cfg := &config.Config{
-		Providers: map[string]config.Provider{
-			"p": {Type: config.ProviderAnthropic, APIKeyEnv: "DEFINITELY_UNSET_KEY_12345"},
-		},
-		Roles: config.Roles{
-			Finder: config.RoleModel{Provider: "p", Model: "m"},
-		},
-	}
-	_, err := ResolveRole(context.Background(), cfg, "finder", Options{})
-	if err == nil {
-		t.Fatal("expected error when API key env var is unset")
-	}
-}
 
 func TestNewClient_OpenAICompatibleSerializesToolCalls(t *testing.T) {
 	// An openai-compatible endpoint defaults to ParallelToolCalls=false, and
@@ -136,8 +39,8 @@ func TestNewClient_OpenAICompatibleSerializesToolCalls(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(multiBody))
 	})
-	provider := config.Provider{Type: config.ProviderOpenAICompatible, BaseURL: base, APIKeyEnv: "X"}
-	client, err := NewClient(context.Background(), provider, "ollama", "llama3", "key", Options{})
+	spec := ProviderSpec{Type: ProviderOpenAICompatible, BaseURL: base}
+	client, err := NewClient(context.Background(), spec, "ollama", "llama3", "key", Options{})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -157,81 +60,77 @@ func TestNewClient_OpenAICompatibleSerializesToolCalls(t *testing.T) {
 	}
 }
 
-// TestRoleModel_CartographerFallback pins the optional cartographer role: an
-// unset [roles.cartographer] resolves to the finder's mapping, while an
-// explicit mapping wins. This is what lets the summary pass point at a cheaper
-// model without forcing every config to declare one.
-func TestRoleModel_CartographerFallback(t *testing.T) {
-	cfg := &config.Config{Roles: config.Roles{
-		Finder: config.RoleModel{Provider: "p", Model: "finder-model"},
-	}}
-	rm, ok := roleModel(cfg, "cartographer")
-	if !ok {
-		t.Fatal("roleModel(cartographer) not ok")
-	}
-	if rm.Provider != "p" || rm.Model != "finder-model" {
-		t.Errorf("unset cartographer = %+v, want finder fallback {p finder-model}", rm)
-	}
-	cfg.Roles.Cartographer = config.RoleModel{Provider: "p2", Model: "carto-model"}
-	rm, ok = roleModel(cfg, "cartographer")
-	if !ok || rm.Provider != "p2" || rm.Model != "carto-model" {
-		t.Errorf("explicit cartographer = %+v, want {p2 carto-model}", rm)
-	}
-}
-
-// TestResolveRole_LLMRequestTimeoutWiring asserts that the per-attempt
-// request_timeout config field is threaded through to the constructed
-// role client's RetryConfig.RequestTimeout. Anthropic reports
-// ParallelToolCalls=true so WithSerializedToolCalls is a passthrough and
-// the returned client is the *retryClient built inside NewClient — the
-// most idiomatic layer at which to observe the wiring without adding a
-// public accessor.
-func TestResolveRole_LLMRequestTimeoutWiring(t *testing.T) {
-	t.Setenv("TEST_LLM_TLS_KEY", "sk-test")
+// TestNewClient_RequestTimeoutWiring asserts that an explicit RequestTimeout in
+// opts.Retry is honoured by NewClient and threads through to the *retryClient
+// layer. This is a white-box test (package llm) so it can type-assert *retryClient
+// directly without an exported accessor.
+//
+// Anthropic reports ParallelToolCalls=true so WithSerializedToolCalls is a
+// passthrough; the outermost client is the *retryClient itself.
+func TestNewClient_RequestTimeoutWiring(t *testing.T) {
 	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(mockTextBody("anthropic", "ok", 1, 1)))
 	})
-	mk := func(rt time.Duration) *config.Config {
-		return &config.Config{
-			Providers: map[string]config.Provider{
-				"p": {Type: config.ProviderAnthropic, BaseURL: base, APIKeyEnv: "TEST_LLM_TLS_KEY"},
-			},
-			Roles: config.Roles{
-				Finder: config.RoleModel{Provider: "p", Model: "m"},
-			},
-			LLM: config.LLM{RequestTimeout: rt},
-		}
-	}
-	// Zero / omitted: the resolved client must carry the LLM package default.
-	c, err := ResolveRole(context.Background(), mk(0), "finder", Options{})
+	t.Setenv("UNUSED_KEY", "sk-test")
+
+	spec := ProviderSpec{Type: ProviderAnthropic, BaseURL: base}
+
+	// Zero MaxAttempts triggers the DefaultRetryConfig reset; RequestTimeout
+	// must be the package default.
+	c, err := NewClient(context.Background(), spec, "p", "m", "sk-test", Options{})
 	if err != nil {
-		t.Fatalf("ResolveRole(zero): %v", err)
+		t.Fatalf("NewClient(default): %v", err)
 	}
 	rc, ok := c.(*retryClient)
 	if !ok {
-		t.Fatalf("ResolveRole returned %T, want *retryClient", c)
+		t.Fatalf("NewClient returned %T, want *retryClient (anthropic skips serializing wrapper)", c)
 	}
 	if rc.cfg.RequestTimeout != DefaultRequestTimeout {
-		t.Errorf("zero-config RequestTimeout = %v, want default %v", rc.cfg.RequestTimeout, DefaultRequestTimeout)
+		t.Errorf("default RequestTimeout = %v, want %v", rc.cfg.RequestTimeout, DefaultRequestTimeout)
 	}
-	// Explicit positive: the configured value must be the one the client runs with.
+
+	// Explicit timeout: supplied value must survive the construction path.
 	want := 42 * time.Second
-	c, err = ResolveRole(context.Background(), mk(want), "finder", Options{})
+	retryCfg := DefaultRetryConfig()
+	retryCfg.RequestTimeout = want
+	c, err = NewClient(context.Background(), spec, "p", "m", "sk-test", Options{Retry: retryCfg})
 	if err != nil {
-		t.Fatalf("ResolveRole(explicit): %v", err)
+		t.Fatalf("NewClient(explicit): %v", err)
 	}
 	rc, ok = c.(*retryClient)
 	if !ok {
-		t.Fatalf("ResolveRole returned %T, want *retryClient", c)
+		t.Fatalf("NewClient returned %T, want *retryClient", c)
 	}
 	if rc.cfg.RequestTimeout != want {
 		t.Errorf("explicit RequestTimeout = %v, want %v", rc.cfg.RequestTimeout, want)
 	}
-	// MaxAttempts must be the package default — guards against the NewClient
-	// reset path (MaxAttempts==0) silently re-deriving the cfg and dropping
-	// our override.
 	if rc.cfg.MaxAttempts != DefaultRetryConfig().MaxAttempts {
-		t.Errorf("MaxAttempts = %d, want default %d (reset must not have fired)", rc.cfg.MaxAttempts, DefaultRetryConfig().MaxAttempts)
+		t.Errorf("MaxAttempts = %d, want default %d", rc.cfg.MaxAttempts, DefaultRetryConfig().MaxAttempts)
+	}
+}
+
+// TestOpenAIContextWindow_PerModel asserts that openAIContextWindow returns
+// distinct values for models with different context sizes, and that unknown
+// models get the 128k default. This proves the capability constructors consult
+// the model parameter (Part B — scaleFinderForContext fires correctly for small
+// models like gpt-4 which is 8k, not 128k).
+func TestOpenAIContextWindow_PerModel(t *testing.T) {
+	cases := []struct {
+		model string
+		want  int
+	}{
+		{"gpt-4", 8_192},
+		{"gpt-4-32k", 32_768},
+		{"gpt-4o", 128_000},
+		{"o1", 200_000},
+		{"gpt-4.1", 1_047_576},
+		{"unknown-model-xyz", 128_000}, // default fallback
+	}
+	for _, tc := range cases {
+		caps := openAICapabilities(tc.model)
+		if caps.ContextWindow != tc.want {
+			t.Errorf("openAICapabilities(%q).ContextWindow = %d, want %d", tc.model, caps.ContextWindow, tc.want)
+		}
 	}
 }

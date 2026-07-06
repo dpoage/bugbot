@@ -371,7 +371,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	finderClient := llm.WithRecorder(f.clients.Finder, rec, roleFinder, "", "")
 	verifierClient := llm.WithRecorder(f.clients.Verifier, rec, roleVerifier, "", "")
 	// Cartographer client: configurable via the optional [roles.cartographer]
-	// mapping (falls back to the finder's model when unset; see llm.roleModel).
+	// mapping (falls back to the finder's model when unset; see config.roleModel).
 	// Tagged roleCartographer so its spend is a distinct ledger line yet still
 	// charged to the finder pool (see spendRecorder.Record).
 	cartographerBase := f.clients.Cartographer

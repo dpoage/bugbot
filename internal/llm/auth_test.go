@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-
-	"github.com/dpoage/bugbot/internal/config"
 )
 
 // mockAnthropicResponse returns a minimal valid Anthropic /v1/messages response
@@ -107,10 +105,9 @@ func TestNewClient_AnthropicAPIKeyMode(t *testing.T) {
 		_, _ = w.Write([]byte(mockAnthropicResponse()))
 	})
 
-	provider := config.Provider{
-		Type:      config.ProviderAnthropic,
-		BaseURL:   base,
-		APIKeyEnv: "UNUSED_IN_THIS_TEST",
+	provider := ProviderSpec{
+		Type:    ProviderAnthropic,
+		BaseURL: base,
 	}
 	client, err := NewClient(context.Background(), provider, "claude", "claude-test", "sk-ant-via-registry", Options{})
 	if err != nil {
@@ -142,11 +139,10 @@ func TestNewClient_AnthropicOAuthMode(t *testing.T) {
 		_, _ = w.Write([]byte(mockAnthropicResponse()))
 	})
 
-	provider := config.Provider{
-		Type:         config.ProviderAnthropic,
-		Auth:         "oauth-token",
-		BaseURL:      base,
-		AuthTokenEnv: "UNUSED_IN_THIS_TEST",
+	provider := ProviderSpec{
+		Type:    ProviderAnthropic,
+		Auth:    "oauth-token",
+		BaseURL: base,
 	}
 	// The secret (bearer token) is passed as the apiKey argument; NewClient
 	// routes it to authToken because provider.Auth == "oauth-token".

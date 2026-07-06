@@ -34,7 +34,6 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/agent"
-	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/llm"
 )
@@ -46,9 +45,9 @@ type recordEnv struct {
 	apiKey  string
 }
 
-// recordAPIKeyEnvVar names the env var holding the live key. It is wired into a
-// synthetic config.Provider so NewClient's production construction path resolves
-// the key exactly as ResolveRole would in production (see live_test.go).
+// recordAPIKeyEnvVar names the env var holding the live key. It is passed
+// directly to os.Getenv so llm.NewClient receives the resolved value rather
+// than a config.Provider — keeping internal/llm free of config imports.
 const recordAPIKeyEnvVar = "LLM_LIVE_API_KEY"
 
 // requireRecordEnv reads the recorder environment and skips when any required
@@ -77,23 +76,16 @@ func requireRecordEnv(t *testing.T) recordEnv {
 	return env
 }
 
-// newRecordClient builds a Client the way production does: a config.Provider of
-// type openai-compatible whose APIKeyEnv names the live key var, resolved
-// through config.Config.APIKey and handed to llm.NewClient. role tags the
-// emitted UsageEvents. This is the same construction path as live_test.go.
+// newRecordClient builds a Client the way production does: an openai-compatible
+// ProviderSpec handed to llm.NewClient. role tags the emitted UsageEvents.
 func newRecordClient(t *testing.T, env recordEnv, role string) llm.Client {
 	t.Helper()
-	provider := config.Provider{
-		Type:      config.ProviderOpenAICompatible,
-		BaseURL:   env.baseURL,
-		APIKeyEnv: recordAPIKeyEnvVar,
+	spec := llm.ProviderSpec{
+		Type:    llm.ProviderOpenAICompatible,
+		BaseURL: env.baseURL,
 	}
-	cfg := &config.Config{Providers: map[string]config.Provider{"live": provider}}
-	apiKey, err := cfg.APIKey("live")
-	if err != nil {
-		t.Fatalf("resolve live api key: %v", err)
-	}
-	client, err := llm.NewClient(context.Background(), provider, "live", env.model, apiKey, llm.Options{Role: role})
+	apiKey := env.apiKey
+	client, err := llm.NewClient(context.Background(), spec, "live", env.model, apiKey, llm.Options{Role: role})
 	if err != nil {
 		t.Fatalf("build %s client: %v", role, err)
 	}

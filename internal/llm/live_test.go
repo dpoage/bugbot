@@ -13,7 +13,7 @@
 //	LLM_LIVE_API_KEY=sk-... \
 //	go test -tags live ./internal/llm/ -run TestLive -v
 //
-// It builds the client exactly the way production does (a config.Provider of
+// It builds the client exactly the way production does (a ProviderSpec of
 // type "openai-compatible" routed through llm.NewClient), so it exercises the
 // real construction path — retry + recorder wrappers and all — not a shortcut.
 // Prompts are kept tiny and max_tokens modest: this costs real money.
@@ -27,8 +27,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/dpoage/bugbot/internal/config"
 )
 
 // captureRecorder is a concurrency-safe Recorder that buffers every UsageEvent
@@ -59,9 +57,8 @@ type liveEnv struct {
 	apiKey  string
 }
 
-// liveAPIKeyEnvVar is the env var name the test wires into the synthetic
-// config.Provider so NewClient's production construction path resolves the key
-// the same way ResolveRole would in production.
+// liveAPIKeyEnvVar is the env var holding the API key, read directly via
+// os.Getenv so the llm package stays free of config imports.
 const liveAPIKeyEnvVar = "LLM_LIVE_API_KEY"
 
 // requireLiveEnv reads the live-probe environment and skips the test with a
@@ -90,29 +87,25 @@ func requireLiveEnv(t *testing.T) liveEnv {
 	return env
 }
 
-// newLiveClient builds a Client the way production does: a config.Provider of
-// type openai-compatible whose APIKeyEnv names the live key variable, resolved
-// through config.Config.APIKey and handed to llm.NewClient. rec, if non-nil, is
-// attached as the usage Recorder.
+// newLiveClient builds a Client the way production does: a ProviderSpec of
+// type openai-compatible whose base URL is the live endpoint; the API key is
+// read from LLM_LIVE_API_KEY via os.Getenv. rec, if non-nil, is attached as
+// the usage Recorder.
 func newLiveClient(t *testing.T, env liveEnv, rec Recorder) Client {
 	t.Helper()
 
-	provider := config.Provider{
-		Type:      config.ProviderOpenAICompatible,
-		BaseURL:   env.baseURL,
-		APIKeyEnv: liveAPIKeyEnvVar,
+	spec := ProviderSpec{
+		Type:    ProviderOpenAICompatible,
+		BaseURL: env.baseURL,
 	}
 
-	// Resolve the key through config exactly like ResolveRole does in production,
-	// rather than passing env.apiKey directly. This exercises the real env->key
-	// resolution path.
-	cfg := &config.Config{Providers: map[string]config.Provider{"live": provider}}
-	apiKey, err := cfg.APIKey("live")
-	if err != nil {
-		t.Fatalf("resolve live api key: %v", err)
+	// Resolve the API key from the environment directly — the live test owns
+	// its own key lookup so the llm package stays free of config imports.
+	apiKey := os.Getenv(liveAPIKeyEnvVar)
+	if apiKey == "" {
+		t.Fatalf("resolve live api key: env var %q is unset", liveAPIKeyEnvVar)
 	}
-
-	client, err := NewClient(context.Background(), provider, "live", env.model, apiKey, Options{
+	client, err := NewClient(context.Background(), spec, "live", env.model, apiKey, Options{
 		Role:     "finder",
 		Recorder: rec,
 	})

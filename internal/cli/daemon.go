@@ -217,7 +217,7 @@ func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 	// Ledger repro + patch-prover spend (bugbot-58c). The daemon retags the
 	// recorder with each cycle's scan-run id via Deps.ReproTagger.
 	rec := newLedgerRecorder(ctx, st)
-	client, err := llm.ResolveRole(ctx, cfg, "reproducer", llm.Options{Recorder: rec})
+	client, err := config.ResolveRole(ctx, cfg, "reproducer", llm.Options{Recorder: rec})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer client: %w", err)
 	}

@@ -208,7 +208,7 @@ const (
 )
 
 // RoleClients holds the per-role LLM clients the funnel drives. Tests inject
-// fakes; the CLI builds these via llm.ResolveRole. Finder and Verifier are
+// fakes; the CLI builds these via config.ResolveRole. Finder and Verifier are
 // required (New rejects nil). Cartographer and Arbiter are optional: when nil,
 // the package-summary pass reuses Finder and the split-verdict arbiter reuses
 // Verifier respectively. Reproducer is not used by this stage (Tier 1

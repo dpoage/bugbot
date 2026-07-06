@@ -53,7 +53,7 @@ func allAdapters() []adapterFactory {
 					apiKey:   "test-key",
 					baseURL:  baseURL,
 					provider: "openai-compatible",
-					caps:     openAICompatibleCapabilities(),
+					caps:     openAICompatibleCapabilities("llama-test"),
 				})
 			},
 		},

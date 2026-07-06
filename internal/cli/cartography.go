@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
@@ -48,7 +49,7 @@ func newCartographyCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("open target: %w", err)
 				}
-				client, err := llm.ResolveRole(ctx, &cfg, "cartographer", llm.Options{})
+				client, err := config.ResolveRole(ctx, &cfg, "cartographer", llm.Options{})
 				if err != nil {
 					return fmt.Errorf("build cartographer client: %w", err)
 				}

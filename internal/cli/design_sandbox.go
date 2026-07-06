@@ -301,7 +301,7 @@ func runAgentTier(
 	if err != nil {
 		return initial, fmt.Errorf("load config: %w (is bugbot.yaml configured?)", err)
 	}
-	client, err := llm.ResolveRole(ctx, &cfg, "reproducer", llm.Options{})
+	client, err := config.ResolveRole(ctx, &cfg, "reproducer", llm.Options{})
 	if err != nil {
 		return initial, fmt.Errorf("resolve LLM role: %w", err)
 	}

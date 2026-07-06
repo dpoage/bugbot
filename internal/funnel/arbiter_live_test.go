@@ -78,7 +78,7 @@ func TestArbiterLive_ReplaySplits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config %s: %v", cfgPath, err)
 	}
-	verifier, err := llm.ResolveRole(ctx, &cfg, "verifier", llm.Options{})
+	verifier, err := config.ResolveRole(ctx, &cfg, "verifier", llm.Options{})
 	if err != nil {
 		t.Fatalf("resolve verifier client: %v", err)
 	}
