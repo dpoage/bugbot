@@ -165,3 +165,24 @@ func TestPane_AgentActivityIgnoresUnknown(t *testing.T) {
 		t.Errorf("expected no-active-agents placeholder:\n%s", got)
 	}
 }
+
+// TestPane_ReproAttemptFoldsIntoAgentActivity verifies a KindReproAttempt
+// event folds into the matching active agent's activity note (the same slot
+// KindAgentActivity uses) and updates the pane's last-event line.
+func TestPane_ReproAttemptFoldsIntoAgentActivity(t *testing.T) {
+	var buf bytes.Buffer
+	p := newTestPane(&buf, 200, fixedClock(time.Unix(1_000_000, 0)))
+
+	p.Handle(Event{Kind: KindAgentStarted, Role: RoleReproducer, Label: "nil deref"})
+	p.Handle(Event{Kind: KindReproAttempt, Role: RoleReproducer, Label: "nil deref", Attempt: 1, MaxAttempts: 2, Verdict: "exit_zero"})
+	buf.Reset()
+	p.paintNow()
+
+	got := StripANSI(buf.String())
+	if !strings.Contains(got, "attempt 1/2: exit_zero") {
+		t.Errorf("expected attempt note in agent line, got:\n%s", got)
+	}
+	if !strings.Contains(got, "nil deref") {
+		t.Errorf("expected finding label in last-event line, got:\n%s", got)
+	}
+}
