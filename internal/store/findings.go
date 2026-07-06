@@ -111,6 +111,13 @@ type Finding struct {
 	// verdict. Zero = not swept (impact-sweep marker; set by UpdateFindingSeverity,
 	// preserved across re-upsert when file_hash is unchanged, reset on file_hash change).
 	SweptAt time.Time
+	// ReproContradicted is true when this finding's repro test has been run
+	// >= ReproContradictionThreshold times and exited 0 each time, meaning the
+	// bug did not manifest on repeated attempts. This is disconfirming evidence:
+	// the automated test cannot reproduce the bug. Derived from
+	// repro_attempts.exit_zero_count via a LEFT JOIN at read time; false when
+	// no repro_attempts row exists for this fingerprint.
+	ReproContradicted bool
 }
 
 // encodeLenses encodes the lens list as a JSON array for storage in the
@@ -479,13 +486,13 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 
 // GetFinding returns the finding with the given id, or ErrNotFound.
 func (s *Store) GetFinding(ctx context.Context, id string) (Finding, error) {
-	return s.queryOne(ctx, `WHERE id = ?`, id)
+	return s.queryOne(ctx, `WHERE f.id = ?`, id)
 }
 
 // GetFindingByFingerprint returns the finding with the given fingerprint, or
 // ErrNotFound.
 func (s *Store) GetFindingByFingerprint(ctx context.Context, fingerprint string) (Finding, error) {
-	return s.queryOne(ctx, `WHERE fingerprint = ?`, fingerprint)
+	return s.queryOne(ctx, `WHERE f.fingerprint = ?`, fingerprint)
 }
 
 // OpenFindingsByLocusKey returns every OPEN finding sharing the lens-independent
@@ -494,7 +501,7 @@ func (s *Store) GetFindingByFingerprint(ctx context.Context, fingerprint string)
 // line-fallback) anchor there are at most a handful of findings, so this is a
 // bounded indexed read, not a table scan. An empty result is not an error.
 func (s *Store) OpenFindingsByLocusKey(ctx context.Context, locusKey string) ([]Finding, error) {
-	q := findingColumns + " FROM findings WHERE locus_key = ? AND status = ? ORDER BY created_at ASC, id ASC"
+	q := findingColumns + findingFrom + " WHERE f.locus_key = ? AND f.status = ? ORDER BY f.created_at ASC, f.id ASC"
 	return queryRows(ctx, s, "open_findings_by_locus_key", q, []any{locusKey, string(StatusOpen)},
 		func(r *sql.Rows) (Finding, error) { return scanFinding(r) })
 }
@@ -508,27 +515,27 @@ func (s *Store) ListFindings(ctx context.Context, filter FindingFilter) ([]Findi
 	var where []string
 	var args []any
 	if filter.Status != "" {
-		where = append(where, "status = ?")
+		where = append(where, "f.status = ?")
 		args = append(args, string(filter.Status))
 	}
 	if filter.HasTier {
-		where = append(where, "tier = ?")
+		where = append(where, "f.tier = ?")
 		args = append(args, int(filter.Tier))
 	}
 	if filter.CommitSHA != "" {
-		where = append(where, "commit_sha = ?")
+		where = append(where, "f.commit_sha = ?")
 		args = append(args, filter.CommitSHA)
 	}
 	if filter.Lens != "" {
-		where = append(where, "lens = ?")
+		where = append(where, "f.lens = ?")
 		args = append(args, filter.Lens)
 	}
 
-	q := findingColumns + " FROM findings"
+	q := findingColumns + findingFrom
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
-	q += " ORDER BY updated_at DESC, id ASC"
+	q += " ORDER BY f.updated_at DESC, f.id ASC"
 
 	return queryRows(ctx, s, "list_findings", q, args, func(r *sql.Rows) (Finding, error) { return scanFinding(r) })
 }
@@ -662,7 +669,7 @@ func (s *Store) UpdateFindingSeverity(ctx context.Context, id string, sev domain
 // OpenBacklog (deferred items have their updated_at bumped and move to the back).
 func (s *Store) UnsweptOpenFindings(ctx context.Context) ([]Finding, error) {
 	return queryRows(ctx, s, "unswept_open_findings",
-		findingColumns+" FROM findings WHERE status = 'open' AND swept_at IS NULL ORDER BY updated_at ASC, id ASC",
+		findingColumns+findingFrom+" WHERE f.status = 'open' AND f.swept_at IS NULL ORDER BY f.updated_at ASC, f.id ASC",
 		nil, func(r *sql.Rows) (Finding, error) { return scanFinding(r) })
 }
 
@@ -723,14 +730,25 @@ func (s *Store) AppendFindingSites(ctx context.Context, fingerprint string, site
 }
 
 // findingColumns is the SELECT column list shared by single- and multi-row reads.
-const findingColumns = `SELECT id, fingerprint, title, description, reasoning, verdict_detail,
-	severity, tier, status, lens, file, line, commit_sha, file_hash, repro_path, repro_witness,
-	fix_patch, needs_human, needs_human_reason,
-	corroborating_lenses, sites, confidence, created_at, updated_at, swept_at, locus_key`
+// It includes a LEFT JOIN against repro_attempts to populate ReproContradicted
+// in a single query, using the unique fingerprint index for O(1) lookup per row.
+// The COALESCE(ra.exit_zero_count, 0) column is appended last so scanFinding can
+// scan it into ReproContradicted without disturbing the existing column offsets.
+const findingColumns = `SELECT f.id, f.fingerprint, f.title, f.description, f.reasoning, f.verdict_detail,
+	f.severity, f.tier, f.status, f.lens, f.file, f.line, f.commit_sha, f.file_hash, f.repro_path, f.repro_witness,
+	f.fix_patch, f.needs_human, f.needs_human_reason,
+	f.corroborating_lenses, f.sites, f.confidence, f.created_at, f.updated_at, f.swept_at, f.locus_key,
+	COALESCE(ra.exit_zero_count, 0) AS exit_zero_count`
+
+// findingFrom is the FROM clause that pairs with findingColumns. The LEFT JOIN
+// on repro_attempts is safe on all three read paths (queryOne, ListFindings,
+// OpenFindingsByLocusKey) because the repro_attempts table may have no row for
+// a given fingerprint; the COALESCE above handles the NULL.
+const findingFrom = ` FROM findings f LEFT JOIN repro_attempts ra ON ra.fingerprint = f.fingerprint`
 
 func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (Finding, error) {
 	var f Finding
-	err := s.queryRow(ctx, "query_finding", findingColumns+" FROM findings "+whereClause, args, func(row *sql.Row) error {
+	err := s.queryRow(ctx, "query_finding", findingColumns+findingFrom+" "+whereClause, args, func(row *sql.Row) error {
 		var e error
 		f, e = scanFinding(row)
 		return e
@@ -756,12 +774,14 @@ func scanFinding(sc rowScanner) (Finding, error) {
 		sitesStr             string
 		createdAt, updatedAt string
 		sweptAt              sql.NullString
+		exitZeroCount        int
 	)
 	if err := sc.Scan(
 		&f.ID, &f.Fingerprint, &f.Title, &f.Description, &f.Reasoning, &f.VerdictDetail,
 		&f.Severity, &f.Tier, &status, &f.Lens, &f.File, &f.Line, &f.CommitSHA,
 		&f.FileHash, &repro, &reproWitness, &f.FixPatch, &needsHuman, &needsHumanReason,
 		&corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt, &sweptAt, &f.LocusKey,
+		&exitZeroCount,
 	); err != nil {
 		return Finding{}, err
 	}
@@ -770,6 +790,7 @@ func scanFinding(sc rowScanner) (Finding, error) {
 	f.ReproWitness = reproWitness.String
 	f.NeedsHuman = needsHuman != 0
 	f.NeedsHumanReason = NeedsHumanReason(needsHumanReason)
+	f.ReproContradicted = exitZeroCount >= ReproContradictionThreshold
 	f.CorroboratingLenses = decodeLenses(corrob)
 	f.Sites = decodeSites(sitesStr)
 	// Confidence: always recompute at read time so it is consistent with the

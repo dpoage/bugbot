@@ -93,10 +93,14 @@ func newReportListCmd() *cobra.Command {
 			}
 
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			_, _ = fmt.Fprintln(tw, "ID\tTIER\tSEVERITY\tLOCATION\tSTATUS\tTITLE")
+			_, _ = fmt.Fprintln(tw, "ID\tTIER\tSEVERITY\tLOCATION\tSTATUS\tFLAGS\tTITLE")
 			for _, f := range findings {
-				_, _ = fmt.Fprintf(tw, "%s\tT%d\t%s\t%s:%d\t%s\t%s\n",
-					util.Truncate(f.ID, 12), f.Tier, f.Severity, f.File, f.Line, f.Status, f.Title)
+				flags := ""
+				if f.ReproContradicted {
+					flags = "repro-contradicted"
+				}
+				_, _ = fmt.Fprintf(tw, "%s\tT%d\t%s\t%s:%d\t%s\t%s\t%s\n",
+					util.Truncate(f.ID, 12), f.Tier, f.Severity, f.File, f.Line, f.Status, flags, f.Title)
 			}
 			return tw.Flush()
 		},
@@ -138,6 +142,9 @@ func newReportShowCmd() *cobra.Command {
 			_, _ = fmt.Fprintf(out, "Commit:      %s\n", f.CommitSHA)
 			if f.ReproPath != "" {
 				_, _ = fmt.Fprintf(out, "Repro:       %s\n", f.ReproPath)
+			}
+			if f.ReproContradicted {
+				_, _ = fmt.Fprintf(out, "Repro-contradicted: yes (test ran >= %d times, bug did not manifest)\n", store.ReproContradictionThreshold)
 			}
 			_, _ = fmt.Fprintf(out, "Created:     %s\n", f.CreatedAt.Format("2006-01-02 15:04:05 MST"))
 			_, _ = fmt.Fprintf(out, "Updated:     %s\n", f.UpdatedAt.Format("2006-01-02 15:04:05 MST"))

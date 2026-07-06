@@ -137,6 +137,9 @@ func writeFinding(b *strings.Builder, n int, f store.Finding) {
 		// patch-prover specifically, which is false for below-quorum findings.
 		b.WriteString("**Needs human review:** automated analysis could not conclusively resolve this finding.\n\n")
 	}
+	if f.ReproContradicted {
+		fmt.Fprintf(b, "**Repro-contradicted:** the reproduction test ran >= %d times and exited 0 each time — the bug did not manifest on independent attempts. This is disconfirming evidence; consider re-examining the finding.\n\n", store.ReproContradictionThreshold)
+	}
 }
 
 // orUnknown returns s, or a placeholder when s is empty, so the rendered

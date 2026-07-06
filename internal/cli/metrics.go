@@ -11,12 +11,12 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
-// newMetricsCmd reports valid-findings-per-token per scan run and a pooled
-// cartographer on/off comparison. It is the read surface over the per-run
-// counters the funnel persists in scan_runs.stats_json (Verified, token
-// totals, cartographer_enabled), so the detection-efficiency trend is
-// inspectable without hand-writing json_extract SQL. Purely informational:
-// exits 0 even with no runs recorded.
+// newMetricsCmd reports valid-findings-per-token per scan run, a pooled
+// cartographer on/off comparison, and per-lens survival/repro statistics.
+// It is the read surface over the per-run counters the funnel persists in
+// scan_runs.stats_json (Verified, token totals, cartographer_enabled), so the
+// detection-efficiency trend is inspectable without hand-writing json_extract
+// SQL. Purely informational: exits 0 even with no runs recorded.
 func newMetricsCmd() *cobra.Command {
 	var limit int
 	cmd := &cobra.Command{
@@ -38,12 +38,22 @@ func newMetricsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			lensRows, err := st.LensMetrics(ctx)
+			if err != nil {
+				return err
+			}
 			out := cmd.OutOrStdout()
-			if len(rows) == 0 {
+			if len(rows) == 0 && len(lensRows) == 0 {
 				_, _ = fmt.Fprintln(out, "no finished scan runs recorded yet")
 				return nil
 			}
-			printRunMetrics(out, rows)
+			if len(rows) > 0 {
+				printRunMetrics(out, rows)
+			}
+			if len(lensRows) > 0 {
+				_, _ = fmt.Fprintln(out)
+				printLensMetrics(out, lensRows)
+			}
 			return nil
 		},
 	}
@@ -91,4 +101,28 @@ func printRunMetrics(out io.Writer, rows []store.RunMetric) {
 	_, _ = fmt.Fprintln(out, "cartographer on/off (pooled verified findings per 1k tokens):")
 	_, _ = fmt.Fprintf(out, "  on : %d runs, %d verified, %d tokens -> %.3f verified/1k\n", onN, onV, onTok, per1k(onV, onTok))
 	_, _ = fmt.Fprintf(out, "  off: %d runs, %d verified, %d tokens -> %.3f verified/1k\n", offN, offV, offTok, per1k(offV, offTok))
+}
+
+// printLensMetrics renders per-lens survival/refutation/repro rates from stored
+// data (findings + dead_hypotheses + repro_attempts). Each row represents one
+// defect-family (lens); the table helps operators identify lenses that are
+// high false-positive generators (low survival rate) or whose surviving
+// findings cannot be reproduced (low repro rate).
+//
+// ContradictedCount shows how many surviving findings for that lens have
+// accumulated >= ReproContradictionThreshold exit-zero repro attempts —
+// disconfirming evidence that the bug manifests at all.
+func printLensMetrics(out io.Writer, rows []store.LensStat) {
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(out, "per-lens calibration (survival = survived / (survived + killed)):")
+	_, _ = fmt.Fprintln(tw, "LENS\tSURVIVED\tKILLED\tSURVIVAL%\tREPROD\tREPRO%\tCONTRADICTED")
+	for _, l := range rows {
+		_, _ = fmt.Fprintf(tw, "%s\t%d\t%d\t%.1f%%\t%d\t%.1f%%\t%d\n",
+			l.Lens, l.Survived, l.Killed,
+			l.SurvivalRate()*100,
+			l.Reprod, l.ReproRate()*100,
+			l.ContradictedCount,
+		)
+	}
+	_ = tw.Flush()
 }

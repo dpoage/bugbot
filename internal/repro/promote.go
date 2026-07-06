@@ -29,6 +29,10 @@ type Summary struct {
 	FixWitnessed int
 	// NeedsHuman is the number where patch-prover exhausted attempts without a fix.
 	NeedsHuman int
+	// ExitZeroCount is the number of attempts where the repro ran but the bug
+	// did not manifest (exit 0). These contribute to the per-finding
+	// repro-contradiction signal in the store.
+	ExitZeroCount int
 	// PerFinding holds the per-finding outcome in input order.
 	PerFinding []FindingOutcome
 }
@@ -58,6 +62,11 @@ type FindingOutcome struct {
 	// done, or abandoned — no reproduction work was performed. Skipped outcomes
 	// are excluded from Summary.Attempted and Summary.Failed.
 	Skipped bool
+	// ExitZero is true when the repro ran without infrastructure error but
+	// exited 0 — the test ran and the bug did not manifest. This is
+	// disconfirming evidence; >= ReproContradictionThreshold such outcomes
+	// sets the repro-contradicted signal on the finding.
+	ExitZero bool
 }
 
 // PromoteOne attempts to reproduce a single finding and updates the store row
@@ -179,6 +188,9 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 		if o.NeedsHuman {
 			summary.NeedsHuman++
 		}
+		if o.ExitZero {
+			summary.ExitZeroCount++
+		}
 	}
 	return summary, nil
 }
@@ -226,6 +238,12 @@ func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding sto
 
 	// Attempt completed (success or definitive failure): mark done.
 	_ = st.FinishReproAttempt(ctx, finding.Fingerprint)
+	if att.Promoted {
+		// A successful reproduction is definitive positive evidence — clear any
+		// prior exit-zero contradiction signal so the finding is not simultaneously
+		// Tier<=1 (reproduced) and repro-contradicted.
+		_ = st.ZeroExitZeroCount(ctx, finding.Fingerprint)
+	}
 
 	outcome.Attempts = att.Attempts
 	if att.Promoted {
@@ -264,6 +282,16 @@ func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding sto
 		}
 	} else {
 		outcome.Reason = att.Reason
+		// Record exit-zero outcomes (test ran, bug did not manifest) against the
+		// repro_attempts row. This is distinct from infrastructure errors
+		// (already handled above via RequeueReproAttemptOnInfraError) and from
+		// successful repros (att.Promoted). Only exit_zero counts toward the
+		// repro-contradiction signal; other non-promotion reasons (build_error,
+		// toolchain_error, not_demonstrated, timeout) do not.
+		if att.Reason == string(VerdictReasonExitZero) {
+			outcome.ExitZero = true
+			_ = st.RecordExitZeroAttempt(ctx, finding.Fingerprint)
+		}
 	}
 
 	return outcome, nil
