@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -133,6 +132,9 @@ func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 // decoding. The public Run passes nil; RunJSON passes its schema.
 func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
 	tr := NewTranscript()
+	if r.transcriptDir != "" {
+		tr.enableStreaming(r.transcriptPath(tr, task))
+	}
 
 	messages := []llm.Message{{Role: llm.RoleUser, Content: task}}
 
@@ -178,7 +180,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 				if !errors.Is(err, ErrBudgetExhausted) {
 					// A hook failure that isn't a budget stop is an infrastructure
 					// error; surface it rather than misreporting a clean stop.
-					r.autosave(tr, task)
+					tr.closeStream()
 					return outcome, fmt.Errorf("agent: budget check: %w", err)
 				}
 				// Shared pool exhausted: give the model one reserved finalization
@@ -193,7 +195,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 		}
 
 		if err := ctx.Err(); err != nil {
-			r.autosave(tr, task)
+			tr.closeStream()
 			return outcome, err
 		}
 
@@ -206,7 +208,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 
 		resp, err := r.completeOnce(ctx, tr, &messages, outcome, responseSchema, false)
 		if err != nil {
-			r.autosave(tr, task)
+			tr.closeStream()
 			return outcome, err
 		}
 
@@ -217,7 +219,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 			// would record refusal prose — or stale FinalText from an earlier
 			// turn — as the answer (bugbot-wm2m). Surface a typed error instead.
 			if resp.StopReason == llm.StopError {
-				r.autosave(tr, task)
+				tr.closeStream()
 				return outcome, &ErrStopReason{StopReason: resp.StopReason, Text: resp.Text, Outcome: outcome}
 			}
 			break
@@ -234,7 +236,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 		// Execute each requested tool call sequentially and feed results back.
 		for _, call := range resp.ToolCalls {
 			if err := ctx.Err(); err != nil {
-				r.autosave(tr, task)
+				tr.closeStream()
 				return outcome, err
 			}
 			result, isErr := r.runTool(ctx, call)
@@ -261,7 +263,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 		}
 	}
 
-	r.autosave(tr, task)
+	tr.closeStream()
 	return outcome, nil
 }
 
@@ -313,7 +315,7 @@ func (r *Runner) finalizeAndTruncate(
 	// discarded: this is the run's final turn, so no later compaction can fire.
 	*messages, _ = r.maybeCompact(*messages, compactThreshold, toolNameByID)
 	if _, cerr := r.completeOnce(ctx, tr, messages, outcome, responseSchema, true); cerr != nil {
-		r.autosave(tr, task)
+		tr.closeStream()
 		return cerr
 	}
 	return nil
@@ -566,31 +568,15 @@ func (r *Runner) finishTruncated(o *Outcome, reason string) {
 	o.TruncationReason = reason
 }
 
-// autosave writes the transcript to the configured TranscriptDir, if any.
-// Persistence failures are intentionally swallowed: a run's result must not
-// hinge on disk availability, and the caller still has the in-memory transcript
-// on the Outcome.
-func (r *Runner) autosave(tr *Transcript, task string) {
-	if r.transcriptDir == "" {
-		return
-	}
-	if err := os.MkdirAll(r.transcriptDir, 0o755); err != nil {
-		return
-	}
+// transcriptPath computes the JSONL path for a run's transcript under
+// r.transcriptDir, named "<timestamp>-<task-slug>.jsonl". Streaming (see
+// Transcript.enableStreaming) opens this path lazily on the first recorded
+// event; a run that never records anything never creates the file or its
+// parent directory.
+func (r *Runner) transcriptPath(tr *Transcript, task string) string {
 	ts := tr.now().UTC().Format("20060102T150405.000Z")
 	name := ts + "-" + slug(task) + ".jsonl"
-	path := filepath.Join(r.transcriptDir, name)
-	f, err := os.Create(path)
-	if err != nil {
-		return
-	}
-	// autosave is best-effort: persistence failures must not break a run, so we
-	// deliberately discard both the write and close errors. SaveJSONL itself
-	// best-effort Flushes any successfully-encoded prefix on encode error, so
-	// the file usually contains at least the events encoded before the failure;
-	// Close then runs to release the OS handle regardless of outcome.
-	defer func() { _ = f.Close() }()
-	_ = tr.SaveJSONL(f)
+	return filepath.Join(r.transcriptDir, name)
 }
 
 // slugRE keeps slugs filesystem-safe: lowercase alphanumerics and dashes.

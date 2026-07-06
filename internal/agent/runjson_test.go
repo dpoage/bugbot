@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -84,6 +86,90 @@ func TestRunJSON_RepairSucceeds(t *testing.T) {
 		t.Errorf("repair prompt missing parse-failure note:\n%s", repairTask)
 	}
 	_ = out
+}
+
+// TestRunJSON_RepairPreservesStreamedTranscript is a regression test for a
+// bug where RunJSON's repair round-trip reused the SAME *Transcript run()
+// had already streamed-and-closed: closeStream nilled streamFile/streamEnc
+// but left streamPath set, so repair()'s completion re-triggered
+// streamAppend's lazy-open path, which reopened the file with os.Create
+// (O_TRUNC) — wiping the main run's already-streamed events down to just the
+// two repair events, and leaking the newly reopened handle since nothing
+// closed it again.
+//
+// The fix disarms streaming entirely once closeStream runs (clearing
+// streamPath, not just streamFile/streamEnc), so a later reuse of the same
+// Transcript — as repair() does — never reopens the file: the repair's
+// events land in Transcript.Events (in-memory) exactly as they did before
+// streaming existed, and the on-disk file is left holding the untouched,
+// complete main-run transcript.
+//
+// This forces a repair round-trip with WithTranscriptDir set and asserts:
+// exactly one file on disk, containing the main run's events UNTRUNCATED and
+// UNCORRUPTED (not overwritten down to just the repair's events), while the
+// in-memory Outcome.Transcript.Events additionally carries the repair's
+// events that never made it to disk.
+func TestRunJSON_RepairPreservesStreamedTranscript(t *testing.T) {
+	dir := t.TempDir()
+	fc := newFakeClient(
+		textResp("here is the answer: not json at all", 5, 5),
+		textResp(`{"file":"c.go","message":"fixed"}`, 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys", WithTranscriptDir(dir))
+
+	var got finding
+	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(`{"type":"object"}`), &got)
+	if err != nil {
+		t.Fatalf("RunJSON should succeed after repair: %v", err)
+	}
+	if got.File != "c.go" {
+		t.Errorf("parsed = %+v", got)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 transcript file (repair must never create/reopen a second one), got %d: %v", len(entries), entries)
+	}
+
+	f, err := os.Open(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	loaded, err := LoadJSONL(f)
+	if err != nil {
+		t.Fatalf("LoadJSONL: %v", err)
+	}
+
+	// The main run took exactly one turn (request+assistant); the buggy
+	// version would have shown 2 events too, but they'd be the REPAIR's
+	// events, not the main run's — distinguish by content, not just count.
+	if len(loaded.Events) != 2 {
+		t.Fatalf("on-disk events = %d, want 2 (the main run's request+assistant, untruncated); on-disk=%+v",
+			len(loaded.Events), loaded.Events)
+	}
+	foundMainRunText := false
+	for _, ev := range loaded.Events {
+		if ev.Kind == EventAssistant && ev.Text == "here is the answer: not json at all" {
+			foundMainRunText = true
+		}
+		if ev.Kind == EventAssistant && ev.Text == `{"file":"c.go","message":"fixed"}` {
+			t.Error("on-disk transcript contains the REPAIR's assistant text: the bug (reopen-and-truncate) has regressed")
+		}
+	}
+	if !foundMainRunText {
+		t.Errorf("on-disk transcript missing the main run's assistant text; got %+v", loaded.Events)
+	}
+
+	// The in-memory Outcome.Transcript is the complete picture: main run's 2
+	// events plus the repair's 2 events, since repair() appends onto the same
+	// Transcript object regardless of streaming.
+	if len(out.Transcript.Events) != 4 {
+		t.Errorf("in-memory Transcript.Events = %d, want 4 (main run + repair)", len(out.Transcript.Events))
+	}
 }
 
 func TestRunJSON_RepairFails(t *testing.T) {

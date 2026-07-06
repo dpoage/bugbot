@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/llm"
@@ -62,15 +64,90 @@ type Event struct {
 // content (not hashes) so the eval harness can replay it deterministically. A
 // Transcript is not safe for concurrent mutation, but a single Runner appends
 // to it sequentially.
+//
+// Streaming: when enableStreaming is called, every record* call below also
+// appends the just-recorded event as one JSON line to a file, so an operator
+// can `tail -f` a stuck run's transcript instead of waiting for it to finish.
+// The file is opened lazily on the first recorded event (never for a run that
+// records nothing) and closed via closeStream at run end. Streaming is
+// best-effort: open/encode failures disable it silently (streamPath is
+// cleared) so a broken disk never affects the run's result. The Runner that
+// owns a Transcript is single-goroutine per run, so streamFile/streamEnc need
+// no locking.
 type Transcript struct {
 	// Events are the run's events in chronological order.
 	Events []Event `json:"-"`
 	clock  func() time.Time
+
+	streamPath string
+	streamFile *os.File
+	streamEnc  *json.Encoder
 }
 
 // NewTranscript returns an empty transcript using the real wall clock.
 func NewTranscript() *Transcript {
 	return &Transcript{clock: time.Now}
+}
+
+// enableStreaming arms incremental JSONL writes to path: the file is created
+// (directories included) on the first subsequent record* call, not here, so a
+// run that records nothing never touches disk. A no-op path (empty string)
+// leaves streaming disabled.
+func (t *Transcript) enableStreaming(path string) {
+	t.streamPath = path
+}
+
+// streamAppend writes ev as one JSON line to the streaming file, opening it
+// (and its parent directory) on first use. Best-effort: any failure disables
+// further attempts for this transcript by clearing streamPath, matching the
+// never-fail-the-run autosave contract.
+func (t *Transcript) streamAppend(ev *Event) {
+	if t.streamPath == "" {
+		return
+	}
+	if t.streamFile == nil {
+		if err := os.MkdirAll(filepath.Dir(t.streamPath), 0o755); err != nil {
+			t.streamPath = ""
+			return
+		}
+		f, err := os.Create(t.streamPath)
+		if err != nil {
+			t.streamPath = ""
+			return
+		}
+		t.streamFile = f
+		t.streamEnc = json.NewEncoder(f)
+	}
+	if err := t.streamEnc.Encode(ev); err != nil {
+		// Leave the file open (a later event might still succeed); just drop
+		// this line, matching autosave's discard-on-error contract.
+		return
+	}
+}
+
+// closeStream closes the streaming file, if one was opened, and disarms
+// streaming by clearing streamPath. Idempotent and best-effort: called
+// unconditionally at run end (and every early-return path) regardless of
+// whether streaming was ever armed or actually opened a file.
+//
+// Clearing streamPath (not just streamFile/streamEnc) matters because a
+// Transcript outlives one run() call: RunJSON's repair() reuses the same
+// *Transcript for its one repair completion AFTER run() has already called
+// closeStream. Without clearing streamPath, streamAppend would see
+// streamPath still set and streamFile nil, and reopen the same path with
+// os.Create — truncating the just-closed main-run transcript down to only
+// the repair's two events, and leaking the newly reopened file handle since
+// nothing closes it again. Clearing streamPath makes closeStream a true
+// terminal state: repair's events are recorded in-memory only (Events), same
+// as pre-streaming behavior, and the on-disk file keeps the complete
+// main-run transcript untouched.
+func (t *Transcript) closeStream() {
+	if t.streamFile != nil {
+		_ = t.streamFile.Close()
+		t.streamFile = nil
+		t.streamEnc = nil
+	}
+	t.streamPath = ""
 }
 
 // now returns the current time, allowing tests to inject a fixed clock.
@@ -93,6 +170,7 @@ func (t *Transcript) recordRequest(step int, msgs []llm.Message) {
 		Time:     t.now(),
 		Messages: snap,
 	})
+	t.streamAppend(&t.Events[len(t.Events)-1])
 }
 
 // recordAssistant appends an EventAssistant for the model's response at step.
@@ -107,6 +185,7 @@ func (t *Transcript) recordAssistant(step int, resp llm.Response) {
 		StopReason: resp.StopReason,
 		Usage:      &u,
 	})
+	t.streamAppend(&t.Events[len(t.Events)-1])
 }
 
 // recordToolResult appends an EventToolResult for one executed tool call.
@@ -120,6 +199,7 @@ func (t *Transcript) recordToolResult(step int, call llm.ToolCall, result string
 		Result:     result,
 		IsError:    isErr,
 	})
+	t.streamAppend(&t.Events[len(t.Events)-1])
 }
 
 // SaveJSONL writes the transcript as JSON Lines (one Event per line) to w.
