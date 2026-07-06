@@ -65,7 +65,8 @@ func (m Model) viewCockpit() string {
 		st := fr.Snapshot
 		b.WriteString(headerStyle.Render("bugbot — active") + "\n")
 		if st.ScanKind != "" {
-			b.WriteString(fmt.Sprintf("scan: kind=%s commit=%s\n", st.ScanKind, util.ShortSHA(st.Commit)))
+			b.WriteString(fmt.Sprintf("scan: kind=%s commit=%s elapsed=%s\n",
+				st.ScanKind, util.ShortSHA(st.Commit), elapsedSince(st.StartedAt)))
 		}
 		if st.Stage != "" {
 			b.WriteString("stage: " + st.Stage + "\n")
@@ -77,7 +78,7 @@ func (m Model) viewCockpit() string {
 			b.WriteString(dimStyle.Render("(none active)") + "\n")
 		}
 		for _, a := range st.ActiveAgents {
-			line := fmt.Sprintf("  %-12s %s", a.Role, a.Label)
+			line := fmt.Sprintf("  %-12s %-24s running %s", a.Role, a.Label, elapsedSince(a.Started))
 			if a.Activity != "" {
 				line += "  [" + a.Activity + "]"
 			}
@@ -117,13 +118,24 @@ func (m Model) viewAgents() string {
 func agentLine(a AgentView) string {
 	state := a.Status
 	if a.Live {
-		state = "live"
+		state = "running " + elapsedSince(a.Started)
 	}
-	line := fmt.Sprintf("%-10s %-24s %-10s", a.Role, a.Label, state)
+	line := fmt.Sprintf("%-10s %-24s %-16s", a.Role, a.Label, state)
 	if a.Live && a.Activity != "" {
 		line += "  [" + a.Activity + "]"
 	}
 	return line
+}
+
+// elapsedSince renders how long ago t was, rounded to the second, or "-" for
+// a zero time. Called from View (not stored on Model), so the repaint tick
+// (repaintInterval) actually advances what's on screen between Frame updates
+// rather than re-rendering an identical frame.
+func elapsedSince(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return time.Since(t).Round(time.Second).String()
 }
 
 // viewAgentDetail renders the drill-down for the selected agent: its
@@ -171,9 +183,7 @@ func (m Model) viewAgentDetail() string {
 	}
 
 	b.WriteString("\n" + sectionStyle.Render("Transcript") + "\n")
-	if !m.transcriptLoaded {
-		b.WriteString(dimStyle.Render("(not loaded)") + "\n")
-	} else if m.transcript == nil {
+	if m.transcript == nil {
 		b.WriteString(dimStyle.Render(m.transcriptNote) + "\n")
 	} else {
 		b.WriteString(m.transcriptView.View() + "\n")
@@ -272,6 +282,9 @@ func renderWorldState(ws WorldState) string {
 
 	if ws.HasTallies {
 		b.WriteString(fmt.Sprintf("findings: %s\n", findingsLine(ws.Tallies)))
+		if ws.Tallies.NeedsHuman > 0 {
+			b.WriteString(fmt.Sprintf("needs human: %d finding(s) flagged for human review\n", ws.Tallies.NeedsHuman))
+		}
 	}
 	if ws.PendingLeadsTotal == 0 {
 		b.WriteString("blackboard: empty\n")

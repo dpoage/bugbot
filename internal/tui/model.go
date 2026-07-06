@@ -15,8 +15,8 @@ import (
 
 // screen identifies one full-screen view. Cockpit/Agents/Findings/Leads are
 // the top-level screens tab cycles through; AgentDetail is only reachable by
-// drilling into an agent from Agents (or Cockpit) and returns to whichever
-// screen pushed it.
+// drilling into an agent from Agents and returns to whichever screen pushed
+// it.
 type screen int
 
 const (
@@ -58,26 +58,41 @@ type Model struct {
 	filter    string
 	filtering bool
 
-	detailIdx        int // absolute index into frame.Agents for the drilled-in agent
-	transcript       *agent.Transcript
-	transcriptNote   string // set when there is no transcript to show, or a load error
+	// detailIdx is the CURRENT position of the drilled-in agent in
+	// frame.Agents, re-resolved from detailKey on every FrameMsg (mergeAgents
+	// rebuilds the slice from scratch each frame, so a raw index would go
+	// stale). -1 means detailKey's agent is not present in the current frame.
+	detailIdx int
+	// detailKey is the stable identity (see agentKey) of the agent behind
+	// screenAgentDetail; empty when no agent has been drilled into yet.
+	detailKey string
+
+	transcript     *agent.Transcript
+	transcriptNote string // set when there is no transcript, it is loading, or a load error
+	// transcriptPath is the TranscriptPath the current transcript/note was
+	// loaded for; a FrameMsg that resolves detailKey to a different
+	// TranscriptPath triggers a reload.
+	transcriptPath   string
 	transcriptView   viewport.Model
-	transcriptLoaded bool // whether the above two fields reflect detailIdx
+	transcriptLoaded bool // whether load has settled (success, empty, or error) for transcriptPath
 
 	width, height int
 	quitting      bool
 }
 
-// NewModel builds the initial Model for feed. now is the model's notion of
-// "current time" for elapsed/staleness rendering; pass a fixed function in
-// tests for deterministic output.
+// NewModel builds the initial Model for feed. The transcript viewport starts
+// sized for the default 80x24 terminal so it renders content even before the
+// first real tea.WindowSizeMsg arrives (matters for tests that never send
+// one; a real tea.Program always sends one immediately after Init).
 func NewModel(feed Feed) Model {
-	return Model{
-		feed:           feed,
-		transcriptView: viewport.New(0, 0),
-		width:          80,
-		height:         24,
+	m := Model{
+		feed:   feed,
+		width:  80,
+		height: 24,
 	}
+	vw, vh := m.transcriptSize()
+	m.transcriptView = viewport.New(vw, vh)
+	return m
 }
 
 // Init implements tea.Model.
@@ -98,8 +113,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case FrameMsg:
 		m.frame = Frame(msg)
 		m.haveFrame = true
+		if m.detailKey != "" {
+			if idx, ok := findAgentByKey(m.frame.Agents, m.detailKey); ok {
+				m.detailIdx = idx
+				if path := m.frame.Agents[idx].TranscriptPath; path != m.transcriptPath {
+					m.transcriptPath = path
+					m.transcriptLoaded = false
+					m.transcriptNote = "loading transcript..."
+					m.clampCursor()
+					return m, tea.Batch(m.feed.Next(), loadTranscriptCmd(m.detailKey, path))
+				}
+			} else {
+				m.detailIdx = -1
+			}
+		}
 		m.clampCursor()
 		return m, m.feed.Next()
+
+	case transcriptLoadedMsg:
+		// Discard results for an agent the user has since navigated away
+		// from (or a superseded reload for the same agent) — msg.key ties
+		// the result back to the request that produced it.
+		if msg.key != m.detailKey {
+			return m, nil
+		}
+		m.transcriptLoaded = true
+		m.transcript = msg.transcript
+		m.transcriptNote = msg.note
+		if msg.transcript != nil {
+			m.transcriptView.SetContent(renderTranscript(msg.transcript))
+		} else {
+			m.transcriptView.SetContent("")
+		}
+		return m, nil
 
 	case repaintMsg:
 		return m, repaintTick()
@@ -113,6 +159,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.filtering {
 		switch msg.Type {
+		case tea.KeyCtrlC:
+			m.quitting = true
+			return m, tea.Quit
 		case tea.KeyEsc:
 			m.filtering = false
 			m.filter = ""
@@ -131,6 +180,27 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.clampCursor()
 		return m, nil
+	}
+
+	// screenAgentDetail forwards navigation to the transcript viewport
+	// instead of the list-cursor keys (there is no list on this screen).
+	if m.screen == screenAgentDetail {
+		switch msg.String() {
+		case "ctrl+c", "q":
+			m.quitting = true
+			return m, tea.Quit
+		case "tab":
+			m.screen = nextTopScreen(m.screen)
+			m.cursor = 0
+			return m, nil
+		case "esc":
+			m.screen = m.prevScreen
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.transcriptView, cmd = m.transcriptView.Update(msg)
+			return m, cmd
+		}
 	}
 
 	switch msg.String() {
@@ -161,18 +231,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.screen == screenAgents {
 			idx := m.visibleAgentIndices()
 			if m.cursor >= 0 && m.cursor < len(idx) {
+				a := m.frame.Agents[idx[m.cursor]]
 				m.detailIdx = idx[m.cursor]
+				m.detailKey = agentKey(a)
 				m.prevScreen = m.screen
 				m.screen = screenAgentDetail
-				m.loadTranscript()
+				m.transcript = nil
+				m.transcriptNote = "loading transcript..."
+				m.transcriptPath = a.TranscriptPath
+				m.transcriptLoaded = false
+				m.transcriptView.SetContent("")
+				return m, loadTranscriptCmd(m.detailKey, a.TranscriptPath)
 			}
 		}
 		return m, nil
 
 	case "esc":
-		if m.screen == screenAgentDetail {
-			m.screen = m.prevScreen
-		} else if m.filter != "" {
+		if m.filter != "" {
 			m.filter = ""
 			m.cursor = 0
 		}
@@ -256,37 +331,40 @@ func (m Model) listLen() int {
 	}
 }
 
-// loadTranscript populates m.transcript/transcriptNote/transcriptView for the
-// agent at m.detailIdx. It only ever reads a local file — no network, no LLM.
-func (m *Model) loadTranscript() {
-	m.transcriptLoaded = true
-	m.transcript = nil
-	m.transcriptNote = ""
-	m.transcriptView.SetContent("")
+// transcriptLoadedMsg is the tea.Msg loadTranscriptCmd resolves to. key ties
+// the result back to the detailKey that requested it, so a stale/superseded
+// load (user drilled into a different agent, or the frame's TranscriptPath
+// changed again, before this one finished) is discarded on arrival rather
+// than clobbering the currently-displayed agent's transcript.
+type transcriptLoadedMsg struct {
+	key        string
+	transcript *agent.Transcript
+	note       string // set when there is no transcript to show, or a load error
+}
 
-	if m.detailIdx < 0 || m.detailIdx >= len(m.frame.Agents) {
-		m.transcriptNote = "no transcript"
-		return
-	}
-	path := m.frame.Agents[m.detailIdx].TranscriptPath
-	if path == "" {
-		m.transcriptNote = "no transcript"
-		return
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		m.transcriptNote = fmt.Sprintf("transcript unavailable: %v", err)
-		return
-	}
-	defer f.Close()
+// loadTranscriptCmd reads path (when non-empty) off the bubbletea Update
+// thread, mirroring SnapshotFeed.buildFrame's own off-thread pattern: this is
+// the ONLY other place internal/tui touches the filesystem, and
+// agent.LoadJSONL reads the whole file into memory, which would otherwise
+// freeze keyboard input on drill-in for a multi-MB transcript. It only ever
+// reads a local file — no network, no LLM.
+func loadTranscriptCmd(key, path string) tea.Cmd {
+	return func() tea.Msg {
+		if path == "" {
+			return transcriptLoadedMsg{key: key, note: "no transcript"}
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return transcriptLoadedMsg{key: key, note: fmt.Sprintf("transcript unavailable: %v", err)}
+		}
+		defer f.Close()
 
-	tr, err := agent.LoadJSONL(f)
-	if err != nil {
-		m.transcriptNote = fmt.Sprintf("transcript unavailable: %v", err)
-		return
+		tr, err := agent.LoadJSONL(f)
+		if err != nil {
+			return transcriptLoadedMsg{key: key, note: fmt.Sprintf("transcript unavailable: %v", err)}
+		}
+		return transcriptLoadedMsg{key: key, transcript: tr}
 	}
-	m.transcript = tr
-	m.transcriptView.SetContent(renderTranscript(tr))
 }
 
 // transcriptSize returns the viewport dimensions for the AgentDetail screen's

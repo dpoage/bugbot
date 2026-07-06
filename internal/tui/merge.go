@@ -2,16 +2,20 @@ package tui
 
 import (
 	"sort"
+	"time"
 
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
 // mergeAgents concatenates live in-flight agents with finished historical
-// units into one display list, sorted by Started ascending. It is a
-// concatenation rather than a join: agent_units rows are only written when a
-// unit finishes, so a live entry and its eventual historical row never
-// coexist for the same physical invocation (see AgentView doc comment).
+// units into one display list, sorted by Started ascending. It is a plain
+// concatenation, not a join, with no dedup key: agent_units rows are written
+// synchronously the instant a unit finishes, but the on-disk status.json
+// still lists it under ActiveAgents until the next rate-limited write, so a
+// live entry and its eventual historical row MAY briefly coexist for up to
+// one snapshot interval (see AgentView doc comment). The window is
+// read-only/cosmetic and self-heals on the next frame.
 //
 // transcriptDir is passed through to discoverTranscript for each historical
 // unit; empty disables lookup entirely (no directory configured).
@@ -24,6 +28,7 @@ func mergeAgents(live []progress.AgentStatus, hist []store.AgentUnit, transcript
 			Label:           historicalLabel(u),
 			Lens:            u.Lens,
 			Strategy:        string(u.Strategy),
+			UnitID:          u.ID,
 			Started:         u.StartedAt,
 			FinishedAt:      u.FinishedAt,
 			Status:          string(u.Status),
@@ -60,4 +65,30 @@ func historicalLabel(u store.AgentUnit) string {
 		return u.Lens + " (" + string(u.Strategy) + ")"
 	}
 	return u.Lens
+}
+
+// agentKey returns a stable identity for a, used to re-resolve the drilled-in
+// agent across frame refreshes (see Model.detailKey) without depending on its
+// position in frame.Agents, which mergeAgents rebuilds from scratch every
+// frame. Historical entries key off the durable agent_units primary key; live
+// entries (which have none yet) key off role+label+start time, which is
+// stable for the lifetime of a single invocation.
+func agentKey(a AgentView) string {
+	if a.UnitID != "" {
+		return "unit:" + a.UnitID
+	}
+	return "live:" + a.Role + "\x00" + a.Label + "\x00" + a.Started.UTC().Format(time.RFC3339Nano)
+}
+
+// findAgentByKey returns the index of the agent in views whose agentKey
+// matches key, or (-1, false) when no longer present (e.g. a live agent
+// finished and flipped to a historical row with a different key, or the
+// scan run rotated out of ListAgentUnits' window).
+func findAgentByKey(views []AgentView, key string) (int, bool) {
+	for i, v := range views {
+		if agentKey(v) == key {
+			return i, true
+		}
+	}
+	return -1, false
 }

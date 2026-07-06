@@ -73,6 +73,9 @@ type Feed interface {
 	Close() error
 }
 
+// Compile-time assertion that SnapshotFeed satisfies Feed.
+var _ Feed = (*SnapshotFeed)(nil)
+
 // leadPreviewMax bounds the pending-lead preview in a Frame; the full list is
 // reachable from the Leads screen.
 const leadPreviewMax = 3
@@ -143,9 +146,15 @@ type WorldState struct {
 // AgentView is one row in the merged agent list: either a live in-flight
 // agent (Live=true, sourced from progress.Status.ActiveAgents) or a finished
 // historical unit (sourced from store.AgentUnit for the latest scan run).
-// agent_units rows are only written when a unit finishes, so a live entry and
-// its eventual historical row never coexist for the same invocation — the
-// merge is a plain concatenation, not a join.
+// agent_units rows are written synchronously the instant a unit finishes,
+// while the on-disk status.json snapshot is rate-limited to at most one
+// write per second (progress.snapshotInterval) — so a live entry and its
+// eventual historical row MAY briefly coexist for up to one snapshot
+// interval after the unit finishes, until the next status.json write drops
+// it from ActiveAgents. The merge is a plain concatenation with no dedup
+// key; the window is read-only and cosmetic (spend/tallies come from the
+// ledger and findings table, never from agent rows, so nothing is
+// double-counted).
 type AgentView struct {
 	Role     string
 	Label    string // display label: live Status.Label, or "lens[/strategy]" historically
@@ -153,6 +162,13 @@ type AgentView struct {
 	Strategy string
 
 	Live bool
+
+	// UnitID is store.AgentUnit.ID for a historical entry, empty for a live
+	// one. Combined with Role/Label/Started it is the stable identity a
+	// drilled-in agent is tracked by (see agentKey in merge.go), so a 1s
+	// frame refresh can never silently swap the agent behind the detail
+	// screen.
+	UnitID string
 
 	Started    time.Time
 	FinishedAt time.Time // zero while live or for skipped units
