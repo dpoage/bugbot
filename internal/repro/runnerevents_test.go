@@ -141,6 +141,24 @@ const realGoTestJSONBuildFail = `{"ImportPath":"fixture2 [fixture2.test]","Actio
 {"Time":"2026-07-06T15:24:03.810035409-06:00","Action":"fail","Package":"fixture2","Elapsed":0,"FailedBuild":"fixture2 [fixture2.test]"}
 `
 
+// realGoTestJSONFatalError is real, trimmed `go test -json ./...` output
+// (go1.25.10) for a test that triggers "fatal error: concurrent map
+// writes": the Go runtime terminates the whole process immediately,
+// bypassing recover(), so the stream has a "run" for the test that was
+// executing but no per-test "fail" — only the package-level one. This is
+// the real-world shape classifyGoEvents must NOT treat as dispositive (see
+// TestClassifyGoEvents): it is a genuine crash, and Go's "fatal error:"
+// ran-marker in interpret.go's fallback cascade is what promotes it.
+const realGoTestJSONFatalError = `{"Time":"2026-07-06T16:00:16.81793128-06:00","Action":"start","Package":"fixture4"}
+{"Time":"2026-07-06T16:00:16.819367559-06:00","Action":"run","Package":"fixture4","Test":"TestConcurrentMapWrite"}
+{"Time":"2026-07-06T16:00:16.819382231-06:00","Action":"output","Package":"fixture4","Test":"TestConcurrentMapWrite","Output":"=== RUN   TestConcurrentMapWrite\n"}
+{"Time":"2026-07-06T16:00:16.819396107-06:00","Action":"output","Package":"fixture4","Test":"TestConcurrentMapWrite","Output":"fatal error: concurrent map writes\n"}
+{"Time":"2026-07-06T16:00:16.82254106-06:00","Action":"output","Package":"fixture4","Test":"TestConcurrentMapWrite","Output":"\n"}
+{"Time":"2026-07-06T16:00:16.82254945-06:00","Action":"output","Package":"fixture4","Test":"TestConcurrentMapWrite","Output":"goroutine 10 [running]:\n"}
+{"Time":"2026-07-06T16:00:16.822806848-06:00","Action":"output","Package":"fixture4","Output":"FAIL\tfixture4\t0.005s\n"}
+{"Time":"2026-07-06T16:00:16.822822711-06:00","Action":"fail","Package":"fixture4","Elapsed":0.005}
+`
+
 func TestParseGoTestEvents(t *testing.T) {
 	events, ok := parseGoTestEvents(realGoTestJSONFailing)
 	if !ok {
@@ -188,13 +206,27 @@ func TestClassifyGoEvents(t *testing.T) {
 			wantOK:     true,
 		},
 		{
-			name: "package fail after a test ran but no per-test fail is not_demonstrated",
+			name: "package fail after a test ran but no per-test fail is not dispositive",
 			stdout: `{"Action":"run","Package":"p","Test":"TestX"}
 {"Action":"fail","Package":"p"}
 `,
-			exitCode:   2,
-			wantReason: VerdictReasonNotDemonstrated,
-			wantOK:     true,
+			exitCode: 2,
+			wantOK:   false,
+		},
+		{
+			// Real `go test -json` output (go1.25.10) for a "fatal error:
+			// concurrent map writes" — the Go runtime terminates the whole
+			// process immediately, bypassing recover(), so the stream has a
+			// "run" for the test that was executing but no per-test "fail"
+			// event, only the package-level one. This is a genuine crash
+			// demonstration, not a build/collection failure: classifyGoEvents
+			// must NOT return a confident verdict here (ok=false), so
+			// interpret()'s marker fallback (Go's "fatal error:" ran-marker)
+			// is the one that promotes it.
+			name:     "real fatal runtime error (concurrent map write) is not dispositive",
+			stdout:   realGoTestJSONFatalError,
+			exitCode: 2,
+			wantOK:   false,
 		},
 		{
 			name: "no fail action at all is not dispositive",
@@ -211,7 +243,7 @@ func TestClassifyGoEvents(t *testing.T) {
 			if !ok {
 				t.Fatalf("parseGoTestEvents ok = false for %q", tc.stdout)
 			}
-			demonstrated, reason, ok := classifyGoEvents(events, tc.exitCode)
+			demonstrated, reason, ok := classifyGoEvents(events)
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
 			}

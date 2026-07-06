@@ -112,7 +112,7 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	switch eco.name {
 	case sandbox.EcosystemGo:
 		if events, parsedOK := parseGoTestEvents(res.Stdout); parsedOK {
-			if demonstrated, reason, ok := classifyGoEvents(events, res.ExitCode); ok {
+			if demonstrated, reason, ok := classifyGoEvents(events); ok {
 				if demonstrated {
 					return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
 				}

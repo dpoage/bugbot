@@ -604,6 +604,24 @@ func TestInterpret_StructuredOutput(t *testing.T) {
 		}
 	})
 
+	// (b2) real `go test -json` output for a "fatal error: concurrent map
+	//      writes" crash — the structured path parses cleanly (ok=true from
+	//      parseGoTestEvents) but classifyGoEvents must decline to be
+	//      dispositive for the "test ran, only a package-level fail"
+	//      shape (see runnerevents_test.go), so interpret() falls through
+	//      to the marker cascade, whose "fatal error:" ran-marker demonstrates
+	//      it. Regression guard for the bugbot-ym09 review finding: an
+	//      earlier version of classifyGoEvents misclassified this exact
+	//      shape as a confident not_demonstrated, making the crash
+	//      unreachable as a T1.
+	t.Run("go_json_fatal_runtime_error_demonstrated_via_markers", func(t *testing.T) {
+		res := sandbox.Result{ExitCode: 2, Stdout: realGoTestJSONFatalError}
+		v := interpret(res, []string{"go", "test", "-json", "./..."})
+		if !v.demonstrated {
+			t.Errorf("want demonstrated=true via marker fallback, got reason=%q", v.reason)
+		}
+	})
+
 	// (c) pytest junitxml with a failing testcase -> demonstrated via the
 	//     structured path.
 	t.Run("pytest_junit_failing_testcase_demonstrated", func(t *testing.T) {

@@ -25,9 +25,13 @@ import (
 // structuredJUnitXMLPath is the workspace-relative path the harness asks
 // pytest to write its JUnit XML report to, and the same path it later reads
 // back via sandbox.Spec.CaptureFiles / sandbox.Result.Captured. Dot-prefixed
-// so it reads as tooling scratch, not a repo artifact; validatePlan already
-// refuses plans that would overwrite an existing repo file, so collision with
-// a real file the agent might otherwise write is not a concern.
+// so it reads as tooling scratch, not a repo artifact. This is a harness-
+// appended flag, not an agent-authored plan.Files entry, so validatePlan's
+// existing-file guard never runs against it; the actual safety property is
+// that the sandbox always executes against a throwaway workspace COPY of the
+// repo (prepareWorkspace / applyWriteFiles) — repoDir itself is never
+// written — so even a genuine collision with a real repo file would only
+// ever clobber the ephemeral copy, not the repository.
 const structuredJUnitXMLPath = ".bugbot-repro-junit.xml"
 
 // normalizeCmdForStructuredOutput rewrites a reproducer plan's command to ask
@@ -138,7 +142,7 @@ func parseGoTestEvents(stdout string) (events []goTestEvent, ok bool) {
 // classifyGoEvents applies positive ran-evidence rules to a decoded
 // `go test -json` stream. It is called only for a non-zero, non-timeout exit
 // (interpret() has already handled exit 0 and the 125/126/127 environment
-// gate), so exitCode here is always some other failure code.
+// gate).
 //
 //   - Any per-test "fail" action (Test non-empty) is dispositive: a specific
 //     test ran and failed. This is the structured equivalent of the
@@ -147,15 +151,20 @@ func parseGoTestEvents(stdout string) (events []goTestEvent, ok bool) {
 //     the package never got far enough to execute a test — go's own build
 //     step failed (surfaced as build-output/build-fail JSON actions on
 //     Go 1.21+, or a bare package fail on older toolchains) — build_error.
-//   - A package-level "fail" where at least one test DID "run" but none has a
-//     recorded per-test "fail" means the test binary aborted (panic, fatal
-//     signal) after starting — we have ran-evidence but no confirmed failing
-//     test, so we refuse to guess which test demonstrated the bug:
-//     not_demonstrated.
-//   - Anything else (no fail action decoded at all, e.g. a truncated capture
-//     cut off before the terminal event) is NOT dispositive: ok=false so the
-//     caller falls back to the marker cascade.
-func classifyGoEvents(events []goTestEvent, exitCode int) (demonstrated bool, reason VerdictReason, ok bool) {
+//   - Anything else is NOT dispositive: ok=false so the caller falls back to
+//     the marker cascade. This deliberately INCLUDES a package-level "fail"
+//     where a test DID "run" but the stream has no per-test "fail" for it —
+//     the shape produced by a goroutine panic or a fatal runtime error that
+//     kills the test binary mid-run. That is a genuine demonstration, not a
+//     "did not run" case, and interpret.go's Go RanMarkers ("panic:", etc.)
+//     is exactly the mechanism that catches it; returning a confident
+//     not_demonstrated here — as an earlier version of this function did —
+//     would make that marker safety net unreachable and turn every such
+//     crash into a false negative. A truncated capture (no fail action
+//     decoded at all) falls into this same default for the same reason: we
+//     only trust the structured path when it gives us dispositive per-test
+//     evidence, never when we'd have to guess.
+func classifyGoEvents(events []goTestEvent) (demonstrated bool, reason VerdictReason, ok bool) {
 	var testRan, testFailed, packageFailed bool
 	for _, e := range events {
 		switch {
@@ -170,8 +179,6 @@ func classifyGoEvents(events []goTestEvent, exitCode int) (demonstrated bool, re
 	switch {
 	case testFailed:
 		return true, "", true
-	case packageFailed && testRan:
-		return false, VerdictReasonNotDemonstrated, true
 	case packageFailed && !testRan:
 		return false, VerdictReasonBuildError, true
 	default:
@@ -228,18 +235,25 @@ func (d junitDoc) allTestcases() []junitTestcase {
 
 // isCollectionError reports whether tc's <error> represents pytest failing to
 // even collect the test (a broken import, a syntax error in the test module)
-// rather than a test that ran and errored. pytest's own convention is to set
-// the error's message attribute to the literal string "collection failure"
-// (bugbot-ym09 fixture verified against a real pytest 9.x run); that string
-// is checked case-insensitively against both the message and the body text in
-// case a future pytest version moves the banner into the traceback instead of
-// the attribute.
+// rather than a test that ran and errored. pytest's own convention, verified
+// against a real pytest 9.1.1 run (see runnerevents_test.go's
+// realJUnitCollectionError), is to set the error's message attribute to the
+// exact literal string "collection failure" — checked here case-
+// insensitively, and against the body text too in case a future pytest
+// version moves the banner into the traceback instead of the attribute.
+// Deliberately narrow: an <error> for any OTHER reason (a fixture setup or
+// teardown failure, for instance, which pytest also reports as <error> but
+// on a test that DID run) does not match here, so isCollectionError returns
+// false and parseJUnitXML's caller falls through to ok=false — the marker
+// cascade, not this function, is left to decide that case, since a positive
+// misclassification either way (build_error vs demonstrated) would be worse
+// than deferring.
 func isCollectionError(tc junitTestcase) bool {
 	if tc.Error == nil {
 		return false
 	}
 	haystack := strings.ToLower(tc.Error.Message + " " + tc.Error.Text)
-	return strings.Contains(haystack, "collection failure") || strings.Contains(haystack, "collecting")
+	return strings.Contains(haystack, "collection failure")
 }
 
 // parseJUnitXML decodes a JUnit XML report (as captured from
