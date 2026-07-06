@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -539,14 +540,15 @@ func captureWorkspaceFiles(ws string, paths []string, maxBytes int) map[string][
 	if len(paths) == 0 {
 		return nil
 	}
+	resolvedWs, err := filepath.EvalSymlinks(ws)
+	if err != nil {
+		return nil
+	}
 	out := make(map[string][]byte, len(paths))
 	for _, rel := range paths {
-		data, err := os.ReadFile(filepath.Join(ws, rel))
-		if err != nil {
+		data, ok := readCaptureFile(resolvedWs, rel, maxBytes)
+		if !ok {
 			continue
-		}
-		if maxBytes > 0 && len(data) > maxBytes {
-			data = data[:maxBytes]
 		}
 		out[rel] = data
 	}
@@ -554,4 +556,64 @@ func captureWorkspaceFiles(ws string, paths []string, maxBytes int) map[string][
 		return nil
 	}
 	return out
+}
+
+// readCaptureFile reads a single capture path defensively. The command that
+// produced ws runs with full read/write access to the workspace, so it is
+// untrusted with respect to what it leaves behind: it can plant a symlink at
+// the capture path (e.g. "report.xml" -> an absolute host path, or ->
+// /dev/zero) to turn a naive read-back into an arbitrary host-file read or an
+// unbounded read (mirrors the write-side symlink-escape class tracked by
+// bugbot-6nqd, applied here to the read-back path). resolvedWs is already
+// symlink-resolved by the caller.
+//
+//   - EvalSymlinks on the full candidate path resolves EVERY component,
+//     intermediate directories and the final path element alike, so a
+//     symlinked parent directory (rel="sub/report.xml" where "sub" points
+//     elsewhere) is caught the same way as a symlinked leaf file. The
+//     resolved path must still land inside resolvedWs; anything else is
+//     refused as an escape attempt, not merely "not captured".
+//   - Only a plain regular file is read: Stat (not Lstat — the path is
+//     already fully resolved, so no symlink remains to distinguish) rejects
+//     directories, FIFOs, and device nodes the command may have created
+//     in-place (no symlink needed for those, so the EvalSymlinks check alone
+//     would not catch them).
+//   - The read goes through io.LimitReader capped at maxBytes, so even a
+//     legitimate-looking regular file that turns out to be enormous never
+//     costs more than maxBytes of I/O — unlike os.ReadFile-then-truncate,
+//     which reads the whole file before the cap is ever applied.
+//
+// A refusal at any of these checks is indistinguishable from "file absent":
+// CaptureFiles is a best-effort contract, not a manifest every run must
+// satisfy, so untrusted or unreadable content is silently omitted rather
+// than failing an otherwise-successful run.
+func readCaptureFile(resolvedWs, rel string, maxBytes int) ([]byte, bool) {
+	resolved, err := filepath.EvalSymlinks(filepath.Join(resolvedWs, rel))
+	if err != nil {
+		return nil, false
+	}
+	if resolved != resolvedWs && !strings.HasPrefix(resolved, resolvedWs+string(filepath.Separator)) {
+		return nil, false
+	}
+
+	f, err := os.Open(resolved)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, false
+	}
+
+	limit := int64(maxBytes)
+	if limit <= 0 {
+		limit = math.MaxInt64
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit))
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
