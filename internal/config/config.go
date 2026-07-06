@@ -315,6 +315,14 @@ type Repro struct {
 	// The batch cap prevents a large backlog from exhausting the per-day budget
 	// in a single firing; the backlog drains gradually across multiple firings.
 	BacklogBatch int `yaml:"backlog_batch"`
+	// MaxParallel bounds concurrent findings processed by repro.PromoteAll
+	// (the daemon's backlog drain, `bugbot repro`, and the post-sweep catch-up
+	// drain). Must be >= 1. Default 2 — sandbox workspace copies are
+	// disk-heavy, so the default stays small. This does NOT govern the in-run
+	// scan hook (`scan --repro`'s per-finding hook): that path's concurrency
+	// is bounded by the funnel's slot pool instead, since one hook call = one
+	// funnel slot already.
+	MaxParallel int `yaml:"max_parallel"`
 	// TranscriptDir, when non-empty, makes every reproducer (and patch-prover)
 	// agent auto-save its JSONL transcript there — one file per finding per
 	// attempt — for post-hoc diagnosis of why a finding did or did not
@@ -453,6 +461,7 @@ func Default() Config {
 			MaxAttempts:      2,
 			PatchMaxAttempts: 3,
 			BacklogBatch:     3,
+			MaxParallel:      2,
 			SandboxMaxExecs:  3,
 		},
 		Report: Report{
@@ -685,6 +694,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt("BUGBOT_REPRO_PATCH_MAX_ATTEMPTS", &cfg.Repro.PatchMaxAttempts),
 		setInt("BUGBOT_REPRO_MAX_ATTEMPTS", &cfg.Repro.MaxAttempts),
 		setInt("BUGBOT_REPRO_BACKLOG_BATCH", &cfg.Repro.BacklogBatch),
+		setInt("BUGBOT_REPRO_MAX_PARALLEL", &cfg.Repro.MaxParallel),
 		setInt("BUGBOT_REPRO_SANDBOX_MAX_EXECS", &cfg.Repro.SandboxMaxExecs),
 		setDur("BUGBOT_DAEMON_POLL_INTERVAL", &cfg.Daemon.PollInterval),
 		setDur("BUGBOT_DAEMON_SWEEP_INTERVAL", &cfg.Daemon.SweepInterval),
@@ -913,6 +923,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Repro.BacklogBatch < 1 {
 		return fmt.Errorf("config: repro.backlog_batch must be >= 1 (got %d)", c.Repro.BacklogBatch)
+	}
+	if c.Repro.MaxParallel < 1 {
+		return fmt.Errorf("config: repro.max_parallel must be >= 1 (got %d)", c.Repro.MaxParallel)
 	}
 	if c.Repro.SandboxMaxExecs < 1 {
 		return fmt.Errorf("config: repro.sandbox_max_execs must be >= 1 (got %d)", c.Repro.SandboxMaxExecs)

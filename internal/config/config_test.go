@@ -582,6 +582,55 @@ func TestValidate_BacklogBatchMustBePositive(t *testing.T) {
 		t.Errorf("backlog_batch=1 should be valid, got %v", err)
 	}
 }
+func TestDefault_MaxParallel(t *testing.T) {
+	cfg := Default()
+	if cfg.Repro.MaxParallel != 2 {
+		t.Errorf("Repro.MaxParallel default = %d, want 2", cfg.Repro.MaxParallel)
+	}
+}
+
+func TestLoad_MaxParallelFromYAML(t *testing.T) {
+	yaml := validYAML + `
+repro:
+  max_parallel: 4
+`
+	cfg, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Repro.MaxParallel != 4 {
+		t.Errorf("MaxParallel = %d, want 4", cfg.Repro.MaxParallel)
+	}
+}
+
+func TestEnvOverride_MaxParallel(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_REPRO_MAX_PARALLEL=6"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Repro.MaxParallel != 6 {
+		t.Errorf("MaxParallel = %d, want 6", cfg.Repro.MaxParallel)
+	}
+}
+
+func TestValidate_MaxParallelMustBePositive(t *testing.T) {
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+	cfg.Repro.MaxParallel = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_parallel") {
+		t.Errorf("max_parallel=0 should be rejected with max_parallel in message, got %v", err)
+	}
+	cfg.Repro.MaxParallel = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_parallel") {
+		t.Errorf("max_parallel=-1 should be rejected, got %v", err)
+	}
+	cfg.Repro.MaxParallel = 1
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("max_parallel=1 should be valid, got %v", err)
+	}
+}
 
 func TestValidate_ReproBacklogIntervalMustBePositive(t *testing.T) {
 	cfg, err := Load(writeTemp(t, validYAML))
