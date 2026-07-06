@@ -15,16 +15,17 @@ import (
 // bubbletea program until the user quits (q / ctrl-c). See selectFeed for
 // the mode-selection contract.
 func Run(ctx context.Context, cfg config.Config) error {
-	feed, cleanup, err := selectFeed(ctx, cfg)
+	feed, disp, cleanup, err := selectFeed(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	return runProgram(ctx, feed)
+	return runProgram(ctx, feed, disp)
 }
 
-// selectFeed picks the Feed to drive Model with and returns a cleanup func
-// the caller MUST run on quit (it releases whatever store handle(s) and
+// selectFeed picks the Feed to drive Model with and returns the Dispatcher
+// backing it (nil outside Owner mode — see below) and a cleanup func the
+// caller MUST run on quit (it releases whatever store handle(s) and
 // Dispatcher the chosen mode acquired). Split out of Run so mode selection
 // is exercised directly in tests without spinning up a real tea.Program.
 //
@@ -37,34 +38,34 @@ func Run(ctx context.Context, cfg config.Config) error {
 //
 //   - No store yet (storeExists is false): always Observer/SnapshotFeed,
 //     regardless of lock availability — engine.Open is never called, so
-//     nothing is created. Dispatch-from-a-fresh-repo is a future dispatch
-//     action's concern (bugbot-2p8z.3); it can create the store itself when
-//     the operator actually asks it to do something.
+//     nothing is created, and the returned Dispatcher is nil (dispatch is
+//     disabled; a fresh repo's first dispatch will need to create the store
+//     itself, which is out of scope for the four local dispatch verbs this
+//     child implements).
 //   - Owner (a store exists AND the writer lock is free, or already ours):
 //     a LiveFeed is built and handed to engine.Open as its progress sink,
 //     so the SAME Dispatcher that decided Owner mode is also the one whose
-//     events the cockpit renders. The returned cleanup closes the
-//     LiveFeed's own store handle AND the Dispatcher, releasing the writer
-//     lock promptly. The Dispatcher is retained only so cleanup can close
-//     it — nothing yet reaches it for dispatch; a future dispatch palette
-//     (bugbot-2p8z.3) will need selectFeed to also return it and thread it
-//     into Model.
+//     events the cockpit renders AND the one returned here for the dispatch
+//     palette to call. The returned cleanup closes the LiveFeed's own store
+//     handle AND the Dispatcher, releasing the writer lock promptly.
 //   - Observer (a store exists but another process holds the lock and
 //     looks actively alive): the Dispatcher is closed immediately
 //     (Owner-only concerns like the heartbeat never started) and the
 //     cockpit falls back to SnapshotFeed, the pre-existing read-only path.
-//     Dispatch is disabled in this mode.
+//     The returned Dispatcher is nil; dispatch is disabled in this mode.
 //   - ErrLocked (the writer lock is held but by an Owner cockpit sitting
 //     idle with no active scan_runs row — see engine.Dispatcher's
 //     heartbeat, which no-ops until a verb runs): engine.Open cannot open
 //     the store writable, so this process falls back to SnapshotFeed
-//     exactly as in the Observer case, rather than crashing.
-func selectFeed(ctx context.Context, cfg config.Config) (Feed, func(), error) {
+//     exactly as in the Observer case (Dispatcher nil), rather than
+//     crashing.
+func selectFeed(ctx context.Context, cfg config.Config) (Feed, *engine.Dispatcher, func(), error) {
 	// A missing state DB means bugbot has never run here: never engage Owner
 	// mode (which would create it via engine.Open's store.Open) just because
 	// the operator glanced at the TUI. See worldstate.go's storeExists doc.
 	if !storeExists(cfg) {
-		return newObserverFeed(ctx, cfg)
+		feed, cleanup, err := newObserverFeed(ctx, cfg)
+		return feed, nil, cleanup, err
 	}
 
 	liveFeed := NewLiveFeed(cfg)
@@ -74,23 +75,25 @@ func selectFeed(ctx context.Context, cfg config.Config) (Feed, func(), error) {
 	case err == nil && d.Mode() == engine.Owner:
 		if openErr := liveFeed.Open(ctx); openErr != nil {
 			_ = d.Close()
-			return nil, nil, openErr
+			return nil, nil, nil, openErr
 		}
 		cleanup := func() {
 			_ = liveFeed.Close()
 			_ = d.Close()
 		}
-		return liveFeed, cleanup, nil
+		return liveFeed, d, cleanup, nil
 
 	case err == nil && d.Mode() == engine.Observer:
 		_ = d.Close()
-		return newObserverFeed(ctx, cfg)
+		feed, cleanup, ferr := newObserverFeed(ctx, cfg)
+		return feed, nil, cleanup, ferr
 
 	case isLocked(err):
-		return newObserverFeed(ctx, cfg)
+		feed, cleanup, ferr := newObserverFeed(ctx, cfg)
+		return feed, nil, cleanup, ferr
 
 	default:
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 }
 
@@ -113,11 +116,26 @@ func isLocked(err error) bool {
 	return errors.As(err, &locked)
 }
 
+// dispatcherOf converts disp to the tui-local dispatcher interface, taking
+// care NOT to produce the classic Go footgun: assigning a nil *T to an
+// interface variable makes the interface itself non-nil (it holds a nil
+// pointer but a concrete type), so a naive `var d dispatcher = disp` would
+// make confirmPaletteRow's `m.disp == nil` gate check always false even for
+// a nil *engine.Dispatcher. Returning the untyped nil interface value here
+// when disp == nil keeps that comparison meaningful.
+func dispatcherOf(disp *engine.Dispatcher) dispatcher {
+	if disp == nil {
+		return nil
+	}
+	return disp
+}
+
 // runProgram drives a full-screen bubbletea program over feed until the user
 // quits. Shared by every mode: Model needs zero changes to render either
-// feed's Frames.
-func runProgram(ctx context.Context, feed Feed) error {
-	p := tea.NewProgram(NewModel(feed), tea.WithAltScreen(), tea.WithContext(ctx))
+// feed's Frames. disp is nil outside Owner mode, disabling the dispatch
+// palette.
+func runProgram(ctx context.Context, feed Feed, disp *engine.Dispatcher) error {
+	p := tea.NewProgram(NewModel(ctx, feed, dispatcherOf(disp)), tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()
 	return err
 }
