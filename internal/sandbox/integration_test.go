@@ -103,6 +103,37 @@ func TestIntegrationWriteFilesInjected(t *testing.T) {
 	}
 }
 
+// TestIntegrationCaptureFilesReadBack — bugbot-ym09 — the structured-output
+// capture seam: a file the containerized command writes into the workspace is
+// read back into Result.Captured before the workspace is torn down. Also
+// covers the missing-file case in the same real-podman run: CaptureFiles asks
+// for a second path the command never writes, and it must be silently absent
+// rather than causing an error.
+func TestIntegrationCaptureFilesReadBack(t *testing.T) {
+	s := newTestCLI(t)
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:      t.TempDir(),
+		Cmd:          []string{"sh", "-c", "echo '<testsuites></testsuites>' > report.xml"},
+		CaptureFiles: []string{"report.xml", "never-written.xml"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, stderr=%q", res.ExitCode, res.Stderr)
+	}
+	got, present := res.Captured["report.xml"]
+	if !present {
+		t.Fatal("Captured[report.xml] absent, want the file the container wrote")
+	}
+	if strings.TrimSpace(string(got)) != "<testsuites></testsuites>" {
+		t.Errorf("Captured[report.xml] = %q", got)
+	}
+	if _, present := res.Captured["never-written.xml"]; present {
+		t.Error("Captured[never-written.xml] present, want silently absent")
+	}
+}
+
 func TestIntegrationTimeoutReapsContainer(t *testing.T) {
 	s := newTestCLI(t)
 	res, err := s.Exec(context.Background(), Spec{

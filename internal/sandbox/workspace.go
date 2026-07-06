@@ -304,3 +304,55 @@ func ValidateWorkspacePath(name string) error {
 	_, err := sanitizeRelPath(name)
 	return err
 }
+
+// sanitizeCapturePaths validates and cleans each Spec.CaptureFiles entry via
+// sanitizeRelPath — the same workspace-escape guard WriteFiles keys obey — so
+// a capture request can never read outside the workspace it wrote into.
+// Returns the cleaned relative paths in the same order; a single invalid
+// entry fails the whole Exec call up front (before spending a sandbox run),
+// mirroring applyWriteFiles' all-or-nothing validation.
+func sanitizeCapturePaths(paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		rel, err := sanitizeRelPath(p)
+		if err != nil {
+			return nil, fmt.Errorf("sandbox: capture file %q: %w", p, err)
+		}
+		out = append(out, rel)
+	}
+	return out, nil
+}
+
+// captureWorkspaceFiles reads the given (already-validated, workspace-
+// relative) paths from ws, capping each at maxBytes like the stdout/stderr
+// caps. It must run after the command finishes but before the workspace is
+// removed (the caller's deferred cleanup). A path that does not exist — the
+// command never produced it, e.g. a test runner crashed before writing its
+// junitxml — is silently omitted: CaptureFiles is a best-effort "grab it if
+// it's there" contract, not a manifest every run must satisfy. Any other read
+// error (permission, path is a directory) is likewise treated as absence
+// rather than failing an otherwise-successful run over a capture side
+// channel.
+func captureWorkspaceFiles(ws string, paths []string, maxBytes int) map[string][]byte {
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make(map[string][]byte, len(paths))
+	for _, rel := range paths {
+		data, err := os.ReadFile(filepath.Join(ws, rel))
+		if err != nil {
+			continue
+		}
+		if maxBytes > 0 && len(data) > maxBytes {
+			data = data[:maxBytes]
+		}
+		out[rel] = data
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
