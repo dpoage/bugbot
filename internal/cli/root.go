@@ -47,6 +47,7 @@ reproduce, report) and tracks findings across confidence tiers:
 		newDesignSandboxCmd(),
 		newSandboxCmd(),
 		newExportCmd(),
+		newTUICmd(),
 	)
 
 	return root
