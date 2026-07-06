@@ -274,11 +274,15 @@ type Event struct {
 
 	// Attempt / MaxAttempts / Verdict describe a KindReproAttempt round: the
 	// 1-based round number, the configured cap (repro.Options.MaxAttempts,
-	// resolved), and the round's outcome — "demonstrated" on success, or a
-	// repro.VerdictReason string ("exit_zero", "timeout", "invalid_plan",
-	// "unparseable_plan", …) on a non-demonstrating round. Role/Label/Duration
-	// are reused from the agent-run fields above (Role is always
-	// RoleReproducer; Label is the finding title).
+	// resolved), and the round's outcome. Verdict is "demonstrated" on
+	// success; a repro.VerdictReason string ("exit_zero", "timeout", …) when
+	// the sandbox ran but did not demonstrate the bug; or one of two synthetic
+	// literals — "unparseable_plan", "invalid_plan" — for a round that never
+	// reached the sandbox at all (the agent's plan failed to parse, or failed
+	// repro's own structural validation). Those two are NOT repro.VerdictReason
+	// constants; they are ad hoc tokens defined at the repro.go emit sites.
+	// Role/Label/Duration are reused from the agent-run fields above (Role is
+	// always RoleReproducer; Label is the finding title).
 	Attempt     int    `json:"attempt,omitempty"`
 	MaxAttempts int    `json:"max_attempts,omitempty"`
 	Verdict     string `json:"verdict,omitempty"`

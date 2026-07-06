@@ -378,6 +378,9 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 				})
 				continue
 			}
+			// Genuine infra failure (not recoverable): abort without a
+			// KindReproAttempt — the round never reached a verdict, so there is
+			// nothing to report as a round outcome.
 			return nil, fmt.Errorf("repro: plan finding %s: %w", finding.ID, perr)
 		}
 		if verr := validatePlan(plan, r.repoDir); verr != nil {
@@ -395,6 +398,9 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 
 		res, serr := r.execute(ctx, plan)
 		if serr != nil {
+			// Same rule as the planFor infra-failure above: a sandbox launch
+			// failure aborts the whole attempt with no KindReproAttempt for
+			// this round.
 			return nil, fmt.Errorf("repro: execute finding %s: %w", finding.ID, serr)
 		}
 
@@ -405,6 +411,11 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		if verdict.demonstrated {
 			roundVerdict = "demonstrated"
 		}
+		// Emitted before writeArtifacts by design: the round's verdict is
+		// final at this point (interpret() already ran), and artifact writing
+		// is a side effect of a "demonstrated" verdict, not part of it — a
+		// failure below aborts the whole Attempt with an error, independent of
+		// whether this event was observed.
 		progress.Emit(r.opts.Progress, progress.Event{
 			Kind: progress.KindReproAttempt, Role: progress.RoleReproducer, Label: finding.Title,
 			Attempt: att.Attempts, MaxAttempts: r.opts.MaxAttempts,

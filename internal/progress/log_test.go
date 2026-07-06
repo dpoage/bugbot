@@ -2,6 +2,7 @@ package progress
 
 import (
 	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,42 @@ func TestLogRenderer_ReproAttempt(t *testing.T) {
 	}
 	if !strings.Contains(out, "nil deref") {
 		t.Errorf("expected finding label in line, got:\n%s", out)
+	}
+}
+
+// TestLogRenderer_HandleSlog_AgentActivityAndReproAttempt verifies the slog
+// bridge (NewSlogRenderer) mirrors the plain-line renderer's role filter for
+// KindAgentActivity (reproducer/patch-prover only, finder suppressed) and
+// emits a record for KindReproAttempt.
+func TestLogRenderer_HandleSlog_AgentActivityAndReproAttempt(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	r := NewSlogRenderer(log)
+
+	r.Handle(Event{Kind: KindAgentActivity, Role: RoleFinder, Label: "lensA", Activity: "reading main.go"})
+	if buf.Len() != 0 {
+		t.Fatalf("finder activity must be suppressed in slog, got:\n%s", buf.String())
+	}
+
+	r.Handle(Event{Kind: KindAgentActivity, Role: RoleReproducer, Label: "nil deref", Activity: "reading handler.go"})
+	out := buf.String()
+	if !strings.Contains(out, "progress: agent activity") || !strings.Contains(out, "reading handler.go") {
+		t.Errorf("expected reproducer activity slog record, got:\n%s", out)
+	}
+
+	buf.Reset()
+	r.Handle(Event{
+		Kind: KindReproAttempt, Role: RoleReproducer, Label: "nil deref",
+		Attempt: 1, MaxAttempts: 2, Verdict: "exit_zero", Duration: 3500 * time.Millisecond,
+	})
+	out = buf.String()
+	if !strings.Contains(out, "progress: repro attempt") {
+		t.Errorf("expected repro attempt slog record, got:\n%s", out)
+	}
+	for _, want := range []string{"attempt=1", "max_attempts=2", "verdict=exit_zero", "\"nil deref\""} {
+		if !strings.Contains(out, want) {
+			t.Errorf("slog record missing %q, got:\n%s", want, out)
+		}
 	}
 }
 
