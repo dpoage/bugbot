@@ -9,10 +9,11 @@ import (
 	"github.com/dpoage/bugbot/internal/tui"
 )
 
-// newTUICmd launches the agent-first terminal cockpit. It never opens the
-// store for writing and never bootstraps role clients: the current
-// implementation is Observer-only (read-only), matching internal/tui's
-// SnapshotFeed.
+// newTUICmd launches the agent-first terminal cockpit. internal/tui.Run
+// auto-selects Owner mode (dispatch-capable, live in-process events) when
+// the store's writer lock is free, and falls back to the pre-existing
+// read-only Observer mode (SnapshotFeed) whenever another process — or an
+// idle Owner cockpit — already holds it.
 func newTUICmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "tui",

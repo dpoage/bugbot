@@ -10,11 +10,13 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
-// fetchWorldState gathers WorldState from st. It mirrors
+// gatherWorldState gathers WorldState from st. It mirrors
 // internal/cli/worldstate.go's fetchWorldState (which is not importable from
 // here; see the WorldState doc comment). Section failures degrade to their
-// zero values — the caller renders whatever it got.
-func fetchWorldState(ctx context.Context, st *store.Store, cfg config.Config) WorldState {
+// zero values — the caller renders whatever it got. Shared by SnapshotFeed
+// (Observer) and LiveFeed (Owner): both merge this same accumulated picture
+// with whichever live-activity source they own.
+func gatherWorldState(ctx context.Context, st *store.Store, cfg config.Config) WorldState {
 	var ws WorldState
 
 	if t, err := st.CountFindings(ctx); err == nil {
@@ -45,6 +47,22 @@ func fetchWorldState(ctx context.Context, st *store.Store, cfg config.Config) Wo
 	}
 
 	return ws
+}
+
+// gatherHistoricalAgents returns the finished agent_units rows for
+// world.LastRun, or nil when the store has no last run or the lookup fails.
+// Degrades to nil on any failure, matching gatherWorldState's contract.
+// Shared by SnapshotFeed and LiveFeed: both merge these with whichever live
+// agent source they own (status.json vs. an in-process progress.Status).
+func gatherHistoricalAgents(ctx context.Context, st *store.Store, world WorldState) []store.AgentUnit {
+	if !world.HasLastRun {
+		return nil
+	}
+	units, err := st.ListAgentUnits(ctx, world.LastRun.ID)
+	if err != nil {
+		return nil
+	}
+	return units
 }
 
 // storageDir returns the directory holding the state DB, which is also where

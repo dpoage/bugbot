@@ -92,14 +92,8 @@ func (f *SnapshotFeed) buildFrame(ctx context.Context) Frame {
 		return fr
 	}
 
-	fr.World = fetchWorldState(ctx, f.st, f.cfg)
-
-	var hist []store.AgentUnit
-	if fr.World.HasLastRun {
-		if units, err := f.st.ListAgentUnits(ctx, fr.World.LastRun.ID); err == nil {
-			hist = units
-		}
-	}
+	fr.World = gatherWorldState(ctx, f.st, f.cfg)
+	hist := gatherHistoricalAgents(ctx, f.st, fr.World)
 
 	var live []progress.AgentStatus
 	if fr.HasSnapshot && !fr.Stale {
