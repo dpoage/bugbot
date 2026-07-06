@@ -103,10 +103,8 @@ func (t *SandboxExecTool) Def() llm.ToolDef {
 // infrastructure failures (sandbox launch errors) and argument validation
 // errors are returned as tool errors.
 func (t *SandboxExecTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
-	// Check the budget before doing anything else.
-	n := t.used.Add(1)
-	if int(n) > t.maxExec {
-		return "", fmt.Errorf("sandbox execution budget exhausted (%d/%d calls used); cannot run more executions for this candidate", int(n)-1, t.maxExec)
+	if err := checkExecBudget(&t.used, t.maxExec, "sandbox execution budget exhausted (%d/%d calls used); cannot run more executions for this candidate"); err != nil {
+		return "", err
 	}
 
 	var args sandboxExecArgs

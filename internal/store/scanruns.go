@@ -195,17 +195,14 @@ func scanScanRun(rows *sql.Rows) (ScanRun, error) {
 // LatestScanRun returns the most recently started scan run, or ErrNotFound
 // when no run has ever been recorded.
 //
-// CAVEAT: the ORDER BY started_at DESC tiebreaks on id DESC, but started_at
-// is a RFC3339 TEXT and does not sort consistently as a string across
-// the second boundary (see the warning on filestate.go's epochSentinel and
-// the matching caution on agent_units). In practice every scan run's
-// started_at is written by nowUTC() at sub-second resolution, so the
-// tiebreak is rarely exercised; the spec was "only wrap errors" for this
-// file, so the ORDER BY is intentionally left as-is.
+// ORDER BY id DESC: scan_run ids are ULIDs (big-endian millisecond timestamp +
+// random suffix), which sort lexicographically by creation time. This matches
+// the convention used by the prune queries and is immune to the RFC3339Nano
+// TEXT mis-sort across second boundaries that started_at exhibited.
 func (s *Store) LatestScanRun(ctx context.Context) (ScanRun, error) {
 	var id string
 	err := s.queryRow(ctx, "latest_scan_run",
-		`SELECT id FROM scan_runs ORDER BY started_at DESC, id DESC LIMIT 1`,
+		`SELECT id FROM scan_runs ORDER BY id DESC LIMIT 1`,
 		nil, func(row *sql.Row) error {
 			return row.Scan(&id)
 		})
@@ -225,15 +222,13 @@ func (s *Store) LatestScanRun(ctx context.Context) (ScanRun, error) {
 // introduced since the last full snapshot. Returns ErrNotFound when no prior
 // finished sweep exists (e.g. the first sweep ever).
 //
-// CAVEAT: ORDER BY finished_at DESC tiebreaks on id DESC; finished_at is an
-// RFC3339 TEXT written by nowUTC() at sub-second resolution, so the same
-// string-sort caveat as LatestScanRun applies and is likewise rarely exercised.
+// ORDER BY id DESC: ULID ordering, matching the prune queries (see LatestScanRun).
 func (s *Store) LastFinishedSweepCommit(ctx context.Context, excludeID string) (string, error) {
 	var sha string
 	err := s.queryRow(ctx, "last_finished_sweep_commit", `
 		SELECT commit_sha FROM scan_runs
 		WHERE kind = ? AND finished_at IS NOT NULL AND id != ?
-		ORDER BY finished_at DESC, id DESC
+		ORDER BY id DESC
 		LIMIT 1`,
 		[]any{string(ScanSweep), excludeID}, func(row *sql.Row) error {
 			return row.Scan(&sha)

@@ -248,8 +248,9 @@ func TestSandboxExecTool_BudgetExhausted(t *testing.T) {
 	if err == nil {
 		t.Fatal("third call should return a budget-exhausted error")
 	}
-	if !strings.Contains(err.Error(), "budget exhausted") {
-		t.Errorf("error should mention budget: %v", err)
+	const wantMsg = "sandbox execution budget exhausted (2/2 calls used); cannot run more executions for this candidate"
+	if err.Error() != wantMsg {
+		t.Errorf("budget error = %q, want %q", err.Error(), wantMsg)
 	}
 	// The sandbox should have been called exactly twice (budget check fires before 3rd exec).
 	if len(fs.calls) != 2 {

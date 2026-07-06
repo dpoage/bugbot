@@ -106,9 +106,8 @@ func (t *RunTestsTool) Def() llm.ToolDef {
 // Non-zero exit codes are reported as normal results; only infrastructure
 // errors and argument errors are returned as tool errors.
 func (t *RunTestsTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
-	n := t.used.Add(1)
-	if int(n) > t.maxExec {
-		return "", fmt.Errorf("run_tests budget exhausted (%d/%d calls used); cannot run more test executions for this candidate", int(n)-1, t.maxExec)
+	if err := checkExecBudget(&t.used, t.maxExec, "run_tests budget exhausted (%d/%d calls used); cannot run more test executions for this candidate"); err != nil {
+		return "", err
 	}
 
 	var args runTestsArgs

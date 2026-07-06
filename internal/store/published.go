@@ -140,22 +140,26 @@ func (s *Store) ListPublishedIssues(ctx context.Context) ([]PublishedIssue, erro
 
 // CountPublishedIssues tallies published_issues rows by state for the status
 // world-state block. The zero map means nothing has ever been published.
+//
+// Uses queryRows (not the writer-only query()) so it is safe to call from
+// read-only callers such as the status command (internal/cli/worldstate.go).
 func (s *Store) CountPublishedIssues(ctx context.Context) (map[IssueState]int, error) {
-	rows, err := s.query(ctx, "count_published_issues",
-		`SELECT state, COUNT(*) FROM published_issues GROUP BY state`)
+	type row struct {
+		state string
+		n     int
+	}
+	rows, err := queryRows(ctx, s, "count_published_issues",
+		`SELECT state, COUNT(*) FROM published_issues GROUP BY state`, nil,
+		func(r *sql.Rows) (row, error) {
+			var v row
+			return v, r.Scan(&v.state, &v.n)
+		})
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
 	out := map[IssueState]int{}
-	_, err = scanRows(rows, func(r *sql.Rows) (struct{}, error) {
-		var state string
-		var n int
-		if err := r.Scan(&state, &n); err != nil {
-			return struct{}{}, err
-		}
-		out[IssueState(state)] = n
-		return struct{}{}, nil
-	})
-	return out, err
+	for _, v := range rows {
+		out[IssueState(v.state)] = v.n
+	}
+	return out, nil
 }

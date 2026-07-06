@@ -246,25 +246,9 @@ func (d *DepSourceRoots) resolve(rel string) (string, error) {
 	return "", fmt.Errorf("%w: %q", errDepPathEscape, rel)
 }
 
-// evalExistingPrefix resolves symlinks on the longest prefix of p that exists
-// on disk, then re-appends the non-existent tail. Mirrors fsRoot.evalExistingPrefix
-// without the in-repo coupling: this one is the dep-source twin, so a tool
-// can validate containment even when the final component does not yet exist.
+// evalExistingPrefix is the dep-source traversal guard; it delegates to the
+// package-level evalExistingPrefixPath so the in-repository and dep-source
+// guards share one implementation (see pathutil.go).
 func evalExistingPrefix(p string) (string, error) {
-	tail := ""
-	cur := p
-	for {
-		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
-			if tail == "" {
-				return resolved, nil
-			}
-			return filepath.Join(resolved, tail), nil
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return p, nil
-		}
-		tail = filepath.Join(filepath.Base(cur), tail)
-		cur = parent
-	}
+	return evalExistingPrefixPath(p)
 }

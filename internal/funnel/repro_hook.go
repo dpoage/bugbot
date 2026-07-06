@@ -41,8 +41,8 @@ import (
 // scan. This function always returns, even on ctx cancellation (the hook
 // receives the cancelled ctx and should respect it).
 //
-// overflowMu/overflowFindings may be nil (e.g. when called from the overflow
-// drain path itself); in that case no overflow tracking is performed.
+// The hook takes no overflow parameters; overflow draining is handled by the
+// caller (Funnel) after runReproAttempt returns.
 func (f *Funnel) runReproAttempt(ctx context.Context, finding store.Finding, scanRunID string) {
 	// Claim check: re-read from store to detect a concurrent promotion,
 	// patch-prover exhaustion, or prior witness before occupying a slot.

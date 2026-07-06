@@ -15,6 +15,15 @@ func TestLatestScanRun(t *testing.T) {
 		t.Fatalf("empty store: err = %v, want ErrNotFound", err)
 	}
 
+	// Pin nowUTC and advance by 1 ms between calls so each ULID has a
+	// distinct millisecond timestamp — ORDER BY id DESC is reliable when the
+	// timestamp prefix differs (identical prefix + random suffix may sort
+	// in arbitrary order within the same millisecond).
+	current := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	orig := nowUTC
+	nowUTC = func() time.Time { return current }
+	defer func() { nowUTC = orig }()
+
 	id1, err := st.BeginScanRun(ctx, ScanSweep, "c1")
 	if err != nil {
 		t.Fatal(err)
@@ -22,6 +31,7 @@ func TestLatestScanRun(t *testing.T) {
 	if err := st.FinishScanRun(ctx, id1, "{}"); err != nil {
 		t.Fatal(err)
 	}
+	current = current.Add(time.Millisecond)
 	id2, err := st.BeginScanRun(ctx, ScanTargeted, "c2")
 	if err != nil {
 		t.Fatal(err)
@@ -213,6 +223,15 @@ func TestLastFinishedSweepCommit(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
+	// Pin nowUTC and advance 1 ms between BeginScanRun calls so each ULID has a
+	// distinct millisecond timestamp — ORDER BY id DESC is reliable when the
+	// timestamp prefix differs (identical prefix + random suffix may sort in
+	// arbitrary order within the same millisecond).
+	current := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	orig := nowUTC
+	nowUTC = func() time.Time { return current }
+	defer func() { nowUTC = orig }()
+
 	// No runs at all -> ErrNotFound.
 	if _, err := st.LastFinishedSweepCommit(ctx, ""); err != ErrNotFound {
 		t.Fatalf("empty store: err = %v, want ErrNotFound", err)
@@ -228,6 +247,7 @@ func TestLastFinishedSweepCommit(t *testing.T) {
 	}
 
 	// A finished sweep at commit A becomes the baseline.
+	current = current.Add(time.Millisecond)
 	s1, err := st.BeginScanRun(ctx, ScanSweep, "sha-A")
 	if err != nil {
 		t.Fatal(err)
@@ -239,8 +259,8 @@ func TestLastFinishedSweepCommit(t *testing.T) {
 		t.Fatalf("after one finished sweep: got %q, err %v; want sha-A", got, err)
 	}
 
-	// A later finished sweep at commit B supersedes A (RFC3339Nano finished_at
-	// is distinct; the id tiebreak also favors the later run).
+	// A later finished sweep at commit B supersedes A.
+	current = current.Add(time.Millisecond)
 	s2, err := st.BeginScanRun(ctx, ScanSweep, "sha-B")
 	if err != nil {
 		t.Fatal(err)
@@ -258,6 +278,7 @@ func TestLastFinishedSweepCommit(t *testing.T) {
 	}
 
 	// A finished NON-sweep run (targeted) is never a baseline.
+	current = current.Add(time.Millisecond)
 	tg, err := st.BeginScanRun(ctx, ScanTargeted, "sha-T")
 	if err != nil {
 		t.Fatal(err)

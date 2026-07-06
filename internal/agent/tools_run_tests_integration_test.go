@@ -168,8 +168,9 @@ func TestPass(t *testing.T) {}
 	if err == nil {
 		t.Fatal("second call should be budget-rejected")
 	}
-	if !strings.Contains(err.Error(), "budget exhausted") {
-		t.Errorf("budget error message missing 'budget exhausted': %v", err)
+	const wantMsg = "run_tests budget exhausted (1/1 calls used); cannot run more test executions for this candidate"
+	if err.Error() != wantMsg {
+		t.Errorf("budget error = %q, want %q", err.Error(), wantMsg)
 	}
 	if tool.ExecCount() != 2 {
 		t.Errorf("ExecCount = %d, want 2", tool.ExecCount())

@@ -83,28 +83,9 @@ func (r *fsRoot) contains(p string) bool {
 	return strings.HasPrefix(p, r.root+string(filepath.Separator))
 }
 
-// evalExistingPrefix resolves symlinks on the longest prefix of p that exists
-// on disk, then re-appends the non-existent tail. This lets us validate
-// containment even when the final component does not yet exist, while still
-// catching a symlinked intermediate directory that escapes the root.
+// evalExistingPrefix delegates to the package-level evalExistingPrefixPath so
+// both the in-repository and dep-source traversal guards share one
+// implementation (see pathutil.go).
 func (r *fsRoot) evalExistingPrefix(p string) (string, error) {
-	// Walk from the full path up toward the root, finding the longest prefix that
-	// EvalSymlinks can resolve.
-	tail := ""
-	cur := p
-	for {
-		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
-			if tail == "" {
-				return resolved, nil
-			}
-			return filepath.Join(resolved, tail), nil
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			// Reached the filesystem root without resolving anything.
-			return p, nil
-		}
-		tail = filepath.Join(filepath.Base(cur), tail)
-		cur = parent
-	}
+	return evalExistingPrefixPath(p)
 }

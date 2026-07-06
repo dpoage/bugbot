@@ -70,6 +70,12 @@ Ingest -> Hypothesize -> Triage -> Verify -> Reproduce -> Report
 
 ## Current status
 
-Scaffold only. `bugbot init` is implemented; `scan`, `daemon`, and `report`
-are wired stubs that load and validate config but do not yet run the pipeline.
-See the beads tracker (`bd show bugbot-v2f`) for the build plan.
+Pipeline is implemented and running. The codebase is ~55 KLOC across 20
+internal packages (204 non-test Go files, 224 test files). Every stage in the
+pipeline above — Ingest, Hypothesize, Triage, Verify, Reproduce, Report — is
+wired end-to-end in `internal/funnel`. `bugbot init`, `scan`, `daemon`, and
+`report` are all functional CLI commands. The sandbox supports Go, Python, Rust,
+JS, C/C++, and Bazel ecosystems (C# via NuGet dep-resolver). Token budgets, per-day limits,
+degradation, and the downstream-budget reservation are all in effect. SARIF and
+markdown emitters are operational. The beads tracker (`bd show bugbot-v2f`)
+tracks ongoing hardening and observability work.
