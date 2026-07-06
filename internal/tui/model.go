@@ -118,8 +118,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailIdx = idx
 				if path := m.frame.Agents[idx].TranscriptPath; path != m.transcriptPath {
 					m.transcriptPath = path
+					m.transcript = nil
 					m.transcriptLoaded = false
 					m.transcriptNote = "loading transcript..."
+					m.transcriptView.SetContent("")
 					m.clampCursor()
 					return m, tea.Batch(m.feed.Next(), loadTranscriptCmd(m.detailKey, path))
 				}

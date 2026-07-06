@@ -342,8 +342,13 @@ func TestUpdate_DrilldownSurvivesReorderedFrame(t *testing.T) {
 
 // TestUpdate_TranscriptLoadsFromRealFile is the B1 regression: drilling into
 // an agent whose TranscriptPath points at a real JSONL file must load and
-// render it (off the Update thread, via loadTranscriptCmd — sendKey executes
-// the returned tea.Cmd exactly as a real tea.Program would).
+// render it via a tea.Cmd (loadTranscriptCmd), NOT inline on the Update
+// thread. It asserts the off-thread property directly: right after the
+// "enter" keypress — before the returned Cmd is executed — the transcript
+// must still be unset and the note must read "loading transcript...". Only
+// running the Cmd (as a real tea.Program's event loop would) populates it.
+// A synchronous (inline) implementation would fail this test by having the
+// transcript already populated at that first checkpoint.
 func TestUpdate_TranscriptLoadsFromRealFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "transcript.jsonl")
@@ -367,8 +372,28 @@ func TestUpdate_TranscriptLoadsFromRealFile(t *testing.T) {
 			{Role: "reproducer", Label: "nil deref", Lens: "nil-safety", UnitID: "u1", TranscriptPath: path},
 		},
 	})
-	m = sendKey(m, "tab")   // -> Agents
-	m = sendKey(m, "enter") // -> AgentDetail; runs loadTranscriptCmd synchronously via sendKey
+	m = sendKey(m, "tab") // -> Agents
+
+	// Fire "enter" WITHOUT running its Cmd yet, to observe the state the
+	// off-thread load leaves behind before it resolves.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if m.screen != screenAgentDetail {
+		t.Fatalf("screen = %v, want AgentDetail immediately after enter", m.screen)
+	}
+	if cmd == nil {
+		t.Fatal("enter on an agent with a TranscriptPath must return a load Cmd, got nil")
+	}
+	if m.transcript != nil {
+		t.Fatal("transcript already populated before the load Cmd ran — load is not off-thread")
+	}
+	if m.transcriptNote != "loading transcript..." {
+		t.Fatalf("transcriptNote = %q before the Cmd ran, want %q", m.transcriptNote, "loading transcript...")
+	}
+
+	// Now run the Cmd, as a real tea.Program's event loop would, and feed its
+	// resulting Msg back through Update.
+	m = runCmd(m, cmd)
 
 	if !m.transcriptLoaded {
 		t.Fatal("transcriptLoaded = false, want true after the load Cmd resolved")
