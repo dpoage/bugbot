@@ -353,6 +353,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 	}
 
 	for i := 0; i < r.opts.MaxAttempts; i++ {
+		roundStart := time.Now()
 		att.Attempts = i + 1
 
 		plan, u, perr := r.planFor(ctx, runner, finding, pkgSummary, feedback)
@@ -370,6 +371,11 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 				feedback = fmt.Sprintf("Your previous response was not a usable repro plan: %s. "+
 					"Return ONLY a JSON object with the repro files and the cmd to run them.", perr)
 				att.Reason = "unparseable plan: " + perr.Error()
+				progress.Emit(r.opts.Progress, progress.Event{
+					Kind: progress.KindReproAttempt, Role: progress.RoleReproducer, Label: finding.Title,
+					Attempt: att.Attempts, MaxAttempts: r.opts.MaxAttempts,
+					Verdict: "unparseable_plan", Duration: time.Since(roundStart),
+				})
 				continue
 			}
 			return nil, fmt.Errorf("repro: plan finding %s: %w", finding.ID, perr)
@@ -379,6 +385,11 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			// attempt: feed the problem back and try again.
 			feedback = fmt.Sprintf("Your previous plan was invalid: %s. Provide files and a cmd (expect is optional but recommended).", verr)
 			att.Reason = "invalid plan: " + verr.Error()
+			progress.Emit(r.opts.Progress, progress.Event{
+				Kind: progress.KindReproAttempt, Role: progress.RoleReproducer, Label: finding.Title,
+				Attempt: att.Attempts, MaxAttempts: r.opts.MaxAttempts,
+				Verdict: "invalid_plan", Duration: time.Since(roundStart),
+			})
 			continue
 		}
 
@@ -389,6 +400,16 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 
 		verdict := interpret(res, plan.Cmd)
 		att.Output = verdict.summary
+
+		roundVerdict := string(verdict.reason)
+		if verdict.demonstrated {
+			roundVerdict = "demonstrated"
+		}
+		progress.Emit(r.opts.Progress, progress.Event{
+			Kind: progress.KindReproAttempt, Role: progress.RoleReproducer, Label: finding.Title,
+			Attempt: att.Attempts, MaxAttempts: r.opts.MaxAttempts,
+			Verdict: roundVerdict, Duration: time.Since(roundStart),
+		})
 
 		if verdict.demonstrated {
 			path, werr := writeArtifacts(r.opts.ArtifactDir, finding, plan, res)
