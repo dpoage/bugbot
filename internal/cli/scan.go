@@ -456,6 +456,7 @@ func buildReproHookForScan(
 		PackageSummary:   packageSummaryProvider(st),
 		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,
+		TryMaxExecs:      cfg.Repro.TryMaxExecs,
 		MaxParallel:      cfg.Repro.MaxParallel,
 	})
 	if rNewErr != nil {

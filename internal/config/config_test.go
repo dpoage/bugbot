@@ -1288,6 +1288,51 @@ func TestEnvOverride_ReproSandboxMaxExecs(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// New-field tests: repro.try_max_execs (bugbot-bkz1).
+// ---------------------------------------------------------------------------
+
+// TestDefault_ReproTryMaxExecs verifies the default value is 4.
+func TestDefault_ReproTryMaxExecs(t *testing.T) {
+	cfg := Default()
+	if cfg.Repro.TryMaxExecs != 4 {
+		t.Errorf("Repro.TryMaxExecs default = %d, want 4", cfg.Repro.TryMaxExecs)
+	}
+}
+
+// TestValidate_ReproTryMaxExecsMustBePositive verifies that Validate rejects
+// Repro.TryMaxExecs < 1 with a message containing "try_max_execs".
+func TestValidate_ReproTryMaxExecsMustBePositive(t *testing.T) {
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+	cfg.Repro.TryMaxExecs = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "try_max_execs") {
+		t.Errorf("TryMaxExecs=0 should be rejected with try_max_execs in message, got %v", err)
+	}
+	cfg.Repro.TryMaxExecs = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "try_max_execs") {
+		t.Errorf("TryMaxExecs=-1 should be rejected, got %v", err)
+	}
+	cfg.Repro.TryMaxExecs = 1
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("TryMaxExecs=1 should be valid, got %v", err)
+	}
+}
+
+// TestEnvOverride_ReproTryMaxExecs verifies that BUGBOT_REPRO_TRY_MAX_EXECS
+// overrides Repro.TryMaxExecs.
+func TestEnvOverride_ReproTryMaxExecs(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_REPRO_TRY_MAX_EXECS=9"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Repro.TryMaxExecs != 9 {
+		t.Errorf("TryMaxExecs = %d, want 9", cfg.Repro.TryMaxExecs)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // New-field tests: repro.max_attempts (bugbot-r2hw).
 // ---------------------------------------------------------------------------
 

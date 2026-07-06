@@ -40,6 +40,20 @@ type Spec struct {
 	// never mounted writable (and is not mutated). Required.
 	RepoDir string
 
+	// Workspace, when non-empty, overrides the fresh-copy-per-Exec default: Exec
+	// uses this HOST DIRECTORY as the workspace directly instead of copying
+	// RepoDir into a new temp dir, and does NOT remove it afterward — the
+	// caller owns its entire lifecycle (creation via MaterializeWorkspace and
+	// removal). WriteFiles are still applied onto it via applyWriteFiles, so
+	// repeated Execs against the same Workspace accumulate/overwrite files
+	// exactly like repeated writes to a real working tree.
+	//
+	// TRUST: only pass a directory the harness itself created (e.g. via
+	// MaterializeWorkspace) — Exec does no provenance check, so an arbitrary
+	// caller-supplied path is trusted verbatim as writable model-code
+	// execution surface. RepoDir is ignored when Workspace is set.
+	Workspace string
+
 	// Cmd is the command (argv) executed inside the container's workspace.
 	// Required and non-empty.
 	Cmd []string

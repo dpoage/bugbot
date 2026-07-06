@@ -121,11 +121,17 @@ func NewCLI(runtime, image string, opts ...Option) (*CLI, error) {
 }
 
 // Close removes this CLI instance's workspace-cache parent directory (see
-// wsCache), if one was ever materialized. It does not affect an in-flight
-// Exec: wsCache's mutex still guards concurrent access, so Close atomically
-// claims the parent-dir path before removing it; an Exec racing Close
-// afterward simply re-lazily-inits a fresh cache dir. Safe to call on a nil
-// receiver and multiple times.
+// wsCache), if one was ever materialized. wsCache's mutex still guards
+// concurrent access, so Close atomically claims the parent-dir path before
+// removing it; an Exec racing Close afterward simply re-lazily-inits a fresh
+// cache dir. That mutex protects the CACHE STATE ONLY (which pristine is
+// current, where the parent dir lives) — it says nothing about an in-flight
+// Exec's OWN per-run workspace clone, which Close never touches. Safety for a
+// concurrent Exec instead comes from construction-site scoping: a caller that
+// defers Close only does so after every Exec using that *CLI has returned, so
+// Close and Close-observing Execs are never concurrent by construction, not
+// because the mutex would arbitrate a race if they were. Safe to call on a
+// nil receiver and multiple times.
 //
 // Callers that hold a *CLI across a natural scope (a single command's RunE, a
 // function that both builds and exhausts the sandbox) should defer Close.
@@ -136,6 +142,25 @@ func (s *CLI) Close() error {
 		return nil
 	}
 	return s.wsCache.close()
+}
+
+// MaterializeWorkspace clones the pristine-workspace cache for repoDir (see
+// wsCache) into a fresh, caller-owned workspace directory and returns its
+// path with no files written into it beyond the clone itself. It is the
+// public seam behind Spec.Workspace: a caller that wants to write into and
+// run repeated Execs against ONE persistent workspace (e.g. the reproducer's
+// try_repro tool, iterating across several sandbox runs before committing to
+// a final plan) materializes it once here, then passes the returned path as
+// Spec.Workspace on each Exec instead of letting Exec copy a fresh one every
+// time.
+//
+// The caller owns the returned directory's entire lifecycle: MaterializeWorkspace
+// applies no WriteFiles and Exec(Workspace: ...) never removes it, so the
+// caller MUST os.RemoveAll it when done (typically via defer at the scope that
+// bounds all the iteration's Execs).
+func (s *CLI) MaterializeWorkspace(repoDir string) (string, error) {
+	ws, _, err := s.prepareWorkspace(repoDir, nil)
+	return ws, err
 }
 
 // staleWorkspaceCacheAge bounds how long an orphaned workspace-cache parent
@@ -230,12 +255,33 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	}
 
 	prepStart := time.Now()
-	ws, cacheHit, err := s.prepareWorkspace(spec.RepoDir, spec.WriteFiles)
-	prepDuration := time.Since(prepStart)
-	if err != nil {
-		return Result{}, err
+	var ws string
+	var cacheHit bool
+	if spec.Workspace != "" {
+		// Caller-owned iteration workspace (see Spec.Workspace doc): skip the
+		// fresh-copy/pristine-cache path entirely and apply WriteFiles directly
+		// onto the given directory. No defer RemoveAll — lifecycle is the
+		// caller's, not ours.
+		info, statErr := os.Stat(spec.Workspace)
+		if statErr != nil {
+			return Result{}, fmt.Errorf("sandbox: stat workspace %q: %w", spec.Workspace, statErr)
+		}
+		if !info.IsDir() {
+			return Result{}, fmt.Errorf("sandbox: workspace %q is not a directory", spec.Workspace)
+		}
+		ws = spec.Workspace
+		if err := applyWriteFiles(ws, spec.WriteFiles); err != nil {
+			return Result{}, err
+		}
+	} else {
+		var err error
+		ws, cacheHit, err = s.prepareWorkspace(spec.RepoDir, spec.WriteFiles)
+		if err != nil {
+			return Result{}, err
+		}
+		defer func() { _ = os.RemoveAll(ws) }()
 	}
-	defer func() { _ = os.RemoveAll(ws) }()
+	prepDuration := time.Since(prepStart)
 
 	p := s.resolveParams(spec)
 	p.workspace = ws

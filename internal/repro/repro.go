@@ -72,6 +72,13 @@ const (
 	// toolchain, inspect output, and confirm the suite layout without burning
 	// unreasonable sandbox capacity.
 	DefaultSandboxMaxExecs = 3
+	// DefaultTryMaxExecs is the per-attempt budget of try_repro calls the
+	// reproducer agent may make. Unlike run_tests (read-only orientation
+	// against the repo's existing suite), try_repro lets the agent write, run,
+	// and observe its OWN candidate repro before committing to a final plan —
+	// a value of 4 covers an initial attempt plus a couple of fix-and-retry
+	// rounds without letting a stuck agent burn unbounded sandbox capacity.
+	DefaultTryMaxExecs = 4
 )
 
 // Options configures a Reproducer.
@@ -101,6 +108,13 @@ type Options struct {
 	// may call run_tests at most this many times per attempt to orient itself
 	// before proposing its repro plan. Zero uses DefaultSandboxMaxExecs.
 	SandboxMaxExecs int
+	// TryMaxExecs is the per-attempt execution budget for try_repro: the
+	// reproducer agent may write/run/observe a candidate repro at most this
+	// many times per attempt before committing to its final plan. Zero uses
+	// DefaultTryMaxExecs. try_repro is only wired when the sandbox backend
+	// supports workspace materialization (see newRunner); Mock-backed tests
+	// that do not implement it never see the tool regardless of this budget.
+	TryMaxExecs int
 	// PatchProver enables the patch-prover stage: after a successful repro,
 	// attempt to produce a minimal fix and prove it with a sandboxed suite run.
 	PatchProver bool
@@ -185,6 +199,9 @@ func (o Options) resolve() Options {
 	}
 	if o.SandboxMaxExecs <= 0 {
 		o.SandboxMaxExecs = DefaultSandboxMaxExecs
+	}
+	if o.TryMaxExecs <= 0 {
+		o.TryMaxExecs = DefaultTryMaxExecs
 	}
 	return o
 }
@@ -330,7 +347,16 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		scope.Finish(usage.InputTokens+usage.OutputTokens, time.Since(start), retErr)
 	}()
 
-	runner, err := r.newRunner(ctx, ingest.DetectLanguage(finding.File), r.buildSystems, scope)
+	// iterWS is the per-Attempt iteration workspace try_repro writes into and
+	// runs against (see iterationWorkspace doc). It stays unmaterialized
+	// (path == "") if the agent never calls try_repro, so an Attempt that
+	// never iterates pays zero extra disk cost. Removed unconditionally when
+	// Attempt returns, so the official clean-room verdict below (execute())
+	// never runs against anything try_repro left behind.
+	iterWS := &iterationWorkspace{}
+	defer func() { _ = iterWS.cleanup() }()
+
+	runner, err := r.newRunner(ctx, ingest.DetectLanguage(finding.File), r.buildSystems, scope, iterWS)
 	if err != nil {
 		return nil, fmt.Errorf("repro: build agent runner: %w", err)
 	}
@@ -416,7 +442,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 // the run's observability handle: its activity sink is wired so the agent's
 // per-turn tool calls surface live, and when StatusNotes is enabled the agent
 // also gets the status_note tool routed to the same sink.
-func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, systems []ingest.BuildSystem, scope progress.AgentScope) (*agent.Runner, error) {
+func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, systems []ingest.BuildSystem, scope progress.AgentScope, iterWS *iterationWorkspace) (*agent.Runner, error) {
 	tools, err := readOnlyTools(r.repoDir)
 	if err != nil {
 		return nil, err
@@ -445,6 +471,18 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 		// counters (unlike the funnel), so there is nothing to accumulate.
 		tools = append(tools, agent.NewRunTestsTool(r.sb, r.repoDir, baseCmd, r.opts.SandboxMaxExecs, r.deps.ROMounts, r.deps.Env, r.deps.SetupCmds, nil))
 	}
+	// try_repro lets the agent write, run, and observe a candidate repro
+	// interactively before committing to its final plan (bugbot-bkz1). Only
+	// wired when the sandbox backend can pre-materialize a caller-owned
+	// workspace (workspaceMaterializer): *sandbox.CLI always can; a bare
+	// sandbox.Mock in a test that doesn't script iteration simply omits the
+	// tool, matching run_tests' no-build-system omission above.
+	tryReproWired := false
+	if mat, ok := r.sb.(workspaceMaterializer); ok {
+		tryReproWired = true
+		tools = append(tools, NewTryReproTool(r.sb, r.repoDir, r.opts.Image, r.opts.Timeout,
+			r.deps.ROMounts, r.deps.Env, r.deps.SetupCmds, mat.MaterializeWorkspace, iterWS, r.opts.TryMaxExecs))
+	}
 	var opts []agent.Option
 	opts = append(opts, agent.WithLimits(r.opts.AgentLimits))
 	if r.opts.TranscriptDir != "" {
@@ -457,6 +495,9 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 	}
 	if len(baseCmd) > 0 {
 		prompt += runTestsGuidance(r.opts.SandboxMaxExecs)
+	}
+	if tryReproWired {
+		prompt += tryReproGuidance(r.opts.TryMaxExecs)
 	}
 	if slices.Contains(r.buildSystems, ingest.BuildSystemBazel) {
 		prompt += bazelGuidance()
@@ -560,14 +601,27 @@ func isBareShellOp(arg string) bool {
 // existing file is rejected as a recoverable revision before any sandbox run
 // (bugbot-ndlw). New files — keys that do not yet exist on disk — are allowed
 // anywhere workspace-relative.
+//
+// The rule set is shared verbatim with try_repro's per-call validation (see
+// validateFilesCmd) so iteration teaches the agent the exact same contract
+// its final plan must satisfy — an interactive round that passes try_repro's
+// gate is guaranteed to also pass validatePlan.
 func validatePlan(p *Plan, repoDir string) error {
-	if len(p.Files) == 0 {
+	return validateFilesCmd(p.Files, p.Cmd, repoDir)
+}
+
+// validateFilesCmd is the structural gate shared by validatePlan (the final
+// submitted plan) and the try_repro tool (each interactive iteration). See
+// validatePlan's doc for the rationale; this function holds the actual rules
+// so the two callers can never drift.
+func validateFilesCmd(files map[string]string, cmd []string, repoDir string) error {
+	if len(files) == 0 {
 		return errors.New("no repro files")
 	}
-	if len(p.Cmd) == 0 {
+	if len(cmd) == 0 {
 		return errors.New("no command")
 	}
-	for fpath := range p.Files {
+	for fpath := range files {
 		// Injected file keys must be workspace-relative: an absolute or
 		// escaping path (e.g. "/tmp/repro_test.cpp") is rejected by the sandbox
 		// at write time, which would otherwise abort the whole attempt with a
@@ -588,7 +642,7 @@ func validatePlan(p *Plan, repoDir string) error {
 			}
 		}
 	}
-	for _, arg := range p.Cmd {
+	for _, arg := range cmd {
 		// Bare shell control operators are meaningless to a sandbox that runs
 		// Cmd as raw argv. A reproducer that emits, say,
 		// ["cmake", "...", "&&", "cmake", "--build", "..."] passes "&&" as a
@@ -611,7 +665,7 @@ func validatePlan(p *Plan, repoDir string) error {
 	// "timeout" verdict (bugbot-opq). Require the flag so the test binary kills
 	// itself first. Scoped to "go test" (the demonstrated failure class);
 	// unwrapShell handles a bash -c wrapper.
-	if eff := unwrapShell(p.Cmd); len(eff) >= 2 &&
+	if eff := unwrapShell(cmd); len(eff) >= 2 &&
 		strings.ToLower(eff[0]) == "go" && strings.ToLower(eff[1]) == "test" &&
 		!hasCmdFlag(eff, "-timeout") {
 		return fmt.Errorf("go test repro must include a -timeout flag so a hung test self-terminates " +

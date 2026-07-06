@@ -200,6 +200,15 @@ func isGitWorkTree(src string) bool {
 // entirely, matching gitWorktreeFiles' fallback contract. When repoDir IS a
 // git work tree but a git command fails, the error is returned rather than
 // silently treated as a cache miss.
+//
+// CAVEAT: the key is content-derived, not identity-derived — it changes only
+// when HEAD or the working-tree status changes, not on every call. A repo
+// that is re-edited back to a PRIOR content state within one long-lived CLI
+// (e.g. a test harness that dirties, then `git checkout`s back to the same
+// tree) can therefore reuse a pristine that is stale relative to intervening
+// history it never saw. This is accepted: repos are static within a single
+// bugbot run, and CLI instances are not held across runs, so the caller-visible
+// content is always exactly what was hashed.
 func workspaceCacheKey(repoDir string) (key string, isRepo bool, err error) {
 	if !isGitWorkTree(repoDir) {
 		return "", false, nil

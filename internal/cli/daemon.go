@@ -253,6 +253,7 @@ func buildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 		PackageSummary:   packageSummaryProvider(st),
 		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,
+		TryMaxExecs:      cfg.Repro.TryMaxExecs,
 		MaxParallel:      cfg.Repro.MaxParallel,
 	})
 	if err != nil {

@@ -308,6 +308,31 @@ test (via the plan's files map) and run it with a targeted cmd. Do NOT use
 run_tests as the demonstration or include it in cmd.`, maxExec)
 }
 
+// tryReproGuidance is appended to the reproducer system prompt when the
+// try_repro tool is wired. It steers the agent toward the interactive
+// write/run/observe/fix loop try_repro exists for, and states plainly that
+// promotion is judged only by an INDEPENDENT re-run of the final plan in a
+// fresh workspace — so leftover files or state from iteration can never
+// substitute for the plan itself demonstrating the bug.
+func tryReproGuidance(maxExec int) string {
+	return fmt.Sprintf(`
+
+You also have try_repro: it lets you write candidate repro files and run a
+command against them in a PERSISTENT workspace scoped to this attempt, so you
+can write, run, observe the output, fix, and re-run — up to %d time(s) —
+BEFORE committing to your final repro plan. Files you write accumulate across
+calls (a later call overwrites a path; everything else you wrote earlier
+stays), so use it the way you would iterate on a failing test locally: get
+your candidate compiling and failing for the reason you expect it to fail,
+THEN submit your final plan.
+
+IMPORTANT: the iteration workspace is discarded when this attempt ends, and
+your final plan is verified by an INDEPENDENT re-run in a completely fresh
+workspace — nothing you left in the iteration workspace (extra files, prior
+state) is present for that re-run. Your submitted files+cmd must be fully
+self-contained and reproduce the failure on their own, exactly as submitted.`, maxExec)
+}
+
 // reproSandboxGuidance renders the sandbox-environment + command-hygiene section
 // appended to every reproducer system prompt. It encodes the realities that
 // caused observed repro failures: the sandbox is a clean git checkout (gitignored
