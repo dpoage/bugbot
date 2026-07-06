@@ -23,16 +23,6 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
-// Version is the Bugbot version stamped into emitted reports. It is a var (not
-// a const) so a build can override it via -ldflags if desired.
-var Version = "0.1.0"
-
-// informationURI is advertised in SARIF as the tool's home page.
-const informationURI = "https://github.com/dpoage/bugbot"
-
-// toolName is the SARIF driver name and the Markdown report attribution.
-const toolName = "bugbot"
-
 // Metadata carries the scan context that frames a set of findings. All fields
 // are optional; emitters degrade gracefully when a field is empty.
 type Metadata struct {

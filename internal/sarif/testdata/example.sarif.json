@@ -7,14 +7,21 @@
         "driver": {
           "name": "bugbot",
           "informationUri": "https://github.com/dpoage/bugbot",
+          "version": "0.1.0",
           "rules": [
             {
               "id": "bounds",
-              "name": "bounds"
+              "name": "bounds",
+              "shortDescription": {
+                "text": "Findings from the bounds lens."
+              }
             },
             {
               "id": "race",
-              "name": "race"
+              "name": "race",
+              "shortDescription": {
+                "text": "Findings from the race lens."
+              }
             }
           ]
         }
@@ -40,6 +47,14 @@
           ],
           "partialFingerprints": {
             "bugbotFingerprint/v2": "fp-abc"
+          },
+          "properties": {
+            "commitSha": "cafebabe",
+            "reasoning": "pointer is never checked before use",
+            "severity": "high",
+            "status": "open",
+            "tier": 1,
+            "tierName": "T1 Reproduced"
           }
         },
         {
@@ -62,6 +77,14 @@
           ],
           "partialFingerprints": {
             "bugbotFingerprint/v2": "fp-ghi"
+          },
+          "properties": {
+            "commitSha": "cafebabe",
+            "reasoning": "denominator may be zero when input is empty",
+            "severity": "low",
+            "status": "open",
+            "tier": 3,
+            "tierName": "T3 Suspected"
           }
         },
         {
@@ -84,6 +107,13 @@
           ],
           "partialFingerprints": {
             "bugbotFingerprint/v2": "fp-def"
+          },
+          "properties": {
+            "commitSha": "cafebabe",
+            "severity": "medium",
+            "status": "open",
+            "tier": 2,
+            "tierName": "T2 Verified"
           }
         }
       ]

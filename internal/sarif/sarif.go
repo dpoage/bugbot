@@ -6,7 +6,10 @@
 package sarif
 
 import (
+	"path"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -17,9 +20,19 @@ const (
 	// Version is the SARIF format version.
 	Version = "2.1.0"
 
-	// InformationURI points at the Bugbot project.
-	InformationURI = "https://github.com/dpoage/bugbot"
+	// DriverName is the canonical tool name stamped into every SARIF driver block.
+	DriverName = "bugbot"
+	// DriverInfoURI is the canonical home-page URI stamped into every SARIF driver block.
+	DriverInfoURI = "https://github.com/dpoage/bugbot"
+
+	// FingerprintKey is the canonical partialFingerprints key for Code Scanning deduplication.
+	FingerprintKey = "bugbotFingerprint/v2"
 )
+
+// ToolVersion is the Bugbot tool version stamped into every emitted SARIF
+// driver block. It is a var so a build can inject a release version via
+// -ldflags "-X github.com/dpoage/bugbot/internal/sarif.ToolVersion=v1.2.3".
+var ToolVersion = "0.1.0"
 
 // Document is the top-level SARIF log.
 type Document struct {
@@ -92,38 +105,97 @@ type Region struct {
 	StartLine int `json:"startLine"`
 }
 
+// Options controls how FromFindingsWithOptions builds a SARIF document.
+type Options struct {
+	// RepoPath is the absolute path of the scanned repository. When set, file
+	// URIs in results are made relative to this path (SARIF best practice).
+	RepoPath string
+}
+
+// RepoRelative returns file made relative to repoPath when possible, with
+// backslashes normalized to forward slashes (SARIF URIs use "/"). When file is
+// already relative, or relativization fails, the cleaned slash form of file is
+// returned unchanged. Absolute paths that escape repoPath are returned as-is
+// (slash-normalized) rather than emitting "../" climbs.
+func RepoRelative(repoPath, file string) string {
+	if file == "" {
+		return ""
+	}
+	norm := func(p string) string {
+		return path.Clean(strings.ReplaceAll(filepath.ToSlash(p), "\\", "/"))
+	}
+	file = strings.ReplaceAll(file, "\\", "/")
+	repoPath = strings.ReplaceAll(repoPath, "\\", "/")
+
+	if repoPath == "" || !path.IsAbs(file) {
+		return norm(file)
+	}
+	rel, err := filepath.Rel(repoPath, file)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return norm(file)
+	}
+	return filepath.ToSlash(rel)
+}
+
 // messageText returns the reasoning text when non-empty, falling back to the
-// title. SARIF requires a non-empty message.text.
+// title + description. SARIF requires a non-empty message.text.
 func messageText(f store.Finding) string {
 	if f.Reasoning != "" {
 		return f.Reasoning
 	}
-	return f.Title
+	msg := f.Title
+	if f.Description != "" {
+		if msg != "" {
+			msg += ": " + f.Description
+		} else {
+			msg = f.Description
+		}
+	}
+	if msg == "" {
+		msg = "(no description)"
+	}
+	return msg
 }
 
-// FromFindings converts a slice of store findings into a SARIF Document.
-//
-// Rules are collected from the unique set of finding.Lens values and sorted for
-// determinism. Results are sorted by (File, Line, RuleID, Fingerprint) so the
-// output is byte-stable across runs.
-//
-// Level is derived from the finding's Tier via domain.Tier.Level().
-// Region is omitted when Line <= 0.
+// FromFindings converts a slice of store findings into a SARIF Document using
+// the package-level defaults (no repo-relative URI rewriting, ToolVersion for
+// driver.version). Equivalent to FromFindingsWithOptions(findings, Options{}).
 func FromFindings(findings []store.Finding) Document {
+	return FromFindingsWithOptions(findings, Options{})
+}
+
+// FromFindingsWithOptions is the canonical finding→SARIF mapping used by both
+// the scan/daemon FS sink (internal/report) and the bugbot export path
+// (internal/cli export). It produces byte-stable output for identical inputs.
+//
+// Level is derived from Tier.Level() (domain logic; NOT from Severity).
+// Fingerprint key is FingerprintKey ("bugbotFingerprint/v2").
+// Rules include a ShortDescription per lens.
+// Results carry a properties bag with tier, status, severity, and optional fields.
+// File URIs are made repo-relative when opts.RepoPath is non-empty.
+func FromFindingsWithOptions(findings []store.Finding, opts Options) Document {
 	// Collect unique lenses preserving insertion order for rule dedup, then sort.
 	seen := make(map[string]struct{}, len(findings))
 	var lenses []string
 	for _, f := range findings {
-		if _, ok := seen[f.Lens]; !ok {
-			seen[f.Lens] = struct{}{}
-			lenses = append(lenses, f.Lens)
+		lens := f.Lens
+		if lens == "" {
+			lens = "unknown"
+		}
+		if _, ok := seen[lens]; !ok {
+			seen[lens] = struct{}{}
+			lenses = append(lenses, lens)
 		}
 	}
 	sort.Strings(lenses)
 
 	rules := make([]Rule, 0, len(lenses))
 	for _, l := range lenses {
-		rules = append(rules, Rule{ID: l, Name: l})
+		rules = append(rules, Rule{
+			ID:               l,
+			Name:             l,
+			ShortDescription: &MessageString{Text: "Findings from the " + l + " lens."},
+		})
 	}
 
 	// Sort findings deterministically before building results.
@@ -145,28 +217,58 @@ func FromFindings(findings []store.Finding) Document {
 
 	results := make([]Result, 0, len(sorted))
 	for _, f := range sorted {
+		ruleID := f.Lens
+		if ruleID == "" {
+			ruleID = "unknown"
+		}
+
 		var region *Region
 		if f.Line > 0 {
 			region = &Region{StartLine: f.Line}
 		}
+
+		uri := RepoRelative(opts.RepoPath, f.File)
+
+		props := map[string]any{
+			"tier":     f.Tier,
+			"tierName": f.Tier.Label(),
+			"status":   string(f.Status),
+			"severity": f.Severity,
+		}
+		if f.Reasoning != "" {
+			props["reasoning"] = f.Reasoning
+		}
+		if f.ReproPath != "" {
+			props["reproPath"] = f.ReproPath
+		}
+		if f.CommitSHA != "" {
+			props["commitSha"] = f.CommitSHA
+		}
+		if len(f.CorroboratingLenses) > 0 {
+			props["corroboratingLenses"] = f.CorroboratingLenses
+		}
+		if f.FixPatch != "" {
+			props["hasFixPatch"] = true
+		}
+		if f.NeedsHuman {
+			props["needsHuman"] = true
+		}
+
 		r := Result{
-			RuleID: f.Lens,
-			Level:  f.Tier.Level(),
-			Message: MessageString{
-				Text: messageText(f),
-			},
-			Locations: []Location{
-				{
-					PhysicalLocation: PhysicalLocation{
-						ArtifactLocation: ArtifactLocation{URI: f.File},
-						Region:           region,
-					},
+			RuleID:  ruleID,
+			Level:   f.Tier.Level(),
+			Message: MessageString{Text: messageText(f)},
+			Locations: []Location{{
+				PhysicalLocation: PhysicalLocation{
+					ArtifactLocation: ArtifactLocation{URI: uri},
+					Region:           region,
 				},
-			},
+			}},
+			Properties: props,
 		}
 		if f.Fingerprint != "" {
 			r.PartialFingerprints = map[string]string{
-				"bugbotFingerprint/v2": f.Fingerprint,
+				FingerprintKey: f.Fingerprint,
 			}
 		}
 		results = append(results, r)
@@ -175,17 +277,16 @@ func FromFindings(findings []store.Finding) Document {
 	return Document{
 		Schema:  Schema,
 		Version: Version,
-		Runs: []Run{
-			{
-				Tool: Tool{
-					Driver: Driver{
-						Name:           "bugbot",
-						InformationURI: InformationURI,
-						Rules:          rules,
-					},
+		Runs: []Run{{
+			Tool: Tool{
+				Driver: Driver{
+					Name:           DriverName,
+					InformationURI: DriverInfoURI,
+					Version:        ToolVersion,
+					Rules:          rules,
 				},
-				Results: results,
 			},
-		},
+			Results: results,
+		}},
 	}
 }
