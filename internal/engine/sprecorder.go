@@ -1,4 +1,4 @@
-package cli
+package engine
 
 import (
 	"context"
@@ -20,6 +20,14 @@ import (
 // id. SetScanRun must be called before each PromoteAll; recording with an
 // empty id is still correct for day-budget totals (TotalsSince does not
 // filter by run), it merely loses per-run attribution.
+//
+// Relocated from internal/cli/sprecorder.go: every call site (the scan repro
+// hook and the daemon's reproducer builder) moved into this package, so this
+// cobra-free, store-only helper moved with them rather than being left
+// orphaned in internal/cli. daemon.Deps.ReproTagger is a structural
+// interface (ScanRunTagger{SetScanRun(id string)}), so *ledgerRecorder still
+// satisfies it from here without either package needing to name the other's
+// type.
 type ledgerRecorder struct {
 	ctx   context.Context
 	store *store.Store
