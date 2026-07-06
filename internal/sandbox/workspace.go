@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // prepareWorkspace copies the repository snapshot at repoDir into a fresh
@@ -43,11 +46,207 @@ func prepareWorkspace(repoDir string, writeFiles map[string][]byte) (string, err
 	return ws, nil
 }
 
+// prepareWorkspace resolves the pristine-workspace cache for spec.RepoDir (see
+// wsCache) and clones the current pristine into a fresh per-run workspace,
+// applying writeFiles on top of the clone. hit reports whether an existing
+// pristine could be reused (true) or had to be (re)materialized (false).
+//
+// Non-git repoDirs have no cheap, reliable content-identity signal to key a
+// cache on (no HEAD, no status), so they bypass the cache entirely and fall
+// back to the original standalone prepareWorkspace — hit is always false on
+// that path.
+func (s *CLI) prepareWorkspace(repoDir string, writeFiles map[string][]byte) (ws string, hit bool, err error) {
+	info, err := os.Stat(repoDir)
+	if err != nil {
+		return "", false, fmt.Errorf("sandbox: stat repo dir %q: %w", repoDir, err)
+	}
+	if !info.IsDir() {
+		return "", false, fmt.Errorf("sandbox: repo dir %q is not a directory", repoDir)
+	}
+
+	key, isRepo, err := workspaceCacheKey(repoDir)
+	if err != nil {
+		return "", false, err
+	}
+	if !isRepo {
+		ws, err := prepareWorkspace(repoDir, writeFiles)
+		return ws, false, err
+	}
+
+	ws, hit, err = s.wsCache.clone(repoDir, key)
+	if err != nil {
+		return "", false, err
+	}
+	if err := applyWriteFiles(ws, writeFiles); err != nil {
+		_ = os.RemoveAll(ws)
+		return "", false, err
+	}
+	return ws, hit, nil
+}
+
+// wsCache is a pristine-materialization cache owned by a CLI instance. A
+// "pristine" is a read-only-by-convention copy of a repo snapshot (produced
+// by copyWorkspace, so it already reflects the git-file-list filtering) keyed
+// by repo identity + content state. Exec clones the current pristine into a
+// fresh writable per-run workspace instead of re-walking and re-copying the
+// source repo from scratch every time.
+//
+// Only the most recently used key is kept — this is a single-entry cache, not
+// an LRU — because a CLI's Execs during any given window overwhelmingly
+// target the same repo at the same commit (one scan or repro run against one
+// target). Zero value is ready to use; the parent directory is created
+// lazily on first use so a CLI that never hits the cached path (no git repos,
+// or never Exec'd) never touches the filesystem for it.
+type wsCache struct {
+	mu sync.Mutex
+	// dir is this instance's cache parent (one os.MkdirTemp per CLI); empty
+	// until the first cache use.
+	dir string
+	// key/pristine describe the currently valid pristine; both empty when
+	// none has been materialized yet.
+	key      string
+	pristine string
+}
+
+// clone ensures a pristine matching key exists for repoDir (materializing it
+// on a miss, evicting the previous one first since only one is kept) and
+// clones it into a fresh temp workspace. hit reports whether key already
+// matched the cached pristine.
+//
+// The mutex covers check-and-materialize only: once a valid pristine path is
+// resolved, the lock is released before the (potentially slow) tree clone, so
+// concurrent Execs against an unchanged repo clone in parallel — the pristine
+// is never mutated in place, only replaced wholesale on a miss. This means a
+// clone racing exactly against a concurrent miss that evicts its source can
+// observe a disappearing pristine; in practice a HEAD/working-tree change
+// invalidating the cache happens BETWEEN runs, not between two overlapping
+// clones of the same batch, so this is an accepted tradeoff rather than a
+// protected invariant.
+func (c *wsCache) clone(repoDir, key string) (ws string, hit bool, err error) {
+	c.mu.Lock()
+	if c.dir == "" {
+		dir, mkErr := os.MkdirTemp("", "bugbot-wscache-")
+		if mkErr != nil {
+			c.mu.Unlock()
+			return "", false, fmt.Errorf("sandbox: create workspace cache dir: %w", mkErr)
+		}
+		c.dir = dir
+	}
+	hit = c.key == key
+	if !hit {
+		if c.pristine != "" {
+			_ = os.RemoveAll(c.pristine)
+		}
+		pristine := filepath.Join(c.dir, key)
+		if mkErr := os.Mkdir(pristine, 0o700); mkErr != nil {
+			c.key, c.pristine = "", ""
+			c.mu.Unlock()
+			return "", false, fmt.Errorf("sandbox: create pristine workspace dir: %w", mkErr)
+		}
+		if cpErr := copyWorkspace(repoDir, pristine); cpErr != nil {
+			_ = os.RemoveAll(pristine)
+			c.key, c.pristine = "", ""
+			c.mu.Unlock()
+			return "", false, fmt.Errorf("sandbox: materialize pristine workspace: %w", cpErr)
+		}
+		c.key, c.pristine = key, pristine
+	}
+	pristine := c.pristine
+	c.mu.Unlock()
+
+	ws, err = os.MkdirTemp("", "bugbot-sandbox-")
+	if err != nil {
+		return "", false, fmt.Errorf("sandbox: create workspace: %w", err)
+	}
+	if err := cloneTree(pristine, ws); err != nil {
+		_ = os.RemoveAll(ws)
+		return "", false, fmt.Errorf("sandbox: clone pristine workspace: %w", err)
+	}
+	return ws, hit, nil
+}
+
+// close removes this cache's parent directory, if one was ever materialized,
+// and resets state so a subsequent clone starts clean. Safe to call multiple
+// times.
+func (c *wsCache) close() error {
+	c.mu.Lock()
+	dir := c.dir
+	c.dir, c.key, c.pristine = "", "", ""
+	c.mu.Unlock()
+	if dir == "" {
+		return nil
+	}
+	return os.RemoveAll(dir)
+}
+
+// isGitWorkTree reports whether src looks like a usable git work tree: it has
+// a .git entry and git is on PATH. Shared by gitWorktreeFiles (which needs
+// the tracked/untracked file list) and workspaceCacheKey (which only needs
+// git's rev-parse/status output) so both agree on when to fall back to a full
+// copy / bypass the cache.
+func isGitWorkTree(src string) bool {
+	if _, statErr := os.Stat(filepath.Join(src, ".git")); statErr != nil {
+		return false
+	}
+	_, lookErr := exec.LookPath("git")
+	return lookErr == nil
+}
+
+// workspaceCacheKey derives the pristine-cache key for repoDir: a hash of the
+// repo's absolute path, its HEAD commit, and a hash of `git status
+// --porcelain` (which captures dirty/untracked drift a bare commit hash
+// misses). isRepo is false (with a nil error) only when repoDir is not a git
+// work tree or git is unavailable — the caller then bypasses the cache
+// entirely, matching gitWorktreeFiles' fallback contract. When repoDir IS a
+// git work tree but a git command fails, the error is returned rather than
+// silently treated as a cache miss.
+func workspaceCacheKey(repoDir string) (key string, isRepo bool, err error) {
+	if !isGitWorkTree(repoDir) {
+		return "", false, nil
+	}
+	abs, err := filepath.Abs(repoDir)
+	if err != nil {
+		return "", true, fmt.Errorf("sandbox: resolve repo dir %q: %w", repoDir, err)
+	}
+	head, headErr := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
+	if headErr != nil {
+		return "", true, fmt.Errorf("sandbox: git rev-parse HEAD in %q: %w%s", repoDir, headErr, gitStderr(headErr))
+	}
+	status, statusErr := exec.Command("git", "-C", repoDir, "status", "--porcelain").Output()
+	if statusErr != nil {
+		return "", true, fmt.Errorf("sandbox: git status --porcelain in %q: %w%s", repoDir, statusErr, gitStderr(statusErr))
+	}
+	statusSum := sha256.Sum256(status)
+	h := sha256.New()
+	h.Write([]byte(abs))
+	h.Write([]byte{0})
+	h.Write([]byte(strings.TrimSpace(string(head))))
+	h.Write([]byte{0})
+	h.Write(statusSum[:])
+	return hex.EncodeToString(h.Sum(nil)), true, nil
+}
+
 // copyTree recursively copies the directory tree rooted at src into dst, which
 // must already exist. Regular files and directories are copied with their
 // permission bits; symlinks are recreated as symlinks (their targets are not
 // followed, which avoids copying outside the tree and preserves repo layout).
 func copyTree(src, dst string) error {
+	return copyTreeWith(src, dst, copyFile)
+}
+
+// cloneTree is copyTree's fast path for cloning a pristine cache entry
+// (internal/sandbox's wsCache) into a fresh per-run workspace: it copies
+// regular files via reflinkOrCopy, which prefers a copy-on-write reflink over
+// a full byte copy where the filesystem supports it.
+func cloneTree(src, dst string) error {
+	return copyTreeWith(src, dst, reflinkOrCopy)
+}
+
+// copyTreeWith is copyTree parameterized over the regular-file copy strategy,
+// shared by copyTree (always a full byte copy) and cloneTree (reflink-first).
+// Directory/symlink handling — the parts that must always be exact, never
+// content-copied — stays identical between the two callers.
+func copyTreeWith(src, dst string, copyRegular func(src, dst string, perm fs.FileMode) error) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -95,7 +294,7 @@ func copyTree(src, dst string) error {
 			if err != nil {
 				return err
 			}
-			return copyFile(path, target, info.Mode().Perm())
+			return copyRegular(path, target, info.Mode().Perm())
 
 		default:
 			// Skip irregular files (devices, sockets, named pipes): they have no

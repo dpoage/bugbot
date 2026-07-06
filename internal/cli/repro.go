@@ -116,6 +116,7 @@ the command exits with a graceful message rather than an error.`,
 				return err
 			}
 			defer rd.repro.Close() //nolint:errcheck
+			defer func() { _ = rd.sb.Close() }()
 
 			out := cmd.OutOrStdout()
 			_, _ = fmt.Fprintf(out,

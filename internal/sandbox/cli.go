@@ -47,6 +47,9 @@ type CLI struct {
 	defaultNetwork     string
 	pidsLimit          int
 	maxOutputBytes     int
+	// wsCache is the pristine-materialization cache backing prepareWorkspace.
+	// Zero value is ready to use; see wsCache's doc comment.
+	wsCache wsCache
 }
 
 // Option configures a CLI sandbox.
@@ -110,7 +113,56 @@ func NewCLI(runtime, image string, opts ...Option) (*CLI, error) {
 	for _, o := range opts {
 		o(s)
 	}
+	// Best-effort hygiene: purge any workspace-cache parent dirs a previous,
+	// non-Closed CLI instance (or a crashed process) left behind. See
+	// purgeStaleWorkspaceCaches.
+	purgeStaleWorkspaceCaches()
 	return s, nil
+}
+
+// Close removes this CLI instance's workspace-cache parent directory (see
+// wsCache), if one was ever materialized. It does not affect an in-flight
+// Exec: wsCache's mutex still guards concurrent access, so Close atomically
+// claims the parent-dir path before removing it; an Exec racing Close
+// afterward simply re-lazily-inits a fresh cache dir. Safe to call on a nil
+// receiver and multiple times.
+//
+// Callers that hold a *CLI across a natural scope (a single command's RunE, a
+// function that both builds and exhausts the sandbox) should defer Close.
+// Where no such scope exists (e.g. a sandbox handed off to a longer-lived
+// consumer), the 24h purge in NewCLI is the backstop.
+func (s *CLI) Close() error {
+	if s == nil {
+		return nil
+	}
+	return s.wsCache.close()
+}
+
+// staleWorkspaceCacheAge bounds how long an orphaned workspace-cache parent
+// dir (see wsCache, purgeStaleWorkspaceCaches) is allowed to linger in the OS
+// temp dir before a later process reclaims it.
+const staleWorkspaceCacheAge = 24 * time.Hour
+
+// purgeStaleWorkspaceCaches best-effort removes bugbot-wscache-* directories
+// in the OS temp dir older than staleWorkspaceCacheAge. It exists because not
+// every *CLI construction site has a natural defer-Close scope (see Close's
+// doc comment), and any process crash bypasses a deferred Close regardless —
+// so this purge, run once per NewCLI, is the backstop that actually bounds
+// disk usage. All failures are swallowed: this is hygiene, never a reason to
+// fail sandbox construction.
+func purgeStaleWorkspaceCaches() {
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "bugbot-wscache-*"))
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-staleWorkspaceCacheAge)
+	for _, dir := range matches {
+		info, statErr := os.Stat(dir)
+		if statErr != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.RemoveAll(dir)
+	}
 }
 
 // Runtime returns the resolved runtime binary name (podman or docker).
@@ -181,7 +233,9 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 		return Result{}, err
 	}
 
-	ws, err := prepareWorkspace(spec.RepoDir, spec.WriteFiles)
+	prepStart := time.Now()
+	ws, cacheHit, err := s.prepareWorkspace(spec.RepoDir, spec.WriteFiles)
+	prepDuration := time.Since(prepStart)
 	if err != nil {
 		return Result{}, err
 	}
@@ -241,7 +295,7 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	close(done)
 	duration := time.Since(start)
 
-	res := Result{Duration: duration}
+	res := Result{Duration: duration, PrepDuration: prepDuration, WorkspaceCacheHit: cacheHit}
 	res.Stdout, res.StdoutTruncated = stdout.result()
 	res.Stderr, res.StderrTruncated = stderr.result()
 	res.Captured = captureWorkspaceFiles(ws, capturePaths, s.maxOutputBytes)
