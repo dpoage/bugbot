@@ -65,13 +65,15 @@ func seedExistingStore(t *testing.T, ctx context.Context, cfg config.Config) {
 
 // TestSelectFeed_OwnerWhenLockFree verifies that with no active scan_runs
 // row and the writer lock free, selectFeed chooses a LiveFeed (Owner mode)
-// — once a store already exists (bugbot has run here before).
+// — once a store already exists (bugbot has run here before) — AND returns
+// the non-nil *engine.Dispatcher backing it, so the dispatch palette has
+// something to call (bugbot-2p8z.3).
 func TestSelectFeed_OwnerWhenLockFree(t *testing.T) {
 	ctx := context.Background()
 	cfg := runTestConfig(t)
 	seedExistingStore(t, ctx, cfg)
 
-	feed, cleanup, err := selectFeed(ctx, cfg)
+	feed, disp, cleanup, err := selectFeed(ctx, cfg)
 	if err != nil {
 		t.Fatalf("selectFeed() error = %v", err)
 	}
@@ -83,6 +85,9 @@ func TestSelectFeed_OwnerWhenLockFree(t *testing.T) {
 	if feed.Mode() != Owner {
 		t.Errorf("Mode() = %v, want Owner", feed.Mode())
 	}
+	if disp == nil {
+		t.Fatal("selectFeed() Dispatcher = nil, want non-nil in Owner mode")
+	}
 }
 
 // TestSelectFeed_FreshRepoStaysObserverAndCreatesNothing is the B1
@@ -91,7 +96,8 @@ func TestSelectFeed_OwnerWhenLockFree(t *testing.T) {
 // lock just because the lock happens to be free — engine.Open (and its
 // underlying store.Open) must never even be called in this case. Mirrors
 // the no-create-on-launch contract storeExists/NewSnapshotFeed have always
-// enforced for the Observer path.
+// enforced for the Observer path. The returned Dispatcher must be nil:
+// dispatch is disabled against a never-run repo.
 func TestSelectFeed_FreshRepoStaysObserverAndCreatesNothing(t *testing.T) {
 	ctx := context.Background()
 	cfg := runTestConfig(t)
@@ -100,7 +106,7 @@ func TestSelectFeed_FreshRepoStaysObserverAndCreatesNothing(t *testing.T) {
 		t.Fatalf("state DB already exists before selectFeed ran: %s", cfg.Storage.Path)
 	}
 
-	feed, cleanup, err := selectFeed(ctx, cfg)
+	feed, disp, cleanup, err := selectFeed(ctx, cfg)
 	if err != nil {
 		t.Fatalf("selectFeed() error = %v", err)
 	}
@@ -112,6 +118,9 @@ func TestSelectFeed_FreshRepoStaysObserverAndCreatesNothing(t *testing.T) {
 	if feed.Mode() != Observer {
 		t.Errorf("Mode() = %v, want Observer", feed.Mode())
 	}
+	if disp != nil {
+		t.Errorf("selectFeed() Dispatcher = %v, want nil (dispatch disabled against a never-run repo)", disp)
+	}
 	if _, err := os.Stat(cfg.Storage.Path); err == nil {
 		t.Errorf("selectFeed() created %s as a side effect of merely launching against a never-run repo", cfg.Storage.Path)
 	}
@@ -122,13 +131,14 @@ func TestSelectFeed_FreshRepoStaysObserverAndCreatesNothing(t *testing.T) {
 
 // TestSelectFeed_ObserverWhenScanActive verifies that a live foreign
 // scan_runs heartbeat makes selectFeed fall back to a read-only SnapshotFeed
-// (Observer mode) rather than a dispatch-capable LiveFeed.
+// (Observer mode) rather than a dispatch-capable LiveFeed, and returns a nil
+// Dispatcher (dispatch is disabled in this mode).
 func TestSelectFeed_ObserverWhenScanActive(t *testing.T) {
 	ctx := context.Background()
 	cfg := runTestConfig(t)
 	seedActiveForeignRun(t, ctx, cfg)
 
-	feed, cleanup, err := selectFeed(ctx, cfg)
+	feed, disp, cleanup, err := selectFeed(ctx, cfg)
 	if err != nil {
 		t.Fatalf("selectFeed() error = %v", err)
 	}
@@ -140,13 +150,16 @@ func TestSelectFeed_ObserverWhenScanActive(t *testing.T) {
 	if feed.Mode() != Observer {
 		t.Errorf("Mode() = %v, want Observer", feed.Mode())
 	}
+	if disp != nil {
+		t.Errorf("selectFeed() Dispatcher = %v, want nil in Observer mode", disp)
+	}
 }
 
 // TestSelectFeed_ErrLockedFallsBackToObserver verifies that when the writer
 // lock is held (an idle Owner cockpit elsewhere: no active scan_runs row, so
 // the ActiveScanRuns probe sees nothing, but store.Open itself hits the
 // flock) selectFeed falls back to SnapshotFeed instead of propagating the
-// error and crashing the TUI.
+// error and crashing the TUI, with a nil Dispatcher.
 func TestSelectFeed_ErrLockedFallsBackToObserver(t *testing.T) {
 	ctx := context.Background()
 	cfg := runTestConfig(t)
@@ -159,7 +172,7 @@ func TestSelectFeed_ErrLockedFallsBackToObserver(t *testing.T) {
 	}
 	defer func() { _ = holder.Close() }()
 
-	feed, cleanup, err := selectFeed(ctx, cfg)
+	feed, disp, cleanup, err := selectFeed(ctx, cfg)
 	if err != nil {
 		t.Fatalf("selectFeed() error = %v, want fallback to Observer instead of an error", err)
 	}
@@ -170,5 +183,8 @@ func TestSelectFeed_ErrLockedFallsBackToObserver(t *testing.T) {
 	}
 	if feed.Mode() != Observer {
 		t.Errorf("Mode() = %v, want Observer", feed.Mode())
+	}
+	if disp != nil {
+		t.Errorf("selectFeed() Dispatcher = %v, want nil (ErrLocked fallback)", disp)
 	}
 }

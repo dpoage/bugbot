@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -78,17 +79,54 @@ type Model struct {
 
 	width, height int
 	quitting      bool
+
+	// disp is the dispatch palette's handle into the in-process engine; nil
+	// means dispatch is disabled (Observer mode, or a never-run repo — see
+	// selectFeed). Model never calls it directly outside confirmPaletteRow.
+	disp dispatcher
+	// ctx is the program's own context (see run.go's runProgram), retained
+	// solely so a dispatched verb's tea.Cmd can derive a cancelable child
+	// context via context.WithCancel(m.ctx) — cancelling one run must not
+	// quit the TUI, so it cannot simply reuse tea.WithContext's lifecycle.
+	// Nothing else on Model reads it.
+	ctx context.Context
+
+	palette paletteState
+
+	// running/runVerb/runStarted/runCancel/runOut describe the ONE active
+	// dispatch, if any — the palette refuses to start a second one while
+	// running is true. runCancel is non-nil only while running is true.
+	running    bool
+	runVerb    string
+	runStarted time.Time
+	runCancel  context.CancelFunc
+	runOut     *capBuffer
+
+	// lastVerb/lastErr/lastResult describe the most recently COMPLETED
+	// dispatch (success, error, or cancelled), rendered on the Cockpit
+	// status line and in the palette overlay until superseded by the next
+	// run.
+	lastVerb   string
+	lastErr    error
+	lastResult string
 }
 
-// NewModel builds the initial Model for feed. The transcript viewport starts
-// sized for the default 80x24 terminal so it renders content even before the
-// first real tea.WindowSizeMsg arrives (matters for tests that never send
-// one; a real tea.Program always sends one immediately after Init).
-func NewModel(feed Feed) Model {
+// NewModel builds the initial Model for feed. disp is the dispatch
+// palette's handle into the in-process engine (nil disables dispatch — see
+// selectFeed); ctx is the program's own context, retained only so a
+// dispatched verb can derive a cancelable child context. The transcript
+// viewport starts sized for the default 80x24 terminal so it renders content
+// even before the first real tea.WindowSizeMsg arrives (matters for tests
+// that never send one; a real tea.Program always sends one immediately
+// after Init).
+func NewModel(ctx context.Context, feed Feed, disp dispatcher) Model {
 	m := Model{
-		feed:   feed,
-		width:  80,
-		height: 24,
+		feed:    feed,
+		disp:    disp,
+		ctx:     ctx,
+		palette: newPaletteState(),
+		width:   80,
+		height:  24,
 	}
 	vw, vh := m.transcriptSize()
 	m.transcriptView = viewport.New(vw, vh)
@@ -152,6 +190,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case repaintMsg:
 		return m, repaintTick()
 
+	case dispatchDoneMsg:
+		m.running = false
+		m.runCancel = nil
+		m.runVerb = ""
+		m.lastVerb = msg.verb
+		m.lastErr = msg.err
+		m.lastResult = msg.summary
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -159,6 +206,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A cancel key stops the active dispatch without quitting the TUI or
+	// closing whatever screen/palette is open; it takes priority over every
+	// other key while a run is in flight, matching the palette's one-at-a-
+	// time gating — while running is true there is always exactly one run a
+	// cancel key could mean.
+	if m.running {
+		switch msg.String() {
+		case "ctrl+x", "esc":
+			return m.cancelRun(), nil
+		}
+	}
+
+	if m.palette.open {
+		return m.handlePaletteKey(msg)
+	}
+
 	if m.filtering {
 		switch msg.Type {
 		case tea.KeyCtrlC:
@@ -213,6 +276,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		m.screen = nextTopScreen(m.screen)
 		m.cursor = 0
+		return m, nil
+	case "d":
+		// Opens from any top-level screen (this switch is unreachable from
+		// screenAgentDetail — see the branch above — and from filtering,
+		// handled earlier). Opens even when m.disp == nil: the palette
+		// renders every verb disabled with the reason instead of hiding
+		// itself, so Observer-mode operators can see WHY dispatch is
+		// unavailable rather than wondering if the key did nothing.
+		m.palette.open = true
+		m.palette.editing = false
 		return m, nil
 
 	case "j", "down":

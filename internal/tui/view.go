@@ -29,6 +29,10 @@ func (m Model) View() string {
 		return ""
 	}
 
+	if m.palette.open {
+		return lipgloss.JoinVertical(lipgloss.Left, m.viewPalette(), "", m.viewFooter())
+	}
+
 	var body string
 	switch m.screen {
 	case screenAgents:
@@ -87,6 +91,9 @@ func (m Model) viewCockpit() string {
 	}
 
 	b.WriteString("\n" + renderWorldState(fr.World))
+	if line, ok := m.dispatchStatusLine(); ok {
+		b.WriteString("\n" + line + "\n")
+	}
 	return b.String()
 }
 
@@ -338,10 +345,13 @@ func (m Model) viewFooter() string {
 	if m.filtering {
 		return footerStyle.Render("filter: type to narrow · enter accept · esc clear")
 	}
-	hint := "j/k move · tab cycle · q quit"
+	if m.running {
+		return footerStyle.Render("ctrl+x/esc cancel run · d dispatch · tab cycle · q quit")
+	}
+	hint := "j/k move · d dispatch · tab cycle · q quit"
 	switch m.screen {
 	case screenAgents:
-		hint = "j/k move · enter drill in · / filter · tab cycle · q quit"
+		hint = "j/k move · enter drill in · / filter · d dispatch · tab cycle · q quit"
 	case screenAgentDetail:
 		hint = "esc back · tab cycle · q quit"
 	}

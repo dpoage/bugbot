@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,7 +95,7 @@ func baseFrame() Frame {
 }
 
 func TestUpdate_LiveAgentAppearsAndUpdatesActivity(t *testing.T) {
-	m := NewModel(&fakeFeed{})
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
 
 	m = sendFrame(m, Frame{
 		HasSnapshot: true,
@@ -118,7 +119,7 @@ func TestUpdate_LiveAgentAppearsAndUpdatesActivity(t *testing.T) {
 }
 
 func TestUpdate_LiveAndHistoricalMerge(t *testing.T) {
-	m := NewModel(&fakeFeed{})
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	m = sendFrame(m, baseFrame())
 
 	if len(m.frame.Agents) != 2 {
@@ -138,7 +139,7 @@ func TestUpdate_LiveAndHistoricalMerge(t *testing.T) {
 }
 
 func TestUpdate_StaleFrameRendersIdle(t *testing.T) {
-	m := NewModel(&fakeFeed{})
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	m = sendFrame(m, Frame{HasSnapshot: true, Stale: true, World: WorldState{HasTallies: true}})
 
 	view := stripANSI(m.View())
@@ -148,7 +149,7 @@ func TestUpdate_StaleFrameRendersIdle(t *testing.T) {
 }
 
 func TestUpdate_ScreenNavigation(t *testing.T) {
-	m := NewModel(&fakeFeed{})
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	m = sendFrame(m, baseFrame())
 
 	if m.screen != screenCockpit {
@@ -184,7 +185,7 @@ func TestUpdate_ScreenNavigation(t *testing.T) {
 }
 
 func TestUpdate_FilterNarrowsAgentList(t *testing.T) {
-	m := NewModel(&fakeFeed{})
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	m = sendFrame(m, baseFrame())
 	m = sendKey(m, "tab") // -> Agents
 
@@ -207,7 +208,7 @@ func TestUpdate_FilterNarrowsAgentList(t *testing.T) {
 }
 
 func TestUpdate_QuitReturnsTeaQuit(t *testing.T) {
-	m := NewModel(&fakeFeed{})
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}
 	next, cmd := m.Update(km)
 	nm := next.(Model)
@@ -223,7 +224,7 @@ func TestUpdate_QuitReturnsTeaQuit(t *testing.T) {
 // Cockpit screen's rendered text (ANSI stripped), following the golden-frame
 // approach in internal/progress/pane_test.go.
 func TestView_GoldenCockpitIdle(t *testing.T) {
-	m := NewModel(&fakeFeed{})
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	m = sendFrame(m, Frame{
 		World: WorldState{HasTallies: true, Tallies: domain.FindingTallies{OpenByTier: map[int]int{1: 2}}},
 	})
@@ -242,7 +243,7 @@ func TestView_GoldenCockpitIdle(t *testing.T) {
 }
 
 func TestView_GoldenCockpitActive(t *testing.T) {
-	m := NewModel(&fakeFeed{})
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	m = sendFrame(m, baseFrame())
 
 	got := stripANSI(m.View())
@@ -262,7 +263,7 @@ func TestView_GoldenCockpitActive(t *testing.T) {
 }
 
 func TestView_GoldenAgentsScreen(t *testing.T) {
-	m := NewModel(&fakeFeed{})
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	m = sendFrame(m, baseFrame())
 	m = sendKey(m, "tab")
 
@@ -291,7 +292,7 @@ func stripANSI(s string) string { return progress.StripANSI(s) }
 // must NOT swap which agent the detail screen shows. detailIdx is re-resolved
 // by agentKey identity, not held as a raw position.
 func TestUpdate_DrilldownSurvivesReorderedFrame(t *testing.T) {
-	m := NewModel(&fakeFeed{})
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	m = sendFrame(m, baseFrame())
 	m = sendKey(m, "tab") // -> Agents; cursor 0 is the live "verifier/candidate A" (Started=1000)
 
@@ -365,7 +366,7 @@ func TestUpdate_TranscriptLoadsFromRealFile(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	m := NewModel(&fakeFeed{})
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	m = sendFrame(m, Frame{
 		HasSnapshot: true,
 		Agents: []AgentView{

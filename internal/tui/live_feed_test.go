@@ -247,7 +247,7 @@ func TestModel_RendersLiveFeedFrame(t *testing.T) {
 
 	fr := f.buildFrame(context.Background())
 
-	m := NewModel(f)
+	m := NewModel(context.Background(), f, nil)
 	m = sendFrame(m, fr)
 
 	if len(m.frame.Agents) != 1 || !m.frame.Agents[0].Live {
