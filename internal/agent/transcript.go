@@ -125,17 +125,29 @@ func (t *Transcript) streamAppend(ev *Event) {
 	}
 }
 
-// closeStream closes the streaming file, if one was opened. Idempotent and
-// best-effort: called unconditionally at run end (and every early-return
-// path) regardless of whether streaming was ever armed or actually opened a
-// file.
+// closeStream closes the streaming file, if one was opened, and disarms
+// streaming by clearing streamPath. Idempotent and best-effort: called
+// unconditionally at run end (and every early-return path) regardless of
+// whether streaming was ever armed or actually opened a file.
+//
+// Clearing streamPath (not just streamFile/streamEnc) matters because a
+// Transcript outlives one run() call: RunJSON's repair() reuses the same
+// *Transcript for its one repair completion AFTER run() has already called
+// closeStream. Without clearing streamPath, streamAppend would see
+// streamPath still set and streamFile nil, and reopen the same path with
+// os.Create — truncating the just-closed main-run transcript down to only
+// the repair's two events, and leaking the newly reopened file handle since
+// nothing closes it again. Clearing streamPath makes closeStream a true
+// terminal state: repair's events are recorded in-memory only (Events), same
+// as pre-streaming behavior, and the on-disk file keeps the complete
+// main-run transcript untouched.
 func (t *Transcript) closeStream() {
-	if t.streamFile == nil {
-		return
+	if t.streamFile != nil {
+		_ = t.streamFile.Close()
+		t.streamFile = nil
+		t.streamEnc = nil
 	}
-	_ = t.streamFile.Close()
-	t.streamFile = nil
-	t.streamEnc = nil
+	t.streamPath = ""
 }
 
 // now returns the current time, allowing tests to inject a fixed clock.
