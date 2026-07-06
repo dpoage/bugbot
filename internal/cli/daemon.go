@@ -205,7 +205,6 @@ func daySpendGetter(ctx context.Context, st *store.Store) func() (int64, int64) 
 	}
 }
 
-
 // printDaemonBanner prints the startup banner: intervals, budgets, sinks, and
 // sandbox availability, so an operator can confirm the configuration at a glance.
 func printDaemonBanner(cmd *cobra.Command, cfg config.Config, dcfg daemon.DaemonConfig, sinks []report.Sink, runtime string, sandboxOK bool) {
