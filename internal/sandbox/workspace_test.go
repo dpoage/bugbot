@@ -127,6 +127,76 @@ func TestApplyWriteFilesRejectsEscape(t *testing.T) {
 	}
 }
 
+// TestApplyWriteFilesRefusesSymlinkedIntermediateDir verifies the bugbot-6nqd
+// write-side hardening: a symlinked directory component planted in the
+// workspace by an earlier (untrusted) command must be refused, never walked
+// through to write outside the workspace root.
+func TestApplyWriteFilesRefusesSymlinkedIntermediateDir(t *testing.T) {
+	ws := t.TempDir()
+	outside := t.TempDir()
+
+	// Simulate a prior untrusted call planting "sub" -> outside.
+	if err := os.Symlink(outside, filepath.Join(ws, "sub")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := applyWriteFiles(ws, map[string][]byte{"sub/evil.txt": []byte("escaped")})
+	if err == nil {
+		t.Fatal("expected error for a symlinked intermediate directory")
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "evil.txt")); !os.IsNotExist(statErr) {
+		t.Errorf("file must not have been written through the symlink: stat err = %v", statErr)
+	}
+}
+
+// TestApplyWriteFilesRefusesSymlinkedLeaf verifies that a symlinked LEAF
+// (planted at exactly the path a later WriteFiles entry targets) is refused
+// rather than followed — the same escape shape as the intermediate-dir case,
+// one level shallower.
+func TestApplyWriteFilesRefusesSymlinkedLeaf(t *testing.T) {
+	ws := t.TempDir()
+	outsideFile := filepath.Join(t.TempDir(), "authorized_keys")
+	mustWrite(t, outsideFile, "original\n", 0o644)
+
+	// Simulate a prior untrusted call planting "leak" -> outsideFile.
+	if err := os.Symlink(outsideFile, filepath.Join(ws, "leak")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := applyWriteFiles(ws, map[string][]byte{"leak": []byte("pwned\n")})
+	if err == nil {
+		t.Fatal("expected error for a symlinked leaf")
+	}
+	got, readErr := os.ReadFile(outsideFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "original\n" {
+		t.Errorf("host file must not have been overwritten through the symlink: got %q", got)
+	}
+}
+
+// TestApplyWriteFilesReuseOverwritesRegularFile verifies the hardening does
+// NOT break the legitimate try_repro reuse case: overwriting a plain
+// (non-symlink) file left by an earlier call on the SAME workspace must still
+// succeed.
+func TestApplyWriteFilesReuseOverwritesRegularFile(t *testing.T) {
+	ws := t.TempDir()
+	if err := applyWriteFiles(ws, map[string][]byte{"x_test.go": []byte("v1")}); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if err := applyWriteFiles(ws, map[string][]byte{"x_test.go": []byte("v2")}); err != nil {
+		t.Fatalf("second write (overwrite): %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(ws, "x_test.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "v2" {
+		t.Errorf("content = %q, want %q (overwrite must take effect)", got, "v2")
+	}
+}
+
 // --- helpers ---
 
 func mustWrite(t *testing.T, path, content string, perm os.FileMode) {

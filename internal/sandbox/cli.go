@@ -266,6 +266,17 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 		// fresh-copy/pristine-cache path entirely and apply WriteFiles directly
 		// onto the given directory. No defer RemoveAll — lifecycle is the
 		// caller's, not ours.
+		//
+		// Require an absolute path: Workspace is trusted verbatim (see the
+		// Spec doc's TRUST note) as a directory this process itself created,
+		// which is always an absolute path (MaterializeWorkspace returns one).
+		// A relative path would resolve against the CLI process's current
+		// working directory instead of the caller's intended location — an
+		// easy-to-miss caller bug that this guard turns into an immediate,
+		// unambiguous error instead of a silent wrong-directory write.
+		if !filepath.IsAbs(spec.Workspace) {
+			return Result{}, fmt.Errorf("sandbox: workspace %q must be an absolute path", spec.Workspace)
+		}
 		info, statErr := os.Stat(spec.Workspace)
 		if statErr != nil {
 			return Result{}, fmt.Errorf("sandbox: stat workspace %q: %w", spec.Workspace, statErr)

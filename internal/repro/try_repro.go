@@ -217,6 +217,15 @@ func (t *TryReproTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 	for path, content := range args.Files {
 		files[path] = []byte(content)
 	}
+	// Note: unlike execute(), Cmd is passed through UNNORMALIZED — no
+	// -json/--junitxml rewrite (see normalizeCmdForStructuredOutput) and no
+	// CaptureFiles. This is intentional, not an oversight: try_repro's result
+	// is advisory (the agent's own diagnostic loop), and execute()'s
+	// structured, dispositive classification of the SAME cmd on the final
+	// plan is what actually gates promotion — so skipping it here costs
+	// nothing but a slightly coarser (marker-based) classification during
+	// iteration, in exchange for keeping this tool's Spec construction simple
+	// and matching exactly what the agent asked to run.
 	spec := sandbox.Spec{
 		RepoDir: t.repoDir,
 		// Workspace pins this run to the attempt's persistent iteration
@@ -233,6 +242,12 @@ func (t *TryReproTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 		Env:        t.depEnv,
 		SetupCmds:  t.setupCmds,
 	}
+	// res, err below: a sandbox launch failure here is a plain tool error
+	// (matching run_tests/RunTestsTool), not an agent.ToolHealthError — the
+	// official verdict (execute()) still re-runs the final plan
+	// authoritatively, so a transient infra hiccup during iteration need not
+	// be escalated as a harness health signal the way a run_tests/sandbox_exec
+	// failure would be.
 	res, err := t.sb.Exec(ctx, spec)
 	if err != nil {
 		return "", fmt.Errorf("try_repro: sandbox execution failed: %w", err)
