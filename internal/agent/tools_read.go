@@ -58,7 +58,7 @@ func (c ReadCaps) resolve() ReadCaps {
 // the same per-result caps; a tool constructed with extraRoots == nil is
 // byte-for-byte equivalent to one built with NewReadFileWithCaps.
 type readFileTool struct {
-	root       *fsRoot
+	root       *FSRoot
 	extraRoots *DepSourceRoots
 	caps       ReadCaps
 }
@@ -79,7 +79,7 @@ func NewReadFile(dir string) (Tool, error) {
 // a prompt-cache prefix, which is why it (not compaction) is the finder's default
 // token-burn lever under a strong prompt cache (see bugbot-3nf).
 func NewReadFileWithCaps(dir string, caps ReadCaps) (Tool, error) {
-	root, err := newFSRoot(dir)
+	root, err := NewFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func NewReadFileWithCaps(dir string, caps ReadCaps) (Tool, error) {
 // the arbiter (bugbot-mi5.17/.18). The tool description is also augmented
 // when extra roots are present so the LLM knows it can read outside the repo.
 func NewReadFileWithDepRoots(dir string, caps ReadCaps, extraRoots *DepSourceRoots) (Tool, error) {
-	root, err := newFSRoot(dir)
+	root, err := NewFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -175,14 +175,14 @@ func (t *readFileTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 	}
 
 	// resolve the path. Two-step lookup (bugbot-mi5.18):
-	//   1. The in-repo fsRoot. A path under the repo root is the
+	//   1. The in-repo FSRoot. A path under the repo root is the
 	//      canonical case and never falls through to step 2.
 	//   2. The dep-source roots. A path that escapes the repo (or
 	//      lexically-resolves under the repo but does not exist there)
 	//      is then tried against every configured dep-source root. A
 	//      path that lives under the repo AND a dep-source root reads
 	//      from the repo (in-repo wins).
-	abs, err := t.root.resolve(args.Path)
+	abs, err := t.root.Resolve(args.Path)
 	if err != nil {
 		// Path lexically escapes the repo root: try dep-source roots.
 		if t.extraRoots == nil {
@@ -284,7 +284,7 @@ func renderNumbered(content string, offset, limit int, byteTruncated bool, caps 
 
 // listDirTool lists directory entries rooted at a repository directory.
 type listDirTool struct {
-	root *fsRoot
+	root *FSRoot
 }
 
 // NewListDir returns a list_dir tool rooted at dir. It lists the entries of a
@@ -292,7 +292,7 @@ type listDirTool struct {
 // size, sorted with directories first then by name. Paths are repo-relative and
 // traversal-protected.
 func NewListDir(dir string) (Tool, error) {
-	root, err := newFSRoot(dir)
+	root, err := NewFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -330,7 +330,7 @@ func (t *listDirTool) Run(ctx context.Context, raw json.RawMessage) (string, err
 		}
 	}
 
-	abs, err := t.root.resolve(args.Path)
+	abs, err := t.root.Resolve(args.Path)
 	if err != nil {
 		return "", err
 	}

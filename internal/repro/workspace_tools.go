@@ -19,19 +19,20 @@ import (
 	"github.com/dpoage/bugbot/internal/sandbox"
 )
 
-// runReproOutputTailBytes bounds the combined-output excerpt returned by
-// run_repro. It is deliberately more generous than the 16 KiB cap on
-// sandbox_exec/run_tests results (tools_sandbox_exec.go's sandboxOutputCap):
-// run_repro is the agent's primary diagnostic loop for its OWN candidate, so
-// truncating too aggressively would hide the exact compiler error or
-// assertion failure it needs to see to fix the next iteration.
+// runReproOutputTailBytes bounds the combined-output excerpt returned by the
+// workspace tool's cat/exec applets. It is deliberately more generous than
+// the 16 KiB cap on sandbox_exec/run_tests results (tools_sandbox_exec.go's
+// sandboxOutputCap): the workspace tool is the agent's primary diagnostic
+// loop for its OWN candidate, so truncating too aggressively would hide the
+// exact compiler error or assertion failure it needs to see to fix the next
+// iteration.
 const runReproOutputTailBytes = 4 * 1024
 
 // workspaceMaterializer is implemented by sandbox backends that can
 // pre-materialize a caller-owned workspace outside of Exec (see
 // sandbox.Spec.Workspace). *sandbox.CLI implements it via the pristine-
 // workspace cache. The workspace tool set (write_repro_file,
-// delete_repro_file, run_repro) is wired only when the configured sandbox
+// delete_repro_file, workspace) is wired only when the configured sandbox
 // implements this interface (checked once in newRunner); a backend that
 // doesn't (e.g. a bare sandbox.Mock in a test that never scripts iteration)
 // simply omits the tools, mirroring how run_tests is omitted when no build
@@ -43,10 +44,10 @@ type workspaceMaterializer interface {
 // iterationWorkspace is the lazily-materialized, per-Attempt workspace the
 // reproducer agent builds its candidate in. It starts empty (path == "") and
 // is materialized on the first tool call that needs it (write_repro_file or
-// run_repro) within one Attempt; every later call in that same Attempt reuses
-// the same directory, so files written by one call remain visible (and can be
-// overwritten) by the next — the interactive write/run/observe/fix loop the
-// design is built around.
+// `workspace exec`) within one Attempt; every later call in that same
+// Attempt reuses the same directory, so files written by one call remain
+// visible (and can be overwritten) by the next — the interactive
+// write/run/observe/fix loop the design is built around.
 //
 // Beyond the directory itself, the holder tracks every repro file the agent
 // wrote (path → contents). That registry IS the submission: Attempt merges it
@@ -113,6 +114,16 @@ func (w *iterationWorkspace) trackedPaths() []string {
 	return paths
 }
 
+// materializedPath returns the iteration workspace's path and whether it has
+// been materialized yet, WITHOUT materializing it. Used by the workspace
+// tool's free ls/cat/status applets so an inspection call never triggers a
+// full repo copy.
+func (w *iterationWorkspace) materializedPath() (string, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.path, w.path != ""
+}
+
 // mergedFiles returns the tracked registry with overlay applied on top
 // (overlay entries win on path collisions). The result is always a fresh map;
 // neither input is mutated. Attempt calls this to fold the workspace into the
@@ -150,7 +161,8 @@ func (w *iterationWorkspace) cleanup() error {
 // WriteReproFileTool exposes the workspace's write/edit affordance:
 // write_repro_file writes ONE NEW file into the per-Attempt iteration
 // workspace and tracks it in the registry that Attempt later submits as the
-// plan's files. Writing is free — it is not gated by the run_repro budget —
+// plan's files. Writing is free — it is not gated by the workspace exec
+// budget —
 // so the agent can edit (overwrite a file it wrote earlier) as many times as
 // it needs between runs.
 type WriteReproFileTool struct {
@@ -181,7 +193,7 @@ func (t *WriteReproFileTool) Def() llm.ToolDef {
 		Name: "write_repro_file",
 		Description: "Write ONE NEW repro/test file into your persistent attempt workspace. Calling it " +
 			"again with the same path replaces the file — that is how you edit. Writing is free (it does " +
-			"not consume the run_repro budget). Every file you write (and do not later delete) is " +
+			"not consume the workspace exec budget). Every file you write (and do not later delete) is " +
 			"automatically included in your final submitted plan: the workspace is the proof. You cannot " +
 			"overwrite a file that already exists in the repository — write NEW files only.",
 		Parameters: json.RawMessage(`{
@@ -289,8 +301,8 @@ func (t *DeleteReproFileTool) Run(_ context.Context, raw json.RawMessage) (strin
 			args.Path, strings.Join(tracked, ", "))
 	}
 	// Best-effort disk removal: the registry is authoritative for submission,
-	// and the workspace copy only matters for subsequent run_repro calls. A
-	// file already absent on disk is fine.
+	// and the workspace copy only matters for subsequent `workspace exec`
+	// calls. A file already absent on disk is fine.
 	t.ws.mu.Lock()
 	ws := t.ws.path
 	t.ws.mu.Unlock()
@@ -303,20 +315,44 @@ func (t *DeleteReproFileTool) Run(_ context.Context, raw json.RawMessage) (strin
 		args.Path, strings.Join(t.ws.trackedPaths(), ", ")), nil
 }
 
-// RunReproTool runs a command against the per-Attempt iteration workspace so
-// the agent can observe how the sandbox classifies its candidate — the
-// write/run/observe/fix loop — before committing to its final plan. Unlike
-// the final Plan (re-run independently for the promotion verdict), run_repro
-// executes against the persistent workspace write_repro_file populated, so
-// state accumulates across calls within one Attempt.
+// workspaceApplets enumerates the valid workspace tool applets, used both to
+// dispatch a call and to render the "unknown applet" teaching message.
+var workspaceApplets = []string{"ls", "cat", "status", "exec"}
+
+// workspaceLSMaxEntries bounds a single `workspace ls` listing so a huge
+// directory (e.g. a populated module cache) cannot flood the agent's
+// context; entries beyond the cap are summarized with a count.
+const workspaceLSMaxEntries = 200
+
+// workspaceUnmaterializedHint is returned by the free ls/cat applets when no
+// iteration workspace has been materialized yet. It deliberately does NOT
+// materialize one — that would silently copy the whole repo just to answer
+// an inspection query — and instead points the agent at what to do next:
+// use the (already free) read_file/list_dir for the pristine repo, or take
+// an action that materializes the workspace for it.
+const workspaceUnmaterializedHint = "workspace not yet materialized: it is created on your first " +
+	"write_repro_file call or `workspace exec` call. To inspect the pristine repository before then, " +
+	"use read_file/list_dir/grep (rooted at the repo)."
+
+// WorkspaceTool is the busybox-style multiplexer over the agent's
+// per-Attempt iteration workspace: argv[0] selects an applet, exactly like a
+// shell command. ls/cat/status are FREE, host-side inspection applets — they
+// never spin a container and never consume the exec budget, even when
+// called before the workspace exists. exec is the single, BUDGETED escape
+// path into the sandbox; it behaves exactly like the tool it replaces,
+// running the given argv against the persistent iteration workspace and
+// rendering the same interpret()-style classification the final plan
+// verdict uses (see renderRunReproResult).
 //
-// The workspace is intentionally NOT the one the official verdict runs
-// against: execute() always materializes its own fresh workspace from
-// RepoDir (the default Spec path, Workspace left empty) and re-applies only
-// the TRACKED file contents, so command side effects (build artifacts,
-// generated state) discovered here can never substitute for the plan
-// demonstrating the bug on its own.
-type RunReproTool struct {
+// bugbot-jto7: replaces RunReproTool. Live dogfood runs showed the agent
+// burning its ENTIRE exec budget on environment probes (`which bazel`,
+// `ls /vendor/...`) before ever writing a candidate, because
+// read_file/list_dir/grep are rooted at the HOST repo and could not see the
+// sandbox or the iteration workspace — executing a command was the agent's
+// ONLY way to look. The free ls/cat/status applets remove that pressure
+// without adding a second command-running tool, which would just recreate
+// the same "drain whichever budget remains" failure mode.
+type WorkspaceTool struct {
 	sb      sandbox.Sandbox
 	repoDir string
 	image   string
@@ -333,16 +369,18 @@ type RunReproTool struct {
 	used    atomic.Int32
 }
 
-// NewRunReproTool builds a run_repro tool bound to one Attempt's iteration
-// workspace holder. sb executes the sandboxed command; repoDir/image/timeout
-// mirror execute()'s Spec policy so an iteration run sees the same
-// network/dep/timeout/image environment the final plan will; roMounts/depEnv/
-// setupCmds carry the resolved dependency strategy; materialize lazily
-// creates the iteration workspace (normally sb.(workspaceMaterializer).
-// MaterializeWorkspace); ws is the shared holder Attempt cleans up on return;
-// maxExec is the per-attempt SANDBOX budget — only calls that actually reach
-// the sandbox consume it.
-func NewRunReproTool(
+// NewWorkspaceTool builds a workspace tool bound to one Attempt's iteration
+// workspace holder. Parameters mirror the removed NewRunReproTool exactly:
+// sb executes the sandboxed command for the exec applet; repoDir/image/
+// timeout mirror execute()'s Spec policy so an exec run sees the same
+// network/dep/timeout/image environment the final plan will; roMounts/
+// depEnv/setupCmds carry the resolved dependency strategy; materialize
+// lazily creates the iteration workspace (normally sb.(workspaceMaterializer).
+// MaterializeWorkspace); ws is the shared holder Attempt cleans up on
+// return; maxExec is the per-attempt SANDBOX budget — only exec calls that
+// actually reach the sandbox consume it; the free ls/cat/status applets
+// never do.
+func NewWorkspaceTool(
 	sb sandbox.Sandbox,
 	repoDir, image string,
 	timeout time.Duration,
@@ -352,8 +390,8 @@ func NewRunReproTool(
 	materialize func(repoDir string) (string, error),
 	ws *iterationWorkspace,
 	maxExec int,
-) *RunReproTool {
-	return &RunReproTool{
+) *WorkspaceTool {
+	return &WorkspaceTool{
 		sb:          sb,
 		repoDir:     repoDir,
 		image:       image,
@@ -367,82 +405,218 @@ func NewRunReproTool(
 	}
 }
 
-// runReproArgs is the JSON schema for the tool arguments — the same cmd
-// vocabulary as Plan (repro.go), so a command that works via run_repro can be
-// submitted as the final plan's cmd with no reshaping.
-type runReproArgs struct {
-	// Cmd is the argv to run against the current iteration workspace.
-	Cmd []string `json:"cmd"`
+// workspaceArgs is the JSON schema for the tool arguments: a single argv
+// array, busybox-style — argv[0] selects the applet, the remainder are its
+// arguments (e.g. the file to cat, or the command to exec).
+type workspaceArgs struct {
+	Argv []string `json:"argv"`
 }
 
 // Def implements agent.Tool.
-func (t *RunReproTool) Def() llm.ToolDef {
+func (t *WorkspaceTool) Def() llm.ToolDef {
 	return llm.ToolDef{
-		Name: "run_repro",
-		Description: "Run a command against your persistent attempt workspace (the repo plus every file " +
-			"you wrote via write_repro_file) and see exactly how the sandbox classifies the result, so " +
-			"you can write, run, observe, fix, and re-run BEFORE committing to your final repro plan. " +
-			"Only calls that reach the sandbox consume the budget. This workspace is discarded when the " +
-			"attempt ends and is NEVER what the final verdict runs against — the official verdict re-runs " +
-			"your cmd in a completely fresh workspace containing the repo plus exactly your written files, " +
-			"so cmd must perform any build steps itself and must not rely on artifacts left by earlier runs.",
+		Name: "workspace",
+		Description: "Busybox-style multiplexer over your persistent attempt workspace (the repo plus " +
+			"every file you wrote via write_repro_file). argv[0] selects the applet:\n" +
+			"  [\"ls\", \"<dir>\"]      list a workspace-relative directory (dir defaults to \".\"). FREE.\n" +
+			"  [\"cat\", \"<file>\"]    show a workspace-relative file's tail (last 4 KiB). FREE.\n" +
+			"  [\"status\"]            report whether the workspace is materialized, your tracked " +
+			"repro files, and your exec budget used/remaining. FREE.\n" +
+			"  [\"exec\", \"<argv...>\"] run a command against the workspace and see exactly how the " +
+			"sandbox classifies it. BUDGETED: consumes the exec budget ONLY when it reaches the sandbox " +
+			"— malformed calls, unknown applets, and invalid commands are free.\n" +
+			"exec runs in your PERSISTENT attempt workspace, discarded when the attempt ends. It is NEVER " +
+			"what the official verdict runs against: that re-runs your submitted plan cmd in a completely " +
+			"FRESH workspace containing the repo plus exactly the files you wrote with write_repro_file — " +
+			"no build artifacts or other exec side effects carry over, so cmd must perform any build steps " +
+			"itself. A file created as a SIDE EFFECT of an exec command (e.g. shell redirection) is NOT " +
+			"tracked or submitted — only files written via write_repro_file are.",
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "cmd": {
+    "argv": {
       "type": "array",
-      "description": "Command as an argv ARRAY of strings, e.g. [\"go\",\"test\",\"-timeout\",\"60s\",\"-run\",\"TestX\",\"./pkg\"]. Wrap multi-step shell commands as [\"bash\",\"-c\",\"<full command>\"].",
+      "description": "Applet and its arguments as a single argv ARRAY of strings, e.g. [\"ls\",\"sub/dir\"], [\"cat\",\"build.log\"], [\"status\"], or [\"exec\",\"go\",\"test\",\"-timeout\",\"60s\",\"-run\",\"TestX\",\"./pkg\"]. Wrap a multi-step shell exec command as [\"exec\",\"bash\",\"-c\",\"<full command>\"].",
       "items": {"type": "string"},
       "minItems": 1
     }
   },
-  "required": ["cmd"],
+  "required": ["argv"],
   "additionalProperties": false
 }`),
 	}
 }
 
-// Run implements agent.Tool. It validates cmd with the SAME rules validatePlan
-// applies to the final plan (so a command that clears run_repro is guaranteed
-// to clear submission too), THEN charges the per-attempt sandbox budget —
-// malformed or invalid calls are rejected for free, so a schema stumble never
-// eats the agent's real iteration rounds. The workspace is lazily materialized
-// on first use and cmd runs against it with the stage's network/dep/timeout/
-// image policy. The result is rendered with an interpret()-style
-// classification so the agent gets the same signal validatePlan/interpret
-// would give the final plan — without spending a revision round to learn it.
-func (t *RunReproTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
-	var args runReproArgs
+// Run implements agent.Tool. It dispatches on argv[0]. Unknown applets and
+// malformed arguments are rejected for free, mirroring the removed
+// RunReproTool's schema-stumble-must-not-cost-budget contract.
+func (t *WorkspaceTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
+	var args workspaceArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return "", fmt.Errorf(`invalid arguments (%v): run_repro takes {"cmd": ["argv", "elements", "..."]} — cmd is a JSON ARRAY of strings, not a single string`, err)
+		return "", fmt.Errorf(`invalid arguments (%v): workspace takes {"argv": ["<applet>", "..."]} — argv is a JSON ARRAY of strings, not a single string`, err)
 	}
-	if len(args.Cmd) == 0 {
-		return "", errors.New(`missing "cmd": pass the command as an argv array, e.g. {"cmd": ["go","test","-timeout","60s","-run","TestX","./pkg"]}`)
+	if len(args.Argv) == 0 {
+		return "", errors.New(`missing "argv": pass the applet and its arguments as an argv array, e.g. {"argv": ["status"]} or {"argv": ["exec","go","test","./..."]}`)
 	}
-	if err := validateReproCmd(args.Cmd); err != nil {
+
+	applet, rest := args.Argv[0], args.Argv[1:]
+	switch applet {
+	case "ls":
+		return t.runLS(rest)
+	case "cat":
+		return t.runCat(rest)
+	case "status":
+		return t.runStatus(), nil
+	case "exec":
+		return t.runExec(ctx, rest)
+	default:
+		return "", fmt.Errorf("unknown workspace applet %q; valid applets are: %s", applet, strings.Join(workspaceApplets, ", "))
+	}
+}
+
+// runLS implements the free `ls [dir]` applet: it lists a workspace-relative
+// directory (default the workspace root), confined via agent.FSRoot so a
+// symlink planted by a build step cannot walk the listing outside the
+// workspace. It never materializes an unmaterialized workspace.
+func (t *WorkspaceTool) runLS(argv []string) (string, error) {
+	dir := "."
+	if len(argv) > 0 {
+		dir = argv[0]
+	}
+	wsPath, ok := t.ws.materializedPath()
+	if !ok {
+		return workspaceUnmaterializedHint, nil
+	}
+	root, err := agent.NewFSRoot(wsPath)
+	if err != nil {
+		return "", fmt.Errorf("workspace ls: %w", err)
+	}
+	abs, err := root.Resolve(dir)
+	if err != nil {
+		return "", fmt.Errorf("workspace ls %q: %w", dir, err)
+	}
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		return "", fmt.Errorf("workspace ls %q: %w", dir, err)
+	}
+	if len(entries) == 0 {
+		return "(empty directory)", nil
+	}
+	total := len(entries)
+	truncated := total > workspaceLSMaxEntries
+	if truncated {
+		entries = entries[:workspaceLSMaxEntries]
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
+			name += "/"
+		}
+		b.WriteString(name)
+		b.WriteByte('\n')
+	}
+	if truncated {
+		fmt.Fprintf(&b, "... (%d more entries, listing truncated at %d)\n", total-workspaceLSMaxEntries, workspaceLSMaxEntries)
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+// runCat implements the free `cat <file>` applet: it returns the tail of a
+// workspace-relative file capped at runReproOutputTailBytes (build logs are
+// the primary use case), with the same tailExcerpt truncation marker
+// exec/interpret feedback already uses. Confined via agent.FSRoot. It never
+// materializes an unmaterialized workspace.
+func (t *WorkspaceTool) runCat(argv []string) (string, error) {
+	if len(argv) == 0 {
+		return "", errors.New(`workspace cat: missing "<file>"; usage: {"argv": ["cat", "<workspace-relative file>"]}`)
+	}
+	file := argv[0]
+	wsPath, ok := t.ws.materializedPath()
+	if !ok {
+		return workspaceUnmaterializedHint, nil
+	}
+	root, err := agent.NewFSRoot(wsPath)
+	if err != nil {
+		return "", fmt.Errorf("workspace cat: %w", err)
+	}
+	abs, err := root.Resolve(file)
+	if err != nil {
+		return "", fmt.Errorf("workspace cat %q: %w", file, err)
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return "", fmt.Errorf("workspace cat %q: %w", file, err)
+	}
+	return tailExcerpt(string(data), runReproOutputTailBytes), nil
+}
+
+// runStatus implements the free `status` applet: it reports whether the
+// iteration workspace is materialized, the sorted list of tracked repro
+// files, and the exec budget used/max — the direct fix for the observed
+// keep-calling-after-exhaustion failure mode (an agent that hit 5/4 and kept
+// retrying), since the agent can now check its remaining budget for free
+// instead of guessing.
+func (t *WorkspaceTool) runStatus() string {
+	wsPath, materialized := t.ws.materializedPath()
+	tracked := t.ws.trackedPaths()
+	used := int(t.used.Load())
+
+	var b strings.Builder
+	if materialized {
+		fmt.Fprintf(&b, "materialized: true (%s)\n", wsPath)
+	} else {
+		b.WriteString("materialized: false (created on your first write_repro_file or `workspace exec` call)\n")
+	}
+	if len(tracked) == 0 {
+		b.WriteString("tracked files: (none)\n")
+	} else {
+		fmt.Fprintf(&b, "tracked files (%d, submitted with your final plan): %s\n", len(tracked), strings.Join(tracked, ", "))
+	}
+	fmt.Fprintf(&b, "exec budget: %d/%d used", used, t.maxExec)
+	return b.String()
+}
+
+// runExec implements the budgeted `exec <argv...>` applet: exactly the
+// removed RunReproTool.Run semantics and ordering — validate cmd with the
+// SAME rules validatePlan applies to the final plan (so a command that
+// clears exec is guaranteed to clear submission too), THEN charge the
+// per-attempt sandbox budget — malformed or invalid calls are rejected for
+// free, so a schema stumble never eats the agent's real iteration rounds.
+// The workspace is lazily materialized on first use and cmd runs against it
+// with the stage's network/dep/timeout/image policy. The result is rendered
+// with an interpret()-style classification so the agent gets the same
+// signal validatePlan/interpret would give the final plan — without
+// spending a revision round to learn it.
+func (t *WorkspaceTool) runExec(ctx context.Context, cmd []string) (string, error) {
+	if len(cmd) == 0 {
+		return "", errors.New(`workspace exec: missing command; pass the argv to run, e.g. {"argv": ["exec","go","test","-timeout","60s","-run","TestX","./pkg"]}`)
+	}
+	if err := validateReproCmd(cmd); err != nil {
 		return "", err
 	}
 	// Budget is charged only after validation: it bounds sandbox capacity, and
 	// a call rejected above never reaches the sandbox.
-	if err := checkRunReproBudget(&t.used, t.maxExec); err != nil {
+	if err := checkWorkspaceExecBudget(&t.used, t.maxExec); err != nil {
 		return "", err
 	}
 
 	ws, err := t.ws.ensure(t.repoDir, t.materialize)
 	if err != nil {
-		return "", fmt.Errorf("run_repro: materialize iteration workspace: %w", err)
+		return "", fmt.Errorf("workspace exec: materialize iteration workspace: %w", err)
 	}
 
 	// Note: unlike execute(), Cmd is passed through UNNORMALIZED — no
 	// -json/--junitxml rewrite (see normalizeCmdForStructuredOutput) and no
-	// CaptureFiles. This is intentional, not an oversight: run_repro's result
-	// is advisory (the agent's own diagnostic loop), and execute()'s
-	// structured, dispositive classification of the SAME cmd on the final
-	// plan is what actually gates promotion — so skipping it here costs
-	// nothing but a slightly coarser (marker-based) classification during
-	// iteration, in exchange for keeping this tool's Spec construction simple
-	// and matching exactly what the agent asked to run. No WriteFiles either:
-	// write_repro_file already put the tracked files on disk in the workspace.
+	// CaptureFiles. This is intentional, not an oversight: exec's result is
+	// advisory (the agent's own diagnostic loop), and execute()'s structured,
+	// dispositive classification of the SAME cmd on the final plan is what
+	// actually gates promotion — so skipping it here costs nothing but a
+	// slightly coarser (marker-based) classification during iteration, in
+	// exchange for keeping this applet's Spec construction simple and
+	// matching exactly what the agent asked to run. No WriteFiles either:
+	// write_repro_file already put the tracked files on disk in the
+	// workspace.
 	spec := sandbox.Spec{
 		RepoDir: t.repoDir,
 		// Workspace pins this run to the attempt's persistent iteration
@@ -451,7 +625,7 @@ func (t *RunReproTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 		// Lifecycle is owned by ws, cleaned up by Attempt's defer, never by
 		// this tool.
 		Workspace: ws,
-		Cmd:       args.Cmd,
+		Cmd:       cmd,
 		Image:     t.image,
 		Timeout:   t.timeout,
 		ROMounts:  t.roMounts,
@@ -466,30 +640,36 @@ func (t *RunReproTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 	// failure would be.
 	res, err := t.sb.Exec(ctx, spec)
 	if err != nil {
-		return "", fmt.Errorf("run_repro: sandbox execution failed: %w", err)
+		return "", fmt.Errorf("workspace exec: sandbox execution failed: %w", err)
 	}
 
-	return renderRunReproResult(res, args.Cmd), nil
+	return renderRunReproResult(res, cmd), nil
 }
 
-// ExecCount returns the number of budget-charged Run calls made so far (calls
-// that passed validation, including budget-exceeded attempts rejected before
-// reaching the sandbox). Unlike RunTestsTool/SandboxExecTool's ExecCount,
-// malformed or invalid calls are NOT counted — they are rejected before the
-// budget is charged.
-func (t *RunReproTool) ExecCount() int {
+// ExecCount returns the number of budget-charged exec calls made so far
+// (calls that passed validation, including budget-exceeded attempts
+// rejected before reaching the sandbox). Unlike RunTestsTool/
+// SandboxExecTool's ExecCount, malformed calls, unknown applets, and
+// invalid commands are NOT counted — they are rejected before the budget is
+// charged.
+func (t *WorkspaceTool) ExecCount() int {
 	return int(t.used.Load())
 }
 
-// checkRunReproBudget atomically increments used and returns a recoverable
-// tool error once the new count exceeds maxExec. Mirrors the shape of
-// agent's unexported checkExecBudget (used by run_tests/sandbox_exec) —
-// duplicated here rather than exported cross-package because it is three
-// lines and the two packages' tool budgets are otherwise unrelated.
-func checkRunReproBudget(used *atomic.Int32, maxExec int) error {
+// checkWorkspaceExecBudget atomically increments used and returns a
+// recoverable tool error once the new count exceeds maxExec. Mirrors the
+// shape of agent's unexported checkExecBudget (used by run_tests/
+// sandbox_exec) — duplicated here rather than exported cross-package
+// because it is three lines and the two packages' tool budgets are
+// otherwise unrelated. The message directs the agent at `workspace status`
+// (free) instead of guessing at its remaining budget, and at submission —
+// the direct fix for the observed keep-calling-after-exhaustion failure
+// mode.
+func checkWorkspaceExecBudget(used *atomic.Int32, maxExec int) error {
 	n := used.Add(1)
 	if int(n) > maxExec {
-		return fmt.Errorf("run_repro budget exhausted (%d/%d calls used); stop iterating and submit your final repro plan",
+		return fmt.Errorf("workspace exec budget exhausted (%d/%d calls used); run `workspace status` to review "+
+			"your tracked files and remaining budget, then submit your final repro plan",
 			int(n)-1, maxExec)
 	}
 	return nil
@@ -498,9 +678,9 @@ func checkRunReproBudget(used *atomic.Int32, maxExec int) error {
 // renderRunReproResult formats a sandbox.Result into the compact text handed
 // back to the agent: the raw outcome (exit code, timeout, duration) plus the
 // SAME positive-evidence classification interpret() applies to the final
-// plan, so an agent iterating via run_repro learns whether its candidate
-// would actually be promoted — without spending a revision round to find out
-// — followed by a generous tail excerpt of the combined output.
+// plan, so an agent iterating via `workspace exec` learns whether its
+// candidate would actually be promoted — without spending a revision round
+// to find out — followed by a generous tail excerpt of the combined output.
 func renderRunReproResult(res sandbox.Result, cmd []string) string {
 	v := interpret(res, cmd)
 	var b strings.Builder
@@ -517,5 +697,5 @@ func renderRunReproResult(res sandbox.Result, cmd []string) string {
 var (
 	_ agent.Tool = (*WriteReproFileTool)(nil)
 	_ agent.Tool = (*DeleteReproFileTool)(nil)
-	_ agent.Tool = (*RunReproTool)(nil)
+	_ agent.Tool = (*WorkspaceTool)(nil)
 )

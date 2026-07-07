@@ -61,7 +61,7 @@ func (t *outlineTool) Run(_ context.Context, raw json.RawMessage) (string, error
 		return "", err
 	}
 
-	abs, err := t.nav.root.resolve(args.File)
+	abs, err := t.nav.root.Resolve(args.File)
 	if err != nil {
 		return "", err
 	}

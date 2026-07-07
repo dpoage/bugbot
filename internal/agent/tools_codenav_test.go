@@ -47,7 +47,7 @@ func (f *fakeNavigator) Close() error {
 func newTestCodeNav(t *testing.T, files map[string]string, nav navigator) (*CodeNav, string) {
 	t.Helper()
 	dir := t.TempDir()
-	// Resolve symlinks so position assertions match fsRoot's canonical root
+	// Resolve symlinks so position assertions match FSRoot's canonical root
 	// (macOS /tmp and friends).
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err == nil {

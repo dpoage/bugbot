@@ -45,9 +45,9 @@ func mustMkdir(t *testing.T, path string) {
 
 func TestFSRoot_Resolve_Traversal(t *testing.T) {
 	root := fixtureTree(t)
-	fr, err := newFSRoot(root)
+	fr, err := NewFSRoot(root)
 	if err != nil {
-		t.Fatalf("newFSRoot: %v", err)
+		t.Fatalf("NewFSRoot: %v", err)
 	}
 
 	tests := []struct {
@@ -68,7 +68,7 @@ func TestFSRoot_Resolve_Traversal(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := fr.resolve(tc.path)
+			got, err := fr.Resolve(tc.path)
 			if tc.wantErr {
 				if err == nil {
 					t.Errorf("resolve(%q) = %q, want error", tc.path, got)
@@ -101,15 +101,15 @@ func TestFSRoot_SymlinkEscape(t *testing.T) {
 		t.Fatalf("symlink dir: %v", err)
 	}
 
-	fr, err := newFSRoot(root)
+	fr, err := NewFSRoot(root)
 	if err != nil {
-		t.Fatalf("newFSRoot: %v", err)
+		t.Fatalf("NewFSRoot: %v", err)
 	}
 
-	if _, err := fr.resolve("escape"); err == nil {
+	if _, err := fr.Resolve("escape"); err == nil {
 		t.Error("resolve via file symlink escaping root should fail")
 	}
-	if _, err := fr.resolve("outdir/secret.txt"); err == nil {
+	if _, err := fr.Resolve("outdir/secret.txt"); err == nil {
 		t.Error("resolve through dir symlink escaping root should fail")
 	}
 }

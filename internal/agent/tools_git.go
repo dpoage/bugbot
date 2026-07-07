@@ -57,7 +57,7 @@ func realGitRunner(ctx context.Context, dir string, args ...string) ([]byte, err
 
 // gitBlameTool serves bounded git blame output rooted at a repository directory.
 type gitBlameTool struct {
-	root    *fsRoot
+	root    *FSRoot
 	repoDir string
 	run     gitRunner
 }
@@ -70,7 +70,7 @@ type gitBlameTool struct {
 //
 // runner may be nil to use the real git subprocess.
 func NewGitBlame(dir string, runner gitRunner) (Tool, error) {
-	root, err := newFSRoot(dir)
+	root, err := NewFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -140,8 +140,8 @@ func (t *gitBlameTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 		return "", fmt.Errorf("line_start (%d) must be <= line_end (%d)", args.LineStart, args.LineEnd)
 	}
 
-	// Validate path through the fsRoot to prevent traversal.
-	if _, err := t.root.resolve(args.Path); err != nil {
+	// Validate path through the FSRoot to prevent traversal.
+	if _, err := t.root.Resolve(args.Path); err != nil {
 		return "", err
 	}
 

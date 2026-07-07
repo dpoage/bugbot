@@ -20,7 +20,7 @@ import (
 // the same way without changing the tool wiring.
 //
 // Each root is independent and traversal-protected (no `..`, no symlink escape),
-// matching the in-repo fsRoot contract. Roots that don't exist on the current
+// matching the in-repo FSRoot contract. Roots that don't exist on the current
 // host (e.g. a C++ developer without a Go toolchain) are simply absent from
 // the active set; the resolve method is a no-op miss for them.
 //
@@ -194,7 +194,7 @@ func (d *DepSourceRoots) Len() int {
 
 // resolve maps a repo-relative path to an absolute on-disk path UNDER ONE OF
 // THE CONFIGURED ROOTS, rejecting absolute inputs and any path that escapes
-// every root. The semantics mirror fsRoot.resolve: the same traversal
+// every root. The semantics mirror FSRoot.Resolve: the same traversal
 // protection (no `..`, symlink containment) and the same empty-string
 // convention are honoured. Returns errDepPathEscape when the path is well
 // formed but lands outside every root, so the tool can distinguish

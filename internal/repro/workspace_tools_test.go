@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -57,10 +58,10 @@ var (
 	_ workspaceMaterializer = (*fakeMaterializingSandbox)(nil)
 )
 
-// newRunReproTool builds a RunReproTool wired to sb for tests, with no
+// newWorkspaceTool builds a WorkspaceTool wired to sb for tests, with no
 // dependency-strategy extras and the given per-attempt budget.
-func newRunReproTool(sb *fakeMaterializingSandbox, repoDir string, maxExec int, ws *iterationWorkspace) *RunReproTool {
-	return NewRunReproTool(sb, repoDir, "", 30*time.Second, nil, nil, nil, sb.MaterializeWorkspace, ws, maxExec)
+func newWorkspaceTool(sb *fakeMaterializingSandbox, repoDir string, maxExec int, ws *iterationWorkspace) *WorkspaceTool {
+	return NewWorkspaceTool(sb, repoDir, "", 30*time.Second, nil, nil, nil, sb.MaterializeWorkspace, ws, maxExec)
 }
 
 // newWriteTool builds a WriteReproFileTool sharing sb's materializer and ws.
@@ -70,7 +71,7 @@ func newWriteTool(sb *fakeMaterializingSandbox, repoDir string, ws *iterationWor
 
 func mustCmdArgs(t *testing.T, cmd []string) json.RawMessage {
 	t.Helper()
-	b, err := json.Marshal(runReproArgs{Cmd: cmd})
+	b, err := json.Marshal(workspaceArgs{Argv: append([]string{"exec"}, cmd...)})
 	if err != nil {
 		t.Fatalf("marshal args: %v", err)
 	}
@@ -96,13 +97,13 @@ func writeFileVia(t *testing.T, tool *WriteReproFileTool, path, contents string)
 	return out
 }
 
-// TestRunReproTool_BudgetExhausted verifies that a call beyond maxExec
+// TestWorkspaceTool_BudgetExhausted verifies that a call beyond maxExec
 // returns a recoverable tool error naming the limit, without reaching the
 // sandbox (CallCount stays at maxExec).
-func TestRunReproTool_BudgetExhausted(t *testing.T) {
+func TestWorkspaceTool_BudgetExhausted(t *testing.T) {
 	sb := newFakeMaterializingSandbox(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestX\nFAIL"}})
 	repoDir := newRepoDir(t)
-	tool := newRunReproTool(sb, repoDir, 2, &iterationWorkspace{})
+	tool := newWorkspaceTool(sb, repoDir, 2, &iterationWorkspace{})
 
 	args := mustCmdArgs(t, []string{"cat", "x_test.go"})
 
@@ -115,7 +116,7 @@ func TestRunReproTool_BudgetExhausted(t *testing.T) {
 	if err == nil {
 		t.Fatal("3rd call should exceed the budget of 2")
 	}
-	if !strings.Contains(err.Error(), "run_repro budget exhausted") || !strings.Contains(err.Error(), "2/2") {
+	if !strings.Contains(err.Error(), "workspace exec budget exhausted") || !strings.Contains(err.Error(), "2/2") {
 		t.Errorf("budget error = %q, want it to name the limit (2/2)", err.Error())
 	}
 	if sb.CallCount() != 2 {
@@ -123,19 +124,22 @@ func TestRunReproTool_BudgetExhausted(t *testing.T) {
 	}
 }
 
-// TestRunReproTool_InvalidCallsDoNotConsumeBudget verifies the fix for the
-// observed budget-burn failure mode: malformed or invalid calls (bad JSON
-// shape, empty cmd, bare shell operator) are rejected BEFORE the budget is
-// charged, so a schema stumble never eats the agent's real iteration rounds.
-func TestRunReproTool_InvalidCallsDoNotConsumeBudget(t *testing.T) {
+// TestWorkspaceTool_InvalidCallsDoNotConsumeBudget verifies the fix for the
+// observed budget-burn failure mode: malformed args, unknown applets, and
+// invalid exec commands (bad JSON shape, empty argv, unknown applet, bare
+// shell operator) are rejected BEFORE the budget is charged, so a schema
+// stumble never eats the agent's real iteration rounds.
+func TestWorkspaceTool_InvalidCallsDoNotConsumeBudget(t *testing.T) {
 	sb := newFakeMaterializingSandbox(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestX\nFAIL"}})
 	repoDir := newRepoDir(t)
-	tool := newRunReproTool(sb, repoDir, 1, &iterationWorkspace{})
+	tool := newWorkspaceTool(sb, repoDir, 1, &iterationWorkspace{})
 
 	invalid := []json.RawMessage{
-		json.RawMessage(`{"cmd": "go test ./..."}`),           // string, not array
-		json.RawMessage(`{"cmd": []}`),                        // empty argv
-		json.RawMessage(`{}`),                                 // missing cmd
+		json.RawMessage(`{"argv": "exec go test ./..."}`),     // string, not array
+		json.RawMessage(`{"argv": []}`),                       // empty argv
+		json.RawMessage(`{}`),                                 // missing argv
+		json.RawMessage(`{"argv": ["frobnicate"]}`),           // unknown applet
+		json.RawMessage(`{"argv": ["exec"]}`),                 // exec with no command
 		mustCmdArgs(t, []string{"make", "&&", "make", "run"}), // bare shell op
 	}
 	for i, raw := range invalid {
@@ -156,20 +160,20 @@ func TestRunReproTool_InvalidCallsDoNotConsumeBudget(t *testing.T) {
 	}
 }
 
-// TestRunReproTool_MalformedArgsTeachSchema verifies that a wrong-shaped cmd
+// TestWorkspaceTool_MalformedArgsTeachSchema verifies that a wrong-shaped argv
 // yields a message that teaches the expected JSON shape instead of leaking Go
 // unmarshal internals as the only guidance.
-func TestRunReproTool_MalformedArgsTeachSchema(t *testing.T) {
+func TestWorkspaceTool_MalformedArgsTeachSchema(t *testing.T) {
 	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
 	repoDir := newRepoDir(t)
-	tool := newRunReproTool(sb, repoDir, 5, &iterationWorkspace{})
+	tool := newWorkspaceTool(sb, repoDir, 5, &iterationWorkspace{})
 
-	_, err := tool.Run(context.Background(), json.RawMessage(`{"cmd": "go test ./..."}`))
+	_, err := tool.Run(context.Background(), json.RawMessage(`{"argv": "exec go test ./..."}`))
 	if err == nil {
-		t.Fatal("expected an error for cmd-as-string")
+		t.Fatal("expected an error for argv-as-string")
 	}
-	if !strings.Contains(err.Error(), "ARRAY") || !strings.Contains(err.Error(), `"cmd"`) {
-		t.Errorf("error = %q, want it to teach that cmd is a JSON array", err.Error())
+	if !strings.Contains(err.Error(), "ARRAY") || !strings.Contains(err.Error(), `"argv"`) {
+		t.Errorf("error = %q, want it to teach that argv is a JSON array", err.Error())
 	}
 }
 
@@ -274,23 +278,23 @@ func TestDeleteReproFile(t *testing.T) {
 	}
 }
 
-// TestRunRepro_RunsAgainstSharedWorkspace verifies that run_repro executes in
+// TestWorkspaceExec_RunsAgainstSharedWorkspace verifies that `workspace exec` executes in
 // the same directory write_repro_file populated (Spec.Workspace pins it, no
 // WriteFiles needed — files are already on disk) and the workspace is
 // materialized exactly once across both tools.
-func TestRunRepro_RunsAgainstSharedWorkspace(t *testing.T) {
+func TestWorkspaceExec_RunsAgainstSharedWorkspace(t *testing.T) {
 	sb := newFakeMaterializingSandbox(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestX\nFAIL"}})
 	repoDir := newRepoDir(t)
 	ws := &iterationWorkspace{}
 	writeTool := newWriteTool(sb, repoDir, ws)
-	runTool := newRunReproTool(sb, repoDir, 5, ws)
+	runTool := newWorkspaceTool(sb, repoDir, 5, ws)
 
 	writeFileVia(t, writeTool, "x_test.go", "package bug\n")
 	if _, err := runTool.Run(context.Background(), mustCmdArgs(t, []string{"cat", "x_test.go"})); err != nil {
-		t.Fatalf("run_repro: %v", err)
+		t.Fatalf("workspace exec: %v", err)
 	}
 	if _, err := runTool.Run(context.Background(), mustCmdArgs(t, []string{"cat", "x_test.go"})); err != nil {
-		t.Fatalf("run_repro (2nd): %v", err)
+		t.Fatalf("workspace exec (2nd): %v", err)
 	}
 
 	made := sb.materialized()
@@ -341,16 +345,16 @@ func TestIterationWorkspace_MergedFiles(t *testing.T) {
 	}
 }
 
-// TestRunReproTool_RendersClassificationAndTail verifies that Run's textual
+// TestWorkspaceTool_RendersClassificationAndTail verifies that Run's textual
 // result carries the exit code, the interpret()-style demonstrated/reason
 // classification, and a tail excerpt of the combined output.
-func TestRunReproTool_RendersClassificationAndTail(t *testing.T) {
+func TestWorkspaceTool_RendersClassificationAndTail(t *testing.T) {
 	sb := newFakeMaterializingSandbox(sandbox.MockResponse{Result: sandbox.Result{
 		ExitCode: 1,
 		Stdout:   "--- FAIL: TestBug\n    bug_test.go:1: boom\nFAIL",
 	}})
 	repoDir := newRepoDir(t)
-	tool := newRunReproTool(sb, repoDir, 5, &iterationWorkspace{})
+	tool := newWorkspaceTool(sb, repoDir, 5, &iterationWorkspace{})
 
 	out, err := tool.Run(context.Background(), mustCmdArgs(t, []string{"go", "test", "-timeout", "60s", "-run", "TestBug", "./..."}))
 	if err != nil {
@@ -367,13 +371,13 @@ func TestRunReproTool_RendersClassificationAndTail(t *testing.T) {
 	}
 }
 
-// TestRunReproTool_NotDemonstratedReasonSurfaced verifies a non-demonstrating
+// TestWorkspaceTool_NotDemonstratedReasonSurfaced verifies a non-demonstrating
 // run (e.g. exit 0) reports demonstrated=false with its reason, so the agent
 // gets the same signal validatePlan/interpret would give the final plan.
-func TestRunReproTool_NotDemonstratedReasonSurfaced(t *testing.T) {
+func TestWorkspaceTool_NotDemonstratedReasonSurfaced(t *testing.T) {
 	sb := newFakeMaterializingSandbox(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "PASS"}})
 	repoDir := newRepoDir(t)
-	tool := newRunReproTool(sb, repoDir, 5, &iterationWorkspace{})
+	tool := newWorkspaceTool(sb, repoDir, 5, &iterationWorkspace{})
 
 	out, err := tool.Run(context.Background(), mustCmdArgs(t, []string{"go", "test", "-timeout", "60s", "-run", "TestBug", "./..."}))
 	if err != nil {
@@ -403,7 +407,7 @@ func TestAttempt_WorkspaceFilesSubmittedAsPlan(t *testing.T) {
 	const testFile = "package bug\n\nimport \"testing\"\n\nfunc TestBug(t *testing.T){ t.Fatal(\"boom\") }\n"
 	client := newToolScriptedClient(
 		toolCallStep("c1", "write_repro_file", string(mustWriteArgs(t, "bug_test.go", testFile))),
-		toolCallStep("c2", "run_repro", string(mustCmdArgs(t, []string{"go", "test", "-timeout", "60s", "-run", "TestBug", "./..."}))),
+		toolCallStep("c2", "workspace", string(mustCmdArgs(t, []string{"go", "test", "-timeout", "60s", "-run", "TestBug", "./..."}))),
 		textStep(`{"cmd":["go","test","-timeout","60s","-run","TestBug","./..."],"expect":"assertion fails"}`),
 	)
 
@@ -457,7 +461,7 @@ func TestAttempt_IterationWorkspaceRemovedAfterReturn(t *testing.T) {
 	// final plan.
 	client := newToolScriptedClient(
 		toolCallStep("c1", "write_repro_file", string(mustWriteArgs(t, "bug_test.go", goodPlan().Files["bug_test.go"]))),
-		toolCallStep("c2", "run_repro", string(mustCmdArgs(t, goodPlan().Cmd))),
+		toolCallStep("c2", "workspace", string(mustCmdArgs(t, goodPlan().Cmd))),
 		textStep(planBody(t, goodPlan())),
 	)
 
@@ -521,5 +525,189 @@ func TestAttempt_NoWorkspaceToolCallLeavesWorkspaceUnmaterialized(t *testing.T) 
 	}
 	if made := sb.materialized(); len(made) != 0 {
 		t.Errorf("MaterializeWorkspace called %d times, want 0 (no workspace tool was ever invoked)", len(made))
+	}
+}
+
+// runApplet is a small helper to invoke a WorkspaceTool applet by argv.
+func runApplet(t *testing.T, tool *WorkspaceTool, argv ...string) (string, error) {
+	t.Helper()
+	raw, err := json.Marshal(workspaceArgs{Argv: argv})
+	if err != nil {
+		t.Fatalf("marshal argv: %v", err)
+	}
+	return tool.Run(context.Background(), raw)
+}
+
+// TestWorkspaceTool_FreeAppletsOnUnmaterializedWorkspace verifies that ls and
+// cat, called before any write_repro_file/exec, return the pristine-repo
+// hint WITHOUT materializing a workspace — materializing on a free call
+// would silently copy the whole repo.
+func TestWorkspaceTool_FreeAppletsOnUnmaterializedWorkspace(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+
+	for _, argv := range [][]string{{"ls"}, {"cat", "x.go"}} {
+		out, err := runApplet(t, tool, argv...)
+		if err != nil {
+			t.Fatalf("%v: unexpected error: %v", argv, err)
+		}
+		if !strings.Contains(out, "not yet materialized") {
+			t.Errorf("%v output = %q, want the unmaterialized hint", argv, out)
+		}
+	}
+	if made := sb.materialized(); len(made) != 0 {
+		t.Errorf("MaterializeWorkspace called %d times, want 0 (free applets must not materialize)", len(made))
+	}
+	if got := tool.ExecCount(); got != 0 {
+		t.Errorf("ExecCount = %d, want 0 (free applets never charge the budget)", got)
+	}
+}
+
+// TestWorkspaceTool_LsAndCat verifies the ls/cat applets against a
+// materialized workspace: ls lists entries with a trailing slash on
+// directories, and cat returns file contents (tail-capped, with a
+// truncation marker when clipped). Neither consumes the exec budget.
+func TestWorkspaceTool_LsAndCat(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+
+	writeFileVia(t, writeTool, "sub/nested_test.go", "package bug\n")
+
+	out, err := runApplet(t, tool, "ls", "sub")
+	if err != nil {
+		t.Fatalf("ls: %v", err)
+	}
+	if !strings.Contains(out, "nested_test.go") {
+		t.Errorf("ls output = %q, want it to list nested_test.go", out)
+	}
+
+	out, err = runApplet(t, tool, "cat", "sub/nested_test.go")
+	if err != nil {
+		t.Fatalf("cat: %v", err)
+	}
+	if !strings.Contains(out, "package bug") {
+		t.Errorf("cat output = %q, want the file contents", out)
+	}
+
+	// A big file must be tail-capped with a truncation marker.
+	big := strings.Repeat("x", runReproOutputTailBytes+1024)
+	writeFileVia(t, writeTool, "big.txt", big)
+	out, err = runApplet(t, tool, "cat", "big.txt")
+	if err != nil {
+		t.Fatalf("cat big: %v", err)
+	}
+	if len(out) >= len(big) {
+		t.Errorf("cat big.txt returned %d bytes, want it capped below the %d-byte input", len(out), len(big))
+	}
+	if !strings.Contains(out, "[head elided]") {
+		t.Errorf("cat big.txt output missing truncation marker: %q", out[:80])
+	}
+
+	if got := tool.ExecCount(); got != 0 {
+		t.Errorf("ExecCount = %d, want 0 (ls/cat never charge the budget)", got)
+	}
+}
+
+// TestWorkspaceTool_LsCatConfinement verifies ls/cat reject a lexical
+// escape ("..") and a symlink planted inside the workspace that points
+// outside it — the same containment agent.FSRoot already guarantees for the
+// host-repo tools.
+func TestWorkspaceTool_LsCatConfinement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows")
+	}
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+	writeFileVia(t, writeTool, "keep_test.go", "package bug\n")
+
+	wsPath := sb.materialized()[0]
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("top secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(wsPath, "escape")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runApplet(t, tool, "cat", "../escape.go"); err == nil {
+		t.Error("cat with \"..\" traversal should fail")
+	}
+	if _, err := runApplet(t, tool, "cat", "escape"); err == nil {
+		t.Error("cat through a symlink escaping the workspace should fail")
+	}
+	if _, err := runApplet(t, tool, "ls", ".."); err == nil {
+		t.Error("ls with \"..\" traversal should fail")
+	}
+}
+
+// TestWorkspaceTool_Status verifies the status applet reports materialization,
+// tracked files, and the exec budget used/max — the direct fix for the
+// observed keep-calling-after-exhaustion failure mode.
+func TestWorkspaceTool_Status(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	tool := newWorkspaceTool(sb, repoDir, 3, ws)
+
+	out, err := runApplet(t, tool, "status")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !strings.Contains(out, "materialized: false") {
+		t.Errorf("status before any write/exec = %q, want materialized: false", out)
+	}
+	if !strings.Contains(out, "0/3 used") {
+		t.Errorf("status output = %q, want exec budget 0/3", out)
+	}
+
+	writeTool := newWriteTool(sb, repoDir, ws)
+	writeFileVia(t, writeTool, "a_test.go", "package bug\n")
+	if _, err := runApplet(t, tool, "exec", "cat", "a_test.go"); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+
+	out, err = runApplet(t, tool, "status")
+	if err != nil {
+		t.Fatalf("status (2nd): %v", err)
+	}
+	if !strings.Contains(out, "materialized: true") {
+		t.Errorf("status after write = %q, want materialized: true", out)
+	}
+	if !strings.Contains(out, "a_test.go") {
+		t.Errorf("status output = %q, want it to list the tracked file", out)
+	}
+	if !strings.Contains(out, "1/3 used") {
+		t.Errorf("status output = %q, want exec budget 1/3 after one exec", out)
+	}
+}
+
+// TestWorkspaceTool_UnknownAppletIsFreeAndEnumerates verifies that an
+// unrecognized applet is rejected for free and the error names the valid
+// applets, so a schema stumble teaches the fix instead of burning budget.
+func TestWorkspaceTool_UnknownAppletIsFreeAndEnumerates(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	tool := newWorkspaceTool(sb, repoDir, 5, &iterationWorkspace{})
+
+	_, err := runApplet(t, tool, "grep", "foo")
+	if err == nil {
+		t.Fatal("expected an error for an unknown applet")
+	}
+	for _, applet := range []string{"ls", "cat", "status", "exec"} {
+		if !strings.Contains(err.Error(), applet) {
+			t.Errorf("unknown-applet error = %q, want it to name applet %q", err.Error(), applet)
+		}
+	}
+	if got := tool.ExecCount(); got != 0 {
+		t.Errorf("ExecCount = %d, want 0 (unknown applet must be free)", got)
 	}
 }

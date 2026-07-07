@@ -28,7 +28,7 @@ const (
 
 // grepTool runs a Go regexp across files under a repository directory.
 type grepTool struct {
-	root *fsRoot
+	root *FSRoot
 }
 
 // NewGrep returns a grep tool rooted at dir. It searches files under the
@@ -37,7 +37,7 @@ type grepTool struct {
 // to matching repo-relative paths. Binary files are skipped. Paths are
 // traversal-protected; symlinked directories are not followed out of the root.
 func NewGrep(dir string) (Tool, error) {
-	root, err := newFSRoot(dir)
+	root, err := NewFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}
