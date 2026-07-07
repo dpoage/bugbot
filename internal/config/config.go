@@ -334,15 +334,16 @@ type Repro struct {
 	// agent: the agent may call run_tests at most this many times per attempt to
 	// orient itself before proposing its repro plan. Must be >= 1. Default 3.
 	SandboxMaxExecs int `yaml:"sandbox_max_execs"`
-	// TryMaxExecs is the per-attempt run_repro budget for the reproducer agent:
-	// the agent may call run_repro at most this many times per attempt to run
-	// and observe its candidate repro INTERACTIVELY (built via write_repro_file
-	// in the persistent iteration workspace) before committing to its final
-	// plan. Unlike SandboxMaxExecs (read-only orientation against the repo's
-	// existing suite), run_repro iterates on the agent's own candidate — the
-	// mirror-image write/run/observe loop a human debugging a flaky repro would
-	// use. Only calls that reach the sandbox consume the budget. Must be >= 1.
-	// Default 4.
+	// TryMaxExecs is the per-attempt workspace-exec budget for the reproducer
+	// agent: the agent may invoke `workspace exec` at most this many times per
+	// attempt to run and observe its candidate repro INTERACTIVELY in the
+	// persistent per-attempt iteration workspace before committing to its
+	// final plan. Unlike SandboxMaxExecs (read-only orientation against the
+	// repo's existing suite), this budget governs the mirror-image
+	// write/run/observe loop a human debugging a flaky repro would use. Only
+	// `workspace exec` calls that reach the sandbox consume the budget; the
+	// free `ls`/`cat`/`status` applets and writes never do. Must be >= 1.
+	// Default 10.
 	TryMaxExecs int `yaml:"try_max_execs"`
 }
 
@@ -503,7 +504,7 @@ func Default() Config {
 			BacklogBatch:     3,
 			MaxParallel:      2,
 			SandboxMaxExecs:  3,
-			TryMaxExecs:      4,
+			TryMaxExecs:      10,
 		},
 		Report: Report{
 			Dir:   ".bugbot/reports",

@@ -633,7 +633,7 @@ func extractToolActivity(call llm.ToolCall) ToolActivity {
 		StartLine int      `json:"start_line"`
 		EndLine   int      `json:"end_line"`
 		Note      string   `json:"note"`
-		Cmd       []string `json:"cmd"`
+		Argv      []string `json:"argv"`
 	}
 	_ = json.Unmarshal(call.Arguments, &args)
 
@@ -692,9 +692,9 @@ func extractToolActivity(call llm.ToolCall) ToolActivity {
 		act.Symbol = note
 	case "write_repro_file", "delete_repro_file":
 		act.File = args.Path
-	case "run_repro":
+	case "workspace":
 		// Argv is joined and truncated to 120 runes (same as status_note).
-		cmd := strings.Join(strings.Fields(strings.Join(args.Cmd, " ")), " ")
+		cmd := strings.Join(strings.Fields(strings.Join(args.Argv, " ")), " ")
 		runes := []rune(cmd)
 		if len(runes) > 120 {
 			cmd = string(runes[:119]) + "…"
