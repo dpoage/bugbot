@@ -30,12 +30,21 @@ func TestEventValidate(t *testing.T) {
 		t.Errorf("Validate: KindAgentFinished valid event unexpected error: %v", err)
 	}
 
-	// KindAgentActivity requires Activity too.
-	if err := (Event{Kind: KindAgentActivity, Role: RoleFinder, Label: "lens"}).Validate(); err == nil {
-		t.Error("Validate: KindAgentActivity without Activity should fail")
+	// KindToolCall requires Role, Label, Tool, and Phase in {start,done}.
+	if err := (Event{Kind: KindToolCall, Role: RoleFinder, Label: "lens"}).Validate(); err == nil {
+		t.Error("Validate: KindToolCall without Tool should fail")
 	}
-	if err := (Event{Kind: KindAgentActivity, Role: RoleFinder, Label: "lens", Activity: "reading"}).Validate(); err != nil {
-		t.Errorf("Validate: KindAgentActivity valid event unexpected error: %v", err)
+	if err := (Event{Kind: KindToolCall, Role: RoleFinder, Label: "lens", Tool: "read_file"}).Validate(); err == nil {
+		t.Error("Validate: KindToolCall without Phase should fail")
+	}
+	if err := (Event{Kind: KindToolCall, Role: RoleFinder, Label: "lens", Tool: "read_file", Phase: "bad"}).Validate(); err == nil {
+		t.Error("Validate: KindToolCall with invalid Phase should fail")
+	}
+	if err := (Event{Kind: KindToolCall, Role: RoleFinder, Label: "lens", Tool: "read_file", Phase: "start"}).Validate(); err != nil {
+		t.Errorf("Validate: KindToolCall valid event unexpected error: %v", err)
+	}
+	if err := (Event{Kind: KindToolCall, Role: RoleFinder, Label: "lens", Tool: "read_file", Phase: "done"}).Validate(); err != nil {
+		t.Errorf("Validate: KindToolCall Phase=done valid event unexpected error: %v", err)
 	}
 
 	// KindFindingVerified without File must fail.

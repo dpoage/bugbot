@@ -128,38 +128,38 @@ func TestPane_RepaintRedrawsInPlace(t *testing.T) {
 	}
 }
 
-// TestPane_AgentActivityRendered verifies that a KindAgentActivity event
-// updates the pane's agent line so the activity note appears in the frame.
-func TestPane_AgentActivityRendered(t *testing.T) {
+// TestPane_ToolCallRendered verifies that a KindToolCall event updates the
+// pane's agent line so the activity note appears in the frame.
+func TestPane_ToolCallRendered(t *testing.T) {
 	var buf bytes.Buffer
 	start := time.Unix(1_000_000, 0)
 	p := newTestPane(&buf, 200, fixedClock(start))
 
 	p.Handle(Event{Kind: KindAgentStarted, Role: RoleFinder, Label: "nil-safety"})
-	p.Handle(Event{Kind: KindAgentActivity, Role: RoleFinder, Label: "nil-safety", Activity: "reading main.go"})
+	p.Handle(Event{Kind: KindToolCall, Role: RoleFinder, Label: "nil-safety", Phase: "start", Tool: "read_file", File: "main.go"})
 	buf.Reset()
 	p.paintNow()
 
 	got := StripANSI(buf.String())
-	if !strings.Contains(got, "reading main.go") {
+	if !strings.Contains(got, "read_file main.go") {
 		t.Errorf("expected activity note in pane frame, got:\n%s", got)
 	}
 }
 
-// TestPane_AgentActivityIgnoresUnknown verifies that a KindAgentActivity event
+// TestPane_ToolCallIgnoresUnknownAgent verifies that a KindToolCall event
 // for an agent that isn't tracked does NOT add a line or panic.
-func TestPane_AgentActivityIgnoresUnknown(t *testing.T) {
+func TestPane_ToolCallIgnoresUnknownAgent(t *testing.T) {
 	var buf bytes.Buffer
 	p := newTestPane(&buf, 200, fixedClock(time.Unix(1, 0)))
 
-	// Activity for an agent that was never started.
-	p.Handle(Event{Kind: KindAgentActivity, Role: RoleFinder, Label: "ghost", Activity: "never tracked"})
+	// ToolCall for an agent that was never started.
+	p.Handle(Event{Kind: KindToolCall, Role: RoleFinder, Label: "ghost", Phase: "start", Tool: "read_file", File: "never.go"})
 	buf.Reset()
 	p.paintNow()
 
 	got := StripANSI(buf.String())
-	if strings.Contains(got, "never tracked") {
-		t.Errorf("untracked agent activity must not appear in pane:\n%s", got)
+	if strings.Contains(got, "never.go") {
+		t.Errorf("untracked agent tool_call must not appear in pane:\n%s", got)
 	}
 	if !strings.Contains(got, "(no active agents)") {
 		t.Errorf("expected no-active-agents placeholder:\n%s", got)

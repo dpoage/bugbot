@@ -54,13 +54,16 @@ const (
 	// (Err is empty on success), and Candidates (finder only; zero for verifiers).
 	KindAgentStarted  Kind = "agent_started"
 	KindAgentFinished Kind = "agent_finished"
-	// KindAgentActivity carries a short human-readable note about what an
-	// in-flight agent is currently doing (e.g. "reading main.go", "running
-	// sandbox"). Emitted at most once per tool-call turn by the runner; the
-	// snapshot and renderers update the relevant AgentStatus.Activity in place.
-	// This is NOT a terminal event.
-	// Fields: Role, Label, Activity.
-	KindAgentActivity Kind = "agent_activity"
+	// KindToolCall carries structured information about one tool-call execution by
+	// an in-flight agent. Emitted twice per call: once with Phase="start" before
+	// execution and once with Phase="done" after (Count and Err filled from the
+	// result). Consumers update the relevant AgentStatus.Activity in place using
+	// progress.Describe(ev); renderers that track individual call records can
+	// accumulate them from the Phase=start/done pairs.
+	//
+	// Fields: Role, Label, Phase, Tool, File, Line, EndLine, Symbol, Pattern,
+	// Count (hits/refs/lines on Phase=done), Err (tool error on Phase=done).
+	KindToolCall Kind = "tool_call"
 	// KindSpendTick reports cumulative token spend as it accrues.
 	// Fields: InputTokens, OutputTokens, CacheReadTokens, CacheCreationTokens.
 	KindSpendTick Kind = "spend_tick"
@@ -242,10 +245,18 @@ type Event struct {
 	// in typed consumers; JSON omitempty keeps wire size small).
 	Candidates int `json:"candidates,omitempty"`
 
-	// Activity carries a short single-line note for KindAgentActivity events:
-	// what the in-flight agent is currently doing, derived from its tool calls
-	// (e.g. "reading main.go", "running sandbox"). Unused on all other events.
-	Activity string `json:"activity,omitempty"`
+	// Phase is "start" or "done" for KindToolCall events. "start" is emitted
+	// before the tool executes; "done" is emitted after with Count and Err filled.
+	Phase string `json:"phase,omitempty"`
+
+	// EndLine is the range end (1-based) for read_file windows (KindToolCall).
+	EndLine int `json:"end_line,omitempty"`
+
+	// Symbol names the target for read_symbol / find_* code-nav calls (KindToolCall).
+	Symbol string `json:"symbol,omitempty"`
+
+	// Pattern holds the grep regex for KindToolCall{Tool="grep"} events.
+	Pattern string `json:"pattern,omitempty"`
 
 	// NextPoll / NextSweep / NextBacklog carry the daemon schedule
 	// (cycle_scheduled). NextBacklog is zero when the backlog-repro timer is
@@ -299,7 +310,7 @@ type Event struct {
 //   - KindStageFinished with a nil Counts is not an error (stage may have been
 //     abandoned), but KindStageFinished with a Stage and a nil Counts is flagged
 //     as a warning (use &Counts{} to signal "ran but produced nothing").
-//   - KindAgentStarted/KindAgentFinished/KindAgentActivity require Role and Label.
+//   - KindAgentStarted/KindAgentFinished require Role and Label.
 //   - KindFindingVerified/KindFindingKilled require File.
 //   - KindToolUnhealthy requires Role, Label, Tool, and Severity (Message is the
 //     human-readable reason and is permitted but not required).
@@ -313,15 +324,25 @@ func (e Event) Validate() error {
 		if e.Stage == "" {
 			return fmt.Errorf("progress: %s event missing Stage", e.Kind)
 		}
-	case KindAgentStarted, KindAgentFinished, KindAgentActivity:
+	case KindAgentStarted, KindAgentFinished:
 		if e.Role == "" {
 			return fmt.Errorf("progress: %s event missing Role", e.Kind)
 		}
 		if e.Label == "" {
 			return fmt.Errorf("progress: %s event missing Label", e.Kind)
 		}
-		if e.Kind == KindAgentActivity && e.Activity == "" {
-			return fmt.Errorf("progress: %s event missing Activity", e.Kind)
+	case KindToolCall:
+		if e.Role == "" {
+			return fmt.Errorf("progress: %s event missing Role", e.Kind)
+		}
+		if e.Label == "" {
+			return fmt.Errorf("progress: %s event missing Label", e.Kind)
+		}
+		if e.Tool == "" {
+			return fmt.Errorf("progress: %s event missing Tool", e.Kind)
+		}
+		if e.Phase != "start" && e.Phase != "done" {
+			return fmt.Errorf("progress: %s event Phase must be start or done, got %q", e.Kind, e.Phase)
 		}
 	case KindFindingVerified, KindFindingKilled:
 		if e.File == "" {

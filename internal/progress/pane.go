@@ -164,13 +164,13 @@ func (p *PaneRenderer) apply(ev Event) {
 			p.counts.Hypothesized += ev.Candidates
 		}
 		p.lastEvent = fmt.Sprintf("%s done: %s", ev.Role, ev.Label)
-	case KindAgentActivity:
+	case KindToolCall:
 		if a, ok := p.agents[agentKey(ev.Role, ev.Label)]; ok {
-			a.activity = ev.Activity
+			a.activity = Describe(ev)
 		}
 	case KindReproAttempt:
 		// Fold into the matching active agent's activity note so the pane's
-		// per-agent line shows round progress (the same slot KindAgentActivity
+		// per-agent line shows round progress (the same slot KindToolCall
 		// updates for tool-call notes); also surface it as the last event so a
 		// single-line tail of the pane still shows repro progress even for a
 		// viewer not watching the per-agent rows.

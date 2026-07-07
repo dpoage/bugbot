@@ -31,7 +31,7 @@ func TestStatusAccumulator_ApplyFoldsAndSnapshotReflects(t *testing.T) {
 
 	acc.Apply(Event{Kind: KindScanStarted, ScanKind: "sweep", Commit: "deadbeef", Time: now})
 	acc.Apply(Event{Kind: KindAgentStarted, Role: RoleFinder, Label: "lensA", Time: now})
-	acc.Apply(Event{Kind: KindAgentActivity, Role: RoleFinder, Label: "lensA", Activity: "reading main.go", Time: now})
+	acc.Apply(Event{Kind: KindToolCall, Role: RoleFinder, Label: "lensA", Phase: "start", Tool: "read_file", File: "main.go", Time: now})
 	acc.Apply(Event{Kind: KindToolUnhealthy, Role: RoleFinder, Label: "lensA", Tool: "sandbox", Severity: "high", Message: "timeout", Time: now})
 
 	snap := acc.Snapshot()
@@ -39,8 +39,9 @@ func TestStatusAccumulator_ApplyFoldsAndSnapshotReflects(t *testing.T) {
 	if snap.ScanKind != "sweep" || snap.Commit != "deadbeef" {
 		t.Errorf("scan identity not folded: %+v", snap)
 	}
-	if len(snap.ActiveAgents) != 1 || snap.ActiveAgents[0].Activity != "reading main.go" {
-		t.Fatalf("ActiveAgents = %+v, want one entry with the folded activity", snap.ActiveAgents)
+	wantActivity := "read_file main.go"
+	if len(snap.ActiveAgents) != 1 || snap.ActiveAgents[0].Activity != wantActivity {
+		t.Fatalf("ActiveAgents = %+v, want one entry with activity %q", snap.ActiveAgents, wantActivity)
 	}
 	if len(snap.UnhealthyTools) != 1 || snap.UnhealthyTools[0].Tool != "sandbox" || snap.UnhealthyTools[0].Severity != "high" {
 		t.Fatalf("UnhealthyTools = %+v, want one sandbox/high entry", snap.UnhealthyTools)

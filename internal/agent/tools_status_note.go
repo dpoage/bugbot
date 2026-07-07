@@ -13,18 +13,19 @@ import (
 // channel only — NOT a place to report findings — and is gated behind the
 // Scan.StatusNotes config flag (off by default).
 //
-// On invocation the note is routed through the activity sink (which emits a
-// KindAgentActivity event so the pane/status readers see it) and returned as
-// a tool result so it appears naturally in the transcript.
+// On invocation the note is routed through the activity sink as a
+// ToolActivity{Tool="status_note", Phase="done", Symbol=<note>}, which the
+// progress seam converts to a KindToolCall event visible in the pane and
+// status.json.
 type statusNoteTool struct {
 	// sink routes the sanitized note to the progress system.
-	sink func(activity string)
+	sink func(act ToolActivity)
 }
 
 // NewStatusNoteTool builds the status_note Tool bound to sink. sink must be
-// non-nil; it is invoked with the sanitized note each time the agent calls
-// the tool. The returned Tool satisfies [agent.Tool].
-func NewStatusNoteTool(sink func(activity string)) Tool {
+// non-nil; it is invoked with a ToolActivity{Tool="status_note"} each time the
+// agent calls the tool. The returned Tool satisfies [agent.Tool].
+func NewStatusNoteTool(sink func(act ToolActivity)) Tool {
 	return statusNoteTool{sink: sink}
 }
 
@@ -63,6 +64,10 @@ func (s statusNoteTool) Run(_ context.Context, args json.RawMessage) (string, er
 		note = string(runes[:119]) + "…"
 	}
 
-	s.sink(note)
+	s.sink(ToolActivity{
+		Phase:  "done",
+		Tool:   "status_note",
+		Symbol: note,
+	})
 	return "noted", nil
 }
