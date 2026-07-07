@@ -256,10 +256,10 @@ func sweepSummary(res *engine.SweepResult) string {
 // currently every key while the palette is open is either consumed here or
 // ignored).
 func (m Model) handlePaletteKey(msg tea.KeyMsg) (Model, tea.Cmd) {
-	// ctrl+x cancels an active run without closing the palette or quitting;
-	// esc also cancels while a run is active (see handleKey's global
-	// pre-check), so this branch only ever sees esc here once nothing is
-	// running.
+	// ctrl+x is intercepted globally in handleKey. Inside the palette,
+	// 'x' also cancels an active run — giving a clearly-labeled affordance
+	// for the most destructive action. esc closes the palette without any
+	// side-effects: run cancellation is never implicit.
 	if m.palette.editing {
 		field := m.paletteEditingField()
 		switch msg.Type {
@@ -277,8 +277,19 @@ func (m Model) handlePaletteKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
-	case "esc":
+	case "esc", "d":
+		// Both esc and 'd' close the palette without side-effects.
+		// 'd' closes because it is the toggle key (closed→open handled in
+		// model.go handleKey; open→close handled here).
 		m.palette.open = false
+		return m, nil
+
+	case "x":
+		// Explicit in-palette cancel for the active run. Only meaningful
+		// while running; a no-op otherwise so the key is safe to press.
+		if m.running {
+			m = m.cancelRun()
+		}
 		return m, nil
 
 	case "j", "down":
@@ -364,6 +375,13 @@ func isCancelled(err error) bool {
 }
 
 // viewPalette renders the dispatch palette overlay.
+//
+// While a run is active the running verb and elapsed time are shown
+// prominently at the top, every dispatch row is rendered disabled with a
+// "run in progress" reason, and an 'x' cancel affordance appears in the
+// footer. This makes the one-at-a-time policy visible rather than silent.
+// esc closes the palette without affecting the run; 'x' (or the global
+// ctrl+x) cancels it.
 func (m Model) viewPalette() string {
 	var b []byte
 	b = append(b, headerStyle.Render("dispatch palette")...)
@@ -373,7 +391,7 @@ func (m Model) viewPalette() string {
 		b = append(b, dimStyle.Render("read-only: another process holds the writer lock")...)
 		b = append(b, '\n')
 	} else if m.running {
-		b = append(b, dimStyle.Render(fmt.Sprintf("running: %s (%s) — ctrl+x/esc to cancel", m.runVerb, elapsedSince(m.runStarted)))...)
+		b = append(b, sectionStyle.Render(fmt.Sprintf("running: %s (%s)", m.runVerb, elapsedSince(m.runStarted)))...)
 		b = append(b, '\n')
 	}
 	b = append(b, '\n')
@@ -385,8 +403,16 @@ func (m Model) viewPalette() string {
 		} else {
 			line = "  " + line
 		}
-		if m.disp == nil {
-			line = dimStyle.Render(line)
+		if m.disp == nil || m.running {
+			// Render the row dim; append a reason so the operator knows
+			// why it cannot be activated rather than seeing a silent no-op.
+			var reason string
+			if m.disp == nil {
+				reason = " (read-only)"
+			} else {
+				reason = " (run in progress)"
+			}
+			line = dimStyle.Render(line + reason)
 		}
 		b = append(b, line...)
 		b = append(b, '\n')
@@ -395,8 +421,10 @@ func (m Model) viewPalette() string {
 	b = append(b, '\n')
 	if m.palette.editing {
 		b = append(b, footerStyle.Render("type value · enter confirm · esc stop editing")...)
+	} else if m.running {
+		b = append(b, footerStyle.Render(fmt.Sprintf("x cancel running %s (%s) · ctrl+x cancel · esc close", m.runVerb, elapsedSince(m.runStarted)))...)
 	} else {
-		b = append(b, footerStyle.Render("j/k move · enter select/edit · s toggle suspected · esc close")...)
+		b = append(b, footerStyle.Render("j/k move · enter select/edit · s toggle suspected · d/esc close")...)
 	}
 
 	if m.lastVerb != "" {
