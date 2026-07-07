@@ -19,18 +19,25 @@ import (
 type matchScore int
 
 const (
-	matchExactSubstring matchScore = iota // target contains query as a substring
-	matchWordPrefix                       // query is a prefix of some word in target (but not a substring of the whole)
-	matchSubsequence                      // query chars appear as a scattered subsequence
+	matchExactSubstring matchScore = iota // (0) best: query appears verbatim in target (not a clean word prefix)
+	matchWordPrefix                       // (1) query is a prefix of a word in target
+	matchSubsequence                      // (2) query chars appear scattered through target in order
 	matchNone                             // no match
 )
 
 // fuzzyScore scores query against target (both case-folded internally).
-// Tier ordering: word-prefix is checked BEFORE Contains so that a query
-// that is both a word-prefix AND an inner substring of the full string ranks
-// as word-prefix (the more semantically precise match) rather than exact
-// substring. This makes the word-prefix tier reachable and ensures prefix
-// outranks mid-string matches.
+// Tier order by iota value — lower is better:
+//
+//	0 matchExactSubstring — mid-string substring hit (not a word prefix)
+//	1 matchWordPrefix     — query starts a word in target
+//	2 matchSubsequence    — scattered chars match in order
+//
+// Word-prefix is checked BEFORE Contains in the function body so that a query
+// which is both a word-prefix AND a substring of the full string is classified
+// as matchWordPrefix (1), not matchExactSubstring (0). This means word-prefix
+// ranks slightly lower than a pure mid-string hit, which is intentional: an
+// exact mid-string match ("andidate" in "candidate") is a stronger signal than
+// a word-prefix match.
 // It returns (matchNone, false) when query does not match at all.
 func fuzzyScore(target, query string) (matchScore, bool) {
 	if query == "" {
@@ -39,20 +46,19 @@ func fuzzyScore(target, query string) (matchScore, bool) {
 	tl := strings.ToLower(target)
 	ql := strings.ToLower(query)
 
-	// Tier 1 (best): query is a prefix of some whitespace/punctuation word.
-	// Checked before Contains so that "nil" matching "nil-safety" (word-prefix)
-	// is returned as matchWordPrefix, not matchExactSubstring.
+	// Check word-prefix first so a query that starts a word is classified as
+	// matchWordPrefix (1) rather than matchExactSubstring (0), keeping the
+	// word-prefix tier reachable and distinguishable from mid-string hits.
 	if hasWordPrefix(tl, ql) {
 		return matchWordPrefix, true
 	}
 
-	// Tier 2: exact substring — query appears verbatim somewhere in target
-	// (but NOT as a clean word prefix, handled above).
+	// Exact substring: query appears verbatim but NOT as a clean word prefix.
 	if strings.Contains(tl, ql) {
 		return matchExactSubstring, true
 	}
 
-	// Tier 3: scattered subsequence.
+	// Scattered subsequence.
 	if isSubsequence(tl, ql) {
 		return matchSubsequence, true
 	}

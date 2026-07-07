@@ -421,7 +421,7 @@ func (m *Model) scrollDown() {
 	case paneDetail:
 		m.transcriptView.LineDown(1)
 	case paneContext:
-		if m.contextMode == contextModeLeads {
+		if m.contextMode == contextModeLeads || m.contextMode == contextModeFindings {
 			m.moveCursor(1)
 		} else {
 			m.contextView.LineDown(1)
@@ -437,7 +437,7 @@ func (m *Model) scrollUp() {
 	case paneDetail:
 		m.transcriptView.LineUp(1)
 	case paneContext:
-		if m.contextMode == contextModeLeads {
+		if m.contextMode == contextModeLeads || m.contextMode == contextModeFindings {
 			m.moveCursor(-1)
 		} else {
 			m.contextView.LineUp(1)

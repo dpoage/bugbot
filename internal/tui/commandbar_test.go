@@ -43,8 +43,8 @@ func TestFuzzyScore_WordPrefixBeatsSubstring(t *testing.T) {
 }
 
 // TestFuzzyScore_WordPrefixOnlyTier verifies the 3-tier ordering:
-// word-prefix (0) < exact-substring (1) < subsequence (2).
-// (Lower matchScore value = better rank.)
+// exact-substring (0) < word-prefix (1) < subsequence (2).
+// (Lower matchScore value = better rank; exact-substring ranks best.)
 func TestFuzzyScore_WordPrefixOnlyTier(t *testing.T) {
 	// word-prefix score should be strictly better than subsequence score.
 	wpScore, wpOk := fuzzyScore("verifier alpha", "ver") // "ver" is word-prefix of "verifier"
@@ -298,6 +298,34 @@ func TestCmdBar_Enter_NavigatesToFinding(t *testing.T) {
 	}
 	if m.contextMode != contextModeFindings {
 		t.Errorf("contextMode should be contextModeFindings, got %v", m.contextMode)
+	}
+}
+
+// TestFindings_JKMovesCursor verifies that j/k advance and retreat the cursor
+// in contextModeFindings (scrollDown/scrollUp route to moveCursor, not the
+// never-rendered contextView viewport).
+func TestFindings_JKMovesCursor(t *testing.T) {
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
+	fr := Frame{
+		Agents: []AgentView{},
+		World: WorldState{
+			Findings:      []domain.Finding{{ID: "f1"}, {ID: "f2"}},
+			FindingsTotal: 2,
+			HasTallies:    true,
+		},
+	}
+	m = sendFrame(m, fr)
+	m.focus = paneContext
+	m.contextMode = contextModeFindings
+	m.cursor = 0
+
+	m = sendKey(m, "j")
+	if m.cursor != 1 {
+		t.Errorf("j should advance findings cursor to 1, got %d", m.cursor)
+	}
+	m = sendKey(m, "k")
+	if m.cursor != 0 {
+		t.Errorf("k should retreat findings cursor to 0, got %d", m.cursor)
 	}
 }
 
