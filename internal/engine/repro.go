@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -264,6 +265,24 @@ type ReproResult struct {
 	Skipped string
 }
 
+// resolveReproTarget resolves opts.Target to the absolute repo path Repro
+// forwards to BuildReproducer as repoRoot. filepath.Abs("") resolves to the
+// process's current working directory, matching the same "" == this repo
+// convention every other Dispatcher verb gets for free via openRepo ->
+// ingest.Open (which calls filepath.Abs internally). Repro has no such
+// intermediary: BuildReproducer takes repoRoot directly and repro.New
+// rejects an empty repoDir outright, so leaving opts.Target unresolved sent
+// every empty-Target caller (the TUI dispatch palette never sets it — see
+// bugbot-pt83) straight into a hard "repro: empty repoDir" failure whenever
+// the backlog was non-empty.
+func resolveReproTarget(target string) (string, error) {
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
 // Repro implements `bugbot repro`'s one-shot backlog drain: it queries the
 // store for open Tier-2/3 findings with no reproduction attempt and runs them
 // through the reproduce+patch-prover pipeline, promoting demonstrated
@@ -282,6 +301,16 @@ func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, e
 	cfg := d.cfg
 	st := d.store
 	out := opts.Out
+
+	// Resolve the target repo path the same way every other Dispatcher verb
+	// does (see openRepo -> ingest.Open): an unset opts.Target (the TUI
+	// dispatch palette never populates it — bugbot-pt83) must mean "this
+	// repo", not an empty repoRoot forwarded verbatim into BuildReproducer.
+	resolvedTarget, err := resolveReproTarget(opts.Target)
+	if err != nil {
+		return nil, fmt.Errorf("resolve target: %w", err)
+	}
+	opts.Target = resolvedTarget
 
 	// --max overrides the config default; 0 means "use config".
 	batchSize := cfg.Repro.BacklogBatch
