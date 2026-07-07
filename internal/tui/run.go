@@ -8,6 +8,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/engine"
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -135,7 +136,16 @@ func dispatcherOf(disp *engine.Dispatcher) dispatcher {
 // feed's Frames. disp is nil outside Owner mode, disabling the dispatch
 // palette.
 func runProgram(ctx context.Context, feed Feed, disp *engine.Dispatcher) error {
-	p := tea.NewProgram(NewModel(ctx, feed, dispatcherOf(disp)), tea.WithAltScreen(), tea.WithContext(ctx))
+	m := NewModel(ctx, feed, dispatcherOf(disp))
+	// Resolve the repo root via ingest.Open (git rev-parse --show-toplevel),
+	// matching every other subsystem that resolves agent file paths against the
+	// git top-level. Launching from a subdirectory or in a non-git directory
+	// degrades gracefully: WithRepoRoot is skipped and the source pane shows a
+	// note rather than resolving against a wrong directory.
+	if repo, err := ingest.Open(ctx, "."); err == nil {
+		m = m.WithRepoRoot(repo.Root())
+	}
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()
 	return err
 }

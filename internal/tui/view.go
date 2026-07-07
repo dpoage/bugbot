@@ -221,6 +221,10 @@ func (m Model) renderContextPane(innerW, innerH int) string {
 		return m.renderFindings()
 	case contextModeLeads:
 		return m.renderLeads()
+	case contextModeSource:
+		return m.renderSourcePane(innerW, innerH)
+	case contextModeGrep:
+		return m.renderGrepPane(innerW, innerH)
 	default:
 		return m.renderCockpitSummary()
 	}
@@ -480,4 +484,30 @@ func (m Model) viewFooter() string {
 	default:
 		return footerStyle.Render("tab/1/2/3 focus · ctrl+p jump · F follow · d dispatch · q quit" + follow)
 	}
+}
+
+// renderSourcePane renders the syntax-highlighted source view in the context pane.
+func (m Model) renderSourcePane(innerW, innerH int) string {
+	if m.sourceNote != "" && len(m.sourceLines) == 0 {
+		var b strings.Builder
+		b.WriteString(headerStyle.Render("Source") + "\n")
+		b.WriteString(dimStyle.Render(m.sourceNote) + "\n")
+		b.WriteString(dimStyle.Render("esc: back") + "\n")
+		return b.String()
+	}
+	content := renderSourceView(m.sourceLines, m.sourceFile, m.sourceLine, m.sourceEndLine, m.sourceOffset, innerW, innerH)
+	return content + "\n" + dimStyle.Render("j/k scroll · esc back")
+}
+
+// renderGrepPane renders the grep hit list in the context pane.
+func (m Model) renderGrepPane(innerW, innerH int) string {
+	if m.grepNote != "" && len(m.grepHits) == 0 {
+		var b strings.Builder
+		b.WriteString(headerStyle.Render("Grep: "+m.grepPattern) + "\n")
+		b.WriteString(dimStyle.Render(m.grepNote) + "\n")
+		b.WriteString(dimStyle.Render("esc: back") + "\n")
+		return b.String()
+	}
+	content := renderGrepView(m.grepHits, m.grepCursor, m.grepOffset, innerW, innerH)
+	return content + "\n" + dimStyle.Render("j/k move · enter open · esc back")
 }
