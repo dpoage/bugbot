@@ -154,8 +154,8 @@ type Options struct {
 	// and the prompt omits capability guidance.
 	Capabilities sandbox.CapabilitySet
 	// Progress, when non-nil, receives agent observability events: each repro
-	// (and patch-prover) run is bracketed with KindAgentStarted/Finished and its
-	// per-turn tool-call activity is emitted as KindAgentActivity, so a running
+	// (and patch-prover) run is bracketed with KindAgentStarted/Finished and
+	// its per-call tool activity is emitted as KindToolCall events, so a running
 	// reproduce stage surfaces in `bugbot status` and the live pane via the
 	// shared progress.AgentScope seam. Nil disables emission (no-op).
 	Progress progress.EventSink
@@ -481,7 +481,7 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 	}
 	tools = append(tools, r.nav.Tools()...)
 	if r.opts.StatusNotes {
-		tools = append(tools, agent.NewStatusNoteTool(scope.ActivitySink()))
+		tools = append(tools, agent.NewStatusNoteTool(toolActivitySink(scope)))
 	}
 	// get_package_context lets the agent pull any package's cartographer summary
 	// (e.g. the repo's test package) to learn the build/test layout cheaply,
@@ -520,7 +520,7 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 	if r.opts.TranscriptDir != "" {
 		opts = append(opts, agent.WithTranscriptDir(r.opts.TranscriptDir))
 	}
-	opts = append(opts, agent.WithActivitySink(scope.ActivitySink()))
+	opts = append(opts, agent.WithActivitySink(toolActivitySink(scope)))
 	prompt := systemPrompt(lang, systems, r.capabilities)
 	if r.pkgSummary != nil {
 		prompt += pkgContextGuidance
@@ -725,4 +725,15 @@ func hasCmdFlag(argv []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// toolActivitySink builds the func(agent.ToolActivity) callback for
+// agent.WithActivitySink and agent.NewStatusNoteTool, routing each structured
+// ToolActivity through scope.EmitToolCall so it surfaces as a KindToolCall
+// progress event without coupling the repro package to agent's types at the
+// call sites.
+func toolActivitySink(scope progress.AgentScope) func(agent.ToolActivity) {
+	return func(act agent.ToolActivity) {
+		scope.EmitToolCall(act.Phase, act.Tool, act.File, act.Line, act.EndLine, act.Symbol, act.Pattern, act.Count, act.Err)
+	}
 }

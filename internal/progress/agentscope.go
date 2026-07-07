@@ -4,17 +4,18 @@ import "time"
 
 // AgentScope is the shared, opt-in observability seam for a single agent run.
 // It brackets the run with KindAgentStarted / KindAgentFinished and routes
-// per-turn activity notes — derived from the runner's tool calls (via
+// per-call structured activity — derived from the runner's tool calls (via
 // agent.WithActivitySink) and from the optional status_note tool — to the sink
-// as KindAgentActivity. Every pipeline stage that drives an agent.Runner
+// as KindToolCall events. Every pipeline stage that drives an agent.Runner
 // (finder, verifier, cartographer, reproducer, patch-prover, severity sweep)
 // wires the SAME plumbing through this type, so each surfaces identically in
 // `bugbot status` and the live pane.
 //
 // AgentScope is the single bridge between the agent layer (which speaks only in
-// plain func(string) callbacks and knows nothing of progress) and the progress
-// event stream (which knows nothing of agents). Keeping the bridge here means
-// the role/label → event mapping is defined once, not re-derived per stage.
+// plain func(ToolActivity) callbacks and knows nothing of progress) and the
+// progress event stream (which knows nothing of agents). Keeping the bridge
+// here means the role/label → event mapping is defined once, not re-derived
+// per stage.
 //
 // Construction is side-effect-free; Start emits the started event. A nil sink
 // is safe — Emit no-ops on nil — so an unobserved run pays nothing. AgentScope
@@ -28,7 +29,7 @@ type AgentScope struct {
 }
 
 // NewAgentScope binds a scope to (role, label) on sink WITHOUT emitting
-// anything. Call Start to emit the agent-started bracket; call ActivitySink on
+// anything. Call Start to emit the agent-started bracket; call EmitToolCall on
 // its own when the started/finished bracket is emitted elsewhere (e.g. a runner
 // option built before the agent's own start/finish lifecycle is known).
 func NewAgentScope(sink EventSink, role, label string) AgentScope {
@@ -43,22 +44,28 @@ func (s AgentScope) Start() AgentScope {
 	return s
 }
 
-// Activity emits a KindAgentActivity note for this agent. An empty note is
-// dropped: KindAgentActivity requires a non-empty Activity, and a blank must
-// never overwrite a prior, meaningful note in the snapshot/pane.
-func (s AgentScope) Activity(note string) {
-	if note == "" {
+// EmitToolCall emits a KindToolCall event for this agent. The flat fields map
+// directly from agent.ToolActivity (the funnel builds the func(ToolActivity)
+// bridge so progress need not import the agent package). An empty tool name is
+// dropped: a KindToolCall event requires Tool to be non-empty.
+func (s AgentScope) EmitToolCall(phase, tool, file string, line, endLine int, symbol, pattern string, count int, errStr string) {
+	if tool == "" {
 		return
 	}
-	Emit(s.sink, Event{Kind: KindAgentActivity, Role: s.role, Label: s.label, Activity: note})
-}
-
-// ActivitySink returns the per-turn callback to hand to agent.WithActivitySink
-// and, when status notes are enabled, agent.NewStatusNoteTool. Routing both the
-// automatic tool-call notes and the manual status_note through one callback
-// keeps the live activity view consistent regardless of which produced a note.
-func (s AgentScope) ActivitySink() func(string) {
-	return s.Activity
+	Emit(s.sink, Event{
+		Kind:    KindToolCall,
+		Role:    s.role,
+		Label:   s.label,
+		Phase:   phase,
+		Tool:    tool,
+		File:    file,
+		Line:    line,
+		EndLine: endLine,
+		Symbol:  symbol,
+		Pattern: pattern,
+		Count:   count,
+		Err:     errStr,
+	})
 }
 
 // Finish emits KindAgentFinished with the run's cumulative token usage,

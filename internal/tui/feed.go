@@ -80,6 +80,10 @@ var _ Feed = (*SnapshotFeed)(nil)
 // reachable from the Leads screen.
 const leadPreviewMax = 3
 
+// findingPreviewMax bounds the open-finding preview in a Frame for the fuzzy
+// jump bar; enough for quick navigation without unbounded allocation.
+const findingPreviewMax = 50
+
 // staleAfter mirrors internal/cli/status.go's staleAfter: how long without a
 // status.json update before a running scan/daemon is treated as dead.
 const staleAfter = 2 * time.Minute
@@ -106,6 +110,12 @@ type Frame struct {
 	// store.AgentUnit rows for World.LastRun, sorted by Started ascending
 	// (launch order reads top-to-bottom). Empty when no store is available.
 	Agents []AgentView
+
+	// ActionRows is the per-agent structured tool-call ring, populated by
+	// LiveFeed (Owner mode) from KindToolCall events. Empty in SnapshotFeed
+	// (Observer) mode — that mode uses AgentView.RecentActions instead.
+	// Keyed by agentFeedKey(role, label) -> ordered rows (oldest first).
+	ActionRows map[string][]ActionRow
 }
 
 // FrameMsg is the tea.Msg a Feed resolves Next()'s tea.Cmd to when it has a
@@ -128,6 +138,11 @@ type WorldState struct {
 	// is the true count on the blackboard.
 	PendingLeads      []store.Lead
 	PendingLeadsTotal int
+
+	// Findings is newest-updated-first, capped at findingPreviewMax; used by
+	// the fuzzy jump bar for finding-row navigation. Open findings only.
+	Findings      []domain.Finding
+	FindingsTotal int
 
 	Published map[store.IssueState]int // empty = never published
 
@@ -191,4 +206,10 @@ type AgentView struct {
 	// never get a transcript, since store.Repro.TranscriptDir only covers
 	// reproducer/patch-prover units.
 	TranscriptPath string
+
+	// RecentActions is the Observer-mode bounded ring of recent Describe
+	// strings for this agent (newest-first), sourced from
+	// AgentStatus.RecentActions in status.json. Empty in Owner mode (use
+	// Frame.ActionRows instead).
+	RecentActions []string
 }

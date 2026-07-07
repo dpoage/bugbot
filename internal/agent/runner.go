@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/dpoage/bugbot/internal/llm"
@@ -29,10 +28,11 @@ type Runner struct {
 	// maxTokens caps output tokens per completion (passed through to the client).
 	// Zero lets the adapter apply its own default.
 	maxTokens int
-	// activitySink, when non-nil, is called once per turn with a short
-	// single-line note about what the agent is doing (derived from tool calls).
-	// Nil by default; zero overhead when unset.
-	activitySink func(activity string)
+	// activitySink, when non-nil, is called twice per tool call: once with
+	// Phase="start" immediately before execution and once with Phase="done"
+	// immediately after (Count and Err filled from the result). Nil by default;
+	// zero overhead when unset.
+	activitySink func(act ToolActivity)
 	// toolHealthSink, when non-nil, is called whenever a tool returns a
 	// *ToolHealthError (a genuine harness/infra failure, not an ordinary
 	// model-recoverable error). Plain tool errors do not trigger it. Nil by
@@ -62,12 +62,12 @@ func WithMaxTokens(n int) Option {
 	return func(r *Runner) { r.maxTokens = n }
 }
 
-// WithActivitySink registers a callback invoked once per tool-call turn with a
-// short single-line note about what the agent is doing (derived from its tool
-// calls via [toolCallActivity]). The callback must be safe for concurrent use.
-// A nil fn is a no-op. When unset, the runner emits no activity notes and
-// incurs zero overhead.
-func WithActivitySink(fn func(activity string)) Option {
+// WithActivitySink registers a callback invoked twice per tool call: once with
+// Phase="start" before execution and once with Phase="done" after (Count and
+// Err set from the result). The callback must be safe for concurrent use. A nil
+// fn is a no-op. When unset, the runner emits no activity events and incurs
+// zero overhead.
+func WithActivitySink(fn func(act ToolActivity)) Option {
 	return func(r *Runner) { r.activitySink = fn }
 }
 
@@ -225,21 +225,32 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 			break
 		}
 
-		// Derive a short activity note from this turn's tool calls and route
-		// it to the activity sink (if any). Done before executing the tools
-		// so the observer sees "reading foo.go" as the work is happening, not
-		// after the slow tool call completes.
-		if r.activitySink != nil {
-			r.activitySink(toolCallActivity(resp.ToolCalls))
-		}
-
 		// Execute each requested tool call sequentially and feed results back.
+		// When an activity sink is registered, emit a start notification before
+		// each call so the observer sees what is happening as it happens, then a
+		// done notification after with the result count and any error.
 		for _, call := range resp.ToolCalls {
 			if err := ctx.Err(); err != nil {
 				tr.closeStream()
 				return outcome, err
 			}
+			var startAct ToolActivity
+			if r.activitySink != nil {
+				startAct = extractToolActivity(call)
+				startAct.Phase = "start"
+				r.activitySink(startAct)
+			}
 			result, isErr := r.runTool(ctx, call)
+			if r.activitySink != nil {
+				doneAct := startAct
+				doneAct.Phase = "done"
+				if isErr {
+					doneAct.Err = result
+				} else {
+					doneAct.Count = countFromResult(call.Name, result)
+				}
+				r.activitySink(doneAct)
+			}
 			tr.recordToolResult(outcome.Iterations, call, result, isErr)
 			toolNameByID[call.ID] = call.Name
 			messages = append(messages, llm.Message{
@@ -599,72 +610,104 @@ func slug(task string) string {
 	return s
 }
 
-// toolCallActivity derives a short, single-line activity string from a turn's
-// tool calls. It returns a human-readable description of the first call (e.g.
-// "reading main.go", "grepping "foo"") truncated to 80 runes. When calls is
-// empty, it returns "".
+// extractToolActivity maps one LLM tool call to a ToolActivity with all
+// structured fields populated from the call's JSON arguments. Phase is NOT set
+// here — the caller stamps "start" or "done" after calling this function.
 //
-// This is a PURE function: it reads only the tool-call metadata that the LLM
-// already produced and makes no model calls. Safe for concurrent use.
-func toolCallActivity(calls []llm.ToolCall) string {
-	if len(calls) == 0 {
-		return ""
-	}
-	call := calls[0]
+// Argument parsing is best-effort: a JSON failure leaves fields at their zero
+// values, which produce a sane (if sparse) ToolActivity. Safe for concurrent
+// use: reads only the call argument bytes.
+func extractToolActivity(call llm.ToolCall) ToolActivity {
+	act := ToolActivity{Tool: call.Name}
 
-	// Extract a key argument from the JSON args to make the note concrete.
+	// Decode the relevant arguments for each tool. Only the fields this tool
+	// can produce are read; unused JSON keys are silently ignored.
 	var args struct {
 		Path      string `json:"path"`
 		Dir       string `json:"dir"`
 		Directory string `json:"directory"`
 		Pattern   string `json:"pattern"`
 		Symbol    string `json:"symbol"`
+		File      string `json:"file"`
+		Line      int    `json:"line"`
+		StartLine int    `json:"start_line"`
+		EndLine   int    `json:"end_line"`
+		Note      string `json:"note"`
 	}
-	// Best-effort parse; zero struct fields on failure produce a sane fallback.
 	_ = json.Unmarshal(call.Arguments, &args)
 
-	var note string
 	switch call.Name {
 	case "read_file":
-		p := args.Path
-		if p == "" {
-			p = "file"
+		act.File = args.Path
+		// Honor both start_line/end_line and plain line/end_line naming.
+		if args.StartLine > 0 {
+			act.Line = args.StartLine
+		} else {
+			act.Line = args.Line
 		}
-		note = "reading " + p
-	case "list_dir":
-		d := args.Dir
-		if d == "" {
-			d = args.Directory
+		act.EndLine = args.EndLine
+	case "read_symbol":
+		act.Symbol = args.Symbol
+		act.File = args.Path
+		if act.File == "" {
+			act.File = args.File
 		}
-		if d == "" {
-			d = "."
-		}
-		note = "listing " + d
 	case "grep":
-		pat := args.Pattern
-		if pat == "" {
-			pat = "…"
+		act.Pattern = args.Pattern
+		act.File = args.Path
+		if act.File == "" {
+			act.File = args.Dir
 		}
-		note = "grepping " + strconv.Quote(pat)
-	case "find_definition", "find_references", "find_implementations", "read_symbol":
-		sym := args.Symbol
-		if sym == "" {
-			sym = "symbol"
+	case "find_definition", "find_references", "find_implementations",
+		"find_usages":
+		act.Symbol = args.Symbol
+		act.File = args.File
+		if act.File == "" {
+			act.File = args.Path
 		}
-		note = "navigating " + sym
+		act.Line = args.Line
+	case "list_dir":
+		act.File = args.Dir
+		if act.File == "" {
+			act.File = args.Directory
+		}
+		if act.File == "" {
+			act.File = "."
+		}
+	case "run_tests":
+		act.File = args.Dir
+		if act.File == "" {
+			act.File = args.Path
+		}
 	case "sandbox_exec":
-		note = "running sandbox"
+		act.Symbol = "sandbox"
+	case "status_note":
+		// Note text is truncated to 120 runes (same as statusNoteTool.Run).
+		note := strings.Join(strings.Fields(args.Note), " ")
+		runes := []rune(note)
+		if len(runes) > 120 {
+			note = string(runes[:119]) + "…"
+		}
+		act.Symbol = note
 	case "post_lead":
-		note = "posting lead"
+		// No structured fields; Tool="post_lead" is sufficient.
 	default:
-		note = call.Name
+		// Unknown tool: Tool name is the only useful field.
 	}
+	return act
+}
 
-	// Collapse any embedded newlines and truncate to 80 runes.
-	note = strings.Join(strings.Fields(note), " ")
-	runes := []rune(note)
-	if len(runes) > 80 {
-		note = string(runes[:79]) + "…"
+// countFromResult extracts a result count from a tool's output string.
+// For most tools the count is 0 (line count is expensive to compute and not
+// worth it for observability). For grep we count newline-separated matches.
+// This is best-effort: a failure returns 0.
+func countFromResult(toolName, result string) int {
+	switch toolName {
+	case "grep":
+		if result == "" {
+			return 0
+		}
+		return strings.Count(result, "\n") + 1
 	}
-	return note
+	return 0
 }

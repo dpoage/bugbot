@@ -66,8 +66,8 @@ func (r paletteRow) editableField() bool {
 }
 
 // paletteState holds the dispatch palette's own UI state, separate from
-// Model's screen/cursor fields (the palette is a modal overlay, not one of
-// the topScreens).
+// Model's focus/cursor fields (the palette is a modal overlay rendered over
+// the pane compositor).
 type paletteState struct {
 	open bool
 	// cursor indexes the currently highlighted row (0..paletteRowCount-1).

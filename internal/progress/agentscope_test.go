@@ -6,13 +6,13 @@ import (
 	"time"
 )
 
-// TestAgentScope_StartActivityFinish verifies the full lifecycle emits the
-// three bracketing events with the scope's role/label, and that Finish carries
-// tokens, duration, and the error message.
-func TestAgentScope_StartActivityFinish(t *testing.T) {
+// TestAgentScope_StartEmitToolCallFinish verifies the full lifecycle emits the
+// bracketing events with the scope's role/label, and that EmitToolCall produces
+// a KindToolCall event.
+func TestAgentScope_StartEmitToolCallFinish(t *testing.T) {
 	var rec recordingSink
 	scope := NewAgentScope(&rec, RoleReproducer, "nil deref in parser").Start()
-	scope.Activity("reading parser.go")
+	scope.EmitToolCall("start", "read_file", "parser.go", 10, 40, "", "", 0, "")
 	scope.Finish(1234, 5*time.Second, errors.New("boom"))
 
 	evs := rec.snapshot()
@@ -24,9 +24,11 @@ func TestAgentScope_StartActivityFinish(t *testing.T) {
 		t.Errorf("started event = %+v", evs[0])
 	}
 
-	if evs[1].Kind != KindAgentActivity || evs[1].Activity != "reading parser.go" ||
-		evs[1].Role != RoleReproducer || evs[1].Label != "nil deref in parser" {
-		t.Errorf("activity event = %+v", evs[1])
+	tc := evs[1]
+	if tc.Kind != KindToolCall || tc.Phase != "start" || tc.Tool != "read_file" ||
+		tc.File != "parser.go" || tc.Line != 10 || tc.EndLine != 40 ||
+		tc.Role != RoleReproducer || tc.Label != "nil deref in parser" {
+		t.Errorf("tool_call event = %+v", tc)
 	}
 
 	fin := evs[2]
@@ -59,33 +61,35 @@ func TestAgentScope_FinishSuccessHasNoErr(t *testing.T) {
 	}
 }
 
-// TestAgentScope_EmptyActivityDropped verifies a blank note emits nothing, so a
-// runner that produces no per-turn note never clears a prior meaningful one.
-func TestAgentScope_EmptyActivityDropped(t *testing.T) {
+// TestAgentScope_EmptyToolDropped verifies an empty tool name emits nothing, so a
+// zero-value EmitToolCall never clears a prior meaningful note.
+func TestAgentScope_EmptyToolDropped(t *testing.T) {
 	var rec recordingSink
 	scope := NewAgentScope(&rec, RoleCartographer, "pkg/foo")
-	scope.Activity("")
+	scope.EmitToolCall("start", "", "", 0, 0, "", "", 0, "")
 
 	if evs := rec.snapshot(); len(evs) != 0 {
-		t.Fatalf("empty activity emitted %d events, want 0: %+v", len(evs), evs)
+		t.Fatalf("empty tool emitted %d events, want 0: %+v", len(evs), evs)
 	}
 }
 
-// TestAgentScope_ActivitySinkRoutesToScope verifies the callback returned by
-// ActivitySink emits a KindAgentActivity bound to the scope — this is exactly
-// what is handed to agent.WithActivitySink and agent.NewStatusNoteTool.
-func TestAgentScope_ActivitySinkRoutesToScope(t *testing.T) {
+// TestAgentScope_EmitToolCallRoutesToScope verifies EmitToolCall produces a
+// KindToolCall event bound to the scope — this is the structured replacement for
+// ActivitySink that the funnel bridges via agent.ToolActivity.
+func TestAgentScope_EmitToolCallRoutesToScope(t *testing.T) {
 	var rec recordingSink
-	sink := NewAgentScope(&rec, RoleSeverity, "3 findings").ActivitySink()
-	sink("re-ranking by reachability")
+	scope := NewAgentScope(&rec, RoleSeverity, "3 findings")
+	scope.EmitToolCall("start", "grep", "internal/", 0, 0, "", "TODO", 0, "")
 
 	evs := rec.snapshot()
 	if len(evs) != 1 {
 		t.Fatalf("got %d events, want 1", len(evs))
 	}
-	if evs[0].Kind != KindAgentActivity || evs[0].Role != RoleSeverity ||
-		evs[0].Label != "3 findings" || evs[0].Activity != "re-ranking by reachability" {
-		t.Errorf("activity event = %+v", evs[0])
+	ev := evs[0]
+	if ev.Kind != KindToolCall || ev.Phase != "start" || ev.Tool != "grep" ||
+		ev.File != "internal/" || ev.Pattern != "TODO" ||
+		ev.Role != RoleSeverity || ev.Label != "3 findings" {
+		t.Errorf("tool_call event = %+v", ev)
 	}
 }
 
@@ -93,11 +97,11 @@ func TestAgentScope_ActivitySinkRoutesToScope(t *testing.T) {
 // panics, so unobserved runs pay nothing.
 func TestAgentScope_NilSinkIsNoOp(t *testing.T) {
 	scope := NewAgentScope(nil, RoleFinder, "lens").Start()
-	scope.Activity("x")
+	scope.EmitToolCall("start", "read_file", "main.go", 0, 0, "", "", 0, "")
 	scope.Finish(1, time.Second, errors.New("e"))
 	// AgentScope{} zero value too.
 	var zero AgentScope
 	zero.Start()
-	zero.Activity("y")
+	zero.EmitToolCall("done", "grep", "", 0, 0, "", "pat", 3, "")
 	zero.Finish(0, 0, nil)
 }

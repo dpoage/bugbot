@@ -134,14 +134,14 @@ func TestPalette_OpenAndClose(t *testing.T) {
 	}
 }
 
-func TestPalette_OpensFromEveryTopScreen(t *testing.T) {
-	for _, scr := range topScreens {
+func TestPalette_OpensFromEveryPane(t *testing.T) {
+	for _, p := range []pane{paneRoster, paneDetail, paneContext} {
 		m := NewModel(context.Background(), &fakeFeed{}, &fakeDispatcher{mode: engine.Owner})
 		m = sendFrame(m, baseFrame())
-		m.screen = scr
+		m.focus = p
 		m = sendKey(m, "d")
 		if !m.palette.open {
-			t.Errorf("screen %v: expected palette to open on 'd'", scr)
+			t.Errorf("pane %v: expected palette to open on 'd'", p)
 		}
 	}
 }
@@ -281,8 +281,7 @@ func TestPalette_ConfirmSweep(t *testing.T) {
 	m = sendKey(m, "j") // rowSweep
 
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = next.(Model)
-	m = runCmd(m, cmd)
+	runCmd(next.(Model), cmd)
 
 	if len(fd.sweepCalls) != 1 {
 		t.Fatalf("Sweep called %d times, want 1", len(fd.sweepCalls))
@@ -377,8 +376,7 @@ func TestPalette_EscCancelsActiveRunInsteadOfClosingPalette(t *testing.T) {
 	defer close(fd.block)
 
 	time.Sleep(10 * time.Millisecond)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m = next.(Model)
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 
 	select {
 	case <-fd.sawCancel:

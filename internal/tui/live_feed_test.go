@@ -34,7 +34,7 @@ func TestLiveFeed_HandleFoldsEventsIntoFrame(t *testing.T) {
 	f.Handle(progress.Event{Kind: progress.KindScanStarted, ScanKind: "sweep", Commit: "deadbeef", Time: now})
 	f.Handle(progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageHypothesize, Time: now})
 	f.Handle(progress.Event{Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: "lensA", Time: now})
-	f.Handle(progress.Event{Kind: progress.KindAgentActivity, Role: progress.RoleFinder, Label: "lensA", Activity: "reading main.go", Time: now})
+	f.Handle(progress.Event{Kind: progress.KindToolCall, Role: progress.RoleFinder, Label: "lensA", Phase: "start", Tool: "read_file", File: "main.go", Time: now})
 	f.Handle(progress.Event{Kind: progress.KindAgentStarted, Role: progress.RoleVerifier, Label: "candidate 1", Time: now})
 	f.Handle(progress.Event{Kind: progress.KindAgentFinished, Role: progress.RoleFinder, Label: "lensA", Candidates: 2, Time: now})
 	f.Handle(progress.Event{Kind: progress.KindStageFinished, Stage: progress.StageHypothesize, Counts: &progress.Counts{Hypothesized: 2}, Time: now})
@@ -87,7 +87,7 @@ func TestLiveFeed_HandleNeverBlocksAndCoalescesWakeups(t *testing.T) {
 		for i := 0; i < n; i++ {
 			label := "lens" + string(rune('A'+i%26))
 			f.Handle(progress.Event{Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: label, Time: now})
-			f.Handle(progress.Event{Kind: progress.KindAgentActivity, Role: progress.RoleFinder, Label: label, Activity: "working", Time: now})
+			f.Handle(progress.Event{Kind: progress.KindToolCall, Role: progress.RoleFinder, Label: label, Phase: "start", Tool: "read_file", File: "working.go", Time: now})
 			f.Handle(progress.Event{Kind: progress.KindAgentFinished, Role: progress.RoleFinder, Label: label, Time: now})
 		}
 	}()
@@ -129,7 +129,7 @@ func TestLiveFeed_HandleConcurrentProducersNeverBlockOrLoseEvents(t *testing.T) 
 			for i := 0; i < perGoroutine; i++ {
 				label := fmt.Sprintf("g%d-lens%d", g, i)
 				f.Handle(progress.Event{Kind: progress.KindAgentStarted, Role: progress.RoleFinder, Label: label, Time: now})
-				f.Handle(progress.Event{Kind: progress.KindAgentActivity, Role: progress.RoleFinder, Label: label, Activity: "working", Time: now})
+				f.Handle(progress.Event{Kind: progress.KindToolCall, Role: progress.RoleFinder, Label: label, Phase: "start", Tool: "read_file", File: "working.go", Time: now})
 				f.Handle(progress.Event{Kind: progress.KindAgentFinished, Role: progress.RoleFinder, Label: label, Time: now})
 			}
 		}(g)
@@ -243,7 +243,7 @@ func TestModel_RendersLiveFeedFrame(t *testing.T) {
 	now := time.Unix(4000, 0)
 	f.Handle(progress.Event{Kind: progress.KindScanStarted, ScanKind: "sweep", Time: now})
 	f.Handle(progress.Event{Kind: progress.KindAgentStarted, Role: progress.RoleVerifier, Label: "candidate A", Time: now})
-	f.Handle(progress.Event{Kind: progress.KindAgentActivity, Role: progress.RoleVerifier, Label: "candidate A", Activity: "running sandbox", Time: now})
+	f.Handle(progress.Event{Kind: progress.KindToolCall, Role: progress.RoleVerifier, Label: "candidate A", Phase: "start", Tool: "sandbox_exec", Time: now})
 
 	fr := f.buildFrame(context.Background())
 
@@ -253,16 +253,16 @@ func TestModel_RendersLiveFeedFrame(t *testing.T) {
 	if len(m.frame.Agents) != 1 || !m.frame.Agents[0].Live {
 		t.Fatalf("live agent not rendered into Model.frame: %+v", m.frame.Agents)
 	}
-	if m.frame.Agents[0].Activity != "running sandbox" {
-		t.Fatalf("activity = %q, want %q", m.frame.Agents[0].Activity, "running sandbox")
+	if m.frame.Agents[0].Activity != "sandbox_exec" {
+		t.Fatalf("activity = %q, want %q", m.frame.Agents[0].Activity, "sandbox_exec")
 	}
 
-	m = sendKey(m, "tab") // -> Agents screen
+	// roster pane is already focused; pressing enter drills into paneDetail.
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = next.(Model)
 	_ = cmd
-	if m.screen != screenAgentDetail {
-		t.Fatalf("screen = %v after enter, want AgentDetail (drill-down failed)", m.screen)
+	if m.focus != paneDetail {
+		t.Fatalf("focus = %v after enter, want paneDetail (drill-down failed)", m.focus)
 	}
 
 	view := stripANSI(m.View())

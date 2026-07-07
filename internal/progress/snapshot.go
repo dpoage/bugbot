@@ -22,6 +22,11 @@ const StatusFileName = "status.json"
 // updates and always settles correctly at the end.
 const snapshotInterval = time.Second
 
+// recentActionsCap is the maximum number of entries in AgentStatus.RecentActions.
+// A ring of 8 entries covers a few turns of tool calls without consuming
+// meaningful memory or making status.json noticeably larger.
+const recentActionsCap = 8
+
 // Status is the JSON document SnapshotSink persists and `bugbot status` reads.
 // It is the cross-process view of a running scan or daemon: enough to tell, from
 // another terminal, that Bugbot is alive and what it is doing.
@@ -96,10 +101,14 @@ type AgentStatus struct {
 	Label   string    `json:"label"`
 	Started time.Time `json:"started"`
 	// Activity is the most recent short note about what this agent is doing,
-	// derived from its tool calls. Empty until the first KindAgentActivity
-	// event arrives for this agent.
+	// derived from KindToolCall events via progress.Describe. Empty until the
+	// first KindToolCall event arrives for this agent.
 	Activity   string    `json:"activity,omitempty"`
 	ActivityAt time.Time `json:"activity_at,omitempty"`
+	// RecentActions is a bounded ring (cap recentActionsCap) of the most recent
+	// Describe lines for this agent, newest-first. Populated from KindToolCall
+	// Phase=start events so observers see what is happening as it starts.
+	RecentActions []string `json:"recent_actions,omitempty"`
 }
 
 // ToolHealth is one entry in Status.UnhealthyTools, aggregating every
@@ -285,19 +294,25 @@ func (a *StatusAccumulator) apply(ev Event) (terminal bool) {
 			s.st.LiveCandidates += ev.Candidates
 		}
 		s.st.LastEvent = ev.Role + " done: " + ev.Label
-	case KindAgentActivity:
+	case KindToolCall:
 		// Update the activity note in-place only when the agent is already
-		// tracked. A stray/late activity must not resurrect a finished agent.
+		// tracked. A stray/late event must not resurrect a finished agent.
 		if a, ok := s.agents[agentKey(ev.Role, ev.Label)]; ok {
-			a.Activity = ev.Activity
+			line := Describe(ev)
+			a.Activity = line
 			a.ActivityAt = ev.Time
+			// Maintain a bounded ring of recent actions (Phase=start only, so
+			// the observer sees the action as it begins rather than doubled).
+			if ev.Phase == "start" {
+				a.RecentActions = pushRing(a.RecentActions, line, recentActionsCap)
+			}
 			s.agents[agentKey(ev.Role, ev.Label)] = a
 		}
 	case KindReproAttempt:
-		// Same fold as KindAgentActivity: surface the round as the tracked
-		// agent's activity note (a reader of `bugbot status` sees round
-		// progress the same way it sees tool-call activity), plus LastEvent so
-		// it's visible even once the agent has finished and been removed.
+		// Same fold as KindToolCall: surface the round as the tracked agent's
+		// activity note (a reader of `bugbot status` sees round progress the
+		// same way it sees tool-call activity), plus LastEvent so it is visible
+		// even once the agent has finished and been removed.
 		note := fmt.Sprintf("attempt %d/%d: %s", ev.Attempt, ev.MaxAttempts, ev.Verdict)
 		if a, ok := s.agents[agentKey(ev.Role, ev.Label)]; ok {
 			a.Activity = note
@@ -478,4 +493,14 @@ func mergeMax(a, b Counts) Counts {
 		a.Killed = b.Killed
 	}
 	return a
+}
+
+// pushRing prepends item to ring and trims it to at most maxLen entries. The
+// result is newest-first: index 0 is the most recent action.
+func pushRing(ring []string, item string, maxLen int) []string {
+	ring = append([]string{item}, ring...)
+	if len(ring) > maxLen {
+		ring = ring[:maxLen]
+	}
+	return ring
 }
