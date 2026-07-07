@@ -7,6 +7,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 )
 
 // --- seat assignment tests ---------------------------------------------------
@@ -606,7 +607,7 @@ func TestRunRefuters_N1_NoSeatClause(t *testing.T) {
 		t.Fatal(err)
 	}
 	budget := &budgetState{}
-	_, _, _, _, _, err = f.runRefuters(ctx, capture, tools, "senior Go engineer", c, 1, budget)
+	_, _, _, _, _, err = f.runRefuters(ctx, capture, tools, "senior Go engineer", c, 1, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -646,7 +647,7 @@ func TestRunRefuters_N3_ThreeDistinctPrompts(t *testing.T) {
 		t.Fatal(err)
 	}
 	budget := &budgetState{}
-	_, _, _, _, _, err = f.runRefuters(ctx, capture, tools, "senior Go engineer", c, 3, budget)
+	_, _, _, _, _, err = f.runRefuters(ctx, capture, tools, "senior Go engineer", c, 3, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title))
 	if err != nil {
 		t.Fatal(err)
 	}

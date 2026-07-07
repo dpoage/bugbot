@@ -400,11 +400,24 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				imp, dep := cart.QueryGraph(pkg, direction)
 				return imp, dep, nil
 			})
+			// One AgentScope per unit run, minted BEFORE any tool is built so
+			// maybeStatusNoteTool, runFinderWithPrompt's activity sink, and this
+			// unit's Finished event all carry the SAME AgentID — see
+			// progress.AgentEventKey / agent_runners.go's activitySinkFor doc
+			// (bugbot-r7ub). label is resolved here (not further down) so the
+			// scope, the status_note tool, and the eventual Started/Finished
+			// events never disagree — a pre-existing latent mismatch when
+			// strategy.Name was non-default (the status_note tool used to key
+			// off u.lens.Name alone while Started/Finished used the
+			// strategy-qualified label).
+			label := unitLabel(u.lens.Name, u.strategy.Name)
+			scope := progress.NewAgentScope(f.opts.Progress, progress.RoleFinder, label).Start()
+
 			unitTools := append(baseTools[:len(baseTools):len(baseTools)], postLeadTool, pkgContextTool, pkgGraphTool)
-			if t := f.maybeStatusNoteTool(progress.RoleFinder, u.lens.Name); t != nil {
+			if t := f.maybeStatusNoteTool(scope); t != nil {
 				unitTools = append(unitTools, t)
 			}
-			if t := f.maybeReportToolIssueTool(result, progress.RoleFinder, u.lens.Name); t != nil {
+			if t := f.maybeReportToolIssueTool(result, progress.RoleFinder, label); t != nil {
 				unitTools = append(unitTools, t)
 			}
 
@@ -423,11 +436,10 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 
 			sysprompt := composeFinderSystemPrompt(persona, u.lens, u.langs, u.strategy)
 
-			label := unitLabel(u.lens.Name, u.strategy.Name)
 			startedAt := time.Now()
 			// runCtx (not ctx) so a breaker trip unblocks the in-flight runner
 			// without disturbing the caller's context.
-			cands, status, outcome, pm, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt, f.toolHealthSinkFor(result, progress.RoleFinder, label))
+			cands, status, outcome, pm, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt, scope, f.toolHealthSinkFor(result, progress.RoleFinder, label))
 			finishedAt := time.Now()
 
 			// Emit KindAgentFinished here (not inside runFinderWithPrompt) so we
@@ -440,7 +452,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				if err == nil && status == finderOK {
 					candidateCount = len(cands)
 				}
-				emitFinderAgentFinished(f.opts.Progress, label, outcome, startedAt, err, candidateCount)
+				emitFinderAgentFinished(scope, outcome, startedAt, err, candidateCount)
 			}
 
 			// Extract per-unit token counts directly from the Outcome's Usage

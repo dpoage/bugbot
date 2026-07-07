@@ -37,6 +37,7 @@ import (
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -138,8 +139,8 @@ func TestArbiterLive_ReplaySplits(t *testing.T) {
 		}
 		c := candidateFromFinding(fnd)
 		persona := ingest.PersonaLanguages([]ingest.Language{ingest.DetectLanguage(fnd.File)}, nil)
-
-		av, tokens, stopped, aerr := f.runArbiter(ctx, verifier, arbiterTools, persona, c, verdicts, seatNames, &budgetState{})
+		scope := progress.NewAgentScope(nil, progress.RoleVerifier, c.Title)
+		av, tokens, stopped, aerr := f.runArbiter(ctx, verifier, arbiterTools, persona, c, verdicts, seatNames, &budgetState{}, scope)
 		if aerr != nil {
 			t.Errorf("%s:%d: runArbiter error: %v", tgt.fileSuffix, tgt.line, aerr)
 			continue

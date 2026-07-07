@@ -6,6 +6,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 )
 
 // TestBudgetStopped_BothTruncationReasons asserts that the shared
@@ -91,7 +92,8 @@ func TestNewAgentRunner_AppliesStandardOptions(t *testing.T) {
 	c := Candidate{Lens: "l", File: "f.go", Line: 1, Title: "t"}
 	budget := &budgetState{}
 
-	verdicts, _, _, _, stopped, err := f.runRefuters(ctx, client, tools, "engineer", c, 1, budget)
+	scope := progress.NewAgentScope(nil, progress.RoleVerifier, c.Title)
+	verdicts, _, _, _, stopped, err := f.runRefuters(ctx, client, tools, "engineer", c, 1, budget, scope)
 	if err != nil {
 		t.Fatalf("runRefuters: %v", err)
 	}

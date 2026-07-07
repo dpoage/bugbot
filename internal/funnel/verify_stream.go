@@ -119,6 +119,14 @@ func (f *Funnel) runVerifyAndPersist(
 	// panel and the arbiter (so the per-candidate sandbox exec budget spans the
 	// whole panel + arbiter, exactly as before this split).
 	var extra []agent.Tool
+	sink := f.opts.Progress
+	startedAt := time.Now()
+	// One AgentScope for the whole candidate verify run (panel + arbiter),
+	// minted BEFORE any tool is built so the status_note tool, every seat's
+	// tool-call activity (runRefuters/runArbiter thread this SAME scope), and
+	// the eventual Finish all carry the run's AgentID — see
+	// agent_runners.go's activitySinkFor doc (bugbot-r7ub).
+	scope := progress.NewAgentScope(sink, progress.RoleVerifier, c.Title).Start()
 	if prefErr := f.ensureDepPrefetch(ctx); prefErr != nil {
 		f.note(result, fmt.Sprintf("sandbox dependency prefetch failed: %v — sandbox_exec disabled", prefErr))
 	} else {
@@ -129,7 +137,7 @@ func (f *Funnel) runVerifyAndPersist(
 			extra = append(extra, rtTool)
 		}
 	}
-	if t := f.maybeStatusNoteTool(progress.RoleVerifier, c.Title); t != nil {
+	if t := f.maybeStatusNoteTool(scope); t != nil {
 		extra = append(extra, t)
 	}
 	if t := f.maybeReportToolIssueTool(result, progress.RoleVerifier, c.Title); t != nil {
@@ -140,10 +148,7 @@ func (f *Funnel) runVerifyAndPersist(
 	// extra tool VALUES.
 	candTools := append(refuterReadTools, extra...)
 
-	sink := f.opts.Progress
-	startedAt := time.Now()
-	scope := progress.NewAgentScope(sink, progress.RoleVerifier, c.Title).Start()
-	verdicts, seatNames, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, candTools, persona, c, nRefuters, budget, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title))
+	verdicts, seatNames, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, candTools, persona, c, nRefuters, budget, scope, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title))
 
 	// Arbiter path.
 	var localArbiterRuns, localArbiterKills, localArbiterFailed int
@@ -162,7 +167,7 @@ func (f *Funnel) runVerifyAndPersist(
 			return
 		}
 		arbiterTools := append(arbiterReadTools, extra...)
-		av, aTokens, aStopped, aErr := f.runArbiter(ctx, arbiter, arbiterTools, persona, c, verdicts, seatNames, budget, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title))
+		av, aTokens, aStopped, aErr := f.runArbiter(ctx, arbiter, arbiterTools, persona, c, verdicts, seatNames, budget, scope, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title))
 		tokens += aTokens
 		localArbiterTokens = aTokens
 		if aStopped {

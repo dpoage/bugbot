@@ -155,17 +155,17 @@ func (p *PaneRenderer) apply(ev Event) {
 		}
 		p.lastEvent = "stage done: " + ev.Stage
 	case KindAgentStarted:
-		p.agents[agentKey(ev.Role, ev.Label)] = &activeAgent{
+		p.agents[AgentEventKey(ev)] = &activeAgent{
 			role: ev.Role, label: ev.Label, started: p.now(),
 		}
 	case KindAgentFinished:
-		delete(p.agents, agentKey(ev.Role, ev.Label))
+		delete(p.agents, AgentEventKey(ev))
 		if ev.Role == RoleFinder && ev.Candidates > 0 {
 			p.counts.Hypothesized += ev.Candidates
 		}
 		p.lastEvent = fmt.Sprintf("%s done: %s", ev.Role, ev.Label)
 	case KindToolCall:
-		if a, ok := p.agents[agentKey(ev.Role, ev.Label)]; ok {
+		if a, ok := p.agents[AgentEventKey(ev)]; ok {
 			a.activity = Describe(ev)
 		}
 	case KindReproAttempt:
@@ -175,7 +175,7 @@ func (p *PaneRenderer) apply(ev Event) {
 		// single-line tail of the pane still shows repro progress even for a
 		// viewer not watching the per-agent rows.
 		note := fmt.Sprintf("attempt %d/%d: %s", ev.Attempt, ev.MaxAttempts, ev.Verdict)
-		if a, ok := p.agents[agentKey(ev.Role, ev.Label)]; ok {
+		if a, ok := p.agents[AgentEventKey(ev)]; ok {
 			a.activity = note
 		}
 		p.lastEvent = fmt.Sprintf("repro %s — %s", note, ev.Label)
@@ -367,8 +367,24 @@ func (p *PaneRenderer) Stop() {
 	p.repaint(true)
 }
 
-// agentKey identifies an active agent by role and label.
+// agentKey identifies an active agent by role and label. It is the fallback
+// half of AgentEventKey for events that carry no AgentID.
 func agentKey(role, label string) string { return role + "\x00" + label }
+
+// AgentEventKey returns the identity key for the agent that emitted ev: its
+// AgentID when set, else the (Role, Label) composite. All consumers that map
+// events to a live agent — the snapshot accumulator, the pane, and the TUI's
+// feed/ring folding — MUST key through AgentEventKey rather than reading
+// Role/Label directly, so that two concurrent agents sharing a (role, label)
+// (e.g. duplicate open finding titles reproduced at once) get distinct
+// entries instead of colliding into one. Events from a pre-identity emitter
+// (no AgentID set) still fold correctly under the historical role+label key.
+func AgentEventKey(ev Event) string {
+	if ev.AgentID != "" {
+		return ev.AgentID
+	}
+	return agentKey(ev.Role, ev.Label)
+}
 
 // dash returns "-" for an empty string so header/agent lines never collapse.
 func dash(s string) string {

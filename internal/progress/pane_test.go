@@ -186,3 +186,49 @@ func TestPane_ReproAttemptFoldsIntoAgentActivity(t *testing.T) {
 		t.Errorf("expected finding label in last-event line, got:\n%s", got)
 	}
 }
+
+// TestPane_ConcurrentAgentsSameLabel_CollisionRegression is the bugbot-r7ub
+// regression for the pane: two reproducer agents on the same duplicate
+// finding title must render as two distinct agent lines, and a KindToolCall
+// carrying one agent's AgentID must only update that agent's activity note.
+// Before AgentID/AgentEventKey keying, both KindAgentStarted events folded
+// into ONE p.agents entry (keyed by role+label), so this test's line-count
+// assertion fails on pre-fix code.
+func TestPane_ConcurrentAgentsSameLabel_CollisionRegression(t *testing.T) {
+	var buf bytes.Buffer
+	p := newTestPane(&buf, 200, fixedClock(time.Unix(1_000_000, 0)))
+
+	const dupTitle = "duplicate open finding"
+	p.Handle(Event{Kind: KindAgentStarted, Role: RoleReproducer, Label: dupTitle, AgentID: "agent-A"})
+	p.Handle(Event{Kind: KindAgentStarted, Role: RoleReproducer, Label: dupTitle, AgentID: "agent-B"})
+
+	if len(p.agents) != 2 {
+		t.Fatalf("p.agents = %d entries, want 2 distinct entries for colliding role+label", len(p.agents))
+	}
+
+	p.Handle(Event{
+		Kind: KindToolCall, Role: RoleReproducer, Label: dupTitle, AgentID: "agent-A",
+		Phase: "start", Tool: "read_file", File: "a.go",
+	})
+	buf.Reset()
+	p.paintNow()
+	got := StripANSI(buf.String())
+
+	// Two agent lines must render (both share label/role text, but there must
+	// be two occurrences of the label line — one with the activity note, one
+	// without).
+	if strings.Count(got, dupTitle) != 2 {
+		t.Fatalf("expected 2 rendered lines for the colliding label, got:\n%s", got)
+	}
+	if !strings.Contains(got, "read_file a.go") {
+		t.Errorf("expected agent-A's activity note in frame, got:\n%s", got)
+	}
+
+	p.Handle(Event{Kind: KindAgentFinished, Role: RoleReproducer, Label: dupTitle, AgentID: "agent-A"})
+	if len(p.agents) != 1 {
+		t.Fatalf("p.agents = %d after agent-A finished, want 1 (agent-B survives)", len(p.agents))
+	}
+	if _, ok := p.agents["agent-B"]; !ok {
+		t.Errorf("expected agent-B to survive agent-A's finish; p.agents = %+v", p.agents)
+	}
+}

@@ -347,3 +347,101 @@ func TestSummarizePackage_NilSink(t *testing.T) {
 		t.Fatal("summary is empty with nil sink")
 	}
 }
+
+// accSink adapts a *progress.StatusAccumulator to progress.EventSink so a
+// funnel Options.Progress can drive the exact fold snapshot.json/the TUI
+// roster use, without standing up a SnapshotSink (no filesystem writes).
+type accSink struct{ acc *progress.StatusAccumulator }
+
+func (s accSink) Handle(ev progress.Event) { s.acc.Apply(ev) }
+
+// TestSummarizePackage_ScopeIdentity_NoRosterLeak is the bugbot-r7ub B1
+// regression for the cartographer path: summarizePackage's KindAgentStarted,
+// every KindToolCall (read_file / summarize_package), and KindAgentFinished
+// must all carry the SAME AgentID, so a progress.StatusAccumulator folding
+// the whole run removes the roster entry on Finish and updates its Activity
+// on every tool call along the way.
+//
+// Pre-fix (B1): cartographer_regen.go's Finish call built its own fresh
+// progress.NewAgentScope(...).Finish(...) instead of reusing the scope Start
+// and every EmitToolCall used — a DIFFERENT AgentID, so
+// progress.AgentEventKey(finishedEvent) missed the roster entry Started
+// keyed under, leaking it in ActiveAgents forever (every cartographer
+// package regen leaks one entry). This test demonstrably fails on that
+// pre-fix code: ActiveAgents is non-empty after summarizePackage returns.
+func TestSummarizePackage_ScopeIdentity_NoRosterLeak(t *testing.T) {
+	const pkg = "identitypkg"
+	files := map[string]string{
+		pkg + "/alpha.go": "package identitypkg\n\nfunc Alpha() {}\n",
+		pkg + "/beta.go":  "package identitypkg\n\nfunc Beta() {}\n",
+	}
+
+	st, repo := openCartographyFixture(t)
+	t.Cleanup(func() { _ = st.Close() })
+	root := repo.Root()
+	for rel, content := range files {
+		abs := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	acc := progress.NewStatusAccumulator()
+	sink := &regenRecordingSink{}
+	multi := progress.NewMulti(accSink{acc}, sink)
+
+	f, err := New(RoleClients{Finder: newScriptedClient(), Verifier: newScriptedClient()},
+		st, repo, Options{
+			Features: FeatureFlags{Cartographer: true},
+			Progress: multi,
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	members := []string{pkg + "/alpha.go", pkg + "/beta.go"}
+	fps := map[string]string{pkg + "/alpha.go": "fp-a", pkg + "/beta.go": "fp-b"}
+
+	ctx := context.Background()
+	_, err = f.summarizePackage(ctx, newScriptedClientWithFallback(`{"summary":"Identity check summary."}`), nil, pkg, members, fps)
+	if err != nil {
+		t.Fatalf("summarizePackage returned error: %v", err)
+	}
+
+	// (a) roster prune: no leaked entry after the run completes.
+	if got := acc.Snapshot().ActiveAgents; len(got) != 0 {
+		t.Fatalf("ActiveAgents = %+v, want empty — Finish's AgentID must match Start's so the accumulator prunes the roster entry", got)
+	}
+
+	// (b) identity consistency: every event in the run shares one AgentID.
+	evs := sink.snapshot()
+	var startID string
+	toolCallSeen := false
+	for _, ev := range evs {
+		switch ev.Kind {
+		case progress.KindAgentStarted:
+			if ev.AgentID == "" {
+				t.Fatal("KindAgentStarted has empty AgentID")
+			}
+			startID = ev.AgentID
+		case progress.KindToolCall:
+			toolCallSeen = true
+			if ev.AgentID != startID {
+				t.Errorf("KindToolCall AgentID = %q, want %q (Started's id) — tool: %s", ev.AgentID, startID, ev.Tool)
+			}
+		case progress.KindAgentFinished:
+			if ev.AgentID != startID {
+				t.Errorf("KindAgentFinished AgentID = %q, want %q (Started's id)", ev.AgentID, startID)
+			}
+		}
+	}
+	if startID == "" {
+		t.Fatal("no KindAgentStarted event observed")
+	}
+	if !toolCallSeen {
+		t.Fatal("no KindToolCall event observed — test fixture must exercise read_file/summarize_package activity")
+	}
+}

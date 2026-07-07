@@ -128,11 +128,13 @@ type ActionRow struct {
 	ObserverText string
 }
 
-// actionKey is the pairing key for start->done matching.
+// actionKey is the pairing key for start->done matching: the emitting
+// agent's feed key (see feedKeyForEvent) plus the tool name. Using FeedKey
+// instead of raw Role/Label means two concurrent agents sharing a
+// (role, label) never pair a start from one with a done from the other.
 type actionKey struct {
-	Role  string
-	Label string
-	Tool  string
+	FeedKey string
+	Tool    string
 }
 
 // actionRing is a per-agent bounded ring of ActionRows plus a pairing index.
@@ -193,15 +195,15 @@ func (r *actionRing) ApplyStart(ev progress.Event) {
 	}
 	idx := r.push(row)
 	r.pending[row.Seq] = idx
-	k := actionKey{Role: ev.Role, Label: ev.Label, Tool: ev.Tool}
+	k := actionKey{FeedKey: feedKeyForEvent(ev), Tool: ev.Tool}
 	r.byKey[k] = append(r.byKey[k], row.Seq)
 }
 
 // ApplyDone folds a Phase=done event: matches the earliest unresolved start by
-// (Role,Label,Tool) and updates it in place. If no match (orphan done), pushes
+// (FeedKey,Tool) and updates it in place. If no match (orphan done), pushes
 // a standalone resolved row.
 func (r *actionRing) ApplyDone(ev progress.Event) {
-	k := actionKey{Role: ev.Role, Label: ev.Label, Tool: ev.Tool}
+	k := actionKey{FeedKey: feedKeyForEvent(ev), Tool: ev.Tool}
 	seqs := r.byKey[k]
 	if len(seqs) > 0 {
 		// match earliest unresolved
@@ -295,12 +297,38 @@ func newActionFeedState() ActionFeedState {
 	}
 }
 
+// agentFeedKey identifies an agent's action-feed ring by (role, label). It is
+// the fallback half of feedKeyForEvent/feedKeyForAgent for pre-identity
+// events / historical AgentViews that carry no AgentID.
 func agentFeedKey(role, label string) string { return role + ":" + label }
+
+// feedKeyForEvent returns the action-feed ring key for the agent that
+// emitted ev: its AgentID when set, else agentFeedKey(role, label). Mirrors
+// progress.AgentEventKey so the same collision fix applies to the action
+// feed's per-agent rings (two concurrent agents sharing a role+label no
+// longer fold into one ring).
+func feedKeyForEvent(ev progress.Event) string {
+	if ev.AgentID != "" {
+		return ev.AgentID
+	}
+	return agentFeedKey(ev.Role, ev.Label)
+}
+
+// feedKeyForAgent returns the action-feed ring key for a, mirroring
+// feedKeyForEvent for the AgentView side of the lookup (renderDetailPane,
+// actionFeedVisibleRows): a's AgentID when set, else agentFeedKey(role,
+// label).
+func feedKeyForAgent(a AgentView) string {
+	if a.AgentID != "" {
+		return a.AgentID
+	}
+	return agentFeedKey(a.Role, a.Label)
+}
 
 // ApplyToolCallEvent folds a KindToolCall event into both the per-agent ring
 // and the aggregate ring.
 func (s *ActionFeedState) ApplyToolCallEvent(ev progress.Event) {
-	k := agentFeedKey(ev.Role, ev.Label)
+	k := feedKeyForEvent(ev)
 	ring, ok := s.perAgent[k]
 	if !ok {
 		ring = newActionRing()
