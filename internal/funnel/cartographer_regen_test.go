@@ -87,17 +87,6 @@ func openRegenFixture(t *testing.T, files map[string]string) (*regenRecordingSin
 	return sink, f, members, fps
 }
 
-// filterToolPhase returns KindToolCall events with the given tool and phase.
-func filterToolPhase(evs []progress.Event, tool, phase string) []progress.Event {
-	var out []progress.Event
-	for _, ev := range evs {
-		if ev.Kind == progress.KindToolCall && ev.Tool == tool && ev.Phase == phase {
-			out = append(out, ev)
-		}
-	}
-	return out
-}
-
 // newScriptedClientWithFallback returns a scriptedClient whose fallback
 // response is the given JSON body.
 func newScriptedClientWithFallback(body string) *scriptedClient {
