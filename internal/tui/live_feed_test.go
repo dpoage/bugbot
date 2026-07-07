@@ -257,12 +257,12 @@ func TestModel_RendersLiveFeedFrame(t *testing.T) {
 		t.Fatalf("activity = %q, want %q", m.frame.Agents[0].Activity, "running sandbox")
 	}
 
-	m = sendKey(m, "tab") // -> Agents screen
+	// roster pane is already focused; pressing enter drills into paneDetail.
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = next.(Model)
 	_ = cmd
-	if m.screen != screenAgentDetail {
-		t.Fatalf("screen = %v after enter, want AgentDetail (drill-down failed)", m.screen)
+	if m.focus != paneDetail {
+		t.Fatalf("focus = %v after enter, want paneDetail (drill-down failed)", m.focus)
 	}
 
 	view := stripANSI(m.View())

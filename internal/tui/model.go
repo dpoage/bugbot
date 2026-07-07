@@ -14,22 +14,32 @@ import (
 	"github.com/dpoage/bugbot/internal/agent"
 )
 
-// screen identifies one full-screen view. Cockpit/Agents/Findings/Leads are
-// the top-level screens tab cycles through; AgentDetail is only reachable by
-// drilling into an agent from Agents and returns to whichever screen pushed
-// it.
-type screen int
+// pane identifies one of the three simultaneous panes in the compositor.
+//
+// paneRoster  — left  — filterable merged agent list
+// paneDetail  — center — selected agent's status + transcript
+// paneContext — right  — cockpit summary / world-state with optional sub-modes
+type pane int
 
 const (
-	screenCockpit screen = iota
-	screenAgents
-	screenAgentDetail
-	screenFindings
-	screenLeads
+	paneRoster  pane = iota // agent list with '/' filter
+	paneDetail              // selected agent detail + transcript
+	paneContext             // cockpit summary / world-state
+	paneCount   = 3
 )
 
-// topScreens is the tab-cycle order.
-var topScreens = []screen{screenCockpit, screenAgents, screenFindings, screenLeads}
+// contextMode is the sub-mode of paneContext; cycles via a key within the pane.
+type contextMode int
+
+const (
+	contextModeSummary  contextMode = iota // cockpit at-a-glance summary
+	contextModeFindings                    // findings tallies
+	contextModeLeads                       // pending-leads blackboard
+)
+
+// minWidthForHorizontal is the column threshold below which panes stack
+// vertically (focused-pane-first) instead of side by side.
+const minWidthForHorizontal = 80
 
 // repaintInterval drives a UI-only re-render (elapsed timers, spend ticker)
 // independent of the Feed's cadence, so the Cockpit advances even between
@@ -43,39 +53,46 @@ func repaintTick() tea.Cmd {
 	return tea.Tick(repaintInterval, func(t time.Time) tea.Msg { return repaintMsg(t) })
 }
 
-// Model is the bubbletea reducer driving every screen. It knows nothing about
-// where Frame values come from — that is entirely Feed's concern — so a
-// future Owner-mode LiveFeed plugs in by construction with zero changes here.
+// Model is the bubbletea reducer driving the three-pane cockpit. It knows
+// nothing about where Frame values come from — that is entirely Feed's concern
+// — so a LiveFeed (Owner mode) or SnapshotFeed (Observer mode) plugs in by
+// construction with zero changes here.
 type Model struct {
 	feed Feed
 
 	frame     Frame
 	haveFrame bool
 
-	screen     screen
-	prevScreen screen // screen to return to from screenAgentDetail on esc
+	// focus is the pane currently receiving keyboard input.
+	focus pane
 
-	cursor    int // index into the CURRENT screen's visible list
+	// contextMode is the sub-mode of paneContext.
+	contextMode contextMode
+
+	// cursor is the row index within the focused pane's navigable list
+	// (roster list for paneRoster, leads list for contextModeLeads).
+	cursor    int
 	filter    string
 	filtering bool
 
-	// detailIdx is the CURRENT position of the drilled-in agent in
-	// frame.Agents, re-resolved from detailKey on every FrameMsg (mergeAgents
-	// rebuilds the slice from scratch each frame, so a raw index would go
-	// stale). -1 means detailKey's agent is not present in the current frame.
+	// detailIdx/detailKey track the agent shown in paneDetail.
+	// detailKey is the stable identity; detailIdx is re-resolved each frame.
 	detailIdx int
-	// detailKey is the stable identity (see agentKey) of the agent behind
-	// screenAgentDetail; empty when no agent has been drilled into yet.
 	detailKey string
 
 	transcript     *agent.Transcript
-	transcriptNote string // set when there is no transcript, it is loading, or a load error
+	transcriptNote string
 	// transcriptPath is the TranscriptPath the current transcript/note was
-	// loaded for; a FrameMsg that resolves detailKey to a different
-	// TranscriptPath triggers a reload.
+	// loaded for; a FrameMsg that resolves detailKey to a different path
+	// triggers a reload.
 	transcriptPath   string
 	transcriptView   viewport.Model
-	transcriptLoaded bool // whether load has settled (success, empty, or error) for transcriptPath
+	transcriptLoaded bool
+
+	// rosterView and contextView are independently scrollable viewport models
+	// for the roster and context panes respectively.
+	rosterView  viewport.Model
+	contextView viewport.Model
 
 	width, height int
 	quitting      bool
@@ -86,30 +103,21 @@ type Model struct {
 	disp dispatcher
 	// ctx is the program's own context (see run.go's runProgram), retained
 	// solely so a dispatched verb's tea.Cmd can derive a cancelable child
-	// context via context.WithCancel(m.ctx) — cancelling one run must not
-	// quit the TUI, so it cannot simply reuse tea.WithContext's lifecycle.
-	// Nothing else on Model reads it.
+	// context via context.WithCancel(m.ctx).
 	ctx context.Context
 
 	palette paletteState
 
 	// running/runVerb/runStarted/runCancel/runOut describe the ONE active
 	// dispatch, if any — the palette refuses to start a second one while
-	// running is true. runCancel is non-nil only while running is true.
+	// running is true.
 	running    bool
 	runVerb    string
 	runStarted time.Time
 	runCancel  context.CancelFunc
 	runOut     *capBuffer
 
-	// lastVerb/lastErr/lastResult describe the most recently COMPLETED
-	// dispatch (success, error, or cancelled), rendered on the Cockpit
-	// status line and in the palette overlay until superseded by the next
-	// run. lastOut is the tail of that run's own Out/ErrOut text (see
-	// capBuffer) — surfaced in the palette's "last dispatch" detail
-	// alongside lastResult's typed *Result summary, since a verb can also
-	// print incidental status text a typed summary does not capture (e.g.
-	// Verify's "no pending candidates" line, a sandbox-degraded warning).
+	// lastVerb/lastErr/lastResult describe the most recently COMPLETED dispatch.
 	lastVerb   string
 	lastErr    error
 	lastResult string
@@ -126,15 +134,20 @@ type Model struct {
 // after Init).
 func NewModel(ctx context.Context, feed Feed, disp dispatcher) Model {
 	m := Model{
-		feed:    feed,
-		disp:    disp,
-		ctx:     ctx,
-		palette: newPaletteState(),
-		width:   80,
-		height:  24,
+		feed:      feed,
+		disp:      disp,
+		ctx:       ctx,
+		palette:   newPaletteState(),
+		width:     80,
+		height:    24,
+		detailIdx: -1,
 	}
-	vw, vh := m.transcriptSize()
+	vw, vh := m.paneDetailSize()
 	m.transcriptView = viewport.New(vw, vh)
+	rw, rh := m.paneRosterSize()
+	m.rosterView = viewport.New(rw, rh)
+	cw, ch := m.paneContextSize()
+	m.contextView = viewport.New(cw, ch)
 	return m
 }
 
@@ -148,9 +161,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		vw, vh := m.transcriptSize()
-		m.transcriptView.Width = vw
-		m.transcriptView.Height = vh
+		m.resizePanes()
 		return m, nil
 
 	case FrameMsg:
@@ -177,8 +188,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case transcriptLoadedMsg:
 		// Discard results for an agent the user has since navigated away
-		// from (or a superseded reload for the same agent) — msg.key ties
-		// the result back to the request that produced it.
+		// from (or a superseded reload for the same agent).
 		if msg.key != m.detailKey {
 			return m, nil
 		}
@@ -196,22 +206,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, repaintTick()
 
 	case dispatchDoneMsg:
-		// runCancel is idempotent (context.CancelFunc): calling it here even
-		// though dispatchCmd's own defer already released runCtx on every
-		// path keeps the invariant simple ("Model never forgets to call a
-		// cancel it created") regardless of which path got here first.
 		if m.runCancel != nil {
 			m.runCancel()
 		}
 		m.running = false
 		m.runCancel = nil
 		m.runVerb = ""
-		// Capture the verb's own captured Out/ErrOut text before dropping
-		// the buffer — this is the only place runOut's contents are ever
-		// read (dispatchCmd only writes it), so a run whose funnel prints
-		// something beyond its typed *Result (e.g. Verify's "no pending
-		// candidates" line, or a sandbox-degraded warning) is not silently
-		// discarded.
 		if m.runOut != nil {
 			m.lastOut = m.runOut.Tail()
 		}
@@ -227,12 +227,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleKey handles keyboard input for the multi-pane compositor.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// A cancel key stops the active dispatch without quitting the TUI or
-	// closing whatever screen/palette is open; it takes priority over every
-	// other key while a run is in flight, matching the palette's one-at-a-
-	// time gating — while running is true there is always exactly one run a
-	// cancel key could mean.
+	// Cancel key stops the active dispatch at highest priority.
 	if m.running {
 		switch msg.String() {
 		case "ctrl+x", "esc":
@@ -272,30 +269,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// screenAgentDetail forwards navigation to the transcript viewport
-	// instead of the list-cursor keys (there is no list on this screen).
-	if m.screen == screenAgentDetail {
-		switch msg.String() {
-		case "ctrl+c", "q":
-			if m.running {
-				m = m.cancelRun()
-			}
-			m.quitting = true
-			return m, tea.Quit
-		case "tab":
-			m.screen = nextTopScreen(m.screen)
-			m.cursor = 0
-			return m, nil
-		case "esc":
-			m.screen = m.prevScreen
-			return m, nil
-		default:
-			var cmd tea.Cmd
-			m.transcriptView, cmd = m.transcriptView.Update(msg)
-			return m, cmd
-		}
-	}
-
 	switch msg.String() {
 	case "ctrl+c", "q":
 		if m.running {
@@ -305,51 +278,80 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "tab":
-		m.screen = nextTopScreen(m.screen)
+		m.focus = (m.focus + 1) % paneCount
 		m.cursor = 0
 		return m, nil
+
+	case "1":
+		m.focus = paneRoster
+		m.cursor = 0
+		return m, nil
+
+	case "2":
+		m.focus = paneDetail
+		return m, nil
+
+	case "3":
+		m.focus = paneContext
+		m.cursor = 0
+		return m, nil
+
 	case "d":
-		// Opens from any top-level screen (this switch is unreachable from
-		// screenAgentDetail — see the branch above — and from filtering,
-		// handled earlier). Opens even when m.disp == nil: the palette
+		// Opens from any pane. Opens even when m.disp == nil: the palette
 		// renders every verb disabled with the reason instead of hiding
 		// itself, so Observer-mode operators can see WHY dispatch is
-		// unavailable rather than wondering if the key did nothing.
+		// unavailable.
 		m.palette.open = true
 		m.palette.editing = false
 		return m, nil
 
 	case "j", "down":
-		m.moveCursor(1)
+		m.scrollDown()
 		return m, nil
 
 	case "k", "up":
-		m.moveCursor(-1)
+		m.scrollUp()
+		return m, nil
+
+	case "f", "pgdown":
+		m.pageDown()
+		return m, nil
+
+	case "b", "pgup":
+		m.pageUp()
 		return m, nil
 
 	case "/":
-		if m.screen == screenAgents {
+		// Filter only available when roster pane is focused.
+		if m.focus == paneRoster {
 			m.filtering = true
 		}
 		return m, nil
 
 	case "enter":
-		if m.screen == screenAgents {
+		// Drill into an agent from the roster pane: sets detailKey and
+		// switches focus to the detail pane to show it.
+		if m.focus == paneRoster {
 			idx := m.visibleAgentIndices()
 			if m.cursor >= 0 && m.cursor < len(idx) {
 				a := m.frame.Agents[idx[m.cursor]]
 				m.detailIdx = idx[m.cursor]
 				m.detailKey = agentKey(a)
-				m.prevScreen = m.screen
-				m.screen = screenAgentDetail
 				m.transcript = nil
 				m.transcriptNote = "loading transcript..."
 				m.transcriptPath = a.TranscriptPath
 				m.transcriptLoaded = false
 				m.transcriptView.SetContent("")
+				m.focus = paneDetail
 				return m, loadTranscriptCmd(m.detailKey, a.TranscriptPath)
 			}
 		}
+		return m, nil
+
+	case "m":
+		// Cycle the context pane's sub-mode (summary → findings → leads → summary).
+		m.contextMode = (m.contextMode + 1) % 3
+		m.cursor = 0
 		return m, nil
 
 	case "esc":
@@ -362,15 +364,56 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// nextTopScreen cycles through topScreens; a detail screen falls back to
-// Cockpit before advancing so tab always lands on a top-level screen.
-func nextTopScreen(cur screen) screen {
-	for i, s := range topScreens {
-		if s == cur {
-			return topScreens[(i+1)%len(topScreens)]
+// scrollDown advances the focused pane's cursor or viewport down by one row.
+func (m *Model) scrollDown() {
+	switch m.focus {
+	case paneRoster:
+		m.moveCursor(1)
+	case paneDetail:
+		m.transcriptView.LineDown(1)
+	case paneContext:
+		if m.contextMode == contextModeLeads {
+			m.moveCursor(1)
+		} else {
+			m.contextView.LineDown(1)
 		}
 	}
-	return topScreens[0]
+}
+
+// scrollUp moves the focused pane's cursor or viewport up by one row.
+func (m *Model) scrollUp() {
+	switch m.focus {
+	case paneRoster:
+		m.moveCursor(-1)
+	case paneDetail:
+		m.transcriptView.LineUp(1)
+	case paneContext:
+		if m.contextMode == contextModeLeads {
+			m.moveCursor(-1)
+		} else {
+			m.contextView.LineUp(1)
+		}
+	}
+}
+
+// pageDown pages the focused pane down.
+func (m *Model) pageDown() {
+	switch m.focus {
+	case paneDetail:
+		m.transcriptView.ViewDown()
+	case paneContext:
+		m.contextView.ViewDown()
+	}
+}
+
+// pageUp pages the focused pane up.
+func (m *Model) pageUp() {
+	switch m.focus {
+	case paneDetail:
+		m.transcriptView.ViewUp()
+	case paneContext:
+		m.contextView.ViewUp()
+	}
 }
 
 // visibleAgentIndices returns indices into m.frame.Agents matching the active
@@ -425,23 +468,112 @@ func (m *Model) clampCursor() {
 	}
 }
 
-// listLen returns the number of navigable rows on the current screen.
+// listLen returns the number of navigable rows in the focused pane's list.
 func (m Model) listLen() int {
-	switch m.screen {
-	case screenAgents:
+	switch m.focus {
+	case paneRoster:
 		return len(m.visibleAgentIndices())
-	case screenLeads:
-		return len(m.frame.World.PendingLeads)
+	case paneContext:
+		if m.contextMode == contextModeLeads {
+			return len(m.frame.World.PendingLeads)
+		}
+		return 0
 	default:
 		return 0
 	}
 }
 
+// resizePanes recalculates all viewport dimensions when the terminal size changes.
+func (m *Model) resizePanes() {
+	rw, rh := m.paneRosterSize()
+	m.rosterView.Width = rw
+	m.rosterView.Height = rh
+
+	dw, dh := m.paneDetailSize()
+	m.transcriptView.Width = dw
+	m.transcriptView.Height = dh
+
+	cw, ch := m.paneContextSize()
+	m.contextView.Width = cw
+	m.contextView.Height = ch
+}
+
+// paneRosterSize returns the (width, height) for the roster viewport.
+func (m Model) paneRosterSize() (int, int) {
+	_, w, h := m.layoutDimensions()
+	// leave 2 lines for header + filter row inside the pane
+	if h < 3 {
+		h = 3
+	}
+	if w < 10 {
+		w = 10
+	}
+	return w - 2, h - 4
+}
+
+// paneDetailSize returns the (width, height) for the transcript viewport.
+func (m Model) paneDetailSize() (int, int) {
+	_, w, h := m.layoutDimensions()
+	// leave lines for header + detail fields + section heading
+	if h < 3 {
+		h = 3
+	}
+	if w < 10 {
+		w = 10
+	}
+	return w - 2, h - 14
+}
+
+// paneContextSize returns the (width, height) for the context viewport.
+func (m Model) paneContextSize() (int, int) {
+	_, w, h := m.layoutDimensions()
+	if h < 3 {
+		h = 3
+	}
+	if w < 10 {
+		w = 10
+	}
+	return w - 2, h - 4
+}
+
+// layoutDimensions returns (horizontal bool, paneWidth int, paneHeight int).
+// When horizontal is true the three panes sit side-by-side; otherwise they
+// stack vertically (narrow terminal degradation).
+// paneWidth and paneHeight describe the inner content area of each pane.
+func (m Model) layoutDimensions() (bool, int, int) {
+	// subtract 2 from height for the footer line + blank separator
+	availH := m.height - 2
+	if availH < 3 {
+		availH = 3
+	}
+
+	if m.width >= minWidthForHorizontal {
+		// horizontal: three columns split roughly 25/45/30
+		paneW := m.width / 3
+		if paneW < 20 {
+			paneW = 20
+		}
+		return true, paneW, availH
+	}
+
+	// vertical stack: each pane gets a third of the height
+	paneH := availH / 3
+	if paneH < 3 {
+		paneH = 3
+	}
+	return false, m.width, paneH
+}
+
+// transcriptSize implements the legacy helper shape that NewModel calls;
+// returns the same dimensions as paneDetailSize.
+func (m Model) transcriptSize() (int, int) {
+	return m.paneDetailSize()
+}
+
 // transcriptLoadedMsg is the tea.Msg loadTranscriptCmd resolves to. key ties
 // the result back to the detailKey that requested it, so a stale/superseded
-// load (user drilled into a different agent, or the frame's TranscriptPath
-// changed again, before this one finished) is discarded on arrival rather
-// than clobbering the currently-displayed agent's transcript.
+// load is discarded on arrival rather than clobbering the displayed agent's
+// transcript.
 type transcriptLoadedMsg struct {
 	key        string
 	transcript *agent.Transcript
@@ -471,20 +603,6 @@ func loadTranscriptCmd(key, path string) tea.Cmd {
 		}
 		return transcriptLoadedMsg{key: key, transcript: tr}
 	}
-}
-
-// transcriptSize returns the viewport dimensions for the AgentDetail screen's
-// transcript pane, leaving room for the detail header above it.
-func (m Model) transcriptSize() (int, int) {
-	w := m.width - 4
-	if w < 10 {
-		w = 10
-	}
-	h := m.height - 12
-	if h < 3 {
-		h = 3
-	}
-	return w, h
 }
 
 // sortedIssueStates returns the keys of a published-issue map in a stable

@@ -134,14 +134,14 @@ func TestPalette_OpenAndClose(t *testing.T) {
 	}
 }
 
-func TestPalette_OpensFromEveryTopScreen(t *testing.T) {
-	for _, scr := range topScreens {
+func TestPalette_OpensFromEveryPane(t *testing.T) {
+	for _, p := range []pane{paneRoster, paneDetail, paneContext} {
 		m := NewModel(context.Background(), &fakeFeed{}, &fakeDispatcher{mode: engine.Owner})
 		m = sendFrame(m, baseFrame())
-		m.screen = scr
+		m.focus = p
 		m = sendKey(m, "d")
 		if !m.palette.open {
-			t.Errorf("screen %v: expected palette to open on 'd'", scr)
+			t.Errorf("pane %v: expected palette to open on 'd'", p)
 		}
 	}
 }
