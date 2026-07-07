@@ -8,6 +8,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/daemon"
+	"github.com/dpoage/bugbot/internal/engine"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -16,7 +17,7 @@ import (
 // one in when cfg.Publish.Enabled is true; otherwise Deps.Publisher is nil and
 // the hook is skipped.
 type storePublisher struct {
-	gh      ghRunner
+	gh      engine.GHRunner
 	st      *store.Store
 	cfg     config.Publish
 	prov    publishProvenance
@@ -32,13 +33,13 @@ type storePublisher struct {
 // It is a compatibility shim that delegates to NewStorePublisherWithProvenance
 // with a zero publishProvenance. Callers that have a live config should prefer
 // NewStorePublisherWithProvenance so the issue body metadata block is populated.
-func NewStorePublisher(gh ghRunner, st *store.Store, cfg config.Publish, log *slog.Logger) *storePublisher {
+func NewStorePublisher(gh engine.GHRunner, st *store.Store, cfg config.Publish, log *slog.Logger) *storePublisher {
 	return NewStorePublisherWithProvenance(gh, st, cfg, publishProvenance{}, log)
 }
 
 // NewStorePublisherWithProvenance constructs a storePublisher with model/provider
 // provenance for the issue body metadata block.
-func NewStorePublisherWithProvenance(gh ghRunner, st *store.Store, cfg config.Publish, prov publishProvenance, log *slog.Logger) *storePublisher {
+func NewStorePublisherWithProvenance(gh engine.GHRunner, st *store.Store, cfg config.Publish, prov publishProvenance, log *slog.Logger) *storePublisher {
 	return &storePublisher{
 		gh:      gh,
 		st:      st,

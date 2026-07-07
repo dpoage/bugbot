@@ -10,7 +10,6 @@ import (
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/engine"
 	"github.com/dpoage/bugbot/internal/funnel"
-	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/util"
 )
@@ -30,6 +29,11 @@ import (
 // (precedence), and — when review.fail_on=verified — nonzero when the run
 // surfaces a NEW Tier<=2 finding not already present on the PR, so CI fails on
 // genuinely new bugs but not on re-posts of already-known ones.
+//
+// The full orchestration (resolve PR, verify HEAD, funnel, plan the gh
+// comment sync, apply it) lives in engine.Dispatcher.ReviewPR; this command is
+// a thin flag-parsing / presentation layer over it, so internal/tui's dispatch
+// palette can drive the same orchestration in-process.
 func newReviewCmd() *cobra.Command {
 	var (
 		target      string
@@ -68,7 +72,6 @@ func newReviewCmd() *cobra.Command {
 
 			out := cmd.OutOrStdout()
 			errOut := cmd.ErrOrStderr()
-			gh := realGH
 
 			d, err := engine.Open(ctx, cfg, progress.NewLogRenderer(errOut))
 			if err != nil {
@@ -76,24 +79,26 @@ func newReviewCmd() *cobra.Command {
 			}
 			defer func() { _ = d.Close() }()
 
-			run, err := executeReview(ctx, reviewParams{
-				d:           d,
-				target:      target,
-				prNumber:    prNumber,
-				concurrency: concurrency,
-				refuters:    refuters,
-				lenses:      lenses,
-				dryRun:      dryRun,
-				gh:          gh,
-				out:         out,
-				errOut:      errOut,
-				reviewCfg:   reviewCfg,
+			res, err := d.ReviewPR(ctx, engine.ReviewPROpts{
+				Target:      target,
+				PRNumber:    prNumber,
+				Concurrency: concurrency,
+				Refuters:    refuters,
+				Lenses:      lenses,
+				Suspected:   reviewCfg.suspected,
+				DryRun:      dryRun,
+				GH:          engine.RealGH,
+				Out:         out,
+				ErrOut:      errOut,
 			})
 			if err != nil {
 				cmd.SilenceUsage = true
 				return err
 			}
 
+			printReviewSummary(out, res)
+
+			run := reviewRun{result: res.Result, newVerifiedCount: res.NewVerifiedCount}
 			if gateErr := reviewGateError(run, reviewCfg.failOn, prNumber); gateErr != nil {
 				cmd.SilenceUsage = true
 				cmd.SilenceErrors = true
@@ -154,80 +159,10 @@ func validateReviewFlags(rc reviewConfig) error {
 	return nil
 }
 
-// reviewParams bundles everything executeReview needs, so the RunE closure stays
-// thin and the orchestration is testable with a fake gh.
-type reviewParams struct {
-	d           *engine.Dispatcher
-	reviewCfg   reviewConfig
-	target      string
-	prNumber    int
-	concurrency int
-	refuters    int
-	lenses      []string
-	dryRun      bool
-	gh          ghRunner
-	out         io.Writer
-	errOut      io.Writer
-}
-
-// reviewRun is the outcome executeReview reports to the gate logic.
+// reviewRun is the outcome engine.ReviewPR reports to the gate logic.
 type reviewRun struct {
 	result           *funnel.Result
 	newVerifiedCount int
-}
-
-// executeReview is the full orchestration: resolve PR, verify HEAD, scan the
-// blast radius, compute commentable lines, plan the comment sync, and apply it
-// (unless dry-run). It is separated from the cobra wiring so tests can drive it
-// with a fake gh and a real local repo.
-func executeReview(ctx context.Context, p reviewParams) (reviewRun, error) {
-	repo, err := ingest.Open(ctx, p.target)
-	if err != nil {
-		return reviewRun{}, fmt.Errorf("open target: %w", err)
-	}
-
-	pr, err := resolvePR(ctx, p.gh, p.prNumber)
-	if err != nil {
-		return reviewRun{}, err
-	}
-
-	head, err := repo.HeadCommit(ctx)
-	if err != nil {
-		return reviewRun{}, fmt.Errorf("resolve HEAD: %w", err)
-	}
-	if head != pr.HeadSHA {
-		return reviewRun{}, fmt.Errorf(
-			"local HEAD %s does not match PR #%d head %s; check out the PR head first:\n  git fetch origin pull/%d/head && git checkout %s",
-			util.ShortSHA(head), p.prNumber, util.ShortSHA(pr.HeadSHA), p.prNumber, pr.HeadSHA)
-	}
-
-	res, err := runReviewScan(ctx, repo, p, pr)
-	if err != nil {
-		return reviewRun{}, err
-	}
-
-	// Commentable RIGHT-side lines, computed locally from the same diff GitHub
-	// anchors against.
-	diff, err := repo.UnifiedDiff(ctx, pr.BaseSHA, pr.HeadSHA)
-	if err != nil {
-		return reviewRun{}, fmt.Errorf("compute PR diff: %w", err)
-	}
-	commentable := parseUnifiedDiff(diff)
-
-	existing, err := loadExisting(ctx, p.gh, p.prNumber)
-	if err != nil {
-		return reviewRun{}, err
-	}
-
-	plan := planSync(res, commentable, existing, pr.HeadSHA, p.reviewCfg.suspected)
-
-	if err := applyPlan(ctx, p.gh, p.prNumber, pr.HeadSHA, plan, p.dryRun, p.out); err != nil {
-		return reviewRun{}, err
-	}
-
-	printReviewSummary(p.out, res, plan, pr, p.dryRun)
-
-	return reviewRun{result: res, newVerifiedCount: len(plan.newGateFingerprints)}, nil
 }
 
 // reviewGateError computes the CI exit gate. The reliability gate takes
@@ -247,114 +182,18 @@ func reviewGateError(run reviewRun, failOn string, prNumber int) error {
 	return nil
 }
 
-// runReviewScan delegates to engine.Dispatcher.Review, which wires the
-// funnel exactly like scan.go, computes the PR's changed files, and runs a
-// Targeted scan over them (blast radius applied internally by the funnel).
-func runReviewScan(ctx context.Context, repo *ingest.Repo, p reviewParams, pr prInfo) (*funnel.Result, error) {
-	return p.d.Review(ctx, engine.ReviewOpts{
-		Repo:        repo,
-		PRNumber:    p.prNumber,
-		BaseSHA:     pr.BaseSHA,
-		HeadSHA:     pr.HeadSHA,
-		Concurrency: p.concurrency,
-		Refuters:    p.refuters,
-		Lenses:      p.lenses,
-		Out:         p.out,
-		ErrOut:      p.errOut,
-	})
-}
-
-// applyPlan executes the decided sync actions against gh, unless dryRun. Skips
-// are no-ops (already counted). Order is stable for deterministic output.
-func applyPlan(ctx context.Context, gh ghRunner, pr int, headSHA string, plan planResult, dryRun bool, out io.Writer) error {
-	for _, a := range plan.actions {
-		if a.op == opSkip {
-			continue
-		}
-		if dryRun {
-			_, _ = fmt.Fprintf(out, "[dry-run] would %s %s comment", a.op, kindName(a.kind))
-			if a.path != "" {
-				_, _ = fmt.Fprintf(out, " at %s:%d", a.path, a.line)
-			}
-			_, _ = fmt.Fprintln(out)
-			continue
-		}
-		if err := applyAction(ctx, gh, pr, headSHA, a); err != nil {
-			return fmt.Errorf("%s %s comment: %w", a.op, kindName(a.kind), err)
-		}
-	}
-	return nil
-}
-
-// applyAction performs one gh write for a non-skip action.
-func applyAction(ctx context.Context, gh ghRunner, pr int, headSHA string, a syncAction) error {
-	switch a.op {
-	case opCreate:
-		switch a.kind {
-		case kindReview:
-			_, err := gh(ctx, "api", "-X", "POST",
-				fmt.Sprintf("repos/{owner}/{repo}/pulls/%d/comments", pr),
-				"-f", "commit_id="+headSHA,
-				"-f", "path="+a.path,
-				"-F", fmt.Sprintf("line=%d", a.line),
-				"-f", "side=RIGHT",
-				"-f", "body="+a.body,
-			)
-			return err
-		case kindIssue:
-			_, err := gh(ctx, "api", "-X", "POST",
-				fmt.Sprintf("repos/{owner}/{repo}/issues/%d/comments", pr),
-				"-f", "body="+a.body,
-			)
-			return err
-		}
-	case opUpdate, opResolve:
-		endpoint := ""
-		switch a.kind {
-		case kindReview:
-			endpoint = fmt.Sprintf("repos/{owner}/{repo}/pulls/comments/%d", a.id)
-		case kindIssue:
-			endpoint = fmt.Sprintf("repos/{owner}/{repo}/issues/comments/%d", a.id)
-		}
-		_, err := gh(ctx, "api", "-X", "PATCH", endpoint, "-f", "body="+a.body)
-		return err
-	}
-	return fmt.Errorf("unhandled action op=%v kind=%v", a.op, a.kind)
-}
-
-func kindName(k commentKind) string {
-	if k == kindReview {
-		return "inline"
-	}
-	return "summary"
-}
-
-// printReviewSummary writes a human-readable account of what the run did: scan
-// outcome and the create/update/skip/resolve tallies.
-func printReviewSummary(out io.Writer, res *funnel.Result, plan planResult, pr prInfo, dryRun bool) {
-	var created, updated, skipped, resolved int
-	for _, a := range plan.actions {
-		switch a.op {
-		case opCreate:
-			created++
-		case opUpdate:
-			updated++
-		case opSkip:
-			skipped++
-		case opResolve:
-			resolved++
-		}
-	}
-
-	_, _ = fmt.Fprintf(out, "\nReview complete for PR #%d (head %s)\n", pr.Number, util.ShortSHA(pr.HeadSHA))
-	_, _ = fmt.Fprintf(out, "Findings surfaced: %d (new verified: %d)\n", len(res.Findings), len(plan.newGateFingerprints))
+// printReviewSummary writes a human-readable account of what the run did:
+// scan outcome and the create/update/skip/resolve tallies.
+func printReviewSummary(out io.Writer, res *engine.ReviewPRResult) {
+	_, _ = fmt.Fprintf(out, "\nReview complete for PR #%d (head %s)\n", res.PRNumber, util.ShortSHA(res.HeadSHA))
+	_, _ = fmt.Fprintf(out, "Findings surfaced: %d (new verified: %d)\n", len(res.Result.Findings), res.NewVerifiedCount)
 	verb := "Comments"
-	if dryRun {
+	if res.DryRun {
 		verb = "Comments (dry-run, nothing posted)"
 	}
-	_, _ = fmt.Fprintf(out, "%s: created=%d updated=%d unchanged=%d resolved=%d\n", verb, created, updated, skipped, resolved)
+	_, _ = fmt.Fprintf(out, "%s: created=%d updated=%d unchanged=%d resolved=%d\n", verb, res.Created, res.Updated, res.Skipped, res.Resolved)
 
-	if !res.Stats.FinderReliable() {
-		_, _ = fmt.Fprintf(out, "\n%s\n", reliabilityWarning(res.Stats))
+	if !res.Result.Stats.FinderReliable() {
+		_, _ = fmt.Fprintf(out, "\n%s\n", reliabilityWarning(res.Result.Stats))
 	}
 }

@@ -1,4 +1,4 @@
-package cli
+package engine
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// ghRunner runs a `gh` CLI invocation and returns its stdout. All GitHub API
+// GHRunner runs a `gh` CLI invocation and returns its stdout. All GitHub API
 // interaction in review mode routes through this single seam so that:
 //   - authentication is gh's problem (we never touch tokens or raw HTTP),
 //   - owner/repo are auto-filled by gh from the repo's origin (no resolution
@@ -16,12 +16,17 @@ import (
 //   - tests can inject a fake that routes on args and returns canned JSON.
 //
 // args are the bare gh arguments (e.g. "api", "repos/{owner}/{repo}/pulls/3").
-type ghRunner func(ctx context.Context, args ...string) ([]byte, error)
+//
+// Exported (unlike the pre-refactor internal/cli.ghRunner) because both
+// internal/cli (publish, review's cobra RunE) and internal/tui (the dispatch
+// palette's review verb) construct one to hand ReviewPR: internal/cli via
+// RealGH, internal/tui the same way once review is reachable in-process.
+type GHRunner func(ctx context.Context, args ...string) ([]byte, error)
 
-// realGH is the default ghRunner: it shells out to the `gh` binary on PATH,
+// RealGH is the default GHRunner: it shells out to the `gh` binary on PATH,
 // mirroring ingest.runGitRaw's stderr-into-error pattern so failures carry gh's
 // own diagnostic (auth errors, 404s, rate limits) rather than a bare exit code.
-func realGH(ctx context.Context, args ...string) ([]byte, error) {
+func RealGH(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "gh", scrubNUL(args)...)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -73,7 +78,7 @@ type prInfo struct {
 // resolvePR fetches the PR via `gh api repos/{owner}/{repo}/pulls/N`. gh
 // auto-fills {owner}/{repo} from the origin remote, so no owner/repo resolution
 // happens here. It parses the base/head SHAs and the head ref.
-func resolvePR(ctx context.Context, gh ghRunner, number int) (prInfo, error) {
+func resolvePR(ctx context.Context, gh GHRunner, number int) (prInfo, error) {
 	raw, err := gh(ctx, "api", fmt.Sprintf("repos/{owner}/{repo}/pulls/%d", number))
 	if err != nil {
 		return prInfo{}, fmt.Errorf("resolve PR #%d: %w", number, err)

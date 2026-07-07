@@ -1,4 +1,4 @@
-package cli
+package engine
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// fakeGH is a test ghRunner that routes on the joined args and records every
+// fakeGH is a test GHRunner that routes on the joined args and records every
 // invocation, so tests can assert the exact gh api calls (and their bodies)
 // review mode makes without touching the network.
 type fakeGH struct {
@@ -32,7 +32,7 @@ func (f *fakeGH) on(substr string, resp []byte) *fakeGH {
 	return f
 }
 
-// run is the ghRunner the code under test calls.
+// run is the GHRunner the code under test calls.
 func (f *fakeGH) run(_ context.Context, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, append([]string(nil), args...))
 	joined := strings.Join(args, " ")
