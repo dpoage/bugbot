@@ -48,6 +48,11 @@ type LiveFeed struct {
 	st   *store.Store // nil until Open succeeds; guarded by stMu
 
 	interval time.Duration // ticker fallback cadence, injectable for tests
+
+	// actionMu guards actionState, which is updated in Handle (any goroutine)
+	// and read in buildFrame (Next's goroutine).
+	actionMu    sync.Mutex
+	actionState ActionFeedState
 }
 
 // Compile-time assertions that LiveFeed satisfies both seams it bridges.
@@ -69,6 +74,7 @@ func NewLiveFeed(cfg config.Config) *LiveFeed {
 		wake:          make(chan struct{}, 1),
 		closed:        make(chan struct{}),
 		interval:      liveFeedInterval,
+		actionState:   newActionFeedState(),
 	}
 }
 
@@ -93,6 +99,19 @@ func (f *LiveFeed) Open(ctx context.Context) error {
 // mutex) and fires a non-blocking, coalescing wakeup for Next.
 func (f *LiveFeed) Handle(ev progress.Event) {
 	f.acc.Apply(ev)
+	switch ev.Kind {
+	case progress.KindToolCall:
+		f.actionMu.Lock()
+		f.actionState.ApplyToolCallEvent(ev)
+		f.actionMu.Unlock()
+	case progress.KindAgentFinished:
+		// Prune the finished agent's ring to prevent unbounded growth across
+		// many scan runs, mirroring snapshot.go's delete(s.agents, key) on
+		// KindAgentFinished.
+		f.actionMu.Lock()
+		f.actionState.PruneAgent(agentFeedKey(ev.Role, ev.Label))
+		f.actionMu.Unlock()
+	}
 	select {
 	case f.wake <- struct{}{}:
 	default:
@@ -172,6 +191,16 @@ func (f *LiveFeed) buildFrame(ctx context.Context) Frame {
 		hist = gatherHistoricalAgents(ctx, st, fr.World)
 	}
 	fr.Agents = mergeAgents(fr.Snapshot.ActiveAgents, hist, f.transcriptDir)
+
+	// Snapshot the per-agent action rows (under actionMu, not stMu).
+	f.actionMu.Lock()
+	if len(f.actionState.perAgent) > 0 {
+		fr.ActionRows = make(map[string][]ActionRow, len(f.actionState.perAgent))
+		for k, ring := range f.actionState.perAgent {
+			fr.ActionRows[k] = ring.Rows()
+		}
+	}
+	f.actionMu.Unlock()
 
 	return fr
 }

@@ -110,6 +110,12 @@ type Frame struct {
 	// store.AgentUnit rows for World.LastRun, sorted by Started ascending
 	// (launch order reads top-to-bottom). Empty when no store is available.
 	Agents []AgentView
+
+	// ActionRows is the per-agent structured tool-call ring, populated by
+	// LiveFeed (Owner mode) from KindToolCall events. Empty in SnapshotFeed
+	// (Observer) mode — that mode uses AgentView.RecentActions instead.
+	// Keyed by agentFeedKey(role, label) -> ordered rows (oldest first).
+	ActionRows map[string][]ActionRow
 }
 
 // FrameMsg is the tea.Msg a Feed resolves Next()'s tea.Cmd to when it has a
@@ -200,4 +206,10 @@ type AgentView struct {
 	// never get a transcript, since store.Repro.TranscriptDir only covers
 	// reproducer/patch-prover units.
 	TranscriptPath string
+
+	// RecentActions is the Observer-mode bounded ring of recent Describe
+	// strings for this agent (newest-first), sourced from
+	// AgentStatus.RecentActions in status.json. Empty in Owner mode (use
+	// Frame.ActionRows instead).
+	RecentActions []string
 }
