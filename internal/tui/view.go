@@ -185,7 +185,7 @@ func (m Model) renderDetailPane(innerW, innerH int) string {
 
 	if m.detailMode {
 		// Action feed view: render the action feed for this agent.
-		feed := renderActionFeed(m.actionFeed, innerW, innerH-8, m.detailKey, recentActionsForView(a, m.frame), m.focus == paneDetail)
+		feed := renderActionFeed(m.actionFeed, innerW, innerH-8, agentFeedKey(a.Role, a.Label), recentActionsForView(a, m.frame), m.focus == paneDetail)
 		b.WriteString(feed)
 	} else {
 		b.WriteString("\n" + sectionStyle.Render("Transcript") + "\n")

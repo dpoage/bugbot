@@ -8,6 +8,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,11 @@ import (
 
 	"github.com/dpoage/bugbot/internal/progress"
 )
+
+// sortActionRowsBySeq sorts rows in place by ascending Seq (chronological).
+func sortActionRowsBySeq(rows []ActionRow) {
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Seq < rows[j].Seq })
+}
 
 // actionRingCap is the bounded ring size per-agent and for the aggregate.
 const actionRingCap = 128
@@ -304,6 +310,36 @@ func (s *ActionFeedState) ApplyToolCallEvent(ev progress.Event) {
 		ring.ApplyDone(ev)
 		s.aggregate.ApplyDone(ev)
 	}
+}
+
+// RebuildAggregate rebuilds the aggregate ring from the union of all per-agent
+// rings, sorted by Seq (monotonic insertion order). Call this after any
+// structural change to perAgent (frame sync, prune). O(total rows) each call
+// but bounded by actionRingCap per agent so stays fast.
+func (s *ActionFeedState) RebuildAggregate() {
+	// Collect all rows.
+	var all []ActionRow
+	for _, ring := range s.perAgent {
+		all = append(all, ring.Rows()...)
+	}
+	// Sort by Seq for chronological interleave.
+	sortActionRowsBySeq(all)
+	// Rebuild aggregate ring (bounded to cap).
+	s.aggregate = newActionRing()
+	start := 0
+	if len(all) > actionRingCap {
+		start = len(all) - actionRingCap
+	}
+	for _, row := range all[start:] {
+		s.aggregate.push(row)
+	}
+}
+
+// PruneAgent removes the ring for the given agentFeedKey, then rebuilds the
+// aggregate. Called on KindAgentFinished to prevent unbounded growth.
+func (s *ActionFeedState) PruneAgent(feedKey string) {
+	delete(s.perAgent, feedKey)
+	s.RebuildAggregate()
 }
 
 // VisibleRows returns the rows for the current view mode, given the selected agent key.

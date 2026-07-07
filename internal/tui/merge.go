@@ -45,12 +45,14 @@ func mergeAgents(live []progress.AgentStatus, hist []store.AgentUnit, transcript
 
 	for _, a := range live {
 		views = append(views, AgentView{
-			Role:          a.Role,
-			Label:         a.Label,
-			Live:          true,
-			Started:       a.Started,
-			Activity:      a.Activity,
-			ActivityAt:    a.ActivityAt,
+			Role:       a.Role,
+			Label:      a.Label,
+			Live:       true,
+			Started:    a.Started,
+			Activity:   a.Activity,
+			ActivityAt: a.ActivityAt,
+			// RecentActions: AgentStatus.RecentActions is a copy (snapshot.go
+			// pushRing always returns a new slice; AgentView takes ownership here).
 			RecentActions: a.RecentActions,
 		})
 	}

@@ -387,3 +387,142 @@ func TestModel_FrameSyncActionRows(t *testing.T) {
 		t.Errorf("Count=%d, want 3", rows[0].Count)
 	}
 }
+
+// ── View()-level regression tests (B1: per-agent render, B2: aggregate render) ──
+
+// TestView_ActionFeedRowAppearsInDetailPane drills into a live agent whose
+// ActionRows frame carries a read_file row and asserts the target string is
+// visible in View() output. This is the exact regression that let B1 slip past
+// the 22 green unit tests: per-agent ring was keyed by agentFeedKey but
+// renderActionFeed was called with m.detailKey (wrong format), producing an
+// empty feed pane in the real UI.
+func TestView_ActionFeedRowAppearsInDetailPane(t *testing.T) {
+	m := NewModel(nil, &fakeFeed{mode: Owner}, nil)
+	m.width = 120
+	m.height = 40
+
+	fr := baseFrame() // verifier "candidate A" is live
+	k := agentFeedKey("verifier", "candidate A")
+	fr.ActionRows = map[string][]ActionRow{
+		k: {
+			{
+				Seq:      1,
+				Tool:     "read_file",
+				Target:   "internal/foo.go:10-40",
+				File:     "internal/foo.go",
+				Line:     10,
+				EndLine:  40,
+				InFlight: false,
+				Count:    30,
+			},
+		},
+	}
+	m = sendFrame(m, fr)
+	// drill in — sets detailMode=true (live agent), detailIdx=0
+	m = sendKey(m, "enter")
+
+	if !m.detailMode {
+		t.Fatal("detailMode should be true after drilling into live agent")
+	}
+
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "internal/foo.go") {
+		t.Errorf("View() should contain row target 'internal/foo.go' in action feed; got:\n%s", view)
+	}
+}
+
+// TestView_AggregateActionFeedAppearsAfterGToggle feeds two agents' ActionRows,
+// toggles 'g', and asserts both agents' rows appear in View(). This is the
+// regression for B2: aggregate was never populated on the Model side, so 'g'
+// always showed an empty pane.
+func TestView_AggregateActionFeedAppearsAfterGToggle(t *testing.T) {
+	m := NewModel(nil, &fakeFeed{mode: Owner}, nil)
+	m.width = 120
+	m.height = 40
+
+	fr := Frame{
+		HasSnapshot: true,
+		Snapshot: progress.Status{
+			ScanKind: "sweep",
+			Stage:    "verify",
+		},
+		// Agents must be set directly; tests bypass Feed.buildFrame.
+		Agents: []AgentView{
+			{Role: "verifier", Label: "candidate A", Live: true, Started: time.Unix(999, 0)},
+			{Role: "finder", Label: "lens1", Live: true, Started: time.Unix(998, 0)},
+		},
+	}
+	k1 := agentFeedKey("verifier", "candidate A")
+	k2 := agentFeedKey("finder", "lens1")
+	fr.ActionRows = map[string][]ActionRow{
+		k1: {{Seq: 1, Tool: "read_file", Target: "alpha.go:1", File: "alpha.go", Line: 1, InFlight: false, Count: 5}},
+		k2: {{Seq: 2, Tool: "grep", Target: `"betaPattern"`, Pattern: "betaPattern", InFlight: false, Count: 2}},
+	}
+	m = sendFrame(m, fr)
+	// drill into first agent
+	m = sendKey(m, "enter")
+	// toggle aggregate
+	m = sendKey(m, "g")
+
+	if !m.actionFeed.showAggregate {
+		t.Fatal("showAggregate should be true after 'g'")
+	}
+
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "alpha.go") {
+		t.Errorf("aggregate feed should contain 'alpha.go'; got:\n%s", view)
+	}
+	if !strings.Contains(view, "betaPattern") {
+		t.Errorf("aggregate feed should contain 'betaPattern'; got:\n%s", view)
+	}
+}
+
+// TestModel_PruneOnAgentFinished asserts that ring count drops when an agent's
+// key is pruned (B3 regression: rings were never removed, leaking 128 rows
+// per finished agent indefinitely).
+func TestModel_PruneOnAgentFinished(t *testing.T) {
+	m := NewModel(nil, &fakeFeed{mode: Owner}, nil)
+	fr := baseFrame()
+	k := agentFeedKey("verifier", "candidate A")
+	fr.ActionRows = map[string][]ActionRow{
+		k: {{Seq: 1, Tool: "grep", Pattern: "TODO", InFlight: false, Count: 3}},
+	}
+	m = sendFrame(m, fr)
+	if _, ok := m.actionFeed.perAgent[k]; !ok {
+		t.Fatal("ring should exist after first frame")
+	}
+
+	// Next frame: ActionRows no longer contains the agent (it finished).
+	fr2 := baseFrame()
+	fr2.ActionRows = map[string][]ActionRow{} // empty: agent gone
+	m = sendFrame(m, fr2)
+
+	if _, ok := m.actionFeed.perAgent[k]; ok {
+		t.Error("ring should have been pruned when agent disappeared from ActionRows")
+	}
+}
+
+// TestActionFeedState_PruneAgent asserts PruneAgent removes the ring and
+// RebuildAggregate reflects the removal.
+func TestActionFeedState_PruneAgent(t *testing.T) {
+	s := newActionFeedState()
+	s.ApplyToolCallEvent(toolCallStart("r", "l1", "grep", "", 0, 0, "", "a"))
+	s.ApplyToolCallEvent(toolCallStart("r", "l2", "read_file", "foo.go", 1, 0, "", ""))
+	s.RebuildAggregate()
+
+	if len(s.aggregate.Rows()) != 2 {
+		t.Fatalf("before prune: aggregate has %d rows, want 2", len(s.aggregate.Rows()))
+	}
+
+	s.PruneAgent(agentFeedKey("r", "l1"))
+	if _, ok := s.perAgent[agentFeedKey("r", "l1")]; ok {
+		t.Error("l1 ring should be gone after prune")
+	}
+	agg := s.aggregate.Rows()
+	if len(agg) != 1 {
+		t.Errorf("after prune: aggregate has %d rows, want 1", len(agg))
+	}
+	if agg[0].Tool != "read_file" {
+		t.Errorf("remaining aggregate row should be read_file, got %q", agg[0].Tool)
+	}
+}

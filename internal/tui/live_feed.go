@@ -99,9 +99,17 @@ func (f *LiveFeed) Open(ctx context.Context) error {
 // mutex) and fires a non-blocking, coalescing wakeup for Next.
 func (f *LiveFeed) Handle(ev progress.Event) {
 	f.acc.Apply(ev)
-	if ev.Kind == progress.KindToolCall {
+	switch ev.Kind {
+	case progress.KindToolCall:
 		f.actionMu.Lock()
 		f.actionState.ApplyToolCallEvent(ev)
+		f.actionMu.Unlock()
+	case progress.KindAgentFinished:
+		// Prune the finished agent's ring to prevent unbounded growth across
+		// many scan runs, mirroring snapshot.go's delete(s.agents, key) on
+		// KindAgentFinished.
+		f.actionMu.Lock()
+		f.actionState.PruneAgent(agentFeedKey(ev.Role, ev.Label))
 		f.actionMu.Unlock()
 	}
 	select {

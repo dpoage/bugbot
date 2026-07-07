@@ -176,7 +176,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.frame = Frame(msg)
 		m.haveFrame = true
 		// Sync action feed from frame (Owner mode) — rows are snapshots from LiveFeed.
-		if len(m.frame.ActionRows) > 0 {
+		// ActionRows != nil means Owner mode even when no agents are currently active.
+		if m.frame.ActionRows != nil {
+			// B3: prune Model-side rings for agents no longer in the frame (finished).
+			for k := range m.actionFeed.perAgent {
+				if _, present := m.frame.ActionRows[k]; !present {
+					delete(m.actionFeed.perAgent, k)
+				}
+			}
+			// Sync/replace per-agent rings from frame snapshot.
 			for k, rows := range m.frame.ActionRows {
 				ring, ok := m.actionFeed.perAgent[k]
 				if !ok {
@@ -184,7 +192,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.actionFeed.perAgent[k] = ring
 				}
 				// Replace the ring's contents with the frame snapshot (already bounded).
-				// We rebuild by pushing all rows to give a clean bounded ring.
+				// Rows slice is a fresh copy from LiveFeed.buildFrame; no aliasing.
 				ring.count = 0
 				ring.head = 0
 				ring.pending = make(map[uint64]int)
@@ -193,6 +201,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					ring.push(row)
 				}
 			}
+			// B2: rebuild aggregate from union of all per-agent rings after sync.
+			m.actionFeed.RebuildAggregate()
 		}
 		if m.detailKey != "" {
 			if idx, ok := findAgentByKey(m.frame.Agents, m.detailKey); ok {
@@ -396,9 +406,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "g":
-		// Toggle action feed between per-agent and aggregate.
-		m.actionFeed.showAggregate = !m.actionFeed.showAggregate
-		m.actionFeed.cursor = 0
+		// Toggle action feed between per-agent and aggregate; gated like 'a'.
+		if m.focus == paneDetail || m.detailKey != "" {
+			m.actionFeed.showAggregate = !m.actionFeed.showAggregate
+			m.actionFeed.cursor = 0
+		}
 		return m, nil
 
 	case "m":
