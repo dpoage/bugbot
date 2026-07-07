@@ -360,12 +360,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKey handles keyboard input for the multi-pane compositor.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Cancel key stops the active dispatch at highest priority.
-	if m.running {
-		switch msg.String() {
-		case "ctrl+x", "esc":
-			return m.cancelRun(), nil
-		}
+	// ctrl+x cancels the active dispatch at highest priority. esc is NOT
+	// intercepted here while running: when the palette is open, esc closes
+	// the palette only (handled in handlePaletteKey); when the palette is
+	// closed, esc keeps its existing non-palette semantics (filter clear,
+	// source-view exit, etc.). Run cancellation is explicit: ctrl+x
+	// globally, or 'x' inside the palette.
+	if m.running && msg.String() == "ctrl+x" {
+		return m.cancelRun(), nil
 	}
 
 	if m.palette.open {
@@ -439,12 +441,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "d":
-		// Opens from any pane. Opens even when m.disp == nil: the palette
-		// renders every verb disabled with the reason instead of hiding
-		// itself, so Observer-mode operators can see WHY dispatch is
-		// unavailable.
-		m.palette.open = true
-		m.palette.editing = false
+		// 'd' toggles the palette: closed→open, open→close. Opens even
+		// when m.disp == nil so Observer-mode operators see WHY dispatch
+		// is unavailable. Toggle while running is intentional: the
+		// operator may want to check the running verb or cancel via 'x'.
+		if m.palette.open {
+			m.palette.open = false
+			m.palette.editing = false
+		} else {
+			m.palette.open = true
+			m.palette.editing = false
+		}
 		return m, nil
 
 	case "j", "down":
