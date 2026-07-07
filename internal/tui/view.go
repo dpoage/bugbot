@@ -69,14 +69,14 @@ func (m Model) viewCockpit() string {
 		st := fr.Snapshot
 		b.WriteString(headerStyle.Render("bugbot — active") + "\n")
 		if st.ScanKind != "" {
-			b.WriteString(fmt.Sprintf("scan: kind=%s commit=%s elapsed=%s\n",
-				st.ScanKind, util.ShortSHA(st.Commit), elapsedSince(st.StartedAt)))
+			fmt.Fprintf(&b, "scan: kind=%s commit=%s elapsed=%s\n",
+				st.ScanKind, util.ShortSHA(st.Commit), elapsedSince(st.StartedAt))
 		}
 		if st.Stage != "" {
 			b.WriteString("stage: " + st.Stage + "\n")
 		}
-		b.WriteString(fmt.Sprintf("run spend: in=%d out=%d total=%d tokens\n",
-			st.SpendInput, st.SpendOutput, st.SpendInput+st.SpendOutput))
+		fmt.Fprintf(&b, "run spend: in=%d out=%d total=%d tokens\n",
+			st.SpendInput, st.SpendOutput, st.SpendInput+st.SpendOutput)
 		b.WriteString("\n" + sectionStyle.Render("Agents") + "\n")
 		if len(st.ActiveAgents) == 0 {
 			b.WriteString(dimStyle.Render("(none active)") + "\n")
@@ -102,7 +102,7 @@ func (m Model) viewAgents() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Agents") + "\n")
 	if m.filtering || m.filter != "" {
-		b.WriteString(fmt.Sprintf("filter: %s\n", m.filter))
+		fmt.Fprintf(&b, "filter: %s\n", m.filter)
 	}
 
 	idx := m.visibleAgentIndices()
@@ -158,29 +158,29 @@ func (m Model) viewAgentDetail() string {
 	}
 	a := m.frame.Agents[m.detailIdx]
 
-	b.WriteString(fmt.Sprintf("role:      %s\n", a.Role))
+	fmt.Fprintf(&b, "role:      %s\n", a.Role)
 	if a.Lens != "" {
-		b.WriteString(fmt.Sprintf("lens:      %s\n", a.Lens))
+		fmt.Fprintf(&b, "lens:      %s\n", a.Lens)
 	}
 	if a.Strategy != "" {
-		b.WriteString(fmt.Sprintf("strategy:  %s\n", a.Strategy))
+		fmt.Fprintf(&b, "strategy:  %s\n", a.Strategy)
 	}
-	b.WriteString(fmt.Sprintf("label:     %s\n", a.Label))
+	fmt.Fprintf(&b, "label:     %s\n", a.Label)
 	if a.Live {
 		b.WriteString("state:     live\n")
 		if a.Activity != "" {
-			b.WriteString(fmt.Sprintf("activity:  %s (at %s)\n", a.Activity, fmtTime(a.ActivityAt)))
+			fmt.Fprintf(&b, "activity:  %s (at %s)\n", a.Activity, fmtTime(a.ActivityAt))
 		}
 	} else {
-		b.WriteString(fmt.Sprintf("state:     %s\n", a.Status))
+		fmt.Fprintf(&b, "state:     %s\n", a.Status)
 	}
-	b.WriteString(fmt.Sprintf("started:   %s\n", fmtTime(a.Started)))
+	fmt.Fprintf(&b, "started:   %s\n", fmtTime(a.Started))
 	if !a.FinishedAt.IsZero() {
-		b.WriteString(fmt.Sprintf("finished:  %s (took %s)\n", fmtTime(a.FinishedAt), a.FinishedAt.Sub(a.Started).Round(time.Second)))
+		fmt.Fprintf(&b, "finished:  %s (took %s)\n", fmtTime(a.FinishedAt), a.FinishedAt.Sub(a.Started).Round(time.Second))
 	}
-	b.WriteString(fmt.Sprintf("tokens:    in=%d out=%d cached=%d\n", a.InputTokens, a.OutputTokens, a.CacheReadTokens))
+	fmt.Fprintf(&b, "tokens:    in=%d out=%d cached=%d\n", a.InputTokens, a.OutputTokens, a.CacheReadTokens)
 	if a.Candidates != 0 || a.LeadsPosted != 0 {
-		b.WriteString(fmt.Sprintf("candidates: %d  leads posted: %d\n", a.Candidates, a.LeadsPosted))
+		fmt.Fprintf(&b, "candidates: %d  leads posted: %d\n", a.Candidates, a.LeadsPosted)
 	}
 	if len(a.Files) > 0 {
 		b.WriteString("files:     " + strings.Join(a.Files, ", ") + "\n")
@@ -212,9 +212,9 @@ func renderTranscript(t *agent.Transcript) string {
 		switch ev.Kind {
 		case agent.EventAssistant:
 			text := util.CollapseWhitespace(ev.Text)
-			b.WriteString(fmt.Sprintf("[step %d] assistant: %s\n", ev.Step, util.TruncateRunes(text, 200)))
+			fmt.Fprintf(&b, "[step %d] assistant: %s\n", ev.Step, util.TruncateRunes(text, 200))
 			for _, tc := range ev.ToolCalls {
-				b.WriteString(fmt.Sprintf("           tool_call: %s\n", tc.Name))
+				fmt.Fprintf(&b, "           tool_call: %s\n", tc.Name)
 			}
 		case agent.EventToolResult:
 			marker := "ok"
@@ -222,7 +222,7 @@ func renderTranscript(t *agent.Transcript) string {
 				marker = "error"
 			}
 			result := util.CollapseWhitespace(ev.Result)
-			b.WriteString(fmt.Sprintf("[step %d] tool_result(%s, %s): %s\n", ev.Step, ev.ToolName, marker, util.TruncateRunes(result, 200)))
+			fmt.Fprintf(&b, "[step %d] tool_result(%s, %s): %s\n", ev.Step, ev.ToolName, marker, util.TruncateRunes(result, 200))
 		}
 	}
 	return b.String()
@@ -240,18 +240,18 @@ func (m Model) viewFindings() string {
 	t := ws.Tallies
 	for tier := 0; tier <= 3; tier++ {
 		if n, ok := t.OpenByTier[tier]; ok && n > 0 {
-			b.WriteString(fmt.Sprintf("T%d open:   %d\n", tier, n))
+			fmt.Fprintf(&b, "T%d open:   %d\n", tier, n)
 		}
 	}
-	b.WriteString(fmt.Sprintf("fixed:      %d\n", t.Fixed))
-	b.WriteString(fmt.Sprintf("dismissed:  %d\n", t.Dismissed))
+	fmt.Fprintf(&b, "fixed:      %d\n", t.Fixed)
+	fmt.Fprintf(&b, "dismissed:  %d\n", t.Dismissed)
 	if t.NeedsHuman > 0 {
-		b.WriteString(fmt.Sprintf("needs human: %d\n", t.NeedsHuman))
+		fmt.Fprintf(&b, "needs human: %d\n", t.NeedsHuman)
 	}
 	if len(ws.Published) > 0 {
 		b.WriteString("\n" + sectionStyle.Render("Published") + "\n")
 		for _, k := range sortedIssueStates(ws.Published) {
-			b.WriteString(fmt.Sprintf("%s: %d\n", k, ws.Published[k]))
+			fmt.Fprintf(&b, "%s: %d\n", k, ws.Published[k])
 		}
 	}
 	return b.String()
@@ -266,7 +266,7 @@ func (m Model) viewLeads() string {
 		b.WriteString(dimStyle.Render("(blackboard empty)") + "\n")
 		return b.String()
 	}
-	b.WriteString(fmt.Sprintf("%d pending lead(s)\n\n", ws.PendingLeadsTotal))
+	fmt.Fprintf(&b, "%d pending lead(s)\n\n", ws.PendingLeadsTotal)
 	for row, l := range ws.PendingLeads {
 		line := formatLead(l)
 		if row == m.cursor {
@@ -288,15 +288,15 @@ func renderWorldState(ws WorldState) string {
 	b.WriteString(sectionStyle.Render("World state") + "\n")
 
 	if ws.HasTallies {
-		b.WriteString(fmt.Sprintf("findings: %s\n", findingsLine(ws.Tallies)))
+		fmt.Fprintf(&b, "findings: %s\n", findingsLine(ws.Tallies))
 		if ws.Tallies.NeedsHuman > 0 {
-			b.WriteString(fmt.Sprintf("needs human: %d finding(s) flagged for human review\n", ws.Tallies.NeedsHuman))
+			fmt.Fprintf(&b, "needs human: %d finding(s) flagged for human review\n", ws.Tallies.NeedsHuman)
 		}
 	}
 	if ws.PendingLeadsTotal == 0 {
 		b.WriteString("blackboard: empty\n")
 	} else {
-		b.WriteString(fmt.Sprintf("blackboard: %d pending lead(s)\n", ws.PendingLeadsTotal))
+		fmt.Fprintf(&b, "blackboard: %d pending lead(s)\n", ws.PendingLeadsTotal)
 	}
 	if ws.HasDaySpend {
 		raw := ws.DaySpend.InputTokens + ws.DaySpend.OutputTokens
@@ -313,7 +313,7 @@ func renderWorldState(ws WorldState) string {
 		if !ws.LastRun.FinishedAt.IsZero() {
 			when = "finished"
 		}
-		b.WriteString(fmt.Sprintf("last run: %s commit=%s %s\n", ws.LastRun.Kind, util.ShortSHA(ws.LastRun.CommitSHA), when))
+		fmt.Fprintf(&b, "last run: %s commit=%s %s\n", ws.LastRun.Kind, util.ShortSHA(ws.LastRun.CommitSHA), when)
 	}
 	return b.String()
 }

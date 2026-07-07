@@ -14,20 +14,6 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
-// testStore opens a fresh on-disk store in a temp dir, mirroring
-// internal/store's own openTemp helper (unexported there, so duplicated).
-func testStore(t *testing.T) (*store.Store, string) {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "state.db")
-	st, err := store.Open(context.Background(), path)
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	return st, dir
-}
-
 // seedScan seeds one scan_run with an agent_units row, a finding, and a lead,
 // returning the scan run id.
 func seedScan(t *testing.T, st *store.Store) string {
@@ -115,7 +101,7 @@ func TestSnapshotFeed_BuildFrame_NoStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSnapshotFeed: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if _, err := os.Stat(cfg.Storage.Path); err == nil {
 		t.Fatal("NewSnapshotFeed must not create the state DB when absent")
@@ -171,7 +157,7 @@ func TestSnapshotFeed_BuildFrame_WorldStateAndAgents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSnapshotFeed: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fr := f.buildFrame(context.Background())
 
@@ -244,7 +230,7 @@ func TestSnapshotFeed_StaleSnapshot_DropsLiveAgents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSnapshotFeed: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fr := f.buildFrame(context.Background())
 	if !fr.Stale {

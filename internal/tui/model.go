@@ -463,7 +463,7 @@ func loadTranscriptCmd(key, path string) tea.Cmd {
 		if err != nil {
 			return transcriptLoadedMsg{key: key, note: fmt.Sprintf("transcript unavailable: %v", err)}
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 
 		tr, err := agent.LoadJSONL(f)
 		if err != nil {
