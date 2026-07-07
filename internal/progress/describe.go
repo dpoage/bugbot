@@ -94,6 +94,14 @@ func describeToolCallBase(ev Event) string {
 		return "status_note"
 	case "post_lead":
 		return "post_lead"
+	case "summarize_package":
+		if ev.File != "" && ev.Count > 0 {
+			return fmt.Sprintf("summarizing %s [%d files]", ev.File, ev.Count)
+		}
+		if ev.File != "" {
+			return "summarizing " + ev.File
+		}
+		return "summarize_package"
 	default:
 		return ev.Tool
 	}
@@ -127,6 +135,11 @@ func describeToolCallDone(ev Event) string {
 	case "read_file":
 		if ev.Count > 0 {
 			return fmt.Sprintf(" [done, %d lines]", ev.Count)
+		}
+		return " [done]"
+	case "summarize_package":
+		if ev.Count > 0 {
+			return fmt.Sprintf(" [done, %d files]", ev.Count)
 		}
 		return " [done]"
 	}
