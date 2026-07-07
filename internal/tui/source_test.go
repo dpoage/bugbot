@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -478,31 +480,48 @@ func TestResolveSourcePath_SymlinkEscape(t *testing.T) {
 
 // ── B2: renderSourceView marks only the target line when endLine==0 ───────────
 
-// TestRenderSourceView_SingleLineMarked verifies that endLine==0 marks ONLY
-// the target line and not the entire file tail. Because lipgloss emits no ANSI
-// in headless tests (no TTY / no color profile), we test the structural
-// invariant: end=0 must clamp to targetLine, so the output equals end=targetLine
-// and "line six" (line 6) still appears verbatim in the render.
+// TestRenderSourceView_SingleLineMarked forces an ANSI256 color profile so
+// lipgloss emits real SGR sequences, then asserts on raw (ANSI-bearing) output:
+//
+//   - raw(end=0) == raw(end=5)  clamping: end<targetLine → end=targetLine
+//   - raw(end=0) != raw(end=6)  end=6 highlights line 6 additionally
+//   - exactly 1 rendered line differs between end=0 and end=6 (line 6's row only)
+//
+// The gutter style (Faint) emits SGR on every line, so counting total SGR lines
+// is meaningless; we compare end=0 vs end=6 row-by-row instead.
 func TestRenderSourceView_SingleLineMarked(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(termenv.Ascii) })
+
 	lines := []string{"line one", "line two", "line three", "line four", "line five target", "line six"}
-	// target=5, end=0 → end clamped to 5; must equal end=5 explicitly.
+
 	outEnd0 := renderSourceView(lines, "test.go", 5, 0, 0, 120, 20)
 	outEnd5 := renderSourceView(lines, "test.go", 5, 5, 0, 120, 20)
-	if stripANSI(outEnd0) != stripANSI(outEnd5) {
-		t.Fatalf("end=0 and end=5 must produce identical output (clamping);\nend=0:\n%s\nend=5:\n%s",
-			stripANSI(outEnd0), stripANSI(outEnd5))
-	}
-	// "line six" must not be swallowed by the highlight range (old bug: endLine==0
-	// kept the `endLine==0 || lineNum<=endLine` arm always true, highlighting EOF+).
-	if !strings.Contains(stripANSI(outEnd0), "line six") {
-		t.Fatal("line six must appear in output; end=0 must not mark entire file tail")
-	}
-	if !strings.Contains(stripANSI(outEnd0), "line five target") {
-		t.Fatal("line five target must appear in output")
-	}
-	// Cross-check: end=6 renders both lines 5 and 6 (both present).
 	outEnd6 := renderSourceView(lines, "test.go", 5, 6, 0, 120, 20)
-	if !strings.Contains(stripANSI(outEnd6), "line five target") || !strings.Contains(stripANSI(outEnd6), "line six") {
-		t.Fatal("end=6 must render both line five target and line six")
+
+	// Clamping: end=0 and end=5 must be byte-identical.
+	if outEnd0 != outEnd5 {
+		t.Fatalf("end=0 and end=5 must produce identical raw output (end clamped to targetLine);\nend=0:\n%s\nend=5:\n%s", outEnd0, outEnd5)
+	}
+
+	// end=6 highlights line 6 too, so the outputs must differ.
+	if outEnd0 == outEnd6 {
+		t.Fatal("end=0 and end=6 must differ in raw output (end=6 marks line 6 additionally)")
+	}
+
+	// Exactly 1 row differs between end=0 and end=6: line 6's rendered row.
+	rows0 := strings.Split(outEnd0, "\n")
+	rows6 := strings.Split(outEnd6, "\n")
+	if len(rows0) != len(rows6) {
+		t.Fatalf("end=0 and end=6 must have equal row count; got %d vs %d", len(rows0), len(rows6))
+	}
+	diffCount := 0
+	for i := range rows0 {
+		if rows0[i] != rows6[i] {
+			diffCount++
+		}
+	}
+	if diffCount != 1 {
+		t.Fatalf("expected exactly 1 differing row between end=0 and end=6 (line 6's row), got %d", diffCount)
 	}
 }
