@@ -364,6 +364,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKey handles keyboard input for the multi-pane compositor.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Single reset point: clear pendingG on every key, unconditionally, before
+	// any early-return path (running, palette, ctrl+p, cmdBar, filter). This
+	// prevents stale gg firing after e.g. g → ctrl+p → esc → g.
+	// The 'g' case below re-sets pendingG when appropriate.
+	wasPendingG := m.pendingG
+	m.pendingG = false
+
 	// Cancel key stops the active dispatch at highest priority.
 	if m.running {
 		switch msg.String() {
@@ -414,11 +421,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 		return m, nil
 	}
-
-	// Single reset point: any key clears pendingG before the switch below.
-	// The 'g' case re-sets it when appropriate.
-	wasPendingG := m.pendingG
-	m.pendingG = false
 
 	switch msg.String() {
 	case "ctrl+c", "q":

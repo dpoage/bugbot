@@ -50,6 +50,8 @@ func sendKey(m Model, key string) Model {
 		km = tea.KeyMsg{Type: tea.KeyCtrlD}
 	case "ctrl+u":
 		km = tea.KeyMsg{Type: tea.KeyCtrlU}
+	case "ctrl+p":
+		km = tea.KeyMsg{Type: tea.KeyCtrlP}
 	default:
 		km = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
 	}
@@ -757,46 +759,109 @@ func TestVimKeys_PendingGCancelOnOtherKey(t *testing.T) {
 }
 
 // TestVimKeys_PendingGDoesNotLeakIntoOverlays asserts that 'g' inside filter,
-// palette, and cmdBar does NOT set pendingG.
+// palette, and cmdBar does NOT set pendingG, and that a stale pendingG set
+// before an overlay is opened is cleared by the overlay-opening key itself —
+// so a subsequent lone 'g' after the overlay closes does NOT trigger gg jump.
 func TestVimKeys_PendingGDoesNotLeakIntoOverlays(t *testing.T) {
-	// '/' then 'g' types into the filter, not pendingG.
-	m := NewModel(context.Background(), &fakeFeed{}, nil)
-	m = sendFrame(m, baseFrame())
-	m = sendKey(m, "/")
-	if !m.filtering {
-		t.Fatal("expected filtering after /")
-	}
-	m = sendKey(m, "g")
-	if m.pendingG {
-		t.Fatal("pendingG must not be set while filtering")
-	}
-	if !strings.Contains(m.filter, "g") {
-		t.Fatalf("filter should contain 'g', got %q", m.filter)
+	base := func() Model {
+		m := NewModel(context.Background(), &fakeFeed{}, nil)
+		m = sendFrame(m, baseFrame())
+		// Advance cursor so a stale gg would be observable (cursor -> 0).
+		m = sendKey(m, "j")
+		return m
 	}
 
-	// 'd' (palette) then 'g' — palette intercepts keys, pendingG unchanged.
-	m2 := NewModel(context.Background(), &fakeFeed{}, nil)
-	m2 = sendFrame(m2, baseFrame())
-	m2 = sendKey(m2, "d")
-	if !m2.palette.open {
-		t.Fatal("expected palette open after d")
-	}
-	m2 = sendKey(m2, "g")
-	if m2.pendingG {
-		t.Fatal("pendingG must not be set while palette is open")
-	}
+	t.Run("filter: g while filtering does not set pendingG", func(t *testing.T) {
+		m := base()
+		m = sendKey(m, "/")
+		if !m.filtering {
+			t.Fatal("expected filtering after /")
+		}
+		m = sendKey(m, "g")
+		if m.pendingG {
+			t.Fatal("pendingG must not be set while filtering")
+		}
+		if !strings.Contains(m.filter, "g") {
+			t.Fatalf("filter should contain 'g', got %q", m.filter)
+		}
+	})
 
-	// ctrl+p (cmdBar) then 'g' — cmdBar intercepts keys, pendingG unchanged.
-	m3 := NewModel(context.Background(), &fakeFeed{}, nil)
-	m3 = sendFrame(m3, baseFrame())
-	m3 = sendKey(m3, "ctrl+p")
-	if !m3.cmdBar.open {
-		t.Fatal("expected cmdBar open after ctrl+p")
-	}
-	m3 = sendKey(m3, "g")
-	if m3.pendingG {
-		t.Fatal("pendingG must not be set while cmdBar is open")
-	}
+	t.Run("filter: pendingG set before / is cleared by /, trailing g sets pendingG not gg", func(t *testing.T) {
+		m := base()
+		m = sendKey(m, "g") // sets pendingG
+		if !m.pendingG {
+			t.Fatal("pendingG should be set")
+		}
+		m = sendKey(m, "/") // opens filter — must clear pendingG
+		if m.pendingG {
+			t.Fatal("pendingG should be cleared when / opens filter")
+		}
+		m = sendKey(m, "esc") // close filter
+		// Lone 'g' after overlay must set pendingG (first chord), not fire gg.
+		// If it fired gg, pendingG would be false and cursor would be 0.
+		m = sendKey(m, "g")
+		if !m.pendingG {
+			t.Fatal("lone g after overlay should set pendingG (first chord), not fire gg")
+		}
+	})
+
+	t.Run("palette: g while palette open does not set pendingG", func(t *testing.T) {
+		m := base()
+		m = sendKey(m, "d")
+		if !m.palette.open {
+			t.Fatal("expected palette open after d")
+		}
+		m = sendKey(m, "g")
+		if m.pendingG {
+			t.Fatal("pendingG must not be set while palette is open")
+		}
+	})
+
+	t.Run("palette: pendingG set before d is cleared by d, trailing g sets pendingG not gg", func(t *testing.T) {
+		m := base()
+		m = sendKey(m, "g") // sets pendingG
+		if !m.pendingG {
+			t.Fatal("pendingG should be set")
+		}
+		m = sendKey(m, "d") // opens palette — must clear pendingG
+		if m.pendingG {
+			t.Fatal("pendingG should be cleared when d opens palette")
+		}
+		m = sendKey(m, "esc") // close palette
+		m = sendKey(m, "g")   // lone g after overlay — must NOT gg-jump
+		if !m.pendingG {
+			t.Fatal("lone g after overlay should set pendingG (first chord), not fire gg")
+		}
+	})
+
+	t.Run("cmdBar: g while cmdBar open does not set pendingG", func(t *testing.T) {
+		m := base()
+		m = sendKey(m, "ctrl+p")
+		if !m.cmdBar.open {
+			t.Fatal("expected cmdBar open after ctrl+p")
+		}
+		m = sendKey(m, "g")
+		if m.pendingG {
+			t.Fatal("pendingG must not be set while cmdBar is open")
+		}
+	})
+
+	t.Run("cmdBar: pendingG set before ctrl+p is cleared by ctrl+p, trailing g sets pendingG not gg", func(t *testing.T) {
+		m := base()
+		m = sendKey(m, "g") // sets pendingG
+		if !m.pendingG {
+			t.Fatal("pendingG should be set")
+		}
+		m = sendKey(m, "ctrl+p") // opens cmdBar — must clear pendingG
+		if m.pendingG {
+			t.Fatal("pendingG should be cleared when ctrl+p opens cmdBar")
+		}
+		m = sendKey(m, "esc") // close cmdBar
+		m = sendKey(m, "g")   // lone g after overlay — must NOT gg-jump
+		if !m.pendingG {
+			t.Fatal("lone g after overlay should set pendingG (first chord), not fire gg")
+		}
+	})
 }
 
 // TestVimKeys_AToggleAggregate asserts 'A' toggles aggregate and old 'g' no longer does.
@@ -829,39 +894,115 @@ func TestVimKeys_AToggleAggregate(t *testing.T) {
 	}
 }
 
-// TestVimKeys_CtrlDU asserts ctrl+d/ctrl+u move cursor/viewport in roster and
-// detail panes without panicking.
+// TestVimKeys_CtrlDU asserts ctrl+d/ctrl+u move cursor/viewport in all pane
+// variants without panicking, and that cursor lists clamp cleanly.
 func TestVimKeys_CtrlDU(t *testing.T) {
-	m := NewModel(context.Background(), &fakeFeed{}, nil)
-	m = sendFrame(m, baseFrame())
+	// Build a world with findings and leads so those cursor lists are non-empty.
+	world := WorldState{
+		HasTallies: true,
+		Tallies:    domain.FindingTallies{OpenByTier: map[int]int{1: 1}},
+		Findings: []domain.Finding{
+			{Tier: 1, File: "a.go", Line: 1},
+			{Tier: 1, File: "b.go", Line: 2},
+		},
+	}
+	m0 := NewModel(context.Background(), &fakeFeed{}, nil)
+	fr := baseFrame()
+	fr.World = world
+	m0 = sendFrame(m0, fr)
 
-	// Roster pane: ctrl+d moves cursor down by step (or to end if fewer rows).
-	m = sendKey(m, "ctrl+d")
-	// With 2 agents step=10: cursor lands at last (index 1).
-	if m.cursor < 0 {
-		t.Fatalf("ctrl+d: cursor went negative: %d", m.cursor)
+	type step struct {
+		name  string
+		setup func(m Model) Model
+		check func(t *testing.T, before, after Model)
 	}
 
-	// ctrl+u brings it back toward 0.
-	m = sendKey(m, "ctrl+u")
-	if m.cursor < 0 {
-		t.Fatalf("ctrl+u: cursor went negative: %d", m.cursor)
+	steps := []step{
+		{
+			name:  "roster cursor moves down then up",
+			setup: func(m Model) Model { return sendKey(m, "1") },
+			check: func(t *testing.T, before, after Model) {
+				if after.cursor < 0 {
+					t.Fatalf("ctrl+d: roster cursor went negative: %d", after.cursor)
+				}
+			},
+		},
+		{
+			name: "detail feed cursor moves",
+			setup: func(m Model) Model {
+				// seed feed rows then drill in
+				k := agentFeedKey("verifier", "candidate A")
+				fr2 := fr
+				fr2.ActionRows = map[string][]ActionRow{
+					k: {
+						{Seq: 1, Tool: "read_file", Target: "f1.go:1", File: "f1.go", Line: 1},
+						{Seq: 2, Tool: "read_file", Target: "f2.go:2", File: "f2.go", Line: 2},
+					},
+				}
+				m = sendFrame(m, fr2)
+				m = sendKey(m, "1")
+				m = sendKey(m, "enter")
+				// detailMode=true (live agent), cursor=0
+				return m
+			},
+			check: func(t *testing.T, before, after Model) {
+				// cursor should clamp at 0 (only 2 rows, step 10 clamps)
+				if after.actionFeed.cursor < 0 {
+					t.Fatalf("ctrl+d: feed cursor negative: %d", after.actionFeed.cursor)
+				}
+			},
+		},
+		{
+			name: "detail transcript viewport no panic",
+			setup: func(m Model) Model {
+				m = sendKey(m, "2") // paneDetail
+				m = sendKey(m, "a") // transcript mode
+				return m
+			},
+			check: func(t *testing.T, before, after Model) {},
+		},
+		{
+			name: "findings cursor clamps",
+			setup: func(m Model) Model {
+				m = sendKey(m, "3")
+				m = sendKey(m, "m") // findings
+				return m
+			},
+			check: func(t *testing.T, before, after Model) {
+				if after.cursor < 0 {
+					t.Fatalf("ctrl+d: findings cursor negative: %d", after.cursor)
+				}
+			},
+		},
+		{
+			name: "context summary viewport no panic",
+			setup: func(m Model) Model {
+				m = sendKey(m, "3") // paneContext, contextModeSummary
+				return m
+			},
+			check: func(t *testing.T, before, after Model) {},
+		},
 	}
 
-	// Detail pane: ctrl+d/ctrl+u on transcript viewport should not panic.
-	m = sendKey(m, "2")
-	m = sendKey(m, "ctrl+d")
-	m = sendKey(m, "ctrl+u")
-	// viewport YOffset is allowed to be 0 (empty content); just no panic.
-
-	// Context pane: ctrl+d/ctrl+u on summary viewport should not panic.
-	m = sendKey(m, "3")
-	m = sendKey(m, "ctrl+d")
-	m = sendKey(m, "ctrl+u")
+	for _, s := range steps {
+		t.Run(s.name, func(t *testing.T) {
+			mc := s.setup(m0)
+			before := mc
+			mc = sendKey(mc, "ctrl+d")
+			s.check(t, before, mc)
+			mc = sendKey(mc, "ctrl+u")
+			if mc.cursor < 0 {
+				t.Fatalf("ctrl+u: cursor negative: %d", mc.cursor)
+			}
+			if mc.actionFeed.cursor < 0 {
+				t.Fatalf("ctrl+u: feed cursor negative: %d", mc.actionFeed.cursor)
+			}
+		})
+	}
 }
 
-// TestVimKeys_GGBottomAllPanes runs gg/G through roster/findings context modes
-// and asserts cursor lands at expected position.
+// TestVimKeys_GGBottomAllPanes runs gg/G through all navigable pane variants
+// and asserts cursor/offset lands at expected position.
 func TestVimKeys_GGBottomAllPanes(t *testing.T) {
 	world := WorldState{
 		HasTallies: true,
@@ -871,24 +1012,46 @@ func TestVimKeys_GGBottomAllPanes(t *testing.T) {
 			{Tier: 1, File: "b.go", Line: 2},
 		},
 	}
-	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	fr := baseFrame()
 	fr.World = world
-	m = sendFrame(m, fr)
+	// Seed ActionRows for detail-feed cursor test.
+	k := agentFeedKey("verifier", "candidate A")
+	fr.ActionRows = map[string][]ActionRow{
+		k: {
+			{Seq: 1, Tool: "read_file", Target: "f1.go:1", File: "f1.go", Line: 1},
+			{Seq: 2, Tool: "read_file", Target: "f2.go:2", File: "f2.go", Line: 2},
+		},
+	}
+	m0 := NewModel(context.Background(), &fakeFeed{}, nil)
+	m0 = sendFrame(m0, fr)
 
-	tests := []struct {
-		name        string
-		setup       func(m Model) Model
-		wantAfterG  int
-		wantAfterGG int
-	}{
+	type ggCase struct {
+		name       string
+		setup      func(m Model) Model
+		getCursor  func(m Model) int
+		wantBottom int
+		wantTop    int
+	}
+
+	cases := []ggCase{
 		{
-			name: "roster",
+			name:       "roster",
+			setup:      func(m Model) Model { return sendKey(m, "1") },
+			getCursor:  func(m Model) int { return m.cursor },
+			wantBottom: 1, // 2 agents
+			wantTop:    0,
+		},
+		{
+			name: "detail-feed cursor",
 			setup: func(m Model) Model {
-				return sendKey(m, "1")
+				m = sendKey(m, "1")
+				m = sendKey(m, "enter")
+				// detailMode=true for live agent
+				return m
 			},
-			wantAfterG:  1, // 2 agents: last index = 1
-			wantAfterGG: 0,
+			getCursor:  func(m Model) int { return m.actionFeed.cursor },
+			wantBottom: 1, // 2 rows
+			wantTop:    0,
 		},
 		{
 			name: "findings",
@@ -897,26 +1060,27 @@ func TestVimKeys_GGBottomAllPanes(t *testing.T) {
 				m = sendKey(m, "m") // summary -> findings
 				return m
 			},
-			wantAfterG:  1,
-			wantAfterGG: 0,
+			getCursor:  func(m Model) int { return m.cursor },
+			wantBottom: 1,
+			wantTop:    0,
 		},
 	}
 
-	for _, tc := range tests {
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mc := tc.setup(m)
+			mc := tc.setup(m0)
 
 			// G -> bottom
 			mc = sendKey(mc, "G")
-			if mc.cursor != tc.wantAfterG {
-				t.Fatalf("G: cursor = %d, want %d", mc.cursor, tc.wantAfterG)
+			if got := tc.getCursor(mc); got != tc.wantBottom {
+				t.Fatalf("G: cursor = %d, want %d", got, tc.wantBottom)
 			}
 
 			// gg -> top
 			mc = sendKey(mc, "g")
 			mc = sendKey(mc, "g")
-			if mc.cursor != tc.wantAfterGG {
-				t.Fatalf("gg: cursor = %d, want %d", mc.cursor, tc.wantAfterGG)
+			if got := tc.getCursor(mc); got != tc.wantTop {
+				t.Fatalf("gg: cursor = %d, want %d", got, tc.wantTop)
 			}
 		})
 	}
