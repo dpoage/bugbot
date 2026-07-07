@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 
 	"github.com/dpoage/bugbot/internal/control"
 	"github.com/dpoage/bugbot/internal/domain"
@@ -24,15 +25,24 @@ import (
 // Nothing else may read element fields from these reconstructed slices:
 // they are placeholder-length only, not real Finding records.
 //
-// NOTE (merge-time follow-up, bugbot-2p8z.5): sibling ReviewDispatch is
-// adding a ReviewPR method to the `dispatcher` interface on a separate
-// branch. Whichever branch merges second must add a ReviewPR method here
-// too — either proxying it as a fifth wire verb or returning an explicit
-// "not supported over Attach" error, per bugbot-2p8z.5's note.
+// ReviewPR is NOT wired over the socket in this wave (bugbot-2p8z.4's verb
+// table — control.Verbs — deliberately excludes review; see
+// internal/control's package doc): it returns errReviewPRNotSupportedOverAttach
+// instead of proxying the RPC. review's opts/result shapes (GH client,
+// dry-run comment-sync deltas) are a poor fit for the socket's
+// count-only DispatchSummary and gh-authenticated network calls are not
+// something a remote daemon should perform on a TUI operator's behalf
+// sight-unseen; wiring it is left to a future bead if Attach-mode review
+// dispatch is wanted.
 type controlDispatch struct {
 	client *control.Client
 }
 
+// errReviewPRNotSupportedOverAttach is returned by controlDispatch.ReviewPR:
+// review is not one of the four socket-dispatchable verbs (bugbot-2p8z.4's
+// control.Verbs table), so it cannot run against a separately-attached
+// daemon in this wave.
+var errReviewPRNotSupportedOverAttach = errors.New("tui: review is not supported over a control-socket Attach connection; run `bugbot review` locally or use Owner mode")
 var _ dispatcher = (*controlDispatch)(nil)
 
 func newControlDispatch(client *control.Client) *controlDispatch {
@@ -44,6 +54,14 @@ func newControlDispatch(client *control.Client) *controlDispatch {
 // engine.Owner rather than adding a parallel engine.Mode value purely for
 // display purposes.
 func (c *controlDispatch) Mode() engine.Mode { return engine.Owner }
+
+// ReviewPR implements dispatcher: always fails with
+// errReviewPRNotSupportedOverAttach — see controlDispatch's doc comment for
+// why review is deliberately not wired over the control socket in this
+// wave. ctx and opts are unused (accepted only to satisfy the interface).
+func (c *controlDispatch) ReviewPR(_ context.Context, _ engine.ReviewPROpts) (*engine.ReviewPRResult, error) {
+	return nil, errReviewPRNotSupportedOverAttach
+}
 
 func (c *controlDispatch) Scan(ctx context.Context, opts engine.ScanOpts) (*engine.ScanResult, error) {
 	sum, err := c.client.Dispatch(ctx, control.VerbScan, control.DispatchOpts{
