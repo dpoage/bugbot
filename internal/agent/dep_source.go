@@ -227,7 +227,7 @@ func (d *DepSourceRoots) resolve(rel string) (string, error) {
 		}
 		// Symlink containment: resolve the longest existing prefix of the path
 		// and ensure it still lands inside the root. This defeats symlinks that
-		// point outside the tree, matching the in-repo fsRoot contract.
+		// point outside the tree, matching the in-repo FSRoot contract.
 		if resolved, err := evalExistingPrefix(cleaned); err == nil {
 			if !strings.HasPrefix(resolved, root+string(filepath.Separator)) && resolved != root {
 				continue

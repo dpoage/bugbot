@@ -92,7 +92,7 @@ func TestDepSourceRoots_RejectsEscape(t *testing.T) {
 
 // TestDepSourceRoots_SymlinkEscapeRejected verifies that a symlink under a
 // root that points OUTSIDE the root is also rejected. Mirrors the in-repo
-// fsRoot.symlink containment test, applied to the dep-source variant.
+// FSRoot symlink containment test, applied to the dep-source variant.
 func TestDepSourceRoots_SymlinkEscapeRejected(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlinks are unreliable on Windows; in-repo tests already gate on this")
