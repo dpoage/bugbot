@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"context"
 	"sync"
 	"time"
 
@@ -186,15 +185,3 @@ func (f *ControlSocketFeed) buildFrame() Frame {
 // dialControlSocket is a small indirection so tests can substitute a fake
 // dialer; production always uses control.Dial.
 var dialControlSocket = control.Dial
-
-// connectControlSocket dials path and, on success, returns a ready
-// ControlSocketFeed. Errors (including "nothing listening") are returned
-// unwrapped so callers (mode selection) can treat any failure the same way:
-// fall back to another mode.
-func connectControlSocket(_ context.Context, path string) (*ControlSocketFeed, error) {
-	client, err := dialControlSocket(path)
-	if err != nil {
-		return nil, err
-	}
-	return NewControlSocketFeed(client), nil
-}

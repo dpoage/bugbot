@@ -37,7 +37,7 @@ func TestServer_FansOutEventsToRealClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial() error: %v", err)
 	}
-	defer cl.Close()
+	defer func() { _ = cl.Close() }()
 
 	// Give the server a moment to register the accepted connection before
 	// broadcasting, otherwise Handle may race the Accept goroutine.
@@ -79,14 +79,14 @@ func TestServer_StalledClientNeverBlocksDeliveryOrOtherClients(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial() stalled client error: %v", err)
 	}
-	defer stalled.Close()
+	defer func() { _ = stalled.Close() }()
 	// Deliberately never drain stalled.Frames().
 
 	healthy, err := Dial(path)
 	if err != nil {
 		t.Fatalf("Dial() healthy client error: %v", err)
 	}
-	defer healthy.Close()
+	defer func() { _ = healthy.Close() }()
 
 	time.Sleep(20 * time.Millisecond)
 
@@ -134,7 +134,7 @@ func TestServer_DispatchRPCRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial() error: %v", err)
 	}
-	defer cl.Close()
+	defer func() { _ = cl.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -169,7 +169,7 @@ func TestServer_DispatchRPCError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial() error: %v", err)
 	}
-	defer cl.Close()
+	defer func() { _ = cl.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -190,7 +190,7 @@ func TestServer_DispatchDisabledByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial() error: %v", err)
 	}
-	defer cl.Close()
+	defer func() { _ = cl.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -283,7 +283,7 @@ func TestClient_DispatchFailsPromptlyWhenServerDies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial() error: %v", err)
 	}
-	defer cl.Close()
+	defer func() { _ = cl.Close() }()
 
 	result := make(chan error, 1)
 	go func() {

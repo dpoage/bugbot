@@ -40,7 +40,7 @@ func TestControlSocketFeed_SatisfiesFeed(t *testing.T) {
 	}
 	f := NewControlSocketFeed(client)
 	f.interval = 20 * time.Millisecond
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if f.Mode() != Attach {
 		t.Errorf("Mode() = %v, want Attach", f.Mode())
@@ -59,7 +59,7 @@ func TestControlSocketFeed_WireEventBecomesFrameMsg(t *testing.T) {
 	}
 	f := NewControlSocketFeed(client)
 	f.interval = 5 * time.Second // long enough that only the wakeup resolves Next
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	msgCh := runAsync(f.Next())
 
