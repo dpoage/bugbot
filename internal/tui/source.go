@@ -35,6 +35,7 @@ import (
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/dpoage/bugbot/internal/progress"
 )
@@ -416,25 +417,21 @@ func renderSourceView(lines []string, file string, targetLine, endLine, offset, 
 		if inRange {
 			// Strip existing ANSI and re-apply highlight style so the mark is visible.
 			plain := progress.StripANSI(lineContent)
-			// Truncate long lines to inner width minus gutter.
+			// Truncate long lines to inner width minus gutter (ANSI-safe).
 			maxContent := innerW - gutterW - 2
 			if maxContent < 0 {
 				maxContent = 0
 			}
-			if len([]rune(plain)) > maxContent {
-				plain = string([]rune(plain)[:maxContent])
-			}
+			plain = xansi.Truncate(plain, maxContent, "")
 			b.WriteString(gutter + highlightStyle.Render(plain) + "\n")
 		} else {
-			// Truncate long lines; strip ANSI for width measurement.
+			// Truncate preserving chroma ANSI escapes; naive rune-slicing
+			// would cut mid-escape and corrupt the terminal output.
 			maxContent := innerW - gutterW - 2
 			if maxContent < 0 {
 				maxContent = 0
 			}
-			plain := progress.StripANSI(lineContent)
-			if len([]rune(plain)) > maxContent {
-				lineContent = string([]rune(plain)[:maxContent])
-			}
+			lineContent = xansi.Truncate(lineContent, maxContent, "")
 			b.WriteString(gutter + lineContent + "\n")
 		}
 		shown++

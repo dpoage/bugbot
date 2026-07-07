@@ -339,6 +339,11 @@ func TestView_GoldenCockpitActive(t *testing.T) {
 // TestView_GoldenAgentsPane verifies the roster pane renders agent rows.
 func TestView_GoldenAgentsPane(t *testing.T) {
 	m := NewModel(context.Background(), &fakeFeed{}, nil)
+	// Use a wide terminal: agent lines are 46+ chars; at 80×24 the inner pane
+	// width is 24, which truncates "running"/"ok" before they can appear.
+	// 160 cols gives innerW=51 so the full line fits on one row.
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	m = next.(Model)
 	m = sendFrame(m, baseFrame())
 	// Roster pane is already focused (pane 0); no tab needed.
 

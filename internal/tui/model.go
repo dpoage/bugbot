@@ -873,8 +873,10 @@ func (m Model) paneContextSize() (int, int) {
 // stack vertically (narrow terminal degradation).
 // paneWidth and paneHeight describe the inner content area of each pane.
 func (m Model) layoutDimensions() (bool, int, int) {
-	// subtract 2 from height for the footer line + blank separator
-	availH := m.height - 2
+	// Subtract 1 for the footer line. viewPanes() is joined directly with
+	// viewFooter() (no blank separator), so panes fill height-1 rows and the
+	// footer fills the last 1 row, giving exactly height total lines.
+	availH := m.height - 1
 	if availH < 3 {
 		availH = 3
 	}
