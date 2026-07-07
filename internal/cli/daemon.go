@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/control"
 	"github.com/dpoage/bugbot/internal/daemon"
 	"github.com/dpoage/bugbot/internal/engine"
 	"github.com/dpoage/bugbot/internal/funnel"
@@ -82,7 +83,32 @@ func newDaemonCmd() *cobra.Command {
 			// spend, and next poll/sweep ETAs from another terminal.
 			snap := progress.NewSnapshotSink(storageDir(cfg)).
 				WithDaySpend(daySpendGetter(ctx, st))
-			progressSink := progress.NewMulti(progress.NewSlogRenderer(logger), snap)
+			progressSinks := []progress.EventSink{progress.NewSlogRenderer(logger), snap}
+
+			// Control socket (bugbot-2p8z.4): disabled by default. When enabled,
+			// dm is filled in once daemon.New succeeds below (a control.Server
+			// needs SubmitDispatch, which lives on *daemon.Daemon — a classic
+			// construction-order chicken/egg resolved by closing over a pointer
+			// assigned after New returns; the server cannot receive a connection,
+			// let alone a dispatch RPC, before Serve is started further down).
+			var ctrlServer *control.Server
+			var dm *daemon.Daemon
+			if cfg.Daemon.ControlSocket.Enabled {
+				sockPath := cfg.ControlSocketPath()
+				dispatchFn := func(dctx context.Context, verb control.Verb, opts control.DispatchOpts) (control.DispatchSummary, error) {
+					if dm == nil {
+						return control.DispatchSummary{}, fmt.Errorf("daemon: control socket not ready")
+					}
+					return dm.SubmitDispatch(dctx, verb, opts)
+				}
+				srv, cErr := control.Listen(sockPath, dispatchFn, logger)
+				if cErr != nil {
+					return fmt.Errorf("control socket: %w", cErr)
+				}
+				ctrlServer = srv
+				progressSinks = append(progressSinks, srv)
+			}
+			progressSink := progress.NewMulti(progressSinks...)
 
 			funnelOpts, sbDegraded, sbErr := engine.BuildFunnelOptions(cfg, engine.FunnelOptionOverrides{})
 			if sbErr != nil {
@@ -154,6 +180,13 @@ func newDaemonCmd() *cobra.Command {
 				deps.Publisher = NewStorePublisherWithProvenance(engine.RealGH, st, cfg.Publish, provenanceFromConfig(cfg), logger)
 			}
 
+			// Dispatch executor: shares THIS process's already-open writer
+			// store (see engine.NewShared's doc — a second store.Open would
+			// contend for the same advisory lock even within one process).
+			if ctrlServer != nil {
+				deps.Dispatch = engineDispatchAdapter{d: engine.NewShared(cfg, progressSink, st)}
+			}
+
 			dcfg := daemon.DaemonConfig{
 				PollInterval:         cfg.Daemon.PollInterval,
 				SweepInterval:        cfg.Daemon.SweepInterval,
@@ -173,6 +206,12 @@ func newDaemonCmd() *cobra.Command {
 				return err
 			}
 
+			if ctrlServer != nil {
+				dm = d
+				go func() { _ = ctrlServer.Serve(ctx) }()
+				defer func() { _ = ctrlServer.Close() }()
+			}
+
 			printDaemonBanner(cmd, cfg, dcfg, sinks, sandboxRuntime, sandboxOK)
 
 			return d.Run(ctx)
@@ -187,6 +226,18 @@ func newDaemonCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&doRepro, "repro", false, "enable the Reproduce stage (promote verified findings to Tier-1 via sandboxed failing tests; requires podman/docker)")
 
 	return cmd
+}
+
+// engineDispatchAdapter adapts *engine.Dispatcher's DispatchVerb method to
+// daemon.Dispatcher's Dispatch-named interface method, so the control
+// socket's verb executor can be *engine.Dispatcher (via engine.NewShared)
+// without daemon.Dispatcher's interface itself needing an engine import.
+type engineDispatchAdapter struct {
+	d *engine.Dispatcher
+}
+
+func (a engineDispatchAdapter) Dispatch(ctx context.Context, verb control.Verb, opts control.DispatchOpts) (control.DispatchSummary, error) {
+	return a.d.DispatchVerb(ctx, verb, opts)
 }
 
 // daySpendGetter returns a function the snapshot sink calls to fill in today's

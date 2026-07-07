@@ -60,7 +60,14 @@ func Run(ctx context.Context, cfg config.Config) error {
 //     the store writable, so this process falls back to SnapshotFeed
 //     exactly as in the Observer case (Dispatcher nil), rather than
 //     crashing.
-func selectFeed(ctx context.Context, cfg config.Config) (Feed, *engine.Dispatcher, func(), error) {
+//   - Attach (a store exists, another process holds the writer lock, AND
+//     that daemon's control socket — bugbot-2p8z.4 — is dialable): instead
+//     of degrading to read-only Observer, a ControlSocketFeed connects to
+//     the daemon and a controlDispatch transport backs the palette, so
+//     dispatch stays enabled even though this process holds no lock of its
+//     own. Tried in both the Observer and ErrLocked branches below, before
+//     falling back to SnapshotFeed.
+func selectFeed(ctx context.Context, cfg config.Config) (Feed, dispatcher, func(), error) {
 	// A missing state DB means bugbot has never run here: never engage Owner
 	// mode (which would create it via engine.Open's store.Open) just because
 	// the operator glanced at the TUI. See worldstate.go's storeExists doc.
@@ -82,20 +89,43 @@ func selectFeed(ctx context.Context, cfg config.Config) (Feed, *engine.Dispatche
 			_ = liveFeed.Close()
 			_ = d.Close()
 		}
-		return liveFeed, d, cleanup, nil
+		return liveFeed, dispatcherOf(d), cleanup, nil
 
 	case err == nil && d.Mode() == engine.Observer:
 		_ = d.Close()
+		if feed, disp, cleanup, ok := tryAttach(ctx, cfg); ok {
+			return feed, disp, cleanup, nil
+		}
 		feed, cleanup, ferr := newObserverFeed(ctx, cfg)
 		return feed, nil, cleanup, ferr
 
 	case isLocked(err):
+		if feed, disp, cleanup, ok := tryAttach(ctx, cfg); ok {
+			return feed, disp, cleanup, nil
+		}
 		feed, cleanup, ferr := newObserverFeed(ctx, cfg)
 		return feed, nil, cleanup, ferr
 
 	default:
 		return nil, nil, nil, err
 	}
+}
+
+// tryAttach dials cfg's control socket (see config.Config.ControlSocketPath)
+// and, if reachable, returns a ready Attach-mode Feed/dispatcher pair with
+// ok=true. ok=false means the socket is not dialable (disabled daemon,
+// wrong path, or nothing listening) — the caller falls back to Observer;
+// this is never treated as a hard error since Attach is purely an upgrade
+// over Observer, never a requirement.
+func tryAttach(ctx context.Context, cfg config.Config) (Feed, dispatcher, func(), bool) {
+	client, err := dialControlSocket(cfg.ControlSocketPath())
+	if err != nil {
+		return nil, nil, nil, false
+	}
+	feed := NewControlSocketFeed(client)
+	disp := newControlDispatch(client)
+	cleanup := func() { _ = feed.Close() }
+	return feed, disp, cleanup, true
 }
 
 // newObserverFeed builds the read-only fallback feed, shared by the
@@ -135,8 +165,8 @@ func dispatcherOf(disp *engine.Dispatcher) dispatcher {
 // quits. Shared by every mode: Model needs zero changes to render either
 // feed's Frames. disp is nil outside Owner mode, disabling the dispatch
 // palette.
-func runProgram(ctx context.Context, feed Feed, disp *engine.Dispatcher) error {
-	m := NewModel(ctx, feed, dispatcherOf(disp))
+func runProgram(ctx context.Context, feed Feed, disp dispatcher) error {
+	m := NewModel(ctx, feed, disp)
 	// Resolve the repo root via ingest.Open (git rev-parse --show-toplevel),
 	// matching every other subsystem that resolves agent file paths against the
 	// git top-level. Launching from a subdirectory or in a non-git directory
