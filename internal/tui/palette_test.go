@@ -378,6 +378,17 @@ func TestPalette_ReviewGatedInObserverMode(t *testing.T) {
 		t.Fatalf("cursor = %v, want rowReview", m.palette.cursor)
 	}
 
+	// rowReview is an editableField row: the first Enter only focuses the
+	// prNumber input (handlePaletteKey's editableField branch runs before
+	// any m.disp check). The gate under test is confirmPaletteRow's
+	// m.disp==nil check, reached only by a second Enter after typing a
+	// value — reproducing exactly what an operator would do.
+	m = sendKey(m, "enter")
+	if !m.palette.editing {
+		t.Fatal("expected editing=true after enter on Review")
+	}
+	m = typeString(m, "42")
+
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = next.(Model)
 	m = runCmd(m, cmd)
