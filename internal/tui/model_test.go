@@ -46,6 +46,10 @@ func sendKey(m Model, key string) Model {
 		km = tea.KeyMsg{Type: tea.KeyTab}
 	case "backspace":
 		km = tea.KeyMsg{Type: tea.KeyBackspace}
+	case "ctrl+d":
+		km = tea.KeyMsg{Type: tea.KeyCtrlD}
+	case "ctrl+u":
+		km = tea.KeyMsg{Type: tea.KeyCtrlU}
 	default:
 		km = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
 	}
@@ -640,5 +644,280 @@ func TestIntegration_EnterOnFeedRowOpensSourcePane(t *testing.T) {
 	view := stripANSI(m.View())
 	if !strings.Contains(view, "src/main.go") {
 		t.Errorf("rendered view missing source pane header src/main.go:\n%s", view)
+	}
+}
+
+// TestVimKeys_HLPaneFocus asserts h/l cycle focus with cursor reset, mirroring tab.
+func TestVimKeys_HLPaneFocus(t *testing.T) {
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
+	m = sendFrame(m, baseFrame())
+
+	// initial focus = paneRoster (0)
+	if m.focus != paneRoster {
+		t.Fatalf("initial focus = %v, want paneRoster", m.focus)
+	}
+
+	// 'l' advances right
+	m = sendKey(m, "l")
+	if m.focus != paneDetail {
+		t.Fatalf("after l: focus = %v, want paneDetail", m.focus)
+	}
+	m = sendKey(m, "l")
+	if m.focus != paneContext {
+		t.Fatalf("after ll: focus = %v, want paneContext", m.focus)
+	}
+	// 'l' wraps back to paneRoster
+	m = sendKey(m, "l")
+	if m.focus != paneRoster {
+		t.Fatalf("after lll (wrap): focus = %v, want paneRoster", m.focus)
+	}
+
+	// 'h' from roster wraps to paneContext
+	m = sendKey(m, "h")
+	if m.focus != paneContext {
+		t.Fatalf("after h (wrap left): focus = %v, want paneContext", m.focus)
+	}
+	m = sendKey(m, "h")
+	if m.focus != paneDetail {
+		t.Fatalf("after hh: focus = %v, want paneDetail", m.focus)
+	}
+	m = sendKey(m, "h")
+	if m.focus != paneRoster {
+		t.Fatalf("after hhh: focus = %v, want paneRoster", m.focus)
+	}
+
+	// cursor resets on h/l: advance cursor first, then switch pane
+	m = sendKey(m, "j") // cursor -> 1
+	if m.cursor == 0 && len(m.visibleAgentIndices()) > 1 {
+		t.Fatal("cursor should advance after j")
+	}
+	m = sendKey(m, "l") // h/l resets cursor
+	if m.cursor != 0 {
+		t.Fatalf("cursor = %d after l; want 0 (reset)", m.cursor)
+	}
+}
+
+// TestVimKeys_GGAndGBottom asserts gg jumps to top and G jumps to bottom.
+func TestVimKeys_GGAndGBottom(t *testing.T) {
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
+	m = sendFrame(m, baseFrame())
+
+	// Move cursor down in roster, then gg should jump back to 0.
+	m = sendKey(m, "j")
+	if m.cursor == 0 && len(m.visibleAgentIndices()) > 1 {
+		t.Fatal("j should have moved cursor")
+	}
+
+	// First 'g' sets pendingG; cursor unchanged.
+	m = sendKey(m, "g")
+	if !m.pendingG {
+		t.Fatal("pendingG should be true after first 'g'")
+	}
+	cursorBefore := m.cursor
+
+	// Second 'g' (gg) jumps to top.
+	m = sendKey(m, "g")
+	if m.pendingG {
+		t.Fatal("pendingG should be cleared after gg")
+	}
+	if m.cursor != 0 {
+		t.Fatalf("cursor = %d after gg, want 0", m.cursor)
+	}
+	_ = cursorBefore
+
+	// G jumps to bottom.
+	m = sendKey(m, "G")
+	want := len(m.visibleAgentIndices()) - 1
+	if m.cursor != want {
+		t.Fatalf("cursor = %d after G, want %d (last visible)", m.cursor, want)
+	}
+}
+
+// TestVimKeys_PendingGCancelOnOtherKey asserts that g then j clears pendingG
+// and j still scrolls the cursor.
+func TestVimKeys_PendingGCancelOnOtherKey(t *testing.T) {
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
+	m = sendFrame(m, baseFrame())
+
+	// Set pendingG.
+	m = sendKey(m, "g")
+	if !m.pendingG {
+		t.Fatal("pendingG should be set after g")
+	}
+
+	// j should clear pendingG and still scroll.
+	before := m.cursor
+	m = sendKey(m, "j")
+	if m.pendingG {
+		t.Fatal("pendingG should be cleared after j")
+	}
+	if m.cursor <= before && len(m.visibleAgentIndices()) > 1 {
+		t.Fatalf("j should have scrolled cursor: before=%d after=%d", before, m.cursor)
+	}
+}
+
+// TestVimKeys_PendingGDoesNotLeakIntoOverlays asserts that 'g' inside filter,
+// palette, and cmdBar does NOT set pendingG.
+func TestVimKeys_PendingGDoesNotLeakIntoOverlays(t *testing.T) {
+	// '/' then 'g' types into the filter, not pendingG.
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
+	m = sendFrame(m, baseFrame())
+	m = sendKey(m, "/")
+	if !m.filtering {
+		t.Fatal("expected filtering after /")
+	}
+	m = sendKey(m, "g")
+	if m.pendingG {
+		t.Fatal("pendingG must not be set while filtering")
+	}
+	if !strings.Contains(m.filter, "g") {
+		t.Fatalf("filter should contain 'g', got %q", m.filter)
+	}
+
+	// 'd' (palette) then 'g' — palette intercepts keys, pendingG unchanged.
+	m2 := NewModel(context.Background(), &fakeFeed{}, nil)
+	m2 = sendFrame(m2, baseFrame())
+	m2 = sendKey(m2, "d")
+	if !m2.palette.open {
+		t.Fatal("expected palette open after d")
+	}
+	m2 = sendKey(m2, "g")
+	if m2.pendingG {
+		t.Fatal("pendingG must not be set while palette is open")
+	}
+
+	// ctrl+p (cmdBar) then 'g' — cmdBar intercepts keys, pendingG unchanged.
+	m3 := NewModel(context.Background(), &fakeFeed{}, nil)
+	m3 = sendFrame(m3, baseFrame())
+	m3 = sendKey(m3, "ctrl+p")
+	if !m3.cmdBar.open {
+		t.Fatal("expected cmdBar open after ctrl+p")
+	}
+	m3 = sendKey(m3, "g")
+	if m3.pendingG {
+		t.Fatal("pendingG must not be set while cmdBar is open")
+	}
+}
+
+// TestVimKeys_AToggleAggregate asserts 'A' toggles aggregate and old 'g' no longer does.
+func TestVimKeys_AToggleAggregate(t *testing.T) {
+	m := NewModel(context.Background(), &fakeFeed{mode: Owner}, nil)
+	m = sendFrame(m, baseFrame())
+	m = sendKey(m, "enter") // drill into live agent
+
+	if m.actionFeed.showAggregate {
+		t.Fatal("showAggregate should be false initially")
+	}
+
+	// 'A' toggles aggregate.
+	m = sendKey(m, "A")
+	if !m.actionFeed.showAggregate {
+		t.Fatal("showAggregate should be true after A")
+	}
+	m = sendKey(m, "A")
+	if m.actionFeed.showAggregate {
+		t.Fatal("showAggregate should be false after second A")
+	}
+
+	// lone 'g' no longer toggles aggregate (it sets pendingG instead).
+	m = sendKey(m, "g")
+	if m.actionFeed.showAggregate {
+		t.Fatal("'g' alone must not toggle aggregate (that is A now)")
+	}
+	if !m.pendingG {
+		t.Fatal("lone 'g' should set pendingG")
+	}
+}
+
+// TestVimKeys_CtrlDU asserts ctrl+d/ctrl+u move cursor/viewport in roster and
+// detail panes without panicking.
+func TestVimKeys_CtrlDU(t *testing.T) {
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
+	m = sendFrame(m, baseFrame())
+
+	// Roster pane: ctrl+d moves cursor down by step (or to end if fewer rows).
+	m = sendKey(m, "ctrl+d")
+	// With 2 agents step=10: cursor lands at last (index 1).
+	if m.cursor < 0 {
+		t.Fatalf("ctrl+d: cursor went negative: %d", m.cursor)
+	}
+
+	// ctrl+u brings it back toward 0.
+	m = sendKey(m, "ctrl+u")
+	if m.cursor < 0 {
+		t.Fatalf("ctrl+u: cursor went negative: %d", m.cursor)
+	}
+
+	// Detail pane: ctrl+d/ctrl+u on transcript viewport should not panic.
+	m = sendKey(m, "2")
+	m = sendKey(m, "ctrl+d")
+	m = sendKey(m, "ctrl+u")
+	// viewport YOffset is allowed to be 0 (empty content); just no panic.
+
+	// Context pane: ctrl+d/ctrl+u on summary viewport should not panic.
+	m = sendKey(m, "3")
+	m = sendKey(m, "ctrl+d")
+	m = sendKey(m, "ctrl+u")
+}
+
+// TestVimKeys_GGBottomAllPanes runs gg/G through roster/findings context modes
+// and asserts cursor lands at expected position.
+func TestVimKeys_GGBottomAllPanes(t *testing.T) {
+	world := WorldState{
+		HasTallies: true,
+		Tallies:    domain.FindingTallies{OpenByTier: map[int]int{1: 1}},
+		Findings: []domain.Finding{
+			{Tier: 1, File: "a.go", Line: 1},
+			{Tier: 1, File: "b.go", Line: 2},
+		},
+	}
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
+	fr := baseFrame()
+	fr.World = world
+	m = sendFrame(m, fr)
+
+	tests := []struct {
+		name        string
+		setup       func(m Model) Model
+		wantAfterG  int
+		wantAfterGG int
+	}{
+		{
+			name: "roster",
+			setup: func(m Model) Model {
+				return sendKey(m, "1")
+			},
+			wantAfterG:  1, // 2 agents: last index = 1
+			wantAfterGG: 0,
+		},
+		{
+			name: "findings",
+			setup: func(m Model) Model {
+				m = sendKey(m, "3")
+				m = sendKey(m, "m") // summary -> findings
+				return m
+			},
+			wantAfterG:  1,
+			wantAfterGG: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := tc.setup(m)
+
+			// G -> bottom
+			mc = sendKey(mc, "G")
+			if mc.cursor != tc.wantAfterG {
+				t.Fatalf("G: cursor = %d, want %d", mc.cursor, tc.wantAfterG)
+			}
+
+			// gg -> top
+			mc = sendKey(mc, "g")
+			mc = sendKey(mc, "g")
+			if mc.cursor != tc.wantAfterGG {
+				t.Fatalf("gg: cursor = %d, want %d", mc.cursor, tc.wantAfterGG)
+			}
+		})
 	}
 }

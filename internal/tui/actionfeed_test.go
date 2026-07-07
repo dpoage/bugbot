@@ -309,13 +309,13 @@ func TestModel_ActionFeedAggregatToggle(t *testing.T) {
 	if m.actionFeed.showAggregate {
 		t.Fatal("expected per-agent mode initially")
 	}
-	m = sendKey(m, "g")
+	m = sendKey(m, "A")
 	if !m.actionFeed.showAggregate {
-		t.Fatal("expected aggregate mode after 'g'")
+		t.Fatal("expected aggregate mode after 'A'")
 	}
-	m = sendKey(m, "g")
+	m = sendKey(m, "A")
 	if m.actionFeed.showAggregate {
-		t.Fatal("expected per-agent mode after second 'g'")
+		t.Fatal("expected per-agent mode after second 'A'")
 	}
 }
 
@@ -432,11 +432,11 @@ func TestView_ActionFeedRowAppearsInDetailPane(t *testing.T) {
 	}
 }
 
-// TestView_AggregateActionFeedAppearsAfterGToggle feeds two agents' ActionRows,
-// toggles 'g', and asserts both agents' rows appear in View(). This is the
-// regression for B2: aggregate was never populated on the Model side, so 'g'
+// TestView_AggregateActionFeedAppearsAfterAToggle feeds two agents' ActionRows,
+// toggles 'A', and asserts both agents' rows appear in View(). This is the
+// regression for B2: aggregate was never populated on the Model side, so 'A'
 // always showed an empty pane.
-func TestView_AggregateActionFeedAppearsAfterGToggle(t *testing.T) {
+func TestView_AggregateActionFeedAppearsAfterAToggle(t *testing.T) {
 	m := NewModel(context.Background(), &fakeFeed{mode: Owner}, nil)
 	m.width = 120
 	m.height = 40
@@ -462,11 +462,11 @@ func TestView_AggregateActionFeedAppearsAfterGToggle(t *testing.T) {
 	m = sendFrame(m, fr)
 	// drill into first agent
 	m = sendKey(m, "enter")
-	// toggle aggregate
-	m = sendKey(m, "g")
+	// toggle aggregate with 'A'
+	m = sendKey(m, "A")
 
 	if !m.actionFeed.showAggregate {
-		t.Fatal("showAggregate should be true after 'g'")
+		t.Fatal("showAggregate should be true after 'A'")
 	}
 
 	view := stripANSI(m.View())

@@ -473,16 +473,16 @@ func (m Model) viewFooter() string {
 	}
 	switch m.focus {
 	case paneRoster:
-		return footerStyle.Render("j/k move · enter drill in · / filter · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
+		return footerStyle.Render("j/k move · h/l pane · gg/G top/bot · ctrl+d/u half · enter drill in · / filter · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
 	case paneDetail:
 		if m.detailMode {
-			return footerStyle.Render("j/k scroll feed · enter open · a transcript · g toggle-all · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
+			return footerStyle.Render("j/k scroll feed · enter open · a transcript · A toggle-all · gg/G top/bot · ctrl+d/u half · h/l pane · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
 		}
-		return footerStyle.Render("j/k scroll transcript · a action-feed · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
+		return footerStyle.Render("j/k scroll transcript · a action-feed · gg/G top/bot · ctrl+d/u half · h/l pane · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
 	case paneContext:
-		return footerStyle.Render("m cycle modes · j/k scroll/move · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
+		return footerStyle.Render("m cycle modes · j/k scroll/move · gg/G top/bot · ctrl+d/u half · h/l pane · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
 	default:
-		return footerStyle.Render("tab/1/2/3 focus · ctrl+p jump · F follow · d dispatch · q quit" + follow)
+		return footerStyle.Render("h/l pane · tab/1/2/3 focus · ctrl+p jump · F follow · d dispatch · q quit" + follow)
 	}
 }
 
