@@ -146,6 +146,27 @@ func TestActionRing_MultipleStartDonePairsInOrder(t *testing.T) {
 
 // ── ActionFeedState tests ─────────────────────────────────────────────────────
 
+// TestActionFeedState_WorkspaceToolsHaveTarget verifies that run_repro
+// (Symbol-only) and write_repro_file (File-only) events produce rows with a
+// non-empty Target via buildTarget's generic Symbol/File fallthrough cases —
+// these tools have no explicit buildTarget case.
+func TestActionFeedState_WorkspaceToolsHaveTarget(t *testing.T) {
+	s := newActionFeedState()
+
+	s.ApplyToolCallEvent(toolCallStart("reproducer", "candidate A", "run_repro", "", 0, 0, "go test ./...", ""))
+	s.ApplyToolCallEvent(toolCallStart("reproducer", "candidate A", "write_repro_file", "repro_test.go", 0, 0, "", ""))
+
+	rows := s.perAgent[agentFeedKey("reproducer", "candidate A")].Rows()
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	for _, row := range rows {
+		if row.Target == "" {
+			t.Errorf("tool %q: Target is empty, want non-empty", row.Tool)
+		}
+	}
+}
+
 func TestActionFeedState_PerAgentVsAggregate(t *testing.T) {
 	s := newActionFeedState()
 

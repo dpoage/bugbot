@@ -162,6 +162,39 @@ func TestDescribe_KindToolCall(t *testing.T) {
 			ev:   Event{Kind: KindToolCall, Tool: "post_lead", Phase: "start"},
 			want: "post_lead",
 		},
+		// write_repro_file
+		{
+			name: "write_repro_file start with path",
+			ev:   Event{Kind: KindToolCall, Tool: "write_repro_file", Phase: "start", File: "repro_test.go"},
+			want: "write_repro_file repro_test.go",
+		},
+		{
+			name: "write_repro_file start no path",
+			ev:   Event{Kind: KindToolCall, Tool: "write_repro_file", Phase: "start"},
+			want: "write_repro_file",
+		},
+		// delete_repro_file
+		{
+			name: "delete_repro_file start with path",
+			ev:   Event{Kind: KindToolCall, Tool: "delete_repro_file", Phase: "start", File: "repro_test.go"},
+			want: "delete_repro_file repro_test.go",
+		},
+		{
+			name: "delete_repro_file start no path",
+			ev:   Event{Kind: KindToolCall, Tool: "delete_repro_file", Phase: "start"},
+			want: "delete_repro_file",
+		},
+		// run_repro
+		{
+			name: "run_repro start with symbol",
+			ev:   Event{Kind: KindToolCall, Tool: "run_repro", Phase: "start", Symbol: "go test ./..."},
+			want: "run_repro go test ./...",
+		},
+		{
+			name: "run_repro start no symbol",
+			ev:   Event{Kind: KindToolCall, Tool: "run_repro", Phase: "start"},
+			want: "run_repro",
+		},
 		// summarize_package — explicit case (not generic fallback)
 		{
 			name: "summarize_package start with pkg and count",
