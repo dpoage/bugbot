@@ -177,7 +177,7 @@ func TestApplyWriteFilesRefusesSymlinkedLeaf(t *testing.T) {
 }
 
 // TestApplyWriteFilesReuseOverwritesRegularFile verifies the hardening does
-// NOT break the legitimate try_repro reuse case: overwriting a plain
+// NOT break the legitimate iteration-workspace reuse case: overwriting a plain
 // (non-symlink) file left by an earlier call on the SAME workspace must still
 // succeed.
 func TestApplyWriteFilesReuseOverwritesRegularFile(t *testing.T) {

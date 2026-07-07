@@ -312,29 +312,42 @@ test (via the plan's files map) and run it with a targeted cmd. Do NOT use
 run_tests as the demonstration or include it in cmd.`, maxExec)
 }
 
-// tryReproGuidance is appended to the reproducer system prompt when the
-// try_repro tool is wired. It steers the agent toward the interactive
-// write/run/observe/fix loop try_repro exists for, and states plainly that
-// promotion is judged only by an INDEPENDENT re-run of the final plan in a
-// fresh workspace — so leftover files or state from iteration can never
-// substitute for the plan itself demonstrating the bug.
-func tryReproGuidance(maxExec int) string {
+// workspaceGuidance is appended to the reproducer system prompt when the
+// workspace tool set (write_repro_file, delete_repro_file, run_repro) is
+// wired. It steers the agent toward the interactive write/run/observe/fix
+// loop the workspace exists for, spells out each tool's argument shape (live
+// runs showed agents guessing files-as-array and empty-files calls when the
+// contract was only implied), and states plainly that promotion is judged by
+// an INDEPENDENT re-run of the final plan in a fresh workspace — containing
+// the repo plus exactly the tracked files — so command side effects from
+// iteration can never substitute for the plan itself demonstrating the bug.
+func workspaceGuidance(maxExec int) string {
 	return fmt.Sprintf(`
 
-You also have try_repro: it lets you write candidate repro files and run a
-command against them in a PERSISTENT workspace scoped to this attempt, so you
-can write, run, observe the output, fix, and re-run — up to %d time(s) —
-BEFORE committing to your final repro plan. Files you write accumulate across
-calls (a later call overwrites a path; everything else you wrote earlier
-stays), so use it the way you would iterate on a failing test locally: get
-your candidate compiling and failing for the reason you expect it to fail,
-THEN submit your final plan.
+You have a persistent WORKSPACE for this attempt (a fresh copy of the repo)
+and three tools to build your reproduction in it:
+- write_repro_file {"path": "<repo-relative path>", "contents": "<full file
+  contents>"} writes ONE NEW file. Calling it again with the same path
+  replaces the file — that is how you edit. Writing is free (no budget). You
+  cannot overwrite files that already exist in the repository.
+- delete_repro_file {"path": ...} removes a file you wrote earlier (e.g. a
+  broken helper that would poison the final build).
+- run_repro {"cmd": ["argv", ...]} runs a command against the workspace and
+  reports the same classification the final verdict uses. You may run up to
+  %d time(s); malformed or invalid calls are rejected WITHOUT consuming the
+  budget, and writes never consume it.
 
-IMPORTANT: the iteration workspace is discarded when this attempt ends, and
-your final plan is verified by an INDEPENDENT re-run in a completely fresh
-workspace — nothing you left in the iteration workspace (extra files, prior
-state) is present for that re-run. Your submitted files+cmd must be fully
-self-contained and reproduce the failure on their own, exactly as submitted.`, maxExec)
+Work the way you would locally: investigate, write your candidate test, run
+it, read the output, edit, and re-run until it fails FOR THE REASON the
+finding describes. THEN submit your final plan.
+
+SUBMISSION: every file you wrote (and did not delete) is automatically
+included in your final plan — the workspace IS the proof. The plan's "files"
+field is an optional overlay; you do not need to repeat file contents in it.
+The official verdict re-runs your cmd in a BRAND-NEW workspace containing the
+repo plus exactly those files: build artifacts and other side effects of your
+iteration runs are NOT carried over, so cmd must perform any build steps
+itself, exactly as submitted.`, maxExec)
 }
 
 // reproSandboxGuidance renders the sandbox-environment + command-hygiene section
@@ -487,23 +500,26 @@ func capabilityGuidance(caps sandbox.CapabilitySet) string {
 }
 
 // planSchema is the JSON schema for the reproducer agent's plan output. Only
-// files and cmd are required: they are load-bearing for execution and mirror
-// validatePlan's structural gate. expect is descriptive-only (artifact README,
-// patch context, human review) so it is requested but not required — a model
-// that produces a runnable files+cmd plan must not have the whole attempt
-// aborted with a hard parse error merely for omitting the prose description.
+// cmd is required: files may legitimately be absent when the agent built its
+// repro in the iteration workspace (Attempt merges every write_repro_file'd
+// file into the plan before validation — the workspace is the proof), and
+// when the workspace tools are not wired, validatePlan's recoverable
+// "no repro files" feedback handles an empty plan better than a hard schema
+// failure. expect is descriptive-only (artifact README, patch context, human
+// review) so it is requested but not required — a model that produces a
+// runnable plan must not have the whole attempt aborted with a hard parse
+// error merely for omitting the prose description.
 var planSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "files": {
       "type": "object",
-      "description": "Repro/test files to inject, keyed by a workspace-relative path INSIDE the repo (e.g. \"repro_test.cpp\" or \"test/repro_test.cpp\"). Absolute or escaping paths like \"/tmp/foo.cpp\" are REJECTED — write injected sources into the repo tree. You MAY still emit build outputs to /tmp at run time via cmd (e.g. -o /tmp/repro). For Go, typically one _test.go file.",
-      "additionalProperties": {"type": "string"},
-      "minProperties": 1
+      "description": "Repro/test files to inject, keyed by a workspace-relative path INSIDE the repo (e.g. \"repro_test.cpp\" or \"test/repro_test.cpp\") mapping to FULL file contents. May be OMITTED when you wrote your files via write_repro_file — every workspace file is submitted automatically, and entries here are applied on top. Absolute or escaping paths like \"/tmp/foo.cpp\" are REJECTED — write injected sources into the repo tree. You MAY still emit build outputs to /tmp at run time via cmd (e.g. -o /tmp/repro). For Go, typically one _test.go file.",
+      "additionalProperties": {"type": "string"}
     },
     "cmd": {
       "type": "array",
-      "description": "Argv to run the repro, e.g. [\"go\",\"test\",\"-run\",\"TestX\",\"./pkg\"].",
+      "description": "Argv to run the repro, e.g. [\"go\",\"test\",\"-timeout\",\"60s\",\"-run\",\"TestX\",\"./pkg\"].",
       "items": {"type": "string"},
       "minItems": 1
     },
@@ -513,7 +529,7 @@ var planSchema = json.RawMessage(`{
       "description": "Short description of the expected failure (what assertion fails and why)."
     }
   },
-  "required": ["files", "cmd"],
+  "required": ["cmd"],
   "additionalProperties": false
 }`)
 

@@ -72,12 +72,14 @@ const (
 	// toolchain, inspect output, and confirm the suite layout without burning
 	// unreasonable sandbox capacity.
 	DefaultSandboxMaxExecs = 3
-	// DefaultTryMaxExecs is the per-attempt budget of try_repro calls the
+	// DefaultTryMaxExecs is the per-attempt budget of run_repro calls the
 	// reproducer agent may make. Unlike run_tests (read-only orientation
-	// against the repo's existing suite), try_repro lets the agent write, run,
-	// and observe its OWN candidate repro before committing to a final plan —
-	// a value of 4 covers an initial attempt plus a couple of fix-and-retry
-	// rounds without letting a stuck agent burn unbounded sandbox capacity.
+	// against the repo's existing suite), run_repro lets the agent run and
+	// observe its OWN candidate repro in the iteration workspace before
+	// committing to a final plan — a value of 4 covers an initial attempt plus
+	// a couple of fix-and-retry rounds without letting a stuck agent burn
+	// unbounded sandbox capacity. Only calls that reach the sandbox consume
+	// the budget; writes (write_repro_file) are free.
 	DefaultTryMaxExecs = 4
 )
 
@@ -108,12 +110,13 @@ type Options struct {
 	// may call run_tests at most this many times per attempt to orient itself
 	// before proposing its repro plan. Zero uses DefaultSandboxMaxExecs.
 	SandboxMaxExecs int
-	// TryMaxExecs is the per-attempt execution budget for try_repro: the
-	// reproducer agent may write/run/observe a candidate repro at most this
-	// many times per attempt before committing to its final plan. Zero uses
-	// DefaultTryMaxExecs. try_repro is only wired when the sandbox backend
+	// TryMaxExecs is the per-attempt execution budget for run_repro: the
+	// reproducer agent may run/observe its candidate repro at most this many
+	// times per attempt before committing to its final plan. Zero uses
+	// DefaultTryMaxExecs. The workspace tool set (write_repro_file,
+	// delete_repro_file, run_repro) is only wired when the sandbox backend
 	// supports workspace materialization (see newRunner); Mock-backed tests
-	// that do not implement it never see the tool regardless of this budget.
+	// that do not implement it never see the tools regardless of this budget.
 	TryMaxExecs int
 	// PatchProver enables the patch-prover stage: after a successful repro,
 	// attempt to produce a minimal fix and prove it with a sandboxed suite run.
@@ -347,12 +350,14 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		scope.Finish(usage.InputTokens+usage.OutputTokens, time.Since(start), retErr)
 	}()
 
-	// iterWS is the per-Attempt iteration workspace try_repro writes into and
-	// runs against (see iterationWorkspace doc). It stays unmaterialized
-	// (path == "") if the agent never calls try_repro, so an Attempt that
-	// never iterates pays zero extra disk cost. Removed unconditionally when
-	// Attempt returns, so the official clean-room verdict below (execute())
-	// never runs against anything try_repro left behind.
+	// iterWS is the per-Attempt iteration workspace the agent builds its
+	// candidate in (see iterationWorkspace doc): write_repro_file writes into
+	// it, run_repro executes against it, and its tracked files are merged into
+	// the submitted plan below. It stays unmaterialized (path == "") if the
+	// agent never uses the workspace tools, so an Attempt that never iterates
+	// pays zero extra disk cost. Removed unconditionally when Attempt returns,
+	// so the official clean-room verdict below (execute()) never runs against
+	// anything the iteration left behind.
 	iterWS := &iterationWorkspace{}
 	defer func() { _ = iterWS.cleanup() }()
 
@@ -409,6 +414,13 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			// nothing to report as a round outcome.
 			return nil, fmt.Errorf("repro: plan finding %s: %w", finding.ID, perr)
 		}
+		// The workspace is the proof: every file the agent wrote via
+		// write_repro_file (and did not delete) is folded into the submitted
+		// plan, with any inline plan.Files entries applied on top. This makes
+		// self-containment structural — the clean-room verdict re-runs exactly
+		// what iteration ran — instead of relying on the agent to retranscribe
+		// file contents into the plan JSON verbatim.
+		plan.Files = iterWS.mergedFiles(plan.Files)
 		if verr := validatePlan(plan, r.repoDir); verr != nil {
 			// A structurally invalid plan is treated like a non-demonstrating
 			// attempt: feed the problem back and try again.
@@ -503,17 +515,23 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 		// counters (unlike the funnel), so there is nothing to accumulate.
 		tools = append(tools, agent.NewRunTestsTool(r.sb, r.repoDir, baseCmd, r.opts.SandboxMaxExecs, r.deps.ROMounts, r.deps.Env, r.deps.SetupCmds, nil))
 	}
-	// try_repro lets the agent write, run, and observe a candidate repro
-	// interactively before committing to its final plan (bugbot-bkz1). Only
-	// wired when the sandbox backend can pre-materialize a caller-owned
-	// workspace (workspaceMaterializer): *sandbox.CLI always can; a bare
-	// sandbox.Mock in a test that doesn't script iteration simply omits the
-	// tool, matching run_tests' no-build-system omission above.
-	tryReproWired := false
+	// The workspace tool set (write_repro_file, delete_repro_file, run_repro)
+	// lets the agent build, run, and observe a candidate repro interactively
+	// in a persistent per-attempt workspace before committing to its final
+	// plan (bugbot-bkz1, bugbot-hu59); the files it writes are submitted with
+	// the plan automatically. Only wired when the sandbox backend can
+	// pre-materialize a caller-owned workspace (workspaceMaterializer):
+	// *sandbox.CLI always can; a bare sandbox.Mock in a test that doesn't
+	// script iteration simply omits the tools, matching run_tests'
+	// no-build-system omission above.
+	workspaceWired := false
 	if mat, ok := r.sb.(workspaceMaterializer); ok {
-		tryReproWired = true
-		tools = append(tools, NewTryReproTool(r.sb, r.repoDir, r.opts.Image, r.opts.Timeout,
-			r.deps.ROMounts, r.deps.Env, r.deps.SetupCmds, mat.MaterializeWorkspace, iterWS, r.opts.TryMaxExecs))
+		workspaceWired = true
+		tools = append(tools,
+			NewWriteReproFileTool(r.repoDir, mat.MaterializeWorkspace, iterWS),
+			NewDeleteReproFileTool(iterWS),
+			NewRunReproTool(r.sb, r.repoDir, r.opts.Image, r.opts.Timeout,
+				r.deps.ROMounts, r.deps.Env, r.deps.SetupCmds, mat.MaterializeWorkspace, iterWS, r.opts.TryMaxExecs))
 	}
 	var opts []agent.Option
 	opts = append(opts, agent.WithLimits(r.opts.AgentLimits))
@@ -528,8 +546,8 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 	if len(baseCmd) > 0 {
 		prompt += runTestsGuidance(r.opts.SandboxMaxExecs)
 	}
-	if tryReproWired {
-		prompt += tryReproGuidance(r.opts.TryMaxExecs)
+	if workspaceWired {
+		prompt += workspaceGuidance(r.opts.TryMaxExecs)
 	}
 	if slices.Contains(r.buildSystems, ingest.BuildSystemBazel) {
 		prompt += bazelGuidance()
@@ -637,52 +655,71 @@ func isBareShellOp(arg string) bool {
 // run on them. A failure here is recoverable: Attempt feeds the message back to
 // the agent and revises, so the checks below double as corrective guidance.
 //
-// repoDir is the host path to the target repository. When non-empty, each
-// Files key is stat-checked against repoDir: a plan that would overwrite an
-// existing file is rejected as a recoverable revision before any sandbox run
-// (bugbot-ndlw). New files — keys that do not yet exist on disk — are allowed
-// anywhere workspace-relative.
-//
-// The rule set is shared verbatim with try_repro's per-call validation (see
-// validateFilesCmd) so iteration teaches the agent the exact same contract
-// its final plan must satisfy — an interactive round that passes try_repro's
-// gate is guaranteed to also pass validatePlan.
+// The per-file and per-cmd rules are shared verbatim with the workspace tools'
+// per-call validation (validateReproFilePath in write_repro_file,
+// validateReproCmd in run_repro) so iteration teaches the agent the exact same
+// contract its final plan must satisfy — a file or command that cleared the
+// tools' gate is guaranteed to clear submission too. Attempt merges the
+// workspace registry into p.Files before calling this, so a cmd-only plan
+// after write_repro_file calls carries those files here.
 func validatePlan(p *Plan, repoDir string) error {
-	return validateFilesCmd(p.Files, p.Cmd, repoDir)
+	if len(p.Files) == 0 {
+		return errors.New(`no repro files: the plan must inject at least one NEW file that demonstrates the bug. ` +
+			`Either write your repro into the workspace with write_repro_file (every file you write is ` +
+			`submitted with the plan automatically), or set the plan's "files" to a JSON object mapping ` +
+			`repo-relative paths to FULL file contents, e.g. {"repro_test.go": "package ..."}`)
+	}
+	if len(p.Cmd) == 0 {
+		return errors.New(`no command: set "cmd" to the argv array that builds and runs your repro, ` +
+			`e.g. ["go","test","-timeout","60s","-run","TestX","./pkg"]`)
+	}
+	for fpath := range p.Files {
+		if err := validateReproFilePath(fpath, repoDir); err != nil {
+			return err
+		}
+	}
+	return validateReproCmd(p.Cmd)
 }
 
-// validateFilesCmd is the structural gate shared by validatePlan (the final
-// submitted plan) and the try_repro tool (each interactive iteration). See
-// validatePlan's doc for the rationale; this function holds the actual rules
-// so the two callers can never drift.
-func validateFilesCmd(files map[string]string, cmd []string, repoDir string) error {
-	if len(files) == 0 {
-		return errors.New("no repro files")
+// validateReproFilePath is the per-file structural gate shared by validatePlan
+// (every key of the final submitted plan's files) and the write_repro_file
+// tool (each interactive write). Holding the actual rules in one place keeps
+// the two callers from drifting: a path accepted during iteration is accepted
+// at submission.
+//
+// repoDir is the host path to the target repository. When non-empty, fpath is
+// stat-checked against it: a file that would overwrite an existing repo file
+// is rejected as a recoverable revision before any sandbox run (bugbot-ndlw).
+// New files — paths that do not yet exist on disk — are allowed anywhere
+// workspace-relative.
+func validateReproFilePath(fpath, repoDir string) error {
+	// Injected file keys must be workspace-relative: an absolute or
+	// escaping path (e.g. "/tmp/repro_test.cpp") is rejected by the sandbox
+	// at write time, which would otherwise abort the whole attempt with a
+	// hard infrastructure error instead of a recoverable revision. Catch it
+	// here using the sandbox's own rule so the agent is told to fix it.
+	if err := sandbox.ValidateWorkspacePath(fpath); err != nil {
+		return fmt.Errorf("file %q must be a workspace-relative path inside the repo "+
+			"(no leading %q, no %q), e.g. %q: %w", fpath, "/", "..", "repro_test.cpp", err)
 	}
-	if len(cmd) == 0 {
-		return errors.New("no command")
-	}
-	for fpath := range files {
-		// Injected file keys must be workspace-relative: an absolute or
-		// escaping path (e.g. "/tmp/repro_test.cpp") is rejected by the sandbox
-		// at write time, which would otherwise abort the whole attempt with a
-		// hard infrastructure error instead of a recoverable revision. Catch it
-		// here using the sandbox's own rule so the agent is told to fix it.
-		if err := sandbox.ValidateWorkspacePath(fpath); err != nil {
-			return fmt.Errorf("file %q must be a workspace-relative path inside the repo "+
-				"(no leading %q, no %q), e.g. %q: %w", fpath, "/", "..", "repro_test.cpp", err)
+	// Reject writes that would overwrite an existing repo file. The agent
+	// must only write NEW files; overwriting production sources, go.mod,
+	// fixtures, or existing tests causes the subsequent run to demonstrate
+	// a self-inflicted change rather than the claimed bug (bugbot-ndlw).
+	if repoDir != "" {
+		if _, err := os.Stat(filepath.Join(repoDir, fpath)); err == nil {
+			return fmt.Errorf("file %q already exists in the repository; "+
+				"write NEW files only; modify nothing that exists in the repo", fpath)
 		}
-		// Reject plans that would overwrite an existing repo file. The agent
-		// must only write NEW files; overwriting production sources, go.mod,
-		// fixtures, or existing tests causes the subsequent run to demonstrate
-		// a self-inflicted change rather than the claimed bug (bugbot-ndlw).
-		if repoDir != "" {
-			if _, err := os.Stat(filepath.Join(repoDir, fpath)); err == nil {
-				return fmt.Errorf("file %q already exists in the repository; "+
-					"write NEW files only; modify nothing that exists in the repo", fpath)
-			}
-		}
 	}
+	return nil
+}
+
+// validateReproCmd is the per-command structural gate shared by validatePlan
+// (the final submitted plan's cmd) and the run_repro tool (each interactive
+// run). Holding the actual rules in one place keeps the two callers from
+// drifting: a command accepted during iteration is accepted at submission.
+func validateReproCmd(cmd []string) error {
 	for _, arg := range cmd {
 		// Bare shell control operators are meaningless to a sandbox that runs
 		// Cmd as raw argv. A reproducer that emits, say,

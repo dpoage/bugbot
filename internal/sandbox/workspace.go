@@ -463,7 +463,7 @@ func copyFile(src, dst string, perm fs.FileMode) (err error) {
 // SECURITY (bugbot-6nqd): the workspace is populated by an UNTRUSTED command
 // (the container runs model-authored code with full read/write access to it),
 // and — since bugbot-bkz1 — a workspace can be REUSED across several Execs
-// within one attempt (try_repro's iteration workspace). That means content
+// within one attempt (the reproducer's iteration workspace). That means content
 // left behind by an earlier call is adversarial input to a later call's
 // write, not merely to a later call's read (readCaptureFile's existing
 // concern): a planted symlink, leaf OR intermediate directory, would

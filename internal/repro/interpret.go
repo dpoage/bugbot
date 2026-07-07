@@ -300,12 +300,15 @@ func (v verdict) feedback(p *Plan) string {
 		b.WriteString("Your repro did not demonstrate the bug as expected. Revise it.")
 	}
 	// bugbot-bkz1: the run just interpreted above is the OFFICIAL, independent
-	// verdict — if try_repro demonstrated something close to this earlier in
-	// the attempt, the mismatch almost always means the submitted files+cmd
-	// depended on state (a build artifact, an earlier write) that existed only
-	// in the discarded iteration workspace and is absent from this fresh one.
-	b.WriteString(" This official run used a brand-new workspace, independent of any try_repro " +
-		"iteration: your submitted files+cmd must be fully self-contained.")
+	// verdict — if run_repro demonstrated something close to this earlier in
+	// the attempt, the mismatch almost always means the command depended on
+	// state (a build artifact, generated output from an earlier run) that
+	// existed only in the discarded iteration workspace. The submitted files
+	// themselves cannot drift (Attempt merges the workspace registry into the
+	// plan), so point the agent at command side effects specifically.
+	b.WriteString(" This official run used a brand-new workspace, independent of any run_repro " +
+		"iteration: it contained the repo plus exactly your submitted files, but NO side effects " +
+		"of earlier runs (build artifacts, generated state) — your cmd must rebuild everything it needs itself.")
 	if len(p.Cmd) > 0 {
 		fmt.Fprintf(&b, "\n\nCommand run: %s", strings.Join(p.Cmd, " "))
 	}

@@ -172,7 +172,8 @@ func TestIntegrationCaptureFilesSymlinkEscapeRejected(t *testing.T) {
 
 // TestIntegrationApplyWriteFilesSymlinkEscapeRejected — bugbot-6nqd — proves
 // the WRITE-side symlink hardening against a REAL container and a REAL
-// workspace REUSE across two Execs, exactly the try_repro shape (bugbot-bkz1):
+// workspace REUSE across two Execs, exactly the reproducer's iteration shape
+// (bugbot-bkz1):
 // call 1's containerized command plants a symlink pointing at an absolute
 // HOST path outside the workspace; call 2 asks WriteFiles to write to that
 // same relative path. Without the fix, applyWriteFiles (running on the HOST,
@@ -195,7 +196,7 @@ func TestIntegrationApplyWriteFilesSymlinkEscapeRejected(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	// Call 1 (try_repro iteration #1): the container plants a symlink named
+	// Call 1 (iteration run #1): the container plants a symlink named
 	// "leak" pointing at an absolute host path outside the workspace — all
 	// `ln -s` needs is write access to its own workspace.
 	res1, err := s.Exec(context.Background(), Spec{
@@ -210,7 +211,7 @@ func TestIntegrationApplyWriteFilesSymlinkEscapeRejected(t *testing.T) {
 		t.Fatalf("plant symlink ExitCode = %d, stderr=%q", res1.ExitCode, res1.Stderr)
 	}
 
-	// Call 2 (try_repro iteration #2, SAME workspace): a WriteFiles entry
+	// Call 2 (iteration run #2, SAME workspace): a WriteFiles entry
 	// targets the exact relative path the container just planted a symlink at.
 	_, err = s.Exec(context.Background(), Spec{
 		RepoDir:    repoDir,

@@ -389,10 +389,10 @@ func TestSystemPrompt_NoGradingDisclosure(t *testing.T) {
 		// compose mirrors newRunner's prompt assembly (see
 		// TestSystemPrompt_BazelBuildSystem): systemPrompt() plus every
 		// conditionally-appended block a real run can carry, including
-		// tryReproGuidance — added by bugbot-bkz1 outside systemPrompt()
-		// itself, so a disclosure regression introduced there would
-		// otherwise go uncovered by this test.
-		p := systemPrompt(lang, noSystems, nil) + tryReproGuidance(4)
+		// workspaceGuidance — added by bugbot-bkz1/bugbot-hu59 outside
+		// systemPrompt() itself, so a disclosure regression introduced there
+		// would otherwise go uncovered by this test.
+		p := systemPrompt(lang, noSystems, nil) + workspaceGuidance(4)
 		for _, bad := range forbidden {
 			if strings.Contains(p, bad) {
 				t.Errorf("composed prompt(%v) contains forbidden grading-disclosure string %q", lang, bad)

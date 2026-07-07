@@ -149,7 +149,7 @@ func (s *CLI) Close() error {
 // path with no files written into it beyond the clone itself. It is the
 // public seam behind Spec.Workspace: a caller that wants to write into and
 // run repeated Execs against ONE persistent workspace (e.g. the reproducer's
-// try_repro tool, iterating across several sandbox runs before committing to
+// run_repro tool, iterating across several sandbox runs before committing to
 // a final plan) materializes it once here, then passes the returned path as
 // Spec.Workspace on each Exec instead of letting Exec copy a fresh one every
 // time.

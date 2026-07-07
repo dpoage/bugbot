@@ -334,13 +334,15 @@ type Repro struct {
 	// agent: the agent may call run_tests at most this many times per attempt to
 	// orient itself before proposing its repro plan. Must be >= 1. Default 3.
 	SandboxMaxExecs int `yaml:"sandbox_max_execs"`
-	// TryMaxExecs is the per-attempt try_repro budget for the reproducer agent:
-	// the agent may call try_repro at most this many times per attempt to
-	// write, run, and observe candidate repro files/commands INTERACTIVELY
-	// before committing to its final plan. Unlike SandboxMaxExecs (read-only
-	// orientation against the repo's existing suite), try_repro lets the agent
-	// iterate on its own candidate — the mirror-image write/run/observe loop a
-	// human debugging a flaky repro would use. Must be >= 1. Default 4.
+	// TryMaxExecs is the per-attempt run_repro budget for the reproducer agent:
+	// the agent may call run_repro at most this many times per attempt to run
+	// and observe its candidate repro INTERACTIVELY (built via write_repro_file
+	// in the persistent iteration workspace) before committing to its final
+	// plan. Unlike SandboxMaxExecs (read-only orientation against the repo's
+	// existing suite), run_repro iterates on the agent's own candidate — the
+	// mirror-image write/run/observe loop a human debugging a flaky repro would
+	// use. Only calls that reach the sandbox consume the budget. Must be >= 1.
+	// Default 4.
 	TryMaxExecs int `yaml:"try_max_execs"`
 }
 

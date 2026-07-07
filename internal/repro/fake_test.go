@@ -114,7 +114,8 @@ func textStep(text string) toolScriptStep {
 
 // toolScriptedClient is a sequential fake llm.Client that can request tool
 // calls, unlike scriptedClient (which only ever returns final text). It
-// exists to exercise the reproducer's tool loop (try_repro) end-to-end: each
+// exists to exercise the reproducer's tool loop (write_repro_file/run_repro)
+// end-to-end: each
 // call to Complete returns the next scripted step in order; once exhausted it
 // returns a benign end-turn so an over-running test fails on assertions
 // rather than panicking on an out-of-range index.
