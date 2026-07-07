@@ -47,6 +47,7 @@ func mergeAgents(live []progress.AgentStatus, hist []store.AgentUnit, transcript
 		views = append(views, AgentView{
 			Role:       a.Role,
 			Label:      a.Label,
+			AgentID:    a.AgentID,
 			Live:       true,
 			Started:    a.Started,
 			Activity:   a.Activity,
@@ -74,11 +75,17 @@ func historicalLabel(u store.AgentUnit) string {
 // agent across frame refreshes (see Model.detailKey) without depending on its
 // position in frame.Agents, which mergeAgents rebuilds from scratch every
 // frame. Historical entries key off the durable agent_units primary key; live
-// entries (which have none yet) key off role+label+start time, which is
-// stable for the lifetime of a single invocation.
+// entries key off AgentID when the emitter set one (stable and unique for the
+// run's whole lifetime, unlike role+label+start which can collide when two
+// concurrent agents share a label). Live entries from a pre-identity emitter
+// fall back to role+label+start time, which is stable for the lifetime of a
+// single invocation but not collision-proof across duplicate labels.
 func agentKey(a AgentView) string {
 	if a.UnitID != "" {
 		return "unit:" + a.UnitID
+	}
+	if a.AgentID != "" {
+		return "live-id:" + a.AgentID
 	}
 	return "live:" + a.Role + "\x00" + a.Label + "\x00" + a.Started.UTC().Format(time.RFC3339Nano)
 }

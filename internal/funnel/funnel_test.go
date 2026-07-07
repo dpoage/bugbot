@@ -18,6 +18,7 @@ import (
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -224,6 +225,49 @@ func TestSweep_E2E_OneVerifiedFinding(t *testing.T) {
 	}
 	if run.Kind != store.ScanOneshot {
 		t.Errorf("scan kind = %q, want oneshot", run.Kind)
+	}
+}
+
+// TestSweep_AgentRosterEmptyAfterCompletion_ScopeIdentityRegression is the
+// bugbot-r7ub B1 regression at the full-pipeline level: every finder unit and
+// every verifier candidate run must Start/ToolCall/Finish under ONE AgentID
+// each, so a progress.StatusAccumulator folding the whole sweep never shows a
+// leaked roster entry once Sweep returns.
+//
+// Pre-fix (B1): the funnel minted a FRESH progress.AgentScope at each of
+// several call sites within one logical run (activitySinkFor / maybeStatus-
+// NoteTool / emitAgentFinished / emitFinderAgentFinished each built their own
+// scope), so a finder unit's KindAgentStarted, its KindToolCall activity, and
+// its KindAgentFinished disagreed on AgentID — the accumulator's delete on
+// Finish missed the entry Started created, leaking one roster entry per
+// finder unit forever. This test demonstrably fails on that pre-fix code:
+// ActiveAgents is non-empty after Sweep returns.
+func TestSweep_AgentRosterEmptyAfterCompletion_ScopeIdentityRegression(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	finder := finderOnNilLens(newScriptedClient())
+	verifier := verifierRouting(newScriptedClient())
+
+	acc := progress.NewStatusAccumulator()
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
+		Progress: accSink{acc},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Findings) != 1 {
+		t.Fatalf("want 1 finding (sanity check on the fixture), got %d", len(res.Findings))
+	}
+
+	if got := acc.Snapshot().ActiveAgents; len(got) != 0 {
+		t.Fatalf("ActiveAgents = %+v, want empty after Sweep completes — every finder/verifier run's "+
+			"Started/ToolCall/Finished events must share one AgentID so the accumulator prunes correctly", got)
 	}
 }
 

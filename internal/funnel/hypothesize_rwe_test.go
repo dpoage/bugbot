@@ -18,6 +18,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 )
 
 // rweFinderFake is a minimal llm.Client whose Complete branches on
@@ -188,9 +189,9 @@ func TestRwe_RunFinderWithPrompt_RetryOnMaxTokensTruncation(t *testing.T) {
 	tasks := finderTask([]string{"bug.go"}, nil, "")
 	startedAt := time.Now()
 	lens := f.lenses[0]
-
+	scope := progress.NewAgentScope(nil, progress.RoleFinder, "rwe-find")
 	cands, status, outcome, pm, err := f.runFinderWithPrompt(
-		ctx, fake, tools, "you are a finder", "rwe-find", lens, tasks, budget, startedAt,
+		ctx, fake, tools, "you are a finder", "rwe-find", lens, tasks, budget, startedAt, scope,
 	)
 	if err != nil {
 		t.Fatalf("runFinderWithPrompt err: %v", err)
@@ -249,8 +250,9 @@ func TestRwe_RunFinderWithPrompt_NoRetryOnNonTruncatedParseFailure(t *testing.T)
 	startedAt := time.Now()
 	lens := f.lenses[0]
 
+	scope2 := progress.NewAgentScope(nil, progress.RoleFinder, "rwe-find")
 	cands, status, _, pm, err := f.runFinderWithPrompt(
-		ctx, fake, tools, "you are a finder", "rwe-find", lens, tasks, budget, startedAt,
+		ctx, fake, tools, "you are a finder", "rwe-find", lens, tasks, budget, startedAt, scope2,
 	)
 	if err != nil {
 		t.Fatalf("runFinderWithPrompt err: %v", err)

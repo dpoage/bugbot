@@ -6,6 +6,7 @@ import (
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/progress"
 )
 
 // VerifyFinding re-runs adversarial verification against a single already-stored
@@ -63,7 +64,12 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd domain.Finding) (refuted
 	// earlier Go finding must not leak into a Python finding's prompts.
 	f.hasGoDepSource = f.goDepSourceFor([]ingest.Language{fileLang})
 
-	verdicts, seatNames, _, _, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, persona, c, n, &budgetState{})
+	// VerifyFinding brackets no Started/Finished (it is a cheap standalone
+	// re-check, not a roster-visible run — matches pre-bugbot-r7ub behavior).
+	// The scope is still minted so every seat's tool-call activity shares ONE
+	// AgentID instead of a fresh one per seat (see activitySinkFor's doc).
+	scope := progress.NewAgentScope(f.opts.Progress, progress.RoleVerifier, fnd.Title)
+	verdicts, seatNames, _, _, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, persona, c, n, &budgetState{}, scope)
 	if err != nil {
 		return false, "", err
 	}

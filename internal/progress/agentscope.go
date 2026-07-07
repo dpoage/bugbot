@@ -1,6 +1,10 @@
 package progress
 
-import "time"
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"time"
+)
 
 // AgentScope is the shared, opt-in observability seam for a single agent run.
 // It brackets the run with KindAgentStarted / KindAgentFinished and routes
@@ -22,25 +26,58 @@ import "time"
 // is immutable after construction and the sink fanout is concurrency-safe, so a
 // scope may be shared across the goroutines of one agent run and parallel
 // agents may hold independent scopes.
+//
+// id disambiguates concurrent agents that share (role, label) — e.g. two
+// reproducer runs on duplicate open finding titles. It is minted once in
+// NewAgentScope and stamped onto every event the scope emits (see
+// events.go's AgentID doc); consumers key by progress.AgentEventKey, which
+// falls back to (role, label) when id is empty (it never is for a scope built
+// by NewAgentScope, but hand-built Events from older code paths may omit it).
 type AgentScope struct {
 	sink  EventSink
 	role  string
 	label string
+	id    string
 }
 
 // NewAgentScope binds a scope to (role, label) on sink WITHOUT emitting
 // anything. Call Start to emit the agent-started bracket; call EmitToolCall on
 // its own when the started/finished bracket is emitted elsewhere (e.g. a runner
 // option built before the agent's own start/finish lifecycle is known).
+//
+// NewAgentScope mints a fresh AgentID for the scope: 8 random bytes,
+// hex-encoded. progress deliberately does not import internal/store (which
+// has its own, unexported ID generator for agent_units primary keys) to stay
+// dependency-light, so this is a small independent generator rather than a
+// shared one.
 func NewAgentScope(sink EventSink, role, label string) AgentScope {
-	return AgentScope{sink: sink, role: role, label: label}
+	return AgentScope{sink: sink, role: role, label: label, id: newAgentID()}
+}
+
+// newAgentID returns a 16-character random hex string for use as an
+// AgentScope's id, or "" on a crypto/rand failure (a practically-impossible
+// but non-zero-probability I/O error). "" is deliberate, not a degenerate
+// fallback value: AgentEventKey and every consumer keyed by it treat an
+// empty AgentID as "no identity, fall back to (role, label)" — the same path
+// pre-identity emitters already take — so a rand failure degrades to the
+// historical role+label keying instead of silently colliding every agent in
+// the process under one shared all-zeros id. Collisions among successfully
+// minted ids are not guarded against beyond the birthday bound of 8 random
+// bytes, which is ample for the number of agents any single scan or daemon
+// cycle runs concurrently.
+func newAgentID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // Start emits KindAgentStarted and returns the scope for chaining, so callers
 // can write `scope := progress.NewAgentScope(sink, role, label).Start()`. Pair
 // every Start with a Finish (typically deferred).
 func (s AgentScope) Start() AgentScope {
-	Emit(s.sink, Event{Kind: KindAgentStarted, Role: s.role, Label: s.label})
+	Emit(s.sink, Event{Kind: KindAgentStarted, Role: s.role, Label: s.label, AgentID: s.id})
 	return s
 }
 
@@ -56,6 +93,7 @@ func (s AgentScope) EmitToolCall(phase, tool, file string, line, endLine int, sy
 		Kind:    KindToolCall,
 		Role:    s.role,
 		Label:   s.label,
+		AgentID: s.id,
 		Phase:   phase,
 		Tool:    tool,
 		File:    file,
@@ -72,9 +110,28 @@ func (s AgentScope) EmitToolCall(phase, tool, file string, line, endLine int, sy
 // wall-clock duration, and error (left empty on success). tokens is the sum of
 // input and output tokens; callers derive it from agent.Outcome.Usage.
 func (s AgentScope) Finish(tokens int64, dur time.Duration, err error) {
-	ev := Event{Kind: KindAgentFinished, Role: s.role, Label: s.label, Tokens: tokens, Duration: dur}
+	ev := Event{Kind: KindAgentFinished, Role: s.role, Label: s.label, AgentID: s.id, Tokens: tokens, Duration: dur}
 	if err != nil {
 		ev.Err = err.Error()
+	}
+	Emit(s.sink, ev)
+}
+
+// EmitEvent emits ev under this agent's identity: Role, Label, and AgentID
+// are filled in when the caller left them empty, then the event is forwarded
+// to Emit unchanged otherwise. This is for emitters that build their own
+// Event kinds (e.g. repro.go's KindReproAttempt rounds) but still want the
+// event correctly attributed to the agent run the scope represents — without
+// AgentScope needing a dedicated Emit* method for every such Kind.
+func (s AgentScope) EmitEvent(ev Event) {
+	if ev.Role == "" {
+		ev.Role = s.role
+	}
+	if ev.Label == "" {
+		ev.Label = s.label
+	}
+	if ev.AgentID == "" {
+		ev.AgentID = s.id
 	}
 	Emit(s.sink, ev)
 }

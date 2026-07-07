@@ -109,7 +109,7 @@ func (f *LiveFeed) Handle(ev progress.Event) {
 		// many scan runs, mirroring snapshot.go's delete(s.agents, key) on
 		// KindAgentFinished.
 		f.actionMu.Lock()
-		f.actionState.PruneAgent(agentFeedKey(ev.Role, ev.Label))
+		f.actionState.PruneAgent(feedKeyForEvent(ev))
 		f.actionMu.Unlock()
 	}
 	select {

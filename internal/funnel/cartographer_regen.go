@@ -213,7 +213,7 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, budget
 		errStr = err.Error()
 	}
 	scope.EmitToolCall("done", "summarize_package", pkg, 0, 0, "", "", len(members), errStr)
-	emitAgentFinished(f.opts.Progress, progress.RoleCartographer, pkg, outcome, start, err)
+	emitAgentFinished(scope, outcome, start, err)
 	if err != nil {
 		return "", err
 	}

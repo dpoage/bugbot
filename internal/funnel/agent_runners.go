@@ -69,12 +69,16 @@ func (f *Funnel) newAgentRunner(client llm.Client, tools []agent.Tool, systemPro
 	return agent.NewRunner(client, tools, systemPrompt, opts...)
 }
 
-// activitySinkFor returns a WithActivitySink option that routes each tool call's
-// structured activity to the funnel's progress sink as a KindToolCall event for
-// (role, label), via the shared progress.AgentScope seam. A nil progress sink
-// makes emission a no-op (progress.Emit handles nil sinks).
-func (f *Funnel) activitySinkFor(role, label string) agent.Option {
-	scope := progress.NewAgentScope(f.opts.Progress, role, label)
+// activitySinkFor returns a WithActivitySink option that routes each tool
+// call's structured activity to scope's sink as a KindToolCall event carrying
+// scope's AgentID, via the shared progress.AgentScope seam. Callers MUST pass
+// the SAME scope used for that run's KindAgentStarted/KindAgentFinished
+// bracket (and any other emission for the run) — progress.AgentEventKey folds
+// live-agent state by AgentID, so a tool call carrying a DIFFERENT scope's id
+// than the run's Started/Finished bracket silently orphans that activity (see
+// bugbot-r7ub). A nil progress sink makes emission a no-op (progress.Emit
+// handles nil sinks).
+func (f *Funnel) activitySinkFor(scope progress.AgentScope) agent.Option {
 	return agent.WithActivitySink(func(act agent.ToolActivity) {
 		scope.EmitToolCall(act.Phase, act.Tool, act.File, act.Line, act.EndLine, act.Symbol, act.Pattern, act.Count, act.Err)
 	})
@@ -83,14 +87,14 @@ func (f *Funnel) activitySinkFor(role, label string) agent.Option {
 // maybeStatusNoteTool returns a status_note Tool when f.opts.Features.StatusNotes is
 // true, or nil when the flag is off. Callers append the non-nil result to
 // their tool slice before building the runner; when nil, the tool is absent
-// and the tool set is byte-identical to the pre-feature state. The tool's notes
-// flow through the same AgentScope EmitToolCall seam as automatic tool-call
-// events, so manual and derived activity render identically.
-func (f *Funnel) maybeStatusNoteTool(role, label string) agent.Tool {
+// and the tool set is byte-identical to the pre-feature state. The tool's
+// notes flow through the SAME AgentScope EmitToolCall seam as automatic
+// tool-call events (see activitySinkFor's doc on scope identity), so manual
+// and derived activity render identically and fold under the same AgentID.
+func (f *Funnel) maybeStatusNoteTool(scope progress.AgentScope) agent.Tool {
 	if !f.opts.Features.StatusNotes {
 		return nil
 	}
-	scope := progress.NewAgentScope(f.opts.Progress, role, label)
 	return agent.NewStatusNoteTool(func(act agent.ToolActivity) {
 		scope.EmitToolCall(act.Phase, act.Tool, act.File, act.Line, act.EndLine, act.Symbol, act.Pattern, act.Count, act.Err)
 	})

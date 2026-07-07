@@ -138,7 +138,7 @@ func (f *ControlSocketFeed) applyFrame(fr control.Frame) {
 			f.actionMu.Unlock()
 		case progress.KindAgentFinished:
 			f.actionMu.Lock()
-			f.actionState.PruneAgent(agentFeedKey(ev.Role, ev.Label))
+			f.actionState.PruneAgent(feedKeyForEvent(ev))
 			f.actionMu.Unlock()
 		}
 	case control.FrameKindStatus:

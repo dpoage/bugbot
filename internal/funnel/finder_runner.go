@@ -63,8 +63,12 @@ const (
 func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, persona string, l Lens, langs []ingest.Language, task string, budget *budgetState) ([]Candidate, finderStatus, *finderPostmortem, error) {
 	sysprompt := finderSystemPrompt(persona, l, langs)
 	start := time.Now()
-	cands, status, outcome, pm, err := f.runFinderWithPrompt(ctx, finder, tools, sysprompt, l.Name, l, task, budget, start)
-	emitAgentFinished(f.opts.Progress, progress.RoleFinder, l.Name, outcome, start, err)
+	// One AgentScope for the whole run, threaded through runFinderWithPrompt so
+	// its tool-call activity and this call's Finished event share the run's
+	// AgentID (see agent_runners.go's activitySinkFor doc).
+	scope := progress.NewAgentScope(f.opts.Progress, progress.RoleFinder, l.Name).Start()
+	cands, status, outcome, pm, err := f.runFinderWithPrompt(ctx, finder, tools, sysprompt, l.Name, l, task, budget, start, scope)
+	emitAgentFinished(scope, outcome, start, err)
 	return cands, status, pm, err
 }
 
@@ -76,7 +80,12 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 // startedAt is the wall-clock time the caller captured before invoking this
 // function; the caller is responsible for emitting KindAgentFinished (with the
 // Candidates count it derives from the returned candidates slice) after this
-// function returns. runFinderWithPrompt only emits KindAgentStarted.
+// function returns. scope is the SAME AgentScope the caller already Started
+// for this run — runFinderWithPrompt neither mints nor Starts a scope itself;
+// it only threads scope into the runner's activity sink so every KindToolCall
+// this run emits carries the run's AgentID, matching the Started/Finished
+// bracket the caller owns (see agent_runners.go's activitySinkFor doc and
+// bugbot-r7ub).
 //
 // The returned *agent.Outcome carries the agent's Usage (InputTokens /
 // OutputTokens / CacheReadInputTokens) that the caller uses to populate the
@@ -95,16 +104,14 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 // (hypothesize) can fold it into the Detail field of the
 // recordFinderUnitWithTimeDetail call. This keeps the recording at a single
 // site and avoids threading a store reference into this function.
-func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState, startedAt time.Time, extraOpts ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, error) {
-	progress.NewAgentScope(f.opts.Progress, progress.RoleFinder, label).Start()
-
+func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState, startedAt time.Time, scope progress.AgentScope, extraOpts ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, error) {
 	// attempt runs one finder pass: it builds the runner (layering any
 	// per-attempt options on top of the standard finder set), runs RunJSON, and
 	// maps the result into candidates or a classified failure + postmortem. It
 	// is invoked once normally and, on a max-tokens-truncation parse failure,
 	// once more at a doubled output cap (bugbot-rwe).
 	attempt := func(extra ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, error) {
-		opts := append([]agent.Option{f.activitySinkFor(progress.RoleFinder, label)}, extraOpts...)
+		opts := append([]agent.Option{f.activitySinkFor(scope)}, extraOpts...)
 		opts = append(opts, extra...)
 		runner := f.newAgentRunner(finder, tools, sysprompt, budget.finderRunnerLimits(f.opts.Limits.FinderLimits), opts...)
 

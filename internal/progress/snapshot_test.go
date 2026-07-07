@@ -704,3 +704,91 @@ func TestSnapshot_RecentActions_RingBound(t *testing.T) {
 		t.Errorf("RecentActions[last] = %q, want grep \"pat4\"", last)
 	}
 }
+
+// TestSnapshot_ConcurrentAgentsSameLabel_CollisionRegression is the
+// bugbot-r7ub regression: two reproducer agents working duplicate open
+// finding titles share (Role, Label). Before AgentID/AgentEventKey, both
+// KindAgentStarted events folded into the SAME agents map entry (keyed by
+// role+label), so:
+//   - only one entry ever appeared in Status.Agents, not two
+//   - a KindToolCall carrying one agent's identity bled its Activity into
+//     the other agent's slot (there was only one slot)
+//   - KindAgentFinished for the FIRST agent to finish deleted the shared
+//     entry out from under the still-running SECOND agent
+//
+// This test demonstrably FAILS on pre-fix code (no AgentID field/keying):
+// both Start events collide into one map entry, so len(Status.Agents) is 1
+// instead of 2 immediately after both start, and the KindToolCall assertion
+// (which checks agent B's Activity is untouched by agent A's tool call)
+// fails because there is only one shared entry both events touch.
+func TestSnapshot_ConcurrentAgentsSameLabel_CollisionRegression(t *testing.T) {
+	clock := time.Unix(80000, 0)
+	now := func() time.Time { return clock }
+	s, path := newTestSnapshot(t, now)
+
+	const dupTitle = "duplicate open finding"
+
+	// Two independent reproducer agents, same role+label, distinct AgentID —
+	// exactly what two AgentScopes minted from NewAgentScope produce for the
+	// same duplicate-titled finding.
+	s.Handle(Event{Kind: KindAgentStarted, Role: RoleReproducer, Label: dupTitle, AgentID: "agent-A", Time: clock})
+	s.Handle(Event{Kind: KindAgentStarted, Role: RoleReproducer, Label: dupTitle, AgentID: "agent-B", Time: clock})
+
+	st := s.acc.Snapshot()
+	if len(st.ActiveAgents) != 2 {
+		t.Fatalf("ActiveAgents = %d, want 2 distinct entries for colliding role+label; got %+v", len(st.ActiveAgents), st.ActiveAgents)
+	}
+	seen := map[string]bool{}
+	for _, a := range st.ActiveAgents {
+		if a.AgentID == "" {
+			t.Fatalf("agent entry missing AgentID: %+v", a)
+		}
+		seen[a.AgentID] = true
+	}
+	if !seen["agent-A"] || !seen["agent-B"] {
+		t.Fatalf("expected distinct AgentIDs agent-A and agent-B, got %+v", st.ActiveAgents)
+	}
+
+	// A KindToolCall carrying agent-A's identity must update ONLY agent-A's
+	// Activity, leaving agent-B's untouched.
+	clock = clock.Add(time.Second)
+	s.Handle(Event{
+		Kind: KindToolCall, Role: RoleReproducer, Label: dupTitle, AgentID: "agent-A",
+		Phase: "start", Tool: "read_file", File: "a.go", Time: clock,
+	})
+	st = s.acc.Snapshot()
+	for _, a := range st.ActiveAgents {
+		switch a.AgentID {
+		case "agent-A":
+			if a.Activity != "read_file a.go" {
+				t.Errorf("agent-A Activity = %q, want %q", a.Activity, "read_file a.go")
+			}
+		case "agent-B":
+			if a.Activity != "" {
+				t.Errorf("agent-B Activity leaked from agent-A's tool call: %q", a.Activity)
+			}
+		}
+	}
+
+	// Finish agent-A: only its entry must be removed; agent-B stays live.
+	clock = clock.Add(time.Second)
+	s.Handle(Event{Kind: KindAgentFinished, Role: RoleReproducer, Label: dupTitle, AgentID: "agent-A", Time: clock})
+	st = s.acc.Snapshot()
+	if len(st.ActiveAgents) != 1 {
+		t.Fatalf("ActiveAgents = %d after agent-A finished, want 1 (agent-B survives); got %+v", len(st.ActiveAgents), st.ActiveAgents)
+	}
+	if st.ActiveAgents[0].AgentID != "agent-B" {
+		t.Fatalf("surviving agent = %q, want agent-B", st.ActiveAgents[0].AgentID)
+	}
+
+	// Sanity: status.json also reflects this via the normal Handle path.
+	clock = clock.Add(2 * time.Second) // past rate-limit window
+	s.Handle(Event{Kind: KindSpendTick, InputTokens: 1, Time: clock})
+	written, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if len(written.ActiveAgents) != 1 || written.ActiveAgents[0].AgentID != "agent-B" {
+		t.Fatalf("status.json ActiveAgents = %+v, want only agent-B", written.ActiveAgents)
+	}
+}
