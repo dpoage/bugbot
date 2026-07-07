@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -135,7 +137,19 @@ func dispatcherOf(disp *engine.Dispatcher) dispatcher {
 // feed's Frames. disp is nil outside Owner mode, disabling the dispatch
 // palette.
 func runProgram(ctx context.Context, feed Feed, disp *engine.Dispatcher) error {
-	p := tea.NewProgram(NewModel(ctx, feed, dispatcherOf(disp)), tea.WithAltScreen(), tea.WithContext(ctx))
+	m := NewModel(ctx, feed, dispatcherOf(disp))
+	// Resolve the repo root from the working directory at launch time.
+	// bugbot tui is run from the target repository root (same convention as
+	// bugbot scan --target ".", the default). os.Getwd at program start is
+	// the authoritative source; a symlink-resolved absolute path is preferred
+	// but we fall back to the raw wd on EvalSymlinks failure.
+	if wd, err := os.Getwd(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(wd); err == nil {
+			wd = resolved
+		}
+		m = m.WithRepoRoot(wd)
+	}
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()
 	return err
 }

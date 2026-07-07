@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -35,6 +36,8 @@ const (
 	contextModeSummary  contextMode = iota // cockpit at-a-glance summary
 	contextModeFindings                    // findings tallies
 	contextModeLeads                       // pending-leads blackboard
+	contextModeSource                      // jump-to-source file view (bugbot-2p8z.9)
+	contextModeGrep                        // grep hit list (bugbot-2p8z.9)
 )
 
 // minWidthForHorizontal is the column threshold below which panes stack
@@ -122,6 +125,41 @@ type Model struct {
 	lastErr    error
 	lastResult string
 	lastOut    string
+
+	// repoRoot is the absolute path of the target repository, used by the
+	// source pane to resolve repo-relative file paths (bugbot-2p8z.9).
+	// Set via WithRepoRoot after construction; defaults to "" (no-op / note
+	// shown in pane). run.go sets it from the working directory at launch.
+	repoRoot string
+
+	// sourceLoadGen is a monotonically-incrementing generation counter; each
+	// new openSourceMsg bumps it so stale async loads are discarded on arrival.
+	sourceLoadGen int
+	// sourceLines is the currently-loaded source file, one ANSI-highlighted
+	// line per element.
+	sourceLines []string
+	// sourceFile is the repo-relative path of the loaded source file.
+	sourceFile string
+	// sourceOffset is the 0-based first visible line in the source view.
+	sourceOffset int
+	// sourceLine/sourceEndLine are the target range to mark (1-based).
+	sourceLine, sourceEndLine int
+	// sourceNote is set when the file cannot be loaded (missing, binary, etc.).
+	sourceNote string
+
+	// grepHits is the currently-loaded grep result set.
+	grepHits []grepHit
+	// grepNote is set when grep returns no results or fails.
+	grepNote string
+	// grepCursor is the selected hit in the grep list.
+	grepCursor int
+	// grepOffset is the first visible hit row (for scrolling).
+	grepOffset int
+	// grepPattern is the pattern used for the current grep (for display).
+	grepPattern string
+	// prevContextMode stores the mode to return to when esc is pressed from
+	// source/grep view.
+	prevContextMode contextMode
 }
 
 // NewModel builds the initial Model for feed. disp is the dispatch
@@ -148,6 +186,15 @@ func NewModel(ctx context.Context, feed Feed, disp dispatcher) Model {
 	m.rosterView = viewport.New(rw, rh)
 	cw, ch := m.paneContextSize()
 	m.contextView = viewport.New(cw, ch)
+	return m
+}
+
+// WithRepoRoot sets the repository root used by the source pane to resolve
+// repo-relative file paths. root is cleaned via filepath.Clean; an empty
+// root disables file opening (the source pane shows a note instead).
+// This is a post-construction setter so NewModel's signature stays stable.
+func (m Model) WithRepoRoot(root string) Model {
+	m.repoRoot = filepath.Clean(root)
 	return m
 }
 
@@ -219,6 +266,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastVerb = msg.verb
 		m.lastErr = msg.err
 		m.lastResult = msg.summary
+		return m, nil
+
+	case openSourceMsg:
+		return m.handleOpenSource(msg)
+
+	case sourceLoadedMsg:
+		// Discard stale loads (superseded by a newer openSourceMsg).
+		if msg.gen != m.sourceLoadGen {
+			return m, nil
+		}
+		m.sourceLines = msg.lines
+		m.sourceFile = msg.file
+		m.sourceLine = msg.line
+		m.sourceEndLine = msg.endLine
+		m.sourceNote = msg.note
+		// Scroll to the target line.
+		if msg.line > 0 {
+			m.sourceOffset = msg.line - 1
+		} else {
+			m.sourceOffset = 0
+		}
+		return m, nil
+
+	case grepLoadedMsg:
+		if msg.gen != m.sourceLoadGen {
+			return m, nil
+		}
+		m.grepHits = msg.hits
+		m.grepNote = msg.note
+		m.grepCursor = 0
+		m.grepOffset = 0
 		return m, nil
 
 	case tea.KeyMsg:
@@ -346,15 +424,37 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, loadTranscriptCmd(m.detailKey, a.TranscriptPath)
 			}
 		}
+		// In grep mode, enter on a hit opens the file.
+		if m.focus == paneContext && m.contextMode == contextModeGrep {
+			if m.grepCursor >= 0 && m.grepCursor < len(m.grepHits) {
+				hit := m.grepHits[m.grepCursor]
+				return m.handleOpenSource(openSourceMsg{
+					File: hit.file,
+					Line: hit.line,
+				})
+			}
+		}
 		return m, nil
 
 	case "m":
 		// Cycle the context pane's sub-mode (summary → findings → leads → summary).
+		// Source/grep modes are entered via openSourceMsg and exited via esc.
+		if m.contextMode == contextModeSource || m.contextMode == contextModeGrep {
+			return m, nil
+		}
 		m.contextMode = (m.contextMode + 1) % 3
 		m.cursor = 0
 		return m, nil
 
 	case "esc":
+		// Source/grep view: return to the previous context mode.
+		if m.focus == paneContext && (m.contextMode == contextModeSource || m.contextMode == contextModeGrep) {
+			m.contextMode = m.prevContextMode
+			if m.contextMode == contextModeSource || m.contextMode == contextModeGrep {
+				m.contextMode = contextModeSummary
+			}
+			return m, nil
+		}
 		if m.filter != "" {
 			m.filter = ""
 			m.cursor = 0
@@ -362,6 +462,54 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// handleOpenSource dispatches an openSourceMsg by bumping the load generation
+// and returning the appropriate async tea.Cmd. When Pattern is non-empty the
+// grep hit-list view is opened; otherwise the file source view.
+func (m Model) handleOpenSource(msg openSourceMsg) (tea.Model, tea.Cmd) {
+	m.prevContextMode = m.contextMode
+	if m.contextMode == contextModeSource || m.contextMode == contextModeGrep {
+		m.prevContextMode = contextModeSummary
+	}
+	m.sourceLoadGen++
+	gen := m.sourceLoadGen
+	m.focus = paneContext
+
+	if msg.Pattern != "" && msg.File == "" {
+		// Grep-only: show hit list.
+		m.contextMode = contextModeGrep
+		m.grepHits = nil
+		m.grepNote = fmt.Sprintf("searching for %q...", msg.Pattern)
+		m.grepPattern = msg.Pattern
+		m.grepCursor = 0
+		m.grepOffset = 0
+		root := m.repoRoot
+		if root == "" {
+			root = "."
+		}
+		return m, func() tea.Msg { return loadGrepCmd(gen, root, msg.Pattern)() }
+	}
+
+	// Source file view (Pattern may also be present but File takes priority).
+	m.contextMode = contextModeSource
+	m.sourceLines = nil
+	m.sourceNote = fmt.Sprintf("loading %s...", msg.File)
+	m.sourceFile = msg.File
+	m.sourceLine = msg.Line
+	m.sourceEndLine = msg.EndLine
+	m.sourceOffset = 0
+
+	if msg.File == "" {
+		m.sourceNote = "no file specified"
+		return m, nil
+	}
+	root := m.repoRoot
+	if root == "" {
+		m.sourceNote = "repo root not configured"
+		return m, nil
+	}
+	return m, func() tea.Msg { return loadSourceCmd(gen, root, msg)() }
 }
 
 // scrollDown advances the focused pane's cursor or viewport down by one row.
@@ -372,9 +520,22 @@ func (m *Model) scrollDown() {
 	case paneDetail:
 		m.transcriptView.LineDown(1)
 	case paneContext:
-		if m.contextMode == contextModeLeads {
+		switch m.contextMode {
+		case contextModeLeads:
 			m.moveCursor(1)
-		} else {
+		case contextModeSource:
+			m.sourceOffset++
+			if m.sourceOffset > len(m.sourceLines)-1 {
+				m.sourceOffset = len(m.sourceLines) - 1
+			}
+			if m.sourceOffset < 0 {
+				m.sourceOffset = 0
+			}
+		case contextModeGrep:
+			if m.grepCursor < len(m.grepHits)-1 {
+				m.grepCursor++
+			}
+		default:
 			m.contextView.LineDown(1)
 		}
 	}
@@ -388,9 +549,19 @@ func (m *Model) scrollUp() {
 	case paneDetail:
 		m.transcriptView.LineUp(1)
 	case paneContext:
-		if m.contextMode == contextModeLeads {
+		switch m.contextMode {
+		case contextModeLeads:
 			m.moveCursor(-1)
-		} else {
+		case contextModeSource:
+			m.sourceOffset--
+			if m.sourceOffset < 0 {
+				m.sourceOffset = 0
+			}
+		case contextModeGrep:
+			if m.grepCursor > 0 {
+				m.grepCursor--
+			}
+		default:
 			m.contextView.LineUp(1)
 		}
 	}
