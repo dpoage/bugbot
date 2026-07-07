@@ -564,12 +564,6 @@ func (m Model) layoutDimensions() (bool, int, int) {
 	return false, m.width, paneH
 }
 
-// transcriptSize implements the legacy helper shape that NewModel calls;
-// returns the same dimensions as paneDetailSize.
-func (m Model) transcriptSize() (int, int) {
-	return m.paneDetailSize()
-}
-
 // transcriptLoadedMsg is the tea.Msg loadTranscriptCmd resolves to. key ties
 // the result back to the detailKey that requested it, so a stale/superseded
 // load is discarded on arrival rather than clobbering the displayed agent's

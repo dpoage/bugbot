@@ -99,10 +99,15 @@ func (m Model) applyPaneBorder(p pane, content string, paneW, paneH int) string 
 	if m.focus == p {
 		style = paneBorderFocused
 	}
-	return style.
-		Width(paneW - 2).
-		Height(paneH - 2).
-		Render(content)
+	w := paneW - 2
+	if w < 1 {
+		w = 1
+	}
+	h := paneH - 2
+	if h < 1 {
+		h = 1
+	}
+	return style.Width(w).Height(h).Render(content)
 }
 
 // ── Roster pane ───────────────────────────────────────────────────────────────

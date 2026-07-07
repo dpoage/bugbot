@@ -377,7 +377,17 @@ func TestView_GoldenMultiPane80x24(t *testing.T) {
 }
 
 // TestView_GoldenMultiPane120x40 is a golden-frame test at the 120×40 size.
+// It also asserts that the 120×40 output differs from the 80×24 output so
+// that the reflow on WindowSizeMsg is actually exercised — not just that both
+// sizes render the same fixed string.
 func TestView_GoldenMultiPane120x40(t *testing.T) {
+	// Render at 80×24 first for the reflow comparison.
+	m80 := NewModel(context.Background(), &fakeFeed{}, nil)
+	next80, _ := m80.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m80 = next80.(Model)
+	m80 = sendFrame(m80, baseFrame())
+	view80 := stripANSI(m80.View())
+
 	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = next.(Model)
@@ -393,6 +403,11 @@ func TestView_GoldenMultiPane120x40(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("120×40 golden view missing %q, got:\n%s", want, got)
 		}
+	}
+
+	// Reflow guard: a wider/taller terminal must produce a different layout.
+	if got == view80 {
+		t.Errorf("120×40 view is identical to 80×24 view — reflow did not change the layout")
 	}
 }
 
