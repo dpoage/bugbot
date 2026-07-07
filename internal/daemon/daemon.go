@@ -123,6 +123,14 @@ type Deps struct {
 	// unconditionally. The hook must never return an error; it degrades
 	// gracefully on any failure. nil is silently skipped.
 	SeedContradictions func(ctx context.Context)
+
+	// Dispatch, when non-nil, is the executor for control-socket dispatch
+	// RPCs (bugbot-2p8z.4): SubmitDispatch enqueues verb/opts and the
+	// scheduler loop calls Dispatch.Dispatch at the next cycle boundary,
+	// serialized with (never concurrent with) an in-flight cycle. nil
+	// disables dispatch entirely — the control socket, if enabled, still
+	// streams events but every dispatch RPC replies with an error.
+	Dispatch Dispatcher
 }
 
 // ScanRunTagger lets the daemon attribute a long-lived client's spend ledger
@@ -226,6 +234,12 @@ type Daemon struct {
 	seedAnalyzers      func(ctx context.Context)
 	seedContradictions func(ctx context.Context)
 
+	// dispatch is the control-socket verb executor (Deps.Dispatch); nil
+	// disables dispatch. dispatchCh is the queue SubmitDispatch posts to and
+	// Run's select loop drains — see dispatch.go.
+	dispatch   Dispatcher
+	dispatchCh chan dispatchJob
+
 	// idleMultiplier is the current backoff multiplier (0 = no backoff). It grows
 	// by one each idle poll up to maxBackoffMultiplier and resets to 0 on any
 	// activity. Written only by the single scheduler goroutine; stored atomically
@@ -302,6 +316,8 @@ func New(deps Deps, cfg DaemonConfig) (*Daemon, error) {
 		publisher:          deps.Publisher,
 		seedAnalyzers:      deps.SeedAnalyzers,
 		seedContradictions: deps.SeedContradictions,
+		dispatch:           deps.Dispatch,
+		dispatchCh:         make(chan dispatchJob, dispatchQueueSize),
 		fopts:              fopts,
 		sharedNav:          sharedNav,
 		sinks:              deps.Sinks,
