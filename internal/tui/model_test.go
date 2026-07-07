@@ -574,3 +574,71 @@ func TestUpdate_TranscriptLoadsFromRealFile(t *testing.T) {
 		}
 	}
 }
+
+// TestIntegration_EnterOnFeedRowOpensSourcePane exercises the full .8 -> .9
+// composition on the merged tree: a structured action-feed row carrying a
+// File target, ENTER in the detail pane's feed mode, the resulting
+// openSourceMsg flowing through Update into handleOpenSource, and the async
+// bounded load resolving into the source view. The two features were built on
+// separate branches against the openSourceMsg contract stub; this is the seam
+// test proving they compose.
+func TestIntegration_EnterOnFeedRowOpensSourcePane(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := "package main\n\nfunc main() {\n\tprintln(\"hi\")\n}\n"
+	if err := os.WriteFile(filepath.Join(root, "src", "main.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewModel(context.Background(), &fakeFeed{}, nil).WithRepoRoot(root)
+	fr := baseFrame()
+	fr.ActionRows = map[string][]ActionRow{
+		agentFeedKey("verifier", "candidate A"): {
+			{Seq: 1, AgentRole: "verifier", AgentLabel: "candidate A", Tool: "read_file",
+				Target: "src/main.go:3", File: "src/main.go", Line: 3, EndLine: 4},
+		},
+	}
+	m = sendFrame(m, fr)
+
+	// Drill into the live agent (roster cursor starts on it): detailMode
+	// defaults to the action feed for live agents.
+	m = sendKey(m, "enter")
+	if m.focus != paneDetail || !m.detailMode {
+		t.Fatalf("after drill-in: focus=%v detailMode=%v, want paneDetail+feed", m.focus, m.detailMode)
+	}
+
+	// ENTER on the feed row emits openSourceMsg; handleOpenSource turns it
+	// into an async bounded load resolving to sourceLoadedMsg. runCmd is
+	// deliberately one-hop, so drive the two-hop chain explicitly.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("enter on feed row returned no cmd, want openSourceMsg emission")
+	}
+	next, cmd = m.Update(cmd()) // openSourceMsg -> handleOpenSource
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatalf("openSourceMsg produced no load cmd (note=%q)", m.sourceNote)
+	}
+	next, _ = m.Update(cmd()) // sourceLoadedMsg -> applied
+	m = next.(Model)
+
+	if m.contextMode != contextModeSource {
+		t.Fatalf("contextMode = %v, want contextModeSource (note=%q)", m.contextMode, m.sourceNote)
+	}
+	if m.sourceFile != "src/main.go" || m.sourceLine != 3 || m.sourceEndLine != 4 {
+		t.Fatalf("source target = %s:%d-%d, want src/main.go:3-4", m.sourceFile, m.sourceLine, m.sourceEndLine)
+	}
+	if m.sourceNote != "" {
+		t.Fatalf("sourceNote = %q, want clean load", m.sourceNote)
+	}
+	if len(m.sourceLines) != 5 {
+		t.Fatalf("loaded %d source lines, want 5", len(m.sourceLines))
+	}
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "src/main.go") {
+		t.Errorf("rendered view missing source pane header src/main.go:\n%s", view)
+	}
+}
