@@ -283,6 +283,25 @@ func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, e
 	st := d.store
 	out := opts.Out
 
+	// Resolve the target repo path the same way every other Dispatcher verb
+	// does (openRepo -> ingest.Open, which validates a git work tree and
+	// resolves to `git rev-parse --show-toplevel`, NOT merely
+	// filepath.Abs). An unset opts.Target (the TUI dispatch palette never
+	// populates it — bugbot-pt83) resolves via ingest.Open("") ==
+	// ingest.Open(cwd), matching every sibling verb; the resolved toplevel
+	// (not just an absolute cwd) matters because repro.New keys dependency
+	// detection, build-system detection, and finding file paths off the
+	// repo ROOT, and a TUI launched from a subdirectory would otherwise
+	// silently repro against the wrong (sub)tree. Without resolving to a
+	// real path at all, BuildReproducer/repro.New rejected an empty
+	// repoDir outright ("repro: empty repoDir") whenever the backlog was
+	// non-empty.
+	repo, err := d.openRepo(ctx, opts.Target)
+	if err != nil {
+		return nil, err
+	}
+	opts.Target = repo.Root()
+
 	// --max overrides the config default; 0 means "use config".
 	batchSize := cfg.Repro.BacklogBatch
 	if opts.MaxN > 0 {
