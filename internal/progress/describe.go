@@ -92,6 +92,21 @@ func describeToolCallBase(ev Event) string {
 			return "status_note: " + ev.Symbol
 		}
 		return "status_note"
+	case "write_repro_file":
+		if ev.File != "" {
+			return "write_repro_file " + ev.File
+		}
+		return "write_repro_file"
+	case "delete_repro_file":
+		if ev.File != "" {
+			return "delete_repro_file " + ev.File
+		}
+		return "delete_repro_file"
+	case "run_repro":
+		if ev.Symbol != "" {
+			return "run_repro " + ev.Symbol
+		}
+		return "run_repro"
 	case "post_lead":
 		return "post_lead"
 	case "summarize_package":

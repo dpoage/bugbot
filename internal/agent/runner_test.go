@@ -437,6 +437,26 @@ func TestExtractToolActivity_Mapping(t *testing.T) {
 			want: ToolActivity{Tool: "status_note", Symbol: "checking parser"},
 		},
 		{
+			name: "write_repro_file",
+			call: llm.ToolCall{Name: "write_repro_file", Arguments: []byte(`{"path":"repro_test.go","contents":"package main"}`)},
+			want: ToolActivity{Tool: "write_repro_file", File: "repro_test.go"},
+		},
+		{
+			name: "delete_repro_file",
+			call: llm.ToolCall{Name: "delete_repro_file", Arguments: []byte(`{"path":"repro_test.go"}`)},
+			want: ToolActivity{Tool: "delete_repro_file", File: "repro_test.go"},
+		},
+		{
+			name: "run_repro",
+			call: llm.ToolCall{Name: "run_repro", Arguments: []byte(`{"cmd":["go","test","./..."]}`)},
+			want: ToolActivity{Tool: "run_repro", Symbol: "go test ./..."},
+		},
+		{
+			name: "run_repro truncates long cmd",
+			call: llm.ToolCall{Name: "run_repro", Arguments: []byte(`{"cmd":["go","test","-run","` + strings.Repeat("x", 130) + `"]}`)},
+			want: ToolActivity{Tool: "run_repro", Symbol: "go test -run " + strings.Repeat("x", 106) + "…"},
+		},
+		{
 			name: "unknown tool",
 			call: llm.ToolCall{Name: "some_custom_tool", Arguments: []byte(`{}`)},
 			want: ToolActivity{Tool: "some_custom_tool"},

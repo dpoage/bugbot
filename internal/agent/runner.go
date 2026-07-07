@@ -623,16 +623,17 @@ func extractToolActivity(call llm.ToolCall) ToolActivity {
 	// Decode the relevant arguments for each tool. Only the fields this tool
 	// can produce are read; unused JSON keys are silently ignored.
 	var args struct {
-		Path      string `json:"path"`
-		Dir       string `json:"dir"`
-		Directory string `json:"directory"`
-		Pattern   string `json:"pattern"`
-		Symbol    string `json:"symbol"`
-		File      string `json:"file"`
-		Line      int    `json:"line"`
-		StartLine int    `json:"start_line"`
-		EndLine   int    `json:"end_line"`
-		Note      string `json:"note"`
+		Path      string   `json:"path"`
+		Dir       string   `json:"dir"`
+		Directory string   `json:"directory"`
+		Pattern   string   `json:"pattern"`
+		Symbol    string   `json:"symbol"`
+		File      string   `json:"file"`
+		Line      int      `json:"line"`
+		StartLine int      `json:"start_line"`
+		EndLine   int      `json:"end_line"`
+		Note      string   `json:"note"`
+		Cmd       []string `json:"cmd"`
 	}
 	_ = json.Unmarshal(call.Arguments, &args)
 
@@ -689,6 +690,16 @@ func extractToolActivity(call llm.ToolCall) ToolActivity {
 			note = string(runes[:119]) + "…"
 		}
 		act.Symbol = note
+	case "write_repro_file", "delete_repro_file":
+		act.File = args.Path
+	case "run_repro":
+		// Argv is joined and truncated to 120 runes (same as status_note).
+		cmd := strings.Join(strings.Fields(strings.Join(args.Cmd, " ")), " ")
+		runes := []rune(cmd)
+		if len(runes) > 120 {
+			cmd = string(runes[:119]) + "…"
+		}
+		act.Symbol = cmd
 	case "post_lead":
 		// No structured fields; Tool="post_lead" is sufficient.
 	default:
