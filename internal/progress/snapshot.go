@@ -97,8 +97,14 @@ type Status struct {
 
 // AgentStatus is one in-flight agent in the snapshot.
 type AgentStatus struct {
-	Role    string    `json:"role"`
-	Label   string    `json:"label"`
+	Role  string `json:"role"`
+	Label string `json:"label"`
+	// AgentID is the run's unique identity (progress.AgentEventKey source),
+	// empty when the accumulator folded events from a pre-identity emitter.
+	// Included so status.json readers and Attach clients can key by run
+	// identity instead of (Role, Label), which collides across concurrent
+	// agents that share a label (e.g. duplicate finding titles).
+	AgentID string    `json:"agent_id,omitempty"`
 	Started time.Time `json:"started"`
 	// Activity is the most recent short note about what this agent is doing,
 	// derived from KindToolCall events via progress.Describe. Empty until the
@@ -285,11 +291,11 @@ func (a *StatusAccumulator) apply(ev Event) (terminal bool) {
 		}
 		s.st.LastEvent = "stage done: " + ev.Stage
 	case KindAgentStarted:
-		s.agents[agentKey(ev.Role, ev.Label)] = AgentStatus{
-			Role: ev.Role, Label: ev.Label, Started: ev.Time,
+		s.agents[AgentEventKey(ev)] = AgentStatus{
+			Role: ev.Role, Label: ev.Label, AgentID: ev.AgentID, Started: ev.Time,
 		}
 	case KindAgentFinished:
-		delete(s.agents, agentKey(ev.Role, ev.Label))
+		delete(s.agents, AgentEventKey(ev))
 		if ev.Role == RoleFinder && ev.Candidates > 0 {
 			s.st.LiveCandidates += ev.Candidates
 		}
@@ -297,7 +303,7 @@ func (a *StatusAccumulator) apply(ev Event) (terminal bool) {
 	case KindToolCall:
 		// Update the activity note in-place only when the agent is already
 		// tracked. A stray/late event must not resurrect a finished agent.
-		if a, ok := s.agents[agentKey(ev.Role, ev.Label)]; ok {
+		if a, ok := s.agents[AgentEventKey(ev)]; ok {
 			line := Describe(ev)
 			a.Activity = line
 			a.ActivityAt = ev.Time
@@ -306,7 +312,7 @@ func (a *StatusAccumulator) apply(ev Event) (terminal bool) {
 			if ev.Phase == "start" {
 				a.RecentActions = pushRing(a.RecentActions, line, recentActionsCap)
 			}
-			s.agents[agentKey(ev.Role, ev.Label)] = a
+			s.agents[AgentEventKey(ev)] = a
 		}
 	case KindReproAttempt:
 		// Same fold as KindToolCall: surface the round as the tracked agent's
@@ -314,10 +320,10 @@ func (a *StatusAccumulator) apply(ev Event) (terminal bool) {
 		// same way it sees tool-call activity), plus LastEvent so it is visible
 		// even once the agent has finished and been removed.
 		note := fmt.Sprintf("attempt %d/%d: %s", ev.Attempt, ev.MaxAttempts, ev.Verdict)
-		if a, ok := s.agents[agentKey(ev.Role, ev.Label)]; ok {
+		if a, ok := s.agents[AgentEventKey(ev)]; ok {
 			a.Activity = note
 			a.ActivityAt = ev.Time
-			s.agents[agentKey(ev.Role, ev.Label)] = a
+			s.agents[AgentEventKey(ev)] = a
 		}
 		s.st.LastEvent = "repro " + note + " — " + ev.Label
 	case KindSpendTick:

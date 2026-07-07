@@ -1012,8 +1012,9 @@ func (m Model) actionFeedVisibleRows() []ActionRow {
 			}
 			return rows
 		}
-		// Owner mode: key by agentFeedKey(role, label) — stable identity for ring lookup.
-		feedKey := agentFeedKey(a.Role, a.Label)
+		// Owner mode: key by feedKeyForAgent(a) — AgentID when set, else
+		// role+label — stable identity for ring lookup.
+		feedKey := feedKeyForAgent(a)
 		return m.actionFeed.VisibleRows(feedKey)
 	}
 	return nil

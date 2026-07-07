@@ -125,7 +125,9 @@ type Frame struct {
 	// ActionRows is the per-agent structured tool-call ring, populated by
 	// LiveFeed (Owner mode) from KindToolCall events. Empty in SnapshotFeed
 	// (Observer) mode — that mode uses AgentView.RecentActions instead.
-	// Keyed by agentFeedKey(role, label) -> ordered rows (oldest first).
+	// Keyed by feedKeyForEvent(ev) — the event's AgentID when set, else
+	// agentFeedKey(role, label) — so concurrent agents sharing a (role,
+	// label) get distinct rings. Look up with feedKeyForAgent(agentView).
 	ActionRows map[string][]ActionRow
 }
 
@@ -186,6 +188,13 @@ type AgentView struct {
 	Label    string // display label: live Status.Label, or "lens[/strategy]" historically
 	Lens     string
 	Strategy string
+
+	// AgentID is the live run's unique identity (progress.AgentEventKey
+	// source), copied from AgentStatus.AgentID. Empty for historical entries
+	// and for live entries folded from a pre-identity emitter. Used to
+	// disambiguate concurrent agents sharing (Role, Label) — see
+	// feedKeyForAgent in actionfeed.go.
+	AgentID string
 
 	Live bool
 

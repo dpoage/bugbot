@@ -179,6 +179,76 @@ func TestActionFeedState_AggregateBounded(t *testing.T) {
 	}
 }
 
+// TestActionFeedState_ConcurrentAgentsSameLabel_CollisionRegression is the
+// bugbot-r7ub regression: two event streams sharing (Role, Label) but with
+// distinct AgentID must fold into DISTINCT rings, and a KindAgentFinished for
+// one agent must prune only that agent's ring. Before feedKeyForEvent (which
+// falls back to agentFeedKey only when AgentID is empty), both streams
+// collided into a single ring keyed by role+label, so this test's ring-count
+// assertions fail on pre-fix code.
+func TestActionFeedState_ConcurrentAgentsSameLabel_CollisionRegression(t *testing.T) {
+	s := newActionFeedState()
+
+	const role, label = "reproducer", "duplicate open finding"
+	evA := toolCallStart(role, label, "read_file", "a.go", 1, 0, "", "")
+	evA.AgentID = "agent-A"
+	evB := toolCallStart(role, label, "read_file", "b.go", 1, 0, "", "")
+	evB.AgentID = "agent-B"
+
+	s.ApplyToolCallEvent(evA)
+	s.ApplyToolCallEvent(evB)
+
+	if len(s.perAgent) != 2 {
+		t.Fatalf("perAgent = %d rings, want 2 distinct rings for colliding role+label", len(s.perAgent))
+	}
+	keyA, keyB := feedKeyForEvent(evA), feedKeyForEvent(evB)
+	if keyA == keyB {
+		t.Fatalf("feedKeyForEvent produced identical keys for distinct AgentIDs: %q", keyA)
+	}
+	rowsA := s.VisibleRows(keyA)
+	if len(rowsA) != 1 || rowsA[0].File != "a.go" {
+		t.Fatalf("agent-A ring = %+v, want single row for a.go", rowsA)
+	}
+	rowsB := s.VisibleRows(keyB)
+	if len(rowsB) != 1 || rowsB[0].File != "b.go" {
+		t.Fatalf("agent-B ring = %+v, want single row for b.go", rowsB)
+	}
+
+	// KindAgentFinished for agent-A must prune ONLY agent-A's ring.
+	finishedA := progress.Event{Kind: progress.KindAgentFinished, Role: role, Label: label, AgentID: "agent-A"}
+	s.PruneAgent(feedKeyForEvent(finishedA))
+	if _, ok := s.perAgent[keyA]; ok {
+		t.Error("agent-A ring should be pruned")
+	}
+	if _, ok := s.perAgent[keyB]; !ok {
+		t.Error("agent-B ring must survive agent-A's finish — same-label sibling wiped out")
+	}
+}
+
+// TestActionFeedState_EmptyAgentID_FoldsUnderRoleLabel verifies the
+// backward-compatibility fallback: events from a pre-identity emitter (no
+// AgentID set, e.g. an old-daemon Attach connection) still fold into ONE
+// ring keyed by role+label, exactly like before this change.
+func TestActionFeedState_EmptyAgentID_FoldsUnderRoleLabel(t *testing.T) {
+	s := newActionFeedState()
+
+	ev1 := toolCallStart("finder", "lensX", "grep", "", 0, 0, "", "foo")
+	ev2 := toolCallStart("finder", "lensX", "read_file", "x.go", 1, 0, "", "")
+	// Both events deliberately carry no AgentID.
+
+	s.ApplyToolCallEvent(ev1)
+	s.ApplyToolCallEvent(ev2)
+
+	if len(s.perAgent) != 1 {
+		t.Fatalf("perAgent = %d rings, want 1 (pre-identity events fold under role+label)", len(s.perAgent))
+	}
+	k := agentFeedKey("finder", "lensX")
+	rows := s.VisibleRows(k)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows folded under role+label fallback key, got %d", len(rows))
+	}
+}
+
 // ── Tool glyph/color coverage ─────────────────────────────────────────────────
 
 func TestToolGlyphs_AllTools(t *testing.T) {

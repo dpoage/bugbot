@@ -223,6 +223,16 @@ type Event struct {
 	Duration time.Duration `json:"duration,omitempty"`
 	Err      string        `json:"err,omitempty"`
 
+	// AgentID uniquely identifies one agent run (minted by AgentScope at
+	// construction, stable across every event that run emits). It disambiguates
+	// concurrent agents that share the same (Role, Label) — e.g. two reproducer
+	// agents working duplicate open finding titles — which Role/Label alone
+	// cannot. Empty when emitted by a pre-identity build (older daemon writing
+	// NDJSON to a control socket, or an event constructed by hand); consumers
+	// MUST fall back to the (Role, Label) composite in that case rather than
+	// treating an empty AgentID as "no agent".
+	AgentID string `json:"agent_id,omitempty"`
+
 	// InputTokens / OutputTokens carry cumulative spend on spend_tick and the
 	// final summary. InputTokens includes cached tokens (the llm.Usage
 	// convention); CacheReadTokens / CacheCreationTokens are the subsets served
