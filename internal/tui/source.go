@@ -368,12 +368,6 @@ func loadGrepCmd(gen int, root, pattern string) func() interface{} {
 	}
 }
 
-// wrapLoadSourceCmd wraps loadSourceCmd result as tea.Msg.
-func wrapLoadSourceCmd(gen int, root string, msg openSourceMsg) func() interface{} {
-	inner := loadSourceCmd(gen, root, msg)
-	return inner
-}
-
 // ── Rendering ────────────────────────────────────────────────────────────────
 
 // renderSourceView renders the source pane content given the loaded lines,
@@ -401,7 +395,7 @@ func renderSourceView(lines []string, file string, targetLine, endLine, offset, 
 	}
 
 	gutterW := len(fmt.Sprintf("%d", len(lines)))
-	linesFmt := fmt.Sprintf("%%-%dd", gutterW) // left-aligned line number
+	linesFmt := fmt.Sprintf("%%%dd", gutterW) // right-aligned line number
 
 	shown := 0
 	for i := offset; i < len(lines) && shown < innerH; i++ {
@@ -412,7 +406,13 @@ func renderSourceView(lines []string, file string, targetLine, endLine, offset, 
 
 		// Highlight target range: apply reverse video on top of chroma ANSI.
 		// We do this by line index, not by regex, so it's safe over ANSI output.
-		inRange := targetLine > 0 && lineNum >= targetLine && (endLine == 0 || lineNum <= endLine)
+		// endLine==0 means single-line: clamp end to targetLine so only that
+		// one line is marked (not the whole file tail).
+		end := endLine
+		if end < targetLine {
+			end = targetLine
+		}
+		inRange := targetLine > 0 && lineNum >= targetLine && lineNum <= end
 		if inRange {
 			// Strip existing ANSI and re-apply highlight style so the mark is visible.
 			plain := progress.StripANSI(lineContent)
@@ -426,16 +426,14 @@ func renderSourceView(lines []string, file string, targetLine, endLine, offset, 
 			}
 			b.WriteString(gutter + highlightStyle.Render(plain) + "\n")
 		} else {
-			// Truncate long lines.
+			// Truncate long lines; strip ANSI for width measurement.
 			maxContent := innerW - gutterW - 2
 			if maxContent < 0 {
 				maxContent = 0
 			}
 			plain := progress.StripANSI(lineContent)
 			if len([]rune(plain)) > maxContent {
-				lineContent = lineContent // keep ANSI for non-highlighted; but truncate plain
-				plain = string([]rune(plain)[:maxContent])
-				lineContent = plain
+				lineContent = string([]rune(plain)[:maxContent])
 			}
 			b.WriteString(gutter + lineContent + "\n")
 		}

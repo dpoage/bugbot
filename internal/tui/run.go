@@ -3,13 +3,12 @@ package tui
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/engine"
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -138,16 +137,13 @@ func dispatcherOf(disp *engine.Dispatcher) dispatcher {
 // palette.
 func runProgram(ctx context.Context, feed Feed, disp *engine.Dispatcher) error {
 	m := NewModel(ctx, feed, dispatcherOf(disp))
-	// Resolve the repo root from the working directory at launch time.
-	// bugbot tui is run from the target repository root (same convention as
-	// bugbot scan --target ".", the default). os.Getwd at program start is
-	// the authoritative source; a symlink-resolved absolute path is preferred
-	// but we fall back to the raw wd on EvalSymlinks failure.
-	if wd, err := os.Getwd(); err == nil {
-		if resolved, err := filepath.EvalSymlinks(wd); err == nil {
-			wd = resolved
-		}
-		m = m.WithRepoRoot(wd)
+	// Resolve the repo root via ingest.Open (git rev-parse --show-toplevel),
+	// matching every other subsystem that resolves agent file paths against the
+	// git top-level. Launching from a subdirectory or in a non-git directory
+	// degrades gracefully: WithRepoRoot is skipped and the source pane shows a
+	// note rather than resolving against a wrong directory.
+	if repo, err := ingest.Open(ctx, "."); err == nil {
+		m = m.WithRepoRoot(repo.Root())
 	}
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()

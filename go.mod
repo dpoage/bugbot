@@ -3,6 +3,7 @@ module github.com/dpoage/bugbot
 go 1.25.0
 
 require (
+	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/anthropics/anthropic-sdk-go v1.50.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
@@ -21,7 +22,6 @@ require (
 	cloud.google.com/go v0.116.0 // indirect
 	cloud.google.com/go/auth v0.9.3 // indirect
 	cloud.google.com/go/compute/metadata v0.5.0 // indirect
-	github.com/alecthomas/chroma/v2 v2.27.0 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect

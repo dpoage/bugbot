@@ -417,10 +417,10 @@ func TestSourceEsc_ReturnsToPrevMode(t *testing.T) {
 		t.Fatalf("expected contextModeSource, got %v", m.contextMode)
 	}
 
-	// Press esc — should return to findings mode.
+	// Press esc — should return to the prior mode (contextModeFindings).
 	m = sendKey(m, "esc")
-	if m.contextMode == contextModeSource {
-		t.Fatalf("esc did not exit source mode")
+	if m.contextMode != contextModeFindings {
+		t.Fatalf("esc should restore prior mode (findings), got %v", m.contextMode)
 	}
 }
 
@@ -445,5 +445,64 @@ func TestOpenSourceMsg_PathEscape_Note(t *testing.T) {
 	}
 	if len(m.sourceLines) != 0 {
 		t.Fatal("expected no lines for escaping path")
+	}
+}
+
+// ── N3: additional path-safety cases ─────────────────────────────────────────
+
+// TestResolveSourcePath_EscapeAfterClean checks that "a/../../etc/passwd"
+// (which Clean reduces to "../etc/passwd") is rejected.
+func TestResolveSourcePath_EscapeAfterClean(t *testing.T) {
+	root := t.TempDir()
+	_, err := resolveSourcePath(root, "a/../../etc/passwd")
+	if err == nil {
+		t.Fatal("expected error for path that escapes root after Clean, got nil")
+	}
+}
+
+// TestResolveSourcePath_SymlinkEscape checks that a symlink inside the repo
+// that points outside the root is rejected.
+func TestResolveSourcePath_SymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	// Create a symlink inside root pointing to outside.
+	link := filepath.Join(root, "escape_link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skip("symlinks not supported on this filesystem:", err)
+	}
+	_, err := resolveSourcePath(root, "escape_link")
+	if err == nil {
+		t.Fatal("expected error for symlink escaping root, got nil")
+	}
+}
+
+// ── B2: renderSourceView marks only the target line when endLine==0 ───────────
+
+// TestRenderSourceView_SingleLineMarked verifies that endLine==0 marks ONLY
+// the target line and not the entire file tail. Because lipgloss emits no ANSI
+// in headless tests (no TTY / no color profile), we test the structural
+// invariant: end=0 must clamp to targetLine, so the output equals end=targetLine
+// and "line six" (line 6) still appears verbatim in the render.
+func TestRenderSourceView_SingleLineMarked(t *testing.T) {
+	lines := []string{"line one", "line two", "line three", "line four", "line five target", "line six"}
+	// target=5, end=0 → end clamped to 5; must equal end=5 explicitly.
+	outEnd0 := renderSourceView(lines, "test.go", 5, 0, 0, 120, 20)
+	outEnd5 := renderSourceView(lines, "test.go", 5, 5, 0, 120, 20)
+	if stripANSI(outEnd0) != stripANSI(outEnd5) {
+		t.Fatalf("end=0 and end=5 must produce identical output (clamping);\nend=0:\n%s\nend=5:\n%s",
+			stripANSI(outEnd0), stripANSI(outEnd5))
+	}
+	// "line six" must not be swallowed by the highlight range (old bug: endLine==0
+	// kept the `endLine==0 || lineNum<=endLine` arm always true, highlighting EOF+).
+	if !strings.Contains(stripANSI(outEnd0), "line six") {
+		t.Fatal("line six must appear in output; end=0 must not mark entire file tail")
+	}
+	if !strings.Contains(stripANSI(outEnd0), "line five target") {
+		t.Fatal("line five target must appear in output")
+	}
+	// Cross-check: end=6 renders both lines 5 and 6 (both present).
+	outEnd6 := renderSourceView(lines, "test.go", 5, 6, 0, 120, 20)
+	if !strings.Contains(stripANSI(outEnd6), "line five target") || !strings.Contains(stripANSI(outEnd6), "line six") {
+		t.Fatal("end=6 must render both line five target and line six")
 	}
 }
