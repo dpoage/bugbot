@@ -1,6 +1,7 @@
 package progress
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -392,10 +393,10 @@ func TestSnapshot_LiveTriagedCounter(t *testing.T) {
 	}
 }
 
-// TestSnapshot_AgentActivity_UpdatesTrackedAgent verifies that a KindAgentActivity
+// TestSnapshot_ToolCall_UpdatesTrackedAgent verifies that a KindToolCall
 // event sets Activity and ActivityAt on the matching in-flight agent and that
 // the fields survive refreshAgents into the persisted snapshot.
-func TestSnapshot_AgentActivity_UpdatesTrackedAgent(t *testing.T) {
+func TestSnapshot_ToolCall_UpdatesTrackedAgent(t *testing.T) {
 	clock := time.Unix(50000, 0)
 	now := func() time.Time { return clock }
 	s, path := newTestSnapshot(t, now)
@@ -405,7 +406,7 @@ func TestSnapshot_AgentActivity_UpdatesTrackedAgent(t *testing.T) {
 
 	clock = clock.Add(2 * time.Second) // past rate-limit window
 	actAt := clock
-	s.Handle(Event{Kind: KindAgentActivity, Role: RoleFinder, Label: "lensA", Activity: "reading main.go", Time: actAt})
+	s.Handle(Event{Kind: KindToolCall, Role: RoleFinder, Label: "lensA", Phase: "start", Tool: "read_file", File: "main.go", Time: actAt})
 
 	// Force a write with a non-terminal event after the rate-limit window.
 	clock = clock.Add(2 * time.Second)
@@ -419,18 +420,19 @@ func TestSnapshot_AgentActivity_UpdatesTrackedAgent(t *testing.T) {
 		t.Fatalf("ActiveAgents = %d, want 1", len(st.ActiveAgents))
 	}
 	a := st.ActiveAgents[0]
-	if a.Activity != "reading main.go" {
-		t.Errorf("Activity = %q, want %q", a.Activity, "reading main.go")
+	wantActivity := "read_file main.go"
+	if a.Activity != wantActivity {
+		t.Errorf("Activity = %q, want %q", a.Activity, wantActivity)
 	}
 	if !a.ActivityAt.Equal(actAt) {
 		t.Errorf("ActivityAt = %v, want %v", a.ActivityAt, actAt)
 	}
 }
 
-// TestSnapshot_AgentActivity_IgnoresUntracked verifies that a KindAgentActivity
+// TestSnapshot_ToolCall_IgnoresUntracked verifies that a KindToolCall
 // event for an agent that is not in the tracked-agents map (e.g. a stray or
 // post-finish event) does not resurrect a finished agent or create a new one.
-func TestSnapshot_AgentActivity_IgnoresUntracked(t *testing.T) {
+func TestSnapshot_ToolCall_IgnoresUntracked(t *testing.T) {
 	clock := time.Unix(51000, 0)
 	now := func() time.Time { return clock }
 	s, path := newTestSnapshot(t, now)
@@ -439,13 +441,13 @@ func TestSnapshot_AgentActivity_IgnoresUntracked(t *testing.T) {
 	s.Handle(Event{Kind: KindAgentStarted, Role: RoleFinder, Label: "lensB", Time: clock})
 	s.Handle(Event{Kind: KindAgentFinished, Role: RoleFinder, Label: "lensB", Time: clock})
 
-	// A stray activity event for the now-finished agent.
+	// A stray tool_call for the now-finished agent.
 	clock = clock.Add(2 * time.Second)
-	s.Handle(Event{Kind: KindAgentActivity, Role: RoleFinder, Label: "lensB", Activity: "stray", Time: clock})
+	s.Handle(Event{Kind: KindToolCall, Role: RoleFinder, Label: "lensB", Phase: "start", Tool: "read_file", File: "stray.go", Time: clock})
 
-	// Activity for a never-started agent.
+	// tool_call for a never-started agent.
 	clock = clock.Add(2 * time.Second)
-	s.Handle(Event{Kind: KindAgentActivity, Role: RoleFinder, Label: "ghost", Activity: "ghost activity", Time: clock})
+	s.Handle(Event{Kind: KindToolCall, Role: RoleFinder, Label: "ghost", Phase: "start", Tool: "grep", Pattern: "ghost", Time: clock})
 
 	// Force a write.
 	clock = clock.Add(2 * time.Second)
@@ -456,14 +458,14 @@ func TestSnapshot_AgentActivity_IgnoresUntracked(t *testing.T) {
 		t.Fatalf("read status: %v", err)
 	}
 	if len(st.ActiveAgents) != 0 {
-		t.Errorf("stray activity must not resurrect finished agent; got %+v", st.ActiveAgents)
+		t.Errorf("stray tool_call must not resurrect finished agent; got %+v", st.ActiveAgents)
 	}
 }
 
-// TestSnapshot_AgentActivity_SurvivesRefreshAgents verifies that the Activity
+// TestSnapshot_ToolCall_SurvivesRefreshAgents verifies that the Activity
 // and ActivityAt fields survive the refreshAgents pass (i.e. they are not
 // lost when the sorted slice is rebuilt from the map).
-func TestSnapshot_AgentActivity_SurvivesRefreshAgents(t *testing.T) {
+func TestSnapshot_ToolCall_SurvivesRefreshAgents(t *testing.T) {
 	clock := time.Unix(52000, 0)
 	now := func() time.Time { return clock }
 	s, path := newTestSnapshot(t, now)
@@ -473,7 +475,7 @@ func TestSnapshot_AgentActivity_SurvivesRefreshAgents(t *testing.T) {
 
 	actAt := clock.Add(time.Second)
 	clock = actAt
-	s.Handle(Event{Kind: KindAgentActivity, Role: RoleFinder, Label: "lensC", Activity: "grepping \"foo\"", Time: actAt})
+	s.Handle(Event{Kind: KindToolCall, Role: RoleFinder, Label: "lensC", Phase: "start", Tool: "grep", Pattern: "foo", Time: actAt})
 
 	clock = clock.Add(2 * time.Second)
 	s.Handle(Event{Kind: KindScanFinished, ScanKind: "sweep", Time: clock}) // terminal => always writes
@@ -482,15 +484,13 @@ func TestSnapshot_AgentActivity_SurvivesRefreshAgents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read status: %v", err)
 	}
-	// scan_finished does not remove agents from the map (only KindAgentFinished does).
-	// The snapshot will still reflect the tracked agents. What matters is the Activity
-	// field survived refreshAgents on the terminal write.
 	found := false
 	for _, a := range st.ActiveAgents {
 		if a.Role == RoleFinder && a.Label == "lensC" {
 			found = true
-			if a.Activity != `grepping "foo"` {
-				t.Errorf("Activity not preserved through refreshAgents: got %q", a.Activity)
+			wantActivity := `grep "foo"`
+			if a.Activity != wantActivity {
+				t.Errorf("Activity not preserved through refreshAgents: got %q, want %q", a.Activity, wantActivity)
 			}
 			if !a.ActivityAt.Equal(actAt) {
 				t.Errorf("ActivityAt not preserved through refreshAgents: got %v, want %v", a.ActivityAt, actAt)
@@ -506,7 +506,7 @@ func TestSnapshot_AgentActivity_SurvivesRefreshAgents(t *testing.T) {
 	s2.Handle(Event{Kind: KindAgentStarted, Role: RoleFinder, Label: "lensD", Time: clock})
 	clock = clock.Add(2 * time.Second)
 	actAt2 := clock
-	s2.Handle(Event{Kind: KindAgentActivity, Role: RoleFinder, Label: "lensD", Activity: "navigating Foo", Time: actAt2})
+	s2.Handle(Event{Kind: KindToolCall, Role: RoleFinder, Label: "lensD", Phase: "start", Tool: "find_definition", Symbol: "Foo", Time: actAt2})
 	clock = clock.Add(2 * time.Second)
 	s2.Handle(Event{Kind: KindStageStarted, Stage: StagePersist, Time: clock}) // non-terminal write after interval
 
@@ -517,8 +517,9 @@ func TestSnapshot_AgentActivity_SurvivesRefreshAgents(t *testing.T) {
 	if len(st2.ActiveAgents) != 1 {
 		t.Fatalf("expected 1 active agent, got %d", len(st2.ActiveAgents))
 	}
-	if st2.ActiveAgents[0].Activity != "navigating Foo" {
-		t.Errorf("Activity = %q, want %q", st2.ActiveAgents[0].Activity, "navigating Foo")
+	wantActivity2 := "find_definition Foo"
+	if st2.ActiveAgents[0].Activity != wantActivity2 {
+		t.Errorf("Activity = %q, want %q", st2.ActiveAgents[0].Activity, wantActivity2)
 	}
 	if !st2.ActiveAgents[0].ActivityAt.Equal(actAt2) {
 		t.Errorf("ActivityAt = %v, want %v", st2.ActiveAgents[0].ActivityAt, actAt2)
@@ -527,7 +528,7 @@ func TestSnapshot_AgentActivity_SurvivesRefreshAgents(t *testing.T) {
 
 // TestSnapshot_ReproAttempt_UpdatesTrackedAgentAndLastEvent verifies that a
 // KindReproAttempt event folds into the matching tracked agent's Activity
-// (same slot as KindAgentActivity) and always sets Status.LastEvent, so
+// (same slot as KindToolCall) and always sets Status.LastEvent, so
 // `bugbot status` surfaces repro round progress.
 func TestSnapshot_ReproAttempt_UpdatesTrackedAgentAndLastEvent(t *testing.T) {
 	clock := time.Unix(53000, 0)
@@ -651,5 +652,55 @@ func TestSnapshot_ToolUnhealthy_AggregatesByMaxSeverity(t *testing.T) {
 	}
 	if !th.LastAt.After(lowAt) {
 		t.Errorf("LastAt should be after lowAt; got %v, lowAt %v", th.LastAt, lowAt)
+	}
+}
+
+// TestSnapshot_RecentActions_RingBound verifies that pushing more than
+// recentActionsCap (8) Phase=start KindToolCall events for one agent keeps
+// only the 8 newest entries, newest-first.
+func TestSnapshot_RecentActions_RingBound(t *testing.T) {
+	clock := time.Unix(70000, 0)
+	now := func() time.Time { return clock }
+	s, path := newTestSnapshot(t, now)
+
+	s.Handle(Event{Kind: KindAgentStarted, Role: RoleFinder, Label: "ring-test", Time: clock})
+
+	const total = 12 // deliberately more than recentActionsCap (8)
+	for i := 0; i < total; i++ {
+		clock = clock.Add(time.Millisecond)
+		s.Handle(Event{
+			Kind:    KindToolCall,
+			Role:    RoleFinder,
+			Label:   "ring-test",
+			Phase:   "start",
+			Tool:    "grep",
+			Pattern: fmt.Sprintf("pat%d", i),
+			Time:    clock,
+		})
+	}
+
+	// Force a write past the rate-limit window so the snapshot is persisted.
+	clock = clock.Add(2 * time.Second)
+	s.Handle(Event{Kind: KindSpendTick, InputTokens: 1, Time: clock})
+
+	st, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if len(st.ActiveAgents) != 1 {
+		t.Fatalf("ActiveAgents = %d, want 1", len(st.ActiveAgents))
+	}
+	ra := st.ActiveAgents[0].RecentActions
+	if len(ra) != recentActionsCap {
+		t.Errorf("RecentActions len = %d, want %d (ring bound)", len(ra), recentActionsCap)
+	}
+	// Newest-first: index 0 must be the last pattern pushed (pat11).
+	if len(ra) > 0 && ra[0] != `grep "pat11"` {
+		t.Errorf("RecentActions[0] = %q, want grep \"pat11\" (newest first)", ra[0])
+	}
+	// Oldest surviving entry must be pat4 (total-cap = 12-8 = 4th oldest pushed).
+	last := ra[len(ra)-1]
+	if last != `grep "pat4"` {
+		t.Errorf("RecentActions[last] = %q, want grep \"pat4\"", last)
 	}
 }

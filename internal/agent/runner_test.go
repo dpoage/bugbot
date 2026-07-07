@@ -358,138 +358,158 @@ func TestRun_AccumulatesCacheUsage(t *testing.T) {
 	}
 }
 
-// TestToolCallActivity_Mapping verifies the tool-name → human-text mapping for
-// every branch documented in the spec.
-func TestToolCallActivity_Mapping(t *testing.T) {
+// TestExtractToolActivity_Mapping verifies the structured extractor populates
+// the correct ToolActivity fields for each tool type.
+func TestExtractToolActivity_Mapping(t *testing.T) {
 	tests := []struct {
-		name     string
-		calls    []llm.ToolCall
-		wantSub  string // must appear as substring
-		wantNone bool   // empty calls => ""
+		name string
+		call llm.ToolCall
+		want ToolActivity
 	}{
 		{
-			name:     "empty",
-			calls:    nil,
-			wantNone: true,
+			name: "read_file with path and range",
+			call: llm.ToolCall{Name: "read_file", Arguments: []byte(`{"path":"cmd/main.go","start_line":10,"end_line":40}`)},
+			want: ToolActivity{Tool: "read_file", File: "cmd/main.go", Line: 10, EndLine: 40},
 		},
 		{
-			name:    "read_file",
-			calls:   []llm.ToolCall{{Name: "read_file", Arguments: []byte(`{"path":"cmd/main.go"}`)}},
-			wantSub: "reading cmd/main.go",
+			name: "read_file no path",
+			call: llm.ToolCall{Name: "read_file", Arguments: []byte(`{}`)},
+			want: ToolActivity{Tool: "read_file"},
 		},
 		{
-			name:    "read_file no path",
-			calls:   []llm.ToolCall{{Name: "read_file", Arguments: []byte(`{}`)}},
-			wantSub: "reading file",
+			name: "read_symbol",
+			call: llm.ToolCall{Name: "read_symbol", Arguments: []byte(`{"symbol":"Runner","path":"agent.go"}`)},
+			want: ToolActivity{Tool: "read_symbol", Symbol: "Runner", File: "agent.go"},
 		},
 		{
-			name:    "list_dir",
-			calls:   []llm.ToolCall{{Name: "list_dir", Arguments: []byte(`{"dir":"internal/agent"}`)}},
-			wantSub: "listing internal/agent",
+			name: "grep with pattern and dir",
+			call: llm.ToolCall{Name: "grep", Arguments: []byte(`{"pattern":"TODO","dir":"internal/"}`)},
+			want: ToolActivity{Tool: "grep", Pattern: "TODO", File: "internal/"},
 		},
 		{
-			name:    "list_dir via directory field",
-			calls:   []llm.ToolCall{{Name: "list_dir", Arguments: []byte(`{"directory":"src"}`)}},
-			wantSub: "listing src",
+			name: "find_definition",
+			call: llm.ToolCall{Name: "find_definition", Arguments: []byte(`{"symbol":"Runner","file":"runner.go"}`)},
+			want: ToolActivity{Tool: "find_definition", Symbol: "Runner", File: "runner.go"},
 		},
 		{
-			name:    "grep",
-			calls:   []llm.ToolCall{{Name: "grep", Arguments: []byte(`{"pattern":"TODO"}`)}},
-			wantSub: `grepping "TODO"`,
+			name: "find_references",
+			call: llm.ToolCall{Name: "find_references", Arguments: []byte(`{"symbol":"Emit"}`)},
+			want: ToolActivity{Tool: "find_references", Symbol: "Emit"},
 		},
 		{
-			name:    "find_definition",
-			calls:   []llm.ToolCall{{Name: "find_definition", Arguments: []byte(`{"symbol":"Runner"}`)}},
-			wantSub: "navigating Runner",
+			name: "find_implementations",
+			call: llm.ToolCall{Name: "find_implementations", Arguments: []byte(`{"symbol":"Tool"}`)},
+			want: ToolActivity{Tool: "find_implementations", Symbol: "Tool"},
 		},
 		{
-			name:    "find_references",
-			calls:   []llm.ToolCall{{Name: "find_references", Arguments: []byte(`{"symbol":"Emit"}`)}},
-			wantSub: "navigating Emit",
+			name: "find_usages",
+			call: llm.ToolCall{Name: "find_usages", Arguments: []byte(`{"symbol":"Sink"}`)},
+			want: ToolActivity{Tool: "find_usages", Symbol: "Sink"},
 		},
 		{
-			name:    "find_implementations",
-			calls:   []llm.ToolCall{{Name: "find_implementations", Arguments: []byte(`{"symbol":"Tool"}`)}},
-			wantSub: "navigating Tool",
+			name: "list_dir",
+			call: llm.ToolCall{Name: "list_dir", Arguments: []byte(`{"dir":"internal/agent"}`)},
+			want: ToolActivity{Tool: "list_dir", File: "internal/agent"},
 		},
 		{
-			name:    "read_symbol",
-			calls:   []llm.ToolCall{{Name: "read_symbol", Arguments: []byte(`{"symbol":"Sink"}`)}},
-			wantSub: "navigating Sink",
+			name: "list_dir via directory field",
+			call: llm.ToolCall{Name: "list_dir", Arguments: []byte(`{"directory":"src"}`)},
+			want: ToolActivity{Tool: "list_dir", File: "src"},
 		},
 		{
-			name:    "sandbox_exec",
-			calls:   []llm.ToolCall{{Name: "sandbox_exec", Arguments: []byte(`{}`)}},
-			wantSub: "running sandbox",
+			name: "list_dir empty defaults to dot",
+			call: llm.ToolCall{Name: "list_dir", Arguments: []byte(`{}`)},
+			want: ToolActivity{Tool: "list_dir", File: "."},
 		},
 		{
-			name:    "post_lead",
-			calls:   []llm.ToolCall{{Name: "post_lead", Arguments: []byte(`{}`)}},
-			wantSub: "posting lead",
+			name: "sandbox_exec",
+			call: llm.ToolCall{Name: "sandbox_exec", Arguments: []byte(`{}`)},
+			want: ToolActivity{Tool: "sandbox_exec", Symbol: "sandbox"},
 		},
 		{
-			name:    "unknown tool uses name",
-			calls:   []llm.ToolCall{{Name: "some_custom_tool", Arguments: []byte(`{}`)}},
-			wantSub: "some_custom_tool",
+			name: "post_lead",
+			call: llm.ToolCall{Name: "post_lead", Arguments: []byte(`{}`)},
+			want: ToolActivity{Tool: "post_lead"},
+		},
+		{
+			name: "status_note",
+			call: llm.ToolCall{Name: "status_note", Arguments: []byte(`{"note":"checking parser"}`)},
+			want: ToolActivity{Tool: "status_note", Symbol: "checking parser"},
+		},
+		{
+			name: "unknown tool",
+			call: llm.ToolCall{Name: "some_custom_tool", Arguments: []byte(`{}`)},
+			want: ToolActivity{Tool: "some_custom_tool"},
+		},
+		{
+			name: "malformed JSON args",
+			call: llm.ToolCall{Name: "read_file", Arguments: []byte(`not-valid-json`)},
+			want: ToolActivity{Tool: "read_file"}, // zero fields; no panic
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := toolCallActivity(tc.calls)
-			if tc.wantNone {
-				if got != "" {
-					t.Errorf("toolCallActivity(nil) = %q, want empty", got)
-				}
-				return
+			got := extractToolActivity(tc.call)
+			if got.Tool != tc.want.Tool {
+				t.Errorf("Tool = %q, want %q", got.Tool, tc.want.Tool)
 			}
-			if !strings.Contains(got, tc.wantSub) {
-				t.Errorf("toolCallActivity(%v) = %q, want substring %q", tc.calls[0].Name, got, tc.wantSub)
+			if got.File != tc.want.File {
+				t.Errorf("File = %q, want %q", got.File, tc.want.File)
+			}
+			if got.Symbol != tc.want.Symbol {
+				t.Errorf("Symbol = %q, want %q", got.Symbol, tc.want.Symbol)
+			}
+			if got.Pattern != tc.want.Pattern {
+				t.Errorf("Pattern = %q, want %q", got.Pattern, tc.want.Pattern)
+			}
+			if got.Line != tc.want.Line {
+				t.Errorf("Line = %d, want %d", got.Line, tc.want.Line)
+			}
+			if got.EndLine != tc.want.EndLine {
+				t.Errorf("EndLine = %d, want %d", got.EndLine, tc.want.EndLine)
 			}
 		})
 	}
 }
 
-// TestToolCallActivity_Truncation verifies that a very long tool-call argument
-// (e.g. a very long path) is truncated to 80 runes.
-func TestToolCallActivity_Truncation(t *testing.T) {
-	longPath := strings.Repeat("a", 200)
-	calls := []llm.ToolCall{{Name: "read_file", Arguments: []byte(`{"path":"` + longPath + `"}`)}}
-	got := toolCallActivity(calls)
-	runes := []rune(got)
-	if len(runes) > 80 {
-		t.Errorf("toolCallActivity truncation: got %d runes, want ≤80", len(runes))
-	}
-}
-
-// TestWithActivitySink_CalledPerTurn verifies that WithActivitySink installs a
-// sink that is called once per tool-call turn (not on clean finish turns).
-func TestWithActivitySink_CalledPerTurn(t *testing.T) {
+// TestWithActivitySink_CalledPerCallStartDone verifies that WithActivitySink
+// emits start+done pairs per tool call (not once per turn) and that Phase is
+// set correctly.
+func TestWithActivitySink_CalledPerCallStartDone(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"hi"}`, 10, 4),
 		toolResp("c2", "echo", `{"v":"bye"}`, 8, 3),
 		textResp("done", 5, 2),
 	)
 
-	var mu strings.Builder
-	var calls []string
-	sink := func(activity string) {
-		_ = mu // appease the race detector; Builder is not concurrent but sink is called sequentially
-		calls = append(calls, activity)
+	var acts []ToolActivity
+	sink := func(act ToolActivity) {
+		acts = append(acts, act)
 	}
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithActivitySink(sink))
 	_, err := r.Run(context.Background(), "task")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	// Two tool-call turns → two sink calls.
-	if len(calls) != 2 {
-		t.Errorf("sink called %d times, want 2 (one per tool-call turn)", len(calls))
+	// Two tool-call turns, one call each => 4 events: start+done per call.
+	if len(acts) != 4 {
+		t.Errorf("sink called %d times, want 4 (start+done per call × 2 turns)", len(acts))
 	}
-	// Each call should be non-empty (derived from "echo" → default name fallback).
-	for i, c := range calls {
-		if c == "" {
-			t.Errorf("sink call %d was empty", i)
+	phases := make([]string, len(acts))
+	for i, a := range acts {
+		phases[i] = a.Phase
+		if a.Tool == "" {
+			t.Errorf("act[%d].Tool is empty", i)
+		}
+	}
+	wantPhases := []string{"start", "done", "start", "done"}
+	for i, p := range wantPhases {
+		if i >= len(phases) {
+			break
+		}
+		if phases[i] != p {
+			t.Errorf("acts[%d].Phase = %q, want %q", i, phases[i], p)
 		}
 	}
 }
@@ -505,6 +525,38 @@ func TestWithActivitySink_NilIsNoop(t *testing.T) {
 	_, err := r.Run(context.Background(), "task")
 	if err != nil {
 		t.Fatalf("Run without sink: %v", err)
+	}
+}
+
+// TestWithActivitySink_DoneErrOnFailingTool verifies that when a tool returns
+// an error the done event carries Err (non-empty) and Count=0.
+func TestWithActivitySink_DoneErrOnFailingTool(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "boom", `{}`, 5, 2),
+		textResp("recovered", 3, 1),
+	)
+	var acts []ToolActivity
+	r := NewRunner(fc, []Tool{echoTool{name: "boom", failMsg: "disk on fire"}}, "sys",
+		WithActivitySink(func(act ToolActivity) { acts = append(acts, act) }))
+	_, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(acts) != 2 {
+		t.Fatalf("sink called %d times, want 2 (start+done)", len(acts))
+	}
+	start, done := acts[0], acts[1]
+	if start.Phase != "start" {
+		t.Errorf("acts[0].Phase = %q, want start", start.Phase)
+	}
+	if done.Phase != "done" {
+		t.Errorf("acts[1].Phase = %q, want done", done.Phase)
+	}
+	if done.Err == "" {
+		t.Error("done.Err is empty; want the tool error string")
+	}
+	if done.Count != 0 {
+		t.Errorf("done.Count = %d, want 0 on error", done.Count)
 	}
 }
 

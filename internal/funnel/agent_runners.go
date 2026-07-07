@@ -69,25 +69,31 @@ func (f *Funnel) newAgentRunner(client llm.Client, tools []agent.Tool, systemPro
 	return agent.NewRunner(client, tools, systemPrompt, opts...)
 }
 
-// activitySinkFor returns a WithActivitySink option that routes each turn's
-// tool-call note to the funnel's progress sink as a KindAgentActivity event for
+// activitySinkFor returns a WithActivitySink option that routes each tool call's
+// structured activity to the funnel's progress sink as a KindToolCall event for
 // (role, label), via the shared progress.AgentScope seam. A nil progress sink
 // makes emission a no-op (progress.Emit handles nil sinks).
 func (f *Funnel) activitySinkFor(role, label string) agent.Option {
-	return agent.WithActivitySink(progress.NewAgentScope(f.opts.Progress, role, label).ActivitySink())
+	scope := progress.NewAgentScope(f.opts.Progress, role, label)
+	return agent.WithActivitySink(func(act agent.ToolActivity) {
+		scope.EmitToolCall(act.Phase, act.Tool, act.File, act.Line, act.EndLine, act.Symbol, act.Pattern, act.Count, act.Err)
+	})
 }
 
 // maybeStatusNoteTool returns a status_note Tool when f.opts.Features.StatusNotes is
 // true, or nil when the flag is off. Callers append the non-nil result to
 // their tool slice before building the runner; when nil, the tool is absent
 // and the tool set is byte-identical to the pre-feature state. The tool's notes
-// flow through the same AgentScope activity sink as automatic tool-call notes,
-// so manual and derived activity render identically.
+// flow through the same AgentScope EmitToolCall seam as automatic tool-call
+// events, so manual and derived activity render identically.
 func (f *Funnel) maybeStatusNoteTool(role, label string) agent.Tool {
 	if !f.opts.Features.StatusNotes {
 		return nil
 	}
-	return agent.NewStatusNoteTool(progress.NewAgentScope(f.opts.Progress, role, label).ActivitySink())
+	scope := progress.NewAgentScope(f.opts.Progress, role, label)
+	return agent.NewStatusNoteTool(func(act agent.ToolActivity) {
+		scope.EmitToolCall(act.Phase, act.Tool, act.File, act.Line, act.EndLine, act.Symbol, act.Pattern, act.Count, act.Err)
+	})
 }
 
 // toolIssueMu guards Result.Stats.ToolIssues, which the finder and verify
