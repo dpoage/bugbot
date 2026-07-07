@@ -7,8 +7,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -191,84 +189,89 @@ func TestGeometry_GrepPaneDoesNotExceedBounds(t *testing.T) {
 // ── Scroll-isolation regression ───────────────────────────────────────────────
 
 // TestGeometry_ScrollSourceDoesNotShiftSiblings is the core regression for
-// bugbot-2p8z.13: scrolling the source (context) pane must leave the roster
-// and detail pane rendered substrings byte-identical before and after each
-// scroll step.
+// bugbot-2p8z.13: scrolling the source pane must not change the total frame
+// dimensions and must leave sibling pane content byte-identical. The test
+// scrolls all the way to EOF so every scroll offset is exercised, and
+// asserts frame dimensions on each step (catching the pre-fix bug where an
+// over-tall source pane displaced siblings). Sibling regions are compared on
+// the RAW (un-stripped) rendered strings so ANSI padding differences are
+// caught even when stripped text happens to be identical.
 func TestGeometry_ScrollSourceDoesNotShiftSiblings(t *testing.T) {
-	// Build a real source file so the source pane has content to scroll.
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	var sb strings.Builder
-	for i := 1; i <= 100; i++ {
-		fmt.Fprintf(&sb, "// line %d: some code here\n", i)
-	}
-	if err := os.WriteFile(filepath.Join(root, "src", "scroll_test.go"), []byte(sb.String()), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	const termW, termH = 80, 24
 
-	m := NewModel(context.Background(), &fakeFeed{}, nil).WithRepoRoot(root)
-	m = setSize(m, 80, 24)
-	fr := overflowFrame()
-	m = sendFrame(m, fr)
-
-	// Drill into source pane: open the file.
-	m.contextMode = contextModeSource
-	m.sourceFile = "src/scroll_test.go"
-	m.sourceLine = 1
-	m.sourceEndLine = 0
-	// Build lines manually (avoid async load in tests).
+	// Build 100-line source so there is room to scroll.
 	srcLines := make([]string, 100)
 	for i := range srcLines {
 		srcLines[i] = fmt.Sprintf("// line %d: some code here", i+1)
 	}
+
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
+	m = setSize(m, termW, termH)
+	m = sendFrame(m, overflowFrame())
+	m.contextMode = contextModeSource
+	m.sourceFile = "src/scroll_test.go"
+	m.sourceLine = 0
+	m.sourceEndLine = 0
 	m.sourceLines = srcLines
 	m.sourceOffset = 0
 	m.focus = paneContext
 
-	// extractSiblings slices the roster column (cols 0-25) and detail column
-	// (cols 26-51) from every ANSI-stripped terminal row. These column bounds
-	// are deterministic: layoutDimensions gives paneW=26 at 80 cols, so each
-	// pane occupies exactly 26 screen columns. We join the slices from all
-	// rows so a single comparison proves neither sibling pane changed.
-	extractSiblings := func(m Model) (roster, detail string) {
-		stripped := stripANSI(m.View())
-		lines := strings.Split(stripped, "\n")
-		var rlines, dlines []string
-		for _, l := range lines {
-			runes := []rune(l)
-			// Roster pane: columns 0-25 (26 wide).
-			rEnd := 26
-			if rEnd > len(runes) {
-				rEnd = len(runes)
-			}
-			rlines = append(rlines, string(runes[:rEnd]))
-			// Detail pane: columns 26-51.
-			dStart := 26
-			dEnd := 52
-			if dStart > len(runes) {
-				dStart = len(runes)
-			}
-			if dEnd > len(runes) {
-				dEnd = len(runes)
-			}
-			dlines = append(dlines, string(runes[dStart:dEnd]))
+	// extractRawSiblings renders roster and detail panes independently so the
+	// comparison is against the RAW string (ANSI codes included). Any change
+	// in geometry — padding, borders, height — shows up as a byte difference.
+	extractRawSiblings := func(m Model) (roster, detail string) {
+		_, paneW, paneH := m.layoutDimensions()
+		iw := paneW - 2
+		if iw < 1 {
+			iw = 1
 		}
-		return strings.Join(rlines, "\n"), strings.Join(dlines, "\n")
+		ih := paneH - 2
+		if ih < 1 {
+			ih = 1
+		}
+		rContent := m.renderRosterPane(iw, ih)
+		dContent := m.renderDetailPane(iw, ih)
+		return m.applyPaneBorder(paneRoster, rContent, paneW, paneH),
+			m.applyPaneBorder(paneDetail, dContent, paneW, paneH)
 	}
 
-	rosterBefore, detailBefore := extractSiblings(m)
+	rosterBefore, detailBefore := extractRawSiblings(m)
 
-	// Scroll the source pane N times; siblings must be byte-identical.
-	for step := 0; step < 10; step++ {
+	// Verify initial frame dimensions.
+	v0 := m.View()
+	if h := lipgloss.Height(v0); h != termH {
+		t.Fatalf("initial frame: Height=%d want %d", h, termH)
+	}
+	if w := lipgloss.Width(v0); w > termW {
+		t.Fatalf("initial frame: Width=%d want <=%d", w, termW)
+	}
+
+	// Scroll from offset 0 all the way past EOF. Each 'j' advances sourceOffset
+	// by 1; scrolling past EOF is safe (clamped). We run len(srcLines)+5 steps
+	// to exercise the EOF boundary.
+	for step := 0; step < len(srcLines)+5; step++ {
 		m = sendKey(m, "j")
-		rosterAfter, detailAfter := extractSiblings(m)
+
+		// Frame dimensions must not change on ANY scroll step.
+		v := m.View()
+		if h := lipgloss.Height(v); h != termH {
+			t.Errorf("step %d (offset=%d): Height=%d want %d",
+				step, m.sourceOffset, h, termH)
+		}
+		if w := lipgloss.Width(v); w > termW {
+			t.Errorf("step %d (offset=%d): Width=%d want <=%d",
+				step, m.sourceOffset, w, termW)
+		}
+
+		// Sibling panes must be byte-identical (RAW, not stripped).
+		rosterAfter, detailAfter := extractRawSiblings(m)
 		if rosterAfter != rosterBefore {
-			t.Errorf("step %d: roster pane changed after source scroll\nbefore: %q\nafter:  %q", step, rosterBefore, rosterAfter)
+			t.Errorf("step %d (offset=%d): roster pane changed after source scroll",
+				step, m.sourceOffset)
 		}
 		if detailAfter != detailBefore {
-			t.Errorf("step %d: detail pane changed after source scroll\nbefore: %q\nafter:  %q", step, detailBefore, detailAfter)
+			t.Errorf("step %d (offset=%d): detail pane changed after source scroll",
+				step, m.sourceOffset)
 		}
 	}
 }
