@@ -10,6 +10,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/progress"
 )
 
 // ---------------------------------------------------------------------------
@@ -246,7 +247,7 @@ func TestWiring_NonGoRepo_RefuterPromptLacksGoMust(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, _, _, err = f.runRefuters(ctx, capture, tools, "senior C++ engineer", c, 1, &budgetState{})
+	_, _, _, _, _, err = f.runRefuters(ctx, capture, tools, "senior C++ engineer", c, 1, &budgetState{}, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +299,7 @@ func TestWiring_GoRepo_RefuterPromptHasMust(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, _, _, err = f.runRefuters(ctx, capture, tools, "senior Go engineer", c, 1, &budgetState{})
+	_, _, _, _, _, err = f.runRefuters(ctx, capture, tools, "senior Go engineer", c, 1, &budgetState{}, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title))
 	if err != nil {
 		t.Fatal(err)
 	}

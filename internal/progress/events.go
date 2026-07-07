@@ -50,8 +50,10 @@ const (
 	KindStageFinished Kind = "stage_finished"
 	// KindAgentStarted / KindAgentFinished bracket one finder or verifier agent
 	// run.
-	// Fields: Role, Label. KindAgentFinished also sets Tokens, Duration, Err
-	// (Err is empty on success), and Candidates (finder only; zero for verifiers).
+	// Fields: Role, Label, AgentID (this run's identity; see AgentID's field
+	// doc — empty from a pre-identity emitter). KindAgentFinished also sets
+	// Tokens, Duration, Err (Err is empty on success), and Candidates (finder
+	// only; zero for verifiers).
 	KindAgentStarted  Kind = "agent_started"
 	KindAgentFinished Kind = "agent_finished"
 	// KindToolCall carries structured information about one tool-call execution by
@@ -60,8 +62,8 @@ const (
 	// result). Consumers update the relevant AgentStatus.Activity in place using
 	// progress.Describe(ev); renderers that track individual call records can
 	// accumulate them from the Phase=start/done pairs.
-	//
-	// Fields: Role, Label, Phase, Tool, File, Line, EndLine, Symbol, Pattern,
+	// Fields: Role, Label, AgentID (the emitting run's identity; empty from a
+	// pre-identity emitter), Phase, Tool, File, Line, EndLine, Symbol, Pattern,
 	// Count (hits/refs/lines on Phase=done), Err (tool error on Phase=done).
 	KindToolCall Kind = "tool_call"
 	// KindSpendTick reports cumulative token spend as it accrues.
@@ -139,7 +141,9 @@ const (
 	// bracketing KindAgentStarted/KindAgentFinished pair for the whole
 	// multi-round attempt. Low-volume (bounded by MaxAttempts, default 2), so
 	// renderers can surface every round rather than suppressing it as noise.
-	// Fields: Role (RoleReproducer), Label (finding title), Attempt,
+	// Fields: Role (RoleReproducer), Label (finding title), AgentID (the
+	// attempt's run identity, shared with its bracketing KindAgentStarted/
+	// KindAgentFinished pair — see repro.go's scope.EmitEvent), Attempt,
 	// MaxAttempts, Verdict, Duration.
 	KindReproAttempt Kind = "repro_attempt"
 )

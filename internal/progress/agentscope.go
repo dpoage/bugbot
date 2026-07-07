@@ -55,12 +55,21 @@ func NewAgentScope(sink EventSink, role, label string) AgentScope {
 }
 
 // newAgentID returns a 16-character random hex string for use as an
-// AgentScope's id. Collisions are not guarded against beyond the birthday
-// bound of 8 random bytes, which is ample for the number of agents any single
-// scan or daemon cycle runs concurrently.
+// AgentScope's id, or "" on a crypto/rand failure (a practically-impossible
+// but non-zero-probability I/O error). "" is deliberate, not a degenerate
+// fallback value: AgentEventKey and every consumer keyed by it treat an
+// empty AgentID as "no identity, fall back to (role, label)" — the same path
+// pre-identity emitters already take — so a rand failure degrades to the
+// historical role+label keying instead of silently colliding every agent in
+// the process under one shared all-zeros id. Collisions among successfully
+// minted ids are not guarded against beyond the birthday bound of 8 random
+// bytes, which is ample for the number of agents any single scan or daemon
+// cycle runs concurrently.
 func newAgentID() string {
 	var b [8]byte
-	_, _ = rand.Read(b[:])
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
 	return hex.EncodeToString(b[:])
 }
 

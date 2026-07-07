@@ -14,34 +14,37 @@ import (
 	"github.com/dpoage/bugbot/internal/progress"
 )
 
-// emitAgentFinished emits an agent-finished progress event with the run's token
-// usage, wall-clock duration, and error (if any), via the shared
-// progress.AgentScope seam. outcome may be nil when the run failed before
-// producing one; tokens then default to zero.
-func emitAgentFinished(sink progress.EventSink, role, label string, outcome *agent.Outcome, start time.Time, err error) {
+// emitAgentFinished emits an agent-finished progress event with the run's
+// token usage, wall-clock duration, and error (if any), via scope — the SAME
+// AgentScope that bracketed the run's Start (and every ToolCall in between),
+// so KindAgentFinished carries the run's AgentID and the roster/pane/action-
+// feed entries this run created are pruned by identity rather than by
+// (role, label), which collides across concurrent runs sharing a label (see
+// bugbot-r7ub). outcome may be nil when the run failed before producing one;
+// tokens then default to zero.
+func emitAgentFinished(scope progress.AgentScope, outcome *agent.Outcome, start time.Time, err error) {
 	var tokens int64
 	if outcome != nil {
 		tokens = outcome.Usage.InputTokens + outcome.Usage.OutputTokens
 	}
-	progress.NewAgentScope(sink, role, label).Finish(tokens, time.Since(start), err)
+	scope.Finish(tokens, time.Since(start), err)
 }
 
-// emitFinderAgentFinished emits a KindAgentFinished event for a finder unit,
-// carrying the candidate count so live status counters can tick per-unit during
-// the hypothesize stage. candidates is non-zero only on a successful (finderOK)
-// run; callers pass zero for error/parse-fail/budget-stop paths.
-func emitFinderAgentFinished(sink progress.EventSink, label string, outcome *agent.Outcome, start time.Time, err error, candidates int) {
-	if sink == nil {
-		return
-	}
+// emitFinderAgentFinished emits a KindAgentFinished event for a finder unit
+// through scope — the SAME AgentScope that bracketed the unit's Start and
+// ToolCall activity — carrying the candidate count so live status counters
+// can tick per-unit during the hypothesize stage. candidates is non-zero only
+// on a successful (finderOK) run; callers pass zero for error/parse-fail/
+// budget-stop paths. scope.EmitEvent fills Role/Label/AgentID from scope
+// (the Event below leaves them zero), which is what lets this Finished event
+// be pruned by the same identity its Started/ToolCall siblings used.
+func emitFinderAgentFinished(scope progress.AgentScope, outcome *agent.Outcome, start time.Time, err error, candidates int) {
 	var tokens int64
 	if outcome != nil {
 		tokens = outcome.Usage.InputTokens + outcome.Usage.OutputTokens
 	}
 	ev := progress.Event{
 		Kind:       progress.KindAgentFinished,
-		Role:       progress.RoleFinder,
-		Label:      label,
 		Tokens:     tokens,
 		Duration:   time.Since(start),
 		Candidates: candidates,
@@ -49,7 +52,7 @@ func emitFinderAgentFinished(sink progress.EventSink, label string, outcome *age
 	if err != nil {
 		ev.Err = err.Error()
 	}
-	progress.Emit(sink, ev)
+	scope.EmitEvent(ev)
 }
 
 // readOnlyTools builds the read-only code tool set (read_file, list_dir, grep,

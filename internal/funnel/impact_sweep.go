@@ -467,12 +467,14 @@ func adjudicateImpact(
 	// One tool-less batched completion; the started/finished bracket is the
 	// observability (no per-turn tool-call activity to report).
 	label := fmt.Sprintf("%d findings", len(entries))
-	progress.NewAgentScope(sink, progress.RoleSeverity, label).Start()
+	// One AgentScope for the whole call so Start/Finish share the run's
+	// AgentID (see agent_runners.go's activitySinkFor doc, bugbot-r7ub).
+	scope := progress.NewAgentScope(sink, progress.RoleSeverity, label).Start()
 	runner := agent.NewRunner(client, nil, impactAdjSystemPrompt)
 	var resp impactAdjResponse
 	start := time.Now()
 	outcome, rerr := runner.RunJSON(ctx, task, impactAdjSchema, &resp)
-	emitAgentFinished(sink, progress.RoleSeverity, label, outcome, start, rerr)
+	emitAgentFinished(scope, outcome, start, rerr)
 	if rerr != nil {
 		return nil, fmt.Errorf("impact_sweep: LLM adjudication: %w", rerr)
 	}

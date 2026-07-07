@@ -9,6 +9,7 @@ import (
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/progress"
 )
 
 // End-to-end boundary integration tests for bugbot-jwd. The mechanism that
@@ -247,7 +248,7 @@ func TestStructuredOutput_RefuterCarriesRefutationSchema(t *testing.T) {
 		Title: "real bug for refuter test",
 	}
 	budget := &budgetState{}
-	verdicts, _, _, failed, stopped, err := f.runRefuters(ctx, verifier, tools, "senior Go engineer", c, 1, budget)
+	verdicts, _, _, failed, stopped, err := f.runRefuters(ctx, verifier, tools, "senior Go engineer", c, 1, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title))
 	if err != nil {
 		t.Fatalf("runRefuters: %v", err)
 	}
@@ -292,7 +293,7 @@ func TestStructuredOutput_RefuterNoCapPassthrough(t *testing.T) {
 
 	c := Candidate{Lens: "l", File: "f.go", Line: 1, Title: "t"}
 	budget := &budgetState{}
-	if _, _, _, _, _, err := f.runRefuters(ctx, verifier, tools, "engineer", c, 1, budget); err != nil {
+	if _, _, _, _, _, err := f.runRefuters(ctx, verifier, tools, "engineer", c, 1, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title)); err != nil {
 		t.Fatalf("runRefuters: %v", err)
 	}
 	for i, r := range verifier.allRequests() {
@@ -322,10 +323,10 @@ func TestStructuredOutput_ArbiterCarriesArbiterSchema(t *testing.T) {
 	// 3rd call is the arbiter, also not-refuted.
 	verifier := newScriptedSequenceClient(notRefutedJSON,
 		refutedJSON, notRefutedJSON, notRefutedArbiterJSON)
-
 	c := Candidate{Lens: "l", File: "f.go", Line: 1, Title: "split candidate"}
 	budget := &budgetState{}
-	verdicts, seats, _, _, _, err := f.runRefuters(ctx, verifier, tools, "engineer", c, 2, budget)
+	scope := progress.NewAgentScope(nil, progress.RoleVerifier, c.Title)
+	verdicts, seats, _, _, _, err := f.runRefuters(ctx, verifier, tools, "engineer", c, 2, budget, scope)
 	if err != nil {
 		t.Fatalf("runRefuters: %v", err)
 	}
@@ -333,7 +334,7 @@ func TestStructuredOutput_ArbiterCarriesArbiterSchema(t *testing.T) {
 		t.Fatalf("expected split verdict, got %+v", verdicts)
 	}
 
-	av, _, _, aerr := f.runArbiter(ctx, verifier, tools, "engineer", c, verdicts, seats, budget)
+	av, _, _, aerr := f.runArbiter(ctx, verifier, tools, "engineer", c, verdicts, seats, budget, scope)
 	if aerr != nil {
 		t.Fatalf("runArbiter: %v", aerr)
 	}

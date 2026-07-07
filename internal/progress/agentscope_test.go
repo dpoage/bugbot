@@ -46,6 +46,56 @@ func TestAgentScope_StartEmitToolCallFinish(t *testing.T) {
 	}
 }
 
+// TestAgentScope_EventsShareAgentID verifies that every event a single
+// AgentScope emits (Start, EmitToolCall, Finish) carries the SAME non-empty
+// AgentID — the invariant progress.AgentEventKey and every consumer (the
+// snapshot accumulator, the pane, the TUI's action feed) depend on to fold a
+// run's events without colliding against a concurrent run sharing the same
+// (role, label). See bugbot-r7ub.
+func TestAgentScope_EventsShareAgentID(t *testing.T) {
+	var rec recordingSink
+	scope := NewAgentScope(&rec, RoleReproducer, "dup title").Start()
+	scope.EmitToolCall("start", "read_file", "a.go", 1, 0, "", "", 0, "")
+	scope.Finish(0, time.Second, nil)
+
+	evs := rec.snapshot()
+	if len(evs) != 3 {
+		t.Fatalf("got %d events, want 3: %+v", len(evs), evs)
+	}
+	id := evs[0].AgentID
+	if id == "" {
+		t.Fatal("Started event has empty AgentID")
+	}
+	for i, ev := range evs {
+		if ev.AgentID != id {
+			t.Errorf("event[%d] (%s) AgentID = %q, want %q (Started's id)", i, ev.Kind, ev.AgentID, id)
+		}
+	}
+}
+
+// TestAgentScope_DistinctScopesMintDistinctAgentIDs verifies two AgentScopes
+// built for the identical (role, label) — e.g. two reproducer agents on
+// duplicate open finding titles — get distinct AgentIDs, which is what lets
+// AgentEventKey disambiguate them.
+func TestAgentScope_DistinctScopesMintDistinctAgentIDs(t *testing.T) {
+	var rec recordingSink
+	a := NewAgentScope(&rec, RoleReproducer, "dup title").Start()
+	b := NewAgentScope(&rec, RoleReproducer, "dup title").Start()
+
+	evs := rec.snapshot()
+	if len(evs) != 2 {
+		t.Fatalf("got %d events, want 2: %+v", len(evs), evs)
+	}
+	if evs[0].AgentID == "" || evs[1].AgentID == "" {
+		t.Fatalf("expected non-empty AgentIDs, got %+v", evs)
+	}
+	if evs[0].AgentID == evs[1].AgentID {
+		t.Fatalf("two independent scopes for the same (role, label) minted the SAME AgentID: %q", evs[0].AgentID)
+	}
+	_ = a
+	_ = b
+}
+
 // TestAgentScope_FinishSuccessHasNoErr verifies a nil error leaves Err empty,
 // matching the funnel's existing emitAgentFinished contract.
 func TestAgentScope_FinishSuccessHasNoErr(t *testing.T) {
