@@ -56,7 +56,7 @@ type navigator interface {
 // the query timeout) the tools degrade to a clear "ERROR:" result telling the
 // model to fall back to grep — they never hang and never abort the run.
 type CodeNav struct {
-	root *fsRoot
+	root *FSRoot
 	nav  navigator
 	// body is the syntactic backend used by read_symbol to pull a declaration's
 	// full body directly by name when the file's language is tree-sitter
@@ -94,7 +94,7 @@ type tsOutlineBackend interface {
 // crashed, or unsupported for the language. The tree-sitter tier never starts a
 // process and only reads files under the root.
 func NewCodeNav(dir string) (*CodeNav, error) {
-	root, err := newFSRoot(dir)
+	root, err := NewFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +226,7 @@ func (t *codeNavTool) Run(ctx context.Context, raw json.RawMessage) (string, err
 		return "", err
 	}
 
-	abs, err := t.nav.root.resolve(args.File)
+	abs, err := t.nav.root.Resolve(args.File)
 	if err != nil {
 		return "", err
 	}

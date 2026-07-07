@@ -96,7 +96,7 @@ func (t *findUsagesTool) Run(ctx context.Context, raw json.RawMessage) (string, 
 		n = findUsagesMaxN
 	}
 
-	abs, err := t.nav.root.resolve(args.File)
+	abs, err := t.nav.root.Resolve(args.File)
 	if err != nil {
 		return "", err
 	}

@@ -72,15 +72,19 @@ const (
 	// toolchain, inspect output, and confirm the suite layout without burning
 	// unreasonable sandbox capacity.
 	DefaultSandboxMaxExecs = 3
-	// DefaultTryMaxExecs is the per-attempt budget of run_repro calls the
-	// reproducer agent may make. Unlike run_tests (read-only orientation
-	// against the repo's existing suite), run_repro lets the agent run and
-	// observe its OWN candidate repro in the iteration workspace before
-	// committing to a final plan — a value of 4 covers an initial attempt plus
-	// a couple of fix-and-retry rounds without letting a stuck agent burn
-	// unbounded sandbox capacity. Only calls that reach the sandbox consume
-	// the budget; writes (write_repro_file) are free.
-	DefaultTryMaxExecs = 4
+	// DefaultTryMaxExecs is the per-attempt budget of `workspace exec` calls
+	// the reproducer agent may make. Unlike run_tests (read-only orientation
+	// against the repo's existing suite), workspace exec lets the agent run
+	// and observe its OWN candidate repro in the iteration workspace before
+	// committing to a final plan. This is a single shared pool for BOTH
+	// probing the sandbox environment (toolchain, layout) and rehearsing the
+	// candidate — the workspace tool's free ls/cat/status applets cover most
+	// probe-only needs without spending this budget, so raising it to 10
+	// (from 4) buys real write/run/observe/fix looping capacity rather than
+	// re-adding the probe pressure the free applets exist to remove. Only
+	// calls that reach the sandbox consume it; writes (write_repro_file) and
+	// the free applets are free.
+	DefaultTryMaxExecs = 10
 )
 
 // Options configures a Reproducer.
@@ -110,11 +114,11 @@ type Options struct {
 	// may call run_tests at most this many times per attempt to orient itself
 	// before proposing its repro plan. Zero uses DefaultSandboxMaxExecs.
 	SandboxMaxExecs int
-	// TryMaxExecs is the per-attempt execution budget for run_repro: the
-	// reproducer agent may run/observe its candidate repro at most this many
-	// times per attempt before committing to its final plan. Zero uses
+	// TryMaxExecs is the per-attempt execution budget for `workspace exec`:
+	// the reproducer agent may run/observe its candidate repro at most this
+	// many times per attempt before committing to its final plan. Zero uses
 	// DefaultTryMaxExecs. The workspace tool set (write_repro_file,
-	// delete_repro_file, run_repro) is only wired when the sandbox backend
+	// delete_repro_file, workspace) is only wired when the sandbox backend
 	// supports workspace materialization (see newRunner); Mock-backed tests
 	// that do not implement it never see the tools regardless of this budget.
 	TryMaxExecs int
@@ -352,10 +356,11 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 
 	// iterWS is the per-Attempt iteration workspace the agent builds its
 	// candidate in (see iterationWorkspace doc): write_repro_file writes into
-	// it, run_repro executes against it, and its tracked files are merged into
-	// the submitted plan below. It stays unmaterialized (path == "") if the
-	// agent never uses the workspace tools, so an Attempt that never iterates
-	// pays zero extra disk cost. Removed unconditionally when Attempt returns,
+	// it, `workspace exec` executes against it, and its tracked files are
+	// merged into the submitted plan below. It stays unmaterialized
+	// (path == "") if the agent never uses the workspace tools, so an
+	// Attempt that never iterates pays zero extra disk cost. Removed
+	// unconditionally when Attempt returns,
 	// so the official clean-room verdict below (execute()) never runs against
 	// anything the iteration left behind.
 	iterWS := &iterationWorkspace{}
@@ -515,22 +520,22 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 		// counters (unlike the funnel), so there is nothing to accumulate.
 		tools = append(tools, agent.NewRunTestsTool(r.sb, r.repoDir, baseCmd, r.opts.SandboxMaxExecs, r.deps.ROMounts, r.deps.Env, r.deps.SetupCmds, nil))
 	}
-	// The workspace tool set (write_repro_file, delete_repro_file, run_repro)
+	// The workspace tool set (write_repro_file, delete_repro_file, workspace)
 	// lets the agent build, run, and observe a candidate repro interactively
 	// in a persistent per-attempt workspace before committing to its final
-	// plan (bugbot-bkz1, bugbot-hu59); the files it writes are submitted with
-	// the plan automatically. Only wired when the sandbox backend can
-	// pre-materialize a caller-owned workspace (workspaceMaterializer):
-	// *sandbox.CLI always can; a bare sandbox.Mock in a test that doesn't
-	// script iteration simply omits the tools, matching run_tests'
-	// no-build-system omission above.
+	// plan (bugbot-bkz1, bugbot-hu59, bugbot-jto7); the files it writes are
+	// submitted with the plan automatically. Only wired when the sandbox
+	// backend can pre-materialize a caller-owned workspace
+	// (workspaceMaterializer): *sandbox.CLI always can; a bare sandbox.Mock in
+	// a test that doesn't script iteration simply omits the tools, matching
+	// run_tests' no-build-system omission above.
 	workspaceWired := false
 	if mat, ok := r.sb.(workspaceMaterializer); ok {
 		workspaceWired = true
 		tools = append(tools,
 			NewWriteReproFileTool(r.repoDir, mat.MaterializeWorkspace, iterWS),
 			NewDeleteReproFileTool(iterWS),
-			NewRunReproTool(r.sb, r.repoDir, r.opts.Image, r.opts.Timeout,
+			NewWorkspaceTool(r.sb, r.repoDir, r.opts.Image, r.opts.Timeout,
 				r.deps.ROMounts, r.deps.Env, r.deps.SetupCmds, mat.MaterializeWorkspace, iterWS, r.opts.TryMaxExecs))
 	}
 	var opts []agent.Option
@@ -657,7 +662,8 @@ func isBareShellOp(arg string) bool {
 //
 // The per-file and per-cmd rules are shared verbatim with the workspace tools'
 // per-call validation (validateReproFilePath in write_repro_file,
-// validateReproCmd in run_repro) so iteration teaches the agent the exact same
+// validateReproCmd in the workspace tool's exec applet) so iteration teaches
+// the agent the exact same
 // contract its final plan must satisfy — a file or command that cleared the
 // tools' gate is guaranteed to clear submission too. Attempt merges the
 // workspace registry into p.Files before calling this, so a cmd-only plan
@@ -716,8 +722,8 @@ func validateReproFilePath(fpath, repoDir string) error {
 }
 
 // validateReproCmd is the per-command structural gate shared by validatePlan
-// (the final submitted plan's cmd) and the run_repro tool (each interactive
-// run). Holding the actual rules in one place keeps the two callers from
+// (the final submitted plan's cmd) and the workspace tool's exec applet
+// (each interactive run). Holding the actual rules in one place keeps the two callers from
 // drifting: a command accepted during iteration is accepted at submission.
 func validateReproCmd(cmd []string) error {
 	for _, arg := range cmd {
