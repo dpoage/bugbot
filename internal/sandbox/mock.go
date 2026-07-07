@@ -33,7 +33,7 @@ type MockResponse struct {
 // a caller-supplied Workspace is recorded on the Call like every other Spec
 // field but otherwise ignored — it never gates or alters which scripted
 // response comes back. Tests that need to distinguish an iteration-workspace
-// call (e.g. run_repro) from a clean-room call (e.g. execute()) do so via a
+// call (e.g. workspace exec) from a clean-room call (e.g. execute()) do so via a
 // ResponseFunc keyed on spec.Workspace == "" themselves.
 type Mock struct {
 	mu sync.Mutex
