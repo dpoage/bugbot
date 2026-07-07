@@ -108,6 +108,14 @@ type Model struct {
 
 	palette paletteState
 
+	// cmdBar is the fuzzy jump bar overlay (ctrl+p).
+	cmdBar cmdBarState
+
+	// followActive, when true, auto-selects the most-recently-active live
+	// agent on each frame update. Any manual roster navigation disables it.
+	// Toggled by 'F'.
+	followActive bool
+
 	// running/runVerb/runStarted/runCancel/runOut describe the ONE active
 	// dispatch, if any — the palette refuses to start a second one while
 	// running is true.
@@ -138,6 +146,7 @@ func NewModel(ctx context.Context, feed Feed, disp dispatcher) Model {
 		disp:      disp,
 		ctx:       ctx,
 		palette:   newPaletteState(),
+		cmdBar:    newCmdBarState(),
 		width:     80,
 		height:    24,
 		detailIdx: -1,
@@ -184,6 +193,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.clampCursor()
+		// Apply follow-active-agent after standard frame processing.
+		var followCmd tea.Cmd
+		m, followCmd = m.applyFollowActive(m.frame)
+		if followCmd != nil {
+			return m, tea.Batch(m.feed.Next(), followCmd)
+		}
 		return m, m.feed.Next()
 
 	case transcriptLoadedMsg:
@@ -239,6 +254,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.palette.open {
 		return m.handlePaletteKey(msg)
+	}
+
+	// ctrl+p opens the command bar from any state; the bar itself intercepts
+	// all keys while open.
+	if msg.String() == "ctrl+p" {
+		m.cmdBar.openCmdBar(m.frame)
+		return m, nil
+	}
+
+	if m.cmdBar.open {
+		return m.handleCmdBarKey(msg)
 	}
 
 	if m.filtering {
@@ -306,10 +332,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "j", "down":
+		// Manual roster navigation disables follow-active.
+		if m.focus == paneRoster {
+			m.followActive = false
+		}
 		m.scrollDown()
 		return m, nil
 
 	case "k", "up":
+		// Manual roster navigation disables follow-active.
+		if m.focus == paneRoster {
+			m.followActive = false
+		}
 		m.scrollUp()
 		return m, nil
 
@@ -343,8 +377,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.transcriptLoaded = false
 				m.transcriptView.SetContent("")
 				m.focus = paneDetail
+				// Manual drill-in cancels follow mode.
+				m.followActive = false
 				return m, loadTranscriptCmd(m.detailKey, a.TranscriptPath)
 			}
+		}
+		return m, nil
+
+	case "F":
+		// 'F' (capital) toggles follow-active-agent mode. Lower-case 'f' is
+		// taken by pgdown. Capital 'F' is free: confirm by checking handleKey's
+		// full switch — no existing case uses it.
+		m.followActive = !m.followActive
+		// If just enabled and a frame is present, apply immediately.
+		if m.followActive && m.haveFrame {
+			var cmd tea.Cmd
+			m, cmd = m.applyFollowActive(m.frame)
+			return m, cmd
 		}
 		return m, nil
 

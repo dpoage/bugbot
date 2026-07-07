@@ -48,6 +48,10 @@ func (m Model) View() string {
 		return lipgloss.JoinVertical(lipgloss.Left, m.viewPalette(), "", m.viewFooter())
 	}
 
+	if m.cmdBar.open {
+		return lipgloss.JoinVertical(lipgloss.Left, m.viewCmdBar(), "", m.viewFooter())
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left, m.viewPanes(), m.viewFooter())
 }
 
@@ -423,6 +427,10 @@ func fmtTime(t time.Time) string {
 
 // viewFooter renders the keymap hint line at the bottom of the screen.
 func (m Model) viewFooter() string {
+	follow := ""
+	if m.followActive {
+		follow = " · [F:follow]"
+	}
 	if m.filtering {
 		return footerStyle.Render("filter: type to narrow · enter accept · esc clear · ctrl+c quit")
 	}
@@ -431,12 +439,12 @@ func (m Model) viewFooter() string {
 	}
 	switch m.focus {
 	case paneRoster:
-		return footerStyle.Render("j/k move · enter drill in · / filter · d dispatch · tab/1/2/3 · q quit")
+		return footerStyle.Render("j/k move · enter drill in · / filter · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
 	case paneDetail:
-		return footerStyle.Render("j/k scroll transcript · d dispatch · tab/1/2/3 · q quit")
+		return footerStyle.Render("j/k scroll transcript · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
 	case paneContext:
-		return footerStyle.Render("m cycle modes · j/k scroll/move · d dispatch · tab/1/2/3 · q quit")
+		return footerStyle.Render("m cycle modes · j/k scroll/move · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
 	default:
-		return footerStyle.Render("tab/1/2/3 focus · d dispatch · q quit")
+		return footerStyle.Render("tab/1/2/3 focus · ctrl+p jump · F follow · d dispatch · q quit" + follow)
 	}
 }
