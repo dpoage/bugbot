@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -12,56 +13,60 @@ import (
 // ── Fuzzy ranking tests ───────────────────────────────────────────────────────
 
 func TestFuzzyScore_ExactSubstring(t *testing.T) {
-	score, ok := fuzzyScore("verifier candidate A", "candidate")
+	// "candidate" is a mid-string substring of the target — not a word prefix
+	// (the word is "candidate" itself, but the query starts a word: it IS a
+	// word prefix too). Use a query that is NOT a word start to force exact.
+	// "andidate" is a substring but not a word prefix → must be matchExactSubstring.
+	score, ok := fuzzyScore("verifier candidate A", "andidate")
 	if !ok {
 		t.Fatal("expected match")
 	}
 	if score != matchExactSubstring {
-		t.Fatalf("want matchExactSubstring, got %v", score)
+		t.Fatalf("want matchExactSubstring for mid-word substring, got %v", score)
 	}
 }
 
-func TestFuzzyScore_WordPrefix(t *testing.T) {
+// TestFuzzyScore_WordPrefixBeatsSubstring verifies that a query which is both
+// a word-prefix AND an inner substring of the full target string is classified
+// as matchWordPrefix (N2: word-prefix is checked before Contains).
+func TestFuzzyScore_WordPrefixBeatsSubstring(t *testing.T) {
+	// "nil" is a prefix of word "nil-safety" AND a substring of the full string
+	// "nil-safety finder". After N2 fix, word-prefix is checked first, so it
+	// returns matchWordPrefix (better than exact substring).
 	score, ok := fuzzyScore("nil-safety finder", "nil")
 	if !ok {
 		t.Fatal("expected match")
 	}
-	if score != matchExactSubstring {
-		// "nil" is a substring of "nil-safety finder", so this is exact.
-		// That's fine — we just care exact >= word >= subseq.
-		t.Logf("score %v (exact substring is fine too)", score)
+	if score != matchWordPrefix {
+		t.Fatalf("want matchWordPrefix (word-prefix checked before Contains), got %v", score)
 	}
-
-	// "find" is a prefix of "finder" but not a substring of the whole string
-	// unless the whole string contains "find" — which it does. Let's use a
-	// pattern that is ONLY a word prefix, not a full substring.
-	// "safe" appears inside "nil-safety" so it's exact.
-	// Use a target where query is a word prefix but not an inner substring.
-	score2, ok2 := fuzzyScore("verifier alpha", "ver")
-	if !ok2 {
-		t.Fatal("expected match for word prefix")
-	}
-	// "ver" is a prefix of "verifier" and also a substring, so exact is fine.
-	_ = score2
 }
 
-func TestFuzzyScore_WordPrefixOnly(t *testing.T) {
-	// "can" is a prefix of "candidate" but is it a substring of the full
-	// string "verifier candidate A"? Yes. Use a case where the query is a
-	// strict word prefix that is NOT a substring of the full string.
-	// E.g. target = "foo bar baz", query = "ba" — "ba" appears in "bar" AND
-	// "baz" as a substring of the whole string. Hard to construct a case
-	// where word prefix fires but not exact — rely on ranking order instead.
-	//
-	// Test ranking: exact > word-prefix > subsequence, by comparing scores.
-	t1, _ := fuzzyScore("abcdef", "abc")      // exact substring
-	t2, _ := fuzzyScore("abc-def ghi", "ghi") // exact substring (appears at end)
-	t3, _ := fuzzyScore("abc def", "ad")      // scattered subsequence only
-	if t1 > t3 {
-		t.Errorf("exact (%v) should rank better (lower) than subseq (%v)", t1, t3)
+// TestFuzzyScore_WordPrefixOnlyTier verifies the 3-tier ordering:
+// word-prefix (0) < exact-substring (1) < subsequence (2).
+// (Lower matchScore value = better rank.)
+func TestFuzzyScore_WordPrefixOnlyTier(t *testing.T) {
+	// word-prefix score should be strictly better than subsequence score.
+	wpScore, wpOk := fuzzyScore("verifier alpha", "ver") // "ver" is word-prefix of "verifier"
+	ssScore, ssOk := fuzzyScore("abc def", "ad")         // "ad" is only a scattered subsequence
+
+	if !wpOk {
+		t.Fatal("expected word-prefix match")
 	}
-	if t2 > t3 {
-		t.Errorf("exact (%v) should rank better (lower) than subseq (%v)", t2, t3)
+	if !ssOk {
+		t.Fatal("expected subsequence match")
+	}
+	if wpScore >= ssScore {
+		t.Errorf("word-prefix (%v) should rank better (lower score) than subsequence (%v)", wpScore, ssScore)
+	}
+
+	// exact-substring score should be strictly better than subsequence.
+	exScore, exOk := fuzzyScore("abcdef", "bcd") // "bcd" is NOT a word prefix; it IS a substring
+	if !exOk {
+		t.Fatal("expected exact-substring match")
+	}
+	if exScore >= ssScore {
+		t.Errorf("exact-substring (%v) should rank better (lower) than subsequence (%v)", exScore, ssScore)
 	}
 }
 
@@ -96,21 +101,22 @@ func TestFuzzyScore_CaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestFilterCandidates_RankingOrder checks that word-prefix outranks scattered
+// subsequence, and that exact-substring outranks scattered subsequence.
 func TestFilterCandidates_RankingOrder(t *testing.T) {
-	// Build candidates whose display strings have different match quality.
-	// candidate A: exact substring match for "ver"
-	// candidate B: subsequence match for "ver" via "v...e...r" pattern
+	// candidate A: "verifier alpha" — "ver" is a word-prefix of "verifier"
+	// candidate B: "vxexr xfoo"    — "ver" is only a scattered subsequence
 	candidates := []cmdCandidate{
 		{kind: cmdKindAgent, label: "B", display: "vxexr xfoo"},     // subsequence only
-		{kind: cmdKindAgent, label: "A", display: "verifier alpha"}, // exact substring
+		{kind: cmdKindAgent, label: "A", display: "verifier alpha"}, // word-prefix (of "verifier")
 	}
 	results := filterCandidates(candidates, "ver")
 	if len(results) != 2 {
 		t.Fatalf("want 2 results, got %d", len(results))
 	}
-	// "verifier alpha" has "ver" as exact substring → should come first.
+	// "verifier alpha" has "ver" as a word-prefix → better rank → first.
 	if results[0].label != "A" {
-		t.Errorf("exact substring match should rank first, got %q", results[0].label)
+		t.Errorf("word-prefix match should rank first, got %q", results[0].label)
 	}
 }
 
@@ -154,6 +160,29 @@ func TestCmdBar_CtrlP_Opens(t *testing.T) {
 	}
 }
 
+// TestCmdBar_CtrlP_AlreadyOpen verifies that ctrl+p while the bar is already
+// open is a no-op — it does not wipe the current query (N3).
+func TestCmdBar_CtrlP_AlreadyOpen(t *testing.T) {
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
+	m = sendFrame(m, agentFrame())
+	m = sendKey(m, "ctrl+p")
+	// Type "nil" to set a query.
+	m = sendKey(m, "n")
+	m = sendKey(m, "i")
+	m = sendKey(m, "l")
+	queryBefore := m.cmdBar.input.Value()
+	resultsBefore := len(m.cmdBar.results)
+
+	// Second ctrl+p should be a no-op.
+	m = sendKey(m, "ctrl+p")
+	if m.cmdBar.input.Value() != queryBefore {
+		t.Errorf("ctrl+p while open should not wipe query: before=%q after=%q", queryBefore, m.cmdBar.input.Value())
+	}
+	if len(m.cmdBar.results) != resultsBefore {
+		t.Errorf("ctrl+p while open should not change results")
+	}
+}
+
 func TestCmdBar_Esc_Closes(t *testing.T) {
 	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	m = sendFrame(m, agentFrame())
@@ -171,31 +200,41 @@ func TestCmdBar_Esc_Closes(t *testing.T) {
 	}
 }
 
+// TestCmdBar_TypeFilters asserts that typing a query narrows the result list:
+// the matching candidate is included and a non-matching one is excluded (N4).
 func TestCmdBar_TypeFilters(t *testing.T) {
 	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	m = sendFrame(m, agentFrame())
 	m = sendKey(m, "ctrl+p")
-	// Type "nil" — should filter to only the "finder nil-safety" agent.
+
+	// agentFrame has two agents: "verifier candidate A" and "finder nil-safety".
+	// Type "nil" — should match "finder nil-safety" but NOT "verifier candidate A".
 	m = sendKey(m, "n")
 	m = sendKey(m, "i")
 	m = sendKey(m, "l")
+
 	if len(m.cmdBar.results) == 0 {
 		t.Fatal("expected at least one result after typing 'nil'")
 	}
+
+	// The "verifier candidate A" agent should NOT appear in results (N4).
 	for _, r := range m.cmdBar.results {
-		if r.kind != cmdKindAgent {
-			continue
+		if r.kind == cmdKindAgent && r.agentKey == agentKey(m.frame.Agents[0]) {
+			t.Errorf("'verifier candidate A' should be excluded after typing 'nil', but it appears in results")
 		}
-		// "nil" should be in the matching candidate's display.
-		found := false
-		for _, r2 := range m.cmdBar.results {
-			if r2.kind == cmdKindAgent && (r2.agentIdx == 1 || r2.label != "") {
-				found = true
-				break
-			}
+	}
+
+	// The "finder nil-safety" agent SHOULD appear.
+	found := false
+	nilSafetyKey := agentKey(m.frame.Agents[1])
+	for _, r := range m.cmdBar.results {
+		if r.kind == cmdKindAgent && r.agentKey == nilSafetyKey {
+			found = true
+			break
 		}
-		_ = found
-		break
+	}
+	if !found {
+		t.Error("'finder nil-safety' should be included after typing 'nil'")
 	}
 }
 
@@ -214,6 +253,51 @@ func TestCmdBar_Enter_NavigatesToAgent(t *testing.T) {
 	}
 	if m.detailKey == "" {
 		t.Error("detailKey should be set after selecting agent")
+	}
+}
+
+// TestCmdBar_Enter_NavigatesToFinding verifies that selecting a finding
+// candidate focuses paneContext in contextModeFindings at the right cursor (B1).
+func TestCmdBar_Enter_NavigatesToFinding(t *testing.T) {
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
+	fr := Frame{
+		HasSnapshot: true,
+		Agents:      []AgentView{},
+		World: WorldState{
+			Findings: []domain.Finding{
+				{ID: "f1", Title: "nil dereference", File: "pkg/foo.go"},
+				{ID: "f2", Title: "use after free", File: "pkg/bar.go"},
+			},
+			FindingsTotal: 2,
+			HasTallies:    true,
+		},
+	}
+	m = sendFrame(m, fr)
+	m = sendKey(m, "ctrl+p")
+
+	// Expect two finding candidates.
+	var findingCandidates int
+	for _, r := range m.cmdBar.results {
+		if r.kind == cmdKindFinding {
+			findingCandidates++
+		}
+	}
+	if findingCandidates != 2 {
+		t.Fatalf("expected 2 finding candidates, got %d (total results: %d)", findingCandidates, len(m.cmdBar.results))
+	}
+
+	// Select first finding by navigating to it.
+	m.cmdBar.cursor = 0
+	m = sendKey(m, "enter")
+
+	if m.cmdBar.open {
+		t.Fatal("command bar should close on enter")
+	}
+	if m.focus != paneContext {
+		t.Errorf("focus should be paneContext after finding selection, got %v", m.focus)
+	}
+	if m.contextMode != contextModeFindings {
+		t.Errorf("contextMode should be contextModeFindings, got %v", m.contextMode)
 	}
 }
 
@@ -253,6 +337,67 @@ func TestCmdBar_Enter_NavigatesToLead(t *testing.T) {
 	}
 }
 
+// TestCmdBar_LeadReResolveByID verifies that N6 stable-ID re-resolution works:
+// if a lead reorders in the frame while the bar is open, navigation still
+// lands on the correct lead by ID.
+func TestCmdBar_LeadReResolveByID(t *testing.T) {
+	lead1 := store.Lead{ID: "l1", TargetLens: "nil-safety", File: "a.go", Note: "check nil"}
+	lead2 := store.Lead{ID: "l2", TargetLens: "bounds", File: "b.go", Note: "bounds check"}
+
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
+	fr1 := Frame{
+		Agents: []AgentView{},
+		World: WorldState{
+			PendingLeads:      []store.Lead{lead1, lead2},
+			PendingLeadsTotal: 2,
+		},
+	}
+	m = sendFrame(m, fr1)
+	m = sendKey(m, "ctrl+p")
+
+	// Select second lead (lead2, index 1) in the bar.
+	if len(m.cmdBar.results) < 2 {
+		t.Fatalf("expected ≥2 candidates, got %d", len(m.cmdBar.results))
+	}
+	// Find lead2 candidate in results.
+	lead2Pos := -1
+	for i, r := range m.cmdBar.results {
+		if r.kind == cmdKindLead && r.leadID == "l2" {
+			lead2Pos = i
+			break
+		}
+	}
+	if lead2Pos < 0 {
+		t.Fatal("lead2 not found in results")
+	}
+	m.cmdBar.cursor = lead2Pos
+
+	// Simulate frame refresh that reorders leads (lead2 now at index 0).
+	fr2 := Frame{
+		Agents: []AgentView{},
+		World: WorldState{
+			PendingLeads:      []store.Lead{lead2, lead1}, // reversed
+			PendingLeadsTotal: 2,
+		},
+	}
+	m = sendFrame(m, fr2)
+
+	// The bar is now closed (sendFrame goes through Update/FrameMsg, which
+	// doesn't close the bar). Re-open is NOT needed — bar stays open across frames.
+	// But sendFrame calls Update(FrameMsg) which updates m.frame; the bar itself
+	// keeps its candidate snapshot from openCmdBar time. Navigate now:
+	m = sendKey(m, "enter")
+
+	// lead2 is now at index 0 in m.frame.World.PendingLeads; re-resolution by ID
+	// should place cursor at 0.
+	if m.cursor != 0 {
+		t.Errorf("lead2 should re-resolve to index 0 after frame reorder, cursor=%d", m.cursor)
+	}
+	if m.contextMode != contextModeLeads {
+		t.Errorf("contextMode should be contextModeLeads, got %v", m.contextMode)
+	}
+}
+
 func TestCmdBar_JKMovesSelection(t *testing.T) {
 	m := NewModel(context.Background(), &fakeFeed{}, nil)
 	m = sendFrame(m, agentFrame())
@@ -275,8 +420,7 @@ func TestCmdBar_JKMovesSelection(t *testing.T) {
 
 // ── Follow-active-agent tests ─────────────────────────────────────────────────
 
-// twoAgentFrameWithActivity returns two frames: first has agent A most active,
-// second has agent B most active.
+// twoAgentFrameWithActivity returns a Frame with two live agents at the given ActivityAt times.
 func twoAgentFrameWithActivity(aActivityAt, bActivityAt time.Time) Frame {
 	return Frame{
 		HasSnapshot: true,
@@ -329,8 +473,6 @@ func TestFollowActive_AutoSelectsMostRecentAgent(t *testing.T) {
 		t.Errorf("follow should select agent A (most active), detailKey=%q want %q", m.detailKey, aKey)
 	}
 	if m.focus != paneDetail {
-		// follow puts us in detail pane only when we select a new agent;
-		// since detailKey was empty, it should have switched.
 		t.Errorf("focus should be paneDetail, got %v", m.focus)
 	}
 

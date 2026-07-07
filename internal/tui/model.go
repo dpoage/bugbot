@@ -523,8 +523,11 @@ func (m Model) listLen() int {
 	case paneRoster:
 		return len(m.visibleAgentIndices())
 	case paneContext:
-		if m.contextMode == contextModeLeads {
+		switch m.contextMode {
+		case contextModeLeads:
 			return len(m.frame.World.PendingLeads)
+		case contextModeFindings:
+			return len(m.frame.World.Findings)
 		}
 		return 0
 	default:

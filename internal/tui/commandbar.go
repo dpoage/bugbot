@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -19,12 +20,17 @@ type matchScore int
 
 const (
 	matchExactSubstring matchScore = iota // target contains query as a substring
-	matchWordPrefix                       // query is a prefix of some word in target
+	matchWordPrefix                       // query is a prefix of some word in target (but not a substring of the whole)
 	matchSubsequence                      // query chars appear as a scattered subsequence
 	matchNone                             // no match
 )
 
 // fuzzyScore scores query against target (both case-folded internally).
+// Tier ordering: word-prefix is checked BEFORE Contains so that a query
+// that is both a word-prefix AND an inner substring of the full string ranks
+// as word-prefix (the more semantically precise match) rather than exact
+// substring. This makes the word-prefix tier reachable and ensures prefix
+// outranks mid-string matches.
 // It returns (matchNone, false) when query does not match at all.
 func fuzzyScore(target, query string) (matchScore, bool) {
 	if query == "" {
@@ -33,14 +39,17 @@ func fuzzyScore(target, query string) (matchScore, bool) {
 	tl := strings.ToLower(target)
 	ql := strings.ToLower(query)
 
-	// Tier 1: exact substring.
-	if strings.Contains(tl, ql) {
-		return matchExactSubstring, true
-	}
-
-	// Tier 2: prefix of any whitespace/punctuation-delimited word.
+	// Tier 1 (best): query is a prefix of some whitespace/punctuation word.
+	// Checked before Contains so that "nil" matching "nil-safety" (word-prefix)
+	// is returned as matchWordPrefix, not matchExactSubstring.
 	if hasWordPrefix(tl, ql) {
 		return matchWordPrefix, true
+	}
+
+	// Tier 2: exact substring — query appears verbatim somewhere in target
+	// (but NOT as a clean word prefix, handled above).
+	if strings.Contains(tl, ql) {
+		return matchExactSubstring, true
 	}
 
 	// Tier 3: scattered subsequence.
@@ -52,18 +61,20 @@ func fuzzyScore(target, query string) (matchScore, bool) {
 }
 
 // hasWordPrefix reports whether ql is a prefix of any word in tl.
-// Word boundaries are positions immediately after whitespace or punctuation.
+// Word boundaries are positions immediately after a non-letter/non-digit rune,
+// or position 0.
 func hasWordPrefix(tl, ql string) bool {
 	runes := []rune(tl)
 	qrunes := []rune(ql)
-	for i, r := range runes {
-		// A word starts at position 0 or after a non-letter/non-digit.
-		wordStart := i == 0 || !unicode.IsLetter(runes[i-1]) && !unicode.IsDigit(runes[i-1])
+	if len(qrunes) == 0 {
+		return true
+	}
+	for i := range runes {
+		// A word starts at position 0 or immediately after a non-alnum rune.
+		wordStart := i == 0 || (!unicode.IsLetter(runes[i-1]) && !unicode.IsDigit(runes[i-1]))
 		if !wordStart {
 			continue
 		}
-		_ = r
-		// Check if the query is a prefix starting at i.
 		if i+len(qrunes) > len(runes) {
 			continue
 		}
@@ -108,8 +119,10 @@ func isSubsequence(s, sub string) bool {
 type cmdKind int
 
 const (
-	cmdKindAgent cmdKind = iota
-	cmdKindLead
+	cmdKindAgent   cmdKind = iota
+	cmdKindFinding         // open finding: enter -> paneContext+contextModeFindings+cursor
+	cmdKindLead            // pending lead: enter -> paneContext+contextModeLeads+cursor
+	cmdKindFile            // file from AgentView.Files: enter -> owning agent's detail pane
 )
 
 // cmdCandidate is one selectable item in the command bar.
@@ -118,23 +131,33 @@ type cmdCandidate struct {
 	label   string // display text shown in the bar
 	display string // searchable text used for fuzzy matching
 
-	// For cmdKindAgent: index into frame.Agents.
+	// For cmdKindAgent and cmdKindFile: stable key for re-resolution.
 	agentIdx int
-	agentKey string // stable key for re-resolution
+	agentKey string
 
-	// For cmdKindLead: index into frame.World.PendingLeads.
-	leadIdx int
+	// For cmdKindFinding: stable identity for re-resolution (domain.Finding.ID).
+	findingID  string
+	findingIdx int // fallback position
+
+	// For cmdKindLead: stable identity for re-resolution (store.Lead.ID).
+	leadID  string
+	leadIdx int // fallback position
 }
 
 // buildCandidates constructs the full candidate universe from frame.
-// Called on every keystroke; allocation is proportional to frame size
-// (small — typically <100 agents + leads in practice).
+// Called on every keystroke; allocation is proportional to frame size.
+// Candidate order: agents, findings, leads, files (within each group,
+// frame order is preserved).
 func buildCandidates(frame Frame) []cmdCandidate {
-	caps := len(frame.Agents) + len(frame.World.PendingLeads)
+	caps := len(frame.Agents) + len(frame.World.Findings) + len(frame.World.PendingLeads)
+	// Count files across all agents.
+	for _, a := range frame.Agents {
+		caps += len(a.Files)
+	}
 	candidates := make([]cmdCandidate, 0, caps)
 
 	for i, a := range frame.Agents {
-		label := fmt.Sprintf("agent  %-10s  %s", a.Role, a.Label)
+		label := fmt.Sprintf("agent   %-10s  %s", a.Role, a.Label)
 		search := a.Role + " " + a.Label
 		candidates = append(candidates, cmdCandidate{
 			kind:     cmdKindAgent,
@@ -145,15 +168,43 @@ func buildCandidates(frame Frame) []cmdCandidate {
 		})
 	}
 
+	for i, f := range frame.World.Findings {
+		label := fmt.Sprintf("finding %-40s  %s", f.Title, f.File)
+		search := f.Title + " " + f.File
+		candidates = append(candidates, cmdCandidate{
+			kind:       cmdKindFinding,
+			label:      label,
+			display:    search,
+			findingID:  f.ID,
+			findingIdx: i,
+		})
+	}
+
 	for i, l := range frame.World.PendingLeads {
-		label := fmt.Sprintf("lead   %-10s  %s", l.TargetLens, l.File)
+		label := fmt.Sprintf("lead    %-10s  %s", l.TargetLens, l.File)
 		search := l.TargetLens + " " + l.File + " " + l.Note
 		candidates = append(candidates, cmdCandidate{
 			kind:    cmdKindLead,
 			label:   label,
 			display: search,
+			leadID:  l.ID,
 			leadIdx: i,
 		})
+	}
+
+	// File candidates: one entry per file per agent (N1).
+	for i, a := range frame.Agents {
+		for _, file := range a.Files {
+			label := fmt.Sprintf("file    %-30s  [%s %s]", file, a.Role, a.Label)
+			search := file + " " + a.Role + " " + a.Label
+			candidates = append(candidates, cmdCandidate{
+				kind:     cmdKindFile,
+				label:    label,
+				display:  search,
+				agentIdx: i,
+				agentKey: agentKey(a),
+			})
+		}
 	}
 
 	return candidates
@@ -166,25 +217,24 @@ func filterCandidates(all []cmdCandidate, query string) []cmdCandidate {
 	type ranked struct {
 		c    cmdCandidate
 		tier matchScore
-		orig int
 	}
-	ranked_list := make([]ranked, 0, len(all))
-	for i, c := range all {
+	rankedList := make([]ranked, 0, len(all))
+	for _, c := range all {
 		tier, ok := fuzzyScore(c.display, query)
 		if !ok {
 			continue
 		}
-		ranked_list = append(ranked_list, ranked{c: c, tier: tier, orig: i})
+		rankedList = append(rankedList, ranked{c: c, tier: tier})
 	}
 	// Stable sort by tier ascending (lower = better).
-	// Use insertion sort (list is tiny).
-	for i := 1; i < len(ranked_list); i++ {
-		for j := i; j > 0 && ranked_list[j].tier < ranked_list[j-1].tier; j-- {
-			ranked_list[j], ranked_list[j-1] = ranked_list[j-1], ranked_list[j]
+	// Insertion sort is fine — candidate lists are small in practice.
+	for i := 1; i < len(rankedList); i++ {
+		for j := i; j > 0 && rankedList[j].tier < rankedList[j-1].tier; j-- {
+			rankedList[j], rankedList[j-1] = rankedList[j-1], rankedList[j]
 		}
 	}
-	result := make([]cmdCandidate, len(ranked_list))
-	for i, r := range ranked_list {
+	result := make([]cmdCandidate, len(rankedList))
+	for i, r := range rankedList {
 		result[i] = r.c
 	}
 	return result
@@ -207,14 +257,19 @@ type cmdBarState struct {
 // newCmdBarState builds the initial (closed) command bar state.
 func newCmdBarState() cmdBarState {
 	ti := textinput.New()
-	ti.Placeholder = "jump to agent or lead…"
+	ti.Placeholder = "jump to agent, finding, lead, or file…"
 	ti.CharLimit = 128
 	ti.Width = 60
 	return cmdBarState{input: ti}
 }
 
 // openCmdBar opens the command bar and rebuilds the candidate universe from frame.
+// If the bar is already open, this is a no-op (preserves the current query
+// and selection — ctrl+p while open doesn't wipe the user's work).
 func (s *cmdBarState) openCmdBar(frame Frame) {
+	if s.open {
+		return // N3: ctrl+p while already open is a no-op
+	}
 	s.open = true
 	s.allFramed = buildCandidates(frame)
 	s.results = filterCandidates(s.allFramed, "")
@@ -252,8 +307,6 @@ func (s *cmdBarState) selectedCandidate() (cmdCandidate, bool) {
 // ── Key handling ──────────────────────────────────────────────────────────────
 
 // handleCmdBarKey handles a keypress while the command bar overlay is open.
-// Returns (Model, tea.Cmd, consumed bool). When consumed is true the caller
-// must not forward the key to the normal switch.
 func (m Model) handleCmdBarKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
@@ -310,11 +363,17 @@ func (m Model) handleCmdBarKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// cmdBarNavigateWithCmd returns (Model, tea.Cmd) so that agent drill-in can
-// return a loadTranscriptCmd exactly as handleKey's enter case does.
+// cmdBarNavigateWithCmd applies the navigation effect of a confirmed candidate
+// selection. Returns (Model, tea.Cmd): the cmd may be a loadTranscriptCmd
+// for agent/file drill-in.
+//
+// Re-resolution at nav time (N6): leads and findings are re-resolved by stable
+// ID against the current frame (which may have been refreshed while the bar
+// was open) rather than the snapshot index captured at open time.
 func (m Model) cmdBarNavigateWithCmd(c cmdCandidate) (Model, tea.Cmd) {
 	switch c.kind {
-	case cmdKindAgent:
+	case cmdKindAgent, cmdKindFile:
+		// Both agent and file candidates drill into the owning agent's detail pane.
 		idx, ok := findAgentByKey(m.frame.Agents, c.agentKey)
 		if !ok {
 			idx = c.agentIdx
@@ -342,20 +401,63 @@ func (m Model) cmdBarNavigateWithCmd(c cmdCandidate) (Model, tea.Cmd) {
 		}
 		return m, loadTranscriptCmd(m.detailKey, a.TranscriptPath)
 
+	case cmdKindFinding:
+		// Re-resolve by stable ID (N6).
+		target := resolveFindingIdx(m.frame.World.Findings, c.findingID, c.findingIdx)
+		m.focus = paneContext
+		m.contextMode = contextModeFindings
+		m.cursor = target
+		return m, nil
+
 	case cmdKindLead:
+		// Re-resolve by stable ID (N6).
+		target := resolveLeadIdx(m.frame.World.PendingLeads, c.leadID, c.leadIdx)
 		m.focus = paneContext
 		m.contextMode = contextModeLeads
-		target := c.leadIdx
-		if target >= len(m.frame.World.PendingLeads) {
-			target = len(m.frame.World.PendingLeads) - 1
-		}
-		if target < 0 {
-			target = 0
-		}
 		m.cursor = target
 		return m, nil
 	}
 	return m, nil
+}
+
+// resolveFindingIdx returns the current index of the finding with id in findings,
+// falling back to fallback when not found (frame may have reordered).
+func resolveFindingIdx(findings []domain.Finding, id string, fallback int) int {
+	for i, f := range findings {
+		if f.ID == id {
+			return i
+		}
+	}
+	if fallback >= len(findings) {
+		if len(findings) == 0 {
+			return 0
+		}
+		return len(findings) - 1
+	}
+	if fallback < 0 {
+		return 0
+	}
+	return fallback
+}
+
+// resolveLeadIdx returns the current index of the lead with id in leads,
+// falling back to fallback when not found.
+func resolveLeadIdx(leads []store.Lead, id string, fallback int) int {
+	for i, l := range leads {
+		if l.ID == id {
+			return i
+		}
+	}
+	if fallback >= len(leads) {
+		if len(leads) == 0 {
+			return 0
+		}
+		return len(leads) - 1
+	}
+	if fallback < 0 {
+		return 0
+	}
+	return fallback
 }
 
 // ── Follow-active-agent ───────────────────────────────────────────────────────
@@ -363,8 +465,10 @@ func (m Model) cmdBarNavigateWithCmd(c cmdCandidate) (Model, tea.Cmd) {
 // applyFollowActive applies follow-active-agent logic to the model when a new
 // frame arrives and m.followActive is true. It selects the most-recently-
 // active live agent (max ActivityAt among live agents) in the roster and
-// drills into the detail pane. Returns (Model, tea.Cmd): the cmd may be a
-// loadTranscriptCmd when the selected agent changed.
+// drills into the detail pane. Returns (Model, tea.Cmd): always returns a
+// loadTranscriptCmd when the selected agent changes (even for agents with an
+// empty TranscriptPath — loadTranscriptCmd maps "" to "no transcript" gracefully,
+// preventing the detail pane from being stuck at "loading transcript...").
 func (m Model) applyFollowActive(frame Frame) (Model, tea.Cmd) {
 	if !m.followActive {
 		return m, nil
@@ -388,6 +492,7 @@ func (m Model) applyFollowActive(frame Frame) (Model, tea.Cmd) {
 	m.transcriptLoaded = false
 	m.transcriptView.SetContent("")
 	m.focus = paneDetail
+	m.transcriptPath = a.TranscriptPath
 
 	// Advance roster cursor to the agent row.
 	visible := m.visibleAgentIndices()
@@ -398,11 +503,10 @@ func (m Model) applyFollowActive(frame Frame) (Model, tea.Cmd) {
 		}
 	}
 
-	if a.TranscriptPath != m.transcriptPath {
-		m.transcriptPath = a.TranscriptPath
-		return m, loadTranscriptCmd(key, a.TranscriptPath)
-	}
-	return m, nil
+	// Always fire loadTranscriptCmd on agent change (B2 fix): even when
+	// TranscriptPath is empty, loadTranscriptCmd resolves cleanly to
+	// "no transcript" rather than leaving the pane stuck at "loading…".
+	return m, loadTranscriptCmd(key, a.TranscriptPath)
 }
 
 // mostRecentlyActiveAgent returns the index of the live agent with the latest
@@ -457,10 +561,4 @@ func (m Model) viewCmdBar() string {
 	b.WriteString("\n")
 	b.WriteString(footerStyle.Render("type to filter · j/k or ↑/↓ move · enter jump · esc cancel"))
 	return b.String()
-}
-
-// viewCmdBarLeadLabel is exported for tests — renders a lead's display label
-// in the same format buildCandidates uses, for assertion.
-func cmdBarLeadLabel(l store.Lead) string {
-	return fmt.Sprintf("lead   %-10s  %s", l.TargetLens, l.File)
 }

@@ -256,7 +256,9 @@ func (m Model) renderCockpitSummary() string {
 	return b.String()
 }
 
-// renderFindings renders the tallies breakdown in the context pane.
+// renderFindings renders the tallies breakdown and open-finding rows in the
+// context pane. The open-finding list (ws.Findings) is cursor-navigable when
+// contextModeFindings is active, mirroring renderLeads.
 func (m Model) renderFindings() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Findings") + "\n")
@@ -280,6 +282,19 @@ func (m Model) renderFindings() string {
 			for _, k := range sortedIssueStates(ws.Published) {
 				fmt.Fprintf(&b, "%s: %d\n", k, ws.Published[k])
 			}
+		}
+	}
+	if len(ws.Findings) > 0 {
+		b.WriteString("\n" + sectionStyle.Render("Open findings") + "\n")
+		if ws.FindingsTotal > len(ws.Findings) {
+			fmt.Fprintf(&b, "(%d total, showing %d)\n", ws.FindingsTotal, len(ws.Findings))
+		}
+		for row, f := range ws.Findings {
+			line := fmt.Sprintf("%-40s  %s", f.Title, f.File)
+			if row == m.cursor && m.focus == paneContext {
+				line = selectedStyle.Render(line)
+			}
+			b.WriteString(line + "\n")
 		}
 	}
 	b.WriteString(dimStyle.Render("m: cycle views") + "\n")
