@@ -102,11 +102,11 @@ func describeToolCallBase(ev Event) string {
 			return "delete_repro_file " + ev.File
 		}
 		return "delete_repro_file"
-	case "run_repro":
+	case "workspace":
 		if ev.Symbol != "" {
-			return "run_repro " + ev.Symbol
+			return "workspace " + ev.Symbol
 		}
-		return "run_repro"
+		return "workspace"
 	case "post_lead":
 		return "post_lead"
 	case "summarize_package":

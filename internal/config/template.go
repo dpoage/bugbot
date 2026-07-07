@@ -212,7 +212,7 @@ sandbox:
 #   patch_max_attempts: 3      # fix plans tried per finding before needs-human
 #   backlog_batch: 3           # backlog findings per daemon backlog-timer firing
 #   sandbox_max_execs: 3       # per-attempt run_tests budget for the reproducer agent
-#   try_max_execs: 4           # per-attempt run_repro (interactive iteration) budget
+#   try_max_execs: 10          # per-attempt workspace-exec (interactive iteration) budget
 #   transcript_dir: ""         # save agent JSONL transcripts here (empty = off)
 #
 # Enablement is the --repro flag (scan) or the daemon setting; the per-run

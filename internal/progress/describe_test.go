@@ -184,16 +184,16 @@ func TestDescribe_KindToolCall(t *testing.T) {
 			ev:   Event{Kind: KindToolCall, Tool: "delete_repro_file", Phase: "start"},
 			want: "delete_repro_file",
 		},
-		// run_repro
+		// workspace
 		{
-			name: "run_repro start with symbol",
-			ev:   Event{Kind: KindToolCall, Tool: "run_repro", Phase: "start", Symbol: "go test ./..."},
-			want: "run_repro go test ./...",
+			name: "workspace start with symbol",
+			ev:   Event{Kind: KindToolCall, Tool: "workspace", Phase: "start", Symbol: "exec go test ./..."},
+			want: "workspace exec go test ./...",
 		},
 		{
-			name: "run_repro start no symbol",
-			ev:   Event{Kind: KindToolCall, Tool: "run_repro", Phase: "start"},
-			want: "run_repro",
+			name: "workspace start no symbol",
+			ev:   Event{Kind: KindToolCall, Tool: "workspace", Phase: "start"},
+			want: "workspace",
 		},
 		// summarize_package — explicit case (not generic fallback)
 		{

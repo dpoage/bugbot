@@ -447,14 +447,14 @@ func TestExtractToolActivity_Mapping(t *testing.T) {
 			want: ToolActivity{Tool: "delete_repro_file", File: "repro_test.go"},
 		},
 		{
-			name: "run_repro",
-			call: llm.ToolCall{Name: "run_repro", Arguments: []byte(`{"cmd":["go","test","./..."]}`)},
-			want: ToolActivity{Tool: "run_repro", Symbol: "go test ./..."},
+			name: "workspace",
+			call: llm.ToolCall{Name: "workspace", Arguments: []byte(`{"argv":["exec","go","test","./..."]}`)},
+			want: ToolActivity{Tool: "workspace", Symbol: "exec go test ./..."},
 		},
 		{
-			name: "run_repro truncates long cmd",
-			call: llm.ToolCall{Name: "run_repro", Arguments: []byte(`{"cmd":["go","test","-run","` + strings.Repeat("x", 130) + `"]}`)},
-			want: ToolActivity{Tool: "run_repro", Symbol: "go test -run " + strings.Repeat("x", 106) + "…"},
+			name: "workspace truncates long argv",
+			call: llm.ToolCall{Name: "workspace", Arguments: []byte(`{"argv":["exec","go","test","-run","` + strings.Repeat("x", 130) + `"]}`)},
+			want: ToolActivity{Tool: "workspace", Symbol: "exec go test -run " + strings.Repeat("x", 101) + "…"},
 		},
 		{
 			name: "unknown tool",
