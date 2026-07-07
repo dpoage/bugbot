@@ -17,6 +17,8 @@ package agent
 //   - run_tests      → File (package/dir), Symbol (summary label)
 //   - sandbox_exec   → Symbol ("sandbox")
 //   - status_note    → Tool="status_note", Symbol (the note text, truncated)
+//   - write_repro_file/delete_repro_file → File (the repo-relative path)
+//   - run_repro      → Symbol (the argv joined with spaces, truncated)
 //   - post_lead      → (no extra fields)
 //   - unknown        → Tool (name only)
 //
