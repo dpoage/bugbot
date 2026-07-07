@@ -26,11 +26,13 @@ type fakeDispatcher struct {
 	verifyCalls []engine.VerifyOpts
 	reproCalls  []engine.ReproOpts
 	sweepCalls  []engine.SweepOpts
+	reviewCalls []engine.ReviewPROpts
 
 	scanResult   *engine.ScanResult
 	verifyResult *engine.VerifyResult
 	reproResult  *engine.ReproResult
 	sweepResult  *engine.SweepResult
+	reviewResult *engine.ReviewPRResult
 	err          error
 
 	// block, when non-nil, makes every verb call park until it is closed or
@@ -96,6 +98,16 @@ func (f *fakeDispatcher) Sweep(ctx context.Context, opts engine.SweepOpts) (*eng
 		return nil, err
 	}
 	return f.sweepResult, f.err
+}
+
+func (f *fakeDispatcher) ReviewPR(ctx context.Context, opts engine.ReviewPROpts) (*engine.ReviewPRResult, error) {
+	f.mu.Lock()
+	f.reviewCalls = append(f.reviewCalls, opts)
+	f.mu.Unlock()
+	if err := f.wait(ctx); err != nil {
+		return nil, err
+	}
+	return f.reviewResult, f.err
 }
 
 func (f *fakeDispatcher) callCounts() (scan, verify, repro, sweep int) {
@@ -286,6 +298,92 @@ func TestPalette_ConfirmSweep(t *testing.T) {
 
 	if len(fd.sweepCalls) != 1 {
 		t.Fatalf("Sweep called %d times, want 1", len(fd.sweepCalls))
+	}
+}
+
+// TestPalette_ReviewUsesPRInput confirms the review row's PR-number textinput
+// feeds ReviewPROpts.PRNumber through to the dispatcher, mirroring Repro's
+// --max input row.
+func TestPalette_ReviewUsesPRInput(t *testing.T) {
+	fd := &fakeDispatcher{mode: engine.Owner, reviewResult: &engine.ReviewPRResult{}}
+	m := NewModel(context.Background(), &fakeFeed{}, fd)
+	m = sendFrame(m, baseFrame())
+	m = sendKey(m, "d")
+	m = sendKey(m, "j") // -> rowScanTargeted
+	m = sendKey(m, "j") // -> rowVerify
+	m = sendKey(m, "j") // -> rowRepro
+	m = sendKey(m, "j") // -> rowSweep
+	m = sendKey(m, "j") // -> rowReview
+
+	m = sendKey(m, "enter") // focus prNumber input
+	if !m.palette.editing {
+		t.Fatal("expected editing=true after enter on Review")
+	}
+	m = typeString(m, "42")
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	m = runCmd(m, cmd)
+
+	if len(fd.reviewCalls) != 1 {
+		t.Fatalf("ReviewPR called %d times, want 1", len(fd.reviewCalls))
+	}
+	if got := fd.reviewCalls[0].PRNumber; got != 42 {
+		t.Errorf("ReviewPR PRNumber = %d, want 42", got)
+	}
+}
+
+// TestPalette_ReviewRejectsInvalidPRNumber confirms an empty/non-positive PR
+// number never reaches the dispatcher and instead surfaces a clear
+// dispatchDoneMsg error — the HEAD-mismatch-adjacent "never crash, always a
+// status-line error" contract applies to malformed input too.
+func TestPalette_ReviewRejectsInvalidPRNumber(t *testing.T) {
+	fd := &fakeDispatcher{mode: engine.Owner, reviewResult: &engine.ReviewPRResult{}}
+	m := NewModel(context.Background(), &fakeFeed{}, fd)
+	m = sendFrame(m, baseFrame())
+	m = sendKey(m, "d")
+	m = sendKey(m, "j") // -> rowScanTargeted
+	m = sendKey(m, "j") // -> rowVerify
+	m = sendKey(m, "j") // -> rowRepro
+	m = sendKey(m, "j") // -> rowSweep
+	m = sendKey(m, "j") // -> rowReview
+
+	m = sendKey(m, "enter") // focus prNumber input, leave it empty
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	m = runCmd(m, cmd)
+
+	if len(fd.reviewCalls) != 0 {
+		t.Fatalf("ReviewPR must not be called with an empty PR number, got %d calls", len(fd.reviewCalls))
+	}
+	if m.lastErr == nil {
+		t.Fatal("expected a status-line error for an empty PR number")
+	}
+}
+
+// TestPalette_ReviewGatedInObserverMode confirms the review row is disabled
+// exactly like the other four verbs when dispatch is unavailable (m.disp ==
+// nil, e.g. Observer mode) — confirmPaletteRow's silent no-op gate.
+func TestPalette_ReviewGatedInObserverMode(t *testing.T) {
+	m := NewModel(context.Background(), &fakeFeed{}, nil)
+	m = sendFrame(m, baseFrame())
+	m = sendKey(m, "d")
+	m = sendKey(m, "j") // -> rowScanTargeted
+	m = sendKey(m, "j") // -> rowVerify
+	m = sendKey(m, "j") // -> rowRepro
+	m = sendKey(m, "j") // -> rowSweep
+	m = sendKey(m, "j") // -> rowReview
+
+	if m.palette.cursor != rowReview {
+		t.Fatalf("cursor = %v, want rowReview", m.palette.cursor)
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	m = runCmd(m, cmd)
+
+	if m.running {
+		t.Error("confirming a row with a nil dispatcher must be a silent no-op, not start a run")
 	}
 }
 

@@ -1,4 +1,4 @@
-package cli
+package engine
 
 import (
 	"bufio"
@@ -105,8 +105,8 @@ func record(out commentableLines, path string, line int) {
 	set[line] = true
 }
 
-// (executeReview calls Repo.UnifiedDiff directly to obtain the bytes parsed
-// here; the parser above is the seam tests exercise with canned diffs.)
+// (ReviewPR calls Repo.UnifiedDiff directly to obtain the bytes parsed here;
+// the parser above is the seam tests exercise with canned diffs.)
 
 // normalizeDiffPath strips the conventional "b/" prefix git puts on post-image
 // paths and trims any trailing tab-delimited metadata, yielding a repo-relative

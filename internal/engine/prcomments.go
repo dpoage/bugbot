@@ -1,4 +1,4 @@
-package cli
+package engine
 
 import (
 	"context"
@@ -132,7 +132,7 @@ type existingState struct {
 // loadExisting lists the PR's review comments and issue comments, extracts the
 // bugbot markers, and builds the fingerprint→comment and summary indexes used by
 // sync. Both lists are paginated. gh reads here are safe in dry-run.
-func loadExisting(ctx context.Context, gh ghRunner, pr int) (existingState, error) {
+func loadExisting(ctx context.Context, gh GHRunner, pr int) (existingState, error) {
 	st := existingState{byFingerprint: map[string]existingComment{}}
 
 	reviewRaw, err := gh(ctx, "api", "--paginate", fmt.Sprintf("repos/{owner}/{repo}/pulls/%d/comments", pr))
