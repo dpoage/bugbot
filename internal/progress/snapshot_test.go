@@ -1,6 +1,7 @@
 package progress
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -527,7 +528,7 @@ func TestSnapshot_ToolCall_SurvivesRefreshAgents(t *testing.T) {
 
 // TestSnapshot_ReproAttempt_UpdatesTrackedAgentAndLastEvent verifies that a
 // KindReproAttempt event folds into the matching tracked agent's Activity
-// (same slot as KindAgentActivity) and always sets Status.LastEvent, so
+// (same slot as KindToolCall) and always sets Status.LastEvent, so
 // `bugbot status` surfaces repro round progress.
 func TestSnapshot_ReproAttempt_UpdatesTrackedAgentAndLastEvent(t *testing.T) {
 	clock := time.Unix(53000, 0)
@@ -651,5 +652,55 @@ func TestSnapshot_ToolUnhealthy_AggregatesByMaxSeverity(t *testing.T) {
 	}
 	if !th.LastAt.After(lowAt) {
 		t.Errorf("LastAt should be after lowAt; got %v, lowAt %v", th.LastAt, lowAt)
+	}
+}
+
+// TestSnapshot_RecentActions_RingBound verifies that pushing more than
+// recentActionsCap (8) Phase=start KindToolCall events for one agent keeps
+// only the 8 newest entries, newest-first.
+func TestSnapshot_RecentActions_RingBound(t *testing.T) {
+	clock := time.Unix(70000, 0)
+	now := func() time.Time { return clock }
+	s, path := newTestSnapshot(t, now)
+
+	s.Handle(Event{Kind: KindAgentStarted, Role: RoleFinder, Label: "ring-test", Time: clock})
+
+	const total = 12 // deliberately more than recentActionsCap (8)
+	for i := 0; i < total; i++ {
+		clock = clock.Add(time.Millisecond)
+		s.Handle(Event{
+			Kind:    KindToolCall,
+			Role:    RoleFinder,
+			Label:   "ring-test",
+			Phase:   "start",
+			Tool:    "grep",
+			Pattern: fmt.Sprintf("pat%d", i),
+			Time:    clock,
+		})
+	}
+
+	// Force a write past the rate-limit window so the snapshot is persisted.
+	clock = clock.Add(2 * time.Second)
+	s.Handle(Event{Kind: KindSpendTick, InputTokens: 1, Time: clock})
+
+	st, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if len(st.ActiveAgents) != 1 {
+		t.Fatalf("ActiveAgents = %d, want 1", len(st.ActiveAgents))
+	}
+	ra := st.ActiveAgents[0].RecentActions
+	if len(ra) != recentActionsCap {
+		t.Errorf("RecentActions len = %d, want %d (ring bound)", len(ra), recentActionsCap)
+	}
+	// Newest-first: index 0 must be the last pattern pushed (pat11).
+	if len(ra) > 0 && ra[0] != `grep "pat11"` {
+		t.Errorf("RecentActions[0] = %q, want grep \"pat11\" (newest first)", ra[0])
+	}
+	// Oldest surviving entry must be pat4 (total-cap = 12-8 = 4th oldest pushed).
+	last := ra[len(ra)-1]
+	if last != `grep "pat4"` {
+		t.Errorf("RecentActions[last] = %q, want grep \"pat4\"", last)
 	}
 }

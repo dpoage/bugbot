@@ -441,6 +441,11 @@ func TestExtractToolActivity_Mapping(t *testing.T) {
 			call: llm.ToolCall{Name: "some_custom_tool", Arguments: []byte(`{}`)},
 			want: ToolActivity{Tool: "some_custom_tool"},
 		},
+		{
+			name: "malformed JSON args",
+			call: llm.ToolCall{Name: "read_file", Arguments: []byte(`not-valid-json`)},
+			want: ToolActivity{Tool: "read_file"}, // zero fields; no panic
+		},
 	}
 
 	for _, tc := range tests {
@@ -520,6 +525,38 @@ func TestWithActivitySink_NilIsNoop(t *testing.T) {
 	_, err := r.Run(context.Background(), "task")
 	if err != nil {
 		t.Fatalf("Run without sink: %v", err)
+	}
+}
+
+// TestWithActivitySink_DoneErrOnFailingTool verifies that when a tool returns
+// an error the done event carries Err (non-empty) and Count=0.
+func TestWithActivitySink_DoneErrOnFailingTool(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "boom", `{}`, 5, 2),
+		textResp("recovered", 3, 1),
+	)
+	var acts []ToolActivity
+	r := NewRunner(fc, []Tool{echoTool{name: "boom", failMsg: "disk on fire"}}, "sys",
+		WithActivitySink(func(act ToolActivity) { acts = append(acts, act) }))
+	_, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(acts) != 2 {
+		t.Fatalf("sink called %d times, want 2 (start+done)", len(acts))
+	}
+	start, done := acts[0], acts[1]
+	if start.Phase != "start" {
+		t.Errorf("acts[0].Phase = %q, want start", start.Phase)
+	}
+	if done.Phase != "done" {
+		t.Errorf("acts[1].Phase = %q, want done", done.Phase)
+	}
+	if done.Err == "" {
+		t.Error("done.Err is empty; want the tool error string")
+	}
+	if done.Count != 0 {
+		t.Errorf("done.Count = %d, want 0 on error", done.Count)
 	}
 }
 

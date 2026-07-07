@@ -495,12 +495,12 @@ func mergeMax(a, b Counts) Counts {
 	return a
 }
 
-// pushRing prepends item to ring and trims it to at most cap entries. The
+// pushRing prepends item to ring and trims it to at most maxLen entries. The
 // result is newest-first: index 0 is the most recent action.
-func pushRing(ring []string, item string, cap int) []string {
+func pushRing(ring []string, item string, maxLen int) []string {
 	ring = append([]string{item}, ring...)
-	if len(ring) > cap {
-		ring = ring[:cap]
+	if len(ring) > maxLen {
+		ring = ring[:maxLen]
 	}
 	return ring
 }

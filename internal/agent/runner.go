@@ -234,9 +234,10 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 				tr.closeStream()
 				return outcome, err
 			}
-			startAct := extractToolActivity(call)
-			startAct.Phase = "start"
+			var startAct ToolActivity
 			if r.activitySink != nil {
+				startAct = extractToolActivity(call)
+				startAct.Phase = "start"
 				r.activitySink(startAct)
 			}
 			result, isErr := r.runTool(ctx, call)

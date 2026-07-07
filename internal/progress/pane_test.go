@@ -168,7 +168,7 @@ func TestPane_ToolCallIgnoresUnknownAgent(t *testing.T) {
 
 // TestPane_ReproAttemptFoldsIntoAgentActivity verifies a KindReproAttempt
 // event folds into the matching active agent's activity note (the same slot
-// KindAgentActivity uses) and updates the pane's last-event line.
+// KindToolCall uses) and updates the pane's last-event line.
 func TestPane_ReproAttemptFoldsIntoAgentActivity(t *testing.T) {
 	var buf bytes.Buffer
 	p := newTestPane(&buf, 200, fixedClock(time.Unix(1_000_000, 0)))
