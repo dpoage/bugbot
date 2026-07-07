@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -265,24 +264,6 @@ type ReproResult struct {
 	Skipped string
 }
 
-// resolveReproTarget resolves opts.Target to the absolute repo path Repro
-// forwards to BuildReproducer as repoRoot. filepath.Abs("") resolves to the
-// process's current working directory, matching the same "" == this repo
-// convention every other Dispatcher verb gets for free via openRepo ->
-// ingest.Open (which calls filepath.Abs internally). Repro has no such
-// intermediary: BuildReproducer takes repoRoot directly and repro.New
-// rejects an empty repoDir outright, so leaving opts.Target unresolved sent
-// every empty-Target caller (the TUI dispatch palette never sets it — see
-// bugbot-pt83) straight into a hard "repro: empty repoDir" failure whenever
-// the backlog was non-empty.
-func resolveReproTarget(target string) (string, error) {
-	abs, err := filepath.Abs(target)
-	if err != nil {
-		return "", err
-	}
-	return abs, nil
-}
-
 // Repro implements `bugbot repro`'s one-shot backlog drain: it queries the
 // store for open Tier-2/3 findings with no reproduction attempt and runs them
 // through the reproduce+patch-prover pipeline, promoting demonstrated
@@ -303,14 +284,23 @@ func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, e
 	out := opts.Out
 
 	// Resolve the target repo path the same way every other Dispatcher verb
-	// does (see openRepo -> ingest.Open): an unset opts.Target (the TUI
-	// dispatch palette never populates it — bugbot-pt83) must mean "this
-	// repo", not an empty repoRoot forwarded verbatim into BuildReproducer.
-	resolvedTarget, err := resolveReproTarget(opts.Target)
+	// does (openRepo -> ingest.Open, which validates a git work tree and
+	// resolves to `git rev-parse --show-toplevel`, NOT merely
+	// filepath.Abs). An unset opts.Target (the TUI dispatch palette never
+	// populates it — bugbot-pt83) resolves via ingest.Open("") ==
+	// ingest.Open(cwd), matching every sibling verb; the resolved toplevel
+	// (not just an absolute cwd) matters because repro.New keys dependency
+	// detection, build-system detection, and finding file paths off the
+	// repo ROOT, and a TUI launched from a subdirectory would otherwise
+	// silently repro against the wrong (sub)tree. Without resolving to a
+	// real path at all, BuildReproducer/repro.New rejected an empty
+	// repoDir outright ("repro: empty repoDir") whenever the backlog was
+	// non-empty.
+	repo, err := d.openRepo(ctx, opts.Target)
 	if err != nil {
-		return nil, fmt.Errorf("resolve target: %w", err)
+		return nil, err
 	}
-	opts.Target = resolvedTarget
+	opts.Target = repo.Root()
 
 	// --max overrides the config default; 0 means "use config".
 	batchSize := cfg.Repro.BacklogBatch
