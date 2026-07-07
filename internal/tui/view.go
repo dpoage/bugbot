@@ -146,7 +146,7 @@ func (m Model) renderRosterPane(innerW, innerH int) string {
 
 // ── Detail pane ───────────────────────────────────────────────────────────────
 
-// renderDetailPane renders the selected agent's detail and transcript viewport.
+// renderDetailPane renders the selected agent's detail and transcript/action-feed viewport.
 func (m Model) renderDetailPane(innerW, innerH int) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Agent Detail") + "\n")
@@ -183,13 +183,28 @@ func (m Model) renderDetailPane(innerW, innerH int) string {
 		fmt.Fprintf(&b, "finished:  %s\n", fmtTime(a.FinishedAt))
 	}
 
-	b.WriteString("\n" + sectionStyle.Render("Transcript") + "\n")
-	if m.transcript == nil {
-		b.WriteString(dimStyle.Render(m.transcriptNote) + "\n")
+	if m.detailMode {
+		// Action feed view: render the action feed for this agent.
+		feed := renderActionFeed(m.actionFeed, innerW, innerH-8, m.detailKey, recentActionsForView(a, m.frame), m.focus == paneDetail)
+		b.WriteString(feed)
 	} else {
-		b.WriteString(m.transcriptView.View() + "\n")
+		b.WriteString("\n" + sectionStyle.Render("Transcript") + "\n")
+		if m.transcript == nil {
+			b.WriteString(dimStyle.Render(m.transcriptNote) + "\n")
+		} else {
+			b.WriteString(m.transcriptView.View() + "\n")
+		}
 	}
 	return b.String()
+}
+
+// recentActionsForView returns the RecentActions for a live Observer-mode agent
+// when the frame has no Owner-mode ActionRows; otherwise nil.
+func recentActionsForView(a AgentView, fr Frame) []string {
+	if fr.ActionRows != nil {
+		return nil
+	}
+	return a.RecentActions
 }
 
 // ── Context pane ─────────────────────────────────────────────────────────────
@@ -433,7 +448,10 @@ func (m Model) viewFooter() string {
 	case paneRoster:
 		return footerStyle.Render("j/k move · enter drill in · / filter · d dispatch · tab/1/2/3 · q quit")
 	case paneDetail:
-		return footerStyle.Render("j/k scroll transcript · d dispatch · tab/1/2/3 · q quit")
+		if m.detailMode {
+			return footerStyle.Render("j/k scroll feed · enter open · a transcript · g toggle-all · d dispatch · tab/1/2/3 · q quit")
+		}
+		return footerStyle.Render("j/k scroll transcript · a action-feed · d dispatch · tab/1/2/3 · q quit")
 	case paneContext:
 		return footerStyle.Render("m cycle modes · j/k scroll/move · d dispatch · tab/1/2/3 · q quit")
 	default:

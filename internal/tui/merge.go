@@ -45,12 +45,13 @@ func mergeAgents(live []progress.AgentStatus, hist []store.AgentUnit, transcript
 
 	for _, a := range live {
 		views = append(views, AgentView{
-			Role:       a.Role,
-			Label:      a.Label,
-			Live:       true,
-			Started:    a.Started,
-			Activity:   a.Activity,
-			ActivityAt: a.ActivityAt,
+			Role:          a.Role,
+			Label:         a.Label,
+			Live:          true,
+			Started:       a.Started,
+			Activity:      a.Activity,
+			ActivityAt:    a.ActivityAt,
+			RecentActions: a.RecentActions,
 		})
 	}
 

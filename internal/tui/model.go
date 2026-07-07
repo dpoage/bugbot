@@ -122,6 +122,13 @@ type Model struct {
 	lastErr    error
 	lastResult string
 	lastOut    string
+
+	// detailMode tracks which view is shown in paneDetail: false=transcript, true=action feed.
+	// Defaults to true (action feed) for live agents; toggled by 'a'.
+	detailMode bool // false=transcript, true=action feed
+
+	// actionFeed is the live action feed rendering state (Owner mode).
+	actionFeed ActionFeedState
 }
 
 // NewModel builds the initial Model for feed. disp is the dispatch
@@ -134,13 +141,14 @@ type Model struct {
 // after Init).
 func NewModel(ctx context.Context, feed Feed, disp dispatcher) Model {
 	m := Model{
-		feed:      feed,
-		disp:      disp,
-		ctx:       ctx,
-		palette:   newPaletteState(),
-		width:     80,
-		height:    24,
-		detailIdx: -1,
+		feed:       feed,
+		disp:       disp,
+		ctx:        ctx,
+		palette:    newPaletteState(),
+		width:      80,
+		height:     24,
+		detailIdx:  -1,
+		actionFeed: newActionFeedState(),
 	}
 	vw, vh := m.paneDetailSize()
 	m.transcriptView = viewport.New(vw, vh)
@@ -167,6 +175,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case FrameMsg:
 		m.frame = Frame(msg)
 		m.haveFrame = true
+		// Sync action feed from frame (Owner mode) — rows are snapshots from LiveFeed.
+		if len(m.frame.ActionRows) > 0 {
+			for k, rows := range m.frame.ActionRows {
+				ring, ok := m.actionFeed.perAgent[k]
+				if !ok {
+					ring = newActionRing()
+					m.actionFeed.perAgent[k] = ring
+				}
+				// Replace the ring's contents with the frame snapshot (already bounded).
+				// We rebuild by pushing all rows to give a clean bounded ring.
+				ring.count = 0
+				ring.head = 0
+				ring.pending = make(map[uint64]int)
+				ring.byKey = make(map[actionKey][]uint64)
+				for _, row := range rows {
+					ring.push(row)
+				}
+			}
+		}
 		if m.detailKey != "" {
 			if idx, ok := findAgentByKey(m.frame.Agents, m.detailKey); ok {
 				m.detailIdx = idx
@@ -203,6 +230,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case repaintMsg:
+		m.actionFeed.advanceSpinner()
 		return m, repaintTick()
 
 	case dispatchDoneMsg:
@@ -343,9 +371,34 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.transcriptLoaded = false
 				m.transcriptView.SetContent("")
 				m.focus = paneDetail
+				// Default to action feed for live agents; transcript for finished.
+				m.detailMode = a.Live
+				m.actionFeed.cursor = 0
 				return m, loadTranscriptCmd(m.detailKey, a.TranscriptPath)
 			}
 		}
+		// ENTER on a feed row in paneDetail emits openSourceMsg (action feed mode).
+		if m.focus == paneDetail && m.detailMode {
+			rows := m.actionFeedVisibleRows()
+			cursor := m.actionFeed.cursor
+			if cursor >= 0 && cursor < len(rows) {
+				cmd := enterOnFeedRow(rows[cursor])
+				return m, cmd
+			}
+		}
+		return m, nil
+
+	case "a":
+		// Toggle paneDetail between transcript and action feed.
+		if m.focus == paneDetail || m.detailKey != "" {
+			m.detailMode = !m.detailMode
+		}
+		return m, nil
+
+	case "g":
+		// Toggle action feed between per-agent and aggregate.
+		m.actionFeed.showAggregate = !m.actionFeed.showAggregate
+		m.actionFeed.cursor = 0
 		return m, nil
 
 	case "m":
@@ -370,7 +423,18 @@ func (m *Model) scrollDown() {
 	case paneRoster:
 		m.moveCursor(1)
 	case paneDetail:
-		m.transcriptView.LineDown(1)
+		if m.detailMode {
+			rows := m.actionFeedVisibleRows()
+			m.actionFeed.cursor++
+			if m.actionFeed.cursor >= len(rows) {
+				m.actionFeed.cursor = len(rows) - 1
+			}
+			if m.actionFeed.cursor < 0 {
+				m.actionFeed.cursor = 0
+			}
+		} else {
+			m.transcriptView.LineDown(1)
+		}
 	case paneContext:
 		if m.contextMode == contextModeLeads {
 			m.moveCursor(1)
@@ -386,7 +450,14 @@ func (m *Model) scrollUp() {
 	case paneRoster:
 		m.moveCursor(-1)
 	case paneDetail:
-		m.transcriptView.LineUp(1)
+		if m.detailMode {
+			m.actionFeed.cursor--
+			if m.actionFeed.cursor < 0 {
+				m.actionFeed.cursor = 0
+			}
+		} else {
+			m.transcriptView.LineUp(1)
+		}
 	case paneContext:
 		if m.contextMode == contextModeLeads {
 			m.moveCursor(-1)
@@ -473,6 +544,11 @@ func (m Model) listLen() int {
 	switch m.focus {
 	case paneRoster:
 		return len(m.visibleAgentIndices())
+	case paneDetail:
+		if m.detailMode {
+			return len(m.actionFeedVisibleRows())
+		}
+		return 0
 	case paneContext:
 		if m.contextMode == contextModeLeads {
 			return len(m.frame.World.PendingLeads)
@@ -481,6 +557,27 @@ func (m Model) listLen() int {
 	default:
 		return 0
 	}
+}
+
+// actionFeedVisibleRows returns the rows to display in the action feed pane
+// for the currently selected agent, in the current view mode (per-agent or aggregate).
+func (m Model) actionFeedVisibleRows() []ActionRow {
+	// Observer mode: use RecentActions from AgentView.
+	if m.detailIdx >= 0 && m.detailIdx < len(m.frame.Agents) {
+		a := m.frame.Agents[m.detailIdx]
+		if len(a.RecentActions) > 0 && m.frame.ActionRows == nil {
+			// Observer: convert RecentActions strings to observer rows, oldest-first.
+			rows := make([]ActionRow, len(a.RecentActions))
+			for i, s := range a.RecentActions {
+				rows[len(a.RecentActions)-1-i] = ActionRow{IsObserver: true, ObserverText: s}
+			}
+			return rows
+		}
+		// Owner mode: key by agentFeedKey(role, label) — stable identity for ring lookup.
+		feedKey := agentFeedKey(a.Role, a.Label)
+		return m.actionFeed.VisibleRows(feedKey)
+	}
+	return nil
 }
 
 // resizePanes recalculates all viewport dimensions when the terminal size changes.
