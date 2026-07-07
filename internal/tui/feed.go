@@ -80,6 +80,10 @@ var _ Feed = (*SnapshotFeed)(nil)
 // reachable from the Leads screen.
 const leadPreviewMax = 3
 
+// findingPreviewMax bounds the open-finding preview in a Frame for the fuzzy
+// jump bar; enough for quick navigation without unbounded allocation.
+const findingPreviewMax = 50
+
 // staleAfter mirrors internal/cli/status.go's staleAfter: how long without a
 // status.json update before a running scan/daemon is treated as dead.
 const staleAfter = 2 * time.Minute
@@ -128,6 +132,11 @@ type WorldState struct {
 	// is the true count on the blackboard.
 	PendingLeads      []store.Lead
 	PendingLeadsTotal int
+
+	// Findings is newest-updated-first, capped at findingPreviewMax; used by
+	// the fuzzy jump bar for finding-row navigation. Open findings only.
+	Findings      []domain.Finding
+	FindingsTotal int
 
 	Published map[store.IssueState]int // empty = never published
 

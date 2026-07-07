@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -29,6 +30,13 @@ func gatherWorldState(ctx context.Context, st *store.Store, cfg config.Config) W
 			leads = leads[:leadPreviewMax]
 		}
 		ws.PendingLeads = leads
+	}
+	if findings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen}); err == nil {
+		ws.FindingsTotal = len(findings)
+		if len(findings) > findingPreviewMax {
+			findings = findings[:findingPreviewMax]
+		}
+		ws.Findings = findings
 	}
 	if pub, err := st.CountPublishedIssues(ctx); err == nil && len(pub) > 0 {
 		ws.Published = pub

@@ -48,6 +48,10 @@ func (m Model) View() string {
 		return lipgloss.JoinVertical(lipgloss.Left, m.viewPalette(), "", m.viewFooter())
 	}
 
+	if m.cmdBar.open {
+		return lipgloss.JoinVertical(lipgloss.Left, m.viewCmdBar(), "", m.viewFooter())
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left, m.viewPanes(), m.viewFooter())
 }
 
@@ -252,7 +256,9 @@ func (m Model) renderCockpitSummary() string {
 	return b.String()
 }
 
-// renderFindings renders the tallies breakdown in the context pane.
+// renderFindings renders the tallies breakdown and open-finding rows in the
+// context pane. The open-finding list (ws.Findings) is cursor-navigable when
+// contextModeFindings is active, mirroring renderLeads.
 func (m Model) renderFindings() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Findings") + "\n")
@@ -276,6 +282,19 @@ func (m Model) renderFindings() string {
 			for _, k := range sortedIssueStates(ws.Published) {
 				fmt.Fprintf(&b, "%s: %d\n", k, ws.Published[k])
 			}
+		}
+	}
+	if len(ws.Findings) > 0 {
+		b.WriteString("\n" + sectionStyle.Render("Open findings") + "\n")
+		if ws.FindingsTotal > len(ws.Findings) {
+			fmt.Fprintf(&b, "(%d total, showing %d)\n", ws.FindingsTotal, len(ws.Findings))
+		}
+		for row, f := range ws.Findings {
+			line := fmt.Sprintf("%-40s  %s", f.Title, f.File)
+			if row == m.cursor && m.focus == paneContext {
+				line = selectedStyle.Render(line)
+			}
+			b.WriteString(line + "\n")
 		}
 	}
 	b.WriteString(dimStyle.Render("m: cycle views") + "\n")
@@ -423,6 +442,10 @@ func fmtTime(t time.Time) string {
 
 // viewFooter renders the keymap hint line at the bottom of the screen.
 func (m Model) viewFooter() string {
+	follow := ""
+	if m.followActive {
+		follow = " · [F:follow]"
+	}
 	if m.filtering {
 		return footerStyle.Render("filter: type to narrow · enter accept · esc clear · ctrl+c quit")
 	}
@@ -431,12 +454,12 @@ func (m Model) viewFooter() string {
 	}
 	switch m.focus {
 	case paneRoster:
-		return footerStyle.Render("j/k move · enter drill in · / filter · d dispatch · tab/1/2/3 · q quit")
+		return footerStyle.Render("j/k move · enter drill in · / filter · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
 	case paneDetail:
-		return footerStyle.Render("j/k scroll transcript · d dispatch · tab/1/2/3 · q quit")
+		return footerStyle.Render("j/k scroll transcript · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
 	case paneContext:
-		return footerStyle.Render("m cycle modes · j/k scroll/move · d dispatch · tab/1/2/3 · q quit")
+		return footerStyle.Render("m cycle modes · j/k scroll/move · ctrl+p jump · F follow · d dispatch · tab/1/2/3 · q quit" + follow)
 	default:
-		return footerStyle.Render("tab/1/2/3 focus · d dispatch · q quit")
+		return footerStyle.Render("tab/1/2/3 focus · ctrl+p jump · F follow · d dispatch · q quit" + follow)
 	}
 }
