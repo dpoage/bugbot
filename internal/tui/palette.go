@@ -16,17 +16,18 @@ import (
 )
 
 // dispatcher is the subset of *engine.Dispatcher the dispatch palette needs
-// to run the four in-process verbs (Scan, Verify, Repro, Sweep). Defined
-// locally — rather than depending on *engine.Dispatcher directly — so tests
-// can inject a fake that records calls and blocks on demand, without
-// spinning up a real funnel/LLM/sandbox stack. A nil dispatcher on Model
-// means dispatch is disabled: Observer mode, or a never-run repo (see
+// to run the five in-process verbs (Scan, Verify, Repro, Sweep, ReviewPR).
+// Defined locally — rather than depending on *engine.Dispatcher directly —
+// so tests can inject a fake that records calls and blocks on demand,
+// without spinning up a real funnel/LLM/sandbox stack. A nil dispatcher on
+// Model means dispatch is disabled: Observer mode, or a never-run repo (see
 // selectFeed).
 type dispatcher interface {
 	Scan(context.Context, engine.ScanOpts) (*engine.ScanResult, error)
 	Verify(context.Context, engine.VerifyOpts) (*engine.VerifyResult, error)
 	Repro(context.Context, engine.ReproOpts) (*engine.ReproResult, error)
 	Sweep(context.Context, engine.SweepOpts) (*engine.SweepResult, error)
+	ReviewPR(context.Context, engine.ReviewPROpts) (*engine.ReviewPRResult, error)
 	Mode() engine.Mode
 }
 
@@ -45,16 +46,8 @@ const (
 	rowVerify
 	rowRepro
 	rowSweep
+	rowReview
 
-	// review dispatch pending bugbot-2p8z: engine review gh-orchestration
-	// extraction. `bugbot review`'s gh comment-sync orchestration lives in
-	// package cli, not engine, so it cannot be dispatched through this
-	// interface yet. When it is extracted into engine, slot it in here:
-	// add a rowReview case above paletteRowCount, a label in
-	// paletteRowLabel, an enablement check in paletteRowEnabled (if it
-	// needs its own precondition), and a case in dispatchCmd's switch. The
-	// palette's navigation, gating, and one-at-a-time run logic need no
-	// changes.
 	paletteRowCount
 )
 
@@ -62,7 +55,7 @@ const (
 // Enter (Scan Targeted's --since ref, Repro's --max N) rather than
 // dispatching immediately.
 func (r paletteRow) editableField() bool {
-	return r == rowScanTargeted || r == rowRepro
+	return r == rowScanTargeted || r == rowRepro || r == rowReview
 }
 
 // paletteState holds the dispatch palette's own UI state, separate from
@@ -78,8 +71,9 @@ type paletteState struct {
 	// stops capturing and returns to navigation).
 	editing bool
 
-	since textinput.Model // Scan --since ref
-	maxN  textinput.Model // Repro --max N
+	since    textinput.Model // Scan --since ref
+	maxN     textinput.Model // Repro --max N
+	prNumber textinput.Model // Review --pr N
 
 	suspected bool // Verify --suspected toggle
 }
@@ -96,7 +90,12 @@ func newPaletteState() paletteState {
 	maxN.CharLimit = 6
 	maxN.Width = 10
 
-	return paletteState{since: since, maxN: maxN}
+	prNumber := textinput.New()
+	prNumber.Placeholder = "PR number"
+	prNumber.CharLimit = 8
+	prNumber.Width = 10
+
+	return paletteState{since: since, maxN: maxN, prNumber: prNumber}
 }
 
 // paletteRowLabel renders row's static label (verb + current sub-choice
@@ -117,6 +116,8 @@ func (m Model) paletteRowLabel(row paletteRow) string {
 		return fmt.Sprintf("Repro — --max %s", m.palette.maxN.View())
 	case rowSweep:
 		return "Sweep — impact-sweep drain"
+	case rowReview:
+		return fmt.Sprintf("Review — --pr %s", m.palette.prNumber.View())
 	default:
 		return "?"
 	}
@@ -172,7 +173,7 @@ type dispatchDoneMsg struct {
 // its progress sink, live agent/stage/spend updates already flow through
 // there with no extra wiring — out only backstops the small amount of
 // incidental text these verbs also print.
-func dispatchCmd(ctx context.Context, cancel context.CancelFunc, disp dispatcher, row paletteRow, since string, maxNText string, suspected bool, out *capBuffer) tea.Cmd {
+func dispatchCmd(ctx context.Context, cancel context.CancelFunc, disp dispatcher, row paletteRow, since string, maxNText string, prNumberText string, suspected bool, out *capBuffer) tea.Cmd {
 	return func() tea.Msg {
 		// Always release runCtx's resources once the verb returns, on every
 		// path (success, error, or an already-cancelled ctx) — cancelRun
@@ -208,6 +209,14 @@ func dispatchCmd(ctx context.Context, cancel context.CancelFunc, disp dispatcher
 		case rowSweep:
 			res, err := disp.Sweep(ctx, engine.SweepOpts{Out: out, ErrOut: out})
 			return dispatchDoneMsg{verb: "sweep", err: err, summary: sweepSummary(res)}
+
+		case rowReview:
+			prNumber, convErr := strconv.Atoi(strings.TrimSpace(prNumberText))
+			if convErr != nil || prNumber <= 0 {
+				return dispatchDoneMsg{verb: "review", err: fmt.Errorf("review requires a positive PR number, got %q", prNumberText)}
+			}
+			res, err := disp.ReviewPR(ctx, engine.ReviewPROpts{PRNumber: prNumber, Suspected: "summary", GH: engine.RealGH, Out: out, ErrOut: out})
+			return dispatchDoneMsg{verb: fmt.Sprintf("review --pr %d", prNumber), err: err, summary: reviewSummary(res)}
 
 		default:
 			return dispatchDoneMsg{verb: "dispatch", err: fmt.Errorf("tui: unrecognized dispatch row %d", row)}
@@ -247,6 +256,17 @@ func sweepSummary(res *engine.SweepResult) string {
 		return "sweep: no unswept findings"
 	}
 	return fmt.Sprintf("sweep complete: %d finding(s)", len(res.Result.Findings))
+}
+
+func reviewSummary(res *engine.ReviewPRResult) string {
+	if res == nil {
+		return "review complete"
+	}
+	count := 0
+	if res.Result != nil {
+		count = len(res.Result.Findings)
+	}
+	return fmt.Sprintf("review complete: PR #%d, %d finding(s), %d new verified", res.PRNumber, count, res.NewVerifiedCount)
 }
 
 // handlePaletteKey handles a keypress while the palette overlay is open. It
@@ -326,10 +346,14 @@ func (m Model) handlePaletteKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 // paletteEditingField returns the textinput.Model backing the row currently
 // under the cursor, for rows that have one.
 func (m *Model) paletteEditingField() *textinput.Model {
-	if m.palette.cursor == rowRepro {
+	switch m.palette.cursor {
+	case rowRepro:
 		return &m.palette.maxN
+	case rowReview:
+		return &m.palette.prNumber
+	default:
+		return &m.palette.since
 	}
-	return &m.palette.since
 }
 
 // confirmPaletteRow starts a dispatch for the row under the cursor, unless
@@ -343,6 +367,7 @@ func (m Model) confirmPaletteRow() (Model, tea.Cmd) {
 	row := m.palette.cursor
 	since := m.palette.since.Value()
 	maxNText := m.palette.maxN.Value()
+	prNumberText := m.palette.prNumber.Value()
 	suspected := m.palette.suspected
 
 	runCtx, cancel := context.WithCancel(m.ctx)
@@ -353,7 +378,7 @@ func (m Model) confirmPaletteRow() (Model, tea.Cmd) {
 	m.runOut = &capBuffer{}
 	m.palette.open = false
 
-	return m, dispatchCmd(runCtx, cancel, m.disp, row, since, maxNText, suspected, m.runOut)
+	return m, dispatchCmd(runCtx, cancel, m.disp, row, since, maxNText, prNumberText, suspected, m.runOut)
 }
 
 // cancelRun stops the active dispatch's context, if one is running. The

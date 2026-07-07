@@ -35,14 +35,25 @@ const (
 	// process holds the writer lock, or because the operator explicitly asked
 	// for a read-only view.
 	Observer
+	// Attach means this process holds no lock of its own at all: it
+	// connected to a separately-running daemon's IPC control socket
+	// (bugbot-2p8z.4) and is streaming that daemon's live events/dispatching
+	// verbs through it. Like Owner, dispatch is enabled; unlike Owner, the
+	// Dispatcher backing it (see ControlSocketFeed's paired dispatch
+	// transport) executes remotely rather than in-process.
+	Attach
 )
 
 // String renders the mode for header/status display.
 func (m Mode) String() string {
-	if m == Owner {
+	switch m {
+	case Owner:
 		return "owner"
+	case Attach:
+		return "attach"
+	default:
+		return "observer"
 	}
-	return "observer"
 }
 
 // Feed is the seam between Model and however frames get produced.

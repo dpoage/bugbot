@@ -375,6 +375,36 @@ type Daemon struct {
 	// stage so findings stranded by interrupted runs are still reconciled.
 	// Must be > 0. Default 6h.
 	ImpactSweepInterval time.Duration `yaml:"impact_sweep_interval"`
+
+	// ControlSocket configures the optional IPC control socket that lets a
+	// separately-running `bugbot tui` ATTACH to this daemon (streaming
+	// events, dispatching verbs) instead of degrading to read-only Observer
+	// mode. Disabled by default: no knob set, no listener, byte-identical
+	// daemon behavior.
+	ControlSocket ControlSocket `yaml:"control_socket"`
+}
+
+// ControlSocket configures the daemon's optional IPC control socket
+// (bugbot-2p8z.4). See internal/control's package doc for the wire
+// protocol.
+type ControlSocket struct {
+	// Enabled turns on the listener. Default false.
+	Enabled bool `yaml:"enabled"`
+	// Path overrides the socket path. Empty means the default:
+	// "<dir of storage.path>/daemon.sock", alongside status.json.
+	Path string `yaml:"path"`
+}
+
+// ControlSocketPath resolves the daemon control socket's path: an explicit
+// Daemon.ControlSocket.Path override, or the default (a "daemon.sock"
+// sibling of the state DB / status.json). Shared by the CLI (which listens
+// here) and internal/tui (which dials here for Attach mode) so the two
+// sides can never disagree about where the socket lives.
+func (c Config) ControlSocketPath() string {
+	if c.Daemon.ControlSocket.Path != "" {
+		return c.Daemon.ControlSocket.Path
+	}
+	return filepath.Join(filepath.Dir(c.Storage.Path), "daemon.sock")
 }
 
 // Storage configures the embedded SQLite state store.
@@ -670,6 +700,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	setStr("BUGBOT_REVIEW_SUSPECTED", &cfg.Review.Suspected)
 	setStr("BUGBOT_VERIFY_SANDBOX_MIN_SEVERITY", &cfg.Verify.SandboxMinSeverity)
 	setStr("BUGBOT_REPRO_TRANSCRIPT_DIR", &cfg.Repro.TranscriptDir)
+	setStr("BUGBOT_DAEMON_CONTROL_SOCKET_PATH", &cfg.Daemon.ControlSocket.Path)
 
 	// BUGBOT_PUBLISH_LABELS is comma-separated; an explicit env var replaces the
 	// whole slice rather than appending, matching the override pattern elsewhere.
@@ -722,6 +753,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setBool("BUGBOT_SCAN_STATUS_NOTES", &cfg.Scan.StatusNotes),
 		setBool("BUGBOT_SCAN_TOOL_COMPLAINTS", &cfg.Scan.ToolComplaints),
 		setBool("BUGBOT_SCAN_HEAT_ORDERING", &cfg.Scan.HeatOrdering),
+		setBool("BUGBOT_DAEMON_CONTROL_SOCKET_ENABLED", &cfg.Daemon.ControlSocket.Enabled),
 	} {
 		if err != nil {
 			return err

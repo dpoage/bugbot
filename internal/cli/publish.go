@@ -17,13 +17,14 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/engine"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
 // publishGH is a package-level seam that tests can replace with a fakeGH.
-// Production code leaves it nil and the command wires in realGH at run time.
-var publishGH ghRunner
+// Production code leaves it nil and the command wires in engine.RealGH at run time.
+var publishGH engine.GHRunner
 
 // newPublishCmd implements `bugbot publish`: files open findings as GitHub
 // issues via gh, idempotently, and closes linked issues when findings are
@@ -69,7 +70,7 @@ Requires the gh CLI to be installed and authenticated.`,
 
 			gh := publishGH
 			if gh == nil {
-				gh = realGH
+				gh = engine.RealGH
 			}
 
 			prov := provenanceFromConfig(cfg)
@@ -108,7 +109,7 @@ func provenanceFromConfig(cfg config.Config) publishProvenance {
 // loads findings and published_issues, plans the reconcile, and applies it.
 // w receives the human-readable summary; pass cmd.OutOrStdout() from a cobra
 // command or any io.Writer from the daemon hook.
-func runPublish(ctx context.Context, w io.Writer, gh ghRunner, st *store.Store, cfg config.Publish, prov publishProvenance, tierMin int, dryRun bool) error {
+func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.Store, cfg config.Publish, prov publishProvenance, tierMin int, dryRun bool) error {
 
 	// Gather inputs for the pure planner.
 	openFindings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
@@ -472,7 +473,7 @@ func planPublish(
 // findIssueByMarker lists the repo's bugbot issues (filtered by the first
 // configured label when present) and returns the number of the issue whose
 // body carries the fingerprint marker. Used only on the rare recover path.
-func findIssueByMarker(ctx context.Context, gh ghRunner, labels []string, fingerprint string) (int, bool, error) {
+func findIssueByMarker(ctx context.Context, gh engine.GHRunner, labels []string, fingerprint string) (int, bool, error) {
 	path := "repos/{owner}/{repo}/issues?state=all&per_page=100"
 	if len(labels) > 0 {
 		path += "&labels=" + labels[0]
@@ -652,6 +653,28 @@ func sanitizeControlChars(s string) string {
 // meaningful Markdown whitespace.
 func isC0Control(c byte) bool {
 	return c < 0x20 && c != '\t' && c != '\n' && c != '\r'
+}
+
+// severityLabel and titleOrUnknown are pure formatting helpers duplicated
+// from internal/engine's own copies (used by planSync/renderSummaryBody):
+// both packages format the same domain.Finding fields, but the gh
+// comment-sync orchestration that owns the review-side copies now lives in
+// internal/engine (bugbot-2p8z.5), and pulling in an engine dependency here
+// just for two one-line string helpers would be the wrong direction — cli
+// already depends on engine, not the other way around, and neither format
+// is public API, so a two-line duplication is the correct trade-off.
+func severityLabel(s domain.Severity) string {
+	if string(s) == "" {
+		return "unspecified"
+	}
+	return string(s)
+}
+
+func titleOrUnknown(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "(untitled finding)"
+	}
+	return s
 }
 
 // renderIssueBody renders the deterministic issue body for a finding.
@@ -991,7 +1014,7 @@ func extractRunCommands(content string) string {
 // resolveRepoURL fetches the GitHub repo URL via `gh repo view --json url -q
 // .url`. Errors are tolerated: the function returns "" to signal that
 // permalinks should be omitted rather than aborting the publish run.
-func resolveRepoURL(ctx context.Context, gh ghRunner) string {
+func resolveRepoURL(ctx context.Context, gh engine.GHRunner) string {
 	raw, err := gh(ctx, "repo", "view", "--json", "url", "-q", ".url")
 	if err != nil {
 		return ""
@@ -1000,7 +1023,7 @@ func resolveRepoURL(ctx context.Context, gh ghRunner) string {
 }
 
 // ghCreateIssue posts a new GitHub issue and returns the issue number.
-func ghCreateIssue(ctx context.Context, gh ghRunner, title, body string, labels []string) (int, error) {
+func ghCreateIssue(ctx context.Context, gh engine.GHRunner, title, body string, labels []string) (int, error) {
 	title = sanitizeControlChars(title)
 	args := []string{
 		"api", "repos/{owner}/{repo}/issues",
@@ -1034,7 +1057,7 @@ func ghCreateIssue(ctx context.Context, gh ghRunner, title, body string, labels 
 }
 
 // ghUpdateIssue patches the body of an existing GitHub issue.
-func ghUpdateIssue(ctx context.Context, gh ghRunner, number int, body string) error {
+func ghUpdateIssue(ctx context.Context, gh engine.GHRunner, number int, body string) error {
 	_, err := gh(ctx,
 		"api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d", number),
 		"-X", "PATCH",
@@ -1060,7 +1083,7 @@ func autoCloseComment(status string) string {
 // ghCommentIssue posts a comment on the issue. The caller records the
 // "closing" state between this and the state PATCH so an interrupted close
 // never re-posts the comment.
-func ghCommentIssue(ctx context.Context, gh ghRunner, number int, comment string) error {
+func ghCommentIssue(ctx context.Context, gh engine.GHRunner, number int, comment string) error {
 	_, err := gh(ctx,
 		"api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d/comments", number),
 		"-X", "POST",
@@ -1076,7 +1099,7 @@ func ghCommentIssue(ctx context.Context, gh ghRunner, number int, comment string
 }
 
 // ghPatchIssueClosed patches the issue state to closed.
-func ghPatchIssueClosed(ctx context.Context, gh ghRunner, number int) error {
+func ghPatchIssueClosed(ctx context.Context, gh engine.GHRunner, number int) error {
 	_, err := gh(ctx,
 		"api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d", number),
 		"-X", "PATCH",

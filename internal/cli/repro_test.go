@@ -8,7 +8,11 @@ package cli
 //
 //   - Empty-backlog branch: when the store has no eligible findings the command
 //     prints the graceful "no eligible findings" message and exits 0.
-//     (Exits before sandbox detection, so no runtime required.)
+//     (Exits before reaching BuildReproducer, so no API credentials required;
+//     still resolves --target via a real `git rev-parse --show-toplevel`
+//     against this git repo — Dispatcher.Repro validates the target up front
+//     for every call now, see bugbot-pt83 — but that always succeeds here
+//     since the test process runs inside the repo's git work tree.)
 //
 //   - --max=0 defaults to cfg.Repro.BacklogBatch (uses config, not flag):
 //     verified via the empty-backlog path which also exercises the batch-size
@@ -18,7 +22,10 @@ package cli
 //     command is structured so backlog is queried AFTER sandbox detection, so
 //     we verify the batch cap by running with a container runtime present (if
 //     any) and checking the output, or by inspecting the pre-sandbox-detect
-//     flag parse does not error.
+//     flag parse does not error. When a runtime IS present, --target's default
+//     (".") resolves to this git repo's toplevel (not the cli package's own
+//     test-process cwd), so the sandbox preflight may legitimately demand a Go
+//     toolchain the test's sandbox.image lacks — see TestReproCmd_MaxSmaller.
 //
 // The sandbox-detect branch cannot be faked cheaply without an injection seam.
 // When no container runtime is on PATH, the command exits before building the
@@ -96,11 +103,21 @@ func TestReproCmd_EmptyBacklog(t *testing.T) {
 //	    "no container runtime" skip message and exits 0. The batch-size
 //	    resolution (which is what --max controls) has already happened
 //	    silently; the flag was parsed correctly.
-//	(b) Container runtime found: the command proceeds past sandbox detection
-//	    and queries the backlog. If it can also build the reproducer (API key
-//	    available) the header will print "attempting 2 (max=2,". Without an
-//	    API key it will error at buildReproducer — which is expected and is
-//	    not what this test is about; we skip that assertion in that case.
+//	(b) Container runtime found: the command proceeds past sandbox detection.
+//	    Target defaults to "." (--target's default, see addTargetFlag), which
+//	    Dispatcher.Repro resolves to this git repo's TOPLEVEL (bugbot-pt83:
+//	    the same ingest.Open-based resolution Scan/Verify/Sweep already use),
+//	    not the cli package's own test-process cwd — so the sandbox preflight
+//	    (VerifySandboxOnce) legitimately sees a real Go toolchain requirement.
+//	    Sub-outcomes once a runtime is found:
+//	      - toolchain_missing: the configured sandbox.image (config.Default()
+//	        uses debian:stable-slim, no `go` binary) can't satisfy that
+//	        requirement — an environment/image gap, not a flag/batch-cap
+//	        defect (both already ran by this point).
+//	      - api key missing: reaches buildReproducer and fails there instead —
+//	        expected in CI, also not what this test is about.
+//	      - both satisfied: proceeds to the backlog query and prints
+//	        "attempting 2 (max=2,", confirming the batch cap.
 //
 // The key invariant tested here is: the flag is parsed without error, and the
 // batch cap is printed correctly when the full path is reachable.
@@ -165,6 +182,21 @@ func TestReproCmd_MaxSmaller(t *testing.T) {
 	case err != nil && strings.Contains(err.Error(), "api key"):
 		// Runtime found, API key missing: expected in CI. The flag and batch-cap
 		// logic ran correctly; the error is from buildReproducer, not from our code.
+		return
+	case err != nil && strings.Contains(err.Error(), "toolchain_missing"):
+		// Runtime found; the sandbox preflight (VerifySandboxOnce) reached a real
+		// container and correctly detected the test repo's Go toolchain
+		// requirement (--target defaults to ".", which Dispatcher.Repro resolves
+		// to this git repo's TOPLEVEL — see bugbot-pt83 — not the cli package's
+		// own test-process cwd). config.Default()'s sandbox.image
+		// (debian:stable-slim) has no `go` binary, so the preflight fails with
+		// toolchain_missing before ever reaching buildReproducer. This is an
+		// environment/image gap, not a flag-parse defect: the flag parsed and
+		// the batch SIZE resolved (openRepo + batch-size resolution happen
+		// before the sandbox preflight) — only the cap's APPLICATION
+		// (backlog[:batchSize], which happens after the preflight) never runs
+		// in this arm, so this outcome does not confirm the cap itself; that
+		// invariant is instead pinned by the "attempting 2 (max=2," arm above.
 		return
 	case err != nil:
 		t.Fatalf("repro --max=2 errored unexpectedly: %v\noutput: %s", err, out)

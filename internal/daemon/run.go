@@ -177,6 +177,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 			stop()
 			d.log.Info("daemon: shutting down", "reason", ctx.Err().Error())
 			return nil
+		case job := <-d.dispatchCh:
+			// A control-socket dispatch RPC arrived. Run it to completion on
+			// THIS goroutine — the same one that runs every cycle — so it can
+			// never overlap with an in-flight poll/sweep/backlog/drain cycle,
+			// then loop back to re-evaluate the schedule (the dispatch verb
+			// itself may have changed store state the next cycle should see
+			// fresh, e.g. a just-completed scan).
+			stop()
+			d.execDispatch(ctx, job)
+			continue
 		case <-timerC:
 		}
 

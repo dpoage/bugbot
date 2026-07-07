@@ -16,6 +16,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/engine"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -1282,8 +1283,8 @@ func TestNewStorePublisher_DelegatesProvenance(t *testing.T) {
 	cfg := config.Publish{TierMin: 2, CloseOnFixed: true}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	shim := NewStorePublisher(realGH, st, cfg, log)
-	explicit := NewStorePublisherWithProvenance(realGH, st, cfg, publishProvenance{}, log)
+	shim := NewStorePublisher(engine.RealGH, st, cfg, log)
+	explicit := NewStorePublisherWithProvenance(engine.RealGH, st, cfg, publishProvenance{}, log)
 
 	// Both should have the same zero provenance. We verify by running a dry
 	// publish with a fake gh (no real network call) and checking no panic/error.
