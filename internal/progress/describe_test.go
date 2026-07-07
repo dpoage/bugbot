@@ -162,6 +162,37 @@ func TestDescribe_KindToolCall(t *testing.T) {
 			ev:   Event{Kind: KindToolCall, Tool: "post_lead", Phase: "start"},
 			want: "post_lead",
 		},
+		// summarize_package — explicit case (not generic fallback)
+		{
+			name: "summarize_package start with pkg and count",
+			ev:   Event{Kind: KindToolCall, Tool: "summarize_package", Phase: "start", File: "internal/funnel", Count: 3},
+			want: "summarizing internal/funnel [3 files]",
+		},
+		{
+			name: "summarize_package start with pkg no count",
+			ev:   Event{Kind: KindToolCall, Tool: "summarize_package", Phase: "start", File: "internal/funnel"},
+			want: "summarizing internal/funnel",
+		},
+		{
+			name: "summarize_package start no file",
+			ev:   Event{Kind: KindToolCall, Tool: "summarize_package", Phase: "start"},
+			want: "summarize_package",
+		},
+		{
+			name: "summarize_package done with count",
+			ev:   Event{Kind: KindToolCall, Tool: "summarize_package", Phase: "done", File: "internal/funnel", Count: 3},
+			want: "summarizing internal/funnel [3 files] [done, 3 files]",
+		},
+		{
+			name: "summarize_package done no count",
+			ev:   Event{Kind: KindToolCall, Tool: "summarize_package", Phase: "done", File: "internal/funnel"},
+			want: "summarizing internal/funnel [done]",
+		},
+		{
+			name: "summarize_package done with error",
+			ev:   Event{Kind: KindToolCall, Tool: "summarize_package", Phase: "done", File: "internal/funnel", Err: "context deadline exceeded"},
+			want: "summarizing internal/funnel [done, error: context deadline exceeded]",
+		},
 		// unknown tool
 		{
 			name: "unknown tool start",

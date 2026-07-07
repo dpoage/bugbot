@@ -183,7 +183,7 @@ func TestActionFeedState_AggregateBounded(t *testing.T) {
 
 func TestToolGlyphs_AllTools(t *testing.T) {
 	tools := []string{"grep", "read_file", "read_symbol", "find_references", "list_dir",
-		"run_tests", "sandbox_exec", "status_note", "unknown_tool"}
+		"run_tests", "sandbox_exec", "status_note", "summarize_package", "unknown_tool"}
 	for _, tool := range tools {
 		g := toolGlyph(tool)
 		if g == "" {
@@ -195,6 +195,37 @@ func TestToolGlyphs_AllTools(t *testing.T) {
 		if rendered == "" {
 			t.Errorf("renderActionRow for tool %q returned empty string", tool)
 		}
+	}
+}
+
+// TestToolGlyph_SummarizePackage verifies that summarize_package renders with
+// its dedicated glyph (🗺) and a non-default color, and that the rendered row
+// is non-empty for both in-flight and resolved states.
+func TestToolGlyph_SummarizePackage(t *testing.T) {
+	const tool = "summarize_package"
+
+	g := toolGlyph(tool)
+	if g != "🗺" {
+		t.Errorf("toolGlyph(%q) = %q, want 🗺", tool, g)
+	}
+
+	color := toolColor(tool)
+	if color == toolColor("unknown_tool") {
+		t.Errorf("toolColor(%q) returned the default/fallback color; want a dedicated color", tool)
+	}
+
+	// Render in-flight row.
+	inFlight := ActionRow{Tool: tool, Target: "internal/funnel [3 files]", InFlight: true}
+	rendered := renderActionRow(inFlight, "⠋", 80)
+	if rendered == "" {
+		t.Errorf("renderActionRow(%q, in-flight) returned empty string", tool)
+	}
+
+	// Render resolved row.
+	resolved := ActionRow{Tool: tool, Target: "internal/funnel [3 files]", InFlight: false, Count: 3}
+	rendered = renderActionRow(resolved, "⠋", 80)
+	if rendered == "" {
+		t.Errorf("renderActionRow(%q, resolved) returned empty string", tool)
 	}
 }
 

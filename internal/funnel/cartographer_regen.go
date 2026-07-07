@@ -117,6 +117,13 @@ func normalizeSummary(s string) string {
 // single bounded paragraph (see normalizeSummary) before being returned; an
 // empty result is reported as an error so the caller drops the package from
 // the regen batch.
+//
+// Synthetic tool-call events are emitted through the AgentScope so the TUI
+// action feed shows the per-file reads and the summarize_package call instead
+// of the generic "(no tool calls yet)" placeholder. Each member file that is
+// actually read (not skipped by the byte budget) emits a read_file start/done
+// pair; an unreadable file emits done with an Err. The summarize_package tool
+// brackets the entire RunJSON call.
 func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, budget *budgetState, pkg string, members []string, fps map[string]string) (string, error) {
 	if len(members) == 0 {
 		return "", errors.New("cartograph: empty members for package")
@@ -130,6 +137,11 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, budget
 		members = members[:DefaultCartographerMaxFiles]
 	}
 
+	// Hoist the scope so read_file events land inside the agent bracket.
+	// Start() emits KindAgentStarted; we emit KindAgentFinished via
+	// emitAgentFinished after RunJSON returns.
+	scope := progress.NewAgentScope(f.opts.Progress, progress.RoleCartographer, pkg).Start()
+
 	// Compose the user message: a brief preamble then a per-file block.
 	var body strings.Builder
 	body.WriteString("Package: ")
@@ -142,12 +154,20 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, budget
 			break
 		}
 		abs := filepath.Join(root, filepath.FromSlash(rel))
+		// Emit read_file start before reading.
+		scope.EmitToolCall("start", "read_file", rel, 1, 0, "", "", 0, "")
 		content, err := readFileHead(abs, DefaultCartographerHeadLines, perFileHead)
 		if err != nil {
 			// Unreadable file (deleted, race): skip with a one-liner so
 			// the model knows the file was once here.
 			fmt.Fprintf(&body, "--- %s ---\n  (unreadable: %v)\n", rel, err)
+			scope.EmitToolCall("done", "read_file", rel, 1, 0, "", "", 0, err.Error())
 			continue
+		}
+		// Count lines read for the done event.
+		linesRead := strings.Count(content, "\n")
+		if linesRead == 0 && content != "" {
+			linesRead = 1
 		}
 		// Stop writing more files once the running total exceeds the
 		// cap. The per-file head was sized so a typical file fits
@@ -155,6 +175,9 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, budget
 		// own cap rather than spilling the rest.
 		projected := body.Len() + len(content) + len(rel) + 8
 		if projected > DefaultCartographerInputBytes {
+			// File was read but not included due to budget: emit done
+			// with the lines that were read, then break.
+			scope.EmitToolCall("done", "read_file", rel, 1, linesRead, "", "", linesRead, "")
 			body.WriteString("  [additional files omitted to fit budget]\n")
 			break
 		}
@@ -165,6 +188,8 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, budget
 		if !strings.HasSuffix(content, "\n") {
 			body.WriteString("\n")
 		}
+		// Emit read_file done with line count.
+		scope.EmitToolCall("done", "read_file", rel, 1, linesRead, "", "", linesRead, "")
 	}
 
 	limits := f.opts.Limits.FinderLimits
@@ -174,18 +199,20 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, budget
 		// finders use to stop mid-run when the shared budget is exhausted.
 		limits = budget.finderRunnerLimits(f.opts.Limits.FinderLimits)
 	}
-	// Surface this per-package summary as an in-flight agent in `bugbot status`
-	// and the live pane via the shared AgentScope seam. The cartographer drives
-	// a single tool-less completion, so there is no per-turn tool-call activity;
-	// the started/finished bracket is what shows the operator the cartograph
-	// stage is doing work (and on which package).
-	progress.NewAgentScope(f.opts.Progress, progress.RoleCartographer, pkg).Start()
 	runner := f.newAgentRunner(client, nil, cartographySystemPrompt, limits)
 	var out struct {
 		Summary string `json:"summary"`
 	}
+	// Emit summarize_package start before the LLM call.
+	scope.EmitToolCall("start", "summarize_package", pkg, 0, 0, "", "", len(members), "")
 	start := time.Now()
 	outcome, err := runner.RunJSON(ctx, body.String(), cartographySummarySchema, &out)
+	// Emit summarize_package done with error if any.
+	errStr := ""
+	if err != nil {
+		errStr = err.Error()
+	}
+	scope.EmitToolCall("done", "summarize_package", pkg, 0, 0, "", "", len(members), errStr)
 	emitAgentFinished(f.opts.Progress, progress.RoleCartographer, pkg, outcome, start, err)
 	if err != nil {
 		return "", err
