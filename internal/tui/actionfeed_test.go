@@ -183,7 +183,7 @@ func TestActionFeedState_AggregateBounded(t *testing.T) {
 
 func TestToolGlyphs_AllTools(t *testing.T) {
 	tools := []string{"grep", "read_file", "read_symbol", "find_references", "list_dir",
-		"run_tests", "sandbox_exec", "status_note", "unknown_tool"}
+		"run_tests", "sandbox_exec", "status_note", "summarize_package", "unknown_tool"}
 	for _, tool := range tools {
 		g := toolGlyph(tool)
 		if g == "" {
@@ -195,6 +195,37 @@ func TestToolGlyphs_AllTools(t *testing.T) {
 		if rendered == "" {
 			t.Errorf("renderActionRow for tool %q returned empty string", tool)
 		}
+	}
+}
+
+// TestToolGlyph_SummarizePackage verifies that summarize_package renders with
+// its dedicated glyph (🗺) and a non-default color, and that the rendered row
+// is non-empty for both in-flight and resolved states.
+func TestToolGlyph_SummarizePackage(t *testing.T) {
+	const tool = "summarize_package"
+
+	g := toolGlyph(tool)
+	if g != "🗺" {
+		t.Errorf("toolGlyph(%q) = %q, want 🗺", tool, g)
+	}
+
+	color := toolColor(tool)
+	if color == toolColor("unknown_tool") {
+		t.Errorf("toolColor(%q) returned the default/fallback color; want a dedicated color", tool)
+	}
+
+	// Render in-flight row.
+	inFlight := ActionRow{Tool: tool, Target: "internal/funnel [3 files]", InFlight: true}
+	rendered := renderActionRow(inFlight, "⠋", 80)
+	if rendered == "" {
+		t.Errorf("renderActionRow(%q, in-flight) returned empty string", tool)
+	}
+
+	// Render resolved row.
+	resolved := ActionRow{Tool: tool, Target: "internal/funnel [3 files]", InFlight: false, Count: 3}
+	rendered = renderActionRow(resolved, "⠋", 80)
+	if rendered == "" {
+		t.Errorf("renderActionRow(%q, resolved) returned empty string", tool)
 	}
 }
 
@@ -309,13 +340,13 @@ func TestModel_ActionFeedAggregatToggle(t *testing.T) {
 	if m.actionFeed.showAggregate {
 		t.Fatal("expected per-agent mode initially")
 	}
-	m = sendKey(m, "g")
+	m = sendKey(m, "A")
 	if !m.actionFeed.showAggregate {
-		t.Fatal("expected aggregate mode after 'g'")
+		t.Fatal("expected aggregate mode after 'A'")
 	}
-	m = sendKey(m, "g")
+	m = sendKey(m, "A")
 	if m.actionFeed.showAggregate {
-		t.Fatal("expected per-agent mode after second 'g'")
+		t.Fatal("expected per-agent mode after second 'A'")
 	}
 }
 
@@ -432,11 +463,11 @@ func TestView_ActionFeedRowAppearsInDetailPane(t *testing.T) {
 	}
 }
 
-// TestView_AggregateActionFeedAppearsAfterGToggle feeds two agents' ActionRows,
-// toggles 'g', and asserts both agents' rows appear in View(). This is the
-// regression for B2: aggregate was never populated on the Model side, so 'g'
+// TestView_AggregateActionFeedAppearsAfterAToggle feeds two agents' ActionRows,
+// toggles 'A', and asserts both agents' rows appear in View(). This is the
+// regression for B2: aggregate was never populated on the Model side, so 'A'
 // always showed an empty pane.
-func TestView_AggregateActionFeedAppearsAfterGToggle(t *testing.T) {
+func TestView_AggregateActionFeedAppearsAfterAToggle(t *testing.T) {
 	m := NewModel(context.Background(), &fakeFeed{mode: Owner}, nil)
 	m.width = 120
 	m.height = 40
@@ -462,11 +493,11 @@ func TestView_AggregateActionFeedAppearsAfterGToggle(t *testing.T) {
 	m = sendFrame(m, fr)
 	// drill into first agent
 	m = sendKey(m, "enter")
-	// toggle aggregate
-	m = sendKey(m, "g")
+	// toggle aggregate with 'A'
+	m = sendKey(m, "A")
 
 	if !m.actionFeed.showAggregate {
-		t.Fatal("showAggregate should be true after 'g'")
+		t.Fatal("showAggregate should be true after 'A'")
 	}
 
 	view := stripANSI(m.View())

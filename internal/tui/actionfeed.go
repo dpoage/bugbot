@@ -3,7 +3,7 @@ package tui
 // actionfeed.go: live scrolling action feed for KindToolCall events.
 //
 // The feed renders as a view mode in the detail pane, toggled with 'a'.
-// 'g' toggles between per-agent and aggregate-all-agents view.
+// 'A' toggles between per-agent and aggregate-all-agents view.
 // j/k scroll; ENTER on a row with File or Pattern emits openSourceMsg.
 
 import (
@@ -54,6 +54,8 @@ func toolGlyph(tool string) string {
 		return "⚙"
 	case tool == "status_note":
 		return "📝"
+	case tool == "summarize_package":
+		return "🗺"
 	default:
 		return "▶"
 	}
@@ -78,6 +80,8 @@ func toolColor(tool string) lipgloss.Color {
 		return lipgloss.Color("1") // red
 	case tool == "status_note":
 		return lipgloss.Color("8") // dim
+	case tool == "summarize_package":
+		return lipgloss.Color("13") // bright magenta — cartographer brand
 	default:
 		return lipgloss.Color("7") // white
 	}

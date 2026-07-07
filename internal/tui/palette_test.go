@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -364,24 +365,251 @@ func TestPalette_CancelStopsContextAndClearsRunningOnDone(t *testing.T) {
 	}
 }
 
-func TestPalette_EscCancelsActiveRunInsteadOfClosingPalette(t *testing.T) {
+// TestPalette_EscClosesPaletteRunUntouched verifies the NEW contract:
+// esc while a run is active closes the palette but leaves the dispatch
+// context alive. The old behaviour (esc cancelled the run) is the bug.
+func TestPalette_EscClosesPaletteRunUntouched(t *testing.T) {
+	fd := &fakeDispatcher{mode: engine.Owner, block: make(chan struct{}), sawCancel: make(chan struct{})}
+	m := NewModel(context.Background(), &fakeFeed{}, fd)
+	m = sendFrame(m, baseFrame())
+	m = sendKey(m, "d") // open palette
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // start Scan Sweep, parks on fd.block
+	m = next.(Model)
+	if !m.running {
+		t.Fatal("expected running=true after dispatch")
+	}
+	// palette closes when dispatch starts (confirmPaletteRow); re-open it.
+	if m.palette.open {
+		t.Fatal("expected palette closed once dispatch starts")
+	}
+	go func() { cmd() }() // let it park; unblocked by defer
+	defer close(fd.block)
+
+	m = sendKey(m, "d") // re-open palette while running
+	if !m.palette.open {
+		t.Fatal("expected palette open after 'd' while running")
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	// esc must close the palette, not cancel the run.
+	m = sendKey(m, "esc")
+	if m.palette.open {
+		t.Fatal("expected palette closed after esc")
+	}
+	if !m.running {
+		t.Fatal("expected run still active after esc (esc must not cancel)")
+	}
+
+	// Confirm the dispatch context was NOT cancelled within a short window.
+	select {
+	case <-fd.sawCancel:
+		t.Fatal("esc incorrectly cancelled the dispatch context")
+	case <-time.After(50 * time.Millisecond):
+		// good — context was not cancelled
+	}
+}
+
+// TestPalette_DToggleClosesPalette verifies that pressing 'd' while the
+// palette is open closes it (toggle), and pressing 'd' again re-opens it.
+func TestPalette_DToggleClosesPalette(t *testing.T) {
+	m := NewModel(context.Background(), &fakeFeed{}, &fakeDispatcher{mode: engine.Owner})
+	m = sendFrame(m, baseFrame())
+
+	m = sendKey(m, "d") // open
+	if !m.palette.open {
+		t.Fatal("expected palette open after first 'd'")
+	}
+	m = sendKey(m, "d") // close via toggle
+	if m.palette.open {
+		t.Fatal("expected palette closed after second 'd' (toggle)")
+	}
+	m = sendKey(m, "d") // open again
+	if !m.palette.open {
+		t.Fatal("expected palette open after third 'd'")
+	}
+}
+
+// TestPalette_CtrlXCancelsWithPaletteOpen verifies ctrl+x cancels the run
+// whether the palette is open or closed.
+func TestPalette_CtrlXCancelsWithPaletteOpen(t *testing.T) {
+	for _, paletteOpen := range []bool{false, true} {
+		name := "palette_closed"
+		if paletteOpen {
+			name = "palette_open"
+		}
+		t.Run(name, func(t *testing.T) {
+			fd := &fakeDispatcher{mode: engine.Owner, block: make(chan struct{}), sawCancel: make(chan struct{})}
+			m := NewModel(context.Background(), &fakeFeed{}, fd)
+			m = sendFrame(m, baseFrame())
+			m = sendKey(m, "d")
+
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // start Scan Sweep
+			m = next.(Model)
+			if !m.running {
+				t.Fatal("expected running=true")
+			}
+			msgCh := make(chan tea.Msg, 1)
+			go func() { msgCh <- cmd() }()
+			defer close(fd.block)
+
+			if paletteOpen {
+				m = sendKey(m, "d") // re-open palette
+				if !m.palette.open {
+					t.Fatal("expected palette open")
+				}
+			}
+
+			time.Sleep(10 * time.Millisecond)
+			m = sendKey(m, "ctrl+x")
+
+			select {
+			case <-fd.sawCancel:
+			case <-time.After(2 * time.Second):
+				t.Fatal("ctrl+x did not cancel the dispatch context")
+			}
+
+			var msg tea.Msg
+			select {
+			case msg = <-msgCh:
+			case <-time.After(2 * time.Second):
+				t.Fatal("dispatch cmd never resolved after ctrl+x cancellation")
+			}
+			next, _ = m.Update(msg)
+			m = next.(Model)
+			if m.running {
+				t.Fatal("expected running=false after dispatchDoneMsg")
+			}
+			if !isCancelled(m.lastErr) {
+				t.Fatalf("lastErr = %v, want context.Canceled", m.lastErr)
+			}
+		})
+	}
+}
+
+// TestPalette_PaletteXCancels verifies the in-palette 'x' key cancels the
+// active run (the labeled affordance shown in the footer while running).
+func TestPalette_PaletteXCancels(t *testing.T) {
 	fd := &fakeDispatcher{mode: engine.Owner, block: make(chan struct{}), sawCancel: make(chan struct{})}
 	m := NewModel(context.Background(), &fakeFeed{}, fd)
 	m = sendFrame(m, baseFrame())
 	m = sendKey(m, "d")
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // start Scan Sweep
 	m = next.(Model)
-	go func() { cmd() }()
+	if !m.running {
+		t.Fatal("expected running=true")
+	}
+	msgCh := make(chan tea.Msg, 1)
+	go func() { msgCh <- cmd() }()
 	defer close(fd.block)
 
+	// Re-open palette (dispatch closed it); press 'x' to cancel.
+	m = sendKey(m, "d")
+	if !m.palette.open {
+		t.Fatal("expected palette open after 'd'")
+	}
+
 	time.Sleep(10 * time.Millisecond)
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = sendKey(m, "x")
 
 	select {
 	case <-fd.sawCancel:
 	case <-time.After(2 * time.Second):
-		t.Fatal("esc while running did not cancel the dispatch context")
+		t.Fatal("palette 'x' did not cancel the dispatch context")
+	}
+
+	var msg tea.Msg
+	select {
+	case msg = <-msgCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatch cmd never resolved after 'x' cancellation")
+	}
+	next, _ = m.Update(msg)
+	m = next.(Model)
+	if m.running {
+		t.Fatal("expected running=false after dispatchDoneMsg")
+	}
+	if !isCancelled(m.lastErr) {
+		t.Fatalf("lastErr = %v, want context.Canceled", m.lastErr)
+	}
+}
+
+// TestPalette_DoubleDispatchRefusedWithVisibleReason verifies the
+// one-at-a-time policy: trying to confirm a row while a run is active is
+// refused, and the rendered palette shows a per-row "run in progress" reason.
+func TestPalette_DoubleDispatchRefusedWithVisibleReason(t *testing.T) {
+	fd := &fakeDispatcher{mode: engine.Owner, block: make(chan struct{})}
+	m := NewModel(context.Background(), &fakeFeed{}, fd)
+	m = sendFrame(m, baseFrame())
+	m = sendKey(m, "d")
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // starts Scan Sweep, parks
+	m = next.(Model)
+	if !m.running {
+		t.Fatal("expected running=true")
+	}
+	go func() { cmd() }()
+	defer close(fd.block)
+
+	// Re-open palette while running; try confirm — must be refused.
+	m = sendKey(m, "d")
+	m = sendKey(m, "j") // rowScanTargeted
+	m = sendKey(m, "enter")
+	time.Sleep(20 * time.Millisecond)
+
+	if scan, verify, repro, sweep := fd.callCounts(); scan != 1 || verify != 0 || repro != 0 || sweep != 0 {
+		t.Fatalf("call counts after refused second dispatch = (scan=%d verify=%d repro=%d sweep=%d), want (1,0,0,0)",
+			scan, verify, repro, sweep)
+	}
+
+	// Palette render must include the "run in progress" reason on each row.
+	rendered := m.viewPalette()
+	if !strings.Contains(rendered, "run in progress") {
+		t.Errorf("palette render while running must show 'run in progress' reason; got:\n%s", rendered)
+	}
+}
+
+// TestPalette_FinishedRunDoesNotTrapKeys verifies that when a dispatch
+// finishes while the palette is open, result state renders and normal keys
+// continue to work (palette does not enter a stuck state).
+func TestPalette_FinishedRunDoesNotTrapKeys(t *testing.T) {
+	fd := &fakeDispatcher{mode: engine.Owner, scanResult: &engine.ScanResult{}}
+	m := NewModel(context.Background(), &fakeFeed{}, fd)
+	m = sendFrame(m, baseFrame())
+	m = sendKey(m, "d")
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // starts + finishes Scan Sweep (no block)
+	m = next.(Model)
+	if !m.running {
+		t.Fatal("expected running=true")
+	}
+
+	// Deliver the completion message (palette is closed because dispatch started).
+	m = runCmd(m, cmd)
+	if m.running {
+		t.Fatal("expected running=false after dispatch completes")
+	}
+
+	// Open the palette after completion; navigation and esc should work normally.
+	m = sendKey(m, "d")
+	if !m.palette.open {
+		t.Fatal("expected palette open after 'd' post-completion")
+	}
+	m = sendKey(m, "j") // navigate — must not crash or freeze
+	if m.palette.cursor == 0 {
+		t.Fatal("expected cursor to move after j")
+	}
+	m = sendKey(m, "esc")
+	if m.palette.open {
+		t.Fatal("expected palette closed after esc post-completion")
+	}
+	// Normal key outside palette must work.
+	prev := m.focus
+	m = sendKey(m, "tab")
+	if m.focus == prev {
+		t.Fatal("tab should cycle focus after palette close")
 	}
 }
 

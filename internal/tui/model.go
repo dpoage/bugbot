@@ -78,6 +78,10 @@ type Model struct {
 	filter    string
 	filtering bool
 
+	// pendingG is set after a lone 'g' press; a second 'g' jumps to top.
+	// Any other key clears it first (single reset point at the top of handleKey).
+	pendingG bool
+
 	// detailIdx/detailKey track the agent shown in paneDetail.
 	// detailKey is the stable identity; detailIdx is re-resolved each frame.
 	detailIdx int
@@ -360,12 +364,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKey handles keyboard input for the multi-pane compositor.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Cancel key stops the active dispatch at highest priority.
-	if m.running {
-		switch msg.String() {
-		case "ctrl+x", "esc":
-			return m.cancelRun(), nil
-		}
+	// Single reset point: clear pendingG on every key, unconditionally, before
+	// any early-return path (running, palette, ctrl+p, cmdBar, filter). This
+	// prevents stale gg firing after e.g. g → ctrl+p → esc → g.
+	// The 'g' case below re-sets pendingG when appropriate.
+	wasPendingG := m.pendingG
+	m.pendingG = false
+
+	// ctrl+x cancels the active dispatch at highest priority. esc is NOT
+	// intercepted here while running: when the palette is open, esc closes
+	// the palette only (handled in handlePaletteKey); when the palette is
+	// closed, esc keeps its existing non-palette semantics (filter clear,
+	// source-view exit, etc.). Run cancellation is explicit: ctrl+x
+	// globally, or 'x' inside the palette.
+	if m.running && msg.String() == "ctrl+x" {
+		return m.cancelRun(), nil
 	}
 
 	if m.palette.open {
@@ -438,13 +451,30 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 		return m, nil
 
+	case "h":
+		// 'h' moves focus left (wrapping); mirrors tab/1/2/3 cursor-reset semantics.
+		m.focus = (m.focus + paneCount - 1) % paneCount
+		m.cursor = 0
+		return m, nil
+
+	case "l":
+		// 'l' moves focus right (wrapping); mirrors tab/1/2/3 cursor-reset semantics.
+		m.focus = (m.focus + 1) % paneCount
+		m.cursor = 0
+		return m, nil
+
 	case "d":
-		// Opens from any pane. Opens even when m.disp == nil: the palette
-		// renders every verb disabled with the reason instead of hiding
-		// itself, so Observer-mode operators can see WHY dispatch is
-		// unavailable.
-		m.palette.open = true
-		m.palette.editing = false
+		// 'd' toggles the palette: closed→open, open→close. Opens even
+		// when m.disp == nil so Observer-mode operators see WHY dispatch
+		// is unavailable. Toggle while running is intentional: the
+		// operator may want to check the running verb or cancel via 'x'.
+		if m.palette.open {
+			m.palette.open = false
+			m.palette.editing = false
+		} else {
+			m.palette.open = true
+			m.palette.editing = false
+		}
 		return m, nil
 
 	case "j", "down":
@@ -469,6 +499,28 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "b", "pgup":
 		m.pageUp()
+		return m, nil
+
+	case "ctrl+d":
+		m.halfPageDown()
+		return m, nil
+
+	case "ctrl+u":
+		m.halfPageUp()
+		return m, nil
+
+	case "g":
+		// gg = jump to top. First 'g' sets pendingG; second 'g' jumps.
+		if wasPendingG {
+			m.jumpTop()
+		} else {
+			m.pendingG = true
+		}
+		return m, nil
+
+	case "G":
+		// 'G' jumps to the bottom of the focused pane.
+		m.jumpBottom()
 		return m, nil
 
 	case "/":
@@ -529,8 +581,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "g":
-		// Toggle action feed between per-agent and aggregate; gated like 'a'.
+	case "A":
+		// Toggle action feed between per-agent and aggregate (mnemonic: All-agents).
+		// Gated like 'a': only active when the detail pane is focused or an agent
+		// is selected. Pairs with 'a' (transcript/feed toggle).
 		if m.focus == paneDetail || m.detailKey != "" {
 			m.actionFeed.showAggregate = !m.actionFeed.showAggregate
 			m.actionFeed.cursor = 0
@@ -719,6 +773,156 @@ func (m *Model) pageUp() {
 	}
 }
 
+// halfPageDown moves the focused pane down by half a page. Viewports use
+// HalfPageDown (non-deprecated bubbles v1 name); cursor lists step by
+// max(1, height/2) using a fixed sensible step of 10 rows — this avoids
+// coupling every list renderer's height computation into the model.
+func (m *Model) halfPageDown() {
+	const step = 10
+	switch m.focus {
+	case paneRoster:
+		m.moveCursor(step)
+	case paneDetail:
+		if m.detailMode {
+			rows := m.actionFeedVisibleRows()
+			m.actionFeed.cursor += step
+			if m.actionFeed.cursor >= len(rows) {
+				m.actionFeed.cursor = len(rows) - 1
+			}
+			if m.actionFeed.cursor < 0 {
+				m.actionFeed.cursor = 0
+			}
+		} else {
+			m.transcriptView.HalfPageDown()
+		}
+	case paneContext:
+		switch m.contextMode {
+		case contextModeLeads, contextModeFindings:
+			m.moveCursor(step)
+		case contextModeSource:
+			_, ph := m.paneContextSize()
+			m.sourceOffset += ph / 2
+			if m.sourceOffset > len(m.sourceLines)-1 {
+				m.sourceOffset = len(m.sourceLines) - 1
+			}
+			if m.sourceOffset < 0 {
+				m.sourceOffset = 0
+			}
+		case contextModeGrep:
+			m.grepCursor += step
+			if m.grepCursor >= len(m.grepHits) {
+				m.grepCursor = len(m.grepHits) - 1
+			}
+			if m.grepCursor < 0 {
+				m.grepCursor = 0
+			}
+		default:
+			m.contextView.HalfPageDown()
+		}
+	}
+}
+
+// halfPageUp moves the focused pane up by half a page. Mirrors halfPageDown.
+func (m *Model) halfPageUp() {
+	const step = 10
+	switch m.focus {
+	case paneRoster:
+		m.moveCursor(-step)
+	case paneDetail:
+		if m.detailMode {
+			m.actionFeed.cursor -= step
+			if m.actionFeed.cursor < 0 {
+				m.actionFeed.cursor = 0
+			}
+		} else {
+			m.transcriptView.HalfPageUp()
+		}
+	case paneContext:
+		switch m.contextMode {
+		case contextModeLeads, contextModeFindings:
+			m.moveCursor(-step)
+		case contextModeSource:
+			_, ph := m.paneContextSize()
+			m.sourceOffset -= ph / 2
+			if m.sourceOffset < 0 {
+				m.sourceOffset = 0
+			}
+		case contextModeGrep:
+			m.grepCursor -= step
+			if m.grepCursor < 0 {
+				m.grepCursor = 0
+			}
+		default:
+			m.contextView.HalfPageUp()
+		}
+	}
+}
+
+// jumpTop moves the focused pane's cursor/viewport to the very first row.
+// Routing mirrors scrollDown/scrollUp; roster respects the active filter.
+func (m *Model) jumpTop() {
+	switch m.focus {
+	case paneRoster:
+		m.cursor = 0
+	case paneDetail:
+		if m.detailMode {
+			m.actionFeed.cursor = 0
+		} else {
+			m.transcriptView.GotoTop()
+		}
+	case paneContext:
+		switch m.contextMode {
+		case contextModeLeads, contextModeFindings:
+			m.cursor = 0
+		case contextModeSource:
+			m.sourceOffset = 0
+		case contextModeGrep:
+			m.grepCursor = 0
+		default:
+			m.contextView.GotoTop()
+		}
+	}
+}
+
+// jumpBottom moves the focused pane's cursor/viewport to the very last row.
+// Routing mirrors scrollDown/scrollUp; roster respects the active filter.
+func (m *Model) jumpBottom() {
+	switch m.focus {
+	case paneRoster:
+		idx := m.visibleAgentIndices()
+		if len(idx) > 0 {
+			m.cursor = len(idx) - 1
+		}
+	case paneDetail:
+		if m.detailMode {
+			rows := m.actionFeedVisibleRows()
+			if len(rows) > 0 {
+				m.actionFeed.cursor = len(rows) - 1
+			}
+		} else {
+			m.transcriptView.GotoBottom()
+		}
+	case paneContext:
+		switch m.contextMode {
+		case contextModeLeads, contextModeFindings:
+			n := m.listLen()
+			if n > 0 {
+				m.cursor = n - 1
+			}
+		case contextModeSource:
+			if len(m.sourceLines) > 0 {
+				m.sourceOffset = len(m.sourceLines) - 1
+			}
+		case contextModeGrep:
+			if len(m.grepHits) > 0 {
+				m.grepCursor = len(m.grepHits) - 1
+			}
+		default:
+			m.contextView.GotoBottom()
+		}
+	}
+}
+
 // visibleAgentIndices returns indices into m.frame.Agents matching the active
 // filter (case-insensitive substring over role/label/lens/activity/detail),
 // or every index when no filter is set.
@@ -873,8 +1077,10 @@ func (m Model) paneContextSize() (int, int) {
 // stack vertically (narrow terminal degradation).
 // paneWidth and paneHeight describe the inner content area of each pane.
 func (m Model) layoutDimensions() (bool, int, int) {
-	// subtract 2 from height for the footer line + blank separator
-	availH := m.height - 2
+	// Subtract 1 for the footer line. viewPanes() is joined directly with
+	// viewFooter() (no blank separator), so panes fill height-1 rows and the
+	// footer fills the last 1 row, giving exactly height total lines.
+	availH := m.height - 1
 	if availH < 3 {
 		availH = 3
 	}
