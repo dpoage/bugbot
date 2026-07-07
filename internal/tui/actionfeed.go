@@ -3,7 +3,7 @@ package tui
 // actionfeed.go: live scrolling action feed for KindToolCall events.
 //
 // The feed renders as a view mode in the detail pane, toggled with 'a'.
-// 'g' toggles between per-agent and aggregate-all-agents view.
+// 'A' toggles between per-agent and aggregate-all-agents view.
 // j/k scroll; ENTER on a row with File or Pattern emits openSourceMsg.
 
 import (
