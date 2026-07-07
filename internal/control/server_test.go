@@ -212,3 +212,102 @@ func TestDialable(t *testing.T) {
 		t.Error("Dialable() = true for a nonexistent socket, want false")
 	}
 }
+
+// waitForCond polls cond until true or a bounded deadline, failing the test
+// on timeout. Used instead of a single fixed sleep so these regression tests
+// assert on observable server state, not on timing.
+func waitForCond(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !cond() {
+		t.Fatal("condition never became true within 2s")
+	}
+}
+
+// TestServer_ClientDisconnectDoesNotLeakConnection is a regression test for
+// a goroutine/entry leak: clientConn.run's wg.Wait() used to block forever
+// after the read loop broke on disconnect, because writeLoop only exits on
+// c.done (closed by the deferred c.close(), which ran AFTER wg.Wait() —
+// a deadlock cycle) or a write error. That left the client stuck in
+// s.clients and its reader/writer goroutines alive until the next broadcast
+// happened to hit a write error. Asserts the server's client registry
+// empties out promptly (bounded poll, not a blind sleep) after the client
+// closes its end.
+func TestServer_ClientDisconnectDoesNotLeakConnection(t *testing.T) {
+	srv, path := testServer(t, nil)
+
+	cl, err := Dial(path)
+	if err != nil {
+		t.Fatalf("Dial() error: %v", err)
+	}
+
+	waitForCond(t, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return len(srv.clients) == 1
+	})
+
+	if err := cl.Close(); err != nil {
+		t.Fatalf("Client.Close() error: %v", err)
+	}
+
+	waitForCond(t, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return len(srv.clients) == 0
+	})
+}
+
+// TestClient_DispatchFailsPromptlyWhenServerDies is a regression test for a
+// client-side hang: readLoop used to only close c.frames on a decode error,
+// never c.closed, so an in-flight Dispatch (whose select races the reply
+// channel against c.closed) would block until the CALLER's ctx expired —
+// even though the connection was already dead. Uses a ctx with a long
+// deadline (2 minutes) so a pass can only mean closeConn's teardown path
+// unblocked Dispatch, not the ctx timing out on its own.
+func TestClient_DispatchFailsPromptlyWhenServerDies(t *testing.T) {
+	blockDispatch := make(chan struct{}) // never closed: the verb never replies
+	dispatch := func(ctx context.Context, verb Verb, opts DispatchOpts) (DispatchSummary, error) {
+		<-blockDispatch
+		return DispatchSummary{}, nil
+	}
+	srv, path := testServer(t, dispatch)
+
+	cl, err := Dial(path)
+	if err != nil {
+		t.Fatalf("Dial() error: %v", err)
+	}
+	defer cl.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_, dErr := cl.Dispatch(ctx, VerbScan, DispatchOpts{})
+		result <- dErr
+	}()
+
+	// Give the request a moment to reach the server and start blocking in
+	// the fake dispatch func, then kill the server out from under the
+	// client — simulating a daemon crash/exit.
+	time.Sleep(50 * time.Millisecond)
+	if err := srv.Close(); err != nil {
+		t.Fatalf("Server.Close() error: %v", err)
+	}
+
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Error("Dispatch() error = nil after server died, want an error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Dispatch() did not return promptly after the server died (client-side hang)")
+	}
+	close(blockDispatch)
+}

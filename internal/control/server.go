@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -232,12 +233,28 @@ func (c *clientConn) run(ctx context.Context) {
 		if err := dec.Decode(&req); err != nil {
 			break
 		}
+		if req.V != ProtocolVersion {
+			// Refuse a mismatched protocol version rather than misparse a
+			// future incompatible request shape.
+			c.send(Frame{V: ProtocolVersion, Kind: FrameKindReply, Reply: &DispatchReply{
+				ID: req.ID, Error: fmt.Sprintf("control: unsupported protocol version %d, want %d", req.V, ProtocolVersion),
+			}})
+			continue
+		}
 		wg.Add(1)
 		go func(req Request) {
 			defer wg.Done()
 			c.handleRequest(ctx, req)
 		}(req)
 	}
+	// Close immediately once the read side is done (client disconnected or
+	// sent malformed input): close is closeOnce-guarded and idempotent with
+	// the deferred call above, but MUST happen before wg.Wait() below —
+	// writeLoop only ever exits on c.done closing or a write error, so
+	// without this, wg.Wait() would block forever on every disconnect,
+	// leaking the writer goroutine (and this one) and a dead clients-map
+	// entry until the next broadcast happened to notice a write failure.
+	c.close()
 	wg.Wait()
 }
 

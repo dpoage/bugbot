@@ -113,21 +113,39 @@ func (c *Client) Dispatch(ctx context.Context, verb Verb, opts DispatchOpts) (Di
 // Close closes the underlying connection and unblocks Frames()/any pending
 // Dispatch calls.
 func (c *Client) Close() error {
-	var err error
+	c.closeConn()
+	return nil
+}
+
+// closeConn is the shared, idempotent teardown both Close (caller-initiated)
+// and readLoop (connection-died-on-its-own, e.g. the daemon exited) drive
+// through: it closes c.closed exactly once, which unblocks every pending
+// Dispatch call's select (each already races <-c.closed against its reply
+// channel) with a "connection closed" error, and closes the socket. Without
+// this shared path, a naturally-dead connection (daemon crash/exit) would
+// leave any in-flight Dispatch call blocked forever — the palette would show
+// "running..." indefinitely instead of surfacing an error.
+func (c *Client) closeConn() {
 	c.closeOnce.Do(func() {
 		close(c.closed)
-		err = c.conn.Close()
+		_ = c.conn.Close()
 	})
-	return err
 }
 
 func (c *Client) readLoop() {
 	defer close(c.frames)
+	defer c.closeConn()
 	dec := json.NewDecoder(c.conn)
 	for {
 		var fr Frame
 		if err := dec.Decode(&fr); err != nil {
 			return
+		}
+		if fr.V != ProtocolVersion {
+			// Refuse to misparse a future incompatible frame shape; simply
+			// skip it rather than tearing down the whole connection over one
+			// unrecognized frame.
+			continue
 		}
 		if fr.Kind == FrameKindReply && fr.Reply != nil {
 			c.mu.Lock()

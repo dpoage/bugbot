@@ -102,13 +102,19 @@ func (f *ControlSocketFeed) Next() tea.Cmd {
 // readLoop drains the client's inbound frames, folding events into the
 // accumulator/action state exactly like LiveFeed.Handle does, and firing
 // the same non-blocking coalescing wakeup Next waits on. Exits when the
-// client's Frames channel closes (connection dropped) or the feed closes.
+// feed closes OR the client's Frames channel closes (the connection died —
+// daemon exited/crashed, or the peer otherwise dropped): in that case
+// readLoop ALSO closes f.closed (via the same closeOnce Close() uses), so a
+// naturally-dead connection unblocks any pending Next() exactly like an
+// explicit Close() would, instead of leaving the cockpit spinning on its
+// idle ticker forever with no indication the daemon is gone.
 func (f *ControlSocketFeed) readLoop() {
 	defer close(f.readDone)
 	for {
 		select {
 		case fr, ok := <-f.client.Frames():
 			if !ok {
+				f.closeOnce.Do(func() { close(f.closed) })
 				return
 			}
 			f.applyFrame(fr)
