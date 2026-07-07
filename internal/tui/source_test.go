@@ -23,13 +23,6 @@ func newTestModel(root string) Model {
 	return m
 }
 
-// sendMsg injects a tea.Msg directly into Update, runs any returned cmd, and
-// returns the new Model. This is the pattern used by model_test.go's runCmd.
-func sendMsg(m Model, msg tea.Msg) Model {
-	next, cmd := m.Update(msg)
-	return runCmd(next.(Model), cmd)
-}
-
 // ── Path resolution tests ─────────────────────────────────────────────────────
 
 func TestResolveSourcePath_Valid(t *testing.T) {

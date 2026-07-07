@@ -303,10 +303,11 @@ func (s *ActionFeedState) ApplyToolCallEvent(ev progress.Event) {
 		s.perAgent[k] = ring
 	}
 
-	if ev.Phase == "start" {
+	switch ev.Phase {
+	case "start":
 		ring.ApplyStart(ev)
 		s.aggregate.ApplyStart(ev)
-	} else if ev.Phase == "done" {
+	case "done":
 		ring.ApplyDone(ev)
 		s.aggregate.ApplyDone(ev)
 	}

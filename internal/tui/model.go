@@ -642,7 +642,7 @@ func (m *Model) scrollDown() {
 				m.actionFeed.cursor = 0
 			}
 		} else {
-			m.transcriptView.LineDown(1)
+			m.transcriptView.ScrollDown(1)
 		}
 	case paneContext:
 		switch m.contextMode {
@@ -661,7 +661,7 @@ func (m *Model) scrollDown() {
 				m.grepCursor++
 			}
 		default:
-			m.contextView.LineDown(1)
+			m.contextView.ScrollDown(1)
 		}
 	}
 }
@@ -678,7 +678,7 @@ func (m *Model) scrollUp() {
 				m.actionFeed.cursor = 0
 			}
 		} else {
-			m.transcriptView.LineUp(1)
+			m.transcriptView.ScrollUp(1)
 		}
 	case paneContext:
 		switch m.contextMode {
@@ -694,7 +694,7 @@ func (m *Model) scrollUp() {
 				m.grepCursor--
 			}
 		default:
-			m.contextView.LineUp(1)
+			m.contextView.ScrollUp(1)
 		}
 	}
 }
@@ -703,9 +703,9 @@ func (m *Model) scrollUp() {
 func (m *Model) pageDown() {
 	switch m.focus {
 	case paneDetail:
-		m.transcriptView.ViewDown()
+		m.transcriptView.PageDown()
 	case paneContext:
-		m.contextView.ViewDown()
+		m.contextView.PageDown()
 	}
 }
 
@@ -713,9 +713,9 @@ func (m *Model) pageDown() {
 func (m *Model) pageUp() {
 	switch m.focus {
 	case paneDetail:
-		m.transcriptView.ViewUp()
+		m.transcriptView.PageUp()
 	case paneContext:
-		m.contextView.ViewUp()
+		m.contextView.PageUp()
 	}
 }
 

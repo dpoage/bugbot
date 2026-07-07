@@ -68,7 +68,7 @@ var genericEntityStoplist = map[string]bool{
 	"val": true, "buf": true, "num": true, "cnt": true, "ret": true,
 	"src": true, "dst": true, "max": true, "min": true, "len": true,
 	"cur": true, "key": true, "row": true, "col": true, "pos": true,
-	"end": true, "sum": true,
+	"end": true, "sum": true, "line": true, "rows": true,
 	"idx": true, "off": true, "str": true, "data": true,
 	"i": true, "j": true, "k": true, "n": true, "v": true, "x": true,
 	"y": true, "r": true, "w": true, "rw": true, "id": true, "fd": true,

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -273,7 +274,7 @@ func TestRenderActionFeed_ObserverRecentActions(t *testing.T) {
 // ── Model-level integration tests ─────────────────────────────────────────────
 
 func newTestModelWithAgent() Model {
-	m := NewModel(nil, &fakeFeed{mode: Owner}, nil)
+	m := NewModel(context.Background(), &fakeFeed{mode: Owner}, nil)
 	fr := baseFrame()
 	m = sendFrame(m, fr)
 	// drill into first agent
@@ -365,7 +366,7 @@ func TestModel_ActionFeedScrolling(t *testing.T) {
 }
 
 func TestModel_FrameSyncActionRows(t *testing.T) {
-	m := NewModel(nil, &fakeFeed{mode: Owner}, nil)
+	m := NewModel(context.Background(), &fakeFeed{mode: Owner}, nil)
 	// Build a frame with ActionRows
 	fr := baseFrame()
 	k := agentFeedKey("verifier", "candidate A")
@@ -397,7 +398,7 @@ func TestModel_FrameSyncActionRows(t *testing.T) {
 // renderActionFeed was called with m.detailKey (wrong format), producing an
 // empty feed pane in the real UI.
 func TestView_ActionFeedRowAppearsInDetailPane(t *testing.T) {
-	m := NewModel(nil, &fakeFeed{mode: Owner}, nil)
+	m := NewModel(context.Background(), &fakeFeed{mode: Owner}, nil)
 	m.width = 120
 	m.height = 40
 
@@ -436,7 +437,7 @@ func TestView_ActionFeedRowAppearsInDetailPane(t *testing.T) {
 // regression for B2: aggregate was never populated on the Model side, so 'g'
 // always showed an empty pane.
 func TestView_AggregateActionFeedAppearsAfterGToggle(t *testing.T) {
-	m := NewModel(nil, &fakeFeed{mode: Owner}, nil)
+	m := NewModel(context.Background(), &fakeFeed{mode: Owner}, nil)
 	m.width = 120
 	m.height = 40
 
@@ -481,7 +482,7 @@ func TestView_AggregateActionFeedAppearsAfterGToggle(t *testing.T) {
 // key is pruned (B3 regression: rings were never removed, leaking 128 rows
 // per finished agent indefinitely).
 func TestModel_PruneOnAgentFinished(t *testing.T) {
-	m := NewModel(nil, &fakeFeed{mode: Owner}, nil)
+	m := NewModel(context.Background(), &fakeFeed{mode: Owner}, nil)
 	fr := baseFrame()
 	k := agentFeedKey("verifier", "candidate A")
 	fr.ActionRows = map[string][]ActionRow{
