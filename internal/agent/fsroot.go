@@ -10,20 +10,24 @@ import (
 // errPathEscape is returned when a requested path resolves outside the root.
 var errPathEscape = errors.New("path escapes the repository root")
 
-// fsRoot anchors the built-in code tools at a single repository directory and
+// FSRoot anchors the built-in code tools at a single repository directory and
 // resolves model-supplied, repo-relative paths to absolute on-disk paths while
 // guaranteeing they cannot escape the root — including via "..", absolute
 // inputs, or symlinks that point outside the tree.
-type fsRoot struct {
+//
+// Exported so package repro can reuse the same containment logic to confine
+// its workspace tool's free inspection applets (ls/cat) to the per-attempt
+// iteration workspace, instead of duplicating it.
+type FSRoot struct {
 	// root is the cleaned, symlink-resolved absolute repository root. All
 	// resolved paths must remain within it.
 	root string
 }
 
-// newFSRoot resolves dir to a canonical absolute root. It follows symlinks on
+// NewFSRoot resolves dir to a canonical absolute root. It follows symlinks on
 // the root itself (so the containment check compares like with like) but does
 // not require dir to exist as a directory beyond being resolvable.
-func newFSRoot(dir string) (*fsRoot, error) {
+func NewFSRoot(dir string) (*FSRoot, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve root %q: %w", dir, err)
@@ -35,16 +39,16 @@ func newFSRoot(dir string) (*fsRoot, error) {
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = resolved
 	}
-	return &fsRoot{root: filepath.Clean(abs)}, nil
+	return &FSRoot{root: filepath.Clean(abs)}, nil
 }
 
-// resolve maps a model-supplied, repo-relative path to an absolute on-disk path
+// Resolve maps a model-supplied, repo-relative path to an absolute on-disk path
 // inside the root, rejecting absolute inputs and any path that escapes the root
 // either lexically ("..") or after symlink resolution.
 //
 // An empty path resolves to the root itself (useful for list_dir of the repo
 // root).
-func (r *fsRoot) resolve(rel string) (string, error) {
+func (r *FSRoot) Resolve(rel string) (string, error) {
 	// Normalize separators so callers may use forward slashes regardless of OS,
 	// matching the repo-relative, slash-normalized convention used elsewhere.
 	rel = filepath.FromSlash(rel)
@@ -76,7 +80,7 @@ func (r *fsRoot) resolve(rel string) (string, error) {
 }
 
 // contains reports whether p is the root itself or lies beneath it.
-func (r *fsRoot) contains(p string) bool {
+func (r *FSRoot) contains(p string) bool {
 	if p == r.root {
 		return true
 	}
@@ -86,6 +90,6 @@ func (r *fsRoot) contains(p string) bool {
 // evalExistingPrefix delegates to the package-level evalExistingPrefixPath so
 // both the in-repository and dep-source traversal guards share one
 // implementation (see pathutil.go).
-func (r *fsRoot) evalExistingPrefix(p string) (string, error) {
+func (r *FSRoot) evalExistingPrefix(p string) (string, error) {
 	return evalExistingPrefixPath(p)
 }

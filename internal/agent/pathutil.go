@@ -7,7 +7,7 @@ import "path/filepath"
 // validate containment even when the final path component does not yet exist,
 // while still catching a symlinked intermediate directory that escapes a root.
 //
-// It is the single authoritative implementation used by both fsRoot
+// It is the single authoritative implementation used by both FSRoot
 // (in-repository traversal guard) and DepSourceRoots (dep-source traversal
 // guard). Keeping one copy ensures any hardening applied to this path hits
 // both security boundaries simultaneously.

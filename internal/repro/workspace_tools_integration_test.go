@@ -39,7 +39,7 @@ func newWorkspaceFinding() domain.Finding {
 // TestIntegration_WorkspaceFixesCompileErrorWithinOneAttempt exercises the
 // core bugbot-bkz1/bugbot-hu59 claim against a real container runtime: a
 // candidate with a compile error is fixed by OVERWRITING the file via
-// write_repro_file and re-running — two run_repro iterations WITHIN A SINGLE
+// write_repro_file and re-running — two workspace exec iterations WITHIN A SINGLE
 // outer Attempt round (MaxAttempts: 1 — a second outer round would mean the
 // fix happened via the old blind-revision path, not the interactive loop).
 // The final plan carries cmd ONLY: the workspace registry supplies the file,
@@ -97,9 +97,9 @@ func TestDivideByZeroReported(t *testing.T) {
 
 	client := newToolScriptedClient(
 		toolCallStep("c1", "write_repro_file", string(mustWriteArgs(t, "calc_repro_test.go", brokenTest))),
-		toolCallStep("c2", "run_repro", string(mustCmdArgs(t, cmd))),
+		toolCallStep("c2", "workspace", string(mustCmdArgs(t, cmd))),
 		toolCallStep("c3", "write_repro_file", string(mustWriteArgs(t, "calc_repro_test.go", fixedTest))),
-		toolCallStep("c4", "run_repro", string(mustCmdArgs(t, cmd))),
+		toolCallStep("c4", "workspace", string(mustCmdArgs(t, cmd))),
 		// cmd-only final plan: the workspace registry is the proof.
 		textStep(`{"cmd":["go","test","-timeout","60s","-run","TestDivideByZeroReported","./..."],"expect":"TestDivideByZeroReported fails because Divide(1,0) returns ok=true"}`),
 	)
@@ -126,7 +126,7 @@ func TestDivideByZeroReported(t *testing.T) {
 		t.Fatalf("Attempt not promoted: %+v", att)
 	}
 	if att.Attempts != 1 {
-		t.Errorf("Attempts = %d, want 1 (the fix must land within run_repro iteration, not an outer revision round)", att.Attempts)
+		t.Errorf("Attempts = %d, want 1 (the fix must land within workspace exec iteration, not an outer revision round)", att.Attempts)
 	}
 	if got := att.Plan.Files["calc_repro_test.go"]; got != fixedTest {
 		t.Errorf("promoted plan carries the wrong file contents (want the FIXED candidate from the workspace registry); got:\n%s", got)
@@ -137,7 +137,7 @@ func TestDivideByZeroReported(t *testing.T) {
 // guarantee against a real container runtime under workspace-as-proof
 // semantics: TRACKED files (write_repro_file) carry into the official verdict
 // by design, but COMMAND SIDE EFFECTS do not — a marker file created by
-// run_repro's cmd inside the iteration workspace must NOT be visible to the
+// workspace exec's cmd inside the iteration workspace must NOT be visible to the
 // official run, which executes against a brand-new workspace containing the
 // repo plus only the tracked files. The final plan's canary test asserts the
 // marker is ABSENT; if isolation ever broke (the official run reused the
@@ -165,7 +165,7 @@ import (
 )
 
 // TestMarkerAbsent must PASS in a genuinely clean workspace: marker.txt was
-// only ever created as a side effect of a run_repro cmd inside the
+// only ever created as a side effect of a workspace exec cmd inside the
 // (now-discarded) iteration workspace, never tracked via write_repro_file and
 // never present in the repo the official verdict copies from.
 func TestMarkerAbsent(t *testing.T) {
@@ -177,7 +177,7 @@ func TestMarkerAbsent(t *testing.T) {
 
 	client := newToolScriptedClient(
 		// Plant the marker as a COMMAND SIDE EFFECT (not a tracked write).
-		toolCallStep("c1", "run_repro", string(mustCmdArgs(t, []string{"bash", "-c", "echo leaked-if-you-can-see-this > marker.txt && cat marker.txt"}))),
+		toolCallStep("c1", "workspace", string(mustCmdArgs(t, []string{"bash", "-c", "echo leaked-if-you-can-see-this > marker.txt && cat marker.txt"}))),
 		// Track the canary; it becomes the submitted proof.
 		toolCallStep("c2", "write_repro_file", string(mustWriteArgs(t, "marker_canary_test.go", canaryTest))),
 		textStep(`{"cmd":["go","test","-timeout","60s","-run","TestMarkerAbsent","./..."],"expect":"canary: marker.txt must not exist in the official verdict's workspace"}`),

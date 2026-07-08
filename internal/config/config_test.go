@@ -1291,11 +1291,11 @@ func TestEnvOverride_ReproSandboxMaxExecs(t *testing.T) {
 // New-field tests: repro.try_max_execs (bugbot-bkz1).
 // ---------------------------------------------------------------------------
 
-// TestDefault_ReproTryMaxExecs verifies the default value is 4.
+// TestDefault_ReproTryMaxExecs verifies the default value is 10.
 func TestDefault_ReproTryMaxExecs(t *testing.T) {
 	cfg := Default()
-	if cfg.Repro.TryMaxExecs != 4 {
-		t.Errorf("Repro.TryMaxExecs default = %d, want 4", cfg.Repro.TryMaxExecs)
+	if cfg.Repro.TryMaxExecs != 10 {
+		t.Errorf("Repro.TryMaxExecs default = %d, want 10", cfg.Repro.TryMaxExecs)
 	}
 }
 

@@ -78,7 +78,7 @@ func (t *readSymbolTool) Run(ctx context.Context, raw json.RawMessage) (string, 
 		return "", err
 	}
 
-	abs, err := t.nav.root.resolve(args.File)
+	abs, err := t.nav.root.Resolve(args.File)
 	if err != nil {
 		return "", err
 	}

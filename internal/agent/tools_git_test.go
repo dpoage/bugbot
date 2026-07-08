@@ -167,12 +167,12 @@ func TestGitBlame_InjectedRunner(t *testing.T) {
 	runner := func(_ context.Context, _ string, _ ...string) ([]byte, error) {
 		return fakeOut, nil
 	}
-	// We need an fsRoot, which requires at least the dir to exist. That's fine.
+	// We need an FSRoot, which requires at least the dir to exist. That's fine.
 	tool, err := NewGitBlame(dir, runner)
 	if err != nil {
 		t.Fatalf("NewGitBlame: %v", err)
 	}
-	// Write a dummy file so fsRoot.resolve succeeds.
+	// Write a dummy file so FSRoot.Resolve succeeds.
 	if err := os.WriteFile(filepath.Join(dir, "foo.go"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}

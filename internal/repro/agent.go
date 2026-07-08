@@ -313,41 +313,68 @@ run_tests as the demonstration or include it in cmd.`, maxExec)
 }
 
 // workspaceGuidance is appended to the reproducer system prompt when the
-// workspace tool set (write_repro_file, delete_repro_file, run_repro) is
-// wired. It steers the agent toward the interactive write/run/observe/fix
-// loop the workspace exists for, spells out each tool's argument shape (live
-// runs showed agents guessing files-as-array and empty-files calls when the
-// contract was only implied), and states plainly that promotion is judged by
-// an INDEPENDENT re-run of the final plan in a fresh workspace — containing
-// the repo plus exactly the tracked files — so command side effects from
-// iteration can never substitute for the plan itself demonstrating the bug.
+// workspace tool set (write_repro_file, delete_repro_file, workspace) is
+// wired. It is an ORDERED workflow, not a feature list — bugbot-jto7's live
+// dogfood evidence showed an agent burning its ENTIRE exec budget on
+// environment probes before ever writing a candidate file, so the ordering
+// here (investigate -> orient in the sandbox with FREE applets -> author ->
+// loop the BUDGETED exec -> submit) is deliberate, not decorative. It also
+// spells out each tool's argument shape (live runs showed agents guessing
+// files-as-array and empty-files calls when the contract was only implied),
+// and states plainly that promotion is judged by an INDEPENDENT re-run of
+// the final plan in a fresh workspace — containing the repo plus exactly
+// the tracked files — so command side effects from iteration (including
+// workspace exec's) can never substitute for the plan itself demonstrating
+// the bug.
 func workspaceGuidance(maxExec int) string {
 	return fmt.Sprintf(`
 
-You have a persistent WORKSPACE for this attempt (a fresh copy of the repo)
-and three tools to build your reproduction in it:
-- write_repro_file {"path": "<repo-relative path>", "contents": "<full file
-  contents>"} writes ONE NEW file. Calling it again with the same path
-  replaces the file — that is how you edit. Writing is free (no budget). You
-  cannot overwrite files that already exist in the repository.
-- delete_repro_file {"path": ...} removes a file you wrote earlier (e.g. a
-  broken helper that would poison the final build).
-- run_repro {"cmd": ["argv", ...]} runs a command against the workspace and
-  reports the same classification the final verdict uses. You may run up to
-  %d time(s); malformed or invalid calls are rejected WITHOUT consuming the
-  budget, and writes never consume it.
+You have a persistent WORKSPACE for this attempt (a fresh copy of the repo).
+Work it as an ORDERED loop:
 
-Work the way you would locally: investigate, write your candidate test, run
-it, read the output, edit, and re-run until it fails FOR THE REASON the
-finding describes. THEN submit your final plan.
-
-SUBMISSION: every file you wrote (and did not delete) is automatically
-included in your final plan — the workspace IS the proof. The plan's "files"
-field is an optional overlay; you do not need to repeat file contents in it.
-The official verdict re-runs your cmd in a BRAND-NEW workspace containing the
-repo plus exactly those files: build artifacts and other side effects of your
-iteration runs are NOT carried over, so cmd must perform any build steps
-itself, exactly as submitted.`, maxExec)
+1. INVESTIGATE with your read-only tools (read_file, list_dir, grep). They
+   are rooted at the HOST repository, NOT the sandbox: any gitignored
+   build/vendor artifacts you see there do NOT exist in the sandbox checkout
+   your commands actually run against — do not assume they do.
+2. ORIENT IN THE SANDBOX using the workspace tool's FREE applets before
+   spending any exec budget:
+   - workspace {"argv": ["ls", "<dir>"]} lists a workspace-relative
+     directory (dir defaults to "."). FREE.
+   - workspace {"argv": ["cat", "<file>"]} shows a workspace-relative
+     file's tail. FREE.
+   - workspace {"argv": ["status"]} reports whether the workspace is
+     materialized, your tracked files, and your exec budget used/remaining.
+     FREE.
+   Also prefer get_package_context / run_tests (where wired) over spending
+   exec budget: they orient you on the build/test layout for free or out of
+   a separate, smaller budget. Reach for workspace {"argv": ["exec", ...]}
+   only for what those cannot show you (e.g. confirming a toolchain flag
+   actually works in THIS sandbox).
+3. AUTHOR your candidate with write_repro_file {"path": "<repo-relative
+   path>", "contents": "<full file contents>"} — writes ONE NEW file.
+   Calling it again with the same path replaces the file — that is how you
+   edit. Writing is free (no budget). You cannot overwrite a file that
+   already exists in the repository. delete_repro_file {"path": ...}
+   removes a file you wrote earlier (e.g. a broken helper that would
+   poison the final build).
+4. LOOP: workspace {"argv": ["exec", "<argv...>"]} runs a command against
+   the workspace and reports the same demonstrated/reason classification
+   the final verdict uses. You may exec up to %d time(s) total; malformed
+   calls, unknown applets, and invalid commands are rejected WITHOUT
+   consuming the budget, and writes never consume it. Read the
+   classification and output, edit your candidate with write_repro_file,
+   and re-exec until it reports demonstrated=true FOR THE REASON the
+   finding describes.
+5. SUBMIT the EXACT cmd that demonstrated the bug. Every file you wrote
+   (and did not delete) is automatically included in your final plan — the
+   workspace IS the proof; the plan's "files" field is an optional overlay,
+   you do not need to repeat file contents in it. The official verdict
+   re-runs your cmd in a BRAND-NEW workspace containing the repo plus
+   exactly those tracked files: build artifacts and any other side effects
+   of your exec runs are NOT carried over — a file an exec command merely
+   CREATED (e.g. via shell redirection) is NOT tracked or submitted, only
+   files written via write_repro_file are — so cmd must perform any build
+   steps itself, exactly as submitted.`, maxExec)
 }
 
 // reproSandboxGuidance renders the sandbox-environment + command-hygiene section
