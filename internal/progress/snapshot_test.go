@@ -792,3 +792,38 @@ func TestSnapshot_ConcurrentAgentsSameLabel_CollisionRegression(t *testing.T) {
 		t.Fatalf("status.json ActiveAgents = %+v, want only agent-B", written.ActiveAgents)
 	}
 }
+
+// TestSnapshot_SpendStreamsSumAndSurviveScanFinished pins bugbot-psva's
+// aggregation in status.json: funnel ("") and repro (RoleReproducer) ticks
+// each carry their own cumulative totals; the persisted Spend* fields are the
+// per-stream sum, and the funnel's scan-finished totals must not erase repro
+// spend accrued by the catch-up drain running after the funnel returned.
+func TestSnapshot_SpendStreamsSumAndSurviveScanFinished(t *testing.T) {
+	clock := time.Unix(9000, 0)
+	now := func() time.Time { return clock }
+	s, path := newTestSnapshot(t, now)
+
+	s.Handle(Event{Kind: KindSpendTick, InputTokens: 1000, OutputTokens: 100, Time: clock})
+	clock = clock.Add(2 * time.Second) // past the write rate-limit window
+	s.Handle(Event{Kind: KindSpendTick, Role: RoleReproducer, InputTokens: 300, OutputTokens: 50, CacheReadTokens: 10, Time: clock})
+	st, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if st.SpendInput != 1300 || st.SpendOutput != 150 || st.SpendCacheRead != 10 {
+		t.Errorf("spend = in:%d out:%d cache:%d, want 1300/150/10 (sum of streams)",
+			st.SpendInput, st.SpendOutput, st.SpendCacheRead)
+	}
+
+	// Terminal event always writes; its totals are the funnel stream's finals.
+	clock = clock.Add(2 * time.Second)
+	s.Handle(Event{Kind: KindScanFinished, InputTokens: 1200, OutputTokens: 120, Time: clock})
+	st, err = ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status after finish: %v", err)
+	}
+	if st.SpendInput != 1500 || st.SpendOutput != 170 {
+		t.Errorf("spend after scan_finished = in:%d out:%d, want 1500/170 (repro stream preserved)",
+			st.SpendInput, st.SpendOutput)
+	}
+}

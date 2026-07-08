@@ -232,3 +232,32 @@ func TestPane_ConcurrentAgentsSameLabel_CollisionRegression(t *testing.T) {
 		t.Errorf("expected agent-B to survive agent-A's finish; p.agents = %+v", p.agents)
 	}
 }
+
+// TestPane_SpendTicksSumAcrossStreams pins bugbot-psva's aggregation: the
+// funnel and the repro stage each emit CUMULATIVE ticks for their own stream
+// (Role "" and RoleReproducer); the pane must display the sum of the latest
+// per-stream totals, and a scan-finished final total (funnel stream) must not
+// erase repro spend.
+func TestPane_SpendTicksSumAcrossStreams(t *testing.T) {
+	var buf bytes.Buffer
+	p := newTestPane(&buf, 200, fixedClock(time.Unix(1_000_000, 0)))
+
+	p.Handle(Event{Kind: KindSpendTick, InputTokens: 1000, OutputTokens: 100})
+	p.Handle(Event{Kind: KindSpendTick, Role: RoleReproducer, InputTokens: 300, OutputTokens: 50, CacheReadTokens: 10})
+	// Funnel stream ticks again with a HIGHER cumulative total: it must
+	// replace the previous funnel value, not stack on top of it.
+	p.Handle(Event{Kind: KindSpendTick, InputTokens: 2000, OutputTokens: 200})
+	buf.Reset()
+	p.paintNow()
+	if got := StripANSI(buf.String()); !strings.Contains(got, "in=2300 out=250 total=2550") {
+		t.Errorf("pane spend must sum latest per-stream totals (2000+300 / 200+50), got:\n%s", got)
+	}
+
+	// Scan-finished totals come from the funnel recorder only.
+	p.Handle(Event{Kind: KindScanFinished, InputTokens: 2500, OutputTokens: 220})
+	buf.Reset()
+	p.paintNow()
+	if got := StripANSI(buf.String()); !strings.Contains(got, "in=2800 out=270 total=3070") {
+		t.Errorf("scan-finished totals must update the funnel stream without erasing repro spend, got:\n%s", got)
+	}
+}

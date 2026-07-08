@@ -126,3 +126,41 @@ func TestLedgerRecorder_ConcurrentRecords(t *testing.T) {
 		t.Errorf("concurrent totals = %+v, want in=80 out=8", got)
 	}
 }
+
+// TestLedgerRecorder_OnRecordEmitsCumulativeTotals pins bugbot-psva's fix:
+// each Record invokes onRecord with run-cumulative totals (the KindSpendTick
+// contract), so repro spend surfaces live instead of only in the ledger.
+func TestLedgerRecorder_OnRecordEmitsCumulativeTotals(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	rec := newLedgerRecorder(ctx, st)
+	type tick struct{ in, out, cached int64 }
+	var ticks []tick
+	rec.onRecord = func(in, out, cached int64) {
+		ticks = append(ticks, tick{in, out, cached})
+	}
+
+	rec.Record(llm.UsageEvent{
+		Role:  "reproducer",
+		Usage: llm.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadInputTokens: 800},
+	})
+	rec.Record(llm.UsageEvent{
+		Role:  "patch-prover",
+		Usage: llm.Usage{InputTokens: 500, OutputTokens: 100},
+	})
+
+	want := []tick{{1000, 200, 800}, {1500, 300, 800}}
+	if len(ticks) != len(want) {
+		t.Fatalf("onRecord called %d times, want %d", len(ticks), len(want))
+	}
+	for i := range want {
+		if ticks[i] != want[i] {
+			t.Errorf("tick[%d] = %+v, want %+v (totals must be cumulative)", i, ticks[i], want[i])
+		}
+	}
+}

@@ -43,6 +43,18 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 	// Ledger repro + patch-prover spend (bugbot-58c). Callers retag the
 	// recorder with each run's/cycle's scan-run id.
 	rec := newLedgerRecorder(ctx, st)
+	// Surface repro spend live: without this the pane/status token counters
+	// freeze while reproducer/patch-prover agents run — the ledgerRecorder
+	// only wrote the store ledger (bugbot-psva). Role tags the tick's stream
+	// so consumers sum it with the funnel's own ticks instead of clobbering.
+	if prog != nil {
+		rec.onRecord = func(in, out, cached int64) {
+			progress.Emit(prog, progress.Event{
+				Kind: progress.KindSpendTick, Role: progress.RoleReproducer,
+				InputTokens: in, OutputTokens: out, CacheReadTokens: cached,
+			})
+		}
+	}
 	client, err := config.ResolveRole(ctx, cfg, "reproducer", llm.Options{Recorder: rec})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer client: %w", err)
@@ -127,6 +139,16 @@ func buildReproHookForScan(
 	// hook on first use (the funnel supplies it), and again after the sweep
 	// for the catch-up drain.
 	rec = newLedgerRecorder(ctx, st)
+	// Same live spend tick as BuildReproducer (bugbot-psva): the in-run hook's
+	// recorder is constructed separately, so it wires its own emission.
+	if prog != nil {
+		rec.onRecord = func(in, out, cached int64) {
+			progress.Emit(prog, progress.Event{
+				Kind: progress.KindSpendTick, Role: progress.RoleReproducer,
+				InputTokens: in, OutputTokens: out, CacheReadTokens: cached,
+			})
+		}
+	}
 	reproClient, rErr := config.ResolveRole(ctx, &cfg, "reproducer", llm.Options{Recorder: rec})
 	if rErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer client: %w", rErr)

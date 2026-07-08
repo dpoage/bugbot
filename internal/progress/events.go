@@ -66,8 +66,14 @@ const (
 	// pre-identity emitter), Phase, Tool, File, Line, EndLine, Symbol, Pattern,
 	// Count (hits/refs/lines on Phase=done), Err (tool error on Phase=done).
 	KindToolCall Kind = "tool_call"
-	// KindSpendTick reports cumulative token spend as it accrues.
-	// Fields: InputTokens, OutputTokens, CacheReadTokens, CacheCreationTokens.
+	// KindSpendTick reports cumulative token spend as it accrues. Totals are
+	// cumulative PER EMITTING RECORDER, and Role names that stream: "" is the
+	// funnel's per-run recorder (also the pre-Role wire format), RoleReproducer
+	// is the repro stage's ledger recorder, which runs outside the funnel.
+	// Consumers must keep the latest totals per stream and sum across streams
+	// (see spendAggregator) — during `scan --repro` both recorders tick
+	// concurrently and would otherwise clobber each other.
+	// Fields: Role, InputTokens, OutputTokens, CacheReadTokens, CacheCreationTokens.
 	KindSpendTick Kind = "spend_tick"
 	// KindBudgetDegraded / KindBudgetStopped mirror the funnel's budget
 	// degradation and hard-stop decisions (also surfaced on Result).

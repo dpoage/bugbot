@@ -64,6 +64,7 @@ type PaneRenderer struct {
 	inTokens     int64
 	outTokens    int64
 	cachedTokens int64
+	spend        spendAggregator         // per-stream cumulative ticks behind the three fields above
 	agents       map[string]*activeAgent // keyed by role+label
 	lastEvent    string
 	prevLines    int // lines painted last frame, to know how far to move up
@@ -180,9 +181,8 @@ func (p *PaneRenderer) apply(ev Event) {
 		}
 		p.lastEvent = fmt.Sprintf("repro %s — %s", note, ev.Label)
 	case KindSpendTick:
-		p.inTokens = ev.InputTokens
-		p.outTokens = ev.OutputTokens
-		p.cachedTokens = ev.CacheReadTokens
+		p.spend.tick(ev.Role, ev.InputTokens, ev.OutputTokens, ev.CacheReadTokens)
+		p.inTokens, p.outTokens, p.cachedTokens = p.spend.totals()
 	case KindFindingVerified:
 		p.counts.Verified++
 		p.lastEvent = "verified: " + ev.Title
@@ -210,9 +210,10 @@ func (p *PaneRenderer) apply(ev Event) {
 			p.mergeCounts(*ev.Counts)
 		}
 		if ev.InputTokens > 0 || ev.OutputTokens > 0 {
-			p.inTokens = ev.InputTokens
-			p.outTokens = ev.OutputTokens
-			p.cachedTokens = ev.CacheReadTokens
+			// Final totals come from the funnel's recorder — update that stream
+			// only, so repro spend ticked under RoleReproducer survives.
+			p.spend.tick("", ev.InputTokens, ev.OutputTokens, ev.CacheReadTokens)
+			p.inTokens, p.outTokens, p.cachedTokens = p.spend.totals()
 		}
 		p.lastEvent = "finished"
 	}

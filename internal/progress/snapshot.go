@@ -147,6 +147,7 @@ type StatusAccumulator struct {
 	st        Status
 	agents    map[string]AgentStatus
 	unhealthy map[string]ToolHealth // tool -> aggregated health
+	spend     spendAggregator       // per-stream cumulative spend behind st.Spend*
 }
 
 // NewStatusAccumulator builds an empty accumulator, stamping the resulting
@@ -327,9 +328,8 @@ func (a *StatusAccumulator) apply(ev Event) (terminal bool) {
 		}
 		s.st.LastEvent = "repro " + note + " — " + ev.Label
 	case KindSpendTick:
-		s.st.SpendInput = ev.InputTokens
-		s.st.SpendOutput = ev.OutputTokens
-		s.st.SpendCacheRead = ev.CacheReadTokens
+		s.spend.tick(ev.Role, ev.InputTokens, ev.OutputTokens, ev.CacheReadTokens)
+		s.st.SpendInput, s.st.SpendOutput, s.st.SpendCacheRead = s.spend.totals()
 	case KindFindingVerified:
 		s.st.Counts.Verified++
 		s.st.LiveVerified++
@@ -356,9 +356,10 @@ func (a *StatusAccumulator) apply(ev Event) (terminal bool) {
 			s.st.Counts = mergeMax(s.st.Counts, *ev.Counts)
 		}
 		if ev.InputTokens > 0 || ev.OutputTokens > 0 {
-			s.st.SpendInput = ev.InputTokens
-			s.st.SpendOutput = ev.OutputTokens
-			s.st.SpendCacheRead = ev.CacheReadTokens
+			// Final totals come from the funnel's recorder — update that stream
+			// only, so repro spend ticked under RoleReproducer survives.
+			s.spend.tick("", ev.InputTokens, ev.OutputTokens, ev.CacheReadTokens)
+			s.st.SpendInput, s.st.SpendOutput, s.st.SpendCacheRead = s.spend.totals()
 		}
 		s.st.Stage = ""
 		// Belt-and-suspenders: live counters are reset per stage and on scan

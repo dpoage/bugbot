@@ -34,6 +34,17 @@ type ledgerRecorder struct {
 
 	mu        sync.Mutex
 	scanRunID string
+	// in/out/cacheRead accumulate every Record's usage, mirroring the funnel
+	// spendRecorder's counters, so onRecord can report run-cumulative totals
+	// suitable for KindSpendTick.
+	in, out, cacheRead int64
+
+	// onRecord, when non-nil, is called after each Record with the new
+	// cumulative input/output/cache-read totals. BuildReproducer and the scan
+	// repro hook use it to emit progress spend ticks (Role=RoleReproducer) so
+	// repro spend is visible live, not only in the ledger (bugbot-psva). It
+	// must be cheap and non-blocking (it runs on the agent request path).
+	onRecord func(in, out, cached int64)
 }
 
 // newLedgerRecorder builds a recorder bound to the store. ctx is used for the
@@ -56,7 +67,15 @@ func (r *ledgerRecorder) SetScanRun(id string) {
 func (r *ledgerRecorder) Record(ev llm.UsageEvent) {
 	r.mu.Lock()
 	id := r.scanRunID
+	r.in += ev.Usage.InputTokens
+	r.out += ev.Usage.OutputTokens
+	r.cacheRead += ev.Usage.CacheReadInputTokens
+	in, out, cached := r.in, r.out, r.cacheRead
+	cb := r.onRecord
 	r.mu.Unlock()
+	if cb != nil {
+		cb(in, out, cached)
+	}
 	_, _ = r.store.RecordSpend(r.ctx, store.Spend{
 		ScanRunID:           id,
 		Role:                ev.Role,
