@@ -35,7 +35,10 @@ import (
 // renamed file keeps its dismissal (suppression memory), its
 // repro-contradicted signal (repro_attempts join in findingColumns), and its
 // GitHub issue link (published_issues) intact rather than orphaning them under
-// a fingerprint nothing will ever look up again.
+// a fingerprint nothing will ever look up again. Any other finding's
+// superseded_by pointer AT this fingerprint (backlog reconcile,
+// bugbot-ezmx.4) is rewritten too, so a renamed canonical row does not strand
+// a dangling merge pointer on the duplicate it absorbed.
 //
 // Idempotent by construction: it selects rows WHERE file = oldFile, and once a
 // row is rewritten its file column no longer equals oldFile, so a second call
@@ -101,6 +104,17 @@ func (s *Store) RenameFindingIdentity(ctx context.Context, oldFile, newFile stri
 			}
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE published_issues SET fingerprint = ? WHERE fingerprint = ?`,
+				newFP, m.fingerprint,
+			); err != nil {
+				return err
+			}
+			// A superseded row elsewhere may point AT this finding as its
+			// canonical (superseded_by). Cosmetic today -- no consumer resolves
+			// the pointer -- but keep it in step with every other identity
+			// rewrite above rather than let it dangle at the pre-rename
+			// fingerprint.
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE findings SET superseded_by = ? WHERE superseded_by = ?`,
 				newFP, m.fingerprint,
 			); err != nil {
 				return err

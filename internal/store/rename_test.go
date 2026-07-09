@@ -250,3 +250,63 @@ func TestRenameFindingIdentity_NoMatchIsNoop(t *testing.T) {
 		}
 	}
 }
+
+// TestRenameFindingIdentity_RewritesSupersededByPointer proves the 5th
+// rewrite (bugbot-ezmx.4): when the CANONICAL row of a backlog-reconcile
+// merge is later renamed, the duplicate row's superseded_by pointer follows
+// it to the new fingerprint instead of dangling at the pre-rename identity.
+func TestRenameFindingIdentity_RewritesSupersededByPointer(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	const oldFile, newFile = "internal/old/handler.go", "internal/new/handler.go"
+	locus := "S:func\x00Handle"
+	const kind = domain.DefectNilDeref
+	const subject = "Handle"
+	oldFP := domain.FingerprintV3(oldFile, locus, kind, subject)
+
+	if _, err := st.UpsertFinding(ctx, domain.Finding{
+		Fingerprint: oldFP,
+		LocusKey:    domain.LocusKey(oldFile, locus),
+		Title:       "canonical nil deref",
+		Severity:    "high",
+		Tier:        domain.TierSuspected,
+		Lens:        "nil-safety",
+		File:        oldFile,
+		Line:        42,
+		DefectKind:  kind,
+		Subject:     subject,
+	}); err != nil {
+		t.Fatalf("seed canonical: %v", err)
+	}
+
+	dup := sampleFindingAt("elsewhere.go", 5, "resource-leaks", "duplicate nil deref", domain.StatusOpen)
+	if _, err := st.UpsertFinding(ctx, dup); err != nil {
+		t.Fatalf("seed dup: %v", err)
+	}
+	reason := "backlog reconcile: merged into " + oldFP + " (dedup arbiter yes)"
+	if err := st.SupersedeAsDuplicate(ctx, dup.Fingerprint, oldFP, reason); err != nil {
+		t.Fatalf("SupersedeAsDuplicate: %v", err)
+	}
+
+	resolve := fixedLocusResolver(map[int]string{42: locus})
+	n, err := st.RenameFindingIdentity(ctx, oldFile, newFile, resolve)
+	if err != nil {
+		t.Fatalf("RenameFindingIdentity: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 finding rewritten, got %d", n)
+	}
+	newFP := domain.FingerprintV3(newFile, locus, kind, subject)
+
+	got, err := st.GetFindingByFingerprint(ctx, dup.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint(dup): %v", err)
+	}
+	if got.SupersededBy != newFP {
+		t.Fatalf("dup.SupersededBy = %q, want rewritten canonical fingerprint %q", got.SupersededBy, newFP)
+	}
+	if got.SupersededReason != reason {
+		t.Fatalf("dup.SupersededReason changed unexpectedly: %q", got.SupersededReason)
+	}
+}

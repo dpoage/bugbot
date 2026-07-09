@@ -226,12 +226,22 @@ type FindingFilter struct {
 //
 //	(g) T0 conflicts with NeedsHuman: a fix-witnessed finding is fully resolved
 //	    and must not be flagged for human review.
+//
+//	(h) SupersededBy/SupersededReason require Status == StatusSuperseded (a
+//	    merge pointer or prose reason must never survive on a non-superseded
+//	    row -- see UpsertFinding, which clears both on any re-upsert that
+//	    does not itself set Status to superseded).
 func ValidateFindingState(f Finding) error {
 	tier := int(f.Tier)
 
 	// (g) T0 + NeedsHuman is contradictory.
 	if tier == 0 && f.NeedsHuman {
 		return fmt.Errorf("%w: T0 (fix-witnessed) and NeedsHuman are mutually exclusive", ErrIllegalTransition)
+	}
+
+	// (h) SupersededBy/SupersededReason require Status == StatusSuperseded.
+	if (f.SupersededBy != "" || f.SupersededReason != "") && f.Status != StatusSuperseded {
+		return fmt.Errorf("%w: SupersededBy/SupersededReason set but Status is %q, not superseded", ErrIllegalTransition, f.Status)
 	}
 
 	// (a) T0 requires ReproPath.

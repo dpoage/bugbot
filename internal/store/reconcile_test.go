@@ -84,3 +84,51 @@ func TestSupersedeAsDuplicate_RequiresCanonicalFingerprint(t *testing.T) {
 		t.Fatal("expected an error for empty canonical fingerprint, got nil")
 	}
 }
+
+// TestSupersedeAsDuplicate_RegressionRemint_ClearsProvenanceOnReupsert proves
+// the invariant domain.Finding.SupersededBy documents: a live re-discovery of
+// the EXACT SAME fingerprint by a future scan (the regression-of-the-merged-
+// defect scenario) must clear both superseded_by and superseded_reason back
+// to empty, not leave a stale merge pointer dangling on a row that is once
+// again StatusOpen.
+func TestSupersedeAsDuplicate_RegressionRemint_ClearsProvenanceOnReupsert(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	canonical := sampleFindingAt("x.go", 10, "nil-safety", "canonical nil deref", domain.StatusOpen)
+	dup := sampleFindingAt("x.go", 12, "resource-leaks", "duplicate nil deref", domain.StatusOpen)
+	if _, err := st.UpsertFinding(ctx, canonical); err != nil {
+		t.Fatalf("seed canonical: %v", err)
+	}
+	if _, err := st.UpsertFinding(ctx, dup); err != nil {
+		t.Fatalf("seed dup: %v", err)
+	}
+	reason := "backlog reconcile: merged into " + canonical.Fingerprint + " (dedup arbiter yes)"
+	if err := st.SupersedeAsDuplicate(ctx, dup.Fingerprint, canonical.Fingerprint, reason); err != nil {
+		t.Fatalf("SupersedeAsDuplicate: %v", err)
+	}
+
+	// A fresh scan re-discovers the SAME defect (same lens/file/locus -> same
+	// v3 fingerprint) and upserts it as open, exactly like any other
+	// re-discovery. UpsertFinding's incoming struct never carries
+	// SupersededBy/Reason (no caller sets them), so this exercises the UPDATE
+	// path's clearing behavior.
+	remint := sampleFindingAt("x.go", 12, "resource-leaks", "duplicate nil deref", domain.StatusOpen)
+	if _, err := st.UpsertFinding(ctx, remint); err != nil {
+		t.Fatalf("re-upsert (regression remint): %v", err)
+	}
+
+	got, err := st.queryOne(ctx, "WHERE f.fingerprint = ?", dup.Fingerprint)
+	if err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	if got.Status != domain.StatusOpen {
+		t.Fatalf("Status after re-upsert = %q, want %q", got.Status, domain.StatusOpen)
+	}
+	if got.SupersededBy != "" {
+		t.Fatalf("SupersededBy after re-upsert = %q, want empty (stale merge pointer must not survive)", got.SupersededBy)
+	}
+	if got.SupersededReason != "" {
+		t.Fatalf("SupersededReason after re-upsert = %q, want empty", got.SupersededReason)
+	}
+}

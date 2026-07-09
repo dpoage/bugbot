@@ -317,7 +317,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f domain.Finding) (domain.Fin
 				  needs_human = CASE WHEN needs_human = 1 THEN 1 ELSE ? END,
 				  needs_human_reason = CASE WHEN needs_human = 1 THEN needs_human_reason ELSE ? END,
 				  corroborating_lenses=?, sites=?, confidence=?, updated_at=?, locus_key=?,
-				  defect_kind=?, subject=?,
+				  defect_kind=?, subject=?, superseded_by=?, superseded_reason=?,
 				  swept_at = CASE WHEN ? = file_hash THEN swept_at ELSE NULL END
 				WHERE id=?`,
 				f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
@@ -331,7 +331,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f domain.Finding) (domain.Fin
 				string(f.NeedsHumanReason),
 				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
 				f.UpdatedAt.Format(timeLayout), f.LocusKey,
-				string(f.DefectKind), f.Subject,
+				string(f.DefectKind), f.Subject, f.SupersededBy, f.SupersededReason,
 				f.FileHash, f.ID,
 			); err != nil {
 				return annotateErr(s.path, "upsert_finding", err)
@@ -824,9 +824,9 @@ func (s *Store) CountFindings(ctx context.Context) (domain.FindingTallies, error
 		case domain.StatusDismissed:
 			t.Dismissed += v.n
 		default:
-			// StatusSuperseded (and any future states) intentionally omitted
-			// from the pane: nothing writes superseded today, and the tallies
-			// show actionable lifecycle states only.
+			// StatusSuperseded rows are merged-away duplicates (backlog
+			// reconcile, bugbot-ezmx.4): intentionally excluded from the pane,
+			// which shows only actionable lifecycle states.
 		}
 	}
 	return t, nil
