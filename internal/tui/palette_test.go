@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/dpoage/bugbot/internal/engine"
+	"github.com/dpoage/bugbot/internal/funnel"
 )
 
 // fakeDispatcher is a test double for dispatcher: it records every call's
@@ -122,10 +123,10 @@ func (f *fakeDispatcher) ReviewPR(ctx context.Context, opts engine.ReviewPROpts)
 	return f.reviewResult, f.err
 }
 
-func (f *fakeDispatcher) callCounts() (scan, verify, repro, sweep int) {
+func (f *fakeDispatcher) callCounts() (scan, verify, repro, sweep, reconcile int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.scanCalls), len(f.verifyCalls), len(f.reproCalls), len(f.sweepCalls)
+	return len(f.scanCalls), len(f.verifyCalls), len(f.reproCalls), len(f.sweepCalls), len(f.reconcileCalls)
 }
 
 // typeString feeds each rune of s through sendKey, mirroring a user typing
@@ -204,8 +205,8 @@ func TestPalette_ConfirmScanSweep(t *testing.T) {
 	if m.running {
 		t.Fatal("expected running=false after dispatchDoneMsg")
 	}
-	if scan, verify, repro, sweep := fd.callCounts(); scan != 1 || verify != 0 || repro != 0 || sweep != 0 {
-		t.Fatalf("call counts = (scan=%d verify=%d repro=%d sweep=%d), want (1,0,0,0)", scan, verify, repro, sweep)
+	if scan, verify, repro, sweep, reconcile := fd.callCounts(); scan != 1 || verify != 0 || repro != 0 || sweep != 0 || reconcile != 0 {
+		t.Fatalf("call counts = (scan=%d verify=%d repro=%d sweep=%d reconcile=%d), want (1,0,0,0,0)", scan, verify, repro, sweep, reconcile)
 	}
 	if got := fd.scanCalls[0]; got.Since != "" {
 		t.Errorf("Scan Sweep called with Since=%q, want empty (whole-snapshot)", got.Since)
@@ -310,6 +311,39 @@ func TestPalette_ConfirmSweep(t *testing.T) {
 
 	if len(fd.sweepCalls) != 1 {
 		t.Fatalf("Sweep called %d times, want 1", len(fd.sweepCalls))
+	}
+}
+
+// TestPalette_ConfirmReconcile confirms the reconcile row (bugbot-7bjl)
+// dispatches through the Reconcile method and the resulting summary line
+// renders reconcileSummary's text, mirroring TestPalette_ConfirmSweep.
+func TestPalette_ConfirmReconcile(t *testing.T) {
+	fd := &fakeDispatcher{mode: engine.Owner, reconcileResult: &engine.ReconcileResult{
+		Result: &funnel.Result{Stats: funnel.Stats{
+			ReconcileNominated:  3,
+			ReconcileArbitrated: 3,
+			ReconcileMerged:     1,
+			ReconcileSkippedCap: 0,
+		}},
+	}}
+	m := NewModel(context.Background(), &fakeFeed{}, fd)
+	m = sendFrame(m, baseFrame())
+	m = sendKey(m, "d")
+	m = sendKey(m, "j") // rowScanTargeted
+	m = sendKey(m, "j") // rowVerify
+	m = sendKey(m, "j") // rowRepro
+	m = sendKey(m, "j") // rowSweep
+	m = sendKey(m, "j") // rowReconcile
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = runCmd(next.(Model), cmd)
+
+	if len(fd.reconcileCalls) != 1 {
+		t.Fatalf("Reconcile called %d times, want 1", len(fd.reconcileCalls))
+	}
+	wantSummary := "reconcile complete: 3 nominated, 3 arbitrated, 1 merged, 0 skipped (cap)"
+	if got := dispatchResultLine(m.lastVerb, m.lastErr, m.lastResult); got != "reconcile: "+wantSummary {
+		t.Errorf("dispatchResultLine = %q, want %q", got, "reconcile: "+wantSummary)
 	}
 }
 
@@ -437,8 +471,8 @@ func TestPalette_OneAtATimeRefusesSecondDispatch(t *testing.T) {
 	m = sendKey(m, "enter")
 	time.Sleep(20 * time.Millisecond) // let any (incorrect) second dispatch start
 
-	if scan, verify, repro, sweep := fd.callCounts(); scan != 1 || verify != 0 || repro != 0 || sweep != 0 {
-		t.Fatalf("call counts after refused second dispatch = (scan=%d verify=%d repro=%d sweep=%d), want (1,0,0,0)", scan, verify, repro, sweep)
+	if scan, verify, repro, sweep, reconcile := fd.callCounts(); scan != 1 || verify != 0 || repro != 0 || sweep != 0 || reconcile != 0 {
+		t.Fatalf("call counts after refused second dispatch = (scan=%d verify=%d repro=%d sweep=%d reconcile=%d), want (1,0,0,0,0)", scan, verify, repro, sweep, reconcile)
 	}
 }
 
@@ -683,9 +717,9 @@ func TestPalette_DoubleDispatchRefusedWithVisibleReason(t *testing.T) {
 	m = sendKey(m, "enter")
 	time.Sleep(20 * time.Millisecond)
 
-	if scan, verify, repro, sweep := fd.callCounts(); scan != 1 || verify != 0 || repro != 0 || sweep != 0 {
-		t.Fatalf("call counts after refused second dispatch = (scan=%d verify=%d repro=%d sweep=%d), want (1,0,0,0)",
-			scan, verify, repro, sweep)
+	if scan, verify, repro, sweep, reconcile := fd.callCounts(); scan != 1 || verify != 0 || repro != 0 || sweep != 0 || reconcile != 0 {
+		t.Fatalf("call counts after refused second dispatch = (scan=%d verify=%d repro=%d sweep=%d reconcile=%d), want (1,0,0,0,0)",
+			scan, verify, repro, sweep, reconcile)
 	}
 
 	// Palette render must include the "run in progress" reason on each row.
@@ -746,6 +780,18 @@ func TestUpdate_DispatchDoneMsg_UpdatesResultLine(t *testing.T) {
 		{"success", dispatchDoneMsg{verb: "sweep", summary: "sweep complete: 2 finding(s)"}, "sweep: sweep complete: 2 finding(s)"},
 		{"error", dispatchDoneMsg{verb: "verify", err: errors.New("boom")}, "verify: error: boom"},
 		{"cancelled", dispatchDoneMsg{verb: "scan (sweep)", err: context.Canceled}, "scan (sweep): cancelled"},
+		{
+			"reconcile populated",
+			dispatchDoneMsg{verb: "reconcile", summary: reconcileSummary(&engine.ReconcileResult{Result: &funnel.Result{Stats: funnel.Stats{
+				ReconcileNominated: 5, ReconcileArbitrated: 4, ReconcileMerged: 2, ReconcileSkippedCap: 1,
+			}}})},
+			"reconcile: reconcile complete: 5 nominated, 4 arbitrated, 2 merged, 1 skipped (cap)",
+		},
+		{
+			"reconcile nothing nominated",
+			dispatchDoneMsg{verb: "reconcile", summary: reconcileSummary(&engine.ReconcileResult{Result: &funnel.Result{}})},
+			"reconcile: reconcile: no duplicate candidates nominated",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
