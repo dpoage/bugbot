@@ -2,6 +2,7 @@ package funnel
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -489,13 +490,19 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 
 	// Step 5d: durable cross-lens fold. In-memory clustering (5/5b/5c) only sees
 	// clusters from THIS triage pass — it cannot see a primary persisted by a
-	// prior (interrupted) run, whose cluster state was lost on restart. Point-
-	// lookup the findings table by the lens-independent locus key; if an OPEN
-	// finding from a DIFFERENT lens describes the same defect (SimilarFinding:
-	// the same line window + description jaccard the in-scan merge uses), fold
-	// this candidate in as corroboration instead of forwarding a duplicate
-	// primary. Same-lens hits are left to the fingerprint upsert. Idempotent:
-	// the lens and site sets dedup, so a replay converges.
+	// prior (interrupted or completed) run, whose cluster state was lost on
+	// restart or was never seen this run at all. Window-lookup the findings
+	// table by the same-file line window (the same breadth publish-side
+	// SimilarFinding adoption uses), across open/fixed/dismissed rows: an OPEN
+	// hit from a DIFFERENT lens describing the same defect folds in as
+	// corroboration; a DISMISSED hit suppresses the candidate outright (it is
+	// a re-discovery of something already rejected); a FIXED hit reopens as a
+	// regression instead of minting a new finding. All three are triage
+	// terminal fates — the whole point is that they never reach verify, so no
+	// refuter panel is spent re-litigating a fold the store already settled.
+	// Same-lens hits are left to the fingerprint upsert. Idempotent: the lens
+	// and site sets dedup, and status transitions are themselves idempotent,
+	// so a replay converges.
 	if folded, ferr := ts.durableCrossLensFold(ctx, st, ic, stats); ferr != nil {
 		return ferr
 	} else if folded {
@@ -519,36 +526,53 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 	return nil
 }
 
-// durableCrossLensFold absorbs candidate ic into an already-persisted OPEN
-// finding at the same lens-independent locus when it is the same defect under
-// a different identity than an exact-fingerprint match would catch. It exists
-// because in-memory clustering is rebuilt from scratch each run: a primary
-// persisted by a prior interrupted run is invisible to it, so a WAL-replayed
-// sibling would otherwise become a second finding. OpenFindingsByLocusKey is
-// an indexed point-lookup returning the handful of findings at one
-// enclosing-symbol anchor.
+// durableCrossLensFold absorbs candidate ic into an already-persisted finding
+// at the same file, within the same line window SimilarFinding uses, when it
+// is the same defect under a different identity than an exact-fingerprint
+// match would catch. It exists because in-memory clustering is rebuilt from
+// scratch each run: a primary persisted by a prior run — interrupted, or
+// simply not seen by this run's own candidate pool — is invisible to it, so a
+// re-discovered sibling would otherwise become a second finding.
+// FindingsByFileWindow is an indexed lookup returning the handful of findings
+// near one line in one file.
+//
+// The lookup is widened from the original exact-locusKey/OPEN-only point
+// lookup: a locus-key hit is a proper subset of the same-file window (same
+// enclosing symbol implies same file, nearby lines), so this also catches the
+// case a locus-key match could not — the candidate's fingerprint (and derived
+// locus_key) drifted because the enclosing symbol was renamed, even though
+// the code didn't meaningfully move. It also now considers fixed/dismissed
+// rows, not just open ones, so a re-discovered duplicate of an already-
+// resolved defect dies here instead of reaching verify.
 //
 // Under Fingerprint v3, an exact-fingerprint match (identical locus,
 // defect_kind, AND subject — regardless of lens) is already handled by the
 // ordinary upsert-by-fingerprint path, so it is skipped here as a no-op, not
 // folded. What remains for this function is the genuinely ambiguous case:
-// same locus, SAME defect_kind (a different defect_kind at this locus is, by
-// design, a distinct bug — see domain.FingerprintV3 — and must never fold),
-// but a subject/description that differs enough to mint a different
+// same-file window, SAME defect_kind (a different defect_kind at this locus
+// is, by design, a distinct bug — see domain.FingerprintV3 — and must never
+// fold), but a subject/description that differs enough to mint a different
 // fingerprint (e.g. the model phrased the subject differently). description
-// jaccard (SimilarFinding) is the tiebreaker for exactly that residual case —
-// demoted from "the" cross-lens merge signal to a narrow fallback. The
-// broader root-cause layers (5b/5c) are deliberately NOT mirrored here, so
-// the durable path only ever under-merges, never more aggressively. Reverify
-// candidates are excluded: they own a durable row to re-judge and must not be
-// absorbed elsewhere. Returns true when the candidate was folded (a triage
-// terminal fate). The store writes dedup, so the fold is idempotent on replay.
+// jaccard (SimilarFinding) is the tiebreaker for exactly that residual case.
+// bugbot-ezmx.2's LLM dedup arbiter is a further fallback on a SimilarFinding
+// miss, but ONLY for the OPEN branch (a plain corroboration fold): the
+// dismissed-suppression and fixed-regression branches are STATE-CHANGING and
+// stay deterministic-only (SimilarFinding must actually match) — an arbiter
+// false-positive there would silently suppress or reopen a finding instead
+// of merely keeping an extra candidate around, which is a materially worse
+// mistake than the arbiter is trusted for. The broader root-cause layers
+// (5b/5c) are deliberately NOT mirrored here, so the durable path only ever
+// under-merges, never more aggressively. Reverify candidates are excluded:
+// they own a durable row to re-judge and must not be absorbed elsewhere.
+// Returns true when the candidate was folded (a triage terminal fate). The
+// store writes dedup, so the fold is idempotent on replay.
 func (ts *triageState) durableCrossLensFold(ctx context.Context, st *store.Store, ic indexedCand, stats *Stats) (bool, error) {
 	c := ic.c
 	if c.Reverify || c.LocusKey == "" {
 		return false, nil
 	}
-	existing, err := st.OpenFindingsByLocusKey(ctx, c.LocusKey)
+	existing, err := st.FindingsByFileWindow(ctx, c.File, c.Line, DefaultMergeWindow,
+		[]domain.Status{domain.StatusOpen, domain.StatusFixed, domain.StatusDismissed})
 	if err != nil {
 		return false, err
 	}
@@ -560,7 +584,7 @@ func (ts *triageState) durableCrossLensFold(ctx context.Context, st *store.Store
 			continue
 		}
 		if f.DefectKind != "" && f.DefectKind != c.DefectKind {
-			// A DIFFERENT defect_kind at the same locus is a distinct defect by
+			// A DIFFERENT defect_kind in this window is a distinct defect by
 			// design — never fold across kinds, regardless of description overlap.
 			continue
 		}
@@ -570,27 +594,73 @@ func (ts *triageState) durableCrossLensFold(ctx context.Context, st *store.Store
 			// fold case; leave it to the exact-fingerprint upsert path.
 			continue
 		}
-		if !SimilarFinding(c.File, c.Line, c.Description, f.File, f.Line, f.Description) {
-			// bugbot-ezmx.2: same locus, same/unknown defect_kind, different
-			// lens, but jaccard (SimilarFinding's tiebreaker) fell short — spend
-			// one bounded LLM dedup-arbiter turn before giving up on this row.
-			// A confident "yes" folds exactly like a SimilarFinding match; "no",
-			// "unsure", or cap-exhausted leave the candidate to the next existing
-			// finding (or, having exhausted existing, a new primary).
-			if ts.dedupVerdictFor(ctx, candidateDedupView(c), findingDedupView(f), stats) != dedupSame {
+		similar := SimilarFinding(c.File, c.Line, c.Description, f.File, f.Line, f.Description)
+		switch f.Status {
+		case domain.StatusDismissed:
+			// Deterministic-only: a maintainer's dismissal is only ever mirrored
+			// onto the candidate on an actual SimilarFinding match, never on an
+			// arbiter guess — see the function doc.
+			if !similar {
 				continue
 			}
+			// The re-discovery matches a defect a maintainer already rejected:
+			// suppress this candidate's own fingerprint exactly as if it had been
+			// dismissed directly, so future scans skip it at the step-4
+			// IsSuppressed check too (converges with bugbot-oiem, which owns the
+			// suppression-side identity concern).
+			reason := fmt.Sprintf("durable fold: same-file-window match of dismissed finding %s", f.Fingerprint)
+			if err := st.AddSuppression(ctx, c.Fingerprint, reason); err != nil {
+				return false, err
+			}
+			stats.DroppedSuppressedDurable++
+			return true, nil
+		case domain.StatusFixed:
+			// Deterministic-only, same rationale as the dismissed branch: a
+			// regression reopen is a state-changing mutation of a settled row.
+			if !similar {
+				continue
+			}
+			// The re-discovery matches a defect already marked fixed: treat it as
+			// a regression of THAT row instead of minting a new finding. Identity
+			// and history (tier, repro artifacts) are preserved by
+			// ReopenAsRegression; the new lens/site are attached exactly as the
+			// open-finding fold below does.
+			if err := st.ReopenAsRegression(ctx, f.Fingerprint); err != nil {
+				return false, err
+			}
+			if err := st.AddCorroboratingLenses(ctx, f.Fingerprint, []string{c.Lens}); err != nil {
+				return false, err
+			}
+			if err := st.AppendFindingSites(ctx, f.Fingerprint, []domain.Site{{File: c.File, Line: c.Line}}); err != nil {
+				return false, err
+			}
+			stats.RegressionReopened++
+			return true, nil
+		default: // domain.StatusOpen
+			if !similar {
+				// bugbot-ezmx.2: same-file window, same/unknown defect_kind,
+				// different lens, but jaccard (SimilarFinding's tiebreaker) fell
+				// short — spend one bounded LLM dedup-arbiter turn before giving
+				// up on this row. A confident "yes" folds exactly like a
+				// SimilarFinding match; "no", "unsure", or cap-exhausted leave the
+				// candidate to the next existing finding (or, having exhausted
+				// existing, a new primary). Restricted to this OPEN branch only —
+				// see the function doc for why dismissed/fixed stay deterministic.
+				if ts.dedupVerdictFor(ctx, candidateDedupView(c), findingDedupView(f), stats) != dedupSame {
+					continue
+				}
+			}
+			// The row was just read under the single-writer lock, so a non-nil
+			// error here is a genuine I/O failure, not a benign race — propagate it.
+			if err := st.AddCorroboratingLenses(ctx, f.Fingerprint, []string{c.Lens}); err != nil {
+				return false, err
+			}
+			if err := st.AppendFindingSites(ctx, f.Fingerprint, []domain.Site{{File: c.File, Line: c.Line}}); err != nil {
+				return false, err
+			}
+			stats.MergedCrossLensDurable++
+			return true, nil
 		}
-		// The row was just read under the single-writer lock, so a non-nil error
-		// here is a genuine I/O failure, not a benign race — propagate it.
-		if err := st.AddCorroboratingLenses(ctx, f.Fingerprint, []string{c.Lens}); err != nil {
-			return false, err
-		}
-		if err := st.AppendFindingSites(ctx, f.Fingerprint, []domain.Site{{File: c.File, Line: c.Line}}); err != nil {
-			return false, err
-		}
-		stats.MergedCrossLensDurable++
-		return true, nil
 	}
 	return false, nil
 }

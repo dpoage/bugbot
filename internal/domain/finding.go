@@ -77,11 +77,13 @@ type Finding struct {
 	ID          string
 	Fingerprint string
 	// LocusKey is the lens-independent location identity sha256(normFile, locus):
-	// the Fingerprint inputs minus the lens. It backs the durable cross-lens fold
-	// (triage's OpenFindingsByLocusKey point-lookup) so a finding persisted by a
-	// prior run can absorb a later same-locus, different-lens candidate as
-	// corroboration instead of spawning a duplicate. Persisted + indexed; empty on
-	// pre-migration rows, which simply do not participate until re-upserted.
+	// the Fingerprint inputs minus the lens. It still backs IsSuppressed's
+	// legacy fallback and RenameFindingIdentity's rewrite, and is a proper
+	// subset of the same-file window store.FindingsByFileWindow now queries
+	// for triage's durable cross-lens fold (the fold widened past an exact
+	// locus_key match so a drifted locus still folds in). Persisted + indexed;
+	// empty on pre-migration rows, which simply do not participate until
+	// re-upserted.
 	LocusKey string
 	// DefectKind is the closed taxonomy class this finding belongs to (see
 	// DefectKind in identity.go). Empty on pre-v3 rows (migrated v2 findings

@@ -356,15 +356,39 @@ func (s *Store) GetFindingByFingerprint(ctx context.Context, fingerprint string)
 	return s.queryOne(ctx, `WHERE f.fingerprint = ?`, fingerprint)
 }
 
-// OpenFindingsByLocusKey returns every OPEN finding sharing the lens-independent
-// locus key, via the idx_findings_locus_key index. Triage's durable cross-lens
-// fold uses it as a per-candidate point-lookup: at a single enclosing-symbol (or
-// line-fallback) anchor there are at most a handful of findings, so this is a
-// bounded indexed read, not a table scan. An empty result is not an error.
-func (s *Store) OpenFindingsByLocusKey(ctx context.Context, locusKey string) ([]domain.Finding, error) {
-	return queryRows(ctx, s, "open_findings_by_locus_key",
-		findingColumns+findingFrom+` WHERE f.status = 'open' AND f.locus_key = ?`,
-		[]any{locusKey}, func(r *sql.Rows) (domain.Finding, error) { return scanFinding(r) })
+// FindingsByFileWindow returns findings in the given file whose line lies
+// within window lines of the anchor line, restricted to the given statuses
+// (must be non-empty). It supersedes the old exact-locus_key/OPEN-only point
+// lookup this triage fold originally used (idx_findings_locus_key, added by
+// migration 015, is now unused by this query but is kept: IsSuppressed's
+// legacy fallback and RenameFindingIdentity still match on locus_key
+// directly): a locus_key hit is a proper SUBSET of this same-file window
+// (same enclosing symbol implies same file, nearby lines), so widening to the
+// window also catches a re-discovered candidate whose fingerprint (and
+// therefore locus_key) drifted — a renamed enclosing symbol shifts the locus
+// text even though the code didn't meaningfully move — mirroring the
+// same-file, same-window rule funnel.SimilarFinding applies at publish time.
+// Matching is an exact `file` string comparison, not normalized: candidates
+// within one triage run share the same raw path spelling the finder emitted,
+// and SimilarFinding (applied by the caller against each row this returns)
+// remains the authoritative normPath+jaccard predicate — this query is only a
+// coarse, indexed pre-filter. Status is caller-selectable (not open-only): a
+// caller may need fixed/dismissed rows too, to suppress a candidate that
+// reproduces a dismissed defect or reopen one that reproduces a fixed one.
+func (s *Store) FindingsByFileWindow(ctx context.Context, file string, line, window int, statuses []domain.Status) ([]domain.Finding, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(statuses))
+	args := make([]any, 0, len(statuses)+3)
+	for i, st := range statuses {
+		placeholders[i] = "?"
+		args = append(args, string(st))
+	}
+	args = append(args, file, line-window, line+window)
+	q := findingColumns + findingFrom +
+		` WHERE f.status IN (` + strings.Join(placeholders, ",") + `) AND f.file = ? AND f.line BETWEEN ? AND ?`
+	return queryRows(ctx, s, "findings_by_file_window", q, args, func(r *sql.Rows) (domain.Finding, error) { return scanFinding(r) })
 }
 
 // ListFindings returns findings matching the filter, newest-updated first.
@@ -428,6 +452,40 @@ func (s *Store) UpdateStatus(ctx context.Context, fingerprint string, status dom
 			if err := addSuppressionTx(ctx, tx, fingerprint, reason); err != nil {
 				return annotateErr(s.path, "update_status", err)
 			}
+		}
+		return nil
+	})
+}
+
+// ReopenAsRegression flips a FIXED finding back to StatusOpen in place,
+// preserving its identity (same id/fingerprint row — no new row is created)
+// and its full history: tier, repro artifacts, and corroborating lenses are
+// left untouched by this call. It is triage's regression path: the durable
+// cross-lens fold uses it when a re-discovered candidate matches a fixed row
+// under the same-file-window rule, on the theory that the fix regressed
+// rather than that this is a brand-new bug worth minting a fresh finding for.
+// swept_at is the ONLY mutable field this call resets (cleared so the sweep
+// stage re-evaluates reachability on the reopened row) — it does not touch
+// repro_attempts the way UpsertFinding's code-changed branch does; a caller
+// that also needs the repro queue re-armed must do that separately. Accepts
+// any current status (not just fixed) so a concurrent reopen racing this
+// call converges on open either way; returns ErrNotFound if no finding has
+// that fingerprint.
+func (s *Store) ReopenAsRegression(ctx context.Context, fingerprint string) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE findings SET status = ?, updated_at = ?, swept_at = NULL WHERE fingerprint = ?`,
+			string(domain.StatusOpen), nowUTC().Format(timeLayout), fingerprint,
+		)
+		if err != nil {
+			return annotateErr(s.path, "reopen_as_regression", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return annotateErr(s.path, "reopen_as_regression", err)
+		}
+		if n == 0 {
+			return ErrNotFound
 		}
 		return nil
 	})
@@ -603,9 +661,9 @@ const findingColumns = `SELECT f.id, f.fingerprint, f.title, f.description, f.re
 	COALESCE(ra.exit_zero_count, 0) AS exit_zero_count`
 
 // findingFrom is the FROM clause that pairs with findingColumns. The LEFT JOIN
-// on repro_attempts is safe on all three read paths (queryOne, ListFindings,
-// OpenFindingsByLocusKey) because the repro_attempts table may have no row for
-// a given fingerprint; the COALESCE above handles the NULL.
+// on repro_attempts is safe on every read path built from it (queryOne,
+// ListFindings, FindingsByFileWindow, etc.) because the repro_attempts table
+// may have no row for a given fingerprint; the COALESCE above handles the NULL.
 const findingFrom = ` FROM findings f LEFT JOIN repro_attempts ra ON ra.fingerprint = f.fingerprint`
 
 func (s *Store) queryOne(ctx context.Context, whereClause string, args ...any) (domain.Finding, error) {

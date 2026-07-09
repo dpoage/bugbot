@@ -43,8 +43,10 @@ type Candidate struct {
 	Fingerprint string
 	// LocusKey is the lens-independent location identity domain.LocusKey(file, locus):
 	// the Fingerprint inputs minus the lens. Set in triage alongside Fingerprint and
-	// carried onto the persisted finding, so a later same-locus, different-lens
-	// candidate can be folded in via store.OpenFindingsByLocusKey.
+	// carried onto the persisted finding; it still backs the legacy suppression
+	// fallback and rename rewriting, and remains a proper subset of the
+	// same-file window store.FindingsByFileWindow queries for the durable
+	// cross-lens fold.
 	LocusKey string
 	// CorroboratingLenses lists the OTHER lenses that independently reported the
 	// same underlying defect (same file, nearby line) and were collapsed into this
@@ -134,21 +136,39 @@ type Stats struct {
 	// MergedWithinLens/MergedCrossLens which track the tighter 10-line window.
 	MergedRootCause int `json:"merged_root_cause,omitempty"`
 	// MergedCrossLensDurable counts candidates absorbed by durableCrossLensFold
-	// (triage_streaming.go): a WAL-replayed candidate folded into an OPEN
-	// finding PERSISTED BY A PRIOR RUN at the same locus, discovered via an
-	// indexed store lookup rather than this run's in-memory clustering. Unlike
-	// MergedCrossLens (this run's own in-memory cross-lens merge), this is
-	// cross-scan reconciliation — the same SimilarFinding predicate the
-	// publish-time backlog adoption uses — so it is counted SEPARATELY and
-	// excluded from DuplicateRate's in-run scope.
+	// (triage_streaming.go): a WAL-replayed (or otherwise re-discovered)
+	// candidate folded into an OPEN finding PERSISTED BY A PRIOR RUN at the
+	// same file-line window, discovered via an indexed store lookup rather
+	// than this run's in-memory clustering. Unlike MergedCrossLens (this run's
+	// own in-memory cross-lens merge), this is cross-scan reconciliation — the
+	// same SimilarFinding predicate the publish-time backlog adoption uses —
+	// so it is counted SEPARATELY and excluded from DuplicateRate's in-run
+	// scope.
 	MergedCrossLensDurable int `json:"merged_cross_lens_durable,omitempty"`
+	// DroppedSuppressedDurable counts candidates absorbed by
+	// durableCrossLensFold into a DISMISSED finding at the same file-line
+	// window instead of an open one: the candidate is a re-discovery of a
+	// defect a maintainer already rejected, so it is suppressed exactly as if
+	// it had matched that dismissal by exact fingerprint (bugbot-oiem is the
+	// convergent suppression-side concern — both paths land on the same
+	// suppressions row). Cross-scan reconciliation like MergedCrossLensDurable;
+	// excluded from DuplicateRate for the same reason.
+	DroppedSuppressedDurable int `json:"dropped_suppressed_durable,omitempty"`
+	// RegressionReopened counts candidates absorbed by durableCrossLensFold
+	// into a FIXED finding at the same file-line window: the candidate is
+	// treated as a regression of the previously-fixed defect (store.
+	// ReopenAsRegression flips the row back to open in place) rather than a
+	// brand-new finding. Cross-scan reconciliation like MergedCrossLensDurable;
+	// excluded from DuplicateRate for the same reason.
+	RegressionReopened int `json:"regression_reopened,omitempty"`
 	// DedupArbiterRuns is the number of LLM dedup-arbiter invocations
 	// (bugbot-ezmx.2): one bounded, zero-tool completion spent per location
 	// collision the jaccard gate could not resolve on its own (same locus/kind,
 	// description similarity below mergeSimilarityThreshold), at both the
 	// in-run cluster collision site (triage_streaming.go step 5) and the
-	// durableCrossLensFold SimilarFinding fallback. Bounded by
-	// DefaultDedupArbiterCap per scan — a handful, not one per candidate.
+	// durableCrossLensFold SimilarFinding fallback (OPEN-status branch only).
+	// Bounded by DefaultDedupArbiterCap per scan — a handful, not one per
+	// candidate.
 	DedupArbiterRuns int `json:"dedup_arbiter_runs,omitempty"`
 	// DedupArbiterMerges is the subset of DedupArbiterRuns that returned a
 	// confident "yes" and were folded via the caller's normal merge path
@@ -173,6 +193,7 @@ type Stats struct {
 	// arbiter runs (a subset of InputTokens+OutputTokens), mirroring
 	// ArbiterTokens for the split-verdict arbiter.
 	DedupArbiterTokens int64 `json:"dedup_arbiter_tokens,omitempty"`
+
 	// FinderRuns is the number of finder (lens, chunk) agents that actually
 	// launched (i.e. were not skipped by budget degradation/stop). FinderFailures
 	// is how many of those produced NO parseable output even after the repair
@@ -336,10 +357,12 @@ func (s Stats) FinderReliable() bool {
 // above 1.0 on a resumed run.
 //
 // Deliberately scoped to in-run triage dedup: it does NOT count
-// MergedCrossLensDurable (a WAL-replayed candidate folded into a finding a
-// PRIOR run persisted) or cross-scan backlog adoption (SimilarFinding at
-// publish time) — both reconcile against a DIFFERENT run's findings, not
-// this run's own candidate pool. Zero when the denominator is zero (nothing
+// MergedCrossLensDurable, DroppedSuppressedDurable, or RegressionReopened (a
+// WAL-replayed or re-discovered candidate folded into / suppressed against /
+// reopening a finding a PRIOR run persisted) or cross-scan backlog adoption
+// (SimilarFinding at publish time) — all of these reconcile against a
+// DIFFERENT run's findings, not this run's own candidate pool. Zero when the
+// denominator is zero (nothing
 // to have a rate over).
 func (s Stats) DuplicateRate() float64 {
 	pool := s.Hypothesized + s.Resumed
