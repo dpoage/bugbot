@@ -2,13 +2,13 @@ package eval
 
 import "testing"
 
-// TestRunDupEval_SmilarFindingDecidesPredicted pins that RunDupEval's
+// TestRunDupEval_SimilarFindingDecidesPredicted pins that RunDupEval's
 // Predicted field is exactly funnel.SimilarFinding's decision, not some
 // reimplementation: a pair engineered to satisfy SimilarFinding's rule
 // (same normalized file, within DefaultMergeWindow lines, jaccard over
 // threshold) scores TP when labeled a duplicate, and a pair outside the
 // window scores FN despite matching wording.
-func TestRunDupEval_SmilarFindingDecidesPredicted(t *testing.T) {
+func TestRunDupEval_SimilarFindingDecidesPredicted(t *testing.T) {
 	pairs := []DupPair{
 		{
 			Name:       "within-window-high-overlap",

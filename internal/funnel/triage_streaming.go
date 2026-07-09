@@ -483,7 +483,7 @@ func (ts *triageState) durableCrossLensFold(ctx context.Context, st *store.Store
 		if err := st.AppendFindingSites(ctx, f.Fingerprint, []domain.Site{{File: c.File, Line: c.Line}}); err != nil {
 			return false, err
 		}
-		stats.MergedCrossLens++
+		stats.MergedCrossLensDurable++
 		return true, nil
 	}
 	return false, nil

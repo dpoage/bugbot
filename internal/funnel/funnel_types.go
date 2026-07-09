@@ -118,6 +118,15 @@ type Stats struct {
 	// (same-file broad-window or cross-file decl/def) — distinct from
 	// MergedWithinLens/MergedCrossLens which track the tighter 10-line window.
 	MergedRootCause int `json:"merged_root_cause,omitempty"`
+	// MergedCrossLensDurable counts candidates absorbed by durableCrossLensFold
+	// (triage_streaming.go): a WAL-replayed candidate folded into an OPEN
+	// finding PERSISTED BY A PRIOR RUN at the same locus, discovered via an
+	// indexed store lookup rather than this run's in-memory clustering. Unlike
+	// MergedCrossLens (this run's own in-memory cross-lens merge), this is
+	// cross-scan reconciliation — the same SimilarFinding predicate the
+	// publish-time backlog adoption uses — so it is counted SEPARATELY and
+	// excluded from DuplicateRate's in-run scope.
+	MergedCrossLensDurable int `json:"merged_cross_lens_durable,omitempty"`
 	// FinderRuns is the number of finder (lens, chunk) agents that actually
 	// launched (i.e. were not skipped by budget degradation/stop). FinderFailures
 	// is how many of those produced NO parseable output even after the repair
@@ -269,22 +278,30 @@ func (s Stats) FinderReliable() bool {
 	return s.FinderRuns > 0 && s.FinderFailures == 0
 }
 
-// DuplicateRate is the fraction of raw hypothesized candidates that triage
-// identified as a duplicate of some other candidate in the SAME run: exact-
-// fingerprint duplicates (DroppedDuplicate) plus every non-primary member
-// collapsed by the location-based and same-root-cause merges
-// (MergedWithinLens + MergedCrossLens + MergedRootCause), divided by
-// Hypothesized. It is deliberately scoped to in-run triage dedup — it does
-// NOT count cross-scan backlog adoption (SimilarFinding at publish time),
-// which reconciles against a DIFFERENT run's findings, not this run's own
-// candidate pool. Zero when Hypothesized is zero (nothing to have a rate
-// over).
+// DuplicateRate is the fraction of the candidate pool that ENTERED triage
+// this run — fresh finder output (Hypothesized) plus WAL-replayed pending
+// candidates (Resumed), i.e. everything triage actually judged — that triage
+// identified as a duplicate of some other candidate: exact-fingerprint
+// duplicates (DroppedDuplicate) plus every non-primary member collapsed by
+// the in-run location-based and same-root-cause merges (MergedWithinLens +
+// MergedCrossLens + MergedRootCause). The denominator MUST include Resumed:
+// a WAL-replayed candidate can be dropped/merged exactly like a fresh one, so
+// counting it in the numerator but not the denominator can push the rate
+// above 1.0 on a resumed run.
+//
+// Deliberately scoped to in-run triage dedup: it does NOT count
+// MergedCrossLensDurable (a WAL-replayed candidate folded into a finding a
+// PRIOR run persisted) or cross-scan backlog adoption (SimilarFinding at
+// publish time) — both reconcile against a DIFFERENT run's findings, not
+// this run's own candidate pool. Zero when the denominator is zero (nothing
+// to have a rate over).
 func (s Stats) DuplicateRate() float64 {
-	if s.Hypothesized == 0 {
+	pool := s.Hypothesized + s.Resumed
+	if pool == 0 {
 		return 0
 	}
 	dup := s.DroppedDuplicate + s.MergedWithinLens + s.MergedCrossLens + s.MergedRootCause
-	return float64(dup) / float64(s.Hypothesized)
+	return float64(dup) / float64(pool)
 }
 
 // MostFindersFailed reports whether a strict majority of the finders that ran

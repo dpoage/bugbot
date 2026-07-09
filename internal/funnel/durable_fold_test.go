@@ -100,8 +100,8 @@ func TestTriageState_DurableCrossLensFold(t *testing.T) {
 	if ready := ts.popReady(); len(ready) != 0 {
 		t.Fatalf("popReady = %d, want 0 (candidate folded, not forwarded): %+v", len(ready), ready)
 	}
-	if stats.MergedCrossLens != 1 {
-		t.Errorf("MergedCrossLens = %d, want 1", stats.MergedCrossLens)
+	if stats.MergedCrossLensDurable != 1 {
+		t.Errorf("MergedCrossLensDurable = %d, want 1", stats.MergedCrossLensDurable)
 	}
 
 	all, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
@@ -154,8 +154,8 @@ func TestTriageState_DurableFold_DistinctBugNotMerged(t *testing.T) {
 	if ready := ts.popReady(); len(ready) != 1 {
 		t.Fatalf("popReady = %d, want 1 (distinct bug forwarded as its own primary): %+v", len(ready), ready)
 	}
-	if stats.MergedCrossLens != 0 {
-		t.Errorf("MergedCrossLens = %d, want 0 (similarity guard must reject the merge)", stats.MergedCrossLens)
+	if stats.MergedCrossLensDurable != 0 {
+		t.Errorf("MergedCrossLensDurable = %d, want 0 (similarity guard must reject the merge)", stats.MergedCrossLensDurable)
 	}
 	seeded, err := st.GetFindingByFingerprint(ctx, seedFP)
 	if err != nil {

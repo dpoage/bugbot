@@ -52,23 +52,24 @@ func TestSnapshot_WritesAndReadsBack(t *testing.T) {
 
 // TestSnapshot_DuplicateRatePersistsToStatusJSON pins bugbot-ezmx.8's
 // plumbing: funnel.Stats.DuplicateRate() rides Counts.DuplicateRate through
-// KindScanFinished into the written status.json, and mergeMax (not the raw
-// last-write) decides the settled value so an earlier stage's rate can never
-// silently overwrite a later, more complete one with a lower number.
+// KindScanFinished into the written status.json, folded via mergeMax rather
+// than a raw last-write. The stages are seeded HIGH-then-LOW (0.35 then
+// 0.2) specifically so mergeMax and a naive overwrite would disagree: a
+// last-write implementation would incorrectly settle at 0.2.
 func TestSnapshot_DuplicateRatePersistsToStatusJSON(t *testing.T) {
 	s, path := newTestSnapshot(t, func() time.Time { return time.Unix(3000, 0) })
 
 	s.Handle(Event{Kind: KindScanStarted, ScanKind: "sweep", Time: time.Unix(3000, 0)})
 	s.Handle(Event{
 		Kind: KindStageFinished, Stage: StageTriage,
-		Counts: &Counts{Hypothesized: 10, Triaged: 8, DuplicateRate: 0.2},
+		Counts: &Counts{Hypothesized: 10, Triaged: 8, DuplicateRate: 0.35},
 		Time:   time.Unix(3000, 0),
 	})
-	// Terminal event forces a write; the final rate (0.35) must win even
-	// though it arrives after the intermediate 0.2 from triage.
+	// Terminal event forces a write; mergeMax must keep the earlier, HIGHER
+	// 0.35 rather than overwrite it with this stage's lower 0.2.
 	s.Handle(Event{
 		Kind: KindScanFinished, ScanKind: "sweep",
-		Counts: &Counts{Hypothesized: 10, Triaged: 8, Verified: 5, Killed: 2, DuplicateRate: 0.35},
+		Counts: &Counts{Hypothesized: 10, Triaged: 8, Verified: 5, Killed: 2, DuplicateRate: 0.2},
 		Time:   time.Unix(3000, 0),
 	})
 
@@ -77,7 +78,7 @@ func TestSnapshot_DuplicateRatePersistsToStatusJSON(t *testing.T) {
 		t.Fatalf("read status: %v", err)
 	}
 	if st.Counts.DuplicateRate != 0.35 {
-		t.Errorf("status.json counts.duplicate_rate = %v, want 0.35", st.Counts.DuplicateRate)
+		t.Errorf("status.json counts.duplicate_rate = %v, want 0.35 (mergeMax must keep the higher value)", st.Counts.DuplicateRate)
 	}
 }
 
