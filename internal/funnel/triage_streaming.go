@@ -290,10 +290,11 @@ type triageState struct {
 	nav codeNavRefs
 
 	// refCache memoizes ONE code-nav reference query's result per (file,
-	// symbol) pair for the lifetime of the scan, so a symbol re-evaluated
-	// across multiple triage collisions (e.g. two dissimilar-description
-	// candidates in the same function that both miss the earlier merge rules)
-	// issues at most one query total instead of one per collision.
+	// declaration-line, symbol) key for the lifetime of the scan, so a symbol
+	// re-evaluated across multiple triage collisions (e.g. two
+	// dissimilar-description candidates in the same function that both miss
+	// the earlier merge rules) issues at most one query total instead of one
+	// per collision.
 	refCache map[string]refCacheEntry
 
 	// primariesByKind records cluster primaries in ARRIVAL order, per
@@ -468,7 +469,7 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 			// 5b/5c/5d, then new primary) on "no"/"unsure"/cap-exhausted.
 			if member, collided := clusterJaccardCollision(cluster.members, ic, DefaultMergeWindow); collided {
 				if ts.dedupVerdictFor(ctx, candidateDedupView(member.c), candidateDedupView(c), stats) == dedupSame {
-					ts.handleMember(ctx, st, cluster, c, stats, false)
+					ts.handleMember(ctx, st, cluster, c, stats, mergeWindow)
 					cluster.members = append(cluster.members, ic)
 					ts.addClusterToBucket(canonicalClusterKey(c), cluster)
 					return nil

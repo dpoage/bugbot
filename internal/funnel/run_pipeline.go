@@ -227,7 +227,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	ts.dedupArbiter = &dedupArbiterConfig{
 		f: f, client: verifierClient, budget: budget, root: snap.Root,
 		cap: DefaultDedupArbiterCap,
-	// Wire code navigation into triage's step-5e root-cause fold, best-effort:
+	}
 	// construction is cheap (no language-server process starts until the first
 	// query), but a failure here (e.g. an unresolvable repo root) must never
 	// abort the run — the fold is a heuristic layered on top of the
