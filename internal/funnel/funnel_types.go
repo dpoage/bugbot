@@ -27,8 +27,8 @@ type Candidate struct {
 	Title       string
 	Description string
 	Severity    domain.Severity
-	Evidence   string
-	Confidence domain.Confidence
+	Evidence    string
+	Confidence  domain.Confidence
 	// DefectKind is the closed taxonomy class the finder reported (see
 	// domain.DefectKind), validated by the candidate schema's enum. Set from
 	// the raw finder output; drives Fingerprint v3 identity and the

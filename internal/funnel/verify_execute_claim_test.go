@@ -505,7 +505,8 @@ func TestReplay_ParseSARIFCap_RefutedByExecutor(t *testing.T) {
 	const parseSARIFCand = `{"file":"bug.go","line":10,` +
 		`"title":"parseSARIF cap is bypassed by multi-run SARIF documents",` +
 		`"description":"parseSARIF appends past the cap when SARIF has multiple runs",` +
-		`"severity":"medium","evidence":"cap is bypassed","confidence":"high"}`
+		`"severity":"medium","evidence":"cap is bypassed","confidence":"high",` +
+		`"defect_kind":"bounds","subject":"parseSARIF"}`
 	// boundary-conditions is a real builtin lens; the candidate's Lens
 	// field is populated from the lens name (not the JSON), so the
 	// resulting Candidate has Lens="boundary-conditions" with the

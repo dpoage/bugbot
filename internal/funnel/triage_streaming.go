@@ -239,6 +239,16 @@ type triageState struct {
 	inScope map[string]bool
 	seen    map[string]bool // fingerprints seen (deduped or suppressed)
 
+	// firstLens records, per fingerprint, the Lens of the candidate that FIRST
+	// established that fingerprint (whatever its eventual fate — primary,
+	// root-cause member, or durable fold). Under Fingerprint v3 (lens excluded
+	// from identity), a later arrival with the SAME fingerprint from a
+	// DIFFERENT lens is a genuine cross-lens duplicate of one defect, not a
+	// same-lens re-report; step 3 uses this to stage that lens as
+	// corroboration, mirroring handleMember's cross-lens branch for the
+	// cluster/root-cause merge paths.
+	firstLens map[string]string
+
 	// Incremental cluster state: maps clusterKey (location bucket) → the
 	// clusters anchored in that bucket. A SLICE per bucket is load-bearing:
 	// token-DISSIMILAR defects can share a location bucket (batch mergeClusters
@@ -286,6 +296,7 @@ func newTriageState(snap *ingest.Snapshot) (*triageState, *clusterRegistry) {
 	return &triageState{
 		inScope:      inScope,
 		seen:         make(map[string]bool),
+		firstLens:    make(map[string]string),
 		clusters:     make(map[string][]*internalCluster),
 		fileClusters: make(map[string][]*internalCluster),
 		registry:     reg,
@@ -339,6 +350,20 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 		if staged, killed := ts.registry.AddStagedSite(fp, site); !staged && !killed {
 			_ = st.AppendFindingSites(ctx, fp, []domain.Site{site})
 		}
+		// A DIFFERENT lens minting the SAME v3 fingerprint is a genuine
+		// cross-lens duplicate of one defect (identical locus, defect_kind, and
+		// subject) — record it as corroboration exactly as handleMember does
+		// for the cluster/root-cause merge paths, just via the exact-fingerprint
+		// path instead of jaccard, and count it the same way (MergedCrossLens)
+		// so the stat means "a cross-lens duplicate merged" regardless of which
+		// mechanism caught it. A same-lens repeat (the common re-scan case) is
+		// intentionally NOT staged as corroboration of itself and not counted.
+		if !strings.EqualFold(ts.firstLens[fp], c.Lens) {
+			stats.MergedCrossLens++
+			if staged, killed := ts.registry.AddStagedLens(fp, c.Lens); !staged && !killed {
+				_ = st.AddCorroboratingLenses(ctx, fp, []string{c.Lens})
+			}
+		}
 		dropPending()
 		return nil
 	}
@@ -354,10 +379,12 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 	if suppressed {
 		stats.DroppedSuppressed++
 		ts.seen[fp] = true
+		ts.firstLens[fp] = c.Lens
 		dropPending()
 		return nil
 	}
 	ts.seen[fp] = true
+	ts.firstLens[fp] = c.Lens
 	c.Fingerprint = fp
 	c.LocusKey = locusKey
 

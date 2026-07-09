@@ -218,7 +218,7 @@ func TestSweep_SandboxExec_StatsAggregated(t *testing.T) {
 	const candTitle = "nil deref in Greeting"
 	finder := newScriptedClient().onSystemContains(
 		"nil-safety/error-handling",
-		candJSON(`{"file":"bug.go","line":10,"title":"`+candTitle+`","description":"cfg nil","severity":"high","evidence":"no nil check","confidence":"high"}`),
+		candJSON(`{"file":"bug.go","line":10,"title":"`+candTitle+`","description":"cfg nil","severity":"high","evidence":"no nil check","confidence":"high","defect_kind":"nil-deref","subject":"Greeting"}`),
 	)
 
 	// The verifier first emits a sandbox_exec tool call, then (on the tool-result
@@ -289,7 +289,7 @@ func TestSweep_SandboxExec_AbsentForBelowThreshold(t *testing.T) {
 	// Finder reports a LOW-severity candidate.
 	finder := newScriptedClient().onSystemContains(
 		"nil-safety/error-handling",
-		candJSON(`{"file":"bug.go","line":10,"title":"low sev bug","description":"x","severity":"low","evidence":"y","confidence":"high"}`),
+		candJSON(`{"file":"bug.go","line":10,"title":"low sev bug","description":"x","severity":"low","evidence":"y","confidence":"high","defect_kind":"logic","subject":"Greeting"}`),
 	)
 	verifier := verifierRouting(newScriptedClient())
 

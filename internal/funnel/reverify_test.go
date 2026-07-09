@@ -16,8 +16,9 @@ import (
 // exact row when the verifier promotes (UpsertFinding match) or dismisses.
 func seedSuspectedFinding(t *testing.T, st *store.Store, repo *ingest.Repo) domain.Finding {
 	t.Helper()
+	locus := NewLocusResolver(repo.Root()).Resolve("bug.go", 10)
 	fi := domain.Finding{
-		Fingerprint: domain.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10)),
+		Fingerprint: domain.FingerprintV3("bug.go", locus, domain.DefectNilDeref, "Greeting"),
 		Title:       "orphan T3 needs re-verification",
 		Description: "left orphaned by a prior hard-budget stop",
 		Severity:    domain.SeverityHigh,
@@ -26,6 +27,9 @@ func seedSuspectedFinding(t *testing.T, st *store.Store, repo *ingest.Repo) doma
 		Lens:        "nil-safety/error-handling",
 		File:        "bug.go",
 		Line:        10,
+		LocusKey:    domain.LocusKey("bug.go", locus),
+		DefectKind:  domain.DefectNilDeref,
+		Subject:     "Greeting",
 	}
 	return seedFinding(t, st, fi)
 }
@@ -66,7 +70,7 @@ func TestReverifySuspected_PromotesSurvivor(t *testing.T) {
 		t.Errorf("finder.callCount() = %d, want 0 (modeReverify must skip the finder)", n)
 	}
 
-	got, err := st.GetFindingByFingerprint(ctx, domain.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10)))
+	got, err := st.GetFindingByFingerprint(ctx, domain.FingerprintV3("bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10), domain.DefectNilDeref, "Greeting"))
 	if err != nil {
 		t.Fatalf("GetFindingByFingerprint: %v", err)
 	}
@@ -109,7 +113,7 @@ func TestReverifySuspected_DismissesRefuted(t *testing.T) {
 	}
 
 	// The T3 row must be dismissed (not left open).
-	got, err := st.GetFindingByFingerprint(ctx, domain.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10)))
+	got, err := st.GetFindingByFingerprint(ctx, domain.FingerprintV3("bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10), domain.DefectNilDeref, "Greeting"))
 	if err != nil {
 		t.Fatalf("GetFindingByFingerprint: %v", err)
 	}

@@ -541,7 +541,8 @@ func TestRepro_Burst_ExactlyOncePerFinding(t *testing.T) {
 		// so triage clustering forwards every candidate as its own primary.
 		cands[i] = fmt.Sprintf(`{"file": "bug.go", "line": %d, "title": "burst bug %d",
 			"description": "unique defect token%d alpha%d beta%d", "severity": "high",
-			"evidence": "line", "confidence": "high"}`, 100+i*(DefaultMergeWindow*3), i, i, i, i)
+			"evidence": "line", "confidence": "high",
+			"defect_kind": "logic", "subject": "burst%d"}`, 100+i*(DefaultMergeWindow*3), i, i, i, i, i)
 	}
 	finder := newScriptedClient().onSystemContains("nil-safety/error-handling", candJSON(cands...))
 	verifier := newScriptedClient()

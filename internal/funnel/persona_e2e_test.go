@@ -98,7 +98,8 @@ func TestSweep_PythonRepo_AdaptedPersona(t *testing.T) {
 
 	const pyCand = `{"file": "greet.py", "line": 3, "title": "None deref of cfg in greeting",
 		"description": "cfg may be None", "severity": "high",
-		"evidence": "greeting returns cfg.name without a None check", "confidence": "high"}`
+		"evidence": "greeting returns cfg.name without a None check", "confidence": "high",
+		"defect_kind": "nil-deref", "subject": "greeting"}`
 
 	finderInner := newScriptedClient().onSystemContains("nil-safety/error-handling", candJSON(pyCand))
 	verifierInner := newScriptedClient()
