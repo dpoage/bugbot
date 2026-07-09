@@ -92,6 +92,12 @@ func (d *Daemon) runPoll(ctx context.Context) {
 		"changed_files", len(changed),
 	)
 
+	// Rewrite stored finding/suppression identity for any file renamed within
+	// this range before the funnel work below re-derives fingerprints at the
+	// new paths (bugbot-ezmx.6). Runs regardless of day-budget exhaustion: it
+	// is pure bookkeeping, no LLM spend.
+	d.applyRenames(ctx, lastSeen, pr.HeadSHA)
+
 	res := cycleResult{kind: store.ScanTargeted}
 	if d.dayBudgetExhausted(ctx, &res) {
 		d.logCycle(res, d.clock.now().Sub(start))
