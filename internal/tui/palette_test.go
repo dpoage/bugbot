@@ -21,19 +21,21 @@ import (
 type fakeDispatcher struct {
 	mode engine.Mode
 
-	mu          sync.Mutex
-	scanCalls   []engine.ScanOpts
-	verifyCalls []engine.VerifyOpts
-	reproCalls  []engine.ReproOpts
-	sweepCalls  []engine.SweepOpts
-	reviewCalls []engine.ReviewPROpts
+	mu             sync.Mutex
+	scanCalls      []engine.ScanOpts
+	verifyCalls    []engine.VerifyOpts
+	reproCalls     []engine.ReproOpts
+	sweepCalls     []engine.SweepOpts
+	reconcileCalls []engine.ReconcileOpts
+	reviewCalls    []engine.ReviewPROpts
 
-	scanResult   *engine.ScanResult
-	verifyResult *engine.VerifyResult
-	reproResult  *engine.ReproResult
-	sweepResult  *engine.SweepResult
-	reviewResult *engine.ReviewPRResult
-	err          error
+	scanResult      *engine.ScanResult
+	verifyResult    *engine.VerifyResult
+	reproResult     *engine.ReproResult
+	sweepResult     *engine.SweepResult
+	reconcileResult *engine.ReconcileResult
+	reviewResult    *engine.ReviewPRResult
+	err             error
 
 	// block, when non-nil, makes every verb call park until it is closed or
 	// ctx.Done() fires. sawCancel, when non-nil, is closed the moment a
@@ -98,6 +100,16 @@ func (f *fakeDispatcher) Sweep(ctx context.Context, opts engine.SweepOpts) (*eng
 		return nil, err
 	}
 	return f.sweepResult, f.err
+}
+
+func (f *fakeDispatcher) Reconcile(ctx context.Context, opts engine.ReconcileOpts) (*engine.ReconcileResult, error) {
+	f.mu.Lock()
+	f.reconcileCalls = append(f.reconcileCalls, opts)
+	f.mu.Unlock()
+	if err := f.wait(ctx); err != nil {
+		return nil, err
+	}
+	return f.reconcileResult, f.err
 }
 
 func (f *fakeDispatcher) ReviewPR(ctx context.Context, opts engine.ReviewPROpts) (*engine.ReviewPRResult, error) {
@@ -313,6 +325,7 @@ func TestPalette_ReviewUsesPRInput(t *testing.T) {
 	m = sendKey(m, "j") // -> rowVerify
 	m = sendKey(m, "j") // -> rowRepro
 	m = sendKey(m, "j") // -> rowSweep
+	m = sendKey(m, "j") // -> rowReconcile
 	m = sendKey(m, "j") // -> rowReview
 
 	m = sendKey(m, "enter") // focus prNumber input
@@ -346,6 +359,7 @@ func TestPalette_ReviewRejectsInvalidPRNumber(t *testing.T) {
 	m = sendKey(m, "j") // -> rowVerify
 	m = sendKey(m, "j") // -> rowRepro
 	m = sendKey(m, "j") // -> rowSweep
+	m = sendKey(m, "j") // -> rowReconcile
 	m = sendKey(m, "j") // -> rowReview
 
 	m = sendKey(m, "enter") // focus prNumber input, leave it empty
@@ -372,6 +386,7 @@ func TestPalette_ReviewGatedInObserverMode(t *testing.T) {
 	m = sendKey(m, "j") // -> rowVerify
 	m = sendKey(m, "j") // -> rowRepro
 	m = sendKey(m, "j") // -> rowSweep
+	m = sendKey(m, "j") // -> rowReconcile
 	m = sendKey(m, "j") // -> rowReview
 
 	if m.palette.cursor != rowReview {

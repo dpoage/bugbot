@@ -116,6 +116,29 @@ func (c *controlDispatch) Sweep(ctx context.Context, opts engine.SweepOpts) (*en
 	return &engine.SweepResult{Result: placeholderResult(sum.FindingCount)}, nil
 }
 
+// Reconcile implements dispatcher: proxies the reconcile verb over the
+// control socket, reconstructing a placeholder *funnel.Result whose Stats
+// carries the reconcile counts the wire summary reduced to — see
+// placeholderResult's doc comment for the same "only len()/named fields are
+// ever read back" contract; here palette.go's reconcileSummary only ever
+// reads Stats.Reconcile*.
+func (c *controlDispatch) Reconcile(ctx context.Context, opts engine.ReconcileOpts) (*engine.ReconcileResult, error) {
+	sum, err := c.client.Dispatch(ctx, control.VerbReconcile, control.DispatchOpts{
+		Cap: opts.Cap,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &engine.ReconcileResult{Result: &funnel.Result{
+		Stats: funnel.Stats{
+			ReconcileNominated:  sum.ReconcileNominated,
+			ReconcileArbitrated: sum.ReconcileArbitrated,
+			ReconcileMerged:     sum.ReconcileMerged,
+			ReconcileSkippedCap: sum.ReconcileSkippedCap,
+		},
+	}}, nil
+}
+
 // placeholderResult builds a funnel.Result whose Findings slice has length n
 // and nothing else — see controlDispatch's doc comment for why this is safe
 // (only len() is ever read from it).
