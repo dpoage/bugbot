@@ -135,6 +135,18 @@ type Stats struct {
 	// (same-file broad-window or cross-file decl/def) — distinct from
 	// MergedWithinLens/MergedCrossLens which track the tighter 10-line window.
 	MergedRootCause int `json:"merged_root_cause,omitempty"`
+	// MergedRootCauseCodeNav counts candidates collapsed by the code-nav
+	// root-cause fold (triage_streaming.go step 5e): a candidate one reference
+	// hop (a direct call/use, per the code-navigation backend) from an in-run
+	// cluster primary of the SAME defect_kind — the generalization of
+	// MergedRootCause beyond same-file/decl-def-pair shapes to arbitrary
+	// caller/callee files, the common multi-site case in Go. Counted
+	// SEPARATELY from MergedRootCause (not folded into it) so the heuristic's
+	// yield and precision can be measured independently of the well-calibrated
+	// jaccard-based merges; included in DuplicateRate's numerator because,
+	// like MergedRootCause, it collapses two members of THIS run's own
+	// candidate pool.
+	MergedRootCauseCodeNav int `json:"merged_root_cause_codenav,omitempty"`
 	// MergedCrossLensDurable counts candidates absorbed by durableCrossLensFold
 	// (triage_streaming.go): a WAL-replayed (or otherwise re-discovered)
 	// candidate folded into an OPEN finding PERSISTED BY A PRIOR RUN at the
@@ -193,7 +205,14 @@ type Stats struct {
 	// arbiter runs (a subset of InputTokens+OutputTokens), mirroring
 	// ArbiterTokens for the split-verdict arbiter.
 	DedupArbiterTokens int64 `json:"dedup_arbiter_tokens,omitempty"`
-
+	// MergedCrossLensDurableCodeNav counts candidates absorbed by the code-nav
+	// root-cause fold's open-finding branch (triage_streaming.go step 5e): a
+	// candidate one reference hop from an OPEN finding PERSISTED BY A PRIOR RUN
+	// (or earlier in this run) at a DIFFERENT locus, same defect_kind. Like
+	// MergedCrossLensDurable it reconciles against a finding this run's own
+	// in-memory clustering cannot see, so it is counted SEPARATELY and, for the
+	// same reason, EXCLUDED from DuplicateRate's in-run scope.
+	MergedCrossLensDurableCodeNav int `json:"merged_cross_lens_durable_codenav,omitempty"`
 	// FinderRuns is the number of finder (lens, chunk) agents that actually
 	// launched (i.e. were not skipped by budget degradation/stop). FinderFailures
 	// is how many of those produced NO parseable output even after the repair
@@ -349,27 +368,28 @@ func (s Stats) FinderReliable() bool {
 // this run — fresh finder output (Hypothesized) plus WAL-replayed pending
 // candidates (Resumed), i.e. everything triage actually judged — that triage
 // identified as a duplicate of some other candidate: exact-fingerprint
-// duplicates (DroppedDuplicate) plus every non-primary member collapsed by
 // the in-run location-based and same-root-cause merges (MergedWithinLens +
-// MergedCrossLens + MergedRootCause). The denominator MUST include Resumed:
+// MergedCrossLens + MergedRootCause + MergedRootCauseCodeNav — the code-nav
+// fold's in-run branch, see its own doc for why it counts here). The
+// denominator MUST include Resumed:
 // a WAL-replayed candidate can be dropped/merged exactly like a fresh one, so
 // counting it in the numerator but not the denominator can push the rate
 // above 1.0 on a resumed run.
 //
 // Deliberately scoped to in-run triage dedup: it does NOT count
-// MergedCrossLensDurable, DroppedSuppressedDurable, or RegressionReopened (a
-// WAL-replayed or re-discovered candidate folded into / suppressed against /
-// reopening a finding a PRIOR run persisted) or cross-scan backlog adoption
-// (SimilarFinding at publish time) — all of these reconcile against a
-// DIFFERENT run's findings, not this run's own candidate pool. Zero when the
-// denominator is zero (nothing
+// MergedCrossLensDurable, MergedCrossLensDurableCodeNav, DroppedSuppressedDurable,
+// or RegressionReopened (a WAL-replayed or re-discovered candidate folded into /
+// suppressed against / reopening a finding a PRIOR run — or this run's own
+// earlier candidate — persisted) or cross-scan backlog adoption (SimilarFinding
+// at publish time) — all of these reconcile against a DIFFERENT run's findings,
+// not this run's own candidate pool. Zero when the denominator is zero (nothing
 // to have a rate over).
 func (s Stats) DuplicateRate() float64 {
 	pool := s.Hypothesized + s.Resumed
 	if pool == 0 {
 		return 0
 	}
-	dup := s.DroppedDuplicate + s.MergedWithinLens + s.MergedCrossLens + s.MergedRootCause
+	dup := s.DroppedDuplicate + s.MergedWithinLens + s.MergedCrossLens + s.MergedRootCause + s.MergedRootCauseCodeNav
 	return float64(dup) / float64(pool)
 }
 

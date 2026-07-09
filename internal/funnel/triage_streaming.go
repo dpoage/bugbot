@@ -281,6 +281,27 @@ type triageState struct {
 	// preserving every existing test's fall-through behavior; wired only by
 	// run() in run_pipeline.go.
 	dedupArbiter *dedupArbiterConfig
+	// nav is the code-navigation seam for the code-nav root-cause fold (step
+	// 5e, codenav_fold.go). Nil when code navigation was not available at
+	// triageState construction (Options.CodeNav unset AND *agent.CodeNav
+	// construction failed) — the fold degrades to a silent no-op in that case,
+	// same as any other nav error, since it is a heuristic layered on top of
+	// the identity-precise merge rules above it, never load-bearing.
+	nav codeNavRefs
+
+	// refCache memoizes ONE code-nav reference query's result per (file,
+	// symbol) pair for the lifetime of the scan, so a symbol re-evaluated
+	// across multiple triage collisions (e.g. two dissimilar-description
+	// candidates in the same function that both miss the earlier merge rules)
+	// issues at most one query total instead of one per collision.
+	refCache map[string]refCacheEntry
+
+	// primariesByKind records cluster primaries in ARRIVAL order, per
+	// defect_kind, as they are minted (see process()'s "new cluster" branch).
+	// The code-nav fold consults this instead of scanning ts.clusters/
+	// ts.fileClusters (whose iteration order over a Go map is undefined) so
+	// which same-kind target it tries is deterministic run-to-run.
+	primariesByKind map[domain.DefectKind][]*internalCluster
 }
 
 // internalCluster tracks one location cluster in the triage goroutine.
@@ -301,13 +322,14 @@ func newTriageState(snap *ingest.Snapshot) (*triageState, *clusterRegistry) {
 	}
 	reg := newClusterRegistry()
 	return &triageState{
-		inScope:      inScope,
-		seen:         make(map[string]bool),
-		firstLens:    make(map[string]string),
-		clusters:     make(map[string][]*internalCluster),
-		fileClusters: make(map[string][]*internalCluster),
-		registry:     reg,
-		resolver:     NewLocusResolver(snap.Root),
+		inScope:         inScope,
+		seen:            make(map[string]bool),
+		firstLens:       make(map[string]string),
+		clusters:        make(map[string][]*internalCluster),
+		fileClusters:    make(map[string][]*internalCluster),
+		registry:        reg,
+		resolver:        NewLocusResolver(snap.Root),
+		primariesByKind: make(map[domain.DefectKind][]*internalCluster),
 	}, reg
 }
 
@@ -433,7 +455,7 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 				// the member list so later chain links can bridge through this
 				// member, and alias this member's bucket to the cluster so the
 				// chain stays discoverable as it spans buckets.
-				ts.handleMember(ctx, st, cluster, c, stats, false)
+				ts.handleMember(ctx, st, cluster, c, stats, mergeWindow)
 				cluster.members = append(cluster.members, ic)
 				ts.addClusterToBucket(canonicalClusterKey(c), cluster)
 				return nil
@@ -464,7 +486,7 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 		}
 		seenClusters[cluster] = true
 		if sameFileSameRootCause(cluster.members, ic) {
-			ts.handleMember(ctx, st, cluster, c, stats, true)
+			ts.handleMember(ctx, st, cluster, c, stats, mergeRootCause)
 			cluster.members = append(cluster.members, ic)
 			return nil
 		}
@@ -478,7 +500,7 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 			}
 			seenClusters[cluster] = true
 			if crossFileDeclDefSameRootCause(cluster.members, ic) {
-				ts.handleMember(ctx, st, cluster, c, stats, true)
+				ts.handleMember(ctx, st, cluster, c, stats, mergeRootCause)
 				cluster.members = append(cluster.members, ic)
 				// Also index this cross-file member under its own file key so
 				// further members in the same file can bridge through it.
@@ -509,6 +531,18 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 		dropPending()
 		return nil
 	}
+	// Step 5e: code-nav root-cause fold — the reference-hop generalization of
+	// 5c beyond literal source/header mates to arbitrary caller/callee files
+	// (the common multi-site case in Go, where crossFilePeerKeys never
+	// matches: .go has no paired extension in sourceExtensions). See
+	// codenav_fold.go for the full contract; it is a bounded, best-effort
+	// heuristic that never blocks or fails triage.
+	if folded, ferr := ts.codeNavRootCauseFold(ctx, st, ic, locus, stats); ferr != nil {
+		return ferr
+	} else if folded {
+		dropPending()
+		return nil
+	}
 
 	// New cluster: this candidate is the primary. A candidate bridging two
 	// existing clusters joins the first match above; full cluster MERGING is
@@ -519,6 +553,13 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 	ts.addClusterToBucket(canonicalClusterKey(c), nc)
 	ts.addToFileClusters(normFile, nc)
 	ts.registry.Register(fp)
+	// Record this primary as a same-defect_kind fold target for LATER
+	// candidates' code-nav root-cause fold (step 5e above). Empty defect_kind
+	// (legacy Reverify rows) is never indexed here: the fold treats empty as a
+	// mismatch, so it would never be looked up under "" anyway.
+	if c.DefectKind != "" {
+		ts.primariesByKind[c.DefectKind] = append(ts.primariesByKind[c.DefectKind], nc)
+	}
 	// Initialize Sites with the primary's own location.
 	c.Sites = []Site{{File: c.File, Line: c.Line}}
 	ts.ready = append(ts.ready, c)
@@ -677,10 +718,31 @@ func (ts *triageState) addClusterToBucket(key string, cluster *internalCluster) 
 	ts.clusters[key] = append(ts.clusters[key], cluster)
 }
 
-// handleMember handles a corroborating member of an existing cluster.
-// rootCause is true when this is a same-root-cause merge (broad-window same-file
-// or cross-file decl/def); false for the ordinary window-based cross-lens merge.
-func (ts *triageState) handleMember(ctx context.Context, st *store.Store, cluster *internalCluster, c Candidate, stats *Stats, rootCause bool) {
+// mergeKind distinguishes which Stats counter a corroborating member
+// increments in handleMember, and whether the merge is "root-cause-shaped"
+// (always stages a corroborating lens on a cross-lens hit; the ordinary
+// window merge only counts it once via MergedCrossLens/MergedWithinLens).
+type mergeKind int
+
+const (
+	// mergeWindow is the ordinary step-5 proximity + description-similarity
+	// merge.
+	mergeWindow mergeKind = iota
+	// mergeRootCause is the step-5b (same-file broad-window) or step-5c
+	// (cross-file decl/def) same-root-cause merge.
+	mergeRootCause
+	// mergeCodeNav is the step-5e code-nav reference-hop fold
+	// (codenav_fold.go): a candidate one hop from an in-run cluster primary
+	// of the same defect_kind, discovered via the code-navigation backend
+	// rather than filename pattern matching or description similarity.
+	mergeCodeNav
+)
+
+// handleMember handles a corroborating member of an existing cluster. kind
+// selects which Stats counter is incremented and, for mergeRootCause/
+// mergeCodeNav, always stages a corroborating lens on a cross-lens hit (see
+// mergeKind).
+func (ts *triageState) handleMember(ctx context.Context, st *store.Store, cluster *internalCluster, c Candidate, stats *Stats, kind mergeKind) {
 	// This member is merged into an existing cluster (its lens may be recorded as
 	// corroboration, but its own claim does not proceed to verify): a triage
 	// terminal fate. Drop its write-ahead-log row, best-effort. The cluster
@@ -700,8 +762,12 @@ func (ts *triageState) handleMember(ctx context.Context, st *store.Store, cluste
 		_ = st.AppendFindingSites(ctx, cluster.fingerprint, []domain.Site{site})
 	}
 
-	if rootCause {
-		stats.MergedRootCause++
+	if kind == mergeRootCause || kind == mergeCodeNav {
+		if kind == mergeRootCause {
+			stats.MergedRootCause++
+		} else {
+			stats.MergedRootCauseCodeNav++
+		}
 		// For root-cause merges that are also same-lens, no new corroborating lens.
 		if strings.EqualFold(c.Lens, cluster.members[0].c.Lens) {
 			return
