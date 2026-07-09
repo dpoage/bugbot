@@ -491,6 +491,41 @@ func (s *Store) ReopenAsRegression(ctx context.Context, fingerprint string) erro
 	})
 }
 
+// SupersedeAsDuplicate closes the finding at dupFingerprint as
+// StatusSuperseded, recording canonicalFingerprint in superseded_by (the
+// typed, machine-readable merge pointer) and reason in superseded_reason
+// (prose, never parsed by machine logic). Used by the daemon's backlog
+// reconcile cycle (bugbot-ezmx.4) after a confident dedup-arbiter "yes": the
+// canonical row is expected to already carry the duplicate's folded
+// sites/lenses via AppendFindingSites/AddCorroboratingLenses (the caller's
+// responsibility -- this call only terminal-closes the duplicate). Does NOT
+// touch swept_at or any other lifecycle field, mirroring UpdateStatus.
+// Returns ErrNotFound if dupFingerprint does not exist; errors if
+// canonicalFingerprint is empty (a superseded row must always point
+// somewhere).
+func (s *Store) SupersedeAsDuplicate(ctx context.Context, dupFingerprint, canonicalFingerprint, reason string) error {
+	if canonicalFingerprint == "" {
+		return fmt.Errorf("store: SupersedeAsDuplicate requires a non-empty canonical fingerprint")
+	}
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE findings SET status = ?, superseded_by = ?, superseded_reason = ?, updated_at = ? WHERE fingerprint = ?`,
+			string(domain.StatusSuperseded), canonicalFingerprint, reason, nowUTC().Format(timeLayout), dupFingerprint,
+		)
+		if err != nil {
+			return annotateErr(s.path, "supersede_as_duplicate", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return annotateErr(s.path, "supersede_as_duplicate", err)
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
 // MarkFixed sets the finding's status to StatusFixed.
 func (s *Store) MarkFixed(ctx context.Context, fingerprint string) error {
 	return s.UpdateStatus(ctx, fingerprint, domain.StatusFixed, "")
@@ -657,7 +692,7 @@ const findingColumns = `SELECT f.id, f.fingerprint, f.title, f.description, f.re
 	f.severity, f.tier, f.status, f.lens, f.file, f.line, f.commit_sha, f.file_hash, f.repro_path, f.repro_witness,
 	f.fix_patch, f.needs_human, f.needs_human_reason,
 	f.corroborating_lenses, f.sites, f.confidence, f.created_at, f.updated_at, f.swept_at, f.locus_key,
-	f.defect_kind, f.subject,
+	f.defect_kind, f.subject, f.superseded_by, f.superseded_reason,
 	COALESCE(ra.exit_zero_count, 0) AS exit_zero_count`
 
 // findingFrom is the FROM clause that pairs with findingColumns. The LEFT JOIN
@@ -701,7 +736,7 @@ func scanFinding(sc rowScanner) (domain.Finding, error) {
 		&f.Severity, &f.Tier, &status, &f.Lens, &f.File, &f.Line, &f.CommitSHA,
 		&f.FileHash, &repro, &reproWitness, &f.FixPatch, &needsHuman, &needsHumanReason,
 		&corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt, &sweptAt, &f.LocusKey,
-		&f.DefectKind, &f.Subject,
+		&f.DefectKind, &f.Subject, &f.SupersededBy, &f.SupersededReason,
 		&exitZeroCount,
 	); err != nil {
 		return domain.Finding{}, err

@@ -378,6 +378,11 @@ type Daemon struct {
 	// stage so findings stranded by interrupted runs are still reconciled.
 	// Must be > 0. Default 6h.
 	ImpactSweepInterval time.Duration `yaml:"impact_sweep_interval"`
+	// ReconcileInterval is the cadence at which the daemon runs the
+	// backlog-reconcile drain (bugbot-ezmx.4): OPEN findings are grouped by
+	// file, nominated candidate pairs are confirmed by the dedup arbiter, and
+	// confident duplicates are merged. Must be > 0. Default 24h.
+	ReconcileInterval time.Duration `yaml:"reconcile_interval"`
 
 	// ControlSocket configures the optional IPC control socket that lets a
 	// separately-running `bugbot tui` ATTACH to this daemon (streaming
@@ -527,6 +532,7 @@ func Default() Config {
 			ReproBacklogInterval: 1 * time.Hour,
 			VerifyDrainInterval:  1 * time.Hour,
 			ImpactSweepInterval:  6 * time.Hour,
+			ReconcileInterval:    24 * time.Hour,
 		},
 		Storage: Storage{
 			Path: ".bugbot/state.db",
@@ -747,6 +753,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setDur("BUGBOT_DAEMON_REPRO_BACKLOG_INTERVAL", &cfg.Daemon.ReproBacklogInterval),
 		setDur("BUGBOT_DAEMON_VERIFY_DRAIN_INTERVAL", &cfg.Daemon.VerifyDrainInterval),
 		setDur("BUGBOT_DAEMON_IMPACT_SWEEP_INTERVAL", &cfg.Daemon.ImpactSweepInterval),
+		setDur("BUGBOT_DAEMON_RECONCILE_INTERVAL", &cfg.Daemon.ReconcileInterval),
 		setDur("BUGBOT_LLM_REQUEST_TIMEOUT", &cfg.LLM.RequestTimeout),
 		setBool("BUGBOT_VERIFY_SANDBOX_EXEC", &cfg.Verify.SandboxExec),
 		setBool("BUGBOT_PUBLISH_ENABLED", &cfg.Publish.Enabled),
@@ -990,6 +997,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Daemon.ImpactSweepInterval <= 0 {
 		return fmt.Errorf("config: daemon.impact_sweep_interval must be > 0")
+	}
+	if c.Daemon.ReconcileInterval <= 0 {
+		return fmt.Errorf("config: daemon.reconcile_interval must be > 0")
 	}
 	if c.LLM.RequestTimeout < 0 {
 		return fmt.Errorf("config: llm.request_timeout must be >= 0 (0 uses LLM package default)")

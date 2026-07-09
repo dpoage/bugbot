@@ -157,6 +157,21 @@ type Finding struct {
 	// repro_attempts.exit_zero_count via a LEFT JOIN at read time; false when
 	// no repro_attempts row exists for this fingerprint.
 	ReproContradicted bool
+	// SupersededBy is the canonical fingerprint this finding was merged into
+	// by backlog reconcile (bugbot-ezmx.4), set only when Status ==
+	// StatusSuperseded. Empty otherwise. This is the MACHINE-READABLE merge
+	// pointer -- callers must key merge logic on this field, never on
+	// SupersededReason's prose (repo invariant: machine decisions never key
+	// on prose). A live re-discovery of this exact fingerprint by a future
+	// scan naturally clears both fields back to empty on upsert (UpsertFinding
+	// does not preserve them), the same way a fixed finding's history is left
+	// for a fresh scan to overwrite.
+	SupersededBy string
+	// SupersededReason is a human-readable note explaining why this finding
+	// was superseded (e.g. "backlog reconcile: merged into <fp> (dedup
+	// arbiter yes)"). Prose only -- never parsed by machine logic; see
+	// SupersededBy.
+	SupersededReason string
 }
 
 // FindingTallies is the aggregate finding picture for the status pane.

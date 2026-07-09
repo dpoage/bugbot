@@ -213,6 +213,30 @@ type Stats struct {
 	// in-memory clustering cannot see, so it is counted SEPARATELY and, for the
 	// same reason, EXCLUDED from DuplicateRate's in-run scope.
 	MergedCrossLensDurableCodeNav int `json:"merged_cross_lens_durable_codenav,omitempty"`
+
+	// ReconcileNominated is the number of candidate pairs the backlog
+	// reconcile cycle (bugbot-ezmx.4) nominated: OPEN findings sharing a
+	// normalized file, within DefaultMergeWindow lines, compatible
+	// defect_kind, and SimilarFinding-close descriptions. Kind-mismatched or
+	// far-apart pairs are never nominated (no arbiter spend).
+	ReconcileNominated int `json:"reconcile_nominated,omitempty"`
+	// ReconcileArbitrated is the subset of ReconcileNominated actually sent
+	// to the dedup arbiter (bounded by the reconcile per-cycle cap; the
+	// remainder count as ReconcileSkippedCap).
+	ReconcileArbitrated int `json:"reconcile_arbitrated,omitempty"`
+	// ReconcileMerged is the subset of ReconcileArbitrated that returned a
+	// confident "yes": the newer row was folded into the older (canonical)
+	// row via AppendFindingSites/AddCorroboratingLenses and closed
+	// StatusSuperseded.
+	ReconcileMerged int `json:"reconcile_merged,omitempty"`
+	// ReconcileSkippedCap counts nominated pairs skipped because the
+	// per-cycle reconcile cap was already exhausted -- graceful
+	// pass-through, both findings kept open for the next cycle.
+	ReconcileSkippedCap int `json:"reconcile_skipped_cap,omitempty"`
+	// ReconcileFailures counts arbiter runs that produced no parseable
+	// verdict (infra or parse failure); treated as "unsure" (no merge).
+	ReconcileFailures int `json:"reconcile_failures,omitempty"`
+
 	// FinderRuns is the number of finder (lens, chunk) agents that actually
 	// launched (i.e. were not skipped by budget degradation/stop). FinderFailures
 	// is how many of those produced NO parseable output even after the repair
