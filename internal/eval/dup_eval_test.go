@@ -2,12 +2,14 @@ package eval
 
 import "testing"
 
-// TestRunDupEval_SimilarFindingDecidesPredicted pins that RunDupEval's
-// Predicted field is exactly funnel.SimilarFinding's decision, not some
-// reimplementation: a pair engineered to satisfy SimilarFinding's rule
-// (same normalized file, within DefaultMergeWindow lines, jaccard over
-// threshold) scores TP when labeled a duplicate, and a pair outside the
-// window scores FN despite matching wording.
+// TestRunDupEval_SimilarFindingDecidesPredicted pins that funnel.SimilarFinding
+// is the composed v3 stack's TIEBREAK stage (scoreV3's stage 3), reached
+// unchanged when the pairs carry no DefectKind/Subject (both empty, so the
+// kind gate is a wildcard no-op) and land on different lines (so exact-fp
+// never fires): a pair engineered to satisfy SimilarFinding's rule (same
+// normalized file, within DefaultMergeWindow lines, jaccard over threshold)
+// scores TP when labeled a duplicate, and a pair outside the window scores
+// FN despite matching wording.
 func TestRunDupEval_SimilarFindingDecidesPredicted(t *testing.T) {
 	pairs := []DupPair{
 		{
@@ -112,33 +114,66 @@ func TestBuiltinDupPairs_CoversAllChannels(t *testing.T) {
 	}
 }
 
-// TestRunDupEval_BuiltinBaseline pins the CURRENT v2 identity layer's
-// baseline against the seeded corpus: perfect precision (it never merges two
-// distinct defects in this corpus — the conservative threshold documented in
-// cluster.go holds) but well under perfect recall (it misses roughly half of
-// the true duplicates: heavy paraphrase, cross-lens vocabulary drift,
-// cross-file caller/callee splits, and rename line-drift all fall outside
-// the file+10-line+jaccard rule). This is the number every later identity
-// change (bugbot-ezmx.1's v3, etc.) must be measured against — a regression
-// here means dedup got WORSE, not better.
+// TestRunDupEval_BuiltinBaseline pins the POST-v3 composed identity stack's
+// baseline (bugbot-ezmx.9) against the seeded corpus: RunDupEval now scores
+// funnel.SameOrUnknownKind -> domain.FingerprintV3 exact equality ->
+// funnel.SimilarFinding, not funnel.SimilarFinding alone.
+//
+// Pre-v3 pin (bugbot-ezmx.8, funnel.SimilarFinding only): precision=1.00
+// recall=0.57 (8/14 TP), with every channel showing at least one false
+// negative.
+//
+// Post-v3 pin, per channel (deltas vs the pre-v3 8/14 TP overall):
+//   - paraphrase:     4/4 TP (was 3/4) — the heavy-rewrite pair now converges
+//     at exact-fp (same locus/kind/subject), bypassing its low description
+//     overlap entirely.
+//   - cross_lens:     4/4 TP (was 3/4) — the security-vs-perf vocabulary
+//     pair converges the same way: two lenses, one root cause, one locus.
+//   - caller_callee:  1/3 TP (unchanged) — both root-cause/symptom pairs are
+//     cross-file, so FingerprintV3's file component and SimilarFinding's
+//     same-file window both still miss them; a cross-file merge is out of
+//     scope for this same-file identity/tiebreak composition.
+//   - rename:         2/3 TP (was 1/3) — the large-shift pair now converges
+//     at exact-fp: the symbol-anchored locus survives 85 lines of drift
+//     inserted above the bug (bugbot-ezmx.5's whole point), even though it
+//     is still outside SimilarFinding's merge window. The wording-drift
+//     pair remains a false negative: it renames the enclosing FUNCTION
+//     itself, so even the symbol locus changes.
+//
+// Aggregate: 11/14 TP, recall RISES from 0.57 to 11/14 ≈ 0.79. Precision
+// stays 1.00 — the composed stack introduces no new false positives; every
+// SameDefect=false pair is still separated by the kind gate or a subject
+// mismatch at exact-fp, exactly as designed into the corpus.
+//
+// This is the number every later identity change must be measured against —
+// a regression here means dedup got WORSE, not better. The two remaining
+// caller_callee false negatives and the one rename false negative are
+// documented, expected gaps (cross-file merge and function-level rename
+// respectively), not bugs in this eval.
 func TestRunDupEval_BuiltinBaseline(t *testing.T) {
 	res := RunDupEval(BuiltinDupPairs())
 
 	if got, want := res.Precision(), 1.0; got != want {
-		t.Errorf("baseline precision = %v, want %v (v2 must not have started merging distinct defects)", got, want)
+		t.Errorf("baseline precision = %v, want %v (composed v3 stack must not have started merging distinct defects)", got, want)
 	}
-	const wantRecall = 8.0 / 14.0 // 8 TP out of 14 SameDefect=true pairs
+	const wantRecall = 11.0 / 14.0 // 11 TP out of 14 SameDefect=true pairs
 	if got := res.Recall(); got < wantRecall-1e-9 || got > wantRecall+1e-9 {
 		t.Errorf("baseline recall = %v, want %v (regression: identity layer got worse or better without updating this pin)", got, wantRecall)
 	}
 
-	// Every channel must show at least one recall gap in the CURRENT layer —
-	// that gap is precisely what the epic's later children are meant to
-	// close, and losing it here would mean the corpus stopped being a useful
-	// baseline.
-	for ch, t2 := range res.ByChannel {
-		if t2.FN == 0 {
-			t.Errorf("channel %s has zero false negatives in the v2 baseline; corpus should demonstrate a known gap for every channel", ch)
+	wantChannelTally := map[DupChannel]channelTally{
+		DupChannelParaphrase:   {TP: 4, FN: 0, TN: 1},
+		DupChannelCrossLens:    {TP: 4, FN: 0, TN: 1},
+		DupChannelCallerCallee: {TP: 1, FN: 2, TN: 1},
+		DupChannelRename:       {TP: 2, FN: 1, TN: 1},
+	}
+	for ch, want := range wantChannelTally {
+		got, ok := res.ByChannel[ch]
+		if !ok {
+			t.Fatalf("channel %s missing from result", ch)
+		}
+		if got.TP != want.TP || got.FN != want.FN || got.TN != want.TN || got.FP != 0 {
+			t.Errorf("channel %s tally = %+v, want TP=%d FN=%d TN=%d FP=0", ch, *got, want.TP, want.FN, want.TN)
 		}
 	}
 }

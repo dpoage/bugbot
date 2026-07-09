@@ -157,6 +157,15 @@ func sameOrUnknownKind(a, b domain.DefectKind) bool {
 	return a == "" || b == "" || a == b
 }
 
+// SameOrUnknownKind is the exported form of sameOrUnknownKind, for callers
+// outside the funnel package that need to score the same kind-compatibility
+// gate triage's clustering and internal/funnel/reconcile.go's durable-fold
+// candidate nomination use, without re-implementing the wildcard rule (see
+// internal/eval's dup-pair eval, bugbot-ezmx.9).
+func SameOrUnknownKind(a, b domain.DefectKind) bool {
+	return sameOrUnknownKind(a, b)
+}
+
 // abs returns the absolute value of n.
 func abs(n int) int {
 	if n < 0 {

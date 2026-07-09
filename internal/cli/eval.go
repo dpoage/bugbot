@@ -57,11 +57,16 @@ captured out-of-band via 'go test -tags record').
 
 With --dup-pairs, the command instead runs the labeled duplicate-pair corpus
 (internal/eval.BuiltinDupPairs, covering the paraphrase, cross-lens,
-caller/callee, and rename duplicate channels) through the CURRENT identity
-layer's cross-scan similarity decision (funnel.SimilarFinding) and prints a
-per-channel precision/recall table. This makes NO LLM calls and applies NO
-gate — the labels are ground truth, not what current code does, so a low
-recall here is an expected baseline measurement (bugbot-ezmx.8), not a
+caller/callee, and rename duplicate channels) through the composed
+deterministic v3 identity decision — funnel.SameOrUnknownKind's kind gate,
+domain.FingerprintV3 exact equality (the primary triage identity path), and
+funnel.SimilarFinding as the durable-fold/publish tiebreaker — and prints a
+per-channel precision/recall table plus per-stage decision attribution. This
+makes NO LLM calls and applies NO gate: the bugbot-ezmx.2 dedup arbiter is a
+separate, non-deterministic judgment layer and stays out of this eval
+entirely. The labels are ground truth, not what current code does, so a low
+recall here is an expected baseline measurement (bugbot-ezmx.9, re-pinned
+post-v3; bugbot-ezmx.8's pre-v3 pin was precision=1.00 recall=0.57), not a
 failure. --dup-pairs takes precedence over --recorded when both are set.`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
@@ -142,12 +147,19 @@ func runRecordedEval(ctx context.Context, out io.Writer, corpusDir string, asJSO
 	return nil
 }
 
-// runDupPairEval scores internal/eval.BuiltinDupPairs against the current
-// identity layer's cross-scan duplicate decision (eval.RunDupEval, backed by
-// funnel.SimilarFinding) and prints the per-channel precision/recall table.
-// Pure function, no I/O beyond the corpus in memory, so this can never fail —
-// error return is kept for symmetry with the other eval entrypoints and future
-// JSON-encode failures.
+// runDupPairEval scores internal/eval.BuiltinDupPairs against the composed
+// deterministic v3 identity decision (eval.RunDupEval: funnel.
+// SameOrUnknownKind's kind gate, domain.FingerprintV3 exact equality — the
+// primary triage-step-3 identity path — and funnel.SimilarFinding as the
+// durable-fold/publish tiebreaker) and prints the per-channel precision/
+// recall table plus a per-stage decision attribution. The bugbot-ezmx.2 LLM
+// dedup arbiter is deliberately NOT part of this: it is a non-deterministic
+// judgment layer invoked only after this deterministic stack already fails
+// to decide, so it has no place in an offline, no-LLM-calls eval.
+// Pure function, no I/O beyond the corpus in memory (RunDupEval's own
+// scratch-directory writes for locus resolution are internal and cleaned up
+// before it returns), so this can never fail — error return is kept for
+// symmetry with the other eval entrypoints and future JSON-encode failures.
 func runDupPairEval(out io.Writer, asJSON bool) error {
 	res := eval.RunDupEval(eval.BuiltinDupPairs())
 	if asJSON {
