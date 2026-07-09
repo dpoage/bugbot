@@ -337,7 +337,7 @@ func TestTriageState_DurableCrossLensFold_DismissedMatch_Suppressed(t *testing.T
 	resolver := NewLocusResolver(root)
 	candLocus := resolver.Resolve(file, candLine)
 	candFP := domain.FingerprintV3(file, candLocus, "", "")
-	sup, err := st.IsSuppressed(ctx, candFP, domain.LocusKey(file, candLocus))
+	sup, err := st.IsSuppressed(ctx, candFP, domain.LocusKey(file, candLocus), "")
 	if err != nil {
 		t.Fatalf("IsSuppressed: %v", err)
 	}
@@ -351,6 +351,126 @@ func TestTriageState_DurableCrossLensFold_DismissedMatch_Suppressed(t *testing.T
 	}
 	if len(all) != 1 {
 		t.Fatalf("total findings = %d, want 1 (a suppression must not mint a new row): %+v", len(all), all)
+	}
+}
+
+// TestTriageState_DurableCrossLensFold_DismissedMatch_DifferingKind_NotSuppressed
+// proves the defect_kind gate holds even against a dismissed row: a candidate
+// with a DIFFERENT non-empty defect_kind than the dismissed finding's is a
+// distinct defect by design and must survive as its own primary, not be
+// silently suppressed.
+func TestTriageState_DurableCrossLensFold_DismissedMatch_DifferingKind_NotSuppressed(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openFixture(t)
+
+	const file, lensA, lensB = "x.go", "resource-leaks", "exception-safety"
+	const seedLine, candLine = 3, 7
+	desc := "the acquired handle a is leaked when use a fails because release is never called on the error path"
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, file), []byte(twoFuncSrc), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	resolver := NewLocusResolver(root)
+	seedLocus := resolver.Resolve(file, seedLine)
+	seedFP := domain.FingerprintV3(file, seedLocus, domain.DefectResourceLeak, "")
+	if _, err := st.UpsertFinding(ctx, domain.Finding{
+		Fingerprint: seedFP,
+		LocusKey:    domain.LocusKey(file, seedLocus),
+		DefectKind:  domain.DefectResourceLeak,
+		Title:       "FuncA leaks handle on error path",
+		Description: desc,
+		Severity:    "high",
+		Tier:        domain.TierVerified,
+		Status:      domain.StatusDismissed,
+		Lens:        lensA,
+		File:        file,
+		Line:        seedLine,
+		Sites:       []domain.Site{{File: file, Line: seedLine}},
+	}); err != nil {
+		t.Fatalf("seed dismissed finding: %v", err)
+	}
+
+	snap := &ingest.Snapshot{Root: root, Files: []ingest.File{{Path: file}}}
+	ts, _ := newTriageState(snap)
+	var stats Stats
+	cand := Candidate{
+		Lens: lensB, File: file, Line: candLine,
+		Title:       "handle not released on the exception path",
+		Description: desc,
+		DefectKind:  domain.DefectLogic,
+		Severity:    "high", Confidence: "high",
+	}
+	if err := ts.process(ctx, st, &stats, cand); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+
+	ready := ts.popReady()
+	if len(ready) != 1 {
+		t.Fatalf("popReady = %d, want 1 (a differing-kind candidate must survive as its own primary): %+v", len(ready), ready)
+	}
+	if stats.DroppedSuppressedDurable != 0 {
+		t.Errorf("DroppedSuppressedDurable = %d, want 0 (differing defect_kind must never fold, even against a dismissed row)", stats.DroppedSuppressedDurable)
+	}
+
+	sup, err := st.IsSuppressed(ctx, ready[0].Fingerprint, ready[0].LocusKey, "")
+	if err != nil {
+		t.Fatalf("IsSuppressed: %v", err)
+	}
+	if sup {
+		t.Error("candidate's fingerprint must not be suppressed: defect_kind differs from the dismissed row")
+	}
+}
+
+// TestTriageState_DurableCrossLensFold_DismissedMatch_Dissimilar_NotSuppressed
+// proves the SimilarFinding gate holds even against a dismissed row: a
+// candidate whose description does not clear the jaccard/window bar is a
+// distinct defect and must survive as its own primary, not be suppressed.
+func TestTriageState_DurableCrossLensFold_DismissedMatch_Dissimilar_NotSuppressed(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openFixture(t)
+
+	const file, lensA, lensB = "x.go", "resource-leaks", "boundary-conditions"
+	const seedLine, candLine = 3, 7
+	leakDesc := "the acquired handle a is leaked when use a fails because release is never called on the error path"
+
+	root, seedFP := seedFileWindowFinding(t, st, file, lensA, leakDesc, seedLine, candLine, domain.StatusDismissed)
+
+	snap := &ingest.Snapshot{Root: root, Files: []ingest.File{{Path: file}}}
+	ts, _ := newTriageState(snap)
+	var stats Stats
+	cand := Candidate{
+		Lens: lensB, File: file, Line: candLine,
+		Title:       "integer overflow in size computation",
+		Description: "multiplying width times height overflows int32 producing a negative allocation size",
+		Severity:    "high", Confidence: "high",
+	}
+	if err := ts.process(ctx, st, &stats, cand); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+
+	ready := ts.popReady()
+	if len(ready) != 1 {
+		t.Fatalf("popReady = %d, want 1 (a dissimilar candidate must survive as its own primary): %+v", len(ready), ready)
+	}
+	if stats.DroppedSuppressedDurable != 0 {
+		t.Errorf("DroppedSuppressedDurable = %d, want 0 (dissimilar description must never suppress against a dismissed row)", stats.DroppedSuppressedDurable)
+	}
+
+	candFP := ready[0].Fingerprint
+	sup, err := st.IsSuppressed(ctx, candFP, ready[0].LocusKey, "")
+	if err != nil {
+		t.Fatalf("IsSuppressed: %v", err)
+	}
+	if sup {
+		t.Error("candidate's fingerprint must not be suppressed: description is not similar to the dismissed row")
+	}
+	seeded, err := st.GetFindingByFingerprint(ctx, seedFP)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint: %v", err)
+	}
+	if seeded.Status != domain.StatusDismissed {
+		t.Errorf("seeded finding status = %q, want dismissed (unchanged)", seeded.Status)
 	}
 }
 
