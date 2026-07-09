@@ -94,6 +94,12 @@ type fakeLLM struct {
 	// requests respectively. Selected by inspecting the system prompt.
 	finderBody  string
 	refuterBody string
+	// dedupBody, when non-empty, is the JSON response served to the ezmx.2/
+	// ezmx.4 dedup arbiter's fixed system prompt (routed on a stable
+	// substring of it, "SAME underlying defect"). Empty means the arbiter
+	// falls through to finderBody, matching the pre-ezmx.4 default: no test
+	// that leaves this unset changes behavior.
+	dedupBody string
 }
 
 func newFakeLLM(finderBody, refuterBody string) *fakeLLM {
@@ -116,10 +122,15 @@ func (c *fakeLLM) Complete(ctx context.Context, req llm.Request) (llm.Response, 
 	c.calls++
 	c.mu.Unlock()
 
-	// Refuters get the skeptical "PROVE the bug is WRONG" system prompt; finders
-	// get a lens system prompt. Route on a stable substring of each.
+	// The dedup arbiter's fixed system prompt is checked first (its text
+	// contains neither "refute" nor "WRONG"). Refuters get the skeptical
+	// "PROVE the bug is WRONG" system prompt; finders get a lens system
+	// prompt. Route on a stable substring of each.
 	body := c.finderBody
-	if strings.Contains(req.System, "refute") || strings.Contains(req.System, "WRONG") {
+	switch {
+	case c.dedupBody != "" && strings.Contains(req.System, "SAME underlying defect"):
+		body = c.dedupBody
+	case strings.Contains(req.System, "refute") || strings.Contains(req.System, "WRONG"):
 		body = c.refuterBody
 	}
 	return llm.Response{
@@ -127,6 +138,12 @@ func (c *fakeLLM) Complete(ctx context.Context, req llm.Request) (llm.Response, 
 		StopReason: llm.StopEndTurn,
 		Usage:      llm.Usage{InputTokens: 100, OutputTokens: 50},
 	}, nil
+}
+
+// dedupVerdictJSON builds a canned dedup-arbiter response body, mirroring
+// funnel's own (package-private) helper of the same name.
+func dedupVerdictJSON(verdict, reasoning string) string {
+	return `{"verdict": "` + verdict + `", "reasoning": "` + reasoning + `"}`
 }
 
 // candidate / verdict JSON bodies shared by tests. The candidate points at
