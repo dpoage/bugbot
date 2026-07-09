@@ -124,21 +124,20 @@ func actionableLockError(err error) error {
 // printReconcileResult writes the supplemental summary line(s) Dispatcher.
 // Reconcile does not print itself: the nominated/arbitrated/merged/skipped
 // counts are self-printed to opts.Out by Reconcile (mirroring Sweep's
-// self-printed one-liner); this adds the failure count and spend, matching
-// the division of labor scan.go's printResult uses for the fields Dispatcher.
-// Scan does not print.
+// self-printed one-liner); this adds the failure count and spend. Spend is
+// reported as Stats.DedupArbiterTokens, NOT InputTokens/OutputTokens/Cache*:
+// funnel.ReconcileDedup never populates those (only the scan run() path
+// does, via rec.totals()) -- every dedup-arbiter token spent during a
+// reconcile pass lands solely in DedupArbiterTokens, so InputTokens/
+// OutputTokens/Cache* are structurally always 0 here and printing them
+// would be dead code that never fires.
 func printReconcileResult(out io.Writer, res *engine.ReconcileResult) {
 	s := res.Result.Stats
 	if s.ReconcileFailures > 0 {
 		_, _ = fmt.Fprintf(out, "Backlog reconcile: %d arbiter call(s) produced no parseable verdict (treated as unsure, no merge)\n",
 			s.ReconcileFailures)
 	}
-	if s.InputTokens > 0 || s.OutputTokens > 0 {
-		_, _ = fmt.Fprintf(out, "Spend: input=%d output=%d total=%d tokens\n",
-			s.InputTokens, s.OutputTokens, s.InputTokens+s.OutputTokens)
-		if s.CacheReadTokens > 0 || s.CacheCreationTokens > 0 {
-			_, _ = fmt.Fprintf(out, "Cache: read=%d created=%d tokens (of input; reads bill at a steep discount)\n",
-				s.CacheReadTokens, s.CacheCreationTokens)
-		}
+	if s.DedupArbiterTokens > 0 {
+		_, _ = fmt.Fprintf(out, "Spend: %d tokens (dedup arbiter)\n", s.DedupArbiterTokens)
 	}
 }

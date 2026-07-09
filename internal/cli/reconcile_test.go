@@ -51,15 +51,15 @@ func TestActionableLockError_PassesThroughOtherErrors(t *testing.T) {
 
 // TestPrintReconcileResult_FailuresAndSpend confirms the CLI's supplemental
 // line covers exactly what Dispatcher.Reconcile does not self-print:
-// arbiter-failure count and token spend.
+// arbiter-failure count and token spend. Spend uses DedupArbiterTokens (the
+// field funnel.ReconcileDedup actually populates) -- NOT InputTokens/
+// OutputTokens, which stay structurally 0 for a reconcile pass.
 func TestPrintReconcileResult_FailuresAndSpend(t *testing.T) {
 	var buf bytes.Buffer
 	res := &engine.ReconcileResult{Result: &funnel.Result{
 		Stats: funnel.Stats{
-			ReconcileFailures: 2,
-			InputTokens:       1000,
-			OutputTokens:      200,
-			CacheReadTokens:   300,
+			ReconcileFailures:  2,
+			DedupArbiterTokens: 150,
 		},
 	}}
 	printReconcileResult(&buf, res)
@@ -67,11 +67,8 @@ func TestPrintReconcileResult_FailuresAndSpend(t *testing.T) {
 	if !strings.Contains(out, "2 arbiter call(s)") {
 		t.Errorf("output = %q, want the arbiter-failure count reported", out)
 	}
-	if !strings.Contains(out, "input=1000 output=200 total=1200") {
-		t.Errorf("output = %q, want the spend line", out)
-	}
-	if !strings.Contains(out, "read=300") {
-		t.Errorf("output = %q, want the cache line", out)
+	if !strings.Contains(out, "150 tokens") {
+		t.Errorf("output = %q, want the dedup-arbiter spend line", out)
 	}
 }
 

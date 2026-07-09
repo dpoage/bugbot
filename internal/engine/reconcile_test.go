@@ -121,6 +121,17 @@ func TestReconcile_ConfidentYesMerges(t *testing.T) {
 	if res.Result.Stats.ReconcileNominated != 1 {
 		t.Fatalf("ReconcileNominated = %d, want 1", res.Result.Stats.ReconcileNominated)
 	}
+	// fakeArbiterClient reports Usage{In:100,Out:50} = 150 tokens; a
+	// reconcile pass's spend lands solely in DedupArbiterTokens (see
+	// funnel.ReconcileDedup / runDedupArbiter's recorder wiring), never
+	// InputTokens/OutputTokens (those stay 0 outside the scan run() path).
+	if res.Result.Stats.DedupArbiterTokens != 150 {
+		t.Fatalf("DedupArbiterTokens = %d, want 150 (100 in + 50 out from the fake arbiter call)", res.Result.Stats.DedupArbiterTokens)
+	}
+	if res.Result.Stats.InputTokens != 0 || res.Result.Stats.OutputTokens != 0 {
+		t.Fatalf("InputTokens/OutputTokens = %d/%d, want 0/0 (reconcile spend is not tracked there)",
+			res.Result.Stats.InputTokens, res.Result.Stats.OutputTokens)
+	}
 
 	got, err := d.store.GetFinding(ctx, newer.ID)
 	if err != nil {
