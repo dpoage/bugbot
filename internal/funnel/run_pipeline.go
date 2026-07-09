@@ -218,6 +218,16 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// corroborating lenses) and verify goroutines (which drain staged lenses and
 	// signal persistence).
 	ts, clusterReg := newTriageState(snap)
+	// Wire the bugbot-ezmx.2 LLM dedup arbiter: reuses the verifier-role client
+	// (already recorder-wrapped as verifierClient above, so its spend is
+	// ledgered exactly like every other verifier-role completion) and the
+	// verify budget pool. snap.Root backs the code-excerpt read; empty on a
+	// snapshot taken without a root, which degrades the excerpt to empty
+	// (dedupCodeExcerpt), not a failure.
+	ts.dedupArbiter = &dedupArbiterConfig{
+		f: f, client: verifierClient, budget: budget, root: snap.Root,
+		cap: DefaultDedupArbiterCap,
+	}
 
 	// findingsMu protects allFindings, verifyKilled, and the verifier stats
 	// fields on result.Stats that the concurrent verify goroutines update.

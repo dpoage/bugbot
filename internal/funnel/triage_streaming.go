@@ -274,6 +274,12 @@ type triageState struct {
 
 	// survivorCount is the number of cluster primaries forwarded.
 	survivorCount int
+
+	// dedupArbiter holds the LLM dedup-arbiter dependencies (bugbot-ezmx.2).
+	// nil (the default from newTriageState) disables the arbiter entirely,
+	// preserving every existing test's fall-through behavior; wired only by
+	// run() in run_pipeline.go.
+	dedupArbiter *dedupArbiterConfig
 }
 
 // internalCluster tracks one location cluster in the triage goroutine.
@@ -431,6 +437,20 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 				ts.addClusterToBucket(canonicalClusterKey(c), cluster)
 				return nil
 			}
+			// bugbot-ezmx.2: near + kind-compatible but jaccard fell short of
+			// mergeSimilarityThreshold — the collision the prose cliff cannot
+			// resolve on its own. Spend one bounded LLM dedup-arbiter turn; fold
+			// exactly like a jaccard-confirmed match on a confident "yes", leave
+			// the candidate to continue down its normal path (next cluster, then
+			// 5b/5c/5d, then new primary) on "no"/"unsure"/cap-exhausted.
+			if member, collided := clusterJaccardCollision(cluster.members, ic, DefaultMergeWindow); collided {
+				if ts.dedupVerdictFor(ctx, candidateDedupView(member.c), candidateDedupView(c), stats) == dedupSame {
+					ts.handleMember(ctx, st, cluster, c, stats, false)
+					cluster.members = append(cluster.members, ic)
+					ts.addClusterToBucket(canonicalClusterKey(c), cluster)
+					return nil
+				}
+			}
 		}
 	}
 
@@ -551,7 +571,15 @@ func (ts *triageState) durableCrossLensFold(ctx context.Context, st *store.Store
 			continue
 		}
 		if !SimilarFinding(c.File, c.Line, c.Description, f.File, f.Line, f.Description) {
-			continue
+			// bugbot-ezmx.2: same locus, same/unknown defect_kind, different
+			// lens, but jaccard (SimilarFinding's tiebreaker) fell short — spend
+			// one bounded LLM dedup-arbiter turn before giving up on this row.
+			// A confident "yes" folds exactly like a SimilarFinding match; "no",
+			// "unsure", or cap-exhausted leave the candidate to the next existing
+			// finding (or, having exhausted existing, a new primary).
+			if ts.dedupVerdictFor(ctx, candidateDedupView(c), findingDedupView(f), stats) != dedupSame {
+				continue
+			}
 		}
 		// The row was just read under the single-writer lock, so a non-nil error
 		// here is a genuine I/O failure, not a benign race — propagate it.

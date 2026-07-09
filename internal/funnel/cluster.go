@@ -120,6 +120,30 @@ func clusterAccepts(cl []indexedCand, it indexedCand, window int) bool {
 	return false
 }
 
+// clusterJaccardCollision reports the bugbot-ezmx.2 dedup-arbiter trigger: a
+// member of cl that is within window lines of it (near) AND kind-compatible
+// with it, but whose description jaccard falls short of
+// mergeSimilarityThreshold — a collision clusterAccepts alone cannot resolve
+// (real matches already return true from clusterAccepts before this is ever
+// consulted; a kind mismatch is never a collision, by design). Returns the
+// first such colliding member for the caller to hand to the arbiter alongside
+// it, and ok=false when there is no such near-miss.
+func clusterJaccardCollision(cl []indexedCand, it indexedCand, window int) (indexedCand, bool) {
+	for _, m := range cl {
+		if abs(m.c.Line-it.c.Line) > window {
+			continue
+		}
+		if !sameOrUnknownKind(m.c.DefectKind, it.c.DefectKind) {
+			continue
+		}
+		if jaccard(m.tok, it.tok) >= mergeSimilarityThreshold {
+			continue // clusterAccepts already accepts this as a real match
+		}
+		return m, true
+	}
+	return indexedCand{}, false
+}
+
 // sameOrUnknownKind reports whether a and b are the same defect_kind, treating
 // an EMPTY kind on either side as an unknown wildcard rather than a mismatch.
 // A candidate never has an empty kind in production (the schema requires

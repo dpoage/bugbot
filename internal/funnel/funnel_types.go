@@ -142,6 +142,37 @@ type Stats struct {
 	// publish-time backlog adoption uses — so it is counted SEPARATELY and
 	// excluded from DuplicateRate's in-run scope.
 	MergedCrossLensDurable int `json:"merged_cross_lens_durable,omitempty"`
+	// DedupArbiterRuns is the number of LLM dedup-arbiter invocations
+	// (bugbot-ezmx.2): one bounded, zero-tool completion spent per location
+	// collision the jaccard gate could not resolve on its own (same locus/kind,
+	// description similarity below mergeSimilarityThreshold), at both the
+	// in-run cluster collision site (triage_streaming.go step 5) and the
+	// durableCrossLensFold SimilarFinding fallback. Bounded by
+	// DefaultDedupArbiterCap per scan — a handful, not one per candidate.
+	DedupArbiterRuns int `json:"dedup_arbiter_runs,omitempty"`
+	// DedupArbiterMerges is the subset of DedupArbiterRuns that returned a
+	// confident "yes" and were folded via the caller's normal merge path
+	// (handleMember / AddCorroboratingLenses+AppendFindingSites). These merges
+	// are ALSO counted by MergedWithinLens/MergedCrossLens (step 5) or
+	// MergedCrossLensDurable (durable fold) — the same code path that would
+	// have counted them had jaccard alone accepted the match — so
+	// DedupArbiterMerges is a visibility overlay, not an additional summand:
+	// it does NOT feed DuplicateRate's numerator itself, preserving numerator
+	// disjointness (see DuplicateRate's doc).
+	DedupArbiterMerges int `json:"dedup_arbiter_merges,omitempty"`
+	// DedupArbiterSkippedCap counts collisions that qualified for the dedup
+	// arbiter but were skipped because DefaultDedupArbiterCap was already
+	// exhausted this scan — graceful pass-through: both candidates are kept
+	// as distinct findings exactly as an "unsure" verdict would produce.
+	DedupArbiterSkippedCap int `json:"dedup_arbiter_skipped_cap,omitempty"`
+	// DedupArbiterFailures counts dedup-arbiter runs that produced no
+	// parseable verdict (infra or parse failure); these are treated as
+	// "unsure" (no merge), never as a silent kill or merge.
+	DedupArbiterFailures int `json:"dedup_arbiter_failures,omitempty"`
+	// DedupArbiterTokens is the total input+output tokens spent by dedup
+	// arbiter runs (a subset of InputTokens+OutputTokens), mirroring
+	// ArbiterTokens for the split-verdict arbiter.
+	DedupArbiterTokens int64 `json:"dedup_arbiter_tokens,omitempty"`
 	// FinderRuns is the number of finder (lens, chunk) agents that actually
 	// launched (i.e. were not skipped by budget degradation/stop). FinderFailures
 	// is how many of those produced NO parseable output even after the repair
