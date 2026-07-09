@@ -126,6 +126,33 @@ func TestRepro_EscalatesUnconditionally(t *testing.T) {
 	}
 }
 
+// TestReconcile_EscalatesUnconditionally verifies that Dispatcher.Reconcile
+// never refuses with ErrObserver: ReconcileOpts has no Force field (see its
+// doc comment), so Reconcile escalates Observer -> Owner unconditionally,
+// exactly like Repro.
+func TestReconcile_EscalatesUnconditionally(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t)
+	seedActiveForeignRun(t, ctx, cfg)
+
+	d, err := Open(ctx, cfg, nil)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	if d.Mode() != Observer {
+		t.Fatalf("Mode() = %v, want Observer", d.Mode())
+	}
+
+	if _, err := d.Reconcile(ctx, ReconcileOpts{Out: io.Discard}); errors.Is(err, ErrObserver) {
+		t.Errorf("Reconcile() returned ErrObserver, want unconditional escalation: %v", err)
+	}
+	if d.Mode() != Owner {
+		t.Errorf("Mode() after Reconcile() = %v, want Owner (Reconcile must escalate unconditionally)", d.Mode())
+	}
+}
+
 // TestEnsureOwner_ForceEscalates verifies that Force=true escalates an
 // Observer Dispatcher to Owner (mirroring checkScanLock's force bypass) so a
 // subsequent dispatch is not refused with ErrObserver.
