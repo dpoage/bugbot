@@ -164,12 +164,12 @@ func (ts *triageState) codeNavRootCauseFold(ctx context.Context, st *store.Store
 		return true, nil
 	}
 
-	// Durably persisted open findings: reuse the existing indexed locus-key
-	// lookup (the same one durableCrossLensFold uses) at each reference's own
-	// locus, so no new store query shape is introduced.
+	// Durably persisted OPEN findings: for each reference location, look up
+	// findings in the same-file window (the same indexed lookup
+	// durableCrossLensFold uses), gate on the SAME defect_kind, then route
+	// the pair through the arbiter exactly like the in-run branch above.
 	for _, ref := range refs {
-		refLocus := ts.resolver.Resolve(ref.File, ref.Line)
-		findings, ferr := st.OpenFindingsByLocusKey(ctx, domain.LocusKey(ref.File, refLocus))
+		findings, ferr := st.FindingsByFileWindow(ctx, ref.File, ref.Line, DefaultMergeWindow, []domain.Status{domain.StatusOpen})
 		if ferr != nil {
 			return false, ferr
 		}
