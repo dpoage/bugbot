@@ -81,3 +81,22 @@ func TestFrame_EventEmptyAgentIDOmittedFromWire(t *testing.T) {
 		t.Errorf("AgentID = %q, want empty", got.Event.AgentID)
 	}
 }
+
+// TestVerbReconcile_KnownAndInTable verifies VerbReconcile (bugbot-7bjl) is
+// registered in Verbs and Known() reports true, matching every sibling
+// dispatch verb.
+func TestVerbReconcile_KnownAndInTable(t *testing.T) {
+	if !VerbReconcile.Known() {
+		t.Error("VerbReconcile.Known() = false, want true")
+	}
+	found := false
+	for _, v := range Verbs {
+		if v == VerbReconcile {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Verbs = %v, want it to contain VerbReconcile", Verbs)
+	}
+}

@@ -66,17 +66,20 @@ const ProtocolVersion = 1
 type Verb string
 
 const (
-	VerbScan   Verb = "scan"
-	VerbVerify Verb = "verify"
-	VerbRepro  Verb = "repro"
-	VerbSweep  Verb = "sweep"
+	VerbScan      Verb = "scan"
+	VerbVerify    Verb = "verify"
+	VerbRepro     Verb = "repro"
+	VerbSweep     Verb = "sweep"
+	VerbReconcile Verb = "reconcile"
 )
 
 // Verbs lists every verb this build of the protocol accepts, in stable
 // order. Table-driven per bugbot-2p8z.4's scope pin: review (bugbot-2p8z.5)
 // is deliberately NOT included here — it lands as an additive entry once
-// its engine-side extraction exists.
-var Verbs = []Verb{VerbScan, VerbVerify, VerbRepro, VerbSweep}
+// its engine-side extraction exists. VerbReconcile (bugbot-7bjl) is the
+// on-demand trigger for the backlog-reconcile dedup pass landed timer-only
+// in bugbot-ezmx.4.
+var Verbs = []Verb{VerbScan, VerbVerify, VerbRepro, VerbSweep, VerbReconcile}
 
 // Known reports whether v is one of Verbs.
 func (v Verb) Known() bool {
@@ -103,6 +106,7 @@ type DispatchOpts struct {
 	Force     bool   `json:"force,omitempty"`
 	Suspected bool   `json:"suspected,omitempty"` // verify only
 	MaxN      int    `json:"max_n,omitempty"`     // repro only
+	Cap       int    `json:"cap,omitempty"`       // reconcile only: dedup-arbiter invocation cap, <=0 means funnel.DefaultReconcileCap
 }
 
 // Request is a client->server dispatch RPC. ID correlates the eventual
@@ -139,6 +143,14 @@ type DispatchSummary struct {
 	Attempted  int    `json:"attempted,omitempty"`
 	HasSummary bool   `json:"has_summary,omitempty"`
 	Skipped    string `json:"skipped,omitempty"`
+	// ReconcileNominated/Arbitrated/Merged/SkippedCap are reconcile-only,
+	// mirroring funnel.Stats' Reconcile* counters (the reduced-counts
+	// philosophy applied to the same fields the timer path already
+	// persists in the scan run's Stats JSON).
+	ReconcileNominated  int `json:"reconcile_nominated,omitempty"`
+	ReconcileArbitrated int `json:"reconcile_arbitrated,omitempty"`
+	ReconcileMerged     int `json:"reconcile_merged,omitempty"`
+	ReconcileSkippedCap int `json:"reconcile_skipped_cap,omitempty"`
 }
 
 // DispatchReply is a server->client answer to a Request with a matching ID.
