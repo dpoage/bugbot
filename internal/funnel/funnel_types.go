@@ -120,8 +120,13 @@ type Stats struct {
 	// counted here — MergedWithinLens when its lens equals the primary's lens
 	// (the same lens reported the same defect twice with different wording),
 	// MergedCrossLens when it came from a different lens. These are distinct from
-	// DroppedDuplicate (exact fingerprint match): a merged member is a DIFFERENT
-	// fingerprint that nonetheless points at the same underlying bug.
+	// DroppedDuplicate (exact fingerprint match): a merged member here is a
+	// DIFFERENT fingerprint that nonetheless points at the same underlying bug.
+	// Under Fingerprint v3 (locus+defect_kind+subject, lens excluded from
+	// identity), a genuine cross-lens duplicate more often collides at the
+	// exact-fingerprint step instead of reaching this location-based merge —
+	// that case increments ONLY DroppedDuplicate, deliberately NOT
+	// MergedCrossLens, to keep the two fields non-overlapping.
 	MergedWithinLens int `json:"merged_within_lens"`
 	MergedCrossLens  int `json:"merged_cross_lens"`
 	// MergedRootCause counts candidates collapsed by the same-root-cause merge

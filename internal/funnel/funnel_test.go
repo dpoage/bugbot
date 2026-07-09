@@ -1905,8 +1905,75 @@ func TestTriageState_SameBucketDissimilarClusters(t *testing.T) {
 	if len(primaries) != 2 {
 		t.Fatalf("primaries = %d, want 2 (one per dissimilar group): %+v", len(primaries), primaries)
 	}
-	if stats.MergedCrossLens != 2 {
-		t.Errorf("MergedCrossLens = %d, want 2 (p2 into p1's cluster, l2 into l1's)", stats.MergedCrossLens)
+	// Under v3, p1/p2 (and l1/l2) share the same locus with empty defect_kind
+	// and subject (this test never sets either), so they collide at the
+	// exact-fingerprint dedup step (DroppedDuplicate) rather than reaching the
+	// window+jaccard cluster merge (MergedCrossLens) — see funnel_types.go's
+	// MergedCrossLens doc. The bucket-orphaning property this test guards
+	// (two dissimilar groups sharing a location bucket must not collapse into
+	// one, or lose a group to bucket-pointer overwrite) still holds: exactly
+	// one primary survives per group either way.
+	if stats.DroppedDuplicate != 2 {
+		t.Errorf("DroppedDuplicate = %d, want 2 (p2 as p1's duplicate, l2 as l1's)", stats.DroppedDuplicate)
+	}
+	if stats.MergedCrossLens != 0 {
+		t.Errorf("MergedCrossLens = %d, want 0 (v3 exact-fp dedup catches this pair before the location-merge step)", stats.MergedCrossLens)
+	}
+}
+
+// TestTriageState_DifferentDefectKindBlocksWindowMerge pins bugbot-ezmx.1
+// acceptance criterion 4 at the CLUSTERING layer (not just the domain-level
+// fingerprint layer TestFingerprintV3_KindDisambiguates already covers): two
+// candidates at the SAME file, WITHIN the merge window, with description
+// Jaccard comfortably ABOVE mergeSimilarityThreshold — everything the OLD
+// (pre-v3) rule needed to collapse them into one cluster — must still stay
+// SEPARATE primaries when their defect_kind differs. Without the
+// sameOrUnknownKind guard in clusterAccepts, this test would report 1
+// primary (the pre-existing distinct-defect tests all use empty kinds, where
+// the guard is a wildcard no-op — this is the one exercising its
+// discriminating branch).
+func TestTriageState_DifferentDefectKindBlocksWindowMerge(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openFixture(t)
+
+	// Identical description text -> jaccard = 1.0, far above the 0.18
+	// threshold. Same file, 2 lines apart -> well within DefaultMergeWindow
+	// (10). Only defect_kind differs.
+	const sharedDesc = "cfg may be nil and is dereferenced without a guard in Greeting"
+	leakCand := Candidate{
+		Lens: "nil-safety/error-handling", File: "bug.go", Line: 10,
+		Title: "nil deref of cfg", Description: sharedDesc,
+		Severity: "high", Confidence: "high",
+		DefectKind: domain.DefectNilDeref, Subject: "Greeting",
+	}
+	resourceCand := Candidate{
+		Lens: "resource-leaks", File: "bug.go", Line: 12,
+		Title: "cfg handle leaked", Description: sharedDesc,
+		Severity: "high", Confidence: "high",
+		DefectKind: domain.DefectResourceLeak, Subject: "Greeting",
+	}
+
+	// Fixture precondition: jaccard really is above threshold, or this test
+	// silently stops testing the guard it claims to.
+	if j := jaccard(descTokens(leakCand.Description), descTokens(resourceCand.Description)); j < mergeSimilarityThreshold {
+		t.Fatalf("fixture broken: jaccard=%v below mergeSimilarityThreshold=%v", j, mergeSimilarityThreshold)
+	}
+
+	snap := &ingest.Snapshot{Files: []ingest.File{{Path: "bug.go"}}}
+	ts, _ := newTriageState(snap)
+	var stats Stats
+	for _, cand := range []Candidate{leakCand, resourceCand} {
+		if err := ts.process(ctx, st, &stats, cand); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+	}
+	primaries := ts.popReady()
+	if len(primaries) != 2 {
+		t.Fatalf("primaries = %d, want 2 (different defect_kind at a jaccard-similar, window-near location must NOT merge): %+v", len(primaries), primaries)
+	}
+	if stats.MergedWithinLens+stats.MergedCrossLens+stats.MergedRootCause != 0 {
+		t.Errorf("merges = within:%d cross:%d rootcause:%d, want all 0 (the kind mismatch must block every merge path)",
+			stats.MergedWithinLens, stats.MergedCrossLens, stats.MergedRootCause)
 	}
 }
 

@@ -37,9 +37,11 @@ const (
 	DefectOther             DefectKind = "other"
 )
 
-// AllDefectKinds is the closed enum in declaration order. It backs the
-// candidate JSON schema's "enum" list (internal/funnel/prompt.go) and
-// DefectKind.Valid, so the taxonomy is defined in exactly one place.
+// AllDefectKinds is the closed enum in declaration order. It is the
+// authoritative Go-side list; the candidate JSON schema's "enum" list
+// (internal/funnel/prompt.go's candidatesSchema) is a hand-maintained COPY
+// that must stay in sync — TestCandidatesSchema_DefectKindEnumMatchesDomain
+// (internal/funnel) asserts the two are identical, element-for-element.
 var AllDefectKinds = []DefectKind{
 	DefectNilDeref,
 	DefectUncheckedError,

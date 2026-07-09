@@ -181,6 +181,48 @@ func TestIsSuppressed_LegacyLocusFallback_PreservesV2SuppressionCoverage(t *test
 	}
 }
 
+// TestIsSuppressed_LegacyLocusFallback_ZeroBackfillLosesCoverage pins the
+// DOCUMENTED bound of the 020_defect_identity_v3 migration's backfill (see
+// that migration's comment): a legacy suppression row for which NO finding
+// sharing its v2 fingerprint exists at migration time (the finding was later
+// deleted, or the row predates the locus_key column added in migration 015
+// and was never re-upserted since) cannot be backfilled — a fingerprint is a
+// one-way hash, so there is no way to recover the file/locus it once covered.
+// Such a row is left with locus_key=” and genuinely stops suppressing once
+// a fresh scan mints a v3 fingerprint for the same defect. This test proves
+// that is the ACTUAL runtime behavior (not silently different from the
+// documented bound), so the gap stays a known, pinned limitation rather than
+// an untested one.
+func TestIsSuppressed_LegacyLocusFallback_ZeroBackfillLosesCoverage(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	v2FP := domain.Fingerprint("nil-safety", "orphaned.go", "S:function\x00Orphaned")
+
+	// Simulate the migration backfill's OUTCOME for an unbackfillable row: no
+	// finding ever shared this fingerprint, so the backfill UPDATE's WHERE
+	// EXISTS clause never matched it — legacy=1, locus_key stays ''.
+	if _, err := st.DB().ExecContext(ctx,
+		`INSERT INTO suppressions (fingerprint, reason, created_at, locus_key, legacy) VALUES (?, ?, ?, '', 1)`,
+		v2FP, "v2-era: no surviving finding to backfill from", "2025-01-01T00:00:00Z",
+	); err != nil {
+		t.Fatalf("seed unbackfillable legacy suppression: %v", err)
+	}
+
+	// A fresh scan re-discovers the "same" defect (by a human's judgment) and
+	// mints a v3 fingerprint. Coverage is lost: no exact-fingerprint match (the
+	// hash schemes differ) and no locus fallback (locus_key was never
+	// recoverable), so this candidate is NOT suppressed.
+	v3FP := domain.FingerprintV3("orphaned.go", "S:function\x00Orphaned", domain.DefectLogic, "Orphaned")
+	suppressed, err := st.IsSuppressed(ctx, v3FP, "some-locus-we-cannot-know-was-the-right-one")
+	if err != nil {
+		t.Fatalf("IsSuppressed: %v", err)
+	}
+	if suppressed {
+		t.Fatal("an unbackfillable legacy row (locus_key='') must NOT suppress anything — if this now passes, either a locus_key='' match slipped through (a real bug: it would blanket-suppress every future candidate) or the backfill became more capable and this test's documented gap should be revisited")
+	}
+}
+
 // TestListSuppressions_DeterministicOrderUnderTiedCreatedAt verifies the
 // rowid tiebreak added in 89r.5: when many suppressions share a created_at
 // (e.g. one round of triage-dismissal fired within the same wall-clock tick),

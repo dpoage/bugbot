@@ -336,7 +336,20 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 	// and collide right here, with no reliance on description similarity.
 	locus := ts.resolver.Resolve(c.File, c.Line)
 	locusKey := domain.LocusKey(c.File, locus)
-	fp := domain.FingerprintV3(c.File, locus, c.DefectKind, c.Subject)
+	// Reverify candidates carry a durable row's already-minted identity
+	// (findingToCandidate copies Fingerprint/DefectKind/Subject verbatim from
+	// the stored Finding); re-deriving fp here would, for a PRE-v3 row (empty
+	// DefectKind/Subject persisted before this bead), mint FingerprintV3(...,
+	// "", "") — never equal to that row's stored v2-scheme fingerprint — and
+	// UpsertFinding would insert a NEW row instead of updating it, orphaning
+	// the original T3 finding as an untouched duplicate. Keeping the stored
+	// fingerprint for Reverify candidates avoids that identity-scheme jump;
+	// it matches findingToCandidate's own doc ("Fingerprint is set from the
+	// finding to keep the verify-stage signals... consistent").
+	fp := c.Fingerprint
+	if !c.Reverify {
+		fp = domain.FingerprintV3(c.File, locus, c.DefectKind, c.Subject)
+	}
 	if ts.seen[fp] {
 		stats.DroppedDuplicate++
 		// Same identity as an earlier survivor. The locus no longer carries the
@@ -354,12 +367,13 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 		// cross-lens duplicate of one defect (identical locus, defect_kind, and
 		// subject) — record it as corroboration exactly as handleMember does
 		// for the cluster/root-cause merge paths, just via the exact-fingerprint
-		// path instead of jaccard, and count it the same way (MergedCrossLens)
-		// so the stat means "a cross-lens duplicate merged" regardless of which
-		// mechanism caught it. A same-lens repeat (the common re-scan case) is
-		// intentionally NOT staged as corroboration of itself and not counted.
+		// path instead of jaccard. Not counted in MergedCrossLens: per that
+		// field's doc it tracks the location-based merge of a DIFFERENT
+		// fingerprint onto a primary; this is DroppedDuplicate's own case
+		// (identical fingerprint) and already accounted for above. A same-lens
+		// repeat (the common re-scan case) is intentionally NOT staged as
+		// corroboration of itself.
 		if !strings.EqualFold(ts.firstLens[fp], c.Lens) {
-			stats.MergedCrossLens++
 			if staged, killed := ts.registry.AddStagedLens(fp, c.Lens); !staged && !killed {
 				_ = st.AddCorroboratingLenses(ctx, fp, []string{c.Lens})
 			}
