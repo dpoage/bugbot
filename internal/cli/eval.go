@@ -27,6 +27,7 @@ func newEvalCmd() *cobra.Command {
 		asJSON    bool
 		recorded  bool
 		corpusDir string
+		dupPairs  bool
 	)
 
 	cmd := &cobra.Command{
@@ -52,7 +53,16 @@ invariant, so --recorded does NOT apply the precision gate: it exits non-zero
 only on a replay/divergence error (a transcript that no longer drives the
 pipeline, or a malformed corpus), never on a "low" precision. When no corpus
 exists it prints a clear message and exits zero (the corpus is optional and is
-captured out-of-band via 'go test -tags record').`,
+captured out-of-band via 'go test -tags record').
+
+With --dup-pairs, the command instead runs the labeled duplicate-pair corpus
+(internal/eval.BuiltinDupPairs, covering the paraphrase, cross-lens,
+caller/callee, and rename duplicate channels) through the CURRENT identity
+layer's cross-scan similarity decision (funnel.SimilarFinding) and prints a
+per-channel precision/recall table. This makes NO LLM calls and applies NO
+gate — the labels are ground truth, not what current code does, so a low
+recall here is an expected baseline measurement (bugbot-ezmx.8), not a
+failure. --dup-pairs takes precedence over --recorded when both are set.`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -62,6 +72,10 @@ captured out-of-band via 'go test -tags record').`,
 				ctx = context.Background()
 			}
 			out := cmd.OutOrStdout()
+
+			if dupPairs {
+				return runDupPairEval(out, asJSON)
+			}
 
 			if recorded {
 				return runRecordedEval(ctx, out, corpusDir, asJSON)
@@ -90,6 +104,7 @@ captured out-of-band via 'go test -tags record').`,
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the suite result as machine-readable JSON instead of a table")
 	cmd.Flags().BoolVar(&recorded, "recorded", false, "replay the committed real-model transcript corpus (recorded mode) instead of scripted mode; prints the table without the precision gate")
 	cmd.Flags().StringVar(&corpusDir, "corpus", eval.DefaultRecordedDir, "directory holding the recorded-mode transcript corpus (used with --recorded)")
+	cmd.Flags().BoolVar(&dupPairs, "dup-pairs", false, "run the labeled duplicate-pair corpus through the identity layer (offline, no LLM calls) and report precision/recall of the duplicate decision, instead of the detection suite")
 
 	return cmd
 }
@@ -124,5 +139,26 @@ func runRecordedEval(ctx context.Context, out io.Writer, corpusDir string, asJSO
 	}
 	_, _ = fmt.Fprintln(out, res.String())
 	_, _ = fmt.Fprintln(out, "(recorded mode: scores are a measurement of a real model, not a gated invariant)")
+	return nil
+}
+
+// runDupPairEval scores internal/eval.BuiltinDupPairs against the current
+// identity layer's cross-scan duplicate decision (eval.RunDupEval, backed by
+// funnel.SimilarFinding) and prints the per-channel precision/recall table.
+// Pure function, no I/O beyond the corpus in memory, so this can never fail —
+// error return is kept for symmetry with the other eval entrypoints and future
+// JSON-encode failures.
+func runDupPairEval(out io.Writer, asJSON bool) error {
+	res := eval.RunDupEval(eval.BuiltinDupPairs())
+	if asJSON {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(res); err != nil {
+			return fmt.Errorf("encode dup-pair eval result: %w", err)
+		}
+		return nil
+	}
+	_, _ = fmt.Fprintln(out, res.String())
+	_, _ = fmt.Fprintln(out, "(dup-pairs mode: measures the current identity layer against labeled ground truth; not a gated invariant)")
 	return nil
 }
