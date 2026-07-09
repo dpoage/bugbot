@@ -269,6 +269,24 @@ func (s Stats) FinderReliable() bool {
 	return s.FinderRuns > 0 && s.FinderFailures == 0
 }
 
+// DuplicateRate is the fraction of raw hypothesized candidates that triage
+// identified as a duplicate of some other candidate in the SAME run: exact-
+// fingerprint duplicates (DroppedDuplicate) plus every non-primary member
+// collapsed by the location-based and same-root-cause merges
+// (MergedWithinLens + MergedCrossLens + MergedRootCause), divided by
+// Hypothesized. It is deliberately scoped to in-run triage dedup — it does
+// NOT count cross-scan backlog adoption (SimilarFinding at publish time),
+// which reconciles against a DIFFERENT run's findings, not this run's own
+// candidate pool. Zero when Hypothesized is zero (nothing to have a rate
+// over).
+func (s Stats) DuplicateRate() float64 {
+	if s.Hypothesized == 0 {
+		return 0
+	}
+	dup := s.DroppedDuplicate + s.MergedWithinLens + s.MergedCrossLens + s.MergedRootCause
+	return float64(dup) / float64(s.Hypothesized)
+}
+
 // MostFindersFailed reports whether a strict majority of the finders that ran
 // failed to produce parseable output. A scan in this state has effectively no
 // signal and should exit nonzero so automation does not treat it as "clean".

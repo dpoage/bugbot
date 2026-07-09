@@ -50,6 +50,37 @@ func TestSnapshot_WritesAndReadsBack(t *testing.T) {
 	}
 }
 
+// TestSnapshot_DuplicateRatePersistsToStatusJSON pins bugbot-ezmx.8's
+// plumbing: funnel.Stats.DuplicateRate() rides Counts.DuplicateRate through
+// KindScanFinished into the written status.json, and mergeMax (not the raw
+// last-write) decides the settled value so an earlier stage's rate can never
+// silently overwrite a later, more complete one with a lower number.
+func TestSnapshot_DuplicateRatePersistsToStatusJSON(t *testing.T) {
+	s, path := newTestSnapshot(t, func() time.Time { return time.Unix(3000, 0) })
+
+	s.Handle(Event{Kind: KindScanStarted, ScanKind: "sweep", Time: time.Unix(3000, 0)})
+	s.Handle(Event{
+		Kind: KindStageFinished, Stage: StageTriage,
+		Counts: &Counts{Hypothesized: 10, Triaged: 8, DuplicateRate: 0.2},
+		Time:   time.Unix(3000, 0),
+	})
+	// Terminal event forces a write; the final rate (0.35) must win even
+	// though it arrives after the intermediate 0.2 from triage.
+	s.Handle(Event{
+		Kind: KindScanFinished, ScanKind: "sweep",
+		Counts: &Counts{Hypothesized: 10, Triaged: 8, Verified: 5, Killed: 2, DuplicateRate: 0.35},
+		Time:   time.Unix(3000, 0),
+	})
+
+	st, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if st.Counts.DuplicateRate != 0.35 {
+		t.Errorf("status.json counts.duplicate_rate = %v, want 0.35", st.Counts.DuplicateRate)
+	}
+}
+
 func TestSnapshot_RateLimitsWrites(t *testing.T) {
 	// Clock advances by less than snapshotInterval between events; only the first
 	// (lastWrite zero) and any terminal write should hit disk.

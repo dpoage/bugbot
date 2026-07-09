@@ -290,6 +290,8 @@ func (m Model) renderCockpitSummary(innerW, innerH int) string {
 		}
 		fmt.Fprintf(&b, "run spend: in=%d out=%d total=%d tokens\n",
 			st.SpendInput, st.SpendOutput, st.SpendInput+st.SpendOutput)
+		fmt.Fprintf(&b, "stages: hypothesized=%d triaged=%d verified=%d killed=%d dup_rate=%.2f\n",
+			st.Counts.Hypothesized, st.Counts.Triaged, st.Counts.Verified, st.Counts.Killed, st.Counts.DuplicateRate)
 		b.WriteString("\n" + sectionStyle.Render("Agents") + "\n")
 		if len(st.ActiveAgents) == 0 {
 			b.WriteString(dimStyle.Render("(none active)") + "\n")

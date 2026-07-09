@@ -190,8 +190,8 @@ func etaString(t, now time.Time) string {
 //   - During verify (LiveVerified > 0 or LiveKilled > 0): appends per-field
 //     live notes so operators see verdicts accumulating.
 //   - After stage-finish: live fields are zero; the line is the unadorned
-//     "hypothesized=H triaged=T verified=V killed=K" format, preserving the
-//     exact output that existed before this feature.
+//     "hypothesized=H triaged=T verified=V killed=K dup_rate=R" format, R
+//     being funnel.Stats.DuplicateRate() carried through Status.Counts.
 func fmtStageCounts(st progress.Status) string {
 	hyp := fmt.Sprintf("hypothesized=%d", st.Counts.Hypothesized)
 	if st.LiveCandidates > 0 {
@@ -213,7 +213,9 @@ func fmtStageCounts(st progress.Status) string {
 		tri += fmt.Sprintf(" (so far: %d)", st.LiveTriaged)
 	}
 
-	return fmt.Sprintf("%s %s %s %s", hyp, tri, ver, kil)
+	dup := fmt.Sprintf("dup_rate=%.2f", st.Counts.DuplicateRate)
+
+	return fmt.Sprintf("%s %s %s %s %s", hyp, tri, ver, kil, dup)
 }
 
 // fmtTime renders a timestamp, or "-" when zero.

@@ -220,8 +220,8 @@ func printResult(out io.Writer, res *funnel.Result) {
 	}
 
 	s := res.Stats
-	_, _ = fmt.Fprintf(out, "\nStages: hypothesized=%d triaged=%d verified=%d killed=%d\n",
-		s.Hypothesized, s.Triaged, s.Verified, s.Killed)
+	_, _ = fmt.Fprintf(out, "\nStages: hypothesized=%d triaged=%d verified=%d killed=%d dup_rate=%.2f\n",
+		s.Hypothesized, s.Triaged, s.Verified, s.Killed, s.DuplicateRate())
 	if s.Resumed > 0 {
 		_, _ = fmt.Fprintf(out, "Resumed: %d candidate(s) from a prior interrupted run replayed into triage/verify\n", s.Resumed)
 	}

@@ -540,7 +540,10 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	result.Stats.Triaged = triagedCount
 	progress.Emit(sink, progress.Event{
 		Kind: progress.KindStageFinished, Stage: progress.StageTriage,
-		Counts: &progress.Counts{Hypothesized: hypothesizedCount, Triaged: triagedCount},
+		Counts: &progress.Counts{
+			Hypothesized: hypothesizedCount, Triaged: triagedCount,
+			DuplicateRate: result.Stats.DuplicateRate(),
+		},
 	})
 	if !verifyStarted.Load() {
 		progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageVerify})
@@ -637,6 +640,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		Counts: &progress.Counts{
 			Hypothesized: hypothesizedCount, Triaged: triagedCount,
 			Verified: result.Stats.Verified, Killed: killed,
+			DuplicateRate: result.Stats.DuplicateRate(),
 		},
 	})
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StagePersist})
@@ -659,6 +663,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			Hypothesized: result.Stats.Hypothesized, Triaged: result.Stats.Triaged,
 			Verified: result.Stats.Verified, Killed: result.Stats.Killed,
 			FinderFailures: result.Stats.FinderFailures,
+			DuplicateRate:  result.Stats.DuplicateRate(),
 		},
 		InputTokens: in, OutputTokens: out,
 		CacheReadTokens: cacheRead, CacheCreationTokens: cacheCreated,
