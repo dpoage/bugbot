@@ -16,17 +16,18 @@ import (
 )
 
 // dispatcher is the subset of *engine.Dispatcher the dispatch palette needs
-// to run the five in-process verbs (Scan, Verify, Repro, Sweep, ReviewPR).
-// Defined locally — rather than depending on *engine.Dispatcher directly —
-// so tests can inject a fake that records calls and blocks on demand,
-// without spinning up a real funnel/LLM/sandbox stack. A nil dispatcher on
-// Model means dispatch is disabled: Observer mode, or a never-run repo (see
-// selectFeed).
+// to run the six in-process verbs (Scan, Verify, Repro, Sweep, Reconcile,
+// ReviewPR). Defined locally — rather than depending on *engine.Dispatcher
+// directly — so tests can inject a fake that records calls and blocks on
+// demand, without spinning up a real funnel/LLM/sandbox stack. A nil
+// dispatcher on Model means dispatch is disabled: Observer mode, or a
+// never-run repo (see selectFeed).
 type dispatcher interface {
 	Scan(context.Context, engine.ScanOpts) (*engine.ScanResult, error)
 	Verify(context.Context, engine.VerifyOpts) (*engine.VerifyResult, error)
 	Repro(context.Context, engine.ReproOpts) (*engine.ReproResult, error)
 	Sweep(context.Context, engine.SweepOpts) (*engine.SweepResult, error)
+	Reconcile(context.Context, engine.ReconcileOpts) (*engine.ReconcileResult, error)
 	ReviewPR(context.Context, engine.ReviewPROpts) (*engine.ReviewPRResult, error)
 	Mode() engine.Mode
 }
@@ -46,6 +47,7 @@ const (
 	rowVerify
 	rowRepro
 	rowSweep
+	rowReconcile
 	rowReview
 
 	paletteRowCount
@@ -116,6 +118,8 @@ func (m Model) paletteRowLabel(row paletteRow) string {
 		return fmt.Sprintf("Repro — --max %s", m.palette.maxN.View())
 	case rowSweep:
 		return "Sweep — impact-sweep drain"
+	case rowReconcile:
+		return "Reconcile — backlog dedup pass"
 	case rowReview:
 		return fmt.Sprintf("Review — --pr %s", m.palette.prNumber.View())
 	default:
@@ -210,6 +214,10 @@ func dispatchCmd(ctx context.Context, cancel context.CancelFunc, disp dispatcher
 			res, err := disp.Sweep(ctx, engine.SweepOpts{Out: out, ErrOut: out})
 			return dispatchDoneMsg{verb: "sweep", err: err, summary: sweepSummary(res)}
 
+		case rowReconcile:
+			res, err := disp.Reconcile(ctx, engine.ReconcileOpts{Out: out})
+			return dispatchDoneMsg{verb: "reconcile", err: err, summary: reconcileSummary(res)}
+
 		case rowReview:
 			prNumber, convErr := strconv.Atoi(strings.TrimSpace(prNumberText))
 			if convErr != nil || prNumber <= 0 {
@@ -256,6 +264,18 @@ func sweepSummary(res *engine.SweepResult) string {
 		return "sweep: no unswept findings"
 	}
 	return fmt.Sprintf("sweep complete: %d finding(s)", len(res.Result.Findings))
+}
+
+func reconcileSummary(res *engine.ReconcileResult) string {
+	if res == nil || res.Result == nil {
+		return "reconcile: no duplicate candidates nominated"
+	}
+	s := res.Result.Stats
+	if s.ReconcileNominated == 0 {
+		return "reconcile: no duplicate candidates nominated"
+	}
+	return fmt.Sprintf("reconcile complete: %d nominated, %d arbitrated, %d merged, %d skipped (cap)",
+		s.ReconcileNominated, s.ReconcileArbitrated, s.ReconcileMerged, s.ReconcileSkippedCap)
 }
 
 func reviewSummary(res *engine.ReviewPRResult) string {

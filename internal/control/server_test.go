@@ -157,6 +157,58 @@ func TestServer_DispatchRPCRoundTrip(t *testing.T) {
 	}
 }
 
+// TestServer_DispatchRPCRoundTrip_Reconcile verifies the reconcile verb
+// (bugbot-7bjl) round-trips over the control socket exactly like the four
+// pre-existing verbs: the Cap opt reaches the fake DispatchFunc (standing in
+// for the daemon's real engine.Dispatcher.Reconcile, which would run a
+// scripted dedup arbiter through funnel.ReconcileDedup — see
+// funnel/reconcile_test.go for that layer's coverage) and the reply summary
+// carries the reduced nominated/arbitrated/merged/skipped-cap counts back
+// to the caller, correlated by request ID.
+func TestServer_DispatchRPCRoundTrip_Reconcile(t *testing.T) {
+	var mu sync.Mutex
+	var gotVerb Verb
+	var gotOpts DispatchOpts
+
+	dispatch := func(_ context.Context, verb Verb, opts DispatchOpts) (DispatchSummary, error) {
+		mu.Lock()
+		gotVerb, gotOpts = verb, opts
+		mu.Unlock()
+		// Stands in for a real reconcile pass over a scripted dedup arbiter
+		// (funnel/reconcile_test.go): 2 nominated, 2 arbitrated, 1 merged,
+		// 0 skipped-cap.
+		return DispatchSummary{ReconcileNominated: 2, ReconcileArbitrated: 2, ReconcileMerged: 1, ReconcileSkippedCap: 0}, nil
+	}
+
+	_, path := testServer(t, dispatch)
+
+	cl, err := Dial(path)
+	if err != nil {
+		t.Fatalf("Dial() error: %v", err)
+	}
+	defer func() { _ = cl.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sum, err := cl.Dispatch(ctx, VerbReconcile, DispatchOpts{Cap: 10})
+	if err != nil {
+		t.Fatalf("Dispatch() error: %v", err)
+	}
+	if sum.ReconcileNominated != 2 || sum.ReconcileArbitrated != 2 || sum.ReconcileMerged != 1 || sum.ReconcileSkippedCap != 0 {
+		t.Errorf("Dispatch() summary = %+v, want Nominated=2 Arbitrated=2 Merged=1 SkippedCap=0", sum)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotVerb != VerbReconcile {
+		t.Errorf("dispatch received verb %q, want %q", gotVerb, VerbReconcile)
+	}
+	if gotOpts.Cap != 10 {
+		t.Errorf("dispatch received opts %+v, want Cap=10", gotOpts)
+	}
+}
+
 // TestServer_DispatchRPCError verifies an erroring DispatchFunc surfaces as
 // a non-OK reply the client turns into an error, still correlated by ID.
 func TestServer_DispatchRPCError(t *testing.T) {

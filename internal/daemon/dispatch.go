@@ -22,7 +22,7 @@ const dispatchQueueSize = 4
 // already-open store (see engine.NewShared + engine.Dispatcher.DispatchVerb)
 // — package daemon deliberately does not import engine, keeping the
 // scheduler loop's dependency surface small and verb semantics centralized
-// where Scan/Verify/Repro/Sweep already live. Tests inject a fake.
+// where Scan/Verify/Repro/Sweep/Reconcile already live. Tests inject a fake.
 //
 // nil disables dispatch entirely: SubmitDispatch returns an error without
 // ever touching the scheduler loop, and Daemon.Run never selects on the
@@ -62,8 +62,9 @@ var errDispatchDisabled = errors.New("daemon: dispatch not enabled")
 //
 // Reply semantics: SubmitDispatch returns once the verb has RUN TO
 // COMPLETION, not merely been accepted — matching how the in-process
-// dispatch palette already behaves (a Scan/Verify/Repro/Sweep call blocks
-// its caller until the verb returns). See bugbot-2p8z.4's design notes.
+// dispatch palette already behaves (a Scan/Verify/Repro/Sweep/Reconcile
+// call blocks its caller until the verb returns). See bugbot-2p8z.4's
+// design notes.
 func (d *Daemon) SubmitDispatch(ctx context.Context, verb control.Verb, opts control.DispatchOpts) (control.DispatchSummary, error) {
 	if d.dispatch == nil {
 		return control.DispatchSummary{}, errDispatchDisabled
