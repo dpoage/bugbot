@@ -116,10 +116,12 @@ func candJSON(cands ...string) string {
 const (
 	realCand = `{"file": "bug.go", "line": 10, "title": "nil deref of cfg in Greeting",
 		"description": "cfg may be nil", "severity": "high",
-		"evidence": "Greeting returns cfg.Name without a nil check", "confidence": "high"}`
+		"evidence": "Greeting returns cfg.Name without a nil check", "confidence": "high",
+		"defect_kind": "nil-deref", "subject": "Greeting"}`
 	bogusCand = `{"file": "clean.go", "line": 5, "title": "Add overflows on large ints",
 		"description": "imagined overflow", "severity": "low",
-		"evidence": "a + b", "confidence": "high"}`
+		"evidence": "a + b", "confidence": "high",
+		"defect_kind": "logic", "subject": "Add"}`
 )
 
 // finderOn routes the nil-safety lens finder to return both candidates and

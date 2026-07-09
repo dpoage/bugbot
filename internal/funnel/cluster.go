@@ -3,6 +3,8 @@ package funnel
 import (
 	"path"
 	"strings"
+
+	"github.com/dpoage/bugbot/internal/domain"
 )
 
 // DefaultMergeWindow is the line-proximity window, in lines, for the
@@ -108,11 +110,27 @@ func clusterAccepts(cl []indexedCand, it indexedCand, window int) bool {
 		return false
 	}
 	for _, m := range cl {
+		if !sameOrUnknownKind(m.c.DefectKind, it.c.DefectKind) {
+			continue
+		}
 		if jaccard(m.tok, it.tok) >= mergeSimilarityThreshold {
 			return true
 		}
 	}
 	return false
+}
+
+// sameOrUnknownKind reports whether a and b are the same defect_kind, treating
+// an EMPTY kind on either side as an unknown wildcard rather than a mismatch.
+// A candidate never has an empty kind in production (the schema requires
+// defect_kind), but a Reverify candidate reconstructed from a pre-v3 finding
+// (persisted before this bead) does, and clustering must not spuriously
+// refuse to merge such a row purely for lacking data that did not exist yet.
+// Two NON-empty kinds that differ are always a mismatch: distinct defect_kinds
+// at the same locus are, by design, distinct defects (see domain.FingerprintV3)
+// and must never collapse into one cluster regardless of description overlap.
+func sameOrUnknownKind(a, b domain.DefectKind) bool {
+	return a == "" || b == "" || a == b
 }
 
 // abs returns the absolute value of n.
@@ -179,6 +197,9 @@ func sharedTokenCount(a, b map[string]bool) int {
 //     high-ratio-but-tiny-vocabulary false positives)
 func sameFileSameRootCause(cl []indexedCand, it indexedCand) bool {
 	for _, m := range cl {
+		if !sameOrUnknownKind(m.c.DefectKind, it.c.DefectKind) {
+			continue
+		}
 		if jaccard(m.tok, it.tok) >= sameRootCauseThreshold &&
 			sharedTokenCount(m.tok, it.tok) >= sameRootCauseMinSharedTokens {
 			return true
@@ -261,6 +282,9 @@ func crossFileDeclDefSameRootCause(cl []indexedCand, it indexedCand) bool {
 	}
 	// Check description similarity against any member.
 	for _, m := range cl {
+		if !sameOrUnknownKind(m.c.DefectKind, it.c.DefectKind) {
+			continue
+		}
 		if jaccard(m.tok, it.tok) >= sameRootCauseThreshold &&
 			sharedTokenCount(m.tok, it.tok) >= sameRootCauseMinSharedTokens {
 			return true

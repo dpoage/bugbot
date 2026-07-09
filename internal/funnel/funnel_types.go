@@ -27,8 +27,18 @@ type Candidate struct {
 	Title       string
 	Description string
 	Severity    domain.Severity
-	Evidence    string
-	Confidence  domain.Confidence
+	Evidence   string
+	Confidence domain.Confidence
+	// DefectKind is the closed taxonomy class the finder reported (see
+	// domain.DefectKind), validated by the candidate schema's enum. Set from
+	// the raw finder output; drives Fingerprint v3 identity and the
+	// same-symbol distinct-defect guard in clustering.
+	DefectKind domain.DefectKind
+	// Subject is the RAW (un-normalized) symbol name the finder reported.
+	// domain.NormalizeSubject is applied where identity is minted
+	// (triageState.process); this field carries the finder's original text so
+	// it survives round-trips (e.g. persistOrphan) unmodified.
+	Subject string
 	// Fingerprint is the store dedup key (lens+file+line+title). Set in triage.
 	Fingerprint string
 	// LocusKey is the lens-independent location identity domain.LocusKey(file, locus):

@@ -319,9 +319,13 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 		return nil
 	}
 	// Step 3: exact fingerprint dedup. The fingerprint is the durable, cross-scan
-	// identity (lens + file + enclosing-symbol locus); see domain.Fingerprint.
+	// identity (locus + defect_kind + subject); see domain.FingerprintV3. Lens
+	// is deliberately NOT part of identity: two different lenses reporting the
+	// same defect_kind/subject at the same locus mint the IDENTICAL fingerprint
+	// and collide right here, with no reliance on description similarity.
 	locus := ts.resolver.Resolve(c.File, c.Line)
-	fp := domain.Fingerprint(c.Lens, c.File, locus)
+	locusKey := domain.LocusKey(c.File, locus)
+	fp := domain.FingerprintV3(c.File, locus, c.DefectKind, c.Subject)
 	if ts.seen[fp] {
 		stats.DroppedDuplicate++
 		// Same identity as an earlier survivor. The locus no longer carries the
@@ -338,8 +342,12 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 		dropPending()
 		return nil
 	}
-	// Step 4: suppression check.
-	suppressed, err := st.IsSuppressed(ctx, fp)
+	// Step 4: suppression check. locusKey backs the legacy (pre-v3) fallback:
+	// a suppression recorded before defect_kind/subject existed can only have
+	// been keyed by (lens, file, locus); IsSuppressed's legacy path matches on
+	// locusKey alone for those rows so suppression coverage survives the v2->v3
+	// cutover (see internal/store/migrations for the backfill).
+	suppressed, err := st.IsSuppressed(ctx, fp, locusKey)
 	if err != nil {
 		return err
 	}
@@ -351,7 +359,7 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 	}
 	ts.seen[fp] = true
 	c.Fingerprint = fp
-	c.LocusKey = domain.LocusKey(c.File, locus)
+	c.LocusKey = locusKey
 
 	// Step 5: incremental clustering. Membership is ANY-MEMBER: the candidate
 	// joins a cluster if it is window-near AND token-similar to any existing
@@ -446,15 +454,26 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 }
 
 // durableCrossLensFold absorbs candidate ic into an already-persisted OPEN
-// finding at the same lens-independent locus when a DIFFERENT lens reported the
-// same defect. It exists because in-memory clustering is rebuilt from scratch
-// each run: a primary persisted by a prior interrupted run is invisible to it,
-// so a WAL-replayed cross-lens sibling would otherwise become a second finding.
-// OpenFindingsByLocusKey is an indexed point-lookup returning the handful of
-// findings at one enclosing-symbol anchor; SimilarFinding then applies the SAME
-// same-defect predicate (the tight line window + description jaccard) as in-scan
-// step 5 — the broader root-cause layers (5b/5c) are deliberately NOT mirrored,
-// so the durable path only ever under-merges, never more aggressively. Reverify
+// finding at the same lens-independent locus when it is the same defect under
+// a different identity than an exact-fingerprint match would catch. It exists
+// because in-memory clustering is rebuilt from scratch each run: a primary
+// persisted by a prior interrupted run is invisible to it, so a WAL-replayed
+// sibling would otherwise become a second finding. OpenFindingsByLocusKey is
+// an indexed point-lookup returning the handful of findings at one
+// enclosing-symbol anchor.
+//
+// Under Fingerprint v3, an exact-fingerprint match (identical locus,
+// defect_kind, AND subject — regardless of lens) is already handled by the
+// ordinary upsert-by-fingerprint path, so it is skipped here as a no-op, not
+// folded. What remains for this function is the genuinely ambiguous case:
+// same locus, SAME defect_kind (a different defect_kind at this locus is, by
+// design, a distinct bug — see domain.FingerprintV3 — and must never fold),
+// but a subject/description that differs enough to mint a different
+// fingerprint (e.g. the model phrased the subject differently). description
+// jaccard (SimilarFinding) is the tiebreaker for exactly that residual case —
+// demoted from "the" cross-lens merge signal to a narrow fallback. The
+// broader root-cause layers (5b/5c) are deliberately NOT mirrored here, so
+// the durable path only ever under-merges, never more aggressively. Reverify
 // candidates are excluded: they own a durable row to re-judge and must not be
 // absorbed elsewhere. Returns true when the candidate was folded (a triage
 // terminal fate). The store writes dedup, so the fold is idempotent on replay.
@@ -468,8 +487,21 @@ func (ts *triageState) durableCrossLensFold(ctx context.Context, st *store.Store
 		return false, err
 	}
 	for _, f := range existing {
+		if f.Fingerprint == c.Fingerprint {
+			// Identical v3 identity (locus + defect_kind + subject): the ordinary
+			// upsert-by-fingerprint path already lands this candidate on the same
+			// row once it clears verify. Nothing to fold here.
+			continue
+		}
+		if f.DefectKind != "" && f.DefectKind != c.DefectKind {
+			// A DIFFERENT defect_kind at the same locus is a distinct defect by
+			// design — never fold across kinds, regardless of description overlap.
+			continue
+		}
 		if strings.EqualFold(f.Lens, c.Lens) {
-			// Same lens means the same fingerprint; the upsert already dedups it.
+			// Same lens, same defect_kind, but the fingerprint differs (a subject
+			// phrasing drift within one lens's own re-report): not a cross-lens
+			// fold case; leave it to the exact-fingerprint upsert path.
 			continue
 		}
 		if !SimilarFinding(c.File, c.Line, c.Description, f.File, f.Line, f.Description) {

@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"path"
 	"strings"
 	"time"
 )
@@ -83,7 +82,16 @@ type Finding struct {
 	// prior run can absorb a later same-locus, different-lens candidate as
 	// corroboration instead of spawning a duplicate. Persisted + indexed; empty on
 	// pre-migration rows, which simply do not participate until re-upserted.
-	LocusKey      string
+	LocusKey string
+	// DefectKind is the closed taxonomy class this finding belongs to (see
+	// DefectKind in identity.go). Empty on pre-v3 rows (migrated v2 findings
+	// that predate the defect_kind/subject fields); such rows simply do not
+	// participate in kind-gated clustering/durable-fold logic until re-upserted
+	// by a fresh scan.
+	DefectKind DefectKind
+	// Subject is the normalized symbol at fault (see NormalizeSubject). Empty
+	// on pre-v3 rows, same caveat as DefectKind.
+	Subject       string
 	Title         string
 	Description   string
 	Reasoning     string // the adversarial verification trace
@@ -257,7 +265,7 @@ func ValidateFindingState(f Finding) error {
 // partialFingerprints key. Two findings with the same fingerprint are the same
 // bug and dedup/upsert onto one row.
 func Fingerprint(lens, file, locus string) string {
-	normFile := strings.ToLower(path.Clean(strings.ReplaceAll(file, "\\", "/")))
+	normFile := normalizeFilePath(file)
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "bugbotFingerprint/v2\x00%s\x00%s\x00%s", strings.ToLower(lens), normFile, locus)
 	return hex.EncodeToString(h.Sum(nil))
@@ -270,7 +278,7 @@ func Fingerprint(lens, file, locus string) string {
 // durable cross-lens fold keys on it. The "bugbotLocus/v1" token namespaces the
 // scheme independently of the fingerprint version.
 func LocusKey(file, locus string) string {
-	normFile := strings.ToLower(path.Clean(strings.ReplaceAll(file, "\\", "/")))
+	normFile := normalizeFilePath(file)
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "bugbotLocus/v1\x00%s\x00%s", normFile, locus)
 	return hex.EncodeToString(h.Sum(nil))

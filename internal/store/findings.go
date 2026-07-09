@@ -154,7 +154,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f domain.Finding) (domain.Fin
 	f.Confidence = findingConfidence(f.Tier, f.Severity, len(f.CorroboratingLenses))
 
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		suppressed, err := isSuppressedTx(ctx, tx, f.Fingerprint)
+		suppressed, err := isSuppressedTx(ctx, tx, f.Fingerprint, f.LocusKey)
 		if err != nil {
 			return annotateErr(s.path, "upsert_finding", err)
 		}
@@ -190,14 +190,16 @@ func (s *Store) UpsertFinding(ctx context.Context, f domain.Finding) (domain.Fin
 				  (id, fingerprint, title, description, reasoning, verdict_detail, severity, tier,
 				   status, lens, file, line, commit_sha, file_hash, repro_path, repro_witness,
 				   fix_patch, needs_human, needs_human_reason,
-				   corroborating_lenses, sites, confidence, created_at, updated_at, swept_at, locus_key)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				   corroborating_lenses, sites, confidence, created_at, updated_at, swept_at, locus_key,
+				   defect_kind, subject)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
 				f.Tier, string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA,
 				f.FileHash, nullStr(f.ReproPath), f.ReproWitness, f.FixPatch, boolInt(f.NeedsHuman),
 				string(f.NeedsHumanReason),
 				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
 				f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout), nullTime(f.SweptAt), f.LocusKey,
+				string(f.DefectKind), f.Subject,
 			); err != nil {
 				return annotateErr(s.path, "upsert_finding", err)
 			}
@@ -308,6 +310,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f domain.Finding) (domain.Fin
 				  needs_human = CASE WHEN needs_human = 1 THEN 1 ELSE ? END,
 				  needs_human_reason = CASE WHEN needs_human = 1 THEN needs_human_reason ELSE ? END,
 				  corroborating_lenses=?, sites=?, confidence=?, updated_at=?, locus_key=?,
+				  defect_kind=?, subject=?,
 				  swept_at = CASE WHEN ? = file_hash THEN swept_at ELSE NULL END
 				WHERE id=?`,
 				f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
@@ -320,7 +323,9 @@ func (s *Store) UpsertFinding(ctx context.Context, f domain.Finding) (domain.Fin
 				boolInt(f.NeedsHuman),
 				string(f.NeedsHumanReason),
 				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
-				f.UpdatedAt.Format(timeLayout), f.LocusKey, f.FileHash, f.ID,
+				f.UpdatedAt.Format(timeLayout), f.LocusKey,
+				string(f.DefectKind), f.Subject,
+				f.FileHash, f.ID,
 			); err != nil {
 				return annotateErr(s.path, "upsert_finding", err)
 			}
@@ -587,6 +592,7 @@ const findingColumns = `SELECT f.id, f.fingerprint, f.title, f.description, f.re
 	f.severity, f.tier, f.status, f.lens, f.file, f.line, f.commit_sha, f.file_hash, f.repro_path, f.repro_witness,
 	f.fix_patch, f.needs_human, f.needs_human_reason,
 	f.corroborating_lenses, f.sites, f.confidence, f.created_at, f.updated_at, f.swept_at, f.locus_key,
+	f.defect_kind, f.subject,
 	COALESCE(ra.exit_zero_count, 0) AS exit_zero_count`
 
 // findingFrom is the FROM clause that pairs with findingColumns. The LEFT JOIN
@@ -630,6 +636,7 @@ func scanFinding(sc rowScanner) (domain.Finding, error) {
 		&f.Severity, &f.Tier, &status, &f.Lens, &f.File, &f.Line, &f.CommitSHA,
 		&f.FileHash, &repro, &reproWitness, &f.FixPatch, &needsHuman, &needsHumanReason,
 		&corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt, &sweptAt, &f.LocusKey,
+		&f.DefectKind, &f.Subject,
 		&exitZeroCount,
 	); err != nil {
 		return domain.Finding{}, err
