@@ -35,13 +35,13 @@ func NewShared(cfg config.Config, sink progress.EventSink, st *store.Store) *Dis
 }
 
 // DispatchVerb executes verb via the Dispatcher's existing Scan/Verify/
-// Repro/Sweep methods, translating a control-socket wire request into the
-// verb's typed Opts and reducing its typed Result into the small structured
-// summary the wire protocol carries back (see internal/control's package
-// doc: dispatch replies are a summary, not a serialized funnel.Result —
-// full result trees are neither meant to cross a process boundary nor
-// needed by the palette, which only ever renders a short count-based
-// summary line).
+// Repro/Sweep/Reconcile methods, translating a control-socket wire request
+// into the verb's typed Opts and reducing its typed Result into the small
+// structured summary the wire protocol carries back (see internal/control's
+// package doc: dispatch replies are a summary, not a serialized
+// funnel.Result — full result trees are neither meant to cross a process
+// boundary nor needed by the palette, which only ever renders a short
+// count-based summary line).
 //
 // Table-driven per bugbot-2p8z.4's scope pin: a future review verb
 // (bugbot-2p8z.5, once extracted from package cli into engine) slots in by
@@ -90,6 +90,15 @@ func (d *Dispatcher) DispatchVerb(ctx context.Context, verb control.Verb, opts c
 		}
 		return sweepDispatchSummary(res), nil
 
+	case control.VerbReconcile:
+		res, err := d.Reconcile(ctx, ReconcileOpts{
+			Cap: opts.Cap, Out: io.Discard,
+		})
+		if err != nil {
+			return control.DispatchSummary{}, err
+		}
+		return reconcileDispatchSummary(res), nil
+
 	default:
 		return control.DispatchSummary{}, fmt.Errorf("engine: unknown dispatch verb %q", verb)
 	}
@@ -127,4 +136,17 @@ func sweepDispatchSummary(res *SweepResult) control.DispatchSummary {
 		return control.DispatchSummary{}
 	}
 	return control.DispatchSummary{HasResult: true, FindingCount: len(res.Result.Findings)}
+}
+
+func reconcileDispatchSummary(res *ReconcileResult) control.DispatchSummary {
+	if res == nil || res.Result == nil {
+		return control.DispatchSummary{}
+	}
+	s := res.Result.Stats
+	return control.DispatchSummary{
+		ReconcileNominated:  s.ReconcileNominated,
+		ReconcileArbitrated: s.ReconcileArbitrated,
+		ReconcileMerged:     s.ReconcileMerged,
+		ReconcileSkippedCap: s.ReconcileSkippedCap,
+	}
 }

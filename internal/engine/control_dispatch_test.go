@@ -93,4 +93,22 @@ func TestDispatchSummaryHelpers(t *testing.T) {
 			t.Errorf("sweepDispatchSummary() = %+v, want HasResult=true FindingCount=3", got)
 		}
 	})
+	t.Run("reconcile nil result", func(t *testing.T) {
+		got := reconcileDispatchSummary(&ReconcileResult{})
+		if got != (control.DispatchSummary{}) {
+			t.Errorf("reconcileDispatchSummary(nil Result) = %+v, want zero value", got)
+		}
+	})
+	t.Run("reconcile with counts", func(t *testing.T) {
+		got := reconcileDispatchSummary(&ReconcileResult{Result: &funnel.Result{Stats: funnel.Stats{
+			ReconcileNominated:  5,
+			ReconcileArbitrated: 4,
+			ReconcileMerged:     2,
+			ReconcileSkippedCap: 1,
+		}}})
+		want := control.DispatchSummary{ReconcileNominated: 5, ReconcileArbitrated: 4, ReconcileMerged: 2, ReconcileSkippedCap: 1}
+		if got != want {
+			t.Errorf("reconcileDispatchSummary() = %+v, want %+v", got, want)
+		}
+	})
 }
