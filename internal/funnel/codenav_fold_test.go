@@ -170,34 +170,42 @@ func TestTriageState_CodeNavHopFold_CallerCalleeSameFinding(t *testing.T) {
 	}
 }
 
-// TestTriageState_CodeNavHopFold_DifferentKindNotMerged proves the kind guard:
-// an otherwise one-hop pair with DIFFERENT defect_kind stays separate — two
-// primaries are forwarded, and no code-nav fold stat is incremented.
+// TestTriageState_CodeNavHopFold_DifferentKindNotMerged proves the kind guard
+// actually gates a REAL hop, not just an order/query-direction artifact: the
+// caller-side candidate (kind "race") is registered as the in-run primary
+// FIRST, so when the callee-side candidate (kind "resource-leak") is
+// processed second, its own symbol query genuinely resolves a hop into the
+// caller's span (nav.calls proves the query ran and returned data) — but
+// codeNavRootCauseFold only ever looks up ts.primariesByKind under the
+// CANDIDATE's own kind, so the race-kind primary is never even a candidate
+// target for a resource-leak nomination. Two primaries are forwarded, no
+// code-nav fold stat is incremented, and the arbiter is never invoked.
 func TestTriageState_CodeNavHopFold_DifferentKindNotMerged(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	_, snap := newHopFixture(t)
+	root, snap := newHopFixture(t)
 
 	ts, _ := newTriageState(snap)
 	nav := &stubRefNav{answers: map[string][]agent.RefLocation{
 		"callee.go\x00Callee": {{File: "caller.go", Line: 4}},
 	}}
 	ts.nav = nav
+	ts.dedupArbiter = newCodeNavArbiterConfig(t, root, "yes", "would merge if the kind guard did not gate it first")
 
 	var stats Stats
-	calleeCand := Candidate{
-		Lens: "resource-leaks", File: "callee.go", Line: 4,
-		Title: "handle leak in Callee", Description: "the handle is never released on the error path in Callee",
-		Severity: "high", Confidence: "high", DefectKind: domain.DefectResourceLeak,
-	}
 	callerCand := Candidate{
 		Lens: "concurrency", File: "caller.go", Line: 4,
 		Title: "race in Caller", Description: "Caller reads a shared field without holding the lock other goroutines use",
 		Severity: "high", Confidence: "high", DefectKind: domain.DefectRace,
 	}
+	calleeCand := Candidate{
+		Lens: "resource-leaks", File: "callee.go", Line: 4,
+		Title: "handle leak in Callee", Description: "the handle is never released on the error path in Callee",
+		Severity: "high", Confidence: "high", DefectKind: domain.DefectResourceLeak,
+	}
 
 	var forwarded []Candidate
-	for _, c := range []Candidate{calleeCand, callerCand} {
+	for _, c := range []Candidate{callerCand, calleeCand} {
 		if err := ts.process(ctx, st, &stats, c); err != nil {
 			t.Fatalf("process: %v", err)
 		}
@@ -209,6 +217,16 @@ func TestTriageState_CodeNavHopFold_DifferentKindNotMerged(t *testing.T) {
 	}
 	if stats.MergedRootCauseCodeNav != 0 {
 		t.Errorf("MergedRootCauseCodeNav = %d, want 0", stats.MergedRootCauseCodeNav)
+	}
+	if stats.DedupArbiterRuns != 0 {
+		t.Errorf("DedupArbiterRuns = %d, want 0 (the kind-bucket miss must gate before any nomination reaches the arbiter)", stats.DedupArbiterRuns)
+	}
+	// Both own-symbol queries actually ran (caller's returns nothing stubbed,
+	// callee's resolves a genuine hop into the caller's span) — proving the
+	// kind mismatch, not a missing/short-circuited query, is what blocks the
+	// fold.
+	if nav.calls != 2 {
+		t.Errorf("nav.calls = %d, want 2 (the callee's hop must actually resolve, not be skipped)", nav.calls)
 	}
 }
 
@@ -581,5 +599,60 @@ func TestTriageState_CodeNavHopFold_ExcludedKindsNeverNominate(t *testing.T) {
 	}
 	if nav.calls != 0 {
 		t.Errorf("nav.calls = %d, want 0 (neither candidate's kind is eligible to nominate, so no query is ever issued)", nav.calls)
+	}
+}
+
+// TestTriageState_CodeNavHopFold_EmptyKindNeverNominates proves the
+// empty-defect_kind guard: unlike sameOrUnknownKind elsewhere in triage, an
+// empty DefectKind is a MISMATCH here, not a wildcard — a candidate with no
+// defect_kind gives the reference-hop check no signal to distinguish "same
+// bug, different site" from "two unrelated reports one call apart". A
+// non-Reverify candidate with DefectKind:"" must never nominate: its own
+// symbol is never even queried, and the arbiter is never invoked.
+func TestTriageState_CodeNavHopFold_EmptyKindNeverNominates(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	root, snap := newHopFixture(t)
+
+	ts, _ := newTriageState(snap)
+	nav := &stubRefNav{answers: map[string][]agent.RefLocation{
+		"callee.go\x00Callee": {{File: "caller.go", Line: 4}},
+	}}
+	ts.nav = nav
+	ts.dedupArbiter = newCodeNavArbiterConfig(t, root, "yes", "would merge if the empty-kind guard did not gate it first")
+
+	var stats Stats
+	callerCand := Candidate{
+		Lens: "exception-safety", File: "caller.go", Line: 4,
+		Title: "leak propagates through Caller", Description: "Caller does not release the handle acquired by the callee on error",
+		Severity: "high", Confidence: "high", DefectKind: domain.DefectResourceLeak,
+	}
+	calleeCand := Candidate{
+		Lens: "resource-leaks", File: "callee.go", Line: 4,
+		Title: "handle leak in Callee", Description: "the handle is never released on the error path in Callee",
+		Severity: "high", Confidence: "high", // DefectKind intentionally left empty.
+	}
+
+	var forwarded []Candidate
+	for _, c := range []Candidate{callerCand, calleeCand} {
+		if err := ts.process(ctx, st, &stats, c); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+		forwarded = append(forwarded, ts.popReady()...)
+	}
+
+	if len(forwarded) != 2 {
+		t.Fatalf("forwarded = %d, want 2 (an empty defect_kind must never fold via the code-nav hop)", len(forwarded))
+	}
+	if stats.MergedRootCauseCodeNav != 0 {
+		t.Errorf("MergedRootCauseCodeNav = %d, want 0", stats.MergedRootCauseCodeNav)
+	}
+	if stats.DedupArbiterRuns != 0 {
+		t.Errorf("DedupArbiterRuns = %d, want 0 (the empty-kind guard must trip before any nomination reaches the arbiter)", stats.DedupArbiterRuns)
+	}
+	// Only the caller's own (target-less) collision issues a query; the
+	// empty-kind candidate's guard trips before refs() is ever called.
+	if nav.calls != 1 {
+		t.Errorf("nav.calls = %d, want 1 (empty-kind candidate must never issue a reference query)", nav.calls)
 	}
 }
