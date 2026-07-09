@@ -78,7 +78,7 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 	if _, err := st.GetFindingByFingerprint(ctx, oldFP); err != ErrNotFound {
 		t.Fatalf("old fingerprint should be gone, got err=%v", err)
 	}
-	if sup, _ := st.IsSuppressed(ctx, oldFP, ""); sup {
+	if sup, _ := st.IsSuppressed(ctx, oldFP, "", ""); sup {
 		t.Fatal("old fingerprint should no longer be marked suppressed")
 	}
 
@@ -100,7 +100,7 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 	if got.DefectKind != kind || got.Subject != subject {
 		t.Fatalf("defect_kind/subject must survive rename unchanged: got kind=%q subject=%q", got.DefectKind, got.Subject)
 	}
-	sup, err := st.IsSuppressed(ctx, newFP, "")
+	sup, err := st.IsSuppressed(ctx, newFP, "", "")
 	if err != nil {
 		t.Fatalf("IsSuppressed(new): %v", err)
 	}

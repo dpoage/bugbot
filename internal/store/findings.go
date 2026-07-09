@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -154,7 +155,13 @@ func (s *Store) UpsertFinding(ctx context.Context, f domain.Finding) (domain.Fin
 	f.Confidence = findingConfidence(f.Tier, f.Severity, len(f.CorroboratingLenses))
 
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		suppressed, err := isSuppressedTx(ctx, tx, f.Fingerprint, f.LocusKey)
+		// legacyLocusKey backs bugbot-ezmx.5's content-anchor dual-lookup: a
+		// suppression minted before the content anchor existed was keyed on the
+		// bare "L:<line>" fallback locus (domain.LocusKey(file, "L:"+line)),
+		// which a content-anchored locus_key no longer reproduces. Checking both
+		// keeps that old suppression honored until its finding is next rewritten.
+		legacyLocusKey := domain.LocusKey(f.File, "L:"+strconv.Itoa(f.Line))
+		suppressed, err := isSuppressedTx(ctx, tx, f.Fingerprint, f.LocusKey, legacyLocusKey)
 		if err != nil {
 			return annotateErr(s.path, "upsert_finding", err)
 		}

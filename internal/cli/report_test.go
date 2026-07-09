@@ -158,7 +158,7 @@ func TestReportDismissFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
-	suppressed, err := st.IsSuppressed(ctx, f.Fingerprint, "")
+	suppressed, err := st.IsSuppressed(ctx, f.Fingerprint, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

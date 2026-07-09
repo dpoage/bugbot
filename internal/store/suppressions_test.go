@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
@@ -24,7 +25,7 @@ func TestSuppressionFlow_DismissedNeverResurfaces(t *testing.T) {
 		t.Fatalf("dismiss: %v", err)
 	}
 
-	sup, err := st.IsSuppressed(ctx, f.Fingerprint, "")
+	sup, err := st.IsSuppressed(ctx, f.Fingerprint, "", "")
 	if err != nil {
 		t.Fatalf("IsSuppressed: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestAddSuppression_PreemptiveBeforeFindingExists(t *testing.T) {
 
 func TestIsSuppressed_Unknown(t *testing.T) {
 	st := openTemp(t)
-	sup, err := st.IsSuppressed(context.Background(), "never-seen", "")
+	sup, err := st.IsSuppressed(context.Background(), "never-seen", "", "")
 	if err != nil {
 		t.Fatalf("IsSuppressed: %v", err)
 	}
@@ -162,7 +163,7 @@ func TestIsSuppressed_LegacyLocusFallback_PreservesV2SuppressionCoverage(t *test
 		t.Fatalf("test setup invariant violated: v3 fingerprint must differ from the v2 one")
 	}
 
-	suppressed, err := st.IsSuppressed(ctx, v3FP, legacyLocusKey)
+	suppressed, err := st.IsSuppressed(ctx, v3FP, legacyLocusKey, "")
 	if err != nil {
 		t.Fatalf("IsSuppressed: %v", err)
 	}
@@ -172,7 +173,7 @@ func TestIsSuppressed_LegacyLocusFallback_PreservesV2SuppressionCoverage(t *test
 
 	// Sanity: the legacy fallback is locus-scoped, not global — an unrelated
 	// locus_key must NOT be suppressed by this row.
-	unrelated, err := st.IsSuppressed(ctx, v3FP, "some-other-locus-entirely")
+	unrelated, err := st.IsSuppressed(ctx, v3FP, "some-other-locus-entirely", "")
 	if err != nil {
 		t.Fatalf("IsSuppressed: %v", err)
 	}
@@ -214,12 +215,65 @@ func TestIsSuppressed_LegacyLocusFallback_ZeroBackfillLosesCoverage(t *testing.T
 	// hash schemes differ) and no locus fallback (locus_key was never
 	// recoverable), so this candidate is NOT suppressed.
 	v3FP := domain.FingerprintV3("orphaned.go", "S:function\x00Orphaned", domain.DefectLogic, "Orphaned")
-	suppressed, err := st.IsSuppressed(ctx, v3FP, "some-locus-we-cannot-know-was-the-right-one")
+	suppressed, err := st.IsSuppressed(ctx, v3FP, "some-locus-we-cannot-know-was-the-right-one", "")
 	if err != nil {
 		t.Fatalf("IsSuppressed: %v", err)
 	}
 	if suppressed {
 		t.Fatal("an unbackfillable legacy row (locus_key='') must NOT suppress anything — if this now passes, either a locus_key='' match slipped through (a real bug: it would blanket-suppress every future candidate) or the backfill became more capable and this test's documented gap should be revisited")
+	}
+}
+
+// TestIsSuppressed_LegacyLineAnchorFallback_PreservesCoverage proves the
+// bugbot-ezmx.5 dual-lookup: a suppression minted before the content anchor
+// existed, keyed by the bare "L:<line>" fallback locus (the ONLY fallback
+// available at package-level code before this bead), must still suppress a
+// fresh scan's candidate at the same file/line even though the resolver now
+// mints a completely different, content-anchored locus for it.
+func TestIsSuppressed_LegacyLineAnchorFallback_PreservesCoverage(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	const file = "pkg/config.go"
+	const line = 42
+	preBeadLocus := "L:" + strconv.Itoa(line) // the ONLY fallback that existed pre-ezmx.5
+	legacyLocusKey := domain.LocusKey(file, preBeadLocus)
+	v2FP := domain.Fingerprint("nil-safety", file, preBeadLocus)
+
+	// Simulate a v2-era suppression row recorded while package-level code
+	// still fell back to the bare line locus.
+	if _, err := st.DB().ExecContext(ctx,
+		`INSERT INTO suppressions (fingerprint, reason, created_at, locus_key, legacy) VALUES (?, ?, ?, ?, 1)`,
+		v2FP, "pre-ezmx.5: package-level false positive", "2025-01-01T00:00:00Z", legacyLocusKey,
+	); err != nil {
+		t.Fatalf("seed pre-content-anchor suppression: %v", err)
+	}
+
+	// A fresh scan re-derives the SAME file/line but, post-ezmx.5, the
+	// resolver mints a content-anchored locus instead of the bare line one.
+	contentLocus := "C:deadbeefcafe#1"
+	freshLocusKey := domain.LocusKey(file, contentLocus)
+	if freshLocusKey == legacyLocusKey {
+		t.Fatalf("test setup invariant violated: content-anchor locus_key must differ from the legacy line-anchor one")
+	}
+	v3FP := domain.FingerprintV3(file, contentLocus, domain.DefectLogic, "LoadConfig")
+
+	suppressed, err := st.IsSuppressed(ctx, v3FP, freshLocusKey, legacyLocusKey)
+	if err != nil {
+		t.Fatalf("IsSuppressed: %v", err)
+	}
+	if !suppressed {
+		t.Fatal("a suppression keyed on the pre-ezmx.5 line-anchor locus must still suppress a candidate resolved via the new content anchor at the same file/line")
+	}
+
+	// Without the legacy key the same lookup must NOT match — proves the
+	// coverage genuinely comes from the dual-lookup, not a coincidence.
+	withoutLegacy, err := st.IsSuppressed(ctx, v3FP, freshLocusKey, "")
+	if err != nil {
+		t.Fatalf("IsSuppressed: %v", err)
+	}
+	if withoutLegacy {
+		t.Fatal("suppression should not match without the legacy locus key argument")
 	}
 }
 

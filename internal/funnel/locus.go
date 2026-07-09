@@ -1,21 +1,31 @@
 package funnel
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/dpoage/bugbot/internal/treesitter"
 )
 
 // LocusResolver maps a (file, line) to the stable location anchor used by the
 // finding fingerprint (domain.Fingerprint): the name of the enclosing top-level
-// declaration when tree-sitter can resolve one, else a line-based fallback.
+// declaration when tree-sitter can resolve one, else a content anchor hashed
+// from the implicated line's normalized text, else (only when the file/line
+// cannot even be read) the line number itself.
 //
 // Anchoring identity to the enclosing symbol makes a finding's fingerprint
 // survive line drift (edits above the bug) and title rewording across scans —
 // the drift that kept re-discovered bugs from deduping and produced duplicate
-// published issues. A nil resolver, an empty root, an unsupported language, or a
-// parse failure all degrade to the line fallback, so the resolver is always
-// safe to call.
+// published issues. Package-level code, unsupported languages, and parse
+// failures all degrade past the symbol anchor; the content anchor keeps THAT
+// case drift-stable too (bugbot-ezmx.5), since it identifies the line by what
+// it says, not where it currently sits. A nil resolver, an empty root, a
+// missing file, or an out-of-range line degrade further to "L:<line>" — a
+// last resort with no drift protection, reachable only when there is no
+// source text left to anchor to at all.
 type LocusResolver struct {
 	root    string
 	backend *treesitter.Backend
@@ -42,6 +52,23 @@ func (lr *LocusResolver) Resolve(file string, line int) string {
 			return "S:" + string(entry.Kind) + "\x00" + entry.Name
 		}
 	}
+	if lr != nil {
+		if anchor, ok := lr.contentAnchor(file, line); ok {
+			return anchor
+		}
+	}
+	return "L:" + itoa(line)
+}
+
+// LegacyLocus returns the pre-bugbot-ezmx.5 fallback locus for line: the bare
+// "L:<line>" anchor every non-symbol locus used to resolve to. It exists
+// purely for dual-lookup against identity minted before this resolver grew
+// the content anchor (store.IsSuppressed's legacy path) — callers hash it the
+// same way a freshly resolved locus is hashed and check both, so a
+// suppression recorded against the old line-anchored scheme keeps matching
+// until the row is naturally rewritten (e.g. by a rename). It is never used
+// to mint new identity.
+func (lr *LocusResolver) LegacyLocus(line int) string {
 	return "L:" + itoa(line)
 }
 
@@ -65,4 +92,60 @@ func (lr *LocusResolver) enclosing(file string, line int) (treesitter.OutlineEnt
 		}
 	}
 	return best, found
+}
+
+// contentAnchor computes a drift-stable fallback anchor for (file, line) from
+// the implicated line's own text, so package-level code, unsupported
+// languages, and parse failures stop re-minting identity on every edit above
+// the line the way the bare line number did. ok is false when there is no
+// text to anchor to: the file cannot be read, line is out of range, or the
+// normalized line is empty (a blank or whitespace-only line carries no
+// distinguishing content — hashing "" would collide every blank line in every
+// file, which is worse than the line-number fallback it would replace).
+//
+// Anchor shape: "C:<12-hex-char sha256 of the normalized line>#<ordinal>".
+// ordinal is the 1-based count of prior lines (top of file through line,
+// inclusive) whose normalized text equals this one's. It exists to break
+// anchor collisions between distinct defects that happen to sit on
+// identical lines (e.g. two unrelated `return err` statements at
+// package level) — without it they would fold into one fingerprint.
+// Because it only counts EQUAL-content lines, inserting unrelated lines
+// above the implicated line never changes it, which is what keeps the
+// anchor stable under drift; only inserting another copy of the SAME
+// line's content above it can shift the ordinal, an accepted, documented
+// edge of the tie-break (see locus_test.go).
+func (lr *LocusResolver) contentAnchor(file string, line int) (string, bool) {
+	if lr.root == "" || line < 1 {
+		return "", false
+	}
+	data, err := os.ReadFile(filepath.Join(lr.root, file))
+	if err != nil {
+		return "", false
+	}
+	lines := strings.Split(string(data), "\n")
+	if line > len(lines) {
+		return "", false
+	}
+	norm := normalizeLocusLine(lines[line-1])
+	if norm == "" {
+		return "", false
+	}
+	ordinal := 0
+	for i := 0; i < line; i++ {
+		if normalizeLocusLine(lines[i]) == norm {
+			ordinal++
+		}
+	}
+	sum := sha256.Sum256([]byte(norm))
+	return "C:" + hex.EncodeToString(sum[:])[:12] + "#" + itoa(ordinal), true
+}
+
+// normalizeLocusLine canonicalizes a source line for content-anchor hashing:
+// trim leading/trailing whitespace and collapse internal whitespace runs to a
+// single space, so pure reformatting (retabbing, trailing-whitespace cleanup)
+// does not mint a new identity for an otherwise-unchanged line.
+// strings.Fields already splits on any whitespace run and drops empties, so
+// joining its result with single spaces performs both trims in one pass.
+func normalizeLocusLine(line string) string {
+	return strings.Join(strings.Fields(line), " ")
 }

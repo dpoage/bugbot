@@ -385,8 +385,13 @@ func (ts *triageState) process(ctx context.Context, st *store.Store, stats *Stat
 	// a suppression recorded before defect_kind/subject existed can only have
 	// been keyed by (lens, file, locus); IsSuppressed's legacy path matches on
 	// locusKey alone for those rows so suppression coverage survives the v2->v3
-	// cutover (see internal/store/migrations for the backfill).
-	suppressed, err := st.IsSuppressed(ctx, fp, locusKey)
+	// cutover (see internal/store/migrations for the backfill). legacyLocusKey
+	// additionally backs the bugbot-ezmx.5 content-anchor cutover: a
+	// suppression minted before the content anchor existed was keyed on the
+	// bare "L:<line>" fallback locus, which the resolver's content anchor no
+	// longer reproduces at this file/line, so both are checked.
+	legacyLocusKey := domain.LocusKey(c.File, ts.resolver.LegacyLocus(c.Line))
+	suppressed, err := st.IsSuppressed(ctx, fp, locusKey, legacyLocusKey)
 	if err != nil {
 		return err
 	}

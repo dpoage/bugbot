@@ -48,14 +48,21 @@ func (s *Store) AddSuppression(ctx context.Context, fingerprint, reason string) 
 // Fingerprint v3 existed (defect_kind/subject were not yet part of identity)
 // is marked legacy at migration time and matched on locus_key alone, since
 // its original fingerprint can never equal a freshly-minted v3 fingerprint.
-// Fresh (post-migration) suppression rows are never legacy and only ever
-// match by exact fingerprint. Pass "" for locusKey when it is unknown or
-// irrelevant to the caller; the legacy fallback then simply never matches.
-func (s *Store) IsSuppressed(ctx context.Context, fingerprint, locusKey string) (bool, error) {
+// legacyLocusKey is a SECOND locus_key candidate checked the same way,
+// backing bugbot-ezmx.5's content-anchor cutover: a suppression minted before
+// that bead was keyed on the bare "L:<line>" fallback locus, which a
+// content-anchored resolve no longer reproduces, so callers pass both the
+// freshly resolved locus_key and the locus_key that "L:<line>" would have
+// hashed to (funnel.LocusResolver.LegacyLocus) so an old row keeps matching
+// until it is naturally rewritten. Fresh (post-migration) suppression rows
+// are never legacy and only ever match by exact fingerprint. Pass "" for
+// either key when it is unknown or irrelevant to the caller; the legacy
+// fallback then simply never matches on that key.
+func (s *Store) IsSuppressed(ctx context.Context, fingerprint, locusKey, legacyLocusKey string) (bool, error) {
 	var one int
 	err := s.queryRow(ctx, "is_suppressed",
-		`SELECT 1 FROM suppressions WHERE fingerprint = ? OR (legacy = 1 AND locus_key = ? AND locus_key != '')`,
-		[]any{fingerprint, locusKey},
+		`SELECT 1 FROM suppressions WHERE fingerprint = ? OR (legacy = 1 AND locus_key != '' AND locus_key IN (?, ?))`,
+		[]any{fingerprint, locusKey, legacyLocusKey},
 		func(row *sql.Row) error {
 			return row.Scan(&one)
 		},
@@ -105,11 +112,11 @@ func addSuppressionTx(ctx context.Context, tx *sql.Tx, fingerprint, reason strin
 }
 
 // isSuppressedTx is the transactional form of IsSuppressed.
-func isSuppressedTx(ctx context.Context, tx *sql.Tx, fingerprint, locusKey string) (bool, error) {
+func isSuppressedTx(ctx context.Context, tx *sql.Tx, fingerprint, locusKey, legacyLocusKey string) (bool, error) {
 	var one int
 	err := tx.QueryRowContext(ctx,
-		`SELECT 1 FROM suppressions WHERE fingerprint = ? OR (legacy = 1 AND locus_key = ? AND locus_key != '')`,
-		fingerprint, locusKey).Scan(&one)
+		`SELECT 1 FROM suppressions WHERE fingerprint = ? OR (legacy = 1 AND locus_key != '' AND locus_key IN (?, ?))`,
+		fingerprint, locusKey, legacyLocusKey).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}

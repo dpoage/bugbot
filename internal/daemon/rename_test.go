@@ -113,7 +113,7 @@ func TestDaemonPollRewritesRenamedFindingIdentity(t *testing.T) {
 	if got.Status != domain.StatusDismissed {
 		t.Fatalf("dismissed status must survive the rename, got %q", got.Status)
 	}
-	sup, err := st.IsSuppressed(context.Background(), newFP, "")
+	sup, err := st.IsSuppressed(context.Background(), newFP, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
