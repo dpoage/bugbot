@@ -719,6 +719,62 @@ func TestValidate_DrainIntervalsMustBePositive(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// New-field tests: ReconcileInterval (bugbot-ezmx.4).
+// ---------------------------------------------------------------------------
+
+func TestDefault_ReconcileInterval(t *testing.T) {
+	cfg := Default()
+	if cfg.Daemon.ReconcileInterval != 24*time.Hour {
+		t.Errorf("Daemon.ReconcileInterval default = %s, want 24h", cfg.Daemon.ReconcileInterval)
+	}
+}
+
+func TestLoad_ReconcileIntervalFromYAML(t *testing.T) {
+	yaml := validYAML + `
+daemon:
+  reconcile_interval: 8h
+`
+	cfg, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Daemon.ReconcileInterval != 8*time.Hour {
+		t.Errorf("ReconcileInterval = %s, want 8h", cfg.Daemon.ReconcileInterval)
+	}
+}
+
+func TestEnvOverride_ReconcileInterval(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{
+		"BUGBOT_DAEMON_RECONCILE_INTERVAL=2h",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Daemon.ReconcileInterval != 2*time.Hour {
+		t.Errorf("ReconcileInterval = %s, want 2h", cfg.Daemon.ReconcileInterval)
+	}
+}
+
+func TestValidate_ReconcileIntervalMustBePositive(t *testing.T) {
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+	cfg.Daemon.ReconcileInterval = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "reconcile_interval") {
+		t.Errorf("reconcile_interval=0 should be rejected, got %v", err)
+	}
+	cfg.Daemon.ReconcileInterval = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "reconcile_interval") {
+		t.Errorf("reconcile_interval=-1 should be rejected, got %v", err)
+	}
+	cfg.Daemon.ReconcileInterval = time.Hour
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("positive reconcile_interval should be valid, got %v", err)
+	}
+}
+
 func TestDefault_FinderHistoryTokensIsZero(t *testing.T) {
 	// Config default is zero so the funnel applies its own
 	// DefaultFinderHistoryTokens (compaction ON). A non-zero config default here

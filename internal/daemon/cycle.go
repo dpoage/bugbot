@@ -92,6 +92,12 @@ func (d *Daemon) runPoll(ctx context.Context) {
 		"changed_files", len(changed),
 	)
 
+	// Rewrite stored finding/suppression identity for any file renamed within
+	// this range before the funnel work below re-derives fingerprints at the
+	// new paths (bugbot-ezmx.6). Runs regardless of day-budget exhaustion: it
+	// is pure bookkeeping, no LLM spend.
+	d.applyRenames(ctx, lastSeen, pr.HeadSHA)
+
 	res := cycleResult{kind: store.ScanTargeted}
 	if d.dayBudgetExhausted(ctx, &res) {
 		d.logCycle(res, d.clock.now().Sub(start))
@@ -309,6 +315,49 @@ func (d *Daemon) runImpactSweep(ctx context.Context) {
 		return
 	}
 	d.foldSpend(&res, fres)
+	d.logCycle(res, d.clock.now().Sub(start))
+}
+
+// runReconcile is the backlog-reconcile timer step (bugbot-ezmx.4): it
+// nominates duplicate-candidate pairs among currently-OPEN findings and
+// merges every confident dedup-arbiter "yes" — see funnel.ReconcileDedup.
+// Cheap when nothing is nominated (ReconcileDedup's empty-pair fast path
+// returns before opening a scan run). The day-budget gate is applied by the
+// caller (Run); the storeHealthy integrity gate is applied HERE, before any
+// write this cycle — unlike runVerifyDrain, whose missing storeHealthy gate
+// is a known gap (bugbot-lcr0) this cycle deliberately does not copy: a
+// reconcile cycle only ever runs to WRITE (merge/close rows), so skipping it
+// on suspected corruption is strictly the safer default. Merged-away
+// findings count as res.closedF, matching reverifyOpenFindings' auto-close
+// accounting; the nominated/arbitrated/merged breakdown is visible in the
+// scan run's persisted Stats JSON, the same place every other drain reports.
+// Returns quietly on context cancellation.
+func (d *Daemon) runReconcile(ctx context.Context) {
+	if !d.storeHealthy(ctx) {
+		return
+	}
+
+	start := d.clock.now()
+	progress.Emit(d.prog, progress.Event{Kind: progress.KindCycleStarted, ScanKind: string(store.ScanReconcile)})
+	res := cycleResult{kind: store.ScanReconcile}
+
+	f, err := d.newFunnel()
+	if err != nil {
+		d.log.Error("daemon: build funnel failed", "err", err)
+		return
+	}
+	defer func() { _ = f.Close() }() // shut down per-cycle language servers
+
+	fres, err := f.ReconcileDedup(ctx, funnel.DefaultReconcileCap)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		d.log.Error("daemon: backlog reconcile failed", "err", err)
+		return
+	}
+	d.foldSpend(&res, fres)
+	res.closedF = fres.Stats.ReconcileMerged
 	d.logCycle(res, d.clock.now().Sub(start))
 }
 

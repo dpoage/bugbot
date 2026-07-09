@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"path"
 	"strings"
 	"time"
 )
@@ -78,12 +77,23 @@ type Finding struct {
 	ID          string
 	Fingerprint string
 	// LocusKey is the lens-independent location identity sha256(normFile, locus):
-	// the Fingerprint inputs minus the lens. It backs the durable cross-lens fold
-	// (triage's OpenFindingsByLocusKey point-lookup) so a finding persisted by a
-	// prior run can absorb a later same-locus, different-lens candidate as
-	// corroboration instead of spawning a duplicate. Persisted + indexed; empty on
-	// pre-migration rows, which simply do not participate until re-upserted.
-	LocusKey      string
+	// the Fingerprint inputs minus the lens. It still backs IsSuppressed's
+	// legacy fallback and RenameFindingIdentity's rewrite, and is a proper
+	// subset of the same-file window store.FindingsByFileWindow now queries
+	// for triage's durable cross-lens fold (the fold widened past an exact
+	// locus_key match so a drifted locus still folds in). Persisted + indexed;
+	// empty on pre-migration rows, which simply do not participate until
+	// re-upserted.
+	LocusKey string
+	// DefectKind is the closed taxonomy class this finding belongs to (see
+	// DefectKind in identity.go). Empty on pre-v3 rows (migrated v2 findings
+	// that predate the defect_kind/subject fields); such rows simply do not
+	// participate in kind-gated clustering/durable-fold logic until re-upserted
+	// by a fresh scan.
+	DefectKind DefectKind
+	// Subject is the normalized symbol at fault (see NormalizeSubject). Empty
+	// on pre-v3 rows, same caveat as DefectKind.
+	Subject       string
 	Title         string
 	Description   string
 	Reasoning     string // the adversarial verification trace
@@ -147,6 +157,21 @@ type Finding struct {
 	// repro_attempts.exit_zero_count via a LEFT JOIN at read time; false when
 	// no repro_attempts row exists for this fingerprint.
 	ReproContradicted bool
+	// SupersededBy is the canonical fingerprint this finding was merged into
+	// by backlog reconcile (bugbot-ezmx.4), set only when Status ==
+	// StatusSuperseded. Empty otherwise. This is the MACHINE-READABLE merge
+	// pointer -- callers must key merge logic on this field, never on
+	// SupersededReason's prose (repo invariant: machine decisions never key
+	// on prose). A live re-discovery of this exact fingerprint by a future
+	// scan naturally clears both fields back to empty on upsert (UpsertFinding
+	// does not preserve them), the same way a fixed finding's history is left
+	// for a fresh scan to overwrite.
+	SupersededBy string
+	// SupersededReason is a human-readable note explaining why this finding
+	// was superseded (e.g. "backlog reconcile: merged into <fp> (dedup
+	// arbiter yes)"). Prose only -- never parsed by machine logic; see
+	// SupersededBy.
+	SupersededReason string
 }
 
 // FindingTallies is the aggregate finding picture for the status pane.
@@ -201,12 +226,22 @@ type FindingFilter struct {
 //
 //	(g) T0 conflicts with NeedsHuman: a fix-witnessed finding is fully resolved
 //	    and must not be flagged for human review.
+//
+//	(h) SupersededBy/SupersededReason require Status == StatusSuperseded (a
+//	    merge pointer or prose reason must never survive on a non-superseded
+//	    row -- see UpsertFinding, which clears both on any re-upsert that
+//	    does not itself set Status to superseded).
 func ValidateFindingState(f Finding) error {
 	tier := int(f.Tier)
 
 	// (g) T0 + NeedsHuman is contradictory.
 	if tier == 0 && f.NeedsHuman {
 		return fmt.Errorf("%w: T0 (fix-witnessed) and NeedsHuman are mutually exclusive", ErrIllegalTransition)
+	}
+
+	// (h) SupersededBy/SupersededReason require Status == StatusSuperseded.
+	if (f.SupersededBy != "" || f.SupersededReason != "") && f.Status != StatusSuperseded {
+		return fmt.Errorf("%w: SupersededBy/SupersededReason set but Status is %q, not superseded", ErrIllegalTransition, f.Status)
 	}
 
 	// (a) T0 requires ReproPath.
@@ -257,7 +292,7 @@ func ValidateFindingState(f Finding) error {
 // partialFingerprints key. Two findings with the same fingerprint are the same
 // bug and dedup/upsert onto one row.
 func Fingerprint(lens, file, locus string) string {
-	normFile := strings.ToLower(path.Clean(strings.ReplaceAll(file, "\\", "/")))
+	normFile := normalizeFilePath(file)
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "bugbotFingerprint/v2\x00%s\x00%s\x00%s", strings.ToLower(lens), normFile, locus)
 	return hex.EncodeToString(h.Sum(nil))
@@ -270,7 +305,7 @@ func Fingerprint(lens, file, locus string) string {
 // durable cross-lens fold keys on it. The "bugbotLocus/v1" token namespaces the
 // scheme independently of the fingerprint version.
 func LocusKey(file, locus string) string {
-	normFile := strings.ToLower(path.Clean(strings.ReplaceAll(file, "\\", "/")))
+	normFile := normalizeFilePath(file)
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "bugbotLocus/v1\x00%s\x00%s", normFile, locus)
 	return hex.EncodeToString(h.Sum(nil))

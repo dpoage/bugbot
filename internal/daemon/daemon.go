@@ -202,6 +202,12 @@ type DaemonConfig struct {
 	// default when <= 0. This is the impact-sweep DRAIN pass, distinct from the
 	// full Sweep scan (SweepInterval).
 	ImpactSweepInterval time.Duration
+	// ReconcileInterval is the cadence of the backlog-reconcile timer
+	// (bugbot-ezmx.4): the daemon nominates duplicate-candidate pairs among
+	// OPEN findings and merges confident dedup-arbiter "yes" pairs. New
+	// applies a 24h default when <= 0. Standalone maintenance drain, distinct
+	// from the full Sweep scan and the other two drains.
+	ReconcileInterval time.Duration
 }
 
 // maxBackoffMultiplier caps idle backoff: the next poll is delayed by at most
@@ -280,15 +286,19 @@ func New(deps Deps, cfg DaemonConfig) (*Daemon, error) {
 			cfg.ReproBacklogBatch = 3
 		}
 	}
-	// The maintenance drains (verify + impact-sweep) always run; they are NOT
-	// gated on EnableRepro. Apply >0 defaults when unset (mirroring the repro
-	// backlog default) so a caller that constructs DaemonConfig directly (e.g.
-	// tests) without these intervals still gets a working cadence.
+	// The maintenance drains (verify + impact-sweep + reconcile) always run;
+	// they are NOT gated on EnableRepro. Apply >0 defaults when unset
+	// (mirroring the repro backlog default) so a caller that constructs
+	// DaemonConfig directly (e.g. tests) without these intervals still gets a
+	// working cadence.
 	if cfg.VerifyDrainInterval <= 0 {
 		cfg.VerifyDrainInterval = time.Hour
 	}
 	if cfg.ImpactSweepInterval <= 0 {
 		cfg.ImpactSweepInterval = 6 * time.Hour
+	}
+	if cfg.ReconcileInterval <= 0 {
+		cfg.ReconcileInterval = 24 * time.Hour
 	}
 
 	log := deps.Logger

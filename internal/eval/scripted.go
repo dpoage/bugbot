@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/llm"
 )
 
@@ -151,8 +152,24 @@ const (
 	NotRefutedArbiterJSON = `{"refuted": false, "reasoning": "I read the code and the call path; the dissent's refutation does not hold and the defect is reachable.", "confidence": "high", "evidence": ["fixture.go:10"]}`
 )
 
+// DefaultEvalDefectKind / DefaultEvalSubject are the fallback defect_kind and
+// subject Candidates() fills in when a case does not specify one, mirroring
+// the Severity/Confidence "high" default below. Every built-in case relies on
+// (file, line) — not (defect_kind, subject) — to distinguish candidates, so a
+// UNIFORM default across a case's candidates preserves pre-bugbot-ezmx.1
+// behavior: two candidates only converge when their locus does, exactly as
+// before defect_kind/subject existed. Exported so eval.go's Suppression
+// pre-seeding path (which must mint the SAME v3 fingerprint a default-kind
+// candidate will) can reuse them instead of hand-duplicating the default.
+const (
+	DefaultEvalDefectKind = domain.DefectOther
+	DefaultEvalSubject    = "eval-fixture"
+)
+
 // CandidateJSON is one finder-reported candidate, used to build finder
-// responses. Fields mirror the funnel's finder schema.
+// responses. Fields mirror the funnel's finder schema. DefectKind/Subject
+// default to DefaultEvalDefectKind/DefaultEvalSubject when empty (see
+// Candidates) so existing cases that predate bugbot-ezmx.1 need no changes.
 type CandidateJSON struct {
 	File        string
 	Line        int
@@ -161,12 +178,16 @@ type CandidateJSON struct {
 	Severity    string // critical|high|medium|low
 	Evidence    string
 	Confidence  string // high|medium|low
+	DefectKind  string // one of domain.AllDefectKinds; defaults to DefaultEvalDefectKind
+	Subject     string // defaults to DefaultEvalSubject
 }
 
 // Candidates renders a finder candidate-list JSON body from the given
 // candidates, matching the funnel's finder schema. It is the exported builder
 // cases use to declare finder output. Empty Severity/Confidence default to
-// "high" so a case can declare a high-confidence bug with just file/line/title.
+// "high"; empty DefectKind/Subject default to DefaultEvalDefectKind/
+// DefaultEvalSubject — so a case can declare a high-confidence bug with just
+// file/line/title.
 func Candidates(cands ...CandidateJSON) string {
 	type wire struct {
 		File        string `json:"file"`
@@ -176,6 +197,8 @@ func Candidates(cands ...CandidateJSON) string {
 		Severity    string `json:"severity"`
 		Evidence    string `json:"evidence"`
 		Confidence  string `json:"confidence"`
+		DefectKind  string `json:"defect_kind"`
+		Subject     string `json:"subject"`
 	}
 	payload := struct {
 		Candidates []wire `json:"candidates"`
@@ -189,10 +212,19 @@ func Candidates(cands ...CandidateJSON) string {
 		if conf == "" {
 			conf = "high"
 		}
+		kind := c.DefectKind
+		if kind == "" {
+			kind = string(DefaultEvalDefectKind)
+		}
+		subject := c.Subject
+		if subject == "" {
+			subject = DefaultEvalSubject
+		}
 		payload.Candidates = append(payload.Candidates, wire{
 			File: c.File, Line: c.Line, Title: c.Title,
 			Description: c.Description, Severity: sev,
 			Evidence: c.Evidence, Confidence: conf,
+			DefectKind: kind, Subject: subject,
 		})
 	}
 	b, err := json.Marshal(payload)

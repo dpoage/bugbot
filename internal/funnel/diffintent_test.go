@@ -259,7 +259,8 @@ func TestHypothesize_DiffIntentOneTaskOnTargeted(t *testing.T) {
 
 	diffIntentCand := `{"file": "bug.go", "line": 5, "title": "intent gap: validation removed",
 		"description": "diff removes the validate() call the message claims to add",
-		"severity": "high", "evidence": "line 5 shows removal", "confidence": "high"}`
+		"severity": "high", "evidence": "line 5 shows removal", "confidence": "high",
+		"defect_kind": "contract-violation", "subject": "validate"}`
 
 	finder := newScriptedClient().onSystemContains("diff-intent", candJSON(diffIntentCand))
 	verifier := newScriptedClient().onTaskContains("intent gap", notRefutedJSON)
@@ -451,7 +452,8 @@ func TestDegradedLensNames_CommitRunKeepsDiffIntentAndNilSafety(t *testing.T) {
 	// diff-intent returns a candidate; nil-safety also returns one; others return nothing.
 	diffIntentCand := `{"file": "bug.go", "line": 5, "title": "intent mismatch",
 		"description": "diff says add but removes", "severity": "high",
-		"evidence": "see diff", "confidence": "high"}`
+		"evidence": "see diff", "confidence": "high",
+		"defect_kind": "contract-violation", "subject": "validate"}`
 
 	finder := newScriptedClient().
 		onSystemContains("diff-intent", candJSON(diffIntentCand)).

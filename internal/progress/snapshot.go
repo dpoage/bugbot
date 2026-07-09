@@ -499,6 +499,9 @@ func mergeMax(a, b Counts) Counts {
 	if b.Killed > a.Killed {
 		a.Killed = b.Killed
 	}
+	if b.DuplicateRate > a.DuplicateRate {
+		a.DuplicateRate = b.DuplicateRate
+	}
 	return a
 }
 

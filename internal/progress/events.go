@@ -195,6 +195,13 @@ type Counts struct {
 	// run. Non-zero means the result is suspect: some lens's findings were lost,
 	// so an empty/sparse finding set is not a clean bill of health.
 	FinderFailures int `json:"finder_failures,omitempty"`
+	// DuplicateRate is funnel.Stats.DuplicateRate(): the fraction of
+	// Hypothesized candidates triage identified as a duplicate of another
+	// candidate in this run (exact-fingerprint drops plus location/root-cause
+	// merges), so a drift here — up or down — flags a change in the identity
+	// layer's dedup behavior even when Verified/Killed look unchanged. Zero
+	// when Hypothesized is zero.
+	DuplicateRate float64 `json:"duplicate_rate,omitempty"`
 }
 
 // Event is one progress record. It is deliberately flat and JSON-serializable:

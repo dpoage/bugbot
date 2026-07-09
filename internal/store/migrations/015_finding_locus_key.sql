@@ -10,8 +10,14 @@
 -- by the prior run became a SECOND finding instead of folding in.
 --
 -- locus_key = sha256(normFile, locus) is the fingerprint inputs MINUS the lens.
--- Indexed so triage does a per-candidate point-lookup (OpenFindingsByLocusKey)
--- and folds a cross-lens hit as corroboration. Existing rows default to '' and do
--- not participate until their next upsert recomputes the key (forward-looking).
+-- Indexed so triage can point-look-up a candidate's exact locus. Existing rows
+-- default to '' and do not participate until their next upsert recomputes the
+-- key (forward-looking).
+--
+-- bugbot-ezmx.3: the durable cross-lens fold no longer queries this column
+-- directly (it widened to store.FindingsByFileWindow's same-file line-window
+-- lookup, so a drifted locus_key still folds in) -- but the column and this
+-- index are kept: IsSuppressed's legacy fallback and RenameFindingIdentity's
+-- rewrite still match/rewrite locus_key by exact value.
 ALTER TABLE findings ADD COLUMN locus_key TEXT NOT NULL DEFAULT '';
 CREATE INDEX idx_findings_locus_key ON findings(locus_key);

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
@@ -24,7 +25,7 @@ func TestSuppressionFlow_DismissedNeverResurfaces(t *testing.T) {
 		t.Fatalf("dismiss: %v", err)
 	}
 
-	sup, err := st.IsSuppressed(ctx, f.Fingerprint)
+	sup, err := st.IsSuppressed(ctx, f.Fingerprint, "", "")
 	if err != nil {
 		t.Fatalf("IsSuppressed: %v", err)
 	}
@@ -115,12 +116,164 @@ func TestAddSuppression_PreemptiveBeforeFindingExists(t *testing.T) {
 
 func TestIsSuppressed_Unknown(t *testing.T) {
 	st := openTemp(t)
-	sup, err := st.IsSuppressed(context.Background(), "never-seen")
+	sup, err := st.IsSuppressed(context.Background(), "never-seen", "", "")
 	if err != nil {
 		t.Fatalf("IsSuppressed: %v", err)
 	}
 	if sup {
 		t.Fatal("unknown fingerprint should not be suppressed")
+	}
+}
+
+// TestIsSuppressed_LegacyLocusFallback_PreservesV2SuppressionCoverage pins the
+// v2->v3 migration contract (bugbot-ezmx.1): a suppression row that predates
+// Fingerprint v3 (defect_kind/subject did not exist yet, so it was recorded
+// under a v2-scheme fingerprint keyed by (lens, file, locus)) must still
+// suppress the SAME locus after a fresh scan mints a v3 fingerprint for it —
+// even though the two fingerprint strings are completely different hashes.
+//
+// This seeds a "legacy" suppression row directly via SQL exactly as the
+// 020_defect_identity_v3 migration's backfill would have produced it: legacy=1
+// and locus_key populated from a v2-era finding sharing the old fingerprint.
+// It does NOT re-run the migration's ALTER/UPDATE statements (those already
+// run unconditionally on every openTemp() in this package; a SQL mistake
+// there would fail every store test at Open, not just this one) — it proves
+// the RUNTIME fallback IsSuppressed relies on to honor a backfilled row.
+func TestIsSuppressed_LegacyLocusFallback_PreservesV2SuppressionCoverage(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	const legacyLocusKey = "legacy-locus-key-nil-deref-greeting"
+	v2FP := domain.Fingerprint("nil-safety", "bug.go", "S:function\x00Greeting")
+
+	// Simulate the migration backfill: a pre-v3 suppression row, marked legacy,
+	// with locus_key populated from the finding it once matched.
+	if _, err := st.DB().ExecContext(ctx,
+		`INSERT INTO suppressions (fingerprint, reason, created_at, locus_key, legacy) VALUES (?, ?, ?, ?, 1)`,
+		v2FP, "v2-era: known noise", "2025-01-01T00:00:00Z", legacyLocusKey,
+	); err != nil {
+		t.Fatalf("seed legacy suppression: %v", err)
+	}
+
+	// A fresh scan re-discovers the same defect and mints a v3 fingerprint —
+	// necessarily DIFFERENT from the legacy v2 fingerprint (different scheme,
+	// different inputs).
+	v3FP := domain.FingerprintV3("bug.go", "S:function\x00Greeting", domain.DefectNilDeref, "Greeting")
+	if v3FP == v2FP {
+		t.Fatalf("test setup invariant violated: v3 fingerprint must differ from the v2 one")
+	}
+
+	suppressed, err := st.IsSuppressed(ctx, v3FP, legacyLocusKey, "")
+	if err != nil {
+		t.Fatalf("IsSuppressed: %v", err)
+	}
+	if !suppressed {
+		t.Fatal("a v2-era suppression must still suppress a post-migration v3 fingerprint at the same locus")
+	}
+
+	// Sanity: the legacy fallback is locus-scoped, not global — an unrelated
+	// locus_key must NOT be suppressed by this row.
+	unrelated, err := st.IsSuppressed(ctx, v3FP, "some-other-locus-entirely", "")
+	if err != nil {
+		t.Fatalf("IsSuppressed: %v", err)
+	}
+	if unrelated {
+		t.Fatal("legacy suppression fallback must be scoped to its own locus_key, not suppress everything")
+	}
+}
+
+// TestIsSuppressed_LegacyLocusFallback_ZeroBackfillLosesCoverage pins the
+// DOCUMENTED bound of the 020_defect_identity_v3 migration's backfill (see
+// that migration's comment): a legacy suppression row for which NO finding
+// sharing its v2 fingerprint exists at migration time (the finding was later
+// deleted, or the row predates the locus_key column added in migration 015
+// and was never re-upserted since) cannot be backfilled — a fingerprint is a
+// one-way hash, so there is no way to recover the file/locus it once covered.
+// Such a row is left with locus_key=” and genuinely stops suppressing once
+// a fresh scan mints a v3 fingerprint for the same defect. This test proves
+// that is the ACTUAL runtime behavior (not silently different from the
+// documented bound), so the gap stays a known, pinned limitation rather than
+// an untested one.
+func TestIsSuppressed_LegacyLocusFallback_ZeroBackfillLosesCoverage(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	v2FP := domain.Fingerprint("nil-safety", "orphaned.go", "S:function\x00Orphaned")
+
+	// Simulate the migration backfill's OUTCOME for an unbackfillable row: no
+	// finding ever shared this fingerprint, so the backfill UPDATE's WHERE
+	// EXISTS clause never matched it — legacy=1, locus_key stays ''.
+	if _, err := st.DB().ExecContext(ctx,
+		`INSERT INTO suppressions (fingerprint, reason, created_at, locus_key, legacy) VALUES (?, ?, ?, '', 1)`,
+		v2FP, "v2-era: no surviving finding to backfill from", "2025-01-01T00:00:00Z",
+	); err != nil {
+		t.Fatalf("seed unbackfillable legacy suppression: %v", err)
+	}
+
+	// A fresh scan re-discovers the "same" defect (by a human's judgment) and
+	// mints a v3 fingerprint. Coverage is lost: no exact-fingerprint match (the
+	// hash schemes differ) and no locus fallback (locus_key was never
+	// recoverable), so this candidate is NOT suppressed.
+	v3FP := domain.FingerprintV3("orphaned.go", "S:function\x00Orphaned", domain.DefectLogic, "Orphaned")
+	suppressed, err := st.IsSuppressed(ctx, v3FP, "some-locus-we-cannot-know-was-the-right-one", "")
+	if err != nil {
+		t.Fatalf("IsSuppressed: %v", err)
+	}
+	if suppressed {
+		t.Fatal("an unbackfillable legacy row (locus_key='') must NOT suppress anything — if this now passes, either a locus_key='' match slipped through (a real bug: it would blanket-suppress every future candidate) or the backfill became more capable and this test's documented gap should be revisited")
+	}
+}
+
+// TestIsSuppressed_LegacyLineAnchorFallback_PreservesCoverage proves the
+// bugbot-ezmx.5 dual-lookup: a suppression minted before the content anchor
+// existed, keyed by the bare "L:<line>" fallback locus (the ONLY fallback
+// available at package-level code before this bead), must still suppress a
+// fresh scan's candidate at the same file/line even though the resolver now
+// mints a completely different, content-anchored locus for it.
+func TestIsSuppressed_LegacyLineAnchorFallback_PreservesCoverage(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	const file = "pkg/config.go"
+	const line = 42
+	preBeadLocus := "L:" + strconv.Itoa(line) // the ONLY fallback that existed pre-ezmx.5
+	legacyLocusKey := domain.LocusKey(file, preBeadLocus)
+	v2FP := domain.Fingerprint("nil-safety", file, preBeadLocus)
+
+	// Simulate a v2-era suppression row recorded while package-level code
+	// still fell back to the bare line locus.
+	if _, err := st.DB().ExecContext(ctx,
+		`INSERT INTO suppressions (fingerprint, reason, created_at, locus_key, legacy) VALUES (?, ?, ?, ?, 1)`,
+		v2FP, "pre-ezmx.5: package-level false positive", "2025-01-01T00:00:00Z", legacyLocusKey,
+	); err != nil {
+		t.Fatalf("seed pre-content-anchor suppression: %v", err)
+	}
+
+	// A fresh scan re-derives the SAME file/line but, post-ezmx.5, the
+	// resolver mints a content-anchored locus instead of the bare line one.
+	contentLocus := "C:deadbeefcafe#1"
+	freshLocusKey := domain.LocusKey(file, contentLocus)
+	if freshLocusKey == legacyLocusKey {
+		t.Fatalf("test setup invariant violated: content-anchor locus_key must differ from the legacy line-anchor one")
+	}
+	v3FP := domain.FingerprintV3(file, contentLocus, domain.DefectLogic, "LoadConfig")
+
+	suppressed, err := st.IsSuppressed(ctx, v3FP, freshLocusKey, legacyLocusKey)
+	if err != nil {
+		t.Fatalf("IsSuppressed: %v", err)
+	}
+	if !suppressed {
+		t.Fatal("a suppression keyed on the pre-ezmx.5 line-anchor locus must still suppress a candidate resolved via the new content anchor at the same file/line")
+	}
+
+	// Without the legacy key the same lookup must NOT match — proves the
+	// coverage genuinely comes from the dual-lookup, not a coincidence.
+	withoutLegacy, err := st.IsSuppressed(ctx, v3FP, freshLocusKey, "")
+	if err != nil {
+		t.Fatalf("IsSuppressed: %v", err)
+	}
+	if withoutLegacy {
+		t.Fatal("suppression should not match without the legacy locus key argument")
 	}
 }
 

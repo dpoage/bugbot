@@ -218,6 +218,24 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// corroborating lenses) and verify goroutines (which drain staged lenses and
 	// signal persistence).
 	ts, clusterReg := newTriageState(snap)
+	// Wire the bugbot-ezmx.2 LLM dedup arbiter: reuses the verifier-role client
+	// (already recorder-wrapped as verifierClient above, so its spend is
+	// ledgered exactly like every other verifier-role completion) and the
+	// verify budget pool. snap.Root backs the code-excerpt read; empty on a
+	// snapshot taken without a root, which degrades the excerpt to empty
+	// (dedupCodeExcerpt), not a failure.
+	ts.dedupArbiter = &dedupArbiterConfig{
+		f: f, client: verifierClient, budget: budget, root: snap.Root,
+		cap: DefaultDedupArbiterCap,
+	}
+	// construction is cheap (no language-server process starts until the first
+	// query), but a failure here (e.g. an unresolvable repo root) must never
+	// abort the run — the fold is a heuristic layered on top of the
+	// identity-precise merge rules above it, never load-bearing. Leaving
+	// ts.nav nil makes codeNavRootCauseFold a silent no-op.
+	if nav, err := f.codeNav(); err == nil {
+		ts.nav = nav
+	}
 
 	// findingsMu protects allFindings, verifyKilled, and the verifier stats
 	// fields on result.Stats that the concurrent verify goroutines update.
@@ -540,7 +558,10 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	result.Stats.Triaged = triagedCount
 	progress.Emit(sink, progress.Event{
 		Kind: progress.KindStageFinished, Stage: progress.StageTriage,
-		Counts: &progress.Counts{Hypothesized: hypothesizedCount, Triaged: triagedCount},
+		Counts: &progress.Counts{
+			Hypothesized: hypothesizedCount, Triaged: triagedCount,
+			DuplicateRate: result.Stats.DuplicateRate(),
+		},
 	})
 	if !verifyStarted.Load() {
 		progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StageVerify})
@@ -637,6 +658,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		Counts: &progress.Counts{
 			Hypothesized: hypothesizedCount, Triaged: triagedCount,
 			Verified: result.Stats.Verified, Killed: killed,
+			DuplicateRate: result.Stats.DuplicateRate(),
 		},
 	})
 	progress.Emit(sink, progress.Event{Kind: progress.KindStageStarted, Stage: progress.StagePersist})
@@ -659,6 +681,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			Hypothesized: result.Stats.Hypothesized, Triaged: result.Stats.Triaged,
 			Verified: result.Stats.Verified, Killed: result.Stats.Killed,
 			FinderFailures: result.Stats.FinderFailures,
+			DuplicateRate:  result.Stats.DuplicateRate(),
 		},
 		InputTokens: in, OutputTokens: out,
 		CacheReadTokens: cacheRead, CacheCreationTokens: cacheCreated,

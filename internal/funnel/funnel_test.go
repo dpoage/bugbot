@@ -116,10 +116,12 @@ func candJSON(cands ...string) string {
 const (
 	realCand = `{"file": "bug.go", "line": 10, "title": "nil deref of cfg in Greeting",
 		"description": "cfg may be nil", "severity": "high",
-		"evidence": "Greeting returns cfg.Name without a nil check", "confidence": "high"}`
+		"evidence": "Greeting returns cfg.Name without a nil check", "confidence": "high",
+		"defect_kind": "nil-deref", "subject": "Greeting"}`
 	bogusCand = `{"file": "clean.go", "line": 5, "title": "Add overflows on large ints",
 		"description": "imagined overflow", "severity": "low",
-		"evidence": "a + b", "confidence": "high"}`
+		"evidence": "a + b", "confidence": "high",
+		"defect_kind": "logic", "subject": "Add"}`
 )
 
 // finderOn routes the nil-safety lens finder to return both candidates and
@@ -279,7 +281,7 @@ func TestSweep_Suppression_NoFindings(t *testing.T) {
 	verifier := verifierRouting(newScriptedClient())
 
 	// Pre-suppress the real candidate's fingerprint.
-	fp := domain.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10))
+	fp := domain.FingerprintV3("bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10), domain.DefectNilDeref, "Greeting")
 	if err := st.AddSuppression(ctx, fp, "test: known non-bug"); err != nil {
 		t.Fatal(err)
 	}
@@ -611,10 +613,12 @@ func TestSweep_CrossLensMerge_CorroborationPersisted(t *testing.T) {
 	// primary should verify and persist, carrying the other lens as corroboration.
 	nilLensCand := `{"file": "bug.go", "line": 10, "title": "nil deref of cfg in Greeting",
 		"description": "cfg may be nil and is dereferenced without a guard in Greeting", "severity": "high",
-		"evidence": "Greeting returns cfg.Name without a nil check", "confidence": "high"}`
+		"evidence": "Greeting returns cfg.Name without a nil check", "confidence": "high",
+		"defect_kind": "nil-deref", "subject": "Greeting"}`
 	apiLensCand := `{"file": "bug.go", "line": 10, "title": "unchecked pointer cfg used in Greeting",
 		"description": "the cfg pointer may be nil and is dereferenced without a guard, panicking", "severity": "medium",
-		"evidence": "cfg.Name read with no nil check", "confidence": "high"}`
+		"evidence": "cfg.Name read with no nil check", "confidence": "high",
+		"defect_kind": "nil-deref", "subject": "cfg"}`
 
 	finder := newScriptedClient().
 		onSystemContains("nil-safety/error-handling", candJSON(nilLensCand)).
@@ -705,7 +709,8 @@ func TestSweep_LowConfidenceDropped(t *testing.T) {
 	st, repo := openFixture(t)
 
 	lowCand := `{"file": "bug.go", "line": 10, "title": "maybe nil", "description": "x",
-		"severity": "low", "evidence": "y", "confidence": "low"}`
+		"severity": "low", "evidence": "y", "confidence": "low",
+		"defect_kind": "nil-deref", "subject": "Greeting"}`
 	finder := newScriptedClient().onSystemContains("nil-safety/error-handling", candJSON(lowCand))
 	verifier := newScriptedClient()
 
@@ -1037,8 +1042,8 @@ func TestVerify_MultiCandidate_NoRace(t *testing.T) {
 	for i := range nCands {
 		line := 10 + i*DefaultMergeWindow*3
 		candParts[i] = fmt.Sprintf(
-			`{"file":"bug.go","line":%d,"title":"race-guard candidate %d","description":"verify race guard %d","severity":"high","evidence":"evidence %d","confidence":"high"}`,
-			line, i, i, i,
+			`{"file":"bug.go","line":%d,"title":"race-guard candidate %d","description":"verify race guard %d","severity":"high","evidence":"evidence %d","confidence":"high","defect_kind":"race","subject":"guard%d"}`,
+			line, i, i, i, i,
 		)
 	}
 	finder := newScriptedClient().onSystemContains("nil-safety/error-handling", candJSON(candParts...))
@@ -1264,45 +1269,64 @@ func TestSweep_GlobalSlotPool_MaxParallelEnforced(t *testing.T) {
 
 // ---- streaming topology tests -----------------------------------------------
 
-// TestTriageState_BothOrdersCluster is the keystone test for incremental
-// clustering order-independence. It calls ts.process() directly with the same
-// two-lens, same-location pair in BOTH arrival orders and asserts that in each
-// case exactly ONE cluster primary is forwarded to verify, and the secondary
-// member is staged as a corroborating lens.
+// TestTriageState_BothOrdersCluster is the keystone test for cross-lens
+// convergence order-independence. It calls ts.process() directly with the same
+// two-lens, same-location, same-defect_kind, same-subject pair in BOTH arrival
+// orders and asserts that in each case exactly ONE cluster primary is
+// forwarded to verify, both primaries carry the IDENTICAL Fingerprint v3
+// (proving they converge on the same identity regardless of arrival order),
+// and the secondary member is staged as a corroborating lens.
+//
+// Under Fingerprint v3 (bugbot-ezmx.1), candA and candB share the same
+// (locus, defect_kind, subject) triple and therefore mint the IDENTICAL
+// fingerprint — they no longer rely on step 5's jaccard-gated location
+// clustering to converge; they collide at step 3's ordinary exact-fingerprint
+// dedup. Corroboration is still recorded there (see triageState.process's
+// step 3 duplicate branch), so the observable contract — one primary, the
+// other lens staged as corroboration — is unchanged even though the
+// mechanism that produces it moved earlier in the pipeline. This is the
+// funnel-level proof that cross-lens duplicates of one defect converge
+// WITHOUT relying on description similarity: descriptions below are
+// deliberately dissimilar (see the differing title/description text) and
+// convergence still holds because defect_kind + subject + locus already
+// agree.
 //
 // Testing the triage state directly (rather than end-to-end via Sweep) gives
 // deterministic control of arrival order without fighting goroutine scheduling.
 // The end-to-end cross-lens corroboration path is covered by
 // TestSweep_CrossLensMerge_CorroborationPersisted.
 //
-// VACUITY: if ts.process / handleMember / AddStagedLens were removed or broken,
-// the test would fail because either two primaries would be forwarded (breaking
-// "triaged=1") or the staged lens would be absent (breaking "staged != empty").
+// VACUITY: if ts.process / the step 3 duplicate branch / AddStagedLens were
+// removed or broken, the test would fail because either two primaries would
+// be forwarded (breaking "1 primary") or the staged lens would be absent
+// (breaking "staged != empty").
 func TestTriageState_BothOrdersCluster(t *testing.T) {
 	const lensA = "nil-safety/error-handling"
 	const lensB = "resource-leaks"
 
-	// Two candidates at the same location with similar descriptions.
-	// Different fingerprints (different lens × title), so exact-dedup doesn't
-	// collapse them. Jaccard similarity between the descriptions is above the
-	// merge threshold (they share most meaningful tokens).
+	// Two candidates at the same location with DELIBERATELY DISSIMILAR titles
+	// and descriptions (so this test cannot be passing "by accident" via the
+	// old jaccard-based location merge) but the SAME defect_kind and subject —
+	// the structured identity that now drives convergence.
 	candA := Candidate{
 		Lens: lensA, File: "bug.go", Line: 10,
 		Title:       "nil deref of cfg in Greeting",
 		Description: "cfg may be nil and is dereferenced without a guard in Greeting",
 		Severity:    "high", Confidence: "high",
+		DefectKind: domain.DefectNilDeref, Subject: "Greeting",
 	}
 	candB := Candidate{
 		Lens: lensB, File: "bug.go", Line: 10,
-		Title:       "cfg pointer may be nil in Greeting",
-		Description: "cfg may be nil and is dereferenced without a guard in Greeting",
+		Title:       "totally different wording, no shared tokens at all",
+		Description: "zzz qqq wwww completely unrelated prose on purpose",
 		Severity:    "medium", Confidence: "high",
+		DefectKind: domain.DefectNilDeref, Subject: "Greeting",
 	}
 
 	// fp sets a placeholder Fingerprint; triage's process() recomputes the real
 	// identity from the enclosing-symbol locus, so this value only needs to compile.
 	fp := func(c Candidate) Candidate {
-		c.Fingerprint = domain.Fingerprint(c.Lens, c.File, "L:"+itoa(c.Line))
+		c.Fingerprint = domain.FingerprintV3(c.File, "L:"+itoa(c.Line), c.DefectKind, c.Subject)
 		return c
 	}
 	candA = fp(candA)
@@ -1347,6 +1371,7 @@ func TestTriageState_BothOrdersCluster(t *testing.T) {
 	}
 
 	// Order A: candA (nil-safety) arrives first → becomes primary; candB staged.
+	var fpOrderA, fpOrderB string
 	t.Run("lensA_primary", func(t *testing.T) {
 		primaries, staged := processOrder(t, candA, candB)
 
@@ -1356,6 +1381,7 @@ func TestTriageState_BothOrdersCluster(t *testing.T) {
 		if primaries[0].Lens != lensA {
 			t.Errorf("primary lens = %q, want %q (first-arrival)", primaries[0].Lens, lensA)
 		}
+		fpOrderA = primaries[0].Fingerprint
 		// VACUITY: if staging were removed, staged would be nil and this assertion fails.
 		if want := []string{lensB}; !reflect.DeepEqual(staged, want) {
 			t.Errorf("staged lenses = %v, want %v\n(VACUITY: absent staging → staged=nil → this fails)", staged, want)
@@ -1374,11 +1400,23 @@ func TestTriageState_BothOrdersCluster(t *testing.T) {
 		if primaries[0].Lens != lensB {
 			t.Errorf("primary lens = %q, want %q (first-arrival)", primaries[0].Lens, lensB)
 		}
+		fpOrderB = primaries[0].Fingerprint
 		// VACUITY: same check for the reversed order.
 		if want := []string{lensA}; !reflect.DeepEqual(staged, want) {
 			t.Errorf("staged lenses = %v, want %v\n(VACUITY: absent staging → staged=nil → this fails)", staged, want)
 		}
 	})
+
+	// The structural proof: both arrival orders converge on the IDENTICAL v3
+	// fingerprint, even though candA/candB share no description tokens at all
+	// (jaccard between them is 0). Convergence here is driven entirely by
+	// (locus, defect_kind, subject) agreement, never by prose similarity.
+	if fpOrderA == "" || fpOrderB == "" {
+		t.Fatal("one of the two subtests failed to record a primary fingerprint")
+	}
+	if fpOrderA != fpOrderB {
+		t.Errorf("fingerprint order A = %q, order B = %q; v3 identity must be arrival-order-independent", fpOrderA, fpOrderB)
+	}
 }
 
 // TestStreaming_MidDiscovery_VerifyStarts tests that in the streaming topology
@@ -1510,7 +1548,7 @@ func TestStreaming_PersistenceBeforeHypothesizeComplete(t *testing.T) {
 		fallback: newScriptedClient(),
 	}
 
-	fp := domain.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10))
+	fp := domain.FingerprintV3("bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10), domain.DefectNilDeref, "Greeting")
 	// Simple verifier: never refutes. The store polling loop below detects when
 	// the finding has been persisted by verify_stream.go's immediate-persist path.
 	verifierClient := &hookClient{
@@ -1622,7 +1660,7 @@ func TestStreaming_Interrupt_PersistedFindingSurvives(t *testing.T) {
 		fallback: newScriptedClient(),
 	}
 
-	fp := domain.Fingerprint("nil-safety/error-handling", "bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10))
+	fp := domain.FingerprintV3("bug.go", NewLocusResolver(repo.Root()).Resolve("bug.go", 10), domain.DefectNilDeref, "Greeting")
 	// Verifier signals persistedCh after the last refuter panel completes,
 	// then cancels ctx. We use a hookClient with a counter.
 	var verifierCalls atomic.Int32
@@ -1867,8 +1905,75 @@ func TestTriageState_SameBucketDissimilarClusters(t *testing.T) {
 	if len(primaries) != 2 {
 		t.Fatalf("primaries = %d, want 2 (one per dissimilar group): %+v", len(primaries), primaries)
 	}
-	if stats.MergedCrossLens != 2 {
-		t.Errorf("MergedCrossLens = %d, want 2 (p2 into p1's cluster, l2 into l1's)", stats.MergedCrossLens)
+	// Under v3, p1/p2 (and l1/l2) share the same locus with empty defect_kind
+	// and subject (this test never sets either), so they collide at the
+	// exact-fingerprint dedup step (DroppedDuplicate) rather than reaching the
+	// window+jaccard cluster merge (MergedCrossLens) — see funnel_types.go's
+	// MergedCrossLens doc. The bucket-orphaning property this test guards
+	// (two dissimilar groups sharing a location bucket must not collapse into
+	// one, or lose a group to bucket-pointer overwrite) still holds: exactly
+	// one primary survives per group either way.
+	if stats.DroppedDuplicate != 2 {
+		t.Errorf("DroppedDuplicate = %d, want 2 (p2 as p1's duplicate, l2 as l1's)", stats.DroppedDuplicate)
+	}
+	if stats.MergedCrossLens != 0 {
+		t.Errorf("MergedCrossLens = %d, want 0 (v3 exact-fp dedup catches this pair before the location-merge step)", stats.MergedCrossLens)
+	}
+}
+
+// TestTriageState_DifferentDefectKindBlocksWindowMerge pins bugbot-ezmx.1
+// acceptance criterion 4 at the CLUSTERING layer (not just the domain-level
+// fingerprint layer TestFingerprintV3_KindDisambiguates already covers): two
+// candidates at the SAME file, WITHIN the merge window, with description
+// Jaccard comfortably ABOVE mergeSimilarityThreshold — everything the OLD
+// (pre-v3) rule needed to collapse them into one cluster — must still stay
+// SEPARATE primaries when their defect_kind differs. Without the
+// sameOrUnknownKind guard in clusterAccepts, this test would report 1
+// primary (the pre-existing distinct-defect tests all use empty kinds, where
+// the guard is a wildcard no-op — this is the one exercising its
+// discriminating branch).
+func TestTriageState_DifferentDefectKindBlocksWindowMerge(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openFixture(t)
+
+	// Identical description text -> jaccard = 1.0, far above the 0.18
+	// threshold. Same file, 2 lines apart -> well within DefaultMergeWindow
+	// (10). Only defect_kind differs.
+	const sharedDesc = "cfg may be nil and is dereferenced without a guard in Greeting"
+	leakCand := Candidate{
+		Lens: "nil-safety/error-handling", File: "bug.go", Line: 10,
+		Title: "nil deref of cfg", Description: sharedDesc,
+		Severity: "high", Confidence: "high",
+		DefectKind: domain.DefectNilDeref, Subject: "Greeting",
+	}
+	resourceCand := Candidate{
+		Lens: "resource-leaks", File: "bug.go", Line: 12,
+		Title: "cfg handle leaked", Description: sharedDesc,
+		Severity: "high", Confidence: "high",
+		DefectKind: domain.DefectResourceLeak, Subject: "Greeting",
+	}
+
+	// Fixture precondition: jaccard really is above threshold, or this test
+	// silently stops testing the guard it claims to.
+	if j := jaccard(descTokens(leakCand.Description), descTokens(resourceCand.Description)); j < mergeSimilarityThreshold {
+		t.Fatalf("fixture broken: jaccard=%v below mergeSimilarityThreshold=%v", j, mergeSimilarityThreshold)
+	}
+
+	snap := &ingest.Snapshot{Files: []ingest.File{{Path: "bug.go"}}}
+	ts, _ := newTriageState(snap)
+	var stats Stats
+	for _, cand := range []Candidate{leakCand, resourceCand} {
+		if err := ts.process(ctx, st, &stats, cand); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+	}
+	primaries := ts.popReady()
+	if len(primaries) != 2 {
+		t.Fatalf("primaries = %d, want 2 (different defect_kind at a jaccard-similar, window-near location must NOT merge): %+v", len(primaries), primaries)
+	}
+	if stats.MergedWithinLens+stats.MergedCrossLens+stats.MergedRootCause != 0 {
+		t.Errorf("merges = within:%d cross:%d rootcause:%d, want all 0 (the kind mismatch must block every merge path)",
+			stats.MergedWithinLens, stats.MergedCrossLens, stats.MergedRootCause)
 	}
 }
 
@@ -2209,7 +2314,8 @@ func TestSweep_SameRootCauseMerge_SitesPersistedE2E(t *testing.T) {
 		return fmt.Sprintf(`{"file": "bug.go", "line": %d,`+
 			` "title": "utf8-truncation-site-%d",`+
 			` "description": %q,`+
-			` "severity": "high", "evidence": "truncation", "confidence": "high"}`,
+			` "severity": "high", "evidence": "truncation", "confidence": "high",`+
+			` "defect_kind": "bounds", "subject": "Truncate"}`,
 			line, line, truncDesc(line))
 	}
 

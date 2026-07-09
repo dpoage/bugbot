@@ -27,6 +27,11 @@ const (
 	// ScanImpactSweep is a standalone impact-sweep drain: it re-ranks unswept
 	// open findings by reachability, decoupled from the terminal Stage F.
 	ScanImpactSweep ScanKind = "impact-sweep"
+	// ScanReconcile is a standalone backlog-reconcile pass (bugbot-ezmx.4): it
+	// nominates candidate pairs among OPEN findings, runs them through the
+	// dedup arbiter seam, and merges confident duplicates. Runs no
+	// finder/verify stages.
+	ScanReconcile ScanKind = "reconcile"
 )
 
 // ScanRun records a single scan invocation. StatsJSON holds an opaque,

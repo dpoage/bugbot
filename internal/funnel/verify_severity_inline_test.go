@@ -36,7 +36,8 @@ func TestVerifyStream_InlineSeverityDownrank(t *testing.T) {
 
 	deadCand := `{"file": "main.go", "line": 4, "title": "nil deref of cfg in deadHelper",
 		"description": "cfg may be nil", "severity": "high",
-		"evidence": "deadHelper returns *cfg without a nil check", "confidence": "high"}`
+		"evidence": "deadHelper returns *cfg without a nil check", "confidence": "high",
+		"defect_kind": "nil-deref", "subject": "deadHelper"}`
 	finder := newScriptedClient().onSystemContains("nil-safety/error-handling", candJSON(deadCand))
 	verifier := newScriptedClient()
 	verifier.fallback = notRefutedJSON // every refuter seat votes not-refuted -> survives

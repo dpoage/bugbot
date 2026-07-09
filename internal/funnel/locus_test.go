@@ -3,6 +3,7 @@ package funnel
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
@@ -58,8 +59,28 @@ func TestLocusResolver_SymbolAnchoredAndLineStable(t *testing.T) {
 	}
 }
 
-// TestLocusResolver_FallsBackToLine covers the safe-degradation paths: no root,
-// a missing file, and an unsupported extension all yield the line fallback.
+// TestLocusResolver_SymbolLocusFormatUnchangedByContentAnchor pins the exact
+// byte-for-byte shape of the symbol-anchored ("S:") locus (bugbot-ezmx.1's
+// format) to prove bugbot-ezmx.5's content anchor is purely an ADDITIONAL
+// fallback tier and never touches the primary symbol path.
+func TestLocusResolver_SymbolLocusFormatUnchangedByContentAnchor(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(locusFixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lr := NewLocusResolver(dir)
+
+	const want = "S:definition.function\x00Foo"
+	if got := lr.Resolve("p.go", 4); got != want {
+		t.Fatalf("symbol locus format = %q, want %q", got, want)
+	}
+}
+
+// TestLocusResolver_FallsBackToLine covers the safe-degradation paths: no root
+// and a missing file both yield the bare line fallback (there is no source
+// text to anchor to). An unsupported extension still HAS a readable file, so
+// it degrades one step less: past the symbol anchor to the content anchor,
+// not all the way to the line.
 func TestLocusResolver_FallsBackToLine(t *testing.T) {
 	if got := NewLocusResolver("").Resolve("p.go", 10); got != "L:10" {
 		t.Errorf("empty-root resolve = %q, want L:10", got)
@@ -74,7 +95,167 @@ func TestLocusResolver_FallsBackToLine(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "data.txt"), []byte("hello\nworld\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := lr.Resolve("data.txt", 1); got != "L:1" {
-		t.Errorf("unsupported-extension resolve = %q, want L:1", got)
+	got := lr.Resolve("data.txt", 1)
+	if !strings.HasPrefix(got, "C:") {
+		t.Errorf("unsupported-extension resolve = %q, want a content anchor (C:...)", got)
+	}
+	if got2 := lr.Resolve("data.txt", 1); got2 != got {
+		t.Errorf("content anchor must be deterministic: %q vs %q", got, got2)
+	}
+}
+
+// TestLocusResolver_ContentAnchorStableUnderLineDrift is the headline fix for
+// bugbot-ezmx.5: non-declaration package-level text (here a comment; Go has
+// no bare statements at package scope, so a comment is the realistic
+// "no enclosing symbol" case) anchors to the implicated line's own
+// normalized text, so inserting unrelated lines ABOVE it — which shifts its
+// line number but not its content — leaves the locus, and therefore the
+// fingerprint, unchanged.
+func TestLocusResolver_ContentAnchorStableUnderLineDrift(t *testing.T) {
+	dir := t.TempDir()
+	const before = "package p\n\n// TODO: wire this up before release\n"
+	if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lr := NewLocusResolver(dir)
+	locusBefore := lr.Resolve("p.go", 3)
+	if strings.HasPrefix(locusBefore, "S:") || strings.HasPrefix(locusBefore, "L:") {
+		t.Fatalf("expected a content anchor for non-declaration package-level text, got %q", locusBefore)
+	}
+
+	// Insert two unrelated lines above the target; its line number shifts
+	// from 3 to 5, but its own text is untouched.
+	const after = "package p\n\nimport \"fmt\"\n\n// TODO: wire this up before release\n"
+	if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(after), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	locusAfter := lr.Resolve("p.go", 5)
+	if locusAfter != locusBefore {
+		t.Fatalf("content anchor must be stable under drift above the line: before %q, after %q", locusBefore, locusAfter)
+	}
+
+	// The fingerprint built from it must also be stable, matching the
+	// symbol-anchored case's guarantee.
+	fpBefore := domain.Fingerprint("nil-safety/error-handling", "p.go", locusBefore)
+	fpAfter := domain.Fingerprint("nil-safety/error-handling", "p.go", locusAfter)
+	if fpBefore != fpAfter {
+		t.Errorf("fingerprint must be stable across line drift for a content-anchored locus")
+	}
+}
+
+// TestLocusResolver_ContentAnchorDuplicateLineTieBreak pins the tie-break for
+// bugbot-ezmx.5's degenerate case: two lines in the same file that are
+// byte-for-byte identical after normalization (e.g. two unrelated `return
+// err` statements at package level, modeled here with a repeated comment)
+// must NOT collapse onto the same anchor — that would fold two distinct
+// defects into one fingerprint. The ordinal (nth occurrence of that exact
+// normalized text, counting from the top of the file) disambiguates them.
+func TestLocusResolver_ContentAnchorDuplicateLineTieBreak(t *testing.T) {
+	dir := t.TempDir()
+	const src = "package p\n\n// unreachable\nfunc other() {}\n// unreachable\n"
+	if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lr := NewLocusResolver(dir)
+
+	first := lr.Resolve("p.go", 3)
+	second := lr.Resolve("p.go", 5)
+	if first == second {
+		t.Fatalf("identical lines at different positions must not collide: both resolved to %q", first)
+	}
+	if !strings.HasSuffix(first, "#1") {
+		t.Errorf("first occurrence ordinal = %q, want suffix #1", first)
+	}
+	if !strings.HasSuffix(second, "#2") {
+		t.Errorf("second occurrence ordinal = %q, want suffix #2", second)
+	}
+	// Same content up to the "#" must match: both anchor the same hash, only
+	// the ordinal differs.
+	if first[:strings.LastIndex(first, "#")] != second[:strings.LastIndex(second, "#")] {
+		t.Errorf("duplicate lines must share the same content hash: %q vs %q", first, second)
+	}
+}
+
+// TestLocusResolver_ContentAnchorOrdinalShiftsWhenDuplicateInsertedBetween
+// pins the documented edge of the ordinal tie-break (see contentAnchor's
+// doc comment): inserting a NEW copy of an already-duplicated line BETWEEN
+// two existing occurrences shifts the ordinal of every occurrence from that
+// point on, unlike inserting unrelated content (which never does, per
+// TestLocusResolver_ContentAnchorStableUnderLineDrift). This is an accepted
+// trade-off, not a bug: it only bites an already-ambiguous duplicate line.
+func TestLocusResolver_ContentAnchorOrdinalShiftsWhenDuplicateInsertedBetween(t *testing.T) {
+	dir := t.TempDir()
+	const before = "package p\n\n// dup\nfunc a() {}\n// dup\nfunc b() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lr := NewLocusResolver(dir)
+
+	firstBefore := lr.Resolve("p.go", 3)  // "// dup", 1st occurrence
+	secondBefore := lr.Resolve("p.go", 5) // "// dup", 2nd occurrence
+	if !strings.HasSuffix(firstBefore, "#1") || !strings.HasSuffix(secondBefore, "#2") {
+		t.Fatalf("setup invariant: want ordinals #1/#2, got %q/%q", firstBefore, secondBefore)
+	}
+
+	// Insert a THIRD "// dup" line between the two existing occurrences. The
+	// second occurrence's line text is untouched but now has TWO equal lines
+	// ahead of it instead of one.
+	const after = "package p\n\n// dup\nfunc a() {}\n// dup\nfunc mid() {}\n// dup\nfunc b() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(after), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// firstBefore's line (3) is unaffected: still the 1st occurrence.
+	if got := lr.Resolve("p.go", 3); got != firstBefore {
+		t.Errorf("first occurrence must be unaffected by an insertion below it: got %q, want %q", got, firstBefore)
+	}
+	// The original second occurrence's TEXT is now at line 7 (shifted by the
+	// two inserted lines) and its ordinal has moved from #2 to #3.
+	movedSecond := lr.Resolve("p.go", 7)
+	if !strings.HasSuffix(movedSecond, "#3") {
+		t.Errorf("ordinal must shift to #3 when a duplicate is inserted ahead of it, got %q", movedSecond)
+	}
+	if movedSecond == secondBefore {
+		t.Errorf("shifted occurrence must NOT keep its pre-insertion anchor %q", secondBefore)
+	}
+}
+
+// TestLocusResolver_ContentAnchorCRLFEquivalence proves the content anchor is
+// line-ending-agnostic: strings.Fields (used by normalizeLocusLine) treats a
+// trailing "\r" as whitespace like any other, so a CRLF-saved file and its
+// LF-only equivalent hash to the identical anchor for the same line.
+func TestLocusResolver_ContentAnchorCRLFEquivalence(t *testing.T) {
+	lfDir := t.TempDir()
+	const lf = "package p\n\n// x := do(a, b)\n"
+	if err := os.WriteFile(filepath.Join(lfDir, "p.go"), []byte(lf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	crlfDir := t.TempDir()
+	const crlf = "package p\r\n\r\n// x := do(a, b)\r\n"
+	if err := os.WriteFile(filepath.Join(crlfDir, "p.go"), []byte(crlf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lfLocus := NewLocusResolver(lfDir).Resolve("p.go", 3)
+	crlfLocus := NewLocusResolver(crlfDir).Resolve("p.go", 3)
+	if lfLocus != crlfLocus {
+		t.Errorf("CRLF and LF variants of the same line must hash to the same anchor: %q vs %q", crlfLocus, lfLocus)
+	}
+}
+
+// TestLocusResolver_ContentAnchorBlankLineFallsBackToLine covers the other
+// degenerate case: a blank or whitespace-only implicated line carries no
+// distinguishing content, so hashing it would collide every blank line in
+// every file. The resolver falls all the way back to the line number instead
+// of minting a content anchor for it.
+func TestLocusResolver_ContentAnchorBlankLineFallsBackToLine(t *testing.T) {
+	dir := t.TempDir()
+	const src = "package p\n\n   \nvar x = 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lr := NewLocusResolver(dir)
+	if got := lr.Resolve("p.go", 3); got != "L:3" {
+		t.Errorf("blank-line resolve = %q, want L:3", got)
 	}
 }

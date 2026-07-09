@@ -47,7 +47,11 @@ Report ONLY concrete, confirmed bugs:
 
 Finding nothing is a valid and common outcome. Most files have no bugs in your assigned category. If you find nothing, return an empty list. An empty list is a correct, expected answer — do NOT pad it with weak or speculative entries to seem productive.
 
-For each real bug, report: the repo-relative file path, the 1-based line number of the defect, a short title, a description of the wrong behavior, the severity, the concrete evidence (the code path / lines that prove it), and your confidence.
+For each real bug, report: the repo-relative file path, the 1-based line number of the defect, a short title, a description of the wrong behavior, the severity, the concrete evidence (the code path / lines that prove it), your confidence, the defect_kind, and the subject.
+
+defect_kind is a closed category — pick exactly one of: nil-deref (dereferencing a value that can be nil/null), unchecked-error (an error/exception return that is ignored or swallowed), resource-leak (a handle, connection, lock, or memory that is never released on some path), race (a data race or other unsynchronized concurrent access), bounds (an out-of-range index, slice, or buffer access), injection (untrusted input reaches a command, query, or template unsanitized), contract-violation (a documented precondition/postcondition/invariant is broken), logic (a wrong result, calculation, or control-flow decision that does not fit the categories above), other (use ONLY when none of the previous eight genuinely fit). Two bugs at the same location with different defect_kind are treated as different bugs, so pick the one that best matches the actual failure mode — do not hedge.
+
+subject is the name of the function, method, or symbol where the defect lives (e.g. "Greeting" or "(*Handler).ServeHTTP") — the same symbol outline/read_symbol would show you as the enclosing declaration.
 
 Severity: critical = data loss / crash in normal use / security hole; high = crash or wrong result on a common path; medium = wrong result on an edge path; low = minor or hard-to-hit.
 Confidence: high = you traced it and it is clearly a bug; medium = strong evidence but one assumption remains; low = plausible but unconfirmed (these will be dropped, so prefer to confirm or omit).`
@@ -71,9 +75,11 @@ var candidatesSchema = json.RawMessage(`{
           "description": {"type": "string", "minLength": 1, "description": "What goes wrong and why."},
           "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
           "evidence": {"type": "string", "minLength": 1, "description": "The concrete code path / lines proving the bug is real and reachable."},
-          "confidence": {"type": "string", "enum": ["high", "medium", "low"]}
+          "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+          "defect_kind": {"type": "string", "enum": ["nil-deref", "unchecked-error", "resource-leak", "race", "bounds", "injection", "contract-violation", "logic", "other"], "description": "The closed defect category; pick the single closest match, 'other' only when none of the rest fit."},
+          "subject": {"type": "string", "minLength": 1, "description": "The function, method, or symbol name where the defect lives (e.g. 'Greeting' or '(*Handler).ServeHTTP')."}
         },
-        "required": ["file", "line", "title", "description", "severity", "evidence", "confidence"],
+        "required": ["file", "line", "title", "description", "severity", "evidence", "confidence", "defect_kind", "subject"],
         "additionalProperties": false
       }
     }
@@ -96,6 +102,13 @@ type rawCandidate struct {
 	Severity    string `json:"severity"`
 	Evidence    string `json:"evidence"`
 	Confidence  string `json:"confidence"`
+	// DefectKind is the closed taxonomy class (see domain.DefectKind); the
+	// schema's enum keeps this list in sync — see TestCandidatesSchema_
+	// DefectKindEnumMatchesDomain.
+	DefectKind string `json:"defect_kind"`
+	// Subject is the raw (un-normalized) symbol name the finder reported; it is
+	// normalized via domain.NormalizeSubject when minting the Fingerprint v3.
+	Subject string `json:"subject"`
 }
 
 // finderSystemPrompt composes the persona-seeded base with a lens: the

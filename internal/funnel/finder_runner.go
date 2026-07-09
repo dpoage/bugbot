@@ -164,6 +164,8 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 				Severity:    normalizeSeverity(domain.Severity(rc.Severity)),
 				Evidence:    rc.Evidence,
 				Confidence:  normalizeConfidence(domain.Confidence(rc.Confidence)),
+				DefectKind:  domain.DefectKind(rc.DefectKind),
+				Subject:     rc.Subject,
 			})
 		}
 		return cands, finderOK, outcome, nil, nil

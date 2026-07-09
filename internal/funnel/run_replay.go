@@ -63,6 +63,8 @@ func findingToCandidate(fi domain.Finding) Candidate {
 		Confidence:          domain.ConfidenceHigh,
 		Fingerprint:         fi.Fingerprint,
 		LocusKey:            fi.LocusKey, // recomputed in triage process(); carried for round-trip fidelity
+		DefectKind:          fi.DefectKind,
+		Subject:             fi.Subject,
 		CorroboratingLenses: fi.CorroboratingLenses,
 		Sites:               sites,
 		Reverify:            true,

@@ -189,6 +189,16 @@ const (
 	// windows and the summary is cached, so a generous 128 KB buys a
 	// well-grounded summary at a one-time-per-change cost.
 	DefaultCartographerInputBytes = 128 * 1024
+	// DefaultDedupArbiterCap is the per-scan cap on LLM dedup-arbiter
+	// invocations (bugbot-ezmx.2): a bounded cheap-model turn spent only on
+	// location collisions the jaccard gate could not resolve (same locus/kind,
+	// description similarity below mergeSimilarityThreshold). Collisions are a
+	// handful per scan, not one per candidate, so a modest cap bounds worst-case
+	// cost without materially limiting coverage; once exhausted, further
+	// collisions pass through unmerged (both findings kept — the safe default).
+	// Overridable via StageLimits in a future config knob if this proves too
+	// tight in practice; a plain constant is enough for the first cut.
+	DefaultDedupArbiterCap = 25
 )
 
 // cartographyInjectMaxPkgs and cartographyInjectMaxBytes bound the size of

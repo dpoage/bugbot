@@ -177,7 +177,7 @@ func TestDismissFlow(t *testing.T) {
 		t.Fatalf("AddSuppression: %v", err)
 	}
 
-	suppressed, err := st.IsSuppressed(ctx, a.Fingerprint)
+	suppressed, err := st.IsSuppressed(ctx, a.Fingerprint, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

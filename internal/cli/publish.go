@@ -117,7 +117,11 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 		return fmt.Errorf("publish: list open findings: %w", err)
 	}
 
-	// Also load fixed+dismissed to drive close actions.
+	// Also load fixed+dismissed+superseded to drive close actions. Superseded
+	// (backlog reconcile, bugbot-ezmx.4) is a merged-away duplicate, closed
+	// exactly like fixed/dismissed so its GitHub issue does not stay open
+	// indefinitely after the underlying defect is now tracked under the
+	// canonical finding.
 	fixedFindings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusFixed})
 	if err != nil {
 		return fmt.Errorf("publish: list fixed findings: %w", err)
@@ -125,6 +129,10 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 	dismissedFindings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusDismissed})
 	if err != nil {
 		return fmt.Errorf("publish: list dismissed findings: %w", err)
+	}
+	supersededFindings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusSuperseded})
+	if err != nil {
+		return fmt.Errorf("publish: list superseded findings: %w", err)
 	}
 
 	published, err := st.ListPublishedIssues(ctx)
@@ -136,7 +144,7 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 		publishedMap[pi.Fingerprint] = pi
 	}
 
-	plan := planPublish(openFindings, fixedFindings, dismissedFindings, publishedMap, tierMin, cfg.CloseOnFixed)
+	plan := planPublish(openFindings, fixedFindings, dismissedFindings, supersededFindings, publishedMap, tierMin, cfg.CloseOnFixed)
 
 	// Resolve the repo URL once; tolerate failure (degrade: no permalinks).
 	repoURL := resolveRepoURL(ctx, gh)
@@ -258,7 +266,7 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			// NOT re-post the comment on every subsequent cycle — the resume
 			// path (skipComment) goes straight to the PATCH.
 			if !act.skipComment {
-				if err := ghCommentIssue(ctx, gh, act.issueNumber, autoCloseComment(string(act.finding.Status))); err != nil {
+				if err := ghCommentIssue(ctx, gh, act.issueNumber, autoCloseComment(act.finding)); err != nil {
 					if isGHGoneOrNotFound(err) {
 						// Issue is already gone — close is a no-op success.
 						// Drop the stale row and move on; do not abort the run.
@@ -383,8 +391,9 @@ func adoptAnchor(f domain.Finding, anchors []pubAnchor) (pubAnchor, bool) {
 	return pubAnchor{}, false
 }
 
-// planPublish is the pure reconciler: given open/fixed/dismissed findings and
-// the current published_issues map, it decides what to do with each finding.
+// planPublish is the pure reconciler: given open/fixed/dismissed/superseded
+// findings and the current published_issues map, it decides what to do with
+// each finding.
 //
 // Inclusion rule: a finding is considered for publication when
 // Tier <= tierMin (lower = stronger: 0=fix-witnessed, 1=reproduced, 2=verified,
@@ -397,10 +406,11 @@ func adoptAnchor(f domain.Finding, anchors []pubAnchor) (pubAnchor, bool) {
 // every finding whose metadata was touched. Document the trade-off and accept
 // it; a true body-diff would require a gh read per issue.
 //
-// Close rule: if close_on_fixed is true, any finding with status fixed or
-// dismissed whose published row state is "open" gets a close action.
+// Close rule: if close_on_fixed is true, any finding with status fixed,
+// dismissed, or superseded (backlog reconcile, bugbot-ezmx.4 — a merged-away
+// duplicate) whose published row state is "open" gets a close action.
 func planPublish(
-	open, fixed, dismissed []domain.Finding,
+	open, fixed, dismissed, superseded []domain.Finding,
 	published map[string]store.PublishedIssue,
 	tierMin int,
 	closeOnFixed bool,
@@ -450,12 +460,18 @@ func planPublish(
 		return actions
 	}
 
-	// Close actions for fixed/dismissed findings with published rows that
-	// haven't completed a close. "closing" rows resume without re-posting the
-	// auto-close comment (it already landed). "pending" rows are skipped: there
-	// is no known issue number to close, and the finding is gone — the rare
-	// interrupted-create-then-fixed overlap is left for a future open cycle.
-	for _, f := range append(fixed, dismissed...) {
+	// Close actions for fixed/dismissed/superseded findings with published
+	// rows that haven't completed a close. "closing" rows resume without
+	// re-posting the auto-close comment (it already landed). "pending" rows
+	// are skipped: there is no known issue number to close, and the finding
+	// is gone — the rare interrupted-create-then-closed overlap is left for a
+	// future open cycle. autoCloseComment renders a duplicate-specific note
+	// for superseded findings, referencing the canonical fingerprint.
+	closeCandidates := make([]domain.Finding, 0, len(fixed)+len(dismissed)+len(superseded))
+	closeCandidates = append(closeCandidates, fixed...)
+	closeCandidates = append(closeCandidates, dismissed...)
+	closeCandidates = append(closeCandidates, superseded...)
+	for _, f := range closeCandidates {
 		pi, found := published[f.Fingerprint]
 		if !found || pi.State == store.IssueStateClosed || pi.State == store.IssueStatePending {
 			continue
@@ -1072,11 +1088,22 @@ func ghUpdateIssue(ctx context.Context, gh engine.GHRunner, number int, body str
 	return nil
 }
 
-// autoCloseComment renders the timeline comment posted before closing.
-func autoCloseComment(status string) string {
+// autoCloseComment renders the timeline comment posted before closing. A
+// finding closed as StatusSuperseded (backlog reconcile, bugbot-ezmx.4)
+// gets a duplicate-specific note referencing the canonical fingerprint --
+// prose provenance for the operator only; the close DECISION was already
+// made by planPublish keying on Status, never on this comment text (repo
+// invariant: machine decisions never key on prose).
+func autoCloseComment(f domain.Finding) string {
+	if f.Status == domain.StatusSuperseded && f.SupersededBy != "" {
+		return fmt.Sprintf(
+			"Auto-closed by bugbot: this finding was merged as a duplicate of another finding (canonical fingerprint: %s).",
+			f.SupersededBy,
+		)
+	}
 	return fmt.Sprintf(
 		"Auto-closed by bugbot: this finding is no longer reported (status: %s).",
-		status,
+		f.Status,
 	)
 }
 

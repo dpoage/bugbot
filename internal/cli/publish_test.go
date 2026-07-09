@@ -48,6 +48,14 @@ func makeDismissedFinding(fp string) domain.Finding {
 	return f
 }
 
+func makeSupersededFinding(fp, canonicalFP string) domain.Finding {
+	f := makeOpenFinding(fp, 2, time.Now())
+	f.Status = domain.StatusSuperseded
+	f.SupersededBy = canonicalFP
+	f.SupersededReason = "backlog reconcile: merged into " + canonicalFP + " (dedup arbiter yes)"
+	return f
+}
+
 func makePublishedIssue(fp string, issueNumber int, state store.IssueState, updatedAt time.Time) store.PublishedIssue {
 	return store.PublishedIssue{
 		Fingerprint: fp,
@@ -62,7 +70,7 @@ func makePublishedIssue(fp string, issueNumber int, state store.IssueState, upda
 func TestPlanPublish_Create(t *testing.T) {
 	now := time.Now()
 	open := []domain.Finding{makeOpenFinding("fp1", 2, now)}
-	actions := planPublish(open, nil, nil, nil, 2, true)
+	actions := planPublish(open, nil, nil, nil, nil, 2, true)
 
 	if len(actions) != 1 {
 		t.Errorf("expected 1 action, got %d: %+v", len(actions), actions)
@@ -78,7 +86,7 @@ func TestPlanPublish_Skip(t *testing.T) {
 	published := map[string]store.PublishedIssue{
 		"fp1": makePublishedIssue("fp1", 10, store.IssueStateOpen, t0.Add(time.Second)),
 	}
-	actions := planPublish(open, nil, nil, published, 2, true)
+	actions := planPublish(open, nil, nil, nil, published, 2, true)
 
 	if len(actions) != 1 {
 		t.Errorf("expected 1 action, got %d: %+v", len(actions), actions)
@@ -95,7 +103,7 @@ func TestPlanPublish_Update(t *testing.T) {
 	published := map[string]store.PublishedIssue{
 		"fp1": makePublishedIssue("fp1", 10, store.IssueStateOpen, t0),
 	}
-	actions := planPublish(open, nil, nil, published, 2, true)
+	actions := planPublish(open, nil, nil, nil, published, 2, true)
 
 	if len(actions) != 1 {
 		t.Errorf("expected 1 action, got %d: %+v", len(actions), actions)
@@ -115,7 +123,7 @@ func TestPlanPublish_TierFiltering(t *testing.T) {
 		makeOpenFinding("fp2", 2, now),
 		makeOpenFinding("fp3", 3, now), // should be excluded
 	}
-	actions := planPublish(open, nil, nil, nil, 2, true)
+	actions := planPublish(open, nil, nil, nil, nil, 2, true)
 
 	// Expect 3 creates (T0, T1, T2), not T3.
 	creates := 0
@@ -138,7 +146,7 @@ func TestPlanPublish_Close(t *testing.T) {
 	published := map[string]store.PublishedIssue{
 		"fp1": makePublishedIssue("fp1", 5, store.IssueStateOpen, time.Now()),
 	}
-	actions := planPublish(nil, fixed, nil, published, 2, true)
+	actions := planPublish(nil, fixed, nil, nil, published, 2, true)
 
 	if len(actions) != 1 {
 		t.Errorf("expected 1 action, got %d: %+v", len(actions), actions)
@@ -156,12 +164,52 @@ func TestPlanPublish_DismissedClose(t *testing.T) {
 	published := map[string]store.PublishedIssue{
 		"fp1": makePublishedIssue("fp1", 7, store.IssueStateOpen, time.Now()),
 	}
-	actions := planPublish(nil, nil, dismissed, published, 2, true)
+	actions := planPublish(nil, nil, dismissed, nil, published, 2, true)
 
 	if len(actions) != 1 {
 		t.Errorf("expected 1 action, got %d: %+v", len(actions), actions)
 	} else if _, ok := actions[0].(publishClose); !ok {
 		t.Errorf("expected publishClose for dismissed, got %T", actions[0])
+	}
+}
+
+// TestPlanPublish_SupersededClose: a superseded (backlog-reconcile
+// merged-away duplicate) finding with an open published row -> close, with a
+// duplicate-specific comment referencing the canonical fingerprint. Proves
+// the ezmx.4 review's blocking finding (superseded findings never closed
+// their GitHub issue) is fixed.
+func TestPlanPublish_SupersededClose(t *testing.T) {
+	const canonicalFP = "canonical-fp-abc123"
+	superseded := []domain.Finding{makeSupersededFinding("fp1", canonicalFP)}
+	published := map[string]store.PublishedIssue{
+		"fp1": makePublishedIssue("fp1", 9, store.IssueStateOpen, time.Now()),
+	}
+	actions := planPublish(nil, nil, nil, superseded, published, 2, true)
+
+	if len(actions) != 1 {
+		t.Fatalf("expected 1 action, got %d: %+v", len(actions), actions)
+	}
+	act, ok := actions[0].(publishClose)
+	if !ok {
+		t.Fatalf("expected publishClose for superseded, got %T", actions[0])
+	}
+	if act.issueNumber != 9 {
+		t.Errorf("issueNumber = %d, want 9", act.issueNumber)
+	}
+	comment := autoCloseComment(act.finding)
+	if !strings.Contains(comment, canonicalFP) {
+		t.Errorf("autoCloseComment(%+v) = %q, want it to reference canonical fingerprint %q", act.finding, comment, canonicalFP)
+	}
+}
+
+// TestAutoCloseComment_NonSupersededOmitsCanonicalFingerprint proves the
+// duplicate-specific wording is superseded-only: a plain fixed/dismissed
+// close comment never mentions SupersededBy (which is empty for those
+// statuses in the first place).
+func TestAutoCloseComment_NonSupersededOmitsCanonicalFingerprint(t *testing.T) {
+	comment := autoCloseComment(makeFixedFinding("fp1"))
+	if strings.Contains(comment, "canonical fingerprint") {
+		t.Errorf("autoCloseComment for a fixed finding should not mention a canonical fingerprint, got %q", comment)
 	}
 }
 
@@ -171,7 +219,7 @@ func TestPlanPublish_CloseOnFixedFalse(t *testing.T) {
 	published := map[string]store.PublishedIssue{
 		"fp1": makePublishedIssue("fp1", 5, store.IssueStateOpen, time.Now()),
 	}
-	actions := planPublish(nil, fixed, nil, published, 2, false /* close_on_fixed=false */)
+	actions := planPublish(nil, fixed, nil, nil, published, 2, false /* close_on_fixed=false */)
 
 	for _, a := range actions {
 		if _, ok := a.(publishClose); ok {
@@ -186,7 +234,7 @@ func TestPlanPublish_AlreadyClosed(t *testing.T) {
 	published := map[string]store.PublishedIssue{
 		"fp1": makePublishedIssue("fp1", 5, store.IssueStateClosed, time.Now()),
 	}
-	actions := planPublish(nil, fixed, nil, published, 2, true)
+	actions := planPublish(nil, fixed, nil, nil, published, 2, true)
 
 	for _, a := range actions {
 		if _, ok := a.(publishClose); ok {
@@ -1615,7 +1663,7 @@ func TestPlanPublish_AdoptsDriftedRediscovery(t *testing.T) {
 	open := []domain.Finding{anchor, drifted, otherFile, farLine, unrelated}
 
 	act := map[string]publishAction{}
-	for _, a := range planPublish(open, nil, nil, published, 2, false) {
+	for _, a := range planPublish(open, nil, nil, nil, published, 2, false) {
 		switch v := a.(type) {
 		case publishAdopt:
 			act[v.finding.Fingerprint] = v

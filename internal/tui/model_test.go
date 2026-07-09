@@ -324,7 +324,9 @@ func TestView_GoldenCockpitActive(t *testing.T) {
 	// Use a wide terminal so pane content is not wrapped at 24-char column boundaries.
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
 	m = next.(Model)
-	m = sendFrame(m, baseFrame())
+	fr := baseFrame()
+	fr.Snapshot.Counts = progress.Counts{Hypothesized: 12, Triaged: 9, Verified: 3, Killed: 2, DuplicateRate: 0.25}
+	m = sendFrame(m, fr)
 
 	got := stripANSI(m.View())
 	for _, want := range []string{
@@ -335,6 +337,12 @@ func TestView_GoldenCockpitActive(t *testing.T) {
 		"candidate A",
 		"reading file",
 		"World state",
+		// bugbot-ezmx.8: the cockpit's stats line carries the same
+		// funnel Stats -> progress.Status.Counts plumbing status.json
+		// uses, including DuplicateRate. Pane wrapping can split the line,
+		// so assert the prefix and the duplicate-rate suffix separately.
+		"stages: hypothesized=12 triaged=9",
+		"dup_rate=0.25",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("golden active view missing %q, got:\n%s", want, got)
