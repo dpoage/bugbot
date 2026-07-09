@@ -49,6 +49,12 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 	if err := st.UpdateStatus(ctx, oldFP, domain.StatusDismissed, "false positive"); err != nil {
 		t.Fatalf("dismiss: %v", err)
 	}
+	if _, err := st.EnqueueRepro(ctx, oldFP); err != nil {
+		t.Fatalf("enqueue repro: %v", err)
+	}
+	if err := st.UpsertPublishedIssue(ctx, oldFP, 42, IssueStateOpen); err != nil {
+		t.Fatalf("upsert published issue: %v", err)
+	}
 
 	resolve := fixedLocusResolver(map[int]string{42: locus})
 	n, err := st.RenameFindingIdentity(ctx, oldFile, newFile, resolve)
@@ -92,6 +98,27 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 	}
 	if !sup {
 		t.Fatal("suppression should carry forward to the new fingerprint")
+	}
+
+	// Repro-attempts queue row and published-issue link both carry forward
+	// onto the new fingerprint so ReproContradicted and the GitHub issue link
+	// survive the rename instead of orphaning under a fingerprint nothing
+	// looks up again.
+	if _, err := st.GetReproAttempt(ctx, oldFP); err != ErrNotFound {
+		t.Fatalf("old fingerprint's repro_attempts row should be gone, got err=%v", err)
+	}
+	if _, err := st.GetReproAttempt(ctx, newFP); err != nil {
+		t.Fatalf("GetReproAttempt(new): %v", err)
+	}
+	if _, err := st.GetPublishedIssue(ctx, oldFP); err != ErrNotFound {
+		t.Fatalf("old fingerprint's published_issues row should be gone, got err=%v", err)
+	}
+	pub, err := st.GetPublishedIssue(ctx, newFP)
+	if err != nil {
+		t.Fatalf("GetPublishedIssue(new): %v", err)
+	}
+	if pub.IssueNumber != 42 {
+		t.Fatalf("published issue number should carry forward, got %d", pub.IssueNumber)
 	}
 
 	// A "rescan" at the new path must not resurrect it as a duplicate open
