@@ -67,16 +67,16 @@ func (s *Store) RenameFindingIdentity(ctx context.Context, oldFile, newFile stri
 		for rows.Next() {
 			var m match
 			if serr := rows.Scan(&m.id, &m.fingerprint, &m.lens, &m.line, &m.defectKind, &m.subject); serr != nil {
-				rows.Close()
+				_ = rows.Close()
 				return serr
 			}
 			matches = append(matches, m)
 		}
 		if rerr := rows.Err(); rerr != nil {
-			rows.Close()
+			_ = rows.Close()
 			return rerr
 		}
-		rows.Close()
+		_ = rows.Close()
 
 		now := nowUTC().Format(timeLayout)
 		for _, m := range matches {

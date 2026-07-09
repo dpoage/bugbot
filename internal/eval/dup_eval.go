@@ -248,7 +248,7 @@ func writeCorpusSources(pairs []DupPair) (root string, cleanup func()) {
 func (r *DupEvalResult) String() string {
 	var b strings.Builder
 	tw := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "channel\tpairs\ttp\tfp\tfn\ttn\tprecision\trecall")
+	_, _ = fmt.Fprintln(tw, "channel\tpairs\ttp\tfp\tfn\ttn\tprecision\trecall")
 
 	channels := make([]string, 0, len(r.ByChannel))
 	for c := range r.ByChannel {
@@ -259,7 +259,7 @@ func (r *DupEvalResult) String() string {
 		c := DupChannel(cs)
 		t := r.ByChannel[c]
 		n := t.TP + t.FP + t.FN + t.TN
-		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%.2f\t%.2f\n",
+		_, _ = fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%.2f\t%.2f\n",
 			c, n, t.TP, t.FP, t.FN, t.TN, precision(t.TP, t.FP), recall(t.TP, t.FN))
 	}
 	_ = tw.Flush()
