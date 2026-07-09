@@ -109,11 +109,14 @@ func (lr *LocusResolver) enclosing(file string, line int) (treesitter.OutlineEnt
 // anchor collisions between distinct defects that happen to sit on
 // identical lines (e.g. two unrelated `return err` statements at
 // package level) — without it they would fold into one fingerprint.
-// Because it only counts EQUAL-content lines, inserting unrelated lines
-// above the implicated line never changes it, which is what keeps the
-// anchor stable under drift; only inserting another copy of the SAME
-// line's content above it can shift the ordinal, an accepted, documented
-// edge of the tie-break (see locus_test.go).
+// Because it only counts EQUAL-content lines, editing unrelated lines above
+// the implicated line never changes it, which is what keeps the anchor
+// stable under ordinary drift; only a change that alters how many prior
+// lines share this line's exact normalized text — inserting, deleting, or
+// editing a neighbor INTO or OUT OF identical content — can shift the
+// ordinal. That is an accepted, documented edge of the tie-break: it only
+// bites when the file already contains duplicate lines, and only for a
+// duplicate whose relative order changes (see locus_test.go).
 func (lr *LocusResolver) contentAnchor(file string, line int) (string, bool) {
 	if lr.root == "" || line < 1 {
 		return "", false

@@ -176,6 +176,73 @@ func TestLocusResolver_ContentAnchorDuplicateLineTieBreak(t *testing.T) {
 	}
 }
 
+// TestLocusResolver_ContentAnchorOrdinalShiftsWhenDuplicateInsertedBetween
+// pins the documented edge of the ordinal tie-break (see contentAnchor's
+// doc comment): inserting a NEW copy of an already-duplicated line BETWEEN
+// two existing occurrences shifts the ordinal of every occurrence from that
+// point on, unlike inserting unrelated content (which never does, per
+// TestLocusResolver_ContentAnchorStableUnderLineDrift). This is an accepted
+// trade-off, not a bug: it only bites an already-ambiguous duplicate line.
+func TestLocusResolver_ContentAnchorOrdinalShiftsWhenDuplicateInsertedBetween(t *testing.T) {
+	dir := t.TempDir()
+	const before = "package p\n\n// dup\nfunc a() {}\n// dup\nfunc b() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lr := NewLocusResolver(dir)
+
+	firstBefore := lr.Resolve("p.go", 3)  // "// dup", 1st occurrence
+	secondBefore := lr.Resolve("p.go", 5) // "// dup", 2nd occurrence
+	if !strings.HasSuffix(firstBefore, "#1") || !strings.HasSuffix(secondBefore, "#2") {
+		t.Fatalf("setup invariant: want ordinals #1/#2, got %q/%q", firstBefore, secondBefore)
+	}
+
+	// Insert a THIRD "// dup" line between the two existing occurrences. The
+	// second occurrence's line text is untouched but now has TWO equal lines
+	// ahead of it instead of one.
+	const after = "package p\n\n// dup\nfunc a() {}\n// dup\nfunc mid() {}\n// dup\nfunc b() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(after), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// firstBefore's line (3) is unaffected: still the 1st occurrence.
+	if got := lr.Resolve("p.go", 3); got != firstBefore {
+		t.Errorf("first occurrence must be unaffected by an insertion below it: got %q, want %q", got, firstBefore)
+	}
+	// The original second occurrence's TEXT is now at line 7 (shifted by the
+	// two inserted lines) and its ordinal has moved from #2 to #3.
+	movedSecond := lr.Resolve("p.go", 7)
+	if !strings.HasSuffix(movedSecond, "#3") {
+		t.Errorf("ordinal must shift to #3 when a duplicate is inserted ahead of it, got %q", movedSecond)
+	}
+	if movedSecond == secondBefore {
+		t.Errorf("shifted occurrence must NOT keep its pre-insertion anchor %q", secondBefore)
+	}
+}
+
+// TestLocusResolver_ContentAnchorCRLFEquivalence proves the content anchor is
+// line-ending-agnostic: strings.Fields (used by normalizeLocusLine) treats a
+// trailing "\r" as whitespace like any other, so a CRLF-saved file and its
+// LF-only equivalent hash to the identical anchor for the same line.
+func TestLocusResolver_ContentAnchorCRLFEquivalence(t *testing.T) {
+	lfDir := t.TempDir()
+	const lf = "package p\n\n// x := do(a, b)\n"
+	if err := os.WriteFile(filepath.Join(lfDir, "p.go"), []byte(lf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	crlfDir := t.TempDir()
+	const crlf = "package p\r\n\r\n// x := do(a, b)\r\n"
+	if err := os.WriteFile(filepath.Join(crlfDir, "p.go"), []byte(crlf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lfLocus := NewLocusResolver(lfDir).Resolve("p.go", 3)
+	crlfLocus := NewLocusResolver(crlfDir).Resolve("p.go", 3)
+	if lfLocus != crlfLocus {
+		t.Errorf("CRLF and LF variants of the same line must hash to the same anchor: %q vs %q", crlfLocus, lfLocus)
+	}
+}
+
 // TestLocusResolver_ContentAnchorBlankLineFallsBackToLine covers the other
 // degenerate case: a blank or whitespace-only implicated line carries no
 // distinguishing content, so hashing it would collide every blank line in
