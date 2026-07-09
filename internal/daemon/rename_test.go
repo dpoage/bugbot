@@ -90,7 +90,9 @@ func TestDaemonPollRewritesRenamedFindingIdentity(t *testing.T) {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	newFP := domain.Fingerprint("nil-deref", newFile, locus)
+	// Pre-v3 seeded row (empty DefectKind/Subject): rename rewrites onto the
+	// v3-scheme fingerprint with kind/subject passed through as empty.
+	newFP := domain.FingerprintV3(newFile, locus, "", "")
 
 	// Old identity gone.
 	if _, err := st.GetFindingByFingerprint(context.Background(), oldFP); err != store.ErrNotFound {
@@ -111,7 +113,7 @@ func TestDaemonPollRewritesRenamedFindingIdentity(t *testing.T) {
 	if got.Status != domain.StatusDismissed {
 		t.Fatalf("dismissed status must survive the rename, got %q", got.Status)
 	}
-	sup, err := st.IsSuppressed(context.Background(), newFP)
+	sup, err := st.IsSuppressed(context.Background(), newFP, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +177,8 @@ func TestDaemonApplyRenamesIdempotentOnReplay(t *testing.T) {
 	d.applyRenames(ctx, base, head)
 	d.applyRenames(ctx, base, head) // replay: must be a no-op, not an error
 
-	newFP := domain.Fingerprint("nil-deref", newFile, locus)
+	// Pre-v3 seeded row: same v3-scheme-with-empty-kind/subject rewrite.
+	newFP := domain.FingerprintV3(newFile, locus, "", "")
 	got, err := st.GetFindingByFingerprint(ctx, newFP)
 	if err != nil {
 		t.Fatalf("GetFindingByFingerprint(new): %v", err)

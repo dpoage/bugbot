@@ -275,11 +275,15 @@ func runWithClients(ctx context.Context, c Case, clients funnel.RoleClients) (*C
 
 	// Pre-suppress configured fingerprints, resolving the enclosing-symbol locus
 	// against the same repo root the funnel uses so the seeded fingerprint matches
-	// what triage computes for the bug at run time.
+	// what triage computes for the bug at run time. Uses FingerprintV3 with the
+	// SAME (DefaultEvalDefectKind, DefaultEvalSubject) Candidates() defaults to
+	// when a case's finder fixture doesn't override defect_kind/subject — lens
+	// is deliberately not part of v3 identity, so s.Lens is unused here (kept
+	// on Suppression for documentation/matching a real dismissal's context).
 	if len(c.Suppress) > 0 {
 		lr := funnel.NewLocusResolver(repo.Root())
 		for _, s := range c.Suppress {
-			fp := domain.Fingerprint(s.Lens, s.File, lr.Resolve(s.File, s.Line))
+			fp := domain.FingerprintV3(s.File, lr.Resolve(s.File, s.Line), DefaultEvalDefectKind, DefaultEvalSubject)
 			if err := st.AddSuppression(ctx, fp, s.Reason); err != nil {
 				return nil, fmt.Errorf("eval: pre-suppress %q in %q: %w", s.Title, c.Name, err)
 			}

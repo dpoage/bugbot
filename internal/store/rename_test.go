@@ -31,7 +31,9 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 
 	const oldFile, newFile = "internal/old/handler.go", "internal/new/handler.go"
 	locus := "S:func\x00Handle"
-	oldFP := domain.Fingerprint("nil-safety", oldFile, locus)
+	const kind = domain.DefectNilDeref
+	const subject = "Handle"
+	oldFP := domain.FingerprintV3(oldFile, locus, kind, subject)
 
 	seeded, err := st.UpsertFinding(ctx, domain.Finding{
 		Fingerprint: oldFP,
@@ -42,6 +44,8 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 		Lens:        "nil-safety",
 		File:        oldFile,
 		Line:        42,
+		DefectKind:  kind,
+		Subject:     subject,
 	})
 	if err != nil {
 		t.Fatalf("seed finding: %v", err)
@@ -65,7 +69,7 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 		t.Fatalf("expected 1 finding rewritten, got %d", n)
 	}
 
-	newFP := domain.Fingerprint("nil-safety", newFile, locus)
+	newFP := domain.FingerprintV3(newFile, locus, kind, subject)
 	if newFP == oldFP {
 		t.Fatalf("test setup invalid: old and new fingerprints must differ")
 	}
@@ -74,11 +78,12 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 	if _, err := st.GetFindingByFingerprint(ctx, oldFP); err != ErrNotFound {
 		t.Fatalf("old fingerprint should be gone, got err=%v", err)
 	}
-	if sup, _ := st.IsSuppressed(ctx, oldFP); sup {
+	if sup, _ := st.IsSuppressed(ctx, oldFP, ""); sup {
 		t.Fatal("old fingerprint should no longer be marked suppressed")
 	}
 
-	// New identity carries the row and the dismissal forward.
+	// New identity carries the row, its defect_kind/subject, and the
+	// dismissal forward.
 	got, err := st.GetFindingByFingerprint(ctx, newFP)
 	if err != nil {
 		t.Fatalf("GetFindingByFingerprint(new): %v", err)
@@ -92,7 +97,10 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 	if got.Status != domain.StatusDismissed {
 		t.Fatalf("dismissed status should survive rename, got %q", got.Status)
 	}
-	sup, err := st.IsSuppressed(ctx, newFP)
+	if got.DefectKind != kind || got.Subject != subject {
+		t.Fatalf("defect_kind/subject must survive rename unchanged: got kind=%q subject=%q", got.DefectKind, got.Subject)
+	}
+	sup, err := st.IsSuppressed(ctx, newFP, "")
 	if err != nil {
 		t.Fatalf("IsSuppressed(new): %v", err)
 	}
@@ -133,6 +141,8 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 		File:        newFile,
 		Line:        42,
 		Status:      domain.StatusOpen,
+		DefectKind:  kind,
+		Subject:     subject,
 	})
 	if err != nil {
 		t.Fatalf("rescan upsert: %v", err)
@@ -161,7 +171,7 @@ func TestRenameFindingIdentity_IdempotentOnReplay(t *testing.T) {
 
 	const oldFile, newFile = "pkg/a.go", "pkg/b.go"
 	locus := "L:10"
-	oldFP := domain.Fingerprint("race", oldFile, locus)
+	oldFP := domain.Fingerprint("race", oldFile, locus) // pre-v3 row: empty DefectKind/Subject
 	seeded, err := st.UpsertFinding(ctx, domain.Finding{
 		Fingerprint: oldFP,
 		LocusKey:    domain.LocusKey(oldFile, locus),
@@ -196,7 +206,10 @@ func TestRenameFindingIdentity_IdempotentOnReplay(t *testing.T) {
 		t.Fatalf("expected 0 rewrites on replay, got %d", n2)
 	}
 
-	newFP := domain.Fingerprint("race", newFile, locus)
+	// A pre-v3 row (empty DefectKind/Subject) rewrites onto the v3-scheme
+	// fingerprint with kind/subject passed through as empty — the correct
+	// value for a row that never had structured identity (see rename.go).
+	newFP := domain.FingerprintV3(newFile, locus, "", "")
 	got, err := st.GetFindingByFingerprint(ctx, newFP)
 	if err != nil {
 		t.Fatalf("GetFindingByFingerprint(new): %v", err)

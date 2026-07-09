@@ -135,7 +135,7 @@ const (
 	fixtureFile = "bug.go"
 	fixtureLine = 3
 
-	candidateJSON = `{"candidates":[{"file":"bug.go","line":3,"title":"possible nil dereference","description":"x may be nil here","severity":"high","evidence":"no guard before use","confidence":"high"}]}`
+	candidateJSON = `{"candidates":[{"file":"bug.go","line":3,"title":"possible nil dereference","description":"x may be nil here","severity":"high","evidence":"no guard before use","confidence":"high","defect_kind":"nil-deref","subject":"f"}]}`
 	emptyJSON     = `{"candidates":[]}`
 
 	notRefutedJSON = `{"refuted":false,"reasoning":"the nil path is reachable and unguarded","confidence":"high"}`

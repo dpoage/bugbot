@@ -9,12 +9,20 @@ import (
 
 // RenameFindingIdentity rewrites the stored identity of every finding whose
 // file matches oldFile to reflect newFile: the file column, the fingerprint,
-// and the locus_key are recomputed via domain.Fingerprint/domain.LocusKey (the
-// same identity helpers a live scan calls), using resolve to re-derive the
-// enclosing-symbol locus at the finding's stored line under its new path.
-// resolve is normally funnel.NewLocusResolver(repoRoot).Resolve — accepted as
-// a plain func so the store package stays free of a dependency on
-// funnel/treesitter.
+// and the locus_key are recomputed via domain.FingerprintV3/domain.LocusKey
+// (the same identity helpers a live scan calls), using resolve to re-derive
+// the enclosing-symbol locus at the finding's stored line under its new path.
+// The finding's own stored defect_kind and subject are carried through
+// verbatim into FingerprintV3 — a pre-v3 row (empty defect_kind/subject,
+// persisted before bugbot-ezmx.1) passes them through as empty strings, which
+// is the correct v3-scheme value for that row (it matches what triage mints
+// for a reconstructed pre-v3 candidate; see triage_streaming.go's
+// `!c.Reverify` guard). The v2 domain.Fingerprint is deliberately NOT used
+// here even as a fallback: every fingerprint minted by a live scan under this
+// bead is v3-scheme, so rewriting to v2 would silently revert identity and
+// break the very convergence this bead exists to establish. resolve is
+// normally funnel.NewLocusResolver(repoRoot).Resolve — accepted as a plain
+// func so the store package stays free of a dependency on funnel/treesitter.
 //
 // Path participates in Fingerprint and LocusKey (internal/domain), so without
 // this a git rename silently mints a fresh identity for unchanged code: the
@@ -44,18 +52,18 @@ func (s *Store) RenameFindingIdentity(ctx context.Context, oldFile, newFile stri
 	n := 0
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		rows, qerr := tx.QueryContext(ctx,
-			`SELECT id, fingerprint, lens, line FROM findings WHERE file = ?`, oldFile)
+			`SELECT id, fingerprint, lens, line, defect_kind, subject FROM findings WHERE file = ?`, oldFile)
 		if qerr != nil {
 			return qerr
 		}
 		type match struct {
-			id, fingerprint, lens string
-			line                  int
+			id, fingerprint, lens, defectKind, subject string
+			line                                       int
 		}
 		var matches []match
 		for rows.Next() {
 			var m match
-			if serr := rows.Scan(&m.id, &m.fingerprint, &m.lens, &m.line); serr != nil {
+			if serr := rows.Scan(&m.id, &m.fingerprint, &m.lens, &m.line, &m.defectKind, &m.subject); serr != nil {
 				rows.Close()
 				return serr
 			}
@@ -70,7 +78,7 @@ func (s *Store) RenameFindingIdentity(ctx context.Context, oldFile, newFile stri
 		now := nowUTC().Format(timeLayout)
 		for _, m := range matches {
 			locus := resolve(newFile, m.line)
-			newFP := domain.Fingerprint(m.lens, newFile, locus)
+			newFP := domain.FingerprintV3(newFile, locus, domain.DefectKind(m.defectKind), m.subject)
 			newLK := domain.LocusKey(newFile, locus)
 
 			if _, err := tx.ExecContext(ctx,
