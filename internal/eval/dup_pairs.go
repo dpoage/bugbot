@@ -412,12 +412,16 @@ func BuiltinDupPairs() []DupPair {
 			B: DupCandidate{File: "internal/repro/agent.go", Line: 224,
 				Desc: "the exec error from runTurn's sandbox call is dropped, so a failed command's empty stdout is parsed anyway",
 				Lens: "error-handling", DefectKind: domain.DefectUncheckedError, Subject: "runTurn", Source: srcAgentGo},
-			// Root cause and symptom are 4 lines apart in the SAME file and
-			// share enough vocabulary to be within window+jaccard — already
-			// caught by the SimilarFinding tiebreaker pre-v3, and the shared
-			// locus/kind here would also converge at exact-fp if the subject
-			// (both "runTurn") coincided at the same line, which it does not
-			// — this pair specifically exercises the tiebreaker stage.
+			// Root cause and symptom are 4 lines apart in the SAME file,
+			// SAME enclosing runTurn function (so the same symbol-anchored
+			// locus) and SAME ground-truth subject: this pair converges at
+			// exact-fp, not the tiebreaker — bugbot-ezmx.5's locus
+			// resolution key is the enclosing declaration, not the exact
+			// line, so root cause and symptom four lines apart inside one
+			// function share an identical FingerprintV3. The
+			// SimilarFinding tiebreaker stage is exercised instead by
+			// rename-small-shift-should-merge below, where the subject
+			// itself changes (a genuine rename) and exact-fp cannot fire.
 			SameDefect: true,
 		},
 		{

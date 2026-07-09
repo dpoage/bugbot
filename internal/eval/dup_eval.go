@@ -56,9 +56,12 @@ func (r DupPairResult) Correct() bool { return r.Predicted == r.Pair.SameDefect 
 // (the primary triage-step-3 identity path), and funnel.SimilarFinding as
 // the same-file window/jaccard tiebreaker durable fold/publish already use.
 // This is the layer that actually dedups post-v3 (bugbot-ezmx.1) — NOT the
-// bugbot-ezmx.2 LLM dedup arbiter, which stays out of this deterministic
-// eval entirely. It reports precision/recall of the composed decision
-// treating "predicted same defect" as positive:
+// bugbot-ezmx.2 LLM dedup arbiter (a non-deterministic judgment layer) or
+// triage step 5e's code-nav root-cause fold (bugbot-ezmx.7,
+// internal/funnel/codenav_fold.go — a reference-hop merge requiring a live
+// language server), both of which stay out of this deterministic,
+// no-LLM/no-code-nav eval entirely. It reports precision/recall of the
+// composed decision treating "predicted same defect" as positive:
 //
 //   - TP: SameDefect=true,  Predicted=true  (a real duplicate the layer caught)
 //   - FP: SameDefect=false, Predicted=true  (distinct defects wrongly merged)
