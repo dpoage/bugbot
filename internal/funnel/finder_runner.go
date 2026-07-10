@@ -67,7 +67,7 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 	// its tool-call activity and this call's Finished event share the run's
 	// AgentID (see agent_runners.go's activitySinkFor doc).
 	scope := progress.NewAgentScope(f.opts.Progress, progress.RoleFinder, l.Name).Start()
-	cands, status, outcome, pm, err := f.runFinderWithPrompt(ctx, finder, tools, sysprompt, l.Name, l, task, budget, start, scope)
+	cands, status, outcome, pm, _, err := f.runFinderWithPrompt(ctx, finder, tools, sysprompt, l.Name, l, task, budget, start, scope)
 	emitAgentFinished(scope, outcome, start, err)
 	return cands, status, pm, err
 }
@@ -104,13 +104,13 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 // (hypothesize) can fold it into the Detail field of the
 // recordFinderUnitWithTimeDetail call. This keeps the recording at a single
 // site and avoids threading a store reference into this function.
-func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState, startedAt time.Time, scope progress.AgentScope, extraOpts ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, error) {
+func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState, startedAt time.Time, scope progress.AgentScope, extraOpts ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, *rawTraversal, error) {
 	// attempt runs one finder pass: it builds the runner (layering any
 	// per-attempt options on top of the standard finder set), runs RunJSON, and
 	// maps the result into candidates or a classified failure + postmortem. It
 	// is invoked once normally and, on a max-tokens-truncation parse failure,
 	// once more at a doubled output cap (bugbot-rwe).
-	attempt := func(extra ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, error) {
+	attempt := func(extra ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, *rawTraversal, error) {
 		opts := append([]agent.Option{f.activitySinkFor(scope)}, extraOpts...)
 		opts = append(opts, extra...)
 		runner := f.newAgentRunner(finder, tools, sysprompt, budget.finderRunnerLimits(f.opts.Limits.FinderLimits), opts...)
@@ -122,7 +122,7 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 			// rather than aborting the whole scan: one lens/chunk failing must not
 			// sink the others. Context cancellation is the exception — propagate it.
 			if ctx.Err() != nil {
-				return nil, finderOK, outcome, nil, ctx.Err()
+				return nil, finderOK, outcome, nil, nil, ctx.Err()
 			}
 			// Distinguish a genuine parse failure from a budget stop. If the run was
 			// truncated by the shared budget pool or its own token budget, an
@@ -138,7 +138,7 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 			// the postmortem so the next real failure is diagnosable from stored data.
 			pm := buildFinderPostmortem(outcome, err)
 			if budgetStopped(outcome) {
-				return nil, finderBudgetStopped, outcome, &pm, nil
+				return nil, finderBudgetStopped, outcome, &pm, nil, nil
 			}
 			// Rate-limit exhaustion is not a lost-finding failure: the provider
 			// throttled us after the retry budget was spent. Coverage is incomplete
@@ -148,9 +148,9 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 			// postmortem already carries Class=finderClassRateLimited via
 			// classifyFinderErr.
 			if errors.Is(err, llm.ErrRateLimited) {
-				return nil, finderRateLimited, outcome, &pm, nil
+				return nil, finderRateLimited, outcome, &pm, nil, nil
 			}
-			return nil, finderParseFailed, outcome, &pm, nil
+			return nil, finderParseFailed, outcome, &pm, nil, nil
 		}
 
 		cands := make([]Candidate, 0, len(out.Candidates))
@@ -168,10 +168,10 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 				Subject:     rc.Subject,
 			})
 		}
-		return cands, finderOK, outcome, nil, nil
+		return cands, finderOK, outcome, nil, out.Traversal, nil
 	}
 
-	cands, status, outcome, pm, err := attempt()
+	cands, status, outcome, pm, traversal, err := attempt()
 	// bugbot-rwe: a finder unit lost to per-completion max-tokens truncation — a
 	// reasoning model (e.g. MiniMax-M3) that spent the DefaultMaxOutputTokens cap
 	// inside <think> blocks before emitting JSON — is recoverable. Retry ONCE at a
@@ -179,9 +179,9 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 	// doubled WithMaxTokens is layered last and so overrides newAgentRunner's
 	// default. shouldRetryFinderCap gates this tightly (see its doc).
 	if shouldRetryFinderCap(status, outcome, err) {
-		cands, status, outcome, pm, err = attempt(agent.WithMaxTokens(finderRetryMaxOutputTokens))
+		cands, status, outcome, pm, traversal, err = attempt(agent.WithMaxTokens(finderRetryMaxOutputTokens))
 	}
-	return cands, status, outcome, pm, err
+	return cands, status, outcome, pm, traversal, err
 }
 
 // finderRetryMaxOutputTokens is the doubled per-completion output cap used on the
