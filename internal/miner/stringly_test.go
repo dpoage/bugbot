@@ -282,14 +282,15 @@ func f(s string) {
 // --------------------------------------------------------------------------
 
 // TestStringlyDrift_PositiveFixture verifies that a case with a typo literal
-// that no producer ever emits is flagged with EXACTLY ONE lead, while other
-// correctly-matched cases in the same switch produce no additional leads.
+// that does not match any const value of the type is flagged with EXACTLY ONE
+// lead (type-A: raw literal not in const set), while correctly-matched cases
+// produce no additional leads.
 //
 // testdata/stringly_drift/typo_case.go has:
-//   - producers: "active", "inactive", "pending" (from statusFromCode)
-//   - consumer switch cases: "activ" (typo), "inactive", "pending"
+//   - type Status string with consts "active", "inactive", "pending"
+//   - switch on Status with case "activ" (typo), "inactive", "pending"
 //
-// Expected: one lead for "activ" (consumed-but-never-produced).
+// Expected: one lead for "activ" (literal not matching any const of Status).
 func TestStringlyDrift_PositiveFixture(t *testing.T) {
 	dir := filepath.Join("testdata", "stringly_drift")
 	snap := buildSnapshot(t, dir, []string{"typo_case.go"})
@@ -312,7 +313,7 @@ func TestStringlyDrift_PositiveFixture(t *testing.T) {
 		if l.PosterLens != stringlyPosterLens {
 			continue
 		}
-		if strings.Contains(l.Note, `"activ"`) && strings.Contains(l.Note, "consumed") {
+		if strings.Contains(l.Note, `"activ"`) {
 			typoLeads = append(typoLeads, l.Note)
 		}
 	}
@@ -327,10 +328,11 @@ func TestStringlyDrift_PositiveFixture(t *testing.T) {
 }
 
 // TestStringlyDrift_NegativeFixture verifies that when every case literal in a
-// switch exactly matches a produced literal, zero stringly-drift leads are emitted.
+// switch exactly matches a const value of the named string type, zero
+// stringly-drift leads are emitted.
 //
-// testdata/stringly_clean/clean_switch.go has producers and consumers in sync:
-// "active", "inactive", "pending" appear in both switch cases and return statements.
+// testdata/stringly_clean/clean_switch.go has type Status string with consts
+// "active", "inactive", "pending" and a switch where all cases match.
 func TestStringlyDrift_NegativeFixture(t *testing.T) {
 	dir := filepath.Join("testdata", "stringly_clean")
 	snap := buildSnapshot(t, dir, []string{"clean_switch.go"})
@@ -398,12 +400,14 @@ func TestStringlyDrift_Determinism(t *testing.T) {
 	}
 }
 
-// TestStringlyDrift_SeamGateBlocks verifies that a switch whose cases are all
-// external protocol values (none appear in any producer) produces zero leads,
-// even though the cases are identifier-shaped and pass the stoplist.
-func TestStringlyDrift_SeamGateBlocks(t *testing.T) {
-	// This switch decodes OpenAI stop reasons — these values are never produced
-	// internally, so the seam gate should suppress all leads.
+// TestStringlyDrift_RawStringSwitchProducesNoLeads verifies that a switch over
+// a raw (untyped) string parameter produces zero stringly-drift leads by
+// construction: the closed-enum model only analyzes switches whose scrutinee
+// resolves to a named string type in the same file.
+func TestStringlyDrift_RawStringSwitchProducesNoLeads(t *testing.T) {
+	// This switch decodes OpenAI stop reasons — the scrutinee is a plain
+	// `string` parameter, not a named string type. No type+const set exists,
+	// so passEnumSwitches returns nothing and no leads are emitted.
 	content := `package x
 
 func handleOpenAI(reason string) {
@@ -417,15 +421,9 @@ func handleOpenAI(reason string) {
 	}
 }
 `
-	consumers := passStringConsumers("t.go", content)
-	// "stop", "tool_calls", "content_filter" — check shape
-	got := map[string]bool{}
-	for _, c := range consumers {
-		got[c.literal] = true
+	namedTypes := passNamedStringTypes(content)
+	switches := passEnumSwitches("t.go", content, namedTypes)
+	if len(switches) != 0 {
+		t.Errorf("raw-string switch should produce 0 enumSwitches, got %d", len(switches))
 	}
-	// "stop" is in stoplist; "tool_calls" and "content_filter" pass shape.
-	// Seam gate suppression is tested at Seed level; here we just verify
-	// that the shape filter doesn't accidentally eat the real protocol words.
-	// No assertions on exact content — just that it doesn't panic.
-	_ = got
 }

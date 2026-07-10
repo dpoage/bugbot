@@ -1,24 +1,22 @@
-// Package x demonstrates a stringly-typed drift defect.
-// The producer emits "active" but the consumer switch has a typo "activ".
+// Package x demonstrates a stringly-typed closed-enum drift defect.
+// Status is a named string type with a closed const set.
+// The switch has a typo case literal "activ" that matches no const value.
 package x
 
-// statusFromCode returns a status string given an integer code.
-func statusFromCode(code int) string {
-	switch code {
-	case 1:
-		return "active" // producer: emits "active"
-	case 2:
-		return "inactive"
-	default:
-		return "pending"
-	}
-}
+// Status is a named string type — a closed enum.
+type Status string
 
-// handleStatus processes a status string.
-// BUG: case "activ" is a typo; the producer never emits "activ".
-func handleStatus(status string) string {
+const (
+	StatusActive   Status = "active"
+	StatusInactive Status = "inactive"
+	StatusPending  Status = "pending"
+)
+
+// handleStatus dispatches on Status.
+// BUG: case "activ" is a typo; no const value of Status equals "activ".
+func handleStatus(status Status) string {
 	switch status {
-	case "activ": // typo — producer emits "active", not "activ"
+	case "activ": // typo — should be "active" (StatusActive)
 		return "do-active-thing"
 	case "inactive":
 		return "do-inactive-thing"

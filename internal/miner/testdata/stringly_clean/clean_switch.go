@@ -1,21 +1,19 @@
-// Package x demonstrates a stringly-correct dispatch: every case matches a produced literal.
+// Package x demonstrates a stringly-correct closed-enum dispatch.
+// All case literals exactly match a defined const value of the Status type.
 package x
 
-// statusFromCode returns a status string given an integer code.
-func statusFromCode(code int) string {
-	switch code {
-	case 1:
-		return "active"
-	case 2:
-		return "inactive"
-	default:
-		return "pending"
-	}
-}
+// Status is a named string type — a closed enum.
+type Status string
 
-// handleStatus processes a status string.
-// All cases exactly match the literals produced above.
-func handleStatus(status string) string {
+const (
+	StatusActive   Status = "active"
+	StatusInactive Status = "inactive"
+	StatusPending  Status = "pending"
+)
+
+// handleStatus dispatches on Status.
+// All cases exactly match const values — no drift.
+func handleStatus(status Status) string {
 	switch status {
 	case "active":
 		return "do-active-thing"

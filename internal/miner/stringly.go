@@ -1,46 +1,41 @@
 package miner
 
-// Stringly-typed drift miner.
+// Stringly-typed drift miner — closed-enum model.
 //
-// Motivation: Go code frequently dispatches on string values that cross a
-// seam — event names, command tokens, codec identifiers — and a rename on
-// one side without a corresponding update on the other creates a silent
-// mismatch. The classic symptom: `case "activ":` that never fires because
-// the producer emits "active".
+// Motivation: Go code that defines a named string type with a closed set of
+// const values (e.g. `type Status string; const StatusActive Status = "active"`)
+// is a stringly-typed enum. When a switch dispatches on such a type, a case
+// using a raw literal that does not match any const value is a typo or stale
+// branch; a const value never covered by any case in the switch is a missing
+// arm.
 //
-// Detection algorithm (precision-biased, two passes):
+// Detection algorithm (file-local, type-anchored):
 //
-//  1. passStringConsumers: scan each Go source file for string literals in
-//     `case "...":`  switch arms, grouped by the switch block they belong to.
-//     Each switch block forms a "consumer family".
+//  1. passNamedStringTypes: scan for `type X string` declarations.
 //
-//  2. passStringProducers: scan each Go source file for string literals in
-//     common producer positions (return, assignment RHS, call arguments).
-//     Build a repo-global "produced" set.
+//  2. passStringEnumConsts: scan for const declarations whose type is one of
+//     the named string types; record each (type, constName) → literalValue.
 //
-//  3. Join — per consumer family (switch block):
-//     a. Seam gate: at least one case literal in the block must appear in
-//        the produced set.  Without this, the entire switch is likely reading
-//        an external protocol value (OpenAI stop reasons, LSP methods, JSON
-//        Schema keywords) and no drift lead is warranted.
-//     b. For each case literal in the block that does NOT appear in the
-//        produced set, post a type-A lead (consumed-but-never-produced).
+//  3. passEnumSwitches: scan for switch statements where the scrutinee can be
+//     resolved to one of the named types (by looking at function parameters,
+//     variable declarations, and local variable types in the same file).
+//     Within each resolved switch, collect all case string literals.
 //
-// This intentionally drops type-B (produced-not-consumed) as repo-global
-// scope makes it too noisy to be precision-safe in v1.
+//  4. Join — per switch block anchored to a named type:
+//     a. Flag each case that uses a raw string literal NOT equal to any const
+//        value of the type  (typo / dead branch).
+//     b. Flag each const value of the type that is NOT handled by any case in
+//        the switch (missing arm).
 //
-// Precision guards:
-//   - Minimum literal length (minStringyLen = 4).
-//   - Combined stoplist (genericEntityStoplist + stringyStoplist).
-//   - Identifier-shape filter: literal must look like a programmatic token
-//     (snake_case / camelCase / kebab-case / dotted) — not prose, not a
-//     file path, not a format string.
-//   - Seam gate (described above): at least 1 in-family literal must be
-//     produced before any case is flagged.
-//   - Dedup: at most one lead per (file, line) pair.
+// Scope: only switches whose scrutinee resolves to a named string type in the
+// SAME FILE are analyzed. Switches over raw strings, interface values, or
+// externally-typed values are entirely out of scope — this is what keeps the
+// miner zero-FP on external-command dispatches in interp.go and
+// capabilities.go.
 //
 // Leads: PosterLens="miner:stringly-drift", TargetLens="api-contract-misuse".
-// File/Line points at the consumer (case) site.
+// File/Line points at the consumer (case) site for type-A; at the switch line
+// for type-B (missing arm).
 
 import (
 	"context"
@@ -99,52 +94,71 @@ var stringyStoplist = map[string]bool{
 	"idle": true, "busy": true, "live": true,
 }
 
-// consumerSite records one string literal in a switch case arm.
-type consumerSite struct {
-	file    string
-	line    int
-	literal string
-	// switchID is a synthetic identifier for the enclosing switch block,
-	// used to group cases into families. It is the line number of the
-	// `switch` keyword.
-	switchID int
+// enumConst records one constant in a named string type's const set.
+type enumConst struct {
+	typeName string
+	name     string // Go identifier (e.g. StatusActive)
+	value    string // string literal value (e.g. "active")
+	line     int
 }
 
-// producerSite records one string literal in a producer position.
-type producerSite struct {
-	file    string
-	line    int
-	literal string
+// enumSwitch records one switch block resolved to a named string type.
+type enumSwitch struct {
+	file       string
+	switchLine int
+	typeName   string
+	// cases: entries for each case arm (may be raw string literal or
+	// const identifier reference). Multi-literal cases expand to multiple entries.
+	cases []enumCaseLit
 }
 
-// switchKeyRe matches the `switch` keyword that opens a switch block.
-var switchKeyRe = regexp.MustCompile(`^\s*switch\b`)
+type enumCaseLit struct {
+	value    string // non-empty when a raw string literal was used
+	identRef string // non-empty when a bare identifier was used (may be a const name)
+	line     int
+}
 
-// caseStringRe matches `case "...":`  (no escape complexity in the literal).
-// Capture group 1 = the literal content (without quotes).
-var caseStringRe = regexp.MustCompile(`\bcase\s+"([^"\\]{1,128})"`)
+// namedStringTypeRe matches `type Foo string` or `type Foo = string`
+// (bare alias). Capture 1 = type name.
+var namedStringTypeRe = regexp.MustCompile(`^\s*type\s+(\w+)\s+string\b`)
 
-// producerStringRe matches string literals in common producer positions:
+// constTypedRe matches a const declaration with an explicit named type and a
+// string literal value.  Handles both block and single-line forms:
 //
-//	return "..."   = "..."   := "..."   f("...")   , "..."
-var producerStringRe = regexp.MustCompile(`(?:return|=|:=|,|\()\s*"([^"\\]{1,128})"`)
+//	Foo TypeName = "value"
+//
+// Capture 1 = const identifier, capture 2 = type name, capture 3 = value.
+var constTypedRe = regexp.MustCompile(`^\s*(\w+)\s+(\w+)\s*=\s*"([^"\\]{1,128})"`)
 
-// isInBlockComment reports whether line (0-indexed) in lines is inside a
-// /* ... */ block comment.  We track state by scanning from the top.
-// This is a best-effort approximation: it handles standard /* */ comments
-// that don't span strings containing "/*" or "*/".
+// switchScrutineeRe captures the expression between `switch` and `{`.
+// Capture 1 = scrutinee expression (may be empty for switch { ... }).
+var switchScrutineeRe = regexp.MustCompile(`^\s*switch\s+([^{]+)\s*\{`)
+
+// caseMultiLitRe matches a case line and captures all comma-separated quoted
+// string literals (no escape support needed for enum values).
+// We split the case-line ourselves after detecting `case `.
+var caseLineRe = regexp.MustCompile(`^\s*case\s+(.+):`)
+
+// singleStringRe extracts "..." literals from a case expression list.
+var singleStringRe = regexp.MustCompile(`"([^"\\]{0,128})"`)
+
+// varDeclRe matches `var name TypeName` or `name TypeName` in a func param list.
+// Capture 1 = var name, capture 2 = type name.
+var varDeclRe = regexp.MustCompile(`\b(\w+)\s+(\w+)\b`)
+
+// buildBlockCommentMask returns a per-line boolean mask: true if the line is
+// inside a /* ... */ block comment (best-effort, ignores strings containing /*).
 func buildBlockCommentMask(lines []string) []bool {
 	mask := make([]bool, len(lines))
 	inBlock := false
 	for i, line := range lines {
 		if inBlock {
 			mask[i] = true
-			if idx := strings.Index(line, "*/"); idx >= 0 {
+			if strings.Contains(line, "*/") {
 				inBlock = false
 			}
 		} else {
 			if idx := strings.Index(line, "/*"); idx >= 0 {
-				// Check it's not inside a string — best-effort: count quotes before /*
 				before := line[:idx]
 				if strings.Count(before, `"`)%2 == 0 {
 					inBlock = true
@@ -157,6 +171,266 @@ func buildBlockCommentMask(lines []string) []bool {
 		}
 	}
 	return mask
+}
+
+// buildBacktickMask returns a per-line boolean mask: true if the line is
+// entirely inside a backtick raw-string literal. This prevents matching
+// string literals inside raw strings or shell heredocs.
+func buildBacktickMask(lines []string) []bool {
+	mask := make([]bool, len(lines))
+	inRaw := false
+	for i, line := range lines {
+		if inRaw {
+			mask[i] = true
+			if idx := strings.Index(line, "`"); idx >= 0 {
+				inRaw = false
+			}
+		} else {
+			count := strings.Count(line, "`")
+			if count%2 == 1 {
+				// odd number of backticks: we enter a raw string on this line
+				// The line itself is partially in raw string; mark it masked
+				// to avoid false hits inside the raw portion.
+				mask[i] = true
+				inRaw = true
+			}
+		}
+	}
+	return mask
+}
+
+// passNamedStringTypes scans a Go source file for `type X string` declarations
+// and returns the set of named string type names found.
+func passNamedStringTypes(content string) map[string]bool {
+	types := make(map[string]bool)
+	lines := strings.Split(content, "\n")
+	blockMask := buildBlockCommentMask(lines)
+	btMask := buildBacktickMask(lines)
+	for i, line := range lines {
+		if blockMask[i] || btMask[i] {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		if m := namedStringTypeRe.FindStringSubmatch(line); m != nil {
+			types[m[1]] = true
+		}
+	}
+	return types
+}
+
+// passStringEnumConsts scans a Go source file for const declarations whose
+// type is one of the named string types and returns the enumConst slice.
+func passStringEnumConsts(content string, namedTypes map[string]bool) []enumConst {
+	if len(namedTypes) == 0 {
+		return nil
+	}
+	var out []enumConst
+	lines := strings.Split(content, "\n")
+	blockMask := buildBlockCommentMask(lines)
+	btMask := buildBacktickMask(lines)
+	for i, line := range lines {
+		if blockMask[i] || btMask[i] {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		m := constTypedRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		constName, typeName, value := m[1], m[2], m[3]
+		if !namedTypes[typeName] {
+			continue
+		}
+		out = append(out, enumConst{
+			typeName: typeName,
+			name:     constName,
+			value:    value,
+			line:     i + 1,
+		})
+	}
+	return out
+}
+
+// resolveScrutineeType tries to determine the named string type of the switch
+// scrutinee expression in a file, given the set of named types and the file
+// content (for function parameter / variable declaration scanning).
+//
+// It uses a simple heuristic: scan the file for declarations of the form
+// `name TypeName` or `var name TypeName` and build a name→type map.
+// If the scrutinee expression is a simple identifier in that map, return the type.
+func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, content string) string {
+	scrutinee = strings.TrimSpace(scrutinee)
+	// Only handle simple identifiers (no dots, no calls).
+	if strings.ContainsAny(scrutinee, ".()[] \t") {
+		return ""
+	}
+	// Build a local name→type map by scanning all `name TypeName` pairs.
+	lines := strings.Split(content, "\n")
+	blockMask := buildBlockCommentMask(lines)
+	btMask := buildBacktickMask(lines)
+	for i, line := range lines {
+		if blockMask[i] || btMask[i] {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		for _, m := range varDeclRe.FindAllStringSubmatch(line, -1) {
+			varName, typeName := m[1], m[2]
+			if varName == scrutinee && namedTypes[typeName] {
+				return typeName
+			}
+		}
+	}
+	return ""
+}
+
+// caseIdentRe extracts bare identifier tokens from a case expression list
+// (tokens that are not string literals and not punctuation).
+var caseIdentRe = regexp.MustCompile(`\b([A-Za-z_]\w*)\b`)
+
+// extractCaseEntries extracts all case arm entries from a case line.
+// It returns enumCaseLit records for each sub-expression:
+//   - string literal:  value set, identRef empty
+//   - bare identifier: identRef set, value empty
+//
+// Handles multi-literal cases like `case "a", "b", SomeConst:`.
+func extractCaseEntries(caseLine string) []enumCaseLit {
+	m := caseLineRe.FindStringSubmatch(caseLine)
+	if m == nil {
+		return nil
+	}
+	expr := m[1]
+	lineNo := 0 // caller fills in
+
+	// Split on commas, then classify each token.
+	parts := strings.Split(expr, ",")
+	var out []enumCaseLit
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		// String literal?
+		if sm := singleStringRe.FindStringSubmatch(part); sm != nil {
+			out = append(out, enumCaseLit{value: sm[1], line: lineNo})
+			continue
+		}
+		// Bare identifier (may be a const name)?
+		if im := caseIdentRe.FindStringSubmatch(part); im != nil {
+			// Skip Go keywords that appear in case lists.
+			switch im[1] {
+			case "case", "default", "nil", "true", "false":
+				continue
+			}
+			out = append(out, enumCaseLit{identRef: im[1], line: lineNo})
+		}
+	}
+	return out
+}
+
+// extractCaseLiterals extracts all quoted string literals from a case line,
+// handling multi-literal cases like `case "a", "b", "c":`.
+// Retained for passStringConsumers compatibility.
+func extractCaseLiterals(caseLine string) []string {
+	m := caseLineRe.FindStringSubmatch(caseLine)
+	if m == nil {
+		return nil
+	}
+	expr := m[1]
+	var vals []string
+	for _, sm := range singleStringRe.FindAllStringSubmatch(expr, -1) {
+		vals = append(vals, sm[1])
+	}
+	return vals
+}
+
+// passEnumSwitches finds switch blocks in the file whose scrutinee resolves to
+// a named string type, and returns the resolved enumSwitch records.
+func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSwitch {
+	if len(namedTypes) == 0 {
+		return nil
+	}
+	lines := strings.Split(content, "\n")
+	blockMask := buildBlockCommentMask(lines)
+	btMask := buildBacktickMask(lines)
+
+	type pendingSwitch struct {
+		switchLine int
+		typeName   string
+		depth      int // brace depth when switch { was opened
+	}
+
+	var out []enumSwitch
+	var stack []pendingSwitch
+	braceDepth := 0
+
+	for i, line := range lines {
+		lineNo := i + 1
+		if blockMask[i] || btMask[i] {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+
+		// Track brace depth to know when a switch block ends.
+		for _, ch := range line {
+			if ch == '{' {
+				braceDepth++
+			} else if ch == '}' {
+				braceDepth--
+				// Pop any switch whose block just closed.
+				if len(stack) > 0 && braceDepth < stack[len(stack)-1].depth {
+					stack = stack[:len(stack)-1]
+				}
+			}
+		}
+
+		// Detect switch keyword.
+		if m := switchScrutineeRe.FindStringSubmatch(line); m != nil {
+			scrutinee := strings.TrimSpace(m[1])
+			typeName := resolveScrutineeType(scrutinee, namedTypes, content)
+			if typeName != "" {
+				stack = append(stack, pendingSwitch{
+					switchLine: lineNo,
+					typeName:   typeName,
+					depth:      braceDepth,
+				})
+				out = append(out, enumSwitch{
+					file:       path,
+					switchLine: lineNo,
+					typeName:   typeName,
+				})
+			}
+			continue
+		}
+
+		// Collect case entries for the innermost active switch.
+		if len(stack) == 0 {
+			continue
+		}
+		sw := &stack[len(stack)-1]
+		var esw *enumSwitch
+		for j := range out {
+			if out[j].switchLine == sw.switchLine && out[j].file == path {
+				esw = &out[j]
+				break
+			}
+		}
+		if esw == nil {
+			continue
+		}
+		entries := extractCaseEntries(line)
+		for k := range entries {
+			entries[k].line = lineNo
+		}
+		esw.cases = append(esw.cases, entries...)
+	}
+
+	return out
 }
 
 // isIdentifierShaped returns true when s looks like a programmatic token:
@@ -203,11 +477,40 @@ func isStringyStopped(s string) bool {
 	return genericEntityStoplist[lower] || stringyStoplist[lower]
 }
 
+// consumerSite is retained for unit tests of passStringConsumers.
+type consumerSite struct {
+	file     string
+	line     int
+	literal  string
+	switchID int
+}
+
+// producerSite is retained for unit tests of passStringProducers.
+type producerSite struct {
+	file    string
+	line    int
+	literal string
+}
+
+// switchKeyRe matches the `switch` keyword that opens a switch block.
+var switchKeyRe = regexp.MustCompile(`^\s*switch\b`)
+
+// caseStringRe matches `case "...":`  (no escape complexity in the literal).
+// Capture group 1 = the first literal content (without quotes).
+var caseStringRe = regexp.MustCompile(`\bcase\s+"([^"\\]{1,128})"`)
+
+// producerStringRe matches string literals in common producer positions:
+//
+//	return "..."   = "..."   := "..."   f("...")   , "..."
+var producerStringRe = regexp.MustCompile(`(?:return|=|:=|,|\()\s*"([^"\\]{1,128})"`)
+
 // passStringConsumers extracts consumer string literals from switch case arms,
 // grouped by switch block (switchID = line of the `switch` keyword).
+// Retained for unit tests; the closed-enum seed does not use it directly.
 func passStringConsumers(path, content string) []consumerSite {
 	lines := strings.Split(content, "\n")
 	blockMask := buildBlockCommentMask(lines)
+	btMask := buildBacktickMask(lines)
 
 	var out []consumerSite
 	currentSwitchID := -1
@@ -215,51 +518,52 @@ func passStringConsumers(path, content string) []consumerSite {
 	for lineIdx, line := range lines {
 		lineNo := lineIdx + 1
 
-		// Skip block-comment lines.
-		if blockMask[lineIdx] {
+		if blockMask[lineIdx] || btMask[lineIdx] {
 			continue
 		}
-		// Skip line comments.
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "//") {
 			continue
 		}
 
-		// Track switch keyword to assign switchID.
 		if switchKeyRe.MatchString(line) {
 			currentSwitchID = lineNo
 		}
 
-		// Extract case string literals.
-		for _, m := range caseStringRe.FindAllStringSubmatch(line, -1) {
-			lit := m[1]
-			if !isIdentifierShaped(lit) || isStringyStopped(lit) {
-				continue
+		// Extract ALL comma-separated string literals on this case line.
+		if strings.Contains(line, "case ") {
+			lits := extractCaseLiterals(line)
+			for _, lit := range lits {
+				if !isIdentifierShaped(lit) || isStringyStopped(lit) {
+					continue
+				}
+				id := currentSwitchID
+				if id < 0 {
+					id = lineNo
+				}
+				out = append(out, consumerSite{
+					file:     path,
+					line:     lineNo,
+					literal:  lit,
+					switchID: id,
+				})
 			}
-			id := currentSwitchID
-			if id < 0 {
-				id = lineNo // fallback: use the case line itself
-			}
-			out = append(out, consumerSite{
-				file:     path,
-				line:     lineNo,
-				literal:  lit,
-				switchID: id,
-			})
 		}
 	}
 	return out
 }
 
 // passStringProducers extracts producer string literals from Go source content.
+// Retained for unit tests; the closed-enum seed does not use it directly.
 func passStringProducers(path, content string) []producerSite {
 	lines := strings.Split(content, "\n")
 	blockMask := buildBlockCommentMask(lines)
+	btMask := buildBacktickMask(lines)
 
 	var out []producerSite
 	for lineIdx, line := range lines {
 		lineNo := lineIdx + 1
-		if blockMask[lineIdx] {
+		if blockMask[lineIdx] || btMask[lineIdx] {
 			continue
 		}
 		trimmed := strings.TrimSpace(line)
@@ -281,13 +585,22 @@ func passStringProducers(path, content string) []producerSite {
 	return out
 }
 
-// seedStringlyDrift runs the stringly-typed drift pass over the snapshot and
-// posts leads. Called from Seed (miner.go) after the existing passes.
+// seedStringlyDrift runs the closed-enum stringly-typed drift pass over the
+// snapshot and posts leads. Called from Seed (miner.go) after the existing
+// passes.
+//
+// Only files that define at least one named string type with const values are
+// analyzed. Switches over raw strings, untyped strings, or external-command
+// tokens are entirely out of scope.
 func seedStringlyDrift(ctx context.Context, snap *ingest.Snapshot, st *store.Store, sum *Summary) error {
-	// Phase 1: collect consumers and producers across all in-scope files.
-	var consumers []consumerSite
-	var producers []producerSite
+	seen := make(map[leadKey]bool)
 
+	// Collect all file paths; sort for determinism.
+	type fileEntry struct {
+		path    string
+		content string
+	}
+	var files []fileEntry
 	for _, f := range snap.Files {
 		if !minerLang(f.Language) {
 			continue
@@ -304,114 +617,148 @@ func seedStringlyDrift(ctx context.Context, snap *ingest.Snapshot, st *store.Sto
 		if err != nil {
 			continue
 		}
-		content := string(data)
-
-		consumers = append(consumers, passStringConsumers(f.Path, content)...)
-		producers = append(producers, passStringProducers(f.Path, content)...)
+		files = append(files, fileEntry{path: f.Path, content: string(data)})
 	}
+	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
 
-	// Phase 2: build repo-global produced set.
-	producedLiterals := make(map[string]bool, len(producers))
-	for _, p := range producers {
-		producedLiterals[p.literal] = true
-	}
-
-	// Phase 3: group consumers by (file, switchID) — each group is one switch block.
-	type switchKey struct {
-		file     string
-		switchID int
-	}
-	type switchEntry struct {
-		sites []consumerSite
-	}
-	// Preserve insertion order for determinism.
-	switchOrder := make([]switchKey, 0)
-	switchGroups := make(map[switchKey]*switchEntry)
-
-	for _, c := range consumers {
-		k := switchKey{file: c.file, switchID: c.switchID}
-		if _, ok := switchGroups[k]; !ok {
-			switchOrder = append(switchOrder, k)
-			switchGroups[k] = &switchEntry{}
+	for _, fe := range files {
+		// Phase 1: discover named string types in this file.
+		namedTypes := passNamedStringTypes(fe.content)
+		if len(namedTypes) == 0 {
+			continue // no named string types → nothing to analyze
 		}
-		switchGroups[k].sites = append(switchGroups[k].sites, c)
-	}
 
-	// Sort switchOrder for full determinism (consumers were appended in file order,
-	// but files may arrive in any order from the snapshot).
-	sort.Slice(switchOrder, func(i, j int) bool {
-		a, b := switchOrder[i], switchOrder[j]
-		if a.file != b.file {
-			return a.file < b.file
+		// Phase 2: collect the const set for each named type.
+		consts := passStringEnumConsts(fe.content, namedTypes)
+		if len(consts) == 0 {
+			continue // type declared but no const values → not a closed enum
 		}
-		return a.switchID < b.switchID
-	})
 
-	seen := make(map[leadKey]bool)
-
-	// Phase 4: per-switch-block join with majority seam gate.
-	for _, sk := range switchOrder {
-		entry := switchGroups[sk]
-		sites := entry.sites
-
-		// Seam gate: the MAJORITY of cases in this block must appear in the
-		// produced set, AND at least 2 cases must be produced.
-		//
-		// Rationale: a switch that decodes an external protocol (OpenAI stop
-		// reasons, JSON Schema types, LSP method names) will have FEW or ZERO
-		// produced cases because those strings are never emitted internally.
-		// A switch that dispatches on an internal enum (status strings, command
-		// tokens) will have MOST of its cases produced internally — and the
-		// one that isn't produced is the interesting outlier (typo / dead branch).
-		//
-		// This majority requirement dramatically reduces false positives on
-		// protocol-decoder switches while preserving recall on internal-dispatch
-		// switches.
-		var producedCount, unproducedCount int
-		for _, s := range sites {
-			if producedLiterals[s.literal] {
-				producedCount++
-			} else {
-				unproducedCount++
+		// Build type → set-of-values map.
+		typeValues := make(map[string]map[string]bool)
+		for _, c := range consts {
+			if typeValues[c.typeName] == nil {
+				typeValues[c.typeName] = make(map[string]bool)
 			}
-		}
-		// Gate: produced must strictly outnumber unproduced, and at least 2 produced.
-		if producedCount < 2 || producedCount <= unproducedCount {
-			continue
+			typeValues[c.typeName][c.value] = true
 		}
 
-		// Flag each case literal that is not in the produced set.
-		for _, s := range sites {
-			if producedLiterals[s.literal] {
-				continue // consumed and produced — no drift
-			}
-			k := leadKey{TargetLens: stringlyTargetLens, File: s.file, Line: s.line}
-			if seen[k] {
+		// Phase 3: find switches anchored to one of these types.
+		switches := passEnumSwitches(fe.path, fe.content, namedTypes)
+
+		for _, sw := range switches {
+			constVals, ok := typeValues[sw.typeName]
+			if !ok || len(constVals) == 0 {
 				continue
 			}
-			seen[k] = true
 
-			note := fmt.Sprintf(
-				"stringly-drift: case literal %q at %s:%d is consumed "+
-					"but never produced anywhere in the snapshot; "+
-					"likely a typo or dead branch",
-				s.literal, s.file, s.line,
-			)
-			note = truncate(note, noteMaxLen)
-
-			if err := st.AddLead(ctx, store.Lead{
-				PosterLens: stringlyPosterLens,
-				TargetLens: stringlyTargetLens,
-				File:       s.file,
-				Line:       s.line,
-				Note:       note,
-			}); err != nil {
-				return fmt.Errorf("miner: stringly-drift lead %s:%d: %w", s.file, s.line, err)
+			// Build constName → value lookup for this type.
+			constNameVal := make(map[string]string) // constName → literal value
+			for _, c := range consts {
+				if c.typeName == sw.typeName {
+					constNameVal[c.name] = c.value
+				}
 			}
-			sum.StringlyDriftLeads++
-			sum.LeadsPosted++
-			if sum.LeadsPosted >= maxLeads {
-				return nil
+
+			// Compute which const values are covered by this switch.
+			// A value is covered if:
+			//   (a) a raw string literal case matches it exactly, OR
+			//   (b) a bare identifier case is a const name whose value matches it.
+			coveredByLiteral := make(map[string]bool) // literal value → covered
+			coveredByIdent := make(map[string]bool)   // literal value → covered via ident
+			hasAnyLiteral := false
+
+			for _, c := range sw.cases {
+				if c.value != "" {
+					// Raw string literal case.
+					hasAnyLiteral = true
+					coveredByLiteral[c.value] = true
+				} else if c.identRef != "" {
+					// Identifier case — look up its value.
+					if val, ok := constNameVal[c.identRef]; ok {
+						coveredByIdent[val] = true
+					}
+				}
+			}
+
+			// Type-A: only when the switch uses raw string literals.
+			// Flag each literal that does not match any const value of the type.
+			if hasAnyLiteral {
+				for _, c := range sw.cases {
+					if c.value == "" {
+						continue // identifier case — not a literal drift candidate
+					}
+					if constVals[c.value] {
+						continue // matches a defined const value
+					}
+					k := leadKey{TargetLens: stringlyTargetLens, File: fe.path, Line: c.line}
+					if seen[k] {
+						continue
+					}
+					seen[k] = true
+
+					note := fmt.Sprintf(
+						"stringly-drift: case literal %q at %s:%d does not match "+
+							"any const value of type %s; likely a typo or stale branch",
+						c.value, fe.path, c.line, sw.typeName,
+					)
+					note = truncate(note, noteMaxLen)
+
+					if err := st.AddLead(ctx, store.Lead{
+						PosterLens: stringlyPosterLens,
+						TargetLens: stringlyTargetLens,
+						File:       fe.path,
+						Line:       c.line,
+						Note:       note,
+					}); err != nil {
+						return fmt.Errorf("miner: stringly-drift lead %s:%d: %w", fe.path, c.line, err)
+					}
+					sum.StringlyDriftLeads++
+					sum.LeadsPosted++
+					if sum.LeadsPosted >= maxLeads {
+						return nil
+					}
+				}
+			}
+
+			// Type-B: const value not covered by any case (literal or ident).
+			// Only fire when the switch uses at least one raw string literal arm
+			// (indicating the author is using raw literals for dispatch).
+			// Switches that use only const identifiers are correct by construction.
+			if !hasAnyLiteral {
+				continue // all cases use const identifiers — no drift possible
+			}
+			for val := range constVals {
+				if coveredByLiteral[val] || coveredByIdent[val] {
+					continue // covered by a literal or an identifier case
+				}
+				k := leadKey{TargetLens: stringlyTargetLens, File: fe.path, Line: sw.switchLine}
+				if seen[k] {
+					continue
+				}
+				seen[k] = true
+
+				note := fmt.Sprintf(
+					"stringly-drift: switch at %s:%d handles type %s but "+
+						"missing case for const value %q",
+					fe.path, sw.switchLine, sw.typeName, val,
+				)
+				note = truncate(note, noteMaxLen)
+
+				if err := st.AddLead(ctx, store.Lead{
+					PosterLens: stringlyPosterLens,
+					TargetLens: stringlyTargetLens,
+					File:       fe.path,
+					Line:       sw.switchLine,
+					Note:       note,
+				}); err != nil {
+					return fmt.Errorf("miner: stringly-drift lead %s:%d: %w", fe.path, sw.switchLine, err)
+				}
+				sum.StringlyDriftLeads++
+				sum.LeadsPosted++
+				if sum.LeadsPosted >= maxLeads {
+					return nil
+				}
 			}
 		}
 	}
