@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dpoage/bugbot/internal/store"
 )
 
 // --------------------------------------------------------------------------
@@ -425,5 +427,128 @@ func handleOpenAI(reason string) {
 	switches := passEnumSwitches("t.go", content, namedTypes)
 	if len(switches) != 0 {
 		t.Errorf("raw-string switch should produce 0 enumSwitches, got %d", len(switches))
+	}
+}
+
+// --------------------------------------------------------------------------
+// Regression tests for the three oracle-found defects
+// --------------------------------------------------------------------------
+
+// TestStringlyDrift_D1_ScopeSpoof verifies that a raw-string switch on a
+// parameter named "mode" in routeCommand does NOT emit leads just because
+// a different function (handleMode) has a typed Mode param with the same name.
+// Before the fix, resolveScrutineeType scanned the whole file and could match
+// the Mode type to the raw-string switch.
+func TestStringlyDrift_D1_ScopeSpoof(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_drift")
+	snap := buildSnapshot(t, dir, []string{"spoof_scope.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("D1: want 0 stringly-drift leads on spoof_scope.go, got %d: %+v",
+			len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_D2_DefaultSuppressesTypeB verifies that a typed-enum switch
+// with explicit cases AND a default: clause emits zero type-B (missing-arm) leads.
+// The explicit-subset + default idiom is valid and must not be flagged.
+func TestStringlyDrift_D2_DefaultSuppressesTypeB(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"default_clause.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("D2: want 0 stringly-drift leads on default_clause.go (has default:), got %d: %+v",
+			len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_D3_DeterminismMultiUncovered verifies that when a switch
+// has >=2 uncovered enum values, the note emitted is stable across repeated
+// Seed runs. This catches the map-range nondeterminism: without sorting,
+// which uncovered value appears in the lead's note flips between runs.
+// The fixture has 3 uncovered values (blue, green, yellow); after sorting,
+// "blue" must always be reported first/only.
+func TestStringlyDrift_D3_DeterminismMultiUncovered(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_drift")
+	snap := buildSnapshot(t, dir, []string{"multi_uncovered.go"})
+
+	ctx := context.Background()
+
+	const runs = 20
+	var firstNotes []string
+
+	for run := 0; run < runs; run++ {
+		st := openStore(t)
+		_, err := Seed(ctx, snap, st)
+		if err != nil {
+			t.Fatalf("run %d Seed: %v", run, err)
+		}
+		leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+		if err != nil {
+			t.Fatalf("run %d PendingLeads: %v", run, err)
+		}
+		var notes []string
+		for _, l := range leads {
+			if l.PosterLens == stringlyPosterLens {
+				notes = append(notes, l.Note)
+			}
+		}
+		if run == 0 {
+			firstNotes = notes
+			// The fixture has 3 uncovered values; at least 1 lead must be emitted.
+			if len(firstNotes) < 1 {
+				t.Fatalf("D3: want >= 1 type-B lead from multi_uncovered.go, got 0")
+			}
+			// After sorting, "blue" is the lexicographically first uncovered value
+			// and must appear in the note (not "green" or "yellow").
+			if !strings.Contains(firstNotes[0], `"blue"`) {
+				t.Errorf("D3: expected sorted-first uncovered value \"blue\" in note, got: %s", firstNotes[0])
+			}
+			continue
+		}
+		if len(notes) != len(firstNotes) {
+			t.Fatalf("D3: run %d got %d leads, run 0 got %d (non-deterministic count)", run, len(notes), len(firstNotes))
+		}
+		for i := range firstNotes {
+			if notes[i] != firstNotes[i] {
+				t.Errorf("D3: run %d lead[%d] differs:\n  run0=%q\n  run%d=%q", run, i, firstNotes[i], run, notes[i])
+			}
+		}
 	}
 }

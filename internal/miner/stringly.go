@@ -107,6 +107,7 @@ type enumSwitch struct {
 	file       string
 	switchLine int
 	typeName   string
+	hasDefault bool // true when the switch has a default: clause
 	// cases: entries for each case arm (may be raw string literal or
 	// const identifier reference). Multi-literal cases expand to multiple entries.
 	cases []enumCaseLit
@@ -262,17 +263,15 @@ func passStringEnumConsts(content string, namedTypes map[string]bool) []enumCons
 // It uses a simple heuristic: scan the file for declarations of the form
 // `name TypeName` or `var name TypeName` and build a name→type map.
 // If the scrutinee expression is a simple identifier in that map, return the type.
-func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, content string) string {
+func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, funcLines []string) string {
 	scrutinee = strings.TrimSpace(scrutinee)
 	// Only handle simple identifiers (no dots, no calls).
 	if strings.ContainsAny(scrutinee, ".()[] \t") {
 		return ""
 	}
-	// Build a local name→type map by scanning all `name TypeName` pairs.
-	lines := strings.Split(content, "\n")
-	blockMask := buildBlockCommentMask(lines)
-	btMask := buildBacktickMask(lines)
-	for i, line := range lines {
+	blockMask := buildBlockCommentMask(funcLines)
+	btMask := buildBacktickMask(funcLines)
+	for i, line := range funcLines {
 		if blockMask[i] || btMask[i] {
 			continue
 		}
@@ -346,6 +345,13 @@ func extractCaseLiterals(caseLine string) []string {
 	return vals
 }
 
+// funcDeclRe detects the start of a function declaration (func keyword at
+// start of non-whitespace, before a opening brace on the same or next line).
+var funcDeclRe = regexp.MustCompile(`^\s*func\s+`)
+
+// defaultClauseRe matches a bare default: clause line.
+var defaultClauseRe = regexp.MustCompile(`^\s*default\s*:`)
+
 // passEnumSwitches finds switch blocks in the file whose scrutinee resolves to
 // a named string type, and returns the resolved enumSwitch records.
 func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSwitch {
@@ -365,6 +371,7 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 	var out []enumSwitch
 	var stack []pendingSwitch
 	braceDepth := 0
+	funcStartLine := -1 // index (0-based) of the current enclosing func declaration
 
 	for i, line := range lines {
 		lineNo := i + 1
@@ -374,6 +381,11 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "//") {
 			continue
+		}
+
+		// Detect function declarations so we can scope scrutinee resolution.
+		if funcDeclRe.MatchString(line) && braceDepth == 0 {
+			funcStartLine = i
 		}
 
 		// Track brace depth to know when a switch block ends.
@@ -392,7 +404,16 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 		// Detect switch keyword.
 		if m := switchScrutineeRe.FindStringSubmatch(line); m != nil {
 			scrutinee := strings.TrimSpace(m[1])
-			typeName := resolveScrutineeType(scrutinee, namedTypes, content)
+			// Resolve scrutinee type using only lines from the enclosing function
+			// body (from the func declaration up to and including this line).
+			// This prevents a named type from a different function spoofing resolution.
+			var funcLines []string
+			if funcStartLine >= 0 {
+				funcLines = lines[funcStartLine : i+1]
+			} else {
+				funcLines = lines[:i+1]
+			}
+			typeName := resolveScrutineeType(scrutinee, namedTypes, funcLines)
 			if typeName != "" {
 				stack = append(stack, pendingSwitch{
 					switchLine: lineNo,
@@ -421,6 +442,11 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 			}
 		}
 		if esw == nil {
+			continue
+		}
+		// Detect default clause — suppress type-B for this switch.
+		if defaultClauseRe.MatchString(line) {
+			esw.hasDefault = true
 			continue
 		}
 		entries := extractCaseEntries(line)
@@ -725,13 +751,20 @@ func seedStringlyDrift(ctx context.Context, snap *ingest.Snapshot, st *store.Sto
 			// Only fire when the switch uses at least one raw string literal arm
 			// (indicating the author is using raw literals for dispatch).
 			// Switches that use only const identifiers are correct by construction.
-			if !hasAnyLiteral {
-				continue // all cases use const identifiers — no drift possible
+			// Switches with a default: clause explicitly handle remaining values —
+			// suppress type-B to avoid false positives on the explicit-subset idiom.
+			if !hasAnyLiteral || sw.hasDefault {
+				continue
 			}
+			// Collect and sort uncovered values for deterministic output.
+			var uncovered []string
 			for val := range constVals {
-				if coveredByLiteral[val] || coveredByIdent[val] {
-					continue // covered by a literal or an identifier case
+				if !coveredByLiteral[val] && !coveredByIdent[val] {
+					uncovered = append(uncovered, val)
 				}
+			}
+			sort.Strings(uncovered)
+			for _, val := range uncovered {
 				k := leadKey{TargetLens: stringlyTargetLens, File: fe.path, Line: sw.switchLine}
 				if seen[k] {
 					continue
