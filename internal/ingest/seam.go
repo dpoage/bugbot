@@ -26,6 +26,22 @@ const (
 	// SeamEnvVar is an environment variable read by source files in at least
 	// two distinct non-Other languages. The seam key is the variable name.
 	SeamEnvVar SeamKind = "env_var"
+	// SeamHTTPRoute is an HTTP route path that has a server-side registration
+	// (PRODUCER) and/or a client-side URL literal call (CONSUMER). The seam
+	// key is the normalized path (leading '/', no host). Emitted when the
+	// producer/consumer sets are non-empty and come from distinct files or
+	// when only one side is present (contract drift: registered-but-never-
+	// called, or called-but-never-registered). Go patterns only in v1; other
+	// languages deferred.
+	SeamHTTPRoute SeamKind = "http_route"
+	// SeamRPCMethod is a protobuf RPC method (declared in a .proto IDL) that
+	// may or may not have matching call sites in non-.proto source. The seam
+	// key is the method name. PRODUCER = proto rpc declaration and/or
+	// server-side handler func. CONSUMER = call site in non-proto source.
+	// Emitted when there is a mismatch (declared-but-uncalled, called-but-
+	// undeclared) or when both sides are present across >=2 files. Go + .proto
+	// only in v1; other languages deferred.
+	SeamRPCMethod SeamKind = "rpc_method"
 )
 
 // SeamSide describes one producer or consumer at a seam: the file that
@@ -151,14 +167,29 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 	// envVarRefs: envVarName -> language -> []fileRef.
 	envVarRefs := make(map[string]map[Language][]fileRef)
 
+	// httpRouteProducers: normalizedPath -> []fileRef (Go server route registrations).
+	httpRouteProducers := make(map[string][]fileRef)
+	// httpRouteConsumers: normalizedPath -> []fileRef (Go client URL-literal call sites).
+	httpRouteConsumers := make(map[string][]fileRef)
+
+	// rpcProducers: methodName -> []fileRef (.proto declarations or Go server handlers).
+	rpcProducers := make(map[string][]fileRef)
+	// rpcConsumers: methodName -> []fileRef (call sites in non-.proto source).
+	rpcConsumers := make(map[string][]fileRef)
+
 	for _, f := range snap.Files {
-		if f.Language == LangOther {
+		// .proto files are LangOther but are scanned for RPC declarations.
+		isProto := strings.HasSuffix(f.Path, ".proto")
+		if f.Language == LangOther && !isProto {
 			continue
 		}
 		content, ok := readCapped(filepath.Join(snap.Root, f.Path), seamMaxBytes)
 		if !ok {
 			continue
 		}
+		// Data-file and env-var detectors apply only to known source languages,
+		// not to .proto IDL files (which are processed solely by rpcProducers).
+		if !isProto {
 		// Data-file references: any string literal whose value ends in
 		// a known data-file suffix. We accept every language's
 		// quoted-string forms because the contract surface is the file
@@ -193,6 +224,67 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 			}
 			line := lineForEnvMatch(f.Language, content, name)
 			lref[f.Language] = append(lref[f.Language], fileRef{file: f.Path, line: line})
+		}
+		} // end if !isProto
+
+		// HTTP route detection (Go only in v1; other languages deferred).
+		// PRODUCER: server route registrations.
+		// CONSUMER: client URL-literal call sites.
+		if f.Language == LangGo {
+			for _, m := range httpServerRouteRe.FindAllSubmatchIndex(content, -1) {
+				// Two capture groups: [2:3] for HandleFunc/Handle, [4:5] for method forms.
+				var raw string
+				if m[2] >= 0 {
+					raw = string(content[m[2]:m[3]])
+				} else if m[4] >= 0 {
+					raw = string(content[m[4]:m[5]])
+				}
+				path := normalizeHTTPPath(raw)
+				if path == "" {
+					continue
+				}
+				line := lineForOffset(content, m[0])
+				httpRouteProducers[path] = append(httpRouteProducers[path], fileRef{file: f.Path, line: line})
+			}
+			for _, m := range httpClientCallRe.FindAllSubmatchIndex(content, -1) {
+				// Two capture groups: [2:3] for NewRequest, [4:5] for method calls.
+				var raw string
+				if m[2] >= 0 {
+					raw = string(content[m[2]:m[3]])
+				} else if m[4] >= 0 {
+					raw = string(content[m[4]:m[5]])
+				}
+				path := normalizeHTTPPath(raw)
+				if path == "" {
+					continue
+				}
+				line := lineForOffset(content, m[0])
+				httpRouteConsumers[path] = append(httpRouteConsumers[path], fileRef{file: f.Path, line: line})
+			}
+		}
+
+		// RPC method detection (Go + .proto in v1; other languages deferred).
+		// .proto files: PRODUCER declarations.
+		// Go files: server handler PRODUCER funcs + call-site CONSUMER refs.
+		if isProto {
+			for _, m := range protoRPCDeclRe.FindAllSubmatchIndex(content, -1) {
+				name := string(content[m[2]:m[3]])
+				line := lineForOffset(content, m[0])
+				rpcProducers[name] = append(rpcProducers[name], fileRef{file: f.Path, line: line})
+			}
+		} else if f.Language == LangGo {
+			// Go server handlers: func (r *FooServer) MethodName(ctx ...
+			for _, m := range goRPCHandlerRe.FindAllSubmatchIndex(content, -1) {
+				name := string(content[m[2]:m[3]])
+				line := lineForOffset(content, m[0])
+				rpcProducers[name] = append(rpcProducers[name], fileRef{file: f.Path, line: line})
+			}
+			// Call sites: .MethodName( or ClientName.MethodName( in Go
+			for _, m := range goRPCCallRe.FindAllSubmatchIndex(content, -1) {
+				name := string(content[m[2]:m[3]])
+				line := lineForOffset(content, m[0])
+				rpcConsumers[name] = append(rpcConsumers[name], fileRef{file: f.Path, line: line})
+			}
 		}
 	}
 
@@ -303,6 +395,144 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 			}
 		}
 	}
+
+	// reduceProducerConsumer builds a Seam from separate producer and consumer
+	// fileRef slices. The gate for HTTP is: at least one side present and >=2
+	// distinct files when both sides are non-empty (self-references suppressed).
+	// For RPC the caller enforces an additional pre-condition: producers must be
+	// non-empty (a real contract — .proto rpc declaration or gRPC server handler
+	// — must exist before consumer call sites are treated as seam evidence).
+	// Sides are sorted by File for determinism.
+	reduceProducerConsumer := func(kind SeamKind, key string, lang Language, producers, consumers []fileRef) *Seam {
+		// Collect distinct files across both sides.
+		filesSet := make(map[string]bool, len(producers)+len(consumers))
+		for _, r := range producers {
+			filesSet[r.file] = true
+		}
+		for _, r := range consumers {
+			filesSet[r.file] = true
+		}
+		// Suppress pure self-references (only one distinct file, both sides in it).
+		if len(filesSet) < 2 && len(producers) > 0 && len(consumers) > 0 {
+			return nil
+		}
+		// Must have at least one side non-empty.
+		if len(producers) == 0 && len(consumers) == 0 {
+			return nil
+		}
+		var sides []SeamSide
+		seen := make(map[string]bool, seamMaxSides)
+		// Sort each side by (line, file) for deterministic first-pick.
+		sortRefs := func(refs []fileRef) []fileRef {
+			out := append([]fileRef(nil), refs...)
+			sort.Slice(out, func(a, b int) bool {
+				if out[a].line != out[b].line {
+					return out[a].line < out[b].line
+				}
+				return out[a].file < out[b].file
+			})
+			return out
+		}
+		prods := sortRefs(producers)
+		cons := sortRefs(consumers)
+		// Interleave: one producer, one consumer, repeat until seamMaxSides.
+		pi, ci := 0, 0
+		for len(sides) < seamMaxSides {
+			advanced := false
+			for pi < len(prods) && len(sides) < seamMaxSides {
+				r := prods[pi]
+				pi++
+				if seen[r.file] {
+					continue
+				}
+				seen[r.file] = true
+				sides = append(sides, SeamSide{File: r.file, Language: lang, Line: r.line})
+				advanced = true
+				break
+			}
+			for ci < len(cons) && len(sides) < seamMaxSides {
+				r := cons[ci]
+				ci++
+				if seen[r.file] {
+					continue
+				}
+				seen[r.file] = true
+				sides = append(sides, SeamSide{File: r.file, Language: lang, Line: r.line})
+				advanced = true
+				break
+			}
+			if !advanced {
+				break
+			}
+		}
+		if len(sides) == 0 {
+			return nil
+		}
+		sort.Slice(sides, func(i, j int) bool { return sides[i].File < sides[j].File })
+		return &Seam{Kind: kind, Key: key, Sides: sides}
+	}
+
+	// HTTP routes: emit after env vars, sorted by path.
+	httpKeys := make([]string, 0, len(httpRouteProducers)+len(httpRouteConsumers))
+	httpKeySet := make(map[string]bool)
+	for k := range httpRouteProducers {
+		if !httpKeySet[k] {
+			httpKeys = append(httpKeys, k)
+			httpKeySet[k] = true
+		}
+	}
+	for k := range httpRouteConsumers {
+		if !httpKeySet[k] {
+			httpKeys = append(httpKeys, k)
+			httpKeySet[k] = true
+		}
+	}
+	sort.Strings(httpKeys)
+	for _, k := range httpKeys {
+		if s := reduceProducerConsumer(SeamHTTPRoute, k, LangGo, httpRouteProducers[k], httpRouteConsumers[k]); s != nil {
+			out = append(out, *s)
+			if len(out) >= seamMaxTotal {
+				return out
+			}
+		}
+	}
+
+	// RPC methods: emit after HTTP routes, sorted by method name.
+	rpcKeys := make([]string, 0, len(rpcProducers)+len(rpcConsumers))
+	rpcKeySet := make(map[string]bool)
+	for k := range rpcProducers {
+		if !rpcKeySet[k] {
+			rpcKeys = append(rpcKeys, k)
+			rpcKeySet[k] = true
+		}
+	}
+	for k := range rpcConsumers {
+		if !rpcKeySet[k] {
+			rpcKeys = append(rpcKeys, k)
+			rpcKeySet[k] = true
+		}
+	}
+	sort.Strings(rpcKeys)
+	for _, k := range rpcKeys {
+		// Producer-anchor gate: skip methods with no real contract declaration.
+		// A call site matching goRPCCallRe without a .proto rpc declaration or
+		// genuine gRPC handler is indistinguishable from an ordinary Go method
+		// call (db.ExecContext, repo.UpsertFinding, …). With no producer the
+		// consumer evidence is noise, not a seam.
+		if len(rpcProducers[k]) == 0 {
+			continue
+		}
+		// For RPC, producers may be .proto (LangOther after DetectLanguage, but
+		// we include them explicitly) or Go handlers; consumers are Go call sites.
+		// Pass LangGo as the representative language; the lens reads the file.
+		if s := reduceProducerConsumer(SeamRPCMethod, k, LangGo, rpcProducers[k], rpcConsumers[k]); s != nil {
+			out = append(out, *s)
+			if len(out) >= seamMaxTotal {
+				return out
+			}
+		}
+	}
+
 	return out
 }
 
@@ -453,4 +683,84 @@ func lineForEnvMatch(lang Language, content []byte, name string) int {
 	default:
 		return 0
 	}
+}
+
+// httpServerRouteRe matches Go HTTP server route registrations. Two pattern
+// groups are combined:
+//  1. Standard-library mux: .HandleFunc("/path", ...) / http.Handle("/path", ...)
+//     — the HandleFunc/Handle keyword is unique to server-side registration.
+//  2. Router-framework shorthand: .Get("/path", handler) / .Post("/path", handler)
+//     — distinguished from the client http.Get("/path") by requiring a COMMA
+//     after the path literal (a handler arg always follows in router frameworks).
+//
+// Captured groups: group 1 for HandleFunc/Handle forms, group 2 for method forms.
+// Go only in v1; other language server frameworks are deferred.
+var httpServerRouteRe = regexp.MustCompile(`(?:(?:\.HandleFunc|\.Handle|http\.Handle|http\.HandleFunc)\s*\(\s*"(/[^"\x00-\x1f]*)"|(?:\.Get|\.Post|\.Put|\.Delete|\.Patch)\s*\(\s*"(/[^"\x00-\x1f]*)"\s*,)`)
+
+// httpClientCallRe matches Go HTTP client URL-literal call sites. Captured
+// group 1 is the URL/path literal. Patterns:
+//   - http.NewRequest(method, "url", ...)
+//   - client.Get("url") / .Get("url")
+//   - resp.Get("url") — conservative: any .Get/.Post/.Put/.Delete with a
+//     string literal starting with '/' or "http"
+//
+// Go only in v1; other client libraries are deferred.
+var httpClientCallRe = regexp.MustCompile(`(?:http\.NewRequest\s*\([^,]+,\s*"((?:https?://[^"]*|/[^"]*))"|(?:\.Get|\.Post|\.Put|\.Delete|\.Patch)\s*\(\s*"((?:https?://[^"]*|/[^"]*))"\s*[,)])`)
+
+// protoRPCDeclRe matches protobuf RPC declarations in .proto files.
+// Captured group 1 is the method name.
+var protoRPCDeclRe = regexp.MustCompile(`\brpc\s+([A-Z][A-Za-z0-9_]*)\s*\(`)
+
+// goRPCHandlerRe matches Go gRPC unary server handler method declarations.
+// A genuine gRPC unary handler has: receiver ending in "Server", an
+// uppercase method name, ctx as the first parameter, a second pointer
+// request parameter, and a (pointer response, error) return list.
+// Methods with only one parameter (e.g. Serve(ctx context.Context) error)
+// do NOT match, preventing control-plane methods from registering as RPC
+// producers. Captured group 1 is the method name.
+var goRPCHandlerRe = regexp.MustCompile(`func\s*\([^)]*Server[^)]*\)\s+([A-Z][A-Za-z0-9_]*)\s*\(\s*ctx\b[^)]*,\s*\*[A-Za-z][A-Za-z0-9_]*\s*\)\s*\(\s*\*[A-Za-z]`)
+
+// goRPCCallRe matches Go gRPC client call sites of the form:
+//   someClient.MethodName(ctx, ...)
+// where MethodName begins with an uppercase letter (exported, matching proto
+// conventions). Captured group 1 is the method name. We require the receiver
+// to be a lowercase-starting identifier (variable, not type assertion) to
+// reduce false positives from struct literals and interface declarations.
+var goRPCCallRe = regexp.MustCompile(`\b[a-z][A-Za-z0-9_]*\.([A-Z][A-Za-z0-9_]*)\s*\(\s*ctx\b`)
+
+// normalizeHTTPPath strips the scheme+host from a URL literal and returns the
+// path component. Returns "" for any literal that doesn't look like a routable
+// path (e.g. bare filenames, empty strings, patterns with only a query string).
+// Examples:
+//
+//	"/widgets"              → "/widgets"
+//	"http://api.example.com/widgets" → "/widgets"
+//	"https://svc/v1/users"  → "/v1/users"
+//	""                      → ""
+//	"widgets"               → "" (no leading slash — not a routable path literal)
+func normalizeHTTPPath(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	// Strip scheme+host if present.
+	if i := strings.Index(raw, "://"); i >= 0 {
+		rest := raw[i+3:]
+		slash := strings.IndexByte(rest, '/')
+		if slash < 0 {
+			return "" // bare host, no path
+		}
+		raw = rest[slash:]
+	}
+	// Path must start with '/'.
+	if raw == "" || raw[0] != '/' {
+		return ""
+	}
+	// Strip query and fragment for grouping.
+	if i := strings.IndexAny(raw, "?#"); i >= 0 {
+		raw = raw[:i]
+	}
+	if raw == "/" || raw == "" {
+		return "" // root-only path is too generic
+	}
+	return raw
 }
