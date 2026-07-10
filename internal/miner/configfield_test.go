@@ -187,7 +187,7 @@ func TestCfPassValidators_SentinelReturnNotRejection(t *testing.T) {
 	src := `package x
 
 // Timeout is in seconds.
-// Default: 0, 0 means the built-in default.
+// Default: 0
 func Apply(c *Config) {
 	if c.Timeout <= 0 {
 		return
@@ -348,11 +348,10 @@ func TestCfMiner_NegativeFixture(t *testing.T) {
 
 // TestCfMiner_NoDoublePostOnDocContradictionFixture verifies that running the
 // FULL Seed (both doc-contradiction and config-field passes) on a combined
-// fixture produces leads from BOTH passes without clobbering each other.
+// fixture produces leads from BOTH passes without interfering.
 //
-// DEFECT 6: AddLead upserts on (target_lens, file, line); a config-field lead
-// at the same (file, line) as a doc-contradiction lead would silently clobber
-// the latter. This test asserts both leads coexist.
+// The two passes post at DISTINCT (file, line) loci so no upsert collision
+// occurs in this fixture. The test guards that each pass fires independently.
 func TestCfMiner_NoDoublePostOnDocContradictionFixture(t *testing.T) {
 	dir := t.TempDir()
 
@@ -455,10 +454,10 @@ func (c *ServerConfig) Validate() error {
 	if !hasCfLead {
 		t.Errorf("expected a config-field lead on cfonly.go; got cfLeads=%+v", cfLeads)
 	}
-	// Config-field must NOT post on validator.go (sentinel doc "0 = unlimited").
+	// Config-field must NOT post on widget_limit.go (sentinel doc "0 = unlimited").
 	for _, l := range cfLeads {
-		if l.File == "validator.go" {
-			t.Errorf("config-field must not clobber doc-contradiction on validator.go: %+v", l)
+		if l.File == "widget_limit.go" {
+			t.Errorf("config-field must not fire on sentinel-doc field: %+v", l)
 		}
 	}
 }
@@ -503,30 +502,25 @@ type AuthConfig struct {
 }
 
 // TestCfMiner_NormativeProseNotFlagged ensures that a doc comment where a
-// normative word appears in PROSE (not bound to the field) is NOT flagged
-// (DEFECT 4: "required dependencies are missing" should not fire).
+// normative word appears in PROSE (not bound to the field name with a leading
+// uppercase letter) is NOT flagged (DEFECT 4).
+//
+// Fixture: struct field Foo is never read. Its first doc line is
+// "foo must handle failures." — "foo" (lowercase) is an unbound normative word.
+// Under the old buggy regex (global (?i) making [A-Z] case-insensitive),
+// "foo must" would match the FieldName-must alternative and produce a false
+// lead. Under the fixed regex ([A-Z] requires PascalCase, no global (?i)),
+// "foo must" does not match and zero leads are produced.
 func TestCfMiner_NormativeProseNotFlagged(t *testing.T) {
 	dir := t.TempDir()
 	src := `package fixture
 
-type SmokeCategory string
-
-const (
-	// SmokeCategoryDepMissing: the toolchain is present but required
-	// dependencies are missing (missing module, missing package, etc.).
-	SmokeCategoryDepMissing SmokeCategory = "dep_missing"
-)
-
 type SomeConfig struct {
-	// Category is the category. callers must always validate before use.
-	Category SmokeCategory
-}
-
-func Use(c SomeConfig) {
-	_ = c.Category
+	// foo must handle failures; this prose is unbound to the field name.
+	Foo string
 }
 `
-	p := filepath.Join(dir, "smoke.go")
+	p := filepath.Join(dir, "prose.go")
 	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +528,7 @@ func Use(c SomeConfig) {
 	snap := &ingest.Snapshot{
 		Root: dir,
 		Files: []ingest.File{
-			{Path: "smoke.go", Language: ingest.LangGo},
+			{Path: "prose.go", Language: ingest.LangGo},
 		},
 	}
 	st, ctx := makeCfStore(t)
@@ -548,11 +542,11 @@ func Use(c SomeConfig) {
 		t.Fatalf("PendingLeads: %v", err)
 	}
 
-	// SmokeCategoryDepMissing: inside const block, should not be harvested.
-	// Category: is read via c.Category in Use → no never-read lead.
+	// Foo is never read, but "foo must" (lowercase) is unbound prose —
+	// it must NOT trigger cfNormativeDocRe with the fixed regex.
 	cfLeads := filterCfLeadsByPoster(leads, cfPosterLens)
 	if len(cfLeads) != 0 {
-		t.Errorf("want 0 config-field leads for prose/const fixture, got %d: %+v", len(cfLeads), cfLeads)
+		t.Errorf("want 0 config-field leads for unbound prose fixture, got %d: %+v", len(cfLeads), cfLeads)
 	}
 }
 
@@ -707,19 +701,29 @@ func (c *Config) Validate() error {
 }
 `
 	dir := t.TempDir()
-	serverFile := filepath.Join(dir, "server.go")
-	clientFile := filepath.Join(dir, "client.go")
-	if err := os.WriteFile(serverFile, []byte(serverSrc), 0o644); err != nil {
+	// Place files in separate subdirectories to simulate different packages.
+	// Go package identity is the directory; the dir-based join key must not
+	// conflate "server/config.go" with "client/config.go" even if both have
+	// `type Config struct` and both package clauses happen to differ.
+	serverDir := filepath.Join(dir, "server")
+	clientDir := filepath.Join(dir, "client")
+	if err := os.MkdirAll(serverDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(clientFile, []byte(clientSrc), 0o644); err != nil {
+	if err := os.MkdirAll(clientDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(serverDir, "config.go"), []byte(serverSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(clientDir, "config.go"), []byte(clientSrc), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	snap := &ingest.Snapshot{
 		Root: dir,
 		Files: []ingest.File{
-			{Path: "server.go", Language: ingest.LangGo},
-			{Path: "client.go", Language: ingest.LangGo},
+			{Path: "server/config.go", Language: ingest.LangGo},
+			{Path: "client/config.go", Language: ingest.LangGo},
 		},
 	}
 	st, ctx := makeCfStore(t)
@@ -734,7 +738,7 @@ func (c *Config) Validate() error {
 	cfLeads := filterCfLeadsByPoster(leads, cfPosterLens)
 	// server's Config.Timeout has Default:0 but NO validator.
 	// client's Config.Timeout has a validator but NO documented default.
-	// Cross-PACKAGE join must NOT produce a lead on server's Config.Timeout.
+	// Cross-DIRECTORY join must NOT produce a lead on server's Config.Timeout.
 	if len(cfLeads) != 0 {
 		t.Errorf("cross-package collision: want 0 leads, got %d: %+v", len(cfLeads), cfLeads)
 	}
@@ -794,6 +798,142 @@ func (c *Config) Validate() error {
 	// The join must still fire exactly one lead on Config.Timeout.
 	if len(cfLeads) != 1 {
 		t.Errorf("same-package cross-file: want 1 lead, got %d: %+v", len(cfLeads), cfLeads)
+	}
+}
+
+// TestCfMiner_CrossDirSamePackageNameNoFalseJoin is the regression test for
+// PROD FINDING 1: two directories each containing `package config` (same
+// package-clause name), same struct name, same field name. One directory has
+// a Default:0 doc and NO validator; the other has a rejecting validator and NO
+// documented default. The dir-based join key must prevent a false positive.
+//
+// Fails before the fix (pkg-name key joins across dirs), passes after.
+func TestCfMiner_CrossDirSamePackageNameNoFalseJoin(t *testing.T) {
+	// dir A: `package config` with Config.Timeout Default:0 and no validator.
+	declSrc := `package config
+
+// Config holds configuration.
+type Config struct {
+	// Timeout is the timeout. Default: 0
+	Timeout int
+}
+`
+	// dir B: ALSO `package config` but with a rejecting validator and no default.
+	valSrc := `package config
+
+import "fmt"
+
+// Config holds configuration.
+type Config struct {
+	Timeout int
+}
+
+func (c *Config) Validate() error {
+	if c.Timeout <= 0 {
+		return fmt.Errorf("Timeout must be > 0")
+	}
+	return nil
+}
+`
+	root := t.TempDir()
+	dirA := filepath.Join(root, "a")
+	dirB := filepath.Join(root, "b")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirA, "config.go"), []byte(declSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirB, "config.go"), []byte(valSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap := &ingest.Snapshot{
+		Root: root,
+		Files: []ingest.File{
+			{Path: "a/config.go", Language: ingest.LangGo},
+			{Path: "b/config.go", Language: ingest.LangGo},
+		},
+	}
+	st, ctx := makeCfStore(t)
+	var sum Summary
+	if err := seedConfigFieldContradictions(ctx, snap, st, &sum); err != nil {
+		t.Fatalf("seedConfigFieldContradictions: %v", err)
+	}
+	leads, err := st.PendingLeads(ctx, cfTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+	cfLeads := filterCfLeadsByPoster(leads, cfPosterLens)
+	// a/config.go has Default:0 but no validator in the same directory.
+	// b/config.go has a validator but no documented default.
+	// The cross-directory join must NOT fire even though both use `package config`.
+	if len(cfLeads) != 0 {
+		t.Errorf("cross-dir same-pkg-name: want 0 leads, got %d: %+v", len(cfLeads), cfLeads)
+	}
+}
+
+// TestCfMiner_NormalizeThenValidateNoFalsePositive is the regression test for
+// PROD FINDING 2: a Normalize method (no error return) sets the field to a
+// default when it is zero, followed by a Validate method that rejects zero.
+// Because zero is normalized before validation, the field is healthy.
+// The field doc documents "0 means auto-detect" — a sentinel value — which
+// cfSentinelDocRe must match to suppress the false positive.
+//
+// Fails before the fix (cfSentinelDocRe not consulted on field doc), passes after.
+func TestCfMiner_NormalizeThenValidateNoFalsePositive(t *testing.T) {
+	src := `package config
+
+import "fmt"
+
+// Cfg holds configuration.
+type Cfg struct {
+	// Conns is the connection pool size. Default: 0 (0 means auto-detect).
+	Conns int
+}
+
+// Normalize sets Conns to a safe default when it is zero or negative.
+func (c *Cfg) Normalize() {
+	if c.Conns <= 0 {
+		c.Conns = 4 // auto-detect
+	}
+}
+
+// Validate rejects zero or negative Conns (called after Normalize).
+func (c *Cfg) Validate() error {
+	if c.Conns <= 0 {
+		return fmt.Errorf("Conns must be positive")
+	}
+	return nil
+}
+`
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "cfg.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap := &ingest.Snapshot{
+		Root: root,
+		Files: []ingest.File{
+			{Path: "cfg.go", Language: ingest.LangGo},
+		},
+	}
+	st, ctx := makeCfStore(t)
+	var sum Summary
+	if err := seedConfigFieldContradictions(ctx, snap, st, &sum); err != nil {
+		t.Fatalf("seedConfigFieldContradictions: %v", err)
+	}
+	leads, err := st.PendingLeads(ctx, cfTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+	cfLeads := filterCfLeadsByPoster(leads, cfPosterLens)
+	// Cfg.Conns documents "0 means auto-detect" — cfSentinelDocRe matches "means".
+	// Even though Validate rejects zero, the field doc declares zero a sentinel.
+	// No lead should be produced.
+	if len(cfLeads) != 0 {
+		t.Errorf("normalize-then-validate: want 0 leads, got %d: %+v", len(cfLeads), cfLeads)
 	}
 }
 
