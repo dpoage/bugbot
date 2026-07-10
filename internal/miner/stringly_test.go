@@ -552,3 +552,68 @@ func TestStringlyDrift_D3_DeterminismMultiUncovered(t *testing.T) {
 		}
 	}
 }
+
+// TestStringlyDrift_ClosureShadowsOuterTypedParam verifies that a closure whose
+// parameter shadows an outer typed-enum parameter is NOT flagged. The inner
+// `mode string` is a raw string; the switch inside cannot be a typed-enum
+// switch, so zero leads must be emitted.
+//
+// Repro: func outer(mode Mode) func(string) { return func(mode string) { switch mode { case "docker":; case "podman": } } }
+func TestStringlyDrift_ClosureShadowsOuterTypedParam(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"closure_shadow.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("ClosureShadow: want 0 stringly-drift leads, got %d: %+v",
+			len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_ClosureOverOuterTypedParam verifies that a closure that
+// captures (but does NOT shadow) an outer typed-enum parameter still fires.
+// The closure has no params of its own; `m` resolves to the outer `m Mode`.
+// The case "activ" is a typo of "active" → must produce at least one lead.
+func TestStringlyDrift_ClosureOverOuterTypedParam(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_drift")
+	snap := buildSnapshot(t, dir, []string{"closure_outer_typed.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) == 0 {
+		t.Errorf("ClosureOuterTyped: want >= 1 stringly-drift lead (typo 'activ'), got 0")
+	}
+}

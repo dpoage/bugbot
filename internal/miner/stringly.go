@@ -257,31 +257,56 @@ func passStringEnumConsts(content string, namedTypes map[string]bool) []enumCons
 }
 
 // resolveScrutineeType tries to determine the named string type of the switch
-// scrutinee expression in a file, given the set of named types and the file
-// content (for function parameter / variable declaration scanning).
+// scrutinee expression, scoped to the innermost enclosing function and walking
+// outward through enclosing function scopes.
 //
-// It uses a simple heuristic: scan the file for declarations of the form
-// `name TypeName` or `var name TypeName` and build a name→type map.
-// If the scrutinee expression is a simple identifier in that map, return the type.
-func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, funcLines []string) string {
+// scopeStarts is a list of 0-based line indices (outermost first, innermost last).
+// For each scope from innermost to outermost:
+//   - If the scrutinee is declared with a named string type → return that type.
+//   - If the scrutinee is declared with any other type → it shadows outer
+//     declarations; stop and return "" (scrutinee is raw/untyped here).
+//   - If not found → continue to the next outer scope.
+//
+// lines is the full file split on "\n"; switchIdx is the 0-based index of the
+// switch line. Each scope covers lines[scopeStarts[j]:switchIdx+1].
+func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, lines []string, scopeStarts []int, switchIdx int) string {
 	scrutinee = strings.TrimSpace(scrutinee)
 	// Only handle simple identifiers (no dots, no calls).
 	if strings.ContainsAny(scrutinee, ".()[] \t") {
 		return ""
 	}
-	blockMask := buildBlockCommentMask(funcLines)
-	btMask := buildBacktickMask(funcLines)
-	for i, line := range funcLines {
-		if blockMask[i] || btMask[i] {
+	end := switchIdx + 1
+	if end > len(lines) {
+		end = len(lines)
+	}
+	// Walk from innermost scope outward (scopeStarts is outermost-first, so
+	// iterate in reverse).
+	for j := len(scopeStarts) - 1; j >= 0; j-- {
+		start := scopeStarts[j]
+		if start < 0 || start >= end {
 			continue
 		}
-		if strings.HasPrefix(strings.TrimSpace(line), "//") {
-			continue
-		}
-		for _, m := range varDeclRe.FindAllStringSubmatch(line, -1) {
-			varName, typeName := m[1], m[2]
-			if varName == scrutinee && namedTypes[typeName] {
-				return typeName
+		scopeLines := lines[start:end]
+		blockMask := buildBlockCommentMask(scopeLines)
+		btMask := buildBacktickMask(scopeLines)
+		for i, line := range scopeLines {
+			if blockMask[i] || btMask[i] {
+				continue
+			}
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			for _, m := range varDeclRe.FindAllStringSubmatch(line, -1) {
+				varName, typeName := m[1], m[2]
+				if varName != scrutinee {
+					continue
+				}
+				if namedTypes[typeName] {
+					return typeName
+				}
+				// Found the name bound to a non-enum type — shadows any outer
+				// enum binding; scrutinee is not a named string type here.
+				return ""
 			}
 		}
 	}
@@ -349,6 +374,10 @@ func extractCaseLiterals(caseLine string) []string {
 // start of non-whitespace, before a opening brace on the same or next line).
 var funcDeclRe = regexp.MustCompile(`^\s*func\s+`)
 
+// funcAnywhereRe detects the `func` keyword anywhere on a line (not just at
+// the start), to catch func literals: `return func(...)`, `go func()`, etc.
+var funcAnywhereRe = regexp.MustCompile(`\bfunc\b`)
+
 // defaultClauseRe matches a bare default: clause line.
 var defaultClauseRe = regexp.MustCompile(`^\s*default\s*:`)
 
@@ -361,17 +390,23 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 	lines := strings.Split(content, "\n")
 	blockMask := buildBlockCommentMask(lines)
 	btMask := buildBacktickMask(lines)
-
 	type pendingSwitch struct {
 		switchLine int
 		typeName   string
 		depth      int // brace depth when switch { was opened
 	}
 
+	// funcScope tracks the line index where a function body starts.
+	// We maintain a stack so that closures (func literals) shadow outer functions.
+	type funcScope struct {
+		startLine int // 0-based line index of the func declaration
+		bodyDepth int // brace depth AFTER the opening { of this func body
+	}
+	var funcStack []funcScope
+	pendingFunc := -1 // 0-based line index of a func keyword awaiting its opening {
 	var out []enumSwitch
 	var stack []pendingSwitch
 	braceDepth := 0
-	funcStartLine := -1 // index (0-based) of the current enclosing func declaration
 
 	for i, line := range lines {
 		lineNo := i + 1
@@ -383,20 +418,30 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 			continue
 		}
 
-		// Detect function declarations so we can scope scrutinee resolution.
-		if funcDeclRe.MatchString(line) && braceDepth == 0 {
-			funcStartLine = i
+		// Detect function declarations (top-level, methods, and func literals)
+		// so we can scope scrutinee resolution to the innermost enclosing body.
+		if funcAnywhereRe.MatchString(line) {
+			pendingFunc = i
 		}
 
-		// Track brace depth to know when a switch block ends.
+		// Track brace depth; push/pop func scopes and switch blocks.
 		for _, ch := range line {
 			if ch == '{' {
 				braceDepth++
+				// If a func keyword was seen and this { opens its body, push a scope.
+				if pendingFunc >= 0 {
+					funcStack = append(funcStack, funcScope{startLine: pendingFunc, bodyDepth: braceDepth})
+					pendingFunc = -1
+				}
 			} else if ch == '}' {
 				braceDepth--
 				// Pop any switch whose block just closed.
 				if len(stack) > 0 && braceDepth < stack[len(stack)-1].depth {
 					stack = stack[:len(stack)-1]
+				}
+				// Pop any func scope whose body just closed.
+				if len(funcStack) > 0 && braceDepth < funcStack[len(funcStack)-1].bodyDepth {
+					funcStack = funcStack[:len(funcStack)-1]
 				}
 			}
 		}
@@ -404,16 +449,17 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 		// Detect switch keyword.
 		if m := switchScrutineeRe.FindStringSubmatch(line); m != nil {
 			scrutinee := strings.TrimSpace(m[1])
-			// Resolve scrutinee type using only lines from the enclosing function
-			// body (from the func declaration up to and including this line).
-			// This prevents a named type from a different function spoofing resolution.
-			var funcLines []string
-			if funcStartLine >= 0 {
-				funcLines = lines[funcStartLine : i+1]
-			} else {
-				funcLines = lines[:i+1]
+			// Resolve scrutinee type by walking scope from innermost func outward.
+			// Build a slice of start-line indices (outermost first).
+			scopeStarts := make([]int, 0, len(funcStack)+1)
+			for _, fs := range funcStack {
+				scopeStarts = append(scopeStarts, fs.startLine)
 			}
-			typeName := resolveScrutineeType(scrutinee, namedTypes, funcLines)
+			if len(scopeStarts) == 0 {
+				// No enclosing func detected; fall back to scanning from file top.
+				scopeStarts = []int{0}
+			}
+			typeName := resolveScrutineeType(scrutinee, namedTypes, lines, scopeStarts, i)
 			if typeName != "" {
 				stack = append(stack, pendingSwitch{
 					switchLine: lineNo,
