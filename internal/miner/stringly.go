@@ -147,6 +147,15 @@ var singleStringRe = regexp.MustCompile(`"([^"\\]{0,128})"`)
 // Capture 1 = var name, capture 2 = type name.
 var varDeclRe = regexp.MustCompile(`\b(\w+)\s+(\w+)\b`)
 
+// shortDeclRe matches short variable declarations that bind/shadow a name:
+//
+//	name :=  or  name, anything :=
+//
+// Capture 1 = first identifier (the name being bound).
+// This is the canonical shadow signal: `:=` always introduces a new binding
+// regardless of what the RHS evaluates to, so we can never prove the type.
+var shortDeclRe = regexp.MustCompile(`^\s*(\w+)(?:\s*,\s*\w+)?\s*:=`)
+
 // buildBlockCommentMask returns a per-line boolean mask: true if the line is
 // inside a /* ... */ block comment (best-effort, ignores strings containing /*).
 func buildBlockCommentMask(lines []string) []bool {
@@ -261,24 +270,40 @@ func passStringEnumConsts(content string, namedTypes map[string]bool) []enumCons
 // outward through enclosing function scopes.
 //
 // scopeStarts is a list of 0-based line indices (outermost first, innermost last).
-// For each scope from innermost to outermost:
-//   - If the scrutinee is declared with a named string type → return that type.
-//   - If the scrutinee is declared with any other type → it shadows outer
-//     declarations; stop and return "" (scrutinee is raw/untyped here).
-//   - If not found → continue to the next outer scope.
+// For each scope from innermost to outermost, we scan ALL lines before the switch
+// and take the NEAREST (last) binding of the scrutinee name:
+//   - Typed decl (`name TypeName` where TypeName is a known enum)  → return that type.
+//   - Typed decl with non-enum type                                → return "" (shadowed).
+//   - Short decl (`name :=` or `name, _ :=`)                      → return "" (cannot prove type).
+//   - No binding in this scope                                     → try next outer scope.
+//
+// This nearest-binding rule closes the entire := shadow FP class: a name
+// rebound via := in a nested block or closure body is treated as unprovably
+// typed regardless of what outer scopes declare. Default = silence.
 //
 // lines is the full file split on "\n"; switchIdx is the 0-based index of the
-// switch line. Each scope covers lines[scopeStarts[j]:switchIdx+1].
+// switch line. Each scope covers lines[scopeStarts[j]:switchIdx].
 func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, lines []string, scopeStarts []int, switchIdx int) string {
 	scrutinee = strings.TrimSpace(scrutinee)
 	// Only handle simple identifiers (no dots, no calls).
 	if strings.ContainsAny(scrutinee, ".()[] \t") {
 		return ""
 	}
-	end := switchIdx + 1
+	end := switchIdx
 	if end > len(lines) {
 		end = len(lines)
 	}
+	if end < 0 {
+		end = 0
+	}
+
+	// binding records what a single line says about the scrutinee name.
+	type binding struct {
+		isEnum   bool   // true → typed decl with a known enum type
+		typeName string // only valid when isEnum=true
+		// isEnum=false and !isEnum → shadowing (short-decl or non-enum typed decl)
+	}
+
 	// Walk from innermost scope outward (scopeStarts is outermost-first, so
 	// iterate in reverse).
 	for j := len(scopeStarts) - 1; j >= 0; j-- {
@@ -289,6 +314,12 @@ func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, lines []
 		scopeLines := lines[start:end]
 		blockMask := buildBlockCommentMask(scopeLines)
 		btMask := buildBacktickMask(scopeLines)
+
+		// Scan all lines in this scope and record the LAST binding of scrutinee.
+		// "Last" = nearest to the switch (highest index i).
+		found := false
+		var last binding
+
 		for i, line := range scopeLines {
 			if blockMask[i] || btMask[i] {
 				continue
@@ -296,19 +327,38 @@ func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, lines []
 			if strings.HasPrefix(strings.TrimSpace(line), "//") {
 				continue
 			}
+
+			// Check short-decl first (`:=`), which always shadows/binds.
+			if m := shortDeclRe.FindStringSubmatch(line); m != nil {
+				if m[1] == scrutinee {
+					found = true
+					last = binding{isEnum: false}
+					continue // keep scanning for a later binding
+				}
+			}
+
+			// Check typed declaration: `name TypeName` or `var name TypeName`.
 			for _, m := range varDeclRe.FindAllStringSubmatch(line, -1) {
 				varName, typeName := m[1], m[2]
 				if varName != scrutinee {
 					continue
 				}
+				found = true
 				if namedTypes[typeName] {
-					return typeName
+					last = binding{isEnum: true, typeName: typeName}
+				} else {
+					last = binding{isEnum: false}
 				}
-				// Found the name bound to a non-enum type — shadows any outer
-				// enum binding; scrutinee is not a named string type here.
-				return ""
 			}
 		}
+
+		if found {
+			if last.isEnum {
+				return last.typeName
+			}
+			return ""
+		}
+		// No binding in this scope — try the next outer scope.
 	}
 	return ""
 }

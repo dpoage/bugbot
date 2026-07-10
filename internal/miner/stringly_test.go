@@ -617,3 +617,66 @@ func TestStringlyDrift_ClosureOverOuterTypedParam(t *testing.T) {
 		t.Errorf("ClosureOuterTyped: want >= 1 stringly-drift lead (typo 'activ'), got 0")
 	}
 }
+
+// TestStringlyDrift_ShadowViaShortDeclClosure verifies that a closure where
+// the scrutinee is rebound via := (not typed as the enum) produces ZERO leads.
+// Repro C: func outer(mode Mode){ handler:=func(){ mode:=fetchCmd(); switch mode { ... } }; handler() }
+func TestStringlyDrift_ShadowViaShortDeclClosure(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"short_decl_closure_shadow.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("ShadowViaShortDeclClosure: want 0 leads, got %d: %+v",
+			len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_ShadowViaShortDeclNestedBlock verifies that a nested block
+// where the scrutinee is rebound via := (not typed as the enum) produces ZERO
+// leads (no closure involved — plain if-block).
+// Repro D: func handle(mode Mode){ if true { mode:=normalize(); switch mode { ... } } }
+func TestStringlyDrift_ShadowViaShortDeclNestedBlock(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"short_decl_nested_block_shadow.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("ShadowViaShortDeclNestedBlock: want 0 leads, got %d: %+v",
+			len(stringlyLeads), stringlyLeads)
+	}
+}
