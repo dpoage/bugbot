@@ -21,15 +21,15 @@ import (
 // units that omit the optional traversal field contribute nothing. No synthetic
 // rows are created.
 type FinderTraversal struct {
-	ID          string
-	ScanRunID   string
-	Lens        string
-	Strategy    string
-	Files       []string // repo-relative file paths the unit was assigned
-	Enumerated  []string // sites the finder considered as candidates for inspection
-	Visited     []string // sites the finder actually traced in detail
+	ID             string
+	ScanRunID      string
+	Lens           string
+	Strategy       string
+	Files          []string // repo-relative file paths the unit was assigned
+	Enumerated     []string // sites the finder considered as candidates for inspection
+	Visited        []string // sites the finder actually traced in detail
 	CandidateCount int
-	CreatedAt   time.Time
+	CreatedAt      time.Time
 }
 
 // AddFinderTraversal inserts a single finder_traversals row. The ID is
