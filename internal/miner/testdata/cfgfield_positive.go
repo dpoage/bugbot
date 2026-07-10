@@ -1,6 +1,8 @@
 // Package fixture is a test fixture for the config-field miner.
 package fixture
 
+import "fmt"
+
 // ServerConfig holds server configuration options.
 type ServerConfig struct {
 	// MaxConnections is the maximum number of connections allowed.

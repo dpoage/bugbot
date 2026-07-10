@@ -76,6 +76,44 @@ type Opts struct {
 	t.Fatal("Port declaration not found")
 }
 
+// TestCfPassFieldDecls_SkipsConstBlock ensures const/var block entries are
+// not harvested as struct fields (DEFECT 3).
+func TestCfPassFieldDecls_SkipsConstBlock(t *testing.T) {
+	src := `package x
+
+type SmokeCategory string
+
+const (
+	// SmokeCategoryDepMissing: the toolchain is present but required
+	// dependencies are missing.
+	SmokeCategoryDepMissing SmokeCategory = "dep_missing"
+)
+
+type Config struct {
+	// MaxRetries is the retry cap. Default: 0
+	MaxRetries int
+}
+`
+	lines := strings.Split(src, "\n")
+	decls := cfPassFieldDecls("x.go", lines)
+
+	for _, d := range decls {
+		if d.name == "SmokeCategoryDepMissing" {
+			t.Errorf("SmokeCategoryDepMissing should not be harvested as a struct field")
+		}
+	}
+	// MaxRetries should still be found.
+	found := false
+	for _, d := range decls {
+		if d.name == "MaxRetries" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("MaxRetries should be harvested from struct block")
+	}
+}
+
 func TestCfPassValidators_RejectsZero(t *testing.T) {
 	src := `package x
 
@@ -106,14 +144,75 @@ func Validate(c *Config) error {
 	}
 }
 
+// TestCfPassValidators_AcceptGuardNotRejection ensures X >= 0 is NOT treated
+// as a rejection (DEFECT 1).
+func TestCfPassValidators_AcceptGuardNotRejection(t *testing.T) {
+	src := `package x
+
+import "fmt"
+
+func Validate(c *Config) error {
+	if c.Timeout >= 0 {
+		// accept-guard: zero and above is fine
+	}
+	if c.MaxRetries <= 0 {
+		return fmt.Errorf("MaxRetries must be > 0")
+	}
+	return nil
+}
+`
+	lines := strings.Split(src, "\n")
+	vals := cfPassValidators("v.go", lines)
+
+	for _, v := range vals {
+		if v.fieldName == "Timeout" {
+			t.Errorf("Timeout: X >= 0 is an accept-guard, must not be a rejection")
+		}
+	}
+	// MaxRetries <= 0 with error return SHOULD be captured.
+	found := false
+	for _, v := range vals {
+		if v.fieldName == "MaxRetries" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("MaxRetries <= 0 with error return should be a rejection")
+	}
+}
+
+// TestCfPassValidators_SentinelReturnNotRejection ensures bare `return` without
+// error in the body is NOT treated as a rejection (DEFECT 2).
+func TestCfPassValidators_SentinelReturnNotRejection(t *testing.T) {
+	src := `package x
+
+// Timeout is in seconds.
+// Default: 0, 0 means the built-in default.
+func Apply(c *Config) {
+	if c.Timeout <= 0 {
+		return
+	}
+	_ = c.Timeout
+}
+`
+	lines := strings.Split(src, "\n")
+	vals := cfPassValidators("v.go", lines)
+
+	for _, v := range vals {
+		if v.fieldName == "Timeout" {
+			t.Errorf("Timeout with sentinel bare-return should NOT be a rejection, got: %+v", v)
+		}
+	}
+}
+
 func TestCfPassValidators_RejectsNeg(t *testing.T) {
 	src := `package x
 
 import "fmt"
 
 func Validate(c *Config) error {
-	if c.Timeout < 0 {
-		return fmt.Errorf("Timeout must not be negative")
+	if c.Budget < 0 {
+		return fmt.Errorf("Budget must be >= 0")
 	}
 	return nil
 }
@@ -123,13 +222,13 @@ func Validate(c *Config) error {
 
 	var found *cfValidatorSite
 	for i := range vals {
-		if vals[i].fieldName == "Timeout" {
+		if vals[i].fieldName == "Budget" {
 			found = &vals[i]
 			break
 		}
 	}
 	if found == nil {
-		t.Fatal("expected validator site for Timeout")
+		t.Fatal("expected validator site for Budget")
 	}
 	if !found.rejectsNeg {
 		t.Error("expected rejectsNeg=true")
@@ -141,8 +240,8 @@ func Validate(c *Config) error {
 func makeCfStore(t *testing.T) (*store.Store, context.Context) {
 	t.Helper()
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "test.db")
-	st, err := store.Open(ctx, path)
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "leads.db"))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -150,28 +249,18 @@ func makeCfStore(t *testing.T) (*store.Store, context.Context) {
 	return st, ctx
 }
 
-// TestCfMiner_PositiveFixture verifies that a struct field with Default: 0
-// and a validator rejecting 0 yields EXACTLY ONE lead with PosterLens
-// "miner:config-field".
+// TestCfMiner_PositiveFixture verifies that the committed testdata positive
+// fixture yields EXACTLY ONE lead with PosterLens "miner:config-field".
+// Mutating testdata/cfgfield_positive.go is what flips this test.
 func TestCfMiner_PositiveFixture(t *testing.T) {
-	dir := t.TempDir()
-	src := `package fixture
-
-import "fmt"
-
-type ServerConfig struct {
-	// MaxConnections is the maximum number of connections allowed.
-	// Default: 0
-	MaxConnections int
-}
-
-func (c *ServerConfig) Validate() error {
-	if c.MaxConnections <= 0 {
-		return fmt.Errorf("MaxConnections must be > 0")
+	fixtureFile := filepath.Join("testdata", "cfgfield_positive.go")
+	raw, err := os.ReadFile(fixtureFile)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", fixtureFile, err)
 	}
-	return nil
-}
-`
+	src := string(raw)
+
+	dir := t.TempDir()
 	p := filepath.Join(dir, "cfg.go")
 	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
@@ -215,35 +304,18 @@ func (c *ServerConfig) Validate() error {
 	}
 }
 
-// TestCfMiner_NegativeFixture verifies that a field whose default is inside
-// its validated range AND a normative-documented field that IS read produce
-// ZERO leads.
+// TestCfMiner_NegativeFixture verifies that the committed testdata negative
+// fixture yields ZERO leads. Mutating testdata/cfgfield_negative.go is what
+// flips this test.
 func TestCfMiner_NegativeFixture(t *testing.T) {
-	dir := t.TempDir()
-	src := `package fixture
-
-import "fmt"
-
-type WorkerConfig struct {
-	// Workers is the number of worker goroutines. defaults to 4
-	Workers int
-
-	// QueueSize must be set before calling Start; required for back-pressure.
-	QueueSize int
-}
-
-func (c *WorkerConfig) Validate() error {
-	if c.Workers <= 0 {
-		return fmt.Errorf("Workers must be > 0")
+	fixtureFile := filepath.Join("testdata", "cfgfield_negative.go")
+	raw, err := os.ReadFile(fixtureFile)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", fixtureFile, err)
 	}
-	return nil
-}
+	src := string(raw)
 
-func Start(cfg WorkerConfig) {
-	_ = cfg.QueueSize
-	_ = cfg.Workers
-}
-`
+	dir := t.TempDir()
 	p := filepath.Join(dir, "worker.go")
 	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
@@ -274,32 +346,84 @@ func Start(cfg WorkerConfig) {
 	}
 }
 
-// TestCfMiner_NoDoublePostOnDocContradictionFixture checks that the config-field
-// miner emits ZERO "miner:config-field" leads on the existing doc-sentinel fixture
-// (the ig7_contradiction testdata), ensuring no overlap with miner:doc-contradiction.
+// TestCfMiner_NoDoublePostOnDocContradictionFixture verifies that running the
+// FULL Seed (both doc-contradiction and config-field passes) on a combined
+// fixture produces leads from BOTH passes without clobbering each other.
+//
+// DEFECT 6: AddLead upserts on (target_lens, file, line); a config-field lead
+// at the same (file, line) as a doc-contradiction lead would silently clobber
+// the latter. This test asserts both leads coexist.
 func TestCfMiner_NoDoublePostOnDocContradictionFixture(t *testing.T) {
-	// Use the existing testdata fixture as the snapshot root.
-	fixtureDir := filepath.Join("testdata", "ig7_contradiction")
-	if _, err := os.Stat(fixtureDir); err != nil {
-		t.Skipf("testdata/ig7_contradiction not present: %v", err)
-	}
+	dir := t.TempDir()
 
-	entries, err := os.ReadDir(fixtureDir)
-	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
+	// widget_limit.go: triggers doc-contradiction (0 = unlimited sentinel) and
+	// config-field signal (a) would too IF it weren't for the sentinel guard.
+	// The doc says "0 = unlimited" so config-field MUST NOT post here.
+	widgetSrc := `package config
+
+// Config holds widget limits.
+type Config struct {
+	// WidgetLimit is the cap on operations.
+	// 0 = unlimited.
+	WidgetLimit int
+}
+`
+
+	// validator.go: validates WidgetLimit with an error return.
+	// doc-contradiction fires here (the only lead at this file+line).
+	validatorSrc := `package config
+
+import "fmt"
+
+func Validate(w *Config) error {
+	if w.WidgetLimit <= 0 {
+		return fmt.Errorf("widget_limit must be > 0")
 	}
-	var files []ingest.File
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") {
-			files = append(files, ingest.File{Path: e.Name(), Language: ingest.LangGo})
+	return nil
+}
+`
+
+	// cfonly.go: triggers config-field signal (a) at a different (file, line)
+	// from the doc-contradiction lead.
+	cfOnlySrc := `package config
+
+import "fmt"
+
+type ServerConfig struct {
+	// MaxConn is the max connections. Default: 0
+	MaxConn int
+}
+
+func (c *ServerConfig) Validate() error {
+	if c.MaxConn <= 0 {
+		return fmt.Errorf("MaxConn must be > 0")
+	}
+	return nil
+}
+`
+
+	writeFile := func(name, content string) {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", name, err)
 		}
 	}
+	writeFile("widget_limit.go", widgetSrc)
+	writeFile("validator.go", validatorSrc)
+	writeFile("cfonly.go", cfOnlySrc)
 
-	snap := &ingest.Snapshot{Root: fixtureDir, Files: files}
+	snap := &ingest.Snapshot{
+		Root: dir,
+		Files: []ingest.File{
+			{Path: "widget_limit.go", Language: ingest.LangGo},
+			{Path: "validator.go", Language: ingest.LangGo},
+			{Path: "cfonly.go", Language: ingest.LangGo},
+		},
+	}
+
 	st, ctx := makeCfStore(t)
-	var sum Summary
-	if err := seedConfigFieldContradictions(ctx, snap, st, &sum); err != nil {
-		t.Fatalf("seedConfigFieldContradictions: %v", err)
+	if _, err := Seed(ctx, snap, st); err != nil {
+		t.Fatalf("Seed: %v", err)
 	}
 
 	leads, err := st.PendingLeads(ctx, cfTargetLens)
@@ -307,9 +431,34 @@ func TestCfMiner_NoDoublePostOnDocContradictionFixture(t *testing.T) {
 		t.Fatalf("PendingLeads: %v", err)
 	}
 
+	var docLeads, cfLeads []store.Lead
 	for _, l := range leads {
-		if l.PosterLens == cfPosterLens {
-			t.Errorf("unexpected config-field lead on doc-contradiction fixture: %+v", l)
+		switch l.PosterLens {
+		case posterLens: // "miner:doc-contradiction"
+			docLeads = append(docLeads, l)
+		case cfPosterLens: // "miner:config-field"
+			cfLeads = append(cfLeads, l)
+		}
+	}
+
+	// Doc-contradiction must fire on validator.go (WidgetLimit <= 0 guard).
+	if len(docLeads) == 0 {
+		t.Error("expected at least one doc-contradiction lead on widget_limit fixture")
+	}
+	// Config-field must fire on cfonly.go (MaxConn default 0 + rejectsZero).
+	hasCfLead := false
+	for _, l := range cfLeads {
+		if l.File == "cfonly.go" {
+			hasCfLead = true
+		}
+	}
+	if !hasCfLead {
+		t.Errorf("expected a config-field lead on cfonly.go; got cfLeads=%+v", cfLeads)
+	}
+	// Config-field must NOT post on validator.go (sentinel doc "0 = unlimited").
+	for _, l := range cfLeads {
+		if l.File == "validator.go" {
+			t.Errorf("config-field must not clobber doc-contradiction on validator.go: %+v", l)
 		}
 	}
 }
@@ -350,6 +499,60 @@ type AuthConfig struct {
 	cfLeads := filterCfLeadsByPoster(leads, cfPosterLens)
 	if len(cfLeads) != 1 {
 		t.Errorf("want 1 normative-never-read lead, got %d: %+v", len(cfLeads), cfLeads)
+	}
+}
+
+// TestCfMiner_NormativeProseNotFlagged ensures that a doc comment where a
+// normative word appears in PROSE (not bound to the field) is NOT flagged
+// (DEFECT 4: "required dependencies are missing" should not fire).
+func TestCfMiner_NormativeProseNotFlagged(t *testing.T) {
+	dir := t.TempDir()
+	src := `package fixture
+
+type SmokeCategory string
+
+const (
+	// SmokeCategoryDepMissing: the toolchain is present but required
+	// dependencies are missing (missing module, missing package, etc.).
+	SmokeCategoryDepMissing SmokeCategory = "dep_missing"
+)
+
+type SomeConfig struct {
+	// Category is the category. callers must always validate before use.
+	Category SmokeCategory
+}
+
+func Use(c SomeConfig) {
+	_ = c.Category
+}
+`
+	p := filepath.Join(dir, "smoke.go")
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := &ingest.Snapshot{
+		Root: dir,
+		Files: []ingest.File{
+			{Path: "smoke.go", Language: ingest.LangGo},
+		},
+	}
+	st, ctx := makeCfStore(t)
+	var sum Summary
+	if err := seedConfigFieldContradictions(ctx, snap, st, &sum); err != nil {
+		t.Fatalf("seedConfigFieldContradictions: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, cfTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	// SmokeCategoryDepMissing: inside const block, should not be harvested.
+	// Category: is read via c.Category in Use → no never-read lead.
+	cfLeads := filterCfLeadsByPoster(leads, cfPosterLens)
+	if len(cfLeads) != 0 {
+		t.Errorf("want 0 config-field leads for prose/const fixture, got %d: %+v", len(cfLeads), cfLeads)
 	}
 }
 

@@ -2,14 +2,15 @@
 //
 // Two signals not covered by the doc-sentinel-vs-validator pass:
 //
-//  (a) DEFAULT-vs-VALIDATION: a config/option struct field whose documented
-//      or coded default value falls outside the range its own validator
-//      enforces. Example: doc/const says "Default: 0" but the validator does
-//      `if x <= 0 { return error }`.
+//	(a) DEFAULT-vs-VALIDATION: a config/option struct field whose documented
+//	    or coded default value falls outside the range its own validator
+//	    enforces. Example: doc/const says "Default: 0" but the validator does
+//	    `if x <= 0 { return error }`.
 //
-//  (b) NORMATIVE-FIELD-NEVER-READ: a struct field whose doc comment carries
-//      an explicit normative claim (must/required/always) but the field name
-//      is never referenced outside its declaration file.
+//	(b) NORMATIVE-FIELD-NEVER-READ: a struct field whose doc comment carries
+//	    an explicit normative claim (must/required/always) BOUND to the field
+//	    name, but the field name is never referenced outside its declaration
+//	    file.
 //
 // Detection is purely deterministic: two regex sweeps per file, joined on the
 // field entity name. Precision is the priority — a false positive is worse
@@ -38,7 +39,9 @@ const (
 
 // ── regex patterns ────────────────────────────────────────────────────────────
 
-// cfStructFieldRe matches a Go struct field declaration line.
+// cfStructFieldRe matches a Go struct field declaration line (indented,
+// exported name). This is used ONLY inside struct-brace tracking; const/var
+// blocks are excluded by the harvester logic.
 // Group 1: field name (exported, PascalCase), group 2: type (optional).
 var cfStructFieldRe = regexp.MustCompile(`^\s+([A-Z][A-Za-z0-9_]*)\s+\S`)
 
@@ -55,12 +58,10 @@ var cfDefaultValRe = regexp.MustCompile(`(?i)\bdefault(?:s?\s+(?:to|is|value|:))
 // Group 1: the numeric literal.
 var cfDefaultTagRe = regexp.MustCompile(`default:"(-?\d+)"`)
 
-// cfValidatorRejectZeroRe matches guards that reject zero / non-positive.
-// Handles both bare `Field <= 0` and struct access `c.Field <= 0`.
-// Does NOT match `< 0` (strict less-than zero) — that is rejectsNeg only.
-//
-//	if x <= 0 { … }   if x == 0 { … error … }
-var cfValidatorRejectZeroRe = regexp.MustCompile(`(?:\b|\.)([A-Z][A-Za-z0-9_]*)\s*(?:<=|==|>=)\s*0\b|\b0\s*(?:<=|==|>=)\s*(?:\w+\.)?([A-Z][A-Za-z0-9_]*)\b`)
+// cfValidatorRejectZeroRe matches guards that REJECT zero.
+// Only: X <= 0, X == 0, 0 >= X, 0 == X
+// Does NOT match X >= 0 (accept-guard) or 0 <= X (accept-guard).
+var cfValidatorRejectZeroRe = regexp.MustCompile(`(?:\b|\.)([A-Z][A-Za-z0-9_]*)\s*(?:<=|==)\s*0\b|\b0\s*(?:>=|==)\s*(?:\w+\.)?([A-Z][A-Za-z0-9_]*)\b`)
 
 // cfValidatorRejectNegRe matches guards that reject negative values.
 // Handles both bare `Field < 0` and struct access `c.Field < 0`.
@@ -68,12 +69,34 @@ var cfValidatorRejectZeroRe = regexp.MustCompile(`(?:\b|\.)([A-Z][A-Za-z0-9_]*)\
 //	if x < 0 { … }
 var cfValidatorRejectNegRe = regexp.MustCompile(`(?:\b|\.)([A-Z][A-Za-z0-9_]*)\s*<\s*0\b|\b0\s*>\s*(?:\w+\.)?([A-Z][A-Za-z0-9_]*)\b`)
 
-// cfNormativeDocRe detects normative words in a doc comment.
-var cfNormativeDocRe = regexp.MustCompile(`(?i)\b(must|required|always|mandatory)\b`)
+// cfNormativeDocRe detects normative patterns BOUND to the field name.
+// Accepts:
+//   - "<FieldName> must ..."
+//   - "must be set/provided/configured/non-empty/positive/valid/enabled"
+//   - "is required" / "is mandatory"
+//
+// This avoids prose like "required dependencies are missing" where "required"
+// describes external dependencies, not the field itself.
+var cfNormativeDocRe = regexp.MustCompile(
+	`(?i)(?:` +
+		`\b[A-Z][A-Za-z0-9_]*\s+must\b` + // FieldName must ...
+		`|must\s+be\s+(?:set|provided|configured|non-empty|positive|valid|enabled|specified)` +
+		`|is\s+(?:required|mandatory)` +
+		`)`)
 
-// cfFieldAccessRe matches any reference to a field (e.g. `.FieldName` or
-// `cfg.FieldName`). Used for the "never-read" signal.
+// cfFieldAccessRe matches dotted field references: `.FieldName` or `cfg.FieldName`.
+// Used for the never-read signal (dotted accesses).
 var cfFieldAccessRe = regexp.MustCompile(`\.([A-Z][A-Za-z0-9_]*)`)
+
+// cfErrReturnRe matches return statements that return an error value.
+// Used by cfHasErrorReturn to distinguish error-returning guards from
+// sentinel-idiom guards that just `return` (exit/skip).
+var cfErrReturnRe = regexp.MustCompile(
+	`\breturn\s+(?:fmt\.Errorf|errors\.New|errors\.As|errors\.Is|\w*[Ee]rr\w*\b)`)
+
+// cfSentinelDocRe matches doc comments that document a sentinel/default
+// meaning for zero (unlimited, means X, no limit, use default, disable).
+var cfSentinelDocRe = regexp.MustCompile(`(?i)\b(unlimited|means\b|disable[sd]?|no\s+limit|use\s+\w+\s+default|built.in\s+default)\b`)
 
 // ── data types ────────────────────────────────────────────────────────────────
 
@@ -89,12 +112,12 @@ type cfFieldDecl struct {
 
 // cfValidatorSite is a validation site that rejects a field value.
 type cfValidatorSite struct {
-	fieldName  string // field name referenced in the condition
-	file       string
-	line       int
+	fieldName   string // field name referenced in the condition
+	file        string
+	line        int
 	rejectsZero bool // true if the guard rejects zero / non-positive
 	rejectsNeg  bool // true if the guard rejects negative (< 0)
-	snippet    string
+	snippet     string
 }
 
 // ── main entry point ─────────────────────────────────────────────────────────
@@ -110,14 +133,22 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 
 	// Collect all field declarations and validator sites across the snapshot.
 	// Also collect a "reference set" per file for the never-read signal.
-	allDecls := make(map[string][]cfFieldDecl)   // file → decls
+	allDecls := make(map[string][]cfFieldDecl)    // file → decls
 	allVals := make(map[string][]cfValidatorSite) // fieldName → sites
 
-	// referenceSet: fieldName → set of files that reference it (via .FieldName)
+	// referenceSet: fieldName → set of files that reference it
+	// Counts both dotted (.FieldName) and bare-identifier references so
+	// package-level consts referenced in assignments/comparisons are not
+	// falsely flagged.
 	referenceSet := make(map[string]map[string]bool)
 
 	for _, f := range snap.Files {
 		if f.Language != ingest.LangGo {
+			continue
+		}
+		// Skip test files: embedded inline fixtures cause FPs because
+		// string literals containing Go source look like real declarations.
+		if strings.HasSuffix(f.Path, "_test.go") {
 			continue
 		}
 		path := filepath.Join(snap.Root, f.Path)
@@ -136,7 +167,7 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 			allVals[v.fieldName] = append(allVals[v.fieldName], v)
 		}
 
-		// Harvest all .FieldName references in this file.
+		// Harvest dotted references: .FieldName
 		for _, m := range cfFieldAccessRe.FindAllStringSubmatch(content, -1) {
 			name := m[1]
 			if !isPlausibleEntity(name) {
@@ -147,6 +178,7 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 			}
 			referenceSet[name][f.Path] = true
 		}
+
 	}
 
 	seen := make(map[leadKey]bool)
@@ -226,9 +258,8 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 			if d.docComment == "" {
 				continue
 			}
-			// Precision guard: normative word must appear in the FIRST line of the
-			// doc comment (the line closest to the field declaration). This rejects
-			// cases where "must" / "required" describes something else in the doc body.
+			// Precision guard: normative word must BIND to the field in the
+			// first doc line (not just appear anywhere in prose).
 			firstDocLine := d.docComment
 			if nl := strings.Index(d.docComment, "\n"); nl >= 0 {
 				firstDocLine = d.docComment[:nl]
@@ -236,9 +267,8 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 			if !cfNormativeDocRe.MatchString(firstDocLine) {
 				continue
 			}
-			// Precision guard: skip if the field is accessed anywhere at all.
-			// The cfFieldAccessRe harvest captures .FieldName appearances across all
-			// files; any entry means the field is consumed somewhere.
+			// Precision guard: skip if the field is accessed anywhere at all
+			// (dotted OR bare identifier references).
 			if len(referenceSet[d.name]) > 0 {
 				continue
 			}
@@ -278,10 +308,80 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 
 // cfPassFieldDecls sweeps lines for exported struct field declarations and
 // their associated doc comments / default values.
+//
+// Only lines INSIDE a `type X struct { ... }` block are harvested.
+// Lines inside const(...) or var(...) blocks are excluded so that const enum
+// values (e.g. SmokeCategory const iota entries) are never treated as fields.
 func cfPassFieldDecls(filePath string, lines []string) []cfFieldDecl {
 	var out []cfFieldDecl
 
+	// Track whether we are inside a struct body.
+	// structDepth > 0 means we're inside at least one struct's braces.
+	// We use a simple brace counter gated on seeing `type ... struct {`.
+	inStruct := false
+	structBraceDepth := 0
+
+	// Track const/var block depth to skip those sections.
+	inConstVar := false
+	constVarParenDepth := 0
+
 	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// ── const/var block tracking ──
+		if !inConstVar {
+			if strings.HasPrefix(trimmed, "const (") || strings.HasPrefix(trimmed, "var (") ||
+				trimmed == "const(" || trimmed == "var(" {
+				inConstVar = true
+				constVarParenDepth = 1
+				continue
+			}
+		} else {
+			for _, ch := range trimmed {
+				if ch == '(' {
+					constVarParenDepth++
+				} else if ch == ')' {
+					constVarParenDepth--
+					if constVarParenDepth <= 0 {
+						inConstVar = false
+						constVarParenDepth = 0
+						break
+					}
+				}
+			}
+			continue // skip all lines inside const/var blocks
+		}
+
+		// ── struct body tracking ──
+		// Detect `type Foo struct {`
+		if strings.Contains(trimmed, "struct {") &&
+			strings.HasPrefix(trimmed, "type ") {
+			inStruct = true
+			structBraceDepth = 1
+			continue
+		}
+		// Detect `} struct {` (embedded struct in struct — simple handling)
+		if inStruct {
+			for _, ch := range trimmed {
+				if ch == '{' {
+					structBraceDepth++
+				} else if ch == '}' {
+					structBraceDepth--
+					if structBraceDepth <= 0 {
+						inStruct = false
+						structBraceDepth = 0
+					}
+				}
+			}
+			if !inStruct {
+				continue
+			}
+		}
+
+		if !inStruct {
+			continue
+		}
+
 		m := cfStructFieldRe.FindStringSubmatch(line)
 		if m == nil {
 			continue
@@ -294,9 +394,9 @@ func cfPassFieldDecls(filePath string, lines []string) []cfFieldDecl {
 		// Collect preceding doc comment block (contiguous // lines above).
 		var commentLines []string
 		for j := i - 1; j >= 0; j-- {
-			trimmed := strings.TrimSpace(lines[j])
-			if strings.HasPrefix(trimmed, "//") {
-				commentLines = append([]string{stripComment(trimmed)}, commentLines...)
+			tr := strings.TrimSpace(lines[j])
+			if strings.HasPrefix(tr, "//") {
+				commentLines = append([]string{stripComment(tr)}, commentLines...)
 			} else {
 				break
 			}
@@ -337,6 +437,14 @@ func cfPassFieldDecls(filePath string, lines []string) []cfFieldDecl {
 
 // cfPassValidators sweeps lines for guard conditions that reject exported
 // field values.
+//
+// Signal (a) gate: only count a guard as a rejection if the surrounding block
+// contains an error-returning statement (fmt.Errorf, errors.New, an *Err*
+// variable). A bare `return` without error (sentinel idiom like `if x <= 0 {
+// return }` with doc "0 means default") is NOT a rejection.
+//
+// Sentinel-doc gate: if the field's doc marks zero as a sentinel value
+// (contains "unlimited"/"means"/"no limit"/"use ... default"/"disable"), skip.
 func cfPassValidators(filePath string, lines []string) []cfValidatorSite {
 	var out []cfValidatorSite
 
@@ -346,7 +454,7 @@ func cfPassValidators(filePath string, lines []string) []cfValidatorSite {
 			continue
 		}
 
-		// Reject zero / non-positive: FieldName <= 0, FieldName == 0, FieldName < 1
+		// Reject zero / non-positive: FieldName <= 0, FieldName == 0, 0 >= FieldName, 0 == FieldName
 		for _, m := range cfValidatorRejectZeroRe.FindAllStringSubmatch(line, -1) {
 			name := m[1]
 			if name == "" {
@@ -355,8 +463,12 @@ func cfPassValidators(filePath string, lines []string) []cfValidatorSite {
 			if !isPlausibleEntity(name) {
 				continue
 			}
-			// Must be followed by a block that returns an error (hasEarlyReturn).
-			if !hasEarlyReturn(lines, i) {
+			// Must be followed by an ERROR-returning statement (not a bare return).
+			if !cfHasErrorReturn(lines, i) {
+				continue
+			}
+			// Skip if doc marks zero as a valid sentinel.
+			if cfIsSentinelDoc(lines, i) {
 				continue
 			}
 			out = append(out, cfValidatorSite{
@@ -377,7 +489,10 @@ func cfPassValidators(filePath string, lines []string) []cfValidatorSite {
 			if !isPlausibleEntity(name) {
 				continue
 			}
-			if !hasEarlyReturn(lines, i) {
+			if !cfHasErrorReturn(lines, i) {
+				continue
+			}
+			if cfIsSentinelDoc(lines, i) {
 				continue
 			}
 			// Only add if not already captured by rejectsZero
@@ -408,8 +523,7 @@ func cfPassValidators(filePath string, lines []string) []cfValidatorSite {
 // parseInt parses a string as an int, returning nil on failure.
 func parseInt(s string) *int {
 	var v int
-	_, err := fmt.Sscanf(s, "%d", &v)
-	if err != nil {
+	if _, err := fmt.Sscanf(s, "%d", &v); err != nil {
 		return nil
 	}
 	return &v
@@ -417,14 +531,53 @@ func parseInt(s string) *int {
 
 // cfNormativeNormWords extracts normative keywords found in s.
 func cfNormativeNormWords(s string) string {
+	var found []string
 	seen := make(map[string]bool)
-	var words []string
 	for _, m := range cfNormativeDocRe.FindAllString(s, -1) {
-		lw := strings.ToLower(m)
-		if !seen[lw] {
-			seen[lw] = true
-			words = append(words, lw)
+		low := strings.ToLower(m)
+		if !seen[low] {
+			seen[low] = true
+			found = append(found, m)
 		}
 	}
-	return strings.Join(words, ", ")
+	return strings.Join(found, ", ")
+}
+
+// cfHasErrorReturn checks whether the block starting at `from` contains an
+// error-returning return statement within the next 6 lines.
+// A bare `return` or `return nil` does NOT count — those are sentinel idioms.
+func cfHasErrorReturn(lines []string, from int) bool {
+	end := from + 6
+	if end > len(lines) {
+		end = len(lines)
+	}
+	for _, l := range lines[from:end] {
+		t := strings.TrimSpace(l)
+		if cfErrReturnRe.MatchString(t) {
+			return true
+		}
+		// panic / os.Exit also count as hard rejections
+		if strings.HasPrefix(t, "panic(") || strings.HasPrefix(t, "os.Exit(") {
+			return true
+		}
+	}
+	return false
+}
+
+// cfIsSentinelDoc checks whether the doc comment lines immediately above
+// the guard at `guardLine` contain a sentinel-value marker (unlimited, means,
+// no limit, etc.). This suppresses FPs on the `0 = use default` idiom.
+func cfIsSentinelDoc(lines []string, guardLine int) bool {
+	// Search upward for any comment line near the guard (within 10 lines).
+	start := guardLine - 10
+	if start < 0 {
+		start = 0
+	}
+	for _, l := range lines[start:guardLine] {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "//") && cfSentinelDocRe.MatchString(t) {
+			return true
+		}
+	}
+	return false
 }

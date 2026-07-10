@@ -1,6 +1,8 @@
 // Package fixture is a test fixture for the config-field miner (negative case).
 package fixture
 
+import "fmt"
+
 // WorkerConfig holds worker pool configuration.
 type WorkerConfig struct {
 	// Workers is the number of worker goroutines. defaults to 4
