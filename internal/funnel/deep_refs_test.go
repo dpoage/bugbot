@@ -36,21 +36,14 @@ func TestDeepRefClosure_NilNav(t *testing.T) {
 	finder := newScriptedClient()
 	verifier := newScriptedClient()
 
-	// No CodeNav injected → f.codeNav() will attempt lazy init, but we want to
-	// verify the nil-safe path. We test deepRefClosure directly: construct a
-	// Funnel with no nav and confirm (nil, nil) is returned.
-	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
-		// Explicitly nil CodeNav (default).
-	})
+	// No CodeNav injected → f.codeNav() returns (nil, nil). We call
+	// f.deepRefClosure directly to exercise the nil-nav guard in production code.
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
 
-	// Reach directly into the Funnel to test deepRefClosure without starting LSP.
-	// We simulate nil nav by testing deepRefClosureWith with a nil nav path: call
-	// it on an empty nav that returns nothing — the nil-nav path in deepRefClosure
-	// is tested via the public contract: no refs section appended.
 	files := []string{"pkg/config.go"}
 	leads := []store.Lead{{
 		PosterLens: "concurrency",
@@ -63,14 +56,12 @@ func TestDeepRefClosure_NilNav(t *testing.T) {
 	// Task produced today (no refs).
 	wantTask := buildContractTraceDeepTask(files, leads)
 
-	// Task produced via the new enrichment path with a nil-returning nav.
-	nilNav := &fakeRefNav{
-		outlines: map[string][]treesitter.OutlineEntry{},
-		refs:     map[string][]agent.RefLocation{},
-	}
-	refs, relFiles := deepRefClosureWith(ctx, nilNav, files)
+	// Exercise the nil-nav guard: f.deepRefClosure calls f.codeNav() which
+	// returns (nil, nil) when no CodeNav is configured. This is the actual
+	// production path guarded by "if err != nil || nav == nil { return nil, nil }".
+	refs, relFiles := f.deepRefClosure(ctx, files)
 	if refs != nil || relFiles != nil {
-		t.Fatalf("empty nav: want (nil, nil), got refs=%v relFiles=%v", refs, relFiles)
+		t.Fatalf("nil-nav deepRefClosure: want (nil, nil), got refs=%v relFiles=%v", refs, relFiles)
 	}
 
 	// Simulate the launch-loop logic with nil results.
@@ -198,7 +189,13 @@ func TestDeepRefClosure_ExcludesUnexportedAndNonLoadBearing(t *testing.T) {
 			},
 		},
 		refs: map[string][]agent.RefLocation{
-			"Store": {{File: "other/use.go", Line: 5}},
+			// Each would-be-filtered symbol gets its own entry so a reverted
+			// filter (passing unexported or non-load-bearing kinds) would return
+			// >1 ref and cause the len==1 assertion below to fail.
+			"unexported": {{File: "other/use.go", Line: 1}},
+			"MaxConns":   {{File: "other/use.go", Line: 2}},
+			"defaultVal": {{File: "other/use.go", Line: 3}},
+			"Store":      {{File: "other/use.go", Line: 5}},
 		},
 	}
 
@@ -269,6 +266,11 @@ func TestDeepRefClosure_Determinism(t *testing.T) {
 // This is a structural invariant: dedupFiles may grow a unit's file list, but
 // units are counted in buildUnits BEFORE deepRefClosure runs (it runs per-unit
 // inside the launch loop). Hence the estimate is always exact.
+//
+// Note: the fixture repo has no exported symbols with cross-file references, so
+// deepRefClosure does not fire the file-expansion path here. This test covers
+// the no-expansion baseline; the unit-count invariant holds regardless because
+// FinderUnits never counts files.
 func TestDeepRefClosure_EstimateUnitCountInvariant(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)

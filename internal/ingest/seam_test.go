@@ -578,3 +578,41 @@ func (r *Repo) ListFindings(ctx context.Context) error {
 		}
 	}
 }
+
+// TestEnumerateSeams_HTTPClientNonRoutableNoPrecisionFlood is the negative-
+// precision guard for the HTTP-route detector: a Go file whose .Get/.Post
+// string arguments are NON-routable (cache key, map key — no leading slash,
+// no http:// scheme) MUST emit ZERO SeamHTTPRoute seams. This must fail if
+// the httpClientCallRe path-anchor or normalizeHTTPPath leading-slash guard
+// is loosened to accept bare strings.
+func TestEnumerateSeams_HTTPClientNonRoutableNoPrecisionFlood(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"cache/client.go": `package cache
+
+import "context"
+
+type Cache struct{}
+type MapStore map[string]string
+
+// .Get with a plain cache key — NOT a URL path.
+func (c *Cache) Lookup(ctx context.Context) string {
+	return c.Get("userkey")
+}
+
+// .Post with a non-path key — NOT a URL path.
+func (m MapStore) Store(ctx context.Context) {
+	m.Post("bucket/object", "value")
+}
+
+func (c *Cache) Get(key string) string   { return "" }
+func (m MapStore) Post(key, val string)  {}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"cache/client.go"})
+	seams := EnumerateSeams(snap)
+	for _, s := range seams {
+		if s.Kind == SeamHTTPRoute {
+			t.Errorf("unexpected SeamHTTPRoute %q: non-routable .Get/.Post string args must not produce HTTP seams", s.Key)
+		}
+	}
+}

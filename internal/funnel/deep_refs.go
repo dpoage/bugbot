@@ -52,9 +52,10 @@ func isLoadBearing(k treesitter.Kind) bool {
 	return false
 }
 
-// isExportedSymbol reports whether name begins with an upper-case ASCII letter,
-// the Go/TS convention for exported symbols. A heuristic: languages without
-// export semantics pass all symbols through.
+// isExportedSymbol reports whether name begins with an upper-case ASCII letter
+// (A–Z). This is a Go-style heuristic; it does not pass unexported symbols
+// through for export-less languages — all symbols must start with an uppercase
+// letter to be considered exported.
 func isExportedSymbol(name string) bool {
 	if name == "" {
 		return false
