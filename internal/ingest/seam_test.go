@@ -528,3 +528,53 @@ service Svc { rpc Foo (A) returns (B); }
 		t.Errorf("SeamHTTPRoute (%d) must come before SeamRPCMethod (%d)", httpIdx, rpcIdx)
 	}
 }
+
+// TestEnumerateSeams_RPCMethodNoPrecisionFlood is the negative-precision guard
+// that would have caught the original flooding bug. A Go file containing
+// multiple ordinary ctx-first method calls (db.ExecContext, repo.UpsertFinding,
+// context.WithTimeout, exec.CommandContext) with NO .proto file and NO gRPC
+// server handler MUST emit ZERO SeamRPCMethod seams. The calls are
+// indistinguishable from gRPC client stubs by pattern alone; only a real
+// producer (proto declaration or handler) makes them seam evidence.
+func TestEnumerateSeams_RPCMethodNoPrecisionFlood(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"store/db.go": `package store
+
+import (
+	"context"
+	"database/sql"
+	"os/exec"
+)
+
+type Repo struct{ db *sql.DB }
+
+func (r *Repo) UpsertFinding(ctx context.Context, id string) error {
+	_, err := r.db.ExecContext(ctx, "INSERT INTO findings VALUES ($1)", id)
+	return err
+}
+
+func (r *Repo) ListFindings(ctx context.Context) error {
+	rows, err := r.db.QueryContext(ctx, "SELECT id FROM findings")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	ctx2, cancel := context.WithTimeout(ctx, 0)
+	defer cancel()
+	_ = ctx2
+
+	cmd := exec.CommandContext(ctx, "git", "status")
+	_ = cmd
+	return nil
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"store/db.go"})
+	seams := EnumerateSeams(snap)
+	for _, s := range seams {
+		if s.Kind == SeamRPCMethod {
+			t.Errorf("unexpected SeamRPCMethod %q: ordinary ctx-first calls must not produce RPC seams without a proto/handler producer", s.Key)
+		}
+	}
+}

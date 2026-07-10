@@ -397,13 +397,12 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 	}
 
 	// reduceProducerConsumer builds a Seam from separate producer and consumer
-	// fileRef slices. The gate is: at least one producer AND at least one
-	// consumer across >=2 distinct files (a self-reference in one file must
-	// not flood). If only one side is present (declared-but-uncalled or
-	// called-but-undeclared) the seam is still emitted — that IS the contract
-	// drift. If both sides are present but all refs live in a single file,
-	// the seam is suppressed (not a cross-process boundary). Sides are sorted
-	// by File for determinism.
+	// fileRef slices. The gate for HTTP is: at least one side present and >=2
+	// distinct files when both sides are non-empty (self-references suppressed).
+	// For RPC the caller enforces an additional pre-condition: producers must be
+	// non-empty (a real contract — .proto rpc declaration or gRPC server handler
+	// — must exist before consumer call sites are treated as seam evidence).
+	// Sides are sorted by File for determinism.
 	reduceProducerConsumer := func(kind SeamKind, key string, lang Language, producers, consumers []fileRef) *Seam {
 		// Collect distinct files across both sides.
 		filesSet := make(map[string]bool, len(producers)+len(consumers))
@@ -515,6 +514,14 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 	}
 	sort.Strings(rpcKeys)
 	for _, k := range rpcKeys {
+		// Producer-anchor gate: skip methods with no real contract declaration.
+		// A call site matching goRPCCallRe without a .proto rpc declaration or
+		// genuine gRPC handler is indistinguishable from an ordinary Go method
+		// call (db.ExecContext, repo.UpsertFinding, …). With no producer the
+		// consumer evidence is noise, not a seam.
+		if len(rpcProducers[k]) == 0 {
+			continue
+		}
 		// For RPC, producers may be .proto (LangOther after DetectLanguage, but
 		// we include them explicitly) or Go handlers; consumers are Go call sites.
 		// Pass LangGo as the representative language; the lens reads the file.
@@ -704,12 +711,14 @@ var httpClientCallRe = regexp.MustCompile(`(?:http\.NewRequest\s*\([^,]+,\s*"((?
 // Captured group 1 is the method name.
 var protoRPCDeclRe = regexp.MustCompile(`\brpc\s+([A-Z][A-Za-z0-9_]*)\s*\(`)
 
-// goRPCHandlerRe matches Go gRPC server handler method declarations of the
-// form:  func (r *SomethingServer) MethodName(ctx
-// Captured group 1 is the method name. These are recognizable as RPC
-// implementations by the receiver type ending in "Server" and the first
-// parameter being ctx.
-var goRPCHandlerRe = regexp.MustCompile(`func\s*\([^)]*Server[^)]*\)\s+([A-Z][A-Za-z0-9_]*)\s*\(\s*ctx\b`)
+// goRPCHandlerRe matches Go gRPC unary server handler method declarations.
+// A genuine gRPC unary handler has: receiver ending in "Server", an
+// uppercase method name, ctx as the first parameter, a second pointer
+// request parameter, and a (pointer response, error) return list.
+// Methods with only one parameter (e.g. Serve(ctx context.Context) error)
+// do NOT match, preventing control-plane methods from registering as RPC
+// producers. Captured group 1 is the method name.
+var goRPCHandlerRe = regexp.MustCompile(`func\s*\([^)]*Server[^)]*\)\s+([A-Z][A-Za-z0-9_]*)\s*\(\s*ctx\b[^)]*,\s*\*[A-Za-z][A-Za-z0-9_]*\s*\)\s*\(\s*\*[A-Za-z]`)
 
 // goRPCCallRe matches Go gRPC client call sites of the form:
 //   someClient.MethodName(ctx, ...)
