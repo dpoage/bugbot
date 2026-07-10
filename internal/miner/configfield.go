@@ -107,6 +107,12 @@ var cfSentinelDocRe = regexp.MustCompile(`(?i)\b(unlimited|means\b|disable[sd]?|
 // Group 1: struct type name (without pointer star).
 var cfMethodReceiverRe = regexp.MustCompile(`^func\s*\(\s*\w+\s+\*?([A-Za-z][A-Za-z0-9_]*)\s*\)`)
 
+// cfPackageClauseRe matches the package declaration line and extracts the
+// package name. Used to qualify the join key with the package so that
+// same-named structs in different packages never collide.
+// Group 1: package name.
+var cfPackageClauseRe = regexp.MustCompile(`^package\s+(\w+)`)
+
 // ── data types ────────────────────────────────────────────────────────────────
 
 // cfFieldDecl is a struct field declaration site with its associated doc
@@ -114,6 +120,7 @@ var cfMethodReceiverRe = regexp.MustCompile(`^func\s*\(\s*\w+\s+\*?([A-Za-z][A-Z
 type cfFieldDecl struct {
 	name       string // exported field name
 	structType string // enclosing struct type name
+	pkg        string // package name from package clause of this file
 	file       string
 	line       int    // 1-based line of the field declaration
 	docComment string // full doc comment block (flattened)
@@ -124,6 +131,7 @@ type cfFieldDecl struct {
 type cfValidatorSite struct {
 	fieldName   string // field name referenced in the condition
 	structType  string // enclosing struct type name (empty if unknown)
+	pkg         string // package name from package clause of this file
 	file        string
 	line        int
 	rejectsZero bool // true if the guard rejects zero / non-positive
@@ -175,7 +183,7 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 
 		allDecls[f.Path] = decls
 		for _, v := range vals {
-			key := v.structType + "\x00" + v.fieldName
+			key := v.pkg + "\x00" + v.structType + "\x00" + v.fieldName
 			allVals[key] = append(allVals[key], v)
 		}
 
@@ -205,7 +213,7 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 				continue
 			}
 			dv := *d.defaultVal
-			key := d.structType + "\x00" + d.name
+			key := d.pkg + "\x00" + d.structType + "\x00" + d.name
 			validators, ok := allVals[key]
 			if !ok {
 				continue
@@ -328,6 +336,15 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 func cfPassFieldDecls(filePath string, lines []string) []cfFieldDecl {
 	var out []cfFieldDecl
 
+	// Extract the package name from the package clause.
+	pkg := ""
+	for _, line := range lines {
+		if pm := cfPackageClauseRe.FindStringSubmatch(strings.TrimSpace(line)); pm != nil {
+			pkg = pm[1]
+			break
+		}
+	}
+
 	// Track whether we are inside a struct body.
 	// structDepth > 0 means we're inside at least one struct's braces.
 	// We use a simple brace counter gated on seeing `type ... struct {`.
@@ -442,6 +459,7 @@ func cfPassFieldDecls(filePath string, lines []string) []cfFieldDecl {
 		out = append(out, cfFieldDecl{
 			name:       name,
 			structType: currentStructType,
+			pkg:        pkg,
 			file:       filePath,
 			line:       i + 1,
 			docComment: docComment,
@@ -463,6 +481,15 @@ func cfPassFieldDecls(filePath string, lines []string) []cfFieldDecl {
 // (contains "unlimited"/"means"/"no limit"/"use ... default"/"disable"), skip.
 func cfPassValidators(filePath string, lines []string) []cfValidatorSite {
 	var out []cfValidatorSite
+
+	// Extract the package name from the package clause.
+	pkg := ""
+	for _, line := range lines {
+		if pm := cfPackageClauseRe.FindStringSubmatch(strings.TrimSpace(line)); pm != nil {
+			pkg = pm[1]
+			break
+		}
+	}
 
 	// Track the current method's receiver struct type.
 	// We update this whenever we see a `func (r *StructType) ...` declaration.
@@ -522,6 +549,7 @@ func cfPassValidators(filePath string, lines []string) []cfValidatorSite {
 			out = append(out, cfValidatorSite{
 				fieldName:   name,
 				structType:  currentReceiverType,
+				pkg:         pkg,
 				file:        filePath,
 				line:        i + 1,
 				rejectsZero: true,
@@ -557,6 +585,7 @@ func cfPassValidators(filePath string, lines []string) []cfValidatorSite {
 				out = append(out, cfValidatorSite{
 					fieldName:  name,
 					structType: currentReceiverType,
+					pkg:        pkg,
 					file:       filePath,
 					line:       i + 1,
 					rejectsNeg: true,

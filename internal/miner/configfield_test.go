@@ -674,6 +674,129 @@ func (c *ClientConfig) Validate() error {
 	}
 }
 
+// TestCfMiner_CrossPackageStructNameNoFalsePositive is the regression test for
+// the cross-package struct-name collision. Package "server" has Config.Timeout
+// with Default:0 and NO validator. Package "client" has Config.Timeout with a
+// validator that rejects zero. Because these are DIFFERENT packages, the join
+// must NOT produce a lead — the default belongs to server's Config, not
+// client's Config.
+func TestCfMiner_CrossPackageStructNameNoFalsePositive(t *testing.T) {
+	serverSrc := `package server
+
+// Config holds server configuration.
+type Config struct {
+	// Timeout is the server timeout. Default: 0
+	Timeout int
+}
+`
+	clientSrc := `package client
+
+import "fmt"
+
+// Config holds client configuration.
+type Config struct {
+	Timeout int
+}
+
+// Validate validates that client Config is well-formed.
+func (c *Config) Validate() error {
+	if c.Timeout <= 0 {
+		return fmt.Errorf("Timeout must be > 0")
+	}
+	return nil
+}
+`
+	dir := t.TempDir()
+	serverFile := filepath.Join(dir, "server.go")
+	clientFile := filepath.Join(dir, "client.go")
+	if err := os.WriteFile(serverFile, []byte(serverSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(clientFile, []byte(clientSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap := &ingest.Snapshot{
+		Root: dir,
+		Files: []ingest.File{
+			{Path: "server.go", Language: ingest.LangGo},
+			{Path: "client.go", Language: ingest.LangGo},
+		},
+	}
+	st, ctx := makeCfStore(t)
+	var sum Summary
+	if err := seedConfigFieldContradictions(ctx, snap, st, &sum); err != nil {
+		t.Fatalf("seedConfigFieldContradictions: %v", err)
+	}
+	leads, err := st.PendingLeads(ctx, cfTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+	cfLeads := filterCfLeadsByPoster(leads, cfPosterLens)
+	// server's Config.Timeout has Default:0 but NO validator.
+	// client's Config.Timeout has a validator but NO documented default.
+	// Cross-PACKAGE join must NOT produce a lead on server's Config.Timeout.
+	if len(cfLeads) != 0 {
+		t.Errorf("cross-package collision: want 0 leads, got %d: %+v", len(cfLeads), cfLeads)
+	}
+}
+
+// TestCfMiner_SamePackageCrossFileDetectionFires verifies that a same-package
+// detection spanning two files (field decl in a.go, validator in b.go) still
+// fires a lead — same-package scoping must not accidentally require same-file.
+func TestCfMiner_SamePackageCrossFileDetectionFires(t *testing.T) {
+	declSrc := `package myapp
+
+// Config holds application configuration.
+type Config struct {
+	// Timeout is the timeout duration. Default: 0
+	Timeout int
+}
+`
+	validatorSrc := `package myapp
+
+import "fmt"
+
+// Validate rejects a zero or negative timeout.
+func (c *Config) Validate() error {
+	if c.Timeout <= 0 {
+		return fmt.Errorf("Timeout must be > 0")
+	}
+	return nil
+}
+`
+	dir := t.TempDir()
+	declFile := filepath.Join(dir, "config.go")
+	valFile := filepath.Join(dir, "validate.go")
+	if err := os.WriteFile(declFile, []byte(declSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(valFile, []byte(validatorSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap := &ingest.Snapshot{
+		Root: dir,
+		Files: []ingest.File{
+			{Path: "config.go", Language: ingest.LangGo},
+			{Path: "validate.go", Language: ingest.LangGo},
+		},
+	}
+	st, ctx := makeCfStore(t)
+	var sum Summary
+	if err := seedConfigFieldContradictions(ctx, snap, st, &sum); err != nil {
+		t.Fatalf("seedConfigFieldContradictions: %v", err)
+	}
+	leads, err := st.PendingLeads(ctx, cfTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+	cfLeads := filterCfLeadsByPoster(leads, cfPosterLens)
+	// Field decl and validator are in different files but the SAME package.
+	// The join must still fire exactly one lead on Config.Timeout.
+	if len(cfLeads) != 1 {
+		t.Errorf("same-package cross-file: want 1 lead, got %d: %+v", len(cfLeads), cfLeads)
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func filterCfLeadsByPoster(leads []store.Lead, poster string) []store.Lead {
