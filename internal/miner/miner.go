@@ -238,6 +238,10 @@ consLoop:
 		return sum, err
 	}
 
+	if err := seedConfigFieldContradictions(ctx, snap, st, &sum); err != nil {
+		return sum, err
+	}
+
 	return sum, nil
 }
 
