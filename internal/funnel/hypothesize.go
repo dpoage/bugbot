@@ -439,7 +439,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			startedAt := time.Now()
 			// runCtx (not ctx) so a breaker trip unblocks the in-flight runner
 			// without disturbing the caller's context.
-			cands, status, outcome, pm, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt, scope, f.toolHealthSinkFor(result, progress.RoleFinder, label))
+			cands, status, outcome, pm, traversal, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt, scope, f.toolHealthSinkFor(result, progress.RoleFinder, label))
 			finishedAt := time.Now()
 
 			// Emit KindAgentFinished here (not inside runFinderWithPrompt) so we
@@ -643,6 +643,25 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				}
 			}
 			f.recordFinderUnitWithTimeDetail(ctx, scanRunID, u, unitIdx, recordStatus, unitDetail, startedAt, finishedAt, inTokens, outTokens, cacheRead, candCount, unitLeadsPosted, result)
+			// Persist finder traversal audit row (best-effort, never aborts scan).
+			// Only written for finderOK units that reported a non-nil traversal
+			// field in their output JSON. Units that omit the optional traversal
+			// field contribute zero rows, which is the expected default (the
+			// traversal field is opt-in to avoid noisy empty rows).
+			if recordStatus == "ok" && traversal != nil {
+				ft := store.FinderTraversal{
+					ScanRunID:      scanRunID,
+					Lens:           u.lens.Name,
+					Strategy:       u.strategy.Name,
+					Files:          u.files,
+					Enumerated:     traversal.Enumerated,
+					Visited:        traversal.Visited,
+					CandidateCount: len(cands),
+				}
+				if ftErr := f.store.AddFinderTraversal(ctx, ft); ftErr != nil {
+					f.note(result, fmt.Sprintf("observability: AddFinderTraversal failed (unit %d, %s): %v", unitIdx, u.lens.Name, ftErr))
+				}
+			}
 
 			// Per-unit coverage: stamp this unit's files immediately when finderOK
 			// on a sweep run (touchCoverage=true). This replaces the old run-end
