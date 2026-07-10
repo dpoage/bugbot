@@ -744,3 +744,98 @@ func TestStringlyDrift_ShadowViaVarInferred(t *testing.T) {
 			len(stringlyLeads), stringlyLeads)
 	}
 }
+
+// TestStringlyDrift_ShadowViaForRange verifies that a for-range loop where the
+// loop variable shadows an outer typed-enum parameter produces ZERO leads.
+// Repro 1: func h(mode Mode, items map[string]int){ for mode := range items { switch mode{case "docker":case "podman":} } }
+func TestStringlyDrift_ShadowViaForRange(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"for_range_shadow.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("ShadowViaForRange: want 0 leads, got %d: %+v",
+			len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_ShadowViaGroupedVar verifies that a grouped var declaration
+// `var mode, other string = ...` that shadows an outer typed-enum parameter
+// produces ZERO leads.
+// Repro 2: func h(mode Mode){ if true { var mode, other string = getCmd(),""; switch mode{...} } }
+func TestStringlyDrift_ShadowViaGroupedVar(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"grouped_var_shadow.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("ShadowViaGroupedVar: want 0 leads, got %d: %+v",
+			len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_ShadowViaNonFirstShortDecl verifies that when the scrutinee
+// appears as a non-first name in a short declaration (`a, mode := ...`), it is
+// detected as a shadow and produces ZERO leads.
+// Repro 3: func h(mode Mode){ if true { a, mode := 1, getCmd(); switch mode{...} } }
+func TestStringlyDrift_ShadowViaNonFirstShortDecl(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"non_first_short_decl_shadow.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("ShadowViaNonFirstShortDecl: want 0 leads, got %d: %+v",
+			len(stringlyLeads), stringlyLeads)
+	}
+}

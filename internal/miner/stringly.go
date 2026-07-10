@@ -149,23 +149,90 @@ var singleStringRe = regexp.MustCompile(`"([^"\\]{0,128})"`)
 // as the pair instead of `name Type`. Use varTypedDeclRe / varInferredDeclRe for that.
 var varDeclRe = regexp.MustCompile(`\b(\w+)\s+(\w+)\b`)
 
-// varTypedDeclRe matches a `var name TypeName` statement (with explicit type).
+// varTypedDeclRe matches a `var name TypeName` statement (with explicit type, single name).
 // Capture 1 = variable name, capture 2 = type name.
 // The optional `= ...` suffix is intentionally ignored — the type is explicit.
+// For grouped `var name, other TypeName` use isVarRebindTarget / isVarTypedEnum instead.
 var varTypedDeclRe = regexp.MustCompile(`^\s*var\s+(\w+)\s+(\w+)\b`)
 
-// varInferredDeclRe matches a `var name = expr` statement (type inferred from RHS).
+// varInferredDeclRe matches a `var name = expr` statement (type inferred from RHS, single name).
 // Capture 1 = variable name. No type information is recoverable from this form.
 var varInferredDeclRe = regexp.MustCompile(`^\s*var\s+(\w+)\s*=`)
 
-// shortDeclRe matches short variable declarations that bind/shadow a name:
+// shortDeclLHSRe extracts all comma-separated identifiers on the LHS of `:=`.
+// It matches the entire `ident, ident, ... :=` prefix so we can check all names.
+// This covers: `name :=`, `a, name :=`, `for name :=`, `for k, name := range`.
+var shortDeclLHSRe = regexp.MustCompile(`^([^:=]+):=`)
+
+// wordRe extracts word tokens (identifiers) from a string.
+var wordRe = regexp.MustCompile(`\b(\w+)\b`)
+
+// isShortDeclTarget returns true if name appears as any LHS identifier before :=.
+// Handles all comma-separated positions and for-range forms.
+func isShortDeclTarget(line, name string) bool {
+	m := shortDeclLHSRe.FindStringSubmatch(line)
+	if m == nil {
+		return false
+	}
+	for _, tok := range wordRe.FindAllString(m[1], -1) {
+		if tok == name {
+			return true
+		}
+	}
+	return false
+}
+
+// varNameListRe matches the name list in a var declaration:
 //
-//	name :=  or  name, anything :=
+//	var name1, name2, ... TypeOrEq
 //
-// Capture 1 = first identifier (the name being bound).
-// This is the canonical shadow signal: `:=` always introduces a new binding
-// regardless of what the RHS evaluates to, so we can never prove the type.
-var shortDeclRe = regexp.MustCompile(`^\s*(\w+)(?:\s*,\s*\w+)?\s*:=`)
+// after stripping the leading `var `. We use it to extract all declared names.
+var varNameListRe = regexp.MustCompile(`^\s*var\s+((?:\w+\s*,\s*)*\w+)\s+(\w+)\b`)
+
+// isVarRebindTarget returns true if name appears as any declared identifier in
+// a `var` statement on this line. It handles:
+//
+//	var name T          (single typed)
+//	var name, other T   (grouped typed)
+//	var name = expr     (single inferred — no type provable)
+//	var name, other = exprs  (grouped inferred)
+func isVarRebindTarget(line, name string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "var ") {
+		return false
+	}
+	// Named list before a type keyword or `=`.
+	// Strip `var ` then split on `,` until we hit something that isn't an ident.
+	rest := strings.TrimSpace(trimmed[4:]) // after `var `
+	// Collect comma-separated idents at the front.
+	for _, tok := range strings.FieldsFunc(rest, func(r rune) bool {
+		return r == ',' || r == '\t' || r == ' '
+	}) {
+		tok = strings.TrimSpace(tok)
+		if !wordRe.MatchString(tok) {
+			break
+		}
+		if tok == name {
+			return true
+		}
+		// If the token doesn't look like a pure ident (contains `=`), stop.
+		if strings.ContainsAny(tok, "=()") {
+			break
+		}
+	}
+	return false
+}
+
+// varTypedEnumType returns the enum type if the line is `var name EnumType` (single
+// name, explicit type that is a known named type). Returns "" for grouped, inferred,
+// or non-enum typed declarations.
+func varTypedEnumType(line string, namedTypes map[string]bool) (varName, typeName string) {
+	m := varTypedDeclRe.FindStringSubmatch(line)
+	if m == nil {
+		return "", ""
+	}
+	return m[1], m[2]
+}
 
 // buildBlockCommentMask returns a per-line boolean mask: true if the line is
 // inside a /* ... */ block comment (best-effort, ignores strings containing /*).
@@ -283,14 +350,25 @@ func passStringEnumConsts(content string, namedTypes map[string]bool) []enumCons
 // scopeStarts is a list of 0-based line indices (outermost first, innermost last).
 // For each scope from innermost to outermost, we scan ALL lines before the switch
 // and take the NEAREST (last) binding of the scrutinee name:
-//   - Typed decl (`name TypeName` where TypeName is a known enum)  → return that type.
-//   - Typed decl with non-enum type                                → return "" (shadowed).
-//   - Short decl (`name :=` or `name, _ :=`)                      → return "" (cannot prove type).
-//   - No binding in this scope                                     → try next outer scope.
 //
-// This nearest-binding rule closes the entire := shadow FP class: a name
-// rebound via := in a nested block or closure body is treated as unprovably
-// typed regardless of what outer scopes declare. Default = silence.
+//   - `var name EnumType` (single name, explicit enum type) → return that type.
+//   - Name as ANY LHS token before `:=`                    → return "" (shadow).
+//   - Name in ANY position in a `var` statement (grouped,
+//     inferred, or non-enum typed)                          → return "" (shadow).
+//   - `name EnumType` in param list / other non-var context → return that type.
+//   - `name NonEnumType`                                    → return "" (non-enum typed).
+//   - No binding in this scope                             → try next outer scope.
+//
+// Shadow detection is STRUCTURAL (token-as-LHS-target), not form-enumerated:
+//   - isShortDeclTarget: checks all comma-separated names on the LHS of `:=`,
+//     covering `name :=`, `a, name :=`, `for name :=`, `for k, name := range`.
+//   - isVarRebindTarget: checks all comma-separated names in a `var` statement,
+//     covering single, grouped, typed, and inferred forms.
+//
+// A new syntactic form cannot reintroduce the shadow class as long as it uses
+// `:=` or `var` to introduce a new binding — both are covered structurally.
+// Bare assignment `name = expr` (no `:=`, no `var`) preserves the existing type
+// in Go; it is not a shadow and is left to normal binding resolution.
 //
 // lines is the full file split on "\n"; switchIdx is the 0-based index of the
 // switch line. Each scope covers lines[scopeStarts[j]:switchIdx].
@@ -312,7 +390,6 @@ func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, lines []
 	type binding struct {
 		isEnum   bool   // true → typed decl with a known enum type
 		typeName string // only valid when isEnum=true
-		// isEnum=false and !isEnum → shadowing (short-decl or non-enum typed decl)
 	}
 
 	// Walk from innermost scope outward (scopeStarts is outermost-first, so
@@ -339,43 +416,34 @@ func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, lines []
 				continue
 			}
 
-			// Check short-decl (`:=`), which always shadows with unproventype.
-			if m := shortDeclRe.FindStringSubmatch(line); m != nil {
-				if m[1] == scrutinee {
-					found = true
-					last = binding{isEnum: false}
-					continue // keep scanning for a later binding
-				}
+			// Structural check 1: `:=` — scrutinee as any LHS token.
+			// Covers: `name :=`, `a, name :=`, `for name :=`, `for k, name := range`.
+			// ANY appearance as a `:=` LHS target is an unprovoable-type shadow.
+			if isShortDeclTarget(line, scrutinee) {
+				found = true
+				last = binding{isEnum: false}
+				continue
 			}
 
-			// Check `var name = expr` (type inferred — always a shadow/unprovable).
-			// Must run BEFORE varTypedDeclRe / varDeclRe to avoid partial matches.
-			if m := varInferredDeclRe.FindStringSubmatch(line); m != nil {
-				if m[1] == scrutinee {
-					found = true
+			// Structural check 2: `var` — scrutinee as any declared name.
+			// Handles single/grouped, typed/inferred forms.
+			if isVarRebindTarget(line, scrutinee) {
+				found = true
+				// Only `var name EnumType` (single name) is provably typed.
+				vn, tn := varTypedEnumType(line, namedTypes)
+				if vn == scrutinee && namedTypes[tn] {
+					last = binding{isEnum: true, typeName: tn}
+				} else {
 					last = binding{isEnum: false}
-					continue
 				}
-			}
-
-			// Check `var name TypeName` (explicit type — provable only if TypeName is an enum).
-			if m := varTypedDeclRe.FindStringSubmatch(line); m != nil {
-				if m[1] == scrutinee {
-					found = true
-					if namedTypes[m[2]] {
-						last = binding{isEnum: true, typeName: m[2]}
-					} else {
-						last = binding{isEnum: false}
-					}
-					continue
-				}
+				continue
 			}
 
 			// Check typed declaration: `name TypeName` in param lists and other contexts.
-			// Skip lines that start with `var` — handled above.
+			// Skip lines that start with `var` — handled above by isVarRebindTarget.
 			trimmedLine := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmedLine, "var ") {
-				continue // already handled by varTypedDeclRe / varInferredDeclRe above
+				continue
 			}
 			for _, m := range varDeclRe.FindAllStringSubmatch(line, -1) {
 				varName, typeName := m[1], m[2]
