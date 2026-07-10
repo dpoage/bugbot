@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -428,7 +429,17 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			task := u.customTask
 			if task == "" {
 				if u.strategy.BuildTask != nil {
-					task = u.strategy.BuildTask(u.files, u.leads)
+					// Deep strategy unit: precompute the cross-reference closure
+					// of the seed files' load-bearing symbols so the agent
+					// confirms a specific set instead of rediscovering it.
+					// deepRefClosure is NIL-SAFE: nil/errored nav returns
+					// (nil, nil), producing byte-identical output to today.
+					refs, relFiles := f.deepRefClosure(ctx, u.files)
+					taskFiles := dedupFiles(u.files, relFiles)
+					var b strings.Builder
+					b.WriteString(u.strategy.BuildTask(taskFiles, u.leads))
+					appendRefsSection(&b, refs)
+					task = b.String()
 				} else {
 					task = finderTask(u.files, u.leads, cart.ensureContextFor(ctx, u.files))
 				}

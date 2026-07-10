@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/dpoage/bugbot/internal/lsp"
+	"github.com/dpoage/bugbot/internal/treesitter"
 )
 
 // RefLocation is one repo-relative reference location: the programmatic
@@ -60,4 +61,26 @@ func (c *CodeNav) References(ctx context.Context, file string, line int, sym str
 		out = append(out, RefLocation{File: rel, Line: loc.Range.Start.Line + 1})
 	}
 	return out, nil
+}
+
+// Outline returns the top-level declarations in the given repo-relative file,
+// using the same tree-sitter backend as the outline tool. This is the
+// programmatic seam other packages use for symbol enumeration without a model
+// in the loop (e.g. funnel's reference-closure precomputation).
+//
+// Returns (nil, nil) when the file type is unsupported or outline is
+// unavailable; returns (nil, err) on a real parse error. Callers must treat
+// nil as "best-effort unavailable" and degrade gracefully.
+func (c *CodeNav) Outline(file string) ([]treesitter.OutlineEntry, error) {
+	if c.outline == nil {
+		return nil, nil
+	}
+	abs, err := c.root.Resolve(file)
+	if err != nil {
+		return nil, err
+	}
+	if !c.outline.Supports(abs) {
+		return nil, nil
+	}
+	return c.outline.Outline(abs)
 }
