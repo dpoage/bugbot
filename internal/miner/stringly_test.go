@@ -680,3 +680,67 @@ func TestStringlyDrift_ShadowViaShortDeclNestedBlock(t *testing.T) {
 			len(stringlyLeads), stringlyLeads)
 	}
 }
+
+// TestStringlyDrift_ShadowViaVarTyped verifies that a nested block where the
+// scrutinee is declared via `var name Type` with a non-enum type produces ZERO
+// leads (case E).
+// Repro E: func handle(mode Mode){ if true { var mode string = getCmd(); switch mode {case "docker":case "podman":} } }
+func TestStringlyDrift_ShadowViaVarTyped(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"var_typed_shadow.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("ShadowViaVarTyped: want 0 leads, got %d: %+v",
+			len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_ShadowViaVarInferred verifies that a nested block where the
+// scrutinee is declared via `var name = expr` (inferred type, non-enum) produces
+// ZERO leads (case F).
+// Repro F: func handle(mode Mode){ if true { var mode = getCmd(); switch mode {case "docker":case "podman":} } }
+func TestStringlyDrift_ShadowViaVarInferred(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"var_inferred_shadow.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("ShadowViaVarInferred: want 0 leads, got %d: %+v",
+			len(stringlyLeads), stringlyLeads)
+	}
+}

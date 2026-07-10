@@ -143,9 +143,20 @@ var caseLineRe = regexp.MustCompile(`^\s*case\s+(.+):`)
 // singleStringRe extracts "..." literals from a case expression list.
 var singleStringRe = regexp.MustCompile(`"([^"\\]{0,128})"`)
 
-// varDeclRe matches `var name TypeName` or `name TypeName` in a func param list.
+// varDeclRe matches `name TypeName` in a func param list (two adjacent identifiers).
 // Capture 1 = var name, capture 2 = type name.
+// NOTE: do NOT use this for `var` statements — it greedily matches `var name`
+// as the pair instead of `name Type`. Use varTypedDeclRe / varInferredDeclRe for that.
 var varDeclRe = regexp.MustCompile(`\b(\w+)\s+(\w+)\b`)
+
+// varTypedDeclRe matches a `var name TypeName` statement (with explicit type).
+// Capture 1 = variable name, capture 2 = type name.
+// The optional `= ...` suffix is intentionally ignored — the type is explicit.
+var varTypedDeclRe = regexp.MustCompile(`^\s*var\s+(\w+)\s+(\w+)\b`)
+
+// varInferredDeclRe matches a `var name = expr` statement (type inferred from RHS).
+// Capture 1 = variable name. No type information is recoverable from this form.
+var varInferredDeclRe = regexp.MustCompile(`^\s*var\s+(\w+)\s*=`)
 
 // shortDeclRe matches short variable declarations that bind/shadow a name:
 //
@@ -328,7 +339,7 @@ func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, lines []
 				continue
 			}
 
-			// Check short-decl first (`:=`), which always shadows/binds.
+			// Check short-decl (`:=`), which always shadows with unproventype.
 			if m := shortDeclRe.FindStringSubmatch(line); m != nil {
 				if m[1] == scrutinee {
 					found = true
@@ -337,7 +348,35 @@ func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, lines []
 				}
 			}
 
-			// Check typed declaration: `name TypeName` or `var name TypeName`.
+			// Check `var name = expr` (type inferred — always a shadow/unprovable).
+			// Must run BEFORE varTypedDeclRe / varDeclRe to avoid partial matches.
+			if m := varInferredDeclRe.FindStringSubmatch(line); m != nil {
+				if m[1] == scrutinee {
+					found = true
+					last = binding{isEnum: false}
+					continue
+				}
+			}
+
+			// Check `var name TypeName` (explicit type — provable only if TypeName is an enum).
+			if m := varTypedDeclRe.FindStringSubmatch(line); m != nil {
+				if m[1] == scrutinee {
+					found = true
+					if namedTypes[m[2]] {
+						last = binding{isEnum: true, typeName: m[2]}
+					} else {
+						last = binding{isEnum: false}
+					}
+					continue
+				}
+			}
+
+			// Check typed declaration: `name TypeName` in param lists and other contexts.
+			// Skip lines that start with `var` — handled above.
+			trimmedLine := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmedLine, "var ") {
+				continue // already handled by varTypedDeclRe / varInferredDeclRe above
+			}
 			for _, m := range varDeclRe.FindAllStringSubmatch(line, -1) {
 				varName, typeName := m[1], m[2]
 				if varName != scrutinee {
