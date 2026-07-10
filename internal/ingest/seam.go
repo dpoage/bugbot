@@ -190,41 +190,41 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 		// Data-file and env-var detectors apply only to known source languages,
 		// not to .proto IDL files (which are processed solely by rpcProducers).
 		if !isProto {
-		// Data-file references: any string literal whose value ends in
-		// a known data-file suffix. We accept every language's
-		// quoted-string forms because the contract surface is the file
-		// name, not the language.
-		for _, idx := range quotedIdent.FindAllIndex(content, -1) {
-			s, e := idx[0], idx[1]
-			inner := string(content[s+1 : e-1])
-			if !dataFileSuffixSet[strings.ToLower(filepath.Ext(inner))] {
-				continue
+			// Data-file references: any string literal whose value ends in
+			// a known data-file suffix. We accept every language's
+			// quoted-string forms because the contract surface is the file
+			// name, not the language.
+			for _, idx := range quotedIdent.FindAllIndex(content, -1) {
+				s, e := idx[0], idx[1]
+				inner := string(content[s+1 : e-1])
+				if !dataFileSuffixSet[strings.ToLower(filepath.Ext(inner))] {
+					continue
+				}
+				base := filepath.Base(inner)
+				if base == "." || base == "/" || base == "" {
+					continue
+				}
+				line := lineForOffset(content, s)
+				byLang, ok := dataFileRefs[base]
+				if !ok {
+					byLang = make(map[Language][]fileRef)
+					dataFileRefs[base] = byLang
+				}
+				byLang[f.Language] = append(byLang[f.Language], fileRef{file: f.Path, line: line})
 			}
-			base := filepath.Base(inner)
-			if base == "." || base == "/" || base == "" {
-				continue
+			// Env-var references are language-specific; route to the per-language
+			// detector. Each name found gets its own per-(name, language) row so the
+			// reduction step can group by name across languages.
+			envNames := extractEnvVarNames(f.Language, content)
+			for _, name := range envNames {
+				lref, ok := envVarRefs[name]
+				if !ok {
+					lref = make(map[Language][]fileRef)
+					envVarRefs[name] = lref
+				}
+				line := lineForEnvMatch(f.Language, content, name)
+				lref[f.Language] = append(lref[f.Language], fileRef{file: f.Path, line: line})
 			}
-			line := lineForOffset(content, s)
-			byLang, ok := dataFileRefs[base]
-			if !ok {
-				byLang = make(map[Language][]fileRef)
-				dataFileRefs[base] = byLang
-			}
-			byLang[f.Language] = append(byLang[f.Language], fileRef{file: f.Path, line: line})
-		}
-		// Env-var references are language-specific; route to the per-language
-		// detector. Each name found gets its own per-(name, language) row so the
-		// reduction step can group by name across languages.
-		envNames := extractEnvVarNames(f.Language, content)
-		for _, name := range envNames {
-			lref, ok := envVarRefs[name]
-			if !ok {
-				lref = make(map[Language][]fileRef)
-				envVarRefs[name] = lref
-			}
-			line := lineForEnvMatch(f.Language, content, name)
-			lref[f.Language] = append(lref[f.Language], fileRef{file: f.Path, line: line})
-		}
 		} // end if !isProto
 
 		// HTTP route detection (Go only in v1; other languages deferred).
@@ -721,7 +721,9 @@ var protoRPCDeclRe = regexp.MustCompile(`\brpc\s+([A-Z][A-Za-z0-9_]*)\s*\(`)
 var goRPCHandlerRe = regexp.MustCompile(`func\s*\([^)]*Server[^)]*\)\s+([A-Z][A-Za-z0-9_]*)\s*\(\s*ctx\b[^)]*,\s*\*[A-Za-z][A-Za-z0-9_]*\s*\)\s*\(\s*\*[A-Za-z]`)
 
 // goRPCCallRe matches Go gRPC client call sites of the form:
-//   someClient.MethodName(ctx, ...)
+//
+//	someClient.MethodName(ctx, ...)
+//
 // where MethodName begins with an uppercase letter (exported, matching proto
 // conventions). Captured group 1 is the method name. We require the receiver
 // to be a lowercase-starting identifier (variable, not type assertion) to

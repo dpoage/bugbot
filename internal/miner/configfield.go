@@ -394,9 +394,10 @@ func cfPassFieldDecls(filePath string, lines []string) []cfFieldDecl {
 		// Detect `} struct {` (embedded struct in struct — simple handling)
 		if inStruct {
 			for _, ch := range trimmed {
-				if ch == '{' {
+				switch ch {
+				case '{':
 					structBraceDepth++
-				} else if ch == '}' {
+				case '}':
 					structBraceDepth--
 					if structBraceDepth <= 0 {
 						inStruct = false
@@ -513,9 +514,10 @@ func cfPassValidators(filePath string, lines []string) []cfValidatorSite {
 		}
 		// Track brace depth to know when we exit the current function.
 		for _, ch := range trimmed {
-			if ch == '{' {
+			switch ch {
+			case '{':
 				funcBraceDepth++
-			} else if ch == '}' {
+			case '}':
 				funcBraceDepth--
 				if funcBraceDepth <= 0 {
 					funcBraceDepth = 0
@@ -634,10 +636,11 @@ func cfHasErrorReturn(lines []string, from int) bool {
 	for j := from; j < len(lines); j++ {
 		t := strings.TrimSpace(lines[j])
 		for _, ch := range t {
-			if ch == '{' {
+			switch ch {
+			case '{':
 				depth++
 				started = true
-			} else if ch == '}' {
+			case '}':
 				depth--
 				if started && depth <= 0 {
 					// Closed the guard block — stop.

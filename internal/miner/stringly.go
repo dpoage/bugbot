@@ -155,10 +155,6 @@ var varDeclRe = regexp.MustCompile(`\b(\w+)\s+(\w+)\b`)
 // For grouped `var name, other TypeName` use isVarRebindTarget / isVarTypedEnum instead.
 var varTypedDeclRe = regexp.MustCompile(`^\s*var\s+(\w+)\s+(\w+)\b`)
 
-// varInferredDeclRe matches a `var name = expr` statement (type inferred from RHS, single name).
-// Capture 1 = variable name. No type information is recoverable from this form.
-var varInferredDeclRe = regexp.MustCompile(`^\s*var\s+(\w+)\s*=`)
-
 // shortDeclLHSRe extracts all comma-separated identifiers on the LHS of `:=`.
 // It matches the entire `ident, ident, ... :=` prefix so we can check all names.
 // This covers: `name :=`, `a, name :=`, `for name :=`, `for k, name := range`.
@@ -181,13 +177,6 @@ func isShortDeclTarget(line, name string) bool {
 	}
 	return false
 }
-
-// varNameListRe matches the name list in a var declaration:
-//
-//	var name1, name2, ... TypeOrEq
-//
-// after stripping the leading `var `. We use it to extract all declared names.
-var varNameListRe = regexp.MustCompile(`^\s*var\s+((?:\w+\s*,\s*)*\w+)\s+(\w+)\b`)
 
 // isVarRebindTarget returns true if name appears as any declared identifier in
 // a `var` statement on this line. It handles:
@@ -527,10 +516,6 @@ func extractCaseLiterals(caseLine string) []string {
 	return vals
 }
 
-// funcDeclRe detects the start of a function declaration (func keyword at
-// start of non-whitespace, before a opening brace on the same or next line).
-var funcDeclRe = regexp.MustCompile(`^\s*func\s+`)
-
 // funcAnywhereRe detects the `func` keyword anywhere on a line (not just at
 // the start), to catch func literals: `return func(...)`, `go func()`, etc.
 var funcAnywhereRe = regexp.MustCompile(`\bfunc\b`)
@@ -583,14 +568,15 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 
 		// Track brace depth; push/pop func scopes and switch blocks.
 		for _, ch := range line {
-			if ch == '{' {
+			switch ch {
+			case '{':
 				braceDepth++
 				// If a func keyword was seen and this { opens its body, push a scope.
 				if pendingFunc >= 0 {
 					funcStack = append(funcStack, funcScope{startLine: pendingFunc, bodyDepth: braceDepth})
 					pendingFunc = -1
 				}
-			} else if ch == '}' {
+			case '}':
 				braceDepth--
 				// Pop any switch whose block just closed.
 				if len(stack) > 0 && braceDepth < stack[len(stack)-1].depth {
@@ -687,13 +673,13 @@ func isIdentifierShaped(s string) bool {
 	}
 	// Must start with a letter (not / or . or digit — those are paths/URLs/numbers).
 	first := rune(s[0])
-	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z')) {
+	if (first < 'a' || first > 'z') && (first < 'A' || first > 'Z') {
 		return false
 	}
 	// Allowed interior characters: letters, digits, underscore, hyphen, dot, slash.
 	for _, c := range s {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-			(c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') &&
+			(c < '0' || c > '9') && c != '_' && c != '-' && c != '.' {
 			return false
 		}
 	}
@@ -723,10 +709,6 @@ type producerSite struct {
 
 // switchKeyRe matches the `switch` keyword that opens a switch block.
 var switchKeyRe = regexp.MustCompile(`^\s*switch\b`)
-
-// caseStringRe matches `case "...":`  (no escape complexity in the literal).
-// Capture group 1 = the first literal content (without quotes).
-var caseStringRe = regexp.MustCompile(`\bcase\s+"([^"\\]{1,128})"`)
 
 // producerStringRe matches string literals in common producer positions:
 //
