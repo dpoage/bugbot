@@ -150,6 +150,9 @@ type Summary struct {
 	// EnumDriftLeads counts leads from the enum/const-drift pass
 	// (switch cases using raw integer literals instead of named constants).
 	EnumDriftLeads int
+	// StringlyDriftLeads counts leads from the stringly-typed drift pass
+	// (consumed string literals with no producer, or vice-versa).
+	StringlyDriftLeads int
 }
 
 type leadKey struct {
@@ -235,6 +238,10 @@ consLoop:
 	}
 
 	if err := seedEnumDrift(ctx, snap, st, &sum); err != nil {
+		return sum, err
+	}
+
+	if err := seedStringlyDrift(ctx, snap, st, &sum); err != nil {
 		return sum, err
 	}
 
