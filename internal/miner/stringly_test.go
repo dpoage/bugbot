@@ -590,7 +590,9 @@ func TestStringlyDrift_ClosureShadowsOuterTypedParam(t *testing.T) {
 // TestStringlyDrift_ClosureOverOuterTypedParam verifies that a closure that
 // captures (but does NOT shadow) an outer typed-enum parameter still fires.
 // The closure has no params of its own; `m` resolves to the outer `m Mode`.
-// The case "activ" is a typo of "active" → must produce at least one lead.
+// The case "activ" is a typo of "active" → exactly 1 type-A lead.
+// "inactive" is never covered → exactly 1 type-B lead.
+// Expected total: 2 stringly-drift leads.
 func TestStringlyDrift_ClosureOverOuterTypedParam(t *testing.T) {
 	dir := filepath.Join("testdata", "stringly_drift")
 	snap := buildSnapshot(t, dir, []string{"closure_outer_typed.go"})
@@ -613,8 +615,10 @@ func TestStringlyDrift_ClosureOverOuterTypedParam(t *testing.T) {
 			stringlyLeads = append(stringlyLeads, l)
 		}
 	}
-	if len(stringlyLeads) == 0 {
-		t.Errorf("ClosureOuterTyped: want >= 1 stringly-drift lead (typo 'activ'), got 0")
+	// Exactly 2 leads: type-A for "activ" (typo) + type-B for "inactive" (missing arm).
+	if len(stringlyLeads) != 2 {
+		t.Errorf("ClosureOuterTyped: want exactly 2 stringly-drift leads (1 type-A + 1 type-B), got %d: %+v",
+			len(stringlyLeads), stringlyLeads)
 	}
 }
 
@@ -837,5 +841,121 @@ func TestStringlyDrift_ShadowViaNonFirstShortDecl(t *testing.T) {
 	if len(stringlyLeads) != 0 {
 		t.Errorf("ShadowViaNonFirstShortDecl: want 0 leads, got %d: %+v",
 			len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Regression tests for production findings 1, 2, and 3
+// --------------------------------------------------------------------------
+
+// TestStringlyDrift_BraceInCaseStringNoFalseLead verifies that a `}` inside a
+// string literal in a case body does not decrement braceDepth and pop the
+// switch early (Finding 1). Both cases must be recognized; no false type-B.
+//
+// testdata/stringly_clean/brace_in_case_string.go:
+//   - type BraceMode string with consts "a", "b"
+//   - switch with case "a" (body has s := "}") and case "b"
+//
+// Before the fix: the `}` inside the string pops the switch → "b" dropped →
+// false type-B lead for missing "b". After the fix: 0 leads.
+func TestStringlyDrift_BraceInCaseStringNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"brace_in_case_string.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("BraceInCaseString: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_WrappedCaseArmNoFalseLead verifies that a gofmt-preserved
+// wrapped case list (case expression split across two lines) is fully recognized
+// and does not produce false type-B leads (Finding 2).
+//
+// testdata/stringly_clean/wrapped_case_arm.go:
+//   - type WrappedMode string with consts "a", "b", "c"
+//   - switch with case "a", then case "b",\n\t\t"c":
+//
+// Before the fix: "b" and "c" dropped → false type-B for both. After: 0 leads.
+func TestStringlyDrift_WrappedCaseArmNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"wrapped_case_arm.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("WrappedCaseArm: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_EnumTypeInCommentNotResolved verifies that a `name EnumType`
+// word-pair that appears only inside a string literal or a trailing // comment
+// does not cause a raw-string scrutinee to resolve to the enum type (Finding 3).
+//
+// testdata/stringly_clean/enum_type_in_comment.go:
+//   - type CommentMode string with consts "run", "stop"
+//   - logMode(cmd string): string contains "cmd CommentMode: " and comment says
+//     "cmd CommentMode changed" — raw string switch must produce 0 leads.
+//
+// Before the fix: varDeclRe matches the word-pair in the string/comment →
+// scrutinee resolved to CommentMode → false leads for missing arms.
+// After the fix: 0 leads.
+func TestStringlyDrift_EnumTypeInCommentNotResolved(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"enum_type_in_comment.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("EnumTypeInComment: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
 	}
 }

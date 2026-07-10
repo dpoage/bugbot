@@ -119,8 +119,10 @@ type enumCaseLit struct {
 	line     int
 }
 
-// namedStringTypeRe matches `type Foo string` or `type Foo = string`
-// (bare alias). Capture 1 = type name.
+// namedStringTypeRe matches `type Foo string` (defined type only).
+// It deliberately does NOT match `type Foo = string` aliases — aliases are
+// identity-string and would re-admit the raw-string FP class the miner is
+// designed to avoid. Capture 1 = type name.
 var namedStringTypeRe = regexp.MustCompile(`^\s*type\s+(\w+)\s+string\b`)
 
 // constTypedRe matches a const declaration with an explicit named type and a
@@ -162,6 +164,58 @@ var shortDeclLHSRe = regexp.MustCompile(`^([^:=]+):=`)
 
 // wordRe extracts word tokens (identifiers) from a string.
 var wordRe = regexp.MustCompile(`\b(\w+)\b`)
+
+// sanitizeLine blanks the content of inline double-quoted string literals and
+// strips trailing // line comments from a Go source line. This prevents brace
+// counters and identifier matchers from reacting to `}` or identifier-shaped
+// text inside string values or comments.
+//
+// It does NOT handle backtick strings (covered by buildBacktickMask) or block
+// comments (covered by buildBlockCommentMask). The result has the same byte
+// length as the input so line offsets remain valid.
+func sanitizeLine(line string) string {
+	var b strings.Builder
+	b.Grow(len(line))
+	inString := false
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if inString {
+			if ch == '\\' {
+				// Escape sequence: write both bytes as spaces.
+				b.WriteByte(' ')
+				if i+1 < len(line) {
+					i++
+					b.WriteByte(' ')
+				}
+				continue
+			}
+			if ch == '"' {
+				inString = false
+				b.WriteByte(ch)
+				continue
+			}
+			// Inside string — blank the content.
+			b.WriteByte(' ')
+			continue
+		}
+		// Outside string.
+		if ch == '"' {
+			inString = true
+			b.WriteByte(ch)
+			continue
+		}
+		// Check for trailing line comment.
+		if ch == '/' && i+1 < len(line) && line[i+1] == '/' {
+			// Blank the rest of the line.
+			for ; i < len(line); i++ {
+				b.WriteByte(' ')
+			}
+			break
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
 
 // isShortDeclTarget returns true if name appears as any LHS identifier before :=.
 // Handles all comma-separated positions and for-range forms.
@@ -430,11 +484,15 @@ func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, lines []
 
 			// Check typed declaration: `name TypeName` in param lists and other contexts.
 			// Skip lines that start with `var` — handled above by isVarRebindTarget.
+			// Sanitize first so that a `name EnumType` word-pair inside a string
+			// literal or trailing // comment does not falsely resolve the scrutinee
+			// to an enum type (Finding 3).
 			trimmedLine := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmedLine, "var ") {
 				continue
 			}
-			for _, m := range varDeclRe.FindAllStringSubmatch(line, -1) {
+			sanitized := sanitizeLine(line)
+			for _, m := range varDeclRe.FindAllStringSubmatch(sanitized, -1) {
 				varName, typeName := m[1], m[2]
 				if varName != scrutinee {
 					continue
@@ -550,6 +608,11 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 	var stack []pendingSwitch
 	braceDepth := 0
 
+	// pendingCase accumulates a wrapped case expression across continuation lines.
+	// gofmt preserves `case "a",\n\t\t"b":` — the expression spans two lines.
+	pendingCase := ""    // non-empty while accumulating
+	pendingCaseLine := 0 // lineNo of the `case` keyword line
+
 	for i, line := range lines {
 		lineNo := i + 1
 		if blockMask[i] || btMask[i] {
@@ -560,14 +623,18 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 			continue
 		}
 
+		// Sanitize the line before brace counting so that `}` inside a string
+		// literal or a trailing // comment does not skew braceDepth (Finding 1).
+		sanitized := sanitizeLine(line)
+
 		// Detect function declarations (top-level, methods, and func literals)
 		// so we can scope scrutinee resolution to the innermost enclosing body.
 		if funcAnywhereRe.MatchString(line) {
 			pendingFunc = i
 		}
 
-		// Track brace depth; push/pop func scopes and switch blocks.
-		for _, ch := range line {
+		// Track brace depth using the sanitized line; push/pop func scopes and switch blocks.
+		for _, ch := range sanitized {
 			switch ch {
 			case '{':
 				braceDepth++
@@ -638,14 +705,78 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 			esw.hasDefault = true
 			continue
 		}
-		entries := extractCaseEntries(line)
-		for k := range entries {
-			entries[k].line = lineNo
+
+		// Handle multi-line case expressions (Finding 2).
+		// gofmt may emit `case "b",` on one line and `"c":` on the next.
+		// Accumulate until the expression ends with `:` (outside parens/brackets).
+		if pendingCase != "" {
+			// Continuation line: append and check for terminator.
+			pendingCase += " " + trimmed
+			// Check if the accumulated expression is terminated.
+			if isCompleteCaseExpr(pendingCase) {
+				entries := extractCaseEntries(pendingCase)
+				for k := range entries {
+					entries[k].line = pendingCaseLine
+				}
+				esw.cases = append(esw.cases, entries...)
+				pendingCase = ""
+				pendingCaseLine = 0
+			}
+			continue
 		}
-		esw.cases = append(esw.cases, entries...)
+
+		// Check for a new case line.
+		if strings.HasPrefix(trimmed, "case ") || trimmed == "case" {
+			if isCompleteCaseExpr(trimmed) {
+				entries := extractCaseEntries(line)
+				for k := range entries {
+					entries[k].line = lineNo
+				}
+				esw.cases = append(esw.cases, entries...)
+			} else {
+				// Incomplete: start accumulation.
+				pendingCase = trimmed
+				pendingCaseLine = lineNo
+			}
+			continue
+		}
 	}
 
 	return out
+}
+
+// isCompleteCaseExpr returns true when the case expression (from the `case`
+// keyword to the end of the accumulated string) is terminated by a `:` that is
+// not inside parentheses, brackets, or braces.
+func isCompleteCaseExpr(expr string) bool {
+	depth := 0
+	inStr := false
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		if inStr {
+			if ch == '\\' {
+				i++
+				continue
+			}
+			if ch == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inStr = true
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ':':
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isIdentifierShaped returns true when s looks like a programmatic token:
