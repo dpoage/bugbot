@@ -556,6 +556,124 @@ func Use(c SomeConfig) {
 	}
 }
 
+// ── regression tests for oracle-found false-positive sources ─────────────────
+
+// TestCfMiner_D1_SiblingGuardErrorReturnNotBledIn reproduces DEFECT D1:
+// a normalize guard (`if x <= 0 { x = defaultX }`) followed by a SEPARATE
+// error-returning guard on a DIFFERENT field in the SAME function. Before the
+// fix, the error return in the second guard bled into the first guard's 6-line
+// window, causing the normalized field to be falsely flagged as a validator
+// contradiction. After the fix the block-scoped scan limits the search to the
+// first guard's own braces and yields ZERO leads.
+func TestCfMiner_D1_SiblingGuardErrorReturnNotBledIn(t *testing.T) {
+	src := `package fixture
+
+import "fmt"
+
+// Cfg holds configuration.
+type Cfg struct {
+	// X is the poll interval. Default: 0
+	X int
+	// Name is the service name.
+	Name string
+}
+
+// Validate validates the config.
+func (c *Cfg) Validate() error {
+	if c.X <= 0 {
+		c.X = 10 // normalize, NOT an error return
+	}
+	if c.Name == "" {
+		return fmt.Errorf("Name must not be empty")
+	}
+	return nil
+}
+`
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cfg.go")
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap := &ingest.Snapshot{
+		Root: dir,
+		Files: []ingest.File{
+			{Path: "cfg.go", Language: ingest.LangGo},
+		},
+	}
+	st, ctx := makeCfStore(t)
+	var sum Summary
+	if err := seedConfigFieldContradictions(ctx, snap, st, &sum); err != nil {
+		t.Fatalf("seedConfigFieldContradictions: %v", err)
+	}
+	leads, err := st.PendingLeads(ctx, cfTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+	cfLeads := filterCfLeadsByPoster(leads, cfPosterLens)
+	if len(cfLeads) != 0 {
+		t.Errorf("D1: want 0 leads (X is normalized not rejected), got %d: %+v", len(cfLeads), cfLeads)
+	}
+}
+
+// TestCfMiner_D2_CrossStructJoinNoFalsePositive reproduces DEFECT D2:
+// two structs sharing a field name where only ONE struct's validator rejects
+// zero. Before the fix, the bare-fieldName join matched the other struct's
+// validator, producing a false lead. After the fix the join is scoped by
+// (structType, fieldName) and yields ZERO leads on the unrelated struct.
+func TestCfMiner_D2_CrossStructJoinNoFalsePositive(t *testing.T) {
+	src := `package fixture
+
+import "fmt"
+
+// ServerConfig holds server configuration.
+type ServerConfig struct {
+	// Timeout is the server timeout. Default: 0
+	Timeout int
+}
+
+// ClientConfig holds client configuration.
+type ClientConfig struct {
+	// Timeout is the client timeout.
+	Timeout int
+}
+
+// Validate validates ClientConfig — rejects zero Timeout.
+func (c *ClientConfig) Validate() error {
+	if c.Timeout <= 0 {
+		return fmt.Errorf("Timeout must be > 0")
+	}
+	return nil
+}
+`
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cfg.go")
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap := &ingest.Snapshot{
+		Root: dir,
+		Files: []ingest.File{
+			{Path: "cfg.go", Language: ingest.LangGo},
+		},
+	}
+	st, ctx := makeCfStore(t)
+	var sum Summary
+	if err := seedConfigFieldContradictions(ctx, snap, st, &sum); err != nil {
+		t.Fatalf("seedConfigFieldContradictions: %v", err)
+	}
+	leads, err := st.PendingLeads(ctx, cfTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+	cfLeads := filterCfLeadsByPoster(leads, cfPosterLens)
+	// ServerConfig.Timeout has Default:0 but NO validator of its own.
+	// ClientConfig.Timeout has a validator but NO documented default.
+	// Cross-struct join must NOT produce a lead on ServerConfig.Timeout.
+	if len(cfLeads) != 0 {
+		t.Errorf("D2: want 0 leads (cross-struct join must not fire), got %d: %+v", len(cfLeads), cfLeads)
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func filterCfLeadsByPoster(leads []store.Lead, poster string) []store.Lead {

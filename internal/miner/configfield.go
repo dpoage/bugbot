@@ -45,6 +45,10 @@ const (
 // Group 1: field name (exported, PascalCase), group 2: type (optional).
 var cfStructFieldRe = regexp.MustCompile(`^\s+([A-Z][A-Za-z0-9_]*)\s+\S`)
 
+// cfStructDeclRe matches a struct type declaration line and extracts the struct name.
+// Group 1: struct name.
+var cfStructDeclRe = regexp.MustCompile(`^type\s+([A-Za-z][A-Za-z0-9_]*)\s+struct\s*\{`)
+
 // cfDefaultValRe matches doc-comment or struct-literal patterns that set a
 // default numeric value.  Covers:
 //   - "Default: -1", "default 0", "defaults to 0"
@@ -98,12 +102,18 @@ var cfErrReturnRe = regexp.MustCompile(
 // meaning for zero (unlimited, means X, no limit, use default, disable).
 var cfSentinelDocRe = regexp.MustCompile(`(?i)\b(unlimited|means\b|disable[sd]?|no\s+limit|use\s+\w+\s+default|built.in\s+default)\b`)
 
+// cfMethodReceiverRe matches a method declaration with a named receiver and
+// extracts the receiver's struct type name.
+// Group 1: struct type name (without pointer star).
+var cfMethodReceiverRe = regexp.MustCompile(`^func\s*\(\s*\w+\s+\*?([A-Za-z][A-Za-z0-9_]*)\s*\)`)
+
 // ── data types ────────────────────────────────────────────────────────────────
 
 // cfFieldDecl is a struct field declaration site with its associated doc
 // comment and (optionally) coded default value.
 type cfFieldDecl struct {
 	name       string // exported field name
+	structType string // enclosing struct type name
 	file       string
 	line       int    // 1-based line of the field declaration
 	docComment string // full doc comment block (flattened)
@@ -113,6 +123,7 @@ type cfFieldDecl struct {
 // cfValidatorSite is a validation site that rejects a field value.
 type cfValidatorSite struct {
 	fieldName   string // field name referenced in the condition
+	structType  string // enclosing struct type name (empty if unknown)
 	file        string
 	line        int
 	rejectsZero bool // true if the guard rejects zero / non-positive
@@ -134,7 +145,7 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 	// Collect all field declarations and validator sites across the snapshot.
 	// Also collect a "reference set" per file for the never-read signal.
 	allDecls := make(map[string][]cfFieldDecl)    // file → decls
-	allVals := make(map[string][]cfValidatorSite) // fieldName → sites
+	allVals := make(map[string][]cfValidatorSite) // "StructType\x00fieldName" → sites
 
 	// referenceSet: fieldName → set of files that reference it
 	// Counts both dotted (.FieldName) and bare-identifier references so
@@ -164,7 +175,8 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 
 		allDecls[f.Path] = decls
 		for _, v := range vals {
-			allVals[v.fieldName] = append(allVals[v.fieldName], v)
+			key := v.structType + "\x00" + v.fieldName
+			allVals[key] = append(allVals[key], v)
 		}
 
 		// Harvest dotted references: .FieldName
@@ -193,7 +205,8 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 				continue
 			}
 			dv := *d.defaultVal
-			validators, ok := allVals[d.name]
+			key := d.structType + "\x00" + d.name
+			validators, ok := allVals[key]
 			if !ok {
 				continue
 			}
@@ -320,6 +333,7 @@ func cfPassFieldDecls(filePath string, lines []string) []cfFieldDecl {
 	// We use a simple brace counter gated on seeing `type ... struct {`.
 	inStruct := false
 	structBraceDepth := 0
+	currentStructType := "" // name of the enclosing struct type
 
 	// Track const/var block depth to skip those sections.
 	inConstVar := false
@@ -354,10 +368,10 @@ func cfPassFieldDecls(filePath string, lines []string) []cfFieldDecl {
 
 		// ── struct body tracking ──
 		// Detect `type Foo struct {`
-		if strings.Contains(trimmed, "struct {") &&
-			strings.HasPrefix(trimmed, "type ") {
+		if sm := cfStructDeclRe.FindStringSubmatch(trimmed); sm != nil {
 			inStruct = true
 			structBraceDepth = 1
+			currentStructType = sm[1]
 			continue
 		}
 		// Detect `} struct {` (embedded struct in struct — simple handling)
@@ -370,6 +384,7 @@ func cfPassFieldDecls(filePath string, lines []string) []cfFieldDecl {
 					if structBraceDepth <= 0 {
 						inStruct = false
 						structBraceDepth = 0
+						currentStructType = ""
 					}
 				}
 			}
@@ -426,6 +441,7 @@ func cfPassFieldDecls(filePath string, lines []string) []cfFieldDecl {
 
 		out = append(out, cfFieldDecl{
 			name:       name,
+			structType: currentStructType,
 			file:       filePath,
 			line:       i + 1,
 			docComment: docComment,
@@ -448,7 +464,39 @@ func cfPassFieldDecls(filePath string, lines []string) []cfFieldDecl {
 func cfPassValidators(filePath string, lines []string) []cfValidatorSite {
 	var out []cfValidatorSite
 
+	// Track the current method's receiver struct type.
+	// We update this whenever we see a `func (r *StructType) ...` declaration.
+	// Brace depth tracks when we leave that function scope.
+	currentReceiverType := ""
+	funcBraceDepth := 0
+
 	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Track method receiver type.
+		if strings.HasPrefix(trimmed, "func ") {
+			if rm := cfMethodReceiverRe.FindStringSubmatch(trimmed); rm != nil {
+				currentReceiverType = rm[1]
+				funcBraceDepth = 0 // will be incremented when we see the opening {
+			} else {
+				// package-level func, not a method
+				currentReceiverType = ""
+				funcBraceDepth = 0
+			}
+		}
+		// Track brace depth to know when we exit the current function.
+		for _, ch := range trimmed {
+			if ch == '{' {
+				funcBraceDepth++
+			} else if ch == '}' {
+				funcBraceDepth--
+				if funcBraceDepth <= 0 {
+					funcBraceDepth = 0
+					currentReceiverType = ""
+				}
+			}
+		}
+
 		// Must look like a guard: if ... { (with early return/error implied)
 		if !strings.Contains(line, "if ") {
 			continue
@@ -473,6 +521,7 @@ func cfPassValidators(filePath string, lines []string) []cfValidatorSite {
 			}
 			out = append(out, cfValidatorSite{
 				fieldName:   name,
+				structType:  currentReceiverType,
 				file:        filePath,
 				line:        i + 1,
 				rejectsZero: true,
@@ -507,6 +556,7 @@ func cfPassValidators(filePath string, lines []string) []cfValidatorSite {
 			if !dup {
 				out = append(out, cfValidatorSite{
 					fieldName:  name,
+					structType: currentReceiverType,
 					file:       filePath,
 					line:       i + 1,
 					rejectsNeg: true,
@@ -543,22 +593,41 @@ func cfNormativeNormWords(s string) string {
 	return strings.Join(found, ", ")
 }
 
-// cfHasErrorReturn checks whether the block starting at `from` contains an
-// error-returning return statement within the next 6 lines.
+// cfHasErrorReturn checks whether the if-guard block at line `from` contains an
+// error-returning statement. The scan is bounded to the guard's OWN block by
+// tracking brace depth: we enter at the opening `{` on the guard line (or the
+// next line) and stop as soon as that block closes. An error return in a sibling
+// or later guard will never be attributed to this guard.
 // A bare `return` or `return nil` does NOT count — those are sentinel idioms.
 func cfHasErrorReturn(lines []string, from int) bool {
-	end := from + 6
-	if end > len(lines) {
-		end = len(lines)
-	}
-	for _, l := range lines[from:end] {
-		t := strings.TrimSpace(l)
-		if cfErrReturnRe.MatchString(t) {
-			return true
+	depth := 0
+	started := false
+	for j := from; j < len(lines); j++ {
+		t := strings.TrimSpace(lines[j])
+		for _, ch := range t {
+			if ch == '{' {
+				depth++
+				started = true
+			} else if ch == '}' {
+				depth--
+				if started && depth <= 0 {
+					// Closed the guard block — stop.
+					return false
+				}
+			}
 		}
-		// panic / os.Exit also count as hard rejections
-		if strings.HasPrefix(t, "panic(") || strings.HasPrefix(t, "os.Exit(") {
-			return true
+		if started {
+			if cfErrReturnRe.MatchString(t) {
+				return true
+			}
+			// panic / os.Exit also count as hard rejections.
+			if strings.HasPrefix(t, "panic(") || strings.HasPrefix(t, "os.Exit(") {
+				return true
+			}
+		}
+		// Safety: if we haven't found an opening brace within 3 lines, bail.
+		if !started && j > from+2 {
+			return false
 		}
 	}
 	return false
