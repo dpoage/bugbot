@@ -165,10 +165,15 @@ var shortDeclLHSRe = regexp.MustCompile(`^([^:=]+):=`)
 // wordRe extracts word tokens (identifiers) from a string.
 var wordRe = regexp.MustCompile(`\b(\w+)\b`)
 
-// sanitizeLine blanks the content of inline double-quoted string literals and
-// strips trailing // line comments from a Go source line. This prevents brace
-// counters and identifier matchers from reacting to `}` or identifier-shaped
-// text inside string values or comments.
+// sanitizeLine blanks the content of inline double-quoted string literals,
+// rune literals, and strips trailing // line comments from a Go source line.
+// This prevents brace counters and identifier matchers from reacting to `}`,
+// `"`, or identifier-shaped text inside string/rune values or comments.
+//
+// Rune literals: while outside a double-quoted string or comment, a `'` opens
+// a rune literal; content is blanked until the closing `'`, respecting
+// backslash escapes (`'\”`, `'\n'`, `'\\'`). A `'` inside a double-quoted
+// string does NOT start a rune, and a `"` inside a rune does NOT start a string.
 //
 // It does NOT handle backtick strings (covered by buildBacktickMask) or block
 // comments (covered by buildBlockCommentMask). The result has the same byte
@@ -177,6 +182,7 @@ func sanitizeLine(line string) string {
 	var b strings.Builder
 	b.Grow(len(line))
 	inString := false
+	inRune := false
 	for i := 0; i < len(line); i++ {
 		ch := line[i]
 		if inString {
@@ -198,9 +204,33 @@ func sanitizeLine(line string) string {
 			b.WriteByte(' ')
 			continue
 		}
-		// Outside string.
+		if inRune {
+			if ch == '\\' {
+				// Escape sequence: write both bytes as spaces.
+				b.WriteByte(' ')
+				if i+1 < len(line) {
+					i++
+					b.WriteByte(' ')
+				}
+				continue
+			}
+			if ch == '\'' {
+				inRune = false
+				b.WriteByte(ch)
+				continue
+			}
+			// Inside rune literal — blank the content.
+			b.WriteByte(' ')
+			continue
+		}
+		// Outside string and rune.
 		if ch == '"' {
 			inString = true
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == '\'' {
+			inRune = true
 			b.WriteByte(ch)
 			continue
 		}

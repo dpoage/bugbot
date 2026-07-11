@@ -959,3 +959,79 @@ func TestStringlyDrift_EnumTypeInCommentNotResolved(t *testing.T) {
 		t.Errorf("EnumTypeInComment: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
 	}
 }
+
+// TestStringlyDrift_RuneWithQuoteNoFalseLead verifies that a `"` inside a rune
+// literal (`'"'`) does NOT open a fake double-quoted string that would blank the
+// following `{` and pop the switch early (rune-literal regression).
+//
+// testdata/stringly_clean/rune_with_quote.go:
+//   - type RuneQuoteMode string with consts "a", "b"
+//   - switch m { case "a": if c == '"' { c = 0 } case "b": }
+//
+// Before sanitizeLine rune-tracking: '"' opens a fake string, blanks `{` →
+// braceDepth desync → switch pops early → false type-B for missing "b".
+// After: 0 leads.
+func TestStringlyDrift_RuneWithQuoteNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"rune_with_quote.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("RuneWithQuote: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_RuneWithBraceNoFalseLead verifies that a `}` inside a rune
+// literal (`'}'`) is NOT counted by the brace counter, which would pop the
+// switch early (rune-literal regression).
+//
+// testdata/stringly_clean/rune_with_brace.go:
+//   - type RuneBraceMode string with consts "a", "b"
+//   - switch m { case "a": if r == '}' { r = 0 } case "b": }
+//
+// Before sanitizeLine rune-tracking: '}' rune is counted as a closing brace →
+// braceDepth desync → switch pops early → false type-B for missing "b".
+// After: 0 leads.
+func TestStringlyDrift_RuneWithBraceNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"rune_with_brace.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("RuneWithBrace: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
