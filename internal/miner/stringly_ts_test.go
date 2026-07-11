@@ -615,6 +615,16 @@ func TestStringlyTSDrift_TestFileSkipped(t *testing.T) {
 	}
 }
 
+// TestStringlyTSDrift_NegativeParenlessArrowShadow: paren-less arrow param shadows
+// outer typed param — round-2 oracle repro (FP before fix, 0 after). Expected: 0 leads.
+func TestStringlyTSDrift_NegativeParenlessArrowShadow(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_ts_clean")
+	n, _ := runTSDriftFixture(t, dir, []string{"parenless_arrow_shadow.ts"})
+	if n != 0 {
+		t.Errorf("expected 0 leads for paren-less arrow shadow, got %d", n)
+	}
+}
+
 // TestStringlyTSDrift_NegativeCleanCorpus: all clean fixtures together → 0 leads.
 func TestStringlyTSDrift_NegativeCleanCorpus(t *testing.T) {
 	dir := filepath.Join("testdata", "stringly_ts_clean")
@@ -628,10 +638,52 @@ func TestStringlyTSDrift_NegativeCleanCorpus(t *testing.T) {
 		"block_const_shadow.ts",
 		"predefined_type_union.ts",
 		"object_property_pollution.ts",
+		"parenless_arrow_shadow.ts",
 	}
 	n, leads := runTSDriftFixture(t, dir, rels)
 	if n != 0 || len(leads) != 0 {
 		t.Errorf("clean corpus: expected 0 leads, got StringlyTSDriftLeads=%d, leads=%+v", n, leads)
+	}
+}
+
+// ─── HasError parse-failure gate ─────────────────────────────────────────────
+
+// TestStringlyTSDrift_ParseErrorFileSkipped verifies that files producing
+// HasError()=true trees are counted in TSParseFailures and produce 0 leads.
+// We exercise this by writing a snippet that the gotreesitter TS grammar v0.20.2
+// cannot parse (typed-param arrow function) into a temp snapshot.
+func TestStringlyTSDrift_ParseErrorFileSkipped(t *testing.T) {
+	h := loadTSHandleForTest(t)
+	// Confirm this snippet actually produces a parse error.
+	src := []byte("const f = (x: string) => x;")
+	tree, err := parseTSFile(h, src)
+	if err != nil || tree == nil {
+		t.Skip("parseTSFile returned err/nil; cannot exercise HasError path")
+	}
+	defer tree.Release()
+	if !tree.RootNode().HasError() {
+		t.Skip("grammar now parses typed arrows without error; HasError guard still safe to skip")
+	}
+	// Now run the full miner over this file (must be written to disk).
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "typed_arrow.ts"), src, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	snap := &ingest.Snapshot{
+		Commit: "test",
+		Root:   dir,
+		Files:  []ingest.File{{Path: "typed_arrow.ts", Language: ingest.LangTypeScript, Size: int64(len(src))}},
+	}
+	st := openStore(t)
+	var sum Summary
+	if err := seedStringlyTSDrift(context.Background(), snap, st, &sum); err != nil {
+		t.Fatalf("seedStringlyTSDrift: %v", err)
+	}
+	if sum.TSParseFailures != 1 {
+		t.Errorf("expected TSParseFailures=1, got %d", sum.TSParseFailures)
+	}
+	if sum.StringlyTSDriftLeads != 0 {
+		t.Errorf("expected 0 leads on parse-error file, got %d", sum.StringlyTSDriftLeads)
 	}
 }
 

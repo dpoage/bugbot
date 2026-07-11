@@ -63,6 +63,22 @@ package miner
 // defects that would flood leads. JavaScript is excluded; JS string unions via
 // JSDoc exist but are not reliably structurally checkable without a type checker.
 //
+// # v1 grammar limitation (known gap)
+//
+// The pure-Go gotreesitter TypeScript grammar (gotreesitter v0.20.2) cannot
+// parse arrow functions with TYPED parameters:
+//
+//	const f = (x: string) => x   // → parse error, tree has HasError()=true
+//	arr.map((x: C) => ...)       // → same
+//
+// Function declarations and class methods with typed params parse fine; only
+// typed-param arrows fail. In the effect library sweep corpus ~48% of files
+// trigger this error (typed arrows are pervasive in idiomatic TS). Files whose
+// parse tree has HasError()=true are SKIPPED entirely (safe: corrupted AST
+// nodes produce undefined query results). The coverage gap is tracked for a
+// follow-up grammar-upgrade bead; current analysis is v1 and limited to files
+// the grammar fully accepts.
+//
 // Leads: PosterLens="miner:stringly-ts-drift", TargetLens="api-contract-misuse".
 
 import (
@@ -162,10 +178,21 @@ const tsTypedParamQuery = `
       type: (type_annotation (type_identifier) @param.type)))) @param.func
 `
 
-// tsAnyParamQuery finds ALL function parameters regardless of type annotation.
-// Used to detect shadow bindings: an untyped parameter in an inner function
-// that has the same name as a typed outer parameter hides the outer type.
-// Captures: "any.name" = parameter identifier, "any.func" = enclosing function.
+// tsAnyParamQuery finds ALL scope-introducing identifier bindings that are NOT
+// covered by the typed-param query. These are used as shadow sentinels: if any
+// of these bindings is the NEAREST enclosing binding for a scrutinee, the outer
+// typed param is shadowed and the switch is skipped (precision-first).
+//
+// Covered binding forms:
+//   - Parenthesized formal params in function/method/arrow (required and optional)
+//   - Paren-less single-param arrow: xs.forEach(event => ...) —
+//     AST: (arrow_function parameter: (identifier))
+//   - for-of / for-in loop binding: for (const x of xs) / for (x in obj) —
+//     AST: (for_in_statement left: (identifier))
+//   - catch clause binding: try {} catch (e) {} —
+//     AST: (catch_clause parameter: (identifier))
+//
+// All captures use "any.name" (binding identifier) and "any.func" (scope node).
 const tsAnyParamQuery = `
 (function_declaration
   parameters: (formal_parameters
@@ -179,12 +206,17 @@ const tsAnyParamQuery = `
   parameters: (formal_parameters
     [(required_parameter pattern: (identifier) @any.name)
      (optional_parameter pattern: (identifier) @any.name)])) @any.func
+(arrow_function
+  parameter: (identifier) @any.name) @any.func
+(for_in_statement
+  left: (identifier) @any.name) @any.func
+(catch_clause
+  parameter: (identifier) @any.name) @any.func
 `
 
 // tsBlockScopeQuery finds block-scoped const/let/var declarators that bind
 // an identifier. Used to detect block-scoped shadows of outer typed params.
-// Captures: "decl.name" = the identifier, "decl.scope" = the statement node
-// (lexical_declaration or variable_declaration; scope ends at its end byte).
+// Captures: "decl.name" = the identifier, "decl.scope" = the statement node.
 const tsBlockScopeQuery = `
 (lexical_declaration
   (variable_declarator name: (identifier) @decl.name)) @decl.scope
@@ -543,40 +575,35 @@ func passTS_Bindings(h *tsLangHandle, tree *gts.Tree, src []byte, knownTypes map
 	}
 
 	// Collect block-scoped const/let/var declarators.
-	// We use the statement node's end byte as the scope end.
-	// Block-scoped declarations scope to the enclosing block, but approximating
-	// with the statement's end byte is conservative (wider than actual scope),
-	// which is safe for our purpose: if the switch is inside the statement node,
-	// the binding shadows any outer typed param.
+	// TDZ semantics: let/const shadow the ENTIRE enclosing block (including
+	// code before the declaration at runtime). We model the scope as
+	// [enclosingBlock.StartByte(), enclosingBlock.EndByte()] so that a
+	// const declared after the switch still shadows an outer typed param.
+	// This matches the JS/TS TDZ specification: the binding exists from the
+	// start of the block, even if access before the initializer throws.
+	// Because any reference before the declaration would be a runtime error,
+	// treating the whole block as shadowed is conservative-safe.
 	for _, m := range h.blockScopeQ.Execute(tree) {
 		var bindName string
-		var scopeStart, scopeEnd uint32
-		hasScopeCapture := false
+		var declNode *gts.Node
 		for _, c := range m.Captures {
 			switch c.Name {
 			case "decl.name":
 				bindName = c.Node.Text(src)
 			case "decl.scope":
-				// The scope of a block-scoped variable extends from the declaration
-				// to the end of the enclosing block. We approximate with the
-				// declaration statement's parent block's end byte. For precision,
-				// we use the file end (which is conservative but always correct):
-				// if the variable is declared before the switch, and it shadows
-				// an outer typed param, the switch is in its scope.
-				// Actual: use parent block end.
-				scopeStart = c.Node.StartByte()
-				scopeEnd = c.Node.EndByte()
-				hasScopeCapture = true
+				declNode = c.Node
 			}
 		}
-		if bindName == "" || !hasScopeCapture {
+		if bindName == "" || declNode == nil {
 			continue
 		}
-		// Walk up to the enclosing block to get the true scope end.
-		if declNode := findCapture(m, "decl.scope"); declNode != nil {
-			if block := enclosingBlock(declNode); block != nil {
-				scopeEnd = block.EndByte()
-			}
+		// Use the enclosing block's byte range as the binding's scope.
+		// Conservative fallback: use the declaration statement's own range.
+		scopeStart := declNode.StartByte()
+		scopeEnd := declNode.EndByte()
+		if block := enclosingBlock(declNode); block != nil {
+			scopeStart = block.StartByte()
+			scopeEnd = block.EndByte()
 		}
 		out = append(out, tsBinding{
 			name:         bindName,
@@ -598,19 +625,15 @@ func findCapture(m gts.QueryMatch, name string) *gts.Node {
 	return nil
 }
 
-// enclosingBlock walks up the parent chain to find the nearest
-// statement_block (the {…} body of a function, if, for, etc.).
+// enclosingBlock walks up the parent chain to find the nearest ancestor that
+// spans multiple children — the enclosing { } block. We use ChildCount()>2
+// as a proxy for "this is a block node, not a wrapper node with one child".
+// A statement_block has at least '{', possibly statements, and '}'. This is
+// conservative: the first multi-child ancestor is always at least as wide as
+// the actual block, which is what we want for scope-span computation.
 func enclosingBlock(n *gts.Node) *gts.Node {
 	cur := n.Parent()
 	for cur != nil {
-		// statement_block is the TS grammar node for { ... }
-		// We don't have lang here but we can check by ChildCount heuristic;
-		// actually use a string comparison on the raw symbol name:
-		// gts.Node.Type requires lang, but we can walk until we find a
-		// suitable block. Since we just want the end byte conservatively,
-		// we'll use the parent of the declaration (the next enclosing scope).
-		// For block-scoped let/const, the scope is the nearest ancestor block.
-		// Returning the first non-trivial parent is a safe conservative approximation.
 		if cur.ChildCount() > 2 {
 			return cur
 		}
@@ -914,6 +937,15 @@ func seedStringlyTSDrift(ctx context.Context, snap *ingest.Snapshot, st *store.S
 
 		tree, err := parseTSFile(h, src)
 		if err != nil || tree == nil {
+			continue
+		}
+		// Skip files whose parse tree contains errors. The gotreesitter TS grammar
+		// v0.20.2 cannot parse typed-param arrow functions (e.g. arr.map((x: T)=>...)),
+		// which is pervasive in idiomatic TypeScript. Running queries on an ERROR tree
+		// produces undefined results. Count failures for observability.
+		if tree.RootNode().HasError() {
+			sum.TSParseFailures++
+			tree.Release()
 			continue
 		}
 

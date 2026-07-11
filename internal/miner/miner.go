@@ -156,6 +156,10 @@ type Summary struct {
 	// StringlyTSDriftLeads counts leads from the TypeScript string-union drift
 	// pass (type Alias = 'a' | 'b' | ... vs switch case literals — TS only).
 	StringlyTSDriftLeads int
+	// TSParseFailures counts TS files skipped because the gotreesitter grammar
+	// produced a parse tree with HasError()=true (known gap: typed-param arrow
+	// functions). Exposed so callers and tests can audit grammar coverage.
+	TSParseFailures int
 }
 
 type leadKey struct {
