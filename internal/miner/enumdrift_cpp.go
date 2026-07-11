@@ -179,32 +179,70 @@ const cppDefaultQuery = `
       (default) @default.kw))) @sw.has.default
 `
 
-// cppParamTypeQuery finds function parameter declarations typed with a
-// type_identifier (a named type, not a primitive like int/char/unsigned).
-// Captures: "param.type" (type_identifier), "param.name" (identifier).
-const cppParamTypeQuery = `
-(parameter_declaration
-  type: (type_identifier) @param.type
-  declarator: (identifier) @param.name)
+// cppTypedParamQuery finds typed function parameters with the enclosing
+// function_definition as scope span.
+//
+// Using function_definition (not compound_statement / function body) is
+// intentional: it gives the parameter a LARGER scope span than a local
+// variable declared inside the function body. In nearest-binding resolution
+// (smallest span wins), a local variable declaration inside the body has a
+// smaller span (compound_statement) and therefore shadows the outer typed
+// param — which is the correct C scoping rule for local-variable shadows.
+//
+// Captures: "param.type" (type_identifier), "param.name" (identifier),
+//
+//	"param.scope" (@func = the function_definition node).
+const cppTypedParamQuery = `
+(function_definition
+  declarator: (function_declarator
+    parameters: (parameter_list
+      (parameter_declaration
+        type: (type_identifier) @param.type
+        declarator: (identifier) @param.name)))) @param.scope
 `
 
-// cppLocalVarQuery finds local variable declarations typed with a type_identifier.
+// cppPrimParamQuery finds primitive-typed function parameters (int/char/etc.)
+// using the function_definition as scope (same rationale as cppTypedParamQuery).
+// These are recorded as shadow sentinels with typeName="".
+// Captures: "prim.type" (primitive_type), "prim.name" (identifier),
+//
+//	"prim.scope" (@func = the function_definition node).
+const cppPrimParamQuery = `
+(function_definition
+  declarator: (function_declarator
+    parameters: (parameter_list
+      (parameter_declaration
+        type: (primitive_type) @prim.type
+        declarator: (identifier) @prim.name)))) @prim.scope
+`
+
+// cppTypedLocalVarQuery finds local variable declarations typed with a
+// type_identifier inside a compound_statement, capturing the compound_statement
+// as the scope span.
 // Covers: Color x = val;
-// Captures: "var.type" (type_identifier), "var.name" (identifier).
-const cppLocalVarQuery = `
-(declaration
-  type: (type_identifier) @var.type
-  declarator: (init_declarator
-    declarator: (identifier) @var.name))
+// Captures: "var.type" (type_identifier), "var.name" (identifier),
+//
+//	"var.scope" (compound_statement).
+const cppTypedLocalVarQuery = `
+(compound_statement
+  (declaration
+    type: (type_identifier) @var.type
+    declarator: (init_declarator
+      declarator: (identifier) @var.name))) @var.scope
 `
 
-// cppLocalVarNoInitQuery finds uninitialized local variable declarations.
-// Covers: Color x;
-// Captures: "var.type" (type_identifier), "var.name" (identifier).
-const cppLocalVarNoInitQuery = `
-(declaration
-  type: (type_identifier) @var.type
-  declarator: (identifier) @var.name)
+// cppPrimLocalVarQuery finds primitive-typed local variable declarations,
+// used as shadow sentinels (same rationale as cppPrimParamQuery).
+// Covers: int x = val; char c = ...; etc.
+// Captures: "prim.type" (primitive_type), "prim.name" (identifier),
+//
+//	"prim.scope" (compound_statement).
+const cppPrimLocalVarQuery = `
+(compound_statement
+  (declaration
+    type: (primitive_type) @prim.type
+    declarator: (init_declarator
+      declarator: (identifier) @prim.name))) @prim.scope
 `
 
 // ─── data types ──────────────────────────────────────────────────────────────
@@ -276,9 +314,10 @@ type cppLangHandle struct {
 	caseIdentQ         *gts.Query
 	caseIntQ           *gts.Query
 	defaultQ           *gts.Query
-	paramTypeQ         *gts.Query
-	localVarQ          *gts.Query
-	localVarNoInitQ    *gts.Query
+	typedParamQ        *gts.Query // typed param + body scope
+	primParamQ         *gts.Query // primitive param + body scope (shadow sentinel)
+	typedLocalVarQ     *gts.Query // typed local var + compound scope
+	primLocalVarQ      *gts.Query // primitive local var + compound scope (shadow sentinel)
 }
 
 // loadCppLangHandle loads and compiles all queries for the grammar identified
@@ -309,14 +348,17 @@ func loadCppLangHandle(sample string) (*cppLangHandle, error) {
 	if h.defaultQ, err = gts.NewQuery(cppDefaultQuery, lang); err != nil {
 		return nil, fmt.Errorf("enum-cpp-drift: compile default query: %w", err)
 	}
-	if h.paramTypeQ, err = gts.NewQuery(cppParamTypeQuery, lang); err != nil {
-		return nil, fmt.Errorf("enum-cpp-drift: compile param-type query: %w", err)
+	if h.typedParamQ, err = gts.NewQuery(cppTypedParamQuery, lang); err != nil {
+		return nil, fmt.Errorf("enum-cpp-drift: compile typed-param query: %w", err)
 	}
-	if h.localVarQ, err = gts.NewQuery(cppLocalVarQuery, lang); err != nil {
-		return nil, fmt.Errorf("enum-cpp-drift: compile local-var query: %w", err)
+	if h.primParamQ, err = gts.NewQuery(cppPrimParamQuery, lang); err != nil {
+		return nil, fmt.Errorf("enum-cpp-drift: compile prim-param query: %w", err)
 	}
-	if h.localVarNoInitQ, err = gts.NewQuery(cppLocalVarNoInitQuery, lang); err != nil {
-		return nil, fmt.Errorf("enum-cpp-drift: compile local-var-noinit query: %w", err)
+	if h.typedLocalVarQ, err = gts.NewQuery(cppTypedLocalVarQuery, lang); err != nil {
+		return nil, fmt.Errorf("enum-cpp-drift: compile typed-local-var query: %w", err)
+	}
+	if h.primLocalVarQ, err = gts.NewQuery(cppPrimLocalVarQuery, lang); err != nil {
+		return nil, fmt.Errorf("enum-cpp-drift: compile prim-local-var query: %w", err)
 	}
 	return h, nil
 }
@@ -416,83 +458,126 @@ func passC_EnumDecls(h *cppLangHandle, tree *gts.Tree, src []byte) (members map[
 // passC_Switches extracts switch statements, bindings, and case arms from a
 // file that has HasError()=false.
 //
-// Returns bindings (param/local variable type bindings in scope) and switches.
+// Bindings carry REAL scope spans derived from the enclosing function body
+// (compound_statement). Nearest-binding resolution in joinCppDrift selects
+// the binding with the smallest scope span that contains the switch start
+// byte, correctly handling cross-function isolation and inner-block shadowing.
+//
+// Primitive-typed bindings (int x, char c, ...) are recorded with typeName=""
+// as shadow sentinels: if the nearest enclosing binding of the scrutinee is
+// primitive, the switch is not over a known enum type → emit nothing.
 func passC_Switches(h *cppLangHandle, tree *gts.Tree, src []byte, relPath string) (bindings []cppBinding, switches []cppSwitch) {
-	// Collect parameter bindings: typed parameters in function declarations.
-	for _, m := range h.paramTypeQ.Execute(tree) {
+	// ── typed parameter bindings (Color c → real function-body scope) ────
+	for _, m := range h.typedParamQ.Execute(tree) {
 		var typeName, name string
+		var scopeStart, scopeEnd uint32
+		hasScope := false
 		for _, c := range m.Captures {
 			switch c.Name {
 			case "param.type":
 				typeName = c.Node.Text(src)
 			case "param.name":
 				name = c.Node.Text(src)
+			case "param.scope":
+				scopeStart = c.Node.StartByte()
+				scopeEnd = c.Node.EndByte()
+				hasScope = true
 			}
 		}
-		if typeName == "" || name == "" {
+		if typeName == "" || name == "" || !hasScope {
 			continue
 		}
-		// Find the enclosing function_definition by walking up the parent chain
-		// from the param.name node. We store a placeholder scope [0, fileLen]
-		// which is safe because parameters are always scoped to the function.
-		// A more precise implementation would walk up to the function_definition,
-		// but the parent chain API isn't exposed in this gotreesitter version.
-		// Since parameter names are unique-within-function in practice, and we
-		// de-duplicate by selecting the NEAREST binding, using file-scope for
-		// params is conservative (a later block-scoped shadow will be preferred).
 		bindings = append(bindings, cppBinding{
 			name:       name,
 			typeName:   typeName,
-			scopeStart: 0,
-			scopeEnd:   uint32(len(src)),
+			scopeStart: scopeStart,
+			scopeEnd:   scopeEnd,
 		})
 	}
 
-	// Collect local variable bindings (initialized).
-	for _, m := range h.localVarQ.Execute(tree) {
+	// ── primitive parameter shadow sentinels (int x → function-body scope) ─
+	// These bindings have typeName="" and prevent a same-named outer typed
+	// param from being selected as the nearest binding.
+	for _, m := range h.primParamQ.Execute(tree) {
+		var name string
+		var scopeStart, scopeEnd uint32
+		hasScope := false
+		for _, c := range m.Captures {
+			switch c.Name {
+			case "prim.name":
+				name = c.Node.Text(src)
+			case "prim.scope":
+				scopeStart = c.Node.StartByte()
+				scopeEnd = c.Node.EndByte()
+				hasScope = true
+			}
+		}
+		if name == "" || !hasScope {
+			continue
+		}
+		bindings = append(bindings, cppBinding{
+			name:       name,
+			typeName:   "", // sentinel: primitive, not an enum type
+			scopeStart: scopeStart,
+			scopeEnd:   scopeEnd,
+		})
+	}
+
+	// ── typed local variable bindings (Color x = ...; → compound scope) ──
+	for _, m := range h.typedLocalVarQ.Execute(tree) {
 		var typeName, name string
+		var scopeStart, scopeEnd uint32
+		hasScope := false
 		for _, c := range m.Captures {
 			switch c.Name {
 			case "var.type":
 				typeName = c.Node.Text(src)
 			case "var.name":
 				name = c.Node.Text(src)
+			case "var.scope":
+				scopeStart = c.Node.StartByte()
+				scopeEnd = c.Node.EndByte()
+				hasScope = true
 			}
 		}
-		if typeName == "" || name == "" {
+		if typeName == "" || name == "" || !hasScope {
 			continue
 		}
 		bindings = append(bindings, cppBinding{
 			name:       name,
 			typeName:   typeName,
-			scopeStart: 0,
-			scopeEnd:   uint32(len(src)),
+			scopeStart: scopeStart,
+			scopeEnd:   scopeEnd,
 		})
 	}
 
-	// Collect local variable bindings (uninitialized).
-	for _, m := range h.localVarNoInitQ.Execute(tree) {
-		var typeName, name string
+	// ── primitive local variable shadow sentinels (int x = ...; → compound) ─
+	for _, m := range h.primLocalVarQ.Execute(tree) {
+		var name string
+		var scopeStart, scopeEnd uint32
+		hasScope := false
 		for _, c := range m.Captures {
 			switch c.Name {
-			case "var.type":
-				typeName = c.Node.Text(src)
-			case "var.name":
+			case "prim.name":
 				name = c.Node.Text(src)
+			case "prim.scope":
+				scopeStart = c.Node.StartByte()
+				scopeEnd = c.Node.EndByte()
+				hasScope = true
 			}
 		}
-		if typeName == "" || name == "" {
+		if name == "" || !hasScope {
 			continue
 		}
 		bindings = append(bindings, cppBinding{
 			name:       name,
-			typeName:   typeName,
-			scopeStart: 0,
-			scopeEnd:   uint32(len(src)),
+			typeName:   "", // sentinel: primitive, not an enum type
+			scopeStart: scopeStart,
+			scopeEnd:   scopeEnd,
 		})
 	}
 
-	// Collect switches.
+	// ── switch collection ─────────────────────────────────────────────────
 	type switchEntry struct {
 		scrutinee  string
 		switchByte uint32
@@ -529,7 +614,7 @@ func passC_Switches(h *cppLangHandle, tree *gts.Tree, src []byte, relPath string
 		return bindings, nil
 	}
 
-	// Collect case identifier arms, grouped by enclosing switch byte range.
+	// ── case identifier arms ──────────────────────────────────────────────
 	caseIdentsBySw := make(map[uint32][]string)
 	for _, m := range h.caseIdentQ.Execute(tree) {
 		for _, c := range m.Captures {
@@ -537,7 +622,6 @@ func passC_Switches(h *cppLangHandle, tree *gts.Tree, src []byte, relPath string
 				continue
 			}
 			cb := c.Node.StartByte()
-			// Associate with the smallest enclosing switch.
 			for _, sw := range switchList {
 				if cb >= sw.switchByte && cb < sw.switchEnd {
 					caseIdentsBySw[sw.switchByte] = append(caseIdentsBySw[sw.switchByte], c.Node.Text(src))
@@ -546,7 +630,7 @@ func passC_Switches(h *cppLangHandle, tree *gts.Tree, src []byte, relPath string
 		}
 	}
 
-	// Collect case integer arms with their source line numbers.
+	// ── case integer arms ─────────────────────────────────────────────────
 	caseIntsBySw := make(map[uint32][]cppCaseInt)
 	for _, m := range h.caseIntQ.Execute(tree) {
 		for _, c := range m.Captures {
@@ -567,7 +651,7 @@ func passC_Switches(h *cppLangHandle, tree *gts.Tree, src []byte, relPath string
 		}
 	}
 
-	// Collect switches that have a default clause.
+	// ── default clause detection ──────────────────────────────────────────
 	defaultSwitches := make(map[uint32]bool)
 	for _, m := range h.defaultQ.Execute(tree) {
 		for _, c := range m.Captures {
@@ -615,11 +699,17 @@ type cppEnumPool struct {
 // joinCppDrift emits Type-A and Type-B leads for one file's switches given
 // the corpus-wide enum pool.
 //
-// Nearest-binding resolution: for each switch scrutinee, we select the binding
-// with the SMALLEST scope span that contains the switch start byte. This
-// resolves shadowing: an inner `int x = ...;` shadows an outer `Color x` param.
+// dir is the directory of the switch file (forward-slash, as returned by
+// filepath.ToSlash(filepath.Dir(relPath))). The pool is keyed by dir+typeName
+// so that same-named enums in different directories never collide.
+//
+// Nearest-binding resolution: for each switch scrutinee, select the binding
+// with the SMALLEST scope span containing the switch start byte. If the
+// nearest binding has typeName="" (primitive shadow sentinel) or no matching
+// enum exists for the dir-scoped key, emit nothing (precision-first).
 func joinCppDrift(
 	path string,
+	dir string,
 	pool *cppEnumPool,
 	bindings []cppBinding,
 	switches []cppSwitch,
@@ -652,12 +742,15 @@ func joinCppDrift(
 			}
 		}
 
+		// typeName=="" means the nearest binding is a primitive shadow sentinel
+		// (int, char, etc.) — not an enum type. Emit nothing.
 		if nearestBinding == nil || nearestBinding.typeName == "" {
 			continue
 		}
 
-		// Look up the enum by type name.
-		enum, ok := pool.byTypeName[nearestBinding.typeName]
+		// Look up the enum by dir-scoped key.
+		key := dir + "/" + nearestBinding.typeName
+		enum, ok := pool.byTypeName[key]
 		if !ok {
 			continue
 		}
@@ -937,51 +1030,50 @@ func seedCppEnumDrift(ctx context.Context, snap *ingest.Snapshot, st *store.Stor
 		return nil // no enums found in corpus
 	}
 
-	// ── Build enum pool ────────────────────────────────────────────────────
-	// Heuristic: associate typedef names declared in the same header with the
-	// enumerator pool from that header.
+	// ── Build enum pool (dir-scoped) ───────────────────────────────────────
+	// Enum type names are keyed by dir+typeName to avoid cross-directory
+	// collision: two directories may each define `typedef enum {...} Status;`
+	// for different member sets. Merging them would corrupt the member set
+	// and produce false Type-A leads when the integer value maps diverge.
 	//
-	// For each file that has BOTH enumerators AND typedef names:
-	//   – If exactly one typedef name is found, associate all enumerators in
-	//     that file with that name.
-	//   – If multiple typedef names, we can't determine which corresponds to
-	//     the enum — skip (precision-first).
-	//   – If no typedef names, the enum is anonymous or has a tag name we
-	//     can't extract — store under opaque key only (no type-name join).
+	// The intended join is same-directory header/impl: colors.h in dir A
+	// defines Color; process.c in dir A switches on Color. An impl file in
+	// dir B that happens to use Color maps to dir B's own enum, not dir A's.
+	//
+	// Per-file rules:
+	//   – Exactly one typedef name + members → register under dir+typeName.
+	//   – Multiple typedef names in one file → ambiguous, skip (precision-first).
+	//   – Same dir+typeName seen twice → take the first registration and skip
+	//     subsequent; cross-file same-dir repetition is rare and low-risk
+	//     (both should define the same enum), but any divergence is safer to
+	//     ignore than to merge.
+	//   – No typedef names (anonymous/unresolvable) → skip (no type-name join).
 	pool := &cppEnumPool{
 		allMembers:  allMembers,
 		memberTypes: make(map[string]string),
 		byTypeName:  make(map[string]*cppEnum),
 	}
 
-	for path, fe := range fileInfoByPath {
-		if len(fe.members) == 0 {
+	for fpath, fe := range fileInfoByPath {
+		if len(fe.members) == 0 || len(fe.typeNames) != 1 {
 			continue
 		}
-		_ = path
-		if len(fe.typeNames) == 1 {
-			typeName := fe.typeNames[0]
-			// Check for conflicts: if this type name was already registered
-			// from a different file with DIFFERENT members, we can't know which
-			// is correct — skip (precision-first).
-			if existing, ok := pool.byTypeName[typeName]; ok {
-				// Merge: keep members that appear in BOTH (intersection).
-				// Conservative: only members common to all declarations are safe.
-				for m := range existing.members {
-					if !fe.members[m] {
-						delete(existing.members, m)
-					}
-				}
-				continue
-			}
-			allExplicit := fe.valByMem != nil && len(fe.valByMem) == len(fe.members) && len(fe.members) > 0
-			pool.byTypeName[typeName] = &cppEnum{
-				name:          typeName,
-				members:       fe.members,
-				valueByMember: fe.valByMem,
-				memberByValue: fe.memByVal,
-				allExplicit:   allExplicit,
-			}
+		typeName := fe.typeNames[0]
+		// Key: dir of the file (forward-slash, no trailing slash) + "/" + typeName.
+		dir := filepath.ToSlash(filepath.Dir(fpath))
+		key := dir + "/" + typeName
+		if _, exists := pool.byTypeName[key]; exists {
+			// Same dir+type already registered (e.g. duplicate include guard).
+			// Keep the first registration; skip subsequent.
+			continue
+		}
+		allExplicit := fe.valByMem != nil && len(fe.valByMem) == len(fe.members) && len(fe.members) > 0
+		pool.byTypeName[key] = &cppEnum{
+			name:          typeName,
+			members:       fe.members,
+			valueByMember: fe.valByMem,
+			memberByValue: fe.memByVal,
+			allExplicit:   allExplicit,
 		}
 	}
 
@@ -1038,7 +1130,8 @@ func seedCppEnumDrift(ctx context.Context, snap *ingest.Snapshot, st *store.Stor
 			continue
 		}
 
-		typeA, typeB := joinCppDrift(f.Path, pool, bindings, switches)
+		fileDir := filepath.ToSlash(filepath.Dir(f.Path))
+		typeA, typeB := joinCppDrift(f.Path, fileDir, pool, bindings, switches)
 		for _, lead := range append(typeA, typeB...) {
 			if err := st.AddLead(ctx, lead); err != nil {
 				return fmt.Errorf("miner: enum-cpp-drift lead %s: %w", lead.File, err)

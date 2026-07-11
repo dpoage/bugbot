@@ -2,6 +2,7 @@ package miner
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -323,7 +324,7 @@ typedef enum { COLOR_RED = 0, COLOR_GREEN = 1, COLOR_BLUE = 2 } Color;
 		allMembers:  members,
 		memberTypes: make(map[string]string),
 		byTypeName: map[string]*cppEnum{
-			"Color": {
+			"./Color": {
 				name:          "Color",
 				members:       members,
 				valueByMember: valByMem,
@@ -359,7 +360,7 @@ void process(Color c) {
 		t.Fatal("no switches extracted")
 	}
 
-	typeA, _ := joinCppDrift("process.c", pool, bindings, switches)
+	typeA, _ := joinCppDrift("process.c", ".", pool, bindings, switches)
 	if len(typeA) == 0 {
 		t.Error("expected at least one Type-A lead for case 1 == COLOR_GREEN value")
 	}
@@ -388,7 +389,7 @@ func TestJoinCppDrift_TypeB_MissingArm(t *testing.T) {
 		allMembers:  members,
 		memberTypes: make(map[string]string),
 		byTypeName: map[string]*cppEnum{
-			"Color": {
+			"./Color": {
 				name:    "Color",
 				members: members,
 			},
@@ -421,7 +422,7 @@ void process(Color c) {
 		t.Fatal("no switches found")
 	}
 
-	_, typeB := joinCppDrift("process.c", pool, bindings, switches)
+	_, typeB := joinCppDrift("process.c", ".", pool, bindings, switches)
 	if len(typeB) == 0 {
 		t.Error("expected a Type-B lead for COLOR_BLUE (missing arm, no default)")
 	}
@@ -450,7 +451,7 @@ func TestJoinCppDrift_DefaultSuppressesTypeB(t *testing.T) {
 		allMembers:  members,
 		memberTypes: make(map[string]string),
 		byTypeName: map[string]*cppEnum{
-			"Status": {
+			"./Status": {
 				name:    "Status",
 				members: members,
 			},
@@ -480,7 +481,7 @@ void check(Status s) {
 	}
 
 	bindings, switches := passC_Switches(h, switchTree, switchSrc, "check.c")
-	_, typeB := joinCppDrift("check.c", pool, bindings, switches)
+	_, typeB := joinCppDrift("check.c", ".", pool, bindings, switches)
 	if len(typeB) != 0 {
 		t.Errorf("expected 0 Type-B leads with default clause, got %d: %+v", len(typeB), typeB)
 	}
@@ -500,7 +501,7 @@ func TestJoinCppDrift_UntypedScrutineeNoLead(t *testing.T) {
 		allMembers:  members,
 		memberTypes: make(map[string]string),
 		byTypeName: map[string]*cppEnum{
-			"Status": {
+			"./Status": {
 				name:    "Status",
 				members: members,
 			},
@@ -529,7 +530,7 @@ void process_raw(int code) {
 	}
 
 	bindings, switches := passC_Switches(h, switchTree, switchSrc, "raw.c")
-	typeA, typeB := joinCppDrift("raw.c", pool, bindings, switches)
+	typeA, typeB := joinCppDrift("raw.c", ".", pool, bindings, switches)
 	if len(typeA)+len(typeB) != 0 {
 		t.Errorf("expected 0 leads for int-typed scrutinee, got A=%d B=%d", len(typeA), len(typeB))
 	}
@@ -653,5 +654,244 @@ func TestCppEnumDrift_NegativeFixtures(t *testing.T) {
 
 	if len(leads) != 0 {
 		t.Errorf("expected 0 leads from clean fixtures, got %d", len(leads))
+	}
+}
+
+// ─── D1 oracle repros: scope isolation ───────────────────────────────────────
+
+// TestPassCSwitches_CrossFunctionIsolation proves the D1 fix: a typed binding
+// in function f does not leak into function g's switch statement.
+//
+// Oracle repro: void f(Color x){...} + void g(int x){ switch(x){case A:case B:} }
+// Before fix: file-wide scope [0,len] made f's Color-x binding visible in g's
+// switch → false type-B lead for any Color member not covered in g's switch.
+// After fix: real function-body scopes prevent the cross-function binding.
+func TestPassCSwitches_CrossFunctionIsolation(t *testing.T) {
+	h := loadCLangHandle(t)
+
+	// Two functions in one file: f has Color param, g has int param.
+	// g's switch is over an int — no enum lead should fire.
+	src := []byte(`
+void f(Color x) {
+    switch (x) {
+        case COLOR_RED: break;
+    }
+}
+void g(int x) {
+    switch (x) {
+        case 0:
+        case 1:
+            break;
+    }
+}
+`)
+	tree, err := parseCppFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+	if tree.RootNode().HasError() {
+		t.Skip("parse error")
+	}
+
+	bindings, switches := passC_Switches(h, tree, src, "multi.c")
+	if len(switches) == 0 {
+		t.Skip("no switches — grammar limitation")
+	}
+
+	// Pool with Color typedef.
+	members := map[string]bool{
+		"COLOR_RED": true, "COLOR_GREEN": true, "COLOR_BLUE": true,
+	}
+	pool := &cppEnumPool{
+		allMembers:  members,
+		memberTypes: make(map[string]string),
+		byTypeName: map[string]*cppEnum{
+			"./Color": {name: "Color", members: members},
+		},
+	}
+
+	typeA, typeB := joinCppDrift("multi.c", ".", pool, bindings, switches)
+	// g's switch is over int x (primitive sentinel) — must produce 0 leads.
+	// f's switch IS over Color x but only covers COLOR_RED; however f's switch
+	// is in the bindings too — we accept leads from f but not from g.
+	// The key check: any lead from g (switches[1]) must NOT exist.
+	// Since we can't distinguish which switch a lead came from in this test,
+	// we verify by checking that leads don't exceed what f's single switch could produce.
+	// f covers COLOR_RED → COLOR_GREEN and COLOR_BLUE are uncovered → max 2 type-B leads from f.
+	// g's switch on int x should produce 0 leads (primitive shadow).
+	for _, lead := range append(typeA, typeB...) {
+		// All leads must be from g = nil (no enum join) or from f.
+		// Simplest: leads must point to a line within f's body (lines 2-7),
+		// not g's body (lines 8-14). f's switch is at line 3.
+		if lead.Line >= 8 {
+			t.Errorf("D1 cross-function FP: lead at line %d is inside g's body (int switch): %s",
+				lead.Line, lead.Note)
+		}
+	}
+}
+
+// TestPassCSwitches_IntShadowNoLead proves the D1 fix: an int local variable
+// shadowing an outer Color parameter makes the switch invisible to the miner.
+//
+// Oracle repro: void h(Color x){ int x = 0; switch(x){...} }
+// Before fix: both the Color-param binding and the int-local binding had
+// file-wide scope → same span → first-in-slice won (unpredictable).
+// After fix: the int-local binding has the inner compound_statement scope
+// (smaller span) and wins as nearest binding → typeName="" → no leads.
+func TestPassCSwitches_IntShadowNoLead(t *testing.T) {
+	h := loadCLangHandle(t)
+
+	// Color x is the outer param; int x shadows it inside the block.
+	src := []byte(`
+void h(Color x) {
+    int x = 0;
+    switch (x) {
+        case 0: break;
+        case 1: break;
+    }
+}
+`)
+	tree, err := parseCppFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+	if tree.RootNode().HasError() {
+		t.Skip("parse error")
+	}
+
+	bindings, switches := passC_Switches(h, tree, src, "shadow.c")
+	if len(switches) == 0 {
+		t.Skip("no switches")
+	}
+
+	members := map[string]bool{
+		"COLOR_RED": true, "COLOR_GREEN": true, "COLOR_BLUE": true,
+	}
+	pool := &cppEnumPool{
+		allMembers:  members,
+		memberTypes: make(map[string]string),
+		byTypeName: map[string]*cppEnum{
+			"./Color": {name: "Color", members: members},
+		},
+	}
+
+	typeA, typeB := joinCppDrift("shadow.c", ".", pool, bindings, switches)
+	if total := len(typeA) + len(typeB); total != 0 {
+		t.Errorf("D1 int-shadow FP: expected 0 leads when int x shadows Color x, got %d", total)
+		for _, l := range append(typeA, typeB...) {
+			t.Logf("  FP: %s:%d: %s", l.File, l.Line, l.Note)
+		}
+	}
+}
+
+// TestPassCSwitches_PositiveControlSameFunctionFires proves that the scope
+// fix does not over-suppress: a legitimately typed switch in the same function
+// still produces Type-B leads.
+func TestPassCSwitches_PositiveControlSameFunctionFires(t *testing.T) {
+	h := loadCLangHandle(t)
+
+	// Color c param, switch missing COLOR_BLUE — should fire.
+	src := []byte(`
+void check(Color c) {
+    switch (c) {
+        case COLOR_RED: break;
+        case COLOR_GREEN: break;
+    }
+}
+`)
+	tree, err := parseCppFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+	if tree.RootNode().HasError() {
+		t.Skip("parse error")
+	}
+
+	bindings, switches := passC_Switches(h, tree, src, "pos.c")
+	if len(switches) == 0 {
+		t.Skip("no switches")
+	}
+
+	members := map[string]bool{
+		"COLOR_RED": true, "COLOR_GREEN": true, "COLOR_BLUE": true,
+	}
+	pool := &cppEnumPool{
+		allMembers:  members,
+		memberTypes: make(map[string]string),
+		byTypeName: map[string]*cppEnum{
+			"./Color": {name: "Color", members: members},
+		},
+	}
+
+	_, typeB := joinCppDrift("pos.c", ".", pool, bindings, switches)
+	if len(typeB) == 0 {
+		t.Error("positive control: expected Type-B lead for missing COLOR_BLUE")
+	}
+}
+
+// ─── D2 oracle repro: two-dir same-name enum ─────────────────────────────────
+
+// TestCppEnumDrift_TwoDirSameNameNoLead proves the D2 fix: two directories
+// each defining `typedef enum {...} Color;` with DIFFERENT members do NOT
+// produce false Type-A leads when their integer value maps conflict.
+//
+// Before fix: the pool merged the two enums by intersection + kept the first
+// value map → value map had dir_a's values but dir_b's values might collide.
+// After fix: pool keyed by dir+typeName; cross-dir enums are separate and the
+// switch file in dir_b only joins against dir_b's Color enum.
+//
+// Fixture layout:
+//   - dir_a/colors.h — Color { RED=0, GREEN=1, BLUE=2 }
+//   - dir_b/colors.h — Color { ALPHA=10, BETA=20, GAMMA=30 }
+//   - dir_b/switch.c — switch(c) over dir_b's Color (exhaustive, no lead expected)
+func TestCppEnumDrift_TwoDirSameNameNoLead(t *testing.T) {
+	root := filepath.Join("testdata", "cpp_oracle_repro")
+
+	// dir_b/switch.c — exhaustive switch over dir_b's Color (ALPHA, BETA, GAMMA)
+	switchC := filepath.Join(root, "dir_b", "switch.c")
+	if err := os.WriteFile(switchC, []byte(`
+void handle(Color c) {
+    switch (c) {
+        case COLOR_ALPHA: break;
+        case COLOR_BETA:  break;
+        case COLOR_GAMMA: break;
+    }
+}
+`), 0o644); err != nil {
+		t.Fatalf("write switch.c: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(switchC) })
+
+	snap := &ingest.Snapshot{
+		Commit: "test",
+		Root:   root,
+		Files: []ingest.File{
+			{Path: "dir_a/colors.h", Language: ingest.LangC},
+			{Path: "dir_b/colors.h", Language: ingest.LangC},
+			{Path: "dir_b/switch.c", Language: ingest.LangC},
+		},
+	}
+	st := openStore(t)
+
+	var sum Summary
+	if err := seedCppEnumDrift(context.Background(), snap, st, &sum); err != nil {
+		t.Fatalf("seedCppEnumDrift: %v", err)
+	}
+
+	leads, err := st.ListLeads(context.Background())
+	if err != nil {
+		t.Fatalf("ListLeads: %v", err)
+	}
+
+	t.Logf("CppDriftLeads=%d CppParseFailures=%d total leads=%d", sum.CppDriftLeads, sum.CppParseFailures, len(leads))
+	for i, l := range leads {
+		t.Logf("  FP lead[%d] %s:%d: %s", i, l.File, l.Line, l.Note)
+	}
+
+	if len(leads) != 0 {
+		t.Errorf("D2: expected 0 leads (no cross-dir enum merge), got %d", len(leads))
 	}
 }
