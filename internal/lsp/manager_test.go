@@ -317,10 +317,10 @@ func TestDefaultServersCSharp(t *testing.T) {
 }
 
 // TestDefaultServersJdtls asserts that the built-in registry contains exactly
-// one entry for ".java" files, that it is jdtls, carries no extra arguments
-// (jdtls auto-derives its per-workspace data directory from the working
-// directory — see startServer: cmd.Dir = rootDir), and maps the extension to
-// the "java" language identifier.
+// one entry for ".java" files, that it is jdtls, maps the extension to the
+// "java" language identifier, and carries a -data argument containing the
+// ${BUGBOT_LSP_ROOT_HASH} placeholder so that spawn-time expansion produces
+// a per-full-path workspace directory (not basename-keyed).
 func TestDefaultServersJdtls(t *testing.T) {
 	servers := DefaultServers()
 
@@ -341,8 +341,55 @@ func TestDefaultServersJdtls(t *testing.T) {
 	if got := cfg.LanguageIDs[".java"]; got != "java" {
 		t.Errorf("languageId for .java = %q, want %q", got, "java")
 	}
-	if len(cfg.Args) != 0 {
-		t.Errorf("jdtls config must have no Args (data dir is auto-derived from CWD), got %v", cfg.Args)
+	// The -data arg must be present and must contain the root-hash placeholder
+	// so that startServer expands it to a full-path-scoped directory.
+	const placeholder = "${BUGBOT_LSP_ROOT_HASH}"
+	var hasData bool
+	for i, a := range cfg.Args {
+		if a == "-data" && i+1 < len(cfg.Args) {
+			if !strings.Contains(cfg.Args[i+1], placeholder) {
+				t.Errorf("-data value %q must contain placeholder %q", cfg.Args[i+1], placeholder)
+			}
+			hasData = true
+			break
+		}
+	}
+	if !hasData {
+		t.Errorf("jdtls config must have a -data <dir> arg containing %q; Args = %v", placeholder, cfg.Args)
+	}
+}
+
+// TestExpandArgsRootHash proves the three invariants of arg expansion:
+//  1. Two roots with the SAME basename but different full paths produce
+//     DIFFERENT expanded args (no basename collision).
+//  2. The same root produces the SAME expanded args every time (deterministic).
+//  3. Args without the placeholder are returned unchanged (no allocation path).
+func TestExpandArgsRootHash(t *testing.T) {
+	// Two clones with the same leaf name but different parent directories.
+	root1 := "/home/alice/projects/myapp"
+	root2 := "/home/bob/work/myapp" // same basename "myapp", different full path
+
+	args := []string{"-data", "/tmp/bugbot-jdtls-${BUGBOT_LSP_ROOT_HASH}"}
+
+	expanded1 := expandArgs(args, root1)
+	expanded2 := expandArgs(args, root2)
+
+	// Invariant 1: different full paths → different -data dirs.
+	if expanded1[1] == expanded2[1] {
+		t.Errorf("roots %q and %q have the same basename but different full paths; "+
+			"expected different -data dirs, both got %q", root1, root2, expanded1[1])
+	}
+
+	// Invariant 2: same root → same result, every time.
+	again := expandArgs(args, root1)
+	if expanded1[1] != again[1] {
+		t.Errorf("expandArgs not deterministic for root %q: %q vs %q", root1, expanded1[1], again[1])
+	}
+
+	// Invariant 3: no placeholder → original slice returned unmodified.
+	plain := []string{"--stdio"}
+	if got := expandArgs(plain, root1); &got[0] != &plain[0] {
+		t.Errorf("expandArgs with no placeholder should return the original slice, got a copy")
 	}
 }
 

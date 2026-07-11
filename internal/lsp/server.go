@@ -2,11 +2,14 @@ package lsp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,7 +20,11 @@ type ServerConfig struct {
 	// Cmd is the server binary name (resolved via exec.LookPath) or an
 	// absolute path.
 	Cmd string
-	// Args are the command-line arguments (e.g. "--stdio").
+	// Args are the command-line arguments passed to Cmd. The token
+	// ${BUGBOT_LSP_ROOT_HASH} anywhere in an element is replaced at spawn
+	// time with the first 16 hex digits of sha256(rootDir), giving each
+	// server a deterministic, full-path-scoped scratch directory regardless
+	// of how many roots share the same basename.
 	Args []string
 	// Env, when non-empty, is appended to the inherited environment. Used by
 	// tests to drive a fake server; empty for real servers.
@@ -29,7 +36,8 @@ type ServerConfig struct {
 
 // DefaultServers is the built-in server registry: gopls for Go,
 // typescript-language-server for TS/JS, pyright (with pylsp as fallback) for
-// Python, rust-analyzer for Rust, clangd for C/C++, and csharp-ls for C#.
+// Python, rust-analyzer for Rust, clangd for C/C++, csharp-ls for C#, and
+// jdtls (Eclipse JDT LS) for Java.
 // Order matters only for extensions served by multiple configs (Python): the
 // first config whose binary is installed wins.
 func DefaultServers() []ServerConfig {
@@ -69,11 +77,18 @@ func DefaultServers() []ServerConfig {
 			},
 		},
 		{
-			// jdtls (Eclipse JDT Language Server) speaks LSP over stdio via the
-			// 'jdtls' Python wrapper script. No -data flag is needed: the manager
-			// sets cmd.Dir = rootDir, so jdtls auto-derives a per-workspace data
-			// directory from the working directory under the system temp dir.
+			// jdtls (Eclipse JDT Language Server) speaks LSP over stdio via
+			// the 'jdtls' Python wrapper script. The -data argument pins the
+			// per-workspace Eclipse metadata directory to a path derived from
+			// the full absolute rootDir: without it, jdtls defaults to
+			// ~/.cache/jdtls/jdtls-<sha1(basename(root))>, keyed on the
+			// BASENAME only, so two roots named identically (e.g. two clones
+			// both called "myapp") share a data dir and corrupt each other's
+			// index. ${BUGBOT_LSP_ROOT_HASH} is expanded at spawn time to the
+			// first 16 hex digits of sha256(rootDir), giving each root its own
+			// isolated directory.
 			Cmd:         "jdtls",
+			Args:        []string{"-data", os.TempDir() + "/bugbot-jdtls-${BUGBOT_LSP_ROOT_HASH}"},
 			LanguageIDs: map[string]string{".java": "java"},
 		},
 		{
@@ -112,6 +127,36 @@ type serverCaps struct {
 	implementation bool
 }
 
+// rootHashHex returns the first 16 hex digits of sha256(rootDir). It is used
+// to derive per-workspace scratch directories that are unique across full
+// paths, not just basenames.
+func rootHashHex(rootDir string) string {
+	h := sha256.Sum256([]byte(rootDir))
+	return hex.EncodeToString(h[:])[:16]
+}
+
+// expandArgs replaces every occurrence of ${BUGBOT_LSP_ROOT_HASH} within each
+// element of args with the first 16 hex digits of sha256(rootDir). Elements
+// that do not contain the token are returned as-is (no allocation). The
+// original slice is never modified.
+func expandArgs(args []string, rootDir string) []string {
+	const token = "${BUGBOT_LSP_ROOT_HASH}"
+	var expanded []string
+	for i, a := range args {
+		if strings.Contains(a, token) {
+			if expanded == nil {
+				expanded = make([]string, len(args))
+				copy(expanded, args)
+			}
+			expanded[i] = strings.ReplaceAll(a, token, rootHashHex(rootDir))
+		}
+	}
+	if expanded != nil {
+		return expanded
+	}
+	return args
+}
+
 // startServer launches the configured binary, performs the
 // initialize/initialized handshake (bounded by ctx), and returns a ready
 // server. A missing binary returns an *exec.Error from LookPath so callers can
@@ -122,7 +167,8 @@ func startServer(ctx context.Context, cfg ServerConfig, rootDir string) (*server
 		return nil, err
 	}
 
-	cmd := exec.Command(path, cfg.Args...)
+	args := expandArgs(cfg.Args, rootDir)
+	cmd := exec.Command(path, args...)
 	cmd.Dir = rootDir
 	if len(cfg.Env) > 0 {
 		cmd.Env = append(os.Environ(), cfg.Env...)
