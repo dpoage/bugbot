@@ -158,9 +158,13 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 		return nil
 	}
 	// fileRef is the per-(file, language) row kept in the index maps.
+	// The lang field carries the actual file language for HTTP/RPC detectors
+	// so that multi-language seam sides carry their true language rather than
+	// a hardcoded representative. Zero value ("") means "use default lang".
 	type fileRef struct {
 		file string
 		line int
+		lang Language // optional: set by HTTP/RPC detectors; "" → use caller default
 	}
 	// dataFileRefs: dataFileKey -> language -> []fileRef.
 	dataFileRefs := make(map[string]map[Language][]fileRef)
@@ -227,12 +231,12 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 			}
 		} // end if !isProto
 
-		// HTTP route detection (Go only in v1; other languages deferred).
+		// HTTP route detection: Go, JS/TS, and Python producer/consumer patterns.
 		// PRODUCER: server route registrations.
 		// CONSUMER: client URL-literal call sites.
-		if f.Language == LangGo {
+		switch f.Language {
+		case LangGo:
 			for _, m := range httpServerRouteRe.FindAllSubmatchIndex(content, -1) {
-				// Two capture groups: [2:3] for HandleFunc/Handle, [4:5] for method forms.
 				var raw string
 				if m[2] >= 0 {
 					raw = string(content[m[2]:m[3]])
@@ -244,10 +248,9 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 					continue
 				}
 				line := lineForOffset(content, m[0])
-				httpRouteProducers[path] = append(httpRouteProducers[path], fileRef{file: f.Path, line: line})
+				httpRouteProducers[path] = append(httpRouteProducers[path], fileRef{file: f.Path, line: line, lang: LangGo})
 			}
 			for _, m := range httpClientCallRe.FindAllSubmatchIndex(content, -1) {
-				// Two capture groups: [2:3] for NewRequest, [4:5] for method calls.
 				var raw string
 				if m[2] >= 0 {
 					raw = string(content[m[2]:m[3]])
@@ -259,31 +262,122 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 					continue
 				}
 				line := lineForOffset(content, m[0])
-				httpRouteConsumers[path] = append(httpRouteConsumers[path], fileRef{file: f.Path, line: line})
+				httpRouteConsumers[path] = append(httpRouteConsumers[path], fileRef{file: f.Path, line: line, lang: LangGo})
+			}
+		case LangJavaScript, LangTypeScript:
+			// PRODUCER: Express/Koa/Fastify style app.get('/path', handler) /
+			// router.post('/path', handler). Requires a comma after the path
+			// literal (handler arg) to distinguish from consumer fetch calls.
+			for _, m := range httpJsRouteProducerRe.FindAllSubmatchIndex(content, -1) {
+				var raw string
+				if m[2] >= 0 {
+					raw = string(content[m[2]:m[3]])
+				} else if m[4] >= 0 {
+					raw = string(content[m[4]:m[5]])
+				}
+				path := normalizeHTTPPath(raw)
+				if path == "" {
+					continue
+				}
+				line := lineForOffset(content, m[0])
+				httpRouteProducers[path] = append(httpRouteProducers[path], fileRef{file: f.Path, line: line, lang: f.Language})
+			}
+			// CONSUMER: fetch('/path') and axios/http client calls with a
+			// leading-slash or full URL. Non-routable strings (cache keys,
+			// map keys) are rejected by normalizeHTTPPath's leading-slash gate.
+			// httpJsClientCallRe has 4 capture groups (fetch-sq, fetch-dq,
+			// axios-sq, axios-dq); scan all pairs for the first non-empty one.
+			for _, m := range httpJsClientCallRe.FindAllSubmatchIndex(content, -1) {
+				raw := firstSubmatch(content, m)
+				path := normalizeHTTPPath(raw)
+				if path == "" {
+					continue
+				}
+				line := lineForOffset(content, m[0])
+				httpRouteConsumers[path] = append(httpRouteConsumers[path], fileRef{file: f.Path, line: line, lang: f.Language})
+			}
+		case LangPython:
+			// PRODUCER: Flask @app.route('/path'), FastAPI @app.get('/path').
+			// Both decorator forms require a leading-slash literal.
+			for _, m := range httpPyRouteDecoratorRe.FindAllSubmatchIndex(content, -1) {
+				var raw string
+				if m[2] >= 0 {
+					raw = string(content[m[2]:m[3]])
+				} else if m[4] >= 0 {
+					raw = string(content[m[4]:m[5]])
+				}
+				path := normalizeHTTPPath(raw)
+				if path == "" {
+					continue
+				}
+				line := lineForOffset(content, m[0])
+				httpRouteProducers[path] = append(httpRouteProducers[path], fileRef{file: f.Path, line: line, lang: LangPython})
+			}
+			// PRODUCER: Django path('accounts/login/', ...) — no leading slash
+			// in source; normalizePyDjangoPath adds one for cross-language join.
+			for _, m := range httpPyDjangoPathRe.FindAllSubmatchIndex(content, -1) {
+				raw := string(content[m[2]:m[3]])
+				path := normalizePyDjangoPath(raw)
+				if path == "" {
+					continue
+				}
+				line := lineForOffset(content, m[0])
+				httpRouteProducers[path] = append(httpRouteProducers[path], fileRef{file: f.Path, line: line, lang: LangPython})
+			}
+			// CONSUMER: requests.get(url)/httpx.get(url) with a leading-slash
+			// or full-URL literal. Mirrors Go's httpClientCallRe precision gate.
+			for _, m := range httpPyClientCallRe.FindAllSubmatchIndex(content, -1) {
+				raw := string(content[m[2]:m[3]])
+				path := normalizeHTTPPath(raw)
+				if path == "" {
+					continue
+				}
+				line := lineForOffset(content, m[0])
+				httpRouteConsumers[path] = append(httpRouteConsumers[path], fileRef{file: f.Path, line: line, lang: LangPython})
 			}
 		}
 
-		// RPC method detection (Go + .proto in v1; other languages deferred).
+		// RPC method detection: Go + .proto + Python gRPC.
 		// .proto files: PRODUCER declarations.
 		// Go files: server handler PRODUCER funcs + call-site CONSUMER refs.
+		// Python files: gRPC servicer PRODUCER declarations + stub CONSUMER calls.
 		if isProto {
 			for _, m := range protoRPCDeclRe.FindAllSubmatchIndex(content, -1) {
 				name := string(content[m[2]:m[3]])
 				line := lineForOffset(content, m[0])
-				rpcProducers[name] = append(rpcProducers[name], fileRef{file: f.Path, line: line})
+				rpcProducers[name] = append(rpcProducers[name], fileRef{file: f.Path, line: line, lang: LangOther})
 			}
 		} else if f.Language == LangGo {
-			// Go server handlers: func (r *FooServer) MethodName(ctx ...
 			for _, m := range goRPCHandlerRe.FindAllSubmatchIndex(content, -1) {
 				name := string(content[m[2]:m[3]])
 				line := lineForOffset(content, m[0])
-				rpcProducers[name] = append(rpcProducers[name], fileRef{file: f.Path, line: line})
+				rpcProducers[name] = append(rpcProducers[name], fileRef{file: f.Path, line: line, lang: LangGo})
 			}
-			// Call sites: .MethodName( or ClientName.MethodName( in Go
 			for _, m := range goRPCCallRe.FindAllSubmatchIndex(content, -1) {
 				name := string(content[m[2]:m[3]])
 				line := lineForOffset(content, m[0])
-				rpcConsumers[name] = append(rpcConsumers[name], fileRef{file: f.Path, line: line})
+				rpcConsumers[name] = append(rpcConsumers[name], fileRef{file: f.Path, line: line, lang: LangGo})
+			}
+		} else if f.Language == LangPython {
+			// Python gRPC servicer method PRODUCER: tight signature
+			// def MethodName(self, request, context) — exactly those three
+			// parameters in order. This is the canonical gRPC-Python servicer
+			// shape and is distinctive enough to be a precision anchor.
+			// The producer-anchor gate at emission means a bare def matching
+			// this pattern but with no .proto or Go handler pair is suppressed.
+			for _, m := range pyRPCHandlerRe.FindAllSubmatchIndex(content, -1) {
+				name := string(content[m[2]:m[3]])
+				line := lineForOffset(content, m[0])
+				rpcProducers[name] = append(rpcProducers[name], fileRef{file: f.Path, line: line, lang: LangPython})
+			}
+			// Python gRPC stub CONSUMER: stub.MethodName(request).
+			// Producer-anchor gate (enforced at emission) prevents flooding:
+			// any lowercase_var.UpperMethod() matches this pattern, and without
+			// a real producer it is noise, not a seam.
+			for _, m := range pyRPCCallRe.FindAllSubmatchIndex(content, -1) {
+				name := string(content[m[2]:m[3]])
+				line := lineForOffset(content, m[0])
+				rpcConsumers[name] = append(rpcConsumers[name], fileRef{file: f.Path, line: line, lang: LangPython})
 			}
 		}
 	}
@@ -403,7 +497,7 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 	// non-empty (a real contract — .proto rpc declaration or gRPC server handler
 	// — must exist before consumer call sites are treated as seam evidence).
 	// Sides are sorted by File for determinism.
-	reduceProducerConsumer := func(kind SeamKind, key string, lang Language, producers, consumers []fileRef) *Seam {
+	reduceProducerConsumer := func(kind SeamKind, key string, defaultLang Language, producers, consumers []fileRef) *Seam {
 		// Collect distinct files across both sides.
 		filesSet := make(map[string]bool, len(producers)+len(consumers))
 		for _, r := range producers {
@@ -446,7 +540,11 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 					continue
 				}
 				seen[r.file] = true
-				sides = append(sides, SeamSide{File: r.file, Language: lang, Line: r.line})
+				sideL := defaultLang
+				if r.lang != "" {
+					sideL = r.lang
+				}
+				sides = append(sides, SeamSide{File: r.file, Language: sideL, Line: r.line})
 				advanced = true
 				break
 			}
@@ -457,7 +555,11 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 					continue
 				}
 				seen[r.file] = true
-				sides = append(sides, SeamSide{File: r.file, Language: lang, Line: r.line})
+				sideL := defaultLang
+				if r.lang != "" {
+					sideL = r.lang
+				}
+				sides = append(sides, SeamSide{File: r.file, Language: sideL, Line: r.line})
 				advanced = true
 				break
 			}
@@ -763,6 +865,128 @@ func normalizeHTTPPath(raw string) string {
 	}
 	if raw == "/" || raw == "" {
 		return "" // root-only path is too generic
+	}
+	return raw
+}
+
+// firstSubmatch returns the string content of the first non-empty captured
+// group in a FindAllSubmatchIndex result row m (which pairs [start, end] for
+// the whole match at m[0:2] and each group at m[2i:2i+1]). Returns "" when
+// no group captured anything. Used when a regex has multiple alternation
+// branches each with one capture group (the active branch wins).
+func firstSubmatch(content []byte, m []int) string {
+	for i := 2; i+1 < len(m); i += 2 {
+		if m[i] >= 0 {
+			return string(content[m[i]:m[i+1]])
+		}
+	}
+	return ""
+}
+
+// httpJsRouteProducerRe matches JS/TS server-side HTTP route registrations for
+// Express, Koa, and Fastify. The pattern requires:
+//  1. A method receiver (any identifier) followed by .get/.post/.put/.delete/.patch
+//  2. A string literal (single- or double-quoted) with a leading slash as the first arg
+//  3. A COMMA immediately after the path literal, proving a handler arg follows
+//     (this is the critical distinguisher from consumer fetch/axios calls).
+//
+// Captured groups: group 1 for single-quoted paths, group 2 for double-quoted paths.
+var httpJsRouteProducerRe = regexp.MustCompile(`(?:\.get|\.post|\.put|\.delete|\.patch)\s*\(\s*(?:'(/[^'\x00-\x1f]*)'|"(/[^"\x00-\x1f]*)")\s*,`)
+
+// httpJsClientCallRe matches JS/TS client HTTP calls. Patterns:
+//  1. fetch('/path') or fetch("https://host/path") — the built-in fetch API
+//  2. axios.get('/path') / axios.post('/path') etc — axios client
+//
+// A leading slash (or full URL whose path normalizeHTTPPath extracts) is
+// required; non-routable strings (cache keys, map keys) are rejected by
+// normalizeHTTPPath's leading-slash gate, mirroring the Go detector's gate.
+//
+// Captured groups: group 1 (single-quote fetch), group 2 (double-quote fetch),
+// group 3 (single-quote axios), group 4 (double-quote axios).
+var httpJsClientCallRe = regexp.MustCompile(`(?:(?:\bfetch\s*\(\s*(?:'((?:https?://[^']*|/[^']*))'|"((?:https?://[^"]*|/[^"]*))")\s*[,)])|(?:\baxios\.(?:get|post|put|delete|patch)\s*\(\s*(?:'((?:https?://[^']*|/[^']*))'|"((?:https?://[^"]*|/[^"]*))")\s*[,)]))`)
+
+// httpPyRouteDecoratorRe matches Python Flask and FastAPI HTTP route
+// decorator/call forms:
+//  1. Flask:   @app.route('/path') or @bp.route('/path')
+//  2. FastAPI: @app.get('/path') / @app.post('/path') etc.
+//
+// The decorator must include a leading-slash path literal (single- or
+// double-quoted). Captured groups: group 1 for single-quoted, group 2 for
+// double-quoted.
+var httpPyRouteDecoratorRe = regexp.MustCompile(`@\w+\.(?:route|get|post|put|delete|patch)\s*\(\s*(?:'(/[^'\x00-\x1f]*)'|"(/[^"\x00-\x1f]*)")`)
+
+// httpPyDjangoPathRe matches Django urlpatterns path() calls:
+//
+//	path('accounts/login/', ...)
+//	path("api/v1/users/", ...)
+//
+// Django paths do NOT have a leading slash; normalizePyDjangoPath prepends
+// one for cross-language join consistency. The pattern requires a comma
+// after the path literal (view arg follows) to avoid matching ordinary
+// string arguments in other call sites. Captured group 1 is the raw path.
+var httpPyDjangoPathRe = regexp.MustCompile(`\bpath\(\s*(?:'([^'\x00-\x1f]*)'|"([^"\x00-\x1f]*)")\s*,`)
+
+// httpPyClientCallRe matches Python HTTP client URL-literal call sites.
+// Libraries: requests, httpx, aiohttp (via session.get). The first arg
+// must be a string literal with a leading slash or full URL; non-routable
+// strings are rejected by normalizeHTTPPath's leading-slash gate.
+// Captured group 1 (single-quote) or group 2 (double-quote) is the URL/path.
+var httpPyClientCallRe = regexp.MustCompile(`\b(?:requests|httpx|session)\.(?:get|post|put|delete|patch)\s*\(\s*(?:'((?:https?://[^']*|/[^']*))'|"((?:https?://[^"]*|/[^"]*))"\s*)`)
+
+// pyRPCHandlerRe matches Python gRPC servicer method declarations. The
+// canonical gRPC-Python servicer method has exactly three parameters:
+// self, request, and context — in that order. This tight signature
+// prevents ordinary instance methods (self, arg) from matching.
+// Captured group 1 is the method name (must be uppercase, matching proto
+// conventions).
+var pyRPCHandlerRe = regexp.MustCompile(`def\s+([A-Z][A-Za-z0-9_]*)\s*\(\s*self\s*,\s*request\s*,\s*context\s*\)`)
+
+// pyRPCCallRe matches Python gRPC stub call sites of the form:
+//
+//	stub.MethodName(request)
+//
+// where MethodName begins with an uppercase letter (matching proto/gRPC
+// conventions). The receiver must be a lowercase-starting identifier.
+// This pattern is intentionally broad; the producer-anchor gate in the
+// emission step is the precision control (consumer-only evidence is never
+// emitted as a seam, mirroring the Go RPC flood lesson).
+var pyRPCCallRe = regexp.MustCompile(`\b[a-z][A-Za-z0-9_]*\.([A-Z][A-Za-z0-9_]*)\s*\(`)
+
+// normalizePyDjangoPath normalizes a Django path() string to a routable
+// path with a leading slash, consistent with normalizeHTTPPath's output
+// format. Django path patterns have no leading slash in source (e.g.
+// "accounts/login/"); this function prepends one so that a Django producer
+// and a fetch("/accounts/login/") consumer join on the same key.
+//
+// Returns "" for the empty string or a string that is already a full URL
+// (which normalizeHTTPPath should handle instead). The "/" root path is
+// rejected as too generic, matching normalizeHTTPPath's gate.
+func normalizePyDjangoPath(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	// If it already has a scheme, delegate to the standard normalizer.
+	if strings.Contains(raw, "://") {
+		return normalizeHTTPPath(raw)
+	}
+	// Strip query and fragment.
+	if i := strings.IndexAny(raw, "?#"); i >= 0 {
+		raw = raw[:i]
+	}
+	if raw == "" {
+		return ""
+	}
+	// Prepend leading slash if absent.
+	if raw[0] != '/' {
+		raw = "/" + raw
+	}
+	// Strip trailing slash for join consistency (Django paths often end with /).
+	// Exception: don't strip if raw is exactly "/".
+	if len(raw) > 1 && raw[len(raw)-1] == '/' {
+		raw = raw[:len(raw)-1]
+	}
+	if raw == "/" || raw == "" {
+		return ""
 	}
 	return raw
 }
