@@ -160,6 +160,14 @@ type Summary struct {
 	// produced a parse tree with HasError()=true (known gap: typed-param arrow
 	// functions). Exposed so callers and tests can audit grammar coverage.
 	TSParseFailures int
+	// StringlyPyDriftLeads counts leads from the Python string-union drift pass
+	// (Literal[...] type aliases / StrEnum classes vs if-elif/match dispatch).
+	StringlyPyDriftLeads int
+	// PyParseFailures counts Python files skipped due to HasError() in the parse tree.
+	PyParseFailures int
+	// ConfigFieldPyLeads counts leads from the Python config-field contradiction
+	// pass (pydantic/dataclass Field(default=X) vs validator rejecting X).
+	ConfigFieldPyLeads int
 }
 
 type leadKey struct {
@@ -257,6 +265,14 @@ consLoop:
 	}
 
 	if err := seedStringlyTSDrift(ctx, snap, st, &sum); err != nil {
+		return sum, err
+	}
+
+	if err := seedStringlyPyDrift(ctx, snap, st, &sum); err != nil {
+		return sum, err
+	}
+
+	if err := seedConfigFieldPyContradictions(ctx, snap, st, &sum); err != nil {
 		return sum, err
 	}
 
