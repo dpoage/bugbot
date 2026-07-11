@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/treesitter"
 )
@@ -396,6 +397,131 @@ func TestDedupFiles(t *testing.T) {
 	for i, f := range got {
 		if f != want[i] {
 			t.Errorf("dedupFiles[%d] = %q, want %q", i, f, want[i])
+		}
+	}
+}
+
+// TestIsPublicSymbol_CppVisibilityAuthoritative proves that isPublicSymbol
+// uses VisibilityPublic/VisibilityPrivate as the authoritative answer for C++,
+// ignoring the name entirely.
+func TestIsPublicSymbol_CppVisibilityAuthoritative(t *testing.T) {
+	// A C++ private member with a non-underscore name must be excluded.
+	got := isPublicSymbol(ingest.LangCPP, "secret", treesitter.VisibilityPrivate)
+	if got {
+		t.Error("C++ VisibilityPrivate symbol 'secret': want false, got true")
+	}
+
+	// A C++ public member must be included regardless of name casing.
+	got = isPublicSymbol(ingest.LangCPP, "_openButNamedWeird", treesitter.VisibilityPublic)
+	if !got {
+		t.Error("C++ VisibilityPublic symbol '_openButNamedWeird': want true, got false")
+	}
+}
+
+// TestDeepRefClosure_CppPrivateMemberExcluded proves the end-to-end path:
+// a C++ private member with VisibilityPrivate is excluded from the closure
+// even though its name passes the old underscore heuristic; a public method
+// with VisibilityPublic and a cross-file reference is included.
+func TestDeepRefClosure_CppPrivateMemberExcluded(t *testing.T) {
+	ctx := context.Background()
+	seedFile := "pkg/widget.cpp"
+	refFile := "pkg/main.cpp"
+
+	nav := &fakeRefNav{
+		outlines: map[string][]treesitter.OutlineEntry{
+			seedFile: {
+				// Public method: VisibilityPublic overrides any name heuristic.
+				{
+					Name:       "render",
+					Kind:       treesitter.KindMethod,
+					StartLine:  3,
+					EndLine:    6,
+					Visibility: treesitter.VisibilityPublic,
+				},
+				// Private member: VisibilityPrivate must exclude it even though
+				// the name "computeLayout" would pass the old underscore heuristic.
+				{
+					Name:       "computeLayout",
+					Kind:       treesitter.KindMethod,
+					StartLine:  8,
+					EndLine:    12,
+					Visibility: treesitter.VisibilityPrivate,
+				},
+			},
+		},
+		refs: map[string][]agent.RefLocation{
+			"render":        {{File: refFile, Line: 20}},
+			"computeLayout": {{File: refFile, Line: 30}}, // must NOT appear in closure
+		},
+	}
+
+	refs, relFiles := deepRefClosureWith(ctx, nav, []string{seedFile})
+
+	// Only render should be in the closure.
+	if len(refs) != 1 {
+		t.Fatalf("want 1 ref (render only), got %d: %v", len(refs), refs)
+	}
+	if refs[0].Symbol != "render" {
+		t.Errorf("ref Symbol = %q, want render", refs[0].Symbol)
+	}
+	if refs[0].File != refFile || refs[0].Line != 20 {
+		t.Errorf("ref site = %s:%d, want %s:20", refs[0].File, refs[0].Line, refFile)
+	}
+	// computeLayout must not appear anywhere.
+	for _, r := range refs {
+		if r.Symbol == "computeLayout" {
+			t.Error("computeLayout (VisibilityPrivate) must not appear in closure")
+		}
+	}
+	_ = relFiles
+}
+
+// TestDeepRefClosure_GoRegressionUnchanged proves that Go symbols with
+// VisibilityUnknown continue to use the uppercase export rule unchanged.
+// This is a regression guard: the visibility change must not alter Go behavior.
+func TestDeepRefClosure_GoRegressionUnchanged(t *testing.T) {
+	ctx := context.Background()
+	seedFile := "pkg/store.go"
+	refFile := "main/main.go"
+
+	nav := &fakeRefNav{
+		outlines: map[string][]treesitter.OutlineEntry{
+			seedFile: {
+				// Exported Go symbol with VisibilityUnknown → uppercase rule applies.
+				{
+					Name:       "Store",
+					Kind:       treesitter.KindType,
+					StartLine:  5,
+					EndLine:    20,
+					Visibility: treesitter.VisibilityUnknown,
+				},
+				// Unexported Go symbol with VisibilityUnknown → uppercase rule rejects.
+				{
+					Name:       "internalHelper",
+					Kind:       treesitter.KindFunction,
+					StartLine:  22,
+					EndLine:    30,
+					Visibility: treesitter.VisibilityUnknown,
+				},
+			},
+		},
+		refs: map[string][]agent.RefLocation{
+			"Store":          {{File: refFile, Line: 10}},
+			"internalHelper": {{File: refFile, Line: 15}}, // must NOT appear
+		},
+	}
+
+	refs, _ := deepRefClosureWith(ctx, nav, []string{seedFile})
+
+	if len(refs) != 1 {
+		t.Fatalf("want 1 ref (Store only), got %d: %v", len(refs), refs)
+	}
+	if refs[0].Symbol != "Store" {
+		t.Errorf("ref Symbol = %q, want Store", refs[0].Symbol)
+	}
+	for _, r := range refs {
+		if r.Symbol == "internalHelper" {
+			t.Error("internalHelper (unexported Go) must not appear in closure")
 		}
 	}
 }
