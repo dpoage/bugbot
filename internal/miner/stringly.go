@@ -166,10 +166,11 @@ var shortDeclLHSRe = regexp.MustCompile(`^([^:=]+):=`)
 var wordRe = regexp.MustCompile(`\b(\w+)\b`)
 
 // sanitizeLine blanks the content of inline double-quoted string literals,
-// rune literals, single-line backtick raw-string literals, and strips trailing
-// // line comments from a Go source line. This prevents brace counters and
-// identifier matchers from reacting to `}`, `"`, or identifier-shaped text
-// inside string/rune/raw-string values or comments.
+// rune literals, single-line backtick raw-string literals, single-line
+// /* ... */ block comments, and strips trailing // line comments from a Go
+// source line. This prevents brace counters and identifier matchers from
+// reacting to `}`, `"`, or identifier-shaped text inside string/rune/
+// raw-string values or comments.
 //
 // Rune literals: while outside a double-quoted string or comment, a `'` opens
 // a rune literal; content is blanked until the closing `'`, respecting
@@ -186,8 +187,16 @@ var wordRe = regexp.MustCompile(`\b(\w+)\b`)
 // whole-line-masked); sanitizeLine only neutralizes balanced (even-backtick)
 // single-line raw strings.
 //
-// It does NOT handle block comments (covered by buildBlockCommentMask). The
-// result has the same byte length as the input so line offsets remain valid.
+// Single-line block comments: while outside string/rune/backtick/line-comment,
+// `/*` opens a block comment; content (including the `/*` and `*/` delimiters)
+// is blanked until the closing `*/` ON THE SAME LINE, then scanning resumes
+// normally. If no matching `*/` exists on the line (multi-line block comment),
+// only the `/*` and everything after it is blanked (the line is already
+// whole-line-masked by buildBlockCommentMask so the content is irrelevant, but
+// we must not desync the multi-line mask). A `/*` inside a string/rune/
+// backtick/`//` does NOT open a block comment.
+//
+// The result has the same byte length as the input so line offsets remain valid.
 func sanitizeLine(line string) string {
 	var b strings.Builder
 	b.Grow(len(line))
@@ -269,6 +278,27 @@ func sanitizeLine(line string) string {
 			}
 			break
 		}
+		// Check for single-line block comment /* ... */.
+		if ch == '/' && i+1 < len(line) && line[i+1] == '*' {
+			// Look for the closing */ on this same line.
+			close := strings.Index(line[i+2:], "*/")
+			if close >= 0 {
+				// Matching */ found on this line: blank the entire span
+				// (/* content */) and resume scanning after */.
+				end := i + 2 + close + 2 // index after closing */
+				for ; i < end; i++ {
+					b.WriteByte(' ')
+				}
+				i-- // loop will i++ at top
+				continue
+			}
+			// No closing */ on this line: multi-line block comment.
+			// Blank /* and the rest — buildBlockCommentMask handles the rest.
+			for ; i < len(line); i++ {
+				b.WriteByte(' ')
+			}
+			break
+		}
 		b.WriteByte(ch)
 	}
 	return b.String()
@@ -335,7 +365,10 @@ func varTypedEnumType(line string, namedTypes map[string]bool) (varName, typeNam
 }
 
 // buildBlockCommentMask returns a per-line boolean mask: true if the line is
-// inside a /* ... */ block comment (best-effort, ignores strings containing /*).
+// ENTIRELY inside a /* ... */ block comment (i.e. the block comment opened on
+// a previous line and has not yet closed). Lines that contain a self-contained
+// single-line /* ... */ comment are NOT masked — sanitizeLine handles those
+// inline, preserving surrounding code.
 func buildBlockCommentMask(lines []string) []bool {
 	mask := make([]bool, len(lines))
 	inBlock := false
@@ -349,10 +382,14 @@ func buildBlockCommentMask(lines []string) []bool {
 			if idx := strings.Index(line, "/*"); idx >= 0 {
 				before := line[:idx]
 				if strings.Count(before, `"`)%2 == 0 {
-					inBlock = true
-					mask[i] = true
-					if strings.Contains(line[idx+2:], "*/") {
-						inBlock = false
+					after := line[idx+2:]
+					if strings.Contains(after, "*/") {
+						// Single-line /* ... */ — not a whole-line mask.
+						// sanitizeLine blanks the span; no mask needed.
+					} else {
+						// Opens a multi-line block comment.
+						inBlock = true
+						mask[i] = true
 					}
 				}
 			}

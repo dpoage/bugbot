@@ -8,8 +8,9 @@ package stringly_clean
 type BacktickMode string
 
 const (
-	BacktickModeRun  BacktickMode = "run"
-	BacktickModeStop BacktickMode = "stop"
+	BacktickModeRun   BacktickMode = "run"
+	BacktickModeStop  BacktickMode = "stop"
+	BacktickModePause BacktickMode = "pause" // uncovered: absent from switch to make test fail-before/pass-after
 )
 
 func runBacktickWordPair(cmd string) {
@@ -18,5 +19,16 @@ func runBacktickWordPair(cmd string) {
 	switch cmd {
 	case "run":
 	case "stop":
+	}
+}
+
+// typedSwitch triggers a genuine type-B lead for the missing "pause" arm.
+// Without backtick tracking, the word-pair above would ALSO falsely resolve
+// this function's raw-string switch — producing extra false leads.
+func dispatchBacktickMode(m BacktickMode) {
+	switch m {
+	case "run":
+	case "stop":
+		// "pause" deliberately missing to produce exactly 1 genuine lead
 	}
 }
