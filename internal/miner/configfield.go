@@ -75,17 +75,21 @@ var cfValidatorRejectNegRe = regexp.MustCompile(`(?:\b|\.)([A-Z][A-Za-z0-9_]*)\s
 
 // cfNormativeDocRe detects normative patterns BOUND to the field name.
 // Accepts:
-//   - "<FieldName> must ..."
+//   - "<FieldName> must ..."  (FieldName starts with an uppercase letter)
 //   - "must be set/provided/configured/non-empty/positive/valid/enabled"
 //   - "is required" / "is mandatory"
 //
 // This avoids prose like "required dependencies are missing" where "required"
 // describes external dependencies, not the field itself.
+//
+// Note: (?i) is intentionally absent from the field-name clause so that the
+// [A-Z] anchor correctly requires PascalCase — only the must-be / is-required
+// alternatives are inherently case-insensitive enough to omit it.
 var cfNormativeDocRe = regexp.MustCompile(
-	`(?i)(?:` +
+	`(?:` +
 		`\b[A-Z][A-Za-z0-9_]*\s+must\b` + // FieldName must ...
-		`|must\s+be\s+(?:set|provided|configured|non-empty|positive|valid|enabled|specified)` +
-		`|is\s+(?:required|mandatory)` +
+		`|(?i)must\s+be\s+(?:set|provided|configured|non-empty|positive|valid|enabled|specified)` +
+		`|(?i)is\s+(?:required|mandatory)` +
 		`)`)
 
 // cfFieldAccessRe matches dotted field references: `.FieldName` or `cfg.FieldName`.
@@ -108,8 +112,8 @@ var cfSentinelDocRe = regexp.MustCompile(`(?i)\b(unlimited|means\b|disable[sd]?|
 var cfMethodReceiverRe = regexp.MustCompile(`^func\s*\(\s*\w+\s+\*?([A-Za-z][A-Za-z0-9_]*)\s*\)`)
 
 // cfPackageClauseRe matches the package declaration line and extracts the
-// package name. Used to qualify the join key with the package so that
-// same-named structs in different packages never collide.
+// package name. Retained for pkg field population; the join key now uses
+// filepath.Dir(f.Path) (Go package identity is the directory, not the clause).
 // Group 1: package name.
 var cfPackageClauseRe = regexp.MustCompile(`^package\s+(\w+)`)
 
@@ -121,6 +125,7 @@ type cfFieldDecl struct {
 	name       string // exported field name
 	structType string // enclosing struct type name
 	pkg        string // package name from package clause of this file
+	dir        string // directory of this file (filepath.Dir(f.Path)); used as join key
 	file       string
 	line       int    // 1-based line of the field declaration
 	docComment string // full doc comment block (flattened)
@@ -132,6 +137,7 @@ type cfValidatorSite struct {
 	fieldName   string // field name referenced in the condition
 	structType  string // enclosing struct type name (empty if unknown)
 	pkg         string // package name from package clause of this file
+	dir         string // directory of this file (filepath.Dir(f.Path)); used as join key
 	file        string
 	line        int
 	rejectsZero bool // true if the guard rejects zero / non-positive
@@ -153,12 +159,11 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 	// Collect all field declarations and validator sites across the snapshot.
 	// Also collect a "reference set" per file for the never-read signal.
 	allDecls := make(map[string][]cfFieldDecl)    // file → decls
-	allVals := make(map[string][]cfValidatorSite) // "StructType\x00fieldName" → sites
+	allVals := make(map[string][]cfValidatorSite) // "dir\x00StructType\x00fieldName" → sites
 
-	// referenceSet: fieldName → set of files that reference it
-	// Counts both dotted (.FieldName) and bare-identifier references so
-	// package-level consts referenced in assignments/comparisons are not
-	// falsely flagged.
+	// referenceSet: fieldName → set of files that reference it.
+	// Counts dotted (.FieldName) accesses; fields are always accessed with a
+	// receiver qualifier in Go, so bare-identifier harvesting is not needed.
 	referenceSet := make(map[string]map[string]bool)
 
 	for _, f := range snap.Files {
@@ -181,9 +186,20 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 		decls := cfPassFieldDecls(f.Path, lines)
 		vals := cfPassValidators(f.Path, lines)
 
+		// Populate the dir field: Go package identity is the directory,
+		// not the package-clause name. Two files with `package config` in
+		// different directories are in DIFFERENT packages.
+		fDir := filepath.Dir(f.Path)
+		for i := range decls {
+			decls[i].dir = fDir
+		}
+		for i := range vals {
+			vals[i].dir = fDir
+		}
+
 		allDecls[f.Path] = decls
 		for _, v := range vals {
-			key := v.pkg + "\x00" + v.structType + "\x00" + v.fieldName
+			key := v.dir + "\x00" + v.structType + "\x00" + v.fieldName
 			allVals[key] = append(allVals[key], v)
 		}
 
@@ -198,7 +214,6 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 			}
 			referenceSet[name][f.Path] = true
 		}
-
 	}
 
 	seen := make(map[leadKey]bool)
@@ -213,7 +228,14 @@ func seedConfigFieldContradictions(ctx context.Context, snap *ingest.Snapshot, s
 				continue
 			}
 			dv := *d.defaultVal
-			key := d.pkg + "\x00" + d.structType + "\x00" + d.name
+			// If the field's own doc documents zero as a sentinel value
+			// (e.g. "0 = auto", "0 means unlimited"), the default is
+			// intentional — skip to avoid false positives on the
+			// normalize-then-validate pattern.
+			if cfSentinelDocRe.MatchString(d.docComment) {
+				continue
+			}
+			key := d.dir + "\x00" + d.structType + "\x00" + d.name
 			validators, ok := allVals[key]
 			if !ok {
 				continue
