@@ -197,6 +197,15 @@ var wordRe = regexp.MustCompile(`\b(\w+)\b`)
 // backtick/`//` does NOT open a block comment.
 //
 // The result has the same byte length as the input so line offsets remain valid.
+//
+// KNOWN LIMITATION (tracked: bugbot-my7a.3.1): this per-line sanitizer covers
+// all five Go single-line non-code forms, but the BOUNDARY line of a MULTI-line
+// block comment or raw string is whole-line-masked by buildBlockCommentMask /
+// buildBacktickMask, which drops real code co-located with a multi-line `/*` or
+// backtick opener/closer (e.g. a `case` label or `{` on the line a multi-line
+// comment opens). Rare and gofmt-canonical; can yield a false "missing case"
+// lead. The durable fix is a stateful cross-line sanitizer that retires both
+// masks — deferred to the follow-up bead.
 func sanitizeLine(line string) string {
 	var b strings.Builder
 	b.Grow(len(line))
