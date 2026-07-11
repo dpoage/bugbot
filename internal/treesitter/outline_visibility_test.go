@@ -334,3 +334,48 @@ func TestOutlineVisibility_CPP_CharLiteralQuote_DefectC(t *testing.T) {
 		t.Errorf("closed.Visibility = %q, want private — private: section must be respected after char literal line", closed.Visibility)
 	}
 }
+
+// TestOutlineVisibility_Rust_PubActivation is the integration regression for
+// the tdq5.1 x tdq5.4 merge interaction: rustVisibilityMap was implemented
+// while the Rust grammar was absent (dormant — grammarForExt(".rs") was nil),
+// and activated the moment the grammar landed. This test drives the REAL
+// Outline path over parsed Rust and pins the pub semantics: pub and
+// pub(crate) are public (crate-internal is still cross-file), an
+// attribute-preceded pub item resolves through the #[...] walk-back, and
+// unmodified items are private.
+func TestOutlineVisibility_Rust_PubActivation(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"vis.rs": "pub fn api() -> u32 { 1 }\n" + // 1: public
+			"fn internal() -> u32 { 2 }\n" + // 2: private
+			"pub(crate) fn crate_wide() -> u32 { 3 }\n" + // 3: public (crate counts)
+			"#[derive(Debug)]\n" + // 4: attribute line
+			"pub struct Exported { v: u32 }\n" + // 5: public via walk-back-free same-line pub
+			"struct Hidden { v: u32 }\n", // 6: private
+	})
+	b := New(root)
+	entries, err := b.Outline(filepath.Join(root, "vis.rs"))
+	if err != nil {
+		t.Fatalf("Outline: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no outline entries — Rust grammar not active?")
+	}
+
+	want := map[string]Visibility{
+		"api":        VisibilityPublic,
+		"internal":   VisibilityPrivate,
+		"crate_wide": VisibilityPublic,
+		"Exported":   VisibilityPublic,
+		"Hidden":     VisibilityPrivate,
+	}
+	for name, wantVis := range want {
+		e, ok := outlineByName(entries, name)
+		if !ok {
+			t.Errorf("%s not found in outline", name)
+			continue
+		}
+		if e.Visibility != wantVis {
+			t.Errorf("%s.Visibility = %q, want %q", name, e.Visibility, wantVis)
+		}
+	}
+}

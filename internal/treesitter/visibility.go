@@ -342,12 +342,17 @@ func isCppAnonNamespace(before string) bool {
 
 // rustVisibilityMap analyzes a Rust source and returns 0-based start row →
 // Visibility for each definition row in startRows. Presence of a "pub" or
-// "pub(...)" modifier on the definition line or on a preceding non-attribute
-// line (up to 5 lines back) → public; absence → private.
+// "pub(...)" modifier on the definition row → public; absence → private.
+// pub(crate)/pub(super) count as public: crate-internal is still cross-file
+// visible, which is what the deep-refs closure cares about.
 //
-// This function is implemented and tested but its results are only consumed
-// once the Rust grammar lands (tdq5.1). Until then no .rs tags are produced
-// by tagFile, so the map is never queried in production.
+// The definition row is the tag node's start row. In tree-sitter-rust the
+// visibility_modifier is the FIRST CHILD of the item node (outer #[...]
+// attributes are separate sibling nodes), so when an item has a pub modifier
+// it is always on the node's start row — the same-line check is complete.
+// Checking any earlier line would read the PREVIOUS item's declaration and
+// inherit its visibility (activation bug caught by
+// TestOutlineVisibility_Rust_PubActivation).
 func rustVisibilityMap(src []byte, startRows []uint32) map[uint32]Visibility {
 	lines := bytes.Split(src, []byte("\n"))
 	out := make(map[uint32]Visibility, len(startRows))
@@ -363,24 +368,6 @@ func rustLineVisibility(lines [][]byte, row uint32) Visibility {
 	}
 	if hasPubToken(lines[row]) {
 		return VisibilityPublic
-	}
-	// Walk backward past attribute lines (#[...]) to find pub on a prior line.
-	for i := 1; i <= 5; i++ {
-		prev := int(row) - i
-		if prev < 0 {
-			break
-		}
-		trimmed := bytes.TrimSpace(lines[prev])
-		if len(trimmed) == 0 {
-			break // blank line between declarations
-		}
-		if len(trimmed) > 0 && trimmed[0] == '#' {
-			continue // attribute line — keep scanning up
-		}
-		if hasPubToken(lines[prev]) {
-			return VisibilityPublic
-		}
-		break
 	}
 	return VisibilityPrivate
 }
