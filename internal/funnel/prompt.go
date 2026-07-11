@@ -54,7 +54,9 @@ defect_kind is a closed category — pick exactly one of: nil-deref (dereferenci
 subject is the name of the function, method, or symbol where the defect lives (e.g. "Greeting" or "(*Handler).ServeHTTP") — the same symbol outline/read_symbol would show you as the enclosing declaration.
 
 Severity: critical = data loss / crash in normal use / security hole; high = crash or wrong result on a common path; medium = wrong result on an edge path; low = minor or hard-to-hit.
-Confidence: high = you traced it and it is clearly a bug; medium = strong evidence but one assumption remains; low = plausible but unconfirmed (these will be dropped, so prefer to confirm or omit).`
+Confidence: high = you traced it and it is clearly a bug; medium = strong evidence but one assumption remains; low = plausible but unconfirmed (these will be dropped, so prefer to confirm or omit).
+
+Optionally include a top-level "traversal" field summarising the sites you enumerated and visited during your inspection; this powers the observability feed but never affects candidate scoring.`
 }
 
 // candidatesSchema is the JSON schema the finder must satisfy. A top-level
@@ -82,6 +84,15 @@ var candidatesSchema = json.RawMessage(`{
         "required": ["file", "line", "title", "description", "severity", "evidence", "confidence", "defect_kind", "subject"],
         "additionalProperties": false
       }
+    },
+    "traversal": {
+      "type": "object",
+      "description": "Optional traversal summary: sites the finder enumerated and visited. Omit if not tracking traversal.",
+      "properties": {
+        "enumerated": {"type": "array", "items": {"type": "string"}, "description": "Sites considered as candidates for inspection."},
+        "visited":    {"type": "array", "items": {"type": "string"}, "description": "Sites actually traced in detail."}
+      },
+      "additionalProperties": false
     }
   },
   "required": ["candidates"],
@@ -91,6 +102,17 @@ var candidatesSchema = json.RawMessage(`{
 // candidateList is the parsed finder output.
 type candidateList struct {
 	Candidates []rawCandidate `json:"candidates"`
+	Traversal  *rawTraversal  `json:"traversal,omitempty"`
+}
+
+// rawTraversal is the optional traversal summary a finder may include in its
+// output. It records the sites the finder enumerated (considered for
+// inspection) and visited (actually traced in detail). Both slices are
+// model-authored string identifiers; they are persisted verbatim in the
+// finder_traversals audit table without normalisation.
+type rawTraversal struct {
+	Enumerated []string `json:"enumerated"`
+	Visited    []string `json:"visited"`
 }
 
 // rawCandidate is one finder-reported bug, before triage.

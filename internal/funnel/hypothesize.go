@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -428,7 +429,17 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			task := u.customTask
 			if task == "" {
 				if u.strategy.BuildTask != nil {
-					task = u.strategy.BuildTask(u.files, u.leads)
+					// Deep strategy unit: precompute the cross-reference closure
+					// of the seed files' load-bearing symbols so the agent
+					// confirms a specific set instead of rediscovering it.
+					// deepRefClosure is NIL-SAFE: nil/errored nav returns
+					// (nil, nil), producing byte-identical output to today.
+					refs, relFiles := f.deepRefClosure(ctx, u.files)
+					taskFiles := dedupFiles(u.files, relFiles)
+					var b strings.Builder
+					b.WriteString(u.strategy.BuildTask(taskFiles, u.leads))
+					appendRefsSection(&b, refs)
+					task = b.String()
 				} else {
 					task = finderTask(u.files, u.leads, cart.ensureContextFor(ctx, u.files))
 				}
@@ -439,7 +450,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			startedAt := time.Now()
 			// runCtx (not ctx) so a breaker trip unblocks the in-flight runner
 			// without disturbing the caller's context.
-			cands, status, outcome, pm, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt, scope, f.toolHealthSinkFor(result, progress.RoleFinder, label))
+			cands, status, outcome, pm, traversal, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt, scope, f.toolHealthSinkFor(result, progress.RoleFinder, label))
 			finishedAt := time.Now()
 
 			// Emit KindAgentFinished here (not inside runFinderWithPrompt) so we
@@ -643,6 +654,25 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				}
 			}
 			f.recordFinderUnitWithTimeDetail(ctx, scanRunID, u, unitIdx, recordStatus, unitDetail, startedAt, finishedAt, inTokens, outTokens, cacheRead, candCount, unitLeadsPosted, result)
+			// Persist finder traversal audit row (best-effort, never aborts scan).
+			// Only written for finderOK units that reported a non-nil traversal
+			// field in their output JSON. Units that omit the optional traversal
+			// field contribute zero rows, which is the expected default (the
+			// traversal field is opt-in to avoid noisy empty rows).
+			if recordStatus == "ok" && traversal != nil {
+				ft := store.FinderTraversal{
+					ScanRunID:      scanRunID,
+					Lens:           u.lens.Name,
+					Strategy:       u.strategy.Name,
+					Files:          u.files,
+					Enumerated:     traversal.Enumerated,
+					Visited:        traversal.Visited,
+					CandidateCount: len(cands),
+				}
+				if ftErr := f.store.AddFinderTraversal(ctx, ft); ftErr != nil {
+					f.note(result, fmt.Sprintf("observability: AddFinderTraversal failed (unit %d, %s): %v", unitIdx, u.lens.Name, ftErr))
+				}
+			}
 
 			// Per-unit coverage: stamp this unit's files immediately when finderOK
 			// on a sweep run (touchCoverage=true). This replaces the old run-end

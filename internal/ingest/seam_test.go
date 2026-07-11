@@ -262,3 +262,357 @@ func TestEnumerateSeams_LineNumberPopulated(t *testing.T) {
 		t.Errorf("Go side line = %d, want 4", goLine)
 	}
 }
+
+// TestEnumerateSeams_HTTPRouteServerOnly verifies that a Go server registering
+// a route with no client caller produces exactly one SeamHTTPRoute seam whose
+// key is the normalized path and whose side points at the server file.
+func TestEnumerateSeams_HTTPRouteServerOnly(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"server/handlers.go": `package server
+
+import "net/http"
+
+func Register(mux *http.ServeMux) {
+	mux.HandleFunc("/widgets", handleWidgets)
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"server/handlers.go"})
+	seams := EnumerateSeams(snap)
+	s := seamByKey(seams, SeamHTTPRoute, "/widgets")
+	if s == nil {
+		t.Fatal("expected SeamHTTPRoute for /widgets, got none")
+	}
+	if !hasSide(s, "server/handlers.go") {
+		t.Errorf("server file not in sides: %+v", s.Sides)
+	}
+}
+
+// TestEnumerateSeams_HTTPRouteClientOnly verifies that a Go client calling a
+// URL path with no server registration produces a SeamHTTPRoute seam (the
+// called-but-never-registered case).
+func TestEnumerateSeams_HTTPRouteClientOnly(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"client/client.go": `package client
+
+import (
+	"net/http"
+)
+
+func GetWidgets() (*http.Response, error) {
+	return http.Get("/widgets")
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"client/client.go"})
+	seams := EnumerateSeams(snap)
+	s := seamByKey(seams, SeamHTTPRoute, "/widgets")
+	if s == nil {
+		t.Fatal("expected SeamHTTPRoute for /widgets (client-only), got none")
+	}
+	if !hasSide(s, "client/client.go") {
+		t.Errorf("client file not in sides: %+v", s.Sides)
+	}
+}
+
+// TestEnumerateSeams_HTTPRouteBothSides verifies that a server registration and
+// a client call to the same route across two distinct files produces a seam
+// with both files as sides.
+func TestEnumerateSeams_HTTPRouteBothSides(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"server/handlers.go": `package server
+
+import "net/http"
+
+func Register(mux *http.ServeMux) {
+	mux.HandleFunc("/widgets", handleWidgets)
+}
+`,
+		"client/client.go": `package client
+
+import "net/http"
+
+func GetWidgets() (*http.Response, error) {
+	return http.Get("/widgets")
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"server/handlers.go", "client/client.go"})
+	seams := EnumerateSeams(snap)
+	s := seamByKey(seams, SeamHTTPRoute, "/widgets")
+	if s == nil {
+		t.Fatal("expected SeamHTTPRoute for /widgets (both sides), got none")
+	}
+	if !hasSide(s, "server/handlers.go") {
+		t.Errorf("server file not in sides: %+v", s.Sides)
+	}
+	if !hasSide(s, "client/client.go") {
+		t.Errorf("client file not in sides: %+v", s.Sides)
+	}
+}
+
+// TestEnumerateSeams_HTTPRouteSelfReferenceSuppressed verifies that a single
+// file containing both a server registration and a client call for the same
+// path does NOT produce a seam (the producer/consumer-split gate).
+func TestEnumerateSeams_HTTPRouteSelfReferenceSuppressed(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"all_in_one.go": `package main
+
+import "net/http"
+
+func main() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/widgets", func(w http.ResponseWriter, r *http.Request) {})
+	resp, _ := http.Get("/widgets")
+	_ = resp
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"all_in_one.go"})
+	seams := EnumerateSeams(snap)
+	s := seamByKey(seams, SeamHTTPRoute, "/widgets")
+	if s != nil {
+		t.Errorf("expected no seam for single-file self-reference, got %+v", s)
+	}
+}
+
+// TestEnumerateSeams_RPCMethodProtoOnly verifies that a .proto rpc declaration
+// with no code call site produces a SeamRPCMethod seam (declared-but-uncalled).
+func TestEnumerateSeams_RPCMethodProtoOnly(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"api/widget.proto": `syntax = "proto3";
+
+service WidgetService {
+  rpc GetWidget (GetWidgetRequest) returns (GetWidgetResponse);
+}
+`,
+	})
+	// .proto files have LangOther; makeSnapshot uses DetectLanguage.
+	// We must include the .proto path in the snapshot so the scanner sees it.
+	snap := makeSnapshot(t, root, []string{"api/widget.proto"})
+	seams := EnumerateSeams(snap)
+	s := seamByKey(seams, SeamRPCMethod, "GetWidget")
+	if s == nil {
+		t.Fatal("expected SeamRPCMethod for GetWidget (proto-only), got none")
+	}
+	if !hasSide(s, "api/widget.proto") {
+		t.Errorf("proto file not in sides: %+v", s.Sides)
+	}
+}
+
+// TestEnumerateSeams_RPCMethodBothSides verifies that a .proto rpc declaration
+// AND a Go call site produce a seam with both files named as sides.
+func TestEnumerateSeams_RPCMethodBothSides(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"api/widget.proto": `syntax = "proto3";
+
+service WidgetService {
+  rpc GetWidget (GetWidgetRequest) returns (GetWidgetResponse);
+}
+`,
+		"client/widget_client.go": `package client
+
+import (
+	"context"
+	pb "example.com/api"
+)
+
+func Fetch(ctx context.Context, c pb.WidgetServiceClient) {
+	resp, _ := c.GetWidget(ctx, &pb.GetWidgetRequest{})
+	_ = resp
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"api/widget.proto", "client/widget_client.go"})
+	seams := EnumerateSeams(snap)
+	s := seamByKey(seams, SeamRPCMethod, "GetWidget")
+	if s == nil {
+		t.Fatal("expected SeamRPCMethod for GetWidget (both sides), got none")
+	}
+	if !hasSide(s, "api/widget.proto") {
+		t.Errorf("proto file not in sides: %+v", s.Sides)
+	}
+	if !hasSide(s, "client/widget_client.go") {
+		t.Errorf("client file not in sides: %+v", s.Sides)
+	}
+}
+
+// TestEnumerateSeams_HTTPRouteNewRequest verifies the http.NewRequest consumer
+// pattern is recognised as a consumer side.
+func TestEnumerateSeams_HTTPRouteNewRequest(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"client/fetch.go": `package client
+
+import "net/http"
+
+func Fetch() (*http.Response, error) {
+	req, _ := http.NewRequest("GET", "http://api.example.com/widgets", nil)
+	return http.DefaultClient.Do(req)
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"client/fetch.go"})
+	seams := EnumerateSeams(snap)
+	s := seamByKey(seams, SeamHTTPRoute, "/widgets")
+	if s == nil {
+		t.Fatal("expected SeamHTTPRoute for /widgets (NewRequest), got none")
+	}
+	if !hasSide(s, "client/fetch.go") {
+		t.Errorf("fetch file not in sides: %+v", s.Sides)
+	}
+}
+
+// TestEnumerateSeams_SeamOrdering verifies that SeamHTTPRoute and SeamRPCMethod
+// rows appear after SeamDataFile and SeamEnvVar rows in the output (Kind ordering).
+func TestEnumerateSeams_SeamOrdering(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"go/a.go": `package a
+
+import (
+	"os"
+	"net/http"
+)
+
+var _ = os.Getenv("MY_VAR")
+
+func init() {
+	http.HandleFunc("/alpha", nil)
+}
+`,
+		"py/b.py": `import os
+x = os.getenv("MY_VAR")
+`,
+		"client/c.go": `package c
+
+import "net/http"
+
+func f() { http.Get("/alpha") }
+`,
+		"api/svc.proto": `syntax = "proto3";
+service Svc { rpc Foo (A) returns (B); }
+`,
+	})
+	snap := makeSnapshot(t, root, []string{
+		"go/a.go",
+		"py/b.py",
+		"client/c.go",
+		"api/svc.proto",
+	})
+	seams := EnumerateSeams(snap)
+
+	// Find indices of each kind in the output slice.
+	kindIndex := func(kind SeamKind) int {
+		for i, s := range seams {
+			if s.Kind == kind {
+				return i
+			}
+		}
+		return -1
+	}
+	envIdx := kindIndex(SeamEnvVar)
+	httpIdx := kindIndex(SeamHTTPRoute)
+	rpcIdx := kindIndex(SeamRPCMethod)
+	if envIdx < 0 {
+		t.Fatal("SeamEnvVar not found")
+	}
+	if httpIdx < 0 {
+		t.Fatal("SeamHTTPRoute not found")
+	}
+	if rpcIdx < 0 {
+		t.Fatal("SeamRPCMethod not found")
+	}
+	if envIdx >= httpIdx {
+		t.Errorf("SeamEnvVar (%d) must come before SeamHTTPRoute (%d)", envIdx, httpIdx)
+	}
+	if httpIdx >= rpcIdx {
+		t.Errorf("SeamHTTPRoute (%d) must come before SeamRPCMethod (%d)", httpIdx, rpcIdx)
+	}
+}
+
+// TestEnumerateSeams_RPCMethodNoPrecisionFlood is the negative-precision guard
+// that would have caught the original flooding bug. A Go file containing
+// multiple ordinary ctx-first method calls (db.ExecContext, repo.UpsertFinding,
+// context.WithTimeout, exec.CommandContext) with NO .proto file and NO gRPC
+// server handler MUST emit ZERO SeamRPCMethod seams. The calls are
+// indistinguishable from gRPC client stubs by pattern alone; only a real
+// producer (proto declaration or handler) makes them seam evidence.
+func TestEnumerateSeams_RPCMethodNoPrecisionFlood(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"store/db.go": `package store
+
+import (
+	"context"
+	"database/sql"
+	"os/exec"
+)
+
+type Repo struct{ db *sql.DB }
+
+func (r *Repo) UpsertFinding(ctx context.Context, id string) error {
+	_, err := r.db.ExecContext(ctx, "INSERT INTO findings VALUES ($1)", id)
+	return err
+}
+
+func (r *Repo) ListFindings(ctx context.Context) error {
+	rows, err := r.db.QueryContext(ctx, "SELECT id FROM findings")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	ctx2, cancel := context.WithTimeout(ctx, 0)
+	defer cancel()
+	_ = ctx2
+
+	cmd := exec.CommandContext(ctx, "git", "status")
+	_ = cmd
+	return nil
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"store/db.go"})
+	seams := EnumerateSeams(snap)
+	for _, s := range seams {
+		if s.Kind == SeamRPCMethod {
+			t.Errorf("unexpected SeamRPCMethod %q: ordinary ctx-first calls must not produce RPC seams without a proto/handler producer", s.Key)
+		}
+	}
+}
+
+// TestEnumerateSeams_HTTPClientNonRoutableNoPrecisionFlood is the negative-
+// precision guard for the HTTP-route detector: a Go file whose .Get/.Post
+// string arguments are NON-routable (cache key, map key — no leading slash,
+// no http:// scheme) MUST emit ZERO SeamHTTPRoute seams. This must fail if
+// the httpClientCallRe path-anchor or normalizeHTTPPath leading-slash guard
+// is loosened to accept bare strings.
+func TestEnumerateSeams_HTTPClientNonRoutableNoPrecisionFlood(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"cache/client.go": `package cache
+
+import "context"
+
+type Cache struct{}
+type MapStore map[string]string
+
+// .Get with a plain cache key — NOT a URL path.
+func (c *Cache) Lookup(ctx context.Context) string {
+	return c.Get("userkey")
+}
+
+// .Post with a non-path key — NOT a URL path.
+func (m MapStore) Store(ctx context.Context) {
+	m.Post("bucket/object", "value")
+}
+
+func (c *Cache) Get(key string) string   { return "" }
+func (m MapStore) Post(key, val string)  {}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"cache/client.go"})
+	seams := EnumerateSeams(snap)
+	for _, s := range seams {
+		if s.Kind == SeamHTTPRoute {
+			t.Errorf("unexpected SeamHTTPRoute %q: non-routable .Get/.Post string args must not produce HTTP seams", s.Key)
+		}
+	}
+}

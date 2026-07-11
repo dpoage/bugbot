@@ -92,6 +92,23 @@ func appendLeadsSection(b *strings.Builder, leads []store.Lead) {
 	}
 }
 
+// appendRefsSection renders the PRECOMPUTED CROSS-REFERENCES block when refs
+// is non-empty, mirroring appendLeadsSection's newline-flatten prompt-injection
+// guard. Empty refs => appends nothing, preserving byte-identity with today's
+// output when code-nav is unavailable.
+func appendRefsSection(b *strings.Builder, refs []deepRef) {
+	if len(refs) == 0 {
+		return
+	}
+	b.WriteString("\nPRECOMPUTED CROSS-REFERENCES (the far ends of this seed's contracts/state — verify each for disagreement; may be incomplete):\n")
+	for _, r := range refs {
+		// Flatten the symbol name so a pathological name cannot fabricate
+		// extra lines or break out of this section's framing.
+		sym := strings.Join(strings.Fields(r.Symbol), "")
+		fmt.Fprintf(b, "  - %s referenced at %s:%d\n", sym, r.File, r.Line)
+	}
+}
+
 // stateTraceDeepSystemClause is the verbatim system-prompt addition for the
 // state-trace-deep strategy. It reframes the chunk as a starting point for
 // tracing shared mutable state and lifecycle-managed resources to every
