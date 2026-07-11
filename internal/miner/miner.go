@@ -168,6 +168,12 @@ type Summary struct {
 	// ConfigFieldPyLeads counts leads from the Python config-field contradiction
 	// pass (pydantic/dataclass Field(default=X) vs validator rejecting X).
 	ConfigFieldPyLeads int
+	// StringlyRsDriftLeads counts leads from the Rust &str match-drift pass
+	// (const &str producer pool vs match arm string literals — Rust only).
+	StringlyRsDriftLeads int
+	// RsParseFailures counts Rust files skipped due to HasError() in the parse tree.
+	// Expected ~7.1% on real corpora (ripgrep + serde corpus measurement).
+	RsParseFailures int
 }
 
 type leadKey struct {
@@ -273,6 +279,10 @@ consLoop:
 	}
 
 	if err := seedConfigFieldPyContradictions(ctx, snap, st, &sum); err != nil {
+		return sum, err
+	}
+
+	if err := seedStringlyRsDrift(ctx, snap, st, &sum); err != nil {
 		return sum, err
 	}
 
