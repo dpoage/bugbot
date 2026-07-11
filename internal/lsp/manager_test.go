@@ -316,6 +316,36 @@ func TestDefaultServersCSharp(t *testing.T) {
 	}
 }
 
+// TestDefaultServersJdtls asserts that the built-in registry contains exactly
+// one entry for ".java" files, that it is jdtls, carries no extra arguments
+// (jdtls auto-derives its per-workspace data directory from the working
+// directory — see startServer: cmd.Dir = rootDir), and maps the extension to
+// the "java" language identifier.
+func TestDefaultServersJdtls(t *testing.T) {
+	servers := DefaultServers()
+
+	var javaConfigs []ServerConfig
+	for _, cfg := range servers {
+		if _, ok := cfg.LanguageIDs[".java"]; ok {
+			javaConfigs = append(javaConfigs, cfg)
+		}
+	}
+
+	if len(javaConfigs) != 1 {
+		t.Fatalf("expected exactly one config claiming .java, got %d: %v", len(javaConfigs), javaConfigs)
+	}
+	cfg := javaConfigs[0]
+	if cfg.Cmd != "jdtls" {
+		t.Errorf("config for .java has Cmd %q, want %q", cfg.Cmd, "jdtls")
+	}
+	if got := cfg.LanguageIDs[".java"]; got != "java" {
+		t.Errorf("languageId for .java = %q, want %q", got, "java")
+	}
+	if len(cfg.Args) != 0 {
+		t.Errorf("jdtls config must have no Args (data dir is auto-derived from CWD), got %v", cfg.Args)
+	}
+}
+
 // TestManagerConcurrentQueriesAcrossCrash exercises a server crash in the
 // middle of several concurrent queries. The manager allows exactly one
 // restart (maxRestarts=1), and the first instance crashes on its first

@@ -69,6 +69,14 @@ func DefaultServers() []ServerConfig {
 			},
 		},
 		{
+			// jdtls (Eclipse JDT Language Server) speaks LSP over stdio via the
+			// 'jdtls' Python wrapper script. No -data flag is needed: the manager
+			// sets cmd.Dir = rootDir, so jdtls auto-derives a per-workspace data
+			// directory from the working directory under the system temp dir.
+			Cmd:         "jdtls",
+			LanguageIDs: map[string]string{".java": "java"},
+		},
+		{
 			// csharp-ls speaks LSP over stdio with no extra arguments.
 			Cmd:         "csharp-ls",
 			LanguageIDs: map[string]string{".cs": "csharp"},
