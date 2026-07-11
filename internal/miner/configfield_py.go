@@ -8,57 +8,61 @@ package miner
 // field(default=X) default value and a validator in the SAME class that
 // rejects exactly that sentinel value.
 //
-// Join key: (file, class name, field name) — the decorator-to-field binding
-// is explicit in pydantic: @validator('fieldname') or @field_validator('fieldname')
-// names the field as a string literal, making the join tractable without
-// a type checker (unlike TypeScript Zod chains which required only consumer-side
-// evidence and was descoped).
+// # Why tree-sitter (not regex)
+//
+// The first implementation used regex sweeps. The oracle identified two
+// proven false-positive failure modes:
+//
+//  (a) Docstring FP: pyFieldDefRe matched `timeout: int = Field(default=0)`
+//      appearing inside a triple-quoted docstring, which is a string literal
+//      in the AST, not an assignment — the AST approach rejects it for free.
+//
+//  (b) Nested-class scope FP: pyClassDeclRe was column-0-anchored, so an
+//      inner class never reset the "current class" tracking, causing an inner
+//      class's validator to misjoin an outer class's field — violating the
+//      same-class guard. Tree-sitter's class_definition containment provides
+//      exact scoping with no manual state machine.
+//
+// Join key: (file path, class startByte, field name). Both the field and
+// the validator query capture their enclosing class_definition node, so
+// containment-based joining is structurally exact.
 //
 // # Detection algorithm
 //
-//  1. passPyCFFields: find class-body assignments of the form:
-//       fieldname: T = Field(default=SENTINEL)
-//       fieldname: T = field(default=SENTINEL)
-//     where SENTINEL is an integer or None. Emit (class, field, sentinel).
+//  1. pyCFFieldQuery: find class-body typed assignments of the form:
+//       fieldname: T = Field(default=SENTINEL)   where SENTINEL is integer or None
+//     Capture: class.def, class.name, field.name, kwarg.val (the sentinel node).
 //
-//  2. passPyCFValidators: find decorated functions of the form:
-//       @validator('fieldname') / @field_validator('fieldname')
-//       def ...(cls, v):
-//           if v OP SENTINEL:
-//               raise ...
-//     Emit (class, field, sentinel, op) for the first raise-bearing guard.
+//  2. pyCFValidatorQuery: find class-body decorated functions whose
+//     decorator is @validator('field') or @field_validator('field')
+//     and whose body contains `if param OP SENTINEL: raise ...`.
+//     Capture: class.def, class.name, field.name (from decorator string),
+//              guard.cond (comparison_operator node for operator extraction).
 //
-//  3. Join: if a field's default matches a validator's reject sentinel,
-//     and the reject condition covers the default (e.g. default=0 + reject
-//     v<=0 → contradiction; default=-1 + reject v<0 → contradiction),
-//     emit a lead.
+//  3. Join: group fields and validators by (classStartByte, fieldName).
+//     For each joined pair, call cfPyContradicts to evaluate whether the
+//     default is covered by the reject condition.
 //
 // # Precision guards
 //
-//   - Sentinel must be an integer literal or None (strings excluded: too
-//     ambiguous without full type resolution).
-//   - Only Field()/field() RHS calls (not bare defaults or other callables).
-//   - Validator must have a raise statement in the guard body; a bare
-//     conditional without raise is not a rejection.
-//   - Both sides must be in the SAME class (not cross-class).
+//   - Sentinel must be integer literal or None node (strings excluded).
+//   - Field must use Field()/field() with explicit default= keyword.
+//   - Validator decorator must be @validator or @field_validator.
+//   - Guard must have raise in the consequence (if_statement → block → raise_statement).
+//   - Both field and validator must be in the SAME class_definition node
+//     (by startByte equality, not name equality — handles same-name nested classes).
 //   - Test files are skipped (isPyTestPath gate).
-//
-// # Implementation approach
-//
-// Pure regex over Python source text, mirroring the Go configfield.go style.
-// Tree-sitter was probed and the AST is clean, but the regex approach is
-// sufficient for the structural patterns here (explicit decorator names,
-// explicit keyword args) and avoids grammar-query complexity for this pass.
-// A tree-sitter upgrade is straightforward if precision issues arise.
 
 import (
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
+
+	gts "github.com/odvcencio/gotreesitter"
+	tsregistry "github.com/odvcencio/gotreesitter/grammars"
 
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
@@ -70,168 +74,299 @@ const (
 	cfPyMaxLeads   = 50
 )
 
-// ─── regex patterns ───────────────────────────────────────────────────────────
+// ─── query S-expressions ─────────────────────────────────────────────────────
 
-// pyClassDeclRe matches a class definition line.
-// Group 1: class name.
-var pyClassDeclRe = regexp.MustCompile(`^class\s+([A-Za-z_][A-Za-z0-9_]*)\s*[:(]`)
-
-// pyFieldDefRe matches pydantic/dataclass field declarations of the form:
+// pyCFFieldIntQuery finds class-body typed field assignments with integer defaults:
 //
-//	fieldname: T = Field(default=SENTINEL)
-//	fieldname: T = field(default=SENTINEL)
+//	fieldname: T = Field(default=<integer>)
+//	fieldname: T = field(default=<integer>)
 //
-// Group 1: field name, Group 2: sentinel value (integer or "None").
-var pyFieldDefRe = regexp.MustCompile(`^\s+([a-z_][A-Za-z0-9_]*):\s*\S.*=\s*(?:Field|field)\s*\([^)]*\bdefault\s*=\s*(-?\d+|None)\b`)
+// Captures: class.def (class_definition node), class.name, field.name, kwarg.val (integer).
+const pyCFFieldIntQuery = `
+(class_definition
+  name: (identifier) @class.name
+  body: (block
+    (assignment
+      left: (identifier) @field.name
+      type: (type)
+      right: (call
+        function: (identifier) @call.fn
+        arguments: (argument_list
+          (keyword_argument
+            name: (identifier) @kwarg.name
+            value: (integer) @kwarg.val)))))) @class.def
+`
 
-// pyValidatorDecRe matches pydantic validator decorator lines.
-// Captures the field name(s) from @validator('field') or @field_validator('field').
-// Group 1: field name string.
-var pyValidatorDecRe = regexp.MustCompile(`@(?:validator|field_validator)\s*\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]`)
+// pyCFFieldNoneQuery finds class-body typed field assignments with None defaults.
+const pyCFFieldNoneQuery = `
+(class_definition
+  name: (identifier) @class.name
+  body: (block
+    (assignment
+      left: (identifier) @field.name
+      type: (type)
+      right: (call
+        function: (identifier) @call.fn
+        arguments: (argument_list
+          (keyword_argument
+            name: (identifier) @kwarg.name
+            value: (none) @kwarg.val)))))) @class.def
+`
 
-// pyGuardRe matches a simple guard of the form:
+// pyCFValidatorIntQuery finds @validator/@field_validator decorated methods
+// whose body has an if-guard comparing param to an integer sentinel that
+// raises on match.
 //
-//	if v OP SENTINEL:
-//	if value OP SENTINEL:
+// Captures: class.def, class.name, dec.fn, field.name (from decorator string),
 //
-// Group 1: comparison operator, Group 2: sentinel (integer or "None").
-// We accept any single-identifier LHS (the parameter name).
-var pyGuardRe = regexp.MustCompile(`\bif\s+[a-z_][A-Za-z0-9_]*\s*(==|!=|<=|<|>=|>|is\s+None|is\s+not\s+None)\s*(-?\d+|None)\b`)
+//	guard.cond (comparison_operator node — operator extracted in Go).
+const pyCFValidatorIntQuery = `
+(class_definition
+  name: (identifier) @class.name
+  body: (block
+    (decorated_definition
+      (decorator
+        (call
+          function: (identifier) @dec.fn
+          arguments: (argument_list (string) @field.name)))
+      (function_definition
+        body: (block
+          (if_statement
+            condition: (comparison_operator
+              (identifier)
+              (integer) @guard.sentinel) @guard.cond
+            consequence: (block (raise_statement)))))))) @class.def
+`
 
-// pyRaiseRe matches a raise statement (for guard body detection).
-var pyRaiseRe = regexp.MustCompile(`\braise\b`)
+// pyCFValidatorNoneQuery finds @validator methods with a `is None` guard.
+const pyCFValidatorNoneQuery = `
+(class_definition
+  name: (identifier) @class.name
+  body: (block
+    (decorated_definition
+      (decorator
+        (call
+          function: (identifier) @dec.fn
+          arguments: (argument_list (string) @field.name)))
+      (function_definition
+        body: (block
+          (if_statement
+            condition: (comparison_operator
+              (identifier)
+              (none) @guard.sentinel) @guard.cond
+            consequence: (block (raise_statement)))))))) @class.def
+`
 
-// ─── data types ──────────────────────────────────────────────────────────────
+// ─── language handle cache ────────────────────────────────────────────────────
 
-type pyCFField struct {
-	className string
-	fieldName string
-	sentinel  string // integer string or "None"
-	line      int    // 1-based
+type cfPyLangHandle struct {
+	lang           *gts.Language
+	fieldIntQ      *gts.Query
+	fieldNoneQ     *gts.Query
+	validatorIntQ  *gts.Query
+	validatorNoneQ *gts.Query
 }
 
-type pyCFValidator struct {
-	className string
-	fieldName string
-	rejectOp  string // the comparison operator from the guard
-	sentinel  string // the rejected value
-	line      int    // 1-based line of the guard
+var cfPyLangHandleCache *cfPyLangHandle
+
+func loadCFPyLangHandle() (*cfPyLangHandle, error) {
+	if cfPyLangHandleCache != nil {
+		return cfPyLangHandleCache, nil
+	}
+	entry := tsregistry.DetectLanguage("x.py")
+	if entry == nil {
+		return nil, fmt.Errorf("config-field-py: no grammar for x.py")
+	}
+	lang := entry.Language()
+	h := &cfPyLangHandle{lang: lang}
+	var err error
+	compile := func(name, q string) *gts.Query {
+		if err != nil {
+			return nil
+		}
+		query, e := gts.NewQuery(q, lang)
+		if e != nil {
+			err = fmt.Errorf("config-field-py: compile %s query: %w", name, e)
+			return nil
+		}
+		return query
+	}
+	h.fieldIntQ = compile("field-int", pyCFFieldIntQuery)
+	h.fieldNoneQ = compile("field-none", pyCFFieldNoneQuery)
+	h.validatorIntQ = compile("validator-int", pyCFValidatorIntQuery)
+	h.validatorNoneQ = compile("validator-none", pyCFValidatorNoneQuery)
+	if err != nil {
+		return nil, err
+	}
+	cfPyLangHandleCache = h
+	return h, nil
+}
+
+// ─── data types ──────────────────────────────────────────────name──────────────
+
+type cfPyField struct {
+	classStart uint32 // startByte of the class_definition node (join key)
+	className  string
+	fieldName  string
+	sentinel   string // integer string or "None"
+	line       int    // 1-based line of the field assignment
+}
+
+type cfPyValidator struct {
+	classStart uint32 // startByte of the class_definition node (join key)
+	className  string
+	fieldName  string // from the decorator string (unquoted)
+	rejectOp   string // comparison operator text
+	sentinel   string // rejected value text
+	line       int    // 1-based line of the decorator
 }
 
 // ─── pass functions ───────────────────────────────────────────────────────────
 
-func passPyCFFields(path, content string) []pyCFField {
-	lines := strings.Split(content, "\n")
-	var out []pyCFField
-	currentClass := ""
-	for i, line := range lines {
-		if m := pyClassDeclRe.FindStringSubmatch(line); m != nil {
-			currentClass = m[1]
-			continue
-		}
-		if currentClass == "" {
-			continue
-		}
-		// Detect end of class (de-indent to column 0 non-empty non-comment line).
-		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' && line[0] != '#' && line[0] != '\n' {
-			currentClass = ""
-			continue
-		}
-		if m := pyFieldDefRe.FindStringSubmatch(line); m != nil {
-			out = append(out, pyCFField{
-				className: currentClass,
-				fieldName: m[1],
-				sentinel:  m[2],
-				line:      i + 1,
+// passCFPyFields extracts Field(default=X) declarations from class bodies.
+func passCFPyFields(h *cfPyLangHandle, tree *gts.Tree, src []byte) []cfPyField {
+	var out []cfPyField
+
+	extractFromQuery := func(q *gts.Query, sentinelType string) {
+		for _, m := range q.Execute(tree) {
+			var classStart uint32
+			var className, fieldName, callFn, kwargName, sentinelVal string
+			var fieldLine int
+			for _, c := range m.Captures {
+				switch c.Name {
+				case "class.def":
+					classStart = c.Node.StartByte()
+				case "class.name":
+					className = c.Node.Text(src)
+				case "field.name":
+					fieldName = c.Node.Text(src)
+					fieldLine = int(c.Node.StartPoint().Row) + 1
+				case "call.fn":
+					callFn = c.Node.Text(src)
+				case "kwarg.name":
+					kwargName = c.Node.Text(src)
+				case "kwarg.val":
+					sentinelVal = c.Node.Text(src)
+				}
+			}
+			// Gate: only Field() or field() calls with default= keyword.
+			if callFn != "Field" && callFn != "field" {
+				continue
+			}
+			if kwargName != "default" {
+				continue
+			}
+			if fieldName == "" || sentinelVal == "" || className == "" {
+				continue
+			}
+			out = append(out, cfPyField{
+				classStart: classStart,
+				className:  className,
+				fieldName:  fieldName,
+				sentinel:   sentinelVal,
+				line:       fieldLine,
 			})
 		}
 	}
+
+	extractFromQuery(h.fieldIntQ, "integer")
+	extractFromQuery(h.fieldNoneQ, "none")
 	return out
 }
 
-func passPyCFValidators(path, content string) []pyCFValidator {
-	lines := strings.Split(content, "\n")
-	var out []pyCFValidator
-	currentClass := ""
-	pendingField := "" // field name from the most recent @validator decorator
-	pendingLine := 0
+// passCFPyValidators extracts @validator/@field_validator declarations.
+func passCFPyValidators(h *cfPyLangHandle, tree *gts.Tree, src []byte) []cfPyValidator {
+	var out []cfPyValidator
 
-	for i, line := range lines {
-		if m := pyClassDeclRe.FindStringSubmatch(line); m != nil {
-			currentClass = m[1]
-			pendingField = ""
-			continue
-		}
-		if currentClass == "" {
-			continue
-		}
-		// End of class.
-		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' && line[0] != '#' && line[0] != '\n' {
-			currentClass = ""
-			pendingField = ""
-			continue
-		}
-		// @validator or @field_validator decorator.
-		if m := pyValidatorDecRe.FindStringSubmatch(line); m != nil {
-			pendingField = m[1]
-			pendingLine = i + 1
-			continue
-		}
-		// After a validator decorator, look for a guard with raise in the next ~15 lines.
-		if pendingField != "" {
-			if m := pyGuardRe.FindStringSubmatch(line); m != nil {
-				op := strings.TrimSpace(m[1])
-				sentinel := m[2]
-				// Check if there's a raise in the next few lines (guard body).
-				hasRaise := false
-				for j := i + 1; j < i+5 && j < len(lines); j++ {
-					if pyRaiseRe.MatchString(lines[j]) {
-						hasRaise = true
-						break
-					}
-				}
-				if hasRaise {
-					out = append(out, pyCFValidator{
-						className: currentClass,
-						fieldName: pendingField,
-						rejectOp:  op,
-						sentinel:  sentinel,
-						line:      pendingLine,
-					})
-					pendingField = ""
+	extractFromQuery := func(q *gts.Query) {
+		for _, m := range q.Execute(tree) {
+			var classStart uint32
+			var className, decFn, fieldNameRaw, sentinelVal string
+			var condNode *gts.Node
+			var decLine int
+			for _, c := range m.Captures {
+				switch c.Name {
+				case "class.def":
+					classStart = c.Node.StartByte()
+				case "class.name":
+					className = c.Node.Text(src)
+				case "dec.fn":
+					decFn = c.Node.Text(src)
+					decLine = int(c.Node.StartPoint().Row) + 1
+				case "field.name":
+					fieldNameRaw = c.Node.Text(src) // still quoted: 'timeout'
+				case "guard.sentinel":
+					sentinelVal = c.Node.Text(src)
+				case "guard.cond":
+					condNode = c.Node
 				}
 			}
+			if decFn != "validator" && decFn != "field_validator" {
+				continue
+			}
+			fieldName := unquotePyString(fieldNameRaw)
+			if fieldName == "" || sentinelVal == "" || condNode == nil {
+				continue
+			}
+			// Extract operator from comparison_operator node: child[1] is the op token.
+			rejectOp := cfPyExtractOp(condNode, h.lang, src)
+			if rejectOp == "" {
+				continue
+			}
+			out = append(out, cfPyValidator{
+				classStart: classStart,
+				className:  className,
+				fieldName:  fieldName,
+				rejectOp:   rejectOp,
+				sentinel:   sentinelVal,
+				line:       decLine,
+			})
 		}
 	}
+
+	extractFromQuery(h.validatorIntQ)
+	extractFromQuery(h.validatorNoneQ)
 	return out
 }
 
-// cfPyContradicts reports whether a field default is contradicted by a validator.
-//
-// The logic: if the validator rejects the sentinel value and the field's
-// default IS that sentinel value, that's a contradiction.
+// cfPyExtractOp extracts the operator text from a comparison_operator node.
+// The operator is the anonymous token at child[1] between the two operands.
+func cfPyExtractOp(condNode *gts.Node, lang *gts.Language, src []byte) string {
+	if condNode == nil {
+		return ""
+	}
+	// comparison_operator children: [operand, op_token, operand]
+	// The operator is child[1] (anonymous, not named).
+	if condNode.ChildCount() < 3 {
+		return ""
+	}
+	op := condNode.Child(1)
+	if op == nil {
+		return ""
+	}
+	return strings.TrimSpace(op.Text(src))
+}
+
+// cfPyContradicts reports whether a field's default is rejected by a validator.
 //
 // Examples:
 //
-//	default=0 + reject `v <= 0` → yes (0 <= 0 is true → rejected)
-//	default=-1 + reject `v < 0` → yes (-1 < 0)
-//	default=0 + reject `v == 0` → yes
-//	default=0 + reject `v != 0` → no (validator keeps 0, rejects others)
-//	default=None + reject `v is None` → yes
-func cfPyContradicts(field pyCFField, val pyCFValidator) bool {
-	if field.fieldName != val.fieldName || field.className != val.className {
-		return false
-	}
+//	default=0 + reject v<=0  → yes (0 <= 0)
+//	default=-1 + reject v<0  → yes (-1 < 0)
+//	default=0 + reject v==0  → yes
+//	default=5 + reject v<=0  → no  (5 > 0)
+//	default=None + reject is None → yes
+func cfPyContradicts(field cfPyField, val cfPyValidator) bool {
 	fSentinel := field.sentinel
 	vSentinel := val.sentinel
 	op := val.rejectOp
 
-	// None sentinel case.
+	// None sentinel.
 	if fSentinel == "None" {
-		return op == "is None"
+		return op == "is" && vSentinel == "None"
 	}
-	if op == "is None" || op == "is not None" {
-		return false // numeric default vs None check: no contradiction
+	if vSentinel == "None" {
+		return false
 	}
 
 	fi, err1 := strconv.ParseInt(fSentinel, 10, 64)
@@ -252,8 +387,6 @@ func cfPyContradicts(field pyCFField, val pyCFValidator) bool {
 	case ">":
 		return fi > vi
 	case "!=":
-		// reject v != vi: only vi passes; if default == vi, that's fine.
-		// if default != vi, the default is rejected. But this is unusual.
 		return fi != vi
 	}
 	return false
@@ -262,6 +395,11 @@ func cfPyContradicts(field pyCFField, val pyCFValidator) bool {
 // ─── seed entrypoint ──────────────────────────────────────────────────────────
 
 func seedConfigFieldPyContradictions(ctx context.Context, snap *ingest.Snapshot, st *store.Store, sum *Summary) error {
+	h, err := loadCFPyLangHandle()
+	if err != nil {
+		return nil // grammar unavailable — degrade silently
+	}
+
 	leadsPosted := 0
 	seen := make(map[leadKey]bool)
 
@@ -273,30 +411,45 @@ func seedConfigFieldPyContradictions(ctx context.Context, snap *ingest.Snapshot,
 			continue
 		}
 		abs := filepath.Join(snap.Root, filepath.FromSlash(f.Path))
-		fi, err := os.Stat(abs)
-		if err != nil {
+		fi, statErr := os.Stat(abs)
+		if statErr != nil {
 			continue
 		}
 		if fi.Size() > maxFileBytes {
 			continue
 		}
-		raw, err := os.ReadFile(abs)
-		if err != nil {
-			continue
-		}
-		content := string(raw)
-
-		fields := passPyCFFields(f.Path, content)
-		if len(fields) == 0 {
-			continue
-		}
-		validators := passPyCFValidators(f.Path, content)
-		if len(validators) == 0 {
+		raw, readErr := os.ReadFile(abs)
+		if readErr != nil {
 			continue
 		}
 
+		parser := gts.NewParser(h.lang)
+		tree, parseErr := parser.Parse(raw)
+		if parseErr != nil || tree == nil {
+			continue
+		}
+		if tree.RootNode().HasError() {
+			tree.Release()
+			continue
+		}
+
+		fields := passCFPyFields(h, tree, raw)
+		validators := passCFPyValidators(h, tree, raw)
+		tree.Release()
+
+		if len(fields) == 0 || len(validators) == 0 {
+			continue
+		}
+
+		// Join on (classStart, fieldName): same class_definition node + same field name.
 		for _, field := range fields {
 			for _, val := range validators {
+				if field.classStart != val.classStart {
+					continue // different class_definition nodes
+				}
+				if field.fieldName != val.fieldName {
+					continue
+				}
 				if !cfPyContradicts(field, val) {
 					continue
 				}
@@ -310,14 +463,14 @@ func seedConfigFieldPyContradictions(ctx context.Context, snap *ingest.Snapshot,
 					field.className, field.fieldName, field.sentinel,
 					val.line, val.rejectOp, val.sentinel,
 				)
-				if err := st.AddLead(ctx, store.Lead{
+				if addErr := st.AddLead(ctx, store.Lead{
 					PosterLens: cfPyPosterLens,
 					TargetLens: cfPyTargetLens,
 					File:       f.Path,
 					Line:       field.line,
 					Note:       truncate(note, noteMaxLen),
-				}); err != nil {
-					return fmt.Errorf("miner: config-field-py lead %s: %w", f.Path, err)
+				}); addErr != nil {
+					return fmt.Errorf("miner: config-field-py lead %s: %w", f.Path, addErr)
 				}
 				sum.ConfigFieldPyLeads++
 				sum.LeadsPosted++

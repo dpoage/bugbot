@@ -595,6 +595,22 @@ func TestPyDrift_Clean_ShadowFor(t *testing.T) {
 	}
 }
 
+// TestPyDrift_Clean_ShadowMatchCapture is the D3 oracle repro: match-case
+// capture pattern (`case status:`) binds the subject name, shadowing the outer
+// typed param. Expected: 0 leads.
+func TestPyDrift_Clean_ShadowMatchCapture(t *testing.T) {
+	snap := pySnapFile(t, "stringly_py_clean/shadow_match_capture.py")
+	st := openStore(t)
+	var sum Summary
+	if err := seedStringlyPyDrift(context.Background(), snap, st, &sum); err != nil {
+		t.Fatalf("seedStringlyPyDrift: %v", err)
+	}
+	leads, _ := st.ListLeads(context.Background())
+	if len(leads) != 0 {
+		t.Errorf("match-capture D3 repro: want 0 leads, got %d: %v", len(leads), leads)
+	}
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 func contains(s, sub string) bool {

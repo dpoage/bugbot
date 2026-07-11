@@ -143,7 +143,15 @@ const pyTypedDefaultParamQuery = `
 // pyAnyParamQuery finds ALL scope-introducing identifier bindings:
 // untyped function params, typed params (to catch shadow sentinels even
 // when the type is unknown), lambda params, for targets, with targets,
-// except targets, comprehension vars.
+// except targets, comprehension vars, and match-case CAPTURE PATTERNS.
+//
+// match-case capture forms that introduce bindings (precision-critical):
+//
+//	case status:          — bare identifier in case_pattern (dotted_name child)
+//	case Point() as p:    — as-pattern in case_pattern (identifier after 'as')
+//
+// These bind the matched value to the name inside the case body, shadowing
+// any outer typed parameter of the same name → must be shadow sentinels.
 //
 // All captures use "any.name" (binding identifier) and "any.scope" (scope node).
 const pyAnyParamQuery = `
@@ -172,6 +180,11 @@ const pyAnyParamQuery = `
     (as_pattern_target (identifier) @any.name))) @any.scope
 (for_in_clause
   left: (identifier) @any.name) @any.scope
+(case_clause
+  (case_pattern (dotted_name (identifier) @any.name))) @any.scope
+(case_clause
+  (case_pattern
+    (as_pattern (identifier) @any.name))) @any.scope
 `
 
 // pyAnnotatedVarQuery finds annotated variable assignments (module or function
