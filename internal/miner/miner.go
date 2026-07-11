@@ -249,6 +249,10 @@ consLoop:
 		return sum, err
 	}
 
+	if err := seedStringlyTSDrift(ctx, snap, st, &sum); err != nil {
+		return sum, err
+	}
+
 	return sum, nil
 }
 
