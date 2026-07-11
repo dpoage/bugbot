@@ -160,6 +160,15 @@ type Summary struct {
 	// produced a parse tree with HasError()=true (known gap: typed-param arrow
 	// functions). Exposed so callers and tests can audit grammar coverage.
 	TSParseFailures int
+	// CppDriftLeads counts leads from the C/C++ enum-drift pass
+	// (switch cases missing enum members, or integer literals colliding with
+	// named enumerator values). See enumdrift_cpp.go.
+	CppDriftLeads int
+	// CppParseFailures counts C/C++ files where the gotreesitter grammar
+	// produced a parse tree with HasError()=true (known gap: enum declarations
+	// cause HasError in the v0.20.2 C/C++ grammar). Files with HasError are
+	// allowed for enum extraction but skipped for switch analysis.
+	CppParseFailures int
 }
 
 type leadKey struct {
@@ -257,6 +266,10 @@ consLoop:
 	}
 
 	if err := seedStringlyTSDrift(ctx, snap, st, &sum); err != nil {
+		return sum, err
+	}
+
+	if err := seedCppEnumDrift(ctx, snap, st, &sum); err != nil {
 		return sum, err
 	}
 
