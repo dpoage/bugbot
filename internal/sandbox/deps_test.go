@@ -2432,18 +2432,25 @@ func TestGradleResolveFetchShape(t *testing.T) {
 		t.Error("Gradle FETCH ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
 	}
 
-	// GRADLE_USER_HOME must point at the writable /tmp copy, not the RO mount.
-	if !envHas(res.Env, "GRADLE_USER_HOME=/tmp/gradlecache") {
-		t.Errorf("fetch env missing GRADLE_USER_HOME=/tmp/gradlecache; got %v", res.Env)
+	// GRADLE_USER_HOME must point at the disk-backed workspace copy, not /tmp
+	// (tmpfs is 512 MB capped and would cause ENOSPC for large Gradle caches).
+	if !envHas(res.Env, "GRADLE_USER_HOME="+gradleHomeDir) {
+		t.Errorf("fetch env missing GRADLE_USER_HOME=%s; got %v", gradleHomeDir, res.Env)
 	}
 
-	// SetupCmd must copy the RO cache to writable /tmp.
-	if len(res.SetupCmds) != 1 {
-		t.Fatalf("Gradle FETCH must have 1 SetupCmd, got %d: %v", len(res.SetupCmds), res.SetupCmds)
+	// SetupCmds: [0] mkdir, [1] cp. Two commands required (not one), so the
+	// copy target exists before cp -a populates it.
+	if len(res.SetupCmds) != 2 {
+		t.Fatalf("Gradle FETCH must have 2 SetupCmds (mkdir + cp), got %d: %v", len(res.SetupCmds), res.SetupCmds)
 	}
-	setupCmd := strings.Join(res.SetupCmds[0], " ")
-	if !strings.Contains(setupCmd, gradleCacheMount) || !strings.Contains(setupCmd, "/tmp/gradlecache") {
-		t.Errorf("SetupCmd %v should copy %s to /tmp/gradlecache", res.SetupCmds[0], gradleCacheMount)
+	// First cmd: mkdir -p <gradleHomeDir>
+	if !slices.Contains(res.SetupCmds[0], gradleHomeDir) {
+		t.Errorf("SetupCmds[0] = %v; want mkdir targeting %s", res.SetupCmds[0], gradleHomeDir)
+	}
+	// Second cmd: cp -a /gradlecache/. <gradleHomeDir>
+	setupCmd := strings.Join(res.SetupCmds[1], " ")
+	if !strings.Contains(setupCmd, gradleCacheMount) || !strings.Contains(setupCmd, gradleHomeDir) {
+		t.Errorf("SetupCmds[1] = %v; want cp from %s to %s", res.SetupCmds[1], gradleCacheMount, gradleHomeDir)
 	}
 
 	if res.Prefetch == nil {

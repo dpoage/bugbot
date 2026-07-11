@@ -1907,6 +1907,12 @@ func runNuGetPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOp
 //     gets :Z isolation). Same offline enforcement as HOST: network=none is
 //     the boundary.
 //
+//   - SECURITY (prefetch): `mvn -B dependency:go-offline` instantiates POM
+//     plugins and any .mvn/extensions.xml build extensions, executing repo-
+//     controlled Java code ONLINE. There is no Maven analog to npm's
+//     --ignore-scripts. Accepted under the bugbot-gu0o posture; see
+//     runMavenPrefetch for the full rationale.
+//
 //   - Container path /m2cache is distinct from /modcache, /depcache,
 //     /cargo/registry, /npmcache, /nugetcache, and /gradlecache so the mount
 //     registry's ContainerPath uniqueness constraint is satisfied.
@@ -2079,6 +2085,17 @@ func newMavenPrefetch(repoDir, hostCache string, opts DepOptions) func(context.C
 
 // runMavenPrefetch performs the actual online mvn dependency:go-offline. It is
 // a no-op when the cache is already warm for the repo's current pom.xml.
+//
+// SECURITY: `mvn -B dependency:go-offline` loads the Maven project model (POM),
+// which instantiates configured POM plugins and any build extensions declared in
+// .mvn/extensions.xml. This executes repo-controlled Java code ONLINE (network-
+// enabled container). There is no Maven analog to npm's --ignore-scripts; the
+// POM lifecycle is always evaluated. This is accepted under the bugbot-gu0o
+// posture (same document-and-accept decision as pip's `pip download` executing
+// setup.py and dotnet's `dotnet restore` running NuGet scripts). The threat is
+// mitigated by the container's other hardening (cap-drop ALL, no-new-privileges,
+// read-only root, pid limit) and by the absence of secret-bearing mounts during
+// the prefetch run.
 func runMavenPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions) error {
 	lockHash, hashErr := mavenPomHash(repoDir)
 	sentinel := filepath.Join(hostCache, prefetchSentinel)
@@ -2161,23 +2178,40 @@ func runMavenPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOp
 //     if Gradle adds read-only-cache support or if a copy-to-writable
 //     HOST variant becomes worth the complexity.
 //
-//   - FETCH → Gradle dependency cache prefetch + writable-copy install:
+//   - FETCH → Gradle dependency cache prefetch + writable-copy run:
 //     1. Prefetch (network bridge, ONE online step): run
-//          gradle dependencies --no-daemon
+//          gradle dependencies --no-daemon -q
 //        in a network-enabled container with the cache dir mounted WRITABLE
 //        at /gradlecache. GRADLE_USER_HOME=/gradlecache directs Gradle to
 //        populate caches/ and wrapper/ there.
 //     2. Resolution: mount the same dir READ-ONLY at /gradlecache
-//        (Shared=false — bugbot-owned, gets :Z), and add a SetupCmd that
-//        copies the RO cache to a writable location before build:
-//          sh -c "cp -a /gradlecache /tmp/gradlecache"
-//        then set GRADLE_USER_HOME=/tmp/gradlecache (via env). This mirrors
-//        npm's copy-on-setup pattern and avoids the lock-contention problem:
-//        the copy lives on /tmp tmpfs (writable) where Gradle can acquire
-//        its lock files freely. The cp adds startup overhead (~seconds for
-//        typical Gradle caches) but is necessary for correctness.
+//        (Shared=false — bugbot-owned, gets :Z), and add two SetupCmds that
+//        copy the RO cache to a disk-backed workspace location before build:
+//          mkdir -p /workspace/.bugbot-gradle-home
+//          cp -a /gradlecache/. /workspace/.bugbot-gradle-home
+//        then set GRADLE_USER_HOME=/workspace/.bugbot-gradle-home (via env).
+//        WHY WORKSPACE, NOT /tmp: Gradle caches for a real project routinely
+//        exceed hundreds of MB; the /tmp tmpfs is capped at 512 MB
+//        (buildRunArgs: --tmpfs /tmp:size=512m) and a cache copy that exceeds
+//        it causes exit 125 → environment_error → silent recall loss (same
+//        failure mode as Go builds before goCacheDir was introduced). The
+//        disk-backed /workspace has no such cap. The copy target is
+//        dot-prefixed (/workspace/.bugbot-gradle-home) so `gradle test ./...`
+//        and similar recursive globs skip it (Gradle, like Go, ignores
+//        directories beginning with "." or "_").
 //        --no-daemon in both prefetch and build prevents a Gradle daemon from
 //        persisting between runs (correct for ephemeral containers).
+//
+//   - SECURITY (prefetch): Gradle executes settings.gradle / build.gradle
+//     (Groovy/Kotlin DSL) at configuration time. This is inherent to Gradle's
+//     build model: there is no --ignore-scripts analog — configuration code
+//     always runs. During the prefetch the container has network access, so
+//     malicious configuration code could exfiltrate data or contact external
+//     services. This is within the bugbot-gu0o posture (accepted per the
+//     document-and-accept decision for all prefetch ecosystems that execute
+//     repo-controlled code online). The threat is mitigated by the container's
+//     other hardening (cap-drop ALL, no-new-privileges, read-only root, pid
+//     limit) and by the absence of secret-bearing mounts during the prefetch.
 //
 //   - Lock-hash key: sha256(gradle.lockfile) if present at root, else
 //     sha256 of sorted concatenated contents of build.gradle, build.gradle.kts,
@@ -2188,12 +2222,20 @@ func runMavenPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOp
 //     /cargo/registry, /npmcache, /nugetcache, and /m2cache so the mount
 //     registry's ContainerPath uniqueness constraint is satisfied.
 
-// gradleCacheMount is where the Gradle user home directory is mounted inside
-// the container (FETCH strategy). GRADLE_USER_HOME is set to the writable copy
-// at /tmp/gradlecache (via SetupCmd) — the RO mount is a staging point only.
-// Distinct from all other ecosystem mount paths per the mount registry's
-// uniqueness obligation.
+// gradleCacheMount is where the populated Gradle user home is mounted
+// READ-ONLY inside the container (FETCH strategy staging point). At run time a
+// SetupCmd copies it to gradleHomeDir (disk-backed /workspace) so Gradle can
+// acquire file-locks freely. Distinct from all other ecosystem mount paths per
+// the mount registry's uniqueness obligation.
 const gradleCacheMount = "/gradlecache"
+
+// gradleHomeDir is the disk-backed writable copy of the Gradle user home
+// created inside the container before each run. It lives under /workspace (the
+// per-run, disk-backed copy — no size cap) rather than /tmp (512 MB tmpfs) so
+// large Gradle caches do not overflow the tmpfs and cause exit 125 /
+// environment_error. The dot-prefix causes Gradle recursive globs to skip it
+// (same convention as goCacheDir / goTmpDir).
+const gradleHomeDir = workspaceMount + "/.bugbot-gradle-home"
 
 // gradleEcosystem is the Gradle dependency resolver. It detects repos with a
 // root build.gradle / build.gradle.kts / settings.gradle / settings.gradle.kts
@@ -2244,14 +2286,22 @@ func resolveGradle(repoDir string, opts DepOptions) (Resolution, error) {
 }
 
 // gradleResolution builds the Resolution for Gradle FETCH: a read-only mount of
-// the populated cache at /gradlecache plus a SetupCmd that copies it to a
-// writable /tmp/gradlecache before the build. GRADLE_USER_HOME is set to the
-// writable copy so Gradle can acquire lock files freely.
+// the populated cache at /gradlecache plus two SetupCmds that create a writable
+// copy under the disk-backed /workspace before the build. GRADLE_USER_HOME is
+// set to that copy so Gradle can acquire file-locks freely.
 //
-// The copy is necessary because Gradle writes lock files inside GRADLE_USER_HOME
-// even for read-only dependency resolution; a read-only mount causes "Could not
-// acquire lock" failures. Copying to /tmp (writable tmpfs) resolves this at the
-// cost of copy startup time.
+// WHY /workspace, NOT /tmp: Gradle caches for real projects routinely exceed
+// hundreds of MB. The /tmp tmpfs is capped at 512 MB (buildRunArgs:
+// --tmpfs /tmp:size=512m); a copy that overflows it causes exit 125 →
+// environment_error → silent recall loss. /workspace is a per-run, disk-backed
+// copy with no size cap. The copy target is dot-prefixed (gradleHomeDir =
+// /workspace/.bugbot-gradle-home) so recursive build globs skip it.
+//
+// The two-step mkdir+cp is necessary rather than a single cp -a because
+// /workspace/.bugbot-gradle-home must be created explicitly before the copy
+// (cp -a /gradlecache /workspace/.bugbot-gradle-home would create a nested
+// /workspace/.bugbot-gradle-home/gradlecache/ subdirectory, mirroring the
+// cp -a /src /dst semantics when dst does not exist vs when it does).
 func gradleResolution(hostCache string, prefetch func(context.Context) error) Resolution {
 	return Resolution{
 		ROMounts: []ROMount{{
@@ -2260,15 +2310,22 @@ func gradleResolution(hostCache string, prefetch func(context.Context) error) Re
 			Shared:        false, // bugbot-owned dir, :Z isolation correct
 		}},
 		Env: []string{
-			// GRADLE_USER_HOME=/tmp/gradlecache points Gradle at the writable
-			// copy produced by the SetupCmd below.
-			"GRADLE_USER_HOME=/tmp/gradlecache",
+			// GRADLE_USER_HOME points Gradle at the disk-backed writable copy
+			// produced by the SetupCmds below. NOT /tmp — see function comment.
+			"GRADLE_USER_HOME=" + gradleHomeDir,
 		},
 		SetupCmds: [][]string{
-			// Copy the read-only Gradle cache to a writable tmpfs location.
-			// Gradle acquires file-locks inside GRADLE_USER_HOME; the RO mount
-			// at /gradlecache would cause "Could not acquire lock" errors.
-			{"sh", "-c", "cp -a " + gradleCacheMount + " /tmp/gradlecache"},
+			// Create the destination directory before the copy. mkdir -p is safe
+			// to repeat if the dir already exists (e.g. operator SetupCmds ran
+			// first and created it, which cannot happen in practice, but is
+			// idempotent regardless).
+			{"mkdir", "-p", gradleHomeDir},
+			// Copy the read-only Gradle user home into the writable workspace.
+			// `cp -a /gradlecache/. dst` copies CONTENTS (not the dir itself)
+			// into the pre-created destination. Gradle acquires file-locks inside
+			// GRADLE_USER_HOME; the RO /gradlecache mount would cause "Could not
+			// acquire lock" failures without this copy.
+			{"sh", "-c", "cp -a " + gradleCacheMount + "/. " + gradleHomeDir},
 		},
 		Prefetch: prefetch,
 		Strategy: DepStrategyFetch,
@@ -2362,6 +2419,16 @@ func newGradlePrefetch(repoDir, hostCache string, opts DepOptions) func(context.
 // runGradlePrefetch performs the actual online Gradle dependency resolution.
 // It is a no-op when the cache is already warm for the repo's current
 // gradle.lockfile (or Gradle build files fallback hash).
+//
+// SECURITY: `gradle dependencies` evaluates settings.gradle and build.gradle
+// (Groovy or Kotlin DSL) at configuration time. This executes repo-controlled
+// code ONLINE (network-enabled container). There is no Gradle analog to npm's
+// --ignore-scripts — configuration code always runs; it cannot be skipped
+// without fundamentally changing how Gradle loads the project. This is accepted
+// under the bugbot-gu0o posture (same document-and-accept decision as pip,
+// dotnet, and Maven prefetches). The threat is mitigated by the container's
+// other hardening (cap-drop ALL, no-new-privileges, read-only root, pid limit)
+// and by the absence of secret-bearing mounts during the prefetch run.
 func runGradlePrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions) error {
 	lockHash, hashErr := gradleLockHash(repoDir)
 	sentinel := filepath.Join(hostCache, prefetchSentinel)

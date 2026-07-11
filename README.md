@@ -105,6 +105,8 @@ have mount collisions:
   detection for Rust additionally requires a `.cargo/config{.toml}` source-
   replacement stanza — a bare `vendor/` directory without the config is ignored
   by cargo and falls through to the requested strategy.
+- **Maven `fetch` prefetch**: `mvn -B dependency:go-offline` instantiates POM plugins and any `.mvn/extensions.xml` build extensions at project-model load time. This executes repo-controlled Java code in an **online** (network-enabled) container. There is no Maven analog to npm's `--ignore-scripts`; the POM lifecycle is always evaluated. Accepted under the bugbot-gu0o posture (same as pip, dotnet). Mitigated by container hardening (cap-drop ALL, no-new-privileges, read-only root) and the absence of secret-bearing mounts during the prefetch.
+- **Gradle `fetch` prefetch**: `gradle dependencies` evaluates `settings.gradle` and `build.gradle` (Groovy/Kotlin DSL) at configuration time. This executes repo-controlled code in an **online** container. There is no Gradle analog to `--ignore-scripts` — configuration code always runs and cannot be skipped without fundamentally changing how Gradle loads the project. Accepted under the bugbot-gu0o posture. Same mitigations as Maven above.
 - Read-only mounts are never writable; the writable workspace copy remains the
   only writable surface for the untrusted network-none run.
 
