@@ -69,6 +69,8 @@ frontend).
 | **Rust** | `Cargo.toml` | `vendor/` + `.cargo/config{.toml}` with `replace-with` stanza → `CARGO_NET_OFFLINE=true` | mount `$CARGO_HOME/registry` at `/cargo/registry` (read-only, `Shared=true`); `CARGO_HOME=/cargo` | `cargo fetch [--locked]` with `CARGO_HOME=/cargo` (writable); populates `/cargo/registry` | `CARGO_NET_OFFLINE=true` | none |
 | **JS/npm** | `package.json` | `node_modules/` exists → no mounts needed | → **off** (npm HTTP cache does not materialize `node_modules`) | `npm ci --ignore-scripts --cache /npmcache` into `/npmcache` (writable) | `npm_config_offline=true` | `cp -a /npmcache /tmp/npmcache && npm ci --cache /tmp/npmcache` |
 | **C#/NuGet** | root `*.csproj` / `*.sln` / `*.fsproj` | n/a (no vendored detection in v1) | mount `$NUGET_PACKAGES` (default `~/.nuget/packages`) at `/nugetcache` (read-only, `Shared=true`); `NUGET_PACKAGES=/nugetcache` | `dotnet restore [--locked-mode]` into `/nugetcache` (writable) | none — `--network=none` is the enforcement | none |
+| **Maven** | root `pom.xml` | n/a (no vendored detection in v1) | mount `~/.m2/repository` at `/m2cache` (read-only, `Shared=true`); `MAVEN_OPTS=-Dmaven.repo.local=/m2cache` | `mvn -B dependency:go-offline` with `MAVEN_OPTS=-Dmaven.repo.local=/m2cache` (writable) | none — `--network=none` is the enforcement | none |
+| **Gradle** | root `build.gradle[.kts]` / `settings.gradle[.kts]` | n/a (no vendored detection in v1) | → **off** (Gradle cache is lock-heavy under a read-only mount; see deps.go scope decisions) | `gradle dependencies --no-daemon -q` with `GRADLE_USER_HOME=/gradlecache` (writable) | none — `--network=none` is the enforcement | `mkdir -p /workspace/.bugbot-gradle-home && cp -a /gradlecache/. /workspace/.bugbot-gradle-home` (copy to disk-backed workspace; `GRADLE_USER_HOME=/workspace/.bugbot-gradle-home`) |
 
 > **Bazel monorepos** use a custom image instead of dependency mounts — see
 > [Offline Bazel sandbox image](#offline-bazel-sandbox-image) below.
@@ -85,6 +87,8 @@ have mount collisions:
 | Rust | `/cargo/registry` | Cargo registry index + crate sources (`CARGO_HOME=/cargo`) |
 | JS | `/npmcache` | npm HTTP cache (`--cache /npmcache`) |
 | C#/NuGet | `/nugetcache` | NuGet global packages folder (`NUGET_PACKAGES`) |
+| Maven | `/m2cache` | Maven local repository (`-Dmaven.repo.local`) |
+| Gradle | `/gradlecache` | Gradle user home (`GRADLE_USER_HOME`); copied to `/workspace/.bugbot-gradle-home` (disk-backed) at run time |
 
 ### Security notes
 
@@ -101,6 +105,8 @@ have mount collisions:
   detection for Rust additionally requires a `.cargo/config{.toml}` source-
   replacement stanza — a bare `vendor/` directory without the config is ignored
   by cargo and falls through to the requested strategy.
+- **Maven `fetch` prefetch**: `mvn -B dependency:go-offline` instantiates POM plugins and any `.mvn/extensions.xml` build extensions at project-model load time. This executes repo-controlled Java code in an **online** (network-enabled) container. There is no Maven analog to npm's `--ignore-scripts`; the POM lifecycle is always evaluated. Accepted under the bugbot-gu0o posture (same as pip, dotnet). Mitigated by container hardening (cap-drop ALL, no-new-privileges, read-only root) and the absence of secret-bearing mounts during the prefetch.
+- **Gradle `fetch` prefetch**: `gradle dependencies` evaluates `settings.gradle` and `build.gradle` (Groovy/Kotlin DSL) at configuration time. This executes repo-controlled code in an **online** container. There is no Gradle analog to `--ignore-scripts` — configuration code always runs and cannot be skipped without fundamentally changing how Gradle loads the project. Accepted under the bugbot-gu0o posture. Same mitigations as Maven above.
 - Read-only mounts are never writable; the writable workspace copy remains the
   only writable surface for the untrusted network-none run.
 
