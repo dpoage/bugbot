@@ -1248,36 +1248,51 @@ pub async fn check_health(client: &reqwest::Client) -> reqwest::Result<String> {
 
 // TestEnumerateSeams_RPCMethodTonicImplAndProto verifies that a tonic gRPC
 // server handler (Rust PRODUCER) combined with a .proto rpc declaration
-// produces a SeamRPCMethod seam. The tonic handler is the producer-anchor.
+// produces a SeamRPCMethod seam joined on the UpperCamelCase key.
+//
+// tonic-build generates snake_case trait method names from proto UpperCamelCase
+// RPC names (proto: rpc GetWidget → Rust trait: async fn get_widget). The seam
+// detector normalizes the captured snake_case name to UpperCamelCase via
+// snakeToUpperCamel so it joins the .proto declaration key "GetWidget".
+// This test asserts the full join: proto declaration + real tonic codegen
+// signature → SeamRPCMethod with both files as sides.
 func TestEnumerateSeams_RPCMethodTonicImplAndProto(t *testing.T) {
 	root := writeRepo(t, map[string]string{
 		"proto/widget.proto": `syntax = "proto3";
 service WidgetService {
-    rpc GetWidget(GetWidgetRequest) returns (Widget);
-    rpc CreateWidget(CreateWidgetRequest) returns (Widget);
+    rpc GetWidget(GetWidgetRequest) returns (GetWidgetReply);
+    rpc CreateWidget(CreateWidgetRequest) returns (CreateWidgetReply);
 }
 `,
+		// Real tonic-build codegen: snake_case fn names, exact tonic signature.
 		"server/src/service.rs": `use tonic::{Request, Response, Status};
-use proto::widget_server::WidgetServer;
 
 pub struct WidgetService;
 
 #[tonic::async_trait]
 impl widget_server::WidgetServer for WidgetService {
-    async fn GetWidget(
+    async fn get_widget(
         &self,
         request: Request<GetWidgetRequest>,
-    ) -> Result<Response<Widget>, Status> {
-        Ok(Response::new(Widget::default()))
+    ) -> Result<Response<GetWidgetReply>, Status> {
+        Ok(Response::new(GetWidgetReply::default()))
+    }
+
+    async fn create_widget(
+        &self,
+        request: Request<CreateWidgetRequest>,
+    ) -> Result<Response<CreateWidgetReply>, Status> {
+        Ok(Response::new(CreateWidgetReply::default()))
     }
 }
 `,
 	})
 	snap := makeSnapshot(t, root, []string{"proto/widget.proto", "server/src/service.rs"})
 	seams := EnumerateSeams(snap)
+	// Key must be the UpperCamelCase proto name, not the Rust snake_case fn name.
 	seam := seamByKey(seams, SeamRPCMethod, "GetWidget")
 	if seam == nil {
-		t.Fatalf("expected SeamRPCMethod GetWidget, got %+v", seams)
+		t.Fatalf("expected SeamRPCMethod GetWidget (via snake→camel normalization), got %+v", seams)
 	}
 	if !hasSide(seam, "proto/widget.proto") {
 		t.Errorf("expected proto producer side proto/widget.proto: %+v", seam.Sides)
@@ -1291,27 +1306,37 @@ impl widget_server::WidgetServer for WidgetService {
 // guard for Rust HTTP detection. Over-match risks targeted:
 //
 //   - map.route("/key", value) — .route() call whose second arg is NOT a
-//     method-router call like get(). The axum precision anchor (second arg
-//     must start with get/post/put/... method name followed by '(') rejects it.
-//   - hashmap.get("/path") — ordinary .get() with no comma after the arg.
-//     Not a route producer.
-//   - reqwest_client.get("relative-path") — no leading slash. normalizeHTTPPath
-//     rejects non-routable strings.
+//     method-router call like get(). Axum precision anchor rejects it.
+//   - hashmap.get("/path") — ordinary .get() on a HashMap with a slash-keyed
+//     string. The OLD reqwest consumer regex (no .send anchor) would have
+//     fired here, creating a false consumer that joins a real Go producer.
+//     The .send( chain requirement rejects it.
+//   - routes.get("/health") — slash-keyed route-table lookup. Same .send gate.
+//   - client.get("relative-path") — no leading slash. normalizeHTTPPath rejects.
 //
-// A single-file snapshot with these patterns MUST emit ZERO SeamHTTPRoute seams.
+// Cross-language negative: when a real Go producer registers /health and a Rust
+// file contains routes.get("/health") (a route-table lookup, NOT a reqwest call),
+// the Rust file MUST NOT appear as a consumer side.
+//
+// A single-file Rust snapshot MUST emit ZERO SeamHTTPRoute seams.
+// A two-file snapshot (Go producer + Rust map accessor) MUST emit a seam with
+// ONLY the Go side — the Rust accessor must not appear as a consumer.
 func TestEnumerateSeams_HTTPRouteRustNoPrecisionFlood(t *testing.T) {
+	// Part 1: single-file Rust — none of these patterns are route producers/consumers.
 	root := writeRepo(t, map[string]string{
 		"svc/src/cache.rs": `use std::collections::HashMap;
 
 fn use_cache(map: &mut HashMap<String, String>, client: &reqwest::Client) {
     // NOT a route producer: second arg is a plain value, not a method-router call.
-    // map.route("/key", value) -- no get( or post( after the comma.
     let v = map.route("/cache-key", some_value);
 
-    // NOT a route producer: .get() with a non-routable string (no leading slash).
-    let x = map.get("cache-key");
+    // NOT a route consumer: .get() on a HashMap with a slash key and NO .send chain.
+    let x = map.get("/health");
 
-    // NOT a route consumer: no leading slash, not a URL.
+    // NOT a route consumer: route-table lookup, no .send chain.
+    let handler = routes.get("/health");
+
+    // NOT a route consumer: no leading slash.
     let resp = client.get("relative-path");
 }
 `,
@@ -1320,7 +1345,36 @@ fn use_cache(map: &mut HashMap<String, String>, client: &reqwest::Client) {
 	seams := EnumerateSeams(snap)
 	for _, s := range seams {
 		if s.Kind == SeamHTTPRoute {
-			t.Errorf("unexpected SeamHTTPRoute %q: Rust non-route patterns must not produce HTTP seams; got %+v", s.Key, s)
+			t.Errorf("single-file: unexpected SeamHTTPRoute %q: Rust non-route patterns must not produce HTTP seams; got %+v", s.Key, s)
+		}
+	}
+
+	// Part 2: Go producer + Rust slash-keyed map accessor. The Rust accessor
+	// routes.get("/health") must NOT appear as a consumer side; the seam
+	// (if any) must have only the Go side.
+	root2 := writeRepo(t, map[string]string{
+		"api/server.go": `package api
+import "net/http"
+func Register(mux *http.ServeMux) {
+	mux.HandleFunc("/health", handleHealth)
+}
+func handleHealth(w http.ResponseWriter, r *http.Request) {}
+`,
+		"svc/src/lookup.rs": `fn check_route(routes: &RouteTable) {
+    // Slash-keyed map lookup — NOT a reqwest consumer (no .send chain).
+    let h = routes.get("/health");
+}
+`,
+	})
+	snap2 := makeSnapshot(t, root2, []string{"api/server.go", "svc/src/lookup.rs"})
+	seams2 := EnumerateSeams(snap2)
+	for _, s := range seams2 {
+		if s.Kind == SeamHTTPRoute && s.Key == "/health" {
+			for _, side := range s.Sides {
+				if side.File == "svc/src/lookup.rs" {
+					t.Errorf("two-file: Rust slash-keyed map accessor must NOT appear as consumer side; seam=%+v", s)
+				}
+			}
 		}
 	}
 }

@@ -424,19 +424,21 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 			}
 		} else if f.Language == LangRust {
 			// Rust tonic gRPC server handler PRODUCER:
-			//   async fn MethodName(&self, request: Request<Foo>) -> Result<Response<Bar>, Status>
-			// This signature is specific to tonic server implementations.
-			// Producer-anchor gate (enforced at emission) means a file with
-			// only a tonic handler and no .proto counterpart is suppressed.
-			// Client-call detection is intentionally skipped: tonic client call
-			// sites (`client.method_name(req).await`) use snake_case method
-			// names (gRPC-Rust convention) rather than the UpperCamelCase that
-			// .proto rpc declarations use. Reliable matching requires type info
-			// (the client type must implement the generated stub trait). Emitting
-			// on snake_case calls would over-match ordinary async method calls;
-			// the producer-only posture is the correct precision/recall trade-off.
+			//   async fn say_hello(&self, request: Request<HelloRequest>) -> Result<Response<HelloReply>, Status>
+			// tonic-build generates snake_case method names from proto UpperCamelCase RPC
+			// names (SayHello → say_hello). The captured snake_case name is normalized
+			// to UpperCamelCase via snakeToUpperCamel so it joins the exact-match key
+			// from .proto rpc declarations (rpc SayHello(...)), which use UpperCamelCase.
+			// Go/Python RPC paths are unaffected — they use UpperCamelCase natively.
+			// Producer-anchor gate (enforced at emission) means a Rust file with only
+			// a tonic handler but no .proto counterpart is suppressed.
+			// Client-side detection is intentionally absent: tonic client call sites
+			// use snake_case names (client.say_hello(req).await) matching ordinary
+			// async method calls; without type information the false-positive rate is
+			// unacceptable. Producer-only posture documented in design notes.
 			for _, m := range rustRPCHandlerRe.FindAllSubmatchIndex(content, -1) {
-				name := string(content[m[2]:m[3]])
+				snakeName := string(content[m[2]:m[3]])
+				name := snakeToUpperCamel(snakeName) // e.g. "say_hello" → "SayHello"
 				line := lineForOffset(content, m[0])
 				rpcProducers[name] = append(rpcProducers[name], fileRef{file: f.Path, line: line, lang: LangRust})
 			}
@@ -1104,6 +1106,32 @@ func normalizePyDjangoPath(raw string) string {
 	return normalizeHTTPPath(raw)
 }
 
+// snakeToUpperCamel converts a snake_case identifier to UpperCamelCase so that
+// tonic-generated Rust handler names (say_hello, get_widget) join the
+// UpperCamelCase RPC keys used by .proto declarations (SayHello, GetWidget).
+//
+// Each underscore-delimited segment has its first byte uppercased; leading
+// underscores and consecutive underscores produce empty segments that are
+// skipped. Examples:
+//
+//	say_hello   → SayHello
+//	get_widget  → GetWidget
+//	list_items  → ListItems
+//	foo         → Foo
+func snakeToUpperCamel(s string) string {
+	parts := strings.Split(s, "_")
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, p := range parts {
+		if len(p) == 0 {
+			continue
+		}
+		b.WriteByte(p[0] &^ 0x20) // uppercase ASCII letter
+		b.WriteString(p[1:])
+	}
+	return b.String()
+}
+
 // httpRustAxumRouteRe matches axum HTTP route registrations:
 //   - Router::new().route("/path", get(handler)) — .route("/path", verb(fn))
 //   - .route("/path", post(handler).layer(...)) etc.
@@ -1134,27 +1162,41 @@ var httpRustActixAttrRe = regexp.MustCompile(`#\s*\[\s*(?:get|post|put|delete|pa
 var httpRustActixAppRouteRe = regexp.MustCompile(`\.route\s*\(\s*"(/[^"\x00-\x1f]*)"\s*,\s*web\s*::`)
 
 // httpRustClientCallRe matches Rust reqwest HTTP client call sites.
-// Patterns:
-//   - client.get("url") / .get("url")
-//   - reqwest::get("url") (module-level convenience function)
+// Two distinct forms are matched:
+//
+//  1. Module function: reqwest::get("url") — reqwest's own convenience fn,
+//     unambiguous, no additional anchor needed.
+//
+//  2. Method call: client.get("url").send(...) — requires a trailing .send(
+//     (allowing whitespace/method-chaining between closing paren and .send)
+//     to distinguish from the universal collection accessor .get() used by
+//     HashMap, BTreeMap, route tables, etc. WITHOUT .send the pattern fires
+//     on routes.get("/health") alongside a real producer, creating false
+//     consumer sides. The .send anchor is the precision gate.
 //
 // The URL/path must start with a leading slash or http(s):// scheme.
-// Captured group 1 is the URL/path literal.
-var httpRustClientCallRe = regexp.MustCompile(`(?:\breqwest\s*::\s*(?:get|post|put|delete|patch)\s*\(\s*"((?:https?://[^"]*|/[^"]*))"|(?:\.(?:get|post|put|delete|patch))\s*\(\s*"((?:https?://[^"]*|/[^"]*))")\s*[,)]?`)
+// Captured group 1 (module form) or group 2 (method form) is the URL/path.
+var httpRustClientCallRe = regexp.MustCompile(`(?:\breqwest\s*::\s*(?:get|post|put|delete|patch)\s*\(\s*"((?:https?://[^"]*|/[^"]*))"|(?:\.(?:get|post|put|delete|patch))\s*\(\s*"((?:https?://[^"]*|/[^"]*))"[^;]*?\.send\s*\()`)
 
 // rustRPCHandlerRe matches Rust tonic gRPC server-side handler method
-// declarations inside impl blocks:
+// declarations inside impl blocks. tonic-build generates snake_case method
+// names from proto UpperCamelCase RPC names (proto: SayHello → Rust trait:
+// async fn say_hello). The captured name is snake_case and must be converted
+// to UpperCamelCase (via snakeToUpperCamel) before insertion into rpcProducers
+// so it joins .proto rpc declarations that use UpperCamelCase keys.
 //
-//	async fn MethodName(&self, request: Request<Foo>) -> Result<Response<Bar>, Status>
+// Example generated signature:
+//
+//	async fn say_hello(&self, request: Request<HelloRequest>) -> Result<Response<HelloReply>, Status>
 //
 // Precision anchors:
 //  1. Must be async fn (tonic handlers are always async).
 //  2. First param must be &self or &mut self.
 //  3. Second param type must start with Request< (tonic::Request<...>).
 //  4. Return type pattern must include Response< and Status.
-//  5. Method name must begin with an uppercase letter (proto convention).
+//  5. Method name is snake_case (starts with a lowercase letter), ruling out
+//     ordinary camelCase async methods from other traits.
 //
-// This tight signature is specific to tonic server handlers and is
-// unlikely to match ordinary async methods. Captured group 1 is the
-// method name.
-var rustRPCHandlerRe = regexp.MustCompile(`async\s+fn\s+([A-Z][A-Za-z0-9_]*)\s*\(\s*&(?:mut\s+)?self\s*,[^)]*Request\s*<[^)]*\)\s*->\s*Result\s*<\s*Response\s*<`)
+// Captured group 1 is the snake_case method name; caller normalizes to
+// UpperCamelCase before keying into rpcProducers.
+var rustRPCHandlerRe = regexp.MustCompile(`async\s+fn\s+([a-z][a-z0-9_]*)\s*\(\s*&(?:mut\s+)?self\s*,[^)]*Request\s*<[^)]*\)\s*->\s*Result\s*<\s*Response\s*<`)
