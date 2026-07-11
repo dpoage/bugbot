@@ -26,34 +26,153 @@ const (
 	VisibilityUnknown Visibility = "unknown"
 )
 
+// ---- unified C/C++ line sanitizer ---------------------------------------
+//
+// sanitizeCLine produces a "clean" version of one source line suitable for
+// structural scanning (brace counting, keyword detection, access-specifier
+// matching). It applies ALL of the following masking operations in a single
+// pass so that no half-lexer can be tricked by the other's blind spots:
+//
+//  1. Cross-line block comments (/* … */): the caller threads inBC across
+//     loop iterations so a /* that opens on one line is still "in comment"
+//     on the next. Characters inside block comments are replaced with spaces
+//     (not deleted) to preserve column offsets for the `line[:i]` prefix used
+//     by cppInferScope.
+//
+//  2. C-style char literals ('x', '\n', '\\'): the inCh state prevents a
+//     char containing a double-quote (e.g. '"') from flipping the string
+//     state. Without this, char q = '"'; poisons the rest of the line.
+//
+//  3. String literals ("…"): braces and slashes inside strings are replaced
+//     with spaces so they never reach the brace counter or keyword scanner.
+//
+//  4. Line comments (//): once seen outside all other contexts, the rest of
+//     the line is discarded.
+//
+// The returned string has the same length as the input up to the point where
+// a // terminates it. Chars inside comments/strings are replaced with ' '.
+// This makes line[:i] prefix slices (used by cppInferScope) always safe.
+//
+// inBC is a pointer to a bool that persists across lines in the calling loop.
+func sanitizeCLine(line []byte, inBC *bool) string {
+	out := make([]byte, len(line))
+	copy(out, line)
+
+	i := 0
+	for i < len(out) {
+		// Inside a block comment: scan for closing */.
+		if *inBC {
+			if i+1 < len(out) && out[i] == '*' && out[i+1] == '/' {
+				out[i] = ' '
+				out[i+1] = ' '
+				*inBC = false
+				i += 2
+			} else {
+				out[i] = ' '
+				i++
+			}
+			continue
+		}
+
+		ch := out[i]
+
+		// Opening block comment: /* (can open and close on the same line).
+		if ch == '/' && i+1 < len(out) && out[i+1] == '*' {
+			out[i] = ' '
+			out[i+1] = ' '
+			i += 2
+			*inBC = true
+			// Keep going — the */ might be on the same line.
+			continue
+		}
+
+		// Line comment: everything from // onward is removed.
+		if ch == '/' && i+1 < len(out) && out[i+1] == '/' {
+			return string(out[:i])
+		}
+
+		// Char literal: 'x' or '\n' or '\\'.
+		if ch == '\'' {
+			out[i] = ' '
+			i++
+			// Escaped char: '\X'
+			if i < len(out) && out[i] == '\\' {
+				out[i] = ' '
+				i++
+			}
+			// The char value.
+			if i < len(out) && out[i] != '\'' {
+				out[i] = ' '
+				i++
+			}
+			// Closing quote.
+			if i < len(out) && out[i] == '\'' {
+				out[i] = ' '
+				i++
+			}
+			continue
+		}
+
+		// String literal: replace contents with spaces.
+		if ch == '"' {
+			out[i] = ' '
+			i++
+			for i < len(out) {
+				c := out[i]
+				if c == '\\' {
+					out[i] = ' '
+					i++
+					if i < len(out) {
+						out[i] = ' '
+						i++
+					}
+					continue
+				}
+				if c == '"' {
+					out[i] = ' '
+					i++
+					break
+				}
+				out[i] = ' '
+				i++
+			}
+			continue
+		}
+
+		i++
+	}
+	return string(out)
+}
+
 // ---- C visibility -------------------------------------------------------
 
 // cVisibilityMap analyzes a C source and returns 0-based start row →
-// Visibility for each definition row in startRows. A definition preceded by
-// the "static" storage-class specifier (anywhere on the same line or up to 3
-// lines above it) is private; all others are public.
+// Visibility for each definition row in startRows. A definition with the
+// "static" storage-class specifier on its start row is private; all others
+// are public.
 func cVisibilityMap(src []byte, startRows []uint32) map[uint32]Visibility {
-	lines := bytes.Split(src, []byte("\n"))
+	rawLines := bytes.Split(src, []byte("\n"))
+
+	// Build sanitized lines (block-comment state threaded).
+	inBC := false
+	lines := make([]string, len(rawLines))
+	for i, l := range rawLines {
+		lines[i] = sanitizeCLine(l, &inBC)
+	}
+
 	out := make(map[uint32]Visibility, len(startRows))
 	for _, row := range startRows {
-		out[row] = cLineVisibility(lines, row)
+		if int(row) >= len(lines) {
+			out[row] = VisibilityPublic
+			continue
+		}
+		if hasStaticToken(lines[row]) {
+			out[row] = VisibilityPrivate
+		} else {
+			out[row] = VisibilityPublic
+		}
 	}
 	return out
-}
-
-// cLineVisibility returns the visibility of a C definition whose node begins
-// at row (0-based). Tree-sitter's function_definition start row is the line
-// that holds the storage-class specifier and return type, so checking only
-// that single line is sufficient to detect "static". Looking further back
-// would cross into the preceding declaration and produce false-private results.
-func cLineVisibility(lines [][]byte, row uint32) Visibility {
-	if int(row) >= len(lines) {
-		return VisibilityPublic
-	}
-	if hasStaticToken(stripLineComment(lines[row])) {
-		return VisibilityPrivate
-	}
-	return VisibilityPublic
 }
 
 // ---- C++ visibility -----------------------------------------------------
@@ -85,8 +204,20 @@ type cppScope struct {
 //     public:/private:/protected: lines).
 //  3. At file/named-namespace scope with "static" keyword → private.
 //  4. Everything else → public.
+//
+// The sanitizeCLine pre-pass blanks out block comments, char literals, string
+// literals, and line-comment tails before the brace counter or access-specifier
+// scanner ever sees the line. inBC is threaded across lines so multi-line block
+// comments are fully masked even when /* and */ appear on different lines.
 func cppVisibilityMap(src []byte, startRows []uint32) map[uint32]Visibility {
-	lines := bytes.Split(src, []byte("\n"))
+	rawLines := bytes.Split(src, []byte("\n"))
+
+	// Single sanitization pass: produces clean lines with consistent masking.
+	inBC := false
+	cleanLines := make([]string, len(rawLines))
+	for i, l := range rawLines {
+		cleanLines[i] = sanitizeCLine(l, &inBC)
+	}
 
 	defRows := make(map[uint32]bool, len(startRows))
 	for _, r := range startRows {
@@ -98,9 +229,9 @@ func cppVisibilityMap(src []byte, startRows []uint32) map[uint32]Visibility {
 	stack := []cppScope{{kind: cppCtxOther, accessPublic: true, depth: 0}}
 	braceDepth := 0
 
-	for rowIdx := range lines {
+	for rowIdx := range cleanLines {
 		row := uint32(rowIdx)
-		line := stripLineComment(lines[rowIdx])
+		line := cleanLines[rowIdx]
 		trimmed := strings.TrimSpace(line)
 
 		// Record visibility for any definition that starts on this row,
@@ -127,6 +258,7 @@ func cppVisibilityMap(src []byte, startRows []uint32) map[uint32]Visibility {
 		}
 
 		// Update access-specifier state for struct/class scopes.
+		// After sanitization these lines are guaranteed comment-free.
 		top := &stack[len(stack)-1]
 		if top.kind == cppCtxStruct || top.kind == cppCtxClass {
 			switch {
@@ -139,25 +271,17 @@ func cppVisibilityMap(src []byte, startRows []uint32) map[uint32]Visibility {
 			}
 		}
 
-		// Walk the line counting braces and pushing/popping scopes.
-		inStr := false
-		inCh := false
+		// Walk the clean line counting braces and pushing/popping scopes.
+		// No string/comment tracking needed here: sanitizeCLine already
+		// replaced all masked chars with spaces.
 		for i := range len(line) {
 			ch := line[i]
-			if ch == '\\' && (inStr || inCh) {
-				// skip next char
-				continue
-			}
-			switch {
-			case ch == '"' && !inCh:
-				inStr = !inStr
-			case ch == '\'' && !inStr:
-				inCh = !inCh
-			case !inStr && !inCh && ch == '{':
+			switch ch {
+			case '{':
 				braceDepth++
 				before := strings.TrimSpace(line[:i])
 				stack = append(stack, cppInferScope(before, braceDepth))
-			case !inStr && !inCh && ch == '}':
+			case '}':
 				// Pop all scopes pushed at this depth.
 				for len(stack) > 1 && stack[len(stack)-1].depth == braceDepth {
 					stack = stack[:len(stack)-1]
@@ -262,27 +386,6 @@ func rustLineVisibility(lines [][]byte, row uint32) Visibility {
 }
 
 // ---- shared helpers ------------------------------------------------------
-
-// stripLineComment removes a C/C++ "//" line comment and everything after it.
-// Block comments are not handled — this is best-effort for visibility detection.
-func stripLineComment(line []byte) string {
-	s := string(line)
-	inStr := false
-	for i := range len(s) - 1 {
-		ch := s[i]
-		if ch == '\\' && inStr {
-			continue
-		}
-		if ch == '"' {
-			inStr = !inStr
-			continue
-		}
-		if !inStr && ch == '/' && s[i+1] == '/' {
-			return s[:i]
-		}
-	}
-	return s
-}
 
 // hasStaticToken reports whether s contains the keyword "static" as a whole
 // word (not a substring of another identifier).
