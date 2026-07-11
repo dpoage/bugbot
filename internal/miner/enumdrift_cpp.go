@@ -219,7 +219,10 @@ const cppPrimParamQuery = `
 // cppTypedLocalVarQuery finds local variable declarations typed with a
 // type_identifier inside a compound_statement, capturing the compound_statement
 // as the scope span.
-// Covers: Color x = val;
+// Covers BOTH forms:
+//   - initialized:   Color x = val;  → declarator: (init_declarator ...)
+//   - uninitialized: Color x;        → declarator: (identifier)
+//
 // Captures: "var.type" (type_identifier), "var.name" (identifier),
 //
 //	"var.scope" (compound_statement).
@@ -229,11 +232,18 @@ const cppTypedLocalVarQuery = `
     type: (type_identifier) @var.type
     declarator: (init_declarator
       declarator: (identifier) @var.name))) @var.scope
+(compound_statement
+  (declaration
+    type: (type_identifier) @var.type
+    declarator: (identifier) @var.name)) @var.scope
 `
 
 // cppPrimLocalVarQuery finds primitive-typed local variable declarations,
 // used as shadow sentinels (same rationale as cppPrimParamQuery).
-// Covers: int x = val; char c = ...; etc.
+// Covers BOTH forms:
+//   - initialized:   int x = 0;  → declarator: (init_declarator ...)
+//   - uninitialized: int x;      → declarator: (identifier)
+//
 // Captures: "prim.type" (primitive_type), "prim.name" (identifier),
 //
 //	"prim.scope" (compound_statement).
@@ -243,6 +253,10 @@ const cppPrimLocalVarQuery = `
     type: (primitive_type) @prim.type
     declarator: (init_declarator
       declarator: (identifier) @prim.name))) @prim.scope
+(compound_statement
+  (declaration
+    type: (primitive_type) @prim.type
+    declarator: (identifier) @prim.name)) @prim.scope
 `
 
 // ─── data types ──────────────────────────────────────────────────────────────

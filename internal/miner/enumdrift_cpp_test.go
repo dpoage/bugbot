@@ -895,3 +895,109 @@ void handle(Color c) {
 		t.Errorf("D2: expected 0 leads (no cross-dir enum merge), got %d", len(leads))
 	}
 }
+
+// ─── P2 oracle repro: uninitialized local variable shadowing ─────────────────
+
+// TestPassCSwitches_UninitPrimShadowNoLead proves that an UNINITIALIZED
+// primitive local (int x; x = compute();) is captured as a shadow sentinel
+// and prevents the outer Color param from matching the switch scrutinee.
+//
+// Oracle repro: void h(Color x){ int x; x=compute(); switch(x){case 0:case 1:} }
+// Before fix: the no-init declarator form was not captured → int x was invisible
+// → outer Color x param leaked with file-wide scope → false type-B leads.
+// After fix: no-init primitive declarator IS captured → typeName="" sentinel
+// wins nearest-binding (smaller compound_statement scope) → 0 leads.
+func TestPassCSwitches_UninitPrimShadowNoLead(t *testing.T) {
+	h := loadCLangHandle(t)
+
+	src := []byte(`
+void h(Color x) {
+    int x;
+    x = 42;
+    switch (x) {
+        case 0: break;
+        case 1: break;
+    }
+}
+`)
+	tree, err := parseCppFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+	if tree.RootNode().HasError() {
+		t.Skip("parse error")
+	}
+
+	bindings, switches := passC_Switches(h, tree, src, "uninit_shadow.c")
+	if len(switches) == 0 {
+		t.Skip("no switches")
+	}
+
+	members := map[string]bool{
+		"COLOR_RED": true, "COLOR_GREEN": true, "COLOR_BLUE": true,
+	}
+	pool := &cppEnumPool{
+		allMembers:  members,
+		memberTypes: make(map[string]string),
+		byTypeName: map[string]*cppEnum{
+			"./Color": {name: "Color", members: members},
+		},
+	}
+
+	typeA, typeB := joinCppDrift("uninit_shadow.c", ".", pool, bindings, switches)
+	if total := len(typeA) + len(typeB); total != 0 {
+		t.Errorf("P2 uninit-prim-shadow FP: expected 0 leads, got %d", total)
+		for _, l := range append(typeA, typeB...) {
+			t.Logf("  FP: %s:%d: %s", l.File, l.Line, l.Note)
+		}
+	}
+}
+
+// TestPassCSwitches_UninitTypedLocalFires proves the positive twin: an
+// UNINITIALIZED typed local (Color c; c = get_color(); switch(c){...}) IS
+// captured as a typed binding and still produces Type-B leads when enum
+// members are missing.
+func TestPassCSwitches_UninitTypedLocalFires(t *testing.T) {
+	h := loadCLangHandle(t)
+
+	src := []byte(`
+void use_color(void) {
+    Color c;
+    c = COLOR_RED;
+    switch (c) {
+        case COLOR_RED: break;
+        case COLOR_GREEN: break;
+    }
+}
+`)
+	tree, err := parseCppFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+	if tree.RootNode().HasError() {
+		t.Skip("parse error")
+	}
+
+	bindings, switches := passC_Switches(h, tree, src, "uninit_typed.c")
+	if len(switches) == 0 {
+		t.Skip("no switches")
+	}
+
+	members := map[string]bool{
+		"COLOR_RED": true, "COLOR_GREEN": true, "COLOR_BLUE": true,
+	}
+	pool := &cppEnumPool{
+		allMembers:  members,
+		memberTypes: make(map[string]string),
+		byTypeName: map[string]*cppEnum{
+			"./Color": {name: "Color", members: members},
+		},
+	}
+
+	_, typeB := joinCppDrift("uninit_typed.c", ".", pool, bindings, switches)
+	if len(typeB) == 0 {
+		t.Error("P2 uninit-typed-local positive twin: expected Type-B lead for missing COLOR_BLUE")
+	}
+}
