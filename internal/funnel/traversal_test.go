@@ -85,6 +85,10 @@ func TestSweep_FinderWithTraversal_PersistsFinderTraversalRow(t *testing.T) {
 	if got.CandidateCount != 1 {
 		t.Errorf("CandidateCount = %d, want 1", got.CandidateCount)
 	}
+	// Strategy must match the sweep-wide strategy used by the nil-safety unit.
+	if got.Strategy != "sweep-wide" {
+		t.Errorf("Strategy = %q, want sweep-wide", got.Strategy)
+	}
 	// Enumerated and Visited match the traversal summary.
 	if len(got.Enumerated) != len(enumerated) {
 		t.Errorf("Enumerated = %v, want %v", got.Enumerated, enumerated)
@@ -114,6 +118,59 @@ func TestSweep_FinderWithTraversal_PersistsFinderTraversalRow(t *testing.T) {
 	}
 	if got.CreatedAt.IsZero() {
 		t.Error("CreatedAt is zero")
+	}
+}
+
+// TestSweep_FinderWithZeroCandidates_TraversalPersistsRow verifies the
+// zero-candidate traversal path: a finder that emits {"candidates":[],"traversal":{...}}
+// MUST still persist exactly ONE finder_traversals row with CandidateCount==0.
+// This is the epic's whole point — a len(cands)>0 regression would slip past
+// both existing tests which always emit at least one candidate.
+func TestSweep_FinderWithZeroCandidates_TraversalPersistsRow(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	// Finder emits zero candidates but a traversal summary on the nil-safety lens.
+	enumerated := []string{"(*Greeter).Greet"}
+	visited := []string{}
+	finderJSON := traversalCandJSON(enumerated, visited) // zero cands
+
+	finder := newScriptedClient()
+	finder.onSystemContains("nil-safety/error-handling", finderJSON)
+	finder.fallback = emptyCandidates // all other lenses: no traversal
+
+	verifier := newScriptedClient()
+	verifier.fallback = notRefutedJSON
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if res.ScanRunID == "" {
+		t.Fatal("res.ScanRunID is empty")
+	}
+
+	rows, err := st.ListFinderTraversals(ctx, res.ScanRunID)
+	if err != nil {
+		t.Fatalf("ListFinderTraversals: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("ListFinderTraversals returned %d rows, want 1 (zero-candidate traversal must still persist a row)", len(rows))
+	}
+	got := rows[0]
+
+	if got.CandidateCount != 0 {
+		t.Errorf("CandidateCount = %d, want 0 (no candidates were emitted)", got.CandidateCount)
+	}
+	if got.Lens != "nil-safety/error-handling" {
+		t.Errorf("Lens = %q, want nil-safety/error-handling", got.Lens)
+	}
+	if len(got.Enumerated) != 1 || got.Enumerated[0] != enumerated[0] {
+		t.Errorf("Enumerated = %v, want %v", got.Enumerated, enumerated)
 	}
 }
 
@@ -168,12 +225,11 @@ func TestCandidatesSchema_ValidatesWithAndWithoutTraversal(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		body       string
-		wantOK     bool
 		wantStatus finderStatus
 	}{
-		{"with_traversal", withTraversal, true, finderOK},
-		{"without_traversal", withoutTraversal, true, finderOK},
-		{"with_extra_field_in_traversal", withExtraField, false, finderParseFailed},
+		{"with_traversal", withTraversal, finderOK},
+		{"without_traversal", withoutTraversal, finderOK},
+		{"with_extra_field_in_traversal", withExtraField, finderParseFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			finder := newScriptedClient()
