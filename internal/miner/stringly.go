@@ -119,8 +119,10 @@ type enumCaseLit struct {
 	line     int
 }
 
-// namedStringTypeRe matches `type Foo string` or `type Foo = string`
-// (bare alias). Capture 1 = type name.
+// namedStringTypeRe matches `type Foo string` (defined type only).
+// It deliberately does NOT match `type Foo = string` aliases — aliases are
+// identity-string and would re-admit the raw-string FP class the miner is
+// designed to avoid. Capture 1 = type name.
 var namedStringTypeRe = regexp.MustCompile(`^\s*type\s+(\w+)\s+string\b`)
 
 // constTypedRe matches a const declaration with an explicit named type and a
@@ -162,6 +164,154 @@ var shortDeclLHSRe = regexp.MustCompile(`^([^:=]+):=`)
 
 // wordRe extracts word tokens (identifiers) from a string.
 var wordRe = regexp.MustCompile(`\b(\w+)\b`)
+
+// sanitizeLine blanks the content of inline double-quoted string literals,
+// rune literals, single-line backtick raw-string literals, single-line
+// /* ... */ block comments, and strips trailing // line comments from a Go
+// source line. This prevents brace counters and identifier matchers from
+// reacting to `}`, `"`, or identifier-shaped text inside string/rune/
+// raw-string values or comments.
+//
+// Rune literals: while outside a double-quoted string or comment, a `'` opens
+// a rune literal; content is blanked until the closing `'`, respecting
+// backslash escapes (`'\"`, `'\n'`, `'\\'`). A `'` inside a double-quoted
+// string does NOT start a rune, and a `"` inside a rune does NOT start a string.
+//
+// Single-line backtick raw strings: while outside a double-quoted string, rune
+// literal, or comment, a backtick opens a raw string; content is blanked until
+// the closing backtick ON THE SAME LINE (Go raw strings have no escape
+// sequences). A backtick inside a double-quoted string or rune literal does NOT
+// open a raw string. A `"`, `'`, or `//` inside a backtick raw string does NOT
+// open a string, rune, or comment. Multi-line raw strings are handled upstream
+// by buildBacktickMask (their opener line has an odd backtick count and is
+// whole-line-masked); sanitizeLine only neutralizes balanced (even-backtick)
+// single-line raw strings.
+//
+// Single-line block comments: while outside string/rune/backtick/line-comment,
+// `/*` opens a block comment; content (including the `/*` and `*/` delimiters)
+// is blanked until the closing `*/` ON THE SAME LINE, then scanning resumes
+// normally. If no matching `*/` exists on the line (multi-line block comment),
+// only the `/*` and everything after it is blanked (the line is already
+// whole-line-masked by buildBlockCommentMask so the content is irrelevant, but
+// we must not desync the multi-line mask). A `/*` inside a string/rune/
+// backtick/`//` does NOT open a block comment.
+//
+// The result has the same byte length as the input so line offsets remain valid.
+//
+// KNOWN LIMITATION (tracked: bugbot-my7a.3.1): this per-line sanitizer covers
+// all five Go single-line non-code forms, but the BOUNDARY line of a MULTI-line
+// block comment or raw string is whole-line-masked by buildBlockCommentMask /
+// buildBacktickMask, which drops real code co-located with a multi-line `/*` or
+// backtick opener/closer (e.g. a `case` label or `{` on the line a multi-line
+// comment opens). Rare and gofmt-canonical; can yield a false "missing case"
+// lead. The durable fix is a stateful cross-line sanitizer that retires both
+// masks — deferred to the follow-up bead.
+func sanitizeLine(line string) string {
+	var b strings.Builder
+	b.Grow(len(line))
+	inString := false
+	inRune := false
+	inBacktick := false
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if inString {
+			if ch == '\\' {
+				// Escape sequence: write both bytes as spaces.
+				b.WriteByte(' ')
+				if i+1 < len(line) {
+					i++
+					b.WriteByte(' ')
+				}
+				continue
+			}
+			if ch == '"' {
+				inString = false
+				b.WriteByte(ch)
+				continue
+			}
+			// Inside string — blank the content.
+			b.WriteByte(' ')
+			continue
+		}
+		if inRune {
+			if ch == '\\' {
+				// Escape sequence: write both bytes as spaces.
+				b.WriteByte(' ')
+				if i+1 < len(line) {
+					i++
+					b.WriteByte(' ')
+				}
+				continue
+			}
+			if ch == '\'' {
+				inRune = false
+				b.WriteByte(ch)
+				continue
+			}
+			// Inside rune literal — blank the content.
+			b.WriteByte(' ')
+			continue
+		}
+		if inBacktick {
+			if ch == '`' {
+				inBacktick = false
+				b.WriteByte(ch)
+				continue
+			}
+			// Inside single-line backtick raw string — blank the content.
+			// No escape sequences in Go raw strings.
+			b.WriteByte(' ')
+			continue
+		}
+		// Outside string, rune, and backtick raw string.
+		if ch == '"' {
+			inString = true
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == '\'' {
+			inRune = true
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == '`' {
+			inBacktick = true
+			b.WriteByte(ch)
+			continue
+		}
+		// Check for trailing line comment.
+		if ch == '/' && i+1 < len(line) && line[i+1] == '/' {
+			// Blank the rest of the line.
+			for ; i < len(line); i++ {
+				b.WriteByte(' ')
+			}
+			break
+		}
+		// Check for single-line block comment /* ... */.
+		if ch == '/' && i+1 < len(line) && line[i+1] == '*' {
+			// Look for the closing */ on this same line.
+			close := strings.Index(line[i+2:], "*/")
+			if close >= 0 {
+				// Matching */ found on this line: blank the entire span
+				// (/* content */) and resume scanning after */.
+				end := i + 2 + close + 2 // index after closing */
+				for ; i < end; i++ {
+					b.WriteByte(' ')
+				}
+				i-- // loop will i++ at top
+				continue
+			}
+			// No closing */ on this line: multi-line block comment.
+			// Blank /* and the rest — buildBlockCommentMask handles the rest.
+			for ; i < len(line); i++ {
+				b.WriteByte(' ')
+			}
+			break
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
 
 // isShortDeclTarget returns true if name appears as any LHS identifier before :=.
 // Handles all comma-separated positions and for-range forms.
@@ -224,7 +374,10 @@ func varTypedEnumType(line string, namedTypes map[string]bool) (varName, typeNam
 }
 
 // buildBlockCommentMask returns a per-line boolean mask: true if the line is
-// inside a /* ... */ block comment (best-effort, ignores strings containing /*).
+// ENTIRELY inside a /* ... */ block comment (i.e. the block comment opened on
+// a previous line and has not yet closed). Lines that contain a self-contained
+// single-line /* ... */ comment are NOT masked — sanitizeLine handles those
+// inline, preserving surrounding code.
 func buildBlockCommentMask(lines []string) []bool {
 	mask := make([]bool, len(lines))
 	inBlock := false
@@ -238,10 +391,14 @@ func buildBlockCommentMask(lines []string) []bool {
 			if idx := strings.Index(line, "/*"); idx >= 0 {
 				before := line[:idx]
 				if strings.Count(before, `"`)%2 == 0 {
-					inBlock = true
-					mask[i] = true
-					if strings.Contains(line[idx+2:], "*/") {
-						inBlock = false
+					after := line[idx+2:]
+					if strings.Contains(after, "*/") {
+						// Single-line /* ... */ — not a whole-line mask.
+						// sanitizeLine blanks the span; no mask needed.
+					} else {
+						// Opens a multi-line block comment.
+						inBlock = true
+						mask[i] = true
 					}
 				}
 			}
@@ -430,11 +587,15 @@ func resolveScrutineeType(scrutinee string, namedTypes map[string]bool, lines []
 
 			// Check typed declaration: `name TypeName` in param lists and other contexts.
 			// Skip lines that start with `var` — handled above by isVarRebindTarget.
+			// Sanitize first so that a `name EnumType` word-pair inside a string
+			// literal or trailing // comment does not falsely resolve the scrutinee
+			// to an enum type (Finding 3).
 			trimmedLine := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmedLine, "var ") {
 				continue
 			}
-			for _, m := range varDeclRe.FindAllStringSubmatch(line, -1) {
+			sanitized := sanitizeLine(line)
+			for _, m := range varDeclRe.FindAllStringSubmatch(sanitized, -1) {
 				varName, typeName := m[1], m[2]
 				if varName != scrutinee {
 					continue
@@ -550,6 +711,11 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 	var stack []pendingSwitch
 	braceDepth := 0
 
+	// pendingCase accumulates a wrapped case expression across continuation lines.
+	// gofmt preserves `case "a",\n\t\t"b":` — the expression spans two lines.
+	pendingCase := ""    // non-empty while accumulating
+	pendingCaseLine := 0 // lineNo of the `case` keyword line
+
 	for i, line := range lines {
 		lineNo := i + 1
 		if blockMask[i] || btMask[i] {
@@ -560,14 +726,18 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 			continue
 		}
 
+		// Sanitize the line before brace counting so that `}` inside a string
+		// literal or a trailing // comment does not skew braceDepth (Finding 1).
+		sanitized := sanitizeLine(line)
+
 		// Detect function declarations (top-level, methods, and func literals)
 		// so we can scope scrutinee resolution to the innermost enclosing body.
 		if funcAnywhereRe.MatchString(line) {
 			pendingFunc = i
 		}
 
-		// Track brace depth; push/pop func scopes and switch blocks.
-		for _, ch := range line {
+		// Track brace depth using the sanitized line; push/pop func scopes and switch blocks.
+		for _, ch := range sanitized {
 			switch ch {
 			case '{':
 				braceDepth++
@@ -638,14 +808,78 @@ func passEnumSwitches(path, content string, namedTypes map[string]bool) []enumSw
 			esw.hasDefault = true
 			continue
 		}
-		entries := extractCaseEntries(line)
-		for k := range entries {
-			entries[k].line = lineNo
+
+		// Handle multi-line case expressions (Finding 2).
+		// gofmt may emit `case "b",` on one line and `"c":` on the next.
+		// Accumulate until the expression ends with `:` (outside parens/brackets).
+		if pendingCase != "" {
+			// Continuation line: append and check for terminator.
+			pendingCase += " " + trimmed
+			// Check if the accumulated expression is terminated.
+			if isCompleteCaseExpr(pendingCase) {
+				entries := extractCaseEntries(pendingCase)
+				for k := range entries {
+					entries[k].line = pendingCaseLine
+				}
+				esw.cases = append(esw.cases, entries...)
+				pendingCase = ""
+				pendingCaseLine = 0
+			}
+			continue
 		}
-		esw.cases = append(esw.cases, entries...)
+
+		// Check for a new case line.
+		if strings.HasPrefix(trimmed, "case ") || trimmed == "case" {
+			if isCompleteCaseExpr(trimmed) {
+				entries := extractCaseEntries(line)
+				for k := range entries {
+					entries[k].line = lineNo
+				}
+				esw.cases = append(esw.cases, entries...)
+			} else {
+				// Incomplete: start accumulation.
+				pendingCase = trimmed
+				pendingCaseLine = lineNo
+			}
+			continue
+		}
 	}
 
 	return out
+}
+
+// isCompleteCaseExpr returns true when the case expression (from the `case`
+// keyword to the end of the accumulated string) is terminated by a `:` that is
+// not inside parentheses, brackets, or braces.
+func isCompleteCaseExpr(expr string) bool {
+	depth := 0
+	inStr := false
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		if inStr {
+			if ch == '\\' {
+				i++
+				continue
+			}
+			if ch == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inStr = true
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ':':
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isIdentifierShaped returns true when s looks like a programmatic token:

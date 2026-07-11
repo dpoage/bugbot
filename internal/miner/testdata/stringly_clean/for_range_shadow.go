@@ -9,6 +9,7 @@ type ForMode string
 const (
 	ForModeDocker ForMode = "docker"
 	ForModePodman ForMode = "podman"
+	ForModeHelm   ForMode = "helm" // 3rd const: uncovered by switch, discriminates shadow regression
 )
 
 func handleForRange(mode ForMode, items map[string]int) {

@@ -9,6 +9,7 @@ type ShortMode string
 const (
 	ShortModeDocker ShortMode = "docker"
 	ShortModePodman ShortMode = "podman"
+	ShortModeHelm   ShortMode = "helm" // 3rd const: uncovered by switch, discriminates shadow regression
 )
 
 func getShortCmd() string { return "docker" }

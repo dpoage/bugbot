@@ -9,10 +9,11 @@ type GroupedMode string
 const (
 	GroupedModeDocker GroupedMode = "docker"
 	GroupedModePodman GroupedMode = "podman"
+	GroupedModeHelm   GroupedMode = "helm" // 3rd const: uncovered by switch, discriminates shadow regression
 )
 
-func getGroupedCmd() string         { return "docker" }
-func getGroupedOther() string       { return "other" }
+func getGroupedCmd() string   { return "docker" }
+func getGroupedOther() string { return "other" }
 
 func handleGroupedVar(mode GroupedMode) {
 	if true {

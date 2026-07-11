@@ -590,7 +590,9 @@ func TestStringlyDrift_ClosureShadowsOuterTypedParam(t *testing.T) {
 // TestStringlyDrift_ClosureOverOuterTypedParam verifies that a closure that
 // captures (but does NOT shadow) an outer typed-enum parameter still fires.
 // The closure has no params of its own; `m` resolves to the outer `m Mode`.
-// The case "activ" is a typo of "active" → must produce at least one lead.
+// The case "activ" is a typo of "active" → exactly 1 type-A lead.
+// "inactive" is never covered → exactly 1 type-B lead.
+// Expected total: 2 stringly-drift leads.
 func TestStringlyDrift_ClosureOverOuterTypedParam(t *testing.T) {
 	dir := filepath.Join("testdata", "stringly_drift")
 	snap := buildSnapshot(t, dir, []string{"closure_outer_typed.go"})
@@ -613,8 +615,10 @@ func TestStringlyDrift_ClosureOverOuterTypedParam(t *testing.T) {
 			stringlyLeads = append(stringlyLeads, l)
 		}
 	}
-	if len(stringlyLeads) == 0 {
-		t.Errorf("ClosureOuterTyped: want >= 1 stringly-drift lead (typo 'activ'), got 0")
+	// Exactly 2 leads: type-A for "activ" (typo) + type-B for "inactive" (missing arm).
+	if len(stringlyLeads) != 2 {
+		t.Errorf("ClosureOuterTyped: want exactly 2 stringly-drift leads (1 type-A + 1 type-B), got %d: %+v",
+			len(stringlyLeads), stringlyLeads)
 	}
 }
 
@@ -837,5 +841,366 @@ func TestStringlyDrift_ShadowViaNonFirstShortDecl(t *testing.T) {
 	if len(stringlyLeads) != 0 {
 		t.Errorf("ShadowViaNonFirstShortDecl: want 0 leads, got %d: %+v",
 			len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Regression tests for production findings 1, 2, and 3
+// --------------------------------------------------------------------------
+
+// TestStringlyDrift_BraceInCaseStringNoFalseLead verifies that a `}` inside a
+// string literal in a case body does not decrement braceDepth and pop the
+// switch early (Finding 1). Both cases must be recognized; no false type-B.
+//
+// testdata/stringly_clean/brace_in_case_string.go:
+//   - type BraceMode string with consts "a", "b"
+//   - switch with case "a" (body has s := "}") and case "b"
+//
+// Before the fix: the `}` inside the string pops the switch → "b" dropped →
+// false type-B lead for missing "b". After the fix: 0 leads.
+func TestStringlyDrift_BraceInCaseStringNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"brace_in_case_string.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("BraceInCaseString: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_WrappedCaseArmNoFalseLead verifies that a gofmt-preserved
+// wrapped case list (case expression split across two lines) is fully recognized
+// and does not produce false type-B leads (Finding 2).
+//
+// testdata/stringly_clean/wrapped_case_arm.go:
+//   - type WrappedMode string with consts "a", "b", "c"
+//   - switch with case "a", then case "b",\n\t\t"c":
+//
+// Before the fix: "b" and "c" dropped → false type-B for both. After: 0 leads.
+func TestStringlyDrift_WrappedCaseArmNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"wrapped_case_arm.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("WrappedCaseArm: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_EnumTypeInCommentNotResolved verifies that a `name EnumType`
+// word-pair that appears only inside a string literal or a trailing // comment
+// does not cause a raw-string scrutinee to resolve to the enum type (Finding 3).
+//
+// testdata/stringly_clean/enum_type_in_comment.go:
+//   - type CommentMode string with consts "run", "stop"
+//   - logMode(cmd string): string contains "cmd CommentMode: " and comment says
+//     "cmd CommentMode changed" — raw string switch must produce 0 leads.
+//
+// Before the fix: varDeclRe matches the word-pair in the string/comment →
+// scrutinee resolved to CommentMode → false leads for missing arms.
+// After the fix: 0 leads.
+func TestStringlyDrift_EnumTypeInCommentNotResolved(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"enum_type_in_comment.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("EnumTypeInComment: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_RuneWithQuoteNoFalseLead verifies that a `"` inside a rune
+// literal (`'"'`) does NOT open a fake double-quoted string that would blank the
+// following `{` and pop the switch early (rune-literal regression).
+//
+// testdata/stringly_clean/rune_with_quote.go:
+//   - type RuneQuoteMode string with consts "a", "b"
+//   - switch m { case "a": if c == '"' { c = 0 } case "b": }
+//
+// Before sanitizeLine rune-tracking: '"' opens a fake string, blanks `{` →
+// braceDepth desync → switch pops early → false type-B for missing "b".
+// After: 0 leads.
+func TestStringlyDrift_RuneWithQuoteNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"rune_with_quote.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("RuneWithQuote: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_RuneWithBraceNoFalseLead verifies that a `}` inside a rune
+// literal (`'}'`) is NOT counted by the brace counter, which would pop the
+// switch early (rune-literal regression).
+//
+// testdata/stringly_clean/rune_with_brace.go:
+//   - type RuneBraceMode string with consts "a", "b"
+//   - switch m { case "a": if r == '}' { r = 0 } case "b": }
+//
+// Before sanitizeLine rune-tracking: '}' rune is counted as a closing brace →
+// braceDepth desync → switch pops early → false type-B for missing "b".
+// After: 0 leads.
+func TestStringlyDrift_RuneWithBraceNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"rune_with_brace.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("RuneWithBrace: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Regression tests for single-line backtick raw strings (oracle repros)
+// --------------------------------------------------------------------------
+
+// TestStringlyDrift_SingleLineRawStringBraceNoFalseLead verifies that a `}`
+// inside a single-line backtick raw string in a case body does NOT decrement
+// braceDepth and pop the switch early. Both cases must be recognized; 0 leads.
+//
+// testdata/stringly_clean/backtick_brace.go:
+//   - type BacktickBraceMode string with consts "a", "b"
+//   - switch with case "a" (body has s := `}`) and case "b"
+//
+// Before sanitizeLine backtick-tracking: `}` inside raw string is counted as a
+// closing brace → braceDepth desync → switch pops early → false type-B for "b".
+// After: 0 leads.
+func TestStringlyDrift_SingleLineRawStringBraceNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"backtick_brace.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("SingleLineRawStringBrace: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_SingleLineRawStringWordPairNoFalseLead verifies that a
+// `cmd BacktickMode` word-pair inside a single-line backtick raw string does
+// NOT cause a raw-string scrutinee switch to resolve to the named enum type.
+// Exactly 1 lead expected: the genuine missing-arm for "pause" (BacktickModePause
+// is declared but absent from the switch). Without backtick tracking, the
+// word-pair inside the raw string would also falsely resolve the raw-string
+// switch → additional false leads; with tracking, only the real lead fires.
+//
+// testdata/stringly_clean/backtick_wordpair.go:
+//   - type BacktickMode string with consts "run", "stop", "pause"
+//   - func with msg := `cmd BacktickMode` (raw string), then switch cmd (string)
+//     with cases "run" and "stop" only (no "pause" case)
+//
+// Before sanitizeLine backtick-tracking: varDeclRe matches the word-pair in
+// the raw string → raw-string scrutinee resolved to BacktickMode → false leads
+// on top of the real "pause" lead.
+// After: exactly 1 stringly lead (missing "pause" arm).
+func TestStringlyDrift_SingleLineRawStringWordPairNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"backtick_wordpair.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	// Exactly 1 genuine lead: missing "pause" arm in the typed-enum switch.
+	// Without backtick tracking the word-pair would also fire on the raw-string
+	// scrutinee, producing additional false leads; backtick tracking suppresses them.
+	if len(stringlyLeads) != 1 {
+		t.Errorf("SingleLineRawStringWordPair: want 1 lead (missing pause), got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Regression tests for single-line /* */ block comments (oracle repros)
+// --------------------------------------------------------------------------
+
+// TestStringlyDrift_InlineBlockCommentCaseNoFalseLead verifies that a single-line
+// /* inline */ block comment on the same line as a case arm does NOT cause the
+// case to be dropped (whole-line masking was replacing the line, dropping
+// "case a"). Zero leads expected.
+//
+// testdata/stringly_clean/inline_block_comment_case.go:
+//   - type InlineBlockCommentMode string with consts "a", "b"
+//   - switch m { case "a": /* inline */ ; case "b": }
+//
+// Before: buildBlockCommentMask whole-line-masked the line → case "a" dropped →
+// false type-B lead for missing "a". After sanitizeLine handles /* */:  0 leads.
+func TestStringlyDrift_InlineBlockCommentCaseNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"inline_block_comment_case.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("InlineBlockCommentCase: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_InlineBlockCommentBraceNoFalseLead verifies that a single-line
+// /* inline */ block comment inside an if-block body does NOT desync the brace
+// counter. Both cases must be recognized; zero leads expected.
+//
+// testdata/stringly_clean/inline_block_comment_brace.go:
+//   - type InlineBlockCommentBraceMode string with consts "a", "b"
+//   - switch m { case "a": if cond { /* inline */ } case "b": }
+//
+// Before: buildBlockCommentMask whole-line-masked the line → the `{` before
+// /* was dropped → braceDepth desync → switch popped early → false type-B for
+// missing "b". After sanitizeLine handles /* */: 0 leads.
+func TestStringlyDrift_InlineBlockCommentBraceNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"inline_block_comment_brace.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("InlineBlockCommentBrace: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
 	}
 }
