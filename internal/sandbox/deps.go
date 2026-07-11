@@ -52,9 +52,13 @@ package sandbox
 //	Rust    Cargo.toml        vendored(vendor/ + .cargo/config replace-with) · off · host · fetch
 //	JS/npm  package.json      vendored(node_modules/) · off · fetch   (host→off)
 //	C#/Nug  *.csproj/*.sln    off · host · fetch   (no v1 vendored convention)
+//	Maven   pom.xml           off · host · fetch   (no v1 vendored convention)
+//	Gradle  build.gradle[.kts]/settings.gradle[.kts]
+//	                          off · fetch          (host→off; RO cache contention)
 //
 // Each ecosystem owns a unique container mount path: /modcache (Go),
-// /depcache (Python), /cargo/registry (Rust), /npmcache (JS), /nugetcache (C#/NuGet).
+// /depcache (Python), /cargo/registry (Rust), /npmcache (JS), /nugetcache (C#/NuGet),
+// /m2cache (Maven), /gradlecache (Gradle).
 // See the README section "Sandbox dependency strategies" for the full per-ecosystem
 // matrix (prefetch commands, offline-enforcement env, in-sandbox setup, security).
 //
@@ -177,6 +181,11 @@ type DepOptions struct {
 	// $NUGET_PACKAGES then ~/.nuget/packages.
 	hostNuGetPackages string
 
+	// hostMavenRepository, when set, overrides the resolved host Maven local
+	// repository directory for the HOST strategy (test seam). Empty resolves
+	// via $HOME/.m2/repository.
+	hostMavenRepository string
+
 	// userCacheDir, when set, overrides the base directory for bugbot-managed
 	// fetch caches (test seam). Empty uses os.UserCacheDir.
 	userCacheDir string
@@ -244,6 +253,8 @@ var ecosystems = []ecosystem{
 	cargoEcosystem,
 	jsEcosystem,
 	nugetEcosystem,
+	mavenEcosystem,
+	gradleEcosystem,
 }
 
 // goEcosystem is the Go dependency resolver. It detects repos with a go.mod
@@ -1836,6 +1847,629 @@ func runNuGetPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOp
 	if hashErr == nil {
 		// Record the warm-cache sentinel. A write failure only costs a redundant
 		// future fetch, so it is non-fatal.
+		_ = os.WriteFile(sentinel, []byte(lockHash), 0o644)
+	}
+	return nil
+}
+
+// ---- JVM ecosystems (Maven and Gradle) --------------------------------------
+//
+// Two distinct ecosystem entries are used rather than one combined "jvm" entry
+// because Maven (~/.m2/repository) and Gradle (~/.gradle/caches) have entirely
+// different HOST cache layouts and container paths. A single entry would either
+// have to mount two directories (complicating strategy orthogonality) or silently
+// ignore the non-dominant tool. Two entries compose cleanly via resolveWith's
+// append semantics, giving a polyglot Maven+Gradle repo correct mounts from both.
+//
+// ---- Maven ecosystem -------------------------------------------------------
+//
+// v1 strategy: Maven local repository HOST + FETCH, driven by root pom.xml.
+//
+// Scope decisions (final; do not change silently — flag any deviation):
+//
+//   - DETECT: root pom.xml exists. Multi-module Maven projects always have a
+//     root pom.xml (the aggregate POM); single-module projects also have one.
+//     Root-level only — matching every other ecosystem's detector scope.
+//
+//   - VENDORED: NOT supported in v1. Maven has no widely-adopted, standard
+//     committed-repository convention equivalent to Go's vendor/modules.txt or
+//     Cargo's vendor/ + .cargo/config stanza. Projects that commit a
+//     repository/ tree are rare and non-standard. NOT-supported-in-v1.
+//
+//   - OFF: empty Resolution{Strategy: DepStrategyOff}.
+//
+//   - HOST: mount the host Maven local repository READ-ONLY at /m2cache.
+//     MAVEN_OPTS=-Dmaven.repo.local=/m2cache tells Maven to use that mount as
+//     the local repository (the standard -Dmaven.repo.local convention).
+//     The default path is $HOME/.m2/repository; a test seam
+//     (hostMavenRepository on DepOptions) overrides it. Shared=true
+//     (host-owned dir, no :Z relabel). Offline enforcement: Maven has no exact
+//     GOPROXY=off analog; --offline (-o) would need a SetupCmd injection and
+//     is fragile for multi-module builds. We follow the NuGet precedent —
+//     --network=none IS the enforcement: a missing artifact hits the
+//     unreachable repository and fails fast with a clear diagnostic. We
+//     deliberately do NOT set -o / --offline to avoid breaking builds that
+//     call mvn in their test scripts with extra goals.
+//
+//   - FETCH: run ONE online `mvn -B dependency:go-offline` in opts.FetchSandbox
+//     into a bugbot-owned cache dir (fetchMavenCacheDir under
+//     userCacheDir/.../m2cache/<hash>), keyed on sha256(pom.xml) (root pom
+//     only — recursive module collection requires a running JVM and is
+//     disproportionate for a v1 key; root pom captures the declared dep set
+//     for single-module projects and the aggregate for multi-module). Mount the
+//     populated repository dir read-only at /m2cache with
+//     MAVEN_OPTS=-Dmaven.repo.local=/m2cache. Shared=false (bugbot-owned dir,
+//     gets :Z isolation). Same offline enforcement as HOST: network=none is
+//     the boundary.
+//
+//   - SECURITY (prefetch): `mvn -B dependency:go-offline` instantiates POM
+//     plugins and any .mvn/extensions.xml build extensions, executing repo-
+//     controlled Java code ONLINE. There is no Maven analog to npm's
+//     --ignore-scripts. Accepted under the bugbot-gu0o posture; see
+//     runMavenPrefetch for the full rationale.
+//
+//   - Container path /m2cache is distinct from /modcache, /depcache,
+//     /cargo/registry, /npmcache, /nugetcache, and /gradlecache so the mount
+//     registry's ContainerPath uniqueness constraint is satisfied.
+
+// m2CacheMount is where the Maven local repository is mounted inside the
+// container (HOST and FETCH strategies). MAVEN_OPTS=-Dmaven.repo.local= is set
+// to this path so Maven resolves artifacts at the standard local repository
+// location without additional configuration.
+// Distinct from all other ecosystem mount paths per the mount registry's
+// uniqueness obligation.
+const m2CacheMount = "/m2cache"
+
+// mavenEcosystem is the Maven dependency resolver. It detects repos with a root
+// pom.xml and applies HOST / FETCH / OFF strategy. v1 has no vendored convention
+// for Maven; see the file-level comment.
+var mavenEcosystem = ecosystem{
+	name:    "maven",
+	detect:  hasPomXML,
+	resolve: resolveMaven,
+}
+
+// resolveMaven is the Maven resolver function. Strategy validation has already
+// run in resolveWith; invalid strategies are unreachable here.
+func resolveMaven(repoDir string, opts DepOptions) (Resolution, error) {
+	// No vendored detection in v1: Maven has no standard committed-repository
+	// convention. See the file-level scope-decisions comment.
+
+	strategy := opts.Strategy
+	if strategy == "" {
+		strategy = DepStrategyOff
+	}
+
+	switch strategy {
+	case DepStrategyOff:
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyHost:
+		repo, err := resolveHostMavenRepository(opts.hostMavenRepository)
+		if err != nil {
+			return Resolution{}, err
+		}
+		// Shared=true: the host Maven local repository is NOT owned by bugbot.
+		// SELinux :Z would relabel the entire repository to a container-private
+		// MCS label, which may break the host toolchain. :ro without a label
+		// suffix is correct here.
+		return mavenResolution(repo, DepStrategyHost, true, nil), nil
+
+	case DepStrategyFetch:
+		if opts.FetchSandbox == nil {
+			return Resolution{}, fmt.Errorf("sandbox: Maven dependency strategy %q requires a fetch sandbox", strategy)
+		}
+		cache, err := fetchMavenCacheDir(repoDir, opts.userCacheDir)
+		if err != nil {
+			return Resolution{}, err
+		}
+		prefetch := newMavenPrefetch(repoDir, cache, opts)
+		// Shared=false: the Maven fetch cache is a bugbot-owned directory under
+		// the user cache dir. :Z SELinux isolation is appropriate.
+		return mavenResolution(cache, DepStrategyFetch, false, prefetch), nil
+
+	default:
+		return Resolution{}, fmt.Errorf("sandbox: unhandled Maven dependency strategy %q", strategy)
+	}
+}
+
+// mavenResolution builds the Resolution shared by HOST and FETCH for Maven:
+// a single read-only mount at /m2cache plus MAVEN_OPTS so Maven uses it as the
+// local repository.
+//
+// shared controls ROMount.Shared: true for HOST (user's real Maven repository —
+// must not be SELinux-relabeled), false for FETCH (bugbot-owned cache dir —
+// :Z isolation correct). See ROMount.Shared for the full rationale.
+//
+// Offline enforcement: Maven has no clean GOPROXY=off analog. The --network=none
+// run itself enforces offline operation: any Maven call that would resolve a
+// missing artifact hits the unreachable repository server and fails fast with a
+// clear diagnostic. We deliberately do NOT set -o / --offline — the OS-level
+// network=none is the enforcement point (same approach as NuGet).
+func mavenResolution(hostRepo string, strategy DepStrategy, shared bool, prefetch func(context.Context) error) Resolution {
+	return Resolution{
+		ROMounts: []ROMount{{
+			HostPath:      hostRepo,
+			ContainerPath: m2CacheMount,
+			Shared:        shared,
+		}},
+		Env: []string{
+			// MAVEN_OPTS=-Dmaven.repo.local=/m2cache so Maven resolves the local
+			// repository at the mounted path. This is the standard Maven property
+			// for overriding the local repository location.
+			"MAVEN_OPTS=-Dmaven.repo.local=" + m2CacheMount,
+		},
+		Prefetch: prefetch,
+		Strategy: strategy,
+	}
+}
+
+// hasPomXML reports whether repoDir contains a root pom.xml.
+// Only stdlib (os.Stat) — the sandbox package must remain stdlib-only.
+func hasPomXML(repoDir string) bool {
+	_, err := os.Stat(filepath.Join(repoDir, "pom.xml"))
+	return err == nil
+}
+
+// resolveHostMavenRepository resolves the host Maven local repository directory.
+// It prefers the override, then $HOME/.m2/repository.
+// Returns an error when no path can be determined (HOME unset) or when the
+// resolved path does not exist on the host (catches a misconfigured or
+// unpopulated repository early, before podman emits an opaque bind-mount error).
+func resolveHostMavenRepository(override string) (string, error) {
+	if override != "" {
+		return checkMavenRepositoryExists(override)
+	}
+
+	// Maven does not have a canonical env var for the local repository path
+	// (MAVEN_OPTS/-Dmaven.repo.local is a runtime override, not a discovery
+	// path). Fall through to the standard default: ~/.m2/repository.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", fmt.Errorf("sandbox: cannot resolve host Maven repository (HOME unset); use dep_strategy: off|fetch")
+	}
+	return checkMavenRepositoryExists(filepath.Join(home, ".m2", "repository"))
+}
+
+// checkMavenRepositoryExists verifies that dir exists on the host and returns it.
+// When the directory is missing it returns a clear, actionable error instead of
+// letting podman fail with an opaque bind-mount error at run time.
+func checkMavenRepositoryExists(dir string) (string, error) {
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("sandbox: host Maven repository %q does not exist; run `mvn dependency:go-offline` on the host first, or use dep_strategy: off|fetch", dir)
+		}
+		return "", fmt.Errorf("sandbox: stat host Maven repository %q: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// fetchMavenCacheDir returns the bugbot-managed Maven local repository cache
+// directory for repoDir (e.g. ~/.cache/bugbot/m2cache/<hash>). Delegates to
+// fetchEcosystemCacheDir. override, when non-empty, overrides the base dir
+// (test seam).
+func fetchMavenCacheDir(repoDir, override string) (string, error) {
+	return fetchEcosystemCacheDir("m2cache", repoDir, override)
+}
+
+// mavenPomHash returns a hex hash of the root pom.xml so the Maven fetch cache
+// can be keyed on the dependency set. Root pom only (v1): multi-module
+// recursive collection requires a running JVM and is disproportionate for a
+// cache key; the root aggregate POM captures the declared dependency set for
+// most common cases. Analogous to goSumHash for Go and cargoLockHash for Rust.
+func mavenPomHash(repoDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(repoDir, "pom.xml"))
+	if err != nil {
+		return "", fmt.Errorf("sandbox: read pom.xml for maven lock hash: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// newMavenPrefetch builds the one-time online mvn prefetch hook for the Maven
+// FETCH strategy. It runs `mvn -B dependency:go-offline` in the FetchSandbox
+// with network enabled and MAVEN_OPTS pointed at hostCache (mounted at
+// /m2cache), keyed on the sha256 of pom.xml so an unchanged dependency set
+// is not re-downloaded. Guarded by a sync.Once so it runs at most once per
+// Resolution.
+func newMavenPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runMavenPrefetch(ctx, repoDir, hostCache, opts)
+	})
+}
+
+// runMavenPrefetch performs the actual online mvn dependency:go-offline. It is
+// a no-op when the cache is already warm for the repo's current pom.xml.
+//
+// SECURITY: `mvn -B dependency:go-offline` loads the Maven project model (POM),
+// which instantiates configured POM plugins and any build extensions declared in
+// .mvn/extensions.xml. This executes repo-controlled Java code ONLINE (network-
+// enabled container). There is no Maven analog to npm's --ignore-scripts; the
+// POM lifecycle is always evaluated. This is accepted under the bugbot-gu0o
+// posture (same document-and-accept decision as pip's `pip download` executing
+// setup.py and dotnet's `dotnet restore` running NuGet scripts). The threat is
+// mitigated by the container's other hardening (cap-drop ALL, no-new-privileges,
+// read-only root, pid limit) and by the absence of secret-bearing mounts during
+// the prefetch run.
+func runMavenPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions) error {
+	lockHash, hashErr := mavenPomHash(repoDir)
+	sentinel := filepath.Join(hostCache, prefetchSentinel)
+
+	if hashErr == nil {
+		if prev, err := os.ReadFile(sentinel); err == nil && strings.TrimSpace(string(prev)) == lockHash {
+			// Cache already populated for this exact pom.xml.
+			return nil
+		}
+	}
+
+	network := opts.FetchNetwork
+	if network == "" {
+		network = "bridge"
+	}
+
+	// `mvn -B dependency:go-offline` downloads all compile/runtime/test
+	// dependencies declared in the POM into the local repository. -B is
+	// batch mode (no interactive prompts).
+	cmd := []string{"mvn", "-B", "dependency:go-offline"}
+
+	// The prefetch container is fully hardened; only network and the writable
+	// cache mount differ from the network-none run.
+	spec := Spec{
+		RepoDir: repoDir,
+		Image:   opts.FetchImage,
+		Network: network,
+		Cmd:     cmd,
+		// Mount the cache dir WRITABLE as /m2cache so mvn populates it.
+		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: m2CacheMount}},
+		Env: []string{
+			"MAVEN_OPTS=-Dmaven.repo.local=" + m2CacheMount,
+		},
+	}
+	res, err := opts.FetchSandbox.Exec(ctx, spec)
+	if err != nil {
+		return fmt.Errorf("sandbox: Maven prefetch `mvn dependency:go-offline` failed to launch: %w", err)
+	}
+	if res.TimedOut {
+		return fmt.Errorf("sandbox: Maven prefetch `mvn dependency:go-offline` timed out")
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("sandbox: Maven prefetch `mvn dependency:go-offline` exited %d: %s", res.ExitCode, lastLines(res.Stderr, 20))
+	}
+
+	if hashErr == nil {
+		_ = os.WriteFile(sentinel, []byte(lockHash), 0o644)
+	}
+	return nil
+}
+
+// ---- Gradle ecosystem -------------------------------------------------------
+//
+// v1 strategy: Gradle caches FETCH only, driven by root build.gradle,
+// build.gradle.kts, settings.gradle, or settings.gradle.kts.
+//
+// Scope decisions (final; do not change silently — flag any deviation):
+//
+//   - DETECT: any of build.gradle, build.gradle.kts, settings.gradle, or
+//     settings.gradle.kts exists at the root. Root-level only — matching
+//     every other ecosystem's detector scope.
+//
+//   - VENDORED: NOT supported in v1. Gradle has no widely-adopted,
+//     standard committed-cache convention. NOT-supported-in-v1.
+//
+//   - OFF: empty Resolution{Strategy: DepStrategyOff}.
+//
+//   - HOST → OFF. CAUTION: Gradle's ~/.gradle/caches directory is
+//     lock-heavy. Gradle maintains file-locks inside the caches directory
+//     even for read-only dependency resolution, because it uses journal
+//     files and lock files to coordinate concurrent builds. Mounting it
+//     read-only inside a container causes Gradle to fail with "Could not
+//     acquire lock on <lock-file>" errors on the very first `gradle test`
+//     invocation. This is fundamentally different from Go's module cache
+//     (lock-free after population) or Maven's repository (also lock-free).
+//     We cannot verify the workaround empirically without a running JDK+Gradle
+//     image in the test environment, so we follow the same decision as
+//     Python/npm for their broken-HOST cases: HOST is treated as OFF rather
+//     than silently broken. A future bead can revisit with a live JDK image
+//     if Gradle adds read-only-cache support or if a copy-to-writable
+//     HOST variant becomes worth the complexity.
+//
+//   - FETCH → Gradle dependency cache prefetch + writable-copy run:
+//     1. Prefetch (network bridge, ONE online step): run
+//          gradle dependencies --no-daemon -q
+//        in a network-enabled container with the cache dir mounted WRITABLE
+//        at /gradlecache. GRADLE_USER_HOME=/gradlecache directs Gradle to
+//        populate caches/ and wrapper/ there.
+//     2. Resolution: mount the same dir READ-ONLY at /gradlecache
+//        (Shared=false — bugbot-owned, gets :Z), and add two SetupCmds that
+//        copy the RO cache to a disk-backed workspace location before build:
+//          mkdir -p /workspace/.bugbot-gradle-home
+//          cp -a /gradlecache/. /workspace/.bugbot-gradle-home
+//        then set GRADLE_USER_HOME=/workspace/.bugbot-gradle-home (via env).
+//        WHY WORKSPACE, NOT /tmp: Gradle caches for a real project routinely
+//        exceed hundreds of MB; the /tmp tmpfs is capped at 512 MB
+//        (buildRunArgs: --tmpfs /tmp:size=512m) and a cache copy that exceeds
+//        it causes exit 125 → environment_error → silent recall loss (same
+//        failure mode as Go builds before goCacheDir was introduced). The
+//        disk-backed /workspace has no such cap. The copy target is
+//        dot-prefixed (/workspace/.bugbot-gradle-home) so `gradle test ./...`
+//        and similar recursive globs skip it (Gradle, like Go, ignores
+//        directories beginning with "." or "_").
+//        --no-daemon in both prefetch and build prevents a Gradle daemon from
+//        persisting between runs (correct for ephemeral containers).
+//
+//   - SECURITY (prefetch): Gradle executes settings.gradle / build.gradle
+//     (Groovy/Kotlin DSL) at configuration time. This is inherent to Gradle's
+//     build model: there is no --ignore-scripts analog — configuration code
+//     always runs. During the prefetch the container has network access, so
+//     malicious configuration code could exfiltrate data or contact external
+//     services. This is within the bugbot-gu0o posture (accepted per the
+//     document-and-accept decision for all prefetch ecosystems that execute
+//     repo-controlled code online). The threat is mitigated by the container's
+//     other hardening (cap-drop ALL, no-new-privileges, read-only root, pid
+//     limit) and by the absence of secret-bearing mounts during the prefetch.
+//
+//   - Lock-hash key: sha256(gradle.lockfile) if present at root, else
+//     sha256 of sorted concatenated contents of build.gradle, build.gradle.kts,
+//     settings.gradle, settings.gradle.kts (whichever exist). Fallback
+//     analogous to nugetLockHash's *.csproj fallback.
+//
+//   - Container path /gradlecache is distinct from /modcache, /depcache,
+//     /cargo/registry, /npmcache, /nugetcache, and /m2cache so the mount
+//     registry's ContainerPath uniqueness constraint is satisfied.
+
+// gradleCacheMount is where the populated Gradle user home is mounted
+// READ-ONLY inside the container (FETCH strategy staging point). At run time a
+// SetupCmd copies it to gradleHomeDir (disk-backed /workspace) so Gradle can
+// acquire file-locks freely. Distinct from all other ecosystem mount paths per
+// the mount registry's uniqueness obligation.
+const gradleCacheMount = "/gradlecache"
+
+// gradleHomeDir is the disk-backed writable copy of the Gradle user home
+// created inside the container before each run. It lives under /workspace (the
+// per-run, disk-backed copy — no size cap) rather than /tmp (512 MB tmpfs) so
+// large Gradle caches do not overflow the tmpfs and cause exit 125 /
+// environment_error. The dot-prefix causes Gradle recursive globs to skip it
+// (same convention as goCacheDir / goTmpDir).
+const gradleHomeDir = workspaceMount + "/.bugbot-gradle-home"
+
+// gradleEcosystem is the Gradle dependency resolver. It detects repos with a
+// root build.gradle / build.gradle.kts / settings.gradle / settings.gradle.kts
+// and applies FETCH / OFF strategy. HOST maps to OFF (Gradle cache is lock-heavy
+// under a read-only mount; see the file-level scope-decisions comment).
+// v1 has no vendored convention for Gradle.
+var gradleEcosystem = ecosystem{
+	name:    "gradle",
+	detect:  hasGradleBuildFile,
+	resolve: resolveGradle,
+}
+
+// resolveGradle is the Gradle resolver function. Strategy validation has already
+// run in resolveWith; invalid strategies are unreachable here.
+func resolveGradle(repoDir string, opts DepOptions) (Resolution, error) {
+	// No vendored detection in v1; see file-level scope-decisions comment.
+
+	strategy := opts.Strategy
+	if strategy == "" {
+		strategy = DepStrategyOff
+	}
+
+	switch strategy {
+	case DepStrategyOff:
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyHost:
+		// HOST → OFF: Gradle's cache is lock-heavy and fights a read-only mount.
+		// See the file-level scope-decisions comment for the rationale.
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyFetch:
+		if opts.FetchSandbox == nil {
+			return Resolution{}, fmt.Errorf("sandbox: Gradle dependency strategy %q requires a fetch sandbox", strategy)
+		}
+		cache, err := fetchGradleCacheDir(repoDir, opts.userCacheDir)
+		if err != nil {
+			return Resolution{}, err
+		}
+		prefetch := newGradlePrefetch(repoDir, cache, opts)
+		// Shared=false: the Gradle fetch cache is bugbot-owned. :Z SELinux
+		// isolation is appropriate.
+		return gradleResolution(cache, prefetch), nil
+
+	default:
+		return Resolution{}, fmt.Errorf("sandbox: unhandled Gradle dependency strategy %q", strategy)
+	}
+}
+
+// gradleResolution builds the Resolution for Gradle FETCH: a read-only mount of
+// the populated cache at /gradlecache plus two SetupCmds that create a writable
+// copy under the disk-backed /workspace before the build. GRADLE_USER_HOME is
+// set to that copy so Gradle can acquire file-locks freely.
+//
+// WHY /workspace, NOT /tmp: Gradle caches for real projects routinely exceed
+// hundreds of MB. The /tmp tmpfs is capped at 512 MB (buildRunArgs:
+// --tmpfs /tmp:size=512m); a copy that overflows it causes exit 125 →
+// environment_error → silent recall loss. /workspace is a per-run, disk-backed
+// copy with no size cap. The copy target is dot-prefixed (gradleHomeDir =
+// /workspace/.bugbot-gradle-home) so recursive build globs skip it.
+//
+// The two-step mkdir+cp is necessary rather than a single cp -a because
+// /workspace/.bugbot-gradle-home must be created explicitly before the copy
+// (cp -a /gradlecache /workspace/.bugbot-gradle-home would create a nested
+// /workspace/.bugbot-gradle-home/gradlecache/ subdirectory, mirroring the
+// cp -a /src /dst semantics when dst does not exist vs when it does).
+func gradleResolution(hostCache string, prefetch func(context.Context) error) Resolution {
+	return Resolution{
+		ROMounts: []ROMount{{
+			HostPath:      hostCache,
+			ContainerPath: gradleCacheMount,
+			Shared:        false, // bugbot-owned dir, :Z isolation correct
+		}},
+		Env: []string{
+			// GRADLE_USER_HOME points Gradle at the disk-backed writable copy
+			// produced by the SetupCmds below. NOT /tmp — see function comment.
+			"GRADLE_USER_HOME=" + gradleHomeDir,
+		},
+		SetupCmds: [][]string{
+			// Create the destination directory before the copy. mkdir -p is safe
+			// to repeat if the dir already exists (e.g. operator SetupCmds ran
+			// first and created it, which cannot happen in practice, but is
+			// idempotent regardless).
+			{"mkdir", "-p", gradleHomeDir},
+			// Copy the read-only Gradle user home into the writable workspace.
+			// `cp -a /gradlecache/. dst` copies CONTENTS (not the dir itself)
+			// into the pre-created destination. Gradle acquires file-locks inside
+			// GRADLE_USER_HOME; the RO /gradlecache mount would cause "Could not
+			// acquire lock" failures without this copy.
+			{"sh", "-c", "cp -a " + gradleCacheMount + "/. " + gradleHomeDir},
+		},
+		Prefetch: prefetch,
+		Strategy: DepStrategyFetch,
+	}
+}
+
+// hasGradleBuildFile reports whether repoDir contains any of the standard
+// Gradle root build files: build.gradle, build.gradle.kts, settings.gradle,
+// or settings.gradle.kts. Root-level only — matching every other ecosystem's
+// detector scope. Only stdlib (os.Stat) — the sandbox package must remain
+// stdlib-only.
+func hasGradleBuildFile(repoDir string) bool {
+	for _, name := range []string{
+		"build.gradle",
+		"build.gradle.kts",
+		"settings.gradle",
+		"settings.gradle.kts",
+	} {
+		if _, err := os.Stat(filepath.Join(repoDir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchGradleCacheDir returns the bugbot-managed Gradle user-home cache
+// directory for repoDir (e.g. ~/.cache/bugbot/gradlecache/<hash>). Delegates
+// to fetchEcosystemCacheDir. override, when non-empty, overrides the base dir
+// (test seam).
+func fetchGradleCacheDir(repoDir, override string) (string, error) {
+	return fetchEcosystemCacheDir("gradlecache", repoDir, override)
+}
+
+// gradleLockHash returns a hex hash of gradle.lockfile (falling back to the
+// sha256 of the sorted concatenated contents of the root Gradle build files
+// when gradle.lockfile is absent) so the Gradle fetch cache can be keyed on
+// the dependency set. Analogous to nugetLockHash's *.csproj fallback pattern.
+func gradleLockHash(repoDir string) (string, error) {
+	if data, err := os.ReadFile(filepath.Join(repoDir, "gradle.lockfile")); err == nil {
+		sum := sha256.Sum256(data)
+		return hex.EncodeToString(sum[:]), nil
+	}
+	// Fallback: hash the sorted concatenated contents of all root Gradle build
+	// files that exist.
+	buildFiles := []string{
+		"build.gradle",
+		"build.gradle.kts",
+		"settings.gradle",
+		"settings.gradle.kts",
+	}
+	var present []string
+	for _, f := range buildFiles {
+		if _, err := os.Stat(filepath.Join(repoDir, f)); err == nil {
+			present = append(present, f)
+		}
+	}
+	if len(present) == 0 {
+		return "", fmt.Errorf("sandbox: no gradle.lockfile or Gradle build files in %q", repoDir)
+	}
+	// Already in canonical order (same as buildFiles); sort anyway for safety.
+	sort.Strings(present)
+	h := sha256.New()
+	for _, n := range present {
+		data, err := os.ReadFile(filepath.Join(repoDir, n))
+		if err != nil {
+			return "", fmt.Errorf("sandbox: read %s for gradle lock hash: %w", n, err)
+		}
+		h.Write([]byte(n))
+		h.Write([]byte{'\n'})
+		h.Write(data)
+		if !strings.HasSuffix(string(data), "\n") {
+			h.Write([]byte{'\n'})
+		}
+	}
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// newGradlePrefetch builds the one-time online Gradle prefetch hook for the
+// FETCH strategy. It runs `gradle dependencies --no-daemon` in the FetchSandbox
+// with network enabled and GRADLE_USER_HOME pointed at hostCache (mounted at
+// /gradlecache), keyed on the sha256 of gradle.lockfile (or the Gradle build
+// files fallback) so an unchanged dependency set is not re-downloaded. Guarded
+// by a sync.Once so it runs at most once per Resolution.
+func newGradlePrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runGradlePrefetch(ctx, repoDir, hostCache, opts)
+	})
+}
+
+// runGradlePrefetch performs the actual online Gradle dependency resolution.
+// It is a no-op when the cache is already warm for the repo's current
+// gradle.lockfile (or Gradle build files fallback hash).
+//
+// SECURITY: `gradle dependencies` evaluates settings.gradle and build.gradle
+// (Groovy or Kotlin DSL) at configuration time. This executes repo-controlled
+// code ONLINE (network-enabled container). There is no Gradle analog to npm's
+// --ignore-scripts — configuration code always runs; it cannot be skipped
+// without fundamentally changing how Gradle loads the project. This is accepted
+// under the bugbot-gu0o posture (same document-and-accept decision as pip,
+// dotnet, and Maven prefetches). The threat is mitigated by the container's
+// other hardening (cap-drop ALL, no-new-privileges, read-only root, pid limit)
+// and by the absence of secret-bearing mounts during the prefetch run.
+func runGradlePrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions) error {
+	lockHash, hashErr := gradleLockHash(repoDir)
+	sentinel := filepath.Join(hostCache, prefetchSentinel)
+
+	if hashErr == nil {
+		if prev, err := os.ReadFile(sentinel); err == nil && strings.TrimSpace(string(prev)) == lockHash {
+			// Cache already populated for this exact Gradle dependency set.
+			return nil
+		}
+	}
+
+	network := opts.FetchNetwork
+	if network == "" {
+		network = "bridge"
+	}
+
+	// `gradle dependencies --no-daemon` resolves all dependency configurations
+	// and populates the Gradle user home (GRADLE_USER_HOME). --no-daemon
+	// prevents a Gradle daemon from persisting between runs (correct for
+	// ephemeral containers). -q suppresses excessive output.
+	cmd := []string{"gradle", "dependencies", "--no-daemon", "-q"}
+
+	spec := Spec{
+		RepoDir: repoDir,
+		Image:   opts.FetchImage,
+		Network: network,
+		Cmd:     cmd,
+		// Mount the cache dir WRITABLE as GRADLE_USER_HOME so Gradle populates
+		// caches/ and wrapper/ there.
+		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: gradleCacheMount}},
+		Env: []string{
+			"GRADLE_USER_HOME=" + gradleCacheMount,
+		},
+	}
+	res, err := opts.FetchSandbox.Exec(ctx, spec)
+	if err != nil {
+		return fmt.Errorf("sandbox: Gradle prefetch `gradle dependencies` failed to launch: %w", err)
+	}
+	if res.TimedOut {
+		return fmt.Errorf("sandbox: Gradle prefetch `gradle dependencies` timed out")
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("sandbox: Gradle prefetch `gradle dependencies` exited %d: %s", res.ExitCode, lastLines(res.Stderr, 20))
+	}
+
+	if hashErr == nil {
 		_ = os.WriteFile(sentinel, []byte(lockHash), 0o644)
 	}
 	return nil

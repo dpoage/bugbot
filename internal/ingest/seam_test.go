@@ -3,6 +3,7 @@ package ingest
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -614,5 +615,830 @@ func (m MapStore) Post(key, val string)  {}
 		if s.Kind == SeamHTTPRoute {
 			t.Errorf("unexpected SeamHTTPRoute %q: non-routable .Get/.Post string args must not produce HTTP seams", s.Key)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// JS/TS + Python HTTP route and RPC seam tests (bead bugbot-93z.19)
+// ---------------------------------------------------------------------------
+
+// TestEnumerateSeams_HTTPRouteExpressProducerGoConsumer verifies that an
+// Express/JS route registration (producer) paired with a Go http.NewRequest
+// consumer across two distinct files produces a SeamHTTPRoute seam with both
+// files as sides.
+func TestEnumerateSeams_HTTPRouteExpressProducerGoConsumer(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"server/routes.js": `const express = require('express');
+const app = express();
+app.get('/widgets', (req, res) => { res.json([]); });
+app.post('/widgets', (req, res) => { res.json({}); });
+`,
+		"client/client.go": `package client
+import "net/http"
+func fetch() (*http.Response, error) {
+	return http.NewRequest("GET", "/widgets", nil)
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"server/routes.js", "client/client.go"})
+	seams := EnumerateSeams(snap)
+	seam := seamByKey(seams, SeamHTTPRoute, "/widgets")
+	if seam == nil {
+		t.Fatalf("expected SeamHTTPRoute /widgets, got %+v", seams)
+	}
+	if !hasSide(seam, "server/routes.js") {
+		t.Errorf("expected JS producer side server/routes.js: %+v", seam.Sides)
+	}
+	if !hasSide(seam, "client/client.go") {
+		t.Errorf("expected Go consumer side client/client.go: %+v", seam.Sides)
+	}
+}
+
+// TestEnumerateSeams_HTTPRouteFlaskProducerFetchConsumer verifies that a Flask
+// @app.route decorator (Python producer) and a JS fetch('/path') consumer
+// across distinct files produce a SeamHTTPRoute seam.
+func TestEnumerateSeams_HTTPRouteFlaskProducerFetchConsumer(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"api/views.py": `from flask import Flask
+app = Flask(__name__)
+
+@app.route('/users')
+def list_users():
+    return []
+`,
+		"web/app.ts": `async function loadUsers() {
+  const resp = await fetch('/users');
+  return resp.json();
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"api/views.py", "web/app.ts"})
+	seams := EnumerateSeams(snap)
+	seam := seamByKey(seams, SeamHTTPRoute, "/users")
+	if seam == nil {
+		t.Fatalf("expected SeamHTTPRoute /users, got %+v", seams)
+	}
+	if !hasSide(seam, "api/views.py") {
+		t.Errorf("expected Python producer side api/views.py: %+v", seam.Sides)
+	}
+	if !hasSide(seam, "web/app.ts") {
+		t.Errorf("expected TS consumer side web/app.ts: %+v", seam.Sides)
+	}
+}
+
+// TestEnumerateSeams_HTTPRouteFastAPIProducerAxiosConsumer verifies that a
+// FastAPI @app.get decorator (Python producer) and an axios.get('/path')
+// consumer in JS produce a SeamHTTPRoute seam.
+func TestEnumerateSeams_HTTPRouteFastAPIProducerAxiosConsumer(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"api/main.py": `from fastapi import FastAPI
+app = FastAPI()
+
+@app.get('/items')
+def get_items():
+    return []
+`,
+		"frontend/api.js": `import axios from 'axios';
+export const getItems = () => axios.get('/items');
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"api/main.py", "frontend/api.js"})
+	seams := EnumerateSeams(snap)
+	seam := seamByKey(seams, SeamHTTPRoute, "/items")
+	if seam == nil {
+		t.Fatalf("expected SeamHTTPRoute /items, got %+v", seams)
+	}
+	if !hasSide(seam, "api/main.py") {
+		t.Errorf("expected Python producer side api/main.py: %+v", seam.Sides)
+	}
+	if !hasSide(seam, "frontend/api.js") {
+		t.Errorf("expected JS consumer side frontend/api.js: %+v", seam.Sides)
+	}
+}
+
+// TestEnumerateSeams_HTTPRouteDjangoProducerGoConsumer verifies that a Django
+// path() registration (no leading slash in source) and a Go client call
+// produce a SeamHTTPRoute seam on the normalized key "/accounts/login".
+// normalizePyDjangoPath prepends '/' and strips the trailing slash.
+func TestEnumerateSeams_HTTPRouteDjangoProducerGoConsumer(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"myapp/urls.py": `from django.urls import path
+from . import views
+urlpatterns = [
+    path('accounts/login/', views.login, name='login'),
+]
+`,
+		"svc/client.go": `package svc
+import "net/http"
+func login() (*http.Response, error) {
+	return http.NewRequest("POST", "/accounts/login", nil)
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"myapp/urls.py", "svc/client.go"})
+	seams := EnumerateSeams(snap)
+	seam := seamByKey(seams, SeamHTTPRoute, "/accounts/login")
+	if seam == nil {
+		t.Fatalf("expected SeamHTTPRoute /accounts/login, got %+v", seams)
+	}
+	if !hasSide(seam, "myapp/urls.py") {
+		t.Errorf("expected Python Django producer side myapp/urls.py: %+v", seam.Sides)
+	}
+	if !hasSide(seam, "svc/client.go") {
+		t.Errorf("expected Go consumer side svc/client.go: %+v", seam.Sides)
+	}
+}
+
+// TestEnumerateSeams_HTTPRoutePyRequestsConsumer verifies that a requests.get()
+// Python consumer paired with a Go server registration produces a seam.
+func TestEnumerateSeams_HTTPRoutePyRequestsConsumer(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"api/server.go": `package api
+import "net/http"
+func Register(mux *http.ServeMux) {
+	mux.HandleFunc("/health", handleHealth)
+}
+func handleHealth(w http.ResponseWriter, r *http.Request) {}
+`,
+		"check/probe.py": `import requests
+def check():
+    r = requests.get('/health')
+    return r.status_code == 200
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"api/server.go", "check/probe.py"})
+	seams := EnumerateSeams(snap)
+	seam := seamByKey(seams, SeamHTTPRoute, "/health")
+	if seam == nil {
+		t.Fatalf("expected SeamHTTPRoute /health, got %+v", seams)
+	}
+	if !hasSide(seam, "api/server.go") {
+		t.Errorf("expected Go producer side api/server.go: %+v", seam.Sides)
+	}
+	if !hasSide(seam, "check/probe.py") {
+		t.Errorf("expected Python consumer side check/probe.py: %+v", seam.Sides)
+	}
+}
+
+// TestEnumerateSeams_RPCMethodPyServicerAndStub verifies that a Python gRPC
+// servicer method (PRODUCER) and a Python stub call site (CONSUMER) across
+// two distinct files produce a SeamRPCMethod seam. The servicer method is the
+// anchor producer; the stub call alone would not emit (producer-anchor gate).
+func TestEnumerateSeams_RPCMethodPyServicerAndStub(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"grpc/servicer.py": `import widget_pb2_grpc
+
+class WidgetServicer(widget_pb2_grpc.WidgetServicer):
+    def GetWidget(self, request, context):
+        return widget_pb2.Widget(id=request.id)
+`,
+		"grpc/client.py": `import grpc
+import widget_pb2_grpc
+
+channel = grpc.insecure_channel('localhost:50051')
+stub = widget_pb2_grpc.WidgetStub(channel)
+
+def fetch_widget(widget_id):
+    return stub.GetWidget(widget_pb2.GetWidgetRequest(id=widget_id))
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"grpc/servicer.py", "grpc/client.py"})
+	seams := EnumerateSeams(snap)
+	seam := seamByKey(seams, SeamRPCMethod, "GetWidget")
+	if seam == nil {
+		t.Fatalf("expected SeamRPCMethod GetWidget, got %+v", seams)
+	}
+	if !hasSide(seam, "grpc/servicer.py") {
+		t.Errorf("expected Python servicer producer side grpc/servicer.py: %+v", seam.Sides)
+	}
+	if !hasSide(seam, "grpc/client.py") {
+		t.Errorf("expected Python stub consumer side grpc/client.py: %+v", seam.Sides)
+	}
+}
+
+// TestEnumerateSeams_HTTPRouteJSNoPrecisionFlood is the negative-precision
+// guard for JS/TS HTTP route detection against the real over-match cases
+// that the oracle identified:
+//
+//   - cache.get('/user/42', fallback) — a leading-slash path as the first arg
+//     with a non-function second arg. The OLD comma-only gate accepted this as
+//     a route PRODUCER; the handler-shape gate (function keyword / arrow) rejects
+//     it. This must NOT produce a SeamHTTPRoute seam.
+//   - graph.path is covered by the Python test; the JS test focuses on the
+//     verb-method over-match where ANY receiver's .get('/path', arg) was a producer.
+//
+// A single-file snapshot with these patterns MUST emit ZERO SeamHTTPRoute seams.
+func TestEnumerateSeams_HTTPRouteJSNoPrecisionFlood(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"lib/cache.js": `// Cache/Map accessor with a leading-slash key and a non-function fallback.
+// The OLD httpJsRouteProducerRe (comma-only gate) accepted this as a PRODUCER
+// route registration, mislabeling the path '/user/42' as a server route.
+// The handler-shape gate (function keyword or arrow) must reject it.
+const user = cache.get('/user/42', fallback);
+
+// Another instance client call with a path-like key and a data body arg.
+// Must NOT be a route producer: 'body' is not a function or arrow shape.
+const item = api.post('/items/new', body);
+
+// Standard DOM accessor — not a route and not a URL path.
+const el = document.get('button.submit');
+
+// A bare string without leading slash — normalizeHTTPPath rejects it.
+const x = lookup('userProfile');
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"lib/cache.js"})
+	seams := EnumerateSeams(snap)
+	for _, s := range seams {
+		if s.Kind == SeamHTTPRoute {
+			t.Errorf("unexpected SeamHTTPRoute %q: cache/accessor .get('/path', arg) without handler shape must not produce HTTP seams; got %+v", s.Key, s)
+		}
+	}
+}
+
+// TestEnumerateSeams_HTTPRoutePyNoPrecisionFlood is the negative-precision
+// guard for Python HTTP detection against the real over-match cases the oracle
+// identified:
+//
+//   - graph.path('shortest', dst) — the OLD httpPyDjangoPathRe used \bpath\(
+//     which matched ANY method call named 'path', including graph.path(...),
+//     networkx.shortest_path('src', 'dst'), etc. The no-receiver gate
+//     (requiring a non-dot prefix character or line start) must reject these.
+//   - The false producer would prefix-slash the first arg: '/shortest'.
+//     With the no-receiver fix, graph.path('shortest', dst) emits NO seam.
+//
+// MUST emit ZERO SeamHTTPRoute seams.
+func TestEnumerateSeams_HTTPRoutePyNoPrecisionFlood(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"graph/algo.py": `import networkx as nx
+
+class GraphAnalyzer:
+    def __init__(self, graph):
+        self.graph = graph
+
+    def shortest(self, src, dst):
+        # graph.path(...) — the OLD Django regex matched this as a route
+        # producer for 'shortest', emitting a SeamHTTPRoute '/shortest'.
+        # The no-receiver gate (no dot before 'path') must reject it.
+        result = self.graph.path('shortest', dst)
+        return result
+
+    def analyze(self, obj):
+        # method.path call — also a method call, must not match
+        p = obj.path('api/v1/', handler)
+        return p
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"graph/algo.py"})
+	seams := EnumerateSeams(snap)
+	for _, s := range seams {
+		if s.Kind == SeamHTTPRoute {
+			t.Errorf("unexpected SeamHTTPRoute %q: graph.path/obj.path method calls must not produce HTTP seams; got %+v", s.Key, s)
+		}
+	}
+}
+
+// TestEnumerateSeams_RPCMethodPyStubNoPrecisionFlood is the negative-precision
+// guard for Python RPC detection. A Python file with ordinary method calls of
+// the form object.UpperMethod() — but NO .proto declaration and NO gRPC
+// servicer class — MUST emit ZERO SeamRPCMethod seams. The producer-anchor
+// gate must suppress all consumer-only evidence.
+func TestEnumerateSeams_RPCMethodPyStubNoPrecisionFlood(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"svc/orm.py": `class Repo:
+    def __init__(self, db):
+        self.db = db
+
+    def query(self):
+        # These look like RPC calls (lowercase.Upper()) but are ORM methods
+        rows = self.db.Execute("SELECT 1")
+        results = self.db.FetchAll()
+        obj = self.client.GetUser(user_id)
+        return results
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"svc/orm.py"})
+	seams := EnumerateSeams(snap)
+	for _, s := range seams {
+		if s.Kind == SeamRPCMethod {
+			t.Errorf("unexpected SeamRPCMethod %q: ordinary Python .UpperMethod() calls must not produce RPC seams without a producer", s.Key)
+		}
+	}
+}
+
+// TestEnumerateSeams_HTTPRouteLanguageSideCarried verifies that the Language
+// field on each SeamSide correctly reflects the actual file language (not a
+// hardcoded LangGo) when JS and Python files are involved.
+func TestEnumerateSeams_HTTPRouteLanguageSideCarried(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"server/app.js": `const express = require('express');
+const app = express();
+app.post('/submit', (req, res) => res.send('ok'));
+`,
+		"client/client.py": `import requests
+def submit(data):
+    return requests.post('/submit', json=data)
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"server/app.js", "client/client.py"})
+	seams := EnumerateSeams(snap)
+	seam := seamByKey(seams, SeamHTTPRoute, "/submit")
+	if seam == nil {
+		t.Fatalf("expected SeamHTTPRoute /submit, got %+v", seams)
+	}
+	// Check that the JS side carries LangJavaScript, not LangGo.
+	foundJS := false
+	foundPy := false
+	for _, side := range seam.Sides {
+		if side.File == "server/app.js" && side.Language == LangJavaScript {
+			foundJS = true
+		}
+		if side.File == "client/client.py" && side.Language == LangPython {
+			foundPy = true
+		}
+	}
+	if !foundJS {
+		t.Errorf("expected JS side with LangJavaScript: %+v", seam.Sides)
+	}
+	if !foundPy {
+		t.Errorf("expected Python side with LangPython: %+v", seam.Sides)
+	}
+}
+
+// TestEnumerateSeams_ZeroNewSeamsOnOwnSource is the CRITICAL EMPIRICAL GATE:
+// running EnumerateSeams over this repo's own production source (Go + SQL,
+// no JS/TS/Python files) must emit ZERO SeamHTTPRoute and ZERO SeamRPCMethod
+// seams from the new JS/Python detectors. The scan deliberately excludes
+// *_test.go files because their embedded string fixtures (e.g. test cases that
+// contain Go HTTP handler snippets) would otherwise produce Go-language
+// single-sided seams that are artifacts of the test harness, not production
+// code. Excluding test files is the correct scope for a production-code
+// precision gate; it also makes the assertion exact (0) rather than "just
+// check the language tags", which the oracle correctly flagged as over-claiming.
+func TestEnumerateSeams_ZeroNewSeamsOnOwnSource(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	snap := buildRealSnapshot(t, repoRoot)
+	seams := EnumerateSeams(snap)
+
+	counts := make(map[SeamKind]int)
+	for _, s := range seams {
+		counts[s.Kind]++
+	}
+	t.Logf("Own-source (non-test) seam counts: DataFile=%d EnvVar=%d HTTPRoute=%d RPCMethod=%d total=%d",
+		counts[SeamDataFile], counts[SeamEnvVar], counts[SeamHTTPRoute], counts[SeamRPCMethod], len(seams))
+
+	// Assert zero HTTPRoute and RPC seams from the production Go source.
+	// The repo has no JS/TS/Python files, so the new detectors have no
+	// production input. Any match here is a false positive from the new tables
+	// firing on Go syntax.
+	if n := counts[SeamHTTPRoute]; n != 0 {
+		for _, s := range seams {
+			if s.Kind == SeamHTTPRoute {
+				t.Logf("  spurious HTTPRoute seam: key=%q sides=%+v", s.Key, s.Sides)
+			}
+		}
+		t.Errorf("expected 0 SeamHTTPRoute on own production source, got %d", n)
+	}
+	if n := counts[SeamRPCMethod]; n != 0 {
+		for _, s := range seams {
+			if s.Kind == SeamRPCMethod {
+				t.Logf("  spurious RPCMethod seam: key=%q sides=%+v", s.Key, s.Sides)
+			}
+		}
+		t.Errorf("expected 0 SeamRPCMethod on own production source, got %d", n)
+	}
+}
+
+// findRepoRoot walks up from the test's working directory to find the repo
+// root (the directory containing go.mod).
+func findRepoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("could not find repo root (no go.mod found)")
+		}
+		dir = parent
+	}
+}
+
+// buildRealSnapshot constructs a Snapshot over the real repo's production source
+// by walking the filesystem and classifying every file via DetectLanguage.
+// *_test.go files are excluded: their embedded Go snippets (HTTP handler strings,
+// env-var literals) are test fixtures, not production code, and would produce
+// artifact seams that obscure the gate's real signal. Only non-Other-language
+// production files are included (plus .proto files for RPC detection).
+func buildRealSnapshot(t *testing.T, root string) *Snapshot {
+	t.Helper()
+	var files []File
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if d.IsDir() {
+			// Skip hidden and vendor directories.
+			name := d.Name()
+			if name == ".git" || name == "vendor" || name == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		// Exclude *_test.go files: their embedded fixture snippets produce
+		// Go-language artifact seams (e.g. mux.HandleFunc("/path", ...) in
+		// test string literals) that are not production code matches.
+		if strings.HasSuffix(rel, "_test.go") {
+			return nil
+		}
+		lang := DetectLanguage(rel)
+		isProto := strings.HasSuffix(rel, ".proto")
+		if lang == LangOther && !isProto {
+			return nil
+		}
+		files = append(files, File{Path: rel, Language: lang})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Snapshot{Root: root, Files: files}
+}
+
+// ---------------------------------------------------------------------------
+// Rust + C/C++ env-var, HTTP, and RPC seam tests (bead bugbot-tdq5.3)
+// ---------------------------------------------------------------------------
+
+// TestEnumerateSeams_EnvVarRustAndGo verifies the env-var detector surfaces a
+// seam when the same variable is read from Rust (std::env::var or env::var)
+// and Go (os.Getenv). Both sides must appear.
+func TestEnumerateSeams_EnvVarRustAndGo(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"svc/config.rs": `use std::env;
+fn load_cfg() {
+    let db = std::env::var("DATABASE_URL").unwrap();
+    let secret = env::var("APP_SECRET").unwrap();
+}
+`,
+		"svc/config.go": `package svc
+import "os"
+func loadCfg() {
+    db := os.Getenv("DATABASE_URL")
+    _ = db
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"svc/config.rs", "svc/config.go"})
+	seams := EnumerateSeams(snap)
+	seam := seamByKey(seams, SeamEnvVar, "DATABASE_URL")
+	if seam == nil {
+		t.Fatalf("expected SeamEnvVar DATABASE_URL, got %+v", seams)
+	}
+	if !hasSide(seam, "svc/config.rs") {
+		t.Errorf("expected Rust side svc/config.rs: %+v", seam.Sides)
+	}
+	if !hasSide(seam, "svc/config.go") {
+		t.Errorf("expected Go side svc/config.go: %+v", seam.Sides)
+	}
+}
+
+// TestEnumerateSeams_EnvVarCppAndPython verifies the env-var detector surfaces
+// a seam when the same variable is read from C++ (getenv) and Python (os.getenv).
+func TestEnumerateSeams_EnvVarCppAndPython(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"server/main.cpp": `#include <cstdlib>
+int main() {
+    const char* port = getenv("SERVER_PORT");
+    const char* secret = secure_getenv("API_SECRET");
+    return 0;
+}
+`,
+		"client/probe.py": `import os
+def probe():
+    port = os.getenv("SERVER_PORT")
+    return port
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"server/main.cpp", "client/probe.py"})
+	seams := EnumerateSeams(snap)
+	seam := seamByKey(seams, SeamEnvVar, "SERVER_PORT")
+	if seam == nil {
+		t.Fatalf("expected SeamEnvVar SERVER_PORT, got %+v", seams)
+	}
+	if !hasSide(seam, "server/main.cpp") {
+		t.Errorf("expected C++ side server/main.cpp: %+v", seam.Sides)
+	}
+	if !hasSide(seam, "client/probe.py") {
+		t.Errorf("expected Python side client/probe.py: %+v", seam.Sides)
+	}
+}
+
+// TestEnumerateSeams_HTTPRouteAxumProducerGoConsumer verifies that an axum
+// .route("/path", get(handler)) registration (Rust producer) paired with a Go
+// http.NewRequest consumer produces a SeamHTTPRoute seam with both sides named.
+func TestEnumerateSeams_HTTPRouteAxumProducerGoConsumer(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"api/src/main.rs": `use axum::{Router, routing::get};
+async fn list_widgets() -> &'static str { "[]" }
+pub fn router() -> Router {
+    Router::new()
+        .route("/widgets", get(list_widgets))
+        .route("/widgets/new", post(create_widget))
+}
+`,
+		"client/client.go": `package client
+import "net/http"
+func fetch() (*http.Response, error) {
+    req, _ := http.NewRequest("GET", "/widgets", nil)
+    return http.DefaultClient.Do(req)
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"api/src/main.rs", "client/client.go"})
+	seams := EnumerateSeams(snap)
+	seam := seamByKey(seams, SeamHTTPRoute, "/widgets")
+	if seam == nil {
+		t.Fatalf("expected SeamHTTPRoute /widgets, got %+v", seams)
+	}
+	if !hasSide(seam, "api/src/main.rs") {
+		t.Errorf("expected Rust axum producer side api/src/main.rs: %+v", seam.Sides)
+	}
+	if !hasSide(seam, "client/client.go") {
+		t.Errorf("expected Go consumer side client/client.go: %+v", seam.Sides)
+	}
+}
+
+// TestEnumerateSeams_HTTPRouteActixAttrProducerFetchConsumer verifies that an
+// actix-web #[get("/path")] attribute macro (Rust producer) paired with a JS
+// fetch consumer produces a SeamHTTPRoute seam.
+func TestEnumerateSeams_HTTPRouteActixAttrProducerFetchConsumer(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"api/src/handlers.rs": `use actix_web::{get, post, HttpResponse};
+
+#[get("/users")]
+async fn list_users() -> HttpResponse {
+    HttpResponse::Ok().finish()
+}
+
+#[post("/users")]
+async fn create_user() -> HttpResponse {
+    HttpResponse::Created().finish()
+}
+`,
+		"web/client.ts": `async function loadUsers() {
+  const resp = await fetch('/users');
+  return resp.json();
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"api/src/handlers.rs", "web/client.ts"})
+	seams := EnumerateSeams(snap)
+	seam := seamByKey(seams, SeamHTTPRoute, "/users")
+	if seam == nil {
+		t.Fatalf("expected SeamHTTPRoute /users, got %+v", seams)
+	}
+	if !hasSide(seam, "api/src/handlers.rs") {
+		t.Errorf("expected Rust actix-web producer side api/src/handlers.rs: %+v", seam.Sides)
+	}
+	if !hasSide(seam, "web/client.ts") {
+		t.Errorf("expected TS consumer side web/client.ts: %+v", seam.Sides)
+	}
+}
+
+// TestEnumerateSeams_HTTPRouteReqwestConsumerFlaskProducer verifies that a
+// reqwest client.get() call (Rust consumer) paired with a Flask @app.route
+// producer produces a SeamHTTPRoute seam.
+func TestEnumerateSeams_HTTPRouteReqwestConsumerFlaskProducer(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"api/app.py": `from flask import Flask
+app = Flask(__name__)
+
+@app.route('/health')
+def health_check():
+    return 'ok'
+`,
+		"client/src/lib.rs": `use reqwest;
+pub async fn check_health(client: &reqwest::Client) -> reqwest::Result<String> {
+    client.get("/health").send().await?.text().await
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"api/app.py", "client/src/lib.rs"})
+	seams := EnumerateSeams(snap)
+	seam := seamByKey(seams, SeamHTTPRoute, "/health")
+	if seam == nil {
+		t.Fatalf("expected SeamHTTPRoute /health, got %+v", seams)
+	}
+	if !hasSide(seam, "api/app.py") {
+		t.Errorf("expected Python Flask producer side api/app.py: %+v", seam.Sides)
+	}
+	if !hasSide(seam, "client/src/lib.rs") {
+		t.Errorf("expected Rust reqwest consumer side client/src/lib.rs: %+v", seam.Sides)
+	}
+}
+
+// TestEnumerateSeams_RPCMethodTonicImplAndProto verifies that a tonic gRPC
+// server handler (Rust PRODUCER) combined with a .proto rpc declaration
+// produces a SeamRPCMethod seam joined on the UpperCamelCase key.
+//
+// tonic-build generates snake_case trait method names from proto UpperCamelCase
+// RPC names (proto: rpc GetWidget → Rust trait: async fn get_widget). The seam
+// detector normalizes the captured snake_case name to UpperCamelCase via
+// snakeToUpperCamel so it joins the .proto declaration key "GetWidget".
+// This test asserts the full join: proto declaration + real tonic codegen
+// signature → SeamRPCMethod with both files as sides.
+func TestEnumerateSeams_RPCMethodTonicImplAndProto(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"proto/widget.proto": `syntax = "proto3";
+service WidgetService {
+    rpc GetWidget(GetWidgetRequest) returns (GetWidgetReply);
+    rpc CreateWidget(CreateWidgetRequest) returns (CreateWidgetReply);
+}
+`,
+		// Real tonic-build codegen: snake_case fn names, exact tonic signature.
+		"server/src/service.rs": `use tonic::{Request, Response, Status};
+
+pub struct WidgetService;
+
+#[tonic::async_trait]
+impl widget_server::WidgetServer for WidgetService {
+    async fn get_widget(
+        &self,
+        request: Request<GetWidgetRequest>,
+    ) -> Result<Response<GetWidgetReply>, Status> {
+        Ok(Response::new(GetWidgetReply::default()))
+    }
+
+    async fn create_widget(
+        &self,
+        request: Request<CreateWidgetRequest>,
+    ) -> Result<Response<CreateWidgetReply>, Status> {
+        Ok(Response::new(CreateWidgetReply::default()))
+    }
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"proto/widget.proto", "server/src/service.rs"})
+	seams := EnumerateSeams(snap)
+	// Key must be the UpperCamelCase proto name, not the Rust snake_case fn name.
+	seam := seamByKey(seams, SeamRPCMethod, "GetWidget")
+	if seam == nil {
+		t.Fatalf("expected SeamRPCMethod GetWidget (via snake→camel normalization), got %+v", seams)
+	}
+	if !hasSide(seam, "proto/widget.proto") {
+		t.Errorf("expected proto producer side proto/widget.proto: %+v", seam.Sides)
+	}
+	if !hasSide(seam, "server/src/service.rs") {
+		t.Errorf("expected Rust tonic impl side server/src/service.rs: %+v", seam.Sides)
+	}
+}
+
+// TestEnumerateSeams_HTTPRouteRustNoPrecisionFlood is the negative-precision
+// guard for Rust HTTP detection. Over-match risks targeted:
+//
+//   - map.route("/key", value) — .route() call whose second arg is NOT a
+//     method-router call like get(). Axum precision anchor rejects it.
+//   - hashmap.get("/path") — ordinary .get() on a HashMap with a slash-keyed
+//     string. The OLD reqwest consumer regex (no .send anchor) would have
+//     fired here, creating a false consumer that joins a real Go producer.
+//     The .send( chain requirement rejects it.
+//   - routes.get("/health") — slash-keyed route-table lookup. Same .send gate.
+//   - client.get("relative-path") — no leading slash. normalizeHTTPPath rejects.
+//
+// Cross-language negative: when a real Go producer registers /health and a Rust
+// file contains routes.get("/health") (a route-table lookup, NOT a reqwest call),
+// the Rust file MUST NOT appear as a consumer side.
+//
+// A single-file Rust snapshot MUST emit ZERO SeamHTTPRoute seams.
+// A two-file snapshot (Go producer + Rust map accessor) MUST emit a seam with
+// ONLY the Go side — the Rust accessor must not appear as a consumer.
+func TestEnumerateSeams_HTTPRouteRustNoPrecisionFlood(t *testing.T) {
+	// Part 1: single-file Rust — none of these patterns are route producers/consumers.
+	root := writeRepo(t, map[string]string{
+		"svc/src/cache.rs": `use std::collections::HashMap;
+
+fn use_cache(map: &mut HashMap<String, String>, client: &reqwest::Client) {
+    // NOT a route producer: second arg is a plain value, not a method-router call.
+    let v = map.route("/cache-key", some_value);
+
+    // NOT a route consumer: .get() on a HashMap with a slash key and NO .send chain.
+    let x = map.get("/health");
+
+    // NOT a route consumer: route-table lookup, no .send chain.
+    let handler = routes.get("/health");
+
+    // NOT a route consumer: no leading slash.
+    let resp = client.get("relative-path");
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"svc/src/cache.rs"})
+	seams := EnumerateSeams(snap)
+	for _, s := range seams {
+		if s.Kind == SeamHTTPRoute {
+			t.Errorf("single-file: unexpected SeamHTTPRoute %q: Rust non-route patterns must not produce HTTP seams; got %+v", s.Key, s)
+		}
+	}
+
+	// Part 2: Go producer + Rust slash-keyed map accessor. The Rust accessor
+	// routes.get("/health") must NOT appear as a consumer side; the seam
+	// (if any) must have only the Go side.
+	root2 := writeRepo(t, map[string]string{
+		"api/server.go": `package api
+import "net/http"
+func Register(mux *http.ServeMux) {
+	mux.HandleFunc("/health", handleHealth)
+}
+func handleHealth(w http.ResponseWriter, r *http.Request) {}
+`,
+		"svc/src/lookup.rs": `fn check_route(routes: &RouteTable) {
+    // Slash-keyed map lookup — NOT a reqwest consumer (no .send chain).
+    let h = routes.get("/health");
+}
+`,
+	})
+	snap2 := makeSnapshot(t, root2, []string{"api/server.go", "svc/src/lookup.rs"})
+	seams2 := EnumerateSeams(snap2)
+	for _, s := range seams2 {
+		if s.Kind == SeamHTTPRoute && s.Key == "/health" {
+			for _, side := range s.Sides {
+				if side.File == "svc/src/lookup.rs" {
+					t.Errorf("two-file: Rust slash-keyed map accessor must NOT appear as consumer side; seam=%+v", s)
+				}
+			}
+		}
+	}
+}
+
+// TestEnumerateSeams_RPCMethodRustTonicNoPrecisionFlood is the negative-
+// precision guard for Rust tonic RPC detection. A Rust file with async
+// methods that resemble tonic handlers but have no .proto producer MUST emit
+// ZERO SeamRPCMethod seams. The producer-anchor gate suppresses them.
+func TestEnumerateSeams_RPCMethodRustTonicNoPrecisionFlood(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"svc/src/client.rs": `use tonic::{Request, Response, Status};
+
+// A client-side call — NOT a server handler (no &self, no Request<> in param,
+// no Result<Response<>, Status> return). Producer-anchor gate must suppress.
+impl SomeClient {
+    // ordinary async fn — does not match rustRPCHandlerRe signature
+    pub async fn do_work(&self, id: u32) -> anyhow::Result<String> {
+        Ok(format!("result {}", id))
+    }
+}
+`,
+	})
+	snap := makeSnapshot(t, root, []string{"svc/src/client.rs"})
+	seams := EnumerateSeams(snap)
+	for _, s := range seams {
+		if s.Kind == SeamRPCMethod {
+			t.Errorf("unexpected SeamRPCMethod %q: Rust async fn without tonic signature must not produce RPC seams; got %+v", s.Key, s)
+		}
+	}
+}
+
+// TestEnumerateSeams_ZeroNewSeamsOnOwnSourceWithRust re-runs the own-source
+// empirical gate and explicitly verifies the Rust detectors add zero false
+// positives on the Go-only production source. This is a belt-and-suspenders
+// check: the existing TestEnumerateSeams_ZeroNewSeamsOnOwnSource covers
+// HTTP and RPC; this test is identical in logic but documents the Rust
+// addition in the test inventory. If the repo ever gains production Rust
+// files the gate must be re-calibrated.
+func TestEnumerateSeams_ZeroNewSeamsOnOwnSourceWithRust(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	snap := buildRealSnapshot(t, repoRoot)
+	seams := EnumerateSeams(snap)
+
+	counts := make(map[SeamKind]int)
+	for _, s := range seams {
+		counts[s.Kind]++
+	}
+	t.Logf("Own-source (non-test, Rust gate) seam counts: DataFile=%d EnvVar=%d HTTPRoute=%d RPCMethod=%d",
+		counts[SeamDataFile], counts[SeamEnvVar], counts[SeamHTTPRoute], counts[SeamRPCMethod])
+
+	if n := counts[SeamHTTPRoute]; n != 0 {
+		for _, s := range seams {
+			if s.Kind == SeamHTTPRoute {
+				t.Logf("  spurious HTTPRoute seam: key=%q sides=%+v", s.Key, s.Sides)
+			}
+		}
+		t.Errorf("Rust detector: expected 0 SeamHTTPRoute on own production source, got %d", n)
+	}
+	if n := counts[SeamRPCMethod]; n != 0 {
+		for _, s := range seams {
+			if s.Kind == SeamRPCMethod {
+				t.Logf("  spurious RPCMethod seam: key=%q sides=%+v", s.Key, s.Sides)
+			}
+		}
+		t.Errorf("Rust detector: expected 0 SeamRPCMethod on own production source, got %d", n)
 	}
 }

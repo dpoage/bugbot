@@ -746,3 +746,305 @@ func TestIntegrationNuGetNoCacheFailsOffline(t *testing.T) {
 	}
 	t.Logf("correctly failed (exit=%d); stderr excerpt: %s", out.ExitCode, out.Stderr)
 }
+
+// ---- Maven integration tests -----------------------------------------------
+
+// mavenTestImage is the Maven image used for the Maven integration tests.
+// maven:3-eclipse-temurin-17 ships mvn, java, and a JDK; it is the official
+// Maven image.
+const mavenTestImage = "docker.io/library/maven:3-eclipse-temurin-17"
+
+// newMavenTestCLI builds a CLI backed by the Maven image, skipping when no
+// runtime is available or the image cannot be used. The first invocation
+// (`true` over bridge) is what actually fails when no docker/podman is around
+// or the image cannot be pulled — the integration test must therefore skip
+// cleanly here, not block CI.
+func newMavenTestCLI(t *testing.T) *CLI {
+	t.Helper()
+	rt, ok := Detect()
+	if !ok {
+		t.Skip("no container runtime detected; skipping Maven integration test")
+	}
+	s, err := NewCLI(rt, mavenTestImage,
+		WithCPUs(2),
+		WithMemoryMB(2048),
+		WithPidsLimit(512),
+		WithTimeout(300*time.Second),
+	)
+	if err != nil {
+		t.Skipf("NewCLI (maven): %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if _, err := s.Exec(ctx, Spec{RepoDir: t.TempDir(), Cmd: []string{"true"}, Network: "bridge"}); err != nil {
+		t.Skipf("cannot run Maven test image %q (pull failed?): %v", mavenTestImage, err)
+	}
+	return s
+}
+
+// writeMavenTestRepo writes a minimal Maven project with a single test that
+// imports the widely-cached commons-lang3 package. The pom.xml uses
+// junit-platform-launcher + junit-jupiter (the standard Maven test triple)
+// so `mvn test` exercises a real external dependency.
+func writeMavenTestRepo(t *testing.T, dir string) {
+	t.Helper()
+	pom := `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>test-project</artifactId>
+  <version>1.0-SNAPSHOT</version>
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-lang3</artifactId>
+      <version>3.14.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+`
+	writeFile(t, filepath.Join(dir, "pom.xml"), pom)
+
+	testSrc := `package com.example;
+import org.apache.commons.lang3.StringUtils;
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+public class ExampleTest {
+    @Test
+    public void testStringUtils() {
+        assertEquals("hello", StringUtils.lowerCase("HELLO"));
+    }
+}
+`
+	writeFile(t, filepath.Join(dir, "src/test/java/com/example/ExampleTest.java"), testSrc)
+}
+
+// TestIntegrationMavenFetchBuildsOffline proves the full Maven FETCH round-trip:
+// prefetch runs `mvn -B dependency:go-offline` online to populate the local
+// repository, then the network-none run uses MAVEN_OPTS=-Dmaven.repo.local=/m2cache
+// (mounted read-only from the populated cache) to build and test. Exit 0 required.
+func TestIntegrationMavenFetchBuildsOffline(t *testing.T) {
+	s := newMavenTestCLI(t)
+	dir := t.TempDir()
+	writeMavenTestRepo(t, dir)
+	cacheBase := t.TempDir()
+
+	res, err := ResolveDeps(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: s,
+		FetchImage:   mavenTestImage,
+		FetchNetwork: "bridge",
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := res.Prefetch(ctx); err != nil {
+		t.Fatalf("prefetch: %v", err)
+	}
+
+	ctx2, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	out, err := s.Exec(ctx2, Spec{
+		RepoDir:  dir,
+		Cmd:      []string{"mvn", "-B", "test"},
+		Network:  "none",
+		ROMounts: res.ROMounts,
+		Env:      res.Env,
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if out.ExitCode != 0 {
+		t.Fatalf("mvn test with cache under --network=none exited %d;\nstdout:\n%s\nstderr:\n%s",
+			out.ExitCode, out.Stdout, out.Stderr)
+	}
+}
+
+// TestIntegrationMavenNoCacheFailsOffline is the negative control: the same
+// mvn test WITHOUT the Maven cache fails under --network=none. This proves
+// that --network=none is enforced and that the cache mount is load-bearing.
+func TestIntegrationMavenNoCacheFailsOffline(t *testing.T) {
+	s := newMavenTestCLI(t)
+	dir := t.TempDir()
+	writeMavenTestRepo(t, dir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	out, err := s.Exec(ctx, Spec{
+		RepoDir: dir,
+		Cmd:     []string{"mvn", "-B", "test"},
+		Network: "none",
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if out.ExitCode == 0 {
+		t.Fatalf("mvn test with NO cache under --network=none should fail, but exited 0;\nstdout:\n%s\nstderr:\n%s",
+			out.Stdout, out.Stderr)
+	}
+	t.Logf("correctly failed (exit=%d); stderr excerpt: %s", out.ExitCode, out.Stderr)
+}
+
+// ---- Gradle integration tests -----------------------------------------------
+
+// gradleTestImage is the Gradle image used for the Gradle integration tests.
+// gradle:8-jdk17 ships gradle, java, and a JDK; it is the official Gradle image.
+const gradleTestImage = "docker.io/library/gradle:8-jdk17"
+
+// newGradleTestCLI builds a CLI backed by the Gradle image, skipping when no
+// runtime is available or the image cannot be used.
+func newGradleTestCLI(t *testing.T) *CLI {
+	t.Helper()
+	rt, ok := Detect()
+	if !ok {
+		t.Skip("no container runtime detected; skipping Gradle integration test")
+	}
+	s, err := NewCLI(rt, gradleTestImage,
+		WithCPUs(2),
+		WithMemoryMB(2048),
+		WithPidsLimit(512),
+		WithTimeout(300*time.Second),
+	)
+	if err != nil {
+		t.Skipf("NewCLI (gradle): %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if _, err := s.Exec(ctx, Spec{RepoDir: t.TempDir(), Cmd: []string{"true"}, Network: "bridge"}); err != nil {
+		t.Skipf("cannot run Gradle test image %q (pull failed?): %v", gradleTestImage, err)
+	}
+	return s
+}
+
+// writeGradleTestRepo writes a minimal Gradle project with a single test that
+// imports guava (widely-cached, pure-Java). Kotlin DSL + JUnit Jupiter is the
+// modern Gradle standard; uses the Kotlin build file so the kts detector fires.
+func writeGradleTestRepo(t *testing.T, dir string) {
+	t.Helper()
+	buildKts := `plugins {
+    java
+}
+repositories {
+    mavenCentral()
+}
+dependencies {
+    implementation("com.google.guava:guava:33.2.1-jre")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+}
+tasks.test {
+    useJUnitPlatform()
+}
+`
+	writeFile(t, filepath.Join(dir, "build.gradle.kts"), buildKts)
+
+	settings := `rootProject.name = "test-project"
+`
+	writeFile(t, filepath.Join(dir, "settings.gradle.kts"), settings)
+
+	testSrc := `import com.google.common.base.Strings;
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+public class ExampleTest {
+    @Test
+    public void testGuava() {
+        assertEquals("hello", Strings.nullToEmpty("hello"));
+    }
+}
+`
+	writeFile(t, filepath.Join(dir, "src/test/java/ExampleTest.java"), testSrc)
+}
+
+// TestIntegrationGradleFetchBuildsOffline proves the full Gradle FETCH round-trip:
+// prefetch runs `gradle dependencies --no-daemon -q` online to populate the
+// Gradle user home, then the network-none run copies the cache to the disk-backed
+// /workspace/.bugbot-gradle-home via SetupCmds and runs `gradle test`. Exit 0 required.
+func TestIntegrationGradleFetchBuildsOffline(t *testing.T) {
+	s := newGradleTestCLI(t)
+	dir := t.TempDir()
+	writeGradleTestRepo(t, dir)
+	cacheBase := t.TempDir()
+
+	res, err := ResolveDeps(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: s,
+		FetchImage:   gradleTestImage,
+		FetchNetwork: "bridge",
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := res.Prefetch(ctx); err != nil {
+		t.Fatalf("prefetch: %v", err)
+	}
+
+	ctx2, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	out, err := s.Exec(ctx2, Spec{
+		RepoDir:   dir,
+		Cmd:       []string{"gradle", "test", "--no-daemon"},
+		Network:   "none",
+		ROMounts:  res.ROMounts,
+		Env:       res.Env,
+		SetupCmds: res.SetupCmds,
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if out.ExitCode != 0 {
+		t.Fatalf("gradle test with cache under --network=none exited %d;\nstdout:\n%s\nstderr:\n%s",
+			out.ExitCode, out.Stdout, out.Stderr)
+	}
+}
+
+// TestIntegrationGradleNoCacheFailsOffline is the negative control: the same
+// gradle test WITHOUT the cache fails under --network=none. This proves that
+// --network=none is enforced and that the cache mount + SetupCmds are
+// load-bearing.
+func TestIntegrationGradleNoCacheFailsOffline(t *testing.T) {
+	s := newGradleTestCLI(t)
+	dir := t.TempDir()
+	writeGradleTestRepo(t, dir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	out, err := s.Exec(ctx, Spec{
+		RepoDir: dir,
+		Cmd:     []string{"gradle", "test", "--no-daemon"},
+		Network: "none",
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if out.ExitCode == 0 {
+		t.Fatalf("gradle test with NO cache under --network=none should fail, but exited 0;\nstdout:\n%s\nstderr:\n%s",
+			out.Stdout, out.Stderr)
+	}
+	t.Logf("correctly failed (exit=%d); stderr excerpt: %s", out.ExitCode, out.Stderr)
+}

@@ -150,9 +150,39 @@ type Summary struct {
 	// EnumDriftLeads counts leads from the enum/const-drift pass
 	// (switch cases using raw integer literals instead of named constants).
 	EnumDriftLeads int
-	// StringlyDriftLeads counts leads from the stringly-typed drift pass
-	// (consumed string literals with no producer, or vice-versa).
+	// StringlyDriftLeads counts leads from the Go stringly-typed drift pass
+	// (type X string; const values vs raw switch case literals — Go only).
 	StringlyDriftLeads int
+	// StringlyTSDriftLeads counts leads from the TypeScript string-union drift
+	// pass (type Alias = 'a' | 'b' | ... vs switch case literals — TS only).
+	StringlyTSDriftLeads int
+	// TSParseFailures counts TS files skipped because the gotreesitter grammar
+	// produced a parse tree with HasError()=true (known gap: typed-param arrow
+	// functions). Exposed so callers and tests can audit grammar coverage.
+	TSParseFailures int
+	// StringlyPyDriftLeads counts leads from the Python string-union drift pass
+	// (Literal[...] type aliases / StrEnum classes vs if-elif/match dispatch).
+	StringlyPyDriftLeads int
+	// PyParseFailures counts Python files skipped due to HasError() in the parse tree.
+	PyParseFailures int
+	// ConfigFieldPyLeads counts leads from the Python config-field contradiction
+	// pass (pydantic/dataclass Field(default=X) vs validator rejecting X).
+	ConfigFieldPyLeads int
+	// CppDriftLeads counts leads from the C/C++ enum-drift pass
+	// (switch cases missing enum members, or integer literals colliding with
+	// named enumerator values). See enumdrift_cpp.go.
+	CppDriftLeads int
+	// CppParseFailures counts C/C++ files where the gotreesitter grammar
+	// produced a parse tree with HasError()=true (known gap: enum declarations
+	// cause HasError in the v0.20.2 C/C++ grammar). Files with HasError are
+	// allowed for enum extraction but skipped for switch analysis.
+	CppParseFailures int
+	// StringlyRsDriftLeads counts leads from the Rust &str match-drift pass
+	// (const &str producer pool vs match arm string literals — Rust only).
+	StringlyRsDriftLeads int
+	// RsParseFailures counts Rust files skipped due to HasError() in the parse tree.
+	// Expected ~7.1% on real corpora (ripgrep + serde corpus measurement).
+	RsParseFailures int
 }
 
 type leadKey struct {
@@ -246,6 +276,26 @@ consLoop:
 	}
 
 	if err := seedStringlyDrift(ctx, snap, st, &sum); err != nil {
+		return sum, err
+	}
+
+	if err := seedStringlyTSDrift(ctx, snap, st, &sum); err != nil {
+		return sum, err
+	}
+
+	if err := seedStringlyPyDrift(ctx, snap, st, &sum); err != nil {
+		return sum, err
+	}
+
+	if err := seedConfigFieldPyContradictions(ctx, snap, st, &sum); err != nil {
+		return sum, err
+	}
+
+	if err := seedCppEnumDrift(ctx, snap, st, &sum); err != nil {
+		return sum, err
+	}
+
+	if err := seedStringlyRsDrift(ctx, snap, st, &sum); err != nil {
 		return sum, err
 	}
 
