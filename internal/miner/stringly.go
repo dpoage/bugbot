@@ -166,23 +166,34 @@ var shortDeclLHSRe = regexp.MustCompile(`^([^:=]+):=`)
 var wordRe = regexp.MustCompile(`\b(\w+)\b`)
 
 // sanitizeLine blanks the content of inline double-quoted string literals,
-// rune literals, and strips trailing // line comments from a Go source line.
-// This prevents brace counters and identifier matchers from reacting to `}`,
-// `"`, or identifier-shaped text inside string/rune values or comments.
+// rune literals, single-line backtick raw-string literals, and strips trailing
+// // line comments from a Go source line. This prevents brace counters and
+// identifier matchers from reacting to `}`, `"`, or identifier-shaped text
+// inside string/rune/raw-string values or comments.
 //
 // Rune literals: while outside a double-quoted string or comment, a `'` opens
 // a rune literal; content is blanked until the closing `'`, respecting
-// backslash escapes (`'\”`, `'\n'`, `'\\'`). A `'` inside a double-quoted
+// backslash escapes (`'\"`, `'\n'`, `'\\'`). A `'` inside a double-quoted
 // string does NOT start a rune, and a `"` inside a rune does NOT start a string.
 //
-// It does NOT handle backtick strings (covered by buildBacktickMask) or block
-// comments (covered by buildBlockCommentMask). The result has the same byte
-// length as the input so line offsets remain valid.
+// Single-line backtick raw strings: while outside a double-quoted string, rune
+// literal, or comment, a backtick opens a raw string; content is blanked until
+// the closing backtick ON THE SAME LINE (Go raw strings have no escape
+// sequences). A backtick inside a double-quoted string or rune literal does NOT
+// open a raw string. A `"`, `'`, or `//` inside a backtick raw string does NOT
+// open a string, rune, or comment. Multi-line raw strings are handled upstream
+// by buildBacktickMask (their opener line has an odd backtick count and is
+// whole-line-masked); sanitizeLine only neutralizes balanced (even-backtick)
+// single-line raw strings.
+//
+// It does NOT handle block comments (covered by buildBlockCommentMask). The
+// result has the same byte length as the input so line offsets remain valid.
 func sanitizeLine(line string) string {
 	var b strings.Builder
 	b.Grow(len(line))
 	inString := false
 	inRune := false
+	inBacktick := false
 	for i := 0; i < len(line); i++ {
 		ch := line[i]
 		if inString {
@@ -223,7 +234,18 @@ func sanitizeLine(line string) string {
 			b.WriteByte(' ')
 			continue
 		}
-		// Outside string and rune.
+		if inBacktick {
+			if ch == '`' {
+				inBacktick = false
+				b.WriteByte(ch)
+				continue
+			}
+			// Inside single-line backtick raw string — blank the content.
+			// No escape sequences in Go raw strings.
+			b.WriteByte(' ')
+			continue
+		}
+		// Outside string, rune, and backtick raw string.
 		if ch == '"' {
 			inString = true
 			b.WriteByte(ch)
@@ -231,6 +253,11 @@ func sanitizeLine(line string) string {
 		}
 		if ch == '\'' {
 			inRune = true
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == '`' {
+			inBacktick = true
 			b.WriteByte(ch)
 			continue
 		}

@@ -1035,3 +1035,84 @@ func TestStringlyDrift_RuneWithBraceNoFalseLead(t *testing.T) {
 		t.Errorf("RuneWithBrace: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
 	}
 }
+
+// --------------------------------------------------------------------------
+// Regression tests for single-line backtick raw strings (oracle repros)
+// --------------------------------------------------------------------------
+
+// TestStringlyDrift_SingleLineRawStringBraceNoFalseLead verifies that a `}`
+// inside a single-line backtick raw string in a case body does NOT decrement
+// braceDepth and pop the switch early. Both cases must be recognized; 0 leads.
+//
+// testdata/stringly_clean/backtick_brace.go:
+//   - type BacktickBraceMode string with consts "a", "b"
+//   - switch with case "a" (body has s := `}`) and case "b"
+//
+// Before sanitizeLine backtick-tracking: `}` inside raw string is counted as a
+// closing brace → braceDepth desync → switch pops early → false type-B for "b".
+// After: 0 leads.
+func TestStringlyDrift_SingleLineRawStringBraceNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"backtick_brace.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("SingleLineRawStringBrace: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_SingleLineRawStringWordPairNoFalseLead verifies that a
+// `cmd BacktickMode` word-pair inside a single-line backtick raw string does
+// NOT cause a raw-string scrutinee switch to resolve to the named enum type.
+// 0 leads expected.
+//
+// testdata/stringly_clean/backtick_wordpair.go:
+//   - type BacktickMode string with consts "run", "stop"
+//   - func with msg := `cmd BacktickMode` (raw string), then switch cmd (string)
+//
+// Before sanitizeLine backtick-tracking: varDeclRe matches the word-pair in
+// the raw string → raw-string scrutinee resolved to BacktickMode → false leads.
+// After: 0 leads.
+func TestStringlyDrift_SingleLineRawStringWordPairNoFalseLead(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_clean")
+	snap := buildSnapshot(t, dir, []string{"backtick_wordpair.go"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	_, err := Seed(ctx, snap, st)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("SingleLineRawStringWordPair: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
