@@ -76,22 +76,6 @@ func TestRealRSSweep(t *testing.T) {
 	}
 	t.Logf("corpus: %d .rs files under %s", len(files), sweepEnv)
 
-	// Use the first root as the snapshot root. For multi-root corpora, we
-	// run separate sweeps per root to keep file paths relative.
-	// Simple case: use the first root and only its files.
-	firstRoot := strings.Split(sweepEnv, ":")[0]
-	var firstFiles []ingest.File
-	for _, f := range files {
-		abs := filepath.Join(firstRoot, filepath.FromSlash(f.Path))
-		if _, err := os.Stat(abs); err == nil {
-			firstFiles = append(firstFiles, f)
-		}
-	}
-	if len(firstFiles) == 0 {
-		// Fallback: run all files under each root separately.
-		firstFiles = files
-	}
-
 	// For multi-root: run each root separately and accumulate.
 	type sweepResult struct {
 		root         string

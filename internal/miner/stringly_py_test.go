@@ -10,21 +10,6 @@ import (
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-func pySnap(t *testing.T, dir string) *ingest.Snapshot {
-	t.Helper()
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		t.Fatalf("abs %s: %v", dir, err)
-	}
-	return &ingest.Snapshot{
-		Commit: "test",
-		Root:   abs,
-		Files: []ingest.File{
-			{Path: filepath.Base(dir) + ".py", Language: ingest.LangPython},
-		},
-	}
-}
-
 // pySnapFile builds a snapshot pointing at a single testdata file,
 // using the testdata directory as the snapshot root.
 func pySnapFile(t *testing.T, relPath string) *ingest.Snapshot {

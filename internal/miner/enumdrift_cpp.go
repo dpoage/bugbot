@@ -431,7 +431,6 @@ func passC_EnumDecls(h *cppLangHandle, tree *gts.Tree, src []byte) (members map[
 	}
 
 	// Extract enumerators with explicit integer values.
-	allExplicit := len(members) > 0
 	explicitCount := 0
 	for _, m := range h.enumeratorWithValQ.Execute(tree) {
 		var name string
@@ -458,8 +457,6 @@ func passC_EnumDecls(h *cppLangHandle, tree *gts.Tree, src []byte) (members map[
 	if explicitCount != len(members) {
 		// Not all members have explicit values — clear the value maps so
 		// Type-A integer collision checks are disabled (precision-first).
-		allExplicit = false
-		_ = allExplicit
 		valByMember = nil
 		memberByVal = nil
 	}
@@ -963,8 +960,6 @@ func seedCppEnumDrift(ctx context.Context, snap *ingest.Snapshot, st *store.Stor
 		isClean   bool     // HasError()=false
 	}
 
-	var fileEnums []fileEnum // parallel to files with LangC/LangCPP
-
 	allMembers := make(map[string]bool) // corpus-wide flat pool
 	// file-level collections keyed by file path
 	fileInfoByPath := make(map[string]*fileEnum)
@@ -1036,7 +1031,6 @@ func seedCppEnumDrift(ctx context.Context, snap *ingest.Snapshot, st *store.Stor
 		}
 		if len(members) > 0 || len(fe.typeNames) > 0 {
 			fileInfoByPath[f.Path] = fe
-			fileEnums = append(fileEnums, *fe)
 		}
 	}
 

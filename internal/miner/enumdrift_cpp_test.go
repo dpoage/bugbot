@@ -19,16 +19,6 @@ func loadCLangHandle(t *testing.T) *cppLangHandle {
 	return h
 }
 
-// loadCppLangHandleForTest loads the C++ grammar handle or skips.
-func loadCppLangHandleForTest(t *testing.T) *cppLangHandle {
-	t.Helper()
-	h, err := loadCppLangHandle("x.cpp")
-	if err != nil {
-		t.Skipf("C++ grammar unavailable: %v", err)
-	}
-	return h
-}
-
 // ─── passC_EnumDecls ─────────────────────────────────────────────────────────
 
 // TestPassCEnumDecls_BasicMembersNoValues proves that enumerator names are
@@ -863,7 +853,7 @@ void handle(Color c) {
 `), 0o644); err != nil {
 		t.Fatalf("write switch.c: %v", err)
 	}
-	t.Cleanup(func() { os.Remove(switchC) })
+	t.Cleanup(func() { _ = os.Remove(switchC) })
 
 	snap := &ingest.Snapshot{
 		Commit: "test",

@@ -758,10 +758,8 @@ func collectRSPatternIdents(n *gts.Node, lang *gts.Language, src []byte, f func(
 // passRS_MatchExprs extracts match expressions with bare-identifier scrutinees
 // and string literal arms.
 func passRS_MatchExprs(h *rsLangHandle, tree *gts.Tree, src []byte) []rsMatchInfo {
-	// Phase 1: collect match expressions with bare-identifier scrutinees.
-	type matchKey struct {
-		start uint32
-	}
+	// Phase 1: collect match expressions with bare-identifier scrutinees,
+	// keyed by the match expression's start byte.
 	byMatch := make(map[uint32]*rsMatchInfo)
 	var order []uint32
 

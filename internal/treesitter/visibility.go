@@ -239,10 +239,10 @@ func cppVisibilityMap(src []byte, startRows []uint32) map[uint32]Visibility {
 		// that a '{' on the definition line does not self-affect the entry.
 		if defRows[row] {
 			cur := stack[len(stack)-1]
-			switch {
-			case cur.kind == cppCtxAnonNS:
+			switch cur.kind {
+			case cppCtxAnonNS:
 				out[row] = VisibilityPrivate
-			case cur.kind == cppCtxStruct || cur.kind == cppCtxClass:
+			case cppCtxStruct, cppCtxClass:
 				if cur.accessPublic {
 					out[row] = VisibilityPublic
 				} else {

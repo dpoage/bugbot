@@ -1241,10 +1241,7 @@ func isPyTestPath(relPath string) bool {
 	}
 	name := strings.TrimSuffix(base, ".py")
 	name = strings.TrimSuffix(name, ".pyi")
-	if strings.HasSuffix(name, "_test") {
-		return true
-	}
-	return false
+	return strings.HasSuffix(name, "_test")
 }
 
 // ─── string unquoting ─────────────────────────────────────────────────────────
