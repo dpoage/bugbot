@@ -817,60 +817,83 @@ def fetch_widget(widget_id):
 }
 
 // TestEnumerateSeams_HTTPRouteJSNoPrecisionFlood is the negative-precision
-// guard for JS/TS HTTP route detection. A JS file containing:
-//   - .get() calls with non-routable string args (cache keys, DOM selectors)
-//   - method calls without a trailing comma (not a route registration)
-//   - fetch() with no leading slash
+// guard for JS/TS HTTP route detection against the real over-match cases
+// that the oracle identified:
 //
-// MUST emit ZERO new SeamHTTPRoute seams.
+//   - cache.get('/user/42', fallback) — a leading-slash path as the first arg
+//     with a non-function second arg. The OLD comma-only gate accepted this as
+//     a route PRODUCER; the handler-shape gate (function keyword / arrow) rejects
+//     it. This must NOT produce a SeamHTTPRoute seam.
+//   - graph.path is covered by the Python test; the JS test focuses on the
+//     verb-method over-match where ANY receiver's .get('/path', arg) was a producer.
+//
+// A single-file snapshot with these patterns MUST emit ZERO SeamHTTPRoute seams.
 func TestEnumerateSeams_HTTPRouteJSNoPrecisionFlood(t *testing.T) {
 	root := writeRepo(t, map[string]string{
-		"lib/client.js": `// DOM selector — not a route
-document.get('button.submit');
+		"lib/cache.js": `// Cache/Map accessor with a leading-slash key and a non-function fallback.
+// The OLD httpJsRouteProducerRe (comma-only gate) accepted this as a PRODUCER
+// route registration, mislabeling the path '/user/42' as a server route.
+// The handler-shape gate (function keyword or arrow) must reject it.
+const user = cache.get('/user/42', fallback);
 
-// Cache lookup — bare key, no leading slash
-cache.get('userProfile');
+// Another instance client call with a path-like key and a data body arg.
+// Must NOT be a route producer: 'body' is not a function or arrow shape.
+const item = api.post('/items/new', body);
 
-// fetch with no leading slash — not a routable path
-fetch('userProfile');
+// Standard DOM accessor — not a route and not a URL path.
+const el = document.get('button.submit');
 
-// A .get() with no comma after the string — consumer, not a route registration
-// (would need normalizeHTTPPath to pass, but no leading slash here)
-client.get('some-cache-key');
+// A bare string without leading slash — normalizeHTTPPath rejects it.
+const x = lookup('userProfile');
 `,
 	})
-	snap := makeSnapshot(t, root, []string{"lib/client.js"})
+	snap := makeSnapshot(t, root, []string{"lib/cache.js"})
 	seams := EnumerateSeams(snap)
 	for _, s := range seams {
 		if s.Kind == SeamHTTPRoute {
-			t.Errorf("unexpected SeamHTTPRoute %q from non-routable JS calls: %+v", s.Key, s)
+			t.Errorf("unexpected SeamHTTPRoute %q: cache/accessor .get('/path', arg) without handler shape must not produce HTTP seams; got %+v", s.Key, s)
 		}
 	}
 }
 
 // TestEnumerateSeams_HTTPRoutePyNoPrecisionFlood is the negative-precision
-// guard for Python HTTP detection. A Python file with:
-//   - requests.get() with a non-routable bare string
-//   - @app.route() with no leading slash
-//   - path() with only the empty string
+// guard for Python HTTP detection against the real over-match cases the oracle
+// identified:
+//
+//   - graph.path('shortest', dst) — the OLD httpPyDjangoPathRe used \bpath\(
+//     which matched ANY method call named 'path', including graph.path(...),
+//     networkx.shortest_path('src', 'dst'), etc. The no-receiver gate
+//     (requiring a non-dot prefix character or line start) must reject these.
+//   - The false producer would prefix-slash the first arg: '/shortest'.
+//     With the no-receiver fix, graph.path('shortest', dst) emits NO seam.
 //
 // MUST emit ZERO SeamHTTPRoute seams.
 func TestEnumerateSeams_HTTPRoutePyNoPrecisionFlood(t *testing.T) {
 	root := writeRepo(t, map[string]string{
-		"util/http_utils.py": `import requests
+		"graph/algo.py": `import networkx as nx
 
-# Non-routable: no leading slash, no full URL
-r = requests.get('some-api-key')
+class GraphAnalyzer:
+    def __init__(self, graph):
+        self.graph = graph
 
-# Django path with empty string — too generic, must be suppressed
-# path('', include('myapp.urls'))
+    def shortest(self, src, dst):
+        # graph.path(...) — the OLD Django regex matched this as a route
+        # producer for 'shortest', emitting a SeamHTTPRoute '/shortest'.
+        # The no-receiver gate (no dot before 'path') must reject it.
+        result = self.graph.path('shortest', dst)
+        return result
+
+    def analyze(self, obj):
+        # method.path call — also a method call, must not match
+        p = obj.path('api/v1/', handler)
+        return p
 `,
 	})
-	snap := makeSnapshot(t, root, []string{"util/http_utils.py"})
+	snap := makeSnapshot(t, root, []string{"graph/algo.py"})
 	seams := EnumerateSeams(snap)
 	for _, s := range seams {
 		if s.Kind == SeamHTTPRoute {
-			t.Errorf("unexpected SeamHTTPRoute %q from non-routable Python calls: %+v", s.Key, s)
+			t.Errorf("unexpected SeamHTTPRoute %q: graph.path/obj.path method calls must not produce HTTP seams; got %+v", s.Key, s)
 		}
 	}
 }
@@ -943,41 +966,46 @@ def submit(data):
 }
 
 // TestEnumerateSeams_ZeroNewSeamsOnOwnSource is the CRITICAL EMPIRICAL GATE:
-// running EnumerateSeams over this repo's own source (Go + SQL) must emit
-// ZERO SeamHTTPRoute seams attributable to the new JS/Python detectors (since
-// the repo has no JS/Python source files). Any SeamHTTPRoute seams that appear
-// must already have been present before the new detectors were added (the
-// existing Go detector). This test guards against the new tables matching on
-// Go source.
+// running EnumerateSeams over this repo's own production source (Go + SQL,
+// no JS/TS/Python files) must emit ZERO SeamHTTPRoute and ZERO SeamRPCMethod
+// seams from the new JS/Python detectors. The scan deliberately excludes
+// *_test.go files because their embedded string fixtures (e.g. test cases that
+// contain Go HTTP handler snippets) would otherwise produce Go-language
+// single-sided seams that are artifacts of the test harness, not production
+// code. Excluding test files is the correct scope for a production-code
+// precision gate; it also makes the assertion exact (0) rather than "just
+// check the language tags", which the oracle correctly flagged as over-claiming.
 func TestEnumerateSeams_ZeroNewSeamsOnOwnSource(t *testing.T) {
-	// Walk the real repo root (two levels up from internal/ingest).
-	// We use os.Getwd() + navigating to the repo root.
 	repoRoot := findRepoRoot(t)
 	snap := buildRealSnapshot(t, repoRoot)
 	seams := EnumerateSeams(snap)
 
-	// Count seams by kind for reporting.
 	counts := make(map[SeamKind]int)
 	for _, s := range seams {
 		counts[s.Kind]++
 	}
-	t.Logf("Own-source seam counts: DataFile=%d EnvVar=%d HTTPRoute=%d RPCMethod=%d total=%d",
+	t.Logf("Own-source (non-test) seam counts: DataFile=%d EnvVar=%d HTTPRoute=%d RPCMethod=%d total=%d",
 		counts[SeamDataFile], counts[SeamEnvVar], counts[SeamHTTPRoute], counts[SeamRPCMethod], len(seams))
 
-	// The repo has no JS/TS/Python source — all HTTP and RPC seams must come
-	// from Go patterns that existed before this bead. Any SeamHTTPRoute or
-	// SeamRPCMethod whose sides include a non-Go, non-proto file is a new
-	// false positive from the new detectors.
-	for _, s := range seams {
-		if s.Kind != SeamHTTPRoute && s.Kind != SeamRPCMethod {
-			continue
-		}
-		for _, side := range s.Sides {
-			if side.Language != LangGo && side.Language != LangOther {
-				t.Errorf("new-type seam %s/%q has non-Go/proto side %q (lang=%s): new detector matched on own source",
-					s.Kind, s.Key, side.File, side.Language)
+	// Assert zero HTTPRoute and RPC seams from the production Go source.
+	// The repo has no JS/TS/Python files, so the new detectors have no
+	// production input. Any match here is a false positive from the new tables
+	// firing on Go syntax.
+	if n := counts[SeamHTTPRoute]; n != 0 {
+		for _, s := range seams {
+			if s.Kind == SeamHTTPRoute {
+				t.Logf("  spurious HTTPRoute seam: key=%q sides=%+v", s.Key, s.Sides)
 			}
 		}
+		t.Errorf("expected 0 SeamHTTPRoute on own production source, got %d", n)
+	}
+	if n := counts[SeamRPCMethod]; n != 0 {
+		for _, s := range seams {
+			if s.Kind == SeamRPCMethod {
+				t.Logf("  spurious RPCMethod seam: key=%q sides=%+v", s.Key, s.Sides)
+			}
+		}
+		t.Errorf("expected 0 SeamRPCMethod on own production source, got %d", n)
 	}
 }
 
@@ -1001,11 +1029,12 @@ func findRepoRoot(t *testing.T) string {
 	}
 }
 
-// buildRealSnapshot constructs a Snapshot over the real repo by walking the
-// filesystem and classifying every file via DetectLanguage, mirroring how the
-// ingest pipeline builds its snapshot. Only non-Other-language files are
-// included (LangOther is excluded by the seam detector loop anyway, except
-// .proto files which are included explicitly via the isProto path).
+// buildRealSnapshot constructs a Snapshot over the real repo's production source
+// by walking the filesystem and classifying every file via DetectLanguage.
+// *_test.go files are excluded: their embedded Go snippets (HTTP handler strings,
+// env-var literals) are test fixtures, not production code, and would produce
+// artifact seams that obscure the gate's real signal. Only non-Other-language
+// production files are included (plus .proto files for RPC detection).
 func buildRealSnapshot(t *testing.T, root string) *Snapshot {
 	t.Helper()
 	var files []File
@@ -1023,6 +1052,12 @@ func buildRealSnapshot(t *testing.T, root string) *Snapshot {
 		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
+			return nil
+		}
+		// Exclude *_test.go files: their embedded fixture snippets produce
+		// Go-language artifact seams (e.g. mux.HandleFunc("/path", ...) in
+		// test string literals) that are not production code matches.
+		if strings.HasSuffix(rel, "_test.go") {
 			return nil
 		}
 		lang := DetectLanguage(rel)

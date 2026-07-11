@@ -863,6 +863,14 @@ func normalizeHTTPPath(raw string) string {
 	if i := strings.IndexAny(raw, "?#"); i >= 0 {
 		raw = raw[:i]
 	}
+	// Strip trailing slash for cross-language join consistency. Django, Flask,
+	// and some frameworks append a trailing slash (APPEND_SLASH=True); a Go
+	// client or fetch() consumer typically omits it. Normalizing to no trailing
+	// slash ensures "/accounts/login/" and "/accounts/login" join on the same
+	// key. Exception: do not strip the root "/" (already rejected below).
+	if len(raw) > 1 && raw[len(raw)-1] == '/' {
+		raw = raw[:len(raw)-1]
+	}
 	if raw == "/" || raw == "" {
 		return "" // root-only path is too generic
 	}
@@ -885,13 +893,20 @@ func firstSubmatch(content []byte, m []int) string {
 
 // httpJsRouteProducerRe matches JS/TS server-side HTTP route registrations for
 // Express, Koa, and Fastify. The pattern requires:
-//  1. A method receiver (any identifier) followed by .get/.post/.put/.delete/.patch
-//  2. A string literal (single- or double-quoted) with a leading slash as the first arg
-//  3. A COMMA immediately after the path literal, proving a handler arg follows
-//     (this is the critical distinguisher from consumer fetch/axios calls).
+//  1. A method verb (.get/.post/.put/.delete/.patch) on any receiver
+//  2. A string literal with a leading slash as the first arg
+//  3. A COMMA after the path literal, followed immediately by a handler-shape
+//     argument: a function keyword, an opening paren (arrow function), or an
+//     identifier followed by a fat-arrow (=> sigil). This handler-shape gate
+//     is the precision anchor: cache.get('/user/42', fallback) and
+//     api.post('/x', body) do NOT match because 'fallback'/'body' are plain
+//     identifiers not followed by '=>', and they carry no function keyword.
+//     Named handler references without a visible '=>' (e.g. app.get('/p',
+//     myHandler)) are missed by this gate — a precision/recall trade-off
+//     that avoids flooding on data-structure accessors.
 //
 // Captured groups: group 1 for single-quoted paths, group 2 for double-quoted paths.
-var httpJsRouteProducerRe = regexp.MustCompile(`(?:\.get|\.post|\.put|\.delete|\.patch)\s*\(\s*(?:'(/[^'\x00-\x1f]*)'|"(/[^"\x00-\x1f]*)")\s*,`)
+var httpJsRouteProducerRe = regexp.MustCompile(`(?:\.get|\.post|\.put|\.delete|\.patch)\s*\(\s*(?:'(/[^'\x00-\x1f]*)'|"(/[^"\x00-\x1f]*)")\s*,\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][A-Za-z0-9_$]*\s*=>)`)
 
 // httpJsClientCallRe matches JS/TS client HTTP calls. Patterns:
 //  1. fetch('/path') or fetch("https://host/path") — the built-in fetch API
@@ -915,23 +930,24 @@ var httpJsClientCallRe = regexp.MustCompile(`(?:(?:\bfetch\s*\(\s*(?:'((?:https?
 // double-quoted.
 var httpPyRouteDecoratorRe = regexp.MustCompile(`@\w+\.(?:route|get|post|put|delete|patch)\s*\(\s*(?:'(/[^'\x00-\x1f]*)'|"(/[^"\x00-\x1f]*)")`)
 
-// httpPyDjangoPathRe matches Django urlpatterns path() calls:
-//
-//	path('accounts/login/', ...)
-//	path("api/v1/users/", ...)
-//
-// Django paths do NOT have a leading slash; normalizePyDjangoPath prepends
-// one for cross-language join consistency. The pattern requires a comma
-// after the path literal (view arg follows) to avoid matching ordinary
-// string arguments in other call sites. Captured group 1 is the raw path.
-var httpPyDjangoPathRe = regexp.MustCompile(`\bpath\(\s*(?:'([^'\x00-\x1f]*)'|"([^"\x00-\x1f]*)")\s*,`)
+// httpPyDjangoPathRe matches Django urlpatterns path() and re_path() calls.
+// The pattern requires the call to NOT be a method call (no receiver dot
+// before 'path') — achieved by requiring a non-dot character or line/group
+// start before the keyword. This rejects graph.path('shortest', dst) while
+// matching bare path('accounts/', view) and re_path(r'^articles/', view).
+// Django paths have no leading slash; normalizePyDjangoPath prepends one.
+// Captured group 1 (single-quoted) or group 2 (double-quoted) is the raw path.
+// The (?m) flag enables ^ to match the start of each line.
+var httpPyDjangoPathRe = regexp.MustCompile("(?m)(?:[\\s,(=\\[{|]|^)(?:path|re_path)\\(\\s*r?(?:'([^'\\x00-\\x1f]*)'|\"([^\"\\x00-\\x1f]*)\")" + `\s*,`)
 
 // httpPyClientCallRe matches Python HTTP client URL-literal call sites.
-// Libraries: requests, httpx, aiohttp (via session.get). The first arg
-// must be a string literal with a leading slash or full URL; non-routable
-// strings are rejected by normalizeHTTPPath's leading-slash gate.
+// Libraries: requests, httpx. The first arg must be a string literal with a
+// leading slash or full URL; non-routable strings are rejected by
+// normalizeHTTPPath's leading-slash gate. The trailing [,)] anchor (like the
+// Go and JS siblings) ensures the string is truly the first positional arg,
+// not a keyword or later argument.
 // Captured group 1 (single-quote) or group 2 (double-quote) is the URL/path.
-var httpPyClientCallRe = regexp.MustCompile(`\b(?:requests|httpx|session)\.(?:get|post|put|delete|patch)\s*\(\s*(?:'((?:https?://[^']*|/[^']*))'|"((?:https?://[^"]*|/[^"]*))"\s*)`)
+var httpPyClientCallRe = regexp.MustCompile(`\b(?:requests|httpx)\.(?:get|post|put|delete|patch)\s*\(\s*(?:'((?:https?://[^']*|/[^']*))'|"((?:https?://[^"]*|/[^"]*))")\s*[,)]`)
 
 // pyRPCHandlerRe matches Python gRPC servicer method declarations. The
 // canonical gRPC-Python servicer method has exactly three parameters:
@@ -952,41 +968,30 @@ var pyRPCHandlerRe = regexp.MustCompile(`def\s+([A-Z][A-Za-z0-9_]*)\s*\(\s*self\
 // emitted as a seam, mirroring the Go RPC flood lesson).
 var pyRPCCallRe = regexp.MustCompile(`\b[a-z][A-Za-z0-9_]*\.([A-Z][A-Za-z0-9_]*)\s*\(`)
 
-// normalizePyDjangoPath normalizes a Django path() string to a routable
-// path with a leading slash, consistent with normalizeHTTPPath's output
-// format. Django path patterns have no leading slash in source (e.g.
-// "accounts/login/"); this function prepends one so that a Django producer
-// and a fetch("/accounts/login/") consumer join on the same key.
+// normalizePyDjangoPath normalizes a Django path() or re_path() string to a
+// routable path with a leading slash, delegating final normalization to
+// normalizeHTTPPath. Django path patterns have no leading slash in source
+// (e.g. "accounts/login/"); this function prepends one and then calls
+// normalizeHTTPPath, which strips the trailing slash, query/fragment, and
+// rejects the root-only "/" path — so Django "accounts/login/" and a
+// fetch("/accounts/login") consumer join on the same key "/accounts/login".
 //
-// Returns "" for the empty string or a string that is already a full URL
-// (which normalizeHTTPPath should handle instead). The "/" root path is
-// rejected as too generic, matching normalizeHTTPPath's gate.
+// re_path raw-string prefixes (e.g. r'^articles/') pass through; the caller
+// is expected to treat them as path keys even when they contain regex syntax.
+// Returns "" for the empty string, scheme-only URLs, or root-only paths.
 func normalizePyDjangoPath(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	// If it already has a scheme, delegate to the standard normalizer.
+	// If it already has a scheme, delegate directly.
 	if strings.Contains(raw, "://") {
 		return normalizeHTTPPath(raw)
 	}
-	// Strip query and fragment.
-	if i := strings.IndexAny(raw, "?#"); i >= 0 {
-		raw = raw[:i]
-	}
-	if raw == "" {
-		return ""
-	}
-	// Prepend leading slash if absent.
+	// Prepend leading slash if absent (Django omits it).
 	if raw[0] != '/' {
 		raw = "/" + raw
 	}
-	// Strip trailing slash for join consistency (Django paths often end with /).
-	// Exception: don't strip if raw is exactly "/".
-	if len(raw) > 1 && raw[len(raw)-1] == '/' {
-		raw = raw[:len(raw)-1]
-	}
-	if raw == "/" || raw == "" {
-		return ""
-	}
-	return raw
+	// Delegate all remaining normalization (query/fragment strip, trailing-slash
+	// strip, root-only rejection) to normalizeHTTPPath for consistency.
+	return normalizeHTTPPath(raw)
 }
