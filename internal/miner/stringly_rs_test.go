@@ -226,9 +226,6 @@ fn dispatch(status: &str) {
 	if m.scrutinee != "status" {
 		t.Errorf("expected scrutinee 'status', got %q", m.scrutinee)
 	}
-	if !m.hasWild {
-		t.Error("expected hasWild=true")
-	}
 	if len(m.arms) != 2 {
 		t.Errorf("expected 2 string arms, got %d: %+v", len(m.arms), m.arms)
 	}
@@ -383,6 +380,145 @@ func TestJoinRSDrift_AllArmsInProducerSet(t *testing.T) {
 	leads := joinRSDrift("src/lib.rs", consts, bindings, matches)
 	if len(leads) != 0 {
 		t.Errorf("expected 0 leads (all arms in producer set), got %d", len(leads))
+	}
+}
+
+// ─── D1 oracle repro tests ──────────────────────────────────────────────────
+
+// TestJoinRSDrift_D1_ZeroOverlapSuppresses verifies the arm↔pool anchor:
+// when no arm literal is in the producer set, the match is not over the
+// const domain and the miner must emit nothing.
+func TestJoinRSDrift_D1_ZeroOverlapSuppresses(t *testing.T) {
+	// Oracle repro: const VERSION="1.4.2" + subcommand dispatch.
+	consts := []rsConstStr{{name: "VERSION", value: "1.4.2"}}
+	bindings := []rsBinding{
+		{name: "cmd", scopeStart: 0, scopeEnd: 1000, isTypedStr: true},
+	}
+	matches := []rsMatchInfo{
+		{
+			scrutinee: "cmd",
+			exprStart: 100,
+			exprEnd:   300,
+			arms: []rsArmLit{
+				{value: "run", line: 10},
+				{value: "build", line: 11},
+				{value: "test", line: 12},
+			},
+		},
+	}
+	leads := joinRSDrift("src/main.rs", consts, bindings, matches)
+	if len(leads) != 0 {
+		t.Errorf("D1: expected 0 leads (zero arm↔pool overlap), got %d: %+v", len(leads), leads)
+	}
+}
+
+// TestJoinRSDrift_D1_VersionConstSubcommand is the file-level repro for D1.
+func TestJoinRSDrift_D1_VersionConstSubcommand(t *testing.T) {
+	h := loadRSHandleForTest(t)
+	src, err := os.ReadFile(filepath.Join("testdata", "stringly_rs_clean", "version_const_subcommand.rs"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	tree, err := parseRSFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+	if tree.RootNode().HasError() {
+		t.Skip("fixture has parse errors")
+	}
+	leads := joinRSDrift("version_const_subcommand.rs",
+		passRS_Consts(h, tree, src),
+		passRS_Bindings(h, tree, src),
+		passRS_MatchExprs(h, tree, src),
+	)
+	if len(leads) != 0 {
+		t.Errorf("D1 version+subcommand: expected 0 leads, got %d: %+v", len(leads), leads)
+	}
+}
+
+// TestJoinRSDrift_D1_ColorConstHTTPVerb is the second file-level D1 repro.
+func TestJoinRSDrift_D1_ColorConstHTTPVerb(t *testing.T) {
+	h := loadRSHandleForTest(t)
+	src, err := os.ReadFile(filepath.Join("testdata", "stringly_rs_clean", "color_const_http_verb.rs"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	tree, err := parseRSFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+	if tree.RootNode().HasError() {
+		t.Skip("fixture has parse errors")
+	}
+	leads := joinRSDrift("color_const_http_verb.rs",
+		passRS_Consts(h, tree, src),
+		passRS_Bindings(h, tree, src),
+		passRS_MatchExprs(h, tree, src),
+	)
+	if len(leads) != 0 {
+		t.Errorf("D1 color+HTTP verb: expected 0 leads, got %d: %+v", len(leads), leads)
+	}
+}
+
+// TestJoinRSDrift_D1_OverlapAnchorTypoFires is the positive control:
+// when arms overlap the pool AND there is a typo arm, exactly 1 lead fires.
+func TestJoinRSDrift_D1_OverlapAnchorTypoFires(t *testing.T) {
+	h := loadRSHandleForTest(t)
+	src, err := os.ReadFile(filepath.Join("testdata", "stringly_rs_drift", "overlap_anchor_typo.rs"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	tree, err := parseRSFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+	if tree.RootNode().HasError() {
+		t.Skip("fixture has parse errors")
+	}
+	leads := joinRSDrift("overlap_anchor_typo.rs",
+		passRS_Consts(h, tree, src),
+		passRS_Bindings(h, tree, src),
+		passRS_MatchExprs(h, tree, src),
+	)
+	if len(leads) != 1 {
+		t.Fatalf("D1 positive control: expected 1 lead for 'pendig', got %d: %+v", len(leads), leads)
+	}
+	if !strings.Contains(leads[0].Note, "pendig") {
+		t.Errorf("lead note should mention 'pendig', got: %q", leads[0].Note)
+	}
+	if leads[0].Line != 13 {
+		t.Errorf("expected lead on line 13, got %d", leads[0].Line)
+	}
+}
+
+// ─── D2 oracle repro tests ──────────────────────────────────────────────────
+
+// TestJoinRSDrift_D2_LetElseDestructureSuppresses verifies that let-else
+// destructuring patterns (tuple_struct_pattern) are registered as sentinels.
+func TestJoinRSDrift_D2_LetElseDestructureSuppresses(t *testing.T) {
+	h := loadRSHandleForTest(t)
+	src, err := os.ReadFile(filepath.Join("testdata", "stringly_rs_clean", "let_else_destructure.rs"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	tree, err := parseRSFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+	if tree.RootNode().HasError() {
+		t.Skip("fixture has parse errors")
+	}
+	leads := joinRSDrift("let_else_destructure.rs",
+		passRS_Consts(h, tree, src),
+		passRS_Bindings(h, tree, src),
+		passRS_MatchExprs(h, tree, src),
+	)
+	if len(leads) != 0 {
+		t.Errorf("D2 let-else: expected 0 leads (cmd is tuple_struct_pattern binding), got %d: %+v", len(leads), leads)
 	}
 }
 

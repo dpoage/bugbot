@@ -59,22 +59,38 @@ package miner
 // All binding forms that can shadow a &str-typed parameter:
 //   - function_item parameter: (parameter (identifier) ...) → typed binding
 //   - closure_parameters identifier → untyped sentinel
-//   - let_declaration identifier (plain let) → untyped sentinel
+//   - let_declaration bare identifier (plain let) → untyped sentinel
+//   - let_declaration tuple_struct_pattern (let-else destructure) → untyped
+//     sentinel; identifiers extracted via collectRSPatternIdents
 //   - for_expression left identifier → untyped sentinel
-//   - let_condition (if let / while let) bound identifier → untyped sentinel
-//   - match_arm pattern capture (identifier inside tuple_struct_pattern,
-//     struct_pattern, etc.) → untyped sentinel
+//   - let_condition (if let / while let) bound identifier → untyped sentinel;
+//     identifiers extracted via collectRSPatternIdents
+//   - match_arm pattern capture (identifier inside tuple_struct_pattern) →
+//     untyped sentinel
 //
 // Any sentinel nearer than the typed parameter causes the match to be skipped.
 //
+// # Arm↔pool anchor (D1 precision guard)
+//
+// A file may have const &str items that are semantically unrelated to the
+// match being analyzed (e.g., const VERSION = "1.4.2" alongside a subcommand
+// dispatch match; const COLOR_RED = "#ff0000" alongside an HTTP verb match).
+// Without an anchor, the miner would flag every arm literal not in the pool —
+// all false positives.
+//
+// Fix: before emitting any lead for a match, require that ≥1 arm literal is
+// already present in the producer pool. A single overlap confirms the match
+// is dispatching over the same domain as the const producers. The threshold
+// is 1 (not majority) because "2 correct arms + 1 typo arm" must still fire;
+// majority would silence the typo in that case.
+//
 // # Test-file gating
 //
-// Files in tests/ directories or named *_test.rs or containing a
-// #[cfg(test)] module are skipped. The heuristic uses path-segment matching
-// (same as isTSTestPath / isPyTestPath siblings) plus a filename suffix check.
-// We do NOT parse the file looking for #[cfg(test)] — that would require
-// another AST pass for minimal gain; tests/ dirs and *_test.rs cover the
-// overwhelming majority.
+// Files in tests/ directories or named *_test.rs are skipped. The heuristic
+// uses path-segment matching (same as isTSTestPath / isPyTestPath siblings)
+// plus a filename suffix check. We do NOT parse the file looking for
+// #[cfg(test)] — that would require another AST pass for minimal gain;
+// tests/ dirs and *_test.rs cover the overwhelming majority.
 //
 // Leads: PosterLens="miner:stringly-rs-drift", TargetLens="api-contract-misuse".
 
@@ -185,6 +201,19 @@ const rsLetDeclarationQuery = `
   pattern: (identifier) @any.name) @any.scope
 `
 
+// rsLetDeclarationPatQuery finds let-else bindings with destructuring patterns
+// (tuple_struct_pattern, struct_pattern). These are shadow sentinels: the
+// bound identifiers shadow any outer &str-typed parameter.
+//
+// Example: `let Some(cmd) = opt else { return; };` — `cmd` is bound via
+// tuple_struct_pattern and must be treated as an untyped sentinel.
+// We capture the let_declaration node as scope; the parent block is resolved
+// in Go code via enclosingRSBlock.
+const rsLetDeclarationPatQuery = `
+(let_declaration
+  pattern: (tuple_struct_pattern) @let.pattern) @let.decl
+`
+
 // rsIfLetQuery finds if-let and while-let bindings. The let_condition node
 // contains the pattern; we extract identifiers from it.
 // We use a broad capture of the let_condition and traverse it in Go code to
@@ -227,14 +256,6 @@ const rsMatchArmRawStrQuery = `
     (raw_string_literal) @arm.val)) @arm.arm
 `
 
-// rsMatchArmWildcardQuery finds match arms with a wildcard pattern (_).
-// Used to detect catch-all arms (suppresses type-A for that match).
-const rsMatchArmWildcardQuery = `
-(match_arm
-  pattern: (match_pattern
-    (_) @wild)) @arm.arm
-`
-
 // ─── data types ──────────────────────────────────────────────────────────────
 
 // rsConstStr is a file-level const &str = "literal" producer.
@@ -254,13 +275,15 @@ type rsBinding struct {
 }
 
 // rsMatchInfo records one match expression with string literal arms.
+// Wildcard arms (_ =>) are intentionally NOT tracked: every &str match in
+// Rust requires _ to compile (exhaustiveness), so hasWild would be true for
+// every match. There is no useful signal in it for type-A detection.
 type rsMatchInfo struct {
 	scrutinee string
 	exprStart uint32
 	exprEnd   uint32
 	exprLine  int
 	arms      []rsArmLit
-	hasWild   bool // has a _ wildcard arm
 }
 
 type rsArmLit struct {
@@ -279,15 +302,14 @@ type rsLangHandle struct {
 	closureParamQ *gts.Query
 	forLoopQ      *gts.Query
 	letDeclQ      *gts.Query
+	letDeclPatQ   *gts.Query
 	ifLetQ        *gts.Query
 	matchArmCapQ  *gts.Query
 	matchExprQ    *gts.Query
 	matchArmStrQ  *gts.Query
 	matchArmRawQ  *gts.Query
-	matchArmWildQ *gts.Query
 }
 
-// loadRSLangHandle loads and compiles all queries for the Rust grammar.
 func loadRSLangHandle() (*rsLangHandle, error) {
 	entry := tsregistry.DetectLanguage("x.rs")
 	if entry == nil {
@@ -315,6 +337,9 @@ func loadRSLangHandle() (*rsLangHandle, error) {
 	if h.letDeclQ, err = gts.NewQuery(rsLetDeclarationQuery, lang); err != nil {
 		return nil, fmt.Errorf("stringly-rs: compile let-decl query: %w", err)
 	}
+	if h.letDeclPatQ, err = gts.NewQuery(rsLetDeclarationPatQuery, lang); err != nil {
+		return nil, fmt.Errorf("stringly-rs: compile let-decl-pat query: %w", err)
+	}
 	if h.ifLetQ, err = gts.NewQuery(rsIfLetQuery, lang); err != nil {
 		return nil, fmt.Errorf("stringly-rs: compile if-let query: %w", err)
 	}
@@ -329,9 +354,6 @@ func loadRSLangHandle() (*rsLangHandle, error) {
 	}
 	if h.matchArmRawQ, err = gts.NewQuery(rsMatchArmRawStrQuery, lang); err != nil {
 		return nil, fmt.Errorf("stringly-rs: compile match-arm-raw query: %w", err)
-	}
-	if h.matchArmWildQ, err = gts.NewQuery(rsMatchArmWildcardQuery, lang); err != nil {
-		return nil, fmt.Errorf("stringly-rs: compile match-arm-wild query: %w", err)
 	}
 	return h, nil
 }
@@ -547,6 +569,47 @@ func passRS_Bindings(h *rsLangHandle, tree *gts.Tree, src []byte) []rsBinding {
 			scopeStart: scopeStart,
 			scopeEnd:   scopeEnd,
 			isTypedStr: false,
+		})
+	}
+
+	// 4b. let-else destructuring patterns: `let Some(cmd) = ... else { ... }`.
+	// The bare-identifier rsLetDeclarationQuery (section 4) only matches
+	// `let identifier = ...` patterns. `let Some(x) = ... else { ... }` has
+	// a tuple_struct_pattern on the left, so `x` is invisible to section 4.
+	// Fix: match let_declaration with tuple_struct_pattern and extract all
+	// identifiers via collectRSPatternIdents (same traversal as if-let).
+	// Scope: enclosing block of the let_declaration (same as section 4).
+	for _, m := range h.letDeclPatQ.Execute(tree) {
+		var patNode *gts.Node
+		var declNode *gts.Node
+		for _, c := range m.Captures {
+			switch c.Name {
+			case "let.pattern":
+				patNode = c.Node
+			case "let.decl":
+				declNode = c.Node
+			}
+		}
+		if patNode == nil || declNode == nil {
+			continue
+		}
+		blockNode := enclosingRSBlock(declNode, h.lang)
+		if blockNode == nil {
+			continue
+		}
+		collectRSPatternIdents(patNode, h.lang, src, func(ident string) {
+			scopeStart := blockNode.StartByte()
+			scopeEnd := blockNode.EndByte()
+			k := fmt.Sprintf("%s:%d", ident, scopeStart)
+			if typedKey[k] {
+				return
+			}
+			out = append(out, rsBinding{
+				name:       ident,
+				scopeStart: scopeStart,
+				scopeEnd:   scopeEnd,
+				isTypedStr: false,
+			})
 		})
 	}
 
@@ -770,26 +833,9 @@ func passRS_MatchExprs(h *rsLangHandle, tree *gts.Tree, src []byte) []rsMatchInf
 		mi.arms = append(mi.arms, rsArmLit{value: val, line: line})
 	}
 
-	// Phase 3: detect wildcard arms.
-	for _, m := range h.matchArmWildQ.Execute(tree) {
-		var armNode *gts.Node
-		for _, c := range m.Captures {
-			if c.Name == "arm.arm" {
-				armNode = c.Node
-			}
-		}
-		if armNode == nil {
-			continue
-		}
-		matchExpr := enclosingRSMatchExpr(armNode, h.lang)
-		if matchExpr == nil {
-			continue
-		}
-		key := matchExpr.StartByte()
-		if mi, ok := byMatch[key]; ok {
-			mi.hasWild = true
-		}
-	}
+	// (Phase 3 removed: wildcard arm tracking was dead code. Every &str match
+	// in Rust must have _ => ... to compile; hasWild would be true for every
+	// match and carries no useful signal for type-A detection.)
 
 	out := make([]rsMatchInfo, 0, len(order))
 	for _, key := range order {
@@ -882,10 +928,17 @@ func unquoteRSRawString(n *gts.Node, lang *gts.Language, src []byte) string {
 //  2. For each match expression:
 //     a. Find the NEAREST binding (smallest scope span containing the match)
 //     whose name matches the scrutinee.
-//     b. If nearest binding is isTypedStr=true: proceed.
-//     Otherwise: skip (precision-first).
-//     c. For each string arm literal NOT in the producer set: emit a type-A lead.
-//     (Wildcard arms are ignored in the arm scan — they are not string lits.)
+//     b. If nearest binding is isTypedStr=true: proceed. Otherwise: skip.
+//     c. ANCHOR CHECK: at least one arm literal must already be in the
+//     producer pool. If zero arms overlap the pool, the match is NOT a
+//     dispatch over the const-defined domain (e.g. subcommand dispatch
+//     against VERSION = "1.4.2", HTTP verb dispatch against COLOR_RED =
+//     "#ff0000"). Require ≥1 overlap; a single hit is sufficient because
+//     it confirms the match is dispatching over the same domain as the
+//     producers, and the remaining non-matching arms are candidate typos.
+//     Requiring majority would silence "2 correct + 1 typo" matches.
+//     d. For each string arm literal NOT in the producer set: emit a type-A
+//     lead. (Wildcard arms are not string literals and are naturally skipped.)
 func joinRSDrift(
 	path string,
 	consts []rsConstStr,
@@ -909,6 +962,21 @@ func joinRSDrift(
 		nearest := nearestRSBinding(mi.scrutinee, mi.exprStart, mi.exprEnd, bindings)
 		if nearest == nil || !nearest.isTypedStr {
 			// No typed binding resolves this scrutinee — skip.
+			continue
+		}
+
+		// Anchor check: require ≥1 arm literal to be in the producer pool.
+		// A match whose arms share zero values with the pool is not dispatching
+		// over the const-defined domain — it is a coincidental &str parameter
+		// being matched against an unrelated set of literals. Without this
+		// anchor, const VERSION="1.4.2" + subcommand dispatch = 3 FPs.
+		var overlap int
+		for _, arm := range mi.arms {
+			if producerValues[arm.value] {
+				overlap++
+			}
+		}
+		if overlap == 0 {
 			continue
 		}
 
