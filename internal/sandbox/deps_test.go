@@ -2105,3 +2105,548 @@ func TestNuGetFetchRequiresSandbox(t *testing.T) {
 		t.Errorf("error = %v, want mention of fetch sandbox", err)
 	}
 }
+
+// ---- Maven ecosystem unit tests --------------------------------------------
+
+// TestMavenDetectOnOff: detect fires on pom.xml, not without.
+func TestMavenDetectOnOff(t *testing.T) {
+	dirNo := t.TempDir()
+	if hasPomXML(dirNo) {
+		t.Error("hasPomXML: true on empty dir, want false")
+	}
+
+	dirYes := t.TempDir()
+	writeFile(t, filepath.Join(dirYes, "pom.xml"), "<project/>\n")
+	if !hasPomXML(dirYes) {
+		t.Error("hasPomXML: false with pom.xml, want true")
+	}
+}
+
+// TestMavenResolveOff: OFF strategy returns empty Resolution.
+func TestMavenResolveOff(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pom.xml"), "<project/>\n")
+
+	res, err := resolveMaven(dir, DepOptions{Strategy: DepStrategyOff})
+	if err != nil {
+		t.Fatalf("resolveMaven OFF: %v", err)
+	}
+	if len(res.ROMounts) != 0 || len(res.Env) != 0 || len(res.SetupCmds) != 0 || res.Prefetch != nil {
+		t.Errorf("Maven OFF: want empty resolution, got %+v", res)
+	}
+	if res.Strategy != DepStrategyOff {
+		t.Errorf("Maven OFF: Strategy=%q want off", res.Strategy)
+	}
+}
+
+// TestMavenResolveHostMount: HOST strategy mounts the host Maven repository at
+// /m2cache, Shared=true (host-owned), MAVEN_OPTS contains -Dmaven.repo.local=/m2cache.
+func TestMavenResolveHostMount(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pom.xml"), "<project/>\n")
+	fakeRepo := t.TempDir()
+
+	res, err := resolveMaven(dir, DepOptions{
+		Strategy:            DepStrategyHost,
+		hostMavenRepository: fakeRepo,
+	})
+	if err != nil {
+		t.Fatalf("resolveMaven HOST: %v", err)
+	}
+
+	if len(res.ROMounts) != 1 {
+		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+	}
+	m := res.ROMounts[0]
+	if m.ContainerPath != m2CacheMount {
+		t.Errorf("ContainerPath = %q, want %q", m.ContainerPath, m2CacheMount)
+	}
+	if m.HostPath != fakeRepo {
+		t.Errorf("HostPath = %q, want %q", m.HostPath, fakeRepo)
+	}
+	// Shared=true: host-owned dir must NOT receive :Z relabel.
+	if !m.Shared {
+		t.Error("host strategy ROMount.Shared = false; want true to suppress :Z relabel on shared host Maven repository")
+	}
+
+	wantEnv := "MAVEN_OPTS=-Dmaven.repo.local=" + m2CacheMount
+	if !envHas(res.Env, wantEnv) {
+		t.Errorf("host env missing %q; got %v", wantEnv, res.Env)
+	}
+	if res.Prefetch != nil {
+		t.Error("host strategy must not set a prefetch hook")
+	}
+	if res.Strategy != DepStrategyHost {
+		t.Errorf("Strategy=%q want host", res.Strategy)
+	}
+}
+
+// TestMavenResolveHostMissingRepositoryErrors: HOST with a nonexistent repository
+// path must return an error before podman gets to try the bind mount.
+func TestMavenResolveHostMissingRepositoryErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pom.xml"), "<project/>\n")
+	missing := filepath.Join(t.TempDir(), "does", "not", "exist")
+
+	_, err := resolveMaven(dir, DepOptions{Strategy: DepStrategyHost, hostMavenRepository: missing})
+	if err == nil {
+		t.Fatal("expected error for missing host Maven repository, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error %q should mention 'does not exist'", err)
+	}
+}
+
+// TestMavenResolveFetchShape: FETCH strategy returns correct mount, env,
+// no SetupCmds, non-nil Prefetch hook, Shared=false.
+func TestMavenResolveFetchShape(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pom.xml"), "<project/>\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolveMaven(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolveMaven FETCH: %v", err)
+	}
+
+	if len(res.ROMounts) != 1 {
+		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+	}
+	m := res.ROMounts[0]
+	if m.ContainerPath != m2CacheMount {
+		t.Errorf("ContainerPath = %q, want %q", m.ContainerPath, m2CacheMount)
+	}
+	if !strings.HasPrefix(m.HostPath, cacheBase) {
+		t.Errorf("maven cache %q should live under user cache base %q", m.HostPath, cacheBase)
+	}
+	if m.Shared {
+		t.Error("Maven FETCH ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
+	}
+
+	wantEnv := "MAVEN_OPTS=-Dmaven.repo.local=" + m2CacheMount
+	if !envHas(res.Env, wantEnv) {
+		t.Errorf("fetch env missing %q; got %v", wantEnv, res.Env)
+	}
+	if len(res.SetupCmds) != 0 {
+		t.Errorf("Maven FETCH must have no SetupCmds, got %v", res.SetupCmds)
+	}
+	if res.Prefetch == nil {
+		t.Fatal("Maven FETCH must set a prefetch hook")
+	}
+	if res.Strategy != DepStrategyFetch {
+		t.Errorf("Strategy = %q, want fetch", res.Strategy)
+	}
+}
+
+// TestMavenResolveFetchPrefetchSpec: Running the prefetch hook invokes the
+// sandbox with a network-enabled, writable-cache `mvn -B dependency:go-offline` spec.
+func TestMavenResolveFetchPrefetchSpec(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pom.xml"), "<project/>\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolveMaven(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolveMaven: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("prefetch: %v", err)
+	}
+	calls := mock.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("prefetch should run exactly one container, got %d", len(calls))
+	}
+	spec := calls[0].Spec
+	if spec.Network == "" || spec.Network == "none" {
+		t.Errorf("prefetch network = %q, want a real network (not none/empty)", spec.Network)
+	}
+	wantCmd := []string{"mvn", "-B", "dependency:go-offline"}
+	if !slices.Equal(spec.Cmd, wantCmd) {
+		t.Errorf("prefetch cmd = %v, want %v", spec.Cmd, wantCmd)
+	}
+	// Cache mounted WRITABLE at /m2cache.
+	if len(spec.RWMounts) != 1 || spec.RWMounts[0].ContainerPath != m2CacheMount {
+		t.Errorf("prefetch must bind cache WRITABLE at %s; got %+v", m2CacheMount, spec.RWMounts)
+	}
+	if len(spec.ROMounts) != 0 {
+		t.Errorf("prefetch should not use read-only mounts; got %+v", spec.ROMounts)
+	}
+	wantEnv := "MAVEN_OPTS=-Dmaven.repo.local=" + m2CacheMount
+	if !envHas(spec.Env, wantEnv) {
+		t.Errorf("prefetch env missing %q; got %v", wantEnv, spec.Env)
+	}
+}
+
+// TestMavenFetchSentinelKeyedOnPom: sentinel is keyed on pom.xml hash;
+// changing pom.xml invalidates the cache (different sentinel → re-fetch).
+func TestMavenFetchSentinelKeyedOnPom(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pom.xml"), "<project><version>1.0</version></project>\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	// First fetch — populates sentinel keyed on pom.xml v1.
+	res, err := resolveMaven(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("first resolveMaven: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("first prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Fatalf("first prefetch: want 1 container, got %d", mock.CallCount())
+	}
+
+	// Warm cache: same pom.xml → second Resolution skips the download.
+	res2, err := resolveMaven(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("second resolveMaven: %v", err)
+	}
+	if err := res2.Prefetch(context.Background()); err != nil {
+		t.Fatalf("second prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Errorf("warm sentinel should skip download; container ran %d times, want 1", mock.CallCount())
+	}
+
+	// Changed pom.xml → sentinel miss → re-fetch.
+	writeFile(t, filepath.Join(dir, "pom.xml"), "<project><version>2.0</version></project>\n")
+	res3, err := resolveMaven(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("third resolveMaven: %v", err)
+	}
+	if err := res3.Prefetch(context.Background()); err != nil {
+		t.Fatalf("third prefetch: %v", err)
+	}
+	if mock.CallCount() != 2 {
+		t.Errorf("changed pom.xml should trigger re-fetch; container ran %d times, want 2", mock.CallCount())
+	}
+}
+
+// TestMavenFetchRequiresSandbox: FETCH with nil FetchSandbox must error.
+func TestMavenFetchRequiresSandbox(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pom.xml"), "<project/>\n")
+	_, err := resolveMaven(dir, DepOptions{Strategy: DepStrategyFetch}) // nil sandbox
+	if err == nil {
+		t.Fatal("Maven FETCH with nil sandbox should error")
+	}
+	if !strings.Contains(err.Error(), "fetch sandbox") {
+		t.Errorf("error = %v, want mention of fetch sandbox", err)
+	}
+}
+
+// ---- Gradle ecosystem unit tests -------------------------------------------
+
+// TestGradleDetectOnOff: detect fires on build.gradle / build.gradle.kts /
+// settings.gradle / settings.gradle.kts, not without.
+func TestGradleDetectOnOff(t *testing.T) {
+	dirNo := t.TempDir()
+	if hasGradleBuildFile(dirNo) {
+		t.Error("hasGradleBuildFile: true on empty dir, want false")
+	}
+
+	for _, name := range []string{"build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"} {
+		d := t.TempDir()
+		writeFile(t, filepath.Join(d, name), "// gradle\n")
+		if !hasGradleBuildFile(d) {
+			t.Errorf("hasGradleBuildFile: false with %q, want true", name)
+		}
+	}
+}
+
+// TestGradleResolveOff: OFF strategy returns empty Resolution.
+func TestGradleResolveOff(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "build.gradle"), "// gradle\n")
+
+	res, err := resolveGradle(dir, DepOptions{Strategy: DepStrategyOff})
+	if err != nil {
+		t.Fatalf("resolveGradle OFF: %v", err)
+	}
+	if res.Strategy != DepStrategyOff {
+		t.Errorf("Strategy=%q want off", res.Strategy)
+	}
+	if len(res.ROMounts) != 0 || len(res.Env) != 0 || len(res.SetupCmds) != 0 || res.Prefetch != nil {
+		t.Errorf("Gradle OFF: want empty resolution, got %+v", res)
+	}
+}
+
+// TestGradleResolveHostIsOff: HOST strategy for Gradle returns OFF because
+// Gradle's cache is lock-heavy and fights a read-only mount.
+func TestGradleResolveHostIsOff(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "build.gradle"), "// gradle\n")
+
+	res, err := resolveGradle(dir, DepOptions{Strategy: DepStrategyHost})
+	if err != nil {
+		t.Fatalf("resolveGradle HOST: %v", err)
+	}
+	if res.Strategy != DepStrategyOff {
+		t.Errorf("Gradle HOST: Strategy=%q want off (host→off due to lock contention)", res.Strategy)
+	}
+	if len(res.ROMounts) != 0 {
+		t.Errorf("Gradle HOST→OFF must have no mounts, got %+v", res.ROMounts)
+	}
+}
+
+// TestGradleResolveFetchShape: FETCH strategy returns correct mount, env,
+// SetupCmd (copy RO→writable), non-nil Prefetch hook, Shared=false.
+func TestGradleResolveFetchShape(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "build.gradle"), "// gradle\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolveGradle(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolveGradle FETCH: %v", err)
+	}
+
+	// Must have exactly one RO mount at /gradlecache, bugbot-owned.
+	if len(res.ROMounts) != 1 {
+		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+	}
+	m := res.ROMounts[0]
+	if m.ContainerPath != gradleCacheMount {
+		t.Errorf("ContainerPath = %q, want %q", m.ContainerPath, gradleCacheMount)
+	}
+	if !strings.HasPrefix(m.HostPath, cacheBase) {
+		t.Errorf("gradle cache %q should live under user cache base %q", m.HostPath, cacheBase)
+	}
+	if m.Shared {
+		t.Error("Gradle FETCH ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
+	}
+
+	// GRADLE_USER_HOME must point at the writable /tmp copy, not the RO mount.
+	if !envHas(res.Env, "GRADLE_USER_HOME=/tmp/gradlecache") {
+		t.Errorf("fetch env missing GRADLE_USER_HOME=/tmp/gradlecache; got %v", res.Env)
+	}
+
+	// SetupCmd must copy the RO cache to writable /tmp.
+	if len(res.SetupCmds) != 1 {
+		t.Fatalf("Gradle FETCH must have 1 SetupCmd, got %d: %v", len(res.SetupCmds), res.SetupCmds)
+	}
+	setupCmd := strings.Join(res.SetupCmds[0], " ")
+	if !strings.Contains(setupCmd, gradleCacheMount) || !strings.Contains(setupCmd, "/tmp/gradlecache") {
+		t.Errorf("SetupCmd %v should copy %s to /tmp/gradlecache", res.SetupCmds[0], gradleCacheMount)
+	}
+
+	if res.Prefetch == nil {
+		t.Fatal("Gradle FETCH must set a prefetch hook")
+	}
+	if res.Strategy != DepStrategyFetch {
+		t.Errorf("Strategy = %q, want fetch", res.Strategy)
+	}
+}
+
+// TestGradleResolveFetchPrefetchSpec: Running the prefetch hook invokes the
+// sandbox with a network-enabled, writable-cache `gradle dependencies --no-daemon -q` spec.
+func TestGradleResolveFetchPrefetchSpec(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "build.gradle"), "// gradle\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolveGradle(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolveGradle: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("prefetch: %v", err)
+	}
+	calls := mock.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("prefetch should run exactly one container, got %d", len(calls))
+	}
+	spec := calls[0].Spec
+	if spec.Network == "" || spec.Network == "none" {
+		t.Errorf("prefetch network = %q, want a real network (not none/empty)", spec.Network)
+	}
+	wantCmd := []string{"gradle", "dependencies", "--no-daemon", "-q"}
+	if !slices.Equal(spec.Cmd, wantCmd) {
+		t.Errorf("prefetch cmd = %v, want %v", spec.Cmd, wantCmd)
+	}
+	// Cache mounted WRITABLE at /gradlecache.
+	if len(spec.RWMounts) != 1 || spec.RWMounts[0].ContainerPath != gradleCacheMount {
+		t.Errorf("prefetch must bind cache WRITABLE at %s; got %+v", gradleCacheMount, spec.RWMounts)
+	}
+	if len(spec.ROMounts) != 0 {
+		t.Errorf("prefetch should not use read-only mounts; got %+v", spec.ROMounts)
+	}
+	if !envHas(spec.Env, "GRADLE_USER_HOME="+gradleCacheMount) {
+		t.Errorf("prefetch env missing GRADLE_USER_HOME=%s; got %v", gradleCacheMount, spec.Env)
+	}
+}
+
+// TestGradleLockHashPreferredOverBuildFiles: gradle.lockfile takes priority
+// over build.gradle for cache keying.
+func TestGradleLockHashPreferredOverBuildFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "build.gradle"), "// v1\n")
+	writeFile(t, filepath.Join(dir, "gradle.lockfile"), "lockfile-content\n")
+
+	h1, err := gradleLockHash(dir)
+	if err != nil {
+		t.Fatalf("gradleLockHash: %v", err)
+	}
+
+	// Change build.gradle — hash should not change (keyed on gradle.lockfile).
+	writeFile(t, filepath.Join(dir, "build.gradle"), "// v2-changed\n")
+	h2, err := gradleLockHash(dir)
+	if err != nil {
+		t.Fatalf("gradleLockHash after build.gradle change: %v", err)
+	}
+	if h1 != h2 {
+		t.Errorf("changing build.gradle should not change hash when gradle.lockfile present; got %q vs %q", h1, h2)
+	}
+
+	// Change gradle.lockfile — hash should change.
+	writeFile(t, filepath.Join(dir, "gradle.lockfile"), "lockfile-v2\n")
+	h3, err := gradleLockHash(dir)
+	if err != nil {
+		t.Fatalf("gradleLockHash after lockfile change: %v", err)
+	}
+	if h1 == h3 {
+		t.Error("changing gradle.lockfile should change hash")
+	}
+}
+
+// TestGradleFetchSentinelKeyedOnBuildFiles: fallback key uses build files;
+// changing build.gradle triggers re-fetch when no gradle.lockfile.
+func TestGradleFetchSentinelKeyedOnBuildFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "build.gradle"), "// v1\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolveGradle(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("first resolveGradle: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("first prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Fatalf("first prefetch: want 1 container, got %d", mock.CallCount())
+	}
+
+	// Warm cache: unchanged build.gradle → skip download.
+	res2, err := resolveGradle(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("second resolveGradle: %v", err)
+	}
+	if err := res2.Prefetch(context.Background()); err != nil {
+		t.Fatalf("second prefetch: %v", err)
+	}
+	if mock.CallCount() != 1 {
+		t.Errorf("warm sentinel should skip download; container ran %d times, want 1", mock.CallCount())
+	}
+
+	// Changed build.gradle → sentinel miss → re-fetch.
+	writeFile(t, filepath.Join(dir, "build.gradle"), "// v2-changed\n")
+	res3, err := resolveGradle(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("third resolveGradle: %v", err)
+	}
+	if err := res3.Prefetch(context.Background()); err != nil {
+		t.Fatalf("third prefetch: %v", err)
+	}
+	if mock.CallCount() != 2 {
+		t.Errorf("changed build.gradle should trigger re-fetch; container ran %d times, want 2", mock.CallCount())
+	}
+}
+
+// TestGradleFetchRequiresSandbox: FETCH with nil FetchSandbox must error.
+func TestGradleFetchRequiresSandbox(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "build.gradle"), "// gradle\n")
+	_, err := resolveGradle(dir, DepOptions{Strategy: DepStrategyFetch}) // nil sandbox
+	if err == nil {
+		t.Fatal("Gradle FETCH with nil sandbox should error")
+	}
+	if !strings.Contains(err.Error(), "fetch sandbox") {
+		t.Errorf("error = %v, want mention of fetch sandbox", err)
+	}
+}
+
+// TestResolveDeps_Maven_GlobalTable tests Maven dispatch through the global
+// ecosystems table (not resolveMaven directly) so if mavenEcosystem.resolve
+// is nil in the copy stored in the slice, this test panics.
+func TestResolveDeps_Maven_GlobalTable(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pom.xml"), "<project/>\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := ResolveDeps(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps Maven: %v", err)
+	}
+	if res.Prefetch == nil {
+		t.Fatal("ResolveDeps Maven FETCH must set a prefetch hook")
+	}
+	// Verify mount path is correct.
+	found := false
+	for _, m := range res.ROMounts {
+		if m.ContainerPath == m2CacheMount {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ResolveDeps Maven: no mount at %s in %+v", m2CacheMount, res.ROMounts)
+	}
+}
+
+// TestResolveDeps_Gradle_GlobalTable tests Gradle dispatch through the global
+// ecosystems table (not resolveGradle directly) so if gradleEcosystem.resolve
+// is nil in the copy stored in the slice, this test panics.
+func TestResolveDeps_Gradle_GlobalTable(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "build.gradle.kts"), "// gradle\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := ResolveDeps(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps Gradle: %v", err)
+	}
+	if res.Prefetch == nil {
+		t.Fatal("ResolveDeps Gradle FETCH must set a prefetch hook")
+	}
+	found := false
+	for _, m := range res.ROMounts {
+		if m.ContainerPath == gradleCacheMount {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ResolveDeps Gradle: no mount at %s in %+v", gradleCacheMount, res.ROMounts)
+	}
+}
