@@ -271,6 +271,73 @@ var grammarTable = func() map[string]*grammar {
 `,
 	}
 
+	// rustGrammar covers Rust (.rs). The gotreesitter v0.20.2 Rust grammar is
+	// bundled and parses 92.9% of real-world .rs files without ERROR nodes
+	// (validated against ripgrep + serde, 308 files, 22 failures = 7.1%).
+	// Parse-rate is above the detector tier's <5% gate, so miners remain gated;
+	// see the committed sweep test in rust_sweep_test.go.
+	//
+	// Nav tier exception: even on the 22 HasError files, def-capture rate is
+	// 96.7% (AST ground truth: 267/276 captured) because the grammar's error
+	// recovery preserves function_item/struct_item/etc. nodes in valid subtrees.
+	// Overall corpus def-capture: 94.0% (5355/5695), above the 90% nav gate.
+	//
+	// Known grammar limitations (gotreesitter v0.20.2):
+	//   - `return` inside a match arm inside Box::new(move |..| { .. }) in a
+	//     function using `?` operators triggers HasError. Pattern is common in
+	//     async/parallel worker closures (rayon, crossbeam, tokio).
+	//   - Two serde_derive files (struct_.rs, ser.rs) produce ast=0 after the
+	//     error cascade; those files' defs are fully missed.
+	//
+	// Captured by rustGrammar defQuery:
+	//   - function_item: free fns, async fns, unsafe fns, pub/pub(crate)/
+	//     pub(super) fns — all visibility qualifiers parse into function_item
+	//   - impl_item: the impl type name (Foo in `impl Foo { ... }`) plus all
+	//     nested function_item children (methods)
+	//   - struct_item, enum_item, trait_item: type declarations
+	//   - mod_item: module declarations (`mod utils { ... }`)
+	//   - const_item, static_item: named constants and statics
+	//
+	// NOT captured:
+	//   - Macro definitions (macro_rules! items use a distinct node type not
+	//     included to avoid false positives on common macro names like `vec!`).
+	//   - Type aliases (`type Foo = Bar;` — type_alias_item) — excluded because
+	//     they're rarely navigation targets vs. the concrete types they alias.
+	//   - Associated types in traits (assoc_type_binding) — minor omission.
+	//
+	// Captured by rustGrammar refQuery:
+	//   - call_expression with identifier callee: `foo()`
+	//   - call_expression with field_expression callee: `obj.method()`
+	//   - call_expression with scoped_identifier callee: `Foo::new()`, `mod::fn()`
+	//
+	// NOT captured as references:
+	//   - Type names in parameter types, return types, struct fields — these
+	//     are type uses, not call references. Navigation by type name uses the
+	//     def query instead (find all definitions of that name).
+	//   - Macro invocations (`println!`, `vec!`) — macro_invocation uses a
+	//     distinct path_expression node that does not match call_expression.
+	//
+	// .rs maps to rustGrammar; no other extension uses Rust.
+	rustGrammar := &grammar{
+		name:   "rust",
+		sample: "x.rs",
+		defQuery: `
+(function_item name: (identifier) @name) @definition.function
+(struct_item name: (type_identifier) @name) @definition.type
+(enum_item name: (type_identifier) @name) @definition.type
+(trait_item name: (type_identifier) @name) @definition.type
+(impl_item type: (type_identifier) @name) @definition.impl
+(mod_item name: (identifier) @name) @definition.module
+(const_item name: (identifier) @name) @definition.constant
+(static_item name: (identifier) @name) @definition.variable
+`,
+		refQuery: `
+(call_expression function: (identifier) @name) @reference.call
+(call_expression function: (field_expression field: (field_identifier) @name)) @reference.call
+(call_expression function: (scoped_identifier name: (identifier) @name)) @reference.call
+`,
+	}
+
 	m := map[string]*grammar{
 		".go":  goGrammar,
 		".py":  pyGrammar,
@@ -297,6 +364,10 @@ var grammarTable = func() map[string]*grammar {
 		// C# uses csharpGrammar. .cs is classified as C# by extLang
 		// (internal/ingest/lang.go) and by the LSP server config.
 		".cs": csharpGrammar,
+		// Rust uses rustGrammar. Grammar parses 92.9% of real files clean;
+		// 94.0% def-capture rate across corpus including HasError files.
+		// See rustGrammar comment above for parse-rate analysis.
+		".rs": rustGrammar,
 	}
 	return m
 }()

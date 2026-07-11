@@ -383,6 +383,9 @@ func TestSupportsAndUnsupported(t *testing.T) {
 			t.Errorf("C/C++ extension %s must be supported", ext)
 		}
 	}
+	if !b.Supports("/x/y.rs") {
+		t.Error("Rust must be supported")
+	}
 	if b.Supports("/x/y.rb") {
 		t.Error("Ruby is not registered and must be unsupported")
 	}
@@ -782,5 +785,121 @@ namespace N {
 	}
 	if got := locLines(t, root, refHello); !contains(got, "app.cs:11") {
 		t.Errorf("csharp References(Hello) = %v, want app.cs:11 (this.Hello member-access call)", got)
+	}
+}
+
+// TestRustFileDefsAndRefs is the load-bearing test for rustGrammar. It
+// exercises all declaration kinds the query claims to capture (fn, struct,
+// enum, trait, impl, mod, const, static) and call-reference shapes (plain
+// identifier, method/field, scoped/path). If rustGrammar's query text does
+// not compile against the Rust registry grammar, tagger construction panics
+// and this test fails — proving the query compiles. Individual line assertions
+// catch "compiles-but-stops-matching" regressions.
+//
+// Cross-file ref fixture: two .rs files sharing a name ("process") verify that
+// the backend scans both files when reporting references.
+//
+// Parse-rate note: the grammar passes 92.9% of real files without ERROR nodes;
+// def-capture is 94.0% corpus-wide including HasError files. See
+// rust_sweep_test.go for the sweep infrastructure and bead bugbot-tdq5.1 for
+// the full analysis. This test uses clean snippets that parse error-free.
+func TestRustFileDefsAndRefs(t *testing.T) {
+	// Line map for lib.rs:
+	//  1: // process Color MAX — comment: must NOT appear as a reference.
+	//  2: pub struct Config { pub size: u32 }
+	//  3: pub enum Color { Red, Green, Blue }
+	//  4: pub trait Processor { fn process(&self, cfg: Config) -> u32; }
+	//  5: pub mod utils { pub fn helper() {} }
+	//  6: pub const MAX: u32 = 100;
+	//  7: pub static INSTANCE: u32 = 0;
+	//  8: pub struct Engine { value: u32 }
+	//  9: impl Engine {
+	// 10:     pub fn new(v: u32) -> Self { Engine { value: v } }
+	// 11:     pub fn process(&self, cfg: Config) -> u32 { self.value + cfg.size }
+	// 12: }
+	// 13: pub fn run(e: Engine) -> u32 {
+	// 14:     let eng = Engine::new(1);
+	// 15:     eng.process(Config { size: 2 })
+	// 16: }
+	const libRS = "" +
+		"// process Color MAX — comment: must NOT appear as a reference.\n" + // 1
+		"pub struct Config { pub size: u32 }\n" + // 2
+		"pub enum Color { Red, Green, Blue }\n" + // 3
+		"pub trait Processor { fn process(&self, cfg: Config) -> u32; }\n" + // 4
+		"pub mod utils { pub fn helper() {} }\n" + // 5
+		"pub const MAX: u32 = 100;\n" + // 6
+		"pub static INSTANCE: u32 = 0;\n" + // 7
+		"pub struct Engine { value: u32 }\n" + // 8
+		"impl Engine {\n" + // 9
+		"    pub fn new(v: u32) -> Self { Engine { value: v } }\n" + // 10
+		"    pub fn process(&self, cfg: Config) -> u32 { self.value + cfg.size }\n" + // 11
+		"}\n" + // 12
+		"pub fn run(e: Engine) -> u32 {\n" + // 13
+		"    let eng = Engine::new(1);\n" + // 14
+		"    eng.process(Config { size: 2 })\n" + // 15
+		"}\n" // 16
+
+	// other.rs calls process via a plain identifier — cross-file reference.
+	const otherRS = "" +
+		"pub fn call_process(e: Engine) -> u32 {\n" + // 1
+		"    process(e)\n" + // 2: plain identifier call ref to process
+		"}\n" // 3
+
+	root := writeRepo(t, map[string]string{
+		"lib.rs":   libRS,
+		"other.rs": otherRS,
+	})
+	b := New(root)
+	abs := filepath.Join(root, "lib.rs")
+
+	def := func(name, wantLine string) {
+		t.Helper()
+		res, err := b.Definition(abs, name)
+		if err != nil {
+			t.Fatalf("rust Definition(%s): %v (Rust grammar failed to parse?)", name, err)
+		}
+		if got := locLines(t, root, res); !contains(got, wantLine) {
+			t.Errorf("rust Definition(%s) = %v, want %s", name, got, wantLine)
+		}
+	}
+
+	def("Config", "lib.rs:2")    // struct_item
+	def("Color", "lib.rs:3")     // enum_item
+	def("Processor", "lib.rs:4") // trait_item
+	def("utils", "lib.rs:5")     // mod_item
+	def("MAX", "lib.rs:6")       // const_item
+	def("INSTANCE", "lib.rs:7")  // static_item
+	def("Engine", "lib.rs:8")    // struct_item (impl_item also maps to Engine on line 9)
+	def("new", "lib.rs:10")      // function_item inside impl
+	def("process", "lib.rs:11")  // function_item inside impl
+	def("run", "lib.rs:13")      // top-level function_item
+
+	// Scoped identifier call: Engine::new(1) on lib.rs line 14.
+	refNew, err := b.References(abs, "new")
+	if err != nil {
+		t.Fatalf("rust References(new): %v", err)
+	}
+	if got := locLines(t, root, refNew); !contains(got, "lib.rs:14") {
+		t.Errorf("rust References(new) = %v, want lib.rs:14 (Engine::new scoped call)", got)
+	}
+
+	// Field/method call: eng.process(...) on lib.rs line 15.
+	refProcess, err := b.References(abs, "process")
+	if err != nil {
+		t.Fatalf("rust References(process): %v", err)
+	}
+	gotProcess := locLines(t, root, refProcess)
+	if !contains(gotProcess, "lib.rs:15") {
+		t.Errorf("rust References(process) = %v, want lib.rs:15 (eng.process field call)", gotProcess)
+	}
+
+	// Cross-file plain-identifier call: process(e) on other.rs line 2.
+	if !contains(gotProcess, "other.rs:2") {
+		t.Errorf("rust References(process) = %v, want other.rs:2 (cross-file plain call)", gotProcess)
+	}
+
+	// Comment on lib.rs:1 mentions "process" textually — must NOT be a reference.
+	if contains(gotProcess, "lib.rs:1") {
+		t.Errorf("rust References(process) wrongly includes lib.rs:1 comment mention: %v", gotProcess)
 	}
 }
