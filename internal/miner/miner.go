@@ -150,9 +150,12 @@ type Summary struct {
 	// EnumDriftLeads counts leads from the enum/const-drift pass
 	// (switch cases using raw integer literals instead of named constants).
 	EnumDriftLeads int
-	// StringlyDriftLeads counts leads from the stringly-typed drift pass
-	// (consumed string literals with no producer, or vice-versa).
+	// StringlyDriftLeads counts leads from the Go stringly-typed drift pass
+	// (type X string; const values vs raw switch case literals — Go only).
 	StringlyDriftLeads int
+	// StringlyTSDriftLeads counts leads from the TypeScript string-union drift
+	// pass (type Alias = 'a' | 'b' | ... vs switch case literals — TS only).
+	StringlyTSDriftLeads int
 }
 
 type leadKey struct {

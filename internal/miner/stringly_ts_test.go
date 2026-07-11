@@ -4,14 +4,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
-// loadTSHandle loads the TypeScript tree-sitter language handle once per test
-// binary run. A nil return means the grammar is unavailable (degrade gracefully).
+// loadTSHandleForTest loads the TypeScript tree-sitter language handle.
 func loadTSHandleForTest(t *testing.T) *tsLangHandle {
 	t.Helper()
 	h, err := loadTSLangHandle("x.ts")
@@ -21,17 +21,7 @@ func loadTSHandleForTest(t *testing.T) *tsLangHandle {
 	return h
 }
 
-// parseSrcForTest is a helper that parses a TypeScript source snippet.
-func parseSrcForTest(t *testing.T, h *tsLangHandle, src []byte) interface{ Release() } {
-	t.Helper()
-	tree, err := parseTSFile(h, src)
-	if err != nil {
-		t.Fatalf("parseTSFile: %v", err)
-	}
-	return tree
-}
-
-// ─── passTS_UnionTypes ────────────────────────────────────────────────────────
+// ─── passTS_UnionTypes ─────────────────────────────────────────────────────────
 
 func TestPassTSUnionTypes_BasicUnion(t *testing.T) {
 	h := loadTSHandleForTest(t)
@@ -50,17 +40,16 @@ func TestPassTSUnionTypes_BasicUnion(t *testing.T) {
 	if u.name != "Status" {
 		t.Errorf("expected type name Status, got %q", u.name)
 	}
-	want := []string{"active", "inactive", "pending"}
-	for _, w := range want {
+	for _, w := range []string{"active", "inactive", "pending"} {
 		if !u.members[w] {
 			t.Errorf("expected member %q in union, members: %v", w, u.members)
 		}
 	}
 }
 
-func TestPassTSUnionTypes_MixedUnionExcluded(t *testing.T) {
+func TestPassTSUnionTypes_MixedNumericLiteralExcluded(t *testing.T) {
 	h := loadTSHandleForTest(t)
-	// A union with a number member must be excluded.
+	// literal number in a literal_type — structural whitelist must exclude.
 	src := []byte(`type Mixed = 'hello' | 42;`)
 	tree, err := parseTSFile(h, src)
 	if err != nil {
@@ -71,14 +60,68 @@ func TestPassTSUnionTypes_MixedUnionExcluded(t *testing.T) {
 	unions := passTS_UnionTypes(h, tree, src)
 	for _, u := range unions {
 		if u.name == "Mixed" {
-			t.Errorf("mixed union should be excluded, got %+v", u)
+			t.Errorf("mixed string|number union must be excluded, got %+v", u)
 		}
+	}
+}
+
+// D2 adversarial: predefined_type keyword (number, boolean) as direct union branch.
+func TestPassTSUnionTypes_PredefinedTypeExcluded(t *testing.T) {
+	h := loadTSHandleForTest(t)
+	// 'number' is a predefined_type node, not a literal_type — structural whitelist.
+	src := []byte(`type Mixed2 = 'read' | 'write' | number;`)
+	tree, err := parseTSFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+
+	unions := passTS_UnionTypes(h, tree, src)
+	for _, u := range unions {
+		if u.name == "Mixed2" {
+			t.Errorf("string|predefined_type union must be excluded, got %+v", u)
+		}
+	}
+}
+
+// D2 adversarial: object_type as union branch.
+func TestPassTSUnionTypes_ObjectTypeExcluded(t *testing.T) {
+	h := loadTSHandleForTest(t)
+	src := []byte(`type Mixed3 = 'a' | 'b' | { custom: string };`)
+	tree, err := parseTSFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+
+	unions := passTS_UnionTypes(h, tree, src)
+	for _, u := range unions {
+		if u.name == "Mixed3" {
+			t.Errorf("string|object_type union must be excluded, got %+v", u)
+		}
+	}
+}
+
+// D3 adversarial: object property types inside a type alias must NOT pollute
+// the union member set. type Config = { mode: 'a' | 'b'; other: 'c' | 'd' }
+// — this is an object_type, not a union alias; the miner must produce 0 unions.
+func TestPassTSUnionTypes_ObjectPropertyTypesNotPolluted(t *testing.T) {
+	h := loadTSHandleForTest(t)
+	src := []byte(`type Config = { mode: 'a' | 'b'; other: 'c' | 'd' };`)
+	tree, err := parseTSFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+
+	unions := passTS_UnionTypes(h, tree, src)
+	if len(unions) != 0 {
+		t.Errorf("object-type alias should produce 0 unions, got %+v", unions)
 	}
 }
 
 func TestPassTSUnionTypes_SingleMemberExcluded(t *testing.T) {
 	h := loadTSHandleForTest(t)
-	// A single-member type alias is not an enum-style union.
 	src := []byte(`type Only = 'singleton';`)
 	tree, err := parseTSFile(h, src)
 	if err != nil {
@@ -112,7 +155,7 @@ func TestPassTSUnionTypes_DoubleQuotes(t *testing.T) {
 	}
 }
 
-// ─── passTS_SwitchCases ────────────────────────────────────────────────────
+// ─── passTS_SwitchCases ────────────────────────────────────────────────────────
 
 func TestPassTSSwitchCases_BasicSwitch(t *testing.T) {
 	h := loadTSHandleForTest(t)
@@ -172,7 +215,6 @@ function check(level: Level): boolean {
 	defer tree.Release()
 
 	switches := passTS_SwitchCases(h, tree, src)
-	// The switch has a case 'low' plus a default.
 	found := false
 	for _, sw := range switches {
 		if sw.scrutinee == "level" {
@@ -187,7 +229,28 @@ function check(level: Level): boolean {
 	}
 }
 
-// ─── joinTSDrift ─────────────────────────────────────────────────────────────
+// ─── joinTSDrift ──────────────────────────────────────────────────────────────
+
+// makeTypedBinding is a helper that creates a typed union binding.
+func makeTypedBinding(name, typeName string, scopeStart, scopeEnd uint32) tsBinding {
+	return tsBinding{
+		name:         name,
+		typeName:     typeName,
+		scopeStart:   scopeStart,
+		scopeEnd:     scopeEnd,
+		isTypedUnion: true,
+	}
+}
+
+// makeUntypedBinding is a helper that creates an untyped binding (shadow).
+func makeUntypedBinding(name string, scopeStart, scopeEnd uint32) tsBinding {
+	return tsBinding{
+		name:         name,
+		scopeStart:   scopeStart,
+		scopeEnd:     scopeEnd,
+		isTypedUnion: false,
+	}
+}
 
 func TestJoinTSDrift_TypeA_TypoLiteral(t *testing.T) {
 	unions := []tsUnionType{{
@@ -195,12 +258,7 @@ func TestJoinTSDrift_TypeA_TypoLiteral(t *testing.T) {
 		members: map[string]bool{"active": true, "inactive": true, "pending": true},
 		line:    1,
 	}}
-	params := []tsFuncParam{{
-		paramName: "s",
-		typeName:  "Status",
-		funcStart: 0,
-		funcEnd:   1000,
-	}}
+	bindings := []tsBinding{makeTypedBinding("s", "Status", 0, 1000)}
 	switches := []tsSwitchInfo{{
 		scrutinee:  "s",
 		switchByte: 50,
@@ -213,14 +271,14 @@ func TestJoinTSDrift_TypeA_TypoLiteral(t *testing.T) {
 		},
 	}}
 
-	typeA, typeB := joinTSDrift("test.ts", unions, params, switches)
+	typeA, typeB := joinTSDrift("test.ts", unions, bindings, switches)
 	if len(typeA) != 1 {
 		t.Fatalf("expected 1 type-A lead, got %d: %+v", len(typeA), typeA)
 	}
 	if typeA[0].Line != 6 {
 		t.Errorf("expected type-A lead at line 6, got %d", typeA[0].Line)
 	}
-	// 'active' is not covered by any case (the typo 'activ' != 'active'),
+	// 'active' is not covered by any case (typo 'activ' != 'active'),
 	// so type-B also fires for the missing 'active' arm — correct behavior.
 	if len(typeB) != 1 {
 		t.Errorf("expected 1 type-B lead (missing 'active'), got %d: %+v", len(typeB), typeB)
@@ -233,12 +291,7 @@ func TestJoinTSDrift_TypeB_MissingArm(t *testing.T) {
 		members: map[string]bool{"north": true, "south": true, "east": true, "west": true},
 		line:    1,
 	}}
-	params := []tsFuncParam{{
-		paramName: "d",
-		typeName:  "Dir",
-		funcStart: 0,
-		funcEnd:   1000,
-	}}
+	bindings := []tsBinding{makeTypedBinding("d", "Dir", 0, 1000)}
 	switches := []tsSwitchInfo{{
 		scrutinee:  "d",
 		switchByte: 50,
@@ -252,7 +305,7 @@ func TestJoinTSDrift_TypeB_MissingArm(t *testing.T) {
 		},
 	}}
 
-	typeA, typeB := joinTSDrift("test.ts", unions, params, switches)
+	typeA, typeB := joinTSDrift("test.ts", unions, bindings, switches)
 	if len(typeA) != 0 {
 		t.Errorf("expected 0 type-A leads, got %d: %+v", len(typeA), typeA)
 	}
@@ -267,57 +320,102 @@ func TestJoinTSDrift_DefaultSuppressesTypeB(t *testing.T) {
 		members: map[string]bool{"debug": true, "info": true, "warn": true, "error": true},
 		line:    1,
 	}}
-	params := []tsFuncParam{{
-		paramName: "lvl",
-		typeName:  "Level",
-		funcStart: 0,
-		funcEnd:   1000,
-	}}
+	bindings := []tsBinding{makeTypedBinding("lvl", "Level", 0, 1000)}
 	switches := []tsSwitchInfo{{
 		scrutinee:  "lvl",
 		switchByte: 50,
 		switchLine: 5,
-		hasDefault: true, // default clause present
+		hasDefault: true,
 		cases: []tsCaseLit{
 			{value: "warn", line: 6},
 			{value: "error", line: 7},
 		},
 	}}
 
-	typeA, typeB := joinTSDrift("test.ts", unions, params, switches)
+	typeA, typeB := joinTSDrift("test.ts", unions, bindings, switches)
 	if len(typeA)+len(typeB) != 0 {
 		t.Errorf("expected 0 leads with default clause, got typeA=%d typeB=%d", len(typeA), len(typeB))
 	}
 }
 
-func TestJoinTSDrift_UntypedScrutineeProducesNoLeads(t *testing.T) {
+func TestJoinTSDrift_NoBindingProducesNoLeads(t *testing.T) {
 	unions := []tsUnionType{{
 		name:    "Status",
 		members: map[string]bool{"active": true, "inactive": true},
 		line:    1,
 	}}
-	// No params — scrutinee has no type binding.
-	var params []tsFuncParam
+	var bindings []tsBinding // no bindings at all
 	switches := []tsSwitchInfo{{
 		scrutinee:  "s",
 		switchByte: 50,
 		switchLine: 5,
 		hasDefault: false,
-		cases: []tsCaseLit{
-			{value: "activ", line: 6}, // typo but no binding
-		},
+		cases:      []tsCaseLit{{value: "activ", line: 6}},
 	}}
 
-	typeA, typeB := joinTSDrift("test.ts", unions, params, switches)
+	typeA, typeB := joinTSDrift("test.ts", unions, bindings, switches)
 	if len(typeA)+len(typeB) != 0 {
 		t.Errorf("expected 0 leads without type binding, got typeA=%d typeB=%d", len(typeA), len(typeB))
 	}
 }
 
-// ─── fixture-based integration tests ─────────────────────────────────────────
+// D1 adversarial: untyped inner binding shadows outer typed union param.
+// The nearest binding (inner, untyped) must win → 0 leads.
+func TestJoinTSDrift_UntypedInnerShadowProducesNoLeads(t *testing.T) {
+	unions := []tsUnionType{{
+		name:    "Event",
+		members: map[string]bool{"click": true, "hover": true},
+		line:    1,
+	}}
+	// Outer typed binding: funcStart=0, funcEnd=1000.
+	// Inner untyped binding: narrower scope, same name "event".
+	bindings := []tsBinding{
+		makeTypedBinding("event", "Event", 0, 1000), // outer typed
+		makeUntypedBinding("event", 200, 800),       // inner untyped — nearer to switch
+	}
+	switches := []tsSwitchInfo{{
+		scrutinee:  "event",
+		switchByte: 400, // inside the inner untyped binding's scope
+		switchLine: 20,
+		hasDefault: false,
+		cases:      []tsCaseLit{{value: "clickk", line: 21}}, // typo
+	}}
 
-// buildTSSnapshot builds a snapshot with TypeScript language for the given
-// relative paths under root.
+	typeA, typeB := joinTSDrift("test.ts", unions, bindings, switches)
+	if len(typeA)+len(typeB) != 0 {
+		t.Errorf("inner untyped shadow must suppress leads, got typeA=%d typeB=%d", len(typeA), len(typeB))
+	}
+}
+
+// D1 adversarial: block-scoped const shadow of outer typed param → 0 leads.
+func TestJoinTSDrift_BlockConstShadowProducesNoLeads(t *testing.T) {
+	unions := []tsUnionType{{
+		name:    "Mode",
+		members: map[string]bool{"a": true, "b": true},
+		line:    1,
+	}}
+	// Outer typed binding; inner block-scoped untyped const.
+	bindings := []tsBinding{
+		makeTypedBinding("mode", "Mode", 0, 1000),
+		makeUntypedBinding("mode", 300, 700), // block const shadows the param
+	}
+	switches := []tsSwitchInfo{{
+		scrutinee:  "mode",
+		switchByte: 450,
+		switchLine: 15,
+		hasDefault: false,
+		cases:      []tsCaseLit{{value: "c", line: 16}}, // not in union
+	}}
+
+	typeA, typeB := joinTSDrift("test.ts", unions, bindings, switches)
+	if len(typeA)+len(typeB) != 0 {
+		t.Errorf("block-const shadow must suppress leads, got typeA=%d typeB=%d", len(typeA), len(typeB))
+	}
+}
+
+// ─── fixture-based integration tests ──────────────────────────────────────────
+
+// buildTSSnapshot builds a snapshot with the given relative paths under root.
 func buildTSSnapshot(t *testing.T, root string, rels []string) *ingest.Snapshot {
 	t.Helper()
 	files := make([]ingest.File, 0, len(rels))
@@ -333,14 +431,11 @@ func buildTSSnapshot(t *testing.T, root string, rels []string) *ingest.Snapshot 
 			Size:     fi.Size(),
 		})
 	}
-	return &ingest.Snapshot{
-		Commit: "test",
-		Root:   root,
-		Files:  files,
-	}
+	return &ingest.Snapshot{Commit: "test", Root: root, Files: files}
 }
 
-// collectLeads collects all leads posted to the store during seedStringlyTSDrift.
+// runTSDriftFixture runs the TS drift miner over the given fixtures and returns
+// the lead count and all posted leads.
 func runTSDriftFixture(t *testing.T, root string, rels []string) (int, []store.Lead) {
 	t.Helper()
 	snap := buildTSSnapshot(t, root, rels)
@@ -352,42 +447,63 @@ func runTSDriftFixture(t *testing.T, root string, rels []string) (int, []store.L
 	}
 	leads, err := st.ListLeads(ctx)
 	if err != nil {
-		t.Fatalf("st.Leads: %v", err)
+		t.Fatalf("st.ListLeads: %v", err)
 	}
-	return sum.StringlyDriftLeads, leads
+	return sum.StringlyTSDriftLeads, leads
 }
 
-// TestStringlyTSDrift_PositiveTypoCase: typo_case.ts has a typo 'activ' in a
-// switch on a Status parameter. The switch has a default clause covering the
-// missing-arm concern; only the type-A typo lead should fire.
+// TestStringlyTSDrift_PositiveTypoCase: typo_case.ts has 'activ' (typo) in a
+// switch on a Status parameter. The switch has a default clause so only the
+// type-A lead fires. Asserts file, line, and lens values.
 func TestStringlyTSDrift_PositiveTypoCase(t *testing.T) {
 	dir := filepath.Join("testdata", "stringly_ts_drift")
 	n, leads := runTSDriftFixture(t, dir, []string{"typo_case.ts"})
 	if n != 1 {
-		t.Errorf("expected 1 StringlyDriftLeads, got %d", n)
+		t.Errorf("expected 1 StringlyTSDriftLeads, got %d", n)
 	}
 	if len(leads) != 1 {
 		t.Fatalf("expected 1 lead, got %d: %+v", len(leads), leads)
 	}
 	lead := leads[0]
 	if lead.PosterLens != stringlyTSPosterLens {
-		t.Errorf("expected PosterLens %q, got %q", stringlyTSPosterLens, lead.PosterLens)
+		t.Errorf("PosterLens: want %q, got %q", stringlyTSPosterLens, lead.PosterLens)
 	}
 	if lead.TargetLens != stringlyTSTargetLens {
-		t.Errorf("expected TargetLens %q, got %q", stringlyTSTargetLens, lead.TargetLens)
+		t.Errorf("TargetLens: want %q, got %q", stringlyTSTargetLens, lead.TargetLens)
+	}
+	if lead.File != "typo_case.ts" {
+		t.Errorf("File: want %q, got %q", "typo_case.ts", lead.File)
+	}
+	// The case 'activ' is on line 8 in the fixture file.
+	if lead.Line != 8 {
+		t.Errorf("Line: want 8 (case 'activ' line), got %d", lead.Line)
+	}
+	if !strings.Contains(lead.Note, "activ") {
+		t.Errorf("Note should mention typo literal 'activ', got: %q", lead.Note)
 	}
 }
 
-// TestStringlyTSDrift_PositiveMissingArm: missing_arm.ts has 'west' missing
-// from a switch over Direction with no default → 1 type-B lead.
+// TestStringlyTSDrift_PositiveMissingArm: missing_arm.ts is missing 'west'
+// from Direction switch with no default → 1 type-B lead.
 func TestStringlyTSDrift_PositiveMissingArm(t *testing.T) {
 	dir := filepath.Join("testdata", "stringly_ts_drift")
 	n, leads := runTSDriftFixture(t, dir, []string{"missing_arm.ts"})
 	if n != 1 {
-		t.Errorf("expected 1 StringlyDriftLeads, got %d", n)
+		t.Errorf("expected 1 StringlyTSDriftLeads, got %d", n)
 	}
 	if len(leads) != 1 {
 		t.Fatalf("expected 1 lead, got %d: %+v", len(leads), leads)
+	}
+	lead := leads[0]
+	if lead.File != "missing_arm.ts" {
+		t.Errorf("File: want %q, got %q", "missing_arm.ts", lead.File)
+	}
+	// The switch is on line 8 in the fixture.
+	if lead.Line != 8 {
+		t.Errorf("Line: want 8 (switch line), got %d", lead.Line)
+	}
+	if !strings.Contains(lead.Note, "west") {
+		t.Errorf("Note should mention missing member 'west', got: %q", lead.Note)
 	}
 }
 
@@ -418,7 +534,7 @@ func TestStringlyTSDrift_NegativeMixedUnion(t *testing.T) {
 	}
 }
 
-// TestStringlyTSDrift_NegativeUntypedScrutinee: switch over plain string param → 0 leads.
+// TestStringlyTSDrift_NegativeUntypedScrutinee: plain string param → 0 leads.
 func TestStringlyTSDrift_NegativeUntypedScrutinee(t *testing.T) {
 	dir := filepath.Join("testdata", "stringly_ts_clean")
 	n, _ := runTSDriftFixture(t, dir, []string{"untyped_scrutinee.ts"})
@@ -427,7 +543,7 @@ func TestStringlyTSDrift_NegativeUntypedScrutinee(t *testing.T) {
 	}
 }
 
-// TestStringlyTSDrift_NegativeDiscriminatedUnion: all members of a shape union covered → 0 leads.
+// TestStringlyTSDrift_NegativeDiscriminatedUnion: exhaustive shape union → 0 leads.
 func TestStringlyTSDrift_NegativeDiscriminatedUnion(t *testing.T) {
 	dir := filepath.Join("testdata", "stringly_ts_clean")
 	n, _ := runTSDriftFixture(t, dir, []string{"discriminated_union.ts"})
@@ -436,21 +552,112 @@ func TestStringlyTSDrift_NegativeDiscriminatedUnion(t *testing.T) {
 	}
 }
 
-// TestStringlyTSDrift_NonTSFileSkipped: Go file renamed .ts should not match
-// TS grammar but ingest.DetectLanguage on .ts returns LangTypeScript;
-// if the file contains valid TS syntax (no union types), 0 leads result.
+// D1 adversarial fixture: untyped forEach shadow → 0 leads.
+func TestStringlyTSDrift_NegativeUntypedForEachShadow(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_ts_clean")
+	n, _ := runTSDriftFixture(t, dir, []string{"untyped_foreach_shadow.ts"})
+	if n != 0 {
+		t.Errorf("expected 0 leads for untyped forEach shadow, got %d", n)
+	}
+}
+
+// D1 adversarial fixture: block-scoped const shadow → 0 leads.
+func TestStringlyTSDrift_NegativeBlockConstShadow(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_ts_clean")
+	n, _ := runTSDriftFixture(t, dir, []string{"block_const_shadow.ts"})
+	if n != 0 {
+		t.Errorf("expected 0 leads for block-const shadow, got %d", n)
+	}
+}
+
+// D2 adversarial fixture: string|number (predefined_type) union → 0 leads.
+func TestStringlyTSDrift_NegativePredefinedTypeMixedUnion(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_ts_clean")
+	n, _ := runTSDriftFixture(t, dir, []string{"predefined_type_union.ts"})
+	if n != 0 {
+		t.Errorf("expected 0 leads for string|number union, got %d", n)
+	}
+}
+
+// D2/D3 adversarial fixture: object property types inside type alias → 0 leads.
+func TestStringlyTSDrift_NegativeObjectPropertyTypePollution(t *testing.T) {
+	dir := filepath.Join("testdata", "stringly_ts_clean")
+	n, _ := runTSDriftFixture(t, dir, []string{"object_property_pollution.ts"})
+	if n != 0 {
+		t.Errorf("expected 0 leads for object-property union pollution, got %d", n)
+	}
+}
+
+// D4: test-file paths must be skipped by isTSTestPath gate.
+func TestStringlyTSDrift_TestFileSkipped(t *testing.T) {
+	// Build a snapshot that includes a .test.ts file that would produce a lead
+	// if scanned, but must be silently skipped.
+	dir := filepath.Join("testdata", "stringly_ts_drift")
+	// Use typo_case.ts as the content but route it through a test-looking path.
+	snap := &ingest.Snapshot{
+		Commit: "test",
+		Root:   dir,
+		Files: []ingest.File{
+			{
+				Path:     "typo_case.test.ts", // test file path
+				Language: ingest.LangTypeScript,
+				Size:     1,
+			},
+		},
+	}
+	st := openStore(t)
+	var sum Summary
+	if err := seedStringlyTSDrift(context.Background(), snap, st, &sum); err != nil {
+		t.Fatalf("seedStringlyTSDrift: %v", err)
+	}
+	if sum.StringlyTSDriftLeads != 0 {
+		t.Errorf("test file must be skipped, got %d leads", sum.StringlyTSDriftLeads)
+	}
+}
+
+// TestStringlyTSDrift_NegativeCleanCorpus: all clean fixtures together → 0 leads.
 func TestStringlyTSDrift_NegativeCleanCorpus(t *testing.T) {
 	dir := filepath.Join("testdata", "stringly_ts_clean")
-	// Run all clean fixtures at once — total leads must be 0.
 	rels := []string{
 		"exhaustive_switch.ts",
 		"default_suppresses_type_b.ts",
 		"mixed_union_excluded.ts",
 		"untyped_scrutinee.ts",
 		"discriminated_union.ts",
+		"untyped_foreach_shadow.ts",
+		"block_const_shadow.ts",
+		"predefined_type_union.ts",
+		"object_property_pollution.ts",
 	}
 	n, leads := runTSDriftFixture(t, dir, rels)
 	if n != 0 || len(leads) != 0 {
-		t.Errorf("clean corpus: expected 0 leads, got StringlyDriftLeads=%d, leads=%+v", n, leads)
+		t.Errorf("clean corpus: expected 0 leads, got StringlyTSDriftLeads=%d, leads=%+v", n, leads)
+	}
+}
+
+// ─── isTSTestPath unit tests ──────────────────────────────────────────────────
+
+func TestIsTSTestPath(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"src/auth/login.ts", false},
+		{"src/auth/login.test.ts", true},
+		{"src/auth/login.spec.tsx", true},
+		{"src/auth/login.TEST.ts", true}, // lowercased
+		{"__tests__/auth.ts", true},
+		{"test/auth.ts", true},
+		{"tests/auth.ts", true},
+		{"src/__tests__/auth.ts", true},
+		{"src/testdata/fixture.ts", true},
+		{"src/auth/testhelper.ts", false}, // 'test' as prefix, not segment
+		{"src/auth/testing.ts", false},
+	}
+	for _, tc := range cases {
+		got := isTSTestPath(tc.path)
+		if got != tc.want {
+			t.Errorf("isTSTestPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
 	}
 }
