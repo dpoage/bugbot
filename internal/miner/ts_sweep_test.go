@@ -35,7 +35,6 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/store"
 )
 
 func TestRealTSSweep(t *testing.T) {
@@ -73,11 +72,7 @@ func TestRealTSSweep(t *testing.T) {
 	t.Logf("corpus: %d .ts files under %s", len(files), root)
 
 	snap := &ingest.Snapshot{Commit: "test", Root: root, Files: files}
-	st, stErr := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
-	if stErr != nil {
-		t.Fatalf("store: %v", stErr)
-	}
-	defer st.Close()
+	st := openStore(t)
 
 	var sum Summary
 	if err := seedStringlyTSDrift(context.Background(), snap, st, &sum); err != nil {

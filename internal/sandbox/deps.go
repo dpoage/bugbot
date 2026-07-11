@@ -186,11 +186,6 @@ type DepOptions struct {
 	// via $HOME/.m2/repository.
 	hostMavenRepository string
 
-	// hostGradleCache, when set, overrides the resolved host Gradle caches
-	// directory for the HOST strategy (test seam). Empty resolves via
-	// $GRADLE_USER_HOME/caches then ~/.gradle/caches.
-	hostGradleCache string
-
 	// userCacheDir, when set, overrides the base directory for bugbot-managed
 	// fetch caches (test seam). Empty uses os.UserCacheDir.
 	userCacheDir string

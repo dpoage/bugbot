@@ -615,16 +615,6 @@ func passTS_Bindings(h *tsLangHandle, tree *gts.Tree, src []byte, knownTypes map
 	return out
 }
 
-// findCapture returns the node for the first capture with the given name.
-func findCapture(m gts.QueryMatch, name string) *gts.Node {
-	for _, c := range m.Captures {
-		if c.Name == name {
-			return c.Node
-		}
-	}
-	return nil
-}
-
 // enclosingBlock walks up the parent chain to find the nearest ancestor that
 // spans multiple children — the enclosing { } block. We use ChildCount()>2
 // as a proxy for "this is a block node, not a wrapper node with one child".
@@ -775,7 +765,7 @@ func joinTSDrift(
 
 		// Find the NEAREST binding of the scrutinee that encloses the switch.
 		// "Nearest" = smallest scope span (most tightly enclosing).
-		var nearestSpan uint32 = ^uint32(0)
+		nearestSpan := ^uint32(0)
 		var nearestBinding *tsBinding
 		for j := range bindings {
 			b := &bindings[j]
