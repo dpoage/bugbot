@@ -980,8 +980,8 @@ public class ExampleTest {
 
 // TestIntegrationGradleFetchBuildsOffline proves the full Gradle FETCH round-trip:
 // prefetch runs `gradle dependencies --no-daemon -q` online to populate the
-// Gradle user home, then the network-none run copies the cache to a writable
-// /tmp/gradlecache via SetupCmds and runs `gradle test`. Exit 0 required.
+// Gradle user home, then the network-none run copies the cache to the disk-backed
+// /workspace/.bugbot-gradle-home via SetupCmds and runs `gradle test`. Exit 0 required.
 func TestIntegrationGradleFetchBuildsOffline(t *testing.T) {
 	s := newGradleTestCLI(t)
 	dir := t.TempDir()
