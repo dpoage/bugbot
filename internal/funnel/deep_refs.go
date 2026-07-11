@@ -53,17 +53,30 @@ func isLoadBearing(k treesitter.Kind) bool {
 	return false
 }
 
-// isPublicSymbol reports whether name looks like part of the file's public
-// API surface under lang's conventions. Go uses its export rule (upper-case
-// ASCII first letter). Every other language has no syntactic export marker
-// tree-sitter can surface, so the leading-underscore private-by-convention
-// rule applies (Python _helper/__init__, JS/TS _internal, C _static): a
-// leading underscore is private, anything else is public. The symbol caps
-// (deepRefMaxSymbols/deepRefMaxRefs) bound the looser non-Go filter.
-func isPublicSymbol(lang ingest.Language, name string) bool {
+// isPublicSymbol reports whether an outline entry is part of the file's
+// public API surface.
+//
+// Decision order:
+//  1. If vis is VisibilityPublic or VisibilityPrivate (populated by the C/C++
+//     access-specifier tracker or the Rust pub-modifier scanner), it is
+//     authoritative and name is ignored for the public/private decision.
+//  2. Otherwise (VisibilityUnknown) name-based heuristics apply:
+//     - Go: uppercase ASCII first letter is the language's export rule.
+//     - All others (Python, JS/TS, …): leading underscore = private
+//     by convention (_helper, __init__, _internal). The symbol caps
+//     (deepRefMaxSymbols/deepRefMaxRefs) bound this looser filter.
+func isPublicSymbol(lang ingest.Language, name string, vis treesitter.Visibility) bool {
 	if name == "" {
 		return false
 	}
+	// Authoritative visibility from the outline analyzer.
+	switch vis {
+	case treesitter.VisibilityPublic:
+		return true
+	case treesitter.VisibilityPrivate:
+		return false
+	}
+	// VisibilityUnknown: fall back to name heuristics.
 	if lang == ingest.LangGo {
 		r := name[0]
 		return r >= 'A' && r <= 'Z'
@@ -117,7 +130,7 @@ func deepRefClosureWith(ctx context.Context, nav refClosureNav, seedFiles []stri
 		}
 		lang := ingest.DetectLanguage(sf)
 		for _, e := range entries {
-			if !isPublicSymbol(lang, e.Name) || !isLoadBearing(e.Kind) {
+			if !isPublicSymbol(lang, e.Name, e.Visibility) || !isLoadBearing(e.Kind) {
 				continue
 			}
 			candidates = append(candidates, candidate{
