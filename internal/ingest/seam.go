@@ -335,12 +335,55 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 				line := lineForOffset(content, m[0])
 				httpRouteConsumers[path] = append(httpRouteConsumers[path], fileRef{file: f.Path, line: line, lang: LangPython})
 			}
+		case LangRust:
+			// PRODUCER: axum .route("/path", get(handler)|post(handler)|...)
+			// Precision anchor: second arg must be a method-router call
+			// (get(, post(, put(, ...) — rejects non-axum .route() calls.
+			for _, m := range httpRustAxumRouteRe.FindAllSubmatchIndex(content, -1) {
+				path := normalizeHTTPPath(string(content[m[2]:m[3]]))
+				if path == "" {
+					continue
+				}
+				line := lineForOffset(content, m[0])
+				httpRouteProducers[path] = append(httpRouteProducers[path], fileRef{file: f.Path, line: line, lang: LangRust})
+			}
+			// PRODUCER: actix-web #[get("/path")] / #[post("/path")] attribute macros.
+			for _, m := range httpRustActixAttrRe.FindAllSubmatchIndex(content, -1) {
+				path := normalizeHTTPPath(string(content[m[2]:m[3]]))
+				if path == "" {
+					continue
+				}
+				line := lineForOffset(content, m[0])
+				httpRouteProducers[path] = append(httpRouteProducers[path], fileRef{file: f.Path, line: line, lang: LangRust})
+			}
+			// PRODUCER: actix-web App::route("/path", web::get()...) imperative form.
+			// Precision anchor: second arg must start with web:: (actix-web prefix).
+			for _, m := range httpRustActixAppRouteRe.FindAllSubmatchIndex(content, -1) {
+				path := normalizeHTTPPath(string(content[m[2]:m[3]]))
+				if path == "" {
+					continue
+				}
+				line := lineForOffset(content, m[0])
+				httpRouteProducers[path] = append(httpRouteProducers[path], fileRef{file: f.Path, line: line, lang: LangRust})
+			}
+			// CONSUMER: reqwest client.get("url") / .get("url") and reqwest::get("url")
+			// with a leading-slash or full-URL literal.
+			for _, m := range httpRustClientCallRe.FindAllSubmatchIndex(content, -1) {
+				raw := firstSubmatch(content, m)
+				path := normalizeHTTPPath(raw)
+				if path == "" {
+					continue
+				}
+				line := lineForOffset(content, m[0])
+				httpRouteConsumers[path] = append(httpRouteConsumers[path], fileRef{file: f.Path, line: line, lang: LangRust})
+			}
 		}
 
-		// RPC method detection: Go + .proto + Python gRPC.
+		// RPC method detection: Go + .proto + Python gRPC + Rust tonic.
 		// .proto files: PRODUCER declarations.
 		// Go files: server handler PRODUCER funcs + call-site CONSUMER refs.
 		// Python files: gRPC servicer PRODUCER declarations + stub CONSUMER calls.
+		// Rust files: tonic server handler PRODUCER funcs (producer-anchor gated).
 		if isProto {
 			for _, m := range protoRPCDeclRe.FindAllSubmatchIndex(content, -1) {
 				name := string(content[m[2]:m[3]])
@@ -378,6 +421,24 @@ func EnumerateSeams(snap *Snapshot) []Seam {
 				name := string(content[m[2]:m[3]])
 				line := lineForOffset(content, m[0])
 				rpcConsumers[name] = append(rpcConsumers[name], fileRef{file: f.Path, line: line, lang: LangPython})
+			}
+		} else if f.Language == LangRust {
+			// Rust tonic gRPC server handler PRODUCER:
+			//   async fn MethodName(&self, request: Request<Foo>) -> Result<Response<Bar>, Status>
+			// This signature is specific to tonic server implementations.
+			// Producer-anchor gate (enforced at emission) means a file with
+			// only a tonic handler and no .proto counterpart is suppressed.
+			// Client-call detection is intentionally skipped: tonic client call
+			// sites (`client.method_name(req).await`) use snake_case method
+			// names (gRPC-Rust convention) rather than the UpperCamelCase that
+			// .proto rpc declarations use. Reliable matching requires type info
+			// (the client type must implement the generated stub trait). Emitting
+			// on snake_case calls would over-match ordinary async method calls;
+			// the producer-only posture is the correct precision/recall trade-off.
+			for _, m := range rustRPCHandlerRe.FindAllSubmatchIndex(content, -1) {
+				name := string(content[m[2]:m[3]])
+				line := lineForOffset(content, m[0])
+				rpcProducers[name] = append(rpcProducers[name], fileRef{file: f.Path, line: line, lang: LangRust})
 			}
 		}
 	}
@@ -688,6 +749,19 @@ var envPyGetenv = regexp.MustCompile(`os\.(?:environ\[\s*["']([A-Za-z_][A-Za-z0-
 // process.env["X"] (computed access) forms.
 var envJsProcessEnv = regexp.MustCompile(`process\.env\.([A-Za-z_][A-Za-z0-9_]*)|process\.env\[\s*["']([A-Za-z_][A-Za-z0-9_]*)["']\s*\]`)
 
+// envRustVar matches Rust std::env::var("X"), env::var("X"), and
+// env::var_os("X") call forms. Both the stdlib path (std::env::var) and
+// the common short-form (env::var) after `use std::env` are covered.
+// var_os is included because it is functionally identical for seam-detection
+// purposes; the return type difference (OsString vs String) is irrelevant.
+var envRustVar = regexp.MustCompile(`(?:std::)?env::var(?:_os)?\s*\(\s*"([A-Za-z_][A-Za-z0-9_]*)"`)
+
+// envCGetenv matches C and C++ getenv("X") and secure_getenv("X") call
+// forms. secure_getenv is a GNU extension that is functionally equivalent
+// for seam-detection purposes. Only double-quoted string literals are
+// matched: char* variables are beyond regex precision.
+var envCGetenv = regexp.MustCompile(`\b(?:secure_)?getenv\s*\(\s*"([A-Za-z_][A-Za-z0-9_]*)"`)
+
 // extractEnvVarNames returns the env-var names referenced in content,
 // dispatching on language. The matchers are deliberately narrow (no
 // fuzzy matching); a refactor that introduces a different env-var API
@@ -733,6 +807,26 @@ func extractEnvVarNames(lang Language, content []byte) []string {
 					break
 				}
 			}
+		}
+		return names
+	case LangRust:
+		out := envRustVar.FindAllSubmatch(content, -1)
+		if len(out) == 0 {
+			return nil
+		}
+		names := make([]string, 0, len(out))
+		for _, m := range out {
+			names = append(names, string(m[1]))
+		}
+		return names
+	case LangC, LangCPP:
+		out := envCGetenv.FindAllSubmatch(content, -1)
+		if len(out) == 0 {
+			return nil
+		}
+		names := make([]string, 0, len(out))
+		for _, m := range out {
+			names = append(names, string(m[1]))
 		}
 		return names
 	default:
@@ -782,6 +876,20 @@ func lineForEnvMatch(lang Language, content []byte, name string) int {
 			}
 		}
 		return 0
+	case LangRust:
+		re := regexp.MustCompile(`(?:std::)?env::var(?:_os)?\s*\(\s*"` + regexp.QuoteMeta(name) + `"`)
+		loc := re.FindIndex(content)
+		if loc == nil {
+			return 0
+		}
+		return lineForOffset(content, loc[0])
+	case LangC, LangCPP:
+		re := regexp.MustCompile(`\b(?:secure_)?getenv\s*\(\s*"` + regexp.QuoteMeta(name) + `"`)
+		loc := re.FindIndex(content)
+		if loc == nil {
+			return 0
+		}
+		return lineForOffset(content, loc[0])
 	default:
 		return 0
 	}
@@ -995,3 +1103,58 @@ func normalizePyDjangoPath(raw string) string {
 	// strip, root-only rejection) to normalizeHTTPPath for consistency.
 	return normalizeHTTPPath(raw)
 }
+
+// httpRustAxumRouteRe matches axum HTTP route registrations:
+//   - Router::new().route("/path", get(handler)) — .route("/path", verb(fn))
+//   - .route("/path", post(handler).layer(...)) etc.
+//
+// Precision anchors:
+//  1. The path literal must have a leading slash.
+//  2. The second arg must start with a method-router call: get(, post(, put(,
+//     delete(, patch( — these are axum::routing::get(...) etc. This rejects
+//     map.route("/key", value) and other non-registration .route() calls.
+//
+// Captured group 1 is the path.
+var httpRustAxumRouteRe = regexp.MustCompile(`\.route\s*\(\s*"(/[^"\x00-\x1f]*)"\s*,\s*(?:get|post|put|delete|patch|head|options|trace)\s*\(`)
+
+// httpRustActixAttrRe matches actix-web attribute-macro route registrations:
+//   - #[get("/path")] / #[post("/path")] / #[put(...)] etc.
+//
+// The attribute form is the primary actix-web route declaration. The path
+// literal must have a leading slash. Captured group 1 is the path.
+var httpRustActixAttrRe = regexp.MustCompile(`#\s*\[\s*(?:get|post|put|delete|patch|head|options)\s*\(\s*"(/[^"\x00-\x1f]*)"`)
+
+// httpRustActixAppRouteRe matches actix-web App::route() / Scope::route()
+// imperative registrations:
+//   - App::new().route("/path", web::get().to(handler))
+//
+// Precision anchor: second arg must start with web:: (actix-web module
+// prefix) to distinguish from arbitrary .route() method calls.
+// Captured group 1 is the path.
+var httpRustActixAppRouteRe = regexp.MustCompile(`\.route\s*\(\s*"(/[^"\x00-\x1f]*)"\s*,\s*web\s*::`)
+
+// httpRustClientCallRe matches Rust reqwest HTTP client call sites.
+// Patterns:
+//   - client.get("url") / .get("url")
+//   - reqwest::get("url") (module-level convenience function)
+//
+// The URL/path must start with a leading slash or http(s):// scheme.
+// Captured group 1 is the URL/path literal.
+var httpRustClientCallRe = regexp.MustCompile(`(?:\breqwest\s*::\s*(?:get|post|put|delete|patch)\s*\(\s*"((?:https?://[^"]*|/[^"]*))"|(?:\.(?:get|post|put|delete|patch))\s*\(\s*"((?:https?://[^"]*|/[^"]*))")\s*[,)]?`)
+
+// rustRPCHandlerRe matches Rust tonic gRPC server-side handler method
+// declarations inside impl blocks:
+//
+//	async fn MethodName(&self, request: Request<Foo>) -> Result<Response<Bar>, Status>
+//
+// Precision anchors:
+//  1. Must be async fn (tonic handlers are always async).
+//  2. First param must be &self or &mut self.
+//  3. Second param type must start with Request< (tonic::Request<...>).
+//  4. Return type pattern must include Response< and Status.
+//  5. Method name must begin with an uppercase letter (proto convention).
+//
+// This tight signature is specific to tonic server handlers and is
+// unlikely to match ordinary async methods. Captured group 1 is the
+// method name.
+var rustRPCHandlerRe = regexp.MustCompile(`async\s+fn\s+([A-Z][A-Za-z0-9_]*)\s*\(\s*&(?:mut\s+)?self\s*,[^)]*Request\s*<[^)]*\)\s*->\s*Result\s*<\s*Response\s*<`)
