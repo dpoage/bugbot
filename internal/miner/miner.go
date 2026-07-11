@@ -177,6 +177,12 @@ type Summary struct {
 	// cause HasError in the v0.20.2 C/C++ grammar). Files with HasError are
 	// allowed for enum extraction but skipped for switch analysis.
 	CppParseFailures int
+	// StringlyRsDriftLeads counts leads from the Rust &str match-drift pass
+	// (const &str producer pool vs match arm string literals — Rust only).
+	StringlyRsDriftLeads int
+	// RsParseFailures counts Rust files skipped due to HasError() in the parse tree.
+	// Expected ~7.1% on real corpora (ripgrep + serde corpus measurement).
+	RsParseFailures int
 }
 
 type leadKey struct {
@@ -286,6 +292,10 @@ consLoop:
 	}
 
 	if err := seedCppEnumDrift(ctx, snap, st, &sum); err != nil {
+		return sum, err
+	}
+
+	if err := seedStringlyRsDrift(ctx, snap, st, &sum); err != nil {
 		return sum, err
 	}
 
