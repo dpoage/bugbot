@@ -202,36 +202,42 @@ const rsLetDeclarationQuery = `
 `
 
 // rsLetDeclarationPatQuery finds let-else bindings with destructuring patterns
-// (tuple_struct_pattern, struct_pattern). These are shadow sentinels: the
+// (tuple_struct_pattern or struct_pattern). These are shadow sentinels: the
 // bound identifiers shadow any outer &str-typed parameter.
 //
-// Example: `let Some(cmd) = opt else { return; };` — `cmd` is bound via
-// tuple_struct_pattern and must be treated as an untyped sentinel.
-// We capture the let_declaration node as scope; the parent block is resolved
-// in Go code via enclosingRSBlock.
+// Examples:
+//   - `let Some(cmd) = opt else { return; };` — tuple_struct_pattern binds cmd
+//   - `let Shape::Circle { cmd } = s else { return; };` — struct_pattern binds cmd
+//   - `let Shape::Circle { radius: r } = s else { return; };` — binds r (not radius)
+//
+// We capture the pattern node and the let_declaration; identifiers are
+// extracted via collectRSPatternIdents in Go code.
 const rsLetDeclarationPatQuery = `
 (let_declaration
-  pattern: (tuple_struct_pattern) @let.pattern) @let.decl
+  pattern: [(tuple_struct_pattern) (struct_pattern)] @let.pattern) @let.decl
 `
 
 // rsIfLetQuery finds if-let and while-let bindings. The let_condition node
-// contains the pattern; we extract identifiers from it.
-// We use a broad capture of the let_condition and traverse it in Go code to
-// extract bound identifiers (tuple_struct_pattern, struct_pattern, identifier).
+// contains the pattern; we extract identifiers from it via
+// collectRSPatternIdents in Go code.
 const rsIfLetQuery = `
 (let_condition
   pattern: (_) @let.pattern) @let.cond
 `
 
-// rsMatchArmCaptureQuery finds match arm patterns that bind identifiers via
-// tuple_struct_pattern (e.g., Foo::Bar(x)) or struct_pattern. We extract
-// the innermost identifiers via Go traversal.
-// We capture the match_arm body as scope.
+// rsMatchArmCaptureQuery finds match arms whose pattern contains a destructuring
+// pattern (tuple_struct_pattern or struct_pattern) that binds identifiers.
+// We capture the pattern and the arm; identifiers are extracted via
+// collectRSPatternIdents in Go code (same traversal as letDeclPatQ).
+//
+// Examples:
+//   - Foo::Bar(x) => ... — tuple_struct_pattern binds x
+//   - Shape::Circle { cmd } => ... — struct_pattern binds cmd (shorthand)
+//   - Shape::Circle { radius: r } => ... — struct_pattern binds r (rename)
 const rsMatchArmCaptureQuery = `
 (match_arm
   pattern: (match_pattern
-    (tuple_struct_pattern
-      (identifier) @any.name))) @any.scope
+    [(tuple_struct_pattern) (struct_pattern)] @arm.pattern)) @arm.arm
 `
 
 // rsMatchExprQuery finds match expressions whose scrutinee is a bare identifier.
@@ -663,46 +669,49 @@ func passRS_Bindings(h *rsLangHandle, tree *gts.Tree, src []byte) []rsBinding {
 		})
 	}
 
-	// 6. Match-arm capture patterns (e.g. Foo::Bar(x) → x is bound).
+	// 6. Match-arm capture patterns: tuple_struct_pattern (Foo::Bar(x)) or
+	// struct_pattern (Circle{cmd}, Circle{radius: r}). Identifiers are
+	// extracted via collectRSPatternIdents, which handles all three forms:
+	// bare identifier binding (x), shorthand field (cmd), renamed field (r).
 	for _, m := range h.matchArmCapQ.Execute(tree) {
-		var bindName string
+		var patNode *gts.Node
 		var armNode *gts.Node
 		for _, c := range m.Captures {
 			switch c.Name {
-			case "any.name":
-				bindName = c.Node.Text(src)
-			case "any.scope":
+			case "arm.pattern":
+				patNode = c.Node
+			case "arm.arm":
 				armNode = c.Node
 			}
 		}
-		if bindName == "" || armNode == nil {
+		if patNode == nil || armNode == nil {
 			continue
 		}
-		// Scope: the match_arm's body block.
+		// Scope: the match_arm's body block (or the arm itself for expr bodies).
 		var bodyBlock *gts.Node
 		for i := range int(armNode.ChildCount()) {
 			child := armNode.Child(i)
-			t := child.Type(h.lang)
-			if t == "block" {
+			if child.Type(h.lang) == "block" {
 				bodyBlock = child
 				break
 			}
 		}
 		if bodyBlock == nil {
-			// Arm body may be an expression without braces; use arm span.
 			bodyBlock = armNode
 		}
-		scopeStart := bodyBlock.StartByte()
-		scopeEnd := bodyBlock.EndByte()
-		k := fmt.Sprintf("%s:%d", bindName, scopeStart)
-		if typedKey[k] {
-			continue
-		}
-		out = append(out, rsBinding{
-			name:       bindName,
-			scopeStart: scopeStart,
-			scopeEnd:   scopeEnd,
-			isTypedStr: false,
+		collectRSPatternIdents(patNode, h.lang, src, func(ident string) {
+			scopeStart := bodyBlock.StartByte()
+			scopeEnd := bodyBlock.EndByte()
+			k := fmt.Sprintf("%s:%d", ident, scopeStart)
+			if typedKey[k] {
+				return
+			}
+			out = append(out, rsBinding{
+				name:       ident,
+				scopeStart: scopeStart,
+				scopeEnd:   scopeEnd,
+				isTypedStr: false,
+			})
 		})
 	}
 
@@ -710,16 +719,35 @@ func passRS_Bindings(h *rsLangHandle, tree *gts.Tree, src []byte) []rsBinding {
 }
 
 // collectRSPatternIdents walks a pattern node and calls f for every bound
-// identifier. Conservative: treats every bare identifier in the pattern as a
-// potential binding. For `Some(x)` this yields "Some" and "x"; calling code
-// uses this as a sentinel list so over-counting is precision-safe (we just
-// suppress more matches, never emit false leads).
+// identifier. Conservative: treats every bare identifier and every
+// shorthand_field_identifier as potential bindings.
+//
+// Node types collected:
+//   - identifier: binding in tuple_struct_pattern (Some(x) → x) and
+//     the renamed field in struct_pattern (Circle{radius: r} → r).
+//     Also collected: path components like "Some", "Shape" in scoped paths;
+//     over-collection is precision-safe (sentinels suppress, never emit).
+//   - shorthand_field_identifier: binding in struct_pattern shorthand form
+//     (Circle{cmd} → cmd); AST uses shorthand_field_identifier not identifier.
+//
+// Field rename form: `field_pattern` has children `field_identifier "radius"`,
+// `:`, `identifier "r"`. The identifier "r" is the binding; field_identifier
+// "radius" is skipped (it is not an identifier node). collectRSPatternIdents
+// correctly walks into field_pattern and collects only "r".
 func collectRSPatternIdents(n *gts.Node, lang *gts.Language, src []byte, f func(string)) {
 	if n == nil {
 		return
 	}
-	if n.Type(lang) == "identifier" {
+	switch n.Type(lang) {
+	case "identifier":
 		f(n.Text(src))
+		return
+	case "shorthand_field_identifier":
+		// struct_pattern shorthand: Circle{cmd} — the field identifier IS the binding.
+		f(n.Text(src))
+		return
+	case "field_identifier":
+		// Struct field name in a rename pattern (radius: r) — NOT a binding; skip.
 		return
 	}
 	for i := range int(n.ChildCount()) {

@@ -522,6 +522,58 @@ func TestJoinRSDrift_D2_LetElseDestructureSuppresses(t *testing.T) {
 	}
 }
 
+// TestRSFixture_D2_StructPatternLetElse verifies struct_pattern let-else
+// bindings (both shorthand and rename forms) suppress leads.
+func TestRSFixture_D2_StructPatternLetElse(t *testing.T) {
+	h := loadRSHandleForTest(t)
+	src, err := os.ReadFile(filepath.Join("testdata", "stringly_rs_clean", "struct_pattern_let_else.rs"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	tree, err := parseRSFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+	if tree.RootNode().HasError() {
+		t.Skip("fixture has parse errors")
+	}
+	leads := joinRSDrift("struct_pattern_let_else.rs",
+		passRS_Consts(h, tree, src),
+		passRS_Bindings(h, tree, src),
+		passRS_MatchExprs(h, tree, src),
+	)
+	if len(leads) != 0 {
+		t.Errorf("D2 struct_pattern let-else: expected 0 leads, got %d: %+v", len(leads), leads)
+	}
+}
+
+// TestRSFixture_D2_StructPatternMatchArm verifies struct_pattern match-arm
+// bindings (both shorthand and rename) suppress leads on the scrutinee.
+func TestRSFixture_D2_StructPatternMatchArm(t *testing.T) {
+	h := loadRSHandleForTest(t)
+	src, err := os.ReadFile(filepath.Join("testdata", "stringly_rs_clean", "struct_pattern_match_arm.rs"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	tree, err := parseRSFile(h, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer tree.Release()
+	if tree.RootNode().HasError() {
+		t.Skip("fixture has parse errors")
+	}
+	leads := joinRSDrift("struct_pattern_match_arm.rs",
+		passRS_Consts(h, tree, src),
+		passRS_Bindings(h, tree, src),
+		passRS_MatchExprs(h, tree, src),
+	)
+	if len(leads) != 0 {
+		t.Errorf("D2 struct_pattern match-arm: expected 0 leads, got %d: %+v", len(leads), leads)
+	}
+}
+
 // ─── isRSTestPath ──────────────────────────────────────────────────────────────
 
 func TestIsRSTestPath(t *testing.T) {
