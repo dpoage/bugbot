@@ -2,6 +2,7 @@ package miner
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1202,5 +1203,43 @@ func TestStringlyDrift_InlineBlockCommentBraceNoFalseLead(t *testing.T) {
 	}
 	if len(stringlyLeads) != 0 {
 		t.Errorf("InlineBlockCommentBrace: want 0 leads, got %d: %+v", len(stringlyLeads), stringlyLeads)
+	}
+}
+
+// TestStringlyDrift_NonGoFileSkipped verifies the LangGo gate: Go-shaped
+// source in a non-Go file (here .py) must produce zero stringly-drift leads.
+// The fixture body is typo_case.go verbatim, which fires exactly one lead as
+// a .go file — so before the gate (minerLang admitted 9 languages) this test
+// failed with 1 lead; the language gate, not the regexes, suppresses it.
+func TestStringlyDrift_NonGoFileSkipped(t *testing.T) {
+	goSource, err := os.ReadFile(filepath.Join("testdata", "stringly_drift", "typo_case.go"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "dispatch.py"), goSource, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	snap := buildSnapshot(t, dir, []string{"dispatch.py"})
+	st := openStore(t)
+
+	ctx := context.Background()
+	if _, err := Seed(ctx, snap, st); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	leads, err := st.PendingLeads(ctx, stringlyTargetLens)
+	if err != nil {
+		t.Fatalf("PendingLeads: %v", err)
+	}
+	var stringlyLeads []store.Lead
+	for _, l := range leads {
+		if l.PosterLens == stringlyPosterLens {
+			stringlyLeads = append(stringlyLeads, l)
+		}
+	}
+	if len(stringlyLeads) != 0 {
+		t.Errorf("NonGoFileSkipped: want 0 stringly-drift leads on dispatch.py, got %d: %+v",
+			len(stringlyLeads), stringlyLeads)
 	}
 }

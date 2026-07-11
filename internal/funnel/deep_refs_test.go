@@ -208,6 +208,39 @@ func TestDeepRefClosure_ExcludesUnexportedAndNonLoadBearing(t *testing.T) {
 	}
 }
 
+// TestDeepRefClosure_NonGoPublicSymbols verifies the language-dispatched
+// public-symbol filter: in a Python seed file a lowercase function is public
+// and enters the closure, while a leading-underscore symbol is private and is
+// excluded. Under the old Go-only uppercase heuristic this test fails with an
+// empty closure (lowercase filtered → candidates empty → (nil, nil)).
+func TestDeepRefClosure_NonGoPublicSymbols(t *testing.T) {
+	ctx := context.Background()
+	seedFile := "pkg/handlers.py"
+
+	nav := &fakeRefNav{
+		outlines: map[string][]treesitter.OutlineEntry{
+			seedFile: {
+				{Name: "process_order", Kind: treesitter.KindFunction, StartLine: 1, EndLine: 10},
+				{Name: "_normalize", Kind: treesitter.KindFunction, StartLine: 12, EndLine: 20},
+			},
+		},
+		refs: map[string][]agent.RefLocation{
+			// Both get their own ref entry so a regression in either direction
+			// (private passing, or public filtered) changes the ref set.
+			"process_order": {{File: "pkg/api.py", Line: 3}},
+			"_normalize":    {{File: "pkg/api.py", Line: 9}},
+		},
+	}
+
+	refs, relFiles := deepRefClosureWith(ctx, nav, []string{seedFile})
+	if len(refs) != 1 || refs[0].Symbol != "process_order" {
+		t.Errorf("want exactly [process_order ref], got %v", refs)
+	}
+	if len(relFiles) != 1 || relFiles[0] != "pkg/api.py" {
+		t.Errorf("want [pkg/api.py], got %v", relFiles)
+	}
+}
+
 // TestDeepRefClosure_Determinism verifies that the same inputs always produce
 // identical refs and relatedFiles order.
 func TestDeepRefClosure_Determinism(t *testing.T) {

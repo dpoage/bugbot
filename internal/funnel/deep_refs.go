@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/treesitter"
 )
 
@@ -18,7 +19,7 @@ type deepRef struct {
 	Line   int
 }
 
-// deepRefMaxSymbols is the maximum number of exported top-level symbols
+// deepRefMaxSymbols is the maximum number of public top-level symbols
 // selected from the seed files for reference lookup. Eight matches the cap
 // the deep-strategy system prompt suggests to the agent.
 const deepRefMaxSymbols = 8
@@ -52,20 +53,26 @@ func isLoadBearing(k treesitter.Kind) bool {
 	return false
 }
 
-// isExportedSymbol reports whether name begins with an upper-case ASCII letter
-// (A–Z). This is a Go-style heuristic; it does not pass unexported symbols
-// through for export-less languages — all symbols must start with an uppercase
-// letter to be considered exported.
-func isExportedSymbol(name string) bool {
+// isPublicSymbol reports whether name looks like part of the file's public
+// API surface under lang's conventions. Go uses its export rule (upper-case
+// ASCII first letter). Every other language has no syntactic export marker
+// tree-sitter can surface, so the leading-underscore private-by-convention
+// rule applies (Python _helper/__init__, JS/TS _internal, C _static): a
+// leading underscore is private, anything else is public. The symbol caps
+// (deepRefMaxSymbols/deepRefMaxRefs) bound the looser non-Go filter.
+func isPublicSymbol(lang ingest.Language, name string) bool {
 	if name == "" {
 		return false
 	}
-	r := name[0]
-	return r >= 'A' && r <= 'Z'
+	if lang == ingest.LangGo {
+		r := name[0]
+		return r >= 'A' && r <= 'Z'
+	}
+	return name[0] != '_'
 }
 
 // deepRefClosure precomputes the cross-reference closure of the load-bearing
-// exported symbols declared in seedFiles. Returns (nil, nil) when the
+// public symbols declared in seedFiles. Returns (nil, nil) when the
 // code-nav bundle is nil or errors — byte-identical to today's behavior.
 func (f *Funnel) deepRefClosure(ctx context.Context, seedFiles []string) (refs []deepRef, relatedFiles []string) {
 	nav, err := f.codeNav()
@@ -80,7 +87,7 @@ func (f *Funnel) deepRefClosure(ctx context.Context, seedFiles []string) (refs [
 //
 // Steps (all NIL-SAFE):
 //  1. Calls nav.Outline on each seed file to enumerate top-level declarations.
-//  2. Selects up to deepRefMaxSymbols load-bearing exported symbols in
+//  2. Selects up to deepRefMaxSymbols load-bearing public symbols in
 //     deterministic order (alphabetical by name, then by file, then by line).
 //  3. For each selected symbol, calls nav.References to find cross-file sites
 //     (excluding the seed files themselves).
@@ -108,8 +115,9 @@ func deepRefClosureWith(ctx context.Context, nav refClosureNav, seedFiles []stri
 		if err != nil || len(entries) == 0 {
 			continue
 		}
+		lang := ingest.DetectLanguage(sf)
 		for _, e := range entries {
-			if !isExportedSymbol(e.Name) || !isLoadBearing(e.Kind) {
+			if !isPublicSymbol(lang, e.Name) || !isLoadBearing(e.Kind) {
 				continue
 			}
 			candidates = append(candidates, candidate{

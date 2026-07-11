@@ -27,7 +27,11 @@ package miner
 //     b. Flag each const value of the type that is NOT handled by any case in
 //        the switch (missing arm).
 //
-// Scope: only switches whose scrutinee resolves to a named string type in the
+// Scope: Go only — every pass encodes Go lexical structure (`type X string`,
+// const blocks, := shadowing, backtick raw strings), so the scan is gated to
+// LangGo files, mirroring the config-field miner. Other languages need their
+// own enum-drift pass (e.g. TS union types, Rust enums); see bugbot-93z.
+// Only switches whose scrutinee resolves to a named string type in the
 // SAME FILE are analyzed. Switches over raw strings, interface values, or
 // externally-typed values are entirely out of scope — this is what keeps the
 // miner zero-FP on external-command dispatches in interp.go and
@@ -1047,7 +1051,7 @@ func seedStringlyDrift(ctx context.Context, snap *ingest.Snapshot, st *store.Sto
 	}
 	var files []fileEntry
 	for _, f := range snap.Files {
-		if !minerLang(f.Language) {
+		if f.Language != ingest.LangGo {
 			continue
 		}
 		abs := filepath.Join(snap.Root, filepath.FromSlash(f.Path))
