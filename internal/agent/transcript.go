@@ -82,13 +82,6 @@ type Transcript struct {
 	streamPath string
 	streamFile *os.File
 	streamEnc  *json.Encoder
-	// savedPath is the path streaming actually wrote to, set once on the first
-	// successful file creation in streamAppend and never cleared afterward
-	// (unlike streamPath, which closeStream clears to disarm re-opening on a
-	// reused Transcript — see closeStream's doc). Callers use SavedPath after
-	// the run to learn where — if anywhere — the transcript was persisted,
-	// e.g. to store it as an exact join key on a database row.
-	savedPath string
 }
 
 // NewTranscript returns an empty transcript using the real wall clock.
@@ -102,19 +95,6 @@ func NewTranscript() *Transcript {
 // leaves streaming disabled.
 func (t *Transcript) enableStreaming(path string) {
 	t.streamPath = path
-}
-
-// SavedPath returns the path the transcript was actually streamed to on
-// disk, or "" if streaming was never armed, never successfully opened a file
-// (best-effort autosave silently disables itself on I/O failure — see
-// streamAppend), or armed but the run recorded nothing (the file is opened
-// lazily on first event). Safe to call any time, including after the run
-// completes (unlike streamPath, this is never cleared by closeStream) — the
-// intended use is a caller reading it from Outcome.Transcript once Run
-// returns, to persist an exact reference to the transcript file (e.g. onto a
-// database row) rather than relying on a timestamp-window guess later.
-func (t *Transcript) SavedPath() string {
-	return t.savedPath
 }
 
 // streamAppend writes ev as one JSON line to the streaming file, opening it
@@ -137,7 +117,6 @@ func (t *Transcript) streamAppend(ev *Event) {
 		}
 		t.streamFile = f
 		t.streamEnc = json.NewEncoder(f)
-		t.savedPath = t.streamPath
 	}
 	if err := t.streamEnc.Encode(ev); err != nil {
 		// Leave the file open (a later event might still succeed); just drop
