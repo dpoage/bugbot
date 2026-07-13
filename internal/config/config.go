@@ -474,6 +474,16 @@ type Config struct {
 	// general directory. Defaults to ".bugbot/transcripts". An explicit empty
 	// string in config disables autosave entirely.
 	TranscriptDir string `yaml:"transcript_dir"`
+	// Stealth enables stealth-install mode: Storage.Path, Report.Dir, and
+	// TranscriptDir are re-rooted (before yaml/env overrides are applied) to
+	// live under $HOME/.bugbot/<repo-key>/ instead of the scanned repo's
+	// working tree, so a scan leaves zero footprint in the repo. The repo key
+	// is derived from the git toplevel of the current working directory (the
+	// repo being scanned), not from wherever the config file happens to live.
+	// Explicit yaml values (including an explicit empty transcript_dir) and
+	// BUGBOT_* path env overrides always take precedence over the seeded
+	// stealth defaults. See internal/config/stealth.go.
+	Stealth bool `yaml:"stealth"`
 }
 
 // Default returns a Config populated with sane defaults. Callers typically
@@ -562,9 +572,41 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("read config %q: %w", path, err)
 	}
 
+	// Stealth peek: cheaply determine whether stealth mode is active BEFORE
+	// the strict decode, so the three state-path defaults can be re-rooted
+	// under $HOME/.bugbot/<repo-key>/ ahead of time. This is a lenient,
+	// tolerant-of-unknown-fields unmarshal of just the `stealth` key — it
+	// must never fail the load on its own. BUGBOT_STEALTH (if set) wins over
+	// the yaml value, matching applyEnvOverrides' env-over-yaml precedence.
+	var peek struct {
+		Stealth *bool `yaml:"stealth"`
+	}
+	_ = yaml.Unmarshal(data, &peek)
+	stealth := peek.Stealth != nil && *peek.Stealth
+	if v, ok := os.LookupEnv("BUGBOT_STEALTH"); ok {
+		b, boolErr := parseEnvBool("BUGBOT_STEALTH", v)
+		if boolErr != nil {
+			return Config{}, boolErr
+		}
+		stealth = b
+	}
+
+	if stealth {
+		base, err := StealthStateDir(RepoToplevel("."))
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve stealth state dir: %w", err)
+		}
+		cfg.Storage.Path = filepath.Join(base, "state.db")
+		cfg.Report.Dir = filepath.Join(base, "reports")
+		cfg.TranscriptDir = filepath.Join(base, "transcripts")
+	}
+
 	// Decode with KnownFields so any unknown or typoed key produces an error
 	// rather than a silent no-op.  We use a Decoder rather than Unmarshal so
-	// KnownFields can be toggled; the Decoder is overlaid onto the defaults.
+	// KnownFields can be toggled; the Decoder is overlaid onto the defaults
+	// (or, under stealth, onto the seeded stealth path defaults above), so
+	// any explicitly-present yaml key — including an explicit empty
+	// transcript_dir — still wins.
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
@@ -580,6 +622,23 @@ func Load(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// parseEnvBool parses a BUGBOT_* boolean environment-variable value
+// ("true"/"1"/"yes" or "false"/"0"/"no", case-insensitive; anything else is
+// an error naming key). Shared by Load's stealth peek (which must resolve
+// BUGBOT_STEALTH before the strict decode runs) and applyEnvOverrides'
+// setBool closure, so every BUGBOT_* boolean accepts exactly the same
+// spelling.
+func parseEnvBool(key, v string) (bool, error) {
+	switch strings.ToLower(v) {
+	case "true", "1", "yes":
+		return true, nil
+	case "false", "0", "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s: invalid boolean value %q (want true or false)", key, v)
+	}
 }
 
 // applyEnvOverrides applies BUGBOT_* overrides from the supplied environment
@@ -634,6 +693,7 @@ func Load(path string) (Config, error) {
 //	BUGBOT_REPRO_SANDBOX_MAX_EXECS     (integer >= 1)
 //	BUGBOT_REPRO_TRY_MAX_EXECS         (integer >= 1)
 //	BUGBOT_REPRO_TRANSCRIPT_DIR        (directory for reproducer agent transcripts)
+//	BUGBOT_STEALTH                     ("true" or "false"; stealth-install mode)
 func applyEnvOverrides(cfg *Config, environ []string) error {
 	env := make(map[string]string, len(environ))
 	for _, kv := range environ {
@@ -650,14 +710,11 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	}
 	setBool := func(key string, dst *bool) error {
 		if v, ok := env[key]; ok {
-			switch strings.ToLower(v) {
-			case "true", "1", "yes":
-				*dst = true
-			case "false", "0", "no":
-				*dst = false
-			default:
-				return fmt.Errorf("%s: invalid boolean value %q (want true or false)", key, v)
+			b, err := parseEnvBool(key, v)
+			if err != nil {
+				return err
 			}
+			*dst = b
 		}
 		return nil
 	}
@@ -777,6 +834,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setBool("BUGBOT_SCAN_TOOL_COMPLAINTS", &cfg.Scan.ToolComplaints),
 		setBool("BUGBOT_SCAN_HEAT_ORDERING", &cfg.Scan.HeatOrdering),
 		setBool("BUGBOT_DAEMON_CONTROL_SOCKET_ENABLED", &cfg.Daemon.ControlSocket.Enabled),
+		setBool("BUGBOT_STEALTH", &cfg.Stealth),
 	} {
 		if err != nil {
 			return err

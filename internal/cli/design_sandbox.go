@@ -568,11 +568,13 @@ func renderSandboxBlock(sb config.Sandbox) string {
 	return string(data)
 }
 
-// mergeSandboxBlock reads the existing bugbot.yaml, replaces (or adds) the
-// sandbox: key with the proposed one, and writes the file back. It prints a
-// unified diff of the change.
+// mergeSandboxBlock reads the existing config file (resolved via
+// configPathFromCmd, so --write edits whichever config was actually
+// discovered — a stealth-mode config under $HOME/.bugbot/<repo-key>/ or a
+// local bugbot.yaml), replaces (or adds) the sandbox: key with the proposed
+// one, and writes the file back. It prints a unified diff of the change.
 func mergeSandboxBlock(cmd *cobra.Command, proposed config.Sandbox) error {
-	path := config.DefaultFileName
+	path := configPathFromCmd(cmd)
 
 	// Read existing file (or start empty if absent).
 	existing, err := os.ReadFile(path)
