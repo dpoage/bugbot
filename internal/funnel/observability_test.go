@@ -2,6 +2,7 @@ package funnel
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -342,5 +343,82 @@ func TestAgentUnits_VerifierRows(t *testing.T) {
 		if killedRow.InputTokens == 0 {
 			t.Errorf("killed row: InputTokens=0, expected nonzero (refuters ran)")
 		}
+	}
+}
+
+// TestAgentUnits_TranscriptKeyMatchesRowID verifies the ID-threading contract
+// end to end: when Options.TranscriptDir is set, every finder AND verifier
+// agent_units row's own ID is minted BEFORE its runner(s) are built and
+// embedded as their autosave transcript filename's join key (agent.
+// WithTranscriptKey), so a real transcript file on disk contains "-<row.ID>-"
+// in its name for every row — the exact join internal/tui/transcript.go's
+// discoverTranscript relies on. A verifier row may correspond to more than
+// one file (refuter seats + arbiter); at least one must match.
+func TestAgentUnits_TranscriptKeyMatchesRowID(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+	transcriptDir := t.TempDir()
+
+	finder := finderOnNilLens(newScriptedClient())
+	verifier := verifierRouting(newScriptedClient())
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
+		Limits:        StageLimits{MaxParallel: 1},
+		TranscriptDir: transcriptDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := f.Sweep(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	units, err := st.ListAgentUnits(ctx, res.ScanRunID)
+	if err != nil {
+		t.Fatalf("ListAgentUnits: %v", err)
+	}
+
+	entries, err := os.ReadDir(transcriptDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%q): %v", transcriptDir, err)
+	}
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	if len(names) == 0 {
+		t.Fatal("no transcript files were written to TranscriptDir")
+	}
+
+	var checked int
+	for _, u := range units {
+		if u.Role != "finder" && u.Role != "verifier" {
+			continue
+		}
+		if u.StartedAt.IsZero() {
+			continue // skipped unit: no runner ever ran, nothing to find
+		}
+		if u.ID == "" {
+			t.Errorf("unit (role=%s lens=%s status=%s) has an empty ID", u.Role, u.Lens, u.Status)
+			continue
+		}
+		checked++
+		marker := "-" + u.ID + "-"
+		found := false
+		for _, name := range names {
+			if strings.Contains(name, marker) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("no transcript filename in %v contains %q for unit (role=%s lens=%s status=%s id=%s)",
+				names, marker, u.Role, u.Lens, u.Status, u.ID)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no launched finder/verifier units found to check — test setup produced nothing to assert")
 	}
 }

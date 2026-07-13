@@ -96,9 +96,19 @@ func (f *Funnel) recordFinderUnitWithTimeDetail(
 // no parseable verdict (infra/parse failures). arbiterRan indicates whether an
 // arbiter ran. arbiterRefuted indicates the arbiter's verdict (meaningful only
 // when arbiterRan is true).
+//
+// unitID is minted by the caller BEFORE the refuter panel / arbiter runners
+// were built and threaded into ALL of them as their shared transcript-
+// filename key (agent.WithTranscriptKey) — passing it as the row's own ID
+// here, instead of leaving AddAgentUnit generate one, is what gives the TUI
+// an EXACT filename<->row join (see discoverTranscript). Unlike a finder
+// unit, a verifier row can correspond to MULTIPLE transcript files (each
+// refuter seat plus the arbiter, when one ran) sharing this same key;
+// discoverTranscript picks one deterministically among the matches.
 func (f *Funnel) recordVerifierUnit(
 	ctx context.Context,
 	scanRunID string,
+	unitID string,
 	lens string,
 	file string,
 	launchOrder int,
@@ -144,6 +154,7 @@ func (f *Funnel) recordVerifierUnit(
 	// We store the total in InputTokens and leave OutputTokens zero since
 	// the split is not available at this level.
 	row := store.AgentUnit{
+		ID:          unitID,
 		ScanRunID:   scanRunID,
 		Role:        "verifier",
 		Lens:        lens,

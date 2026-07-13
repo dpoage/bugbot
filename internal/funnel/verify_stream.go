@@ -63,13 +63,22 @@ func (f *Funnel) runVerifyAndPersist(
 	// (verifier is cheap, latency-sensitive, and gates everything downstream) for
 	// the whole sequential refuter panel + arbiter; ctx is the fanout's runCtx.
 
+	// unitID is minted up front (before any runner exists) so it can be
+	// embedded as EVERY runner's transcript-filename key in this candidate's
+	// verify run (agent.WithTranscriptKey) — refuter seats AND the arbiter
+	// all share it — AND passed as this row's agent_units ID below, giving
+	// the TUI an exact filename<->row join instead of a timestamp-window
+	// heuristic (see internal/tui/transcript.go). A verifier row can
+	// correspond to multiple transcript files sharing this one key.
+	unitID := store.NewID()
+
 	// Hard budget gate: orphan without verifying.
 	if budget.verifyOverHard() {
 		budget.stopped.Store(true)
 		msg := fmt.Sprintf("hard budget reached: verification skipped for %q (%s:%d) — kept as T3 suspected", c.Title, c.File, c.Line)
 		f.note(result, msg)
 		progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
-		f.recordVerifierUnit(ctx, result.ScanRunID, c.Lens, c.File, candIdx,
+		f.recordVerifierUnit(ctx, result.ScanRunID, unitID, c.Lens, c.File, candIdx,
 			time.Time{}, time.Time{}, 0, "orphaned_budget", nil, nil, 0, false, false, result)
 		// Persist as T3 suspected.
 		suspected := persistOrphan(ctx, f, c, commit, fps, budgetStoppedReasoning, result)
@@ -148,7 +157,7 @@ func (f *Funnel) runVerifyAndPersist(
 	// extra tool VALUES.
 	candTools := append(refuterReadTools, extra...)
 
-	verdicts, seatNames, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, candTools, persona, c, nRefuters, budget, scope, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title))
+	verdicts, seatNames, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, candTools, persona, c, nRefuters, budget, scope, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title), agent.WithTranscriptKey(unitID))
 
 	// Arbiter path.
 	var localArbiterRuns, localArbiterKills, localArbiterFailed int
@@ -167,7 +176,7 @@ func (f *Funnel) runVerifyAndPersist(
 			return
 		}
 		arbiterTools := append(arbiterReadTools, extra...)
-		av, aTokens, aStopped, aErr := f.runArbiter(ctx, arbiter, arbiterTools, persona, c, verdicts, seatNames, budget, scope, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title))
+		av, aTokens, aStopped, aErr := f.runArbiter(ctx, arbiter, arbiterTools, persona, c, verdicts, seatNames, budget, scope, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title), agent.WithTranscriptKey(unitID))
 		tokens += aTokens
 		localArbiterTokens = aTokens
 		if aStopped {
@@ -288,7 +297,7 @@ func (f *Funnel) runVerifyAndPersist(
 
 	// Record the verifier agent_units row.
 	arbiterRan := localArbiterRuns > 0 && localArbiterFailed == 0 && !arbiterBudgetStopped
-	f.recordVerifierUnit(ctx, result.ScanRunID, c.Lens, c.File, candIdx,
+	f.recordVerifierUnit(ctx, result.ScanRunID, unitID, c.Lens, c.File, candIdx,
 		startedAt, finishedAt, tokens, recordStatus, seatNames, seatRefutedSlice(verdicts),
 		nFailed, arbiterRan, arbiterRefuted(arbiterVerdict), result)
 

@@ -221,10 +221,13 @@ type AgentView struct {
 	Detail          string
 	Files           []string
 
-	// TranscriptPath is a best-effort discovered JSONL transcript for this
-	// unit (see discoverTranscript). Empty means none found: most agents
-	// never get a transcript, since store.Repro.TranscriptDir only covers
-	// reproducer/patch-prover units.
+	// TranscriptPath is a discovered JSONL transcript for this unit (see
+	// discoverTranscript): an exact filename match for finder/verifier units
+	// (which embed the unit's own store ID in the autosave filename) or a
+	// best-effort timestamp-window guess for reproducer/patch-prover units
+	// (whose autosave path has no access to a pre-minted join key). Empty
+	// means none found — a normal outcome when no TranscriptDir is
+	// configured or the unit's own transcript write failed.
 	TranscriptPath string
 
 	// RecentActions is the Observer-mode bounded ring of recent Describe
