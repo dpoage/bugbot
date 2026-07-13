@@ -10,6 +10,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
 )
@@ -458,8 +459,104 @@ func elapsedSince(t time.Time) string {
 	return time.Since(t).Round(time.Second).String()
 }
 
-// renderTranscript formats a loaded transcript compactly for the viewport: one
-// line per assistant turn (text + tool calls) and one per tool result.
+// transcriptStats summarizes token usage, timing, and anomalies for a loaded
+// transcript. It is computed purely from [agent.Transcript] events — no
+// persistence, no store access — so it stays cheap to recompute on every
+// render.
+type transcriptStats struct {
+	Steps        int // max Event.Step across all events (0 for an empty transcript)
+	AssistantN   int // count of EventAssistant events (turns actually recorded)
+	InputTokens  int64
+	OutputTokens int64
+	// CacheReadTokens/CacheCreationTokens are the informational cache subsets
+	// of InputTokens (see llm.Usage doc comment); zero when no provider
+	// reported cache activity.
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+	ToolCalls           int // total tool calls requested by the assistant
+	ToolErrors          int // EventToolResult entries with IsError set
+	WallTime            time.Duration
+	// AbnormalStopReasons lists distinct StopReasons other than the two
+	// expected mid/end-of-turn values (llm.StopToolUse, llm.StopEndTurn), in
+	// first-seen order. Empty when every assistant turn stopped normally.
+	AbnormalStopReasons []llm.StopReason
+}
+
+// computeTranscriptStats walks a transcript once and tallies usage, timing,
+// and anomaly data for the summary header. Handles nil Usage pointers, zero
+// timestamps, and empty/partial (still-streaming) transcripts without
+// panicking.
+func computeTranscriptStats(t *agent.Transcript) transcriptStats {
+	var s transcriptStats
+	if t == nil || len(t.Events) == 0 {
+		return s
+	}
+
+	seenAbnormal := make(map[llm.StopReason]bool)
+	var first, last time.Time
+	for _, ev := range t.Events {
+		if ev.Step > s.Steps {
+			s.Steps = ev.Step
+		}
+		if !ev.Time.IsZero() {
+			if first.IsZero() {
+				first = ev.Time
+			}
+			last = ev.Time
+		}
+
+		switch ev.Kind {
+		case agent.EventAssistant:
+			s.AssistantN++
+			s.ToolCalls += len(ev.ToolCalls)
+			if ev.Usage != nil {
+				s.InputTokens += ev.Usage.InputTokens
+				s.OutputTokens += ev.Usage.OutputTokens
+				s.CacheReadTokens += ev.Usage.CacheReadInputTokens
+				s.CacheCreationTokens += ev.Usage.CacheCreationInputTokens
+			}
+			if ev.StopReason != "" && ev.StopReason != llm.StopToolUse && ev.StopReason != llm.StopEndTurn {
+				if !seenAbnormal[ev.StopReason] {
+					seenAbnormal[ev.StopReason] = true
+					s.AbnormalStopReasons = append(s.AbnormalStopReasons, ev.StopReason)
+				}
+			}
+		case agent.EventToolResult:
+			if ev.IsError {
+				s.ToolErrors++
+			}
+		}
+	}
+	if !first.IsZero() && !last.IsZero() && last.After(first) {
+		s.WallTime = last.Sub(first)
+	}
+	return s
+}
+
+// renderTranscriptSummary renders the 2-4 line observability header shown
+// above the per-event lines in renderTranscript.
+func renderTranscriptSummary(s transcriptStats) string {
+	var b strings.Builder
+	b.WriteString(sectionStyle.Render("Transcript summary") + "\n")
+	fmt.Fprintf(&b, "steps=%d tool_calls=%d tool_errors=%d wall=%s\n", s.Steps, s.ToolCalls, s.ToolErrors, s.WallTime.Round(time.Second))
+	total := s.InputTokens + s.OutputTokens
+	fmt.Fprintf(&b, "tokens: in=%d out=%d total=%d\n", s.InputTokens, s.OutputTokens, total)
+	if s.CacheReadTokens > 0 || s.CacheCreationTokens > 0 {
+		fmt.Fprintf(&b, "cache: read=%d create=%d\n", s.CacheReadTokens, s.CacheCreationTokens)
+	}
+	if len(s.AbnormalStopReasons) > 0 {
+		reasons := make([]string, len(s.AbnormalStopReasons))
+		for i, r := range s.AbnormalStopReasons {
+			reasons[i] = string(r)
+		}
+		b.WriteString(dimStyle.Render(fmt.Sprintf("abnormal stop reasons: %s", strings.Join(reasons, ", "))) + "\n")
+	}
+	return b.String()
+}
+
+// renderTranscript formats a loaded transcript compactly for the viewport: a
+// summary header (see renderTranscriptSummary) followed by one line per
+// assistant turn (text + tool calls) and one per tool result.
 // EventRequest entries are skipped — the full conversation state is
 // reconstructible from the assistant/tool-result pairs and is too verbose for
 // this pane.
@@ -468,6 +565,8 @@ func renderTranscript(t *agent.Transcript) string {
 		return "(empty transcript)"
 	}
 	var b strings.Builder
+	b.WriteString(renderTranscriptSummary(computeTranscriptStats(t)))
+	b.WriteString("\n")
 	for _, ev := range t.Events {
 		switch ev.Kind {
 		case agent.EventAssistant:

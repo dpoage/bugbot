@@ -2,8 +2,10 @@ package tui
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -183,6 +185,95 @@ func TestLoadSourceCmd_MissingFile(t *testing.T) {
 	msg := raw.(sourceLoadedMsg)
 	if msg.note == "" {
 		t.Fatal("expected non-empty note for missing file")
+	}
+}
+
+// ── Directory target degrades to a listing (bugbot-zykr) ──────────────────────
+
+// TestLoadSourceCmd_DirectoryListing exercises the fix for pressing ENTER on
+// a list_dir feed row: File names a directory, so loadSourceCmd must return
+// a rendered entry listing instead of failing io.ReadAll with EISDIR.
+func TestLoadSourceCmd_DirectoryListing(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "sub", "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub", "b.txt"), []byte("b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub", "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fn := loadSourceCmd(1, root, openSourceMsg{File: "sub"})
+	raw := fn()
+	msg, ok := raw.(sourceLoadedMsg)
+	if !ok {
+		t.Fatalf("expected sourceLoadedMsg, got %T", raw)
+	}
+	if msg.note != "" {
+		t.Fatalf("expected no error note for directory listing, got %q", msg.note)
+	}
+	if len(msg.lines) != 3 {
+		t.Fatalf("expected 3 entries, got %d: %v", len(msg.lines), msg.lines)
+	}
+	// dirs first (trailing '/'), then files alphabetically.
+	want := []string{"child/", "a.txt", "b.txt"}
+	for i, w := range want {
+		if msg.lines[i] != w {
+			t.Fatalf("entry %d: got %q, want %q (all: %v)", i, msg.lines[i], w, msg.lines)
+		}
+	}
+}
+
+// TestLoadSourceCmd_EmptyDirectory checks the empty-directory case produces
+// a human-readable note rather than a blank listing indistinguishable from
+// a still-loading state.
+func TestLoadSourceCmd_EmptyDirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fn := loadSourceCmd(1, root, openSourceMsg{File: "empty"})
+	raw := fn()
+	msg := raw.(sourceLoadedMsg)
+	if msg.note == "" {
+		t.Fatal("expected a note describing the empty directory")
+	}
+	if strings.Contains(msg.note, "errno") || strings.Contains(msg.note, "EISDIR") {
+		t.Fatalf("expected human wording, got raw errno-ish text: %q", msg.note)
+	}
+}
+
+// TestLoadSourceCmd_NonRegularFile checks a target that is neither a regular
+// file nor a directory (here, a Unix domain socket) degrades to a clear note
+// instead of a raw read error.
+func TestLoadSourceCmd_NonRegularFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets not applicable on windows")
+	}
+	root := t.TempDir()
+	sockPath := filepath.Join(root, "sock")
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Skipf("cannot create unix socket for test: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	fn := loadSourceCmd(1, root, openSourceMsg{File: "sock"})
+	raw := fn()
+	msg := raw.(sourceLoadedMsg)
+	if msg.note == "" {
+		t.Fatal("expected a note for a non-regular, non-directory target")
+	}
+	if len(msg.lines) != 0 {
+		t.Fatalf("expected no lines for a non-regular target, got %d", len(msg.lines))
+	}
+	if strings.Contains(msg.note, "EISDIR") || strings.Contains(msg.note, "EINVAL") {
+		t.Fatalf("expected human wording, got raw errno-ish text: %q", msg.note)
 	}
 }
 

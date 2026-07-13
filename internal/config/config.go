@@ -463,6 +463,17 @@ type Config struct {
 	Daemon    Daemon              `yaml:"daemon"`
 	Storage   Storage             `yaml:"storage"`
 	LLM       LLM                 `yaml:"llm"`
+	// TranscriptDir is the default directory every agent run (finder,
+	// verifier, arbiter, cartographer, reproducer, patch-prover) auto-saves
+	// its streaming JSONL transcript to, so the TUI's detail pane and post-hoc
+	// diagnosis always have something to show — not just reproducer/
+	// patch-prover units (see Repro.TranscriptDir, which predates this field
+	// and is genuinely repro-specific: per-finding artifact placement).
+	// Repro.TranscriptDir, when set, still overrides this for the reproducer
+	// and patch-prover stages; when it is empty they fall back to this
+	// general directory. Defaults to ".bugbot/transcripts". An explicit empty
+	// string in config disables autosave entirely.
+	TranscriptDir string `yaml:"transcript_dir"`
 }
 
 // Default returns a Config populated with sane defaults. Callers typically
@@ -537,6 +548,7 @@ func Default() Config {
 		Storage: Storage{
 			Path: ".bugbot/state.db",
 		},
+		TranscriptDir: ".bugbot/transcripts",
 	}
 }
 
@@ -709,6 +721,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	setStr("BUGBOT_REVIEW_SUSPECTED", &cfg.Review.Suspected)
 	setStr("BUGBOT_VERIFY_SANDBOX_MIN_SEVERITY", &cfg.Verify.SandboxMinSeverity)
 	setStr("BUGBOT_REPRO_TRANSCRIPT_DIR", &cfg.Repro.TranscriptDir)
+	setStr("BUGBOT_TRANSCRIPT_DIR", &cfg.TranscriptDir)
 	setStr("BUGBOT_DAEMON_CONTROL_SOCKET_PATH", &cfg.Daemon.ControlSocket.Path)
 
 	// BUGBOT_PUBLISH_LABELS is comma-separated; an explicit env var replaces the

@@ -17,9 +17,9 @@ import (
 // one snapshot interval (see AgentView doc comment). The window is
 // read-only/cosmetic and self-heals on the next frame.
 //
-// transcriptDir is passed through to discoverTranscript for each historical
-// unit; empty disables lookup entirely (no directory configured).
-func mergeAgents(live []progress.AgentStatus, hist []store.AgentUnit, transcriptDir string) []AgentView {
+// transcriptDirs is passed through to discoverTranscript for each historical
+// unit; nil/empty disables lookup entirely (no directory configured).
+func mergeAgents(live []progress.AgentStatus, hist []store.AgentUnit, transcriptDirs []string) []AgentView {
 	views := make([]AgentView, 0, len(live)+len(hist))
 
 	for _, u := range hist {
@@ -39,7 +39,7 @@ func mergeAgents(live []progress.AgentStatus, hist []store.AgentUnit, transcript
 			LeadsPosted:     u.LeadsPosted,
 			Detail:          u.Detail,
 			Files:           u.Files,
-			TranscriptPath:  discoverTranscript(transcriptDir, u),
+			TranscriptPath:  discoverTranscript(transcriptDirs, u),
 		})
 	}
 

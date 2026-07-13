@@ -35,8 +35,8 @@ const liveFeedInterval = time.Second
 // accumulator currently holds — but dropping an EVENT (the fold itself)
 // never happens: Apply always runs, unconditionally, before the wakeup send.
 type LiveFeed struct {
-	cfg           config.Config
-	transcriptDir string
+	cfg            config.Config
+	transcriptDirs []string
 
 	acc  *progress.StatusAccumulator
 	wake chan struct{} // 1-buffered; coalescing wakeup signal
@@ -68,13 +68,13 @@ var _ progress.EventSink = (*LiveFeed)(nil)
 // ErrLocked instead.
 func NewLiveFeed(cfg config.Config) *LiveFeed {
 	return &LiveFeed{
-		cfg:           cfg,
-		transcriptDir: cfg.Repro.TranscriptDir,
-		acc:           progress.NewStatusAccumulator(),
-		wake:          make(chan struct{}, 1),
-		closed:        make(chan struct{}),
-		interval:      liveFeedInterval,
-		actionState:   newActionFeedState(),
+		cfg:            cfg,
+		transcriptDirs: transcriptDirs(cfg),
+		acc:            progress.NewStatusAccumulator(),
+		wake:           make(chan struct{}, 1),
+		closed:         make(chan struct{}),
+		interval:       liveFeedInterval,
+		actionState:    newActionFeedState(),
 	}
 }
 
@@ -190,7 +190,7 @@ func (f *LiveFeed) buildFrame(ctx context.Context) Frame {
 		fr.World = gatherWorldState(ctx, st, f.cfg)
 		hist = gatherHistoricalAgents(ctx, st, fr.World)
 	}
-	fr.Agents = mergeAgents(fr.Snapshot.ActiveAgents, hist, f.transcriptDir)
+	fr.Agents = mergeAgents(fr.Snapshot.ActiveAgents, hist, f.transcriptDirs)
 
 	// Snapshot the per-agent action rows (under actionMu, not stMu).
 	f.actionMu.Lock()
