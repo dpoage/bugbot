@@ -3,9 +3,11 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -16,7 +18,27 @@ import (
 // of the transcript format.
 const transcriptTimestampLayout = "20060102T150405.000Z"
 
-// discoverTranscript locates a JSONL transcript for agent unit u inside dir.
+// transcriptDirs returns the candidate directories transcripts may live in
+// for cfg: the general cfg.TranscriptDir (where every keyed finder/verifier/
+// arbiter/cartographer autosave lands, and — absent a repro-specific
+// override — reproducer/patch-prover files too), then cfg.Repro.TranscriptDir
+// when it redirects those stages elsewhere (the same precedence as
+// internal/engine/repro.go's reproTranscriptDir, from the reader's side).
+// Empty and duplicate entries are dropped; an all-empty config yields nil,
+// which disables discovery entirely.
+func transcriptDirs(cfg config.Config) []string {
+	var dirs []string
+	for _, d := range []string{cfg.TranscriptDir, cfg.Repro.TranscriptDir} {
+		if d == "" || slices.Contains(dirs, d) {
+			continue
+		}
+		dirs = append(dirs, d)
+	}
+	return dirs
+}
+
+// discoverTranscript locates a JSONL transcript for agent unit u across the
+// candidate directories dirs (see transcriptDirs).
 //
 // Every agent run now autosaves (config.TranscriptDir defaults every role
 // on; config.Repro.TranscriptDir may still redirect reproducer/patch-prover
@@ -36,18 +58,33 @@ const transcriptTimestampLayout = "20060102T150405.000Z"
 // timestamp-window heuristic, which discoverTranscript falls back to when no
 // exact match exists — also covering any transcript written before this
 // join key existed.
-func discoverTranscript(dir string, u store.AgentUnit) string {
-	if dir == "" || u.StartedAt.IsZero() {
+func discoverTranscript(dirs []string, u store.AgentUnit) string {
+	if u.StartedAt.IsZero() {
 		return ""
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
+	entries := make([][]os.DirEntry, len(dirs))
+	for i, dir := range dirs {
+		// Missing/unreadable directories contribute no candidates.
+		entries[i], _ = os.ReadDir(dir)
 	}
-	if path, ok := exactMatchTranscript(dir, entries, u.ID); ok {
-		return path
+	// An exact key match in ANY directory beats a heuristic guess in any
+	// other: a keyless repro-style file that happens to fall inside the
+	// unit's time window must never shadow the unit's own keyed file living
+	// in the other directory.
+	for i, dir := range dirs {
+		if path, ok := exactMatchTranscript(dir, entries[i], u.ID); ok {
+			return path
+		}
 	}
-	return heuristicMatchTranscript(dir, entries, u)
+	best := ""
+	bestDelta := time.Duration(-1)
+	for i, dir := range dirs {
+		path, delta, ok := heuristicMatchTranscript(dir, entries[i], u)
+		if ok && (bestDelta < 0 || delta < bestDelta) {
+			best, bestDelta = path, delta
+		}
+	}
+	return best
 }
 
 // exactMatchTranscript scans entries for a ".jsonl" file whose name contains
@@ -87,8 +124,10 @@ func exactMatchTranscript(dir string, entries []os.DirEntry, id string) (string,
 // u.FinishedAt] (with a little slack for a still-running or skipped unit),
 // choosing the closest match to StartedAt when several qualify. This is a
 // best-effort guess, not an exact join — see discoverTranscript for when it
-// is used.
-func heuristicMatchTranscript(dir string, entries []os.DirEntry, u store.AgentUnit) string {
+// is used. Returns the matched path, its |timestamp−StartedAt| delta (so the
+// multi-directory caller can pick the globally closest candidate), and
+// whether any candidate qualified.
+func heuristicMatchTranscript(dir string, entries []os.DirEntry, u store.AgentUnit) (string, time.Duration, bool) {
 	end := u.FinishedAt
 	if end.IsZero() {
 		end = time.Now()
@@ -121,7 +160,10 @@ func heuristicMatchTranscript(dir string, entries []os.DirEntry, u store.AgentUn
 			bestDelta = delta
 		}
 	}
-	return best
+	if best == "" {
+		return "", 0, false
+	}
+	return best, bestDelta, true
 }
 
 // parseTranscriptTimestamp extracts the leading timestamp from an autosaved

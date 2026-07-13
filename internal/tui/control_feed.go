@@ -168,7 +168,7 @@ func (f *ControlSocketFeed) buildFrame() Frame {
 	fr.Snapshot = f.acc.Snapshot()
 	fr.HasSnapshot = true
 	fr.Stale = false
-	fr.Agents = mergeAgents(fr.Snapshot.ActiveAgents, nil, "")
+	fr.Agents = mergeAgents(fr.Snapshot.ActiveAgents, nil, nil)
 
 	f.actionMu.Lock()
 	if len(f.actionState.perAgent) > 0 {

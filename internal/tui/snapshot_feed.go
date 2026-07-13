@@ -22,10 +22,10 @@ const snapshotInterval = time.Second
 // the world-state/agent_units helpers. It never opens the store for writing
 // and never touches the network or an LLM.
 type SnapshotFeed struct {
-	st            *store.Store // nil when no state DB exists yet
-	storageDir    string
-	transcriptDir string
-	cfg           config.Config
+	st             *store.Store // nil when no state DB exists yet
+	storageDir     string
+	transcriptDirs []string
+	cfg            config.Config
 
 	interval time.Duration
 	now      func() time.Time
@@ -38,11 +38,11 @@ type SnapshotFeed struct {
 // every Frame degrades to an empty/idle world-state.
 func NewSnapshotFeed(ctx context.Context, cfg config.Config) (*SnapshotFeed, error) {
 	f := &SnapshotFeed{
-		storageDir:    storageDir(cfg),
-		transcriptDir: cfg.Repro.TranscriptDir,
-		cfg:           cfg,
-		interval:      snapshotInterval,
-		now:           time.Now,
+		storageDir:     storageDir(cfg),
+		transcriptDirs: transcriptDirs(cfg),
+		cfg:            cfg,
+		interval:       snapshotInterval,
+		now:            time.Now,
 	}
 	if storeExists(cfg) {
 		st, err := store.OpenReadOnly(ctx, cfg.Storage.Path)
@@ -99,7 +99,7 @@ func (f *SnapshotFeed) buildFrame(ctx context.Context) Frame {
 	if fr.HasSnapshot && !fr.Stale {
 		live = fr.Snapshot.ActiveAgents
 	}
-	fr.Agents = mergeAgents(live, hist, f.transcriptDir)
+	fr.Agents = mergeAgents(live, hist, f.transcriptDirs)
 
 	return fr
 }
