@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -233,11 +234,34 @@ func splitLines(src []byte) []string {
 // loadSourceCmd reads and highlights a source file off the Update thread.
 // root is the repo root absolute path; msg is the original openSourceMsg.
 // gen is the generation counter for stale-load detection.
+//
+// row.File is not guaranteed to name a regular file: list_dir tool-call rows
+// legitimately point at a directory (agent.NewListDir's own doc comment says
+// so), and other tools could in principle surface a non-regular target (fifo,
+// socket, device node). We stat first and branch: directories degrade to a
+// listing rendered through the same pipeline as file content (see
+// loadDirectoryListing); anything else non-regular degrades to a note instead
+// of letting io.ReadAll fail with a raw EISDIR/EINVAL that the user can't act on.
 func loadSourceCmd(gen int, root string, msg openSourceMsg) func() interface{} {
 	return func() interface{} {
 		absPath, err := resolveSourcePath(root, msg.File)
 		if err != nil {
 			return sourceLoadedMsg{gen: gen, note: err.Error()}
+		}
+
+		info, err := os.Stat(absPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return sourceLoadedMsg{gen: gen, note: fmt.Sprintf("not found: %s", msg.File)}
+			}
+			return sourceLoadedMsg{gen: gen, note: fmt.Sprintf("cannot access %s: %v", msg.File, err)}
+		}
+
+		if info.IsDir() {
+			return loadDirectoryListing(gen, absPath, msg)
+		}
+		if !info.Mode().IsRegular() {
+			return sourceLoadedMsg{gen: gen, note: fmt.Sprintf("%s is not a regular file or directory (skipping)", msg.File)}
 		}
 
 		f, err := os.Open(absPath)
@@ -284,6 +308,53 @@ func loadSourceCmd(gen int, root string, msg openSourceMsg) func() interface{} {
 			line:    msg.Line,
 			endLine: msg.EndLine,
 		}
+	}
+}
+
+// loadDirectoryListing renders a directory's entries as "lines" so the
+// existing renderSourceView pipeline can display them without a dedicated
+// sub-mode. Entries are sorted directories-first then alphabetically within
+// each group (mirroring agent.NewListDir's list_dir tool output), and each
+// directory name carries a trailing '/' so the two kinds stay distinguishable
+// in a plain line list. Capped at sourceMaxLines, same as a source file.
+func loadDirectoryListing(gen int, absPath string, msg openSourceMsg) sourceLoadedMsg {
+	entries, err := os.ReadDir(absPath)
+	if err != nil {
+		return sourceLoadedMsg{gen: gen, note: fmt.Sprintf("cannot list %s: %v", msg.File, err)}
+	}
+
+	var dirs, files []string
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs = append(dirs, e.Name()+"/")
+		} else {
+			files = append(files, e.Name())
+		}
+	}
+	sort.Strings(dirs)
+	sort.Strings(files)
+
+	if len(dirs) == 0 && len(files) == 0 {
+		return sourceLoadedMsg{gen: gen, file: msg.File, note: fmt.Sprintf("%s is empty", msg.File)}
+	}
+
+	names := append(dirs, files...)
+
+	var truncNote string
+	if len(names) > sourceMaxLines {
+		names = names[:sourceMaxLines]
+		truncNote = fmt.Sprintf(" [truncated at %d entries]", sourceMaxLines)
+	}
+
+	lines := append([]string(nil), names...)
+	if truncNote != "" {
+		lines = append(lines, sourceNoteStyle.Render(truncNote))
+	}
+
+	return sourceLoadedMsg{
+		gen:   gen,
+		lines: lines,
+		file:  msg.File,
 	}
 }
 
