@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -21,16 +22,36 @@ import (
 // (starting with the Observer TUI) can share the same wiring through an
 // engine.Dispatcher.
 
-// configPathFromCmd returns the --config flag value from the root persistent
-// flags. Every RunE closure calls this at the top; the root command registers
-// the flag with config.DefaultFileName as the default so the returned value is
-// always a valid path.
+// configPathFromCmd returns the config file path to use, in priority order:
+//  1. an explicit --config flag value that differs from config.DefaultFileName
+//     (the user asked for a specific file; honor it as-is);
+//  2. config.DefaultFileName ("bugbot.yaml") when it exists in the current
+//     directory (today's convention — a local config always wins);
+//  3. the stealth-mode config path under $HOME/.bugbot/<repo-key>/, when it
+//     exists (config.StealthConfigPath), so `bugbot init --stealth` leaves
+//     zero footprint in the repo yet every command still finds its config;
+//  4. config.DefaultFileName otherwise, preserving today's "file not found"
+//     error message when nothing is configured.
+//
+// Every RunE closure calls this at the top; the root command registers the
+// --config flag with config.DefaultFileName as the default.
 func configPathFromCmd(cmd *cobra.Command) string {
 	p, err := cmd.Root().PersistentFlags().GetString("config")
 	if err != nil || p == "" {
+		p = config.DefaultFileName
+	}
+	if p != config.DefaultFileName {
+		return p
+	}
+	if _, statErr := os.Stat(config.DefaultFileName); statErr == nil {
 		return config.DefaultFileName
 	}
-	return p
+	if stealthPath, stealthErr := config.StealthConfigPath("."); stealthErr == nil {
+		if _, statErr := os.Stat(stealthPath); statErr == nil {
+			return stealthPath
+		}
+	}
+	return config.DefaultFileName
 }
 
 // cmdOpenStore is a thin forwarder to engine.OpenStore, kept for the CLI

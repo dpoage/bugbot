@@ -1074,3 +1074,103 @@ func TestCheckProviders_UnreferencedProviderIsWarnNotFail(t *testing.T) {
 		t.Error("expected a result for 'provider testprovider', got none")
 	}
 }
+
+// TestDoctor_StealthSplitBrainWarn asserts that when the loaded config has
+// stealth mode on and a leftover ./.bugbot directory exists in the scanned
+// repo, doctor emits a WARN naming both locations. Without the leftover
+// directory, no such warning fires.
+func TestDoctor_StealthSplitBrainWarn(t *testing.T) {
+	dir := t.TempDir()
+	yaml := "stealth: true\n" + strings.ReplaceAll(doctorMinimalConfig, "%CFGDIR%", dir)
+	cfgPath := filepath.Join(dir, "bugbot.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	repoDir := t.TempDir()
+
+	t.Run("no_leftover_dir", func(t *testing.T) {
+		env := allGreenEnv(t, cfgPath)
+		env.repoDir = repoDir
+		var sb strings.Builder
+		env.out = &sb
+
+		results := runChecks(context.Background(), env, false)
+		for _, r := range results {
+			if r.Name == "stealth split-brain" {
+				t.Errorf("unexpected split-brain warn with no leftover ./.bugbot: %+v", r)
+			}
+		}
+	})
+
+	t.Run("leftover_dir_present", func(t *testing.T) {
+		if err := os.MkdirAll(filepath.Join(repoDir, ".bugbot"), 0o755); err != nil {
+			t.Fatalf("mkdir .bugbot: %v", err)
+		}
+		env := allGreenEnv(t, cfgPath)
+		env.repoDir = repoDir
+		var sb strings.Builder
+		env.out = &sb
+
+		results := runChecks(context.Background(), env, false)
+		var found bool
+		for _, r := range results {
+			if r.Name != "stealth split-brain" {
+				continue
+			}
+			found = true
+			if r.Status != statusWarn {
+				t.Errorf("status = %s, want WARN", r.Status)
+			}
+			if r.hard {
+				t.Error("stealth split-brain warn must not be hard")
+			}
+			if !strings.Contains(r.Detail, repoDir) || !strings.Contains(r.Detail, dir) {
+				t.Errorf("detail should name both paths, got: %s", r.Detail)
+			}
+		}
+		if !found {
+			t.Fatal("expected stealth split-brain result")
+		}
+	})
+}
+
+// TestDoctor_ControlSocketPathLengthWarn asserts that a resolved daemon
+// control-socket path longer than 100 bytes produces a non-hard WARN.
+func TestDoctor_ControlSocketPathLengthWarn(t *testing.T) {
+	dir := t.TempDir()
+	// Storage.Path lives under a very deeply nested directory so
+	// ControlSocketPath() (sibling daemon.sock) exceeds 100 bytes.
+	longSuffix := strings.Repeat("a-very-long-path-segment/", 6)
+	nestedDir := filepath.Join(dir, longSuffix)
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	yaml := strings.ReplaceAll(doctorMinimalConfig, "%CFGDIR%", nestedDir)
+	cfgPath := filepath.Join(dir, "bugbot.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	env := allGreenEnv(t, cfgPath)
+	var sb strings.Builder
+	env.out = &sb
+
+	results := runChecks(context.Background(), env, false)
+	var found bool
+	for _, r := range results {
+		if r.Name != "control socket path" {
+			continue
+		}
+		found = true
+		if r.Status != statusWarn {
+			t.Errorf("status = %s, want WARN", r.Status)
+		}
+		if r.hard {
+			t.Error("control socket path warn must not be hard")
+		}
+	}
+	if !found {
+		t.Fatal("expected control socket path result for a long nested storage path")
+	}
+}

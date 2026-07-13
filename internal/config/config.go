@@ -584,14 +584,11 @@ func Load(path string) (Config, error) {
 	_ = yaml.Unmarshal(data, &peek)
 	stealth := peek.Stealth != nil && *peek.Stealth
 	if v, ok := os.LookupEnv("BUGBOT_STEALTH"); ok {
-		switch strings.ToLower(v) {
-		case "true", "1", "yes":
-			stealth = true
-		case "false", "0", "no":
-			stealth = false
-		default:
-			return Config{}, fmt.Errorf("BUGBOT_STEALTH: invalid boolean value %q (want true or false)", v)
+		b, boolErr := parseEnvBool("BUGBOT_STEALTH", v)
+		if boolErr != nil {
+			return Config{}, boolErr
 		}
+		stealth = b
 	}
 
 	if stealth {
@@ -625,6 +622,23 @@ func Load(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// parseEnvBool parses a BUGBOT_* boolean environment-variable value
+// ("true"/"1"/"yes" or "false"/"0"/"no", case-insensitive; anything else is
+// an error naming key). Shared by Load's stealth peek (which must resolve
+// BUGBOT_STEALTH before the strict decode runs) and applyEnvOverrides'
+// setBool closure, so every BUGBOT_* boolean accepts exactly the same
+// spelling.
+func parseEnvBool(key, v string) (bool, error) {
+	switch strings.ToLower(v) {
+	case "true", "1", "yes":
+		return true, nil
+	case "false", "0", "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s: invalid boolean value %q (want true or false)", key, v)
+	}
 }
 
 // applyEnvOverrides applies BUGBOT_* overrides from the supplied environment
@@ -696,14 +710,11 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	}
 	setBool := func(key string, dst *bool) error {
 		if v, ok := env[key]; ok {
-			switch strings.ToLower(v) {
-			case "true", "1", "yes":
-				*dst = true
-			case "false", "0", "no":
-				*dst = false
-			default:
-				return fmt.Errorf("%s: invalid boolean value %q (want true or false)", key, v)
+			b, err := parseEnvBool(key, v)
+			if err != nil {
+				return err
 			}
+			*dst = b
 		}
 		return nil
 	}

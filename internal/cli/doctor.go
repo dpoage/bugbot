@@ -152,6 +152,37 @@ func checkStore(ctx context.Context, cfg config.Config) checkResult {
 	return checkResult{Name: "state db", Status: statusPass, Detail: "quick_check ok (" + path + ")"}
 }
 
+// checkStealthAdvisories emits non-fatal WARNs for two stealth-mode
+// footguns: (a) a stealth config paired with a leftover ./.bugbot directory
+// in the scanned repo — two possible state locations can silently diverge —
+// and (b) a resolved daemon control-socket path long enough to risk hitting
+// the ~104-108 byte unix domain socket path limit on common platforms.
+// Never affects the exit code.
+func checkStealthAdvisories(env doctorEnv, cfg config.Config) []checkResult {
+	var results []checkResult
+
+	if cfg.Stealth {
+		legacyDir := filepath.Join(env.repoDir, ".bugbot")
+		if info, err := os.Stat(legacyDir); err == nil && info.IsDir() {
+			results = append(results, checkResult{
+				Name:   "stealth split-brain",
+				Status: statusWarn,
+				Detail: fmt.Sprintf("stealth mode is on but %s still exists alongside %s — remove the stale in-repo directory or state may be split across both", legacyDir, filepath.Dir(cfg.Storage.Path)),
+			})
+		}
+	}
+
+	if sockPath := cfg.ControlSocketPath(); len(sockPath) > 100 {
+		results = append(results, checkResult{
+			Name:   "control socket path",
+			Status: statusWarn,
+			Detail: fmt.Sprintf("%s is %d bytes; unix domain socket paths are limited to ~104-108 bytes on common platforms and the daemon may fail to bind", sockPath, len(sockPath)),
+		})
+	}
+
+	return results
+}
+
 // runRepair backs up and rebuilds a corrupt state database via store.Recover,
 // printing a salvage summary. store.Recover takes the cross-process writer
 // lock, so this refuses (with *ErrLocked) when a scan or daemon is running —
@@ -239,6 +270,11 @@ func runChecks(ctx context.Context, env doctorEnv, runSandboxVerify bool) []chec
 		results = append(results, checkStore(ctx, cfg))
 	}
 
+	// 3c. Stealth-mode advisories — warn-only; requires a valid config.
+	if cfgOK {
+		results = append(results, checkStealthAdvisories(env, cfg)...)
+	}
+
 	// 4. Repo facts — informational, never hard.
 	repoResults, langs, buildSystems := checkRepo(ctx, env, cfg, cfgOK)
 	results = append(results, repoResults...)
@@ -292,7 +328,7 @@ func checkConfig(env doctorEnv) (checkResult, config.Config, bool) {
 	return checkResult{
 		Name:   "config",
 		Status: statusPass,
-		Detail: "loaded " + abs,
+		Detail: "loaded " + abs + "; state dir " + filepath.Dir(cfg.Storage.Path),
 	}, cfg, true
 }
 
