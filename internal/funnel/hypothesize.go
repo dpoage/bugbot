@@ -305,6 +305,12 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 		// runCtx (the fanout's derived child) lets a breaker trip unblock this unit
 		// even mid-run.
 		fo.spawn(func(runCtx context.Context) {
+			// unitID is minted up front (before the runner exists) so it can be
+			// embedded as the runner's transcript-filename key (agent.
+			// WithTranscriptKey) AND passed as this unit's agent_units row ID
+			// below — giving the TUI an exact filename<->row join instead of a
+			// timestamp-window heuristic (see internal/tui/transcript.go).
+			unitID := store.NewID()
 			// Gate against the LIVE spend total only once we hold a worker slot, so
 			// the decision reflects spend already recorded by earlier units rather
 			// than a stale pre-launch snapshot. This is what makes degradation and
@@ -315,7 +321,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				f.note(result, msg)
 				progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetStopped, Message: msg})
 				// Record the skipped unit row (zero tokens, empty started_at). Best-effort.
-				f.recordFinderUnit(ctx, scanRunID, u, unitIdx, "skipped_hard_budget", 0, 0, 0, 0, 0, result)
+				f.recordFinderUnit(ctx, scanRunID, unitID, u, unitIdx, "skipped_hard_budget", 0, 0, 0, 0, 0, result)
 				return
 			}
 			if budget.finderOverSoft() {
@@ -327,7 +333,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 					f.note(result, msg)
 					progress.Emit(f.opts.Progress, progress.Event{Kind: progress.KindBudgetDegraded, Message: msg})
 					// Record the skipped unit row (zero tokens, empty started_at). Best-effort.
-					f.recordFinderUnit(ctx, scanRunID, u, unitIdx, "skipped_degraded", 0, 0, 0, 0, 0, result)
+					f.recordFinderUnit(ctx, scanRunID, unitID, u, unitIdx, "skipped_degraded", 0, 0, 0, 0, 0, result)
 					return
 				}
 			}
@@ -450,7 +456,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			startedAt := time.Now()
 			// runCtx (not ctx) so a breaker trip unblocks the in-flight runner
 			// without disturbing the caller's context.
-			cands, status, outcome, pm, traversal, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt, scope, f.toolHealthSinkFor(result, progress.RoleFinder, label))
+			cands, status, outcome, pm, traversal, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt, scope, f.toolHealthSinkFor(result, progress.RoleFinder, label), agent.WithTranscriptKey(unitID))
 			finishedAt := time.Now()
 
 			// Emit KindAgentFinished here (not inside runFinderWithPrompt) so we
@@ -653,7 +659,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 					emit(c)
 				}
 			}
-			f.recordFinderUnitWithTimeDetail(ctx, scanRunID, u, unitIdx, recordStatus, unitDetail, startedAt, finishedAt, inTokens, outTokens, cacheRead, candCount, unitLeadsPosted, result)
+			f.recordFinderUnitWithTimeDetail(ctx, scanRunID, unitID, u, unitIdx, recordStatus, unitDetail, startedAt, finishedAt, inTokens, outTokens, cacheRead, candCount, unitLeadsPosted, result)
 			// Persist finder traversal audit row (best-effort, never aborts scan).
 			// Only written for finderOK units that reported a non-nil traversal
 			// field in their output JSON. Units that omit the optional traversal

@@ -11,12 +11,17 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
-// testConfig returns a minimal config pointing Storage.Path at a fresh
-// on-disk database under t.TempDir().
+// testConfig returns a minimal config pointing Storage.Path and
+// TranscriptDir at fresh locations under t.TempDir() — TranscriptDir now
+// defaults to a non-empty, cwd-relative ".bugbot/transcripts" (every agent
+// role autosaves by default), so any engine test that runs a real funnel/
+// reproducer through this config MUST get an isolated directory or it will
+// litter the repo's working directory with real transcript files (bugbot-yqhf).
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Storage.Path = filepath.Join(t.TempDir(), "state.db")
+	cfg.TranscriptDir = filepath.Join(t.TempDir(), "transcripts")
 	return cfg
 }
 

@@ -16,3 +16,15 @@ func newID() string {
 	_, _ = rand.Read(b[8:])
 	return hex.EncodeToString(b[:])
 }
+
+// NewID returns a new identifier in the same lexicographically-sortable form
+// used for every primary key in this package (see newID). Exported so a
+// caller that needs to know a row's ID BEFORE inserting it — e.g. a funnel
+// agent run that embeds the future agent_units.id in its transcript
+// filename via agent.WithTranscriptKey, so the TUI can join filename to row
+// by an exact ID match instead of a timestamp-window heuristic (see
+// internal/tui/transcript.go) — can generate it up front and pass it back in
+// as AgentUnit.ID.
+func NewID() string {
+	return newID()
+}

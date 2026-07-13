@@ -109,8 +109,9 @@ type FunnelOptionOverrides struct {
 // BuildFunnelOptions returns a fully-populated funnel.Options whose
 // config-driven fields (Filter, TokenBudget, CacheReadBudgetWeight,
 // FinderBudgetShare, FinderTokenClaim, VerifierTokenClaim, FinderHistoryTokens,
-// FinderReadLines, FinderReadBytes, Cartographer, SandboxOpts) are sourced from
-// cfg. It is the SINGLE source of truth for the nine-field budget plumbing:
+// FinderReadLines, FinderReadBytes, Cartographer, SandboxOpts, TranscriptDir)
+// are sourced from cfg. It is the SINGLE source of truth for the nine-field
+// budget plumbing:
 // scan, daemon, and review all flow through here so the parity-drift risk
 // (daemon previously copied SandboxOpts from buildSandboxOpts while scan and
 // review set it directly into opts) is structurally impossible.
@@ -155,9 +156,10 @@ func BuildFunnelOptions(cfg config.Config, overrides FunnelOptionOverrides) (fun
 			Filter: ingest.ScanFilter{Include: cfg.Scan.Include, Exclude: cfg.Scan.Exclude},
 			Lenses: overrides.Lenses,
 		},
-		SandboxOpts: sandboxOpts,
-		Progress:    overrides.Progress,
-		Repro:       overrides.Repro,
+		SandboxOpts:   sandboxOpts,
+		Progress:      overrides.Progress,
+		Repro:         overrides.Repro,
+		TranscriptDir: cfg.TranscriptDir,
 	}
 	return opts, sandboxDegraded, nil
 }
