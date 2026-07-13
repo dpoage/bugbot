@@ -258,4 +258,16 @@ storage:
 # this for the reproducer/patch-prover stages specifically.
 # ---------------------------------------------------------------------------
 transcript_dir: .bugbot/transcripts
+
+# ---------------------------------------------------------------------------
+# stealth: opt-in "stealth install" mode. When true, storage.path, report.dir,
+# and transcript_dir (unless explicitly set above) are re-rooted from this
+# repo's working tree to $HOME/.bugbot/<repo-key>/, where <repo-key> is
+# derived from this repo's git toplevel. No .bugbot/ directory, bugbot.yaml,
+# or any other trace is left in the scanned repo, so nothing needs a
+# .gitignore entry. Run "bugbot init --stealth" to generate and place this
+# config file itself outside the repo (in the same $HOME/.bugbot/<repo-key>/
+# directory) instead of writing bugbot.yaml here.
+# ---------------------------------------------------------------------------
+# stealth: true
 `
