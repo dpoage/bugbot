@@ -550,6 +550,30 @@ func TestInitCmd_StealthZeroFootprint(t *testing.T) {
 		t.Error("stealth config missing active `stealth: true` line")
 	}
 
+	// Decisive: config.Load must resolve Storage.Path, Report.Dir, and
+	// TranscriptDir all under the stealth state dir — not the working tree.
+	// This is the actual "no footprint on scan" acceptance criterion:
+	// storage.path/report.dir must NOT be pinned as explicit .bugbot/...
+	// keys in the written config (they would win over the seeded stealth
+	// defaults and silently defeat stealth mode on the next `bugbot scan`).
+	loadedCfg, loadErr := config.Load(stealthPath)
+	if loadErr != nil {
+		t.Fatalf("config.Load(%s): %v", stealthPath, loadErr)
+	}
+	wantBase, err := config.StealthStateDir(dir)
+	if err != nil {
+		t.Fatalf("StealthStateDir: %v", err)
+	}
+	if got := filepath.Dir(loadedCfg.Storage.Path); got != wantBase {
+		t.Errorf("Storage.Path dir = %q, want %q (storage.path must not be pinned in the written config)", got, wantBase)
+	}
+	if loadedCfg.Report.Dir != filepath.Join(wantBase, "reports") {
+		t.Errorf("Report.Dir = %q, want %q", loadedCfg.Report.Dir, filepath.Join(wantBase, "reports"))
+	}
+	if loadedCfg.TranscriptDir != filepath.Join(wantBase, "transcripts") {
+		t.Errorf("TranscriptDir = %q, want %q", loadedCfg.TranscriptDir, filepath.Join(wantBase, "transcripts"))
+	}
+
 	stateDir, err := config.StealthStateDir(dir)
 	if err != nil {
 		t.Fatalf("StealthStateDir: %v", err)
@@ -603,6 +627,75 @@ func TestInjectStealthFlag(t *testing.T) {
 			}
 			if _, err := config.Load(path); err != nil {
 				t.Fatalf("config.Load with injected stealth flag: %v", err)
+			}
+		})
+	}
+}
+
+// TestStripStealthExplicitPaths confirms that stripStealthExplicitPaths
+// neutralizes the explicit storage.path/report.dir/transcript_dir keys in
+// both the static StarterYAML and a wizard-rendered config, so config.Load
+// under stealth mode resolves all three under the stealth state dir rather
+// than the pinned .bugbot/... in-repo defaults. It also confirms the
+// repro-section commented example text that happens to mention the same
+// paths is left untouched (exact-line matching, not substring).
+func TestStripStealthExplicitPaths(t *testing.T) {
+	wCfg, err := runInteractive(
+		defaultInteractiveInput(),
+		new(bytes.Buffer),
+		t.TempDir(),
+		func(key string) string { return "" },
+		func(name string) (string, error) { return "", os.ErrNotExist },
+	)
+	if err != nil {
+		t.Fatalf("runInteractive: %v", err)
+	}
+	rendered, renderErr := renderConfig(wCfg)
+	if renderErr != nil {
+		t.Fatalf("renderConfig: %v", renderErr)
+	}
+
+	for name, content := range map[string]string{
+		"starter": config.StarterYAML,
+		"wizard":  rendered,
+	} {
+		t.Run(name, func(t *testing.T) {
+			stripped := stripStealthExplicitPaths(injectStealthFlag(content))
+			if strings.Contains(stripped, "\n  path: .bugbot/state.db\n") {
+				t.Error("storage.path still active after stripStealthExplicitPaths")
+			}
+			if strings.Contains(stripped, "\n  dir: .bugbot/reports\n") {
+				t.Error("report.dir still active after stripStealthExplicitPaths")
+			}
+			if strings.Contains(stripped, "\ntranscript_dir: .bugbot/transcripts\n") {
+				t.Error("top-level transcript_dir still active after stripStealthExplicitPaths")
+			}
+
+			dir := newGitRepoDir(t)
+			t.Setenv("HOME", t.TempDir())
+			t.Chdir(dir)
+
+			path := filepath.Join(t.TempDir(), "bugbot.yaml")
+			if err := os.WriteFile(path, []byte(stripped), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("config.Load: %v\n--- content ---\n%s", err, stripped)
+			}
+
+			wantBase, err := config.StealthStateDir(dir)
+			if err != nil {
+				t.Fatalf("StealthStateDir: %v", err)
+			}
+			if got := filepath.Dir(cfg.Storage.Path); got != wantBase {
+				t.Errorf("Storage.Path dir = %q, want %q", got, wantBase)
+			}
+			if cfg.Report.Dir != filepath.Join(wantBase, "reports") {
+				t.Errorf("Report.Dir = %q, want %q", cfg.Report.Dir, filepath.Join(wantBase, "reports"))
+			}
+			if cfg.TranscriptDir != filepath.Join(wantBase, "transcripts") {
+				t.Errorf("TranscriptDir = %q, want %q", cfg.TranscriptDir, filepath.Join(wantBase, "transcripts"))
 			}
 		})
 	}

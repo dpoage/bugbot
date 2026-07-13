@@ -82,6 +82,31 @@ func injectStealthFlag(content string) string {
 	return strings.Replace(content, stealthConfigAnchor, replacement, 1)
 }
 
+// stripStealthExplicitPaths comments out (with an explanatory note) the
+// three explicit path keys that would otherwise override the stealth-mode
+// seeded defaults from config.Load's two-pass path-seeding logic:
+// storage.path, report.dir, and a top-level transcript_dir. Explicit YAML
+// values always win over the seeded defaults, so leaving them active in a
+// config written by --stealth would silently defeat stealth mode on the
+// very next `bugbot scan`. Matching is by exact line content, not
+// substring, so the commented repro-section examples that happen to mention
+// the same paths are left untouched. Applied alongside injectStealthFlag
+// whenever --stealth writes a config.
+func stripStealthExplicitPaths(content string) string {
+	targets := map[string]string{
+		"  path: .bugbot/state.db":            "  # path: .bugbot/state.db  # omitted under --stealth; storage.path is seeded under $HOME/.bugbot/<repo-key>/",
+		"  dir: .bugbot/reports":              "  # dir: .bugbot/reports  # omitted under --stealth; report.dir is seeded under $HOME/.bugbot/<repo-key>/",
+		"transcript_dir: .bugbot/transcripts": "# transcript_dir: .bugbot/transcripts  # omitted under --stealth; transcript_dir is seeded under $HOME/.bugbot/<repo-key>/",
+	}
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if repl, ok := targets[line]; ok {
+			lines[i] = repl
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // stealthInitTarget resolves the stealth-mode config path and its
 // containing state directory for the repo enclosing the current directory.
 func stealthInitTarget() (path, stateDir string, err error) {
@@ -113,7 +138,7 @@ func runInitStatic(cmd *cobra.Command, stealth bool) (err error) {
 		if markErr := config.WriteRepoMarker(stateDir, config.RepoToplevel(".")); markErr != nil {
 			return fmt.Errorf("write repo marker: %w", markErr)
 		}
-		content = injectStealthFlag(content)
+		content = stripStealthExplicitPaths(injectStealthFlag(content))
 	}
 
 	// Refuse to clobber an existing file. Use O_EXCL so the
@@ -190,7 +215,7 @@ func runInitInteractive(cmd *cobra.Command, stealth bool) (err error) {
 		return fmt.Errorf("render config: %w", renderErr)
 	}
 	if stealth {
-		yamlContent = injectStealthFlag(yamlContent)
+		yamlContent = stripStealthExplicitPaths(injectStealthFlag(yamlContent))
 		if mkErr := os.MkdirAll(stateDir, 0o700); mkErr != nil {
 			return fmt.Errorf("create %s: %w", stateDir, mkErr)
 		}

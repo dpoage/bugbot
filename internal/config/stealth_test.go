@@ -134,6 +134,34 @@ func TestWriteRepoMarker(t *testing.T) {
 	}
 }
 
+func TestStealthConfigPath(t *testing.T) {
+	home := setFakeHome(t)
+	toplevel := initGitRepo(t)
+
+	got, err := StealthConfigPath(toplevel)
+	if err != nil {
+		t.Fatalf("StealthConfigPath: %v", err)
+	}
+	want := filepath.Join(home, ".bugbot", RepoKey(toplevel), "bugbot.yaml")
+	if got != want {
+		t.Errorf("StealthConfigPath(%q) = %q, want %q", toplevel, got, want)
+	}
+
+	// A subdirectory of the repo resolves to the same path — the key is
+	// derived from the repo toplevel, not the passed-in dir.
+	sub := filepath.Join(toplevel, "a", "b")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	gotSub, err := StealthConfigPath(sub)
+	if err != nil {
+		t.Fatalf("StealthConfigPath(sub): %v", err)
+	}
+	if gotSub != want {
+		t.Errorf("StealthConfigPath(%q) = %q, want %q (same as repo toplevel)", sub, gotSub, want)
+	}
+}
+
 // setFakeHome points $HOME at a fresh temp dir so stealth-mode tests never
 // touch the developer's real home directory, and returns it.
 func setFakeHome(t *testing.T) string {
@@ -251,6 +279,26 @@ func TestLoadStealth(t *testing.T) {
 		}
 		if cfg.Storage.Path != ".bugbot/state.db" {
 			t.Errorf("storage.path = %q, want default .bugbot/state.db (stealth disabled by env)", cfg.Storage.Path)
+		}
+		if cfg.Stealth {
+			t.Error("cfg.Stealth = true, want false (BUGBOT_STEALTH=false must override yaml stealth: true)")
+		}
+	})
+
+	t.Run("BUGBOT_REPORT_DIR wins over seeded stealth default", func(t *testing.T) {
+		setFakeHome(t)
+		toplevel := initGitRepo(t)
+		t.Chdir(toplevel)
+
+		explicit := filepath.Join(t.TempDir(), "custom-reports")
+		t.Setenv("BUGBOT_REPORT_DIR", explicit)
+		path := writeTemp(t, validYAML+"\nstealth: true\n")
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Report.Dir != explicit {
+			t.Errorf("report.dir = %q, want env override %q", cfg.Report.Dir, explicit)
 		}
 	})
 

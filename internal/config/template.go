@@ -261,13 +261,17 @@ transcript_dir: .bugbot/transcripts
 
 # ---------------------------------------------------------------------------
 # stealth: opt-in "stealth install" mode. When true, storage.path, report.dir,
-# and transcript_dir (unless explicitly set above) are re-rooted from this
-# repo's working tree to $HOME/.bugbot/<repo-key>/, where <repo-key> is
-# derived from this repo's git toplevel. No .bugbot/ directory, bugbot.yaml,
-# or any other trace is left in the scanned repo, so nothing needs a
-# .gitignore entry. Run "bugbot init --stealth" to generate and place this
-# config file itself outside the repo (in the same $HOME/.bugbot/<repo-key>/
-# directory) instead of writing bugbot.yaml here.
+# and transcript_dir are re-rooted from this repo's working tree to
+# $HOME/.bugbot/<repo-key>/, where <repo-key> is derived from this repo's git
+# toplevel — BUT ONLY WHEN LEFT UNSET above. An explicit YAML value always
+# wins over the seeded default, and storage.path / report.dir / transcript_dir
+# are all set explicitly earlier in this very file, so simply uncommenting
+# "stealth: true" here does NOT relocate state — you must also comment out
+# or remove those three explicit keys above, or state stays pinned in this
+# repo. "bugbot init --stealth" is the recommended path: it generates a
+# config with the explicit path keys already omitted and places the file
+# itself outside the repo (in the same $HOME/.bugbot/<repo-key>/ directory),
+# leaving zero trace in the scanned repo — no .gitignore entry needed either.
 # ---------------------------------------------------------------------------
 # stealth: true
 `
