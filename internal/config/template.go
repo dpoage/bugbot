@@ -213,7 +213,7 @@ sandbox:
 #   backlog_batch: 3           # backlog findings per daemon backlog-timer firing
 #   sandbox_max_execs: 3       # per-attempt run_tests budget for the reproducer agent
 #   try_max_execs: 10          # per-attempt workspace-exec (interactive iteration) budget
-#   transcript_dir: ""         # save agent JSONL transcripts here (empty = off)
+#   transcript_dir: ""         # override transcript_dir (below) for reproducer/patch-prover only (empty = inherit)
 #
 # Enablement is the --repro flag (scan) or the daemon setting; the per-run
 # sandbox time cap is sandbox.timeout_seconds above.
@@ -249,4 +249,13 @@ daemon:
 # ---------------------------------------------------------------------------
 storage:
   path: .bugbot/state.db
+
+# ---------------------------------------------------------------------------
+# transcript_dir: where every agent run (finder, verifier, arbiter,
+# cartographer, reproducer, patch-prover) auto-saves its streaming JSONL
+# transcript, so the TUI's detail pane always has one to show. Set empty to
+# disable transcript capture entirely. repro.transcript_dir above overrides
+# this for the reproducer/patch-prover stages specifically.
+# ---------------------------------------------------------------------------
+transcript_dir: .bugbot/transcripts
 `

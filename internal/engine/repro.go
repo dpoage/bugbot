@@ -36,6 +36,19 @@ type ReproDeps struct {
 	Spend *ledgerRecorder
 }
 
+// reproTranscriptDir resolves the reproducer/patch-prover transcript
+// directory: cfg.Repro.TranscriptDir when explicitly set (it predates the
+// general cfg.TranscriptDir and is honored first so an operator's existing
+// per-finding artifact placement keeps working unchanged), falling back to
+// cfg.TranscriptDir so reproducer/patch-prover transcripts are captured by
+// default like every other agent role, without requiring separate config.
+func reproTranscriptDir(cfg config.Config) string {
+	if cfg.Repro.TranscriptDir != "" {
+		return cfg.Repro.TranscriptDir
+	}
+	return cfg.TranscriptDir
+}
+
 // BuildReproducer constructs the reproducer-role LLM client, sandbox, and
 // Reproducer shared by `scan --repro`'s in-run hook, `bugbot repro`'s backlog
 // drain, and the daemon's post-cycle promotion step.
@@ -78,7 +91,7 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 		Capabilities:     caps,
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
-		TranscriptDir:    cfg.Repro.TranscriptDir,
+		TranscriptDir:    reproTranscriptDir(*cfg),
 		PackageSummary:   packageSummaryProvider(st),
 		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,
@@ -168,7 +181,7 @@ func buildReproHookForScan(
 		Capabilities:     caps,
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
-		TranscriptDir:    cfg.Repro.TranscriptDir,
+		TranscriptDir:    reproTranscriptDir(cfg),
 		PackageSummary:   packageSummaryProvider(st),
 		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,

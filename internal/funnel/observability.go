@@ -21,6 +21,7 @@ const keepRuns = 200
 func (f *Funnel) recordFinderUnit(
 	ctx context.Context,
 	scanRunID string,
+	unitID string,
 	u unit,
 	launchOrder int,
 	status string,
@@ -28,7 +29,7 @@ func (f *Funnel) recordFinderUnit(
 	leadsPosted int,
 	result *Result,
 ) {
-	f.recordFinderUnitWithTimeDetail(ctx, scanRunID, u, launchOrder, status, "",
+	f.recordFinderUnitWithTimeDetail(ctx, scanRunID, unitID, u, launchOrder, status, "",
 		time.Time{}, time.Time{}, inTokens, outTokens, cacheRead, candidates, leadsPosted, result)
 }
 
@@ -38,9 +39,17 @@ func (f *Funnel) recordFinderUnit(
 // finderPostmortem from the failure path; it is empty for ok/skipped rows.
 // Best-effort: a failed insert is logged on result.Skipped and never aborts
 // the scan.
+//
+// unitID is minted by the caller BEFORE the finder runner was built (or, for
+// a skipped unit, with nothing built at all) and threaded into the runner as
+// its transcript-filename key (agent.WithTranscriptKey) — passing it as the
+// row's own ID here, instead of leaving AddAgentUnit generate one, is what
+// gives the TUI an EXACT filename<->row join (see discoverTranscript) rather
+// than a timestamp-window guess.
 func (f *Funnel) recordFinderUnitWithTimeDetail(
 	ctx context.Context,
 	scanRunID string,
+	unitID string,
 	u unit,
 	launchOrder int,
 	status string,
@@ -51,6 +60,7 @@ func (f *Funnel) recordFinderUnitWithTimeDetail(
 	result *Result,
 ) {
 	row := store.AgentUnit{
+		ID:              unitID,
 		ScanRunID:       scanRunID,
 		Role:            "finder",
 		Lens:            u.lens.Name,

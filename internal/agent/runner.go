@@ -23,8 +23,16 @@ type Runner struct {
 	limits       Limits
 
 	// transcriptDir, when non-empty, receives an auto-saved JSONL transcript per
-	// run, named "<timestamp>-<slug>.jsonl".
+	// run, named "<timestamp>-<slug>.jsonl" (or "<timestamp>-<key>-<slug>.jsonl"
+	// when transcriptKey is set — see WithTranscriptKey).
 	transcriptDir string
+	// transcriptKey, when non-empty, is embedded in the autosave filename so a
+	// caller that knows a stable identifier for this run BEFORE constructing the
+	// Runner (e.g. a store row's primary key, generated up front) can recover
+	// the exact transcript file later by filename match instead of guessing from
+	// a timestamp window. See WithTranscriptKey and
+	// internal/tui/transcript.go's discoverTranscript.
+	transcriptKey string
 	// maxTokens caps output tokens per completion (passed through to the client).
 	// Zero lets the adapter apply its own default.
 	maxTokens int
@@ -50,10 +58,25 @@ func WithLimits(l Limits) Option {
 }
 
 // WithTranscriptDir makes each run auto-save its transcript to a JSONL file
-// under dir, named "<RFC3339-timestamp>-<task-slug>.jsonl". The directory is
-// created on demand.
+// under dir, named "<RFC3339-timestamp>-<task-slug>.jsonl" (or
+// "<RFC3339-timestamp>-<key>-<task-slug>.jsonl" when WithTranscriptKey is also
+// set). The directory is created on demand.
 func WithTranscriptDir(dir string) Option {
 	return func(r *Runner) { r.transcriptDir = dir }
+}
+
+// WithTranscriptKey embeds key in the autosave filename between the timestamp
+// and the task slug, giving a caller that mints a stable identifier for this
+// run BEFORE constructing the Runner (typically a store row's primary key,
+// generated up front so it can be threaded through both the runner and the
+// eventual row insert) an EXACT way to recover the transcript file later, by
+// filename match, instead of a timestamp-window guess. A no-op unless
+// WithTranscriptDir is also set. Empty key is a no-op (preserves the plain
+// "<timestamp>-<slug>.jsonl" naming used by callers with no stable key, e.g.
+// the reproducer/patch-prover paths, which drive the row's own ID from the
+// store after the run completes and so have nothing to key by up front).
+func WithTranscriptKey(key string) Option {
+	return func(r *Runner) { r.transcriptKey = key }
 }
 
 // WithMaxTokens caps output tokens per completion. Zero uses the adapter
@@ -580,13 +603,20 @@ func (r *Runner) finishTruncated(o *Outcome, reason string) {
 }
 
 // transcriptPath computes the JSONL path for a run's transcript under
-// r.transcriptDir, named "<timestamp>-<task-slug>.jsonl". Streaming (see
+// r.transcriptDir, named "<timestamp>-<task-slug>.jsonl", or
+// "<timestamp>-<r.transcriptKey>-<task-slug>.jsonl" when WithTranscriptKey was
+// set (see its doc for why the key must be exact enough for a caller to
+// recover this file later by filename match). Streaming (see
 // Transcript.enableStreaming) opens this path lazily on the first recorded
 // event; a run that never records anything never creates the file or its
 // parent directory.
 func (r *Runner) transcriptPath(tr *Transcript, task string) string {
 	ts := tr.now().UTC().Format("20060102T150405.000Z")
-	name := ts + "-" + slug(task) + ".jsonl"
+	name := ts
+	if r.transcriptKey != "" {
+		name += "-" + r.transcriptKey
+	}
+	name += "-" + slug(task) + ".jsonl"
 	return filepath.Join(r.transcriptDir, name)
 }
 
