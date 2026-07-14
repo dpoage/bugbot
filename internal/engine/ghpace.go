@@ -57,8 +57,11 @@ var ErrGHRateLimited = errors.New("gh: rate limited")
 // is deliberately excluded: 403 alone is gh's generic "forbidden" status and
 // covers plain auth/permission failures far more often than rate limiting, so
 // treating it as a rate limit would retry (and delay reporting) real auth
-// errors. Only the more specific phrasing below, or an explicit primary-limit
-// "HTTP 429", counts.
+// errors. Only the more specific phrasing below counts — including explicit
+// "429" status phrasings, but never a bare digit scan, since RealGH folds the
+// full gh invocation (including issue/PR numbers) into the returned error
+// text and a numeric issue number like #429 must never be misread as a 429
+// status.
 var ghRateLimitPhrases = []string{
 	"secondary rate limit",
 	"abuse detection",
@@ -66,6 +69,7 @@ var ghRateLimitPhrases = []string{
 	"rate limit exceeded",
 	"api rate limit",
 	"http 429",
+	"429 too many requests",
 }
 
 // IsGHRateLimited reports whether err represents a GitHub rate limit —
@@ -73,6 +77,13 @@ var ghRateLimitPhrases = []string{
 // stderr text (from a runner not routed through NewPacedGH, or bubbled up via
 // %w somewhere else) that matches one of GitHub's known rate-limit phrasings.
 // nil is never rate limited.
+//
+// Deliberately NOT included: any bare "429" digit scan. RealGH folds the
+// full gh invocation into the returned error (ghrunner.go's stderr-into-error
+// pattern), so a permanent failure against an issue/PR numbered 429 (e.g.
+// "repos/{owner}/{repo}/issues/429: HTTP 403: Resource not accessible") would
+// contain the digits "429" without being a rate limit at all. Matching only
+// full phrases like "429 too many requests"/"http 429" avoids that trap.
 func IsGHRateLimited(err error) bool {
 	if err == nil {
 		return false
@@ -86,38 +97,16 @@ func IsGHRateLimited(err error) bool {
 			return true
 		}
 	}
-	return standalone429(text)
-}
-
-// standalone429 reports whether text contains a bare "429" status token that
-// isn't already covered by the "http 429" phrase (e.g. "429 Too Many
-// Requests" without a leading "HTTP "). It requires "429" to be surrounded by
-// non-digit boundaries so it doesn't match as a substring of a larger number
-// (an issue or PR number, a byte count, etc).
-func standalone429(text string) bool {
-	const token = "429"
-	for i := 0; i+len(token) <= len(text); i++ {
-		if text[i:i+len(token)] != token {
-			continue
-		}
-		beforeOK := i == 0 || !isDigit(text[i-1])
-		afterOK := i+len(token) == len(text) || !isDigit(text[i+len(token)])
-		if beforeOK && afterOK {
-			return true
-		}
-	}
 	return false
 }
-
-func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 
 // isMutatingGHCall reports whether args represent a mutating gh api call, per
 // the exact convention every call site in this repo uses: an "-X" flag
 // immediately followed by POST, PATCH, PUT, or DELETE (see
 // internal/cli/publish.go's ghCreateIssue/ghUpdateIssue/ghCommentIssue/
-// ghPatchIssueClosed and internal/engine/prcomments.go). Calls without an -X
-// (the gh api default, GET) are reads and are never paced or specially
-// throttled.
+// ghPatchIssueClosed and internal/engine/review.go's issue/PR-comment and
+// resolve-thread actions). Calls without an -X (the gh api default, GET) are
+// reads and are never paced or specially throttled.
 func isMutatingGHCall(args []string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] != "-X" {
@@ -140,7 +129,6 @@ type pacedGH struct {
 
 	mu           sync.Mutex
 	lastMutation time.Time
-	haveMutated  bool
 
 	// sleep pauses for d, honoring ctx cancellation. Overridable by tests.
 	sleep func(ctx context.Context, d time.Duration) error
@@ -213,7 +201,7 @@ func (p *pacedGH) run(ctx context.Context, args ...string) ([]byte, error) {
 			return nil, fmt.Errorf("gh: rate limited after %d attempt(s): %w: %w", attempt+1, lastErr, ErrGHRateLimited)
 		}
 		if sleepErr := p.sleep(ctx, ghRetryBackoff[attempt]); sleepErr != nil {
-			return nil, fmt.Errorf("gh: rate limited, retry aborted: %w", sleepErr)
+			return nil, fmt.Errorf("gh: rate limited, retry aborted: %w: %w", lastErr, sleepErr)
 		}
 	}
 }
@@ -227,7 +215,7 @@ func (p *pacedGH) pace(ctx context.Context) error {
 	p.mu.Lock()
 	now := p.now()
 	var wait time.Duration
-	if p.haveMutated {
+	if !p.lastMutation.IsZero() {
 		if elapsed := now.Sub(p.lastMutation); elapsed < ghMutationPaceInterval {
 			wait = ghMutationPaceInterval - elapsed
 		}
@@ -242,7 +230,6 @@ func (p *pacedGH) pace(ctx context.Context) error {
 
 	p.mu.Lock()
 	p.lastMutation = p.now()
-	p.haveMutated = true
 	p.mu.Unlock()
 	return nil
 }

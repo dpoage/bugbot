@@ -314,9 +314,12 @@ func TestPacedGH_CancelledContextAbortsPendingPacingWait(t *testing.T) {
 }
 
 // TestIsGHRateLimited table-tests the classifier against every documented
-// phrase plus the bare-403-with-issue-#404 trap (mirroring
-// internal/cli/publish_test.go:1584's isGHGoneOrNotFound rigor: an unrelated
-// numeric token that happens to look like a status code must not misfire).
+// phrase plus two traps: the bare-403-with-issue-#404 case (mirroring
+// internal/cli/publish_test.go:1584's isGHGoneOrNotFound rigor) and a
+// permanent failure against an issue/PR literally numbered 429 — RealGH
+// folds the full gh invocation (including the target issue number) into the
+// returned error text, so "issues/429" must never be misread as an HTTP 429
+// status.
 func TestIsGHRateLimited(t *testing.T) {
 	cases := []struct {
 		name string
@@ -340,6 +343,8 @@ func TestIsGHRateLimited(t *testing.T) {
 		{"unrelated-network", errors.New("dial tcp: connection refused"), false},
 		{"generic", errors.New("boom"), false},
 		{"issue-number-not-429", errors.New("update issue #1429 failed"), false},
+		{"issue-429-permanent-403", fmt.Errorf("gh api repos/{owner}/{repo}/issues/429 -X PATCH ...: exit status 1: HTTP 403: Resource not accessible by integration"), false},
+		{"issue-429-comment-mention", errors.New("update issue #429 failed"), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
