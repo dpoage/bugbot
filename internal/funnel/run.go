@@ -32,6 +32,12 @@ const (
 	// replays candidates reconstructed from open Tier-3 suspected findings
 	// (ReverifySuspected) instead of pending_candidates.
 	modeReverify
+	// modeRevalidate skips the finder/cartographer like modeReverify, but
+	// replays candidates reconstructed from open Tier-2 findings whose
+	// genuine-verdict count is below MinReviewerValidation
+	// (ReverifyUnderValidated) — survivors of budget-degraded panels that
+	// too few reviewer seats actually judged.
+	modeRevalidate
 )
 
 // Sweep runs the funnel over the entire current snapshot of the repository. It

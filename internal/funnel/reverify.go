@@ -2,6 +2,7 @@ package funnel
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
@@ -54,4 +55,53 @@ func (f *Funnel) ReverifySuspected(ctx context.Context) (*Result, error) {
 	// re-anchor). touchCoverage=false: no finder units run, so no coverage to
 	// stamp.
 	return f.run(ctx, store.ScanVerifyDrain, snap, nil, nil, false, modeReverify)
+}
+
+// ReverifyUnderValidated re-runs the verifier on every OPEN Tier-2 finding
+// whose recorded genuine-verdict count is below MinReviewerValidation, WITHOUT
+// invoking the finder/cartographer. It exists because budget degradation
+// shrinks the refuter panel to a single seat (degradedRefuters): a survivor of
+// such a panel is persisted as a normal open T2 finding even though only one
+// reviewer actually judged it — belowQuorum(1,1) is false, so it is not even
+// flagged NeedsHuman. This drain is the later, fresh-budget pass that re-judges
+// those findings with a full panel until each has been validated by at least
+// MinReviewerValidation genuine reviewer verdicts (findings.genuine_verdicts is
+// monotone per file_hash, so a degraded rerun never regresses the count and the
+// eligible set only shrinks).
+//
+// Survivors are re-persisted through the normal verify persist path: the new
+// panel's genuine-verdict count is recorded, severity is re-ranked inline
+// (validateSeverityInline), and a stale below-quorum NeedsHuman flag is
+// released when the new panel meets quorum. Refuted findings are dismissed via
+// the Candidate.Reverify kill path, exactly like ReverifySuspected.
+//
+// When Options.Limits.Refuters is explicitly configured below
+// MinReviewerValidation the drain is a deliberate no-op: every rerun would
+// record a count that can never reach the minimum, re-spending on the same
+// findings every invocation without converging.
+//
+// Pre-migration rows (genuine_verdicts = 0, panel size unknown) are eligible:
+// one full-panel pass records a real count and they drop out.
+func (f *Funnel) ReverifyUnderValidated(ctx context.Context) (*Result, error) {
+	if n := f.opts.Limits.Refuters; n > 0 && n < MinReviewerValidation {
+		res := &Result{}
+		f.note(res, fmt.Sprintf(
+			"revalidate: skipped — configured refuters (%d) below the %d-reviewer minimum; the drain could never converge", n, MinReviewerValidation))
+		return res, nil
+	}
+	under, err := f.store.UnderValidatedOpenFindings(ctx, MinReviewerValidation)
+	if err != nil {
+		return nil, err
+	}
+	if len(under) == 0 {
+		return &Result{}, nil
+	}
+	snap, err := f.snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Same shape as ReverifySuspected: targets=nil, fps=nil (run() recomputes
+	// fps for file_hash anchoring), touchCoverage=false (no finder units run),
+	// and ScanVerifyDrain as the closest existing kind label.
+	return f.run(ctx, store.ScanVerifyDrain, snap, nil, nil, false, modeRevalidate)
 }

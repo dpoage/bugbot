@@ -45,6 +45,14 @@ const (
 	// candidate. Three gives a meaningful majority vote without tripling cost
 	// versus one.
 	DefaultRefuters = 3
+	// MinReviewerValidation is the minimum number of genuine reviewer verdicts
+	// (panel seats that examined the code and produced a parseable verdict) an
+	// open Tier-2 finding must have accumulated from a single verification
+	// panel before the revalidation drain (ReverifyUnderValidated) stops
+	// re-judging it. Equal to DefaultRefuters by design: a full, undegraded
+	// default panel satisfies it in one pass; a budget-degraded 1-seat panel
+	// leaves the finding eligible for a later rerun.
+	MinReviewerValidation = DefaultRefuters
 	// DefaultCacheReadBudgetWeight is the fraction at which cache-read input
 	// tokens count against the token budget when Options leaves it unset. ~0.1
 	// approximates Anthropic's cache-read discount; a conservative, cost-favoring

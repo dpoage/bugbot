@@ -241,3 +241,240 @@ func TestReverifySuspected_Empty(t *testing.T) {
 		t.Errorf("verifier.callCount() = %d, want 0 (no T3s to judge)", n)
 	}
 }
+
+// seedUnderValidatedFinding inserts a durable OPEN Tier-2 finding against
+// bug.go whose genuine-verdict count is below MinReviewerValidation, so
+// ReverifyUnderValidated can pick it up. Same locus/fingerprint recipe as
+// seedSuspectedFinding so triage dedups the replay onto this exact row.
+func seedUnderValidatedFinding(t *testing.T, st *store.Store, repo *ingest.Repo, genuine int, needsHuman bool) domain.Finding {
+	t.Helper()
+	locus := NewLocusResolver(repo.Root()).Resolve("bug.go", 10)
+	fi := domain.Finding{
+		Fingerprint:     domain.FingerprintV3("bug.go", locus, domain.DefectNilDeref, "Greeting"),
+		Title:           "T2 survivor of a degraded 1-seat panel",
+		Description:     "verified while the budget was degraded; only one reviewer judged it",
+		Severity:        domain.SeverityHigh,
+		Tier:            domain.TierVerified,
+		Status:          domain.StatusOpen,
+		Lens:            "nil-safety/error-handling",
+		File:            "bug.go",
+		Line:            10,
+		LocusKey:        domain.LocusKey("bug.go", locus),
+		DefectKind:      domain.DefectNilDeref,
+		Subject:         "Greeting",
+		GenuineVerdicts: genuine,
+	}
+	if needsHuman {
+		fi.NeedsHuman = true
+		fi.NeedsHumanReason = domain.NeedsHumanReasonBelowQuorum
+	}
+	return seedFinding(t, st, fi)
+}
+
+// TestReverifyUnderValidated_ReachesMinimumAndConverges seeds an OPEN T2
+// finding validated by a single reviewer, runs ReverifyUnderValidated with a
+// verifier that returns not-refuted for every seat, and asserts:
+//   - the finder was NEVER invoked (drain is verify-only)
+//   - the row stays open T2 and its genuine-verdict count reaches the
+//     3-reviewer minimum (the full default panel produced 3 genuine verdicts)
+//   - a SECOND run is a no-op (zero further verifier calls): the finding
+//     reached the minimum and dropped out of the WorkRemaining query.
+func TestReverifyUnderValidated_ReachesMinimumAndConverges(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	seeded := seedUnderValidatedFinding(t, st, repo, 1, false)
+
+	finder := newScriptedClient()
+	finder.fallback = candJSON(realCand)
+
+	verifier := newScriptedClient()
+	verifier.fallback = notRefutedJSON
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	res, err := f.ReverifyUnderValidated(ctx)
+	if err != nil {
+		t.Fatalf("ReverifyUnderValidated: %v", err)
+	}
+	if res.Stats.Resumed != 1 {
+		t.Errorf("Stats.Resumed = %d, want 1", res.Stats.Resumed)
+	}
+	if n := finder.callCount(); n != 0 {
+		t.Errorf("finder.callCount() = %d, want 0 (modeRevalidate must skip the finder)", n)
+	}
+
+	got, err := st.GetFindingByFingerprint(ctx, seeded.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint: %v", err)
+	}
+	if got.Status != domain.StatusOpen || got.Tier != domain.TierVerified {
+		t.Errorf("after revalidation: Status=%q Tier=%v, want open T2", got.Status, got.Tier)
+	}
+	if got.GenuineVerdicts < MinReviewerValidation {
+		t.Errorf("after revalidation: GenuineVerdicts = %d, want >= %d (full panel must record its genuine-verdict count)", got.GenuineVerdicts, MinReviewerValidation)
+	}
+	if got.ID != seeded.ID {
+		t.Errorf("revalidated row ID = %q, want the seeded row's ID %q (a different ID means a duplicate was created)", got.ID, seeded.ID)
+	}
+
+	// Convergence: the finding now meets the minimum, so a second drain must
+	// issue no further verifier calls.
+	callsAfterFirst := verifier.callCount()
+	if _, err := f.ReverifyUnderValidated(ctx); err != nil {
+		t.Fatalf("second ReverifyUnderValidated: %v", err)
+	}
+	if n := verifier.callCount(); n != callsAfterFirst {
+		t.Errorf("second run issued %d further verifier calls, want 0 (drain must converge once the minimum is reached)", n-callsAfterFirst)
+	}
+}
+
+// TestReverifyUnderValidated_DismissesRefuted seeds an under-validated OPEN
+// T2 finding and runs the drain with a verifier that refutes: the
+// Candidate.Reverify kill path must dismiss the durable row instead of
+// leaving it open forever.
+func TestReverifyUnderValidated_DismissesRefuted(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	seeded := seedUnderValidatedFinding(t, st, repo, 1, false)
+
+	finder := newScriptedClient()
+	finder.fallback = candJSON(realCand)
+
+	verifier := newScriptedClient()
+	verifier.fallback = refutedJSON
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if _, err := f.ReverifyUnderValidated(ctx); err != nil {
+		t.Fatalf("ReverifyUnderValidated: %v", err)
+	}
+
+	got, err := st.GetFindingByFingerprint(ctx, seeded.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint: %v", err)
+	}
+	if got.Status != domain.StatusDismissed {
+		t.Errorf("after refuted revalidation: Status=%q, want %q", got.Status, domain.StatusDismissed)
+	}
+}
+
+// TestReverifyUnderValidated_ClearsBelowQuorumFlag seeds a below-quorum
+// NeedsHuman T2 survivor. A revalidation panel where every seat produces a
+// genuine verdict meets the quorum floor, which RESOLVES the below-quorum
+// cause: the sticky needs_human upsert guard must be released through the
+// targeted store path.
+func TestReverifyUnderValidated_ClearsBelowQuorumFlag(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	seeded := seedUnderValidatedFinding(t, st, repo, 1, true)
+
+	finder := newScriptedClient()
+	finder.fallback = candJSON(realCand)
+
+	verifier := newScriptedClient()
+	verifier.fallback = notRefutedJSON
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if _, err := f.ReverifyUnderValidated(ctx); err != nil {
+		t.Fatalf("ReverifyUnderValidated: %v", err)
+	}
+
+	got, err := st.GetFindingByFingerprint(ctx, seeded.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint: %v", err)
+	}
+	if got.NeedsHuman || got.NeedsHumanReason != domain.NeedsHumanReasonNone {
+		t.Errorf("below-quorum flag survived a full-quorum revalidation: NeedsHuman=%v reason=%q", got.NeedsHuman, got.NeedsHumanReason)
+	}
+	if got.Status != domain.StatusOpen || got.Tier != domain.TierVerified {
+		t.Errorf("after revalidation: Status=%q Tier=%v, want open T2", got.Status, got.Tier)
+	}
+}
+
+// TestReverifyUnderValidated_SkipsWhenPanelCannotConverge: with Refuters
+// explicitly configured below MinReviewerValidation, every rerun would record
+// a count that can never reach the minimum — the drain must be a deliberate
+// no-op (no snapshot, no LLM calls) instead of re-spending every invocation.
+func TestReverifyUnderValidated_SkipsWhenPanelCannotConverge(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	seeded := seedUnderValidatedFinding(t, st, repo, 1, false)
+
+	finder := newScriptedClient()
+	verifier := newScriptedClient()
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{Limits: StageLimits{Refuters: 1}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	res, err := f.ReverifyUnderValidated(ctx)
+	if err != nil {
+		t.Fatalf("ReverifyUnderValidated: %v", err)
+	}
+	if res == nil {
+		t.Fatal("ReverifyUnderValidated returned nil result")
+	}
+	if n := verifier.callCount(); n != 0 {
+		t.Errorf("verifier.callCount() = %d, want 0 (sub-minimum panel must skip the drain)", n)
+	}
+
+	got, err := st.GetFindingByFingerprint(ctx, seeded.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetFindingByFingerprint: %v", err)
+	}
+	if got.GenuineVerdicts != 1 {
+		t.Errorf("GenuineVerdicts = %d, want 1 (untouched)", got.GenuineVerdicts)
+	}
+}
+
+// TestReverifyUnderValidated_Empty verifies that a store whose open T2
+// findings all meet the minimum is a single-query no-op: no snapshot, no LLM
+// calls.
+func TestReverifyUnderValidated_Empty(t *testing.T) {
+	ctx := context.Background()
+	st, repo := openFixture(t)
+
+	seedUnderValidatedFinding(t, st, repo, MinReviewerValidation, false)
+
+	finder := newScriptedClient()
+	verifier := newScriptedClient()
+
+	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	res, err := f.ReverifyUnderValidated(ctx)
+	if err != nil {
+		t.Fatalf("ReverifyUnderValidated: %v", err)
+	}
+	if res.Stats.Resumed != 0 {
+		t.Errorf("Stats.Resumed = %d, want 0", res.Stats.Resumed)
+	}
+	if n := verifier.callCount(); n != 0 {
+		t.Errorf("verifier.callCount() = %d, want 0 (nothing under-validated)", n)
+	}
+	if n := finder.callCount(); n != 0 {
+		t.Errorf("finder.callCount() = %d, want 0", n)
+	}
+}
