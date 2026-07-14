@@ -70,7 +70,7 @@ Requires the gh CLI to be installed and authenticated.`,
 
 			gh := publishGH
 			if gh == nil {
-				gh = engine.RealGH
+				gh = engine.NewPacedGH(engine.RealGH)
 			}
 
 			prov := provenanceFromConfig(cfg)

@@ -87,7 +87,7 @@ func newReviewCmd() *cobra.Command {
 				Lenses:      lenses,
 				Suspected:   reviewCfg.suspected,
 				DryRun:      dryRun,
-				GH:          engine.RealGH,
+				GH:          engine.NewPacedGH(engine.RealGH),
 				Out:         out,
 				ErrOut:      errOut,
 			})
