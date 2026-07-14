@@ -326,15 +326,16 @@ func (f *Funnel) runVerifyAndPersist(
 		// Killed: signal so triage can discard any staged corroboration.
 		reg.SignalPersisted(c.Fingerprint, false)
 		if c.Reverify {
-			// Reconstructed T3 finding refuted on re-verification: it has a
-			// durable open row the normal kill path (persists nothing) would
-			// leave open forever. Transition it to dismissed with a
-			// re-verification-specific reason so the suppression table records
-			// the event (UpdateStatus(StatusDismissed) doubles as a permanent
-			// suppression, so the same fingerprint will never resurface).
+			// Reconstructed finding (T3 suspected orphan or under-validated T2)
+			// refuted on re-verification: it has a durable open row the normal
+			// kill path (persists nothing) would leave open forever. Transition
+			// it to dismissed with a re-verification-specific reason so the
+			// suppression table records the event (UpdateStatus(StatusDismissed)
+			// doubles as a permanent suppression, so the same fingerprint will
+			// never resurface).
 			if err := f.store.UpdateStatus(ctx, c.Fingerprint, domain.StatusDismissed,
-				"re-verification refuted this previously-suspected (Tier 3) finding"); err != nil {
-				f.note(result, fmt.Sprintf("reverify: dismiss refuted T3 %q failed: %v", c.Title, err))
+				"re-verification refuted this previously-recorded finding"); err != nil {
+				f.note(result, fmt.Sprintf("reverify: dismiss refuted %q failed: %v", c.Title, err))
 			}
 		}
 		// Persist the kill trace into the dead_hypotheses audit store
@@ -443,8 +444,9 @@ func (f *Funnel) runVerifyAndPersist(
 			}
 			return domain.NeedsHumanReasonNone
 		}(),
-		Sites:   allSites,
-		SweptAt: sweptAt,
+		Sites:           allSites,
+		SweptAt:         sweptAt,
+		GenuineVerdicts: len(genuine),
 	}
 	stored, err := f.store.UpsertFinding(ctx, finding)
 	if err != nil {
@@ -459,6 +461,22 @@ func (f *Funnel) runVerifyAndPersist(
 		f.deletePending(ctx, c.PendingID, result)
 		reg.SignalPersisted(c.Fingerprint, false)
 		return
+	}
+	// Quorum met on THIS panel: release a stale below-quorum flag. UpsertFinding's
+	// needs_human guard is deliberately sticky (implicit re-scans must never clear
+	// prover-set flags), so a finding flagged below_quorum by an earlier degraded
+	// panel keeps the flag even after a full-quorum panel just judged it. That
+	// cause is now resolved — clear it through the targeted store path (which
+	// keys on the typed reason column and never touches prover_exhausted) and
+	// mirror the release on the in-memory finding so the repro enqueue below and
+	// the run's Result see the post-release state.
+	if !needsHuman && stored.NeedsHuman && stored.NeedsHumanReason == domain.NeedsHumanReasonBelowQuorum {
+		if cerr := f.store.ClearBelowQuorumNeedsHuman(ctx, c.Fingerprint); cerr != nil {
+			f.note(result, fmt.Sprintf("verify: clear below-quorum flag on %q failed: %v", c.Title, cerr))
+		} else {
+			stored.NeedsHuman = false
+			stored.NeedsHumanReason = domain.NeedsHumanReasonNone
+		}
 	}
 	// Survived and durably persisted as T2: drop the WAL row.
 	f.deletePending(ctx, c.PendingID, result)

@@ -10,16 +10,18 @@ import (
 
 // VerifyOpts holds the parsed flag values for `bugbot verify`.
 type VerifyOpts struct {
-	Target    string
-	Force     bool
-	Suspected bool
-	Out       io.Writer
+	Target         string
+	Force          bool
+	Suspected      bool
+	UnderValidated bool
+	Out            io.Writer
 }
 
 // VerifyResult is the outcome of a Dispatcher.Verify call.
 type VerifyResult struct {
-	Drain     *funnel.Result
-	Suspected *funnel.Result // nil unless Suspected was requested
+	Drain          *funnel.Result
+	Suspected      *funnel.Result // nil unless Suspected was requested
+	UnderValidated *funnel.Result // nil unless UnderValidated was requested
 }
 
 // Verify implements `bugbot verify`: a one-shot verify drain that picks up
@@ -34,6 +36,14 @@ type VerifyResult struct {
 // pipeline — finder/cartographer remain off — but re-judges the durable T3
 // rows against the current code so they can be promoted to Tier 2 or
 // dismissed as refuted.
+//
+// Pass UnderValidated to also re-run the verifier panel on every OPEN Tier-2
+// finding validated by fewer than funnel.MinReviewerValidation genuine
+// reviewer verdicts (budget-degraded 1-seat panels, seat failures, or
+// pre-migration rows with an unknown count). Survivors record the new panel's
+// count and get their severity re-ranked inline; refuted findings are
+// dismissed. Repeat runs converge: the count is monotone per code version, so
+// each finding drops out once it reaches the minimum.
 func (d *Dispatcher) Verify(ctx context.Context, opts VerifyOpts) (*VerifyResult, error) {
 	// Advisory scan-lock: mirrors `bugbot scan`'s lock so a manual verify does
 	// not race the daemon or a concurrent scan.
@@ -114,6 +124,28 @@ func (d *Dispatcher) Verify(ctx context.Context, opts VerifyOpts) (*VerifyResult
 			rres.Stats.Resumed, rres.Stats.Verified, rres.Stats.Killed,
 		)
 		result.Suspected = rres
+	}
+
+	// UnderValidated: revalidation pass over durable open T2 findings whose
+	// genuine-verdict count is below funnel.MinReviewerValidation. The finder
+	// stays off; the verifier re-runs the full panel so each finding accrues
+	// the minimum reviewer validation (or is dismissed as refuted). Only run
+	// when the flag is set so the default behaviour is byte-identical to today.
+	if opts.UnderValidated {
+		_, _ = fmt.Fprintln(out,
+			"\nRe-validating open Tier-2 findings below the 3-reviewer minimum (verifier only, no finder; this can take a few minutes)…")
+		vres, verr := f.ReverifyUnderValidated(ctx)
+		if verr != nil {
+			return nil, fmt.Errorf("revalidate under-validated: %w", verr)
+		}
+		if vres == nil {
+			vres = &funnel.Result{}
+		}
+		_, _ = fmt.Fprintf(out,
+			"Revalidate: %d re-judged, %d verified, %d killed.\n",
+			vres.Stats.Resumed, vres.Stats.Verified, vres.Stats.Killed,
+		)
+		result.UnderValidated = vres
 	}
 	return result, nil
 }

@@ -175,11 +175,11 @@ func (s *Store) UpsertFinding(ctx context.Context, f domain.Finding) (domain.Fin
 		var existingID, existingCreated, existingFileHash string
 		var existingTier domain.Tier
 		var existingRepro, existingReproWitness, existingSweptAt sql.NullString
-		var existingNeedsHuman int
+		var existingNeedsHuman, existingGenuineVerdicts int
 		var existingNeedsHumanReason string
 		err = tx.QueryRowContext(ctx,
-			`SELECT id, created_at, tier, repro_path, repro_witness, needs_human, needs_human_reason, file_hash, swept_at FROM findings WHERE fingerprint = ?`, f.Fingerprint,
-		).Scan(&existingID, &existingCreated, &existingTier, &existingRepro, &existingReproWitness, &existingNeedsHuman, &existingNeedsHumanReason, &existingFileHash, &existingSweptAt)
+			`SELECT id, created_at, tier, repro_path, repro_witness, needs_human, needs_human_reason, file_hash, swept_at, genuine_verdicts FROM findings WHERE fingerprint = ?`, f.Fingerprint,
+		).Scan(&existingID, &existingCreated, &existingTier, &existingRepro, &existingReproWitness, &existingNeedsHuman, &existingNeedsHumanReason, &existingFileHash, &existingSweptAt, &existingGenuineVerdicts)
 
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -198,15 +198,15 @@ func (s *Store) UpsertFinding(ctx context.Context, f domain.Finding) (domain.Fin
 				   status, lens, file, line, commit_sha, file_hash, repro_path, repro_witness,
 				   fix_patch, needs_human, needs_human_reason,
 				   corroborating_lenses, sites, confidence, created_at, updated_at, swept_at, locus_key,
-				   defect_kind, subject)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				   defect_kind, subject, genuine_verdicts)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				f.ID, f.Fingerprint, f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
 				f.Tier, string(f.Status), f.Lens, f.File, f.Line, f.CommitSHA,
 				f.FileHash, nullStr(f.ReproPath), f.ReproWitness, f.FixPatch, boolInt(f.NeedsHuman),
 				string(f.NeedsHumanReason),
 				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
 				f.CreatedAt.Format(timeLayout), f.UpdatedAt.Format(timeLayout), nullTime(f.SweptAt), f.LocusKey,
-				string(f.DefectKind), f.Subject,
+				string(f.DefectKind), f.Subject, f.GenuineVerdicts,
 			); err != nil {
 				return annotateErr(s.path, "upsert_finding", err)
 			}
@@ -295,6 +295,16 @@ func (s *Store) UpsertFinding(ctx context.Context, f domain.Finding) (domain.Fin
 					_ = rerr
 				}
 			}
+			// genuine_verdicts: monotone per code version. While the anchored
+			// code (file_hash) is unchanged, reviewer validation only ever
+			// accumulates — a later budget-degraded 1-seat panel must not
+			// erase a prior full-panel validation, and callers that round-trip
+			// a loaded row (or construct one without the field) must not zero
+			// it. When the code changed, the old validation is stale evidence:
+			// reset to the incoming panel's count.
+			if !codeChanged && existingGenuineVerdicts > f.GenuineVerdicts {
+				f.GenuineVerdicts = existingGenuineVerdicts
+			}
 
 			// Recompute confidence after promotion-guard resolution (tier may have changed).
 			f.Confidence = findingConfidence(f.Tier, f.Severity, len(f.CorroboratingLenses))
@@ -317,7 +327,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f domain.Finding) (domain.Fin
 				  needs_human = CASE WHEN needs_human = 1 THEN 1 ELSE ? END,
 				  needs_human_reason = CASE WHEN needs_human = 1 THEN needs_human_reason ELSE ? END,
 				  corroborating_lenses=?, sites=?, confidence=?, updated_at=?, locus_key=?,
-				  defect_kind=?, subject=?, superseded_by=?, superseded_reason=?,
+				  defect_kind=?, subject=?, superseded_by=?, superseded_reason=?, genuine_verdicts=?,
 				  swept_at = CASE WHEN ? = file_hash THEN swept_at ELSE NULL END
 				WHERE id=?`,
 				f.Title, f.Description, f.Reasoning, f.VerdictDetail, f.Severity,
@@ -331,7 +341,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f domain.Finding) (domain.Fin
 				string(f.NeedsHumanReason),
 				encodeLenses(f.CorroboratingLenses), encodeSites(f.Sites), f.Confidence,
 				f.UpdatedAt.Format(timeLayout), f.LocusKey,
-				string(f.DefectKind), f.Subject, f.SupersededBy, f.SupersededReason,
+				string(f.DefectKind), f.Subject, f.SupersededBy, f.SupersededReason, f.GenuineVerdicts,
 				f.FileHash, f.ID,
 			); err != nil {
 				return annotateErr(s.path, "upsert_finding", err)
@@ -627,6 +637,42 @@ func (s *Store) UnsweptOpenFindings(ctx context.Context) ([]domain.Finding, erro
 		nil, func(r *sql.Rows) (domain.Finding, error) { return scanFinding(r) })
 }
 
+// UnderValidatedOpenFindings returns all OPEN Tier-2 (verified) findings whose
+// genuine_verdicts count is below threshold, ordered oldest-updated-first.
+// This is the WorkRemaining query for the revalidation drain
+// (funnel.ReverifyUnderValidated): each row was persisted by a verification
+// panel where fewer than threshold reviewer seats produced a genuine verdict
+// (budget-degraded 1-seat panels, seat failures, or pre-migration rows whose
+// count is the unknown-sentinel 0). Tier-3 suspected rows are excluded — they
+// are ReverifySuspected's population — and Tier-1/Tier-0 rows carry sandbox
+// repro evidence that supersedes reviewer count.
+func (s *Store) UnderValidatedOpenFindings(ctx context.Context, threshold int) ([]domain.Finding, error) {
+	return queryRows(ctx, s, "under_validated_open_findings",
+		findingColumns+findingFrom+" WHERE f.status = 'open' AND f.tier = ? AND f.genuine_verdicts < ? ORDER BY f.updated_at ASC, f.id ASC",
+		[]any{int(domain.TierVerified), threshold}, func(r *sql.Rows) (domain.Finding, error) { return scanFinding(r) })
+}
+
+// ClearBelowQuorumNeedsHuman clears the NeedsHuman flag on the finding with the
+// given fingerprint IF AND ONLY IF its recorded reason is below_quorum. It is
+// the targeted release valve for UpsertFinding's sticky needs_human guard: the
+// guard exists so implicit re-scans never clear prover-set flags, but a
+// verification panel that has since met the quorum floor RESOLVES the
+// below-quorum cause, and leaving the flag set would strand the finding outside
+// the repro backlog forever. Prover-exhausted flags are untouched (the WHERE
+// clause keys on the typed reason column). No-op when the row does not match.
+func (s *Store) ClearBelowQuorumNeedsHuman(ctx context.Context, fingerprint string) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE findings SET needs_human = 0, needs_human_reason = '', updated_at = ?
+			 WHERE fingerprint = ? AND needs_human = 1 AND needs_human_reason = ?`,
+			nowUTC().Format(timeLayout), fingerprint, string(domain.NeedsHumanReasonBelowQuorum),
+		); err != nil {
+			return annotateErr(s.path, "clear_below_quorum_needs_human", err)
+		}
+		return nil
+	})
+}
+
 // AppendFindingSites appends sites to the sites column of the finding identified
 // by fingerprint, deduplicating entries with the same (file,line). Used by the
 // streaming triage consumer when a root-cause-merged member's primary has already
@@ -692,7 +738,7 @@ const findingColumns = `SELECT f.id, f.fingerprint, f.title, f.description, f.re
 	f.severity, f.tier, f.status, f.lens, f.file, f.line, f.commit_sha, f.file_hash, f.repro_path, f.repro_witness,
 	f.fix_patch, f.needs_human, f.needs_human_reason,
 	f.corroborating_lenses, f.sites, f.confidence, f.created_at, f.updated_at, f.swept_at, f.locus_key,
-	f.defect_kind, f.subject, f.superseded_by, f.superseded_reason,
+	f.defect_kind, f.subject, f.superseded_by, f.superseded_reason, f.genuine_verdicts,
 	COALESCE(ra.exit_zero_count, 0) AS exit_zero_count`
 
 // findingFrom is the FROM clause that pairs with findingColumns. The LEFT JOIN
@@ -736,7 +782,7 @@ func scanFinding(sc rowScanner) (domain.Finding, error) {
 		&f.Severity, &f.Tier, &status, &f.Lens, &f.File, &f.Line, &f.CommitSHA,
 		&f.FileHash, &repro, &reproWitness, &f.FixPatch, &needsHuman, &needsHumanReason,
 		&corrob, &sitesStr, &f.Confidence, &createdAt, &updatedAt, &sweptAt, &f.LocusKey,
-		&f.DefectKind, &f.Subject, &f.SupersededBy, &f.SupersededReason,
+		&f.DefectKind, &f.Subject, &f.SupersededBy, &f.SupersededReason, &f.GenuineVerdicts,
 		&exitZeroCount,
 	); err != nil {
 		return domain.Finding{}, err

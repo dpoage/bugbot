@@ -56,7 +56,9 @@ func (d *Daemon) postCycle(ctx context.Context, fres *funnel.Result, res *cycleR
 
 // runPostCycleDrains reconciles stranded work after the main cycle: it verifies
 // any pending_candidates left by an interrupted run (a no-op on an empty WAL),
-// then re-ranks every open finding not yet swept (this cycle's findings
+// re-validates open Tier-2 findings verified by fewer than the minimum reviewer
+// count (a no-op when every open T2 already meets it), then re-ranks every open
+// finding not yet swept (this cycle's findings
 // included — run() no longer re-ranks inline). It builds its own per-cycle
 // funnel because postCycle has callers with no funnel in scope (a poll cycle
 // with new commits but nothing in scope to scan). Day-budget gated via a
@@ -89,6 +91,21 @@ func (d *Daemon) runPostCycleDrains(ctx context.Context) {
 			return
 		}
 		d.log.Error("daemon: post-cycle verify drain failed", "err", err)
+	}
+
+	// Revalidation drain: re-run the verifier panel on open T2 findings whose
+	// genuine-verdict count is below funnel.MinReviewerValidation — survivors
+	// of budget-degraded 1-seat panels from THIS cycle included, since this
+	// drain's funnel has a fresh per-cycle budget. Convergent across cycles:
+	// the count is monotone per code version, so each finding drops out once
+	// it reaches the minimum. Runs BEFORE the sweep drain so a revalidated
+	// survivor whose inline severity re-rank was budget-skipped is swept in
+	// the same pass.
+	if _, err := f.ReverifyUnderValidated(ctx); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		d.log.Error("daemon: post-cycle revalidation drain failed", "err", err)
 	}
 
 	if _, err := f.SweepDrain(ctx); err != nil {

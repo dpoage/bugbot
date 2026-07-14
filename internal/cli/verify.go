@@ -26,9 +26,10 @@ import (
 // conflicts during the epic.
 func newVerifyCmd() *cobra.Command {
 	var (
-		target    string
-		force     bool
-		suspected bool
+		target         string
+		force          bool
+		suspected      bool
+		undervalidated bool
 	)
 
 	cmd := &cobra.Command{
@@ -49,7 +50,15 @@ orphans from a hard-budget stop or no-verdict panel that have no pending_candida
 WAL row. This is a second pass over the same funnel pipeline — finder/cartographer
 remain off — but re-judges the durable T3 rows against the current code so they
 can be promoted to Tier 2 or dismissed as refuted. Without --suspected the T3
-orphans are left untouched.`,
+orphans are left untouched.
+
+Pass --undervalidated to also re-run the verifier panel on every OPEN Tier-2
+finding validated by fewer than 3 genuine reviewer verdicts (survivors of
+budget-degraded single-seat panels, panels with seat failures, or rows recorded
+before the count existed). Survivors accrue the new panel's reviewer count and
+get their severity re-ranked; refuted findings are dismissed. The pass is
+convergent: repeat it until every open Tier-2 finding reaches the 3-reviewer
+minimum.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -67,12 +76,13 @@ orphans are left untouched.`,
 			}
 			// Default `bugbot verify` stays quiet and never writes a status.json
 			// snapshot (which would race a running daemon's single-writer
-			// snapshot). With --suspected the re-verify pass runs the verifier on
-			// every open Tier-3 finding and can take minutes, so attach a stdout
+			// snapshot). With --suspected or --undervalidated the re-verify pass
+			// runs the verifier on many open findings and can take minutes, so
+			// attach a stdout
 			// LogRenderer — plain log lines only, no status.json — for live
 			// per-stage / per-finding feedback.
 			var sink progress.EventSink
-			if suspected {
+			if suspected || undervalidated {
 				sink = progress.NewLogRenderer(cmd.OutOrStdout())
 			}
 
@@ -83,10 +93,11 @@ orphans are left untouched.`,
 			defer func() { _ = d.Close() }()
 
 			_, err = d.Verify(ctx, engine.VerifyOpts{
-				Target:    target,
-				Force:     force,
-				Suspected: suspected,
-				Out:       cmd.OutOrStdout(),
+				Target:         target,
+				Force:          force,
+				Suspected:      suspected,
+				UnderValidated: undervalidated,
+				Out:            cmd.OutOrStdout(),
 			})
 			return err
 		},
@@ -97,6 +108,8 @@ orphans are left untouched.`,
 		"bypass the advisory single-scan lock and proceed even if another scan appears active")
 	cmd.Flags().BoolVar(&suspected, "suspected", false,
 		"also re-verify open Tier-3 suspected findings (re-runs the verifier without the finder)")
+	cmd.Flags().BoolVar(&undervalidated, "undervalidated", false,
+		"also re-validate open Tier-2 findings verified by fewer than 3 reviewers (re-runs the verifier panel without the finder)")
 
 	return cmd
 }

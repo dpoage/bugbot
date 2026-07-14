@@ -129,6 +129,18 @@ type Finding struct {
 	// NeedsHuman is true; NeedsHumanReasonNone when NeedsHuman is false.
 	// See NeedsHumanReason constants in finding.go.
 	NeedsHumanReason NeedsHumanReason
+	// GenuineVerdicts is the highest count of genuine reviewer verdicts (panel
+	// seats that examined the code and produced a parseable verdict — the same
+	// notion the funnel's quorum check counts) that any single verification
+	// panel has produced against the current FileHash. A budget-degraded
+	// verify runs a 1-seat panel, so a survivor may carry 1 here; the
+	// revalidation drain re-runs the panel on open Tier-2 findings below the
+	// minimum until they reach it. Monotone per code version: UpsertFinding
+	// keeps MAX(stored, incoming) while FileHash is unchanged and resets to
+	// the incoming count when it changes (old validation is stale evidence).
+	// 0 = unknown (pre-migration row or never verified) — eligible for
+	// revalidation.
+	GenuineVerdicts int
 	// CorroboratingLenses are the OTHER lenses that independently reported this
 	// same defect and were collapsed into this finding by triage's location-based
 	// cross-lens dedup. It excludes the finding's own Lens. Persisted as a

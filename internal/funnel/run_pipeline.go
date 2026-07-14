@@ -272,6 +272,10 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	//   - modeReverify:    ListFindings open Tier-3 suspected (durable findings
 	//                      orphaned by a budget/verify-fail stop; the WAL row is
 	//                      already gone, so we replay from the findings table).
+	//   - modeRevalidate:  UnderValidatedOpenFindings (durable open Tier-2 rows
+	//                      whose genuine-verdict count is below
+	//                      MinReviewerValidation; like modeReverify, no WAL row
+	//                      exists — we replay from the findings table).
 	//   - modeFull:        ListPendingCandidates (same as VerifyDrain; the fresh
 	//                      hypothesize stage ALSO runs and produces new candidates).
 	//
@@ -287,6 +291,16 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 		}
 		replay = make([]Candidate, 0, len(susp))
 		for _, fi := range susp {
+			replay = append(replay, findingToCandidate(fi))
+		}
+	case modeRevalidate:
+		under, listErr := f.store.UnderValidatedOpenFindings(ctx, MinReviewerValidation)
+		if listErr != nil {
+			f.note(result, fmt.Sprintf("resume: UnderValidatedOpenFindings failed: %v", listErr))
+			under = nil
+		}
+		replay = make([]Candidate, 0, len(under))
+		for _, fi := range under {
 			replay = append(replay, findingToCandidate(fi))
 		}
 	default:
@@ -336,7 +350,8 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			emit(c)
 		}
 		result.Stats.Resumed = len(replay)
-		// In modeVerifyDrain / modeReverify the finder/cartographer are skipped:
+		// In modeVerifyDrain / modeReverify / modeRevalidate the finder and
+		// cartographer are skipped:
 		// candCh carries only the replayed candidates. Everything downstream is
 		// identical.
 		if mode == modeFull {

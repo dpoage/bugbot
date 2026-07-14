@@ -69,10 +69,12 @@ type Candidate struct {
 	// entries come from merged-away members. Empty when no root-cause merges
 	// occurred (single-site finding).
 	Sites []Site
-	// Reverify marks a candidate reconstructed from a durable OPEN Tier-3 suspected
-	// finding for re-verification (ReverifySuspected). Unlike a fresh or WAL-replayed
-	// candidate it has a durable open finding row and NO pending WAL row (PendingID==""),
-	// so the verify kill path must transition that row out of open when refuted.
+	// Reverify marks a candidate reconstructed from a durable OPEN finding for
+	// re-verification: a Tier-3 suspected orphan (ReverifySuspected) or an
+	// under-validated Tier-2 survivor (ReverifyUnderValidated). Unlike a fresh
+	// or WAL-replayed candidate it has a durable open finding row and NO pending
+	// WAL row (PendingID==""), so the verify kill path must transition that row
+	// out of open when refuted.
 	Reverify bool
 }
 

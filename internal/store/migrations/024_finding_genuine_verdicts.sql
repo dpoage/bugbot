@@ -1,0 +1,19 @@
+-- 024_finding_genuine_verdicts.sql — reviewer-validation depth per finding.
+--
+-- genuine_verdicts records the highest count of GENUINE reviewer verdicts
+-- (seats that examined the code and produced a parseable verdict — the same
+-- notion funnel's genuineVerdicts/belowQuorum use) that any single
+-- verification panel has produced against the finding's current file_hash.
+--
+-- A budget-degraded verify runs a 1-seat panel (degradedRefuters), so a
+-- survivor can be persisted with only one reviewer having judged it and no
+-- structural record of that fact. This column is that record: the
+-- revalidation drain (funnel.ReverifyUnderValidated) re-runs the full panel
+-- on open Tier-2 findings whose value is below the minimum
+-- (funnel.MinReviewerValidation) until each has been validated by at least
+-- that many reviewers.
+--
+-- DEFAULT 0 = unknown (pre-migration row): deliberately eligible for
+-- revalidation, since we cannot reconstruct the panel size retroactively
+-- without parsing prose.
+ALTER TABLE findings ADD COLUMN genuine_verdicts INTEGER NOT NULL DEFAULT 0;
