@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -253,7 +255,7 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			} else {
 				_, _ = fmt.Fprintf(w, "backsynced issue #%d for %s (closed on GitHub; finding already %s)\n", ba.issueNumber, ba.fingerprint[:12], status)
 			}
-			if err := st.UpsertPublishedIssue(ctx, ba.fingerprint, ba.issueNumber, store.IssueStateClosed); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, ba.fingerprint, ba.issueNumber, store.IssueStateClosed, ""); err != nil {
 				return fmt.Errorf("publish: backsync record closed %s: %w", ba.fingerprint[:12], err)
 			}
 			backsynced++
@@ -291,7 +293,57 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 	// Resolve the repo URL once; tolerate failure (degrade: no permalinks).
 	repoURL := resolveRepoURL(ctx, gh)
 
-	created, updated, adopted, reopened, closed, skipped, stale := 0, 0, 0, 0, 0, 0, 0
+	created, updated, adopted, reopened, closed, skipped, stale, failed := 0, 0, 0, 0, 0, 0, 0, 0
+
+	// printSummary writes the one-line apply-loop tally to w. Factored out of
+	// the normal end-of-loop print because the rate-limit abort path below
+	// must also emit it -- before returning the abort error -- so the
+	// daemon's log always shows how far the plan got, not just that it
+	// failed.
+	printSummary := func() {
+		_, _ = fmt.Fprintf(w, "publish: created=%d updated=%d adopted=%d reopened=%d closed=%d backsynced=%d skipped=%d stale=%d failed=%d\n",
+			created, updated, adopted, reopened, closed, backsynced, skipped, stale, failed)
+	}
+
+	// applyGHErr classifies a gh error hit while applying one planned
+	// action and reports how the loop should react:
+	//
+	//   - non-nil return: the WHOLE run must stop. Either gh is missing
+	//     from PATH (nothing else in the plan can succeed either, so keep
+	//     going is pointless) or engine.IsGHRateLimited(err) is true --
+	//     the paced runner (engine.NewPacedGH, wired in at the command
+	//     layer) has already exhausted its 10s/30s/60s retry budget, so
+	//     retrying again here would only burn more GitHub quota. The
+	//     caller must `return` the result immediately.
+	//   - nil return: the failure is scoped to this one action (422
+	//     validation, a transient 5xx that outlived the paced retries,
+	//     etc.). It has already been logged to w and counted in failed;
+	//     the caller should `continue` to the next planned action instead
+	//     of dropping the rest of the plan. This is safe because every
+	//     composite action writes its pending/closing tombstone state to
+	//     the store BEFORE the gh call that can fail here, so a skipped
+	//     action resumes correctly next cycle -- the same tombstone
+	//     design the 410/404 stale-row paths below already rely on.
+	//
+	// Store errors are NOT routed through this helper: any st.* failure
+	// still aborts the run directly at its call site (unchanged), because
+	// a broken local db risks desyncing state no matter which action hit it.
+	applyGHErr := func(action string, issueNumber int, fingerprint string, err error) error {
+		if isGHMissing(err) {
+			return errGHRequired()
+		}
+		if engine.IsGHRateLimited(err) {
+			printSummary()
+			return fmt.Errorf("publish: aborting remaining plan after GitHub rate limit retries exhausted (%s for %s): %w", action, fingerprint[:12], err)
+		}
+		if issueNumber > 0 {
+			_, _ = fmt.Fprintf(w, "failed %s issue #%d for %s: %v\n", action, issueNumber, fingerprint[:12], err)
+		} else {
+			_, _ = fmt.Fprintf(w, "failed %s for %s: %v\n", action, fingerprint[:12], err)
+		}
+		failed++
+		return nil
+	}
 
 	for _, a := range plan {
 		switch act := a.(type) {
@@ -306,14 +358,18 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			// gh create and the store write leaves a tombstone: the next run
 			// plans a recover (marker search) instead of blindly creating a
 			// duplicate issue.
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, 0, store.IssueStatePending); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, 0, store.IssueStatePending, ""); err != nil {
 				return fmt.Errorf("publish: record pending issue: %w", err)
 			}
-			n, err := ghCreateIssue(ctx, gh, act.finding.Title, renderIssueBody(act.finding, repoURL, prov), cfg.Labels)
+			body := renderIssueBody(act.finding, repoURL, prov)
+			n, err := ghCreateIssue(ctx, gh, act.finding.Title, body, cfg.Labels)
 			if err != nil {
-				return err
+				if aerr := applyGHErr("create", 0, act.finding.Fingerprint, err); aerr != nil {
+					return aerr
+				}
+				continue
 			}
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen, bodyHashHex(body)); err != nil {
 				return fmt.Errorf("publish: record created issue: %w", err)
 			}
 			_, _ = fmt.Fprintf(w, "created issue #%d for %s (%s)\n", n, act.finding.Fingerprint[:12], act.finding.Title)
@@ -323,12 +379,14 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			// A re-discovered finding whose fingerprint drifted: adopt the existing
 			// issue (record the new fingerprint -> issue mapping) rather than file a
 			// duplicate. No gh write; the next cycle's update/skip path takes over.
+			// No body was pushed by this action, so body_hash stays "" -- the
+			// eventual update/skip decision is made fresh next cycle.
 			if dryRun {
 				_, _ = fmt.Fprintf(w, "dry-run: adopt issue #%d for %s (re-discovered; fingerprint drifted)\n", act.issueNumber, act.finding.Fingerprint[:12])
 				adopted++
 				continue
 			}
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen, ""); err != nil {
 				return fmt.Errorf("publish: record adopted issue: %w", err)
 			}
 			_, _ = fmt.Fprintf(w, "adopted issue #%d for %s (re-discovered; fingerprint drifted)\n", act.issueNumber, act.finding.Fingerprint[:12])
@@ -346,19 +404,30 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			// create on miss.
 			n, found, err := findIssueByMarker(ctx, gh, cfg.Labels, act.finding.Fingerprint)
 			if err != nil {
-				return fmt.Errorf("publish: recover pending issue: %w", err)
-			}
-			if !found {
-				n, err = ghCreateIssue(ctx, gh, act.finding.Title, renderIssueBody(act.finding, repoURL, prov), cfg.Labels)
-				if err != nil {
-					return err
+				if aerr := applyGHErr("recover", 0, act.finding.Fingerprint, err); aerr != nil {
+					return aerr
 				}
+				continue
+			}
+			// bodyHash stays "" on the adopt-via-marker path: no body was
+			// pushed by this run, so the next publishUpdate decides fresh.
+			bodyHash := ""
+			if !found {
+				body := renderIssueBody(act.finding, repoURL, prov)
+				n, err = ghCreateIssue(ctx, gh, act.finding.Title, body, cfg.Labels)
+				if err != nil {
+					if aerr := applyGHErr("recover-create", 0, act.finding.Fingerprint, err); aerr != nil {
+						return aerr
+					}
+					continue
+				}
+				bodyHash = bodyHashHex(body)
 				created++
 				_, _ = fmt.Fprintf(w, "created issue #%d for %s (recovered pending; no existing issue found)\n", n, act.finding.Fingerprint[:12])
 			} else {
 				_, _ = fmt.Fprintf(w, "recovered issue #%d for %s (adopted via fingerprint marker)\n", n, act.finding.Fingerprint[:12])
 			}
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen, bodyHash); err != nil {
 				return fmt.Errorf("publish: record recovered issue: %w", err)
 			}
 
@@ -368,7 +437,31 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 				updated++
 				continue
 			}
-			if err := ghUpdateIssue(ctx, gh, act.issueNumber, renderIssueBody(act.finding, repoURL, prov)); err != nil {
+			// Render and hash once up front: both the no-op short-circuit
+			// below and the actual PATCH (and its stale-recreate fallback)
+			// need the exact same body, and only one render/hash per action
+			// keeps this cheap.
+			body := renderIssueBody(act.finding, repoURL, prov)
+			h := bodyHashHex(body)
+			if pi := publishedMap[act.finding.Fingerprint]; pi.BodyHash == h && h != "" {
+				// The rendered body is byte-identical to what was last
+				// pushed to GitHub -- this update was triggered by a
+				// metadata-only finding touch (impact sweep,
+				// AddCorroboratingLenses, AppendFindingSites all bump
+				// findings.updated_at without changing anything
+				// renderIssueBody reads), not a real content change. Skip
+				// the PATCH but still upsert so published_issues.updated_at
+				// advances past findings.updated_at -- otherwise the
+				// planner would replan this same no-op update every cycle
+				// forever instead of converging to publishSkip.
+				if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen, h); err != nil {
+					return fmt.Errorf("publish: record unchanged issue: %w", err)
+				}
+				_, _ = fmt.Fprintf(w, "unchanged issue #%d for %s (body identical; no PATCH)\n", act.issueNumber, act.finding.Fingerprint[:12])
+				skipped++
+				continue
+			}
+			if err := ghUpdateIssue(ctx, gh, act.issueNumber, body); err != nil {
 				if isGHGoneOrNotFound(err) {
 					// Local row is stale: the issue was deleted (410) or
 					// transferred/renamed (404) on GitHub. Drop the row, create
@@ -377,11 +470,14 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 					if derr := st.DeletePublishedIssue(ctx, act.finding.Fingerprint); derr != nil {
 						return fmt.Errorf("publish: delete stale published issue: %w", derr)
 					}
-					n, cerr := ghCreateIssue(ctx, gh, act.finding.Title, renderIssueBody(act.finding, repoURL, prov), cfg.Labels)
+					n, cerr := ghCreateIssue(ctx, gh, act.finding.Title, body, cfg.Labels)
 					if cerr != nil {
-						return fmt.Errorf("publish: recreate issue after stale: %w", cerr)
+						if aerr := applyGHErr("update-recreate", 0, act.finding.Fingerprint, cerr); aerr != nil {
+							return aerr
+						}
+						continue
 					}
-					if uerr := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen); uerr != nil {
+					if uerr := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen, h); uerr != nil {
 						return fmt.Errorf("publish: record recreated issue: %w", uerr)
 					}
 					_, _ = fmt.Fprintf(w, "recreated issue #%d for %s (replaced stale row)\n", n, act.finding.Fingerprint[:12])
@@ -389,9 +485,12 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 					created++
 					continue
 				}
-				return err
+				if aerr := applyGHErr("update", act.issueNumber, act.finding.Fingerprint, err); aerr != nil {
+					return aerr
+				}
+				continue
 			}
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen, h); err != nil {
 				return fmt.Errorf("publish: record updated issue: %w", err)
 			}
 			_, _ = fmt.Fprintf(w, "updated issue #%d for %s\n", act.issueNumber, act.finding.Fingerprint[:12])
@@ -409,7 +508,9 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			// bugbot-closed regression (store.ReopenAsRegression). One PATCH
 			// both flips state=open and refreshes the body, so a reopened
 			// issue never shows stale content from before the fix regressed.
-			if err := ghReopenIssue(ctx, gh, act.issueNumber, renderIssueBody(act.finding, repoURL, prov)); err != nil {
+			body := renderIssueBody(act.finding, repoURL, prov)
+			h := bodyHashHex(body)
+			if err := ghReopenIssue(ctx, gh, act.issueNumber, body); err != nil {
 				if isGHGoneOrNotFound(err) {
 					// Same stale-row handling as publishUpdate: the issue is
 					// gone, drop the row and file a fresh one.
@@ -417,11 +518,14 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 					if derr := st.DeletePublishedIssue(ctx, act.finding.Fingerprint); derr != nil {
 						return fmt.Errorf("publish: delete stale published issue: %w", derr)
 					}
-					n, cerr := ghCreateIssue(ctx, gh, act.finding.Title, renderIssueBody(act.finding, repoURL, prov), cfg.Labels)
+					n, cerr := ghCreateIssue(ctx, gh, act.finding.Title, body, cfg.Labels)
 					if cerr != nil {
-						return fmt.Errorf("publish: recreate issue after stale reopen: %w", cerr)
+						if aerr := applyGHErr("reopen-recreate", 0, act.finding.Fingerprint, cerr); aerr != nil {
+							return aerr
+						}
+						continue
 					}
-					if uerr := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen); uerr != nil {
+					if uerr := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen, h); uerr != nil {
 						return fmt.Errorf("publish: record recreated issue: %w", uerr)
 					}
 					_, _ = fmt.Fprintf(w, "recreated issue #%d for %s (replaced stale row)\n", n, act.finding.Fingerprint[:12])
@@ -429,17 +533,19 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 					created++
 					continue
 				}
-				return err
+				if aerr := applyGHErr("reopen", act.issueNumber, act.finding.Fingerprint, err); aerr != nil {
+					return aerr
+				}
+				continue
 			}
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen, h); err != nil {
 				return fmt.Errorf("publish: record reopened issue: %w", err)
 			}
-			// A comment failure here is benign and deliberately left
-			// unrecovered: the row is already "open", so the next cycle
-			// plans a plain body update rather than a second reopen attempt.
-			// The regression note is lost but the issue state is correct --
-			// the same trade-off runPublish already accepts at the
-			// closing-state boundary above (publish.go:264-267 equivalent).
+			// A comment failure here is benign: the row is already "open",
+			// so the next cycle plans a plain body update rather than a
+			// second reopen attempt. The regression note is lost but the
+			// issue state is correct -- the same trade-off runPublish
+			// already accepts at the closing-state boundary above.
 			//
 			// The mirror failure mode is a duplicate comment, not a lost one:
 			// if the process crashes between the PATCH above succeeding and
@@ -452,7 +558,10 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			// accepted: there is no cross-system transaction here, same as
 			// every other two-write gh+store sequence in this function.
 			if err := ghCommentIssue(ctx, gh, act.issueNumber, "Reopened by bugbot: this finding was re-detected as a regression."); err != nil {
-				return err
+				if aerr := applyGHErr("reopen-comment", act.issueNumber, act.finding.Fingerprint, err); aerr != nil {
+					return aerr
+				}
+				continue
 			}
 			_, _ = fmt.Fprintf(w, "reopened issue #%d for %s (regression)\n", act.issueNumber, act.finding.Fingerprint[:12])
 			reopened++
@@ -466,7 +575,8 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			// The close also spans two gh writes (comment, then state PATCH).
 			// Record "closing" once the comment lands so a PATCH failure does
 			// NOT re-post the comment on every subsequent cycle — the resume
-			// path (skipComment) goes straight to the PATCH.
+			// path (skipComment) goes straight to the PATCH. Close never
+			// pushes a body, so body_hash is always "".
 			if !act.skipComment {
 				if err := ghCommentIssue(ctx, gh, act.issueNumber, autoCloseComment(act.finding)); err != nil {
 					if isGHGoneOrNotFound(err) {
@@ -479,9 +589,12 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 						stale++
 						continue
 					}
-					return err
+					if aerr := applyGHErr("close-comment", act.issueNumber, act.finding.Fingerprint, err); aerr != nil {
+						return aerr
+					}
+					continue
 				}
-				if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateClosing); err != nil {
+				if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateClosing, ""); err != nil {
 					return fmt.Errorf("publish: record closing issue: %w", err)
 				}
 			}
@@ -498,9 +611,12 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 					stale++
 					continue
 				}
-				return err
+				if aerr := applyGHErr("close-patch", act.issueNumber, act.finding.Fingerprint, err); aerr != nil {
+					return aerr
+				}
+				continue
 			}
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateClosed); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateClosed, ""); err != nil {
 				return fmt.Errorf("publish: record closed issue: %w", err)
 			}
 			_, _ = fmt.Fprintf(w, "closed issue #%d for %s (status: %s)\n", act.issueNumber, act.finding.Fingerprint[:12], act.finding.Status)
@@ -513,7 +629,10 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 		}
 	}
 
-	_, _ = fmt.Fprintf(w, "publish: created=%d updated=%d adopted=%d reopened=%d closed=%d backsynced=%d skipped=%d stale=%d\n", created, updated, adopted, reopened, closed, backsynced, skipped, stale)
+	printSummary()
+	if failed > 0 {
+		return fmt.Errorf("publish: %d action(s) failed; see log above", failed)
+	}
 	return nil
 }
 
@@ -614,10 +733,16 @@ func adoptAnchor(f domain.Finding, anchors []pubAnchor) (pubAnchor, bool) {
 //
 // Update heuristic: rather than fetching the current issue body (which would
 // require a gh read per issue), we use finding.UpdatedAt > published.UpdatedAt
-// as a proxy. If the finding was updated after the last publish, we re-push
-// the body. This is cheap (no gh reads) at the cost of a no-op PATCH on
-// every finding whose metadata was touched. Document the trade-off and accept
-// it; a true body-diff would require a gh read per issue.
+// as a proxy. If the finding was updated after the last publish, we plan a
+// publishUpdate -- but an updated_at bump is a superset of an actual body
+// change: impact sweep, AddCorroboratingLenses, and AppendFindingSites all
+// touch findings.updated_at without changing anything renderIssueBody reads.
+// This planner stays cheap (no gh reads) by over-selecting; the no-op PATCH
+// this would otherwise cost is closed at apply time instead (bugbot-klaj):
+// runPublish renders the body once, hashes it, and compares against
+// published_issues.body_hash before calling gh -- a hash match skips the
+// PATCH entirely (still upserting so updated_at advances and the planner
+// converges to publishSkip next cycle).
 //
 // Close rule: if close_on_fixed is true, any finding with status fixed,
 // dismissed, or superseded (backlog reconcile, bugbot-ezmx.4 — a merged-away
@@ -1370,6 +1495,17 @@ func ghUpdateIssue(ctx context.Context, gh engine.GHRunner, number int, body str
 		return fmt.Errorf("publish: update issue #%d: %w", number, err)
 	}
 	return nil
+}
+
+// bodyHashHex returns the sha256 hex digest of body. Stored as
+// published_issues.body_hash so the apply loop's publishUpdate case can
+// detect a byte-identical re-render (a metadata-only finding touch, not an
+// actual content change) and skip the PATCH -- see planPublish's Update
+// heuristic doc comment for why the planner over-selects and leaves this
+// check to apply time.
+func bodyHashHex(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
 }
 
 // autoCloseComment renders the timeline comment posted before closing. A

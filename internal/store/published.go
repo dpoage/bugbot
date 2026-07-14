@@ -33,22 +33,35 @@ type PublishedIssue struct {
 	State       IssueState
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// BodyHash is the sha256 hex digest of the issue body last pushed to
+	// GitHub (create/update/reopen), or "" when no body has been pushed yet
+	// (pending/closing/closed rows, or a pre-migration row). The publish
+	// apply loop compares this against a freshly rendered body's hash before
+	// issuing a PATCH, so a metadata-only finding touch (impact sweep,
+	// AddCorroboratingLenses, AppendFindingSites) that leaves the rendered
+	// body unchanged no longer costs a no-op gh call.
+	BodyHash string
 }
 
 // UpsertPublishedIssue records (or refreshes) the GitHub issue linked to a
-// finding fingerprint. On conflict it updates issue_number, state, and
-// updated_at while preserving created_at, so a re-create after a manual close
-// records the new number without losing the original creation timestamp.
-func (s *Store) UpsertPublishedIssue(ctx context.Context, fingerprint string, issueNumber int, state IssueState) error {
+// finding fingerprint. On conflict it updates issue_number, state, body_hash,
+// and updated_at while preserving created_at, so a re-create after a manual
+// close records the new number without losing the original creation
+// timestamp. bodyHash is the sha256 hex digest of the body last pushed to
+// GitHub for this row, or "" for actions that never push a body (pending,
+// closing, closed, adopt) — callers must pass it explicitly so an upsert can
+// never silently retain a stale hash from a previous, different body.
+func (s *Store) UpsertPublishedIssue(ctx context.Context, fingerprint string, issueNumber int, state IssueState, bodyHash string) error {
 	now := nowUTC().Format(timeLayout)
 	_, err := s.exec(ctx, "upsert_published_issue", `
-		INSERT INTO published_issues (fingerprint, issue_number, state, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO published_issues (fingerprint, issue_number, state, created_at, updated_at, body_hash)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(fingerprint) DO UPDATE SET
 		  issue_number = excluded.issue_number,
 		  state        = excluded.state,
-		  updated_at   = excluded.updated_at`,
-		fingerprint, issueNumber, string(state), now, now,
+		  updated_at   = excluded.updated_at,
+		  body_hash    = excluded.body_hash`,
+		fingerprint, issueNumber, string(state), now, now, bodyHash,
 	)
 	if err != nil {
 		return err
@@ -82,12 +95,12 @@ func (s *Store) GetPublishedIssue(ctx context.Context, fingerprint string) (Publ
 	var state string
 	var createdAt, updatedAt string
 	err := s.queryRow(ctx, "get_published_issue",
-		`SELECT fingerprint, issue_number, state, created_at, updated_at
+		`SELECT fingerprint, issue_number, state, created_at, updated_at, body_hash
 		   FROM published_issues
 		  WHERE fingerprint = ?`,
 		[]any{fingerprint},
 		func(row *sql.Row) error {
-			return row.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt)
+			return row.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt, &pi.BodyHash)
 		},
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -115,7 +128,7 @@ func (s *Store) GetPublishedIssue(ctx context.Context, fingerprint string) (Publ
 // the contract honest if a later migration ever changes the uniqueness.
 func (s *Store) ListPublishedIssues(ctx context.Context) ([]PublishedIssue, error) {
 	return queryRows(ctx, s, "list_published_issues",
-		`SELECT fingerprint, issue_number, state, created_at, updated_at
+		`SELECT fingerprint, issue_number, state, created_at, updated_at, body_hash
 		   FROM published_issues
 		  ORDER BY fingerprint ASC, rowid ASC`,
 		nil,
@@ -123,7 +136,7 @@ func (s *Store) ListPublishedIssues(ctx context.Context) ([]PublishedIssue, erro
 			var pi PublishedIssue
 			var state string
 			var createdAt, updatedAt string
-			if err := r.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt); err != nil {
+			if err := r.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt, &pi.BodyHash); err != nil {
 				return PublishedIssue{}, err
 			}
 			pi.State = IssueState(state)

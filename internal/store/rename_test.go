@@ -56,7 +56,7 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 	if _, err := st.EnqueueRepro(ctx, oldFP); err != nil {
 		t.Fatalf("enqueue repro: %v", err)
 	}
-	if err := st.UpsertPublishedIssue(ctx, oldFP, 42, IssueStateOpen); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, oldFP, 42, IssueStateOpen, ""); err != nil {
 		t.Fatalf("upsert published issue: %v", err)
 	}
 

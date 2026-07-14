@@ -1,0 +1,21 @@
+-- bugbot-klaj: no-op PATCH elimination for `bugbot publish`.
+--
+-- planPublish's update heuristic (finding.UpdatedAt > published.UpdatedAt) is
+-- a proxy, not a body diff: an impact sweep, AddCorroboratingLenses, or
+-- AppendFindingSites all bump findings.updated_at without changing anything
+-- renderIssueBody reads, so in daemon mode every post-sweep cycle used to
+-- emit one gh body PATCH per published finding even when the rendered body
+-- was byte-identical to what's already on GitHub.
+--
+-- body_hash stores the sha256 hex of the body actually pushed on the last
+-- successful create/update/reopen. The apply loop renders the body once,
+-- hashes it, and compares against this column before calling gh: on a match
+-- it skips the PATCH but still upserts (with the same hash) so
+-- published_issues.updated_at advances past findings.updated_at and the
+-- planner short-circuits to publishSkip next cycle.
+--
+-- DEFAULT '' = unknown (pre-migration row, or a state -- pending/closing/
+-- closed -- that never pushed a body): deliberately never equal to a real
+-- sha256 hex digest, so the comparison always PATCHes at least once before
+-- it can start skipping.
+ALTER TABLE published_issues ADD COLUMN body_hash TEXT NOT NULL DEFAULT '';

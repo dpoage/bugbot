@@ -12,7 +12,7 @@ func TestUpsertAndGetPublishedIssue(t *testing.T) {
 	st := openTemp(t)
 
 	fp := "fp-abc123"
-	if err := st.UpsertPublishedIssue(ctx, fp, 42, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, 42, "open", ""); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 
@@ -51,7 +51,7 @@ func TestUpsertPublishedIssue_PreservesCreatedAt(t *testing.T) {
 	st := openTemp(t)
 
 	fp := "fp-stable"
-	if err := st.UpsertPublishedIssue(ctx, fp, 1, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, 1, "open", ""); err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
 	first, err := st.GetPublishedIssue(ctx, fp)
@@ -59,7 +59,7 @@ func TestUpsertPublishedIssue_PreservesCreatedAt(t *testing.T) {
 		t.Fatalf("first get: %v", err)
 	}
 
-	if err := st.UpsertPublishedIssue(ctx, fp, 2, "closed"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, 2, "closed", ""); err != nil {
 		t.Fatalf("second upsert: %v", err)
 	}
 	second, err := st.GetPublishedIssue(ctx, fp)
@@ -87,7 +87,7 @@ func TestListPublishedIssues_DeterministicOrder(t *testing.T) {
 
 	fps := []string{"zzz", "aaa", "mmm"}
 	for i, fp := range fps {
-		if err := st.UpsertPublishedIssue(ctx, fp, i+1, "open"); err != nil {
+		if err := st.UpsertPublishedIssue(ctx, fp, i+1, "open", ""); err != nil {
 			t.Fatalf("upsert %q: %v", fp, err)
 		}
 	}
@@ -135,7 +135,7 @@ func TestCountPublishedIssues(t *testing.T) {
 	}
 
 	for i, state := range []IssueState{IssueStateOpen, IssueStateOpen, IssueStateClosed, IssueStatePending} {
-		if err := st.UpsertPublishedIssue(ctx, fmt.Sprintf("fp%d", i), i+1, state); err != nil {
+		if err := st.UpsertPublishedIssue(ctx, fmt.Sprintf("fp%d", i), i+1, state, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -164,7 +164,7 @@ func TestListPublishedIssues_StableOrderAcrossCalls(t *testing.T) {
 	// fingerprint order, regardless of insertion order.
 	fps := []string{"zzz", "aaa", "mmm", "bbb", "yyy"}
 	for i, fp := range fps {
-		if err := st.UpsertPublishedIssue(ctx, fp, i+1, "open"); err != nil {
+		if err := st.UpsertPublishedIssue(ctx, fp, i+1, "open", ""); err != nil {
 			t.Fatalf("upsert %q: %v", fp, err)
 		}
 	}
@@ -201,7 +201,7 @@ func TestDeletePublishedIssue(t *testing.T) {
 	st := openTemp(t)
 
 	fp := "fp-stale"
-	if err := st.UpsertPublishedIssue(ctx, fp, 99, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, 99, "open", ""); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -226,7 +226,7 @@ func TestDeletePublishedIssue(t *testing.T) {
 	}
 
 	// A different fingerprint is unaffected.
-	if err := st.UpsertPublishedIssue(ctx, "fp-fresh", 7, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, "fp-fresh", 7, "open", ""); err != nil {
 		t.Fatalf("seed fresh: %v", err)
 	}
 	if err := st.DeletePublishedIssue(ctx, fp); err != nil {
@@ -234,5 +234,62 @@ func TestDeletePublishedIssue(t *testing.T) {
 	}
 	if _, err := st.GetPublishedIssue(ctx, "fp-fresh"); err != nil {
 		t.Errorf("unrelated row was touched by delete: %v", err)
+	}
+}
+
+// TestUpsertPublishedIssue_BodyHashRoundTrip pins migration 025
+// (published_body_hash): a fresh openTemp store runs 001-025 in order, so
+// body_hash must exist and round-trip through Get/List, and a conflict
+// upsert must refresh it (not just issue_number/state/updated_at) so the
+// publish apply loop's no-op-PATCH check (bugbot-klaj) always compares
+// against the hash of the body actually pushed last.
+func TestUpsertPublishedIssue_BodyHashRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	fp := "fp-hash"
+	if err := st.UpsertPublishedIssue(ctx, fp, 5, IssueStateOpen, "abc123hash"); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	got, err := st.GetPublishedIssue(ctx, fp)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.BodyHash != "abc123hash" {
+		t.Errorf("BodyHash = %q, want %q", got.BodyHash, "abc123hash")
+	}
+
+	list, err := st.ListPublishedIssues(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 || list[0].BodyHash != "abc123hash" {
+		t.Errorf("list BodyHash = %+v, want [abc123hash]", list)
+	}
+
+	// Conflict-update path must also refresh body_hash.
+	if err := st.UpsertPublishedIssue(ctx, fp, 5, IssueStateOpen, "def456hash"); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	got2, err := st.GetPublishedIssue(ctx, fp)
+	if err != nil {
+		t.Fatalf("get2: %v", err)
+	}
+	if got2.BodyHash != "def456hash" {
+		t.Errorf("BodyHash after conflict update = %q, want %q", got2.BodyHash, "def456hash")
+	}
+
+	// A row upserted with "" (e.g. pending/closing/closed states, which
+	// never push a body) leaves the column at the migration's DEFAULT ''.
+	if err := st.UpsertPublishedIssue(ctx, "fp-nobody", 6, IssueStatePending, ""); err != nil {
+		t.Fatalf("upsert nobody: %v", err)
+	}
+	nobody, err := st.GetPublishedIssue(ctx, "fp-nobody")
+	if err != nil {
+		t.Fatalf("get nobody: %v", err)
+	}
+	if nobody.BodyHash != "" {
+		t.Errorf("BodyHash = %q, want empty for a pending row", nobody.BodyHash)
 	}
 }
