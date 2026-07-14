@@ -2194,6 +2194,16 @@ func TestApplyPublish_BacksyncReopenDryRun(t *testing.T) {
 	if !strings.Contains(out, "dry-run: reopen issue #65") {
 		t.Errorf("expected dry-run reopen intent for #65, got: %s", out)
 	}
+	// Negative: issue #77 was just backsync-dismissed in the same pass; it
+	// must never also be planned for reopen (that would mean planPublish's
+	// open loop still saw the dismissed finding sitting on a "closed" row
+	// -- the dry-run/real-run reconciliation divergence bug).
+	if strings.Contains(out, "reopen issue #77") {
+		t.Errorf("issue #77 was backsync-dismissed and must never also be reopened, got: %s", out)
+	}
+	if !strings.Contains(out, "reopened=1") {
+		t.Errorf("expected exactly reopened=1 (issue #65 only), got: %s", out)
+	}
 
 	// Zero store mutations: both findings still open, both rows unchanged.
 	got1, err := st.GetFindingByFingerprint(ctx, f1.Fingerprint)

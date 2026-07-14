@@ -200,6 +200,14 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 		}
 		closedNums := make(map[int]bool, len(closedIssues))
 		for _, is := range closedIssues {
+			// The listing endpoint is shared with pull requests (issues and
+			// PRs share one number namespace on GitHub); a defensive check
+			// on State keeps a malformed/unexpected entry from ever counting
+			// as "closed" here even though we only ever match numbers we
+			// ourselves recorded in published_issues.
+			if is.State != "closed" {
+				continue
+			}
 			closedNums[is.Number] = true
 		}
 
@@ -212,12 +220,16 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 
 		backsyncActions := planBacksync(publishedMap, closedNums, findingByFP)
 
-		// Apply first (or print, under dry-run), then reconcile the in-memory
-		// state that planPublish is about to read -- there is no reload, so
-		// every backsynced row/finding must be patched into openFindings and
-		// publishedMap here or planPublish would immediately undo the sync
-		// (e.g. re-PATCH a body onto an issue we just marked closed).
-		dismissedFPs := make(map[string]bool, len(backsyncActions))
+		// Apply first (or print, under dry-run) -- but the two reconciliation
+		// steps below (publishedMap, dismissedFPs) are ALWAYS derived from
+		// backsyncActions itself, never from what the apply loop happened to
+		// do. backsyncActions is identical in both modes, so dry-run and the
+		// real run must reconcile identically; deriving dismissedFPs only
+		// inside the non-dry-run branch (as an earlier version of this code
+		// did) left dry-run's publishedMap forced to "closed" while
+		// dismissedFPs stayed empty -- planPublish then saw an open finding
+		// sitting on a "closed" row and planned a spurious reopen for the
+		// very issue backsync had just decided to dismiss.
 		for _, ba := range backsyncActions {
 			status := "n/a"
 			if f, ok := findingByFP[ba.fingerprint]; ok {
@@ -237,7 +249,6 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 				if err := st.UpdateStatus(ctx, ba.fingerprint, domain.StatusDismissed, reason); err != nil {
 					return fmt.Errorf("publish: backsync dismiss %s: %w", ba.fingerprint[:12], err)
 				}
-				dismissedFPs[ba.fingerprint] = true
 				_, _ = fmt.Fprintf(w, "backsynced issue #%d for %s (closed on GitHub; finding dismissed)\n", ba.issueNumber, ba.fingerprint[:12])
 			} else {
 				_, _ = fmt.Fprintf(w, "backsynced issue #%d for %s (closed on GitHub; finding already %s)\n", ba.issueNumber, ba.fingerprint[:12], status)
@@ -251,12 +262,17 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 		// Keep the in-memory plan inputs consistent with what was just
 		// applied (or would be, under dry-run -- the printed plan must match
 		// what planPublish would do next) so planPublish never re-touches a
-		// row this step already closed out.
+		// row this step already closed out. Derived from backsyncActions,
+		// not from the apply loop above, for the reason in the comment there.
+		dismissedFPs := make(map[string]bool, len(backsyncActions))
 		for _, ba := range backsyncActions {
 			publishedMap[ba.fingerprint] = store.PublishedIssue{
 				Fingerprint: ba.fingerprint,
 				IssueNumber: ba.issueNumber,
 				State:       store.IssueStateClosed,
+			}
+			if ba.dismissFinding {
+				dismissedFPs[ba.fingerprint] = true
 			}
 		}
 		if len(dismissedFPs) > 0 {
@@ -424,6 +440,17 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			// The regression note is lost but the issue state is correct --
 			// the same trade-off runPublish already accepts at the
 			// closing-state boundary above (publish.go:264-267 equivalent).
+			//
+			// The mirror failure mode is a duplicate comment, not a lost one:
+			// if the process crashes between the PATCH above succeeding and
+			// the UpsertPublishedIssue call succeeding, the row is still
+			// recorded "closed" locally even though GitHub now shows it
+			// open. The next run's planPublish sees that stale-closed row
+			// again and replays the whole reopen (PATCH + comment) --
+			// idempotent for the PATCH, but this comment is posted a second
+			// time. Both directions (lost once, duplicated once) are
+			// accepted: there is no cross-system transaction here, same as
+			// every other two-write gh+store sequence in this function.
 			if err := ghCommentIssue(ctx, gh, act.issueNumber, "Reopened by bugbot: this finding was re-detected as a regression."); err != nil {
 				return err
 			}
