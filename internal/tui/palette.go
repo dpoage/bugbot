@@ -223,7 +223,7 @@ func dispatchCmd(ctx context.Context, cancel context.CancelFunc, disp dispatcher
 			if convErr != nil || prNumber <= 0 {
 				return dispatchDoneMsg{verb: "review", err: fmt.Errorf("review requires a positive PR number, got %q", prNumberText)}
 			}
-			res, err := disp.ReviewPR(ctx, engine.ReviewPROpts{PRNumber: prNumber, Suspected: "summary", GH: engine.RealGH, Out: out, ErrOut: out})
+			res, err := disp.ReviewPR(ctx, engine.ReviewPROpts{PRNumber: prNumber, Suspected: "summary", GH: engine.NewPacedGH(engine.RealGH), Out: out, ErrOut: out})
 			return dispatchDoneMsg{verb: fmt.Sprintf("review --pr %d", prNumber), err: err, summary: reviewSummary(res)}
 
 		default:
