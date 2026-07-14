@@ -338,7 +338,7 @@ func TestApplyPublish_Close(t *testing.T) {
 	st, f := setupPublishStore(t)
 
 	// Pre-record the published issue.
-	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open", ""); err != nil {
 		t.Fatalf("seed published: %v", err)
 	}
 	// Mark the finding fixed.
@@ -572,7 +572,7 @@ func min(a, b int) int {
 func TestApplyPublish_CloseOrdering(t *testing.T) {
 	ctx := context.Background()
 	st, f := setupPublishStore(t)
-	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.MarkFixed(ctx, f.Fingerprint); err != nil {
@@ -612,7 +612,7 @@ func TestApplyPublish_CloseOrdering(t *testing.T) {
 func TestApplyPublish_ClosingResume(t *testing.T) {
 	ctx := context.Background()
 	st, f := setupPublishStore(t)
-	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "closing"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "closing", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.MarkFixed(ctx, f.Fingerprint); err != nil {
@@ -649,7 +649,7 @@ func TestApplyPublish_PendingRecovery(t *testing.T) {
 	t.Run("adopts existing issue by marker", func(t *testing.T) {
 		ctx := context.Background()
 		st, f := setupPublishStore(t)
-		if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 0, "pending"); err != nil {
+		if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 0, "pending", ""); err != nil {
 			t.Fatal(err)
 		}
 
@@ -676,7 +676,7 @@ func TestApplyPublish_PendingRecovery(t *testing.T) {
 	t.Run("creates when no marker found", func(t *testing.T) {
 		ctx := context.Background()
 		st, f := setupPublishStore(t)
-		if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 0, "pending"); err != nil {
+		if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 0, "pending", ""); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1426,7 +1426,7 @@ func TestApplyPublish_UpdateStaleRecreate(t *testing.T) {
 	st, f := setupPublishStore(t)
 
 	// Pre-record an open published row pointing at a now-deleted issue.
-	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 50, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 50, "open", ""); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -1493,7 +1493,7 @@ func TestApplyPublish_UpdateStaleRecreate(t *testing.T) {
 func TestApplyPublish_UpdateStaleRecreate_404(t *testing.T) {
 	ctx := context.Background()
 	st, f := setupPublishStore(t)
-	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open", ""); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	findings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
@@ -1536,7 +1536,7 @@ func TestApplyPublish_UpdateStaleRecreate_404(t *testing.T) {
 func TestApplyPublish_CloseStaleDrop(t *testing.T) {
 	ctx := context.Background()
 	st, f := setupPublishStore(t)
-	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 88, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 88, "open", ""); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if err := st.MarkFixed(ctx, f.Fingerprint); err != nil {
@@ -1611,7 +1611,7 @@ func TestIsGHGoneOrNotFound(t *testing.T) {
 func TestApplyPublish_UpdateRecordsSuccess(t *testing.T) {
 	ctx := context.Background()
 	st, f := setupPublishStore(t)
-	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 60, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 60, "open", ""); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	// Make the finding newer than the published row so the planner updates.
@@ -1865,7 +1865,7 @@ func TestRenderIssueBody_SanitizeAndTruncateJointly(t *testing.T) {
 func TestBacksync_HumanClosedDismissesFinding(t *testing.T) {
 	ctx := context.Background()
 	st, f := setupPublishStore(t)
-	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open", ""); err != nil {
 		t.Fatalf("seed published: %v", err)
 	}
 
@@ -1933,7 +1933,7 @@ func TestBacksync_HumanClosedDismissesFinding(t *testing.T) {
 func TestBacksync_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	st, f := setupPublishStore(t)
-	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open", ""); err != nil {
 		t.Fatalf("seed published: %v", err)
 	}
 
@@ -1985,7 +1985,7 @@ func TestBacksync_Idempotent(t *testing.T) {
 func TestBacksync_FixedFindingHumanClosed(t *testing.T) {
 	ctx := context.Background()
 	st, f := setupPublishStore(t)
-	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 90, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 90, "open", ""); err != nil {
 		t.Fatalf("seed published: %v", err)
 	}
 	if err := st.MarkFixed(ctx, f.Fingerprint); err != nil {
@@ -2048,7 +2048,7 @@ func TestPlanPublish_DismissedNeverReopened(t *testing.T) {
 func TestApplyPublish_RegressionReopen(t *testing.T) {
 	ctx := context.Background()
 	st, f := setupPublishStore(t)
-	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 65, "closed"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 65, "closed", ""); err != nil {
 		t.Fatalf("seed published: %v", err)
 	}
 
@@ -2111,7 +2111,7 @@ func TestApplyPublish_RegressionReopen(t *testing.T) {
 func TestApplyPublish_RegressionReopen_StaleRecreate(t *testing.T) {
 	ctx := context.Background()
 	st, f := setupPublishStore(t)
-	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 65, "closed"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 65, "closed", ""); err != nil {
 		t.Fatalf("seed published: %v", err)
 	}
 
@@ -2150,7 +2150,7 @@ func TestApplyPublish_RegressionReopen_StaleRecreate(t *testing.T) {
 func TestApplyPublish_BacksyncReopenDryRun(t *testing.T) {
 	ctx := context.Background()
 	st, f1 := setupPublishStore(t)
-	if err := st.UpsertPublishedIssue(ctx, f1.Fingerprint, 77, "open"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f1.Fingerprint, 77, "open", ""); err != nil {
 		t.Fatalf("seed published f1: %v", err)
 	}
 
@@ -2167,7 +2167,7 @@ func TestApplyPublish_BacksyncReopenDryRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed f2: %v", err)
 	}
-	if err := st.UpsertPublishedIssue(ctx, f2.Fingerprint, 65, "closed"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, f2.Fingerprint, 65, "closed", ""); err != nil {
 		t.Fatalf("seed published f2: %v", err)
 	}
 
@@ -2257,5 +2257,291 @@ func TestApplyPublish_NoBacksyncWhenNoOpenRows(t *testing.T) {
 		if strings.Contains(strings.Join(call, " "), "state=closed") {
 			t.Errorf("backsync must not list issues when no row is open/closing; got call: %v", call)
 		}
+	}
+}
+
+// ---- Per-action error resilience + body_hash no-op PATCH elimination (bugbot-klaj) ----
+
+// seedSecondOpenFinding adds a second open T2 finding (no published row) to
+// st, distinct from the one setupPublishStore seeds, so a test can exercise
+// two independent plan actions (e.g. a create alongside a close) in one run.
+func seedSecondOpenFinding(t *testing.T, ctx context.Context, st *store.Store) domain.Finding {
+	t.Helper()
+	f := domain.Finding{
+		Fingerprint: domain.Fingerprint("race", "y.go", fmt.Sprintf("%d|%s", 9, "kaboom")),
+		Title:       "kaboom",
+		Description: "desc-a",
+		Reasoning:   "trace-a",
+		Severity:    "high",
+		Tier:        2,
+		Status:      domain.StatusOpen,
+		Lens:        "race",
+		File:        "y.go",
+		Line:        9,
+		CommitSHA:   "c2def",
+	}
+	f, err := st.UpsertFinding(ctx, f)
+	if err != nil {
+		t.Fatalf("seed second finding: %v", err)
+	}
+	return f
+}
+
+// TestApplyPublish_ActionFailureDoesNotBlockRestOfPlan pins bugbot-klaj's
+// per-action error resilience: a 422 on creating one issue must not drop the
+// rest of the plan. The subsequent close for a second, unrelated finding
+// must still apply, and the run must return an aggregate error naming the
+// one failure.
+func TestApplyPublish_ActionFailureDoesNotBlockRestOfPlan(t *testing.T) {
+	ctx := context.Background()
+	st, fClose := setupPublishStore(t)
+
+	// fClose becomes the close action: mark it fixed with an existing open row.
+	if err := st.UpsertPublishedIssue(ctx, fClose.Fingerprint, 77, store.IssueStateOpen, "seed-hash"); err != nil {
+		t.Fatalf("seed published close target: %v", err)
+	}
+	if err := st.MarkFixed(ctx, fClose.Fingerprint); err != nil {
+		t.Fatalf("mark fixed: %v", err)
+	}
+
+	// fCreate is a second, still-open finding with no published row -> the
+	// planner emits a publishCreate action for it, processed BEFORE the
+	// close (planPublish orders create/update/skip actions for `open`
+	// findings first, then close actions for fixed/dismissed/superseded).
+	seedSecondOpenFinding(t, ctx, st)
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
+		on("repos/{owner}/{repo}/issues -X POST", nil).
+		on("issues/77/comments", []byte(`{"id":1}`)).
+		on("issues/77 -X PATCH", []byte(`{"number":77}`))
+	gh.errs["repos/{owner}/{repo}/issues -X POST"] = fmt.Errorf("gh api: HTTP 422: Validation Failed")
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false)
+	if err == nil {
+		t.Fatal("expected an aggregate error naming the create failure")
+	}
+	if !strings.Contains(err.Error(), "1 action(s) failed") {
+		t.Errorf("error should name 1 failure; got: %v", err)
+	}
+
+	// The close must still have applied despite the create failure.
+	if calls := gh.callsContaining("issues/77 -X PATCH"); len(calls) != 1 {
+		t.Fatalf("expected the close PATCH to still apply, got %d calls", len(calls))
+	}
+	pi, gerr := st.GetPublishedIssue(ctx, fClose.Fingerprint)
+	if gerr != nil {
+		t.Fatalf("get published close target: %v", gerr)
+	}
+	if pi.State != store.IssueStateClosed {
+		t.Errorf("close target state = %q, want closed", pi.State)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "failed=1") {
+		t.Errorf("summary must include failed=1; got: %s", out)
+	}
+	if !strings.Contains(out, "closed=1") {
+		t.Errorf("summary must include closed=1; got: %s", out)
+	}
+	if !strings.Contains(out, "failed create for") {
+		t.Errorf("expected a 'failed create for ...' log line; got: %s", out)
+	}
+}
+
+// TestApplyPublish_RateLimitAbortsRemainingPlan pins bugbot-klaj's other
+// classification branch: an error satisfying engine.IsGHRateLimited must
+// abort the rest of the plan (the paced runner has already exhausted its
+// retry budget by the time this surfaces) rather than being treated as an
+// action-scoped failure like a 422.
+func TestApplyPublish_RateLimitAbortsRemainingPlan(t *testing.T) {
+	ctx := context.Background()
+	st, fClose := setupPublishStore(t)
+
+	if err := st.UpsertPublishedIssue(ctx, fClose.Fingerprint, 77, store.IssueStateOpen, "seed-hash"); err != nil {
+		t.Fatalf("seed published close target: %v", err)
+	}
+	if err := st.MarkFixed(ctx, fClose.Fingerprint); err != nil {
+		t.Fatalf("mark fixed: %v", err)
+	}
+
+	// Processed before the close, same ordering as the resilience test above.
+	seedSecondOpenFinding(t, ctx, st)
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
+		on("repos/{owner}/{repo}/issues -X POST", nil)
+	gh.errs["repos/{owner}/{repo}/issues -X POST"] = fmt.Errorf("gh api: secondary rate limit exceeded: %w", engine.ErrGHRateLimited)
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false)
+	if err == nil {
+		t.Fatal("expected an abort error on rate limit")
+	}
+	if !errors.Is(err, engine.ErrGHRateLimited) {
+		t.Errorf("returned error should wrap engine.ErrGHRateLimited; got: %v", err)
+	}
+
+	// The close for the second finding must NOT have been attempted -- it's
+	// later in the plan than the rate-limited create.
+	if calls := gh.callsContaining("issues/77"); len(calls) != 0 {
+		t.Errorf("close must not be attempted after a rate-limit abort; calls: %v", calls)
+	}
+	pi, gerr := st.GetPublishedIssue(ctx, fClose.Fingerprint)
+	if gerr != nil {
+		t.Fatalf("get published close target: %v", gerr)
+	}
+	if pi.State != store.IssueStateOpen {
+		t.Errorf("close target state = %q, want still open (close never attempted)", pi.State)
+	}
+}
+
+// TestApplyPublish_BodyHash_MetadataTouchSkipsPatch pins bugbot-klaj's no-op
+// PATCH elimination: a metadata-only finding touch (any UpsertFinding call
+// that leaves the rendered body unchanged -- the impact sweep,
+// AddCorroboratingLenses, AppendFindingSites analogue exercised here is a
+// bare re-upsert of the same finding content) must not cost a PATCH. The
+// published row's updated_at still advances so the planner converges to
+// publishSkip on the next cycle instead of replanning the same no-op update
+// forever.
+func TestApplyPublish_BodyHash_MetadataTouchSkipsPatch(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+
+	gh1 := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":42}`))
+	var buf1 strings.Builder
+	if err := runPublish(ctx, &buf1, gh1.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	pi1, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published after create: %v", err)
+	}
+	if pi1.BodyHash == "" {
+		t.Fatal("BodyHash must be recorded after create")
+	}
+
+	// Metadata-only touch: re-upsert the SAME finding content. UpsertFinding
+	// always stamps updated_at=now on the update path, so this alone makes
+	// finding.UpdatedAt > published.UpdatedAt and plans a publishUpdate --
+	// but the rendered body is byte-identical.
+	if _, err := st.UpsertFinding(ctx, f); err != nil {
+		t.Fatalf("metadata touch: %v", err)
+	}
+
+	// Deliberately no "issues/42 -X PATCH" route: the apply loop must never
+	// reach ghUpdateIssue for a hash match, so none is needed.
+	gh2 := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]"))
+	var buf2 strings.Builder
+	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if calls := gh2.callsContaining("issues/42 -X PATCH"); len(calls) != 0 {
+		t.Errorf("expected zero PATCH calls on a metadata-only touch, got %d", len(calls))
+	}
+	if !strings.Contains(buf2.String(), "unchanged issue #42") {
+		t.Errorf("expected an 'unchanged issue #42' log line; got: %s", buf2.String())
+	}
+	if !strings.Contains(buf2.String(), "skipped=1") {
+		t.Errorf("second run must count the no-op as skipped, not updated; got: %s", buf2.String())
+	}
+
+	pi2, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published after second run: %v", err)
+	}
+	if !pi2.UpdatedAt.After(pi1.UpdatedAt) {
+		t.Errorf("published_issues.updated_at must advance even without a PATCH: %s -> %s", pi1.UpdatedAt, pi2.UpdatedAt)
+	}
+	if pi2.BodyHash != pi1.BodyHash {
+		t.Errorf("BodyHash must stay the same when the body did not change: %q -> %q", pi1.BodyHash, pi2.BodyHash)
+	}
+
+	// Third run: published.updated_at is now newer than the finding's
+	// updated_at, so the planner converges to publishSkip with zero writes.
+	gh3 := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]"))
+	var buf3 strings.Builder
+	if err := runPublish(ctx, &buf3, gh3.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("third run: %v", err)
+	}
+	if !strings.Contains(buf3.String(), "skipped=1") {
+		t.Errorf("third run should plan publishSkip; got: %s", buf3.String())
+	}
+	for _, call := range gh3.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "PATCH") || strings.Contains(joined, "POST") {
+			t.Errorf("third run should make zero write calls (pure skip); got: %v", call)
+		}
+	}
+}
+
+// TestApplyPublish_BodyHash_RealChangeStillPatches pins the other half of
+// bugbot-klaj's no-op PATCH elimination: a genuine content change
+// (Description, which renderIssueBody reads) must still produce exactly one
+// PATCH, and the stored hash must be refreshed to match the new body.
+func TestApplyPublish_BodyHash_RealChangeStillPatches(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+
+	gh1 := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":42}`))
+	var buf1 strings.Builder
+	if err := runPublish(ctx, &buf1, gh1.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	pi1, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published after create: %v", err)
+	}
+
+	// Real content change: Description drives renderIssueBody's output.
+	f.Description = "a completely different description"
+	if _, err := st.UpsertFinding(ctx, f); err != nil {
+		t.Fatalf("content change: %v", err)
+	}
+
+	gh2 := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
+		on("issues/42 -X PATCH", []byte(`{"number":42}`))
+	var buf2 strings.Builder
+	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	patchCalls := gh2.callsContaining("issues/42 -X PATCH")
+	if len(patchCalls) != 1 {
+		t.Fatalf("expected exactly 1 PATCH for a real content change, got %d", len(patchCalls))
+	}
+	body, _ := argValue(patchCalls[0], "body")
+	if !strings.Contains(body, "a completely different description") {
+		t.Errorf("PATCH body should carry the new description; got: %q", body[:min(len(body), 200)])
+	}
+	if !strings.Contains(buf2.String(), "updated=1") {
+		t.Errorf("second run should count updated=1; got: %s", buf2.String())
+	}
+
+	pi2, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published after second run: %v", err)
+	}
+	if pi2.BodyHash == pi1.BodyHash {
+		t.Error("BodyHash must be refreshed after a real content change")
+	}
+	if pi2.BodyHash != bodyHashHex(body) {
+		t.Errorf("stored BodyHash = %q, want sha256 of the PATCHed body = %q", pi2.BodyHash, bodyHashHex(body))
 	}
 }
