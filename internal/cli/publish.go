@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -42,11 +43,21 @@ func newPublishCmd() *cobra.Command {
 		Long: `Publish open findings to GitHub Issues via the gh CLI.
 
 On each run it:
+  - Backsyncs GitHub -> local first: any published issue a human closed
+    directly on GitHub is detected (one issues-list call, skipped entirely
+    when nothing could have been closed) and pulled into the store -- the
+    open finding is dismissed (so it is not re-reported) and its row is
+    marked closed. This never posts a comment or PATCHes the issue; the
+    human's close stands as-is.
   - Creates a new GitHub issue for every open finding with Tier <= tier_min
     that has not yet been filed.
   - Skips findings whose published issue is already up-to-date.
   - Updates the issue body if the finding was updated more recently than the
     last publish (UpdatedAt > published.updated_at).
+  - Reopens the GitHub issue (state PATCH + fresh body, then a comment) for
+    a finding that regressed after bugbot itself had closed it -- backsync
+    above already ensures a still-open finding pointing at a closed row can
+    only be a bugbot-closed regression, never a human close.
   - Closes the GitHub issue (and posts a comment) for findings that have been
     fixed or dismissed, when close_on_fixed is true.
 
@@ -144,12 +155,127 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 		publishedMap[pi.Fingerprint] = pi
 	}
 
+	// ---- Backsync: GitHub -> local (bugbot-fchv) ----
+	//
+	// planPublish only ever reads local state; nothing above this point looks
+	// at what GitHub itself currently thinks. Two local/remote-drift bugs
+	// follow from that gap:
+	//
+	//  1. A human closes a bugbot-filed issue on GitHub as a triage signal.
+	//     Without backsync the local finding stays "open" forever, and the
+	//     next UpdatedAt bump plans a body PATCH on the closed issue and
+	//     upserts the row back to "open" -- the human's signal is silently
+	//     discarded.
+	//  2. store.ReopenAsRegression flips a fixed finding back to open while
+	//     its published row is still "closed" (bugbot closed it, then the
+	//     defect came back). Nothing PATCHes state=open, so the GitHub issue
+	//     stays closed even though we are actively re-tracking it.
+	//
+	// This step resolves (1): any published row still "open"/"closing" whose
+	// GitHub issue is now closed is backsynced -- the row is marked closed,
+	// and if the local finding is still open we dismiss it (StatusDismissed
+	// records suppression memory, store/findings.go:428-455 -- a human
+	// closing our issue means "don't show me this again"). (2) is resolved
+	// below by planPublish's own IssueStateClosed case, which only ever
+	// fires for rows backsync did NOT touch (they were already closed before
+	// this run), so a still-open finding pointing at one is unambiguously a
+	// bugbot-closed regression, not a human close.
+	//
+	// Cost: one extra `gh api issues?state=closed` list call, and only when
+	// at least one row is in a state that could have been closed on GitHub
+	// (open/closing) -- a store with everything already closed costs zero
+	// gh calls.
+	backsynced := 0
+	needsBacksync := false
+	for _, pi := range published {
+		if pi.State == store.IssueStateOpen || pi.State == store.IssueStateClosing {
+			needsBacksync = true
+			break
+		}
+	}
+	if needsBacksync {
+		closedIssues, err := listBugbotIssues(ctx, gh, cfg.Labels, "closed")
+		if err != nil {
+			return fmt.Errorf("publish: backsync: list closed issues: %w", err)
+		}
+		closedNums := make(map[int]bool, len(closedIssues))
+		for _, is := range closedIssues {
+			closedNums[is.Number] = true
+		}
+
+		findingByFP := make(map[string]domain.Finding, len(openFindings)+len(fixedFindings)+len(dismissedFindings)+len(supersededFindings))
+		for _, group := range [][]domain.Finding{openFindings, fixedFindings, dismissedFindings, supersededFindings} {
+			for _, f := range group {
+				findingByFP[f.Fingerprint] = f
+			}
+		}
+
+		backsyncActions := planBacksync(publishedMap, closedNums, findingByFP)
+
+		// Apply first (or print, under dry-run), then reconcile the in-memory
+		// state that planPublish is about to read -- there is no reload, so
+		// every backsynced row/finding must be patched into openFindings and
+		// publishedMap here or planPublish would immediately undo the sync
+		// (e.g. re-PATCH a body onto an issue we just marked closed).
+		dismissedFPs := make(map[string]bool, len(backsyncActions))
+		for _, ba := range backsyncActions {
+			status := "n/a"
+			if f, ok := findingByFP[ba.fingerprint]; ok {
+				status = string(f.Status)
+			}
+			if dryRun {
+				if ba.dismissFinding {
+					_, _ = fmt.Fprintf(w, "dry-run: backsync issue #%d for %s (closed on GitHub; would dismiss finding)\n", ba.issueNumber, ba.fingerprint[:12])
+				} else {
+					_, _ = fmt.Fprintf(w, "dry-run: backsync issue #%d for %s (closed on GitHub; finding already %s)\n", ba.issueNumber, ba.fingerprint[:12], status)
+				}
+				backsynced++
+				continue
+			}
+			if ba.dismissFinding {
+				reason := fmt.Sprintf("GitHub issue #%d was closed manually; dismissed by publish backsync", ba.issueNumber)
+				if err := st.UpdateStatus(ctx, ba.fingerprint, domain.StatusDismissed, reason); err != nil {
+					return fmt.Errorf("publish: backsync dismiss %s: %w", ba.fingerprint[:12], err)
+				}
+				dismissedFPs[ba.fingerprint] = true
+				_, _ = fmt.Fprintf(w, "backsynced issue #%d for %s (closed on GitHub; finding dismissed)\n", ba.issueNumber, ba.fingerprint[:12])
+			} else {
+				_, _ = fmt.Fprintf(w, "backsynced issue #%d for %s (closed on GitHub; finding already %s)\n", ba.issueNumber, ba.fingerprint[:12], status)
+			}
+			if err := st.UpsertPublishedIssue(ctx, ba.fingerprint, ba.issueNumber, store.IssueStateClosed); err != nil {
+				return fmt.Errorf("publish: backsync record closed %s: %w", ba.fingerprint[:12], err)
+			}
+			backsynced++
+		}
+
+		// Keep the in-memory plan inputs consistent with what was just
+		// applied (or would be, under dry-run -- the printed plan must match
+		// what planPublish would do next) so planPublish never re-touches a
+		// row this step already closed out.
+		for _, ba := range backsyncActions {
+			publishedMap[ba.fingerprint] = store.PublishedIssue{
+				Fingerprint: ba.fingerprint,
+				IssueNumber: ba.issueNumber,
+				State:       store.IssueStateClosed,
+			}
+		}
+		if len(dismissedFPs) > 0 {
+			kept := openFindings[:0]
+			for _, f := range openFindings {
+				if !dismissedFPs[f.Fingerprint] {
+					kept = append(kept, f)
+				}
+			}
+			openFindings = kept
+		}
+	}
+
 	plan := planPublish(openFindings, fixedFindings, dismissedFindings, supersededFindings, publishedMap, tierMin, cfg.CloseOnFixed)
 
 	// Resolve the repo URL once; tolerate failure (degrade: no permalinks).
 	repoURL := resolveRepoURL(ctx, gh)
 
-	created, updated, adopted, closed, skipped, stale := 0, 0, 0, 0, 0, 0
+	created, updated, adopted, reopened, closed, skipped, stale := 0, 0, 0, 0, 0, 0, 0
 
 	for _, a := range plan {
 		switch act := a.(type) {
@@ -255,6 +381,55 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			_, _ = fmt.Fprintf(w, "updated issue #%d for %s\n", act.issueNumber, act.finding.Fingerprint[:12])
 			updated++
 
+		case publishReopen:
+			if dryRun {
+				_, _ = fmt.Fprintf(w, "dry-run: reopen issue #%d for %s (regression)\n", act.issueNumber, act.finding.Fingerprint[:12])
+				reopened++
+				continue
+			}
+			// Backsync (above) already turned every human-closed row into
+			// IssueStateClosed and dismissed the finding, so an OPEN finding
+			// whose row is still closed at this point can only be a
+			// bugbot-closed regression (store.ReopenAsRegression). One PATCH
+			// both flips state=open and refreshes the body, so a reopened
+			// issue never shows stale content from before the fix regressed.
+			if err := ghReopenIssue(ctx, gh, act.issueNumber, renderIssueBody(act.finding, repoURL, prov)); err != nil {
+				if isGHGoneOrNotFound(err) {
+					// Same stale-row handling as publishUpdate: the issue is
+					// gone, drop the row and file a fresh one.
+					_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone on reopen: %v); re-creating\n", act.finding.Fingerprint[:12], act.issueNumber, err)
+					if derr := st.DeletePublishedIssue(ctx, act.finding.Fingerprint); derr != nil {
+						return fmt.Errorf("publish: delete stale published issue: %w", derr)
+					}
+					n, cerr := ghCreateIssue(ctx, gh, act.finding.Title, renderIssueBody(act.finding, repoURL, prov), cfg.Labels)
+					if cerr != nil {
+						return fmt.Errorf("publish: recreate issue after stale reopen: %w", cerr)
+					}
+					if uerr := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen); uerr != nil {
+						return fmt.Errorf("publish: record recreated issue: %w", uerr)
+					}
+					_, _ = fmt.Fprintf(w, "recreated issue #%d for %s (replaced stale row)\n", n, act.finding.Fingerprint[:12])
+					stale++
+					created++
+					continue
+				}
+				return err
+			}
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen); err != nil {
+				return fmt.Errorf("publish: record reopened issue: %w", err)
+			}
+			// A comment failure here is benign and deliberately left
+			// unrecovered: the row is already "open", so the next cycle
+			// plans a plain body update rather than a second reopen attempt.
+			// The regression note is lost but the issue state is correct --
+			// the same trade-off runPublish already accepts at the
+			// closing-state boundary above (publish.go:264-267 equivalent).
+			if err := ghCommentIssue(ctx, gh, act.issueNumber, "Reopened by bugbot: this finding was re-detected as a regression."); err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(w, "reopened issue #%d for %s (regression)\n", act.issueNumber, act.finding.Fingerprint[:12])
+			reopened++
+
 		case publishClose:
 			if dryRun {
 				_, _ = fmt.Fprintf(w, "dry-run: close issue #%d for %s (status: %s)\n", act.issueNumber, act.finding.Fingerprint[:12], act.finding.Status)
@@ -311,14 +486,15 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 		}
 	}
 
-	_, _ = fmt.Fprintf(w, "publish: created=%d updated=%d adopted=%d closed=%d skipped=%d stale=%d\n", created, updated, adopted, closed, skipped, stale)
+	_, _ = fmt.Fprintf(w, "publish: created=%d updated=%d adopted=%d reopened=%d closed=%d backsynced=%d skipped=%d stale=%d\n", created, updated, adopted, reopened, closed, backsynced, skipped, stale)
 	return nil
 }
 
 // publishAction is the sum type for one unit of planned publish work. The
 // concrete types are publishCreate, publishRecover, publishUpdate,
-// publishClose, and publishSkip; each carries only the fields valid for its
-// op so invalid combinations are unrepresentable.
+// publishReopen, publishClose, publishSkip, and publishAdopt; each carries
+// only the fields valid for its op so invalid combinations are
+// unrepresentable.
 type publishAction interface{ publishAction() }
 
 // publishCreate plans a new GitHub issue for a finding with no published row.
@@ -331,6 +507,15 @@ type publishRecover struct{ finding domain.Finding }
 // publishUpdate plans a body re-push for a finding updated after its last
 // publish. issueNumber is the existing GitHub issue to PATCH.
 type publishUpdate struct {
+	finding     domain.Finding
+	issueNumber int
+}
+
+// publishReopen plans reopening a GitHub issue whose published row is
+// closed but the finding is open again -- a regression re-detected after
+// store.ReopenAsRegression flipped it back to StatusOpen. issueNumber is
+// the existing GitHub issue to reopen and refresh.
+type publishReopen struct {
 	finding     domain.Finding
 	issueNumber int
 }
@@ -362,6 +547,7 @@ type publishAdopt struct {
 func (publishCreate) publishAction()  {}
 func (publishRecover) publishAction() {}
 func (publishUpdate) publishAction()  {}
+func (publishReopen) publishAction()  {}
 func (publishClose) publishAction()   {}
 func (publishSkip) publishAction()    {}
 func (publishAdopt) publishAction()   {}
@@ -409,6 +595,17 @@ func adoptAnchor(f domain.Finding, anchors []pubAnchor) (pubAnchor, bool) {
 // Close rule: if close_on_fixed is true, any finding with status fixed,
 // dismissed, or superseded (backlog reconcile, bugbot-ezmx.4 — a merged-away
 // duplicate) whose published row state is "open" gets a close action.
+//
+// Reopen rule: an OPEN finding whose published row is already "closed"
+// (IssueStateClosed) is a regression -- store.ReopenAsRegression flipped a
+// fixed/dismissed finding back to open while its GitHub issue stayed
+// closed. This case can only reach planPublish already disambiguated from
+// a human-closed issue: the caller (runPublish) runs the GitHub->local
+// backsync step first, which reclassifies every human-closed row as
+// closed *and* dismisses its finding (bugbot-fchv). So by the time
+// planPublish sees an open finding pointing at a closed row, the close
+// must have been ours, and it plans a reopen (state PATCH + body refresh)
+// rather than a plain body update.
 func planPublish(
 	open, fixed, dismissed, superseded []domain.Finding,
 	published map[string]store.PublishedIssue,
@@ -446,6 +643,11 @@ func planPublish(
 			// An earlier create was interrupted between the gh call and the
 			// store write; the issue may or may not exist on GitHub.
 			actions = append(actions, publishRecover{finding: f})
+		case pi.State == store.IssueStateClosed:
+			// See the Reopen rule above: an open finding with a closed row
+			// is a bugbot-closed regression, not a human close (backsync
+			// already dismissed and skipped those).
+			actions = append(actions, publishReopen{finding: f, issueNumber: pi.IssueNumber})
 		case f.UpdatedAt.After(pi.UpdatedAt):
 			// Published row exists ("open", or "closing" from a reintroduced
 			// finding — the body re-push is correct either way). If the finding
@@ -486,24 +688,78 @@ func planPublish(
 	return actions
 }
 
-// findIssueByMarker lists the repo's bugbot issues (filtered by the first
-// configured label when present) and returns the number of the issue whose
-// body carries the fingerprint marker. Used only on the rare recover path.
-func findIssueByMarker(ctx context.Context, gh engine.GHRunner, labels []string, fingerprint string) (int, bool, error) {
-	path := "repos/{owner}/{repo}/issues?state=all&per_page=100"
+// backsyncAction is one unit of GitHub->local reconciliation work: a
+// published row whose GitHub issue closed without our involvement.
+// dismissFinding is true only when the local finding still exists and is
+// StatusOpen -- a human closing our issue is a triage signal to stop
+// reporting the finding (StatusDismissed records that as suppression
+// memory). It is false when the local finding is already fixed/dismissed/
+// superseded or gone: there the row was simply lagging the true state, and
+// only the row needs to catch up.
+type backsyncAction struct {
+	fingerprint    string
+	issueNumber    int
+	dismissFinding bool
+}
+
+// planBacksync is the pure reconciler for the GitHub->local direction
+// (bugbot-fchv): given the published_issues rows, the set of issue numbers
+// that are closed on GitHub right now, and the local findings keyed by
+// fingerprint, it decides which rows need to be pulled into sync.
+//
+// Only rows still recorded "open" or "closing" are candidates -- rows
+// already "closed" locally agree with GitHub already, and "pending" rows
+// have no confirmed issue number to check. Results are sorted by
+// fingerprint for deterministic output (map iteration order is not).
+func planBacksync(published map[string]store.PublishedIssue, closedNums map[int]bool, findingByFP map[string]domain.Finding) []backsyncAction {
+	var actions []backsyncAction
+	for fp, pi := range published {
+		if pi.State != store.IssueStateOpen && pi.State != store.IssueStateClosing {
+			continue
+		}
+		if !closedNums[pi.IssueNumber] {
+			continue
+		}
+		dismiss := false
+		if f, ok := findingByFP[fp]; ok && f.Status == domain.StatusOpen {
+			dismiss = true
+		}
+		actions = append(actions, backsyncAction{fingerprint: fp, issueNumber: pi.IssueNumber, dismissFinding: dismiss})
+	}
+	sort.Slice(actions, func(i, j int) bool { return actions[i].fingerprint < actions[j].fingerprint })
+	return actions
+}
+
+// listBugbotIssues lists the repo's bugbot issues in the given GitHub
+// `state` filter value ("open", "closed", or "all"), filtered by the first
+// configured label when present. Shared by findIssueByMarker (state=all,
+// recover path) and the backsync step in runPublish (state=closed).
+func listBugbotIssues(ctx context.Context, gh engine.GHRunner, labels []string, state string) ([]publishIssue, error) {
+	path := "repos/{owner}/{repo}/issues?state=" + state + "&per_page=100"
 	if len(labels) > 0 {
 		path += "&labels=" + labels[0]
 	}
 	raw, err := gh(ctx, "api", "--paginate", path)
 	if err != nil {
 		if isGHMissing(err) {
-			return 0, false, errGHRequired()
+			return nil, errGHRequired()
 		}
-		return 0, false, fmt.Errorf("list issues: %w", err)
+		return nil, fmt.Errorf("list issues: %w", err)
 	}
 	issues, err := parsePublishIssues(raw)
 	if err != nil {
-		return 0, false, fmt.Errorf("parse issues list: %w", err)
+		return nil, fmt.Errorf("parse issues list: %w", err)
+	}
+	return issues, nil
+}
+
+// findIssueByMarker lists the repo's bugbot issues (filtered by the first
+// configured label when present) and returns the number of the issue whose
+// body carries the fingerprint marker. Used only on the rare recover path.
+func findIssueByMarker(ctx context.Context, gh engine.GHRunner, labels []string, fingerprint string) (int, bool, error) {
+	issues, err := listBugbotIssues(ctx, gh, labels, "all")
+	if err != nil {
+		return 0, false, err
 	}
 	marker := "<!-- bugbot:fp=" + fingerprint + " -->"
 	for _, is := range issues {
@@ -532,6 +788,7 @@ func parsePublishIssues(raw []byte) ([]publishIssue, error) {
 type publishIssue struct {
 	Number int    `json:"number"`
 	Body   string `json:"body"`
+	State  string `json:"state"`
 }
 
 // truncateUTF8 returns s sliced to at most max bytes, walking back to a valid
@@ -1137,6 +1394,27 @@ func ghPatchIssueClosed(ctx context.Context, gh engine.GHRunner, number int) err
 			return errGHRequired()
 		}
 		return fmt.Errorf("publish: close issue #%d: %w", number, err)
+	}
+	return nil
+}
+
+// ghReopenIssue reopens a closed GitHub issue and refreshes its body in a
+// single PATCH (state=open, body=...). Unlike ghUpdateIssue (body-only) and
+// ghPatchIssueClosed (state-only), a regression reopen needs both the state
+// flip and a fresh body -- one mutating call does double duty so a reopened
+// issue never shows the stale content it had when it was closed.
+func ghReopenIssue(ctx context.Context, gh engine.GHRunner, number int, body string) error {
+	_, err := gh(ctx,
+		"api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d", number),
+		"-X", "PATCH",
+		"-f", "state=open",
+		"-f", "body="+body,
+	)
+	if err != nil {
+		if isGHMissing(err) {
+			return errGHRequired()
+		}
+		return fmt.Errorf("publish: reopen issue #%d: %w", number, err)
 	}
 	return nil
 }

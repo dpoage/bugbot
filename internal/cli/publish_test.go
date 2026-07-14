@@ -348,6 +348,7 @@ func TestApplyPublish_Close(t *testing.T) {
 
 	gh := newFakeGH().
 		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
 		on("issues/77/comments", []byte(`{"id":1}`)).
 		on("issues/77 -X PATCH", []byte(`{"number":77}`))
 
@@ -496,6 +497,7 @@ func TestApplyPublish_Idempotence(t *testing.T) {
 	// Second run: the finding's UpdatedAt has not changed, so it should be skipped.
 	gh2 := newFakeGH().
 		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
 		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":56}`))
 
 	var buf2 strings.Builder
@@ -540,6 +542,7 @@ func TestPublishCmd_Via_Setup(t *testing.T) {
 	// Re-run: idempotent — no second create.
 	fgh2 := newFakeGH().
 		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
 		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":101}`))
 	publishGH = fgh2.run
 
@@ -578,6 +581,7 @@ func TestApplyPublish_CloseOrdering(t *testing.T) {
 
 	gh := newFakeGH().
 		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
 		on("issues/77/comments", []byte(`{"id":1}`)).
 		on("issues/77 -X PATCH", []byte(`{"number":77}`))
 
@@ -617,6 +621,7 @@ func TestApplyPublish_ClosingResume(t *testing.T) {
 
 	gh := newFakeGH().
 		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
 		on("issues/77 -X PATCH", []byte(`{"number":77}`))
 	// NOTE: no route for issues/77/comments — a comment POST would error.
 
@@ -1438,6 +1443,7 @@ func TestApplyPublish_UpdateStaleRecreate(t *testing.T) {
 
 	fake := newFakeGH().
 		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
 		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":123}`)).
 		on("issues/50 -X PATCH", nil)
 	// The PATCH on the stale #50 returns 410. Inject via the fake's errs map
@@ -1500,6 +1506,7 @@ func TestApplyPublish_UpdateStaleRecreate_404(t *testing.T) {
 	}
 	fake := newFakeGH().
 		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
 		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":456}`)).
 		on("issues/77 -X PATCH", nil)
 	// The PATCH on the stale #77 returns 404. Inject via the fake's errs map
@@ -1539,6 +1546,7 @@ func TestApplyPublish_CloseStaleDrop(t *testing.T) {
 	ghErr := fmt.Errorf("gh api: HTTP 410 Gone")
 	fake := newFakeGH().
 		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
 		on("issues/88/comments", []byte(`{"id":1}`))
 	// Wrap so the PATCH on close returns 410.
 	baseRun := fake.run
@@ -1617,6 +1625,7 @@ func TestApplyPublish_UpdateRecordsSuccess(t *testing.T) {
 	}
 	fake := newFakeGH().
 		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
 		on("issues/60 -X PATCH", []byte(``))
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
@@ -1844,5 +1853,399 @@ func TestRenderIssueBody_SanitizeAndTruncateJointly(t *testing.T) {
 	// Under GitHub's hard limit.
 	if len(body) >= 65536 {
 		t.Errorf("body length %d exceeds GitHub 65536 hard limit", len(body))
+	}
+}
+
+// ---- Backsync + Reopen tests (bugbot-fchv) ----
+
+// TestBacksync_HumanClosedDismissesFinding: an issue closed manually on
+// GitHub must dismiss the local open finding (suppression memory), mark the
+// published row closed, and must NOT PATCH the issue body or post a comment
+// in the same run -- the human's close stands as-is.
+func TestBacksync_HumanClosedDismissesFinding(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open"); err != nil {
+		t.Fatalf("seed published: %v", err)
+	}
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte(`[{"number":77,"body":"","state":"closed"}]`))
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("runPublish: %v", err)
+	}
+
+	// No body PATCH or comment must have been posted for issue #77.
+	if n := len(gh.callsContaining("issues/77 -X PATCH")); n != 0 {
+		t.Errorf("expected zero PATCH calls on a human-closed issue, got %d", n)
+	}
+	if n := len(gh.callsContaining("issues/77/comments")); n != 0 {
+		t.Errorf("expected zero comment calls on a human-closed issue, got %d", n)
+	}
+
+	got, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get finding: %v", err)
+	}
+	if got.Status != domain.StatusDismissed {
+		t.Errorf("finding status = %q, want dismissed", got.Status)
+	}
+
+	// Re-upserting the same finding must not resurrect it as open: the
+	// suppression row backsync created makes UpsertFinding force it back to
+	// dismissed (store/findings.go:164-170).
+	reupserted, err := st.UpsertFinding(ctx, domain.Finding{
+		Fingerprint: f.Fingerprint,
+		Title:       f.Title,
+		Severity:    f.Severity,
+		Tier:        f.Tier,
+		Status:      domain.StatusOpen,
+		Lens:        f.Lens,
+		File:        f.File,
+		Line:        f.Line,
+	})
+	if err != nil {
+		t.Fatalf("re-upsert: %v", err)
+	}
+	if reupserted.Status != domain.StatusDismissed {
+		t.Errorf("re-upsert status = %q, want dismissed (suppression must stick)", reupserted.Status)
+	}
+
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published issue: %v", err)
+	}
+	if pi.State != store.IssueStateClosed {
+		t.Errorf("published state = %q, want closed", pi.State)
+	}
+	if !strings.Contains(buf.String(), "backsynced issue #77") {
+		t.Errorf("expected backsync summary line, got: %s", buf.String())
+	}
+}
+
+// TestBacksync_Idempotent: a second run over an already-backsynced store
+// makes zero backsync gh calls (needsBacksync sees only closed rows) and
+// zero further mutations.
+func TestBacksync_Idempotent(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 77, "open"); err != nil {
+		t.Fatalf("seed published: %v", err)
+	}
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+
+	gh1 := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte(`[{"number":77,"body":"","state":"closed"}]`))
+	var buf1 strings.Builder
+	if err := runPublish(ctx, &buf1, gh1.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	// Second run: only "repo view" is routed. If backsync tried to list
+	// closed issues again, or mutate anything, the fakeGH would either error
+	// (no route) or the assertions below would catch a state change.
+	gh2 := newFakeGH().on("repo view", []byte("https://github.com/owner/repo\n"))
+	var buf2 strings.Builder
+	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if len(gh2.calls) != 1 {
+		t.Errorf("second run should make exactly 1 gh call (repo view), got %d: %v", len(gh2.calls), gh2.calls)
+	}
+	if strings.Contains(buf2.String(), "backsynced issue") {
+		t.Errorf("second run should not backsync again: %s", buf2.String())
+	}
+
+	got, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get finding: %v", err)
+	}
+	if got.Status != domain.StatusDismissed {
+		t.Errorf("finding status = %q, want dismissed (unchanged)", got.Status)
+	}
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published issue: %v", err)
+	}
+	if pi.State != store.IssueStateClosed {
+		t.Errorf("published state = %q, want closed (unchanged)", pi.State)
+	}
+}
+
+// TestBacksync_FixedFindingHumanClosed: a finding that was already fixed
+// locally, whose issue is closed manually on GitHub before bugbot's own
+// close runs, must land with a closed row and no comment/PATCH -- backsync
+// beats planPublish's close action to the row.
+func TestBacksync_FixedFindingHumanClosed(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 90, "open"); err != nil {
+		t.Fatalf("seed published: %v", err)
+	}
+	if err := st.MarkFixed(ctx, f.Fingerprint); err != nil {
+		t.Fatalf("mark fixed: %v", err)
+	}
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte(`[{"number":90,"body":"","state":"closed"}]`))
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("runPublish: %v", err)
+	}
+
+	if n := len(gh.callsContaining("issues/90 -X PATCH")); n != 0 {
+		t.Errorf("expected zero PATCH calls, got %d", n)
+	}
+	if n := len(gh.callsContaining("issues/90/comments")); n != 0 {
+		t.Errorf("expected zero comment calls, got %d", n)
+	}
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published issue: %v", err)
+	}
+	if pi.State != store.IssueStateClosed {
+		t.Errorf("published state = %q, want closed", pi.State)
+	}
+	if !strings.Contains(buf.String(), "finding already fixed") {
+		t.Errorf("expected 'finding already fixed' in output, got: %s", buf.String())
+	}
+}
+
+// TestPlanPublish_DismissedNeverReopened pins that dismissal wins: a
+// dismissed finding whose published row is closed must never produce a
+// publishReopen (or any) action -- planPublish's open-findings loop only
+// ever iterates the `open` slice, and a backsync-dismissed finding is no
+// longer in it.
+func TestPlanPublish_DismissedNeverReopened(t *testing.T) {
+	dismissed := []domain.Finding{makeDismissedFinding("fp1")}
+	published := map[string]store.PublishedIssue{
+		"fp1": makePublishedIssue("fp1", 77, store.IssueStateClosed, time.Now()),
+	}
+	actions := planPublish(nil, nil, dismissed, nil, published, 2, true)
+	for _, a := range actions {
+		if _, ok := a.(publishReopen); ok {
+			t.Fatalf("dismissed finding must never be reopened, got actions: %#v", actions)
+		}
+	}
+	if len(actions) != 0 {
+		t.Errorf("expected zero actions for a dismissed finding with an already-closed row, got %#v", actions)
+	}
+}
+
+// TestApplyPublish_RegressionReopen: an open finding (re-detected regression)
+// whose published row is closed (bugbot closed it previously) must produce
+// exactly one PATCH carrying state=open and a fresh body, followed by a
+// comment, and the row must flip to open.
+func TestApplyPublish_RegressionReopen(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 65, "closed"); err != nil {
+		t.Fatalf("seed published: %v", err)
+	}
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues/65 -X PATCH", []byte(`{"number":65}`)).
+		on("issues/65/comments", []byte(`{"id":1}`))
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("runPublish: %v", err)
+	}
+
+	patchCalls := gh.callsContaining("issues/65 -X PATCH")
+	if len(patchCalls) != 1 {
+		t.Fatalf("expected exactly 1 PATCH call, got %d: %v", len(patchCalls), gh.calls)
+	}
+	state, ok := argValue(patchCalls[0], "state")
+	if !ok || state != "open" {
+		t.Errorf("PATCH state = %q, want open", state)
+	}
+	if body, ok := argValue(patchCalls[0], "body"); !ok || body == "" {
+		t.Errorf("PATCH must carry a non-empty body, got %q (ok=%v)", body, ok)
+	}
+	commentCalls := gh.callsContaining("issues/65/comments")
+	if len(commentCalls) != 1 {
+		t.Errorf("expected exactly 1 comment call, got %d", len(commentCalls))
+	}
+	// Comment must follow the PATCH.
+	patchIdx, commentIdx := -1, -1
+	for i, c := range gh.calls {
+		joined := strings.Join(c, " ")
+		if strings.Contains(joined, "issues/65 -X PATCH") {
+			patchIdx = i
+		}
+		if strings.Contains(joined, "issues/65/comments") {
+			commentIdx = i
+		}
+	}
+	if patchIdx == -1 || commentIdx == -1 || patchIdx > commentIdx {
+		t.Errorf("PATCH must precede the comment: patchIdx=%d commentIdx=%d", patchIdx, commentIdx)
+	}
+
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published issue: %v", err)
+	}
+	if pi.State != store.IssueStateOpen {
+		t.Errorf("published state = %q, want open", pi.State)
+	}
+	if !strings.Contains(buf.String(), "reopened=1") {
+		t.Errorf("expected reopened=1 in summary, got: %s", buf.String())
+	}
+}
+
+// TestApplyPublish_RegressionReopen_StaleRecreate: a 404 on the reopen PATCH
+// means the issue is gone; the stale row must be dropped and a fresh issue
+// created (mirroring publishUpdate's stale path).
+func TestApplyPublish_RegressionReopen_StaleRecreate(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 65, "closed"); err != nil {
+		t.Fatalf("seed published: %v", err)
+	}
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":200}`)).
+		on("issues/65 -X PATCH", nil)
+	gh.errs["issues/65 -X PATCH"] = fmt.Errorf("gh api: HTTP 404 Not Found")
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("runPublish must NOT abort on 404: %v", err)
+	}
+
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published issue: %v", err)
+	}
+	if pi.IssueNumber != 200 {
+		t.Errorf("issue_number = %d, want 200 (recreated)", pi.IssueNumber)
+	}
+	if pi.State != store.IssueStateOpen {
+		t.Errorf("published state = %q, want open", pi.State)
+	}
+	if !strings.Contains(buf.String(), "stale=1") {
+		t.Errorf("summary must include stale=1; got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "created=1") {
+		t.Errorf("summary must include created=1; got: %s", buf.String())
+	}
+}
+
+// TestApplyPublish_BacksyncReopenDryRun: dry-run prints backsync and reopen
+// intents but performs zero gh writes and zero store mutations.
+func TestApplyPublish_BacksyncReopenDryRun(t *testing.T) {
+	ctx := context.Background()
+	st, f1 := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f1.Fingerprint, 77, "open"); err != nil {
+		t.Fatalf("seed published f1: %v", err)
+	}
+
+	f2, err := st.UpsertFinding(ctx, domain.Finding{
+		Fingerprint: domain.Fingerprint("leak", "y.go", "3|leak"),
+		Title:       "leak",
+		Severity:    "medium",
+		Tier:        2,
+		Status:      domain.StatusOpen,
+		Lens:        "leak",
+		File:        "y.go",
+		Line:        3,
+	})
+	if err != nil {
+		t.Fatalf("seed f2: %v", err)
+	}
+	if err := st.UpsertPublishedIssue(ctx, f2.Fingerprint, 65, "closed"); err != nil {
+		t.Fatalf("seed published f2: %v", err)
+	}
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte(`[{"number":77,"body":"","state":"closed"}]`))
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, true /* dry-run */); err != nil {
+		t.Fatalf("runPublish dry-run: %v", err)
+	}
+
+	for _, call := range gh.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "POST") || strings.Contains(joined, "PATCH") {
+			t.Errorf("dry-run should not make write calls; got: %v", call)
+		}
+	}
+	out := buf.String()
+	if !strings.Contains(out, "dry-run: backsync issue #77") {
+		t.Errorf("expected dry-run backsync intent for #77, got: %s", out)
+	}
+	if !strings.Contains(out, "dry-run: reopen issue #65") {
+		t.Errorf("expected dry-run reopen intent for #65, got: %s", out)
+	}
+
+	// Zero store mutations: both findings still open, both rows unchanged.
+	got1, err := st.GetFindingByFingerprint(ctx, f1.Fingerprint)
+	if err != nil {
+		t.Fatalf("get f1: %v", err)
+	}
+	if got1.Status != domain.StatusOpen {
+		t.Errorf("f1 status = %q, want open (dry-run must not mutate)", got1.Status)
+	}
+	pi1, err := st.GetPublishedIssue(ctx, f1.Fingerprint)
+	if err != nil {
+		t.Fatalf("get pi1: %v", err)
+	}
+	if pi1.State != store.IssueStateOpen {
+		t.Errorf("pi1 state = %q, want open (dry-run must not mutate)", pi1.State)
+	}
+	pi2, err := st.GetPublishedIssue(ctx, f2.Fingerprint)
+	if err != nil {
+		t.Fatalf("get pi2: %v", err)
+	}
+	if pi2.State != store.IssueStateClosed {
+		t.Errorf("pi2 state = %q, want closed (dry-run must not mutate)", pi2.State)
+	}
+}
+
+// TestApplyPublish_NoBacksyncWhenNoOpenRows: when no published row is open
+// or closing, backsync must make zero gh calls -- in particular it must
+// never call the closed-issues listing endpoint.
+func TestApplyPublish_NoBacksyncWhenNoOpenRows(t *testing.T) {
+	ctx := context.Background()
+	st, _ := setupPublishStore(t)
+
+	// No published rows at all: the seeded finding has no row yet, so
+	// planPublish will plan a create -- but backsync itself must not touch
+	// gh, since there is nothing to check. The fakeGH has no route for
+	// "issues?state=closed"; if backsync called it, the run would fail with
+	// "no route for" instead of succeeding.
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":10}`))
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		t.Fatalf("runPublish: %v", err)
+	}
+	if !strings.Contains(buf.String(), "created=1") {
+		t.Errorf("expected created=1, got: %s", buf.String())
+	}
+	for _, call := range gh.calls {
+		if strings.Contains(strings.Join(call, " "), "state=closed") {
+			t.Errorf("backsync must not list issues when no row is open/closing; got call: %v", call)
+		}
 	}
 }
