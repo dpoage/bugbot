@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ecosystem"
@@ -284,21 +285,38 @@ func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding dom
 	}
 
 	att, err := r.Attempt(ctx, finding)
+
+	// From here the queue row is 'running' and MUST be transitioned even when
+	// ctx is already cancelled (Ctrl-C, daemon shutdown): writing with the
+	// caller's ctx would fail instantly, leak the lease until the 30-minute
+	// stale-lease reclaim, and every dispatch in between would report
+	// "skipped: already claimed". Detached persist ctx, matching
+	// cartographer.go's interruption-survival convention.
+	qCtx, qCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer qCancel()
+
 	if err != nil {
-		// Infrastructure error: requeue for bounded retry.
-		_ = st.RequeueReproAttemptOnInfraError(ctx, finding.Fingerprint, err.Error())
+		if ctx.Err() != nil {
+			// Interrupt/shutdown, not an infrastructure strike: release the
+			// claim and refund the attempt so repeated interrupts never
+			// exhaust the retry budget and abandon the row.
+			_ = st.ReleaseReproAttempt(qCtx, finding.Fingerprint, "interrupted: "+ctx.Err().Error())
+		} else {
+			// Infrastructure error: requeue for bounded retry.
+			_ = st.RequeueReproAttemptOnInfraError(qCtx, finding.Fingerprint, err.Error())
+		}
 		outcome.Reason = "error: " + err.Error()
 		outcome.Err = err
 		return outcome, err
 	}
 
 	// Attempt completed (success or definitive failure): mark done.
-	_ = st.FinishReproAttempt(ctx, finding.Fingerprint)
+	_ = st.FinishReproAttempt(qCtx, finding.Fingerprint)
 	if att.Promoted {
 		// A successful reproduction is definitive positive evidence — clear any
 		// prior exit-zero contradiction signal so the finding is not simultaneously
 		// Tier<=1 (reproduced) and repro-contradicted.
-		_ = st.ZeroExitZeroCount(ctx, finding.Fingerprint)
+		_ = st.ZeroExitZeroCount(qCtx, finding.Fingerprint)
 	}
 
 	outcome.Attempts = att.Attempts
@@ -351,7 +369,7 @@ func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding dom
 		// toolchain_error, not_demonstrated, timeout) do not.
 		if att.Reason == string(VerdictReasonExitZero) {
 			outcome.ExitZero = true
-			_ = st.RecordExitZeroAttempt(ctx, finding.Fingerprint)
+			_ = st.RecordExitZeroAttempt(qCtx, finding.Fingerprint)
 		}
 	}
 

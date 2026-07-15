@@ -239,6 +239,34 @@ func (s *Store) RequeueReproAttemptOnInfraError(ctx context.Context, fingerprint
 	})
 }
 
+// ReleaseReproAttempt transitions a running repro_attempts row back to pending
+// and REFUNDS the attempt the claim consumed (attempt_count - 1, floored at 0).
+// It is the interrupt/shutdown counterpart to RequeueReproAttemptOnInfraError:
+// an operator interrupt (Ctrl-C, daemon shutdown) is not an infrastructure
+// strike against the finding, so it must not consume the bounded retry budget
+// — otherwise three interrupted cycles would silently abandon the row and
+// every later dispatch would report it "already claimed or exhausted" forever.
+// note is stored in last_error for diagnostics. Only the claim holder calls
+// this; the state = 'running' guard makes a call on any other state a no-op.
+func (s *Store) ReleaseReproAttempt(ctx context.Context, fingerprint, note string) error {
+	now := nowUTC()
+	return s.retry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, `
+			UPDATE repro_attempts
+			SET state = ?,
+			    attempt_count = MAX(attempt_count - 1, 0),
+			    last_error = ?,
+			    updated_at = ?
+			WHERE fingerprint = ? AND state = 'running'`,
+			string(ReproStatePending), note, now.Format(timeLayout), fingerprint,
+		)
+		if err != nil {
+			return annotateErr(s.path, "release_repro_attempt", err)
+		}
+		return nil
+	})
+}
+
 // BlockReproAttemptOnToolchain transitions a repro_attempts row to
 // blocked_toolchain, recording the missing capability's ecosystem name. It is
 // called by promote.go's promoteOne BEFORE ClaimReproAttempt, when the

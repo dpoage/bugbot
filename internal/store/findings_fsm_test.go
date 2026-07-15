@@ -210,6 +210,65 @@ func TestReproQueue_StaleLease(t *testing.T) {
 	}
 }
 
+// TestReproQueue_ReleaseRefundsAttempt verifies the interrupt path
+// (ReleaseReproAttempt): a running row returns to 'pending' with the claim's
+// attempt_count increment refunded, so an operator interrupt never consumes
+// the bounded infra-retry budget — repeated Ctrl-C cycles must not abandon
+// the row into a permanent "already claimed or exhausted" skip.
+func TestReproQueue_ReleaseRefundsAttempt(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	fp := "fingerprint-release"
+	if _, err := st.EnqueueRepro(ctx, fp); err != nil {
+		t.Fatalf("EnqueueRepro: %v", err)
+	}
+	if _, err := st.ClaimReproAttempt(ctx, fp); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	if err := st.ReleaseReproAttempt(ctx, fp, "interrupted: context canceled"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	row, err := st.GetReproAttempt(ctx, fp)
+	if err != nil {
+		t.Fatalf("get after release: %v", err)
+	}
+	if row.State != ReproStatePending {
+		t.Errorf("state = %s, want pending", row.State)
+	}
+	if row.AttemptCount != 0 {
+		t.Errorf("attempt_count = %d, want 0 (claim increment refunded)", row.AttemptCount)
+	}
+	if row.LastError != "interrupted: context canceled" {
+		t.Errorf("last_error = %q, want the release note", row.LastError)
+	}
+
+	// The row is immediately re-claimable — no stale-lease wait, no skip.
+	claimed, err := st.ClaimReproAttempt(ctx, fp)
+	if err != nil {
+		t.Fatalf("re-claim after release: %v", err)
+	}
+	if claimed.AttemptCount != 1 {
+		t.Errorf("attempt_count after re-claim = %d, want 1 (interrupt cycles must not accumulate)", claimed.AttemptCount)
+	}
+
+	// Release gates on state='running': a done row is left alone.
+	if err := st.FinishReproAttempt(ctx, fp); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	if err := st.ReleaseReproAttempt(ctx, fp, "stray release"); err != nil {
+		t.Fatalf("release on done row: %v", err)
+	}
+	row, err = st.GetReproAttempt(ctx, fp)
+	if err != nil {
+		t.Fatalf("get after stray release: %v", err)
+	}
+	if row.State != ReproStateDone {
+		t.Errorf("state = %s, want done (release must not touch non-running rows)", row.State)
+	}
+}
+
 // TestReproQueue_ResetOnCodeChange verifies that a 'done' queue row is reset
 // to 'pending' when the finding's anchored code (file_hash) changes, so the
 // finding is re-eligible for reproduction after a code change.
