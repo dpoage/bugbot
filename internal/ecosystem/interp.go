@@ -19,6 +19,9 @@ package ecosystem
 // allKnownEcosystems list in interp_test.go.
 
 import (
+	"path"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -339,6 +342,119 @@ var InterpTable = []InterpRules{
 			"enoent",
 		},
 	},
+}
+
+// WitnessRules describes how to detect, from a sandbox run's combined
+// output, low-false-positive evidence that the finding's TARGET FILE
+// specifically was (or was not) exercised during the run. This sits next
+// to InterpTable: InterpTable answers "did a test run and fail";
+// WitnessTable answers "does a per-file coverage report say the target was
+// touched". bugbot-qb4r layer (b).
+//
+// Deliberately NOT based on stack-trace/traceback file references: an
+// ordinary failing assertion (assertEqual, t.Errorf, expect().toBe()) in
+// EVERY one of these ecosystems reports the file:line of the ASSERTION
+// (the test file), not the target file being asserted on, even for a
+// completely genuine bug demonstration — only a panic/exception that
+// unwinds through the target's own frames would show it. Trying to require
+// a target-file trace line would reject the overwhelmingly common "wrong
+// value, not a crash" bug shape. Coverage-tool output, when the agent's
+// command happens to produce it, is the one signal that is both reliably
+// parseable and low-false-positive: a coverage report explicitly saying
+// the target file has 0% coverage IS trustworthy negative evidence: the
+// file's code truly never ran. Its ABSENCE (no coverage row for the
+// target at all) proves nothing either way, so callers treat "no data" as
+// permissive — see repro.witnessDemonstration.
+//
+// Ecosystems absent from WitnessTable (bazel, unknown) have no
+// standardized coverage-report format at all — the caller downgrades those
+// to the existing witness-only promotion path instead of trusting a bare
+// exit-code/ran-marker demonstration as full Tier-1.
+type WitnessRules struct {
+	// Name is the ecosystem identifier; mirrors Ecosystem values.
+	Name Ecosystem
+	// CoverageRowPatterns are regexp templates with exactly one %s verb
+	// (filled with the target file's escaped basename before compiling)
+	// and exactly one capturing group: the file's covered-percentage as a
+	// plain number (no '%' sign), taken from that ecosystem's coverage-tool
+	// summary report line for the file (e.g. coverage.py's `Name Stmts
+	// Miss Cover` row, jest --coverage's per-file table row, `go tool
+	// cover -func`'s per-function row).
+	CoverageRowPatterns []string
+}
+
+// WitnessTable is the per-ecosystem execution-witness registry. Only
+// ecosystems with a standard, parseable coverage-report format are listed;
+// bazel (target-label-level summaries) and unknown (no agreed format) are
+// intentionally absent.
+var WitnessTable = []WitnessRules{
+	{
+		// go tool cover -func output: "pkg/widget.go:10:  New   100.0%"
+		Name:                EcosystemGo,
+		CoverageRowPatterns: []string{`%s:\d+:\s+\S+\s+(\d+(?:\.\d+)?)%`},
+	},
+	{
+		// coverage.py / pytest-cov term report: "agent/main.py  42  5  88%"
+		Name:                EcosystemPython,
+		CoverageRowPatterns: []string{`%s\s+\d+\s+\d+\s+(\d+(?:\.\d+)?)%`},
+	},
+	{
+		// jest/istanbul --coverage text-summary table: " main.js | 85.71 | ..."
+		Name:                EcosystemJS,
+		CoverageRowPatterns: []string{`%s\s*\|\s*(\d+(?:\.\d+)?)`},
+	},
+	{
+		// cargo llvm-cov / tarpaulin summary line: "widget.rs: 85.00% ..."
+		Name:                EcosystemRust,
+		CoverageRowPatterns: []string{`%s:?\s+(\d+(?:\.\d+)?)%`},
+	},
+	{
+		// gcov/lcov summary: "File 'widget.cpp' ... Lines executed:85.00%"
+		Name:                EcosystemCpp,
+		CoverageRowPatterns: []string{`%s'[\s\S]{0,160}?executed:(\d+(?:\.\d+)?)%`},
+	},
+}
+
+// WitnessRulesFor returns the WitnessRules for name, or (zero, false) when
+// the ecosystem has no execution-witness support.
+func WitnessRulesFor(name Ecosystem) (WitnessRules, bool) {
+	for _, w := range WitnessTable {
+		if w.Name == name {
+			return w, true
+		}
+	}
+	return WitnessRules{}, false
+}
+
+// TargetCoverage reports the target file's covered-percentage found in out,
+// per this ecosystem's coverage-report row patterns. found is false when no
+// row for the target file's basename is present at all (the run did not
+// produce coverage output, or produced it for other files only) — callers
+// MUST treat that as "no evidence either way", not as a negative signal.
+// When found is true, pct is the parsed percentage (0 is a genuine, trusted
+// "this file never ran" result).
+func (w WitnessRules) TargetCoverage(out, targetPath string) (pct float64, found bool) {
+	if targetPath == "" || len(w.CoverageRowPatterns) == 0 {
+		return 0, false
+	}
+	base := regexp.QuoteMeta(path.Base(targetPath))
+	for _, tmpl := range w.CoverageRowPatterns {
+		// strings.Replace, not fmt.Sprintf: the templates contain literal
+		// '%' characters (the coverage percentage sign) that fmt.Sprintf
+		// would otherwise try to interpret as format verbs.
+		re, err := regexp.Compile(strings.Replace(tmpl, "%s", base, 1))
+		if err != nil {
+			continue
+		}
+		m := re.FindStringSubmatch(out)
+		if m == nil {
+			continue
+		}
+		if v, perr := strconv.ParseFloat(m[1], 64); perr == nil {
+			return v, true
+		}
+	}
+	return 0, false
 }
 
 // interpIndex returns the position of the named entry in InterpTable, or 0

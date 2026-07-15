@@ -313,6 +313,12 @@ type Attempt struct {
 	Plan *Plan
 	// Reason explains a non-promotion (the last failure category) for display.
 	Reason string
+	// WitnessOnly is true when Promoted is true but the detected ecosystem
+	// could not provide an execution witness for the finding's target file
+	// (see ecosystem.WitnessTable / witnessDemonstration): the finding was
+	// genuinely demonstrated, but callers must record it via the existing
+	// witness-only path (bugbot-w1bh) instead of a full Tier-1 promotion.
+	WitnessOnly bool
 }
 
 // Plan is the reproducer agent's proposal for demonstrating a bug. It is the
@@ -438,6 +444,27 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			})
 			continue
 		}
+		// bugbot-qb4r layer (a): the cheap static plan gate. Runs BEFORE any
+		// sandbox execution — a plan whose submitted test files never reach
+		// finding.File through an executable edge (import/require/#include/
+		// use, or same-package colocation) is rejected here, without paying
+		// for a sandbox run that could never be a genuine demonstration
+		// (grep-tests, import-absence lint checks, and transliterations all
+		// stop here). Ecosystems without a static rule (bazel, unknown) are
+		// permissive; layer (b) below (witnessDemonstration) still applies
+		// to whatever DOES execute.
+		ecoName := detectEcosystem(plan.Cmd).name
+		if reason, detail := ClassifyTargetExecution(plan.Files, finding.File, ecoName); reason != "" {
+			gateVerdict := verdict{reason: reason, summary: detail, ecosystem: ecoName}
+			att.Reason = string(reason)
+			scope.EmitEvent(progress.Event{
+				Kind:    progress.KindReproAttempt,
+				Attempt: att.Attempts, MaxAttempts: r.opts.MaxAttempts,
+				Verdict: string(reason), Duration: time.Since(roundStart),
+			})
+			feedback = gateVerdict.feedback(plan)
+			continue
+		}
 
 		res, serr := r.execute(ctx, plan)
 		if serr != nil {
@@ -448,6 +475,15 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		}
 
 		verdict := interpret(res, plan.Cmd)
+		if verdict.demonstrated {
+			// bugbot-qb4r layer (b): the execution witness. Only meaningful
+			// once interpret() has already found ran-evidence; this either
+			// leaves the verdict untouched (witness found), downgrades it to
+			// the non-promoting target_not_executed reason (ecosystem can
+			// witness but didn't), or marks witnessOnly (ecosystem cannot
+			// witness at all — repro-as-evidence, not repro-as-promotion).
+			verdict = witnessDemonstration(verdict, combinedOutput(res), finding.File)
+		}
 		att.Output = verdict.summary
 
 		roundVerdict := string(verdict.reason)
@@ -474,6 +510,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			att.ArtifactPath = path
 			att.Plan = plan
 			att.Reason = ""
+			att.WitnessOnly = verdict.witnessOnly
 			return att, nil
 		}
 
