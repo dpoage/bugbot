@@ -50,6 +50,41 @@ func TestSnapshot_WritesAndReadsBack(t *testing.T) {
 	}
 }
 
+// TestSnapshot_ReproBlockedAggregatesAndResets verifies KindReproBlocked
+// events accumulate per-ecosystem into Status.ReproBlocked (bugbot-14g0
+// acceptance 2) and that a fresh KindScanStarted clears a stale aggregate
+// from a prior run/cycle.
+func TestSnapshot_ReproBlockedAggregatesAndResets(t *testing.T) {
+	s, path := newTestSnapshot(t, func() time.Time { return time.Unix(3000, 0) })
+
+	s.Handle(Event{Kind: KindScanStarted, ScanKind: "oneshot", Time: time.Unix(3000, 0)})
+	s.Handle(Event{Kind: KindReproBlocked, Label: "js", Count: 38, Message: "38 finding(s) blocked: image lacks node", Time: time.Unix(3000, 0)})
+	s.Handle(Event{Kind: KindReproBlocked, Label: "python", Count: 2, Message: "2 finding(s) blocked: image lacks python", Time: time.Unix(3000, 0)})
+	s.Handle(Event{Kind: KindScanFinished, ScanKind: "oneshot", Time: time.Unix(3000, 0)})
+
+	st, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if st.ReproBlocked["js"] != 38 || st.ReproBlocked["python"] != 2 {
+		t.Errorf("ReproBlocked = %v, want js:38 python:2", st.ReproBlocked)
+	}
+	// LastEvent is overwritten by the subsequent KindScanFinished (expected —
+	// terminal events always win); the aggregation into ReproBlocked above is
+	// the actual invariant under test.
+
+	// A new scan must not carry the stale aggregate forward.
+	s.Handle(Event{Kind: KindScanStarted, ScanKind: "oneshot", Time: time.Unix(3001, 0)})
+	s.Handle(Event{Kind: KindScanFinished, ScanKind: "oneshot", Time: time.Unix(3001, 0)})
+	st2, err := ReadStatus(path)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if len(st2.ReproBlocked) != 0 {
+		t.Errorf("ReproBlocked = %v, want empty after a fresh scan_started with no repro_blocked events", st2.ReproBlocked)
+	}
+}
+
 // TestSnapshot_DuplicateRatePersistsToStatusJSON pins bugbot-ezmx.8's
 // plumbing: funnel.Stats.DuplicateRate() rides Counts.DuplicateRate through
 // KindScanFinished into the written status.json, folded via mergeMax rather

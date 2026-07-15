@@ -93,6 +93,12 @@ type Status struct {
 	// sink's internal map at write time (see refreshUnhealthyTools); serialized
 	// as part of Status automatically.
 	UnhealthyTools []ToolHealth `json:"unhealthy_tools,omitempty"`
+	// ReproBlocked aggregates KindReproBlocked events by missing ecosystem
+	// (e.g. {"js": 38}): findings the claim-time capability gate has skipped
+	// this run/cycle. Reset at KindScanStarted/KindCycleStarted so a stale
+	// aggregate from a prior run never lingers. Empty when nothing is
+	// blocked (bugbot-14g0 acceptance 2).
+	ReproBlocked map[string]int `json:"repro_blocked,omitempty"`
 }
 
 // AgentStatus is one in-flight agent in the snapshot.
@@ -272,6 +278,10 @@ func (a *StatusAccumulator) apply(ev Event) (terminal bool) {
 		s.st.LiveTriaged = 0
 		s.st.LiveVerified = 0
 		s.st.LiveKilled = 0
+		// A prior run/cycle's blocked-toolchain aggregate must never linger
+		// into this one — it is re-emitted fresh (or omitted entirely) at
+		// this run's own stage start.
+		s.st.ReproBlocked = nil
 		s.st.LastEvent = "started " + ev.ScanKind
 	case KindStageStarted:
 		s.st.Stage = ev.Stage
@@ -327,6 +337,17 @@ func (a *StatusAccumulator) apply(ev Event) (terminal bool) {
 			s.agents[AgentEventKey(ev)] = a
 		}
 		s.st.LastEvent = "repro " + note + " — " + ev.Label
+	case KindReproBlocked:
+		// One event per missing ecosystem; accumulate rather than overwrite
+		// so a caller emitting per-ecosystem events (see
+		// engine.emitReproBlocked) builds up the full map.
+		if s.st.ReproBlocked == nil {
+			s.st.ReproBlocked = make(map[string]int)
+		}
+		s.st.ReproBlocked[ev.Label] = ev.Count
+		if ev.Message != "" {
+			s.st.LastEvent = ev.Message
+		}
 	case KindSpendTick:
 		s.spend.tick(ev.Role, ev.InputTokens, ev.OutputTokens, ev.CacheReadTokens)
 		s.st.SpendInput, s.st.SpendOutput, s.st.SpendCacheRead = s.spend.totals()

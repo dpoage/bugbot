@@ -2,6 +2,7 @@ package report
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/dpoage/bugbot/internal/domain"
@@ -43,6 +44,7 @@ func Markdown(r Report) string {
 	b.WriteString("\n")
 
 	writeCounts(&b, r.Findings)
+	writeBlockedToolchain(&b, r.Meta.BlockedToolchain)
 
 	b.WriteString("## Findings\n\n")
 	if len(r.Findings) == 0 {
@@ -86,6 +88,32 @@ func writeCounts(b *strings.Builder, fs []domain.Finding) {
 		if bySev[sev] > 0 {
 			fmt.Fprintf(b, "- %s: %d\n", sev, bySev[sev])
 		}
+	}
+	b.WriteString("\n")
+}
+
+// writeBlockedToolchain renders the bugbot-14g0 acceptance-2 aggregate: open
+// repro_attempts rows sitting in blocked_toolchain, grouped by the missing
+// ecosystem, sorted by descending count then ecosystem name for determinism.
+// Renders nothing when counts is nil/empty (nothing is blocked).
+func writeBlockedToolchain(b *strings.Builder, counts map[string]int) {
+	if len(counts) == 0 {
+		return
+	}
+	ecos := make([]string, 0, len(counts))
+	for eco := range counts {
+		ecos = append(ecos, eco)
+	}
+	sort.Slice(ecos, func(i, j int) bool {
+		if counts[ecos[i]] != counts[ecos[j]] {
+			return counts[ecos[i]] > counts[ecos[j]]
+		}
+		return ecos[i] < ecos[j]
+	})
+
+	b.WriteString("## Blocked by Missing Toolchain\n\n")
+	for _, eco := range ecos {
+		fmt.Fprintf(b, "- %d finding(s) blocked: image lacks %s\n", counts[eco], eco)
 	}
 	b.WriteString("\n")
 }

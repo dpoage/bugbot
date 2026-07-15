@@ -379,6 +379,28 @@ func gateEcosystem(finding domain.Finding, caps sandbox.CapabilitySet) (eco stri
 	return eco, true
 }
 
+// SummarizeBlocked previews, for a batch of findings, how many would be
+// skipped by the claim-time capability gate and groups the count by missing
+// ecosystem — without claiming, enqueueing, or touching the store at all.
+// This is the "stage start" aggregate (bugbot-14g0 acceptance 2): a
+// zero-container, zero-store-write preview callers print BEFORE running
+// PromoteAll, e.g. "38 TS findings blocked: image lacks node", using only the
+// already-cached CapabilitySet.
+func (r *Reproducer) SummarizeBlocked(findings []domain.Finding) map[string]int {
+	var counts map[string]int
+	for _, f := range findings {
+		eco, blocked := gateEcosystem(f, r.capabilities)
+		if !blocked {
+			continue
+		}
+		if counts == nil {
+			counts = make(map[string]int)
+		}
+		counts[eco]++
+	}
+	return counts
+}
+
 // patchOutcomeKind is the discriminant for a patch-prover run. Exactly one
 // state applies; contradictory combinations are unrepresentable.
 type patchOutcomeKind int

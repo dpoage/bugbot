@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -251,12 +252,40 @@ func runReproCatchUp(ctx context.Context, out io.Writer, r *repro.Reproducer, st
 	}
 
 	_, _ = fmt.Fprintf(out, "\nReproduce catch-up: %d finding(s) not yet attempted...\n", len(pending))
+	emitReproBlocked(out, nil, r.SummarizeBlocked(pending))
 	summary, err := r.PromoteAll(ctx, st, pending)
 	if err != nil {
 		return fmt.Errorf("reproduce catch-up: %w", err)
 	}
 	printReproSummary(out, summary)
 	return nil
+}
+
+// emitReproBlocked prints the bugbot-14g0 acceptance-2 stage-start aggregate
+// to out ("N findings blocked: image lacks X", one line per missing
+// ecosystem, sorted for determinism) and, when sink is non-nil, emits a
+// KindReproBlocked progress event per ecosystem so a running daemon's
+// status.json (and any other progress sink) carries the same aggregate. A
+// nil/empty blocked map is a silent no-op — nothing was blocked, nothing to
+// report. sink may be nil (e.g. the scan catch-up drain, whose progress sink
+// belongs to the funnel stages, not the repro backlog preview).
+func emitReproBlocked(out io.Writer, sink progress.EventSink, blocked map[string]int) {
+	if len(blocked) == 0 {
+		return
+	}
+	ecos := make([]string, 0, len(blocked))
+	for eco := range blocked {
+		ecos = append(ecos, eco)
+	}
+	sort.Strings(ecos)
+	for _, eco := range ecos {
+		n := blocked[eco]
+		msg := fmt.Sprintf("%d finding(s) blocked: image lacks %s", n, eco)
+		_, _ = fmt.Fprintln(out, msg)
+		progress.Emit(sink, progress.Event{
+			Kind: progress.KindReproBlocked, Label: eco, Count: n, Message: msg,
+		})
+	}
 }
 
 // printReproSummary renders the promotion outcome. Shared by the scan
@@ -267,6 +296,16 @@ func printReproSummary(out io.Writer, s *repro.Summary) {
 	if s.FixWitnessed > 0 || s.NeedsHuman > 0 {
 		_, _ = fmt.Fprintf(out, "Patch-prover: %d fix-witnessed (T0), %d needs-human\n",
 			s.FixWitnessed, s.NeedsHuman)
+	}
+	if s.BlockedToolchain > 0 {
+		ecos := make([]string, 0, len(s.BlockedByEcosystem))
+		for eco := range s.BlockedByEcosystem {
+			ecos = append(ecos, eco)
+		}
+		sort.Strings(ecos)
+		for _, eco := range ecos {
+			_, _ = fmt.Fprintf(out, "Blocked toolchain: %d finding(s) — image lacks %s\n", s.BlockedByEcosystem[eco], eco)
+		}
 	}
 	for _, o := range s.PerFinding {
 		if o.FixWitnessed {
@@ -410,6 +449,11 @@ func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, e
 		_, _ = fmt.Fprintf(out, "Transcripts: %s\n", cfg.Repro.TranscriptDir)
 	}
 
+	// Stage-start aggregate (bugbot-14g0 acceptance 2): a zero-container
+	// preview against the already-probed CapabilitySet, printed to CLI
+	// output AND emitted as progress events (status.json via d.sink) BEFORE
+	// any per-finding claim/attempt happens.
+	emitReproBlocked(out, d.sink, rd.Repro.SummarizeBlocked(batch))
 	summary, err := rd.Repro.PromoteAll(ctx, st, batch)
 	if err != nil {
 		return nil, fmt.Errorf("reproduce: %w", err)

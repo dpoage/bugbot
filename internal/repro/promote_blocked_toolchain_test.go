@@ -208,3 +208,48 @@ func TestGateEcosystem_NeverGatesUngatedEcosystems(t *testing.T) {
 		t.Error("a nil CapabilitySet must never gate (no probe available)")
 	}
 }
+
+// TestSummarizeBlocked_GroupsByEcosystemZeroContainer verifies SummarizeBlocked
+// tallies blocked findings by ecosystem without launching the sandbox or
+// touching the store (bugbot-14g0 acceptance 2's zero-container preview).
+func TestSummarizeBlocked_GroupsByEcosystemZeroContainer(t *testing.T) {
+	repoDir := newRepoDir(t)
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1}})
+	r, err := New(newScriptedClient(), sb, repoDir, Options{
+		ArtifactDir:  t.TempDir(),
+		Capabilities: nodeUnavailableCaps(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	findings := []domain.Finding{
+		{File: "a.ts"},
+		{File: "b.tsx"},
+		{File: "c.go"}, // ungated: must not appear
+	}
+	counts := r.SummarizeBlocked(findings)
+	if counts["js"] != 2 {
+		t.Errorf("counts[js] = %d, want 2", counts["js"])
+	}
+	if _, ok := counts["go"]; ok {
+		t.Errorf("go must never be gated, got %v", counts)
+	}
+	if n := sb.CallCount(); n != 0 {
+		t.Errorf("SummarizeBlocked must not touch the sandbox, got %d calls", n)
+	}
+}
+
+// TestSummarizeBlocked_NilWhenNothingBlocked verifies the nil (not empty-map)
+// zero value when every finding's ecosystem is available or ungated.
+func TestSummarizeBlocked_NilWhenNothingBlocked(t *testing.T) {
+	repoDir := newRepoDir(t)
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1}})
+	r, err := New(newScriptedClient(), sb, repoDir, Options{ArtifactDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts := r.SummarizeBlocked([]domain.Finding{{File: "a.go"}}); counts != nil {
+		t.Errorf("counts = %v, want nil", counts)
+	}
+}

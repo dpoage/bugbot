@@ -291,6 +291,42 @@ func (s *Store) MarkReproAttemptUnsandboxed(ctx context.Context, fingerprint str
 	})
 }
 
+// BlockedToolchainCounts returns the number of repro_attempts rows currently
+// in the blocked_toolchain state, grouped by their recorded missing
+// ecosystem. This is a zero-container query over the queue's persisted state
+// (no probe or sandbox run) — the seam `bugbot report emit` and the daemon
+// use to surface "N findings blocked: image lacks X" without re-running
+// anything (bugbot-14g0 acceptance 2).
+func (s *Store) BlockedToolchainCounts(ctx context.Context) (map[string]int, error) {
+	type row struct {
+		Eco   string
+		Count int
+	}
+	rows, err := queryRows(ctx, s, "blocked_toolchain_counts", `
+		SELECT blocked_ecosystem, COUNT(*)
+		FROM repro_attempts
+		WHERE state = 'blocked_toolchain'
+		GROUP BY blocked_ecosystem`,
+		nil,
+		func(r *sql.Rows) (row, error) {
+			var out row
+			err := r.Scan(&out.Eco, &out.Count)
+			return out, err
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	counts := make(map[string]int, len(rows))
+	for _, r := range rows {
+		counts[r.Eco] = r.Count
+	}
+	return counts, nil
+}
+
 // PendingReproAttempts returns all repro_attempts rows in pending or infra_retry
 // state with attempt_count < max_attempts, ordered oldest-updated-first. This
 // is the queue poll for all three dispatch paths.

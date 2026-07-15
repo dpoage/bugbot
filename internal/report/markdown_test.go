@@ -82,3 +82,33 @@ func TestMarkdownEmpty(t *testing.T) {
 		t.Errorf("empty report should note no findings, got:\n%s", got)
 	}
 }
+
+// TestMarkdownBlockedToolchainSection verifies the bugbot-14g0 acceptance-2
+// aggregate renders as a dedicated, sorted section, and is entirely absent
+// when nothing is blocked (the common case).
+func TestMarkdownBlockedToolchainSection(t *testing.T) {
+	meta := fixtureMeta()
+	meta.BlockedToolchain = map[string]int{"python": 2, "js": 38}
+	got := Markdown(New(fixtureFindings(), meta))
+
+	if !strings.Contains(got, "## Blocked by Missing Toolchain") {
+		t.Fatalf("missing blocked-toolchain section, got:\n%s", got)
+	}
+	if !strings.Contains(got, "38 finding(s) blocked: image lacks js") {
+		t.Errorf("missing js aggregate line, got:\n%s", got)
+	}
+	if !strings.Contains(got, "2 finding(s) blocked: image lacks python") {
+		t.Errorf("missing python aggregate line, got:\n%s", got)
+	}
+	// Higher count (js=38) must sort before the lower one (python=2).
+	if strings.Index(got, "lacks js") > strings.Index(got, "lacks python") {
+		t.Errorf("js (higher count) should render before python, got:\n%s", got)
+	}
+}
+
+func TestMarkdownNoBlockedToolchainSectionWhenEmpty(t *testing.T) {
+	got := Markdown(New(fixtureFindings(), fixtureMeta()))
+	if strings.Contains(got, "Blocked by Missing Toolchain") {
+		t.Errorf("no findings are blocked; section should be absent, got:\n%s", got)
+	}
+}

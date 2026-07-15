@@ -158,3 +158,61 @@ func TestReproQueue_BlockOnToolchain_RequiresExistingRow(t *testing.T) {
 		t.Errorf("expected ErrNotFound for a fingerprint with no queue row, got %v", err)
 	}
 }
+
+// TestBlockedToolchainCounts_GroupsByEcosystem verifies the aggregate query
+// used by report/CLI/status sinks (bugbot-14g0 acceptance 2): counts group by
+// blocked_ecosystem and exclude non-blocked rows.
+func TestBlockedToolchainCounts_GroupsByEcosystem(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	for _, fp := range []string{"ts-1", "ts-2", "ts-3"} {
+		if _, err := st.EnqueueRepro(ctx, fp); err != nil {
+			t.Fatalf("EnqueueRepro(%s): %v", fp, err)
+		}
+		if _, err := st.BlockReproAttemptOnToolchain(ctx, fp, "js"); err != nil {
+			t.Fatalf("BlockReproAttemptOnToolchain(%s): %v", fp, err)
+		}
+	}
+	if _, err := st.EnqueueRepro(ctx, "py-1"); err != nil {
+		t.Fatalf("EnqueueRepro(py-1): %v", err)
+	}
+	if _, err := st.BlockReproAttemptOnToolchain(ctx, "py-1", "python"); err != nil {
+		t.Fatalf("BlockReproAttemptOnToolchain(py-1): %v", err)
+	}
+	// A normally-running row must not be counted.
+	if _, err := st.EnqueueRepro(ctx, "go-1"); err != nil {
+		t.Fatalf("EnqueueRepro(go-1): %v", err)
+	}
+	if _, err := st.ClaimReproAttempt(ctx, "go-1"); err != nil {
+		t.Fatalf("ClaimReproAttempt(go-1): %v", err)
+	}
+
+	counts, err := st.BlockedToolchainCounts(ctx)
+	if err != nil {
+		t.Fatalf("BlockedToolchainCounts: %v", err)
+	}
+	if counts["js"] != 3 {
+		t.Errorf("counts[js] = %d, want 3", counts["js"])
+	}
+	if counts["python"] != 1 {
+		t.Errorf("counts[python] = %d, want 1", counts["python"])
+	}
+	if _, ok := counts["go"]; ok {
+		t.Errorf("a running (non-blocked) row must not appear in counts, got %v", counts)
+	}
+}
+
+// TestBlockedToolchainCounts_EmptyWhenNoneBlocked verifies a nil/empty map
+// (not an error) when nothing is blocked.
+func TestBlockedToolchainCounts_EmptyWhenNoneBlocked(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+	counts, err := st.BlockedToolchainCounts(ctx)
+	if err != nil {
+		t.Fatalf("BlockedToolchainCounts: %v", err)
+	}
+	if len(counts) != 0 {
+		t.Errorf("counts = %v, want empty", counts)
+	}
+}
