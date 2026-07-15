@@ -50,6 +50,14 @@ type bwrapParams struct {
 // back to a model. Toolchain-specific binds (go, node, python, ...) are
 // layered on top via bwrapParams.toolchainBinds, never by widening this list.
 //
+// Bound with --ro-bind-try (not --ro-bind): non-FHS hosts (NixOS, Guix)
+// genuinely lack /lib, /sbin, or even /bin as real paths — a strict --ro-bind
+// on an absent path makes bwrap exit 1 before the sandboxed command ever
+// runs, which previously failed EVERY run on such a host. A missing entry
+// here just means that slice of the allowlist contributes nothing; it is
+// still narrower than the container backend's baked image, exactly as
+// intended.
+//
 // /etc/resolv.conf is deliberately absent here: it is added only when the
 // network is enabled (see buildBwrapArgs), matching the container backend's
 // contract that DNS resolution is unavailable under network=none.
@@ -79,15 +87,29 @@ var fixedROAllowlist = []string{
 //     controlling terminal.
 //   - --clearenv + --setenv     : the sandbox starts with NO inherited host
 //     environment; every variable it sees is explicit, mirroring --env on the
-//     container backend. HOME=/tmp is always set first (Spec.Env may not
-//     override the sandbox's own HOME contract, matching buildRunArgs).
+//     container backend. HOME=/tmp is set first as the sandbox's default,
+//     but p.env is rendered afterward and DOES win on a repeat --setenv HOME
+//     (bwrap's env map is last-write-wins, exactly like buildRunArgs' --env
+//     HOME=/tmp — an operator explicitly setting HOME in Spec.Env overrides
+//     the default, not the other way around).
+//   - tmpfs / FIRST             : the root filesystem is an empty tmpfs,
+//     established BEFORE any subpath (--proc, --dev, --tmpfs /tmp, the
+//     allowlist, workspace) is bound — bwrap applies mount operations in
+//     argv order within one shared mount namespace, so mounting "/" AFTER
+//     something is already mounted at a subpath (e.g. /tmp) shadows that
+//     subpath's mount entirely: the new root's own (empty) /tmp directory
+//     wins, silently making the "earlier" /tmp completely inaccessible.
+//     Getting this backwards previously made HOME=/tmp — and therefore
+//     every toolchain cache that defaults under it (Go, npm, pip, ...) —
+//     unusable in every real run without ever raising an error.
 //   - --proc /proc, --dev /dev  : minimal, namespace-scoped pseudo-filesystems
-//     (no host /proc or /dev is ever bound).
+//     (no host /proc or /dev is ever bound), layered onto the tmpfs root.
 //   - --tmpfs /tmp              : writable scratch space for language
 //     toolchain caches, sized like the container backend's /tmp tmpfs.
-//   - tmpfs / + --ro-bind       : the root filesystem starts as an empty
-//     tmpfs; ONLY the fixed allowlist (fixedROAllowlist) plus any resolved
-//     toolchain/extra RO mounts are bound in, read-only. No wholesale $HOME,
+//   - --ro-bind-try allowlist   : ONLY the fixed allowlist (fixedROAllowlist)
+//     plus any resolved toolchain/extra RO mounts are bound in, read-only —
+//     best-effort (--ro-bind-try) since non-FHS hosts genuinely lack some
+//     allowlist paths, see fixedROAllowlist's doc. No wholesale $HOME,
 //     /root, or /etc bind ever happens.
 //   - --bind ws /workspace      : the workspace copy is the ONLY writable
 //     mount. The original repo is never mounted.
@@ -103,9 +125,6 @@ func buildBwrapArgs(p bwrapParams) []string {
 		"--new-session",
 		"--clearenv",
 		"--setenv", "HOME", "/tmp",
-		"--proc", "/proc",
-		"--dev", "/dev",
-		"--tmpfs", "/tmp",
 	}
 
 	// Network defaults to unshared (set by --unshare-all above). Only an
@@ -115,14 +134,17 @@ func buildBwrapArgs(p bwrapParams) []string {
 		args = append(args, "--share-net")
 	}
 
-	// tmpfs root: everything not explicitly bound below is absent, not merely
-	// read-only. This is the bwrap analogue of --read-only + --tmpfs /tmp on
-	// the container backend, except there is no underlying image filesystem
-	// to fall back to at all.
+	// tmpfs root MUST be established before anything else is bound under it
+	// (see the doc above) — everything not explicitly bound below is then
+	// absent, not merely read-only. This is the bwrap analogue of
+	// --read-only + --tmpfs /tmp on the container backend, except there is
+	// no underlying image filesystem to fall back to at all.
 	args = append(args, "--tmpfs", "/")
 
+	args = append(args, "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp")
+
 	for _, host := range fixedROAllowlist {
-		args = append(args, "--ro-bind", host, host)
+		args = append(args, "--ro-bind-try", host, host)
 	}
 	if bwrapNetworkEnabled(p.network) {
 		// DNS resolution is meaningless (and unreachable) under the unshared
@@ -173,10 +195,12 @@ func buildBwrapArgs(p bwrapParams) []string {
 
 	// --clearenv leaves the sandbox with no environment at all; every
 	// variable it sees must be set explicitly here, mirroring --env on the
-	// container backend. HOME is fixed above and cannot be overridden by
-	// Spec.Env (same contract as buildRunArgs' --env HOME=/tmp). A malformed
-	// entry (no "=") is dropped rather than passed to bwrap as a broken
-	// --setenv invocation.
+	// container backend. HOME's default (set above) IS overridable here: an
+	// operator entry for "HOME" in p.env (Spec.Env) renders a second
+	// --setenv HOME, and bwrap's env map is last-write-wins, so it wins —
+	// same contract as buildRunArgs' --env HOME=/tmp. A malformed entry
+	// (no "=") is dropped rather than passed to bwrap as a broken --setenv
+	// invocation.
 	for _, e := range p.env {
 		if key, value, ok := splitEnvKV(e); ok {
 			args = append(args, "--setenv", key, value)

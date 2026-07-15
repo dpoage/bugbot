@@ -51,10 +51,25 @@ func DetectBwrap() (ok bool, reason string) {
 // every namespace and immediately exit — to prove unprivileged user
 // namespaces actually work end to end, rather than inferring it from a
 // sysctl file whose name and meaning vary across distributions.
+//
+// The probe run needs SOME executable reachable inside the sandbox, but it
+// must not assume fixedROAllowlist's paths exist: on non-FHS hosts (NixOS,
+// Guix) /bin and /sbin are absent entirely, and even `true` lives under
+// /nix/store or /run rather than /bin. Since this ephemeral, immediately-
+// exiting process runs nothing untrusted and only exists to answer "does
+// unshare(2) actually work here", binding the entire host root read-only for
+// it (rather than the real run's narrow allowlist) is safe and portable: it
+// works identically regardless of which distro layout the host uses.
 func probeBwrapUserns(bwrapPath string) error {
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		// Every POSIX system ships a `true` somewhere on PATH; this is
+		// belt-and-suspenders in case PATH is unusually stripped down.
+		truePath = "/bin/true"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), bwrapProbeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bwrapPath, "--unshare-all", "--die-with-parent", "/bin/true")
+	cmd := exec.CommandContext(ctx, bwrapPath, "--unshare-all", "--die-with-parent", "--ro-bind", "/", "/", truePath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if len(out) > 0 {
 			return fmt.Errorf("%s: %s", err, string(out))

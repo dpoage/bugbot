@@ -2,7 +2,10 @@ package sandbox
 
 import (
 	"os"
+	"os/exec"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -21,6 +24,38 @@ func TestDetectBwrapReasonsAreActionable(t *testing.T) {
 	// and usable userns; either way a false result must explain why.
 	if !ok && reason == "" {
 		t.Error("DetectBwrap reported unavailable with no reason")
+	}
+}
+
+// TestDetectBwrapTrueWhenUsable is the regression the reviewer's finding
+// exposed: TestDetectBwrapReasonsAreActionable above accepts ok==false
+// unconditionally on Linux ("either way a false result must explain why"),
+// which let a probeBwrapUserns bug that made EVERY host report unavailable
+// ship unnoticed (the probe ran `bwrap --unshare-all --die-with-parent
+// /bin/true` against bwrap's empty tmpfs root, where /bin/true never
+// exists). This test independently confirms userns is usable (bwrap on
+// PATH + the kernel's own /proc/sys/user/max_user_namespaces > 0) and then
+// asserts DetectBwrap agrees — so a probe that spuriously reports
+// unavailable on a genuinely usable host fails loudly instead of blending
+// into "either way" silence.
+func TestDetectBwrapTrueWhenUsable(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("bwrap is Linux-only")
+	}
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not found on PATH")
+	}
+	raw, err := os.ReadFile("/proc/sys/user/max_user_namespaces")
+	if err != nil {
+		t.Skipf("cannot read /proc/sys/user/max_user_namespaces: %v", err)
+	}
+	max, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || max <= 0 {
+		t.Skip("unprivileged user namespaces are disabled on this host (max_user_namespaces <= 0)")
+	}
+	ok, reason := DetectBwrap()
+	if !ok {
+		t.Fatalf("DetectBwrap reported unavailable on a host with bwrap on PATH and max_user_namespaces=%d: %s", max, reason)
 	}
 }
 

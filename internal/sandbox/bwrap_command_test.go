@@ -28,13 +28,16 @@ func TestBuildBwrapArgsSecurityFlags(t *testing.T) {
 	mustContainSeq(t, args, "--setenv", "FOO", "bar")
 	mustContainSeq(t, args, "--setenv", "BAZ", "qux")
 
-	// The fixed allowlist must be present as read-only binds, and nothing
-	// else claiming to be $HOME, /root, or a wholesale /etc.
+	// The fixed allowlist must be present as best-effort read-only binds
+	// (--ro-bind-try: non-FHS hosts like NixOS genuinely lack some of these
+	// paths, and a strict --ro-bind on an absent path would make bwrap exit
+	// 1 before the sandboxed command ever runs), and nothing else claiming
+	// to be $HOME, /root, or a wholesale /etc.
 	for _, host := range fixedROAllowlist {
-		mustContainSeq(t, args, "--ro-bind", host, host)
+		mustContainSeq(t, args, "--ro-bind-try", host, host)
 	}
 	for i, a := range args {
-		if a == "--ro-bind" || a == "--bind" {
+		if a == "--ro-bind" || a == "--ro-bind-try" || a == "--bind" {
 			if i+1 >= len(args) {
 				continue
 			}
