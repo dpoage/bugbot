@@ -643,6 +643,97 @@ func TestCheckImageToolchain_Direct(t *testing.T) {
 	}
 }
 
+// TestCheckHostToolchain_Direct covers the backend:bwrap analogue of the
+// image check: languages resolve against the HOST PATH (any listed binary
+// suffices), and the bazel advisory keys on host bazel presence rather than
+// image naming. Results are advisory; the test asserts names and statuses.
+func TestCheckHostToolchain_Direct(t *testing.T) {
+	cases := []struct {
+		name     string
+		onPath   map[string]bool
+		network  string
+		langs    []ingest.Language
+		builds   []ingest.BuildSystem
+		wantWarn []string // substrings of WARN names expected
+		wantInfo []string // substrings of INFO names expected
+	}{
+		{
+			name:     "python via python3 passes, missing node warns",
+			onPath:   map[string]bool{"python3": true, "go": true},
+			network:  "none",
+			langs:    []ingest.Language{ingest.LangGo, ingest.LangTypeScript, ingest.LangPython},
+			wantWarn: []string{"host toolchain typescript"},
+		},
+		{
+			name:     "any-of semantics: python (not python3) suffices",
+			onPath:   map[string]bool{"python": true},
+			network:  "none",
+			langs:    []ingest.Language{ingest.LangPython},
+			wantWarn: nil,
+		},
+		{
+			name:     "bazel build system without host bazel warns",
+			onPath:   map[string]bool{"python3": true},
+			network:  "none",
+			langs:    []ingest.Language{ingest.LangPython},
+			builds:   []ingest.BuildSystem{ingest.BuildSystemBazel},
+			wantWarn: []string{"host toolchain bazel"},
+		},
+		{
+			name:     "bazel present under network none is advisory info",
+			onPath:   map[string]bool{"python3": true, "bazel": true},
+			network:  "none",
+			langs:    []ingest.Language{ingest.LangPython},
+			builds:   []ingest.BuildSystem{ingest.BuildSystemBazel},
+			wantInfo: []string{"host bazel offline"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := doctorEnv{lookPath: func(name string) (string, error) {
+				if tc.onPath[name] {
+					return "/fake/bin/" + name, nil
+				}
+				return "", errors.New("not found")
+			}}
+			cfg := config.Config{Sandbox: config.Sandbox{Backend: "bwrap", Network: tc.network}}
+			results := checkHostToolchain(env, tc.langs, tc.builds, cfg)
+			var gotWarn, gotInfo []string
+			for _, r := range results {
+				switch r.Status {
+				case statusWarn:
+					gotWarn = append(gotWarn, r.Name)
+				case statusInfo:
+					gotInfo = append(gotInfo, r.Name)
+				}
+			}
+			assertNamesContain(t, "WARN", gotWarn, tc.wantWarn)
+			assertNamesContain(t, "INFO", gotInfo, tc.wantInfo)
+		})
+	}
+}
+
+// assertNamesContain fails unless got has exactly len(want) entries and each
+// want substring matches some got name.
+func assertNamesContain(t *testing.T, label string, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s results = %v, want %d matching %v", label, got, len(want), want)
+	}
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			if strings.Contains(g, w) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s results %v missing expected %q", label, got, w)
+		}
+	}
+}
+
 // TestCheckImageToolchain_BazelOfflineCustomImageInfo asserts that a Bazel repo
 // under network=none with a CUSTOM/local sandbox image (not a plain public
 // bazel base) gets an advisory INFO — not a WARN — because offline bazel repro

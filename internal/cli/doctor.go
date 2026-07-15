@@ -296,7 +296,15 @@ func runChecks(ctx context.Context, env doctorEnv, runSandboxVerify bool) []chec
 	// repro is configured against a non-custom image. Advisory only — never
 	// affects the exit code (mirrors checkLangTier above).
 	if cfgOK {
-		results = append(results, checkImageToolchain(ctx, env, langs, buildSystems, cfg)...)
+		if cfg.Sandbox.Backend == "bwrap" {
+			// backend bwrap has no image: repro/verify run on HOST
+			// toolchains, so image name-matching and in-image probes would
+			// be pure noise (and misleading — the incident config that
+			// motivated bwrap kept its old image line for fallback).
+			results = append(results, checkHostToolchain(env, langs, buildSystems, cfg)...)
+		} else {
+			results = append(results, checkImageToolchain(ctx, env, langs, buildSystems, cfg)...)
+		}
 	}
 
 	// 6. Live sandbox toolchain smoke-test (--verify-sandbox only).
@@ -894,6 +902,72 @@ func checkImageToolchain(ctx context.Context, env doctorEnv, langs []ingest.Lang
 				Name:   "image bazel offline",
 				Status: statusInfo,
 				Detail: "Bazel detected with sandbox.network=none: offline bazel repro IS supported when the sandbox image is purpose-built — image " + image + " must carry vendored external deps + a prefetched bazel repository cache + a warm disk-cache layer (build it with `bugbot sandbox build`)",
+			})
+		}
+	}
+	return out
+}
+
+// langHostBinaries maps a detected language to the host binaries that make
+// its findings reproducible under backend bwrap, ANY one of which suffices.
+// Deliberately a separate table from langToolchainBinaries: that one picks
+// image-DIFFERENTIATOR binaries (pip, npm) to distinguish image families,
+// while a host check needs the interpreter/runtime a repro actually execs —
+// a NixOS host with python3 but no global pip runs pytest repros fine, and
+// package installers are moot under the network=none default anyway.
+var langHostBinaries = map[ingest.Language][]string{
+	ingest.LangGo:         {"go"},
+	ingest.LangPython:     {"python3", "python"},
+	ingest.LangTypeScript: {"node"},
+	ingest.LangCPP:        {"cc", "gcc", "clang"},
+	ingest.LangRust:       {"cargo"},
+}
+
+// checkHostToolchain is the backend:bwrap analogue of checkImageToolchain:
+// there is no image — repro/verify run on host toolchains inside the bwrap
+// sandbox — so each detected language's runtime is resolved on the host
+// PATH instead of name-matched/probed in an image. A PATH hit is
+// authoritative for the sandbox too: the fixed allowlist plus the store
+// binds expose the host's own binaries, and sandbox.host_toolchains
+// resolution starts from the same PATH. Advisory only — results never
+// affect the exit code, mirroring checkImageToolchain.
+func checkHostToolchain(env doctorEnv, langs []ingest.Language, buildSystems []ingest.BuildSystem, cfg config.Config) []checkResult {
+	var out []checkResult
+	for _, lang := range langs {
+		bins, ok := langHostBinaries[lang]
+		if !ok || len(bins) == 0 {
+			continue
+		}
+		found := false
+		for _, b := range bins {
+			if _, err := env.lookPath(b); err == nil {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, checkResult{
+				Name:   "host toolchain " + string(lang),
+				Status: statusWarn,
+				Detail: string(lang) + " detected but none of " + strings.Join(bins, ", ") + " resolve on the host PATH — backend bwrap runs repro/verify on host toolchains, so its findings will fail; install one, or name its directory explicitly in sandbox.host_toolchains",
+			})
+		}
+	}
+	// Bazel advisory, host edition: there is no purpose-built offline image
+	// under bwrap, so bazel-driven repros depend on the host's bazel and its
+	// already-warm repository/disk caches when the network is unshared.
+	if containsBuildSystemBazel(buildSystems) {
+		if _, err := env.lookPath("bazel"); err != nil {
+			out = append(out, checkResult{
+				Name:   "host toolchain bazel",
+				Status: statusWarn,
+				Detail: "Bazel build files detected but bazel is not on the host PATH — bazel-driven repros will fail under backend bwrap; per-language test repros (go test, pytest, node) are unaffected",
+			})
+		} else if strings.EqualFold(cfg.Sandbox.Network, "none") {
+			out = append(out, checkResult{
+				Name:   "host bazel offline",
+				Status: statusInfo,
+				Detail: "Bazel detected with sandbox.network=none under backend bwrap: bazel runs on the host toolchain, so repros needing external fetches will fail unless the host's bazel repository/disk caches already carry them",
 			})
 		}
 	}
