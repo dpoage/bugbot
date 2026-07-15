@@ -97,6 +97,8 @@ func (r *LogRenderer) line(ev Event) string {
 	case KindReproAttempt:
 		return fmt.Sprintf("repro attempt %d/%d: %s dur=%s — %s",
 			ev.Attempt, ev.MaxAttempts, ev.Verdict, ev.Duration.Round(timeRound), ev.Label)
+	case KindReproBlocked:
+		return "repro: " + ev.Message
 	case KindToolUnhealthy:
 		return "TOOL UNHEALTHY: " + ev.Tool + " (" + ev.Severity + "): " + ev.Message
 	case KindSpendTick:

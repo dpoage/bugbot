@@ -283,7 +283,27 @@ func (d *Daemon) promoteNewFindings(ctx context.Context, fres *funnel.Result) in
 		d.log.Info("daemon: reproduced findings promoted to T1",
 			"promoted", summary.Promoted, "attempted", summary.Attempted)
 	}
+	d.emitReproBlocked(ctx)
 	return summary.Promoted
+}
+
+// emitReproBlocked emits the bugbot-14g0 acceptance-2 stage-start aggregate
+// into the daemon's progress sink (d.prog), so a running daemon's status.json
+// carries "N finding(s) blocked: image lacks X" without an operator having to
+// wait for a `bugbot repro` one-shot to see it — this is the motivating
+// unattended-daemon case the aggregate exists for. Reads the persisted
+// repro_attempts queue state (store.BlockedToolchainCounts, a zero-container
+// query) rather than this cycle's own PromoteAll result, so the aggregate
+// reflects the CURRENT full backlog of blocked findings across cycles, not
+// just what changed this cycle. Best-effort: a query error is logged and
+// otherwise ignored — status reporting must never fail a cycle.
+func (d *Daemon) emitReproBlocked(ctx context.Context) {
+	counts, err := d.store.BlockedToolchainCounts(ctx)
+	if err != nil {
+		d.log.Warn("daemon: blocked-toolchain aggregate query failed", "err", err)
+		return
+	}
+	progress.EmitReproBlocked(d.prog, counts)
 }
 
 // countLines returns the number of lines in b. A file with content but no

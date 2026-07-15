@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/ecosystem"
+	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -34,6 +36,15 @@ type Summary struct {
 	// did not manifest (exit 0). These contribute to the per-finding
 	// repro-contradiction signal in the store.
 	ExitZeroCount int
+	// BlockedToolchain is the number of findings skipped by the claim-time
+	// capability gate (bugbot-14g0): their inferred ecosystem was unavailable
+	// in the sandbox image's probed CapabilitySet, so no attempt was made.
+	// Excluded from Skipped/Attempted/Failed.
+	BlockedToolchain int
+	// BlockedByEcosystem breaks BlockedToolchain down by the missing
+	// ecosystem name (e.g. "js"), for the stage-start aggregate message
+	// ("N findings blocked: image lacks node"). Nil when BlockedToolchain is 0.
+	BlockedByEcosystem map[string]int
 	// PerFinding holds the per-finding outcome in input order.
 	PerFinding []FindingOutcome
 }
@@ -68,6 +79,14 @@ type FindingOutcome struct {
 	// disconfirming evidence; >= ReproContradictionThreshold such outcomes
 	// sets the repro-contradicted signal on the finding.
 	ExitZero bool
+	// BlockedToolchain is true when the claim-time capability gate skipped
+	// this finding because its inferred ecosystem was unavailable in the
+	// probed CapabilitySet. No sandbox run happened; MissingEcosystem names
+	// the unavailable capability.
+	BlockedToolchain bool
+	// MissingEcosystem is the ecosystem name (e.g. "js") that was
+	// unavailable, set only when BlockedToolchain is true.
+	MissingEcosystem string
 }
 
 // PromoteOne attempts to reproduce a single finding and updates the store row
@@ -172,6 +191,14 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 	}
 
 	for _, o := range summary.PerFinding {
+		if o.BlockedToolchain {
+			summary.BlockedToolchain++
+			if summary.BlockedByEcosystem == nil {
+				summary.BlockedByEcosystem = make(map[string]int)
+			}
+			summary.BlockedByEcosystem[o.MissingEcosystem]++
+			continue
+		}
 		if o.Skipped {
 			summary.Skipped++
 			continue
@@ -210,6 +237,32 @@ func (r *Reproducer) PromoteAll(ctx context.Context, st *store.Store, findings [
 // paths.
 func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding domain.Finding) (*FindingOutcome, error) {
 	outcome := &FindingOutcome{FindingID: finding.ID, Title: finding.Title}
+
+	// Claim-time capability gate (bugbot-14g0 fix B): infer the finding's
+	// ecosystem and consult the probed CapabilitySet BEFORE ever claiming a
+	// repro attempt. An unavailable toolchain (e.g. a bazel-only image
+	// reproducing a TypeScript finding) skips straight to blocked_toolchain —
+	// no sandbox run, no agent flailing into a non-behavioral substitute
+	// (bugbot-qb4r), no attempt_count spent. Retryable: the next PromoteAll
+	// call re-runs this same check against the (possibly refreshed) probe
+	// cache, and ClaimReproAttempt accepts blocked_toolchain rows once it
+	// reports available.
+	if eco, blocked := gateEcosystem(finding, r.capabilities); blocked {
+		if _, err := st.EnqueueRepro(ctx, finding.Fingerprint); err != nil {
+			outcome.Reason = "enqueue error: " + err.Error()
+			outcome.Err = err
+			return outcome, err
+		}
+		if _, err := st.BlockReproAttemptOnToolchain(ctx, finding.Fingerprint, eco); err != nil {
+			outcome.Reason = "block error: " + err.Error()
+			outcome.Err = err
+			return outcome, err
+		}
+		outcome.BlockedToolchain = true
+		outcome.MissingEcosystem = eco
+		outcome.Reason = fmt.Sprintf("blocked_toolchain: image lacks %s", blockedToolchainBinary(eco))
+		return outcome, nil
+	}
 
 	// Ensure the queue row exists, then claim it.
 	if _, err := st.EnqueueRepro(ctx, finding.Fingerprint); err != nil {
@@ -303,6 +356,69 @@ func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding dom
 	}
 
 	return outcome, nil
+}
+
+// gateEcosystem returns the missing ecosystem name when finding's inferred
+// toolchain requirement is known-unavailable in caps, so promoteOne can skip
+// straight to blocked_toolchain instead of burning a claim/sandbox attempt on
+// a toolchain gap the capability probe already diagnosed.
+//
+// Returns ("", false) — never gated — when: caps is nil (no probe available,
+// e.g. no sandbox configured); the finding's file extension maps to no
+// ecosystem ecosystem.InferFromExtension recognizes; or that ecosystem has no
+// base-presence probe mode (ecosystem.BaseMode — Go and C/C++ are never
+// gated, see its doc).
+func gateEcosystem(finding domain.Finding, caps sandbox.CapabilitySet) (eco string, blocked bool) {
+	if caps == nil {
+		return "", false
+	}
+	eco = ecosystem.InferFromExtension(finding.File)
+	if eco == "" {
+		return "", false
+	}
+	mode := ecosystem.BaseMode(eco)
+	if mode == "" {
+		return "", false
+	}
+	if caps.Available(eco, mode) {
+		return "", false
+	}
+	return eco, true
+}
+
+// blockedToolchainBinary returns the actual missing BINARY name for eco
+// (ecosystem.BaseMode, e.g. "node" for "js") for use in operator-facing
+// messages — an operator needs to know what to install, not the internal
+// ecosystem key. Falls back to eco itself if BaseMode is somehow empty (never
+// happens for an eco gateEcosystem returned as blocked, but stays safe if
+// called elsewhere).
+func blockedToolchainBinary(eco string) string {
+	if bin := ecosystem.BaseMode(ecosystem.Ecosystem(eco)); bin != "" {
+		return bin
+	}
+	return eco
+}
+
+// SummarizeBlocked previews, for a batch of findings, how many would be
+// skipped by the claim-time capability gate and groups the count by missing
+// ecosystem — without claiming, enqueueing, or touching the store at all.
+// This is the "stage start" aggregate (bugbot-14g0 acceptance 2): a
+// zero-container, zero-store-write preview callers print BEFORE running
+// PromoteAll, e.g. "38 TS findings blocked: image lacks node", using only the
+// already-cached CapabilitySet.
+func (r *Reproducer) SummarizeBlocked(findings []domain.Finding) map[string]int {
+	var counts map[string]int
+	for _, f := range findings {
+		eco, blocked := gateEcosystem(f, r.capabilities)
+		if !blocked {
+			continue
+		}
+		if counts == nil {
+			counts = make(map[string]int)
+		}
+		counts[eco]++
+	}
+	return counts
 }
 
 // patchOutcomeKind is the discriminant for a patch-prover run. Exactly one
