@@ -132,3 +132,38 @@ func TestRejectUnavailableEcosystemPlan_UngatedCommandsPass(t *testing.T) {
 		t.Errorf("nil CapabilitySet must never reject, got %q", msg)
 	}
 }
+
+// TestRejectUnavailableEcosystemPlan_BazelGated pins bugbot-rj3z: a plan
+// reaching for the bazel build driver on a sandbox whose probe reports bazel
+// absent is rejected PRE-LAUNCH with feedback naming bazel and the available
+// language toolchains — instead of burning a sandbox run into an exit-127
+// environment_error (the_cloud: `sh: line 2: exec: bazel: not found`). When
+// the probe reports bazel present, the same plan proceeds untouched.
+func TestRejectUnavailableEcosystemPlan_BazelGated(t *testing.T) {
+	caps := sandbox.CapabilitySet{
+		"bazel":  {"bazel": false},
+		"python": {"python": true},
+	}
+	for _, cmd := range [][]string{
+		{"bazel", "test", "//molecules/robot-control:all"},
+		{"bazelisk", "test", "//..."},
+		{"sh", "-c", "bazel test //... --test_output=errors"},
+	} {
+		msg := rejectUnavailableEcosystemPlan(&Plan{Cmd: cmd}, caps)
+		if msg == "" {
+			t.Errorf("cmd %v: want pre-launch rejection when bazel is unavailable", cmd)
+			continue
+		}
+		if !strings.Contains(msg, "bazel") {
+			t.Errorf("cmd %v: feedback must name bazel, got %q", cmd, msg)
+		}
+		if !strings.Contains(msg, "python") {
+			t.Errorf("cmd %v: feedback must list the available python alternative, got %q", cmd, msg)
+		}
+	}
+
+	available := sandbox.CapabilitySet{"bazel": {"bazel": true}}
+	if msg := rejectUnavailableEcosystemPlan(&Plan{Cmd: []string{"bazel", "test", "//..."}}, available); msg != "" {
+		t.Errorf("bazel-available sandbox must not reject bazel plans, got %q", msg)
+	}
+}

@@ -40,6 +40,9 @@ func TestInferFromCmd(t *testing.T) {
 		{"bare node", []string{"node", "--test", "foo.test.js"}, ecosystem.EcosystemJS},
 		{"pytest", []string{"python3", "-m", "pytest", "-x"}, ecosystem.EcosystemPython},
 		{"cargo test", []string{"cargo", "test", "--", "--nocapture"}, ecosystem.EcosystemRust},
+		{"bazel test", []string{"bazel", "test", "//molecules/..."}, ecosystem.EcosystemBazel},
+		{"bazelisk", []string{"bazelisk", "test", "//..."}, ecosystem.EcosystemBazel},
+		{"sh -c wrapped bazel", []string{"sh", "-c", "bazel test //robot-control:all"}, ecosystem.EcosystemBazel},
 		{"go test ungated", []string{"go", "test", "./..."}, ""},
 		{"bash -c wrapper unwraps", []string{"bash", "-c", "cd sub && npx vitest run"}, ecosystem.EcosystemJS},
 		{"sh -c wrapper unwraps", []string{"sh", "-c", "pytest -x tests/"}, ecosystem.EcosystemPython},
@@ -63,6 +66,7 @@ func TestBaseMode(t *testing.T) {
 		{ecosystem.EcosystemJS, "node"},
 		{ecosystem.EcosystemPython, "python"},
 		{ecosystem.EcosystemRust, "cargo"},
+		{ecosystem.EcosystemBazel, "bazel"},
 		{ecosystem.EcosystemGo, ""},
 		{ecosystem.EcosystemCpp, ""},
 		{"", ""},
@@ -78,7 +82,7 @@ func TestBaseMode(t *testing.T) {
 // that the actual probe table never produces — a silent typo here would make
 // the gate permanently report every js/python/rust finding as blocked.
 func TestBaseMode_MatchesRealProbeEntries(t *testing.T) {
-	for _, eco := range []ecosystem.Ecosystem{ecosystem.EcosystemJS, ecosystem.EcosystemPython, ecosystem.EcosystemRust} {
+	for _, eco := range []ecosystem.Ecosystem{ecosystem.EcosystemJS, ecosystem.EcosystemPython, ecosystem.EcosystemRust, ecosystem.EcosystemBazel} {
 		mode := ecosystem.BaseMode(eco)
 		if mode == "" {
 			t.Fatalf("BaseMode(%q) = \"\", want a real mode name", eco)

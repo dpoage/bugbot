@@ -8,8 +8,8 @@ import (
 
 // allKnownProbeEcosystems lists the ecosystem names that should appear in
 // ProbeEntries. This list is the sync point — if you add a new probe, add its
-// name here. Currently: go, cpp, rust, js, python.
-var allKnownProbeEcosystems = []string{"go", "cpp", "rust", "js", "python"}
+// name here. Currently: go, cpp, rust, js, python, bazel.
+var allKnownProbeEcosystems = []string{"go", "cpp", "rust", "js", "python", "bazel"}
 
 // TestProbeEntries_Completeness asserts every known probe ecosystem has an
 // entry in ProbeEntries.

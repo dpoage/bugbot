@@ -523,6 +523,21 @@ func capabilityGuidance(caps sandbox.CapabilitySet) string {
 		}
 	}
 
+	// Bazel build driver. Rendered so an agent on a bazel-built repo learns
+	// BEFORE planning whether `bazel test` can run at all (bugbot-rj3z);
+	// without this the natural first plan on such repos is a bazel
+	// invocation that dies at exec time.
+	if bzCaps, ok := caps["bazel"]; ok {
+		if bzCaps["bazel"] {
+			b.WriteString("- Bazel: AVAILABLE. You MAY use `bazel test` for targets that need it, but a\n")
+			b.WriteString("  direct language test runner is usually faster and more reliable offline.\n")
+		} else {
+			b.WriteString("- Bazel: UNAVAILABLE in this sandbox, even though the repo may be bazel-built.\n")
+			b.WriteString("  Do NOT propose `bazel`/`bazelisk` invocations. Run the language's test runner\n")
+			b.WriteString("  directly instead (pytest, node, go test, cargo).\n")
+		}
+	}
+
 	return b.String()
 }
 

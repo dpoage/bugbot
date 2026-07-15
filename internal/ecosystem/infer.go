@@ -46,6 +46,7 @@ var baseMode = map[Ecosystem]string{
 	EcosystemJS:     "node",
 	EcosystemPython: "python",
 	EcosystemRust:   "cargo",
+	EcosystemBazel:  "bazel",
 }
 
 // InferFromExtension infers the gated ecosystem for a finding's file path
@@ -72,6 +73,14 @@ var cmdEcosystem = map[string]Ecosystem{
 	"pytest":  EcosystemPython,
 
 	"cargo": EcosystemRust,
+
+	// bazel is a build DRIVER, not a language ecosystem: it is gated so a
+	// plan reaching for `bazel test` on a bazel-built repo is rejected
+	// pre-launch when the sandbox has no bazel (bugbot-rj3z), instead of
+	// burning a sandbox run into exit-127 environment_error. bazelisk is
+	// the bazel launcher and counts as the same requirement.
+	"bazel":    EcosystemBazel,
+	"bazelisk": EcosystemBazel,
 }
 
 // InferFromCmd infers the gated ecosystem a repro plan's command argv
