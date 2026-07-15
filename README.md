@@ -82,6 +82,14 @@ empty tmpfs, and ONLY the following are ever bound in, always read-only:
 - host toolchains resolved from `sandbox.host_toolchains` (bare names like
   `node`/`cargo`, resolved via the host's PATH and symlink-closure, or
   explicit absolute directories) — see `internal/sandbox/toolchain.go`;
+- a POSIX baseline (coreutils, grep, sed, awk, findutils, diff, tar, gzip,
+  bash) resolved automatically from the host at backend construction and
+  appended to the END of the sandbox PATH — never configured by the
+  operator. Container images ship these structurally; the bwrap tmpfs root
+  does not, and on store-based distros the FHS PATH dirs hold only `sh`
+  and `env`, so without this every `mkdir`/`grep` inside a repro dies with
+  "command not found". On FHS hosts the baseline resolves empty (the
+  allowlist already covers it) and nothing changes;
 - the prepared workspace copy, bound read-write at `/workspace` — the only
   writable mount, and the ONLY way the sandboxed process can persist
   anything.

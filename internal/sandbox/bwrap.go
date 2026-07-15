@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -119,6 +120,13 @@ type Bwrap struct {
 	// PathPrepend) for the same resolution that produced toolchainBinds;
 	// see bwrapParams.toolchainPathPrepend for how it reaches buildBwrapArgs.
 	toolchainPathPrepend string
+	// baselinePathAppend is the ":"-joined in-sandbox directories of the
+	// resolved POSIX baseline utilities (resolveBwrapBaseline), appended
+	// AFTER DefaultContainerPath so it never shadows allowlist binaries or
+	// operator toolchains. Empty on FHS hosts, where the baseline is
+	// already reachable through DefaultContainerPath. The matching binds
+	// are merged into toolchainBinds at construction.
+	baselinePathAppend string
 	// wsCache is the pristine-materialization cache backing prepareWorkspace,
 	// shared with the CLI backend via prepareWorkspaceCached (workspace.go).
 	wsCache wsCache
@@ -208,8 +216,118 @@ func NewBwrap(opts ...BwrapOption) (*Bwrap, error) {
 	for _, o := range opts {
 		o(s)
 	}
+
+	// POSIX baseline provisioning (bugbot-qg8b): container images guarantee
+	// a shell + core utilities structurally; the bwrap tmpfs root does not.
+	// On store-based distros (NixOS, Guix) DefaultContainerPath's FHS dirs
+	// hold only sh and env, so bugbot's own machinery (deps.go's `mkdir -p`
+	// setup command, agent-planned `sh -c` scripts) fails with
+	// "mkdir: command not found". Resolve the baseline from the host once
+	// per construction; on FHS hosts this is a no-op (empty baseline).
+	// Operator toolchainBinds win any ContainerPath collision — an operator
+	// pinning e.g. "bash" in sandbox.host_toolchains overrides the baseline
+	// resolution of the same name.
+	baseMounts, basePath := resolveBwrapBaseline(exec.LookPath, filepath.EvalSymlinks)
+	s.baselinePathAppend = basePath
+	seen := make(map[string]bool, len(s.toolchainBinds))
+	for _, m := range s.toolchainBinds {
+		seen[m.ContainerPath] = true
+	}
+	for _, m := range baseMounts {
+		if !seen[m.ContainerPath] {
+			s.toolchainBinds = append(s.toolchainBinds, m)
+		}
+	}
+
 	purgeStaleWorkspaceCaches()
 	return s, nil
+}
+
+// bwrapBaselineUtilities names the POSIX utilities every sandbox run may
+// assume, mirroring what any container base image ships. One name per host
+// PACKAGE is enough on store-based distros (resolving "mkdir" mounts the
+// whole coreutils applet directory; "find" brings xargs's findutils dir —
+// xargs is still listed for hosts that split them), and resolveBwrapBaseline
+// deduplicates by resolved directory. sh is NOT listed: it is reached by the
+// literal /bin/sh path through the fixed allowlist + store binds
+// (bugbot-53rl), not via PATH.
+var bwrapBaselineUtilities = []string{
+	"mkdir", // coreutils: cp, rm, cat, mv, touch, dirname, tee, ... (one package dir)
+	"grep",
+	"sed",
+	"awk",
+	"find",
+	"xargs",
+	"diff",
+	"tar",
+	"gzip",
+	"bash",
+}
+
+// resolveBwrapBaseline resolves bwrapBaselineUtilities into read-only binds
+// and a ":"-joined PATH APPEND for the bwrap sandbox. Filtering happens
+// before the toolchain resolver runs:
+//
+//   - a utility whose symlink-resolved home is already a DefaultContainerPath
+//     directory is skipped — it is reachable through the fixed allowlist
+//     binds, so FHS hosts resolve an EMPTY baseline and keep byte-identical
+//     sandbox argv (no extra mounts, no PATH suffix, no --version probes);
+//   - utilities sharing one resolved directory (nix coreutils-full's
+//     multi-call applets, findutils' find+xargs) collapse to the first name,
+//     so the resolver mounts each host package once.
+//
+// Survivors go through ResolveHostToolchains — the single mount-shaping
+// implementation (see toolchain.go's backend contract) — with fingerprints
+// discarded: baseline utilities are plumbing, not verdict-relevant
+// toolchains. Best-effort throughout: an unresolvable utility is skipped,
+// and a host too broken to resolve any baseline yields ("", nil) rather
+// than an error — the run then fails with the same command-not-found it
+// would have hit anyway, and doctor's bwrap section points at the host.
+// lookPath and evalSymlinks are injected for testability (exec.LookPath and
+// filepath.EvalSymlinks in production).
+func resolveBwrapBaseline(lookPath func(string) (string, error), evalSymlinks func(string) (string, error)) ([]ROMount, string) {
+	names := filterBwrapBaseline(bwrapBaselineUtilities, lookPath, evalSymlinks)
+	if len(names) == 0 {
+		return nil, ""
+	}
+	res, err := ResolveHostToolchains(names)
+	if err != nil {
+		return nil, ""
+	}
+	return res.Mounts, res.PathPrepend
+}
+
+// filterBwrapBaseline applies resolveBwrapBaseline's filtering rules (see
+// its doc) to names: drop unresolvable utilities, drop utilities already
+// reachable through a DefaultContainerPath directory, and collapse
+// utilities sharing one resolved home directory to the first name. Pure
+// with respect to its injected lookups, so the FHS-no-op and
+// store-layout-dedupe guarantees are unit-testable without a store-based
+// host.
+func filterBwrapBaseline(names []string, lookPath func(string) (string, error), evalSymlinks func(string) (string, error)) []string {
+	defaultDirs := make(map[string]bool)
+	for _, d := range strings.Split(DefaultContainerPath, ":") {
+		defaultDirs[d] = true
+	}
+	seenDirs := make(map[string]bool)
+	var kept []string
+	for _, name := range names {
+		p, err := lookPath(name)
+		if err != nil {
+			continue
+		}
+		resolved, err := evalSymlinks(p)
+		if err != nil {
+			continue
+		}
+		dir := filepath.Dir(resolved)
+		if defaultDirs[dir] || seenDirs[dir] {
+			continue
+		}
+		seenDirs[dir] = true
+		kept = append(kept, name)
+	}
+	return kept
 }
 
 // Close removes this Bwrap instance's workspace-cache parent directory, if
@@ -257,6 +375,7 @@ func (s *Bwrap) resolveBwrapParams(spec Spec) (bwrapParams, error) {
 		setupCmds:            spec.SetupCmds,
 		toolchainBinds:       s.toolchainBinds,
 		toolchainPathPrepend: s.toolchainPathPrepend,
+		baselinePathAppend:   s.baselinePathAppend,
 	}, nil
 }
 
