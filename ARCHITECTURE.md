@@ -59,8 +59,13 @@ Ingest -> Hypothesize -> Triage -> Verify -> Reproduce -> Report
 - **`internal/funnel`** — the pipeline stages above, wired together with
   backpressure and budget enforcement between stages.
 - **`internal/sandbox`** — pluggable `Exec` interface for isolated execution.
-  Initial backend is CLI-driven (shells out to podman/docker); network defaults
-  to `none`.
+  `sandbox.backend` selects the implementation: `cli` (default; shells out to
+  podman/docker against a baked image) or `bwrap` (Linux-only, unprivileged
+  user namespaces; runs directly on host toolchains — no image to bake, tmpfs
+  root with allowlisted read-only host binds, workspace as the only writable
+  mount). Network defaults to `none` on both. macOS and any host without
+  usable unprivileged userns fall back to `cli`/podman — see README's
+  "Sandbox backend" section for the allowlist-bind security model.
 - **`internal/report`** — markdown and SARIF emitters plus pluggable sinks.
 - **`internal/config`** — typed config, YAML loading, `BUGBOT_*` env overrides.
   Secrets are referenced by env-var NAME, never stored.
