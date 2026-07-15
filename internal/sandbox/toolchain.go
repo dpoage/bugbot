@@ -74,7 +74,7 @@ const hostToolchainMountRoot = "/opt/bugbot-toolchains"
 // standard Linux distribution's default PATH so images that already ship
 // their own toolchains (and set no ENV PATH override) keep working exactly
 // as before when sandbox.host_toolchains is unconfigured or resolves nothing.
-const defaultContainerPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+const DefaultContainerPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 // toolchainVersionProbeTimeout bounds the HOST-side `<bin> --version` probe
 // used to build a fingerprint. This runs directly on the host (not inside any

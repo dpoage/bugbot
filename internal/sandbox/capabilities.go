@@ -34,6 +34,8 @@ package sandbox
 
 import (
 	"context"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,18 +67,28 @@ const probeTimeout = 30 * time.Second
 // Values are CapabilitySet (always non-nil after a probe attempt).
 var capCache sync.Map
 
-// ProbeCapabilities probes image once per process and returns a CapabilitySet.
-// The probe is best-effort: an Exec error or timeout marks all modes for that
-// ecosystem unavailable, but the call never returns an error. The result is
-// cached keyed on image so subsequent calls are free.
+// ProbeCapabilities probes image once per process (per mounts/env
+// combination — see mountsEnvCacheKey) and returns a CapabilitySet. The probe
+// is best-effort: an Exec error or timeout marks all modes for that ecosystem
+// unavailable, but the call never returns an error. The result is cached
+// keyed on image+mounts+env so subsequent calls with the same inputs are
+// free.
 //
 // repoDir is passed so the sandbox spec has a valid RepoDir; it is only used
 // for the probe workspace copy (read-only; never written). An empty string
 // disables cgo-style probes gracefully (returns all-false caps).
 //
+// mounts and env are threaded into every probe's Spec so a host toolchain
+// mounted via sandbox.host_toolchains (see DepOptions.HostToolchains /
+// ResolveHostToolchains) is visible to the probe exactly as it would be to a
+// real repro run — this is what makes a mounted toolchain show up as
+// available in the returned CapabilitySet (bugbot-14g0 acceptance 4). Pass
+// nil for both when the caller has no dependency/toolchain resolution to
+// thread through (equivalent to the pre-mount probing behavior).
+//
 // sb must be non-nil. The probe runs under network=none (sandbox default) with
 // a short timeout so it cannot stall the caller.
-func ProbeCapabilities(ctx context.Context, sb Sandbox, image, repoDir string) CapabilitySet {
+func ProbeCapabilities(ctx context.Context, sb Sandbox, image, repoDir string, mounts []ROMount, env []string) CapabilitySet {
 	if sb == nil || repoDir == "" {
 		// No sandbox or no repo to probe against — return empty capability set.
 		cs := make(CapabilitySet)
@@ -86,22 +98,42 @@ func ProbeCapabilities(ctx context.Context, sb Sandbox, image, repoDir string) C
 		return cs
 	}
 
-	if v, ok := capCache.Load(image); ok {
+	key := image + "|" + mountsEnvCacheKey(mounts, env)
+	if v, ok := capCache.Load(key); ok {
 		return v.(CapabilitySet)
 	}
-	actual, _ := capCache.LoadOrStore(image, runProbes(ctx, sb, image, repoDir))
+	actual, _ := capCache.LoadOrStore(key, runProbes(ctx, sb, image, repoDir, mounts, env))
 	return actual.(CapabilitySet)
 }
 
+// mountsEnvCacheKey builds a deterministic cache key fragment from mounts and
+// env so ProbeCapabilities never returns a stale result for a different set
+// of host toolchain mounts (a mounted "node" measurably changes the js probe
+// outcome). Order-independent: mounts/env are sorted before joining, since
+// callers may assemble them from map iteration or independent resolution
+// steps in varying order.
+func mountsEnvCacheKey(mounts []ROMount, env []string) string {
+	parts := make([]string, 0, len(mounts)+len(env))
+	for _, m := range mounts {
+		parts = append(parts, "m:"+m.HostPath+"->"+m.ContainerPath)
+	}
+	parts = append(parts, env...)
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
 // runProbes executes all capability probes and assembles the CapabilitySet.
-func runProbes(ctx context.Context, sb Sandbox, image, repoDir string) CapabilitySet {
+// mounts and env are attached to every probe's Spec (see ProbeCapabilities).
+func runProbes(ctx context.Context, sb Sandbox, image, repoDir string, mounts []ROMount, env []string) CapabilitySet {
 	cs := make(CapabilitySet, len(ecoreg.ProbeEntries))
 	for _, e := range ecoreg.ProbeEntries {
 		spec := Spec{
-			RepoDir: repoDir,
-			Cmd:     e.Probe,
-			Image:   image,
-			Timeout: probeTimeout,
+			RepoDir:  repoDir,
+			Cmd:      e.Probe,
+			Image:    image,
+			Timeout:  probeTimeout,
+			ROMounts: mounts,
+			Env:      env,
 			// Network defaults to "none" in the sandbox backend; no override needed.
 		}
 		result, err := sb.Exec(ctx, spec)

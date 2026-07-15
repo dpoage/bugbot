@@ -154,6 +154,11 @@ type Options struct {
 	// locally-checked-out path dependencies that fall outside the scanned repo.
 	// Mounts are read-only with Shared=true (no SELinux :Z relabel).
 	LocalMounts []sandbox.ROMount
+	// HostToolchains are host toolchain names (resolved from the host PATH) or
+	// explicit host directories to bind-mount read-only into the sandbox and
+	// prepend to its PATH — see sandbox.ResolveHostToolchains. Independent of
+	// LocalMounts and DepStrategy; the CLI wires it to config.Sandbox.HostToolchains.
+	HostToolchains []string
 	// Capabilities is the pre-probed CapabilitySet for the sandbox image.
 	// When non-nil, the reproducer prompt enumerates available invocation
 	// modes and instructs the agent to avoid unavailable ones (e.g. -race
@@ -261,10 +266,11 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 	}
 	resolved := opts.resolve()
 	deps, err := sandbox.ResolveDeps(repoDir, sandbox.DepOptions{
-		Strategy:     resolved.DepStrategy,
-		FetchSandbox: sb,
-		FetchImage:   resolved.Image,
-		LocalMounts:  resolved.LocalMounts,
+		Strategy:       resolved.DepStrategy,
+		FetchSandbox:   sb,
+		FetchImage:     resolved.Image,
+		LocalMounts:    resolved.LocalMounts,
+		HostToolchains: resolved.HostToolchains,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("repro: resolve dependency strategy: %w", err)

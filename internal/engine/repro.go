@@ -76,9 +76,12 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 	if err != nil {
 		return nil, fmt.Errorf("build sandbox: %w", err)
 	}
-	// Probe image capabilities once; result is cached per image so repeated
-	// daemon restarts or re-calls to BuildReproducer are free.
-	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, repoRoot)
+	// Probe image capabilities once; result is cached per image+mounts+env so
+	// repeated daemon restarts or re-calls to BuildReproducer are free. Host
+	// toolchain mounts are threaded through so a mounted toolchain shows up as
+	// available (bugbot-14g0 acceptance 4).
+	probeMounts, probeEnv := hostToolchainProbeInputs(*cfg)
+	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, repoRoot, probeMounts, probeEnv)
 	r, err := repro.New(client, sb, repoRoot, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
 		Image:            cfg.Sandbox.Image,
@@ -88,6 +91,7 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 		SetupCmds:        cfg.Sandbox.SetupCmds,
 		LocalMounts:      localMountsFromConfig(*cfg),
+		HostToolchains:   cfg.Sandbox.HostToolchains,
 		Capabilities:     caps,
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
@@ -166,9 +170,11 @@ func buildReproHookForScan(
 	if rErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer client: %w", rErr)
 	}
-	// Probe image capabilities once; result is cached per image so
-	// subsequent daemon cycles and parallel scan runs are free.
-	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, opts.Target)
+	// Probe image capabilities once; result is cached per image+mounts+env so
+	// subsequent daemon cycles and parallel scan runs are free. Host toolchain
+	// mounts are threaded through so a mounted toolchain shows up as available.
+	probeMounts, probeEnv := hostToolchainProbeInputs(cfg)
+	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, opts.Target, probeMounts, probeEnv)
 	r, rNewErr := repro.New(reproClient, sb, opts.Target, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
 		Image:            cfg.Sandbox.Image,
@@ -178,6 +184,7 @@ func buildReproHookForScan(
 		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 		SetupCmds:        cfg.Sandbox.SetupCmds,
 		LocalMounts:      localMountsFromConfig(cfg),
+		HostToolchains:   cfg.Sandbox.HostToolchains,
 		Capabilities:     caps,
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,

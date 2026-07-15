@@ -403,7 +403,7 @@ func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
 		res.ROMounts = append(res.ROMounts, tc.Mounts...)
 		res.Fingerprints = append(res.Fingerprints, tc.Fingerprints...)
 		if tc.PathPrepend != "" {
-			res.Env = append(res.Env, "PATH="+tc.PathPrepend+":"+defaultContainerPath)
+			res.Env = append(res.Env, "PATH="+tc.PathPrepend+":"+DefaultContainerPath)
 		}
 	}
 	return res, nil

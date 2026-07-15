@@ -134,3 +134,24 @@ func localMountsFromConfig(cfg config.Config) []sandbox.ROMount {
 	}
 	return mounts
 }
+
+// hostToolchainProbeInputs resolves cfg.Sandbox.HostToolchains into the
+// ROMounts/Env pair ProbeCapabilities needs to see a mounted host toolchain
+// (bugbot-14g0 acceptance 4). It duplicates the resolution repro.New performs
+// internally via DepOptions.HostToolchains — cheap, deterministic, host-only
+// filesystem/PATH work with no side effects — because the capability probe
+// must run BEFORE repro.New exists (its result feeds repro.Options.Capabilities).
+func hostToolchainProbeInputs(cfg config.Config) ([]sandbox.ROMount, []string) {
+	if len(cfg.Sandbox.HostToolchains) == 0 {
+		return nil, nil
+	}
+	tc, err := sandbox.ResolveHostToolchains(cfg.Sandbox.HostToolchains)
+	if err != nil || len(tc.Mounts) == 0 {
+		return nil, nil
+	}
+	var env []string
+	if tc.PathPrepend != "" {
+		env = []string{"PATH=" + tc.PathPrepend + ":" + sandbox.DefaultContainerPath}
+	}
+	return tc.Mounts, env
+}
