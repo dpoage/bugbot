@@ -6,10 +6,10 @@ import (
 	"github.com/dpoage/bugbot/internal/ecosystem"
 )
 
-// TestWitnessRulesFor_KnownAndUnknown pins which ecosystems can provide an
-// execution witness (Go, Python, Rust, JS, C++) and which cannot (Bazel,
-// unknown) — the split bugbot-qb4r's downgrade-to-witness-only path relies
-// on.
+// TestWitnessRulesFor_KnownAndUnknown pins which ecosystems have a
+// standardized, parseable coverage-report format (Go, Python, Rust, JS,
+// C++) and which don't (Bazel, unknown) — the split bugbot-qb4r's
+// downgrade-to-witness-only path relies on.
 func TestWitnessRulesFor_KnownAndUnknown(t *testing.T) {
 	witnessCapable := []string{
 		ecosystem.EcosystemGo,
@@ -31,71 +31,62 @@ func TestWitnessRulesFor_KnownAndUnknown(t *testing.T) {
 	}
 }
 
-// TestHasTargetWitness_Python covers a genuine pytest traceback frame naming
-// the target file (positive) versus a passing-looking output or one that
-// merely names the test file itself (negative).
-func TestHasTargetWitness_Python(t *testing.T) {
+// TestTargetCoverage_Python covers a coverage.py / pytest-cov terminal
+// report row: a genuine nonzero-coverage row (positive), an explicit 0%
+// row (trusted negative evidence), and plain test output with no coverage
+// report at all (found=false — permissive, no evidence either way).
+func TestTargetCoverage_Python(t *testing.T) {
 	rules, ok := ecosystem.WitnessRulesFor(ecosystem.EcosystemPython)
 	if !ok {
 		t.Fatal("python witness rules missing")
 	}
 	target := "agent/main.py"
 
-	positive := `
-FAILED tests/test_behavior.py::test_no_race - AssertionError
-Traceback (most recent call last):
-  File "tests/test_behavior.py", line 6, in test_no_race
-    self.assertGreaterEqual(compute_sleep_time(), 0)
-  File "agent/main.py", line 42, in compute_sleep_time
-    return _sleep_time - drift
-AssertionError
-`
-	if !rules.HasTargetWitness(positive, target) {
-		t.Error("expected witness for traceback frame naming agent/main.py")
+	covered := "Name              Stmts   Miss  Cover\n---------------------------------\nagent/main.py        42      5    88%\n"
+	if pct, found := rules.TargetCoverage(covered, target); !found || pct <= 0 {
+		t.Errorf("TargetCoverage(covered) = (%v, %v), want positive coverage", pct, found)
 	}
 
-	negativeGrepOnly := `
-FAILED tests/test_grep.py::test_uses_get_value - AssertionError: assert 'SelectedContractStore.getValue()' in '...'
-Traceback (most recent call last):
-  File "tests/test_grep.py", line 8, in test_uses_get_value
-    self.assertIn("SelectedContractStore.getValue()", src)
-AssertionError
-`
-	if rules.HasTargetWitness(negativeGrepOnly, target) {
-		t.Error("grep-test traceback (never naming agent/main.py) must not witness")
+	untouched := "Name              Stmts   Miss  Cover\n---------------------------------\nagent/main.py        42     42     0%\n"
+	if pct, found := rules.TargetCoverage(untouched, target); !found || pct != 0 {
+		t.Errorf("TargetCoverage(untouched) = (%v, %v), want (0, true)", pct, found)
+	}
+
+	noCoverageReport := "FAILED tests/test_behavior.py::test_no_race - AssertionError\n"
+	if _, found := rules.TargetCoverage(noCoverageReport, target); found {
+		t.Error("plain failure output with no coverage report must be found=false (no evidence)")
 	}
 }
 
-// TestHasTargetWitness_Go covers a panic stack trace line naming the
-// target's file:line, and a not-in-stack negative case (only the test file
-// appears).
-func TestHasTargetWitness_Go(t *testing.T) {
+// TestTargetCoverage_Go covers `go tool cover -func` per-function rows.
+func TestTargetCoverage_Go(t *testing.T) {
 	rules, ok := ecosystem.WitnessRulesFor(ecosystem.EcosystemGo)
 	if !ok {
 		t.Fatal("go witness rules missing")
 	}
 	target := "internal/widget/widget.go"
 
-	positive := "--- FAIL: TestWidget (0.00s)\npanic: nil pointer\n\ninternal/widget/widget.go:42 +0x1a\n"
-	if !rules.HasTargetWitness(positive, target) {
-		t.Error("expected witness for panic stack frame naming widget.go")
+	covered := "internal/widget/widget.go:10:  New     100.0%\ntotal:                         (statements)    62.5%\n"
+	if pct, found := rules.TargetCoverage(covered, target); !found || pct <= 0 {
+		t.Errorf("TargetCoverage(covered) = (%v, %v), want positive coverage", pct, found)
 	}
 
-	negative := "--- FAIL: TestWidget (0.00s)\n    widget_test.go:10: assertion failed\n"
-	if rules.HasTargetWitness(negative, target) {
-		t.Error("stack referencing only the test file must not witness the target")
+	// Ordinary go test failure output (no -func report at all): must be
+	// permissive, not a negative signal, even though it names the TEST file.
+	plainFailure := "--- FAIL: TestWidget (0.00s)\n    widget_test.go:10: assertion failed\nFAIL\n"
+	if _, found := rules.TargetCoverage(plainFailure, target); found {
+		t.Error("plain test failure output (no coverage report) must be found=false")
 	}
 }
 
-// TestHasTargetWitness_EmptyInputs covers the defensive zero-value cases:
-// no target path, and an ecosystem with no witness rules (zero value).
-func TestHasTargetWitness_EmptyInputs(t *testing.T) {
+// TestTargetCoverage_EmptyInputs covers the defensive zero-value cases.
+func TestTargetCoverage_EmptyInputs(t *testing.T) {
 	rules, _ := ecosystem.WitnessRulesFor(ecosystem.EcosystemPython)
-	if rules.HasTargetWitness("File \"agent/main.py\", line 1", "") {
-		t.Error("empty targetPath must never witness")
+	if _, found := rules.TargetCoverage("agent/main.py 1 0 100%", ""); found {
+		t.Error("empty targetPath must never be found")
 	}
 	var zero ecosystem.WitnessRules
-	if zero.HasTargetWitness("File \"agent/main.py\", line 1", "agent/main.py") {
-		t.Error("zero-value WitnessRules (no patterns) must never witness")
+	if _, found := zero.TargetCoverage("agent/main.py 1 0 100%", "agent/main.py"); found {
+		t.Error("zero-value WitnessRules (no patterns) must never be found")
 	}
 }
