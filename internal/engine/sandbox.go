@@ -134,3 +134,13 @@ func localMountsFromConfig(cfg config.Config) []sandbox.ROMount {
 	}
 	return mounts
 }
+
+// SandboxRunOpts is the exported wrapper for sandboxRunOpts, for callers
+// outside engine that build their own sandbox.CLI against the app's shared
+// config-derived defaults (e.g. `bugbot bundle replay`, internal/cli/bundle.go)
+// without going through engine.Open/BuildReproducer.
+func SandboxRunOpts(cfg config.Config) []sandbox.Option { return sandboxRunOpts(cfg) }
+
+// LocalMountsFromConfig is the exported wrapper for localMountsFromConfig,
+// for the same external callers as SandboxRunOpts.
+func LocalMountsFromConfig(cfg config.Config) []sandbox.ROMount { return localMountsFromConfig(cfg) }

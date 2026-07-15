@@ -47,6 +47,7 @@ reproduce, report) and tracks findings across confidence tiers:
 		newPublishCmd(),
 		newDesignSandboxCmd(),
 		newSandboxCmd(),
+		newBundleCmd(),
 		newExportCmd(),
 		newTUICmd(),
 	)
