@@ -102,6 +102,14 @@ func TestOpenBacklog_Filter(t *testing.T) {
 	seedFinding(t, st, "needs human", 2, "", true)
 	// Ineligible: T1 (already promoted)
 	seedFinding(t, st, "already t1", 1, "/path", false)
+	// Ineligible: T2, witnessed without needs-human (witness-only ecosystem,
+	// bugbot-qb4r layer b / bugbot-njb8) — the bundle already exists and
+	// witness-only is static per build, so re-dispatching is pure waste.
+	witnessed := seedFinding(t, st, "witness only", 2, "", false)
+	witnessed.ReproWitness = "/artifacts/witness"
+	if _, err := st.UpsertFinding(context.Background(), witnessed); err != nil {
+		t.Fatalf("witness upsert: %v", err)
+	}
 
 	backlog, err := OpenBacklog(context.Background(), st)
 	if err != nil {

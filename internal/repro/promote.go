@@ -23,9 +23,9 @@ type Summary struct {
 	Skipped int
 	// Promoted is the number promoted to Tier-1 (full repro-pathing + patch-prover).
 	Promoted int
-	// Witnessed is the number of below-quorum NeedsHuman findings whose repro
-	// hook fired and wrote a witness bundle (ReproWitness) without promoting.
-	// bugbot-w1bh.
+	// Witnessed is the number of findings whose repro wrote a witness bundle
+	// (ReproWitness) without promoting: below-quorum NeedsHuman survivors
+	// (bugbot-w1bh) and witness-only ecosystems (bugbot-qb4r layer b).
 	Witnessed int
 	// Failed is the number that could not be reproduced (stayed at their prior tier).
 	Failed int
@@ -55,9 +55,10 @@ type FindingOutcome struct {
 	FindingID string
 	Title     string
 	Promoted  bool
-	// Witnessed is true when a below-quorum NeedsHuman finding received a
-	// non-promoting repro attempt that wrote ReproWitness. Mutually
-	// exclusive with Promoted: the hook either promotes OR witnesses.
+	// Witnessed is true when the finding received a non-promoting repro
+	// attempt that wrote ReproWitness (below-quorum NeedsHuman survivor or
+	// witness-only ecosystem). Mutually exclusive with Promoted: the hook
+	// either promotes OR witnesses.
 	Witnessed    bool
 	ArtifactPath string
 	Attempts     int
@@ -310,17 +311,20 @@ func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding dom
 		return outcome, err
 	}
 
-	// Attempt completed (success or definitive failure): mark done.
-	_ = st.FinishReproAttempt(qCtx, finding.Fingerprint)
+	// Attempt completed (success or definitive failure). Persist the outcome
+	// FIRST, then mark the queue row done: marking done before the persist
+	// burned the attempt when the persist failed — the row went terminal with
+	// no evidence recorded and the artifact orphaned on disk (bugbot-njb8).
+	// A persist failure is an infrastructure strike: requeue for bounded
+	// retry via RequeueReproAttemptOnInfraError. Persist calls use qCtx (the
+	// detached persist ctx above) so an operator interrupt cannot lose a
+	// completed attempt's outcome.
+	outcome.Attempts = att.Attempts
 	if att.Promoted {
 		// A successful reproduction is definitive positive evidence — clear any
 		// prior exit-zero contradiction signal so the finding is not simultaneously
 		// Tier<=1 (reproduced) and repro-contradicted.
 		_ = st.ZeroExitZeroCount(qCtx, finding.Fingerprint)
-	}
-
-	outcome.Attempts = att.Attempts
-	if att.Promoted {
 		if finding.NeedsHuman || att.WitnessOnly {
 			// Below-quorum verifier survivor (NeedsHuman), OR a demonstrated
 			// bug whose detected ecosystem cannot provide an execution
@@ -330,22 +334,30 @@ func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding dom
 			// the human gate stands for NeedsHuman, and a witness-only
 			// ecosystem gets no automated fix cascade either — repro-as-
 			// evidence, not repro-as-promotion.
-			if werr := witnessFinding(ctx, st, finding, att.ArtifactPath); werr != nil {
+			if werr := witnessFinding(qCtx, st, finding, att.ArtifactPath); werr != nil {
+				_ = st.RequeueReproAttemptOnInfraError(qCtx, finding.Fingerprint, "witness persist failed: "+werr.Error())
 				outcome.Reason = "witness persist failed: " + werr.Error()
 				outcome.Err = werr
 				return outcome, werr
 			}
 			outcome.Witnessed = true
 			outcome.ArtifactPath = att.ArtifactPath
+			_ = st.FinishReproAttempt(qCtx, finding.Fingerprint)
 		} else {
-			if perr := promoteFinding(ctx, st, finding, att.ArtifactPath); perr != nil {
+			if perr := promoteFinding(qCtx, st, finding, att.ArtifactPath); perr != nil {
+				_ = st.RequeueReproAttemptOnInfraError(qCtx, finding.Fingerprint, "promotion persist failed: "+perr.Error())
 				outcome.Reason = "promotion persist failed: " + perr.Error()
 				outcome.Err = perr
 				return outcome, perr
 			}
 			outcome.Promoted = true
 			outcome.ArtifactPath = att.ArtifactPath
+			_ = st.FinishReproAttempt(qCtx, finding.Fingerprint)
 
+			// The prover runs AFTER the queue row is done: the promotion above
+			// is already durable, and prover errors are reported on the
+			// outcome without re-queueing the (succeeded) repro attempt. It
+			// keeps the caller's ctx — LLM work must stay cancellable.
 			if r.opts.PatchProver {
 				patchResult, perr := r.provePatch(ctx, st, finding, att)
 				if perr != nil {
@@ -360,6 +372,7 @@ func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding dom
 			}
 		}
 	} else {
+		_ = st.FinishReproAttempt(qCtx, finding.Fingerprint)
 		outcome.Reason = att.Reason
 		// Record exit-zero outcomes (test ran, bug did not manifest) against the
 		// repro_attempts row. This is distinct from infrastructure errors
@@ -507,16 +520,17 @@ func promoteFinding(ctx context.Context, st *store.Store, f domain.Finding, repr
 	return nil
 }
 
-// witnessFinding records a non-promoting repro artifact for a below-quorum
-// (NeedsHuman) finding. It mirrors promoteFinding but writes ONLY repro_witness;
-// Tier, ReproPath, and NeedsHuman are left untouched and the patch-prover
-// cascade is intentionally NOT triggered. The human reviewer gets a concrete
-// repro bundle to run; downstream automation continues to honor the human gate
-// because OpenBacklog and the patch-prover still skip NeedsHuman findings.
+// witnessFinding records a non-promoting repro artifact. It mirrors
+// promoteFinding but writes ONLY repro_witness; Tier, ReproPath, and
+// NeedsHuman are left untouched and the patch-prover cascade is intentionally
+// NOT triggered. Downstream automation skips witnessed rows: OpenBacklog and
+// the repro-hook claim checks exclude any finding with ReproWitness set.
 //
 // bugbot-w1bh: this is the witness half of the repro-as-evidence vs
-// repro-as-promotion split. PromoteOne branches to it whenever the
-// demonstrated finding has NeedsHuman set.
+// repro-as-promotion split. promoteOne branches to it when the demonstrated
+// finding has NeedsHuman set (below-quorum survivor — the human reviewer
+// gains a runnable bundle) or att.WitnessOnly (the detected ecosystem has no
+// execution-witness coverage format, bugbot-qb4r layer b).
 func witnessFinding(ctx context.Context, st *store.Store, f domain.Finding, reproPath string) error {
 	current, err := st.GetFindingByFingerprint(ctx, f.Fingerprint)
 	if err != nil {

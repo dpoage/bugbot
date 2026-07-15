@@ -9,9 +9,14 @@ import (
 )
 
 // OpenBacklog returns open findings that have not yet had a reproduction
-// attempt: Tier 2 or 3, ReproPath empty, NeedsHuman false. It queries all open
-// findings from the store (the store filter does not support ReproPath or
-// NeedsHuman predicates) and filters in Go. NeedsHuman excludes both
+// attempt: Tier 2 or 3, ReproPath empty, ReproWitness empty, NeedsHuman
+// false. It queries all open findings from the store (the store filter does
+// not support ReproPath or NeedsHuman predicates) and filters in Go. A
+// non-empty ReproWitness excludes the row: the finding already received its
+// non-promoting witness bundle (below-quorum survivor or witness-only
+// ecosystem, bugbot-qb4r layer b) and witness-only is a static property of
+// the build's ecosystem.WitnessTable — re-dispatching it every firing could
+// only re-produce the same non-promoting outcome. NeedsHuman excludes both
 // patch-prover-exhausted and below-quorum verifier findings deliberately (see
 // the dual-meaning note in funnel/verify_stream.go, bugbot-sw7).
 //
@@ -34,7 +39,7 @@ func OpenBacklog(ctx context.Context, st store.StoreReader) ([]domain.Finding, e
 	}
 	out := make([]domain.Finding, 0, len(all))
 	for _, f := range all {
-		if (f.Tier == domain.TierVerified || f.Tier == domain.TierSuspected) && f.ReproPath == "" && !f.NeedsHuman {
+		if (f.Tier == domain.TierVerified || f.Tier == domain.TierSuspected) && f.ReproPath == "" && f.ReproWitness == "" && !f.NeedsHuman {
 			out = append(out, f)
 		}
 	}

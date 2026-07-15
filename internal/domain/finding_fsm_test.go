@@ -93,11 +93,11 @@ func TestValidateFindingState_IllegalTransitions(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "ILLEGAL: ReproWitness without NeedsHuman",
+			name: "valid ReproWitness without NeedsHuman (witness-only ecosystem, bugbot-qb4r layer b)",
 			mutate: func(f *Finding) {
 				f.ReproWitness = "/artifacts/witness"
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "ILLEGAL: NeedsHuman without reason",

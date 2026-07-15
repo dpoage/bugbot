@@ -19,14 +19,18 @@ import (
 //     repro_path), whether by an earlier in-run attempt, the daemon drain, or
 //     an explicit mutation. Patch-prover-exhausted findings fall here once
 //     the prover wrote the path.
-//   - NeedsHuman AND ReproWitness is non-empty — the below-quorum verifier
-//     survivor has already received its witness artifact; do not re-attempt.
-//   - NeedsHuman alone does NOT skip in-run repros anymore (bugbot-w1bh):
-//     a below-quorum finding (NeedsHuman, no ReproPath) gets exactly ONE
+//   - ReproWitness is non-empty — the finding already received its
+//     non-promoting witness artifact, either as a below-quorum verifier
+//     survivor (bugbot-w1bh) or via a witness-only ecosystem (bugbot-qb4r
+//     layer b, no execution-witness coverage format). Witness-only is a
+//     static property of the build's ecosystem.WitnessTable, so a
+//     re-attempt can only reproduce the same non-promoting outcome.
+//   - NeedsHuman alone does NOT skip in-run repros (bugbot-w1bh): a
+//     below-quorum finding (NeedsHuman, no ReproPath) gets exactly ONE
 //     witness attempt via this path. The repro hook writes ReproWitness,
 //     not ReproPath, so the finding stays excluded from the daemon backlog
-//     (OpenBacklog's !NeedsHuman filter) and from the patch-prover cascade.
-//     Repro-as-evidence is now decoupled from repro-as-promotion.
+//     and from the patch-prover cascade. Repro-as-evidence is decoupled
+//     from repro-as-promotion.
 //
 // This mirrors OpenBacklog in spirit (no concurrent in-run + daemon-drain
 // attempt on the same finding) but is NOT identical: OpenBacklog filters out
@@ -75,7 +79,7 @@ func (f *Funnel) runReproAttempt(ctx context.Context, finding domain.Finding, sc
 		if ferr != nil {
 			return
 		}
-		if current.ReproPath != "" || (current.NeedsHuman && current.ReproWitness != "") {
+		if current.ReproPath != "" || current.ReproWitness != "" {
 			return
 		}
 	}
@@ -94,7 +98,7 @@ func (f *Funnel) runReproAttempt(ctx context.Context, finding domain.Finding, sc
 	// Re-check after slot acquisition: another goroutine may have promoted or
 	// witnessed while we were waiting.
 	current2, err := f.store.GetFindingByFingerprint(ctx, finding.Fingerprint)
-	if err == nil && (current2.ReproPath != "" || (current2.NeedsHuman && current2.ReproWitness != "")) {
+	if err == nil && (current2.ReproPath != "" || current2.ReproWitness != "") {
 		return
 	}
 
@@ -108,10 +112,11 @@ func (f *Funnel) runReproAttempt(ctx context.Context, finding domain.Finding, sc
 	//
 	// Status vocabulary (reproducer role, documented in store/agentunits.go):
 	//   reproduced    — finding promoted to Tier-1 (ReproPath now set)
-	//   witnessed     — below-quorum (NeedsHuman) finding's repro hook fired and
-	//                   wrote ReproWitness. Tier is unchanged; this is repro
-	//                   evidence only, no promotion and no patch-prover
-	//                   cascade. Newly added in bugbot-w1bh.
+	//   witnessed     — the hook fired and wrote ReproWitness without
+	//                   promoting: a below-quorum (NeedsHuman) finding
+	//                   (bugbot-w1bh) or a witness-only ecosystem
+	//                   (bugbot-qb4r layer b). Tier is unchanged; repro
+	//                   evidence only, no patch-prover cascade.
 	//   exhausted     — all attempts failed; finding stays at its prior tier
 	//  — hook returned an error before any sandbox run
 	//   infra_error   — hook returned a non-nil error (infrastructure failure)
@@ -135,11 +140,11 @@ func (f *Funnel) runReproAttempt(ctx context.Context, finding domain.Finding, sc
 		} else if after.ReproPath != "" {
 			status = "reproduced"
 			detail = fmt.Sprintf("tier=%d elapsed_ms=%d", after.Tier, finishedAt.Sub(startedAt).Milliseconds())
-		} else if after.NeedsHuman && after.ReproWitness != "" {
-			// Below-quorum witness recorded: hook wrote ReproWitness but did NOT
-			// promote. Tier is preserved (NeedsHuman path, no Tier-1 promotion).
+		} else if after.ReproWitness != "" {
+			// Witness recorded: hook wrote ReproWitness but did NOT promote.
+			// Tier is preserved (no Tier-1 promotion).
 			status = "witnessed"
-			detail = fmt.Sprintf("tier=%d needs_human=true elapsed_ms=%d", after.Tier, finishedAt.Sub(startedAt).Milliseconds())
+			detail = fmt.Sprintf("tier=%d needs_human=%v elapsed_ms=%d", after.Tier, after.NeedsHuman, finishedAt.Sub(startedAt).Milliseconds())
 		} else if after.NeedsHuman {
 			status = "exhausted"
 			detail = fmt.Sprintf("needs_human=true elapsed_ms=%d", finishedAt.Sub(startedAt).Milliseconds())
