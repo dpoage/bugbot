@@ -19,6 +19,9 @@ package ecosystem
 // allKnownEcosystems list in interp_test.go.
 
 import (
+	"fmt"
+	"path"
+	"regexp"
 	"strings"
 )
 
@@ -339,6 +342,101 @@ var InterpTable = []InterpRules{
 			"enoent",
 		},
 	},
+}
+
+// WitnessRules describes how to detect, from a sandbox run's combined
+// output, that the finding's TARGET FILE specifically appeared in a
+// runtime stack/trace context during the run — i.e. its code actually
+// executed — as opposed to a test that merely ran and failed for some
+// unrelated reason. This sits next to InterpTable: InterpTable answers
+// "did a test run and fail"; WitnessTable answers "did the failure
+// involve the target file". bugbot-qb4r layer (b).
+//
+// Ecosystems absent from WitnessTable (or with an empty TraceFilePatterns)
+// cannot provide a witness at all — the caller (repro.witnessDemonstration)
+// downgrades those to the existing witness-only promotion path instead of
+// rejecting outright, since the runtime genuinely has no reliable way to
+// attribute a failure to a specific source file for that ecosystem.
+type WitnessRules struct {
+	// Name is the ecosystem identifier; mirrors Ecosystem values.
+	Name Ecosystem
+	// TraceFilePatterns are regexp templates with exactly one %s verb. The
+	// verb is filled in with the target file's escaped basename (and,
+	// separately, its extension-stripped basename) before compiling. A
+	// match proves a stack frame / traceback line in the output names the
+	// target file — i.e. the target file's code was on the call stack
+	// when the run failed.
+	TraceFilePatterns []string
+}
+
+// WitnessTable is the per-ecosystem execution-witness registry. Only
+// ecosystems whose failure output reliably attributes a stack frame to a
+// specific source file (via a language-standard traceback/panic format) are
+// listed; bazel (target-label-level summaries) and unknown (no agreed
+// format) are intentionally absent.
+var WitnessTable = []WitnessRules{
+	{
+		Name:              EcosystemGo,
+		TraceFilePatterns: []string{`%s:\d+`},
+	},
+	{
+		Name:              EcosystemPython,
+		TraceFilePatterns: []string{`File "[^"]*%s", line \d+`},
+	},
+	{
+		Name:              EcosystemJS,
+		TraceFilePatterns: []string{`%s:\d+:\d+`},
+	},
+	{
+		Name:              EcosystemRust,
+		TraceFilePatterns: []string{`%s:\d+:\d+`},
+	},
+	{
+		Name:              EcosystemCpp,
+		TraceFilePatterns: []string{`%s:\d+:`},
+	},
+}
+
+// WitnessRulesFor returns the WitnessRules for name, or (zero, false) when
+// the ecosystem has no execution-witness support.
+func WitnessRulesFor(name Ecosystem) (WitnessRules, bool) {
+	for _, w := range WitnessTable {
+		if w.Name == name {
+			return w, true
+		}
+	}
+	return WitnessRules{}, false
+}
+
+// HasTargetWitness reports whether out contains a stack/trace line naming
+// targetPath's basename (or, for extensioned files, its extension-stripped
+// basename — used by Python tracebacks that occasionally report a bare
+// module name). Returns false for a zero-value WitnessRules (no patterns)
+// or an empty targetPath, so callers can call it unconditionally on the
+// result of WitnessRulesFor.
+func (w WitnessRules) HasTargetWitness(out, targetPath string) bool {
+	if targetPath == "" || len(w.TraceFilePatterns) == 0 {
+		return false
+	}
+	base := path.Base(targetPath)
+	candidates := []string{regexp.QuoteMeta(base)}
+	if ext := path.Ext(base); ext != "" {
+		if stripped := regexp.QuoteMeta(strings.TrimSuffix(base, ext)); stripped != candidates[0] {
+			candidates = append(candidates, stripped)
+		}
+	}
+	for _, tmpl := range w.TraceFilePatterns {
+		for _, c := range candidates {
+			re, err := regexp.Compile(fmt.Sprintf(tmpl, c))
+			if err != nil {
+				continue
+			}
+			if re.MatchString(out) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // interpIndex returns the position of the named entry in InterpTable, or 0
