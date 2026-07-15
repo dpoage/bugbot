@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/sandbox"
 	"gopkg.in/yaml.v3"
 )
 
@@ -188,9 +189,17 @@ type Scan struct {
 // Sandbox configures the isolated execution environment used for verification
 // and reproduction.
 type Sandbox struct {
-	// Deprecated: ignored; sandbox backend selection was never implemented.
-	// The field is retained so configs written by older bugbot init wizards
-	// (which emitted `backend: cli`) still parse cleanly under KnownFields mode.
+	// Backend selects the sandbox implementation: "" or "cli" (default) uses
+	// the container-runtime CLI backend (podman/docker, see Runtime/Image);
+	// "podman" and "docker" are accepted as explicit synonyms for "cli" so an
+	// operator who names the runtime directly here still gets the container
+	// path. "bwrap" selects the bubblewrap backend instead: an unprivileged
+	// user-namespace sandbox that runs directly on host toolchains, with no
+	// image to bake (see internal/sandbox/bwrap.go). Backend:bwrap is
+	// rejected by Validate on non-Linux hosts, when bwrap is absent from
+	// PATH, or when unprivileged user namespaces are unavailable — see
+	// DetectBwrap. Image/Runtime/DepStrategy are container-backend-only and
+	// ignored under bwrap.
 	Backend  string `yaml:"backend"`
 	Runtime  string `yaml:"runtime"`
 	Image    string `yaml:"image"`
@@ -243,6 +252,24 @@ type Sandbox struct {
 	// is a deliberate fast-follow gated on containment validation — see issue
 	// bugbot-ixu for the security rationale.
 	LocalMounts []LocalMount `yaml:"local_mounts"`
+	// AllowUncapped opts into running the bwrap backend with NO enforced
+	// memory/CPU/pids limits when neither systemd-run --user --scope nor a
+	// delegated cgroup v2 subtree is available on the host. Ignored by the
+	// container backend, which always enforces limits via the runtime CLI.
+	// Default false: bwrap Exec fails with an actionable error instead of
+	// silently running uncapped (see internal/sandbox/bwrap_caps.go).
+	AllowUncapped bool `yaml:"allow_uncapped"`
+	// HostToolchains lists toolchains (bare PATH names, e.g. "node", "cargo")
+	// or explicit absolute directories to resolve on the HOST and bind
+	// read-only into the bwrap sandbox on top of fixedROAllowlist (see
+	// internal/sandbox/toolchain.go's ResolveHostToolchains). Ignored by the
+	// container backend, which provisions toolchains via the baked image
+	// instead. Each resolved entry also contributes to the sandbox's PATH and
+	// to the ProbeCapabilities cache key (see CapabilityFingerprint), so a
+	// probe result never survives a host toolchain change it never observed.
+	// Empty by default — bwrap runs with only the fixed allowlist until an
+	// operator opts a toolchain in.
+	HostToolchains []string `yaml:"host_toolchains"`
 }
 
 // LocalMount is one entry in sandbox.local_mounts: a host directory
@@ -761,6 +788,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 
 	setStr("BUGBOT_STORAGE_PATH", &cfg.Storage.Path)
 	setStr("BUGBOT_REPORT_DIR", &cfg.Report.Dir)
+	setStr("BUGBOT_SANDBOX_BACKEND", &cfg.Sandbox.Backend)
 	setStr("BUGBOT_SANDBOX_RUNTIME", &cfg.Sandbox.Runtime)
 	setStr("BUGBOT_SANDBOX_IMAGE", &cfg.Sandbox.Image)
 	setStr("BUGBOT_SANDBOX_NETWORK", &cfg.Sandbox.Network)
@@ -956,10 +984,19 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: budgets.per_cycle_tokens (%d) must not exceed budgets.per_day_tokens (%d)", c.Budgets.PerCycleTokens, c.Budgets.PerDayTokens)
 	}
 
-	switch c.Sandbox.Runtime {
-	case "podman", "docker":
+	switch c.Sandbox.Backend {
+	case "", "cli", "podman", "docker":
+		switch c.Sandbox.Runtime {
+		case "podman", "docker":
+		default:
+			return fmt.Errorf("config: sandbox.runtime %q invalid (want podman or docker)", c.Sandbox.Runtime)
+		}
+	case "bwrap":
+		if ok, reason := sandbox.DetectBwrap(); !ok {
+			return fmt.Errorf("config: sandbox.backend bwrap is unusable: %s", reason)
+		}
 	default:
-		return fmt.Errorf("config: sandbox.runtime %q invalid (want podman or docker)", c.Sandbox.Runtime)
+		return fmt.Errorf("config: sandbox.backend %q invalid (want \"\", cli, podman, docker, or bwrap)", c.Sandbox.Backend)
 	}
 	if c.Sandbox.CPUs <= 0 {
 		return fmt.Errorf("config: sandbox.cpus must be > 0")

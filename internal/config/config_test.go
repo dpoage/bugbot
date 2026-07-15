@@ -1523,9 +1523,9 @@ func TestValidate_NetworkIsOpenEnded(t *testing.T) {
 }
 
 // TestLoad_BackwardCompatSandboxBackend verifies that a config written by an
-// older bugbot init wizard (which emitted `backend: cli`) still parses cleanly.
-// Config.Load uses KnownFields(true), so the Backend field must exist in the
-// struct even though its value is ignored at runtime.
+// older bugbot init wizard (which emitted `backend: cli`) still parses and
+// validates cleanly now that Backend selects a real sandbox implementation:
+// "cli" resolves to the same container path those older configs always ran.
 func TestLoad_BackwardCompatSandboxBackend(t *testing.T) {
 	oldStyleYAML := validYAML + "\nsandbox:\n  backend: cli\n"
 	if _, err := Load(writeTemp(t, oldStyleYAML)); err != nil {
