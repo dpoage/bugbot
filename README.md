@@ -41,6 +41,58 @@ Findings carry a confidence tier:
 | **T2 Verified** | Survived adversarial review with a concrete reasoning trace |
 | **T3 Suspected** | Suppressed by default |
 
+## Sandbox backend
+
+`sandbox.backend` selects how the isolated environment described above is
+built:
+
+| Backend | Values | Platform | Isolation |
+|---|---|---|---|
+| **container** (default) | `""`, `cli`, `podman`, `docker` | Linux, macOS | podman/docker: baked image, `--network=none`, dropped capabilities, read-only root |
+| **bwrap** | `bwrap` | Linux only, unprivileged user namespaces required | `bubblewrap`: tmpfs root + allowlisted read-only host binds, `--unshare-all`, no image to bake |
+
+The container backend is the only option on macOS and remains the default
+everywhere: it is what runs a completely hermetic, operator-baked image. The
+bwrap backend trades that hermeticity for zero provisioning cost — it runs
+directly on whatever toolchains the host already has (the host builds and
+tests this repo daily, so it demonstrably has everything a container image
+would otherwise need to be baked with). `bugbot doctor` reports which backend
+is configured and rejects `backend: bwrap` with an actionable reason
+(not Linux, `bwrap` missing from PATH, or unprivileged user namespaces
+unavailable) before any run is attempted.
+
+### Allowlist-bind security model (bwrap)
+
+bwrap has no image filesystem to fall back on: the sandbox root starts as an
+empty tmpfs, and ONLY the following are ever bound in, always read-only:
+
+- a minimal fixed allowlist: `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`,
+  `/etc/ssl` (plus `/etc/resolv.conf`, but only when `sandbox.network: host`
+  is explicitly set — DNS is unreachable and unneeded under the default
+  `network=none`);
+- host toolchains resolved from `sandbox.host_toolchains` (bare names like
+  `node`/`cargo`, resolved via the host's PATH and symlink-closure, or
+  explicit absolute directories) — see `internal/sandbox/toolchain.go`;
+- the prepared workspace copy, bound read-write at `/workspace` — the only
+  writable mount, and the ONLY way the sandboxed process can persist
+  anything.
+
+`$HOME`, `/root`, and `/etc` wholesale are NEVER bound: a broader bind can
+exfiltrate host secrets through workspace → transcript → LLM even under
+`network=none`, since the untrusted command can read anything bound in and
+the sandbox's output is fed straight back to a model. Widen the allowlist by
+naming a toolchain in `sandbox.host_toolchains`, never by editing the fixed
+list — and audit `host_toolchains` (and `sandbox.local_mounts`) with that
+exposure in mind, since each entry grants the untrusted run read access to
+whatever it resolves to.
+
+Resource limits (`sandbox.cpus`/`memory_mb`/`pids_limit`) have no bwrap flag
+equivalent — bwrap has no cgroups of its own. They are enforced via
+`systemd-run --user --scope` when a user systemd session is reachable, else a
+delegated cgroup v2 subtree; when NEITHER mechanism is available, a run
+**fails** with an actionable error rather than silently running uncapped —
+set `sandbox.allow_uncapped: true` to opt into that instead.
+
 ## Sandbox dependency strategies
 
 The sandbox runs untrusted, model-generated code with `--network=none`, all

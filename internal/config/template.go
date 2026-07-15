@@ -120,7 +120,15 @@ scan:
 
 # ---------------------------------------------------------------------------
 # sandbox: isolated execution environment for verification and reproduction.
-# backend is currently "cli" (shells out to a container runtime).
+# backend selects the implementation:
+#   "" | "cli" | "podman" | "docker"   (default) shells out to a container
+#     runtime (podman/docker, auto-detected unless runtime is set below).
+#   "bwrap"   Linux-only, requires unprivileged user namespaces and the
+#     bwrap binary. Runs directly on the HOST's own toolchains (no image to
+#     bake) inside a tmpfs root with a narrow read-only allowlist — see the
+#     README "Sandbox backend" section for the full security model.
+#     "bugbot doctor" reports an actionable reason (not Linux / bwrap
+#     missing / userns unavailable) if bwrap is configured but unusable.
 # network defaults to "none" — reproduction runs offline.
 #
 # IMPORTANT: the reproduce/verify stages run the target repo's OWN test/build
@@ -197,6 +205,13 @@ sandbox:
   # read-only, public toolchain content only — never secrets.
   # host_toolchains:
   #   - node
+  # allow_uncapped: bwrap-only. bwrap has no cgroups of its own; resource
+  # caps (cpus/memory_mb/pids_limit above) are enforced via systemd-run
+  # --user --scope or a delegated cgroup v2 subtree. When NEITHER mechanism
+  # is available, a bwrap run FAILS rather than silently running uncapped —
+  # set this to true to opt into uncapped runs instead. Ignored by the
+  # container backend (the runtime CLI always enforces limits itself).
+  # allow_uncapped: false
 
 # ---------------------------------------------------------------------------
 # verify: configuration for the LLM-assisted patch-verification stage.
