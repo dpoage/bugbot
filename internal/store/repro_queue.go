@@ -24,6 +24,15 @@ const (
 	ReproStateInfraRetry ReproState = "infra_retry"
 	// ReproStateAbandoned: terminal state; infra errors exceeded max_attempts.
 	ReproStateAbandoned ReproState = "abandoned"
+	// ReproStateBlockedToolchain: the claim-time capability gate (promote.go's
+	// promoteOne) found the finding's inferred ecosystem unavailable in the
+	// sandbox image's probed CapabilitySet and skipped the claim entirely — no
+	// sandbox run happened, so attempt_count is NOT incremented. Retryable:
+	// treated as claimable exactly like pending/infra_retry (see
+	// ClaimReproAttempt), so the next cycle's capability re-check (fresh probe
+	// cache after an image/config change) can promote it straight to running.
+	// BlockedEcosystem on the row names which capability was missing.
+	ReproStateBlockedToolchain ReproState = "blocked_toolchain"
 )
 
 // DefaultReproMaxAttempts is the bounded retry cap for infrastructure errors.
@@ -37,8 +46,15 @@ type ReproAttempt struct {
 	AttemptCount int
 	MaxAttempts  int
 	LastError    string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// BlockedEcosystem is the missing-capability ecosystem name (e.g. "js")
+	// when State is ReproStateBlockedToolchain. Empty otherwise.
+	BlockedEcosystem string
+	// Unsandboxed is true when the attempt that produced this row's current
+	// state ran in the fix-C attended escape-hatch mode (workspace copy on
+	// the host, no container) rather than the sandbox.
+	Unsandboxed bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // EnqueueRepro inserts a repro_attempts row for the given fingerprint if none
@@ -56,8 +72,8 @@ func (s *Store) EnqueueRepro(ctx context.Context, fingerprint string) (ReproAtte
 	err := s.retry(ctx, func() error {
 		_, err := s.db.ExecContext(ctx, `
 			INSERT OR IGNORE INTO repro_attempts
-			  (id, fingerprint, state, attempt_count, max_attempts, last_error, created_at, updated_at)
-			VALUES (?, ?, ?, 0, ?, '', ?, ?)`,
+			  (id, fingerprint, state, attempt_count, max_attempts, last_error, blocked_ecosystem, unsandboxed, created_at, updated_at)
+			VALUES (?, ?, ?, 0, ?, '', '', 0, ?, ?)`,
 			id, fingerprint, string(ReproStatePending), DefaultReproMaxAttempts,
 			now.Format(timeLayout), now.Format(timeLayout),
 		)
@@ -74,11 +90,12 @@ func (s *Store) EnqueueRepro(ctx context.Context, fingerprint string) (ReproAtte
 func (s *Store) GetReproAttempt(ctx context.Context, fingerprint string) (ReproAttempt, error) {
 	var ra ReproAttempt
 	var state, createdAt, updatedAt string
+	var unsandboxed int
 	err := s.retry(ctx, func() error {
 		return s.db.QueryRowContext(ctx,
-			`SELECT id, fingerprint, state, attempt_count, max_attempts, last_error, created_at, updated_at
+			`SELECT id, fingerprint, state, attempt_count, max_attempts, last_error, blocked_ecosystem, unsandboxed, created_at, updated_at
 			 FROM repro_attempts WHERE fingerprint = ?`, fingerprint,
-		).Scan(&ra.ID, &ra.Fingerprint, &state, &ra.AttemptCount, &ra.MaxAttempts, &ra.LastError, &createdAt, &updatedAt)
+		).Scan(&ra.ID, &ra.Fingerprint, &state, &ra.AttemptCount, &ra.MaxAttempts, &ra.LastError, &ra.BlockedEcosystem, &unsandboxed, &createdAt, &updatedAt)
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return ReproAttempt{}, ErrNotFound
@@ -87,6 +104,7 @@ func (s *Store) GetReproAttempt(ctx context.Context, fingerprint string) (ReproA
 		return ReproAttempt{}, annotateErr(s.path, "get_repro_attempt", err)
 	}
 	ra.State = ReproState(state)
+	ra.Unsandboxed = unsandboxed != 0
 	var perr error
 	if ra.CreatedAt, perr = parseTime(createdAt); perr != nil {
 		return ReproAttempt{}, perr
@@ -104,15 +122,25 @@ func (s *Store) GetReproAttempt(ctx context.Context, fingerprint string) (ReproA
 const ReproStaleLeaseDuration = 30 * time.Minute
 
 // ClaimReproAttempt atomically transitions a repro_attempts row from
-// pending/infra_retry → running, incrementing attempt_count. It also reclaims
-// crash-stuck 'running' rows whose updated_at is older than ReproStaleLeaseDuration,
-// treating them as infra_retry (the process that held the lease is presumed dead).
+// pending/infra_retry/blocked_toolchain → running, incrementing attempt_count.
+// It also reclaims crash-stuck 'running' rows whose updated_at is older than
+// ReproStaleLeaseDuration, treating them as infra_retry (the process that held
+// the lease is presumed dead).
 // Returns ErrReproAlreadyClaimed if the row is not claimable (already running with
 // a fresh lease, done, or abandoned, or attempt budget exhausted).
 //
-// The UPDATE … WHERE state IN ('pending','infra_retry') AND attempt_count < max_attempts
-// is the single atomic claim gate: concurrent writers are serialized by SQLite's
-// single-connection MaxOpenConns(1) constraint, so exactly one wins per fingerprint.
+// blocked_toolchain is claimable here (not just via BlockReproAttemptOnToolchain's
+// own re-check) so a row the capability gate blocked on a prior cycle claims
+// normally once the caller's own re-check of the (possibly now-fresh) probe
+// cache decides to call ClaimReproAttempt instead of re-blocking it — see
+// promote.go's promoteOne, which performs that re-check before ever reaching
+// here. attempt_count is not incremented while blocked; the claim below is the
+// row's first real attempt.
+//
+// The UPDATE … WHERE state IN ('pending','infra_retry','blocked_toolchain')
+// AND attempt_count < max_attempts is the single atomic claim gate: concurrent
+// writers are serialized by SQLite's single-connection MaxOpenConns(1)
+// constraint, so exactly one wins per fingerprint.
 func (s *Store) ClaimReproAttempt(ctx context.Context, fingerprint string) (ReproAttempt, error) {
 	now := nowUTC()
 	staleThreshold := now.Add(-ReproStaleLeaseDuration)
@@ -135,12 +163,12 @@ func (s *Store) ClaimReproAttempt(ctx context.Context, fingerprint string) (Repr
 			return err
 		}
 
-		// Normal claim: pending or infra_retry, within budget.
+		// Normal claim: pending, infra_retry, or blocked_toolchain, within budget.
 		res, err := s.db.ExecContext(ctx, `
 			UPDATE repro_attempts
-			SET state = ?, attempt_count = attempt_count + 1, updated_at = ?
+			SET state = ?, attempt_count = attempt_count + 1, blocked_ecosystem = '', updated_at = ?
 			WHERE fingerprint = ?
-			  AND state IN ('pending', 'infra_retry')
+			  AND state IN ('pending', 'infra_retry', 'blocked_toolchain')
 			  AND attempt_count < max_attempts`,
 			string(ReproStateRunning), now.Format(timeLayout), fingerprint,
 		)
@@ -206,6 +234,58 @@ func (s *Store) RequeueReproAttemptOnInfraError(ctx context.Context, fingerprint
 		)
 		if err != nil {
 			return annotateErr(s.path, "requeue_repro_attempt_infra_error", err)
+		}
+		return nil
+	})
+}
+
+// BlockReproAttemptOnToolchain transitions a repro_attempts row to
+// blocked_toolchain, recording the missing capability's ecosystem name. It is
+// called by promote.go's promoteOne BEFORE ClaimReproAttempt, when the
+// finding's inferred ecosystem is unavailable in the sandbox image's probed
+// CapabilitySet — no sandbox run happens, so attempt_count is deliberately
+// left untouched (this is not an attempt, successful or otherwise).
+//
+// Only pending/infra_retry/blocked_toolchain rows transition: a row already
+// running, done, or abandoned is left alone (best-effort — the gate check in
+// promoteOne runs before any claim, so a race here means another dispatch
+// path's claim won; that claim's own outcome stands). The caller is
+// responsible for calling EnqueueRepro first so the row exists.
+func (s *Store) BlockReproAttemptOnToolchain(ctx context.Context, fingerprint, ecosystem string) (ReproAttempt, error) {
+	now := nowUTC()
+	err := s.retry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, `
+			UPDATE repro_attempts
+			SET state = ?, blocked_ecosystem = ?, updated_at = ?
+			WHERE fingerprint = ?
+			  AND state IN ('pending', 'infra_retry', 'blocked_toolchain')`,
+			string(ReproStateBlockedToolchain), ecosystem, now.Format(timeLayout), fingerprint,
+		)
+		return err
+	})
+	if err != nil {
+		return ReproAttempt{}, annotateErr(s.path, "block_repro_attempt_on_toolchain", err)
+	}
+	return s.GetReproAttempt(ctx, fingerprint)
+}
+
+// MarkReproAttemptUnsandboxed sets the unsandboxed flag on a fingerprint's
+// repro_attempts row, so a T1 promoted via the fix-C attended escape-hatch
+// (workspace copy on the host, no container) is distinguishable from a
+// normally-sandboxed promotion. Called by the unsandboxed single-finding CLI
+// path once EnqueueRepro has ensured the row exists; safe to call regardless
+// of the row's current state (it does not gate on state — the escape hatch is
+// not a claim/skip queue participant, only a provenance marker on it).
+func (s *Store) MarkReproAttemptUnsandboxed(ctx context.Context, fingerprint string) error {
+	now := nowUTC()
+	return s.retry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, `
+			UPDATE repro_attempts SET unsandboxed = 1, updated_at = ?
+			WHERE fingerprint = ?`,
+			now.Format(timeLayout), fingerprint,
+		)
+		if err != nil {
+			return annotateErr(s.path, "mark_repro_attempt_unsandboxed", err)
 		}
 		return nil
 	})
