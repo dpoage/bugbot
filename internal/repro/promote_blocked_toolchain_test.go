@@ -150,9 +150,13 @@ func TestPromoteAll_BlockedToolchain_ProceedsOnceCapabilityRestored(t *testing.T
 	if pre.State != store.ReproStateBlockedToolchain {
 		t.Fatalf("precondition: queue state = %s, want blocked_toolchain", pre.State)
 	}
+	// The test file imports the target module (src/app.ts) so the plan passes
+	// the bugbot-qb4r static executable-edge gate (ClassifyTargetExecution):
+	// this test is about the CAPABILITY gate, and the plan must be otherwise
+	// legitimate so the recovered cycle reaches a genuine sandbox attempt.
 	plan := Plan{
-		Files:  map[string]string{"app.test.ts": "test('pagination', () => { throw new Error('boom'); });\n"},
-		Cmd:    []string{"npx", "vitest", "run", "app.test.ts"},
+		Files:  map[string]string{"src/app.test.ts": "import { paginate } from './app';\ntest('pagination', () => { expect(paginate([1, 2], 1)).toEqual([2]); });\n"},
+		Cmd:    []string{"npx", "vitest", "run", "src/app.test.ts"},
 		Expect: "the off-by-one causes the test to fail",
 	}
 	client := newScriptedClient(planBody(t, plan))
