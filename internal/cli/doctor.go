@@ -17,6 +17,7 @@ import (
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/lsp"
 	"github.com/dpoage/bugbot/internal/repro"
+	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -261,6 +262,8 @@ func runChecks(ctx context.Context, env doctorEnv, runSandboxVerify bool) []chec
 			Status: statusSkip,
 			Detail: "config did not load",
 		})
+	} else if cfg.Sandbox.Backend == "bwrap" {
+		results = append(results, checkBwrap(ctx, cfg)...)
 	} else {
 		results = append(results, checkSandbox(ctx, env, cfg)...)
 	}
@@ -415,6 +418,48 @@ const sandboxProbeTimeout = 5 * time.Second
 // ls-files on a large repo legitimately takes time, but finite because an
 // informational check must never wedge doctor.
 const repoFactsTimeout = 30 * time.Second
+
+// checkBwrap checks the bwrap backend's usability: bwrap on PATH, Linux, and
+// working unprivileged user namespaces (DetectBwrap probes all three and
+// reports whichever fails with an actionable reason — acceptance criterion
+// 1), plus which resource-limit enforcement mechanism (if any) this host
+// offers (acceptance criterion 4). Bwrap absent/unusable is a hard failure,
+// same severity as a missing container runtime in checkSandbox; a missing
+// resource-limit mechanism is only hard when the operator has not opted
+// into sandbox.allow_uncapped, since that is a real "the next real run will
+// fail" condition rather than an advisory.
+func checkBwrap(ctx context.Context, cfg config.Config) []checkResult {
+	if ok, reason := sandbox.DetectBwrap(); !ok {
+		return []checkResult{
+			{Name: "sandbox binary", Status: statusFail, Detail: reason, hard: true},
+			{Name: "sandbox resource caps", Status: statusSkip, Detail: "bwrap unavailable"},
+		}
+	}
+	results := []checkResult{{
+		Name:   "sandbox binary",
+		Status: statusPass,
+		Detail: "bwrap found on PATH; unprivileged user namespaces verified",
+	}}
+	label, enforced := sandbox.DescribeBwrapCapMethod(ctx)
+	switch {
+	case enforced:
+		results = append(results, checkResult{Name: "sandbox resource caps", Status: statusPass, Detail: label})
+	case cfg.Sandbox.AllowUncapped:
+		results = append(results, checkResult{
+			Name:   "sandbox resource caps",
+			Status: statusWarn,
+			Detail: label + "; sandbox.allow_uncapped is set, so runs proceed with no enforced memory/CPU/pids limits",
+		})
+	default:
+		results = append(results, checkResult{
+			Name:   "sandbox resource caps",
+			Status: statusFail,
+			Detail: label + "; runs will fail — set sandbox.allow_uncapped to proceed uncapped instead",
+			hard:   true,
+		})
+	}
+	return results
+}
 
 // checkSandbox checks the sandbox runtime binary, its responsiveness, and
 // whether the configured image is present locally. Binary absent and runtime
