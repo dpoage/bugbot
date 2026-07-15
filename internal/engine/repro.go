@@ -82,6 +82,7 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 	r, err := repro.New(client, sb, repoRoot, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
 		Image:            cfg.Sandbox.Image,
+		Network:          cfg.Sandbox.Network,
 		PatchProver:      cfg.Repro.PatchProver,
 		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
 		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
@@ -172,6 +173,7 @@ func buildReproHookForScan(
 	r, rNewErr := repro.New(reproClient, sb, opts.Target, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
 		Image:            cfg.Sandbox.Image,
+		Network:          cfg.Sandbox.Network,
 		PatchProver:      cfg.Repro.PatchProver,
 		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
 		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
