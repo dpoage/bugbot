@@ -187,6 +187,16 @@ sandbox:
   # local_mounts:
   #   - host: /absolute/path/to/sibling     # must exist on the host
   #     container: /sibling                  # absolute container path; unique
+  # host_toolchains: mount host toolchains (or explicit host dirs) read-only
+  # and prepend them to the sandbox's PATH. Use when the sandbox image lacks
+  # a toolchain the host already has (e.g. a bazel-only image reproducing a
+  # TypeScript finding needs node): the mounted toolchain then shows up as
+  # available in the probed capability set and the reproducer's prompt.
+  # Bare names are resolved from the host PATH (symlink closures followed);
+  # absolute paths are used directly. Same security posture as local_mounts:
+  # read-only, public toolchain content only — never secrets.
+  # host_toolchains:
+  #   - node
 
 # ---------------------------------------------------------------------------
 # verify: configuration for the LLM-assisted patch-verification stage.

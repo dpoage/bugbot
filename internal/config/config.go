@@ -243,6 +243,19 @@ type Sandbox struct {
 	// is a deliberate fast-follow gated on containment validation — see issue
 	// bugbot-ixu for the security rationale.
 	LocalMounts []LocalMount `yaml:"local_mounts"`
+	// HostToolchains is an ordered list of host toolchain names (resolved from
+	// the host's PATH, following symlink closures — see
+	// sandbox.ResolveHostToolchains) or explicit host directories, mounted
+	// read-only into the sandbox and prepended to its PATH. Use this when the
+	// sandbox image lacks a toolchain the host already has (e.g. a bazel-only
+	// image reproducing a TypeScript finding needs "node"): the mounted
+	// toolchain then shows up as available in the probed CapabilitySet and in
+	// the reproducer agent's capability prompt.
+	//
+	// Same security posture as LocalMounts (see its doc and the ROMount
+	// package doc): READ-ONLY, and only ever exposes public toolchain
+	// content — never point an entry at a directory containing secrets.
+	HostToolchains []string `yaml:"host_toolchains"`
 }
 
 // LocalMount is one entry in sandbox.local_mounts: a host directory
@@ -1000,6 +1013,24 @@ func (c *Config) Validate() error {
 		seen[m.Container] = true
 		if info, err := os.Stat(m.Host); err != nil || !info.IsDir() {
 			return fmt.Errorf("config: sandbox.local_mounts[%d].host %q must be an existing directory", i, m.Host)
+		}
+	}
+	for i, name := range c.Sandbox.HostToolchains {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			return fmt.Errorf("config: sandbox.host_toolchains[%d] must not be empty", i)
+		}
+		// Bare names (e.g. "node") are resolved from the host's PATH at
+		// repro-run time (ResolveHostToolchains) — the machine running
+		// `bugbot config validate` may not be the machine that runs the
+		// sandbox, so no host lookup happens here, only structural
+		// validation. An explicit directory entry, however, names a fixed
+		// path the operator committed to, so it is checked the same way
+		// sandbox.local_mounts[i].host is: it must exist now.
+		if filepath.IsAbs(trimmed) {
+			if info, err := os.Stat(trimmed); err != nil || !info.IsDir() {
+				return fmt.Errorf("config: sandbox.host_toolchains[%d] %q must be an existing directory", i, trimmed)
+			}
 		}
 	}
 
