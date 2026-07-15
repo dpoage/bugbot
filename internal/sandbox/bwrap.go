@@ -60,6 +60,13 @@ func DetectBwrap() (ok bool, reason string) {
 // unshare(2) actually work here", binding the entire host root read-only for
 // it (rather than the real run's narrow allowlist) is safe and portable: it
 // works identically regardless of which distro layout the host uses.
+//
+// INVARIANT: the --ro-bind / / below is acceptable ONLY because this probe
+// always execs a fixed, hardcoded, trusted command (`true`, resolved by
+// this function itself) — it must NEVER be reused to run caller-supplied or
+// model-generated code. Every other bwrap invocation in this package goes
+// through buildBwrapArgs' narrow fixedROAllowlist instead; this is the one
+// deliberate exception, and it must stay that way.
 func probeBwrapUserns(bwrapPath string) error {
 	truePath, err := exec.LookPath("true")
 	if err != nil {
