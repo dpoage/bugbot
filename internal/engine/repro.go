@@ -12,6 +12,7 @@ import (
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/daemon"
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/report"
@@ -279,10 +280,11 @@ func runReproCatchUp(ctx context.Context, out io.Writer, r *repro.Reproducer, st
 }
 
 // emitReproBlocked prints the bugbot-14g0 acceptance-2 stage-start aggregate
-// to out ("N findings blocked: image lacks X", one line per missing
-// ecosystem, sorted for determinism) and, when sink is non-nil, emits a
-// KindReproBlocked progress event per ecosystem so a running daemon's
-// status.json (and any other progress sink) carries the same aggregate. A
+// to out ("N finding(s) blocked: image lacks X", one line per missing
+// ecosystem's actual binary, sorted for determinism) and delegates the
+// event side to progress.EmitReproBlocked, which emits a KindReproBlocked
+// event per ecosystem so a running daemon's status.json (and any other
+// progress sink) carries the same aggregate with the same wording. A
 // nil/empty blocked map is a silent no-op — nothing was blocked, nothing to
 // report. sink may be nil (e.g. the scan catch-up drain, whose progress sink
 // belongs to the funnel stages, not the repro backlog preview).
@@ -296,13 +298,13 @@ func emitReproBlocked(out io.Writer, sink progress.EventSink, blocked map[string
 	}
 	sort.Strings(ecos)
 	for _, eco := range ecos {
-		n := blocked[eco]
-		msg := fmt.Sprintf("%d finding(s) blocked: image lacks %s", n, eco)
-		_, _ = fmt.Fprintln(out, msg)
-		progress.Emit(sink, progress.Event{
-			Kind: progress.KindReproBlocked, Label: eco, Count: n, Message: msg,
-		})
+		binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
+		if binary == "" {
+			binary = eco
+		}
+		_, _ = fmt.Fprintf(out, "%d finding(s) blocked: image lacks %s\n", blocked[eco], binary)
 	}
+	progress.EmitReproBlocked(sink, blocked)
 }
 
 // printReproSummary renders the promotion outcome. Shared by the scan
@@ -321,7 +323,11 @@ func printReproSummary(out io.Writer, s *repro.Summary) {
 		}
 		sort.Strings(ecos)
 		for _, eco := range ecos {
-			_, _ = fmt.Fprintf(out, "Blocked toolchain: %d finding(s) — image lacks %s\n", s.BlockedByEcosystem[eco], eco)
+			binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
+			if binary == "" {
+				binary = eco
+			}
+			_, _ = fmt.Fprintf(out, "Blocked toolchain: %d finding(s) — image lacks %s\n", s.BlockedByEcosystem[eco], binary)
 		}
 	}
 	for _, o := range s.PerFinding {

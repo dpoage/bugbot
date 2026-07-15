@@ -10,6 +10,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
 )
@@ -38,6 +39,14 @@ type worldState struct {
 
 	LastRun    store.ScanRun
 	HasLastRun bool
+
+	// BlockedToolchain surfaces the CURRENT persisted repro_attempts queue
+	// state (store.BlockedToolchainCounts, a zero-container query) grouped by
+	// missing ecosystem — bugbot-14g0 acceptance 2's world-state signal for
+	// an unattended daemon: even a stale/absent live status.json snapshot
+	// (Status.ReproBlocked) still leaves this queryable straight from the
+	// store, since it reflects durable queue rows, not in-memory event state.
+	BlockedToolchain map[string]int
 }
 
 // leadPreviewMax bounds the pending-lead preview in the status pane; the full
@@ -86,6 +95,9 @@ func fetchWorldState(ctx context.Context, cfg config.Config) (worldState, bool) 
 	if run, err := st.LatestScanRun(ctx); err == nil {
 		ws.LastRun = run
 		ws.HasLastRun = true
+	}
+	if blocked, err := st.BlockedToolchainCounts(ctx); err == nil && len(blocked) > 0 {
+		ws.BlockedToolchain = blocked
 	}
 
 	return ws, true
@@ -151,6 +163,22 @@ func renderWorldState(out io.Writer, ws worldState, now time.Time) {
 		}
 		_, _ = fmt.Fprintf(out, "  last run:     %s commit=%s %s\n",
 			ws.LastRun.Kind, util.ShortSHA(ws.LastRun.CommitSHA), when)
+	}
+
+	if len(ws.BlockedToolchain) > 0 {
+		ecos := make([]string, 0, len(ws.BlockedToolchain))
+		for eco := range ws.BlockedToolchain {
+			ecos = append(ecos, eco)
+		}
+		sort.Strings(ecos)
+		for _, eco := range ecos {
+			binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
+			if binary == "" {
+				binary = eco
+			}
+			_, _ = fmt.Fprintf(out, "  blocked:      %d finding(s) — image lacks %s (bugbot repro; sandbox.host_toolchains)\n",
+				ws.BlockedToolchain[eco], binary)
+		}
 	}
 }
 

@@ -255,6 +255,11 @@ type Sandbox struct {
 	// Same security posture as LocalMounts (see its doc and the ROMount
 	// package doc): READ-ONLY, and only ever exposes public toolchain
 	// content — never point an entry at a directory containing secrets.
+	//
+	// PATH override: when any entry resolves, the container's PATH is set to
+	// the resolved toolchain bin dir(s) followed by a standard fallback (see
+	// sandbox.DefaultContainerPath) — this REPLACES, not appends to, whatever
+	// PATH the image itself would otherwise have set.
 	HostToolchains []string `yaml:"host_toolchains"`
 }
 

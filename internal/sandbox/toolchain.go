@@ -207,10 +207,45 @@ func resolveToolchainRoot(name string) (root, execPath string, err error) {
 	root = dir
 	if filepath.Base(dir) == "bin" {
 		// Pull in the toolchain root (sibling lib/, share/, ...) alongside
-		// the bin/ directory, not just the single binary's own folder.
-		root = filepath.Dir(dir)
+		// the bin/ directory, not just the single binary's own folder — but
+		// ONLY when that root is narrow (a version-manager's own versioned
+		// directory, a nix store path, ...). A $HOME/bin/node or
+		// ~/.local/bin/node layout would otherwise ascend straight to $HOME
+		// or ~/.local and RO-mount the user's entire home directory (SSH
+		// keys, git credentials, unrelated dotfiles) into whatever untrusted,
+		// model-driven code the sandbox runs. See isOverbroadToolchainRoot.
+		if candidate := filepath.Dir(dir); !isOverbroadToolchainRoot(candidate) {
+			root = candidate
+		}
 	}
 	return root, resolved, nil
+}
+
+// isOverbroadToolchainRoot reports whether dir is a shared, multi-purpose
+// directory that must never be RO-mounted wholesale as a "toolchain root":
+// the user's home directory itself, or a broad catch-all subdirectory like
+// ~/.local that holds far more than one toolchain. A $HOME/bin/node or
+// ~/.local/bin/node layout ascends exactly here without this guard.
+//
+// Narrow, single-purpose version-manager directories
+// (~/.nvm/versions/node/vX, ~/.asdf/installs/..., a nix store path) are NOT
+// caught by this — they are exactly the layout the ascent exists to support.
+func isOverbroadToolchainRoot(dir string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	home = filepath.Clean(home)
+	dir = filepath.Clean(dir)
+	if dir == home {
+		return true
+	}
+	for _, broad := range []string{".local", ".config", ".cache", ".ssh"} {
+		if dir == filepath.Join(home, broad) {
+			return true
+		}
+	}
+	return false
 }
 
 // sanitizeToolchainSegment reduces name to a single, safe path component for

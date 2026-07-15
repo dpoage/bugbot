@@ -258,7 +258,7 @@ func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding dom
 		}
 		outcome.BlockedToolchain = true
 		outcome.MissingEcosystem = eco
-		outcome.Reason = fmt.Sprintf("blocked_toolchain: image lacks %s", eco)
+		outcome.Reason = fmt.Sprintf("blocked_toolchain: image lacks %s", blockedToolchainBinary(eco))
 		return outcome, nil
 	}
 
@@ -377,6 +377,19 @@ func gateEcosystem(finding domain.Finding, caps sandbox.CapabilitySet) (eco stri
 		return "", false
 	}
 	return eco, true
+}
+
+// blockedToolchainBinary returns the actual missing BINARY name for eco
+// (ecosystem.BaseMode, e.g. "node" for "js") for use in operator-facing
+// messages — an operator needs to know what to install, not the internal
+// ecosystem key. Falls back to eco itself if BaseMode is somehow empty (never
+// happens for an eco gateEcosystem returned as blocked, but stays safe if
+// called elsewhere).
+func blockedToolchainBinary(eco string) string {
+	if bin := ecosystem.BaseMode(ecosystem.Ecosystem(eco)); bin != "" {
+		return bin
+	}
+	return eco
 }
 
 // SummarizeBlocked previews, for a batch of findings, how many would be

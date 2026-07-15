@@ -173,6 +173,19 @@ func allFalse(e ecoreg.ProbeEntry) map[string]bool {
 
 // InvalidateCapabilityCache removes a cached result for image, forcing the next
 // ProbeCapabilities call to re-probe. Intended for tests that need a clean slate.
+//
+// The cache key is composed as image+"|"+mountsEnvCacheKey(...) (see
+// ProbeCapabilities), so a plain capCache.Delete(image) would silently no-op
+// against every real entry once mounts/env are part of the key — this walks
+// the cache and deletes every entry for image regardless of which
+// mounts/env combination produced it.
 func InvalidateCapabilityCache(image string) {
-	capCache.Delete(image)
+	prefix := image + "|"
+	capCache.Range(func(k, _ any) bool {
+		key, ok := k.(string)
+		if ok && (key == image || strings.HasPrefix(key, prefix)) {
+			capCache.Delete(k)
+		}
+		return true
+	})
 }

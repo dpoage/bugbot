@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/ecosystem"
 )
 
 // Markdown renders the report as a readable Markdown document. The output is
@@ -113,7 +114,11 @@ func writeBlockedToolchain(b *strings.Builder, counts map[string]int) {
 
 	b.WriteString("## Blocked by Missing Toolchain\n\n")
 	for _, eco := range ecos {
-		fmt.Fprintf(b, "- %d finding(s) blocked: image lacks %s\n", counts[eco], eco)
+		binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
+		if binary == "" {
+			binary = eco
+		}
+		fmt.Fprintf(b, "- %d finding(s) blocked: image lacks %s\n", counts[eco], binary)
 	}
 	b.WriteString("\n")
 }

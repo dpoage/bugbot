@@ -94,15 +94,15 @@ func TestMarkdownBlockedToolchainSection(t *testing.T) {
 	if !strings.Contains(got, "## Blocked by Missing Toolchain") {
 		t.Fatalf("missing blocked-toolchain section, got:\n%s", got)
 	}
-	if !strings.Contains(got, "38 finding(s) blocked: image lacks js") {
-		t.Errorf("missing js aggregate line, got:\n%s", got)
+	if !strings.Contains(got, "38 finding(s) blocked: image lacks node") {
+		t.Errorf("missing js/node aggregate line (must name the binary, not the ecosystem key), got:\n%s", got)
 	}
 	if !strings.Contains(got, "2 finding(s) blocked: image lacks python") {
 		t.Errorf("missing python aggregate line, got:\n%s", got)
 	}
 	// Higher count (js=38) must sort before the lower one (python=2).
-	if strings.Index(got, "lacks js") > strings.Index(got, "lacks python") {
-		t.Errorf("js (higher count) should render before python, got:\n%s", got)
+	if strings.Index(got, "lacks node") > strings.Index(got, "lacks python") {
+		t.Errorf("js/node (higher count) should render before python, got:\n%s", got)
 	}
 }
 

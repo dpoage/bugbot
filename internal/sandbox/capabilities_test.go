@@ -470,3 +470,40 @@ func TestPythonCapabilityProbeSpec(t *testing.T) {
 		t.Errorf("probe Name = %q, want python", probe.Name)
 	}
 }
+
+// TestInvalidateCapabilityCache_DeletesComposedKey regression-tests the
+// latent bug an oracle review caught: ProbeCapabilities keys its cache on
+// image+"|"+mountsEnvCacheKey(...), never on the bare image string, so a
+// naive capCache.Delete(image) silently no-ops against every real entry.
+// InvalidateCapabilityCache must delete every entry for image regardless of
+// which mounts/env combination produced it.
+func TestInvalidateCapabilityCache_DeletesComposedKey(t *testing.T) {
+	image := "test-image-invalidate-composed-key"
+	InvalidateCapabilityCache(image) // clean slate regardless of prior test order
+
+	mockA := NewMock(MockResponse{Result: Result{ExitCode: 1}})
+	mockB := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "node\nnode_test\n"}})
+
+	// Two different mount sets against the SAME image populate two distinct
+	// composed cache keys (image+"|"+<no mounts>) and (image+"|"+<mounts>).
+	without := ProbeCapabilities(context.Background(), mockA, image, t.TempDir(), nil, nil)
+	if without.Available("js", "node") {
+		t.Fatalf("precondition: expected js/node unavailable without a mount, got %v", without)
+	}
+	mounts := []ROMount{{HostPath: "/host/node", ContainerPath: "/opt/bugbot-toolchains/node", Shared: true}}
+	with := ProbeCapabilities(context.Background(), mockB, image, t.TempDir(), mounts, nil)
+	if !with.Available("js", "node") {
+		t.Fatalf("precondition: expected js/node available with a mount, got %v", with)
+	}
+
+	InvalidateCapabilityCache(image)
+
+	// After invalidation, BOTH composed entries must be gone — re-probing
+	// with mockA now (a mock that always reports unavailable) for the
+	// previously-available "with mounts" case must reflect the fresh probe,
+	// not a stale cached true.
+	reprobed := ProbeCapabilities(context.Background(), mockA, image, t.TempDir(), mounts, nil)
+	if reprobed.Available("js", "node") {
+		t.Errorf("stale cache entry survived InvalidateCapabilityCache: got %v after re-probing with an always-unavailable mock", reprobed)
+	}
+}
