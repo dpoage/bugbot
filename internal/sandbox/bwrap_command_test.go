@@ -36,6 +36,14 @@ func TestBuildBwrapArgsSecurityFlags(t *testing.T) {
 	for _, host := range fixedROAllowlist {
 		mustContainSeq(t, args, "--ro-bind-try", host, host)
 	}
+	// Pin the store-root entries explicitly (not just via the loop above,
+	// which would silently accept their removal from fixedROAllowlist):
+	// on NixOS/Guix, /bin/sh and /usr/bin/env are symlinks into the store,
+	// so dropping these binds re-breaks every SetupCmds run and /bin/sh
+	// capability probe with "execvp /bin/sh: No such file" (bugbot-53rl).
+	mustContainSeq(t, args, "--ro-bind-try", "/nix/store", "/nix/store")
+	mustContainSeq(t, args, "--ro-bind-try", "/gnu/store", "/gnu/store")
+	mustContainSeq(t, args, "--ro-bind-try", "/etc/static", "/etc/static")
 	for i, a := range args {
 		if a == "--ro-bind" || a == "--ro-bind-try" || a == "--bind" {
 			if i+1 >= len(args) {

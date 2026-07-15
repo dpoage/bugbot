@@ -70,6 +70,15 @@ empty tmpfs, and ONLY the following are ever bound in, always read-only:
   `/etc/ssl` (plus `/etc/resolv.conf`, but only when `sandbox.network: host`
   is explicitly set — DNS is unreachable and unneeded under the default
   `network=none`);
+- the store roots of store-based distros, when present: `/nix/store`,
+  `/gnu/store`, and `/etc/static` (NixOS's symlink indirection into the
+  store). On NixOS/Guix the allowlist paths above are symlink farms into
+  the store — `/bin/sh` → `/nix/store/…-bash/bin/sh` — so without the store
+  bind those symlinks dangle inside the sandbox and every `sh`-wrapped run
+  fails with `execvp /bin/sh: No such file or directory`. Both stores are
+  world-readable by design on their distros, so the read-only bind grants
+  the sandboxed code nothing it could not already read unsandboxed as the
+  same user; on FHS hosts the paths do not exist and the bind is a no-op;
 - host toolchains resolved from `sandbox.host_toolchains` (bare names like
   `node`/`cargo`, resolved via the host's PATH and symlink-closure, or
   explicit absolute directories) — see `internal/sandbox/toolchain.go`;

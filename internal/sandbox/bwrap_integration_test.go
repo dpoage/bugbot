@@ -350,3 +350,55 @@ func goRootForTest(t *testing.T) string {
 	t.Skip("GOROOT not resolvable on this host; skipping host-toolchain repro test")
 	return ""
 }
+
+// TestBwrapLiteralBinShResolves pins bugbot-53rl: production code paths
+// (the SetupCmds exit-125 wrapper in buildBwrapArgs and every /bin/sh-based
+// capability probe) exec the LITERAL path /bin/sh inside the sandbox. On
+// store-based distros (NixOS, Guix) /bin/sh is a symlink into the store, so
+// binding /bin alone carries a dangling symlink and exec fails with
+// "execvp /bin/sh: No such file or directory" — the store roots in
+// fixedROAllowlist are what make it resolve. Deliberately uses NO resolver
+// helper mounts (unlike shForTest-based tests): the helpers would mask the
+// exact regression this test exists to catch. Only sh builtins are used —
+// on NixOS /bin contains nothing but sh, so no coreutils can be assumed.
+func TestBwrapLiteralBinShResolves(t *testing.T) {
+	s := newTestBwrap(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Success lane: both the setup wrapper's shell and the command's own
+	// /bin/sh must resolve; a passing setup hands control to the command
+	// with its exit code intact.
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:   t.TempDir(),
+		Timeout:   15 * time.Second,
+		SetupCmds: [][]string{{"sh", "-c", ": setup-ok"}},
+		Cmd:       []string{"/bin/sh", "-c", "echo cmd-ran"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0 (stdout=%q stderr=%q)", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "cmd-ran") {
+		t.Errorf("stdout = %q, want it to contain %q", res.Stdout, "cmd-ran")
+	}
+
+	// Failure lane: a failing setup command must still surface as the
+	// environment_error exit 125, not as a shell-resolution infra failure.
+	res, err = s.Exec(context.Background(), Spec{
+		RepoDir:   t.TempDir(),
+		Timeout:   15 * time.Second,
+		SetupCmds: [][]string{{"sh", "-c", "exit 7"}},
+		Cmd:       []string{"/bin/sh", "-c", "echo never"},
+	})
+	if err != nil {
+		t.Fatalf("Exec (failing setup): %v", err)
+	}
+	if res.ExitCode != 125 {
+		t.Errorf("ExitCode = %d, want 125 for a failed setup command (stderr=%q)", res.ExitCode, res.Stderr)
+	}
+	if strings.Contains(res.Stdout, "never") {
+		t.Errorf("command ran despite a failing setup: stdout=%q", res.Stdout)
+	}
+}
