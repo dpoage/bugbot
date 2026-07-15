@@ -26,6 +26,18 @@ const (
 	VerdictReasonToolchainError VerdictReason = "toolchain_error"
 	// VerdictReasonNotDemonstrated: non-zero exit without positive ran-evidence.
 	VerdictReasonNotDemonstrated VerdictReason = "not_demonstrated"
+	// VerdictReasonTargetNotExecuted: the submitted test(s) ran and failed,
+	// but never demonstrably loaded/executed the finding's TARGET FILE —
+	// either statically (no submitted test file reaches the target through
+	// an import/require/#include/use edge; see ClassifyTargetExecution in
+	// target_exec.go) or at runtime (the detected ecosystem can provide an
+	// execution witness — see ecosystem.WitnessTable — and none was found in
+	// the failure output; see witnessDemonstration below). A grep test on the
+	// target's source text, an import-absence lint check, and a
+	// transliteration that reimplements the buggy logic instead of calling it
+	// all land here: the failing test is real, but it proves nothing about
+	// the target's own code (bugbot-qb4r).
+	VerdictReasonTargetNotExecuted VerdictReason = "target_not_executed"
 )
 
 // verdict is the interpretation of a single sandbox run against the
