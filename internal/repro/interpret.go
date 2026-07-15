@@ -2,8 +2,10 @@ package repro
 
 import (
 	"fmt"
+	"path"
 	"strings"
 
+	eco "github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/util"
 )
@@ -61,6 +63,14 @@ type verdict struct {
 	// prover's failure reporting can disambiguate env-failure from
 	// fix-rejected without re-running detection.
 	ecosystem sandbox.Ecosystem
+	// witnessOnly is true when demonstrated is true but the detected
+	// ecosystem cannot provide an execution witness (no entry in
+	// ecosystem.WitnessTable — see witnessDemonstration below). Callers
+	// must downgrade the promotion to the existing witness-only path
+	// (bugbot-w1bh: repro-as-evidence vs repro-as-promotion) instead of
+	// full Tier-1, since the runtime has no reliable way to attribute the
+	// failure to the target file for this ecosystem.
+	witnessOnly bool
 }
 
 // interpret applies the Tier-1 promotion rules to a sandbox result.
@@ -249,6 +259,68 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	return verdict{reason: VerdictReasonNotDemonstrated, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
 }
 
+// witnessDemonstration applies bugbot-qb4r's execution-witness layer (b) to
+// an ALREADY-demonstrated verdict from interpret(). out is the combined
+// sandbox output (see combinedOutput); targetPath is the finding's target
+// file (finding.File).
+//
+// Deliberately NOT based on stack-trace/traceback file references: an
+// ordinary failing assertion in every supported ecosystem reports the
+// file:line of the ASSERTION (the test file), not the target file being
+// asserted on, even for a completely genuine bug demonstration. Instead
+// this looks for a per-file COVERAGE-REPORT row for the target — trusted,
+// low-false-positive evidence, but only ever present when the agent's own
+// command happened to produce one (see ecosystem.WitnessRules.TargetCoverage).
+//
+// Three outcomes:
+//   - a coverage row for the target exists and shows > 0% covered, OR no
+//     coverage row exists at all (nothing to contradict the demonstration):
+//     v is returned UNCHANGED — this is the common case for every existing
+//     ran-evidence-only demonstration, so a plain `go test`/`pytest` repro
+//     with no coverage instrumentation stays full Tier-1 exactly as before
+//     (acceptance criterion 5's spirit: this layer only SUBTRACTS
+//     confidence on strong contrary evidence, never on absence of proof).
+//   - a coverage row for the target exists and explicitly shows 0%
+//     covered: downgraded to a fresh non-promoting verdict with
+//     VerdictReasonTargetNotExecuted — the same rejection category the
+//     static gate (layer a, ClassifyTargetExecution) uses, so the agent
+//     gets one consistent corrective message regardless of which layer
+//     caught it.
+//   - the detected ecosystem has no standardized coverage-report format at
+//     all (no WitnessTable entry, e.g. bazel/unknown): v is returned with
+//     witnessOnly set, so the caller downgrades the promotion to the
+//     existing witness-only path (bugbot-w1bh) instead of full Tier-1 —
+//     repro-as-evidence, not repro-as-promotion, since there is no
+//     reliable way to attribute the failure to the target file at all for
+//     this ecosystem.
+//
+// Only meaningful when v.demonstrated is already true; verdicts that
+// already failed to demonstrate for another reason (build error, timeout,
+// exit_zero, ...) are returned unchanged. targetPath == "" (no target-file
+// provenance available) is permissive by design, matching
+// ClassifyTargetExecution's own empty-input behavior.
+func witnessDemonstration(v verdict, out, targetPath string) verdict {
+	if !v.demonstrated || targetPath == "" {
+		return v
+	}
+	rules, ok := eco.WitnessRulesFor(v.ecosystem)
+	if !ok {
+		v.witnessOnly = true
+		return v
+	}
+	pct, found := rules.TargetCoverage(out, targetPath)
+	if !found || pct > 0 {
+		return v
+	}
+	return verdict{
+		reason: VerdictReasonTargetNotExecuted,
+		summary: fmt.Sprintf(
+			"the coverage report shows %q at 0%% covered — the test ran and failed, but the target file's own code never executed",
+			path.Base(targetPath)),
+		ecosystem: v.ecosystem,
+	}
+}
+
 // feedback builds the corrective message sent back to the agent after a
 // non-demonstrating attempt, tailored to the verdict's category and
 // including the offending plan's command and the run output the agent
@@ -308,6 +380,13 @@ func (v verdict) feedback(p *Plan) string {
 		b.WriteString("the test runner must actually execute the assertion and report a failure ")
 		b.WriteString("(e.g. Go's `--- FAIL`, pytest's `FAILED tests/...`). Make sure the ")
 		b.WriteString("command runs the test, and the assertion fails on the current buggy code.")
+	case VerdictReasonTargetNotExecuted:
+		b.WriteString("Your repro's test ran and failed, but nothing in it demonstrably executed the FINDING'S TARGET FILE. ")
+		b.WriteString("Reading the target's source text (grep / assertIn on file contents), asserting on what the source ")
+		b.WriteString("does NOT contain (an import-absence lint check), or re-implementing the buggy logic inside the test ")
+		b.WriteString("itself (a transliteration) are not reproductions — the runtime never touches the target's own code. ")
+		b.WriteString("Rewrite the test so it IMPORTS/REQUIRES the target module and CALLS its actual function/method, so the ")
+		b.WriteString("target file's own code runs and fails on the current bug.")
 	default:
 		b.WriteString("Your repro did not demonstrate the bug as expected. Revise it.")
 	}

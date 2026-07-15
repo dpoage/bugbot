@@ -82,11 +82,13 @@ type FindingOutcome struct {
 // (another worker already owns it).
 //
 // Two outcomes on a demonstrated bug (Attempt.Promoted):
-//   - non-NeedsHuman finding → promoteFinding (Tier-1 + ReproPath) and
-//     optionally the patch-prover cascade.
-//   - NeedsHuman finding (below-quorum verifier survivor) → witnessFinding
-//     (ReproWitness only; Tier, ReproPath, NeedsHuman all untouched; no
-//     patch-prover). bugbot-w1bh split: repro-as-evidence vs repro-as-promotion.
+//   - neither NeedsHuman nor WitnessOnly → promoteFinding (Tier-1 + ReproPath)
+//     and optionally the patch-prover cascade.
+//   - NeedsHuman (below-quorum verifier survivor) OR WitnessOnly (the
+//     detected ecosystem cannot provide an execution witness for the
+//     target file — bugbot-qb4r layer b) → witnessFinding (ReproWitness
+//     only; Tier, ReproPath, NeedsHuman all untouched; no patch-prover).
+//     bugbot-w1bh split: repro-as-evidence vs repro-as-promotion.
 //
 // Infrastructure errors (agent/LLM failure, sandbox launch failure) are
 // returned; a finding that simply could not be reproduced is reported via a
@@ -248,10 +250,15 @@ func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding dom
 
 	outcome.Attempts = att.Attempts
 	if att.Promoted {
-		if finding.NeedsHuman {
-			// Below-quorum verifier survivor: witness, do not promote.
-			// Tier, ReproPath, and NeedsHuman all stay as-is; only ReproWitness
-			// is set. No patch-prover cascade: the human gate stands.
+		if finding.NeedsHuman || att.WitnessOnly {
+			// Below-quorum verifier survivor (NeedsHuman), OR a demonstrated
+			// bug whose detected ecosystem cannot provide an execution
+			// witness for the target file (att.WitnessOnly, bugbot-qb4r layer
+			// b): witness, do not promote. Tier, ReproPath, and NeedsHuman all
+			// stay as-is; only ReproWitness is set. No patch-prover cascade:
+			// the human gate stands for NeedsHuman, and a witness-only
+			// ecosystem gets no automated fix cascade either — repro-as-
+			// evidence, not repro-as-promotion.
 			if werr := witnessFinding(ctx, st, finding, att.ArtifactPath); werr != nil {
 				outcome.Reason = "witness persist failed: " + werr.Error()
 				outcome.Err = werr
