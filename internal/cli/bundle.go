@@ -303,9 +303,13 @@ auto-close the finding).`,
 
 // printReplayResult writes a short human-readable account of a replay
 // outcome: whether the sandbox ran at all, the exit code when it did, and
-// the classification.
+// the classification (including bugbot-qb4r layer b's witnessOnly flag,
+// when set — the bug is still demonstrated but the ecosystem could not
+// attribute it to the target file via coverage evidence).
 func printReplayResult(out io.Writer, dir string, res repro.ReplayResult) {
 	switch {
+	case res.Demonstrated && res.WitnessOnly:
+		fmt.Fprintf(out, "%s: DEMONSTRATED, WITNESS-ONLY (exit %d, ecosystem=%s) — bug still present, but %s has no coverage-based witness to attribute it to the target file\n", dir, res.ExitCode, res.Ecosystem, res.Ecosystem)
 	case res.Demonstrated:
 		fmt.Fprintf(out, "%s: DEMONSTRATED (exit %d, ecosystem=%s) — bug still present\n", dir, res.ExitCode, res.Ecosystem)
 	case !res.SandboxRan:

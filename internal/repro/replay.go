@@ -58,6 +58,12 @@ type ReplayResult struct {
 	Summary string
 	// Ecosystem is the detected testing ecosystem (from plan.Cmd).
 	Ecosystem sandbox.Ecosystem
+	// WitnessOnly mirrors Attempt.WitnessOnly: true when Demonstrated is
+	// true but the detected ecosystem has no execution-witness coverage
+	// format at all (bugbot-qb4r layer b, witnessDemonstration) — repro-as-
+	// evidence, not repro-as-promotion. Always false when Demonstrated is
+	// false.
+	WitnessOnly bool
 }
 
 // Replay re-runs bundle's plan against sb, rooted at repoDir (the target
@@ -71,11 +77,14 @@ type ReplayResult struct {
 // and a saved bundle is exactly the kind of untrusted, previously-generated
 // command that the sandbox's hardened default exists to contain.
 //
-// The gate sequence mirrors Attempt's: ClassifyTargetExecution runs first
-// (pre-execute, static, no sandbox cost) against the bundle's own recorded
-// finding.File; only when it raises no objection does Replay spend a sandbox
-// run, whose result is then interpreted with the same interpret() the
-// official path uses.
+// The gate sequence mirrors Attempt's exactly (bugbot-qb4r layers a and b):
+// ClassifyTargetExecution runs first (pre-execute, static, no sandbox cost)
+// against the bundle's own recorded finding.File; only when it raises no
+// objection does Replay spend a sandbox run. The result is interpreted with
+// the same interpret() the official path uses, and — when that interpretation
+// demonstrates the bug — witnessDemonstration re-checks it against any
+// per-file coverage evidence in the run's output, exactly as Attempt does
+// before writeArtifacts.
 func Replay(ctx context.Context, sb sandbox.Sandbox, repoDir string, b *Bundle, opts ReplayOptions) (ReplayResult, error) {
 	plan := b.Plan()
 	ecoName := detectEcosystem(plan.Cmd).name
@@ -95,6 +104,9 @@ func Replay(ctx context.Context, sb sandbox.Sandbox, repoDir string, b *Bundle, 
 	}
 
 	v := interpret(res, plan.Cmd)
+	if v.demonstrated {
+		v = witnessDemonstration(v, combinedOutput(res), b.Manifest.Finding.File)
+	}
 	return ReplayResult{
 		Demonstrated: v.demonstrated,
 		Reason:       v.reason,
@@ -102,5 +114,6 @@ func Replay(ctx context.Context, sb sandbox.Sandbox, repoDir string, b *Bundle, 
 		ExitCode:     res.ExitCode,
 		Summary:      v.summary,
 		Ecosystem:    v.ecosystem,
+		WitnessOnly:  v.witnessOnly,
 	}, nil
 }
