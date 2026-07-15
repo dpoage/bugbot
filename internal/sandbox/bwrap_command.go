@@ -3,6 +3,7 @@ package sandbox
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 )
 
 // bwrapParams is the fully-resolved set of inputs to a single bwrap run,
@@ -39,6 +40,12 @@ type bwrapParams struct {
 	// to place at the front of PATH so resolved toolchain binaries are
 	// actually reachable. Empty when no toolchains were configured/resolved.
 	toolchainPathPrepend string
+	// baselinePathAppend is the ":"-joined in-sandbox directories of the
+	// resolved POSIX baseline utilities (resolveBwrapBaseline), appended
+	// AFTER DefaultContainerPath — and after any caller-supplied PATH in
+	// env — so core utilities stay reachable without ever shadowing
+	// allowlist binaries or operator toolchains. Empty on FHS hosts.
+	baselinePathAppend string
 }
 
 // fixedROAllowlist is the minimal, hardcoded set of host directories bound
@@ -204,12 +211,16 @@ func buildBwrapArgs(p bwrapParams) []string {
 	// same-named binary under the fixed allowlist; DefaultContainerPath (same
 	// constant the container backend's toolchain wiring uses) is always the
 	// tail so plain allowlisted binaries stay reachable even with no
-	// toolchains configured. p.env is applied after this, so an operator who
-	// sets PATH explicitly in Spec.Env still wins.
+	// toolchains configured; baselinePathAppend comes last so POSIX baseline
+	// utilities are a pure fallback, never shadowing either. p.env is applied
+	// after this, so an operator who sets PATH explicitly in Spec.Env still
+	// wins — but see the env loop below: the baseline is re-appended to a
+	// caller PATH too.
 	path := DefaultContainerPath
 	if p.toolchainPathPrepend != "" {
 		path = p.toolchainPathPrepend + ":" + DefaultContainerPath
 	}
+	path = appendBaselinePath(path, p.baselinePathAppend)
 	args = append(args, "--setenv", "PATH", path)
 
 	// --clearenv leaves the sandbox with no environment at all; every
@@ -220,10 +231,26 @@ func buildBwrapArgs(p bwrapParams) []string {
 	// same contract as buildRunArgs' --env HOME=/tmp. A malformed entry
 	// (no "=") is dropped rather than passed to bwrap as a broken --setenv
 	// invocation.
+	//
+	// PATH is the one variable that is rewritten rather than passed
+	// verbatim: the POSIX baseline (see baselinePathAppend) is appended to
+	// a caller-supplied PATH as well. Container images make core utilities
+	// reachable under any PATH bugbot constructs because every internal
+	// constructor ends with the DefaultContainerPath tail and images
+	// populate those directories; on store-based hosts those directories
+	// hold no utilities, so a caller-supplied value like the capability
+	// prober's "<toolchains>:<default>" (engine.hostToolchainProbeInputs)
+	// would silently lose mkdir/grep/... without this append. The baseline
+	// is a strict suffix — a caller PATH still shadows everything in it.
 	for _, e := range p.env {
-		if key, value, ok := splitEnvKV(e); ok {
-			args = append(args, "--setenv", key, value)
+		key, value, ok := splitEnvKV(e)
+		if !ok {
+			continue
 		}
+		if key == "PATH" {
+			value = appendBaselinePath(value, p.baselinePathAppend)
+		}
+		args = append(args, "--setenv", key, value)
 	}
 
 	if len(p.setupCmds) > 0 {
@@ -307,4 +334,22 @@ func validateBwrapMounts(ro, rw []ROMount) error {
 		return err
 	}
 	return check(rw, "writable")
+}
+
+// appendBaselinePath appends the POSIX-baseline directories to a PATH value
+// unless they are already its suffix (a repeated Spec.Env PATH entry, or a
+// caller that composed the effective PATH itself). When no baseline
+// resolved on this host (the FHS case), the incoming value is returned
+// untouched, keeping standard-distro argv byte-identical.
+func appendBaselinePath(current, baseline string) string {
+	if baseline == "" {
+		return current
+	}
+	if current == "" {
+		return baseline
+	}
+	if current == baseline || strings.HasSuffix(current, ":"+baseline) {
+		return current
+	}
+	return current + ":" + baseline
 }

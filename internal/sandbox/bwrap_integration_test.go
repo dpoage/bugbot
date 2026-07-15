@@ -402,3 +402,36 @@ func TestBwrapLiteralBinShResolves(t *testing.T) {
 		t.Errorf("command ran despite a failing setup: stdout=%q", res.Stdout)
 	}
 }
+
+// TestBwrapBaselineUtilitiesReachable pins bugbot-qg8b: the sandbox PATH
+// must reach POSIX core utilities with NO operator host_toolchains and NO
+// helper mounts. On store-based hosts DefaultContainerPath's FHS dirs hold
+// only sh and env, so without the construction-time baseline resolution the
+// exact production shapes below die with "mkdir: command not found":
+// deps.go's applyGoBuildScratch emits a bare `mkdir -p` SetupCmds entry,
+// and agent plans routinely run `sh -c` scripts using coreutils/grep/sed.
+// (On FHS hosts the baseline resolves empty and this passes through the
+// allowlist binds instead — the test is meaningful on both layouts.)
+func TestBwrapBaselineUtilitiesReachable(t *testing.T) {
+	s := newTestBwrap(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir: t.TempDir(),
+		Timeout: 15 * time.Second,
+		// The deps.go applyGoBuildScratch shape: a bare utility argv routed
+		// through the /bin/sh setup wrapper, resolved via PATH.
+		SetupCmds: [][]string{{"mkdir", "-p", ".bugbot-scratch"}},
+		// An agent-plan shape: coreutils + grep piped inside sh -c.
+		Cmd: []string{"/bin/sh", "-c", "mkdir -p out && echo probe > out/f && grep -c probe out/f"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0 (stdout=%q stderr=%q)", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "1") {
+		t.Errorf("stdout = %q, want grep count output %q", res.Stdout, "1")
+	}
+}
