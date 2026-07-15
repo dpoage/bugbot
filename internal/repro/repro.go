@@ -599,8 +599,25 @@ func readOnlyTools(dir string) ([]agent.Tool, error) {
 }
 
 // execute runs a plan in the sandbox with the stage's network/timeout/image
-// policy.
+// policy. network is intentionally left unset so the run inherits the
+// sandbox's configured default (sandbox.network in bugbot.yaml, applied via
+// the CLI's sandboxRunOpts) — see buildSpec's doc comment. Replay (see
+// replay.go) calls buildSpec directly with an explicit "none" instead, since
+// it re-runs a saved bundle rather than an agent-proposed plan.
 func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, error) {
+	return r.sb.Exec(ctx, buildSpec(r.repoDir, plan, r.opts.Image, "", r.opts.Timeout, r.deps))
+}
+
+// buildSpec renders plan into a sandbox.Spec against repoDir, applying the
+// same dependency-mount plumbing (ROMounts/Env/SetupCmds) and structured-
+// output rewrite every repro sandbox run needs, regardless of whether the
+// plan came from a live reproducer agent (execute, network deliberately
+// left "" to inherit the backend's configured default) or a saved bundle
+// being replayed (Replay, network forced to "none" — see replay.go). This is
+// the ONE workspace-reconstruction path both callers share, so a replay
+// genuinely re-runs what the official Attempt path would have run, not a
+// parallel reimplementation of it.
+func buildSpec(repoDir string, plan *Plan, image, network string, timeout time.Duration, deps sandbox.Resolution) sandbox.Spec {
 	files := make(map[string][]byte, len(plan.Files))
 	for path, content := range plan.Files {
 		files[path] = []byte(content)
@@ -613,26 +630,21 @@ func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, e
 	// feedback use, and the rewrite is a harness-owned implementation detail
 	// the agent never needs to see.
 	cmd, captures := normalizeCmdForStructuredOutput(plan.Cmd)
-	spec := sandbox.Spec{
-		RepoDir: r.repoDir,
-		Cmd:     cmd,
-		Image:   r.opts.Image,
-		// Network is intentionally left unset so the run inherits the sandbox's
-		// configured default (sandbox.network in bugbot.yaml, applied via the CLI's
-		// sandboxRunOpts). Forcing "none" here defeated repos whose build must
-		// fetch dependencies at configure time (e.g. CMake FetchContent of
-		// googletest/SDL), which can only resolve when network=host is configured.
-		Timeout:    r.opts.Timeout,
+	return sandbox.Spec{
+		RepoDir:    repoDir,
+		Cmd:        cmd,
+		Image:      image,
+		Network:    network,
+		Timeout:    timeout,
 		WriteFiles: files,
 		// Dependency strategy: mount a module cache read-only and/or set GOFLAGS
 		// so the network-none run can resolve external modules. SetupCmds installs
 		// non-Go ecosystem packages from the mounted cache before Cmd runs.
-		ROMounts:     r.deps.ROMounts,
-		Env:          r.deps.Env,
-		SetupCmds:    r.deps.SetupCmds,
+		ROMounts:     deps.ROMounts,
+		Env:          deps.Env,
+		SetupCmds:    deps.SetupCmds,
 		CaptureFiles: captures,
 	}
-	return r.sb.Exec(ctx, spec)
 }
 
 // bareShellOps is the set of shell control tokens that mean nothing to a
