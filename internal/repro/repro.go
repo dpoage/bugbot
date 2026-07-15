@@ -816,16 +816,16 @@ func rejectUnavailableEcosystemPlan(p *Plan, caps sandbox.CapabilitySet) string 
 
 	if len(alts) == 0 {
 		return fmt.Sprintf(
-			"Your plan's command requires %s, which this sandbox image does not have, and no alternative "+
+			"Your plan's command requires %s, which this sandbox does not have, and no alternative "+
 				"toolchain (js/python/rust) is available either. Do NOT substitute a non-behavioral test in a "+
 				"different language or grep for the pattern — that does not demonstrate the bug. Set cmd to a "+
-				"command this image can actually run, or omit a cmd change and report the environment gap in expect.",
+				"command this sandbox can actually run, or omit a cmd change and report the environment gap in expect.",
 			eco,
 		)
 	}
 	return fmt.Sprintf(
-		"Your plan's command requires %s, which this sandbox image does not have. Available alternative "+
-			"toolchains in this image: %s. If the bug is only observable via %s, do NOT substitute a "+
+		"Your plan's command requires %s, which this sandbox does not have. Available alternative "+
+			"toolchains in this sandbox: %s. If the bug is only observable via %s, do NOT substitute a "+
 			"non-behavioral test in another language — revise cmd to use one of the available toolchains only "+
 			"if the bug is genuinely reproducible that way; otherwise report the environment gap in expect.",
 		eco, strings.Join(alts, ", "), eco,

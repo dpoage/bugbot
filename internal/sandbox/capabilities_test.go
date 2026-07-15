@@ -401,6 +401,29 @@ func TestJsCapabilityProbeSpec(t *testing.T) {
 	}
 }
 
+// TestBazelCapabilityProbeSpec verifies the probe uses /bin/sh and is named
+// "bazel", and that its interpret function reports presence only on the
+// probe's "bazel" token (bugbot-rj3z: the pre-launch gate and agent prompt
+// depend on this probe to keep bazel plans off sandboxes without bazel).
+func TestBazelCapabilityProbeSpec(t *testing.T) {
+	probe := probeByName(t, "bazel")
+	if len(probe.Probe) == 0 {
+		t.Fatal("bazel probe Probe must be non-empty")
+	}
+	if probe.Probe[0] != "/bin/sh" {
+		t.Errorf("Probe[0] = %q, want /bin/sh", probe.Probe[0])
+	}
+	if probe.Name != "bazel" {
+		t.Errorf("probe Name = %q, want bazel", probe.Name)
+	}
+	if modes := probe.Interpret(toProbeResult(Result{ExitCode: 0, Stdout: "bazel\n"})); !modes["bazel"] {
+		t.Errorf("want bazel=true on its token, got %v", modes)
+	}
+	if modes := probe.Interpret(toProbeResult(Result{ExitCode: 1, Stdout: ""})); modes["bazel"] {
+		t.Errorf("want bazel=false on probe failure, got %v", modes)
+	}
+}
+
 // TestPythonProbeInterpret tests the Python capability probe's interpret function.
 func TestPythonProbeInterpret(t *testing.T) {
 	probe := probeByName(t, "python")

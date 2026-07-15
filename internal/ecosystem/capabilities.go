@@ -53,6 +53,7 @@ var ProbeEntries = []ProbeEntry{
 	rustCapabilityProbe,
 	jsCapabilityProbe,
 	pythonCapabilityProbe,
+	bazelCapabilityProbe,
 }
 
 // goCapabilityProbe probes whether the Go sandbox image has cgo + a C
@@ -172,6 +173,31 @@ var pythonCapabilityProbe = ProbeEntry{
 				modes["pytest"] = true
 			case "pytest_timeout":
 				modes["pytest_timeout"] = true
+			}
+		}
+		return modes
+	},
+}
+
+// bazelCapabilityProbe probes whether the sandbox can run the Bazel build
+// driver at all. Unlike the language probes above, bazel is not a language
+// ecosystem — it is a build DRIVER an agent reaches for on bazel-built repos
+// (the_cloud incident: `sh: line 2: exec: bazel: not found` after the plan
+// sailed past the 14g0 gate, bugbot-rj3z). Probing it makes the pre-launch
+// plan gate and the agent's capability prompt aware of its absence, and
+// automatically un-gates it on sandboxes that genuinely provide it (a
+// purpose-built image, or a host install exposed via sandbox.host_toolchains).
+// bazelisk counts as presence: it IS the bazel launcher.
+var bazelCapabilityProbe = ProbeEntry{
+	Name: "bazel",
+	Probe: []string{"/bin/sh", "-c",
+		`{ command -v bazel >/dev/null 2>&1 || command -v bazelisk >/dev/null 2>&1; } && echo bazel`,
+	},
+	Interpret: func(r ProbeResult) map[string]bool {
+		modes := map[string]bool{"bazel": false}
+		for _, line := range strings.Split(r.Stdout, "\n") {
+			if strings.TrimSpace(line) == "bazel" {
+				modes["bazel"] = true
 			}
 		}
 		return modes
