@@ -528,10 +528,18 @@ func capabilityGuidance(caps sandbox.CapabilitySet) string {
 	// without this the natural first plan on such repos is a bazel
 	// invocation that dies at exec time.
 	if bzCaps, ok := caps["bazel"]; ok {
-		if bzCaps["bazel"] {
+		switch {
+		case bzCaps["bazel"]:
 			b.WriteString("- Bazel: AVAILABLE. You MAY use `bazel test` for targets that need it, but a\n")
 			b.WriteString("  direct language test runner is usually faster and more reliable offline.\n")
-		} else {
+		case bzCaps["bazelisk"]:
+			// The launcher works only under the bazelisk NAME: a bare
+			// `bazel` argv dies at exec time (bugbot-4z7m).
+			b.WriteString("- Bazel: available ONLY via the `bazelisk` launcher — a bare `bazel` argv will\n")
+			b.WriteString("  fail (no binary of that name). Invoke `bazelisk test`/`bazelisk build` if a\n")
+			b.WriteString("  target needs it; a direct language test runner is usually faster and more\n")
+			b.WriteString("  reliable offline.\n")
+		default:
 			b.WriteString("- Bazel: UNAVAILABLE in this sandbox, even though the repo may be bazel-built.\n")
 			b.WriteString("  Do NOT propose `bazel`/`bazelisk` invocations. Run the language's test runner\n")
 			b.WriteString("  directly instead (pytest, node, go test, cargo).\n")

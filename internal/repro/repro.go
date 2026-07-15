@@ -795,12 +795,36 @@ func rejectUnavailableEcosystemPlan(p *Plan, caps sandbox.CapabilitySet) string 
 	if caps == nil {
 		return ""
 	}
-	eco := ecosystem.InferFromCmd(p.Cmd)
+	eco, tool := ecosystem.InferToolFromCmd(p.Cmd)
 	if eco == "" {
 		return ""
 	}
 	mode := ecosystem.BaseMode(eco)
-	if mode == "" || caps.Available(eco, mode) {
+	// Launcher families are gated per binary NAME (bugbot-4z7m): `bazel`
+	// and `bazelisk` both infer EcosystemBazel, but the plan execs a
+	// specific argv, and a bazelisk-only sandbox must reject `bazel` (and
+	// vice versa). The probe emits one mode per launcher name, so the mode
+	// to consult is exactly the matched binary. When the SIBLING launcher
+	// works, say so — one revision round with the exact working name beats
+	// steering the agent away from bazel entirely.
+	if eco == ecosystem.EcosystemBazel {
+		if caps.Available(eco, tool) {
+			return ""
+		}
+		sibling := "bazelisk"
+		if tool == "bazelisk" {
+			sibling = "bazel"
+		}
+		if caps.Available(eco, sibling) {
+			return fmt.Sprintf(
+				"Your plan invokes %s, which this sandbox does not have — but %s IS available and is the "+
+					"same launcher. Revise cmd to invoke %s instead; everything else can stay unchanged.",
+				tool, sibling, sibling,
+			)
+		}
+		// Neither launcher works: fall through to the generic
+		// missing-toolchain feedback with the language alternatives.
+	} else if mode == "" || caps.Available(eco, mode) {
 		return ""
 	}
 

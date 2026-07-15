@@ -84,24 +84,39 @@ var cmdEcosystem = map[string]Ecosystem{
 }
 
 // InferFromCmd infers the gated ecosystem a repro plan's command argv
-// requires, by inspecting the argv for a recognized ecosystem binary name. A
-// `bash -c "..."`/`sh -c "..."` wrapper — the pattern reproSandboxGuidance
-// instructs the agent to use for multi-step commands — is unwrapped one
-// level first so a binary named inside the quoted script is still found.
-// Returns "" when no gated ecosystem binary is recognized (e.g. "go", "make",
-// "cmake", or any command this function does not know about); such commands
-// are never blocked by the gate this feeds.
+// requires. See InferToolFromCmd; this drops the matched binary name for
+// callers that only need the ecosystem.
 func InferFromCmd(cmd []string) Ecosystem {
+	eco, _ := InferToolFromCmd(cmd)
+	return eco
+}
+
+// InferToolFromCmd infers the gated ecosystem a repro plan's command argv
+// requires AND the recognized binary base name that matched, by inspecting
+// the argv for a recognized ecosystem binary. A `bash -c "..."`/`sh -c
+// "..."` wrapper — the pattern reproSandboxGuidance instructs the agent to
+// use for multi-step commands — is unwrapped one level first so a binary
+// named inside the quoted script is still found. Returns ("", "") when no
+// gated ecosystem binary is recognized (e.g. "go", "make", "cmake", or any
+// command this function does not know about); such commands are never
+// blocked by the gate this feeds.
+//
+// The matched name matters for launcher families whose members are NOT
+// interchangeable argv (bugbot-4z7m): `bazel` and `bazelisk` both infer
+// EcosystemBazel, but a sandbox where only bazelisk resolves must reject a
+// `bazel` argv — availability is probed and gated per binary NAME there.
+func InferToolFromCmd(cmd []string) (Ecosystem, string) {
 	argv := cmd
 	if len(argv) >= 3 && (argv[0] == "bash" || argv[0] == "sh") && argv[1] == "-c" {
 		argv = strings.Fields(argv[2])
 	}
 	for _, tok := range argv {
-		if eco, ok := cmdEcosystem[filepath.Base(tok)]; ok {
-			return eco
+		base := filepath.Base(tok)
+		if eco, ok := cmdEcosystem[base]; ok {
+			return eco, base
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // BaseMode returns the CapabilitySet mode name representing eco's base

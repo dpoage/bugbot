@@ -134,14 +134,15 @@ func TestRejectUnavailableEcosystemPlan_UngatedCommandsPass(t *testing.T) {
 }
 
 // TestRejectUnavailableEcosystemPlan_BazelGated pins bugbot-rj3z: a plan
-// reaching for the bazel build driver on a sandbox whose probe reports bazel
-// absent is rejected PRE-LAUNCH with feedback naming bazel and the available
-// language toolchains — instead of burning a sandbox run into an exit-127
-// environment_error (the_cloud: `sh: line 2: exec: bazel: not found`). When
-// the probe reports bazel present, the same plan proceeds untouched.
+// reaching for the bazel build driver on a sandbox whose probe reports
+// neither launcher working is rejected PRE-LAUNCH with feedback naming
+// bazel and the available language toolchains — instead of burning a
+// sandbox run into an exit-127 environment_error (the_cloud: `sh: line 2:
+// exec: bazel: not found`). When the probe reports the invoked launcher
+// working, the same plan proceeds untouched.
 func TestRejectUnavailableEcosystemPlan_BazelGated(t *testing.T) {
 	caps := sandbox.CapabilitySet{
-		"bazel":  {"bazel": false},
+		"bazel":  {"bazel": false, "bazelisk": false},
 		"python": {"python": true},
 	}
 	for _, cmd := range [][]string{
@@ -151,7 +152,7 @@ func TestRejectUnavailableEcosystemPlan_BazelGated(t *testing.T) {
 	} {
 		msg := rejectUnavailableEcosystemPlan(&Plan{Cmd: cmd}, caps)
 		if msg == "" {
-			t.Errorf("cmd %v: want pre-launch rejection when bazel is unavailable", cmd)
+			t.Errorf("cmd %v: want pre-launch rejection when no bazel launcher works", cmd)
 			continue
 		}
 		if !strings.Contains(msg, "bazel") {
@@ -162,8 +163,40 @@ func TestRejectUnavailableEcosystemPlan_BazelGated(t *testing.T) {
 		}
 	}
 
-	available := sandbox.CapabilitySet{"bazel": {"bazel": true}}
+	available := sandbox.CapabilitySet{"bazel": {"bazel": true, "bazelisk": false}}
 	if msg := rejectUnavailableEcosystemPlan(&Plan{Cmd: []string{"bazel", "test", "//..."}}, available); msg != "" {
 		t.Errorf("bazel-available sandbox must not reject bazel plans, got %q", msg)
+	}
+}
+
+// TestRejectUnavailableEcosystemPlan_BazelLauncherName pins the bugbot-4z7m
+// per-launcher-name gating: `bazel` and `bazelisk` are the same ecosystem
+// but NOT interchangeable argv. A bazelisk-only sandbox (the common host
+// install) must reject a `bazel` argv — telling the agent the sibling
+// launcher that DOES work — and must let a `bazelisk` argv through, and
+// symmetrically for a bazel-only sandbox.
+func TestRejectUnavailableEcosystemPlan_BazelLauncherName(t *testing.T) {
+	bazeliskOnly := sandbox.CapabilitySet{
+		"bazel":  {"bazel": false, "bazelisk": true},
+		"python": {"python": true},
+	}
+	msg := rejectUnavailableEcosystemPlan(&Plan{Cmd: []string{"bazel", "test", "//..."}}, bazeliskOnly)
+	if msg == "" {
+		t.Fatal("bazelisk-only sandbox: want rejection of a `bazel` argv")
+	}
+	if !strings.Contains(msg, "bazelisk") || !strings.Contains(msg, "invoke bazelisk") {
+		t.Errorf("feedback must direct the agent to the working bazelisk launcher, got %q", msg)
+	}
+	if msg := rejectUnavailableEcosystemPlan(&Plan{Cmd: []string{"bazelisk", "test", "//..."}}, bazeliskOnly); msg != "" {
+		t.Errorf("bazelisk-only sandbox must not reject a bazelisk argv, got %q", msg)
+	}
+
+	bazelOnly := sandbox.CapabilitySet{"bazel": {"bazel": true, "bazelisk": false}}
+	msg = rejectUnavailableEcosystemPlan(&Plan{Cmd: []string{"bazelisk", "build", "//..."}}, bazelOnly)
+	if msg == "" {
+		t.Fatal("bazel-only sandbox: want rejection of a `bazelisk` argv")
+	}
+	if !strings.Contains(msg, "invoke bazel ") {
+		t.Errorf("feedback must direct the agent to the working bazel launcher, got %q", msg)
 	}
 }

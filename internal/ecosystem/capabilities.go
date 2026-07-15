@@ -180,24 +180,40 @@ var pythonCapabilityProbe = ProbeEntry{
 }
 
 // bazelCapabilityProbe probes whether the sandbox can run the Bazel build
-// driver at all. Unlike the language probes above, bazel is not a language
+// driver. Unlike the language probes above, bazel is not a language
 // ecosystem — it is a build DRIVER an agent reaches for on bazel-built repos
-// (the_cloud incident: `sh: line 2: exec: bazel: not found` after the plan
-// sailed past the 14g0 gate, bugbot-rj3z). Probing it makes the pre-launch
-// plan gate and the agent's capability prompt aware of its absence, and
-// automatically un-gates it on sandboxes that genuinely provide it (a
-// purpose-built image, or a host install exposed via sandbox.host_toolchains).
-// bazelisk counts as presence: it IS the bazel launcher.
+// (the_cloud incident chain, bugbot-rj3z/bugbot-4z7m). Probing it makes the
+// pre-launch plan gate and the agent's capability prompt aware of its
+// availability, and automatically un-gates it on sandboxes that genuinely
+// provide it (a purpose-built image, or a host install exposed via
+// sandbox.host_toolchains).
+//
+// The probe EXECUTES `<name> version` rather than `command -v <name>`, and
+// emits a token PER LAUNCHER NAME, for two hard-won reasons (bugbot-4z7m):
+//   - plans exec a specific argv; a bazelisk-only PATH must not advertise
+//     "bazel available" or the agent's `bazel test` dies at exec time — the
+//     per-name tokens let the gate and prompt speak in the exact binary name
+//     that works;
+//   - bazelisk is a downloader: `command -v bazelisk` succeeds even when a
+//     cold cache under network=none means it cannot actually launch bazel.
+//     Executing `version` measures the invariant plans need — "this argv
+//     works HERE" — so a cold-cache bazelisk correctly reports unavailable.
 var bazelCapabilityProbe = ProbeEntry{
 	Name: "bazel",
 	Probe: []string{"/bin/sh", "-c",
-		`{ command -v bazel >/dev/null 2>&1 || command -v bazelisk >/dev/null 2>&1; } && echo bazel`,
+		`bazel version >/dev/null 2>&1 && echo bazel; bazelisk version >/dev/null 2>&1 && echo bazelisk`,
 	},
 	Interpret: func(r ProbeResult) map[string]bool {
-		modes := map[string]bool{"bazel": false}
+		modes := map[string]bool{
+			"bazel":    false,
+			"bazelisk": false,
+		}
 		for _, line := range strings.Split(r.Stdout, "\n") {
-			if strings.TrimSpace(line) == "bazel" {
+			switch strings.TrimSpace(line) {
+			case "bazel":
 				modes["bazel"] = true
+			case "bazelisk":
+				modes["bazelisk"] = true
 			}
 		}
 		return modes

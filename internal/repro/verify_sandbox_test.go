@@ -3,6 +3,7 @@ package repro
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -297,16 +298,19 @@ func TestVerifySandbox_Timeout(t *testing.T) {
 }
 
 // TestSmokeCmd_KnownEcosystems verifies that smokeCmd returns the correct
-// cheap probe for each known ecosystem, given an appropriate repo fixture.
+// cheap probe and launcher name for each known ecosystem, given an
+// appropriate repo fixture.
 func TestSmokeCmd_KnownEcosystems(t *testing.T) {
 	cases := []struct {
-		name     string
-		file     string
-		wantHead string // expected first element of returned cmd
-		wantLen  int    // minimum length
+		name         string
+		file         string
+		wantHead     string // expected first element of returned cmd
+		wantLen      int    // minimum length
+		wantLauncher string
 	}{
-		{"go module", "go.mod", "go", 2},
-		{"cargo", "Cargo.toml", "cargo", 2},
+		{"go module", "go.mod", "go", 2, "go"},
+		{"cargo", "Cargo.toml", "cargo", 2, "cargo"},
+		{"bazel", "MODULE.bazel", "/bin/sh", 3, "bazel"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -317,18 +321,76 @@ func TestSmokeCmd_KnownEcosystems(t *testing.T) {
 				content = []byte("module example.com/x\ngo 1.21\n")
 			case "Cargo.toml":
 				content = []byte("[package]\nname = \"x\"\nversion = \"0.1.0\"\n")
+			case "MODULE.bazel":
+				content = []byte("module(name = \"x\")\n")
 			}
 			if err := writeFileBytes(dir+"/"+tc.file, content); err != nil {
 				t.Fatal(err)
 			}
-			cmd := smokeCmd(dir)
+			cmd, launcher := smokeCmd(dir)
 			if len(cmd) < tc.wantLen {
 				t.Fatalf("smokeCmd len=%d, want >= %d: %v", len(cmd), tc.wantLen, cmd)
 			}
 			if cmd[0] != tc.wantHead {
 				t.Errorf("smokeCmd[0]=%q, want %q", cmd[0], tc.wantHead)
 			}
+			if launcher != tc.wantLauncher {
+				t.Errorf("launcher=%q, want %q", launcher, tc.wantLauncher)
+			}
 		})
+	}
+}
+
+// TestSmokeCmd_BazelProbesBothLaunchers pins the bugbot-4z7m probe shape: the
+// bazel smoke command must try `bazel version` AND fall back to `bazelisk
+// version` (bazelisk is commonly installed under its own name only), keeping
+// exit 127 when neither resolves so classifySmoke still reads
+// toolchain_missing.
+func TestSmokeCmd_BazelProbesBothLaunchers(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeFileBytes(dir+"/MODULE.bazel", []byte("module(name = \"x\")\n")); err != nil {
+		t.Fatal(err)
+	}
+	cmd, launcher := smokeCmd(dir)
+	if launcher != "bazel" {
+		t.Fatalf("launcher = %q, want bazel", launcher)
+	}
+	if len(cmd) != 3 || cmd[0] != "/bin/sh" || cmd[1] != "-c" {
+		t.Fatalf("cmd = %v, want /bin/sh -c <script>", cmd)
+	}
+	script := cmd[2]
+	for _, want := range []string{"bazel version", "bazelisk version", "exit 127"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script %q missing %q", script, want)
+		}
+	}
+}
+
+// TestBlocksRepro_BuildDriverLauncherNeverBlocks pins the bugbot-4z7m stage
+// fix: a bazel/bazelisk-launcher smoke failure — whatever the category —
+// must NOT disable the whole repro stage; per-finding (bugbot-14g0) and
+// per-plan (bugbot-rj3z) gates handle build-driver absence at finding
+// granularity. Language launchers keep the original bugbot-u6td blocking
+// semantics.
+func TestBlocksRepro_BuildDriverLauncherNeverBlocks(t *testing.T) {
+	cases := []struct {
+		launcher string
+		category SmokeCategory
+		want     bool
+	}{
+		{"bazel", SmokeCategoryToolchainMissing, false},
+		{"bazel", SmokeCategoryEnvError, false},
+		{"bazelisk", SmokeCategoryToolchainMissing, false},
+		{"go", SmokeCategoryToolchainMissing, true},
+		{"python", SmokeCategoryEnvError, true},
+		{"go", SmokeCategoryOK, false},
+		{"", SmokeCategoryToolchainMissing, true},
+	}
+	for _, tc := range cases {
+		v := SmokeVerdict{Category: tc.category, Launcher: tc.launcher}
+		if got := v.BlocksRepro(); got != tc.want {
+			t.Errorf("BlocksRepro(launcher=%q, category=%q) = %v, want %v", tc.launcher, tc.category, got, tc.want)
+		}
 	}
 }
 
