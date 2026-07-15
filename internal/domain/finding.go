@@ -107,14 +107,15 @@ type Finding struct {
 	CommitSHA     string
 	FileHash      string
 	ReproPath     string // empty when no reproduction exists
-	// ReproWitness is the bundle path for a non-promoting repro attempt on a
-	// below-quorum (NeedsHuman) finding. It mirrors ReproPath in shape (a
-	// self-contained artifact directory) but does NOT promote the finding:
-	// Tier, ReproPath, and NeedsHuman are all left untouched, and no
-	// patch-prover / publish cascade follows. The human reviewer can run the
-	// bundle but downstream automation does not — the human gate is preserved.
-	// Empty when no witness was recorded. See repro/promote.go::witnessFinding
-	// and funnel/repro_hook.go claim-check split. bugbot-w1bh.
+	// ReproWitness is the bundle path for a non-promoting repro attempt. It
+	// mirrors ReproPath in shape (a self-contained artifact directory) but does
+	// NOT promote the finding: Tier, ReproPath, and NeedsHuman are all left
+	// untouched, and no patch-prover / publish cascade follows. Two producers:
+	// the single witness attempt on a below-quorum (NeedsHuman) finding
+	// (bugbot-w1bh), and a demonstrated bug whose detected ecosystem has no
+	// execution-witness coverage format, making the repro evidence but not
+	// Tier-1 proof (bugbot-qb4r layer b). Empty when no witness was recorded.
+	// See repro/promote.go::witnessFinding and funnel/repro_hook.go.
 	ReproWitness string // empty when no witness repro was attempted
 	// FixPatch is the unified diff text produced by the patch-prover stage when a
 	// minimal fix candidate was witnessed by the sandbox.  Empty when the prover
@@ -223,35 +224,31 @@ type FindingFilter struct {
 //
 //	(b) T1 (reproduced) requires ReproPath.
 //
-//	(c) ReproWitness implies NeedsHuman (a witness bundle is only written for
-//	    the below-quorum path; a non-NeedsHuman finding that somehow has a
-//	    ReproWitness is a logic error).
-//
-//	(d) NeedsHuman requires a non-None NeedsHumanReason (the cause must be
+//	(c) NeedsHuman requires a non-None NeedsHumanReason (the cause must be
 //	    recorded explicitly).
 //
-//	(e) NeedsHumanReason != None implies NeedsHuman (the reason field must not
+//	(d) NeedsHumanReason != None implies NeedsHuman (the reason field must not
 //	    be set when the flag is clear).
 //
-//	(f) ProverExhausted requires ReproPath (patch-prover only runs after T1
+//	(e) ProverExhausted requires ReproPath (patch-prover only runs after T1
 //	    promotion, which sets ReproPath).
 //
-//	(g) T0 conflicts with NeedsHuman: a fix-witnessed finding is fully resolved
+//	(f) T0 conflicts with NeedsHuman: a fix-witnessed finding is fully resolved
 //	    and must not be flagged for human review.
 //
-//	(h) SupersededBy/SupersededReason require Status == StatusSuperseded (a
+//	(g) SupersededBy/SupersededReason require Status == StatusSuperseded (a
 //	    merge pointer or prose reason must never survive on a non-superseded
 //	    row -- see UpsertFinding, which clears both on any re-upsert that
 //	    does not itself set Status to superseded).
 func ValidateFindingState(f Finding) error {
 	tier := int(f.Tier)
 
-	// (g) T0 + NeedsHuman is contradictory.
+	// (f) T0 + NeedsHuman is contradictory.
 	if tier == 0 && f.NeedsHuman {
 		return fmt.Errorf("%w: T0 (fix-witnessed) and NeedsHuman are mutually exclusive", ErrIllegalTransition)
 	}
 
-	// (h) SupersededBy/SupersededReason require Status == StatusSuperseded.
+	// (g) SupersededBy/SupersededReason require Status == StatusSuperseded.
 	if (f.SupersededBy != "" || f.SupersededReason != "") && f.Status != StatusSuperseded {
 		return fmt.Errorf("%w: SupersededBy/SupersededReason set but Status is %q, not superseded", ErrIllegalTransition, f.Status)
 	}
@@ -266,22 +263,17 @@ func ValidateFindingState(f Finding) error {
 		return fmt.Errorf("%w: T1 (reproduced) requires ReproPath", ErrIllegalTransition)
 	}
 
-	// (c) ReproWitness implies NeedsHuman.
-	if f.ReproWitness != "" && !f.NeedsHuman {
-		return fmt.Errorf("%w: ReproWitness set but NeedsHuman is false (witness path is only for below-quorum findings)", ErrIllegalTransition)
-	}
-
-	// (d) NeedsHuman requires a reason.
+	// (c) NeedsHuman requires a reason.
 	if f.NeedsHuman && f.NeedsHumanReason == NeedsHumanReasonNone {
 		return fmt.Errorf("%w: NeedsHuman=true requires a NeedsHumanReason", ErrIllegalTransition)
 	}
 
-	// (e) NeedsHumanReason != None requires NeedsHuman.
+	// (d) NeedsHumanReason != None requires NeedsHuman.
 	if f.NeedsHumanReason != NeedsHumanReasonNone && !f.NeedsHuman {
 		return fmt.Errorf("%w: NeedsHumanReason=%q set but NeedsHuman is false", ErrIllegalTransition, f.NeedsHumanReason)
 	}
 
-	// (f) ProverExhausted requires ReproPath.
+	// (e) ProverExhausted requires ReproPath.
 	if f.NeedsHumanReason == NeedsHumanReasonProverExhausted && f.ReproPath == "" {
 		return fmt.Errorf("%w: NeedsHumanReason=prover_exhausted requires ReproPath (prover runs after T1 promotion)", ErrIllegalTransition)
 	}

@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/store"
 )
 
 // TestPromoteOne_NeedsHuman_WitnessesNotPromotes covers bugbot-w1bh: a
@@ -75,5 +77,150 @@ func TestPromoteOne_NeedsHuman_WitnessesNotPromotes(t *testing.T) {
 	}
 	if !got.NeedsHuman {
 		t.Errorf("witness cleared needs_human, want still true (human gate stands)")
+	}
+}
+
+// witnessOnlyPlan returns a plan whose command detects as
+// ecosystem.EcosystemUnknown (bare python3 script, no pytest -m), which has no
+// execution-witness coverage format: a demonstrated run comes back
+// Promoted=true with WitnessOnly=true (bugbot-qb4r layer b). Mirrors the
+// qb4r regression fixture.
+func witnessOnlyPlan() Plan {
+	return Plan{
+		Files: map[string]string{"repro.py": `
+def time_in_task(start, now):
+    return now - start
+
+if __name__ == "__main__":
+    import sys
+    result = time_in_task(float("inf"), 0)
+    if result == float("-inf"):
+        print("BUGBOT_REPRO_DEMONSTRATED")
+        sys.exit(1)
+`},
+		Cmd:    []string{"python3", "repro.py"},
+		Expect: "demonstrates the stale-state race",
+	}
+}
+
+// witnessOnlySandbox demonstrates the bug: marker printed, exit 1.
+func witnessOnlySandbox() *sandbox.Mock {
+	return sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "BUGBOT_REPRO_DEMONSTRATED\n",
+	}})
+}
+
+// TestPromoteOne_WitnessOnly_PersistsWitness covers bugbot-njb8: a demonstrated
+// bug in a witness-blind ecosystem (att.WitnessOnly, NeedsHuman FALSE) must
+// persist its ReproWitness. Before the fix, domain invariant (c) — written for
+// the pre-qb4r below-quorum-only witness path — rejected the upsert
+// ("ReproWitness set but NeedsHuman is false") and the evidence was lost.
+func TestPromoteOne_WitnessOnly_PersistsWitness(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	repoDir := newRepoDir(t)
+
+	finding := seedTSFinding(t, st)
+	if finding.NeedsHuman {
+		t.Fatal("setup: finding must NOT be NeedsHuman (that is the w1bh path, not qb4r layer b)")
+	}
+
+	client := newScriptedClient(planBody(t, witnessOnlyPlan()))
+	// PatchProver enabled on purpose: witness-only must skip the cascade too.
+	r, err := New(client, witnessOnlySandbox(), repoDir, Options{MaxAttempts: 1, ArtifactDir: t.TempDir(), PatchProver: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	outcome, err := r.PromoteOne(ctx, st, finding)
+	if err != nil {
+		t.Fatalf("PromoteOne: %v", err)
+	}
+
+	if !outcome.Witnessed {
+		t.Errorf("outcome.Witnessed = false, want true (witness-only ecosystem must witness)")
+	}
+	if outcome.Promoted {
+		t.Errorf("outcome.Promoted = true, want false (witness-only must not promote)")
+	}
+	if outcome.FixWitnessed {
+		t.Errorf("outcome.FixWitnessed = true, want false (no patch-prover cascade for a witness)")
+	}
+	if outcome.ArtifactPath == "" {
+		t.Errorf("outcome.ArtifactPath empty, want the witness bundle path")
+	}
+
+	got, err := st.GetFindingByFingerprint(ctx, finding.Fingerprint)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ReproWitness != outcome.ArtifactPath {
+		t.Errorf("store repro_witness=%q != outcome.ArtifactPath=%q", got.ReproWitness, outcome.ArtifactPath)
+	}
+	if got.NeedsHuman {
+		t.Errorf("witness set needs_human, want still false (qb4r layer b is not a human gate)")
+	}
+	if got.Tier != finding.Tier {
+		t.Errorf("witness changed tier: got %d, want %d (no promotion)", got.Tier, finding.Tier)
+	}
+	if got.ReproPath != "" {
+		t.Errorf("witness set repro_path=%q, want empty (no promotion)", got.ReproPath)
+	}
+
+	// Queue row is done: the attempt completed and its outcome persisted.
+	ra, err := st.GetReproAttempt(ctx, finding.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetReproAttempt: %v", err)
+	}
+	if ra.State != store.ReproStateDone {
+		t.Errorf("queue state = %q, want done", ra.State)
+	}
+}
+
+// TestPromoteOne_WitnessPersistFailure_RequeuesAttempt covers the loss mode
+// bugbot-njb8 exposed: when the outcome persist fails AFTER a successful
+// attempt, the queue row must be requeued (infra_retry, claimable) — not
+// marked done, which is terminal and strands the finding with the artifact
+// orphaned on disk. The persist failure is forced by never seeding the
+// finding row: witnessFinding's read-back fails.
+func TestPromoteOne_WitnessPersistFailure_RequeuesAttempt(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	repoDir := newRepoDir(t)
+
+	// NOT upserted: promoteOne's persist step cannot find the row.
+	finding := domain.Finding{
+		ID:          "f-unpersisted",
+		Fingerprint: domain.Fingerprint("concurrency", "src/scheduler/timeInTask.ts", "42|unpersisted"),
+		Title:       "unpersisted witness-only finding",
+		Tier:        2,
+		File:        "src/scheduler/timeInTask.ts",
+	}
+
+	client := newScriptedClient(planBody(t, witnessOnlyPlan()))
+	r, err := New(client, witnessOnlySandbox(), repoDir, Options{MaxAttempts: 1, ArtifactDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	outcome, err := r.PromoteOne(ctx, st, finding)
+	if err == nil {
+		t.Fatalf("PromoteOne err = nil, want persist failure (outcome=%+v)", outcome)
+	}
+	if outcome.Witnessed {
+		t.Errorf("outcome.Witnessed = true, want false (nothing was persisted)")
+	}
+
+	// The attempt must be retryable: requeued as infra_retry, then claimable.
+	ra, err := st.GetReproAttempt(ctx, finding.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetReproAttempt: %v", err)
+	}
+	if ra.State != store.ReproStateInfraRetry {
+		t.Errorf("queue state = %q, want infra_retry (a persist failure must not burn the row into done)", ra.State)
+	}
+	if _, err := st.ClaimReproAttempt(ctx, finding.Fingerprint); err != nil {
+		t.Errorf("ClaimReproAttempt after persist failure: %v, want claimable", err)
 	}
 }
