@@ -98,6 +98,13 @@ type Options struct {
 	// Image overrides the sandbox's default container image for repro runs.
 	// Empty uses the sandbox backend's configured default.
 	Image string
+	// Network records the sandbox network policy applied to repro runs
+	// (config.Sandbox.Network), purely for manifest.json bookkeeping (see
+	// writeArtifacts/buildManifest) — it does NOT affect execute()'s Spec,
+	// which deliberately leaves Spec.Network unset so the run inherits the
+	// sandbox backend's own configured default (see execute's doc comment).
+	// Empty resolves to "none", the package's documented hardened default.
+	Network string
 	// ArtifactDir is the host directory under which per-finding repro bundles
 	// are written. Empty uses DefaultArtifactDir.
 	ArtifactDir string
@@ -194,6 +201,9 @@ func (o Options) resolve() Options {
 	}
 	if o.ArtifactDir == "" {
 		o.ArtifactDir = DefaultArtifactDir
+	}
+	if o.Network == "" {
+		o.Network = "none"
 	}
 	if o.MaxParallel == 0 {
 		o.MaxParallel = DefaultMaxParallel
@@ -466,7 +476,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		})
 
 		if verdict.demonstrated {
-			path, werr := writeArtifacts(r.opts.ArtifactDir, finding, plan, res)
+			path, werr := writeArtifacts(r.opts.ArtifactDir, finding, plan, res, r.opts.Image, r.opts.Network)
 			if werr != nil {
 				return nil, fmt.Errorf("repro: write artifacts for finding %s: %w", finding.ID, werr)
 			}
