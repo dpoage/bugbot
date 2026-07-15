@@ -47,16 +47,19 @@ func prepareWorkspace(repoDir string, writeFiles map[string][]byte) (string, err
 	return ws, nil
 }
 
-// prepareWorkspace resolves the pristine-workspace cache for spec.RepoDir (see
-// wsCache) and clones the current pristine into a fresh per-run workspace,
-// applying writeFiles on top of the clone. hit reports whether an existing
-// pristine could be reused (true) or had to be (re)materialized (false).
+// prepareWorkspaceCached resolves the pristine-workspace cache for repoDir
+// (see wsCache) and clones the current pristine into a fresh per-run
+// workspace, applying writeFiles on top of the clone. hit reports whether an
+// existing pristine could be reused (true) or had to be (re)materialized
+// (false). Shared by every backend that embeds a wsCache (CLI, Bwrap) so the
+// pristine-materialization logic and its cache-bypass rule live in exactly
+// one place.
 //
 // Non-git repoDirs have no cheap, reliable content-identity signal to key a
 // cache on (no HEAD, no status), so they bypass the cache entirely and fall
 // back to the original standalone prepareWorkspace — hit is always false on
 // that path.
-func (s *CLI) prepareWorkspace(repoDir string, writeFiles map[string][]byte) (ws string, hit bool, err error) {
+func prepareWorkspaceCached(wc *wsCache, repoDir string, writeFiles map[string][]byte) (ws string, hit bool, err error) {
 	info, err := os.Stat(repoDir)
 	if err != nil {
 		return "", false, fmt.Errorf("sandbox: stat repo dir %q: %w", repoDir, err)
@@ -74,7 +77,7 @@ func (s *CLI) prepareWorkspace(repoDir string, writeFiles map[string][]byte) (ws
 		return ws, false, err
 	}
 
-	ws, hit, err = s.wsCache.clone(repoDir, key)
+	ws, hit, err = wc.clone(repoDir, key)
 	if err != nil {
 		return "", false, err
 	}
@@ -83,6 +86,11 @@ func (s *CLI) prepareWorkspace(repoDir string, writeFiles map[string][]byte) (ws
 		return "", false, err
 	}
 	return ws, hit, nil
+}
+
+// prepareWorkspace is CLI's wsCache-bound wrapper around prepareWorkspaceCached.
+func (s *CLI) prepareWorkspace(repoDir string, writeFiles map[string][]byte) (ws string, hit bool, err error) {
+	return prepareWorkspaceCached(&s.wsCache, repoDir, writeFiles)
 }
 
 // wsCache is a pristine-materialization cache owned by a CLI instance. A

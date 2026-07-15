@@ -117,6 +117,26 @@ type ToolchainResolution struct {
 	Fingerprints []ToolchainFingerprint
 }
 
+// CapabilityKey renders Fingerprints into a single deterministic string
+// suitable as a ProbeCapabilities cache key (the bwrap analogue of the
+// container backend's image string — see Bwrap.CapabilityFingerprint).
+// Request order is preserved (already stable from ResolveHostToolchains, no
+// re-sorting) so re-resolving the SAME sandbox.host_toolchains config always
+// yields the same key, while any change to which toolchains resolve, their
+// paths, or their versions yields a different one — a probe result never
+// silently survives a host toolchain change it never observed. Empty when no
+// toolchain resolved (callers fall back to their own zero-value key).
+func (r ToolchainResolution) CapabilityKey() string {
+	if len(r.Fingerprints) == 0 {
+		return ""
+	}
+	parts := make([]string, len(r.Fingerprints))
+	for i, fp := range r.Fingerprints {
+		parts[i] = fp.Name + "=" + fp.Path + "@" + fp.Version
+	}
+	return strings.Join(parts, ";")
+}
+
 // ResolveHostToolchains resolves each entry in names into a read-only bind
 // mount, in-container PATH entry, and provenance fingerprint.
 //
