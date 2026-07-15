@@ -66,7 +66,7 @@ func detectBwrapCapMethod(ctx context.Context) bwrapCapMethod {
 // this host currently supports for the bwrap backend, for doctor's advisory
 // reporting: "enforced" (systemd-run --user --scope or cgroup v2 available,
 // so runs get their configured caps) or a reason why neither is available
-// (runs would fail unless sandbox.allow_uncapped is set — see bwrapCapError).
+// (runs would fail unless sandbox.allow_uncapped is set — see errBwrapNoCapMethod).
 func DescribeBwrapCapMethod(ctx context.Context) (label string, enforced bool) {
 	switch detectBwrapCapMethod(ctx) {
 	case bwrapCapSystemdRun:
@@ -132,11 +132,11 @@ func delegatedCgroupV2Dir() (string, bool) {
 	return dir, true
 }
 
-// bwrapCapError is returned when resource limits were requested (the normal
+// errBwrapNoCapMethod is returned when resource limits were requested (the normal
 // case) but neither enforcement mechanism is available and the operator has
 // not opted into running uncapped. It is a distinct type so callers/tests can
 // assert on it without string matching.
-var bwrapCapError = errors.New("sandbox: bwrap backend found no resource-limit mechanism (systemd-run --user --scope or a delegated cgroup v2 subtree); set sandbox.allow_uncapped to run without enforced memory/CPU/pids limits")
+var errBwrapNoCapMethod = errors.New("sandbox: bwrap backend found no resource-limit mechanism (systemd-run --user --scope or a delegated cgroup v2 subtree); set sandbox.allow_uncapped to run without enforced memory/CPU/pids limits")
 
 // systemdRunWrapArgs prepends a systemd-run --user --scope invocation (with
 // MemoryMax/CPUQuota/TasksMax properties) around the given bwrap binary +

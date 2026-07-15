@@ -138,7 +138,7 @@ as "no bundles" (exit 0), not an error.`,
 
 			out := cmd.OutOrStdout()
 			if len(dirs) == 0 {
-				fmt.Fprintln(out, "no bundles found")
+				_, _ = fmt.Fprintln(out, "no bundles found")
 				return nil
 			}
 
@@ -151,12 +151,12 @@ as "no bundles" (exit 0), not an error.`,
 				res := repro.Audit(b)
 				if res.Flagged() {
 					flagged++
-					fmt.Fprintf(out, "FLAGGED %s: %s (%s)\n", dir, res.Reason, res.Detail)
+					_, _ = fmt.Fprintf(out, "FLAGGED %s: %s (%s)\n", dir, res.Reason, res.Detail)
 				} else {
-					fmt.Fprintf(out, "OK      %s\n", dir)
+					_, _ = fmt.Fprintf(out, "OK      %s\n", dir)
 				}
 			}
-			fmt.Fprintf(out, "%d bundle(s) audited, %d flagged\n", len(dirs), flagged)
+			_, _ = fmt.Fprintf(out, "%d bundle(s) audited, %d flagged\n", len(dirs), flagged)
 			if flagged > 0 {
 				return newGateError(fmt.Sprintf("bundle audit: %d bundle(s) flagged by the static target-execution gate", flagged))
 			}
@@ -309,12 +309,12 @@ auto-close the finding).`,
 func printReplayResult(out io.Writer, dir string, res repro.ReplayResult) {
 	switch {
 	case res.Demonstrated && res.WitnessOnly:
-		fmt.Fprintf(out, "%s: DEMONSTRATED, WITNESS-ONLY (exit %d, ecosystem=%s) — bug still present, but %s has no coverage-based witness to attribute it to the target file\n", dir, res.ExitCode, res.Ecosystem, res.Ecosystem)
+		_, _ = fmt.Fprintf(out, "%s: DEMONSTRATED, WITNESS-ONLY (exit %d, ecosystem=%s) — bug still present, but %s has no coverage-based witness to attribute it to the target file\n", dir, res.ExitCode, res.Ecosystem, res.Ecosystem)
 	case res.Demonstrated:
-		fmt.Fprintf(out, "%s: DEMONSTRATED (exit %d, ecosystem=%s) — bug still present\n", dir, res.ExitCode, res.Ecosystem)
+		_, _ = fmt.Fprintf(out, "%s: DEMONSTRATED (exit %d, ecosystem=%s) — bug still present\n", dir, res.ExitCode, res.Ecosystem)
 	case !res.SandboxRan:
-		fmt.Fprintf(out, "%s: REJECTED %s (%s) — static gate, no sandbox run spent\n", dir, res.Reason, res.Summary)
+		_, _ = fmt.Fprintf(out, "%s: REJECTED %s (%s) — static gate, no sandbox run spent\n", dir, res.Reason, res.Summary)
 	default:
-		fmt.Fprintf(out, "%s: %s (exit %d, ecosystem=%s) — %s\n", dir, res.Reason, res.ExitCode, res.Ecosystem, res.Summary)
+		_, _ = fmt.Fprintf(out, "%s: %s (exit %d, ecosystem=%s) — %s\n", dir, res.Reason, res.ExitCode, res.Ecosystem, res.Summary)
 	}
 }

@@ -324,7 +324,7 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 
 	capMethod := detectBwrapCapMethod(ctx)
 	if capMethod == bwrapCapNone && !s.allowUncapped {
-		return Result{}, bwrapCapError
+		return Result{}, errBwrapNoCapMethod
 	}
 
 	timeout := spec.Timeout
@@ -460,7 +460,7 @@ func (s *Bwrap) newResourceCapWrap(method bwrapCapMethod, bwrapArgv []string, cp
 			// Lost the delegated subtree between detection and use (e.g. a
 			// concurrent process reconfigured cgroups); fail rather than
 			// silently running uncapped.
-			return resourceCapWrap{}, bwrapCapError
+			return resourceCapWrap{}, errBwrapNoCapMethod
 		}
 		dir := filepath.Join(parent, "bugbot-"+randToken())
 		if err := os.Mkdir(dir, 0o755); err != nil {
