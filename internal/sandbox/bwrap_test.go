@@ -76,8 +76,6 @@ func TestBwrapOptionsApplyDefaults(t *testing.T) {
 	WithBwrapPidsLimit(64)(s)
 	WithBwrapNetwork("host")(s)
 	WithBwrapAllowUncapped(true)(s)
-	fp := "go1.25+node20"
-	WithBwrapCapabilityFingerprint(fp)(s)
 
 	cpus, mem, pids := s.Limits()
 	if cpus != 3 || mem != 1024 || pids != 64 {
@@ -88,9 +86,6 @@ func TestBwrapOptionsApplyDefaults(t *testing.T) {
 	}
 	if !s.allowUncapped {
 		t.Error("allowUncapped should be true")
-	}
-	if s.CapabilityFingerprint() != fp {
-		t.Errorf("CapabilityFingerprint() = %q, want %q", s.CapabilityFingerprint(), fp)
 	}
 }
 

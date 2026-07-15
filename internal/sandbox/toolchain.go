@@ -74,7 +74,7 @@ const hostToolchainMountRoot = "/opt/bugbot-toolchains"
 // standard Linux distribution's default PATH so images that already ship
 // their own toolchains (and set no ENV PATH override) keep working exactly
 // as before when sandbox.host_toolchains is unconfigured or resolves nothing.
-const defaultContainerPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+const DefaultContainerPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 // toolchainVersionProbeTimeout bounds the HOST-side `<bin> --version` probe
 // used to build a fingerprint. This runs directly on the host (not inside any
@@ -115,26 +115,6 @@ type ToolchainResolution struct {
 	// toolchain, in request order. Entries that failed to resolve are
 	// silently absent (see ResolveHostToolchains doc).
 	Fingerprints []ToolchainFingerprint
-}
-
-// CapabilityKey renders Fingerprints into a single deterministic string
-// suitable as a ProbeCapabilities cache key (the bwrap analogue of the
-// container backend's image string — see Bwrap.CapabilityFingerprint).
-// Request order is preserved (already stable from ResolveHostToolchains, no
-// re-sorting) so re-resolving the SAME sandbox.host_toolchains config always
-// yields the same key, while any change to which toolchains resolve, their
-// paths, or their versions yields a different one — a probe result never
-// silently survives a host toolchain change it never observed. Empty when no
-// toolchain resolved (callers fall back to their own zero-value key).
-func (r ToolchainResolution) CapabilityKey() string {
-	if len(r.Fingerprints) == 0 {
-		return ""
-	}
-	parts := make([]string, len(r.Fingerprints))
-	for i, fp := range r.Fingerprints {
-		parts[i] = fp.Name + "=" + fp.Path + "@" + fp.Version
-	}
-	return strings.Join(parts, ";")
 }
 
 // ResolveHostToolchains resolves each entry in names into a read-only bind
@@ -227,10 +207,45 @@ func resolveToolchainRoot(name string) (root, execPath string, err error) {
 	root = dir
 	if filepath.Base(dir) == "bin" {
 		// Pull in the toolchain root (sibling lib/, share/, ...) alongside
-		// the bin/ directory, not just the single binary's own folder.
-		root = filepath.Dir(dir)
+		// the bin/ directory, not just the single binary's own folder — but
+		// ONLY when that root is narrow (a version-manager's own versioned
+		// directory, a nix store path, ...). A $HOME/bin/node or
+		// ~/.local/bin/node layout would otherwise ascend straight to $HOME
+		// or ~/.local and RO-mount the user's entire home directory (SSH
+		// keys, git credentials, unrelated dotfiles) into whatever untrusted,
+		// model-driven code the sandbox runs. See isOverbroadToolchainRoot.
+		if candidate := filepath.Dir(dir); !isOverbroadToolchainRoot(candidate) {
+			root = candidate
+		}
 	}
 	return root, resolved, nil
+}
+
+// isOverbroadToolchainRoot reports whether dir is a shared, multi-purpose
+// directory that must never be RO-mounted wholesale as a "toolchain root":
+// the user's home directory itself, or a broad catch-all subdirectory like
+// ~/.local that holds far more than one toolchain. A $HOME/bin/node or
+// ~/.local/bin/node layout ascends exactly here without this guard.
+//
+// Narrow, single-purpose version-manager directories
+// (~/.nvm/versions/node/vX, ~/.asdf/installs/..., a nix store path) are NOT
+// caught by this — they are exactly the layout the ascent exists to support.
+func isOverbroadToolchainRoot(dir string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	home = filepath.Clean(home)
+	dir = filepath.Clean(dir)
+	if dir == home {
+		return true
+	}
+	for _, broad := range []string{".local", ".config", ".cache", ".ssh"} {
+		if dir == filepath.Join(home, broad) {
+			return true
+		}
+	}
+	return false
 }
 
 // sanitizeToolchainSegment reduces name to a single, safe path component for

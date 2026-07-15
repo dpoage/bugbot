@@ -39,6 +39,14 @@ type Metadata struct {
 	// store's stats_json) shown verbatim if non-empty.
 	ScanRunID string
 	Stats     string
+	// BlockedToolchain surfaces the repro queue's blocked_toolchain rows,
+	// grouped by missing ecosystem (e.g. {"js": 38}). Populated from
+	// store.BlockedToolchainCounts by the caller (report emit, daemon
+	// post-cycle) — this package never queries the store directly (see the
+	// package doc's import-cycle rationale) — and rendered as an
+	// operator-visible aggregate section when non-empty (bugbot-14g0
+	// acceptance 2). Nil/empty renders nothing.
+	BlockedToolchain map[string]int
 }
 
 // Report bundles the findings and the metadata that describe one rendering.

@@ -6,12 +6,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/util"
 )
@@ -116,6 +118,20 @@ func renderStatus(ctx context.Context, out io.Writer, cfg config.Config, st prog
 	}
 	if st.LastEvent != "" {
 		_, _ = fmt.Fprintf(out, "  last event:   %s\n", st.LastEvent)
+	}
+	if len(st.ReproBlocked) > 0 {
+		ecos := make([]string, 0, len(st.ReproBlocked))
+		for eco := range st.ReproBlocked {
+			ecos = append(ecos, eco)
+		}
+		sort.Strings(ecos)
+		for _, eco := range ecos {
+			binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
+			if binary == "" {
+				binary = eco
+			}
+			_, _ = fmt.Fprintf(out, "  blocked:      %d finding(s) — image lacks %s\n", st.ReproBlocked[eco], binary)
+		}
 	}
 
 	// The accumulated world state (findings, blackboard, sync, spend, last

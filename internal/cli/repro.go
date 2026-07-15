@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 
@@ -28,26 +29,45 @@ func newReproCmd() *cobra.Command {
 		target        string
 		maxN          int
 		transcriptDir string
+		unsandboxed   bool
 	)
 
 	cmd := &cobra.Command{
-		Use:   "repro [flags]",
-		Short: "One-shot backlog drain: reproduce open T2/T3 findings with no prior repro attempt",
+		Use:   "repro [flags] [finding-id]",
+		Short: "Reproduce open findings: backlog batch, or one finding attended (optionally unsandboxed)",
 		Long: `repro queries the store for open Tier-2 and Tier-3 findings that have
 no reproduction attempt (ReproPath empty, NeedsHuman false) and runs them
 through the reproduce+patch-prover pipeline, promoting demonstrated findings
 to Tier-1 (or Tier-0 when the patch-prover witnesses a fix).
 
-This is the same backlog logic the daemon runs on its periodic backlog timer,
-exposed as a one-shot command for manual operation or scripted workflows.
+With no arguments this is the same backlog logic the daemon runs on its
+periodic backlog timer, exposed as a one-shot command for manual operation or
+scripted workflows.
 
-Requires a container runtime (podman or docker) on PATH. When none is found
-the command exits with a graceful message rather than an error.`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+Given a single finding-id (or unambiguous id prefix), repro instead runs that
+ONE finding attended, skipping the backlog entirely. --unsandboxed additionally
+opts that single run out of the container: the repro command runs DIRECTLY ON
+THE HOST, against a fresh workspace copy (never the live checkout), with no
+network policy or resource caps. --unsandboxed requires a finding-id and is
+refused for the backlog batch path — it exists for a human actively watching
+one rerun, never for unattended use.
+
+Requires a container runtime (podman or docker) on PATH for the sandboxed
+paths; --unsandboxed does not. When no runtime is found and --unsandboxed is
+not set, the command exits with a graceful message rather than an error.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if ctx == nil {
 				ctx = context.Background()
+			}
+
+			var findingID string
+			if len(args) == 1 {
+				findingID = args[0]
+			}
+			if unsandboxed && findingID == "" {
+				return fmt.Errorf("repro: --unsandboxed requires a finding-id argument (single-finding attended rerun only)")
 			}
 
 			cfg, err := config.Load(configPathFromCmd(cmd))
@@ -92,6 +112,8 @@ the command exits with a graceful message rather than an error.`,
 				TranscriptDir: transcriptDir,
 				Out:           cmd.OutOrStdout(),
 				StopProgress:  stopPane,
+				FindingID:     findingID,
+				Unsandboxed:   unsandboxed,
 			})
 			return err
 		},
@@ -99,10 +121,13 @@ the command exits with a graceful message rather than an error.`,
 
 	addTargetFlag(cmd, &target)
 	cmd.Flags().IntVar(&maxN, "max", 0,
-		"maximum findings to attempt (0 = use repro.backlog_batch from config)")
+		"maximum findings to attempt (0 = use repro.backlog_batch from config); ignored with a finding-id argument")
 	cmd.Flags().StringVar(&transcriptDir, "transcript-dir", "",
 		"write each reproducer agent transcript (JSONL) to this directory for "+
 			"post-hoc diagnosis; overrides repro.transcript_dir (empty = use config / disabled)")
+	cmd.Flags().BoolVar(&unsandboxed, "unsandboxed", false,
+		"ATTENDED USE ONLY: run the given finding-id directly on the host (workspace copy, no container "+
+			"isolation, full network access) instead of the sandbox; requires a finding-id argument")
 
 	return cmd
 }

@@ -65,7 +65,7 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 	t.Run("race_available_when_cgo_enabled", func(t *testing.T) {
 		InvalidateCapabilityCache("test-image-race-available")
 		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "1\n"}})
-		cs := ProbeCapabilities(context.Background(), mock, "test-image-race-available", t.TempDir())
+		cs := ProbeCapabilities(context.Background(), mock, "test-image-race-available", t.TempDir(), nil, nil)
 		if !cs.Available("go", "race") {
 			t.Errorf("want race available, got %v", cs)
 		}
@@ -74,7 +74,7 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 	t.Run("race_unavailable_when_cgo_disabled", func(t *testing.T) {
 		InvalidateCapabilityCache("test-image-race-unavailable")
 		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "0\n"}})
-		cs := ProbeCapabilities(context.Background(), mock, "test-image-race-unavailable", t.TempDir())
+		cs := ProbeCapabilities(context.Background(), mock, "test-image-race-unavailable", t.TempDir(), nil, nil)
 		if cs.Available("go", "race") {
 			t.Errorf("want race unavailable when CGO_ENABLED=0, got %v", cs)
 		}
@@ -83,7 +83,7 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 	t.Run("race_unavailable_on_exec_error", func(t *testing.T) {
 		InvalidateCapabilityCache("test-image-exec-error")
 		mock := NewMock(MockResponse{Err: errProbeTest})
-		cs := ProbeCapabilities(context.Background(), mock, "test-image-exec-error", t.TempDir())
+		cs := ProbeCapabilities(context.Background(), mock, "test-image-exec-error", t.TempDir(), nil, nil)
 		if cs.Available("go", "race") {
 			t.Errorf("want race unavailable on exec error, got %v", cs)
 		}
@@ -92,15 +92,15 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 	t.Run("cache_hit_returns_same_result", func(t *testing.T) {
 		InvalidateCapabilityCache("test-image-cache-hit")
 		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "1\n"}})
-		cs1 := ProbeCapabilities(context.Background(), mock, "test-image-cache-hit", t.TempDir())
-		cs2 := ProbeCapabilities(context.Background(), mock, "test-image-cache-hit", t.TempDir())
+		cs1 := ProbeCapabilities(context.Background(), mock, "test-image-cache-hit", t.TempDir(), nil, nil)
+		cs2 := ProbeCapabilities(context.Background(), mock, "test-image-cache-hit", t.TempDir(), nil, nil)
 		if cs1["go"]["race"] != cs2["go"]["race"] {
 			t.Errorf("cache hit must return same result: cs1=%v cs2=%v", cs1, cs2)
 		}
 	})
 
 	t.Run("nil_sandbox_returns_all_false", func(t *testing.T) {
-		cs := ProbeCapabilities(context.Background(), nil, "any", "")
+		cs := ProbeCapabilities(context.Background(), nil, "any", "", nil, nil)
 		if cs.Available("go", "race") {
 			t.Errorf("want race unavailable for nil sandbox, got %v", cs)
 		}
@@ -108,11 +108,68 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 
 	t.Run("empty_repoDir_returns_all_false", func(t *testing.T) {
 		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "1\n"}})
-		cs := ProbeCapabilities(context.Background(), mock, "any", "")
+		cs := ProbeCapabilities(context.Background(), mock, "any", "", nil, nil)
 		if cs.Available("go", "race") {
 			t.Errorf("want race unavailable for empty repoDir, got %v", cs)
 		}
 	})
+}
+
+// TestProbeCapabilities_MountsThreadedIntoEveryProbe verifies that mounts and
+// env are attached to every probe Spec, and that they change the returned
+// CapabilitySet — this is what makes a host-mounted toolchain (bugbot-14g0
+// fix A) show up as available in the probe results (acceptance 4).
+func TestProbeCapabilities_MountsThreadedIntoEveryProbe(t *testing.T) {
+	InvalidateCapabilityCache("test-image-toolchain-mount")
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "node\nnode_test\n"}})
+	mounts := []ROMount{{HostPath: "/host/node", ContainerPath: "/opt/bugbot-toolchains/node", Shared: true}}
+	env := []string{"PATH=/opt/bugbot-toolchains/node/bin:/usr/bin"}
+
+	cs := ProbeCapabilities(context.Background(), mock, "test-image-toolchain-mount", t.TempDir(), mounts, env)
+	if !cs.Available("js", "node") {
+		t.Errorf("want js/node available once the mocked probe reports it, got %v", cs)
+	}
+
+	for _, c := range mock.Calls() {
+		if len(c.Spec.ROMounts) != 1 || c.Spec.ROMounts[0].HostPath != "/host/node" {
+			t.Errorf("probe call missing the host toolchain mount: %+v", c.Spec.ROMounts)
+		}
+		found := false
+		for _, e := range c.Spec.Env {
+			if e == env[0] {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("probe call missing the toolchain PATH env, got %v", c.Spec.Env)
+		}
+	}
+}
+
+// TestProbeCapabilities_CacheKeyDependsOnMounts verifies that two calls for
+// the SAME image but DIFFERENT mounts do not share a cache entry — otherwise
+// a probe run before a toolchain was mounted would poison the result for
+// every later call with the mount attached.
+func TestProbeCapabilities_CacheKeyDependsOnMounts(t *testing.T) {
+	InvalidateCapabilityCache("test-image-mount-cache-key")
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 1}}) // no node without the mount
+	mock.ResponseFunc = func(_ int, spec Spec) (Result, error) {
+		if len(spec.ROMounts) > 0 {
+			return Result{ExitCode: 0, Stdout: "node\nnode_test\n"}, nil
+		}
+		return Result{ExitCode: 1}, nil
+	}
+
+	without := ProbeCapabilities(context.Background(), mock, "test-image-mount-cache-key", t.TempDir(), nil, nil)
+	if without.Available("js", "node") {
+		t.Fatalf("without a mount, js/node should be unavailable, got %v", without)
+	}
+
+	mounts := []ROMount{{HostPath: "/host/node", ContainerPath: "/opt/bugbot-toolchains/node", Shared: true}}
+	with := ProbeCapabilities(context.Background(), mock, "test-image-mount-cache-key", t.TempDir(), mounts, nil)
+	if !with.Available("js", "node") {
+		t.Errorf("with the mount, js/node should be available (must not reuse the mount-less cache entry), got %v", with)
+	}
 }
 
 // errProbeTest is a sentinel error for probe-failure tests.
@@ -411,5 +468,42 @@ func TestPythonCapabilityProbeSpec(t *testing.T) {
 	}
 	if probe.Name != "python" {
 		t.Errorf("probe Name = %q, want python", probe.Name)
+	}
+}
+
+// TestInvalidateCapabilityCache_DeletesComposedKey regression-tests the
+// latent bug an oracle review caught: ProbeCapabilities keys its cache on
+// image+"|"+mountsEnvCacheKey(...), never on the bare image string, so a
+// naive capCache.Delete(image) silently no-ops against every real entry.
+// InvalidateCapabilityCache must delete every entry for image regardless of
+// which mounts/env combination produced it.
+func TestInvalidateCapabilityCache_DeletesComposedKey(t *testing.T) {
+	image := "test-image-invalidate-composed-key"
+	InvalidateCapabilityCache(image) // clean slate regardless of prior test order
+
+	mockA := NewMock(MockResponse{Result: Result{ExitCode: 1}})
+	mockB := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "node\nnode_test\n"}})
+
+	// Two different mount sets against the SAME image populate two distinct
+	// composed cache keys (image+"|"+<no mounts>) and (image+"|"+<mounts>).
+	without := ProbeCapabilities(context.Background(), mockA, image, t.TempDir(), nil, nil)
+	if without.Available("js", "node") {
+		t.Fatalf("precondition: expected js/node unavailable without a mount, got %v", without)
+	}
+	mounts := []ROMount{{HostPath: "/host/node", ContainerPath: "/opt/bugbot-toolchains/node", Shared: true}}
+	with := ProbeCapabilities(context.Background(), mockB, image, t.TempDir(), mounts, nil)
+	if !with.Available("js", "node") {
+		t.Fatalf("precondition: expected js/node available with a mount, got %v", with)
+	}
+
+	InvalidateCapabilityCache(image)
+
+	// After invalidation, BOTH composed entries must be gone — re-probing
+	// with mockA now (a mock that always reports unavailable) for the
+	// previously-available "with mounts" case must reflect the fresh probe,
+	// not a stale cached true.
+	reprobed := ProbeCapabilities(context.Background(), mockA, image, t.TempDir(), mounts, nil)
+	if reprobed.Available("js", "node") {
+		t.Errorf("stale cache entry survived InvalidateCapabilityCache: got %v after re-probing with an always-unavailable mock", reprobed)
 	}
 }

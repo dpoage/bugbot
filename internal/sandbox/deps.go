@@ -199,6 +199,13 @@ type DepOptions struct {
 	// Each mount must have HostPath set; Shared is always true (host-owned dirs,
 	// no SELinux :Z relabel). See ROMount.Shared for the full rationale.
 	LocalMounts []ROMount
+	// HostToolchains is an ordered list of host toolchain names (resolved via
+	// the host's PATH) or explicit host directories to bind-mount read-only
+	// into the sandbox and prepend to its PATH, via ResolveHostToolchains.
+	// Independent of ecosystem detection and LocalMounts: a repo may have
+	// ecosystem mounts, local mounts, AND host toolchain mounts active in the
+	// same Spec. Resolved from config.Sandbox.HostToolchains by the caller.
+	HostToolchains []string
 }
 
 // Resolution is the result of resolving a repo's dependency strategy: the
@@ -226,6 +233,10 @@ type Resolution struct {
 	// Strategy is the strategy actually applied (after vendored detection may
 	// have overridden the requested one), for logging/diagnostics.
 	Strategy DepStrategy
+	// Fingerprints records provenance for any host toolchains mounted into
+	// this Resolution (see ResolveHostToolchains). Empty when
+	// DepOptions.HostToolchains was empty or resolved nothing on this host.
+	Fingerprints []ToolchainFingerprint
 }
 
 // ecosystem describes how to detect a build ecosystem and resolve its
@@ -378,6 +389,23 @@ func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
 	// first (registry caches), then operator local mounts. The validateMounts
 	// uniqueness check in sandbox.Exec backstops any ContainerPath collisions.
 	res.ROMounts = append(res.ROMounts, opts.LocalMounts...)
+
+	// Host toolchain mounts (fix A, bugbot-14g0): resolved AFTER local mounts,
+	// independent of ecosystem detection and dep strategy. A resolved
+	// toolchain overrides the container's PATH entirely (see
+	// defaultContainerPath) so its bin dir wins even against an ecosystem
+	// image that already ships (an older or absent) copy of the same tool.
+	if len(opts.HostToolchains) > 0 {
+		tc, tcErr := ResolveHostToolchains(opts.HostToolchains)
+		if tcErr != nil {
+			return Resolution{}, fmt.Errorf("sandbox: resolve host toolchains: %w", tcErr)
+		}
+		res.ROMounts = append(res.ROMounts, tc.Mounts...)
+		res.Fingerprints = append(res.Fingerprints, tc.Fingerprints...)
+		if tc.PathPrepend != "" {
+			res.Env = append(res.Env, "PATH="+tc.PathPrepend+":"+DefaultContainerPath)
+		}
+	}
 	return res, nil
 }
 

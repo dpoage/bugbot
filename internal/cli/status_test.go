@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/progress"
+	"github.com/dpoage/bugbot/internal/store"
 )
 
 // mustMarshalIndent marshals v or fails the test.
@@ -98,6 +100,34 @@ func TestStatus_Fresh(t *testing.T) {
 	}
 }
 
+// TestStatus_LiveReproBlockedRendered is the live-snapshot half of
+// bugbot-14g0 acceptance 2's consumer requirement: Status.ReproBlocked
+// (populated by a KindReproBlocked event) must be rendered by `bugbot
+// status`, naming the actual missing binary (BaseMode: "node" for "js"), not
+// left dead in the struct.
+func TestStatus_LiveReproBlockedRendered(t *testing.T) {
+	cfgPath, _, _ := setup(t)
+	writeStatus(t, cfgPath, progress.Status{
+		PID:          os.Getpid(),
+		StartedAt:    time.Now().Add(-time.Minute),
+		LastUpdated:  time.Now(),
+		ReproBlocked: map[string]int{"js": 38, "python": 2},
+	})
+
+	out, err := run(t, cfgPath, "status")
+	if err != nil {
+		t.Fatalf("status errored: %v", err)
+	}
+	for _, want := range []string{
+		"38 finding(s) — image lacks node",
+		"2 finding(s) — image lacks python",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
 func TestStatus_StaleByTime(t *testing.T) {
 	cfgPath, _, _ := setup(t)
 	writeStatus(t, cfgPath, progress.Status{
@@ -160,6 +190,44 @@ func TestStatus_IdleStillShowsWorldState(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("idle status missing %q\n---\n%s", want, out)
 		}
+	}
+}
+
+// TestStatus_WorldStateReproBlockedRendered is the persisted-store half of
+// bugbot-14g0 acceptance 2's consumer requirement: a blocked_toolchain
+// repro_attempts row (store.BlockedToolchainCounts) must show up in the
+// world-state block even with NO live status.json at all — this is the
+// unattended-daemon-restarted-since case a live-only snapshot cannot cover.
+func TestStatus_WorldStateReproBlockedRendered(t *testing.T) {
+	cfgPath, st, _ := setup(t) // seeds one open T2 finding; writes NO status.json
+
+	// setup() closes its own store handle before returning (see its doc) so
+	// the CLI command can open a fresh one; reopen against the same DB path
+	// to seed the blocked row.
+	ctx := context.Background()
+	reopened, err := store.Open(ctx, st.Path())
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	if _, err := reopened.EnqueueRepro(ctx, "fp-blocked-status-test"); err != nil {
+		t.Fatalf("EnqueueRepro: %v", err)
+	}
+	if _, err := reopened.BlockReproAttemptOnToolchain(ctx, "fp-blocked-status-test", "js"); err != nil {
+		t.Fatalf("BlockReproAttemptOnToolchain: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, cfgPath, "status")
+	if err != nil {
+		t.Fatalf("status errored: %v", err)
+	}
+	if !strings.Contains(out, "World state:") {
+		t.Fatalf("missing World state section:\n%s", out)
+	}
+	if !strings.Contains(out, "1 finding(s) — image lacks node") {
+		t.Errorf("missing persisted blocked-toolchain line:\n%s", out)
 	}
 }
 

@@ -38,6 +38,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
@@ -98,6 +99,13 @@ type Options struct {
 	// Image overrides the sandbox's default container image for repro runs.
 	// Empty uses the sandbox backend's configured default.
 	Image string
+	// Network records the sandbox network policy applied to repro runs
+	// (config.Sandbox.Network), purely for manifest.json bookkeeping (see
+	// writeArtifacts/buildManifest) — it does NOT affect execute()'s Spec,
+	// which deliberately leaves Spec.Network unset so the run inherits the
+	// sandbox backend's own configured default (see execute's doc comment).
+	// Empty resolves to "none", the package's documented hardened default.
+	Network string
 	// ArtifactDir is the host directory under which per-finding repro bundles
 	// are written. Empty uses DefaultArtifactDir.
 	ArtifactDir string
@@ -154,6 +162,11 @@ type Options struct {
 	// locally-checked-out path dependencies that fall outside the scanned repo.
 	// Mounts are read-only with Shared=true (no SELinux :Z relabel).
 	LocalMounts []sandbox.ROMount
+	// HostToolchains are host toolchain names (resolved from the host PATH) or
+	// explicit host directories to bind-mount read-only into the sandbox and
+	// prepend to its PATH — see sandbox.ResolveHostToolchains. Independent of
+	// LocalMounts and DepStrategy; the CLI wires it to config.Sandbox.HostToolchains.
+	HostToolchains []string
 	// Capabilities is the pre-probed CapabilitySet for the sandbox image.
 	// When non-nil, the reproducer prompt enumerates available invocation
 	// modes and instructs the agent to avoid unavailable ones (e.g. -race
@@ -194,6 +207,9 @@ func (o Options) resolve() Options {
 	}
 	if o.ArtifactDir == "" {
 		o.ArtifactDir = DefaultArtifactDir
+	}
+	if o.Network == "" {
+		o.Network = "none"
 	}
 	if o.MaxParallel == 0 {
 		o.MaxParallel = DefaultMaxParallel
@@ -261,10 +277,11 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 	}
 	resolved := opts.resolve()
 	deps, err := sandbox.ResolveDeps(repoDir, sandbox.DepOptions{
-		Strategy:     resolved.DepStrategy,
-		FetchSandbox: sb,
-		FetchImage:   resolved.Image,
-		LocalMounts:  resolved.LocalMounts,
+		Strategy:       resolved.DepStrategy,
+		FetchSandbox:   sb,
+		FetchImage:     resolved.Image,
+		LocalMounts:    resolved.LocalMounts,
+		HostToolchains: resolved.HostToolchains,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("repro: resolve dependency strategy: %w", err)
@@ -313,6 +330,12 @@ type Attempt struct {
 	Plan *Plan
 	// Reason explains a non-promotion (the last failure category) for display.
 	Reason string
+	// WitnessOnly is true when Promoted is true but the detected ecosystem
+	// could not provide an execution witness for the finding's target file
+	// (see ecosystem.WitnessTable / witnessDemonstration): the finding was
+	// genuinely demonstrated, but callers must record it via the existing
+	// witness-only path (bugbot-w1bh) instead of a full Tier-1 promotion.
+	WitnessOnly bool
 }
 
 // Plan is the reproducer agent's proposal for demonstrating a bug. It is the
@@ -438,6 +461,46 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			})
 			continue
 		}
+		// Pre-launch capability gate (bugbot-14g0 fix B, acceptance 3): reject
+		// a plan whose cmd requires an ecosystem the probed CapabilitySet
+		// reports unavailable, BEFORE any sandbox launch. Feedback names the
+		// missing toolchain and the available alternatives so the agent
+		// revises toward something this image can actually run, instead of
+		// receiving a bare environment_error for a gap it already knows
+		// about (bugbot-qb4r: an agent that hits environment_error blind
+		// routes around it with a non-behavioral substitute).
+		if msg := rejectUnavailableEcosystemPlan(plan, r.capabilities); msg != "" {
+			feedback = msg
+			att.Reason = "blocked_toolchain: " + msg
+			scope.EmitEvent(progress.Event{
+				Kind:    progress.KindReproAttempt,
+				Attempt: att.Attempts, MaxAttempts: r.opts.MaxAttempts,
+				Verdict: "blocked_toolchain", Duration: time.Since(roundStart),
+			})
+			continue
+		}
+
+		// bugbot-qb4r layer (a): the cheap static plan gate. Runs BEFORE any
+		// sandbox execution — a plan whose submitted test files never reach
+		// finding.File through an executable edge (import/require/#include/
+		// use, or same-package colocation) is rejected here, without paying
+		// for a sandbox run that could never be a genuine demonstration
+		// (grep-tests, import-absence lint checks, and transliterations all
+		// stop here). Ecosystems without a static rule (bazel, unknown) are
+		// permissive; layer (b) below (witnessDemonstration) still applies
+		// to whatever DOES execute.
+		ecoName := detectEcosystem(plan.Cmd).name
+		if reason, detail := ClassifyTargetExecution(plan.Files, finding.File, ecoName); reason != "" {
+			gateVerdict := verdict{reason: reason, summary: detail, ecosystem: ecoName}
+			att.Reason = string(reason)
+			scope.EmitEvent(progress.Event{
+				Kind:    progress.KindReproAttempt,
+				Attempt: att.Attempts, MaxAttempts: r.opts.MaxAttempts,
+				Verdict: string(reason), Duration: time.Since(roundStart),
+			})
+			feedback = gateVerdict.feedback(plan)
+			continue
+		}
 
 		res, serr := r.execute(ctx, plan)
 		if serr != nil {
@@ -448,6 +511,15 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		}
 
 		verdict := interpret(res, plan.Cmd)
+		if verdict.demonstrated {
+			// bugbot-qb4r layer (b): the execution witness. Only meaningful
+			// once interpret() has already found ran-evidence; this either
+			// leaves the verdict untouched (witness found), downgrades it to
+			// the non-promoting target_not_executed reason (ecosystem can
+			// witness but didn't), or marks witnessOnly (ecosystem cannot
+			// witness at all — repro-as-evidence, not repro-as-promotion).
+			verdict = witnessDemonstration(verdict, combinedOutput(res), finding.File)
+		}
 		att.Output = verdict.summary
 
 		roundVerdict := string(verdict.reason)
@@ -466,7 +538,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		})
 
 		if verdict.demonstrated {
-			path, werr := writeArtifacts(r.opts.ArtifactDir, finding, plan, res)
+			path, werr := writeArtifacts(r.opts.ArtifactDir, finding, plan, res, r.opts.Image, r.opts.Network)
 			if werr != nil {
 				return nil, fmt.Errorf("repro: write artifacts for finding %s: %w", finding.ID, werr)
 			}
@@ -474,6 +546,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			att.ArtifactPath = path
 			att.Plan = plan
 			att.Reason = ""
+			att.WitnessOnly = verdict.witnessOnly
 			return att, nil
 		}
 
@@ -589,8 +662,25 @@ func readOnlyTools(dir string) ([]agent.Tool, error) {
 }
 
 // execute runs a plan in the sandbox with the stage's network/timeout/image
-// policy.
+// policy. network is intentionally left unset so the run inherits the
+// sandbox's configured default (sandbox.network in bugbot.yaml, applied via
+// the CLI's sandboxRunOpts) — see buildSpec's doc comment. Replay (see
+// replay.go) calls buildSpec directly with an explicit "none" instead, since
+// it re-runs a saved bundle rather than an agent-proposed plan.
 func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, error) {
+	return r.sb.Exec(ctx, buildSpec(r.repoDir, plan, r.opts.Image, "", r.opts.Timeout, r.deps))
+}
+
+// buildSpec renders plan into a sandbox.Spec against repoDir, applying the
+// same dependency-mount plumbing (ROMounts/Env/SetupCmds) and structured-
+// output rewrite every repro sandbox run needs, regardless of whether the
+// plan came from a live reproducer agent (execute, network deliberately
+// left "" to inherit the backend's configured default) or a saved bundle
+// being replayed (Replay, network forced to "none" — see replay.go). This is
+// the ONE workspace-reconstruction path both callers share, so a replay
+// genuinely re-runs what the official Attempt path would have run, not a
+// parallel reimplementation of it.
+func buildSpec(repoDir string, plan *Plan, image, network string, timeout time.Duration, deps sandbox.Resolution) sandbox.Spec {
 	files := make(map[string][]byte, len(plan.Files))
 	for path, content := range plan.Files {
 		files[path] = []byte(content)
@@ -603,26 +693,21 @@ func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, e
 	// feedback use, and the rewrite is a harness-owned implementation detail
 	// the agent never needs to see.
 	cmd, captures := normalizeCmdForStructuredOutput(plan.Cmd)
-	spec := sandbox.Spec{
-		RepoDir: r.repoDir,
-		Cmd:     cmd,
-		Image:   r.opts.Image,
-		// Network is intentionally left unset so the run inherits the sandbox's
-		// configured default (sandbox.network in bugbot.yaml, applied via the CLI's
-		// sandboxRunOpts). Forcing "none" here defeated repos whose build must
-		// fetch dependencies at configure time (e.g. CMake FetchContent of
-		// googletest/SDL), which can only resolve when network=host is configured.
-		Timeout:    r.opts.Timeout,
+	return sandbox.Spec{
+		RepoDir:    repoDir,
+		Cmd:        cmd,
+		Image:      image,
+		Network:    network,
+		Timeout:    timeout,
 		WriteFiles: files,
 		// Dependency strategy: mount a module cache read-only and/or set GOFLAGS
 		// so the network-none run can resolve external modules. SetupCmds installs
 		// non-Go ecosystem packages from the mounted cache before Cmd runs.
-		ROMounts:     r.deps.ROMounts,
-		Env:          r.deps.Env,
-		SetupCmds:    r.deps.SetupCmds,
+		ROMounts:     deps.ROMounts,
+		Env:          deps.Env,
+		SetupCmds:    deps.SetupCmds,
 		CaptureFiles: captures,
 	}
-	return r.sb.Exec(ctx, spec)
 }
 
 // bareShellOps is the set of shell control tokens that mean nothing to a
@@ -685,6 +770,66 @@ func validatePlan(p *Plan, repoDir string) error {
 		}
 	}
 	return validateReproCmd(p.Cmd)
+}
+
+// gatedEcosystems is the ordered set of ecosystem.BaseMode-gated ecosystems
+// (see ecosystem.InferFromCmd/BaseMode) consulted for both the "available
+// alternatives" list in rejectUnavailableEcosystemPlan and any future
+// diagnostic that wants to enumerate what a probed image can run.
+var gatedEcosystems = []ecosystem.Ecosystem{ecosystem.EcosystemJS, ecosystem.EcosystemPython, ecosystem.EcosystemRust}
+
+// rejectUnavailableEcosystemPlan checks plan.Cmd against caps and returns
+// revision feedback naming the missing toolchain and the available
+// alternatives, or "" when the plan should proceed to a sandbox launch —
+// either ecosystem.InferFromCmd found no gated ecosystem requirement (e.g.
+// "go test", "make", or any command this function does not recognize), caps
+// is nil (no probe available), or the required ecosystem IS available.
+//
+// This is the pre-launch half of bugbot-14g0's capability gate (fix B,
+// acceptance 3): promote.go's gateEcosystem gates on the FINDING's inferred
+// ecosystem before a claim even happens; this gates on the PLAN's actual cmd
+// right before the sandbox would launch it, catching a plan that (for
+// whatever reason) targets a different toolchain than the finding's file
+// extension implied.
+func rejectUnavailableEcosystemPlan(p *Plan, caps sandbox.CapabilitySet) string {
+	if caps == nil {
+		return ""
+	}
+	eco := ecosystem.InferFromCmd(p.Cmd)
+	if eco == "" {
+		return ""
+	}
+	mode := ecosystem.BaseMode(eco)
+	if mode == "" || caps.Available(eco, mode) {
+		return ""
+	}
+
+	var alts []string
+	for _, alt := range gatedEcosystems {
+		if alt == eco {
+			continue
+		}
+		if m := ecosystem.BaseMode(alt); m != "" && caps.Available(alt, m) {
+			alts = append(alts, alt)
+		}
+	}
+
+	if len(alts) == 0 {
+		return fmt.Sprintf(
+			"Your plan's command requires %s, which this sandbox image does not have, and no alternative "+
+				"toolchain (js/python/rust) is available either. Do NOT substitute a non-behavioral test in a "+
+				"different language or grep for the pattern — that does not demonstrate the bug. Set cmd to a "+
+				"command this image can actually run, or omit a cmd change and report the environment gap in expect.",
+			eco,
+		)
+	}
+	return fmt.Sprintf(
+		"Your plan's command requires %s, which this sandbox image does not have. Available alternative "+
+			"toolchains in this image: %s. If the bug is only observable via %s, do NOT substitute a "+
+			"non-behavioral test in another language — revise cmd to use one of the available toolchains only "+
+			"if the bug is genuinely reproducible that way; otherwise report the environment gap in expect.",
+		eco, strings.Join(alts, ", "), eco,
+	)
 }
 
 // validateReproFilePath is the per-file structural gate shared by validatePlan

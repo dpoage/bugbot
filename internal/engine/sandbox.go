@@ -80,7 +80,6 @@ func newConfiguredSandbox(cfg config.Config) (sandbox.Sandbox, error) {
 			opts = append(opts,
 				sandbox.WithBwrapToolchainBinds(res.Mounts),
 				sandbox.WithBwrapToolchainPath(res.PathPrepend),
-				sandbox.WithBwrapCapabilityFingerprint(res.CapabilityKey()),
 			)
 		}
 		return sandbox.NewBwrap(opts...)
@@ -90,17 +89,6 @@ func newConfiguredSandbox(cfg config.Config) (sandbox.Sandbox, error) {
 		return nil, fmt.Errorf("no container runtime found on PATH (tried podman, docker)")
 	}
 	return sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(cfg)...)
-}
-
-// sandboxCapabilityKey returns the ProbeCapabilities cache key for sb: the
-// bwrap backend's host-toolchain fingerprint when sb is a *Bwrap (so a probe
-// result never survives a toolchain change it never observed — acceptance
-// criterion 5), or cfg.Sandbox.Image for the container backend (unchanged).
-func sandboxCapabilityKey(sb sandbox.Sandbox, cfg config.Config) string {
-	if fp, ok := sb.(interface{ CapabilityFingerprint() string }); ok {
-		return fp.CapabilityFingerprint()
-	}
-	return cfg.Sandbox.Image
 }
 
 // SandboxRemediationHint returns the doctor-facing remediation suggestion for
@@ -266,4 +254,35 @@ func localMountsFromConfig(cfg config.Config) []sandbox.ROMount {
 		mounts[i] = sandbox.ROMount{HostPath: m.Host, ContainerPath: m.Container, Shared: true}
 	}
 	return mounts
+}
+
+// SandboxRunOpts is the exported wrapper for sandboxRunOpts, for callers
+// outside engine that build their own sandbox.CLI against the app's shared
+// config-derived defaults (e.g. `bugbot bundle replay`, internal/cli/bundle.go)
+// without going through engine.Open/BuildReproducer.
+func SandboxRunOpts(cfg config.Config) []sandbox.Option { return sandboxRunOpts(cfg) }
+
+// LocalMountsFromConfig is the exported wrapper for localMountsFromConfig,
+// for the same external callers as SandboxRunOpts.
+func LocalMountsFromConfig(cfg config.Config) []sandbox.ROMount { return localMountsFromConfig(cfg) }
+
+// hostToolchainProbeInputs resolves cfg.Sandbox.HostToolchains into the
+// ROMounts/Env pair ProbeCapabilities needs to see a mounted host toolchain
+// (bugbot-14g0 acceptance 4). It duplicates the resolution repro.New performs
+// internally via DepOptions.HostToolchains — cheap, deterministic, host-only
+// filesystem/PATH work with no side effects — because the capability probe
+// must run BEFORE repro.New exists (its result feeds repro.Options.Capabilities).
+func hostToolchainProbeInputs(cfg config.Config) ([]sandbox.ROMount, []string) {
+	if len(cfg.Sandbox.HostToolchains) == 0 {
+		return nil, nil
+	}
+	tc, err := sandbox.ResolveHostToolchains(cfg.Sandbox.HostToolchains)
+	if err != nil || len(tc.Mounts) == 0 {
+		return nil, nil
+	}
+	var env []string
+	if tc.PathPrepend != "" {
+		env = []string{"PATH=" + tc.PathPrepend + ":" + sandbox.DefaultContainerPath}
+	}
+	return tc.Mounts, env
 }

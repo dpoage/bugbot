@@ -1,6 +1,12 @@
 package progress
 
-import "time"
+import (
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/dpoage/bugbot/internal/ecosystem"
+)
 
 // EventSink consumes progress events. Implementations MUST treat Handle as a passive
 // observation: it must never block the caller for long, never panic, and never
@@ -25,6 +31,40 @@ func Emit(sink EventSink, ev Event) {
 		ev.Time = time.Now()
 	}
 	sink.Handle(ev)
+}
+
+// EmitReproBlocked emits one KindReproBlocked event per ecosystem in counts,
+// sorted by ecosystem name for deterministic ordering, each carrying that
+// ecosystem's count and a human-readable Message ("N finding(s) blocked:
+// image lacks node"). The Message names the actual missing BINARY
+// (ecosystem.BaseMode, e.g. "node" for the "js" ecosystem key) rather than the
+// internal ecosystem key, since that is what an operator needs to go install.
+// A nil/empty counts or a nil sink is a no-op (Emit already handles the
+// nil-sink case; the empty-counts check just avoids the sort). This is the
+// single emission point for the bugbot-14g0 acceptance-2 aggregate, shared by
+// every producer (CLI `bugbot repro`, scan catch-up, and the daemon's
+// post-cycle/backlog promotion) so status.json and the log renderers see the
+// same event shape regardless of which caller fired it.
+func EmitReproBlocked(sink EventSink, counts map[string]int) {
+	if len(counts) == 0 {
+		return
+	}
+	ecos := make([]string, 0, len(counts))
+	for eco := range counts {
+		ecos = append(ecos, eco)
+	}
+	sort.Strings(ecos)
+	for _, eco := range ecos {
+		n := counts[eco]
+		binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
+		if binary == "" {
+			binary = eco
+		}
+		Emit(sink, Event{
+			Kind: KindReproBlocked, Label: eco, Count: n,
+			Message: fmt.Sprintf("%d finding(s) blocked: image lacks %s", n, binary),
+		})
+	}
 }
 
 // SinkFunc adapts a plain function to the EventSink interface.

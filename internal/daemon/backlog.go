@@ -105,6 +105,7 @@ func (d *Daemon) runReproBacklog(ctx context.Context) {
 		"attempted", summary.Attempted,
 		"promoted", summary.Promoted,
 	)
+	d.emitReproBlocked(ctx)
 
 	// Touch findings that were attempted but not promoted so their updated_at
 	// advances. OpenBacklog orders oldest-first, so these failures move to the

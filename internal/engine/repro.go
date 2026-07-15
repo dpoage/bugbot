@@ -5,14 +5,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/daemon"
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
+	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
@@ -76,18 +79,39 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 	if err != nil {
 		return nil, fmt.Errorf("build sandbox: %w", err)
 	}
-	// Probe image capabilities once; result is cached per image so repeated
-	// daemon restarts or re-calls to BuildReproducer are free.
-	caps := sandbox.ProbeCapabilities(ctx, sb, sandboxCapabilityKey(sb, *cfg), repoRoot)
+	r, err := buildReproducerWithSandbox(ctx, cfg, st, repoRoot, sb, prog, client)
+	if err != nil {
+		return nil, err
+	}
+	return &ReproDeps{Client: client, Repro: r, Sb: sb, Spend: rec}, nil
+}
+
+// buildReproducerWithSandbox builds a repro.Reproducer against a caller-supplied
+// Sandbox (the container CLI backend for every normal path, or
+// sandbox.NewHostExec() for the bugbot-14g0 fix-C attended escape hatch —
+// see Dispatcher.reproOne). Factored out of BuildReproducer so the escape
+// hatch reuses the exact same Options wiring (host toolchains, capability
+// probing, dep strategy, ...) instead of a second, drift-prone copy.
+func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot string, sb sandbox.Sandbox, prog progress.EventSink, client llm.Client) (*repro.Reproducer, error) {
+	// Probe image capabilities once; result is cached per image+mounts+env so
+	// repeated daemon restarts or re-calls to BuildReproducer are free. Host
+	// toolchain mounts are threaded through so a mounted toolchain shows up as
+	// available (bugbot-14g0 acceptance 4). Against HostExec this probes the
+	// operator's own host directly — cfg.Sandbox.Image is irrelevant there but
+	// harmless as a cache-key component (HostExec has no image concept).
+	probeMounts, probeEnv := hostToolchainProbeInputs(*cfg)
+	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, repoRoot, probeMounts, probeEnv)
 	r, err := repro.New(client, sb, repoRoot, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
 		Image:            cfg.Sandbox.Image,
+		Network:          cfg.Sandbox.Network,
 		PatchProver:      cfg.Repro.PatchProver,
 		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
 		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
 		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 		SetupCmds:        cfg.Sandbox.SetupCmds,
 		LocalMounts:      localMountsFromConfig(*cfg),
+		HostToolchains:   cfg.Sandbox.HostToolchains,
 		Capabilities:     caps,
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
@@ -101,7 +125,7 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer: %w", err)
 	}
-	return &ReproDeps{Client: client, Repro: r, Sb: sb, Spend: rec}, nil
+	return r, nil
 }
 
 // buildReproHookForScan constructs the in-run reproducer hook when --repro is
@@ -165,18 +189,22 @@ func buildReproHookForScan(
 	if rErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer client: %w", rErr)
 	}
-	// Probe image capabilities once; result is cached per image so
-	// subsequent daemon cycles and parallel scan runs are free.
-	caps := sandbox.ProbeCapabilities(ctx, sb, sandboxCapabilityKey(sb, cfg), opts.Target)
+	// Probe image capabilities once; result is cached per image+mounts+env so
+	// subsequent daemon cycles and parallel scan runs are free. Host toolchain
+	// mounts are threaded through so a mounted toolchain shows up as available.
+	probeMounts, probeEnv := hostToolchainProbeInputs(cfg)
+	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, opts.Target, probeMounts, probeEnv)
 	r, rNewErr := repro.New(reproClient, sb, opts.Target, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
 		Image:            cfg.Sandbox.Image,
+		Network:          cfg.Sandbox.Network,
 		PatchProver:      cfg.Repro.PatchProver,
 		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
 		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
 		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 		SetupCmds:        cfg.Sandbox.SetupCmds,
 		LocalMounts:      localMountsFromConfig(cfg),
+		HostToolchains:   cfg.Sandbox.HostToolchains,
 		Capabilities:     caps,
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
@@ -243,12 +271,41 @@ func runReproCatchUp(ctx context.Context, out io.Writer, r *repro.Reproducer, st
 	}
 
 	_, _ = fmt.Fprintf(out, "\nReproduce catch-up: %d finding(s) not yet attempted...\n", len(pending))
+	emitReproBlocked(out, nil, r.SummarizeBlocked(pending))
 	summary, err := r.PromoteAll(ctx, st, pending)
 	if err != nil {
 		return fmt.Errorf("reproduce catch-up: %w", err)
 	}
 	printReproSummary(out, summary)
 	return nil
+}
+
+// emitReproBlocked prints the bugbot-14g0 acceptance-2 stage-start aggregate
+// to out ("N finding(s) blocked: image lacks X", one line per missing
+// ecosystem's actual binary, sorted for determinism) and delegates the
+// event side to progress.EmitReproBlocked, which emits a KindReproBlocked
+// event per ecosystem so a running daemon's status.json (and any other
+// progress sink) carries the same aggregate with the same wording. A
+// nil/empty blocked map is a silent no-op — nothing was blocked, nothing to
+// report. sink may be nil (e.g. the scan catch-up drain, whose progress sink
+// belongs to the funnel stages, not the repro backlog preview).
+func emitReproBlocked(out io.Writer, sink progress.EventSink, blocked map[string]int) {
+	if len(blocked) == 0 {
+		return
+	}
+	ecos := make([]string, 0, len(blocked))
+	for eco := range blocked {
+		ecos = append(ecos, eco)
+	}
+	sort.Strings(ecos)
+	for _, eco := range ecos {
+		binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
+		if binary == "" {
+			binary = eco
+		}
+		_, _ = fmt.Fprintf(out, "%d finding(s) blocked: image lacks %s\n", blocked[eco], binary)
+	}
+	progress.EmitReproBlocked(sink, blocked)
 }
 
 // printReproSummary renders the promotion outcome. Shared by the scan
@@ -259,6 +316,20 @@ func printReproSummary(out io.Writer, s *repro.Summary) {
 	if s.FixWitnessed > 0 || s.NeedsHuman > 0 {
 		_, _ = fmt.Fprintf(out, "Patch-prover: %d fix-witnessed (T0), %d needs-human\n",
 			s.FixWitnessed, s.NeedsHuman)
+	}
+	if s.BlockedToolchain > 0 {
+		ecos := make([]string, 0, len(s.BlockedByEcosystem))
+		for eco := range s.BlockedByEcosystem {
+			ecos = append(ecos, eco)
+		}
+		sort.Strings(ecos)
+		for _, eco := range ecos {
+			binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
+			if binary == "" {
+				binary = eco
+			}
+			_, _ = fmt.Fprintf(out, "Blocked toolchain: %d finding(s) — image lacks %s\n", s.BlockedByEcosystem[eco], binary)
+		}
 	}
 	for _, o := range s.PerFinding {
 		if o.FixWitnessed {
@@ -288,6 +359,18 @@ type ReproOpts struct {
 	// CLI-owned live pane can clear its in-place status lines first. Safe to
 	// call multiple times.
 	StopProgress func()
+	// FindingID, when non-empty, switches Repro from the backlog batch drain
+	// to a single-finding attended rerun of the finding with this exact id or
+	// unambiguous id prefix (resolved via report.ResolveID). Required for
+	// Unsandboxed (bugbot-14g0 fix C: the escape hatch is single-finding only).
+	FindingID string
+	// Unsandboxed opts into the fix-C attended escape hatch: the finding
+	// named by FindingID runs directly on the host (sandbox.HostExec) against
+	// a workspace copy, with no container isolation. Refused with an error
+	// unless FindingID is also set — this is what keeps the escape hatch out
+	// of the backlog batch path and, structurally, out of the daemon (which
+	// never calls Dispatcher.Repro at all; see daemon.promoteNewFindings).
+	Unsandboxed bool
 }
 
 // ReproResult is the outcome of a Dispatcher.Repro call.
@@ -304,6 +387,16 @@ type ReproResult struct {
 // findings to Tier-1 (or Tier-0 when the patch-prover witnesses a fix). This
 // is the same backlog logic the daemon runs on its periodic backlog timer.
 func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, error) {
+	// Hard refusal (bugbot-14g0 fix C): the unsandboxed escape hatch is
+	// single-finding-attended only. Without FindingID this call is the
+	// backlog batch drain — exactly the unattended path the escape hatch must
+	// never reach — so refuse loudly rather than silently ignoring the flag.
+	if opts.Unsandboxed && opts.FindingID == "" {
+		return nil, fmt.Errorf(
+			"repro: --unsandboxed requires a single finding id (e.g. `bugbot repro <finding-id> --unsandboxed`); " +
+				"it is refused for the backlog batch path")
+	}
+
 	// main's `bugbot repro` had no advisory-lock gate at all — it opened the
 	// store (flock) and proceeded unconditionally. force=true here is the
 	// faithful translation: checkScanLock's heuristic never refuses, so a
@@ -335,6 +428,12 @@ func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, e
 		return nil, err
 	}
 	opts.Target = repo.Root()
+	// Single-finding attended path (opts.FindingID set): resolve one finding
+	// and run it, sandboxed or unsandboxed (bugbot-14g0 fix C), instead of
+	// draining the backlog. Diverges completely from the batch path below.
+	if opts.FindingID != "" {
+		return d.reproOne(ctx, opts, cfg, st, out)
+	}
 
 	// --max overrides the config default; 0 means "use config".
 	batchSize := cfg.Repro.BacklogBatch
@@ -401,6 +500,11 @@ func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, e
 		_, _ = fmt.Fprintf(out, "Transcripts: %s\n", cfg.Repro.TranscriptDir)
 	}
 
+	// Stage-start aggregate (bugbot-14g0 acceptance 2): a zero-container
+	// preview against the already-probed CapabilitySet, printed to CLI
+	// output AND emitted as progress events (status.json via d.sink) BEFORE
+	// any per-finding claim/attempt happens.
+	emitReproBlocked(out, d.sink, rd.Repro.SummarizeBlocked(batch))
 	summary, err := rd.Repro.PromoteAll(ctx, st, batch)
 	if err != nil {
 		return nil, fmt.Errorf("reproduce: %w", err)
@@ -415,5 +519,98 @@ func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, e
 	// queue on the next run, preventing unbounded retries on the same
 	// unreproducible findings.
 	daemon.TouchBacklogFailures(ctx, st, slog.Default(), batch)
+	return &ReproResult{Summary: summary}, nil
+}
+
+// reproOne implements the bugbot-14g0 fix-C single-finding attended path:
+// resolve exactly one finding (by id or unambiguous id prefix) and run it
+// through the reproducer, either sandboxed (the normal container backend) or,
+// with opts.Unsandboxed, via sandbox.HostExec — directly on the host against
+// a workspace copy, never the live checkout. The unsandboxed choice is
+// recorded on the finding's repro_attempts row via MarkReproAttemptUnsandboxed
+// regardless of outcome, so a T1 promoted this way is distinguishable
+// (acceptance 5). Dispatcher.Repro's opt-in gate (opts.Unsandboxed requires
+// opts.FindingID) and its structural separation from the daemon's own
+// PromoteAll call site (daemon.promoteNewFindings never reaches here) are
+// what keep this path out of every unattended flow.
+func (d *Dispatcher) reproOne(ctx context.Context, opts ReproOpts, cfg config.Config, st *store.Store, out io.Writer) (*ReproResult, error) {
+	fnd, err := report.ResolveID(ctx, st, opts.FindingID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve finding %q: %w", opts.FindingID, err)
+	}
+
+	if opts.TranscriptDir != "" {
+		cfg.Repro.TranscriptDir = opts.TranscriptDir
+	}
+
+	var sb sandbox.Sandbox
+	if opts.Unsandboxed {
+		_, _ = fmt.Fprintf(out,
+			"\n!!! UNSANDBOXED: %q will run DIRECTLY ON THE HOST (workspace copy, no container isolation, "+
+				"full network access, your OS user's privileges). Proceed only if you are attended and trust "+
+				"this repro's command. !!!\n\n", fnd.Title)
+		sb = sandbox.NewHostExec()
+	} else {
+		runtime, ok := sandbox.Detect()
+		if !ok {
+			_, _ = fmt.Fprintln(out, "Repro skipped: no container runtime (podman/docker) found on PATH.")
+			return &ReproResult{Skipped: "no container runtime"}, nil
+		}
+		var cerr error
+		sb, cerr = sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(cfg)...)
+		if cerr != nil {
+			return nil, fmt.Errorf("build sandbox: %w", cerr)
+		}
+	}
+	if cliSb, ok := sb.(*sandbox.CLI); ok {
+		defer func() { _ = cliSb.Close() }()
+	}
+
+	rec := newLedgerRecorder(ctx, st)
+	client, err := config.ResolveRole(ctx, &cfg, "reproducer", llm.Options{Recorder: rec})
+	if err != nil {
+		return nil, fmt.Errorf("build reproducer client: %w", err)
+	}
+	r, err := buildReproducerWithSandbox(ctx, &cfg, st, opts.Target, sb, d.sink, client)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close() //nolint:errcheck
+
+	outcome, err := r.PromoteOne(ctx, st, fnd)
+	// Record the unsandboxed provenance flag regardless of outcome/error: the
+	// attempt (or blocked/skip decision) still ran unsandboxed. EnqueueRepro
+	// inside PromoteOne/promoteOne has already ensured the row exists by now.
+	if opts.Unsandboxed {
+		if merr := st.MarkReproAttemptUnsandboxed(ctx, fnd.Fingerprint); merr != nil {
+			_, _ = fmt.Fprintf(out, "warning: failed to record unsandboxed provenance: %v\n", merr)
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reproduce %s: %w", fnd.Title, err)
+	}
+	if opts.StopProgress != nil {
+		opts.StopProgress()
+	}
+
+	summary := &repro.Summary{PerFinding: []repro.FindingOutcome{*outcome}}
+	switch {
+	case outcome.BlockedToolchain:
+		summary.BlockedToolchain = 1
+		summary.BlockedByEcosystem = map[string]int{outcome.MissingEcosystem: 1}
+	case outcome.Skipped:
+		summary.Skipped = 1
+	default:
+		summary.Attempted = 1
+		switch {
+		case outcome.Promoted:
+			summary.Promoted = 1
+		case outcome.Witnessed:
+			summary.Witnessed = 1
+		default:
+			summary.Failed = 1
+		}
+	}
+	printReproSummary(out, summary)
 	return &ReproResult{Summary: summary}, nil
 }

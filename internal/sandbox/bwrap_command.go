@@ -182,14 +182,14 @@ func buildBwrapArgs(p bwrapParams) []string {
 	// to the shell's compiled-in default path, which never includes resolved
 	// toolchain directories. toolchainPathPrepend (from the host-toolchain
 	// resolver's PathPrepend) goes first so resolved toolchains shadow any
-	// same-named binary under the fixed allowlist; defaultContainerPath (same
+	// same-named binary under the fixed allowlist; DefaultContainerPath (same
 	// constant the container backend's toolchain wiring uses) is always the
 	// tail so plain allowlisted binaries stay reachable even with no
 	// toolchains configured. p.env is applied after this, so an operator who
 	// sets PATH explicitly in Spec.Env still wins.
-	path := defaultContainerPath
+	path := DefaultContainerPath
 	if p.toolchainPathPrepend != "" {
-		path = p.toolchainPathPrepend + ":" + defaultContainerPath
+		path = p.toolchainPathPrepend + ":" + DefaultContainerPath
 	}
 	args = append(args, "--setenv", "PATH", path)
 

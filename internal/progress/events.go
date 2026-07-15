@@ -152,6 +152,16 @@ const (
 	// KindAgentFinished pair — see repro.go's scope.EmitEvent), Attempt,
 	// MaxAttempts, Verdict, Duration.
 	KindReproAttempt Kind = "repro_attempt"
+	// KindReproBlocked reports the claim-time capability gate's stage-start
+	// aggregate (bugbot-14g0 acceptance 2): one event per missing ecosystem,
+	// emitted BEFORE PromoteAll runs so the operator sees "N findings
+	// blocked: image lacks node" without waiting for any per-finding sandbox
+	// run — the underlying count comes from a zero-container preview
+	// (repro.Reproducer.SummarizeBlocked) or the persisted queue state
+	// (store.BlockedToolchainCounts).
+	// Fields: Label (missing ecosystem name), Count (number of findings
+	// blocked on it), Message (human-readable summary line).
+	KindReproBlocked Kind = "repro_blocked"
 )
 
 // Stage names the pipeline stage an event belongs to. Kept as plain strings so

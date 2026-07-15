@@ -1,0 +1,4 @@
+{
+  "reason": "target_not_executed",
+  "description": "asserts main.py's source text does not contain a threading primitive (import-absence lint) — never imports/executes main.py, so no race is demonstrated"
+}

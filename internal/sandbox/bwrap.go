@@ -93,8 +93,11 @@ func probeBwrapUserns(bwrapPath string) error {
 // workspace and launches its own bwrap process.
 //
 // Spec.Image is meaningless here — there is no image to select — so it is
-// ignored; ProbeCapabilities callers should key the probe cache on a
-// host-toolchain fingerprint instead (see CapabilityFingerprint).
+// ignored; ProbeCapabilities callers should key the probe cache on the
+// resolved host-toolchain mounts/env instead (see
+// engine.hostToolchainProbeInputs and ProbeCapabilities' mounts/env cache
+// key), the same mechanism used to key a mounted toolchain for the
+// container backend.
 type Bwrap struct {
 	bwrapPath          string
 	defaultCPUs        float64
@@ -116,10 +119,6 @@ type Bwrap struct {
 	// PathPrepend) for the same resolution that produced toolchainBinds;
 	// see bwrapParams.toolchainPathPrepend for how it reaches buildBwrapArgs.
 	toolchainPathPrepend string
-	// capabilityFingerprint identifies the host-toolchain state this backend
-	// was constructed against, for ProbeCapabilities cache keying — the bwrap
-	// analogue of the container backend's image string.
-	capabilityFingerprint string
 	// wsCache is the pristine-materialization cache backing prepareWorkspace,
 	// shared with the CLI backend via prepareWorkspaceCached (workspace.go).
 	wsCache wsCache
@@ -184,15 +183,6 @@ func WithBwrapToolchainPath(prepend string) BwrapOption {
 	return func(s *Bwrap) { s.toolchainPathPrepend = prepend }
 }
 
-// WithBwrapCapabilityFingerprint sets the cache key ProbeCapabilities should
-// use for this backend's probe results, in place of an image string. Callers
-// derive it from the resolved host toolchains (see the host-toolchain
-// resolver's fingerprint output) so a probe result never survives a
-// toolchain change it never actually observed.
-func WithBwrapCapabilityFingerprint(fp string) BwrapOption {
-	return func(s *Bwrap) { s.capabilityFingerprint = fp }
-}
-
 // NewBwrap constructs a Bwrap sandbox. It fails fast with the same
 // actionable reasons as DetectBwrap when the backend is not usable on this
 // host, so a misconfigured `sandbox.backend: bwrap` is caught at
@@ -240,11 +230,6 @@ func (s *Bwrap) MaterializeWorkspace(repoDir string) (string, error) {
 	ws, _, err := prepareWorkspaceCached(&s.wsCache, repoDir, nil)
 	return ws, err
 }
-
-// CapabilityFingerprint returns the host-toolchain fingerprint this backend
-// was constructed with, for ProbeCapabilities cache keying (see Spec.Image's
-// role in the container backend's probe cache).
-func (s *Bwrap) CapabilityFingerprint() string { return s.capabilityFingerprint }
 
 // Limits returns the effective resource caps the backend applies to a Spec
 // that does not override them, mirroring CLI.Limits.

@@ -259,16 +259,23 @@ type Sandbox struct {
 	// Default false: bwrap Exec fails with an actionable error instead of
 	// silently running uncapped (see internal/sandbox/bwrap_caps.go).
 	AllowUncapped bool `yaml:"allow_uncapped"`
-	// HostToolchains lists toolchains (bare PATH names, e.g. "node", "cargo")
-	// or explicit absolute directories to resolve on the HOST and bind
-	// read-only into the bwrap sandbox on top of fixedROAllowlist (see
-	// internal/sandbox/toolchain.go's ResolveHostToolchains). Ignored by the
-	// container backend, which provisions toolchains via the baked image
-	// instead. Each resolved entry also contributes to the sandbox's PATH and
-	// to the ProbeCapabilities cache key (see CapabilityFingerprint), so a
-	// probe result never survives a host toolchain change it never observed.
-	// Empty by default — bwrap runs with only the fixed allowlist until an
-	// operator opts a toolchain in.
+	// HostToolchains is an ordered list of host toolchain names (resolved from
+	// the host's PATH, following symlink closures — see
+	// sandbox.ResolveHostToolchains) or explicit host directories, mounted
+	// read-only into the sandbox and prepended to its PATH. Use this when the
+	// sandbox image lacks a toolchain the host already has (e.g. a bazel-only
+	// image reproducing a TypeScript finding needs "node"): the mounted
+	// toolchain then shows up as available in the probed CapabilitySet and in
+	// the reproducer agent's capability prompt.
+	//
+	// Same security posture as LocalMounts (see its doc and the ROMount
+	// package doc): READ-ONLY, and only ever exposes public toolchain
+	// content — never point an entry at a directory containing secrets.
+	//
+	// PATH override: when any entry resolves, the container's PATH is set to
+	// the resolved toolchain bin dir(s) followed by a standard fallback (see
+	// sandbox.DefaultContainerPath) — this REPLACES, not appends to, whatever
+	// PATH the image itself would otherwise have set.
 	HostToolchains []string `yaml:"host_toolchains"`
 }
 
@@ -1037,6 +1044,24 @@ func (c *Config) Validate() error {
 		seen[m.Container] = true
 		if info, err := os.Stat(m.Host); err != nil || !info.IsDir() {
 			return fmt.Errorf("config: sandbox.local_mounts[%d].host %q must be an existing directory", i, m.Host)
+		}
+	}
+	for i, name := range c.Sandbox.HostToolchains {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			return fmt.Errorf("config: sandbox.host_toolchains[%d] must not be empty", i)
+		}
+		// Bare names (e.g. "node") are resolved from the host's PATH at
+		// repro-run time (ResolveHostToolchains) — the machine running
+		// `bugbot config validate` may not be the machine that runs the
+		// sandbox, so no host lookup happens here, only structural
+		// validation. An explicit directory entry, however, names a fixed
+		// path the operator committed to, so it is checked the same way
+		// sandbox.local_mounts[i].host is: it must exist now.
+		if filepath.IsAbs(trimmed) {
+			if info, err := os.Stat(trimmed); err != nil || !info.IsDir() {
+				return fmt.Errorf("config: sandbox.host_toolchains[%d] %q must be an existing directory", i, trimmed)
+			}
 		}
 	}
 

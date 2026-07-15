@@ -36,6 +36,103 @@ func fakeToolchainHost(t *testing.T, name string) (root, shimDir string) {
 	return root, shimDir
 }
 
+// TestResolveHostToolchains_RefusesHomeBinAscent guards against over-mounting
+// $HOME when a toolchain lives directly at $HOME/bin/<name> (a common manual
+// install layout): ascending past bin/ here would RO-mount the ENTIRE home
+// directory (SSH keys, git credentials, unrelated dotfiles) into the sandbox.
+// The mount must stay narrowed to the bin/ directory itself.
+func TestResolveHostToolchains_RefusesHomeBinAscent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("HOME/bin layout assumed POSIX")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	binDir := filepath.Join(home, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(binDir, "fakenode")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho fake-node version 9.9.9\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	res, err := ResolveHostToolchains([]string{"fakenode"})
+	if err != nil {
+		t.Fatalf("ResolveHostToolchains: %v", err)
+	}
+	if len(res.Mounts) != 1 {
+		t.Fatalf("want 1 mount, got %d: %+v", len(res.Mounts), res.Mounts)
+	}
+	if res.Mounts[0].HostPath != binDir {
+		t.Errorf("mount HostPath = %q, want the narrow bin dir %q (must NOT ascend to $HOME %q)",
+			res.Mounts[0].HostPath, binDir, home)
+	}
+}
+
+// TestResolveHostToolchains_RefusesLocalBinAscent covers the ~/.local/bin/<name>
+// layout the same way.
+func TestResolveHostToolchains_RefusesLocalBinAscent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("~/.local/bin layout assumed POSIX")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	localDir := filepath.Join(home, ".local")
+	binDir := filepath.Join(localDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(binDir, "fakenode")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho fake-node version 9.9.9\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	res, err := ResolveHostToolchains([]string{"fakenode"})
+	if err != nil {
+		t.Fatalf("ResolveHostToolchains: %v", err)
+	}
+	if len(res.Mounts) != 1 || res.Mounts[0].HostPath != binDir {
+		t.Fatalf("mount HostPath = %+v, want the narrow bin dir %q (must NOT ascend to ~/.local %q)",
+			res.Mounts, binDir, localDir)
+	}
+}
+
+// TestResolveHostToolchains_StillAscendsForNarrowVersionedRoot verifies the
+// guard does NOT block the legitimate nvm/asdf case: ascending out of a
+// bin/ directory that sits under a narrow, versioned toolchain root (not
+// $HOME or a broad catch-all) still happens, exactly as
+// TestResolveHostToolchains_SymlinkClosure already pins — this test just
+// makes the "guard does not over-trigger" property explicit against a
+// $HOME-adjacent-but-not-equal path.
+func TestResolveHostToolchains_StillAscendsForNarrowVersionedRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("versioned bin layout assumed POSIX")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	versionedRoot := filepath.Join(home, ".nvm", "versions", "node", "v18.0.0")
+	binDir := filepath.Join(versionedRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(binDir, "fakenode")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho fake-node version 18.0.0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	res, err := ResolveHostToolchains([]string{"fakenode"})
+	if err != nil {
+		t.Fatalf("ResolveHostToolchains: %v", err)
+	}
+	if len(res.Mounts) != 1 || res.Mounts[0].HostPath != versionedRoot {
+		t.Fatalf("mount HostPath = %+v, want the versioned root %q (narrow ascent must still happen for legitimate nvm/asdf layouts)",
+			res.Mounts, versionedRoot)
+	}
+}
+
 func TestResolveHostToolchains_SymlinkClosure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink + shebang semantics assumed POSIX")

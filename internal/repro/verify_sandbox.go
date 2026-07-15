@@ -288,7 +288,6 @@ func newVerifySandbox(cfg config.Config) (sandbox.Sandbox, error) {
 			opts = append(opts,
 				sandbox.WithBwrapToolchainBinds(res.Mounts),
 				sandbox.WithBwrapToolchainPath(res.PathPrepend),
-				sandbox.WithBwrapCapabilityFingerprint(res.CapabilityKey()),
 			)
 		}
 		return sandbox.NewBwrap(opts...)
