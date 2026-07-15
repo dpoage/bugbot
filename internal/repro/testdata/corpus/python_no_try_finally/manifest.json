@@ -1,0 +1,23 @@
+{
+  "finding": {
+    "id": "0000019f396c9337e7cbf18156f91069",
+    "fingerprint": "the_cloud/logic/src-state-setLoading.ts:no-try-finally",
+    "file": "src/state/setLoading.ts",
+    "line": 23,
+    "commit_sha": "the_cloud@20260715"
+  },
+  "plan": {
+    "cmd": ["pytest", "test_no_try_finally.py"],
+    "files": ["test_no_try_finally.py"]
+  },
+  "sandbox": {
+    "image": "python:3.12-slim",
+    "ecosystem": "python",
+    "network": "none"
+  },
+  "result": {
+    "exit_code": 1,
+    "sentinel_seen": false
+  },
+  "bugbot_version": "0.1.0"
+}

@@ -1,0 +1,23 @@
+{
+  "finding": {
+    "id": "synthetic-go-divide-by-zero",
+    "fingerprint": "corpus/logic/calc-calc.go:divide-by-zero",
+    "file": "calc/calc.go",
+    "line": 5,
+    "commit_sha": "corpus@synthetic"
+  },
+  "plan": {
+    "cmd": ["go", "test", "./..."],
+    "files": ["calc/calc_test.go"]
+  },
+  "sandbox": {
+    "image": "docker.io/library/golang:1.26",
+    "ecosystem": "go",
+    "network": "none"
+  },
+  "result": {
+    "exit_code": 1,
+    "sentinel_seen": false
+  },
+  "bugbot_version": "0.1.0"
+}

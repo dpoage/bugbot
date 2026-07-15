@@ -1,0 +1,4 @@
+{
+  "reason": "",
+  "description": "genuine behavioral test: colocated with the target package and calls Divide() directly — must pass the static gate (no static objection) so it stays eligible for promotion"
+}

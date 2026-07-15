@@ -1,0 +1,4 @@
+{
+  "reason": "target_not_executed",
+  "description": "assertIn() on the target file's source text (grep-test) — never imports or executes SelectedContractStore.ts"
+}

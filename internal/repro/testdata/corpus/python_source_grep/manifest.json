@@ -1,0 +1,23 @@
+{
+  "finding": {
+    "id": "0000019f396131b192d73b758917369f",
+    "fingerprint": "the_cloud/logic/src-store-SelectedContractStore.ts:stale-selectedcontract",
+    "file": "src/store/SelectedContractStore.ts",
+    "line": 47,
+    "commit_sha": "the_cloud@20260715"
+  },
+  "plan": {
+    "cmd": ["pytest", "test_grep.py"],
+    "files": ["test_grep.py"]
+  },
+  "sandbox": {
+    "image": "python:3.12-slim",
+    "ecosystem": "python",
+    "network": "none"
+  },
+  "result": {
+    "exit_code": 1,
+    "sentinel_seen": false
+  },
+  "bugbot_version": "0.1.0"
+}
