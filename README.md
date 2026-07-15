@@ -83,7 +83,7 @@ empty tmpfs, and ONLY the following are ever bound in, always read-only:
   `node`/`cargo`, resolved via the host's PATH and symlink-closure, or
   explicit absolute directories) — see `internal/sandbox/toolchain.go`;
 - a POSIX baseline (coreutils, grep, sed, awk, findutils, diff, tar, gzip,
-  bash) resolved automatically from the host at backend construction and
+  bash, which) resolved automatically from the host at backend construction and
   appended to the END of the sandbox PATH — never configured by the
   operator. Container images ship these structurally; the bwrap tmpfs root
   does not, and on store-based distros the FHS PATH dirs hold only `sh`

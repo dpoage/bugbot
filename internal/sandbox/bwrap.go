@@ -262,6 +262,12 @@ var bwrapBaselineUtilities = []string{
 	"tar",
 	"gzip",
 	"bash",
+	// which is NOT a coreutils applet (GNU which on NixOS, debianutils on
+	// Debian, a busybox applet on Alpine) but every container base image
+	// ships it and agents routinely probe with `which node` before falling
+	// back to `command -v` — a missing which burns an exec-budget call on
+	// a spurious environment_error (the_cloud, 2026-07-15).
+	"which",
 }
 
 // resolveBwrapBaseline resolves bwrapBaselineUtilities into read-only binds

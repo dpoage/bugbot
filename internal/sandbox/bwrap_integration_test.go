@@ -422,8 +422,11 @@ func TestBwrapBaselineUtilitiesReachable(t *testing.T) {
 		// The deps.go applyGoBuildScratch shape: a bare utility argv routed
 		// through the /bin/sh setup wrapper, resolved via PATH.
 		SetupCmds: [][]string{{"mkdir", "-p", ".bugbot-scratch"}},
-		// An agent-plan shape: coreutils + grep piped inside sh -c.
-		Cmd: []string{"/bin/sh", "-c", "mkdir -p out && echo probe > out/f && grep -c probe out/f"},
+		// An agent-plan shape: coreutils + grep piped inside sh -c, plus the
+		// ubiquitous `which <tool>` availability probe (not a coreutils
+		// applet; missing from the baseline it exits 127 and burns an agent
+		// exec-budget call on a spurious environment_error).
+		Cmd: []string{"/bin/sh", "-c", "mkdir -p out && echo probe > out/f && grep -c probe out/f && which grep >/dev/null"},
 	})
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
