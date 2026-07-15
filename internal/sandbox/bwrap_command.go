@@ -61,6 +61,22 @@ type bwrapParams struct {
 // /etc/resolv.conf is deliberately absent here: it is added only when the
 // network is enabled (see buildBwrapArgs), matching the container backend's
 // contract that DNS resolution is unavailable under network=none.
+//
+// /nix/store, /gnu/store, and /etc/static exist for store-based distros
+// (NixOS, Guix), where the FHS paths above are symlink farms into the store:
+// /bin/sh -> /nix/store/...-bash/bin/sh. Binding /bin alone carries the
+// SYMLINK into the sandbox but not its target, so exec fails with
+// "execvp /bin/sh: No such file or directory" — which broke every
+// SetupCmds-wrapped run and every /bin/sh-based capability probe on such
+// hosts. Binding the store roots read-only resolves that class wholesale
+// (shells, env, and the rpath lib closures of any store-resolved toolchain)
+// without widening the secret-exfiltration surface: both stores are
+// world-readable by design on their distros, so the sandboxed code gains no
+// read access it would not already have running unsandboxed as the same
+// user. /etc/static is NixOS's symlink-farm indirection into /nix/store
+// (e.g. /etc/ssl/certs -> /etc/static/ssl/certs), needed so the /etc/ssl
+// bind above resolves. On FHS hosts none of the three exist and the
+// --ro-bind-try is a no-op.
 var fixedROAllowlist = []string{
 	"/usr",
 	"/lib",
@@ -68,6 +84,9 @@ var fixedROAllowlist = []string{
 	"/bin",
 	"/sbin",
 	"/etc/ssl",
+	"/etc/static",
+	"/nix/store",
+	"/gnu/store",
 }
 
 // buildBwrapArgs constructs the argv passed to the bwrap binary for a single
