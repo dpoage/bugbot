@@ -957,13 +957,26 @@ func checkHostToolchain(env doctorEnv, langs []ingest.Language, buildSystems []i
 	// under bwrap, so bazel-driven repros depend on the host's bazel and its
 	// already-warm repository/disk caches when the network is unshared.
 	if containsBuildSystemBazel(buildSystems) {
-		if _, err := env.lookPath("bazel"); err != nil {
+		_, bazelErr := env.lookPath("bazel")
+		_, bazeliskErr := env.lookPath("bazelisk")
+		switch {
+		case bazelErr != nil && bazeliskErr != nil:
 			out = append(out, checkResult{
 				Name:   "host toolchain bazel",
 				Status: statusWarn,
-				Detail: "Bazel build files detected but bazel is not on the host PATH — bazel-driven repros will fail under backend bwrap; per-language test repros (go test, pytest, node) are unaffected",
+				Detail: "Bazel build files detected but neither bazel nor bazelisk is on the host PATH — bazel-driven repros will fail under backend bwrap; per-language test repros (go test, pytest, node) are unaffected",
 			})
-		} else if strings.EqualFold(cfg.Sandbox.Network, "none") {
+		case bazelErr != nil:
+			// bazelisk-only host (the common install): reachable in a
+			// sandbox only via sandbox.host_toolchains, only under the
+			// bazelisk NAME, and only useful offline with a warm bazelisk
+			// download cache (bugbot-4z7m).
+			out = append(out, checkResult{
+				Name:   "host toolchain bazel",
+				Status: statusInfo,
+				Detail: "bazelisk is on the host PATH (no `bazel` name). To use it in the sandbox add 'bazelisk' to sandbox.host_toolchains; plans must invoke `bazelisk`, and under network=none its bazel download cache must already be warm. Per-language test repros do not need it",
+			})
+		case strings.EqualFold(cfg.Sandbox.Network, "none"):
 			out = append(out, checkResult{
 				Name:   "host bazel offline",
 				Status: statusInfo,
@@ -1018,6 +1031,18 @@ func checkSandboxVerifier(ctx context.Context, env doctorEnv, cfg config.Config)
 			Name:   "sandbox verifier",
 			Status: statusPass,
 			Detail: "toolchain smoke PASS (" + string(verdict.Category) + "): " + verdict.Detail,
+		}}
+	}
+	if !verdict.BlocksRepro() {
+		// Non-blocking failure: build-driver launchers (bazel/bazelisk) do
+		// not gate the repro stage (bugbot-4z7m) — per-finding and per-plan
+		// capability gates handle them. Report as advisory so the operator
+		// sees the same decision the engine makes, not a spurious FAIL.
+		return []checkResult{{
+			Name:   "sandbox verifier",
+			Status: statusWarn,
+			Detail: "toolchain smoke non-blocking (" + string(verdict.Category) + ", launcher " + verdict.Launcher +
+				"): repro stage proceeds; per-finding capability gates handle plans needing this launcher. " + verdict.Detail,
 		}}
 	}
 	return []checkResult{{

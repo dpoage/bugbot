@@ -58,6 +58,29 @@ func TestInferFromCmd(t *testing.T) {
 	}
 }
 
+// TestInferToolFromCmd pins the matched-binary-name half of the inference
+// (bugbot-4z7m): launcher families (bazel/bazelisk) gate per binary NAME, so
+// the gate needs to know which one the plan actually invokes.
+func TestInferToolFromCmd(t *testing.T) {
+	cases := []struct {
+		cmd      []string
+		wantEco  ecosystem.Ecosystem
+		wantTool string
+	}{
+		{[]string{"bazel", "test", "//..."}, ecosystem.EcosystemBazel, "bazel"},
+		{[]string{"bazelisk", "test", "//..."}, ecosystem.EcosystemBazel, "bazelisk"},
+		{[]string{"sh", "-c", "bazelisk build //x"}, ecosystem.EcosystemBazel, "bazelisk"},
+		{[]string{"npx", "vitest"}, ecosystem.EcosystemJS, "npx"},
+		{[]string{"make", "test"}, "", ""},
+	}
+	for _, c := range cases {
+		eco, tool := ecosystem.InferToolFromCmd(c.cmd)
+		if eco != c.wantEco || tool != c.wantTool {
+			t.Errorf("InferToolFromCmd(%v) = (%q, %q), want (%q, %q)", c.cmd, eco, tool, c.wantEco, c.wantTool)
+		}
+	}
+}
+
 func TestBaseMode(t *testing.T) {
 	cases := []struct {
 		eco  ecosystem.Ecosystem

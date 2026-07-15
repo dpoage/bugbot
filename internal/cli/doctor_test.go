@@ -687,6 +687,14 @@ func TestCheckHostToolchain_Direct(t *testing.T) {
 			builds:   []ingest.BuildSystem{ingest.BuildSystemBazel},
 			wantInfo: []string{"host bazel offline"},
 		},
+		{
+			name:     "bazelisk-only host is advisory info naming the launcher",
+			onPath:   map[string]bool{"python3": true, "bazelisk": true},
+			network:  "none",
+			langs:    []ingest.Language{ingest.LangPython},
+			builds:   []ingest.BuildSystem{ingest.BuildSystemBazel},
+			wantInfo: []string{"host toolchain bazel"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

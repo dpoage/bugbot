@@ -3,6 +3,7 @@ package repro
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -51,15 +52,33 @@ type SmokeVerdict struct {
 	Category SmokeCategory
 	// Detail is a short human-readable explanation (truncated output).
 	Detail string
+	// Launcher is the base name of the toolchain binary the smoke command
+	// probed ("go", "python", "bazel", ...), from smokeCmd's suite
+	// detection. BlocksRepro keys on it: build-driver launchers must not
+	// gate the whole stage (see below).
+	Launcher string
 }
 
 // BlocksRepro reports whether this verdict should gate the repro stage off
-// entirely: the image demonstrably cannot run the target ecosystem, so every
-// per-finding attempt would burn budget on environment_error (bugbot-u6td).
-// Timeout, dep_missing, and unprobeable do NOT block — the first two mean the
-// toolchain responded; unprobeable means we simply had no probe to run, which
-// is no evidence the sandbox is broken.
+// entirely: the sandbox demonstrably cannot run the target ecosystem, so
+// every per-finding attempt would burn budget on environment_error
+// (bugbot-u6td). Timeout, dep_missing, and unprobeable do NOT block — the
+// first two mean the toolchain responded; unprobeable means we simply had no
+// probe to run, which is no evidence the sandbox is broken.
+//
+// Build-driver launchers (bazel/bazelisk) NEVER block, whatever the category
+// (bugbot-4z7m): on a multi-language repo, detectSuiteCmd picks the build
+// driver as THE canonical launcher, so a sandbox without bazel — the normal
+// state under the bwrap backend — would disable the whole stage even though
+// the probed language capabilities (python, node, go) are fully usable. The
+// per-finding claim gate (bugbot-14g0 blocked_toolchain) and the pre-launch
+// plan gate (bugbot-rj3z) now provide the budget protection u6td wanted, at
+// per-finding granularity, with per-finding visibility instead of a silent
+// stage skip.
 func (v SmokeVerdict) BlocksRepro() bool {
+	if v.Launcher == "bazel" || v.Launcher == "bazelisk" {
+		return false
+	}
 	return v.Category == SmokeCategoryToolchainMissing || v.Category == SmokeCategoryEnvError
 }
 
@@ -86,7 +105,7 @@ const smokeTimeout = 45 * time.Second
 // classified as "ok" because we only care whether the toolchain IS PRESENT and
 // FUNCTIONAL — not whether the project's tests pass.
 func VerifySandbox(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec sandbox.Spec, res sandbox.Resolution) (SmokeVerdict, error) {
-	cmd := smokeCmd(repoDir)
+	cmd, launcher := smokeCmd(repoDir)
 	if len(cmd) == 0 {
 		return SmokeVerdict{
 			OK:       false,
@@ -117,21 +136,25 @@ func VerifySandbox(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec
 			OK:       false,
 			Category: SmokeCategoryEnvError,
 			Detail:   "sandbox exec failed: " + err.Error(),
+			Launcher: launcher,
 		}, err
 	}
 
-	return classifySmoke(result, cmd), nil
+	verdict := classifySmoke(result, cmd)
+	verdict.Launcher = launcher
+	return verdict, nil
 }
 
-// smokeCmd picks the cheapest toolchain liveness probe for repoDir.
+// smokeCmd picks the cheapest toolchain liveness probe for repoDir and names
+// the launcher binary it probes (SmokeVerdict.Launcher).
 // It first calls detectSuiteCmd (same package, patch.go) to get the canonical
 // suite launcher, then maps it to a cheaper offline probe where available.
 // Falls back to a bare version probe when no suite cmd is detected, and
-// returns nil when even that cannot be inferred.
-func smokeCmd(repoDir string) []string {
+// returns (nil, "") when even that cannot be inferred.
+func smokeCmd(repoDir string) ([]string, string) {
 	suite := detectSuiteCmd(repoDir)
 	if len(suite) == 0 {
-		return nil
+		return nil, ""
 	}
 
 	// Map the canonical suite command's head binary to a cheap liveness probe.
@@ -140,20 +163,29 @@ func smokeCmd(repoDir string) []string {
 	switch suite[0] {
 	case "go":
 		// go vet is faster than go test and still exercises the build toolchain.
-		return []string{"go", "vet", "./..."}
+		return []string{"go", "vet", "./..."}, "go"
 	case "cargo":
 		// cargo metadata is essentially instantaneous (no compilation).
-		return []string{"cargo", "metadata", "--no-deps", "--format-version=1"}
+		return []string{"cargo", "metadata", "--no-deps", "--format-version=1"}, "cargo"
 	case "python", "python3":
 		// pytest --collect-only exercises the import machinery without running tests.
-		return []string{"python", "-m", "pytest", "--collect-only", "-q"}
+		return []string{"python", "-m", "pytest", "--collect-only", "-q"}, "python"
 	case "npm":
-		return []string{"node", "--version"}
+		return []string{"node", "--version"}, "node"
 	case "pnpm":
-		return []string{"node", "--version"}
-	case "bazel":
-		// bazel version is the only thing that works offline without a workspace.
-		return []string{"bazel", "version"}
+		return []string{"node", "--version"}, "node"
+	case "bazel", "bazelisk":
+		// bazel version is the only thing that works offline without a
+		// workspace. Probe through EITHER launcher name: bazelisk is the
+		// bazel launcher and is commonly installed under its own name only
+		// (bugbot-4z7m); a bare `bazel version` argv would misreport such a
+		// host as toolchain_missing. exec preserves the launcher's own exit
+		// code; exit 127 when neither name resolves keeps classifySmoke's
+		// toolchain_missing semantics.
+		return []string{"/bin/sh", "-c",
+			"command -v bazel >/dev/null 2>&1 && exec bazel version; " +
+				"command -v bazelisk >/dev/null 2>&1 && exec bazelisk version; " +
+				"exit 127"}, "bazel"
 	case "bash":
 		// C/C++ suites are compound `bash -c "cmake ... && ctest ..."` strings.
 		// Probe the toolchain version instead of running the full
@@ -161,15 +193,15 @@ func smokeCmd(repoDir string) []string {
 		if len(suite) >= 3 {
 			switch {
 			case strings.HasPrefix(suite[2], "cmake"):
-				return []string{"cmake", "--version"}
+				return []string{"cmake", "--version"}, "cmake"
 			case strings.HasPrefix(suite[2], "meson"):
-				return []string{"meson", "--version"}
+				return []string{"meson", "--version"}, "meson"
 			}
 		}
 	}
 
 	// Fallback: return the suite command as-is; better than nothing.
-	return suite
+	return suite, filepath.Base(suite[0])
 }
 
 // classifySmoke turns a sandbox.Result from a smoke run into a SmokeVerdict.

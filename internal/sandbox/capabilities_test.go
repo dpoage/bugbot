@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	ecoreg "github.com/dpoage/bugbot/internal/ecosystem"
@@ -401,10 +402,11 @@ func TestJsCapabilityProbeSpec(t *testing.T) {
 	}
 }
 
-// TestBazelCapabilityProbeSpec verifies the probe uses /bin/sh and is named
-// "bazel", and that its interpret function reports presence only on the
-// probe's "bazel" token (bugbot-rj3z: the pre-launch gate and agent prompt
-// depend on this probe to keep bazel plans off sandboxes without bazel).
+// TestBazelCapabilityProbeSpec verifies the probe uses /bin/sh, is named
+// "bazel", EXECUTES the launchers (not command -v — a cold-cache bazelisk
+// under network=none must not read as available, bugbot-4z7m), and reports
+// per-launcher-name tokens so the gate and prompt can speak the exact argv
+// that works (a bazelisk-only PATH must not advertise a working `bazel`).
 func TestBazelCapabilityProbeSpec(t *testing.T) {
 	probe := probeByName(t, "bazel")
 	if len(probe.Probe) == 0 {
@@ -416,11 +418,27 @@ func TestBazelCapabilityProbeSpec(t *testing.T) {
 	if probe.Name != "bazel" {
 		t.Errorf("probe Name = %q, want bazel", probe.Name)
 	}
-	if modes := probe.Interpret(toProbeResult(Result{ExitCode: 0, Stdout: "bazel\n"})); !modes["bazel"] {
-		t.Errorf("want bazel=true on its token, got %v", modes)
+	script := probe.Probe[len(probe.Probe)-1]
+	for _, want := range []string{"bazel version", "bazelisk version"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("probe script %q must execute %q, not merely command -v", script, want)
+		}
 	}
-	if modes := probe.Interpret(toProbeResult(Result{ExitCode: 1, Stdout: ""})); modes["bazel"] {
-		t.Errorf("want bazel=false on probe failure, got %v", modes)
+	cases := []struct {
+		name                string
+		stdout              string
+		wantBazel, wantBisk bool
+	}{
+		{"both work", "bazel\nbazelisk\n", true, true},
+		{"bazel only", "bazel\n", true, false},
+		{"bazelisk only", "bazelisk\n", false, true},
+		{"neither", "", false, false},
+	}
+	for _, tc := range cases {
+		modes := probe.Interpret(toProbeResult(Result{ExitCode: 0, Stdout: tc.stdout}))
+		if modes["bazel"] != tc.wantBazel || modes["bazelisk"] != tc.wantBisk {
+			t.Errorf("%s: modes = %v, want bazel=%v bazelisk=%v", tc.name, modes, tc.wantBazel, tc.wantBisk)
+		}
 	}
 }
 
