@@ -120,7 +120,15 @@ scan:
 
 # ---------------------------------------------------------------------------
 # sandbox: isolated execution environment for verification and reproduction.
-# backend is currently "cli" (shells out to a container runtime).
+# backend selects the implementation:
+#   "" | "cli" | "podman" | "docker"   (default) shells out to a container
+#     runtime (podman/docker, auto-detected unless runtime is set below).
+#   "bwrap"   Linux-only, requires unprivileged user namespaces and the
+#     bwrap binary. Runs directly on the HOST's own toolchains (no image to
+#     bake) inside a tmpfs root with a narrow read-only allowlist — see the
+#     README "Sandbox backend" section for the full security model.
+#     "bugbot doctor" reports an actionable reason (not Linux / bwrap
+#     missing / userns unavailable) if bwrap is configured but unusable.
 # network defaults to "none" — reproduction runs offline.
 #
 # IMPORTANT: the reproduce/verify stages run the target repo's OWN test/build
@@ -187,6 +195,23 @@ sandbox:
   # local_mounts:
   #   - host: /absolute/path/to/sibling     # must exist on the host
   #     container: /sibling                  # absolute container path; unique
+  # host_toolchains: mount host toolchains (or explicit host dirs) read-only
+  # and prepend them to the sandbox's PATH. Use when the sandbox image lacks
+  # a toolchain the host already has (e.g. a bazel-only image reproducing a
+  # TypeScript finding needs node): the mounted toolchain then shows up as
+  # available in the probed capability set and the reproducer's prompt.
+  # Bare names are resolved from the host PATH (symlink closures followed);
+  # absolute paths are used directly. Same security posture as local_mounts:
+  # read-only, public toolchain content only — never secrets.
+  # host_toolchains:
+  #   - node
+  # allow_uncapped: bwrap-only. bwrap has no cgroups of its own; resource
+  # caps (cpus/memory_mb/pids_limit above) are enforced via systemd-run
+  # --user --scope or a delegated cgroup v2 subtree. When NEITHER mechanism
+  # is available, a bwrap run FAILS rather than silently running uncapped —
+  # set this to true to opt into uncapped runs instead. Ignored by the
+  # container backend (the runtime CLI always enforces limits itself).
+  # allow_uncapped: false
 
 # ---------------------------------------------------------------------------
 # verify: configuration for the LLM-assisted patch-verification stage.

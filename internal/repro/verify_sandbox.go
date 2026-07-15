@@ -2,6 +2,7 @@ package repro
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -256,21 +257,41 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	return SmokeVerdict{OK: true, Category: SmokeCategoryOK, Detail: trunc(out, 300)}
 }
 
-// RunSandboxVerify is the convenience entry-point called by doctor.
-// It constructs a sandbox.CLI from cfg, resolves the configured dep strategy,
-// and delegates to VerifySandbox.  The repoDir is the working directory used
-// for both dep resolution and smoke-command detection.
-func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (SmokeVerdict, error) {
-	rt := cfg.Sandbox.Runtime
-	image := cfg.Sandbox.Image
-	if image == "" {
-		return SmokeVerdict{
-			OK:       false,
-			Category: SmokeCategoryEnvError,
-			Detail:   "sandbox.image is not configured",
-		}, nil
+// newVerifySandbox constructs the sandbox backend RunSandboxVerify probes
+// against, selected by cfg.Sandbox.Backend exactly like
+// engine.newConfiguredSandbox (duplicated here rather than imported: engine
+// depends on repro, so importing engine from here would cycle). Toolchain
+// binds/PATH/fingerprint are wired for bwrap exactly as the real repro path
+// wires them, so the smoke probe sees the same environment a real run would
+// — a toolchain that only exists via sandbox.host_toolchains must not read
+// as "missing" here.
+func newVerifySandbox(cfg config.Config) (sandbox.Sandbox, error) {
+	if cfg.Sandbox.Backend == "bwrap" {
+		var opts []sandbox.BwrapOption
+		if cfg.Sandbox.PidsLimit > 0 {
+			opts = append(opts, sandbox.WithBwrapPidsLimit(cfg.Sandbox.PidsLimit))
+		}
+		if cfg.Sandbox.CPUs > 0 {
+			opts = append(opts, sandbox.WithBwrapCPUs(float64(cfg.Sandbox.CPUs)))
+		}
+		if cfg.Sandbox.MemoryMB > 0 {
+			opts = append(opts, sandbox.WithBwrapMemoryMB(cfg.Sandbox.MemoryMB))
+		}
+		if cfg.Sandbox.AllowUncapped {
+			opts = append(opts, sandbox.WithBwrapAllowUncapped(true))
+		}
+		if len(cfg.Sandbox.HostToolchains) > 0 {
+			res, err := sandbox.ResolveHostToolchains(cfg.Sandbox.HostToolchains)
+			if err != nil {
+				return nil, fmt.Errorf("resolve host toolchains: %w", err)
+			}
+			opts = append(opts,
+				sandbox.WithBwrapToolchainBinds(res.Mounts),
+				sandbox.WithBwrapToolchainPath(res.PathPrepend),
+			)
+		}
+		return sandbox.NewBwrap(opts...)
 	}
-
 	var sbOpts []sandbox.Option
 	if cfg.Sandbox.PidsLimit > 0 {
 		// Honor the configured pids cap for the smoke run too, so doctor uses the
@@ -278,12 +299,31 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 		// default of 256 is too low for heavy toolchains like the Bazel JVM).
 		sbOpts = append(sbOpts, sandbox.WithPidsLimit(cfg.Sandbox.PidsLimit))
 	}
-	sb, err := sandbox.NewCLI(rt, image, sbOpts...)
+	return sandbox.NewCLI(cfg.Sandbox.Runtime, cfg.Sandbox.Image, sbOpts...)
+}
+
+// RunSandboxVerify is the convenience entry-point called by doctor.
+// It constructs the configured sandbox backend (container CLI or bwrap),
+// resolves the configured dep strategy, and delegates to VerifySandbox. The
+// repoDir is the working directory used for both dep resolution and
+// smoke-command detection.
+func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (SmokeVerdict, error) {
+	// sandbox.image is meaningless for bwrap (see Bwrap's doc comment) so this
+	// hard requirement applies only to the container backend.
+	if cfg.Sandbox.Backend != "bwrap" && cfg.Sandbox.Image == "" {
+		return SmokeVerdict{
+			OK:       false,
+			Category: SmokeCategoryEnvError,
+			Detail:   "sandbox.image is not configured",
+		}, nil
+	}
+
+	sb, err := newVerifySandbox(cfg)
 	if err != nil {
 		return SmokeVerdict{
 			OK:       false,
 			Category: SmokeCategoryEnvError,
-			Detail:   "could not create sandbox CLI: " + err.Error(),
+			Detail:   "could not create sandbox: " + err.Error(),
 		}, err
 	}
 
@@ -300,7 +340,7 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 	}
 
 	spec := sandbox.Spec{
-		Image:    image,
+		Image:    cfg.Sandbox.Image,
 		CPUs:     float64(cfg.Sandbox.CPUs),
 		MemoryMB: cfg.Sandbox.MemoryMB,
 	}
@@ -336,7 +376,11 @@ type smokeEntry struct {
 //   - false (ok / dep_missing / timeout) → proceed (deps may be absent but
 //     the toolchain ran, so repro attempts are meaningful).
 func VerifySandboxOnce(ctx context.Context, repoDir string, cfg config.Config) (SmokeVerdict, error) {
-	key := repoDir + "\x00" + cfg.Sandbox.Image
+	// Keying purely on cfg.Sandbox.Image would collapse every bwrap config
+	// (Image is always "" there) onto one cache entry regardless of which
+	// host toolchains are configured; fold Backend + HostToolchains in too so
+	// a distinct bwrap configuration gets its own probe.
+	key := repoDir + "\x00" + cfg.Sandbox.Backend + "\x00" + cfg.Sandbox.Image + "\x00" + strings.Join(cfg.Sandbox.HostToolchains, ",")
 	smokeCache.mu.Lock()
 	e, ok := smokeCache.m[key]
 	if !ok {

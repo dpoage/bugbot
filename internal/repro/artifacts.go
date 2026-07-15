@@ -1,6 +1,7 @@
 package repro
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,18 +9,27 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sarif"
 	"github.com/dpoage/bugbot/internal/util"
 )
 
 // writeArtifacts writes a self-contained repro bundle for a demonstrated bug to
 // artifactDir/<finding-id>/ and returns the bundle directory path. The bundle
 // contains the injected repro files (at their plan-relative paths), a run.sh
-// capturing the command, and a README.md describing the finding and how to run
-// it.
+// capturing the command, a README.md describing the finding and how to run
+// it, and a manifest.json (see Manifest) that turns the bundle into a
+// machine-readable fixture: `bugbot bundle audit`/`replay` and the
+// corpus/integration test suites (internal/repro/testdata/corpus,
+// corpus_test.go) parse manifest.json rather than the README prose.
+//
+// image and network are the sandbox execution policy that produced res
+// (Options.Image / Options.Network in the caller); they are recorded
+// verbatim in manifest.json's sandbox block. The ecosystem is derived from
+// plan.Cmd via detectEcosystem, the same detection interpret() itself uses.
 //
 // On any error the partially-written bundle directory is removed so a failed
 // promotion never leaves stale artifacts behind.
-func writeArtifacts(artifactDir string, finding domain.Finding, plan *Plan, res sandbox.Result) (dir string, err error) {
+func writeArtifacts(artifactDir string, finding domain.Finding, plan *Plan, res sandbox.Result, image, network string) (dir string, err error) {
 	id := finding.ID
 	if id == "" {
 		id = "unknown"
@@ -49,7 +59,46 @@ func writeArtifacts(artifactDir string, finding domain.Finding, plan *Plan, res 
 	if werr := os.WriteFile(filepath.Join(dir, "README.md"), []byte(readme(finding, plan, res)), 0o644); werr != nil {
 		return "", werr
 	}
+	manifest := buildManifest(finding, plan, res, image, network)
+	manifestJSON, merr := json.MarshalIndent(manifest, "", "  ")
+	if merr != nil {
+		return "", fmt.Errorf("repro: marshal manifest: %w", merr)
+	}
+	if werr := os.WriteFile(filepath.Join(dir, ManifestFileName), manifestJSON, 0o644); werr != nil {
+		return "", werr
+	}
 	return dir, nil
+}
+
+// buildManifest assembles the Manifest for a demonstrated repro run: the
+// finding identity, the exact plan that was executed, the sandbox policy it
+// ran under, and the run's outcome — everything Bundle/LoadBundle need to
+// treat the bundle as an executable fixture rather than write-only prose.
+func buildManifest(finding domain.Finding, plan *Plan, res sandbox.Result, image, network string) Manifest {
+	out := strings.ToLower(combinedOutput(res))
+	return Manifest{
+		Finding: ManifestFinding{
+			ID:          finding.ID,
+			Fingerprint: finding.Fingerprint,
+			File:        finding.File,
+			Line:        finding.Line,
+			CommitSHA:   finding.CommitSHA,
+		},
+		Plan: ManifestPlan{
+			Cmd:   plan.Cmd,
+			Files: util.SortedKeys(plan.Files),
+		},
+		Sandbox: ManifestSandbox{
+			Image:     image,
+			Ecosystem: detectEcosystem(plan.Cmd).name,
+			Network:   network,
+		},
+		Result: ManifestResult{
+			ExitCode:     res.ExitCode,
+			SentinelSeen: hasAnyMarker(out, reproSentinelMarkers),
+		},
+		BugbotVersion: sarif.ToolVersion,
+	}
 }
 
 // writePlanFiles writes each repro file under dir, creating parent directories

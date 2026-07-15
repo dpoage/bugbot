@@ -1,0 +1,4 @@
+{
+  "reason": "target_not_executed",
+  "description": "executes a hand-transliterated re-implementation of timeInTask.ts's logic and prints the demonstration sentinel — never imports/calls the actual target file"
+}

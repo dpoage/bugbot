@@ -235,8 +235,13 @@ func newReportEmitCmd() *cobra.Command {
 				}
 			}
 
+			blocked, err := st.BlockedToolchainCounts(ctx)
+			if err != nil {
+				return err
+			}
 			rep, err := report.CollectOpen(ctx, st, report.Metadata{
-				GeneratedAt: timeNowUTC(),
+				GeneratedAt:      timeNowUTC(),
+				BlockedToolchain: blocked,
 			})
 			if err != nil {
 				return err

@@ -1,0 +1,4 @@
+{
+  "reason": "target_not_executed",
+  "description": "static assertion that setLoading.ts's source text lacks try/finally — never calls setLoading(), no exception path is ever executed"
+}

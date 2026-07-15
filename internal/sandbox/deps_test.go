@@ -1021,6 +1021,75 @@ func TestResolveDepsLocalMountsOrderAfterEcosystem(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Tests for DepOptions.HostToolchains (host toolchain provisioning, bugbot-14g0)
+// ---------------------------------------------------------------------------
+
+// TestResolveDepsHostToolchains verifies HostToolchains resolve into
+// Resolution.ROMounts/Env/Fingerprints, compose with LocalMounts, and are a
+// no-op when unconfigured or unresolvable.
+func TestResolveDepsHostToolchains(t *testing.T) {
+	t.Run("unconfigured: no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		res, err := ResolveDeps(dir, DepOptions{Strategy: DepStrategyOff})
+		if err != nil {
+			t.Fatalf("ResolveDeps: %v", err)
+		}
+		if len(res.ROMounts) != 0 || len(res.Fingerprints) != 0 {
+			t.Errorf("unconfigured HostToolchains should add nothing, got mounts=%+v fingerprints=%+v", res.ROMounts, res.Fingerprints)
+		}
+	})
+
+	t.Run("explicit dir toolchain mounts and fingerprints", func(t *testing.T) {
+		dir := t.TempDir()
+		tcDir := t.TempDir()
+		res, err := ResolveDeps(dir, DepOptions{
+			Strategy:       DepStrategyOff,
+			LocalMounts:    []ROMount{{HostPath: t.TempDir(), ContainerPath: "/sibling", Shared: true}},
+			HostToolchains: []string{tcDir},
+		})
+		if err != nil {
+			t.Fatalf("ResolveDeps: %v", err)
+		}
+		var hasToolchain, hasSibling bool
+		for _, m := range res.ROMounts {
+			if m.HostPath == tcDir {
+				hasToolchain = true
+				if !m.Shared {
+					t.Error("host toolchain mount must have Shared=true")
+				}
+			}
+			if m.ContainerPath == "/sibling" {
+				hasSibling = true
+			}
+		}
+		if !hasToolchain {
+			t.Errorf("missing host toolchain mount for %q; mounts=%+v", tcDir, res.ROMounts)
+		}
+		if !hasSibling {
+			t.Errorf("host toolchain resolution must compose with LocalMounts; mounts=%+v", res.ROMounts)
+		}
+		if len(res.Fingerprints) != 1 || res.Fingerprints[0].Path != tcDir {
+			t.Errorf("Fingerprints = %+v, want one entry for %q", res.Fingerprints, tcDir)
+		}
+	})
+
+	t.Run("unresolvable name: best-effort no-op, no error", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir()) // nothing resolves
+		dir := t.TempDir()
+		res, err := ResolveDeps(dir, DepOptions{
+			Strategy:       DepStrategyOff,
+			HostToolchains: []string{"definitely-not-a-real-toolchain-xyz"},
+		})
+		if err != nil {
+			t.Fatalf("ResolveDeps should be best-effort (no error) for an unresolvable toolchain, got %v", err)
+		}
+		if len(res.ROMounts) != 0 || len(res.Fingerprints) != 0 || len(res.Env) != 0 {
+			t.Errorf("unresolvable toolchain should add nothing, got %+v", res)
+		}
+	})
+}
+
 // TestResolveWithOperatorSetupCmdsOrder verifies that when operator SetupCmds
 // are prepended at the call site, they appear BEFORE ecosystem-derived setup
 // commands. This tests the contract documented in config.Sandbox.SetupCmds and

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/sandbox"
 	"gopkg.in/yaml.v3"
 )
 
@@ -188,9 +189,17 @@ type Scan struct {
 // Sandbox configures the isolated execution environment used for verification
 // and reproduction.
 type Sandbox struct {
-	// Deprecated: ignored; sandbox backend selection was never implemented.
-	// The field is retained so configs written by older bugbot init wizards
-	// (which emitted `backend: cli`) still parse cleanly under KnownFields mode.
+	// Backend selects the sandbox implementation: "" or "cli" (default) uses
+	// the container-runtime CLI backend (podman/docker, see Runtime/Image);
+	// "podman" and "docker" are accepted as explicit synonyms for "cli" so an
+	// operator who names the runtime directly here still gets the container
+	// path. "bwrap" selects the bubblewrap backend instead: an unprivileged
+	// user-namespace sandbox that runs directly on host toolchains, with no
+	// image to bake (see internal/sandbox/bwrap.go). Backend:bwrap is
+	// rejected by Validate on non-Linux hosts, when bwrap is absent from
+	// PATH, or when unprivileged user namespaces are unavailable — see
+	// DetectBwrap. Image/Runtime/DepStrategy are container-backend-only and
+	// ignored under bwrap.
 	Backend  string `yaml:"backend"`
 	Runtime  string `yaml:"runtime"`
 	Image    string `yaml:"image"`
@@ -243,6 +252,31 @@ type Sandbox struct {
 	// is a deliberate fast-follow gated on containment validation — see issue
 	// bugbot-ixu for the security rationale.
 	LocalMounts []LocalMount `yaml:"local_mounts"`
+	// AllowUncapped opts into running the bwrap backend with NO enforced
+	// memory/CPU/pids limits when neither systemd-run --user --scope nor a
+	// delegated cgroup v2 subtree is available on the host. Ignored by the
+	// container backend, which always enforces limits via the runtime CLI.
+	// Default false: bwrap Exec fails with an actionable error instead of
+	// silently running uncapped (see internal/sandbox/bwrap_caps.go).
+	AllowUncapped bool `yaml:"allow_uncapped"`
+	// HostToolchains is an ordered list of host toolchain names (resolved from
+	// the host's PATH, following symlink closures — see
+	// sandbox.ResolveHostToolchains) or explicit host directories, mounted
+	// read-only into the sandbox and prepended to its PATH. Use this when the
+	// sandbox image lacks a toolchain the host already has (e.g. a bazel-only
+	// image reproducing a TypeScript finding needs "node"): the mounted
+	// toolchain then shows up as available in the probed CapabilitySet and in
+	// the reproducer agent's capability prompt.
+	//
+	// Same security posture as LocalMounts (see its doc and the ROMount
+	// package doc): READ-ONLY, and only ever exposes public toolchain
+	// content — never point an entry at a directory containing secrets.
+	//
+	// PATH override: when any entry resolves, the container's PATH is set to
+	// the resolved toolchain bin dir(s) followed by a standard fallback (see
+	// sandbox.DefaultContainerPath) — this REPLACES, not appends to, whatever
+	// PATH the image itself would otherwise have set.
+	HostToolchains []string `yaml:"host_toolchains"`
 }
 
 // LocalMount is one entry in sandbox.local_mounts: a host directory
@@ -761,6 +795,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 
 	setStr("BUGBOT_STORAGE_PATH", &cfg.Storage.Path)
 	setStr("BUGBOT_REPORT_DIR", &cfg.Report.Dir)
+	setStr("BUGBOT_SANDBOX_BACKEND", &cfg.Sandbox.Backend)
 	setStr("BUGBOT_SANDBOX_RUNTIME", &cfg.Sandbox.Runtime)
 	setStr("BUGBOT_SANDBOX_IMAGE", &cfg.Sandbox.Image)
 	setStr("BUGBOT_SANDBOX_NETWORK", &cfg.Sandbox.Network)
@@ -956,10 +991,19 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: budgets.per_cycle_tokens (%d) must not exceed budgets.per_day_tokens (%d)", c.Budgets.PerCycleTokens, c.Budgets.PerDayTokens)
 	}
 
-	switch c.Sandbox.Runtime {
-	case "podman", "docker":
+	switch c.Sandbox.Backend {
+	case "", "cli", "podman", "docker":
+		switch c.Sandbox.Runtime {
+		case "podman", "docker":
+		default:
+			return fmt.Errorf("config: sandbox.runtime %q invalid (want podman or docker)", c.Sandbox.Runtime)
+		}
+	case "bwrap":
+		if ok, reason := sandbox.DetectBwrap(); !ok {
+			return fmt.Errorf("config: sandbox.backend bwrap is unusable: %s", reason)
+		}
 	default:
-		return fmt.Errorf("config: sandbox.runtime %q invalid (want podman or docker)", c.Sandbox.Runtime)
+		return fmt.Errorf("config: sandbox.backend %q invalid (want \"\", cli, podman, docker, or bwrap)", c.Sandbox.Backend)
 	}
 	if c.Sandbox.CPUs <= 0 {
 		return fmt.Errorf("config: sandbox.cpus must be > 0")
@@ -1000,6 +1044,24 @@ func (c *Config) Validate() error {
 		seen[m.Container] = true
 		if info, err := os.Stat(m.Host); err != nil || !info.IsDir() {
 			return fmt.Errorf("config: sandbox.local_mounts[%d].host %q must be an existing directory", i, m.Host)
+		}
+	}
+	for i, name := range c.Sandbox.HostToolchains {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			return fmt.Errorf("config: sandbox.host_toolchains[%d] must not be empty", i)
+		}
+		// Bare names (e.g. "node") are resolved from the host's PATH at
+		// repro-run time (ResolveHostToolchains) — the machine running
+		// `bugbot config validate` may not be the machine that runs the
+		// sandbox, so no host lookup happens here, only structural
+		// validation. An explicit directory entry, however, names a fixed
+		// path the operator committed to, so it is checked the same way
+		// sandbox.local_mounts[i].host is: it must exist now.
+		if filepath.IsAbs(trimmed) {
+			if info, err := os.Stat(trimmed); err != nil || !info.IsDir() {
+				return fmt.Errorf("config: sandbox.host_toolchains[%d] %q must be an existing directory", i, trimmed)
+			}
 		}
 	}
 
