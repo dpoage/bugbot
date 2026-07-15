@@ -30,7 +30,7 @@ type ReproDeps struct {
 	// Sb backs the reproducer; callers Close it alongside Repro.Close to release
 	// the pristine-workspace cache (internal/sandbox wsCache) when the
 	// reproducer's scope ends.
-	Sb *sandbox.CLI
+	Sb sandbox.Sandbox
 	// Spend ledgers reproducer/patch-prover usage; callers retag it with each
 	// cycle's/run's scan-run id via Spend.SetScanRun.
 	Spend *ledgerRecorder
@@ -52,7 +52,7 @@ func reproTranscriptDir(cfg config.Config) string {
 // BuildReproducer constructs the reproducer-role LLM client, sandbox, and
 // Reproducer shared by `scan --repro`'s in-run hook, `bugbot repro`'s backlog
 // drain, and the daemon's post-cycle promotion step.
-func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot, runtime string, prog progress.EventSink) (*ReproDeps, error) {
+func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot string, prog progress.EventSink) (*ReproDeps, error) {
 	// Ledger repro + patch-prover spend (bugbot-58c). Callers retag the
 	// recorder with each run's/cycle's scan-run id.
 	rec := newLedgerRecorder(ctx, st)
@@ -72,13 +72,13 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer client: %w", err)
 	}
-	sb, err := sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(*cfg)...)
+	sb, err := newConfiguredSandbox(*cfg)
 	if err != nil {
 		return nil, fmt.Errorf("build sandbox: %w", err)
 	}
 	// Probe image capabilities once; result is cached per image so repeated
 	// daemon restarts or re-calls to BuildReproducer are free.
-	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, repoRoot)
+	caps := sandbox.ProbeCapabilities(ctx, sb, sandboxCapabilityKey(sb, *cfg), repoRoot)
 	r, err := repro.New(client, sb, repoRoot, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
 		Image:            cfg.Sandbox.Image,
@@ -127,14 +127,13 @@ func buildReproHookForScan(
 	if !opts.DoRepro || opts.DoEstimate {
 		return nil, nil, nil, attempted, nil
 	}
-	runtime, rtOK := sandbox.Detect()
-	if !rtOK {
-		_, _ = fmt.Fprintln(out, "Reproduce stage skipped: no container runtime (podman/docker) found on PATH.")
+	if !sandboxAvailable(cfg) {
+		_, _ = fmt.Fprintln(out, "Reproduce stage skipped: no sandbox backend (container runtime or bwrap) available.")
 		// hook stays nil so the catch-up drain prints a note; DoRepro check in
 		// the caller still runs (with r == nil) so no catch-up is attempted.
 		return nil, nil, nil, attempted, nil
 	}
-	sb, sbErr := sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(cfg)...)
+	sb, sbErr := newConfiguredSandbox(cfg)
 	if sbErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build sandbox: %w", sbErr)
 	}
@@ -144,8 +143,8 @@ func buildReproHookForScan(
 	// repro attempts remain meaningful evidence when the probe itself failed.
 	if verdict, vErr := repro.VerifySandboxOnce(ctx, opts.Target, cfg); vErr == nil && verdict.BlocksRepro() {
 		_, _ = fmt.Fprintf(out,
-			"Reproduce stage skipped: sandbox toolchain check failed (%s): %s\n  Run `bugbot doctor` and set sandbox.image to a toolchain-capable image.\n",
-			verdict.Category, verdict.Detail)
+			"Reproduce stage skipped: sandbox toolchain check failed (%s): %s\n  Run `bugbot doctor` and %s.\n",
+			verdict.Category, verdict.Detail, SandboxRemediationHint(cfg))
 		return nil, nil, nil, attempted, nil
 	}
 	// Ledger repro + patch-prover spend; the scan run id is pinned by the
@@ -168,7 +167,7 @@ func buildReproHookForScan(
 	}
 	// Probe image capabilities once; result is cached per image so
 	// subsequent daemon cycles and parallel scan runs are free.
-	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, opts.Target)
+	caps := sandbox.ProbeCapabilities(ctx, sb, sandboxCapabilityKey(sb, cfg), opts.Target)
 	r, rNewErr := repro.New(reproClient, sb, opts.Target, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
 		Image:            cfg.Sandbox.Image,
@@ -351,10 +350,9 @@ func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, e
 		cfg.Repro.TranscriptDir = opts.TranscriptDir
 	}
 
-	runtime, ok := sandbox.Detect()
-	if !ok {
-		_, _ = fmt.Fprintln(out, "Repro backlog skipped: no container runtime (podman/docker) found on PATH.")
-		return &ReproResult{Skipped: "no container runtime"}, nil
+	if !sandboxAvailable(cfg) {
+		_, _ = fmt.Fprintln(out, "Repro backlog skipped: no sandbox backend (container runtime or bwrap) available.")
+		return &ReproResult{Skipped: "no sandbox backend"}, nil
 	}
 
 	backlog, err := daemon.OpenBacklog(ctx, st)
@@ -372,8 +370,8 @@ func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, e
 	// empty-backlog exit: no work means no probe.
 	if verdict, vErr := repro.VerifySandboxOnce(ctx, opts.Target, cfg); vErr == nil && verdict.BlocksRepro() {
 		return nil, fmt.Errorf(
-			"sandbox toolchain check failed (%s): %s — run `bugbot doctor` and set sandbox.image to a toolchain-capable image",
-			verdict.Category, verdict.Detail)
+			"sandbox toolchain check failed (%s): %s — run `bugbot doctor` and %s",
+			verdict.Category, verdict.Detail, SandboxRemediationHint(cfg))
 	}
 
 	batch := backlog
@@ -388,16 +386,16 @@ func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, e
 	// d.sink is the CLI-owned live pane/log renderer (see cli/repro.go): it
 	// surfaces repro attempts as they happen but is NOT a SnapshotSink, so it
 	// never races a running daemon's single-writer status.json.
-	rd, err := BuildReproducer(ctx, &cfg, st, opts.Target, runtime, d.sink)
+	rd, err := BuildReproducer(ctx, &cfg, st, opts.Target, d.sink)
 	if err != nil {
 		return nil, err
 	}
 	defer rd.Repro.Close() //nolint:errcheck
-	defer func() { _ = rd.Sb.Close() }()
+	defer closeSandbox(rd.Sb)
 
 	_, _ = fmt.Fprintf(out,
-		"\nRepro backlog: %d eligible, attempting %d (max=%d, runtime=%s)...\n",
-		len(backlog), len(batch), batchSize, runtime,
+		"\nRepro backlog: %d eligible, attempting %d (max=%d, backend=%s)...\n",
+		len(backlog), len(batch), batchSize, sandboxBackendLabel(cfg),
 	)
 	if cfg.Repro.TranscriptDir != "" {
 		_, _ = fmt.Fprintf(out, "Transcripts: %s\n", cfg.Repro.TranscriptDir)

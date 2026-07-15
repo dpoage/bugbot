@@ -20,7 +20,6 @@ import (
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/repro"
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -128,29 +127,30 @@ func newDaemonCmd() *cobra.Command {
 				Progress:   progressSink,
 			}
 
-			// Reproduction is opt-in (--repro) and only wired when a container
-			// runtime is available; otherwise the daemon runs without the
-			// reproduce stage. Sandbox availability is surfaced in the banner.
-			sandboxRuntime, sandboxOK := sandbox.Detect()
+			// Reproduction is opt-in (--repro) and only wired when a sandbox
+			// backend (container runtime or bwrap) is available; otherwise the
+			// daemon runs without the reproduce stage. Sandbox availability is
+			// surfaced in the banner.
+			sandboxOK := engine.SandboxAvailable(cfg)
 			if doRepro && sandboxOK {
 				// Preflight: probe the sandbox toolchain once before wiring the
 				// reproduce stage; a toolchain-less image would turn every backlog
 				// drain into per-finding environment_error burn (bugbot-u6td).
 				if verdict, vErr := repro.VerifySandboxOnce(ctx, repo.Root(), cfg); vErr == nil && verdict.BlocksRepro() {
-					diag := fmt.Sprintf("repro stage disabled: sandbox toolchain check failed (%s): %s — run `bugbot doctor` and set sandbox.image to a toolchain-capable image",
-						verdict.Category, verdict.Detail)
+					diag := fmt.Sprintf("repro stage disabled: sandbox toolchain check failed (%s): %s — run `bugbot doctor` and %s",
+						verdict.Category, verdict.Detail, engine.SandboxRemediationHint(cfg))
 					logger.Error(diag)
 					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), diag)
 					doRepro = false
 				}
 			}
 			if doRepro && sandboxOK {
-				reproducer, rerr := engine.BuildReproducer(ctx, &cfg, st, repo.Root(), sandboxRuntime, progressSink)
+				reproducer, rerr := engine.BuildReproducer(ctx, &cfg, st, repo.Root(), progressSink)
 				if rerr != nil {
 					return rerr
 				}
 				defer reproducer.Repro.Close() //nolint:errcheck
-				defer func() { _ = reproducer.Sb.Close() }()
+				defer func() { engine.CloseSandbox(reproducer.Sb) }()
 				deps.ReproClient = reproducer.Client
 				deps.Reproducer = reproducer.Repro
 				deps.ReproTagger = reproducer.Spend
@@ -213,7 +213,7 @@ func newDaemonCmd() *cobra.Command {
 				defer func() { _ = ctrlServer.Close() }()
 			}
 
-			printDaemonBanner(cmd, cfg, dcfg, sinks, sandboxRuntime, sandboxOK)
+			printDaemonBanner(cmd, cfg, dcfg, sinks, engine.SandboxBackendLabel(cfg), sandboxOK)
 
 			return d.Run(ctx)
 		},
