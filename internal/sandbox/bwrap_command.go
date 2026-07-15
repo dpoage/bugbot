@@ -238,10 +238,10 @@ func buildBwrapArgs(p bwrapParams) []string {
 	// reachable under any PATH bugbot constructs because every internal
 	// constructor ends with the DefaultContainerPath tail and images
 	// populate those directories; on store-based hosts those directories
-	// are empty of utilities, so a caller PATH like the capability prober's
-	// "PATH=<toolchains>:<default>" (engine.hostToolchainProbeInputs) would
-	// silently lose mkdir/grep/... without this append. The baseline is a
-	// strict suffix — a caller PATH still shadows everything in it.
+	// hold no utilities, so a caller-supplied value like the capability
+	// prober's "<toolchains>:<default>" (engine.hostToolchainProbeInputs)
+	// would silently lose mkdir/grep/... without this append. The baseline
+	// is a strict suffix — a caller PATH still shadows everything in it.
 	for _, e := range p.env {
 		key, value, ok := splitEnvKV(e)
 		if !ok {
@@ -338,17 +338,18 @@ func validateBwrapMounts(ro, rw []ROMount) error {
 
 // appendBaselinePath appends the POSIX-baseline directories to a PATH value
 // unless they are already its suffix (a repeated Spec.Env PATH entry, or a
-// caller that composed the effective PATH itself). Empty baseline returns
-// path unchanged — the FHS no-op guarantee.
-func appendBaselinePath(path, baseline string) string {
+// caller that composed the effective PATH itself). When no baseline
+// resolved on this host (the FHS case), the incoming value is returned
+// untouched, keeping standard-distro argv byte-identical.
+func appendBaselinePath(current, baseline string) string {
 	if baseline == "" {
-		return path
+		return current
 	}
-	if path == "" {
+	if current == "" {
 		return baseline
 	}
-	if path == baseline || strings.HasSuffix(path, ":"+baseline) {
-		return path
+	if current == baseline || strings.HasSuffix(current, ":"+baseline) {
+		return current
 	}
-	return path + ":" + baseline
+	return current + ":" + baseline
 }
