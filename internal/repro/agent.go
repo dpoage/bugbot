@@ -375,7 +375,11 @@ Work it as an ORDERED loop:
    consuming the budget, and writes never consume it. Read the
    classification and output, edit your candidate with write_repro_file,
    and re-exec until it reports demonstrated=true FOR THE REASON the
-   finding describes.
+   finding describes. Exec output is automatically tail-capped for you —
+   NEVER pipe your test runner through tail/head/grep to bound it
+   yourself, that discards the runner's exit code and can turn a real
+   failure into a false "passed" (a bash -c pipeline defensively gets
+   pipefail injected, but write clean commands and do not rely on it).
 5. SUBMIT the EXACT cmd that demonstrated the bug. Every file you wrote
    (and did not delete) is automatically included in your final plan — the
    workspace IS the proof; the plan's "files" field is an optional overlay,

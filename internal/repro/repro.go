@@ -787,20 +787,65 @@ func buildSpec(repoDir string, plan *Plan, image, network string, timeout time.D
 
 // applyStructuredOutputSpec applies normalizeCmdForStructuredOutput's cmd
 // rewrite and resulting CaptureFiles onto an otherwise-built sandbox.Spec
-// (bugbot-0zay). It is the ONE seam that turns a raw plan/iteration cmd into
-// the exact request interpret()'s structured path (go test -json, pytest
-// JUnit XML) needs to fire — shared by buildSpec (execute()'s official,
-// clean-room run) and the workspace tool's runExec (iteration preview, see
-// workspace_tools.go) so both feed interpret() IDENTICAL inputs for the
-// same cmd, modulo the workspace directory (fresh WriteFiles copy vs the
-// agent's persistent Workspace — see WorkspaceTool.Def's doc on that
-// residual, intentional divergence). The caller's own cmd variable is left
-// untouched: ecosystem detection and agent-facing feedback still classify
-// against the UNNORMALIZED cmd (interpret(res, cmd) is always called with
-// the original, never spec.Cmd).
+// (bugbot-0zay), then defensively injects `set -o pipefail; ` into a
+// bash -c script via injectPipefail (bugbot-2zoo). It is the ONE seam that
+// turns a raw plan/iteration cmd into the exact request interpret()'s
+// structured path (go test -json, pytest JUnit XML) needs to fire — shared
+// by buildSpec (execute()'s official, clean-room run) and the workspace
+// tool's runExec (iteration preview, see workspace_tools.go) so both feed
+// interpret() IDENTICAL inputs for the same cmd, modulo the workspace
+// directory (fresh WriteFiles copy vs the agent's persistent Workspace —
+// see WorkspaceTool.Def's doc on that residual, intentional divergence).
+// The caller's own cmd variable is left untouched: ecosystem detection and
+// agent-facing feedback still classify against the UNNORMALIZED cmd
+// (interpret(res, cmd) is always called with the original, never spec.Cmd).
 func applyStructuredOutputSpec(spec sandbox.Spec, cmd []string) sandbox.Spec {
 	spec.Cmd, spec.CaptureFiles = normalizeCmdForStructuredOutput(cmd)
+	spec.Cmd = injectPipefail(spec.Cmd)
 	return spec
+}
+
+// injectPipefail prefixes a bash -c script with `set -o pipefail; ` so a
+// filter-terminated pipeline (e.g. `node --test x.test.js 2>&1 | tail -60`)
+// reports the FAILING stage's exit code instead of the last stage's
+// (bugbot-2zoo, live transcript 20260716T153203: the_cloud's agent piped a
+// failing `node --test` through `tail -60`; bash returned tail's exit 0, so
+// both the workspace-exec preview and the official run classified the
+// attempt exit_zero and never surfaced the TAP 'not ok' failure already
+// visible in stdout). Agents reach for tail/head/grep to bound output
+// because they don't know the harness already tail-caps for them
+// (reproSandboxGuidance / workspaceGuidance now say so explicitly) — this
+// injection is the defensive backstop for when they do it anyway.
+//
+// Shape recognition mirrors ecosystem.UnwrapShell (see its doc comment):
+// argv[0] is "bash" or "/bin/bash" and argv[1] is a flag cluster ending in
+// "c" (e.g. "-c", "-lc"), so `bash -lc '...'` is covered the same as plain
+// `bash -c '...'`. Unlike UnwrapShell this NEVER matches "sh"/"/bin/sh" —
+// dash (Debian/Ubuntu's /bin/sh) has no `pipefail` builtin, so injecting it
+// there would itself turn a working script into a syntax error. A script
+// that already mentions "pipefail" (the agent or an earlier round already
+// set it, possibly with a different mode like `set -eo pipefail`) is left
+// alone rather than double-wrapped. Any other shape — non-shell argv, sh -c,
+// too few tokens to be a `bash -c SCRIPT` triple — passes through unchanged.
+func injectPipefail(cmd []string) []string {
+	if len(cmd) < 3 {
+		return cmd
+	}
+	shell := cmd[0]
+	if shell != "bash" && shell != "/bin/bash" {
+		return cmd
+	}
+	flag := cmd[1]
+	if !strings.HasPrefix(flag, "-") || !strings.HasSuffix(flag, "c") {
+		return cmd
+	}
+	script := cmd[2]
+	if strings.Contains(script, "pipefail") {
+		return cmd
+	}
+	out := append([]string(nil), cmd...)
+	out[2] = "set -o pipefail; " + script
+	return out
 }
 
 // bareShellOps is the set of shell control tokens that mean nothing to a
