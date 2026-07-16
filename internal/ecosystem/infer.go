@@ -141,3 +141,20 @@ func InferToolFromCmd(cmd []string) (Ecosystem, string) {
 func BaseMode(eco Ecosystem) string {
 	return baseMode[eco]
 }
+
+// ToolchainBinary returns the missing BINARY name an operator should install
+// for eco, for user-facing "image lacks X" messages (bugbot-813i). For most
+// gated ecosystems BaseMode doubles as the binary name ("node", "python",
+// "cargo", "bazel"), but Go's base mode is the probe token "present"
+// (bugbot-bslx), not a binary — eco itself ("go") is the binary there. Falls
+// back to eco when no base mode is registered. Every user-facing
+// blocked-toolchain message MUST use this, never raw BaseMode.
+func ToolchainBinary(eco Ecosystem) string {
+	if eco == EcosystemGo {
+		return string(eco)
+	}
+	if bin := baseMode[eco]; bin != "" {
+		return bin
+	}
+	return string(eco)
+}

@@ -126,10 +126,8 @@ func renderStatus(ctx context.Context, out io.Writer, cfg config.Config, st prog
 		}
 		sort.Strings(ecos)
 		for _, eco := range ecos {
-			binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
-			if binary == "" {
-				binary = eco
-			}
+			binary := ecosystem.ToolchainBinary(ecosystem.Ecosystem(eco))
+
 			_, _ = fmt.Fprintf(out, "  blocked:      %d finding(s) — image lacks %s\n", st.ReproBlocked[eco], binary)
 		}
 	}

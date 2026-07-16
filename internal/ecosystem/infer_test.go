@@ -132,6 +132,29 @@ func TestBaseMode(t *testing.T) {
 	}
 }
 
+// TestToolchainBinary pins the operator-facing binary name for the
+// "image lacks X" messages (bugbot-813i): Go's BaseMode is the probe token
+// "present", never a binary — raw BaseMode leaked it into user output.
+func TestToolchainBinary(t *testing.T) {
+	cases := []struct {
+		eco  ecosystem.Ecosystem
+		want string
+	}{
+		{ecosystem.EcosystemGo, "go"},
+		{ecosystem.EcosystemJS, "node"},
+		{ecosystem.EcosystemPython, "python"},
+		{ecosystem.EcosystemRust, "cargo"},
+		{ecosystem.EcosystemBazel, "bazel"},
+		{ecosystem.EcosystemCpp, "cpp"},
+		{"weird", "weird"},
+	}
+	for _, c := range cases {
+		if got := ecosystem.ToolchainBinary(c.eco); got != c.want {
+			t.Errorf("ToolchainBinary(%q) = %q, want %q", c.eco, got, c.want)
+		}
+	}
+}
+
 // TestBaseMode_MatchesRealProbeEntries guards against BaseMode naming a mode
 // that the actual probe table never produces — a silent typo here would make
 // the gate permanently report every js/python/rust finding as blocked.
