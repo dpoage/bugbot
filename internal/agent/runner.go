@@ -160,6 +160,24 @@ func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 // attached to every completion in the run (capability-gated; see [complete]),
 // so adapters that support structured output can apply grammar-constrained
 // decoding. The public Run passes nil; RunJSON passes its schema.
+//
+// maxEmptyTurnNudges bounds how many times run() will nudge a model that
+// produced neither a tool call nor visible text (after stripping reasoning
+// <think> blocks) back into the loop before giving up and treating the turn
+// as finished. Real reasoning models (MiniMax-M3 observed in production,
+// bugbot-kpp2) sometimes emit an assistant turn that is ONLY an inline think
+// block — stop=end_turn, zero tool calls — which the old code treated as
+// "model finished its turn", handing RunJSON unparseable empty text and
+// burning its single repair for nothing. The cap keeps a persistently silent
+// model from looping forever: after maxEmptyTurnNudges nudges go unanswered,
+// run() falls through to today's break.
+const maxEmptyTurnNudges = 2
+
+// emptyTurnNudge is appended as a user turn when a completion produced no
+// tool call and no visible text, to give the model another chance to either
+// call a tool or emit its final answer. See [maxEmptyTurnNudges].
+const emptyTurnNudge = "You made no tool call and produced no final answer. Continue: call a tool or emit your final answer now."
+
 func (r *Runner) run(ctx context.Context, seed []llm.Message, task, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
 	tr := NewTranscript()
 	if r.transcriptDir != "" {
@@ -189,6 +207,10 @@ func (r *Runner) run(ctx context.Context, seed []llm.Message, task, finalizeProm
 	// compaction is bounded and never thrashes the prompt cache turn-over-turn.
 	toolNameByID := map[string]string{}
 	compactThreshold := r.limits.HistoryTokenBudget
+
+	// emptyTurnNudges counts how many empty/think-only turns have already
+	// been nudged this run (see [maxEmptyTurnNudges]).
+	emptyTurnNudges := 0
 
 	for {
 		// Stop before the next turn if we've hit the iteration cap. The
@@ -265,6 +287,22 @@ func (r *Runner) run(ctx context.Context, seed []llm.Message, task, finalizeProm
 			if resp.StopReason == llm.StopError {
 				tr.closeStream()
 				return outcome, &ErrStopReason{StopReason: resp.StopReason, Text: resp.Text, Outcome: outcome}
+			}
+			// A turn with no tool call and no visible text once reasoning
+			// <think> blocks are stripped is not a real answer — it's an
+			// empty/think-only turn (bugbot-kpp2: MiniMax-M3 observed emitting
+			// exactly this in production, sometimes narrating a tool call it
+			// never actually made). Nudge the model to continue instead of
+			// treating the turn as finished, up to maxEmptyTurnNudges times;
+			// the nudge turn goes through the normal loop top (iteration cap,
+			// budget checks, compaction all still apply) so it bills and
+			// counts like any other turn. This also covers a truncated,
+			// unclosed think block: StripThinkBlocks strips it to empty too,
+			// and nudging gives the model a chance to re-emit cleanly.
+			if strings.TrimSpace(llm.StripThinkBlocks(resp.Text)) == "" && emptyTurnNudges < maxEmptyTurnNudges {
+				emptyTurnNudges++
+				messages = append(messages, llm.Message{Role: llm.RoleUser, Content: emptyTurnNudge})
+				continue
 			}
 			break
 		}
