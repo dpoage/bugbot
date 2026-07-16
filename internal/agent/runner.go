@@ -138,30 +138,51 @@ func NewRunner(client llm.Client, tools []Tool, systemPrompt string, opts ...Opt
 // rather than returned half-written. It costs at most one additional completion
 // per truncated turn and is reflected in the Outcome's Iterations and Usage.
 func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
-	return r.run(ctx, task, "", nil)
+	return r.run(ctx, nil, task, "", nil)
 }
 
-// run is the shared loop body. finalizePrompt, when non-empty, enables forced
-// finalization: when a stop condition fires (iteration cap, per-run token
-// budget, or shared budget pool) the loop injects this user-role message and
-// takes a single final tool-less completion so the model can emit its answer
-// instead of dangling exploration prose or a silently empty output. RunJSON
-// passes a JSON-demanding prompt; the public Run passes "" and therefore never
-// pays the extra turn.
+// run is the shared loop body. seed, when non-nil, is a prior conversation to
+// continue: task is appended as a NEW user turn onto seed instead of becoming
+// the conversation's sole seed message. The public Run and the default
+// RunJSON path pass seed == nil (reseed every call, today's behavior);
+// [Runner.RunJSONContinue] passes a prior Outcome's Messages so a revision
+// round lands in the SAME conversation as the investigation that produced it.
+//
+// finalizePrompt, when non-empty, enables forced finalization: when a stop
+// condition fires (iteration cap, per-run token budget, or shared budget
+// pool) the loop injects this user-role message and takes a single final
+// tool-less completion so the model can emit its answer instead of dangling
+// exploration prose or a silently empty output. RunJSON passes a
+// JSON-demanding prompt; the public Run passes "" and therefore never pays
+// the extra turn.
 //
 // responseSchema, when non-nil, is the JSON Schema for the final answer. It is
 // attached to every completion in the run (capability-gated; see [complete]),
 // so adapters that support structured output can apply grammar-constrained
 // decoding. The public Run passes nil; RunJSON passes its schema.
-func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
+func (r *Runner) run(ctx context.Context, seed []llm.Message, task, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
 	tr := NewTranscript()
 	if r.transcriptDir != "" {
 		tr.enableStreaming(r.transcriptPath(tr, task))
 	}
 
-	messages := []llm.Message{{Role: llm.RoleUser, Content: task}}
+	var messages []llm.Message
+	if len(seed) > 0 {
+		messages = make([]llm.Message, 0, len(seed)+1)
+		messages = append(messages, seed...)
+		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: task})
+	} else {
+		messages = []llm.Message{{Role: llm.RoleUser, Content: task}}
+	}
 
 	outcome := &Outcome{Transcript: tr}
+	// Snapshot the conversation into the Outcome on every return path (clean
+	// finish, truncation, or error) so a caller that wants to continue this
+	// conversation (RunJSONContinue) always has the latest history available,
+	// even from a truncated or erroring run. messages is reassigned (not just
+	// mutated) throughout the loop below; the deferred closure reads it by
+	// reference at return time, not at defer-registration time.
+	defer func() { outcome.Messages = messages }()
 
 	// History-compaction state. toolNameByID lets a tool-result stub name the
 	// tool it answered; compactThreshold re-arms upward after each firing so

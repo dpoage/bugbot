@@ -46,6 +46,101 @@ func TestRunJSON_DirectParse(t *testing.T) {
 	}
 }
 
+// TestRunJSONContinue_PreservesPriorConversation is the core continuation
+// contract (bugbot-z6ay): a second RunJSONContinue call must NOT reseed the
+// conversation — it must append its task onto the FULL history of the prior
+// round (including round 1's tool-driven investigation), not just round 1's
+// final answer. This is what lets a revision round's feedback land in the
+// same conversation the model already investigated in, instead of asking it
+// to re-orient from scratch.
+func TestRunJSONContinue_PreservesPriorConversation(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "echo", `{"v":"orient"}`, 10, 4),
+		textResp(`{"file":"a.go","message":"round1"}`, 8, 3),
+		textResp(`{"file":"a.go","message":"round2"}`, 8, 3),
+	)
+	tools := []Tool{echoTool{name: "echo"}}
+	r := NewRunner(fc, tools, "sys")
+
+	var got1 finding
+	out1, err := r.RunJSON(context.Background(), "investigate and report", nil, &got1)
+	if err != nil {
+		t.Fatalf("round1 RunJSON: %v", err)
+	}
+	if len(fc.requests) != 2 {
+		t.Fatalf("round1 issued %d requests, want 2 (orient + final)", len(fc.requests))
+	}
+	// Round 1's Outcome must carry the full conversation (seed + tool call +
+	// tool result + final assistant answer) for RunJSONContinue to build on.
+	if want := 4; len(out1.Messages) != want {
+		t.Fatalf("round1 Outcome.Messages = %d entries, want %d (user, assistant tool-call, tool-result, assistant final)", len(out1.Messages), want)
+	}
+
+	var got2 finding
+	out2, err := r.RunJSONContinue(context.Background(), out1, "feedback: fix it", nil, &got2)
+	if err != nil {
+		t.Fatalf("round2 RunJSONContinue: %v", err)
+	}
+	// Exactly one more completion was needed: continuation means the model
+	// did NOT re-issue the orientation tool call it already made in round 1.
+	if len(fc.requests) != 3 {
+		t.Fatalf("round2 issued %d total requests, want 3 (round1's 2 plus round2's 1) -- extra requests mean round 2 re-investigated instead of continuing", len(fc.requests))
+	}
+	round2Req := fc.requests[2]
+	if len(round2Req.Messages) != len(out1.Messages)+1 {
+		t.Fatalf("round2 request has %d messages, want %d (round1's full history plus round2's new task turn)", len(round2Req.Messages), len(out1.Messages)+1)
+	}
+	// Round 2's request must carry round 1's messages verbatim as a prefix --
+	// specifically the tool call and tool result, proving the model literally
+	// saw its own prior investigation rather than a reseeded conversation.
+	for i, want := range out1.Messages {
+		got := round2Req.Messages[i]
+		if got.Role != want.Role || got.Content != want.Content || got.ToolCallID != want.ToolCallID {
+			t.Errorf("round2 request message %d = %+v, want round1 history entry %+v", i, got, want)
+		}
+	}
+	sawToolCall, sawToolResult := false, false
+	for _, m := range round2Req.Messages {
+		if m.Role == llm.RoleAssistant && len(m.ToolCalls) > 0 {
+			sawToolCall = true
+		}
+		if m.Role == llm.RoleToolResult {
+			sawToolResult = true
+		}
+	}
+	if !sawToolCall || !sawToolResult {
+		t.Errorf("round2 request missing round1's investigation: sawToolCall=%v sawToolResult=%v", sawToolCall, sawToolResult)
+	}
+	if got2.Message != "round2" {
+		t.Errorf("round2 parsed = %+v, want message=round2", got2)
+	}
+	if out2 == nil {
+		t.Fatal("round2 Outcome is nil")
+	}
+}
+
+// TestRunJSONContinue_NilPrevDegradesToReseed verifies that a nil prev
+// Outcome is a safe no-op fallback to plain reseeding, so a caller need not
+// special-case round 1 with a nil check before calling RunJSONContinue.
+func TestRunJSONContinue_NilPrevDegradesToReseed(t *testing.T) {
+	fc := newFakeClient(textResp(`{"file":"a.go","message":"bug"}`, 5, 5))
+	r := NewRunner(fc, nil, "sys")
+
+	var got finding
+	if _, err := r.RunJSONContinue(context.Background(), nil, "find a bug", nil, &got); err != nil {
+		t.Fatalf("RunJSONContinue with nil prev: %v", err)
+	}
+	if len(fc.requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(fc.requests))
+	}
+	if len(fc.requests[0].Messages) != 1 {
+		t.Errorf("request messages = %d, want 1 (reseeded, no prior history)", len(fc.requests[0].Messages))
+	}
+	if got.File != "a.go" {
+		t.Errorf("parsed = %+v", got)
+	}
+}
+
 func TestRunJSON_StripsMarkdownFences(t *testing.T) {
 	fc := newFakeClient(textResp("```json\n{\"file\":\"b.go\",\"message\":\"x\"}\n```", 5, 5))
 	r := NewRunner(fc, nil, "sys")
@@ -604,7 +699,7 @@ func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
 		TokenBudget:   -1,
 		BudgetCheck:   pool.Check,
 	}))
-	out, _ := r2.run(context.Background(), "audit", finalizationPrompt(json.RawMessage(`{"type":"object"}`)), nil)
+	out, _ := r2.run(context.Background(), nil, "audit", finalizationPrompt(json.RawMessage(`{"type":"object"}`)), nil)
 	if !out.Truncated {
 		t.Error("Outcome.Truncated = false, want true (budget stop should still mark truncated)")
 	}
