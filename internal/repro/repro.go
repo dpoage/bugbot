@@ -413,6 +413,14 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 	// the agent can correct a non-demonstrating repro. Empty on the first pass.
 	var feedback string
 
+	// prevOutcome is round i's agent.Outcome, threaded into round i+1's
+	// planFor call so RunJSONContinue (see planFor, agent.go) lands the
+	// revision feedback in the SAME conversation as the investigation that
+	// produced it, instead of discarding up to MaxIterations turns of
+	// tool-driven investigation on every revision round (bugbot-z6ay). Nil on
+	// the first pass, which keeps round 1 on the existing RunJSON reseed path.
+	var prevOutcome *agent.Outcome
+
 	// Look up the finding's own package summary once and push it into every plan
 	// request so the agent starts oriented on the buggy code's package instead of
 	// rediscovering it from files. A miss (no cached summary, or a repo-root file)
@@ -428,9 +436,18 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		roundStart := time.Now()
 		att.Attempts = i + 1
 
-		plan, u, perr := r.planFor(ctx, runner, finding, pkgSummary, feedback)
-		usage.InputTokens += u.InputTokens
-		usage.OutputTokens += u.OutputTokens
+		plan, roundOutcome, perr := r.planFor(ctx, runner, finding, pkgSummary, feedback, prevOutcome)
+		if roundOutcome != nil {
+			usage.InputTokens += roundOutcome.Usage.InputTokens
+			usage.OutputTokens += roundOutcome.Usage.OutputTokens
+		}
+		// Thread this round's Outcome into the next round's planFor call
+		// regardless of perr: RunJSON/RunJSONContinue return a usable Outcome
+		// even on an unparseable-output error (its Messages still hold the
+		// round's investigation), so a "revise and try again" round after an
+		// unparseable plan still continues the same conversation instead of
+		// silently dropping back to reseed.
+		prevOutcome = roundOutcome
 		if perr != nil {
 			// An unparseable or schema-violating plan from the agent is a
 			// recoverable model hiccup, not an infrastructure failure: treat it

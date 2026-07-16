@@ -10,7 +10,6 @@ import (
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/util"
 )
@@ -598,18 +597,51 @@ var planSchema = json.RawMessage(`{
 // planFor asks the agent for a repro plan for finding. feedback, when
 // non-empty, is appended to steer a revision after a prior non-demonstrating
 // attempt.
-func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding domain.Finding, pkgSummary, feedback string) (*Plan, llm.Usage, error) {
-	task := buildTask(finding, pkgSummary, feedback)
+//
+// prev, when non-nil, is the previous round's Outcome: planFor then uses
+// [agent.Runner.RunJSONContinue] instead of RunJSON, so this round's request
+// lands in the SAME conversation as the investigation prev's round performed
+// (round 2+ of Attempt's revision loop) instead of re-orienting from
+// scratch. prev == nil (round 1) reseeds via RunJSON exactly as before.
+//
+// The returned Outcome is the round's own, meant to be threaded back in as
+// the NEXT round's prev by the caller — this is how the conversation chains
+// across rounds without Attempt itself touching message history.
+func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding domain.Finding, pkgSummary, feedback string, prev *agent.Outcome) (*Plan, *agent.Outcome, error) {
 	var plan Plan
-	outcome, err := runner.RunJSON(ctx, task, planSchema, &plan)
-	var usage llm.Usage
-	if outcome != nil {
-		usage = outcome.Usage
+	var outcome *agent.Outcome
+	var err error
+	if prev == nil {
+		outcome, err = runner.RunJSON(ctx, buildTask(finding, pkgSummary, feedback), planSchema, &plan)
+	} else {
+		// Only the feedback goes out on a continuation turn: the finding's
+		// title/description/reasoning/package summary already sit in history
+		// as round 1's opening user turn (RunJSONContinue keeps it), so
+		// resending them here would just double the finding's prose on every
+		// revision round for no benefit.
+		outcome, err = runner.RunJSONContinue(ctx, prev, buildRevisionTask(feedback), planSchema, &plan)
 	}
 	if err != nil {
-		return nil, usage, err
+		return nil, outcome, err
 	}
-	return &plan, usage, nil
+	return &plan, outcome, nil
+}
+
+// buildRevisionTask renders the per-round task prompt for a CONTINUATION
+// revision round (round 2+ of Attempt, via planFor's prev != nil branch).
+// Unlike buildTask, it carries only the revision feedback: the finding's
+// framing has already been sent as the conversation's opening turn and stays
+// in history under RunJSONContinue, so it is deliberately not repeated here.
+//
+// feedback is the verbatim output of verdict.feedback (interpret.go); see
+// buildTask's doc comment for the fencing/sanitization contract this
+// preserves — feedback MUST NOT be re-wrapped, stripped, or reformatted.
+func buildRevisionTask(feedback string) string {
+	var b strings.Builder
+	b.WriteString("--- Revision required ---\n")
+	b.WriteString(feedback)
+	b.WriteString("\nProduce a corrected plan.\n")
+	return b.String()
 }
 
 // buildTask renders the per-finding task prompt, including the finding's

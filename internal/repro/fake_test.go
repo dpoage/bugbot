@@ -68,19 +68,24 @@ func (c *scriptedClient) allRequests() []llm.Request {
 	return out
 }
 
-// taskText returns the first user-message content of request n (the task
-// prompt the agent was given), or "" if absent.
+// taskText returns the LAST user-message content of request n (the task
+// prompt this round's own turn carried), or "" if absent. Round 1 has
+// exactly one user message, so this matches the historical "first" behavior
+// there; a continuation round (bugbot-z6ay, see planFor/RunJSONContinue)
+// carries the ENTIRE prior conversation as a prefix, so the round's own new
+// task is the last user turn, not the first.
 func (c *scriptedClient) taskText(n int) string {
 	reqs := c.allRequests()
 	if n < 0 || n >= len(reqs) {
 		return ""
 	}
+	text := ""
 	for _, m := range reqs[n].Messages {
 		if m.Role == llm.RoleUser {
-			return m.Content
+			text = m.Content
 		}
 	}
-	return ""
+	return text
 }
 
 var _ llm.Client = (*scriptedClient)(nil)

@@ -31,6 +31,13 @@ var ErrUnparseableOutput = errors.New("model output did not parse as JSON")
 // round-trip — sending the precise error back and asking for valid JSON only —
 // before failing.
 //
+// Every call reseeds the conversation from scratch (task becomes the sole
+// seed message) — this is the right default for the finder/verifier/single-
+// shot callers that dominate the codebase. A caller driving a multi-round
+// revision loop that wants round N+1 to remember round N's investigation
+// should use [Runner.RunJSONContinue] instead; RunJSON's behavior and cost
+// profile are unchanged by that method's existence.
+//
 // schema is a JSON Schema (raw JSON) describing the expected shape. It is
 // threaded natively as llm.Request.ResponseSchema (capability-gated: when the
 // client reports StructuredOutput==true the schema is sent on the wire, so
@@ -46,6 +53,37 @@ var ErrUnparseableOutput = errors.New("model output did not parse as JSON")
 // repair round-trip still fails, err is non-nil but the Outcome is still
 // returned for inspection.
 func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessage, out any) (*Outcome, error) {
+	return r.runJSON(ctx, nil, task, schema, out)
+}
+
+// RunJSONContinue behaves exactly like [Runner.RunJSON] except it CONTINUES a
+// prior conversation instead of reseeding one: prev.Messages (the Messages
+// field of an earlier RunJSON/RunJSONContinue call's Outcome, on this same
+// Runner) becomes the starting history, and task is appended as a NEW
+// user turn rather than becoming the conversation's sole seed message. A nil
+// prev, or a prev with no Messages, degrades to plain reseeding — identical
+// to RunJSON — so a first-round caller can use this method unconditionally
+// without a nil check.
+//
+// This is the opt-in continuation entry point: it exists so a multi-round
+// revision loop (see internal/repro/repro.go Attempt) can have round N+1's
+// feedback land in the SAME conversation as round N's tool-driven
+// investigation, instead of discarding that investigation and asking the
+// model to re-orient from a truncated summary alone. maybeCompact still
+// bounds the continued history exactly as it does within a single run — no
+// separate summarizer is introduced here.
+func (r *Runner) RunJSONContinue(ctx context.Context, prev *Outcome, task string, schema json.RawMessage, out any) (*Outcome, error) {
+	var seed []llm.Message
+	if prev != nil {
+		seed = prev.Messages
+	}
+	return r.runJSON(ctx, seed, task, schema, out)
+}
+
+// runJSON is the shared implementation behind RunJSON and RunJSONContinue.
+// seed is nil for RunJSON (reseed) or a prior Outcome's Messages for
+// RunJSONContinue (continue).
+func (r *Runner) runJSON(ctx context.Context, seed []llm.Message, task string, schema json.RawMessage, out any) (*Outcome, error) {
 	prompt := task + "\n\n" + jsonInstruction(schema)
 
 	// Reserve the last iteration for a forced finalization turn: if the model is
@@ -54,7 +92,7 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 	// dangling exploration prose that can never parse. The schema is threaded
 	// natively so the finalization turn also benefits from grammar-constrained
 	// output on capable adapters.
-	outcome, err := r.run(ctx, prompt, finalizationPrompt(schema), schema)
+	outcome, err := r.run(ctx, seed, prompt, finalizationPrompt(schema), schema)
 	if err != nil {
 		return outcome, err
 	}
@@ -103,6 +141,14 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 	}
 
 	repairOutcome, rerr := r.repair(ctx, outcome.Transcript, repair, schema)
+	// The repair completion runs against its own throwaway single-turn history
+	// (see [Runner.repair]), not outcome.messages, so it never sees — and
+	// therefore repairOutcome.Messages never carries — the run's investigation.
+	// Propagate the pre-repair conversation onto repairOutcome regardless of
+	// how repair turns out, so a caller chaining RunJSONContinue after a round
+	// that needed repair still continues from the real investigation instead
+	// of an empty history.
+	repairOutcome.Messages = outcome.Messages
 	if rerr != nil {
 		return repairOutcome, rerr
 	}
