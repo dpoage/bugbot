@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 )
@@ -336,6 +337,100 @@ func TestPatchProver_SuiteFailLeadsToNeedsHuman(t *testing.T) {
 	second := client.taskText(1)
 	if !strings.Contains(second, "suite") {
 		t.Errorf("revision task missing suite feedback: %q", second)
+	}
+}
+// TestPatchProver_RevisionContinuesInvestigation is the acceptance test for
+// bugbot-a54h: a Prove revision round (round 2) must continue round 1's
+// conversation instead of reseeding it (the patch-prover analogue of
+// bugbot-z6ay's TestAttempt_RevisionContinuesInvestigation). Round 1
+// investigates via a read_file tool call before submitting a fix that makes
+// the targeted repro pass but the suite fail, forcing a revision round; round
+// 2 is scripted with ONLY a final plan answer and NO further tool-call
+// steps -- if planFor's continuation wiring regressed back to a fresh
+// RunJSON per round, the model would have no orientation and the
+// toolScriptedClient would serve the benign "(unscripted)" fallback instead
+// of a valid plan, and Prove would fail to promote. Promotion therefore
+// proves round 2 never re-issued round 1's orientation tool call, and the
+// recorded round-2 request is asserted to literally contain round 1's
+// tool-call/tool-result messages.
+func TestPatchProver_RevisionContinuesInvestigation(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	repoDir := newRepoDirWithCalc(t)
+	artifactDir := t.TempDir()
+
+	finding, att := buildT1Finding(t, st)
+
+	bundleDir := filepath.Join(artifactDir, finding.ID)
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	client := newToolScriptedClient(
+		// Round 1: one orientation tool call, then a fix that passes the
+		// targeted repro but fails the suite, forcing a revision round.
+		toolCallStep("c1", "read_file", `{"path":"calc.go"}`),
+		textStep(patchPlanBody(t, goodPatchPlan())),
+		// Round 2 (continuation): ONLY the corrected final plan is scripted.
+		textStep(patchPlanBody(t, goodPatchPlan())),
+	)
+
+	sb := sandbox.NewMock(sandbox.MockResponse{})
+	// Attempt 1: targeted pass, suite fail -> revision round.
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "ok"}})
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "FAIL: TestOther"}})
+	// Attempt 2: targeted pass, suite pass -> fix witnessed.
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "ok"}})
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "ok"}})
+
+	prover := &PatchProver{
+		client:      client,
+		sb:          sb,
+		repoDir:     repoDir,
+		maxAttempts: 2,
+		artifactDir: artifactDir,
+	}
+
+	outcome, err := prover.Prove(ctx, st, finding, att)
+	if err != nil {
+		t.Fatalf("Prove: %v", err)
+	}
+	if outcome.kind != patchOutcomeFixWitnessed {
+		t.Fatalf("outcome.kind = %v, want patchOutcomeFixWitnessed -- round 2 likely failed to continue round 1's conversation", outcome.kind)
+	}
+
+	// Exactly 3 LLM completions total: round1's tool call + round1's plan +
+	// round2's plan. No 4th request means round 2 never re-issued the
+	// orientation tool call.
+	reqs := client.requests
+	if len(reqs) != 3 {
+		t.Fatalf("llm completions = %d, want 3 (round1 tool-call + round1 plan + round2 plan)", len(reqs))
+	}
+
+	// Round 2's request (the last one) must carry round 1's investigation
+	// (the read_file tool call and its result) as part of its history --
+	// direct proof the conversation was continued, not reseeded.
+	round2 := reqs[2]
+	sawToolCall, sawToolResult := false, false
+	for _, m := range round2.Messages {
+		if m.Role == llm.RoleAssistant {
+			for _, tc := range m.ToolCalls {
+				if tc.Name == "read_file" {
+					sawToolCall = true
+				}
+			}
+		}
+		if m.Role == llm.RoleToolResult && m.ToolCallID == "c1" {
+			sawToolResult = true
+		}
+	}
+	if !sawToolCall || !sawToolResult {
+		t.Errorf("round2 request missing round1's investigation (sawToolCall=%v sawToolResult=%v); messages:\n%+v", sawToolCall, sawToolResult, round2.Messages)
+	}
+	// Round 2's request must ALSO be longer than round 1's plan request (i.e.
+	// history grew rather than being reset).
+	if len(round2.Messages) <= len(reqs[1].Messages) {
+		t.Errorf("round2 request has %d messages, want more than round1's %d (history must grow, not reseed)", len(round2.Messages), len(reqs[1].Messages))
 	}
 }
 
