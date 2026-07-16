@@ -27,46 +27,57 @@ func toProbeResult(r Result) ecoreg.ProbeResult {
 }
 
 // TestGoProbeInterpret tests the Go capability probe's interpret function
-// directly, covering cgo-present, cgo-absent, and probe-error cases.
+// directly, covering base-presence ("present", bugbot-bslx), cgo-present,
+// cgo-absent, and probe-error cases.
 func TestGoProbeInterpret(t *testing.T) {
 	probe := probeByName(t, "go")
 
-	t.Run("race_available_when_exit0_and_CGO_1", func(t *testing.T) {
-		modes := probe.Interpret(toProbeResult(Result{ExitCode: 0, Stdout: "1\n"}))
+	t.Run("present_and_race_available_when_both_tokens_emitted", func(t *testing.T) {
+		modes := probe.Interpret(toProbeResult(Result{ExitCode: 0, Stdout: "go\nrace\n"}))
+		if !modes["present"] {
+			t.Errorf("want present=true when the go token is emitted, got %v", modes)
+		}
 		if !modes["race"] {
-			t.Errorf("want race=true when exit 0 and CGO_ENABLED=1, got %v", modes)
+			t.Errorf("want race=true when the race token is emitted, got %v", modes)
 		}
 	})
 
-	t.Run("race_unavailable_when_exit0_CGO_0", func(t *testing.T) {
-		modes := probe.Interpret(toProbeResult(Result{ExitCode: 0, Stdout: "0\n"}))
+	t.Run("present_true_race_false_when_only_go_token", func(t *testing.T) {
+		modes := probe.Interpret(toProbeResult(Result{ExitCode: 0, Stdout: "go\n"}))
+		if !modes["present"] {
+			t.Errorf("want present=true, got %v", modes)
+		}
 		if modes["race"] {
-			t.Errorf("want race=false when CGO_ENABLED=0, got %v", modes)
+			t.Errorf("want race=false when CGO_ENABLED != 1 / no C compiler, got %v", modes)
 		}
 	})
 
-	t.Run("race_unavailable_when_nonzero_exit", func(t *testing.T) {
+	t.Run("both_unavailable_when_nonzero_exit_no_tokens", func(t *testing.T) {
 		modes := probe.Interpret(toProbeResult(Result{ExitCode: 1, Stdout: ""}))
-		if modes["race"] {
-			t.Errorf("want race=false when exit non-zero, got %v", modes)
+		if modes["present"] || modes["race"] {
+			t.Errorf("want present=false race=false when exit non-zero and no tokens, got %v", modes)
 		}
 	})
 
-	t.Run("race_unavailable_empty_stdout", func(t *testing.T) {
+	t.Run("both_unavailable_empty_stdout", func(t *testing.T) {
 		modes := probe.Interpret(toProbeResult(Result{ExitCode: 0, Stdout: ""}))
-		if modes["race"] {
-			t.Errorf("want race=false when stdout empty, got %v", modes)
+		if modes["present"] || modes["race"] {
+			t.Errorf("want present=false race=false when stdout empty, got %v", modes)
 		}
 	})
 }
 
 // TestProbeCapabilitiesMock tests ProbeCapabilities using sandbox.NewMock,
-// covering: cgo present, cgo absent, Exec error → unavailable, and cache hit.
+// covering: go present, cgo present, cgo absent, Exec error → unavailable,
+// and cache hit.
 func TestProbeCapabilitiesMock(t *testing.T) {
-	t.Run("race_available_when_cgo_enabled", func(t *testing.T) {
+	t.Run("present_and_race_available_when_go_and_race_tokens", func(t *testing.T) {
 		InvalidateCapabilityCache("test-image-race-available")
-		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "1\n"}})
+		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "go\nrace\n"}})
 		cs := ProbeCapabilities(context.Background(), mock, "test-image-race-available", t.TempDir(), nil, nil)
+		if !cs.Available("go", "present") {
+			t.Errorf("want present available, got %v", cs)
+		}
 		if !cs.Available("go", "race") {
 			t.Errorf("want race available, got %v", cs)
 		}
@@ -74,17 +85,32 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 
 	t.Run("race_unavailable_when_cgo_disabled", func(t *testing.T) {
 		InvalidateCapabilityCache("test-image-race-unavailable")
-		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "0\n"}})
+		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "go\n"}})
 		cs := ProbeCapabilities(context.Background(), mock, "test-image-race-unavailable", t.TempDir(), nil, nil)
+		if !cs.Available("go", "present") {
+			t.Errorf("want present available, got %v", cs)
+		}
 		if cs.Available("go", "race") {
 			t.Errorf("want race unavailable when CGO_ENABLED=0, got %v", cs)
 		}
 	})
 
-	t.Run("race_unavailable_on_exec_error", func(t *testing.T) {
+	t.Run("present_unavailable_when_go_missing", func(t *testing.T) {
+		InvalidateCapabilityCache("test-image-go-missing")
+		mock := NewMock(MockResponse{Result: Result{ExitCode: 127, Stdout: ""}})
+		cs := ProbeCapabilities(context.Background(), mock, "test-image-go-missing", t.TempDir(), nil, nil)
+		if cs.Available("go", "present") {
+			t.Errorf("want present unavailable when the probe emits no go token, got %v", cs)
+		}
+	})
+
+	t.Run("both_unavailable_on_exec_error", func(t *testing.T) {
 		InvalidateCapabilityCache("test-image-exec-error")
 		mock := NewMock(MockResponse{Err: errProbeTest})
 		cs := ProbeCapabilities(context.Background(), mock, "test-image-exec-error", t.TempDir(), nil, nil)
+		if cs.Available("go", "present") {
+			t.Errorf("want present unavailable on exec error, got %v", cs)
+		}
 		if cs.Available("go", "race") {
 			t.Errorf("want race unavailable on exec error, got %v", cs)
 		}
@@ -92,7 +118,7 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 
 	t.Run("cache_hit_returns_same_result", func(t *testing.T) {
 		InvalidateCapabilityCache("test-image-cache-hit")
-		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "1\n"}})
+		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "go\nrace\n"}})
 		cs1 := ProbeCapabilities(context.Background(), mock, "test-image-cache-hit", t.TempDir(), nil, nil)
 		cs2 := ProbeCapabilities(context.Background(), mock, "test-image-cache-hit", t.TempDir(), nil, nil)
 		if cs1["go"]["race"] != cs2["go"]["race"] {
@@ -100,15 +126,17 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 		}
 	})
 
-	t.Run("nil_sandbox_returns_all_false", func(t *testing.T) {
+	t.Run("nil_sandbox_returns_unavailable", func(t *testing.T) {
+		InvalidateCapabilityCache("any")
 		cs := ProbeCapabilities(context.Background(), nil, "any", "", nil, nil)
 		if cs.Available("go", "race") {
 			t.Errorf("want race unavailable for nil sandbox, got %v", cs)
 		}
 	})
 
-	t.Run("empty_repoDir_returns_all_false", func(t *testing.T) {
-		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "1\n"}})
+	t.Run("empty_repoDir_returns_unavailable", func(t *testing.T) {
+		InvalidateCapabilityCache("any")
+		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "go\nrace\n"}})
 		cs := ProbeCapabilities(context.Background(), mock, "any", "", nil, nil)
 		if cs.Available("go", "race") {
 			t.Errorf("want race unavailable for empty repoDir, got %v", cs)

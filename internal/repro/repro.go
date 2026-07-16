@@ -775,15 +775,20 @@ func validatePlan(p *Plan, repoDir string) error {
 // gatedEcosystems is the ordered set of ecosystem.BaseMode-gated ecosystems
 // (see ecosystem.InferFromCmd/BaseMode) consulted for both the "available
 // alternatives" list in rejectUnavailableEcosystemPlan and any future
-// diagnostic that wants to enumerate what a probed image can run.
-var gatedEcosystems = []ecosystem.Ecosystem{ecosystem.EcosystemJS, ecosystem.EcosystemPython, ecosystem.EcosystemRust}
+// diagnostic that wants to enumerate what a probed image can run. Go is
+// included even though its gate has an asymmetric degradation rule
+// (goAvailable, promote.go): the generic caps.Available(eco, mode) check
+// this list feeds into already treats a missing "go" entry as unavailable,
+// so go only ever appears as an "available alternative" when the probe
+// positively confirmed it — never a false claim.
+var gatedEcosystems = []ecosystem.Ecosystem{ecosystem.EcosystemJS, ecosystem.EcosystemPython, ecosystem.EcosystemRust, ecosystem.EcosystemGo}
 
 // rejectUnavailableEcosystemPlan checks plan.Cmd against caps and returns
 // revision feedback naming the missing toolchain and the available
 // alternatives, or "" when the plan should proceed to a sandbox launch —
 // either ecosystem.InferFromCmd found no gated ecosystem requirement (e.g.
-// "go test", "make", or any command this function does not recognize), caps
-// is nil (no probe available), or the required ecosystem IS available.
+// "make", or any command this function does not recognize), caps is nil (no
+// probe available), or the required ecosystem IS available.
 //
 // This is the pre-launch half of bugbot-14g0's capability gate (fix B,
 // acceptance 3): promote.go's gateEcosystem gates on the FINDING's inferred
@@ -824,6 +829,14 @@ func rejectUnavailableEcosystemPlan(p *Plan, caps sandbox.CapabilitySet) string 
 		}
 		// Neither launcher works: fall through to the generic
 		// missing-toolchain feedback with the language alternatives.
+	} else if eco == ecosystem.EcosystemGo {
+		// Go's degradation rule (goAvailable, promote.go): a plan launching
+		// `go test`/`go build` is only rejected when the probe actually ran
+		// for this image and explicitly found no go binary — never when the
+		// probe never populated a "go" entry (bugbot-bslx).
+		if goAvailable(caps) {
+			return ""
+		}
 	} else if mode == "" || caps.Available(eco, mode) {
 		return ""
 	}
@@ -841,7 +854,7 @@ func rejectUnavailableEcosystemPlan(p *Plan, caps sandbox.CapabilitySet) string 
 	if len(alts) == 0 {
 		return fmt.Sprintf(
 			"Your plan's command requires %s, which this sandbox does not have, and no alternative "+
-				"toolchain (js/python/rust) is available either. Do NOT substitute a non-behavioral test in a "+
+				"toolchain (js/python/rust/go) is available either. Do NOT substitute a non-behavioral test in a "+
 				"different language or grep for the pattern — that does not demonstrate the bug. Set cmd to a "+
 				"command this sandbox can actually run, or omit a cmd change and report the environment gap in expect.",
 			eco,

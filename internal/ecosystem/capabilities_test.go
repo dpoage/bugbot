@@ -73,8 +73,21 @@ func TestGoProbeInterpret_ViaEcosystem(t *testing.T) {
 	if probe.Probe[0] != "/bin/sh" {
 		t.Errorf("go probe Probe[0] = %q, want /bin/sh", probe.Probe[0])
 	}
-	modes := probe.Interpret(ecosystem.ProbeResult{ExitCode: 0, Stdout: "1\n"})
+	modes := probe.Interpret(ecosystem.ProbeResult{ExitCode: 0, Stdout: "go\nrace\n"})
+	if !modes["present"] {
+		t.Errorf("go probe: Interpret(exit0, \"go\\nrace\") should give present=true, got %v", modes)
+	}
 	if !modes["race"] {
-		t.Errorf("go probe: Interpret(exit0, CGO=1) should give race=true, got %v", modes)
+		t.Errorf("go probe: Interpret(exit0, \"go\\nrace\") should give race=true, got %v", modes)
+	}
+	// go present but no C compiler / cgo disabled: only "go" token emitted.
+	presentOnly := probe.Interpret(ecosystem.ProbeResult{ExitCode: 0, Stdout: "go\n"})
+	if !presentOnly["present"] || presentOnly["race"] {
+		t.Errorf("go probe: Interpret(exit0, \"go\") = %v, want present=true race=false", presentOnly)
+	}
+	// go binary missing entirely: no tokens at all (bugbot-bslx negative signal).
+	absent := probe.Interpret(ecosystem.ProbeResult{ExitCode: 127, Stdout: ""})
+	if absent["present"] || absent["race"] {
+		t.Errorf("go probe: Interpret(exit127, \"\") = %v, want present=false race=false", absent)
 	}
 }

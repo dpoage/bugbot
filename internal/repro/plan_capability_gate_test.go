@@ -200,3 +200,43 @@ func TestRejectUnavailableEcosystemPlan_BazelLauncherName(t *testing.T) {
 		t.Errorf("feedback must direct the agent to the working bazel launcher, got %q", msg)
 	}
 }
+
+// TestRejectUnavailableEcosystemPlan_GoGated pins bugbot-bslx: a plan
+// launching `go test` on a sandbox whose probe explicitly reported no go
+// binary is rejected pre-launch, naming go, instead of burning a sandbox
+// run into exit-127 "go: not found".
+func TestRejectUnavailableEcosystemPlan_GoGated(t *testing.T) {
+	caps := sandbox.CapabilitySet{"go": {"present": false, "race": false}}
+	msg := rejectUnavailableEcosystemPlan(&Plan{Cmd: []string{"go", "test", "-timeout", "60s", "./..."}}, caps)
+	if msg == "" {
+		t.Fatal("want rejection when the probe explicitly found no go binary")
+	}
+	if !strings.Contains(msg, "go") {
+		t.Errorf("message must name the missing ecosystem (go): %s", msg)
+	}
+
+	// The bash -c wrapper form must be gated too (InferToolFromCmd unwraps it).
+	if msg := rejectUnavailableEcosystemPlan(&Plan{Cmd: []string{"bash", "-c", "go test ./..."}}, caps); msg == "" {
+		t.Error("want rejection for a bash -c wrapped go cmd on a go-less sandbox")
+	}
+}
+
+// TestRejectUnavailableEcosystemPlan_GoProbeAbsentUngated pins bugbot-bslx's
+// CRITICAL degradation rule: a CapabilitySet with no "go" entry at all
+// (probe never ran / no probe data) must NOT reject a go cmd — only an
+// explicit "go unavailable" probe result (tested above) may.
+func TestRejectUnavailableEcosystemPlan_GoProbeAbsentUngated(t *testing.T) {
+	caps := sandbox.CapabilitySet{"js": {"node": false}}
+	if msg := rejectUnavailableEcosystemPlan(&Plan{Cmd: []string{"go", "test", "-timeout", "60s", "./..."}}, caps); msg != "" {
+		t.Errorf("no go probe data must degrade to ungated, got rejection %q", msg)
+	}
+}
+
+// TestRejectUnavailableEcosystemPlan_GoAvailablePasses verifies a go cmd
+// proceeds untouched once the probe reports go present.
+func TestRejectUnavailableEcosystemPlan_GoAvailablePasses(t *testing.T) {
+	caps := sandbox.CapabilitySet{"go": {"present": true, "race": false}}
+	if msg := rejectUnavailableEcosystemPlan(&Plan{Cmd: []string{"go", "test", "-timeout", "60s", "./..."}}, caps); msg != "" {
+		t.Errorf("go present must not reject a go cmd, got %q", msg)
+	}
+}

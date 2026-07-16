@@ -8,12 +8,18 @@ package ecosystem
 // (repro/repro.go's Attempt) share one inference rule instead of drifting.
 //
 // Only ecosystems with a base-toolchain-presence probe mode are gated (see
-// BaseMode): Go and C/C++ images are assumed toolchain-complete — bugbot
-// itself requires a Go toolchain to build, and the cpp probe only measures
-// optional sanitizer support, not compiler presence — so findings in those
-// languages are never blocked by this gate. Only the ecosystems whose
-// absence is the actual production incident (js, python, rust interpreters
-// simply missing from a bazel-only image) are gated.
+// BaseMode): C/C++ images are assumed toolchain-complete — the cpp probe
+// only measures optional sanitizer support, not compiler presence — so
+// findings in that language are never blocked by this gate. js, python,
+// rust, and go are gated: js/python/rust because their absence is the
+// original production incident (interpreters missing from a bazel-only
+// image); go because a host_toolchains image that omits go (bugbot-bslx)
+// burns a full reproducer attempt on exit 127 "go: not found" otherwise.
+// Go's gate has an asymmetric degradation rule the others don't (see
+// repro.goAvailable): a CapabilitySet with no "go" entry at all — i.e. the
+// probe never ran for this image — stays ungated, matching Go's pre-bslx
+// behavior; only a probe that DID run and explicitly found no go binary
+// blocks.
 
 import (
 	"path/filepath"
@@ -36,6 +42,7 @@ var extEcosystem = map[string]Ecosystem{
 	".mts": EcosystemJS,
 	".cts": EcosystemJS,
 	".rs":  EcosystemRust,
+	".go":  EcosystemGo,
 }
 
 // baseMode is the CapabilitySet mode name representing "the ecosystem's
@@ -47,6 +54,7 @@ var baseMode = map[Ecosystem]string{
 	EcosystemPython: "python",
 	EcosystemRust:   "cargo",
 	EcosystemBazel:  "bazel",
+	EcosystemGo:     "present",
 }
 
 // InferFromExtension infers the gated ecosystem for a finding's file path
@@ -74,6 +82,12 @@ var cmdEcosystem = map[string]Ecosystem{
 
 	"cargo": EcosystemRust,
 
+	// go's base mode ("present") backs the bugbot-bslx gate: repro.goAvailable
+	// applies the asymmetric degradation rule (see file doc) on top of this
+	// mapping, so a plan launching `go test`/`go build` is only rejected when
+	// the probe explicitly found no go binary, never when it never ran.
+	"go": EcosystemGo,
+
 	// bazel is a build DRIVER, not a language ecosystem: it is gated so a
 	// plan reaching for `bazel test` on a bazel-built repo is rejected
 	// pre-launch when the sandbox has no bazel (bugbot-rj3z), instead of
@@ -97,9 +111,9 @@ func InferFromCmd(cmd []string) Ecosystem {
 // "..."` wrapper — the pattern reproSandboxGuidance instructs the agent to
 // use for multi-step commands — is unwrapped one level first so a binary
 // named inside the quoted script is still found. Returns ("", "") when no
-// gated ecosystem binary is recognized (e.g. "go", "make", "cmake", or any
-// command this function does not know about); such commands are never
-// blocked by the gate this feeds.
+// gated ecosystem binary is recognized (e.g. "make", "cmake", or any command
+// this function does not know about); such commands are never blocked by
+// the gate this feeds.
 //
 // The matched name matters for launcher families whose members are NOT
 // interchangeable argv (bugbot-4z7m): `bazel` and `bazelisk` both infer
