@@ -974,3 +974,87 @@ func TestWorkspaceTool_FindOutputCap(t *testing.T) {
 		t.Errorf("find output = %q, want a truncation marker", out[:min(len(out), 200)])
 	}
 }
+
+// TestWorkspaceExec_StructuredOutputParity is the core bugbot-0zay
+// regression test: it scripts a mock sandbox whose response depends on
+// whether the incoming Spec.Cmd carries the -json rewrite
+// normalizeCmdForStructuredOutput applies, so the unnormalized (marker-only)
+// and normalized (structured go test -json) branches DISAGREE on
+// demonstrated — the marker-only branch reports plain, marker-less error
+// text (not_demonstrated) while the -json branch reports a dispositive
+// per-test failure event (demonstrated). Before the fix, runExec sent cmd
+// unnormalized and would have landed on the marker-only branch and
+// misclassified a genuine demonstration as not_demonstrated. This asserts
+// `workspace exec`'s preview classification matches what execute()'s
+// official buildSpec path would classify for the identical cmd.
+func TestWorkspaceExec_StructuredOutputParity(t *testing.T) {
+	const jsonFailStdout = `{"Action":"run","Test":"TestBug"}
+{"Action":"fail","Test":"TestBug"}
+{"Action":"fail","Package":"pkg"}
+`
+	const plainStdout = "unexpected error: something went wrong\n"
+
+	responseFunc := func(_ int, spec sandbox.Spec) (sandbox.Result, error) {
+		if hasCmdFlag(spec.Cmd, "-json") {
+			return sandbox.Result{ExitCode: 1, Stdout: jsonFailStdout}, nil
+		}
+		return sandbox.Result{ExitCode: 1, Stdout: plainStdout}, nil
+	}
+
+	cmd := []string{"go", "test", "-timeout", "60s", "-run", "TestBug", "./..."}
+
+	// Sanity check: prove the two branches actually disagree on their OWN
+	// terms — the marker-only branch must NOT demonstrate, so this test
+	// genuinely exercises the structured-path parity fix rather than two
+	// branches that happen to agree anyway.
+	rawVerdict := interpret(sandbox.Result{ExitCode: 1, Stdout: plainStdout}, cmd)
+	if rawVerdict.demonstrated {
+		t.Fatalf("test setup: the marker-only branch must not demonstrate (got demonstrated=true), " +
+			"or this test cannot exercise the marker-vs-structured divergence it is meant to catch")
+	}
+
+	// Official path: buildSpec is execute()'s own spec-assembly helper,
+	// exercised directly against the same scripted mock and cmd.
+	sbOfficial := sandbox.NewMock(sandbox.MockResponse{})
+	sbOfficial.ResponseFunc = responseFunc
+	plan := &Plan{Cmd: cmd, Files: map[string]string{"bug_test.go": "package bug"}}
+	officialSpec := buildSpec(t.TempDir(), plan, "", "", 30*time.Second, sandbox.Resolution{})
+	officialRes, err := sbOfficial.Exec(context.Background(), officialSpec)
+	if err != nil {
+		t.Fatalf("official exec: %v", err)
+	}
+	officialVerdict := interpret(officialRes, cmd)
+	if !officialVerdict.demonstrated {
+		t.Fatalf("test setup: official path did not demonstrate; check the -json branch's fixture")
+	}
+
+	// Preview path: `workspace exec` against an identically scripted mock
+	// and the SAME cmd.
+	sbPreview := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	sbPreview.ResponseFunc = responseFunc
+	repoDir := newRepoDir(t)
+	tool := newWorkspaceTool(sbPreview, repoDir, 5, &iterationWorkspace{})
+
+	out, err := tool.Run(context.Background(), mustCmdArgs(t, cmd))
+	if err != nil {
+		t.Fatalf("workspace exec: %v", err)
+	}
+	if !strings.Contains(out, "demonstrated=true") {
+		t.Errorf("preview output = %q, want demonstrated=true to match the official verdict (demonstrated=%t)",
+			out, officialVerdict.demonstrated)
+	}
+
+	// The mock must actually have seen a normalized (-json) cmd for the
+	// preview call — otherwise the assertion above could pass for the wrong
+	// reason (e.g. a marker cascade fluke).
+	calls := sbPreview.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("sandbox calls = %d, want 1", len(calls))
+	}
+	if !hasCmdFlag(calls[0].Spec.Cmd, "-json") {
+		t.Errorf("preview Spec.Cmd = %v, want the -json rewrite applied (parity with buildSpec)", calls[0].Spec.Cmd)
+	}
+	if len(calls[0].Spec.CaptureFiles) != 0 {
+		t.Errorf("preview Spec.CaptureFiles = %v, want none for a go test cmd (CaptureFiles is the pytest junit case)", calls[0].Spec.CaptureFiles)
+	}
+}
