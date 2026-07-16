@@ -198,8 +198,9 @@ type Sandbox struct {
 	// image to bake (see internal/sandbox/bwrap.go). Backend:bwrap is
 	// rejected by Validate on non-Linux hosts, when bwrap is absent from
 	// PATH, or when unprivileged user namespaces are unavailable — see
-	// DetectBwrap. Image/Runtime/DepStrategy are container-backend-only and
-	// ignored under bwrap.
+	// DetectBwrap. Image/Runtime are container-backend-only and ignored under bwrap.
+	// DepStrategy and LocalMounts (below) ARE honored under bwrap too — see
+	// their own doc comments for the per-backend differences (bugbot-48ya).
 	Backend  string `yaml:"backend"`
 	Runtime  string `yaml:"runtime"`
 	Image    string `yaml:"image"`
@@ -217,15 +218,26 @@ type Sandbox struct {
 	// TimeoutSeconds; one stalled this long is killed. 0 disables the watchdog.
 	IdleTimeoutSeconds int    `yaml:"idle_timeout_seconds"`
 	Network            string `yaml:"network"`
-	// DepStrategy selects how external module dependencies are made available to
-	// the network-none sandbox for Go repos that are not vendored. Vendored repos
-	// (vendor/modules.txt) are always detected and need no strategy. Values:
+	// DepStrategy selects how external module dependencies are made available
+	// to the network-none sandbox for repos that are not vendored. Vendored
+	// repos (vendor/modules.txt for Go, node_modules/ for JS, ...) are always
+	// detected and need no strategy. Honored by BOTH sandbox backends (see
+	// internal/sandbox/deps.go's file doc for the full per-ecosystem matrix
+	// and README's "Sandbox dependency strategies" section). Values:
 	//   off   (default) no dependency mounts; only vendored repos build offline.
-	//   host  mount the host Go module cache read-only (exposes public module
-	//         source — never put secrets in the module cache).
-	//   fetch run one online `go mod download` in a hardened container to warm a
-	//         bugbot-managed cache, then mount it read-only; everything after is
-	//         network-none.
+	//   host  mount a host-owned dependency cache read-only (e.g. the host Go
+	//         module cache; exposes public module source — never put secrets
+	//         in a mounted cache). Under bwrap, Python and JS additionally
+	//         provision from the host's site-packages / npm cache under this
+	//         strategy — the container backend keeps those two OFF (a baked
+	//         image's interpreter/npm version may not match the host's; bwrap
+	//         has no such image, so its host interpreter/npm IS the sandboxed
+	//         one).
+	//   fetch run ONE online dependency download in a hardened, otherwise
+	//         network-none run to warm a bugbot-managed cache, then mount it
+	//         read-only; everything after is network-none. Under bwrap the
+	//         prefetch run shares the host network namespace instead of the
+	//         container backend's bridge network (bwrap has no bridge mode).
 	DepStrategy string `yaml:"dep_strategy"`
 	// SetupCmds is an ordered list of argv commands to run inside the container
 	// BEFORE the main sandbox command but BEFORE any per-ecosystem offline-install
