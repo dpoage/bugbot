@@ -718,16 +718,19 @@ func TestPromoteAll_WithPatchProver_FixWitnessed(t *testing.T) {
 
 	// ResponseFunc to route sandbox calls:
 	//   call 0: repro (exit 1 — bug demonstrated)
-	//   call 1: targeted patch (exit 0 — fix works)
-	//   call 2: suite (exit 0 — suite stays green)
+	//   call 1: bugbot-c49s determinism confirmation (exit 1 — demonstrated again)
+	//   call 2: targeted patch (exit 0 — fix works)
+	//   call 3: suite (exit 0 — suite stays green)
 	sb := sandbox.NewMock(sandbox.MockResponse{})
 	sb.ResponseFunc = func(n int, spec sandbox.Spec) (sandbox.Result, error) {
 		switch n {
 		case 0:
 			return sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nFAIL"}, nil
 		case 1:
-			return sandbox.Result{ExitCode: 0, Stdout: "ok\tbug\t0.01s"}, nil
+			return sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nFAIL"}, nil
 		case 2:
+			return sandbox.Result{ExitCode: 0, Stdout: "ok\tbug\t0.01s"}, nil
+		case 3:
 			return sandbox.Result{ExitCode: 0, Stdout: "ok\tbug\t0.01s"}, nil
 		default:
 			return sandbox.Result{ExitCode: 0}, nil

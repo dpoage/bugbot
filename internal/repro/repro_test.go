@@ -118,9 +118,11 @@ func TestPromoteAll_Success(t *testing.T) {
 	// default (sandbox.network) so a repo whose build fetches deps at configure
 	// time can resolve them. The mock applies no default, so the recorded spec
 	// carries the empty "inherit" value.
+	// bugbot-c49s determinism gate: a promoted repro pays exactly one extra
+	// confirmation sandbox call (same plan, fresh workspace).
 	calls := sb.Calls()
-	if len(calls) != 1 {
-		t.Fatalf("sandbox calls = %d, want 1", len(calls))
+	if len(calls) != 2 {
+		t.Fatalf("sandbox calls = %d, want 2 (official + determinism confirmation)", len(calls))
 	}
 	spec := calls[0].Spec
 	if spec.Network != "" {
@@ -248,9 +250,9 @@ func TestPromoteAll_AbsolutePathPlanRetries(t *testing.T) {
 		t.Fatalf("summary = %+v, want 1 promoted / 0 failed (retry after bad path)", summary)
 	}
 	// The absolute-path plan must never reach the sandbox; only the corrected
-	// plan executes.
-	if n := len(sb.Calls()); n != 1 {
-		t.Fatalf("sandbox calls = %d, want 1 (bad-path plan must not execute)", n)
+	// plan executes — twice (bugbot-c49s determinism confirmation).
+	if n := len(sb.Calls()); n != 2 {
+		t.Fatalf("sandbox calls = %d, want 2 (bad-path plan must not execute; corrected plan pays official + confirmation)", n)
 	}
 	// Two completions: the rejected plan + the corrected one. The revision
 	// request must name the offending path and the workspace-relative rule.
@@ -486,6 +488,9 @@ func TestPromoteAll_ZeroExitThenRevision(t *testing.T) {
 
 	sb := sandbox.NewMock(sandbox.MockResponse{})
 	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "ok\tbug\t0.01s\nPASS"}})
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nFAIL"}})
+	// bugbot-c49s determinism gate: the demonstrating round pays one extra
+	// confirmation run, which must also demonstrate to promote.
 	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nFAIL"}})
 
 	r, err := New(client, sb, repoDir, Options{ArtifactDir: artifactDir})
@@ -1245,9 +1250,11 @@ func TestPromoteAll_WiresTimeout(t *testing.T) {
 	if _, err := r.PromoteAll(ctx, st, []domain.Finding{finding}); err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
+	// bugbot-c49s determinism gate: official run + confirmation run, both
+	// with the same Timeout.
 	calls := sb.Calls()
-	if len(calls) != 1 {
-		t.Fatalf("sandbox calls = %d, want 1", len(calls))
+	if len(calls) != 2 {
+		t.Fatalf("sandbox calls = %d, want 2 (official + determinism confirmation)", len(calls))
 	}
 	if got := calls[0].Spec.Timeout; got != want {
 		t.Errorf("Spec.Timeout = %v, want %v", got, want)
@@ -1495,10 +1502,11 @@ func TestPromoteAll_BareShellOpPlanRetries(t *testing.T) {
 		t.Fatalf("summary = %+v, want 1 promoted / 0 failed (retry after bare shell op)", summary)
 	}
 	// The bare-shell-op plan must never reach the sandbox; only the corrected
-	// (bash-wrapped) plan executes. Load-bearing: it proves the bad plan does
-	// not waste a sandbox run.
-	if n := len(sb.Calls()); n != 1 {
-		t.Fatalf("sandbox calls = %d, want 1 (bare-shell-op plan must not execute)", n)
+	// (bash-wrapped) plan executes — twice (bugbot-c49s determinism
+	// confirmation). Load-bearing: it proves the bad plan does not waste a
+	// sandbox run.
+	if n := len(sb.Calls()); n != 2 {
+		t.Fatalf("sandbox calls = %d, want 2 (bare-shell-op plan must not execute; corrected plan pays official + confirmation)", n)
 	}
 	// Two completions: the rejected plan + the corrected one. The revision
 	// request must name the offending operator and the bash-wrapping fix.

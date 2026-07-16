@@ -568,6 +568,36 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			// witness at all — repro-as-evidence, not repro-as-promotion).
 			verdict = witnessDemonstration(verdict, combinedOutput(res), finding.File)
 		}
+
+		// bugbot-c49s determinism gate: one demonstrating run is not enough
+		// evidence to promote — concurrency/race findings are this stage's
+		// core target class, and are exactly the ones prone to a single
+		// lucky failure. Re-run the IDENTICAL plan once more (a fresh
+		// workspace copy + sandbox run, same spec) and require BOTH runs to
+		// demonstrate before promoting. This costs exactly one extra sandbox
+		// run for a repro that turns out deterministic, and zero extra runs
+		// for a first run that doesn't demonstrate at all (the common case).
+		var confirmRes sandbox.Result
+		if verdict.demonstrated {
+			var cerr error
+			confirmRes, cerr = r.execute(ctx, plan)
+			if cerr != nil {
+				// Same rule as the execute infra-failure above.
+				return nil, fmt.Errorf("repro: confirm finding %s: %w", finding.ID, cerr)
+			}
+			confirmVerdict := interpret(confirmRes, plan.Cmd)
+			if confirmVerdict.demonstrated {
+				confirmVerdict = witnessDemonstration(confirmVerdict, combinedOutput(confirmRes), finding.File)
+			}
+			if !confirmVerdict.demonstrated {
+				// Demonstrated once, not twice consecutively: flaky, not
+				// promoted. flakyVerdict carries a dedicated verdict reason
+				// so the feedback loop below sends the agent actionable
+				// determinism guidance instead of the generic
+				// not-demonstrated message.
+				verdict = flakyVerdict(verdict, confirmVerdict)
+			}
+		}
 		att.Output = verdict.summary
 
 		roundVerdict := string(verdict.reason)
@@ -586,7 +616,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		})
 
 		if verdict.demonstrated {
-			path, werr := writeArtifacts(r.opts.ArtifactDir, finding, plan, res, r.opts.Image, r.opts.Network)
+			path, werr := writeArtifacts(r.opts.ArtifactDir, finding, plan, res, confirmRes, r.opts.Image, r.opts.Network)
 			if werr != nil {
 				return nil, fmt.Errorf("repro: write artifacts for finding %s: %w", finding.ID, werr)
 			}
