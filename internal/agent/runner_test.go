@@ -56,6 +56,44 @@ func TestRun_CleanFinish(t *testing.T) {
 	if got := len(out.Transcript.Events); got != 2 {
 		t.Errorf("transcript events = %d, want 2", got)
 	}
+	// A normal text-only final turn must not trigger the bugbot-kpp2
+	// empty-turn nudge: zero nudges, no nudge message in the conversation.
+	for _, m := range out.Messages {
+		if m.Role == llm.RoleUser && m.Content == emptyTurnNudge {
+			t.Error("nudge message present for a normal text-only final turn")
+		}
+	}
+}
+
+// TestRun_EmptyTurnNudgeThenProse verifies bugbot-kpp2 for the plain (non-
+// JSON) Run path: a think-only turn (zero tool calls, empty after stripping)
+// is nudged, and the model's subsequent real prose becomes FinalText.
+func TestRun_EmptyTurnNudgeThenProse(t *testing.T) {
+	fc := newFakeClient(
+		thinkOnlyResp("mulling it over", 10, 5),
+		textResp("here is my answer", 8, 3),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.FinalText != "here is my answer" {
+		t.Errorf("FinalText = %q, want %q", out.FinalText, "here is my answer")
+	}
+	if out.Iterations != 2 {
+		t.Errorf("Iterations = %d, want 2", out.Iterations)
+	}
+	foundNudge := false
+	for _, m := range out.Messages {
+		if m.Role == llm.RoleUser && m.Content == emptyTurnNudge {
+			foundNudge = true
+		}
+	}
+	if !foundNudge {
+		t.Error("conversation does not contain the empty-turn nudge message")
+	}
 }
 
 func TestRun_ToolCallThenFinish(t *testing.T) {
@@ -774,13 +812,19 @@ func TestRun_StopErrorAfterToolsYieldsTypedError(t *testing.T) {
 
 // TestRun_EmptyFinalTurnFinalTextSet verifies that a final turn with no text
 // leaves FinalTextSet false even when an earlier turn produced text, so
-// callers can tell stale FinalText from a genuine final answer.
+// callers can tell stale FinalText from a genuine final answer. The two
+// trailing empty responses exhaust the bugbot-kpp2 empty-turn-nudge cap
+// (maxEmptyTurnNudges=2) before the loop breaks, so the assertions below
+// still exercise a genuine "model finished with nothing" turn.
 func TestRun_EmptyFinalTurnFinalTextSet(t *testing.T) {
 	withText := toolResp("c1", "ghost", `{}`, 5, 2)
 	withText.resp.Text = "thinking out loud"
+	emptyFinal := scriptStep{resp: llm.Response{StopReason: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 5, OutputTokens: 1}}}
 	fc := newFakeClient(
 		withText,
-		scriptStep{resp: llm.Response{StopReason: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 5, OutputTokens: 1}}},
+		emptyFinal,
+		emptyFinal,
+		emptyFinal,
 	)
 	r := NewRunner(fc, nil, "sys")
 

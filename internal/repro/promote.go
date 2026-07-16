@@ -440,22 +440,13 @@ func gateEcosystem(finding domain.Finding, caps sandbox.CapabilitySet) (eco stri
 	return eco, true
 }
 
-// blockedToolchainBinary returns the actual missing BINARY name for eco
-// (ecosystem.BaseMode, e.g. "node" for "js") for use in operator-facing
-// messages — an operator needs to know what to install, not the internal
-// ecosystem key. Go is special-cased: its BaseMode ("present") is a mode
-// name, not a binary, and eco itself ("go") already IS the binary name.
-// Falls back to eco itself if BaseMode is somehow empty (never happens for
-// an eco gateEcosystem returned as blocked, but stays safe if called
-// elsewhere).
+// blockedToolchainBinary returns the actual missing BINARY name for eco for
+// use in operator-facing messages — an operator needs to know what to
+// install, not the internal ecosystem key. Delegates to
+// ecosystem.ToolchainBinary (bugbot-813i), the single source for this
+// mapping.
 func blockedToolchainBinary(eco string) string {
-	if eco == ecosystem.EcosystemGo {
-		return eco
-	}
-	if bin := ecosystem.BaseMode(ecosystem.Ecosystem(eco)); bin != "" {
-		return bin
-	}
-	return eco
+	return ecosystem.ToolchainBinary(ecosystem.Ecosystem(eco))
 }
 
 // SummarizeBlocked previews, for a batch of findings, how many would be

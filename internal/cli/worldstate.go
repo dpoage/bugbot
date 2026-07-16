@@ -172,10 +172,8 @@ func renderWorldState(out io.Writer, ws worldState, now time.Time) {
 		}
 		sort.Strings(ecos)
 		for _, eco := range ecos {
-			binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
-			if binary == "" {
-				binary = eco
-			}
+			binary := ecosystem.ToolchainBinary(ecosystem.Ecosystem(eco))
+
 			_, _ = fmt.Fprintf(out, "  blocked:      %d finding(s) — image lacks %s (bugbot repro; sandbox.host_toolchains)\n",
 				ws.BlockedToolchain[eco], binary)
 		}

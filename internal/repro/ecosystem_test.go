@@ -4,14 +4,24 @@ package repro
 //
 //   - EcosystemJS.ranMarkers must require runner-anchored evidence (jest
 //     "● " bullet, jest "✕" failing glyph, vitest "×" failing glyph,
-//     vitest "⎯⎯" Failed-Tests section header, jest "Test Suites:"
-//     summary line). The previously-listed bare "failed" and "fail "
-//     matched build/tooling noise from webpack/tsc/babel/rollup/eslint
-//     and could mint a false T1 from a build that only printed "Build
-//     failed" and exited 1 (the same bug class as bugbot-dmy for C/C++,
-//     which already tightened cpp's markers the same way).
+//     vitest "⎯⎯" Failed-Tests section header). The previously-listed bare
+//     "failed" and "fail " matched build/tooling noise from
+//     webpack/tsc/babel/rollup/eslint and could mint a false T1 from a
+//     build that only printed "Build failed" and exited 1 (the same bug
+//     class as bugbot-dmy for C/C++, which already tightened cpp's markers
+//     the same way).
 //   - buildMarkers still win first when both could match (a tsc syntax
 //     error is classified as build_error, not as a demonstration).
+//
+// bugbot-2zoo removed the jest "Test Suites:" summary-line marker: it is
+// PASS-AMBIGUOUS ("Test Suites: 1 passed, 1 total" matches it just as
+// readily as a failing summary), and injectPipefail (repro.go) can turn a
+// passing jest pipeline bounded by an early-terminating filter (e.g.
+// `grep -m1`) into a SIGPIPE exit (141) — with the ambiguous marker still
+// present, that used to mint a false demonstrated on a run that never
+// actually failed. A summary-only jest output with no glyph now correctly
+// classifies as not-ran-evidence; see the "summary line alone" noise cases
+// below.
 //
 // The tests live in a dedicated file so the JS-ecosystem regression
 // coverage is obvious and isolated from the bazel-side tests in
@@ -54,8 +64,8 @@ func TestEcosystemTable_JSRanMarkersTightened(t *testing.T) {
 	// change re-adds them, this test fails BEFORE the noise tests below
 	// turn silently green.
 	for _, m := range rules.ranMarkers {
-		if m == "failed" || m == "fail " || m == "✗" || m == "tests failed" {
-			t.Errorf("EcosystemJS.ranMarkers still contains the legacy bare/loose marker %q (bugbot-5zq regression)", m)
+		if m == "failed" || m == "fail " || m == "✗" || m == "tests failed" || m == "test suites:" {
+			t.Errorf("EcosystemJS.ranMarkers still contains the legacy bare/loose/pass-ambiguous marker %q (bugbot-5zq/bugbot-2zoo regression)", m)
 		}
 	}
 
@@ -67,14 +77,6 @@ func TestEcosystemTable_JSRanMarkersTightened(t *testing.T) {
 		{
 			name: "jest per-failure bullet ●",
 			out:  "FAIL src/add.test.js\n  ✕ sums numbers (3 ms)\n  ● sums numbers\n    expect(received).toBe(expected)\n",
-		},
-		{
-			name: "jest summary line 'Tests:' combined with 'failed'",
-			out:  "Tests:       1 failed, 2 passed, 3 total\nTest Suites: 1 failed, 1 total\n",
-		},
-		{
-			name: "jest summary line 'Test Suites:' (case-insensitive anchor)",
-			out:  "test suites: 1 failed, 1 total\n",
 		},
 		{
 			name: "jest failing-test glyph ✕",
@@ -173,6 +175,19 @@ func TestEcosystemTable_JSRanMarkersTightened(t *testing.T) {
 			name: "arbitrary text with 'failed' but no runner output",
 			out:  "The previous attempt failed because the build was misconfigured. Please retry.\n",
 		},
+		{
+			// bugbot-2zoo: "Test Suites:"/"test suites:" alone (with no
+			// glyph) is exactly the pass-ambiguous shape that used to be a
+			// ranMarker; it is also what a real PASSING jest summary looks
+			// like ("Test Suites: 1 passed, 1 total"), so it must NOT
+			// count as ran-evidence on its own.
+			name: "jest summary line alone, no glyph (bugbot-2zoo: pass-ambiguous, no longer a marker)",
+			out:  "Tests:       1 failed, 2 passed, 3 total\nTest Suites: 1 failed, 1 total\n",
+		},
+		{
+			name: "jest 'Test Suites:' summary alone, case-insensitive (bugbot-2zoo)",
+			out:  "test suites: 1 failed, 1 total\n",
+		},
 	}
 	for _, tc := range noiseCases {
 		t.Run("noise/"+tc.name, func(t *testing.T) {
@@ -236,15 +251,17 @@ func TestEcosystemTable_JSBuildMarkersStillWinFirst(t *testing.T) {
 }
 
 // TestEcosystemTable_JSRanMarkersLowercasedInvariant pins that the
-// new ranMarkers still match after strings.ToLower, the same
-// normalization hasRanEvidence applies. Without this, a marker like
-// "test suites:" (lowercase anchor) would fail to match the raw
-// "Test Suites:" line in real output.
+// ranMarkers still match after strings.ToLower, the same normalization
+// hasRanEvidence applies. Without this, a marker like "assertionerror"
+// would fail to match the raw "AssertionError [ERR_ASSERTION]" text real
+// node:test output emits (bugbot-ds90). ("test suites:" was pinned here
+// before bugbot-2zoo removed it as a pass-ambiguous marker — see
+// TestEcosystemTable_JSRanMarkersTightened's noise cases.)
 func TestEcosystemTable_JSRanMarkersLowercasedInvariant(t *testing.T) {
 	rules := jsRules(t)
 	// Pre-lowercased output, as interpret()/hasRanEvidence sees it.
 	cases := []string{
-		"test suites: 1 failed, 1 total",
+		"assertionerror [err_assertion]: expected values to be strictly equal",
 		" × src/foo.test.ts",
 		"⎯⎯⎯⎯ failed tests 1 ⎯⎯⎯⎯",
 		"  ● sums numbers",

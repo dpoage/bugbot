@@ -37,8 +37,10 @@ func Emit(sink EventSink, ev Event) {
 // sorted by ecosystem name for deterministic ordering, each carrying that
 // ecosystem's count and a human-readable Message ("N finding(s) blocked:
 // image lacks node"). The Message names the actual missing BINARY
-// (ecosystem.BaseMode, e.g. "node" for the "js" ecosystem key) rather than the
-// internal ecosystem key, since that is what an operator needs to go install.
+// (ecosystem.ToolchainBinary, e.g. "node" for the "js" ecosystem key, "go"
+// for go — never Go's probe-mode token "present"; bugbot-813i) rather than
+// the internal ecosystem key, since that is what an operator needs to go
+// install.
 // A nil/empty counts or a nil sink is a no-op (Emit already handles the
 // nil-sink case; the empty-counts check just avoids the sort). This is the
 // single emission point for the bugbot-14g0 acceptance-2 aggregate, shared by
@@ -56,10 +58,7 @@ func EmitReproBlocked(sink EventSink, counts map[string]int) {
 	sort.Strings(ecos)
 	for _, eco := range ecos {
 		n := counts[eco]
-		binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
-		if binary == "" {
-			binary = eco
-		}
+		binary := ecosystem.ToolchainBinary(ecosystem.Ecosystem(eco))
 		Emit(sink, Event{
 			Kind: KindReproBlocked, Label: eco, Count: n,
 			Message: fmt.Sprintf("%d finding(s) blocked: image lacks %s", n, binary),

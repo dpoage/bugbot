@@ -103,15 +103,15 @@ func TestStatus_Fresh(t *testing.T) {
 // TestStatus_LiveReproBlockedRendered is the live-snapshot half of
 // bugbot-14g0 acceptance 2's consumer requirement: Status.ReproBlocked
 // (populated by a KindReproBlocked event) must be rendered by `bugbot
-// status`, naming the actual missing binary (BaseMode: "node" for "js"), not
-// left dead in the struct.
+// status`, naming the actual missing binary — "node" for "js", and "go" (the
+// binary), never Go's probe-mode token "present" (bugbot-813i).
 func TestStatus_LiveReproBlockedRendered(t *testing.T) {
 	cfgPath, _, _ := setup(t)
 	writeStatus(t, cfgPath, progress.Status{
 		PID:          os.Getpid(),
 		StartedAt:    time.Now().Add(-time.Minute),
 		LastUpdated:  time.Now(),
-		ReproBlocked: map[string]int{"js": 38, "python": 2},
+		ReproBlocked: map[string]int{"js": 38, "python": 2, "go": 1},
 	})
 
 	out, err := run(t, cfgPath, "status")
@@ -121,6 +121,7 @@ func TestStatus_LiveReproBlockedRendered(t *testing.T) {
 	for _, want := range []string{
 		"38 finding(s) — image lacks node",
 		"2 finding(s) — image lacks python",
+		"1 finding(s) — image lacks go",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status missing %q\n---\n%s", want, out)

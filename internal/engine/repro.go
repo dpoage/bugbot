@@ -317,10 +317,8 @@ func emitReproBlocked(out io.Writer, sink progress.EventSink, blocked map[string
 	}
 	sort.Strings(ecos)
 	for _, eco := range ecos {
-		binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
-		if binary == "" {
-			binary = eco
-		}
+		binary := ecosystem.ToolchainBinary(ecosystem.Ecosystem(eco))
+
 		_, _ = fmt.Fprintf(out, "%d finding(s) blocked: image lacks %s\n", blocked[eco], binary)
 	}
 	progress.EmitReproBlocked(sink, blocked)
@@ -342,10 +340,8 @@ func printReproSummary(out io.Writer, s *repro.Summary) {
 		}
 		sort.Strings(ecos)
 		for _, eco := range ecos {
-			binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
-			if binary == "" {
-				binary = eco
-			}
+			binary := ecosystem.ToolchainBinary(ecosystem.Ecosystem(eco))
+
 			_, _ = fmt.Fprintf(out, "Blocked toolchain: %d finding(s) — image lacks %s\n", s.BlockedByEcosystem[eco], binary)
 		}
 	}
