@@ -22,6 +22,14 @@ import (
 // corpus/integration test suites (internal/repro/testdata/corpus,
 // corpus_test.go) parse manifest.json rather than the README prose.
 //
+// res is the official demonstrating run; confirmRes is the bugbot-c49s
+// determinism-gate confirmation run (Attempt's second, identical-plan
+// sandbox execution that promotion requires to also demonstrate). Both are
+// recorded in the README so a human reading the bundle sees that the bug
+// reproduced twice in a row, not once. manifest.json's Result block still
+// reflects only res (the official run) — the schema consumed by
+// bundle/replay tooling is unchanged.
+//
 // image and network are the sandbox execution policy that produced res
 // (Options.Image / Options.Network in the caller); they are recorded
 // verbatim in manifest.json's sandbox block. The ecosystem is derived from
@@ -29,7 +37,7 @@ import (
 //
 // On any error the partially-written bundle directory is removed so a failed
 // promotion never leaves stale artifacts behind.
-func writeArtifacts(artifactDir string, finding domain.Finding, plan *Plan, res sandbox.Result, image, network string) (dir string, err error) {
+func writeArtifacts(artifactDir string, finding domain.Finding, plan *Plan, res, confirmRes sandbox.Result, image, network string) (dir string, err error) {
 	id := finding.ID
 	if id == "" {
 		id = "unknown"
@@ -56,7 +64,7 @@ func writeArtifacts(artifactDir string, finding domain.Finding, plan *Plan, res 
 	if werr := os.WriteFile(filepath.Join(dir, "run.sh"), []byte(runScript(plan)), 0o755); werr != nil {
 		return "", werr
 	}
-	if werr := os.WriteFile(filepath.Join(dir, "README.md"), []byte(readme(finding, plan, res)), 0o644); werr != nil {
+	if werr := os.WriteFile(filepath.Join(dir, "README.md"), []byte(readme(finding, plan, res, confirmRes)), 0o644); werr != nil {
 		return "", werr
 	}
 	manifest := buildManifest(finding, plan, res, image, network)
@@ -148,8 +156,13 @@ func shellQuote(s string) string {
 }
 
 // readme renders README.md describing the finding, the expected-vs-actual
-// failure, and how to run the repro.
-func readme(finding domain.Finding, plan *Plan, res sandbox.Result) string {
+// failure, and how to run the repro. res is the official demonstrating run;
+// confirmRes is the bugbot-c49s determinism-gate confirmation run — an
+// identical re-execution of the same plan against a fresh workspace that
+// also had to demonstrate for this bundle to exist. Both runs' outcomes are
+// recorded so a human reading the bundle sees the bug reproduced twice in a
+// row, not once.
+func readme(finding domain.Finding, plan *Plan, res, confirmRes sandbox.Result) string {
 	var b strings.Builder
 	title := finding.Title
 	if title == "" {
@@ -183,6 +196,8 @@ func readme(finding domain.Finding, plan *Plan, res sandbox.Result) string {
 		b.WriteString(" (timed out)")
 	}
 	b.WriteString(", demonstrating the bug. The test is written to PASS once the bug is fixed.\n\n")
+	b.WriteString("**Determinism:** run twice with the identical plan against a fresh workspace each time; ")
+	fmt.Fprintf(&b, "both runs demonstrated the bug (exit codes %d and %d).\n\n", res.ExitCode, confirmRes.ExitCode)
 
 	b.WriteString("## How to run\n\n")
 	b.WriteString("Copy the files below into the target repository (preserving paths), then run:\n\n")
@@ -201,7 +216,13 @@ func readme(finding domain.Finding, plan *Plan, res sandbox.Result) string {
 	b.WriteByte('\n')
 
 	if out := combinedOutput(res); out != "" {
-		b.WriteString("## Captured output\n\n")
+		b.WriteString("## Captured output (run 1/2)\n\n")
+		b.WriteString("```\n")
+		b.WriteString(trunc(out, 4000))
+		b.WriteString("\n```\n")
+	}
+	if out := combinedOutput(confirmRes); out != "" {
+		b.WriteString("\n## Captured output (run 2/2, determinism confirmation)\n\n")
 		b.WriteString("```\n")
 		b.WriteString(trunc(out, 4000))
 		b.WriteString("\n```\n")

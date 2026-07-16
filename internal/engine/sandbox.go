@@ -300,3 +300,31 @@ func depProbeInputs(cfg config.Config, sb sandbox.Sandbox, repoDir string) ([]sa
 	}
 	return res.ROMounts, res.Env
 }
+
+// resolveDepsForPlaybook resolves repoDir's dependency strategy identically
+// to depProbeInputs (same sandbox.ResolveDeps call, same DepOptions), but
+// returns the full sandbox.Resolution instead of just (ROMounts, Env):
+// repro.PlaybookOnce needs SetupCmds and Fingerprints too, to run the SAME
+// battery spec a real repro run's dependency resolution would produce and to
+// key its cache correctly (see resolutionFingerprint in
+// internal/repro/playbook.go). Calling ResolveDeps a second time here
+// (rather than threading depProbeInputs' internal result out) is cheap: it
+// is stat-based dependency-marker detection, not network I/O — the FETCH
+// strategy's Prefetch closure is only BUILT here, never invoked. A
+// resolution error degrades to a zero Resolution, matching depProbeInputs'
+// own degrade-not-abort behavior: PlaybookOnce with mount-less/env-less
+// inputs still produces a valid (just less complete) battery instead of
+// blocking reproducer construction.
+func resolveDepsForPlaybook(cfg config.Config, sb sandbox.Sandbox, repoDir string) sandbox.Resolution {
+	res, err := sandbox.ResolveDeps(repoDir, sandbox.DepOptions{
+		Strategy:       sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+		FetchSandbox:   sb,
+		FetchImage:     cfg.Sandbox.Image,
+		LocalMounts:    localMountsFromConfig(cfg),
+		HostToolchains: cfg.Sandbox.HostToolchains,
+	})
+	if err != nil {
+		return sandbox.Resolution{}
+	}
+	return res
+}

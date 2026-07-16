@@ -235,10 +235,26 @@ func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f domain.Findi
 	var feedback string
 	var lastFailure string
 
+	// prevOutcome is round i's agent.Outcome, threaded into round i+1's
+	// planFor call so RunJSONContinue (see planFor below) lands the revision
+	// feedback in the SAME conversation as the fix investigation that
+	// produced it, instead of discarding that investigation on every
+	// revision round (bugbot-a54h, the patch-prover analogue of
+	// bugbot-z6ay's reproducer fix). Nil on the first pass, which keeps
+	// round 1 on the existing RunJSON reseed path.
+	var prevOutcome *agent.Outcome
+
 	for i := 0; i < maxAtt; i++ {
-		plan, u, perr := p.planFor(ctx, runner, f, att, feedback)
+		plan, u, roundOutcome, perr := p.planFor(ctx, runner, f, att, feedback, prevOutcome)
 		usage.InputTokens += u.InputTokens
 		usage.OutputTokens += u.OutputTokens
+		// Thread this round's Outcome into the next round's planFor call
+		// regardless of perr: RunJSON/RunJSONContinue return a usable
+		// Outcome even on an unparseable-output error (its Messages still
+		// hold the round's investigation), so a revise-and-retry round
+		// after a parse failure still continues rather than silently
+		// dropping back to reseed.
+		prevOutcome = roundOutcome
 		if perr != nil {
 			return patchOutcome{}, fmt.Errorf("patch-prover: plan: %w", perr)
 		}
@@ -359,18 +375,58 @@ func (p *PatchProver) newRunner(scope progress.AgentScope) (*agent.Runner, error
 
 // planFor asks the patch-prover agent for a fix plan, returning the run's token
 // usage so Prove can settle the agent-finished bracket with an accurate total.
-func (p *PatchProver) planFor(ctx context.Context, runner *agent.Runner, f domain.Finding, att *Attempt, feedback string) (*PatchPlan, llm.Usage, error) {
-	task := buildPatchTask(f, att, feedback)
+//
+// prev, when non-nil, is the previous round's Outcome: planFor then uses
+// [agent.Runner.RunJSONContinue] instead of RunJSON, so this round's request
+// lands in the SAME conversation as the fix investigation prev's round
+// performed (round 2+ of Prove's revision loop) instead of re-orienting from
+// scratch. prev == nil (round 1) reseeds via RunJSON exactly as before.
+//
+// The returned Outcome is the round's own, meant to be threaded back in as
+// the NEXT round's prev by the caller (mirrors Reproducer.planFor /
+// bugbot-z6ay) — this is how the conversation chains across rounds without
+// Prove itself touching message history.
+func (p *PatchProver) planFor(ctx context.Context, runner *agent.Runner, f domain.Finding, att *Attempt, feedback string, prev *agent.Outcome) (*PatchPlan, llm.Usage, *agent.Outcome, error) {
 	var plan PatchPlan
-	outcome, err := runner.RunJSON(ctx, task, patchSchema, &plan)
+	var outcome *agent.Outcome
+	var err error
+	if prev == nil {
+		outcome, err = runner.RunJSON(ctx, buildPatchTask(f, att, feedback), patchSchema, &plan)
+	} else {
+		// Only the revision feedback goes out on a continuation turn: the
+		// finding/repro-plan framing already sits in history as round 1's
+		// opening user turn (RunJSONContinue keeps it), so resending it here
+		// would just double the finding's prose on every revision round for
+		// no benefit.
+		outcome, err = runner.RunJSONContinue(ctx, prev, buildPatchRevisionTask(feedback), patchSchema, &plan)
+	}
 	var usage llm.Usage
 	if outcome != nil {
 		usage = outcome.Usage
 	}
 	if err != nil {
-		return nil, usage, err
+		return nil, usage, outcome, err
 	}
-	return &plan, usage, nil
+	return &plan, usage, outcome, nil
+}
+
+// buildPatchRevisionTask renders the per-round task prompt for a
+// CONTINUATION revision round (round 2+ of Prove, via planFor's prev != nil
+// branch). Unlike buildPatchTask, it carries only the revision feedback: the
+// finding's framing and repro-plan context have already been sent as the
+// conversation's opening turn and stay in history under RunJSONContinue, so
+// they are deliberately not repeated here.
+//
+// feedback is the verbatim revision message built by Prove (invalid-plan
+// rejection, targeted-run failure, or suite-run failure); it MUST NOT be
+// re-wrapped, stripped, or reformatted (mirrors buildRevisionTask's
+// contract in agent.go).
+func buildPatchRevisionTask(feedback string) string {
+	var b strings.Builder
+	b.WriteString("--- Revision required ---\n")
+	b.WriteString(feedback)
+	b.WriteString("\nProduce a corrected plan.\n")
+	return b.String()
 }
 
 // buildPatchTask renders the per-finding patch-prover task prompt.

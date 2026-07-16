@@ -3,6 +3,7 @@ package repro
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -538,17 +539,17 @@ func runApplet(t *testing.T, tool *WorkspaceTool, argv ...string) (string, error
 	return tool.Run(context.Background(), raw)
 }
 
-// TestWorkspaceTool_FreeAppletsOnUnmaterializedWorkspace verifies that ls and
-// cat, called before any write_repro_file/exec, return the pristine-repo
-// hint WITHOUT materializing a workspace — materializing on a free call
-// would silently copy the whole repo.
+// TestWorkspaceTool_FreeAppletsOnUnmaterializedWorkspace verifies that
+// ls/cat/grep/find, called before any write_repro_file/exec, return the
+// pristine-repo hint WITHOUT materializing a workspace — materializing on
+// a free call would silently copy the whole repo.
 func TestWorkspaceTool_FreeAppletsOnUnmaterializedWorkspace(t *testing.T) {
 	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
 	repoDir := newRepoDir(t)
 	ws := &iterationWorkspace{}
 	tool := newWorkspaceTool(sb, repoDir, 5, ws)
 
-	for _, argv := range [][]string{{"ls"}, {"cat", "x.go"}} {
+	for _, argv := range [][]string{{"ls"}, {"cat", "x.go"}, {"grep", "foo"}, {"find", "x.go"}} {
 		out, err := runApplet(t, tool, argv...)
 		if err != nil {
 			t.Fatalf("%v: unexpected error: %v", argv, err)
@@ -698,16 +699,362 @@ func TestWorkspaceTool_UnknownAppletIsFreeAndEnumerates(t *testing.T) {
 	repoDir := newRepoDir(t)
 	tool := newWorkspaceTool(sb, repoDir, 5, &iterationWorkspace{})
 
-	_, err := runApplet(t, tool, "grep", "foo")
+	_, err := runApplet(t, tool, "rm", "foo")
 	if err == nil {
 		t.Fatal("expected an error for an unknown applet")
 	}
-	for _, applet := range []string{"ls", "cat", "status", "exec"} {
+	for _, applet := range []string{"ls", "cat", "status", "grep", "find", "exec"} {
 		if !strings.Contains(err.Error(), applet) {
 			t.Errorf("unknown-applet error = %q, want it to name applet %q", err.Error(), applet)
 		}
 	}
 	if got := tool.ExecCount(); got != 0 {
 		t.Errorf("ExecCount = %d, want 0 (unknown applet must be free)", got)
+	}
+}
+
+// TestWorkspaceTool_Grep verifies that `grep` finds content in a
+// materialized workspace file, formats matches as 'path:line:text', and
+// never charges the exec budget.
+func TestWorkspaceTool_Grep(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+
+	writeFileVia(t, writeTool, "sub/nested_test.go", "package bug\n\nfunc TestNeedle(t *testing.T) {}\n")
+	writeFileVia(t, writeTool, "other_test.go", "package bug\n\nfunc TestOther(t *testing.T) {}\n")
+
+	out, err := runApplet(t, tool, "grep", "TestNeedle")
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	if !strings.Contains(out, "sub/nested_test.go:3:func TestNeedle") {
+		t.Errorf("grep output = %q, want a sub/nested_test.go:3:... match", out)
+	}
+	if strings.Contains(out, "other_test.go") {
+		t.Errorf("grep output = %q, must not match other_test.go", out)
+	}
+
+	// A dir argument scopes the search.
+	out, err = runApplet(t, tool, "grep", "func Test", "sub")
+	if err != nil {
+		t.Fatalf("grep sub: %v", err)
+	}
+	if !strings.Contains(out, "nested_test.go") || strings.Contains(out, "other_test.go") {
+		t.Errorf("grep sub output = %q, want only sub/nested_test.go", out)
+	}
+
+	// No matches is reported explicitly, not as an empty string.
+	out, err = runApplet(t, tool, "grep", "NoSuchSymbolAnywhere")
+	if err != nil {
+		t.Fatalf("grep no match: %v", err)
+	}
+	if !strings.Contains(out, "no matches") {
+		t.Errorf("grep no-match output = %q, want it to say so explicitly", out)
+	}
+
+	// An invalid regexp is rejected without touching the sandbox.
+	if _, err := runApplet(t, tool, "grep", "("); err == nil {
+		t.Error("grep with an invalid regexp should fail")
+	}
+
+	if got := tool.ExecCount(); got != 0 {
+		t.Errorf("ExecCount = %d, want 0 (grep never charges the budget)", got)
+	}
+}
+
+// TestWorkspaceTool_Find verifies that `find` matches filenames by glob and
+// by substring under a materialized workspace, and never charges the exec
+// budget.
+func TestWorkspaceTool_Find(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+
+	writeFileVia(t, writeTool, "sub/nested_test.go", "package bug\n")
+	writeFileVia(t, writeTool, "sub/helper.go", "package bug\n")
+	writeFileVia(t, writeTool, "other.txt", "not go\n")
+
+	out, err := runApplet(t, tool, "find", "*_test.go")
+	if err != nil {
+		t.Fatalf("find glob: %v", err)
+	}
+	if !strings.Contains(out, "sub/nested_test.go") {
+		t.Errorf("find glob output = %q, want sub/nested_test.go", out)
+	}
+	if strings.Contains(out, "helper.go") || strings.Contains(out, "other.txt") {
+		t.Errorf("find glob output = %q, want only *_test.go matches", out)
+	}
+
+	out, err = runApplet(t, tool, "find", "helper")
+	if err != nil {
+		t.Fatalf("find substring: %v", err)
+	}
+	if !strings.Contains(out, "sub/helper.go") {
+		t.Errorf("find substring output = %q, want sub/helper.go", out)
+	}
+
+	out, err = runApplet(t, tool, "find", "nothing-matches-this")
+	if err != nil {
+		t.Fatalf("find no match: %v", err)
+	}
+	if !strings.Contains(out, "no matches") {
+		t.Errorf("find no-match output = %q, want it to say so explicitly", out)
+	}
+
+	if got := tool.ExecCount(); got != 0 {
+		t.Errorf("ExecCount = %d, want 0 (find never charges the budget)", got)
+	}
+}
+
+// TestWorkspaceTool_GrepFindConfinement verifies grep/find reject a lexical
+// "../" escape and an absolute path outside the workspace, matching the
+// containment ls/cat already guarantee via agent.FSRoot.
+func TestWorkspaceTool_GrepFindConfinement(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+	writeFileVia(t, writeTool, "keep_test.go", "package bug\n")
+
+	outside := t.TempDir()
+
+	if _, err := runApplet(t, tool, "grep", "package", "../escape"); err == nil {
+		t.Error("grep with \"..\" traversal should fail")
+	}
+	if _, err := runApplet(t, tool, "grep", "package", outside); err == nil {
+		t.Error("grep with an absolute path outside the workspace should fail")
+	}
+	if _, err := runApplet(t, tool, "find", "keep", "../escape"); err == nil {
+		t.Error("find with \"..\" traversal should fail")
+	}
+	if _, err := runApplet(t, tool, "find", "keep", outside); err == nil {
+		t.Error("find with an absolute path outside the workspace should fail")
+	}
+}
+
+// TestWorkspaceTool_GrepFindSymlinkEscape verifies grep/find, which walk
+// the whole workspace tree (unlike ls/cat's single-path lookup), never
+// follow a symlink planted inside the workspace out to the host: neither
+// applet reads through a symlinked file it encounters during the walk, nor
+// descends into a symlinked directory — mirroring
+// TestWorkspaceTool_LsCatConfinement's symlink fixture but exercised
+// against the default whole-tree scan instead of a direct path argument.
+func TestWorkspaceTool_GrepFindSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows")
+	}
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+	writeFileVia(t, writeTool, "keep_test.go", "package bug\n")
+
+	wsPath := sb.materialized()[0]
+	outside := t.TempDir()
+
+	// A symlinked FILE inside the workspace pointing at an outside secret.
+	secretFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secretFile, []byte("needle-in-secret-file\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secretFile, filepath.Join(wsPath, "escape_file.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	// A symlinked DIRECTORY inside the workspace pointing at an outside
+	// directory containing its own matchable file.
+	outsideDir := filepath.Join(outside, "vault")
+	if err := os.Mkdir(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	leaked := filepath.Join(outsideDir, "leaked_test.go")
+	if err := os.WriteFile(leaked, []byte("needle-in-leaked-dir\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(wsPath, "escape_dir")); err != nil {
+		t.Fatal(err)
+	}
+
+	grepOut, err := runApplet(t, tool, "grep", "needle-in-")
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	if strings.Contains(grepOut, "needle-in-secret-file") || strings.Contains(grepOut, "escape_file.txt") {
+		t.Errorf("grep output = %q, must not read through the symlinked file", grepOut)
+	}
+	if strings.Contains(grepOut, "needle-in-leaked-dir") || strings.Contains(grepOut, "leaked_test.go") {
+		t.Errorf("grep output = %q, must not descend the symlinked directory", grepOut)
+	}
+
+	findLeaked, err := runApplet(t, tool, "find", "leaked")
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if strings.Contains(findLeaked, "leaked_test.go") {
+		t.Errorf("find output = %q, must not descend the symlinked directory", findLeaked)
+	}
+
+	// The symlink entries themselves must not surface as matches either —
+	// the walk skips symlinked files/dirs outright rather than resolving
+	// and matching their target.
+	findEscape, err := runApplet(t, tool, "find", "escape")
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if strings.Contains(findEscape, "escape_file") || strings.Contains(findEscape, "escape_dir") {
+		t.Errorf("find output = %q, must not list symlinked entries", findEscape)
+	}
+}
+
+// TestWorkspaceTool_GrepOutputCaps verifies the grep applet enforces both
+// its match-count and output-byte caps: a file with far more than
+// workspaceGrepMaxMatches matching lines is truncated and flagged, and the
+// output never exceeds workspaceGrepMaxOutputBytes by more than one
+// rendered line.
+func TestWorkspaceTool_GrepOutputCaps(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+
+	// One matching line per row, far more rows than workspaceGrepMaxMatches,
+	// so the match-count cap (not EOF) ends the scan.
+	var contents strings.Builder
+	for i := 0; i < workspaceGrepMaxMatches*3; i++ {
+		contents.WriteString("needle line\n")
+	}
+	writeFileVia(t, writeTool, "haystack.txt", contents.String())
+
+	out, err := runApplet(t, tool, "grep", "needle")
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	if got := strings.Count(out, "haystack.txt:"); got != workspaceGrepMaxMatches {
+		t.Errorf("grep returned %d matches, want the cap of %d", got, workspaceGrepMaxMatches)
+	}
+	if !strings.Contains(out, "truncated") {
+		t.Errorf("grep output = %q, want a truncation marker", out[:min(len(out), 200)])
+	}
+	if len(out) > workspaceGrepMaxOutputBytes+256 {
+		t.Errorf("grep output is %d bytes, want it bounded near the %d-byte cap", len(out), workspaceGrepMaxOutputBytes)
+	}
+}
+
+// TestWorkspaceTool_FindOutputCap verifies the find applet enforces its
+// match-count cap: a directory with far more than workspaceFindMaxMatches
+// matching filenames is truncated and flagged.
+func TestWorkspaceTool_FindOutputCap(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+
+	for i := 0; i < workspaceFindMaxMatches+50; i++ {
+		writeFileVia(t, writeTool, fmt.Sprintf("gen/needle_%03d.txt", i), "x")
+	}
+
+	out, err := runApplet(t, tool, "find", "needle_")
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	matches := strings.Count(out, "gen/needle_")
+	if matches != workspaceFindMaxMatches {
+		t.Errorf("find returned %d matches, want the cap of %d", matches, workspaceFindMaxMatches)
+	}
+	if !strings.Contains(out, "truncated") {
+		t.Errorf("find output = %q, want a truncation marker", out[:min(len(out), 200)])
+	}
+}
+
+// TestWorkspaceExec_StructuredOutputParity is the core bugbot-0zay
+// regression test: it scripts a mock sandbox whose response depends on
+// whether the incoming Spec.Cmd carries the -json rewrite
+// normalizeCmdForStructuredOutput applies, so the unnormalized (marker-only)
+// and normalized (structured go test -json) branches DISAGREE on
+// demonstrated — the marker-only branch reports plain, marker-less error
+// text (not_demonstrated) while the -json branch reports a dispositive
+// per-test failure event (demonstrated). Before the fix, runExec sent cmd
+// unnormalized and would have landed on the marker-only branch and
+// misclassified a genuine demonstration as not_demonstrated. This asserts
+// `workspace exec`'s preview classification matches what execute()'s
+// official buildSpec path would classify for the identical cmd.
+func TestWorkspaceExec_StructuredOutputParity(t *testing.T) {
+	const jsonFailStdout = `{"Action":"run","Test":"TestBug"}
+{"Action":"fail","Test":"TestBug"}
+{"Action":"fail","Package":"pkg"}
+`
+	const plainStdout = "unexpected error: something went wrong\n"
+
+	responseFunc := func(_ int, spec sandbox.Spec) (sandbox.Result, error) {
+		if hasCmdFlag(spec.Cmd, "-json") {
+			return sandbox.Result{ExitCode: 1, Stdout: jsonFailStdout}, nil
+		}
+		return sandbox.Result{ExitCode: 1, Stdout: plainStdout}, nil
+	}
+
+	cmd := []string{"go", "test", "-timeout", "60s", "-run", "TestBug", "./..."}
+
+	// Sanity check: prove the two branches actually disagree on their OWN
+	// terms — the marker-only branch must NOT demonstrate, so this test
+	// genuinely exercises the structured-path parity fix rather than two
+	// branches that happen to agree anyway.
+	rawVerdict := interpret(sandbox.Result{ExitCode: 1, Stdout: plainStdout}, cmd)
+	if rawVerdict.demonstrated {
+		t.Fatalf("test setup: the marker-only branch must not demonstrate (got demonstrated=true), " +
+			"or this test cannot exercise the marker-vs-structured divergence it is meant to catch")
+	}
+
+	// Official path: buildSpec is execute()'s own spec-assembly helper,
+	// exercised directly against the same scripted mock and cmd.
+	sbOfficial := sandbox.NewMock(sandbox.MockResponse{})
+	sbOfficial.ResponseFunc = responseFunc
+	plan := &Plan{Cmd: cmd, Files: map[string]string{"bug_test.go": "package bug"}}
+	officialSpec := buildSpec(t.TempDir(), plan, "", "", 30*time.Second, sandbox.Resolution{})
+	officialRes, err := sbOfficial.Exec(context.Background(), officialSpec)
+	if err != nil {
+		t.Fatalf("official exec: %v", err)
+	}
+	officialVerdict := interpret(officialRes, cmd)
+	if !officialVerdict.demonstrated {
+		t.Fatalf("test setup: official path did not demonstrate; check the -json branch's fixture")
+	}
+
+	// Preview path: `workspace exec` against an identically scripted mock
+	// and the SAME cmd.
+	sbPreview := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	sbPreview.ResponseFunc = responseFunc
+	repoDir := newRepoDir(t)
+	tool := newWorkspaceTool(sbPreview, repoDir, 5, &iterationWorkspace{})
+
+	out, err := tool.Run(context.Background(), mustCmdArgs(t, cmd))
+	if err != nil {
+		t.Fatalf("workspace exec: %v", err)
+	}
+	if !strings.Contains(out, "demonstrated=true") {
+		t.Errorf("preview output = %q, want demonstrated=true to match the official verdict (demonstrated=%t)",
+			out, officialVerdict.demonstrated)
+	}
+
+	// The mock must actually have seen a normalized (-json) cmd for the
+	// preview call — otherwise the assertion above could pass for the wrong
+	// reason (e.g. a marker cascade fluke).
+	calls := sbPreview.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("sandbox calls = %d, want 1", len(calls))
+	}
+	if !hasCmdFlag(calls[0].Spec.Cmd, "-json") {
+		t.Errorf("preview Spec.Cmd = %v, want the -json rewrite applied (parity with buildSpec)", calls[0].Spec.Cmd)
+	}
+	if len(calls[0].Spec.CaptureFiles) != 0 {
+		t.Errorf("preview Spec.CaptureFiles = %v, want none for a go test cmd (CaptureFiles is the pytest junit case)", calls[0].Spec.CaptureFiles)
 	}
 }

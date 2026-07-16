@@ -389,6 +389,22 @@ func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding dom
 	return outcome, nil
 }
 
+// goAvailable applies bugbot-bslx's asymmetric degradation rule for the Go
+// ecosystem: unlike js/python/rust (where a missing CapabilitySet entry
+// already means "assume unavailable, block"), Go must default to available
+// unless the capability probe actually ran for this image AND explicitly
+// found no go binary. Go was categorically ungated before bugbot-bslx, so a
+// CapabilitySet built before the go probe existed (or one where the probe
+// never populated a "go" entry) must keep behaving exactly as it did then.
+// caps must be non-nil (callers already check).
+func goAvailable(caps sandbox.CapabilitySet) bool {
+	modes, probed := caps[ecosystem.EcosystemGo]
+	if !probed {
+		return true
+	}
+	return modes[ecosystem.BaseMode(ecosystem.EcosystemGo)]
+}
+
 // gateEcosystem returns the missing ecosystem name when finding's inferred
 // toolchain requirement is known-unavailable in caps, so promoteOne can skip
 // straight to blocked_toolchain instead of burning a claim/sandbox attempt on
@@ -396,9 +412,10 @@ func promoteOne(ctx context.Context, r *Reproducer, st *store.Store, finding dom
 //
 // Returns ("", false) — never gated — when: caps is nil (no probe available,
 // e.g. no sandbox configured); the finding's file extension maps to no
-// ecosystem ecosystem.InferFromExtension recognizes; or that ecosystem has no
-// base-presence probe mode (ecosystem.BaseMode — Go and C/C++ are never
-// gated, see its doc).
+// ecosystem ecosystem.InferFromExtension recognizes; that ecosystem has no
+// base-presence probe mode (ecosystem.BaseMode — C/C++ is never gated, see
+// its doc); or — Go specifically — the probe never ran for this image (see
+// goAvailable's asymmetric degradation rule).
 func gateEcosystem(finding domain.Finding, caps sandbox.CapabilitySet) (eco string, blocked bool) {
 	if caps == nil {
 		return "", false
@@ -406,6 +423,12 @@ func gateEcosystem(finding domain.Finding, caps sandbox.CapabilitySet) (eco stri
 	eco = ecosystem.InferFromExtension(finding.File)
 	if eco == "" {
 		return "", false
+	}
+	if eco == ecosystem.EcosystemGo {
+		if goAvailable(caps) {
+			return "", false
+		}
+		return eco, true
 	}
 	mode := ecosystem.BaseMode(eco)
 	if mode == "" {
@@ -420,10 +443,15 @@ func gateEcosystem(finding domain.Finding, caps sandbox.CapabilitySet) (eco stri
 // blockedToolchainBinary returns the actual missing BINARY name for eco
 // (ecosystem.BaseMode, e.g. "node" for "js") for use in operator-facing
 // messages — an operator needs to know what to install, not the internal
-// ecosystem key. Falls back to eco itself if BaseMode is somehow empty (never
-// happens for an eco gateEcosystem returned as blocked, but stays safe if
-// called elsewhere).
+// ecosystem key. Go is special-cased: its BaseMode ("present") is a mode
+// name, not a binary, and eco itself ("go") already IS the binary name.
+// Falls back to eco itself if BaseMode is somehow empty (never happens for
+// an eco gateEcosystem returned as blocked, but stays safe if called
+// elsewhere).
 func blockedToolchainBinary(eco string) string {
+	if eco == ecosystem.EcosystemGo {
+		return eco
+	}
 	if bin := ecosystem.BaseMode(ecosystem.Ecosystem(eco)); bin != "" {
 		return bin
 	}

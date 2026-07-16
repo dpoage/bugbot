@@ -16,7 +16,7 @@ var noSystems []ingest.BuildSystem
 // TestSystemPrompt_GoGuidance pins the verbatim Go guidance so it never drifts:
 // the Go path is the historically-validated wording.
 func TestSystemPrompt_GoGuidance(t *testing.T) {
-	p := systemPrompt(ingest.LangGo, noSystems, nil)
+	p := systemPrompt(ingest.LangGo, noSystems, nil, Playbook{})
 	if !strings.Contains(p, "*_test.go file in the package that contains the bug") {
 		t.Error("Go repro prompt must keep the *_test.go guidance")
 	}
@@ -28,7 +28,7 @@ func TestSystemPrompt_GoGuidance(t *testing.T) {
 // TestSystemPrompt_PythonGuidance confirms a Python finding gets pytest guidance
 // and the Go-specific guidance is absent.
 func TestSystemPrompt_PythonGuidance(t *testing.T) {
-	p := systemPrompt(ingest.LangPython, noSystems, nil)
+	p := systemPrompt(ingest.LangPython, noSystems, nil, Playbook{})
 	if !strings.Contains(p, "pytest") {
 		t.Error("Python repro prompt must mention pytest")
 	}
@@ -145,7 +145,7 @@ func TestSystemPrompt_PerLanguageGuidance(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := systemPrompt(tt.lang, noSystems, nil)
+			p := systemPrompt(tt.lang, noSystems, nil, Playbook{})
 			if !strings.Contains(p, tt.want) {
 				t.Errorf("systemPrompt(%v) missing %q", tt.lang, tt.want)
 			}
@@ -161,7 +161,7 @@ func TestSystemPrompt_PerLanguageGuidance(t *testing.T) {
 // ctest guidance and does NOT contain invented make commands.
 func TestSystemPrompt_CppCMake(t *testing.T) {
 	cmakeSystems := []ingest.BuildSystem{ingest.BuildSystemCMake}
-	p := systemPrompt(ingest.LangCPP, cmakeSystems, nil)
+	p := systemPrompt(ingest.LangCPP, cmakeSystems, nil, Playbook{})
 
 	if !strings.Contains(p, "ctest") {
 		t.Error("C++ + cmake prompt must mention ctest")
@@ -183,7 +183,7 @@ func TestSystemPrompt_CppCMake(t *testing.T) {
 // invented make or ctest commands.
 func TestSystemPrompt_CppMakeOnly(t *testing.T) {
 	makeSystems := []ingest.BuildSystem{ingest.BuildSystemMake}
-	p := systemPrompt(ingest.LangCPP, makeSystems, nil)
+	p := systemPrompt(ingest.LangCPP, makeSystems, nil, Playbook{})
 
 	if !strings.Contains(p, "standard test framework for its language") {
 		t.Error("C++ + make-only prompt must use generic fallback text")
@@ -201,7 +201,7 @@ func TestSystemPrompt_CppMakeOnly(t *testing.T) {
 // meson test guidance.
 func TestSystemPrompt_CppMeson(t *testing.T) {
 	mesonSystems := []ingest.BuildSystem{ingest.BuildSystemMeson}
-	p := systemPrompt(ingest.LangCPP, mesonSystems, nil)
+	p := systemPrompt(ingest.LangCPP, mesonSystems, nil, Playbook{})
 
 	if !strings.Contains(p, "meson test") {
 		t.Error("C++ + meson prompt must mention meson test")
@@ -218,7 +218,7 @@ func TestSystemPrompt_CppMeson(t *testing.T) {
 // regardless of build systems supplied, and does not contain invented maven or
 // gradle invocations.
 func TestSystemPrompt_CSharp(t *testing.T) {
-	p := systemPrompt(ingest.LangCSharp, noSystems, nil)
+	p := systemPrompt(ingest.LangCSharp, noSystems, nil, Playbook{})
 
 	if !strings.Contains(p, "dotnet test") {
 		t.Error("C# prompt must mention dotnet test")
@@ -239,7 +239,7 @@ func TestSystemPrompt_CSharp(t *testing.T) {
 // mvn test guidance and does not contain gradle invocations.
 func TestSystemPrompt_JavaMaven(t *testing.T) {
 	mavenSystems := []ingest.BuildSystem{ingest.BuildSystemMaven}
-	p := systemPrompt(ingest.LangJava, mavenSystems, nil)
+	p := systemPrompt(ingest.LangJava, mavenSystems, nil, Playbook{})
 
 	if !strings.Contains(p, "mvn test") {
 		t.Error("Java + maven prompt must mention mvn test")
@@ -257,7 +257,7 @@ func TestSystemPrompt_JavaMaven(t *testing.T) {
 // gets gradle test guidance and does not contain maven invocations.
 func TestSystemPrompt_JavaGradle(t *testing.T) {
 	gradleSystems := []ingest.BuildSystem{ingest.BuildSystemGradle}
-	p := systemPrompt(ingest.LangJava, gradleSystems, nil)
+	p := systemPrompt(ingest.LangJava, gradleSystems, nil, Playbook{})
 
 	if !strings.Contains(p, "gradle test") {
 		t.Error("Java + gradle prompt must mention gradle test")
@@ -276,7 +276,7 @@ func TestSystemPrompt_JavaGradle(t *testing.T) {
 // case shares the Java+Gradle path.
 func TestSystemPrompt_KotlinGradle(t *testing.T) {
 	gradleSystems := []ingest.BuildSystem{ingest.BuildSystemGradle}
-	p := systemPrompt(ingest.LangKotlin, gradleSystems, nil)
+	p := systemPrompt(ingest.LangKotlin, gradleSystems, nil, Playbook{})
 
 	if !strings.Contains(p, "gradle test") {
 		t.Error("Kotlin + gradle prompt must mention gradle test")
@@ -328,7 +328,7 @@ func TestSystemPrompt_BazelBuildSystem(t *testing.T) {
 	// along with it (spliced inside systemPrompt), and the build-system-
 	// conditional appended blocks.
 	compose := func(systems []ingest.BuildSystem) string {
-		p := systemPrompt(ingest.LangGo, systems, nil)
+		p := systemPrompt(ingest.LangGo, systems, nil, Playbook{})
 		if slices.Contains(systems, ingest.BuildSystemBazel) {
 			p += bazelGuidance()
 		}
@@ -354,7 +354,7 @@ func TestSystemPrompt_BazelBuildSystem(t *testing.T) {
 // timeout flag, so the agent stops emitting tests that hang until the sandbox
 // idle watchdog kills them.
 func TestSystemPrompt_TerminationGuidance(t *testing.T) {
-	p := systemPrompt(ingest.LangGo, noSystems, nil)
+	p := systemPrompt(ingest.LangGo, noSystems, nil, Playbook{})
 	if !strings.Contains(p, "Self-terminating") {
 		t.Error("repro prompt must require self-terminating tests")
 	}
@@ -392,7 +392,7 @@ func TestSystemPrompt_NoGradingDisclosure(t *testing.T) {
 		// workspaceGuidance — added by bugbot-bkz1/bugbot-hu59 outside
 		// systemPrompt() itself, so a disclosure regression introduced there
 		// would otherwise go uncovered by this test.
-		p := systemPrompt(lang, noSystems, nil) + workspaceGuidance(4)
+		p := systemPrompt(lang, noSystems, nil, Playbook{}) + workspaceGuidance(4)
 		for _, bad := range forbidden {
 			if strings.Contains(p, bad) {
 				t.Errorf("composed prompt(%v) contains forbidden grading-disclosure string %q", lang, bad)
@@ -407,7 +407,7 @@ func TestSystemPrompt_NoGradingDisclosure(t *testing.T) {
 // follow it as a discrete paragraph.
 func TestSystemPrompt_LangGuidanceSection(t *testing.T) {
 	// Go is representative; the section header is language-independent.
-	p := systemPrompt(ingest.LangGo, noSystems, nil)
+	p := systemPrompt(ingest.LangGo, noSystems, nil, Playbook{})
 	if !strings.Contains(p, "Language-specific guidance:") {
 		t.Error("systemPrompt must contain a 'Language-specific guidance:' section header")
 	}
@@ -428,7 +428,7 @@ func TestSystemPrompt_LangGuidanceSection(t *testing.T) {
 // --timeout alongside pytest; it should suggest the coreutils timeout wrapper.
 func TestSystemPrompt_PytestTimeoutOnlyWithPlugin(t *testing.T) {
 	// Without any capability probes: no --timeout suggestion anywhere.
-	noCapPrompt := systemPrompt(ingest.LangPython, noSystems, nil)
+	noCapPrompt := systemPrompt(ingest.LangPython, noSystems, nil, Playbook{})
 	if strings.Contains(noCapPrompt, "pytest --timeout") {
 		t.Error("prompt must NOT suggest 'pytest --timeout' when no capabilities probed")
 	}
@@ -437,7 +437,7 @@ func TestSystemPrompt_PytestTimeoutOnlyWithPlugin(t *testing.T) {
 	capsNoPlugin := sandbox.CapabilitySet{
 		"python": {"pytest": true, "python": true},
 	}
-	noPluginPrompt := systemPrompt(ingest.LangPython, noSystems, capsNoPlugin)
+	noPluginPrompt := systemPrompt(ingest.LangPython, noSystems, capsNoPlugin, Playbook{})
 	if strings.Contains(noPluginPrompt, "pytest --timeout") {
 		t.Error("prompt must NOT suggest 'pytest --timeout' when pytest_timeout not probed")
 	}
@@ -450,7 +450,7 @@ func TestSystemPrompt_PytestTimeoutOnlyWithPlugin(t *testing.T) {
 	capsWithPlugin := sandbox.CapabilitySet{
 		"python": {"pytest": true, "pytest_timeout": true, "python": true},
 	}
-	withPluginPrompt := systemPrompt(ingest.LangPython, noSystems, capsWithPlugin)
+	withPluginPrompt := systemPrompt(ingest.LangPython, noSystems, capsWithPlugin, Playbook{})
 	if !strings.Contains(withPluginPrompt, "pytest --timeout=60") {
 		t.Error("prompt must suggest 'pytest --timeout=60' when pytest_timeout plugin confirmed")
 	}

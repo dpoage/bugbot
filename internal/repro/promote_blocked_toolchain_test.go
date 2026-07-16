@@ -199,13 +199,18 @@ func TestPromoteAll_BlockedToolchain_ProceedsOnceCapabilityRestored(t *testing.T
 	}
 }
 
-// TestGateEcosystem_NeverGatesUngatedEcosystems verifies Go/C++ findings and
-// findings with a nil CapabilitySet are never blocked, matching
-// ecosystem.BaseMode's documented ungated set.
+// TestGateEcosystem_NeverGatesUngatedEcosystems verifies a C++ finding, a Go
+// finding whose CapabilitySet has no "go" probe data (bugbot-bslx's
+// degradation rule — see goAvailable), and findings with a nil
+// CapabilitySet are never blocked.
 func TestGateEcosystem_NeverGatesUngatedEcosystems(t *testing.T) {
 	goFinding := domain.Finding{File: "main.go"}
 	if _, blocked := gateEcosystem(goFinding, nodeUnavailableCaps()); blocked {
-		t.Error("a Go finding must never be gated (no base-presence probe mode)")
+		t.Error("a Go finding must not be gated when the CapabilitySet has no go probe data (degrade to pre-bslx ungated behavior)")
+	}
+	cppFinding := domain.Finding{File: "main.cpp"}
+	if _, blocked := gateEcosystem(cppFinding, nodeUnavailableCaps()); blocked {
+		t.Error("a C++ finding must never be gated (no base-presence probe mode)")
 	}
 	tsFinding := domain.Finding{File: "app.ts"}
 	if _, blocked := gateEcosystem(tsFinding, nil); blocked {
@@ -230,14 +235,14 @@ func TestSummarizeBlocked_GroupsByEcosystemZeroContainer(t *testing.T) {
 	findings := []domain.Finding{
 		{File: "a.ts"},
 		{File: "b.tsx"},
-		{File: "c.go"}, // ungated: must not appear
+		{File: "c.go"}, // no go probe data in nodeUnavailableCaps(): degrades to ungated
 	}
 	counts := r.SummarizeBlocked(findings)
 	if counts["js"] != 2 {
 		t.Errorf("counts[js] = %d, want 2", counts["js"])
 	}
 	if _, ok := counts["go"]; ok {
-		t.Errorf("go must never be gated, got %v", counts)
+		t.Errorf("go must not be counted when the CapabilitySet has no go probe data, got %v", counts)
 	}
 	if n := sb.CallCount(); n != 0 {
 		t.Errorf("SummarizeBlocked must not touch the sandbox, got %d calls", n)
@@ -255,5 +260,209 @@ func TestSummarizeBlocked_NilWhenNothingBlocked(t *testing.T) {
 	}
 	if counts := r.SummarizeBlocked([]domain.Finding{{File: "a.go"}}); counts != nil {
 		t.Errorf("counts = %v, want nil", counts)
+	}
+}
+
+// seedGoFinding inserts a Tier-2 verified finding whose file is Go, so
+// ecosystem.InferFromExtension resolves it to the "go" ecosystem — the
+// bugbot-bslx production incident (a host_toolchains image lacking go
+// burning a full reproducer attempt on exit 127 "go: not found").
+func seedGoFinding(t *testing.T, st *store.Store) domain.Finding {
+	t.Helper()
+	fp := domain.Fingerprint("logic", "internal/paginate.go", fmt.Sprintf("%d|%s", 12, "off-by-one in pagination"))
+	f := domain.Finding{
+		Fingerprint: fp,
+		Title:       "Off-by-one in pagination",
+		Description: "The page offset is computed one index too high.",
+		Reasoning:   "Verified: loop bound uses <= instead of <.",
+		Severity:    "medium",
+		Tier:        2,
+		Status:      domain.StatusOpen,
+		Lens:        "logic",
+		File:        "internal/paginate.go",
+		Line:        12,
+		CommitSHA:   "abc123",
+		FileHash:    "deadbeef",
+	}
+	stored, err := st.UpsertFinding(context.Background(), f)
+	if err != nil {
+		t.Fatalf("seed Go finding: %v", err)
+	}
+	return stored
+}
+
+// goUnavailableCaps mirrors what ProbeCapabilities would return for a
+// host_toolchains image whose probe RAN and explicitly found no go binary
+// (bugbot-bslx's positive-negative signal — the only case that blocks).
+func goUnavailableCaps() sandbox.CapabilitySet {
+	return sandbox.CapabilitySet{
+		"go": {"present": false, "race": false},
+	}
+}
+
+// goAvailableCaps mirrors what ProbeCapabilities would return once a host go
+// toolchain is confirmed present.
+func goAvailableCaps() sandbox.CapabilitySet {
+	return sandbox.CapabilitySet{
+		"go": {"present": true, "race": false},
+	}
+}
+
+// TestPromoteAll_BlockedToolchain_Go_NoAttemptAggregateReported is the
+// bugbot-bslx regression: a go-less image + Go finding must be skipped as
+// blocked_toolchain, with zero agent/sandbox activity, mirroring
+// TestPromoteAll_BlockedToolchain_NoAttemptAggregateReported for js/node.
+func TestPromoteAll_BlockedToolchain_Go_NoAttemptAggregateReported(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	finding := seedGoFinding(t, st)
+	repoDir := newRepoDir(t)
+
+	// No scripted response queued: if the reproducer ever calls the LLM this
+	// panics/fails loudly — the gate must never let the plan-agent run.
+	client := newScriptedClient()
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1}})
+
+	r, err := New(client, sb, repoDir, Options{
+		ArtifactDir:  t.TempDir(),
+		Capabilities: goUnavailableCaps(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
+	if err != nil {
+		t.Fatalf("PromoteAll: %v", err)
+	}
+
+	if summary.BlockedToolchain != 1 {
+		t.Errorf("summary.BlockedToolchain = %d, want 1", summary.BlockedToolchain)
+	}
+	if summary.Attempted != 0 || summary.Failed != 0 || summary.Promoted != 0 {
+		t.Errorf("summary = %+v, want zero attempted/failed/promoted", summary)
+	}
+	if got := summary.BlockedByEcosystem["go"]; got != 1 {
+		t.Errorf("summary.BlockedByEcosystem[go] = %d, want 1", got)
+	}
+	if len(summary.PerFinding) != 1 || !summary.PerFinding[0].BlockedToolchain {
+		t.Fatalf("PerFinding[0] = %+v, want BlockedToolchain=true", summary.PerFinding)
+	}
+	if summary.PerFinding[0].MissingEcosystem != "go" {
+		t.Errorf("MissingEcosystem = %q, want go", summary.PerFinding[0].MissingEcosystem)
+	}
+
+	// No sandbox run happened at all — the gate is a zero-container decision
+	// against the already-cached CapabilitySet.
+	if n := sb.CallCount(); n != 0 {
+		t.Errorf("sandbox CallCount = %d, want 0 (blocked findings must not launch the sandbox)", n)
+	}
+
+	ra, err := st.GetReproAttempt(ctx, finding.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetReproAttempt: %v", err)
+	}
+	if ra.State != store.ReproStateBlockedToolchain {
+		t.Errorf("queue state = %s, want blocked_toolchain", ra.State)
+	}
+	if ra.BlockedEcosystem != "go" {
+		t.Errorf("queue blocked_ecosystem = %q, want go", ra.BlockedEcosystem)
+	}
+	if ra.AttemptCount != 0 {
+		t.Errorf("queue attempt_count = %d, want 0 (blocking is not an attempt)", ra.AttemptCount)
+	}
+}
+
+// TestPromoteAll_BlockedToolchain_Go_ProbeAbsentDegradesToUnblocked pins the
+// bugbot-bslx CRITICAL degradation rule: a CapabilitySet that carries no
+// "go" entry at all (probe never ran / no probe data — the only kind of
+// CapabilitySet that existed before this change) must leave Go findings
+// exactly as ungated as they were pre-bslx. Only an explicit "go
+// unavailable" probe result (goUnavailableCaps, tested above) may block.
+func TestPromoteAll_BlockedToolchain_Go_ProbeAbsentDegradesToUnblocked(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	finding := seedGoFinding(t, st)
+	repoDir := newRepoDir(t)
+
+	plan := Plan{
+		Files:  map[string]string{"internal/paginate_test.go": "package internal\n\nimport \"testing\"\n\nfunc TestPaginate(t *testing.T) {\n\tif got := paginate([]int{1, 2}, 1); len(got) != 1 {\n\t\tt.Fatalf(\"got %v\", got)\n\t}\n}\n"},
+		Cmd:    []string{"go", "test", "-timeout", "60s", "-run", "TestPaginate", "./internal/..."},
+		Expect: "the off-by-one causes the test to fail",
+	}
+	client := newScriptedClient(planBody(t, plan))
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "--- FAIL: TestPaginate (0.00s)\nFAIL\n",
+	}})
+
+	r, err := New(client, sb, repoDir, Options{
+		ArtifactDir: t.TempDir(),
+		// nodeUnavailableCaps has entries for js but none for "go" — this is
+		// exactly the "probe never ran for go" shape the degradation rule
+		// must tolerate.
+		Capabilities: nodeUnavailableCaps(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
+	if err != nil {
+		t.Fatalf("PromoteAll: %v", err)
+	}
+
+	if summary.BlockedToolchain != 0 {
+		t.Errorf("summary.BlockedToolchain = %d, want 0 (no go probe data must degrade to ungated)", summary.BlockedToolchain)
+	}
+	if summary.Attempted != 1 {
+		t.Errorf("summary.Attempted = %d, want 1 (the claim must proceed to a genuine sandbox attempt)", summary.Attempted)
+	}
+	if n := sb.CallCount(); n == 0 {
+		t.Error("sandbox CallCount = 0, want at least 1 — a Go finding with no go probe data must not be blocked")
+	}
+}
+
+// TestPromoteAll_BlockedToolchain_Go_AvailableProceeds pins the happy path:
+// a probe that RAN and confirmed go present must leave the finding fully
+// ungated — the claim proceeds to a genuine sandbox attempt.
+func TestPromoteAll_BlockedToolchain_Go_AvailableProceeds(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	finding := seedGoFinding(t, st)
+	repoDir := newRepoDir(t)
+
+	plan := Plan{
+		Files:  map[string]string{"internal/paginate_test.go": "package internal\n\nimport \"testing\"\n\nfunc TestPaginate(t *testing.T) {\n\tif got := paginate([]int{1, 2}, 1); len(got) != 1 {\n\t\tt.Fatalf(\"got %v\", got)\n\t}\n}\n"},
+		Cmd:    []string{"go", "test", "-timeout", "60s", "-run", "TestPaginate", "./internal/..."},
+		Expect: "the off-by-one causes the test to fail",
+	}
+	client := newScriptedClient(planBody(t, plan))
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "--- FAIL: TestPaginate (0.00s)\nFAIL\n",
+	}})
+
+	r, err := New(client, sb, repoDir, Options{
+		ArtifactDir:  t.TempDir(),
+		Capabilities: goAvailableCaps(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
+	if err != nil {
+		t.Fatalf("PromoteAll: %v", err)
+	}
+
+	if summary.BlockedToolchain != 0 {
+		t.Errorf("summary.BlockedToolchain = %d, want 0 (go confirmed present must not block)", summary.BlockedToolchain)
+	}
+	if summary.Attempted != 1 {
+		t.Errorf("summary.Attempted = %d, want 1 (available go must proceed to a genuine attempt)", summary.Attempted)
+	}
+	if n := sb.CallCount(); n == 0 {
+		t.Error("sandbox CallCount = 0, want at least 1 — an available-go finding must reach the sandbox")
 	}
 }

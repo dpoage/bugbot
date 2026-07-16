@@ -12,7 +12,7 @@ import (
 // that need a real on-disk Bundle rather than a hand-built Manifest.
 func bundleFrom(t *testing.T, finding domain.Finding, plan *Plan, res sandbox.Result) *Bundle {
 	t.Helper()
-	dir, err := writeArtifacts(t.TempDir(), finding, plan, res, "golang:1.21", "none")
+	dir, err := writeArtifacts(t.TempDir(), finding, plan, res, res, "golang:1.21", "none")
 	if err != nil {
 		t.Fatalf("writeArtifacts: %v", err)
 	}

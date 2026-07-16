@@ -40,6 +40,25 @@ const (
 	// all land here: the failing test is real, but it proves nothing about
 	// the target's own code (bugbot-qb4r).
 	VerdictReasonTargetNotExecuted VerdictReason = "target_not_executed"
+	// VerdictReasonFlaky: the repro demonstrated the bug on the official run
+	// but did NOT demonstrate again on an identical confirmation re-run (same
+	// plan, fresh workspace) — bugbot-c49s's determinism gate. Concurrency/
+	// race findings are the core target class for this stage and are exactly
+	// the ones prone to a single lucky failure; requiring two consecutive
+	// demonstrating runs before promotion turns that lucky failure into
+	// corrective feedback instead of a Tier-1 artifact a human can't
+	// reproduce.
+	VerdictReasonFlaky VerdictReason = "flaky_repro"
+	// VerdictReasonForeignFailure: the structured-output path (classifyGoEvents
+	// on go test -json, parseJUnitXML on captured JUnit XML) found dispositive
+	// ran-and-failed evidence, but NONE of the failing test names match a test
+	// the plan itself declared in plan.Files (see extractGoTestNames/
+	// extractPyTestNames, testnames.go) — an unrelated pre-existing failing
+	// test in the same package/module satisfied the ran-evidence gate instead
+	// of the agent's own injected test. Set only by bindTestEvidence, never by
+	// interpret() itself: the marker cascade and any ecosystem with no
+	// extractable declared names are unaffected (bugbot-u47n).
+	VerdictReasonForeignFailure VerdictReason = "foreign_test_failure"
 )
 
 // verdict is the interpretation of a single sandbox run against the
@@ -71,6 +90,17 @@ type verdict struct {
 	// full Tier-1, since the runtime has no reliable way to attribute the
 	// failure to the target file for this ecosystem.
 	witnessOnly bool
+	// structuredFailingTests lists the failing test name(s) the STRUCTURED
+	// path (classifyGoEvents / parseJUnitXML) found dispositive, in event/
+	// document order. Set only when demonstrated is true via that path; nil
+	// for a marker-path demonstration or a non-demonstrating verdict. Consumed
+	// by bindTestEvidence (bugbot-u47n) to check the failure against the
+	// plan's own declared test names before the caller trusts the promotion.
+	structuredFailingTests []string
+	// foreignTest is the one failing test name bindTestEvidence surfaces in
+	// feedback() when reason is VerdictReasonForeignFailure — set only by
+	// bindTestEvidence, empty otherwise.
+	foreignTest string
 }
 
 // interpret applies the Tier-1 promotion rules to a sandbox result.
@@ -134,18 +164,18 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	switch eco.name {
 	case sandbox.EcosystemGo:
 		if events, parsedOK := parseGoTestEvents(res.Stdout); parsedOK {
-			if demonstrated, reason, ok := classifyGoEvents(events); ok {
+			if demonstrated, reason, failing, ok := classifyGoEvents(events); ok {
 				if demonstrated {
-					return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+					return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name, structuredFailingTests: failing}
 				}
 				return verdict{reason: reason, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
 			}
 		}
 	case sandbox.EcosystemPython:
 		if junit, present := res.Captured[structuredJUnitXMLPath]; present {
-			if demonstrated, reason, ok := parseJUnitXML(junit); ok {
+			if demonstrated, reason, failing, ok := parseJUnitXML(junit); ok {
 				if demonstrated {
-					return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+					return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name, structuredFailingTests: failing}
 				}
 				return verdict{reason: reason, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
 			}
@@ -321,6 +351,24 @@ func witnessDemonstration(v verdict, out, targetPath string) verdict {
 	}
 }
 
+// flakyVerdict builds the non-promoting verdict for a repro that
+// demonstrated on the official run (first) but did not demonstrate again on
+// an identical confirmation re-run (second) — bugbot-c49s's determinism
+// gate (see Attempt in repro.go). first is the ALREADY-witnessed
+// demonstrating verdict; second is the confirmation run's (already
+// witnessed) non-demonstrating verdict. The combined summary records both
+// outcomes so the agent's revision feedback and any operator inspecting
+// att.Output can see exactly where the two runs diverged.
+func flakyVerdict(first, second verdict) verdict {
+	return verdict{
+		reason: VerdictReasonFlaky,
+		summary: fmt.Sprintf(
+			"run 1/2 demonstrated the bug; run 2/2 (identical plan, fresh workspace) did not (%s): %s",
+			second.reason, trunc(second.summary, 2000)),
+		ecosystem: first.ecosystem,
+	}
+}
+
 // feedback builds the corrective message sent back to the agent after a
 // non-demonstrating attempt, tailored to the verdict's category and
 // including the offending plan's command and the run output the agent
@@ -339,6 +387,32 @@ func witnessDemonstration(v verdict, out, targetPath string) verdict {
 // failure.
 func (v verdict) feedback(p *Plan) string {
 	var b strings.Builder
+	// bugbot-c49s: the flaky-repro verdict gets its own early-return message,
+	// checked BEFORE the bazel branch below, because it is deliberately
+	// ecosystem-agnostic — a bazel repro that demonstrates once and not
+	// twice consecutively is exactly the same failure mode as any other
+	// ecosystem's, and must get the determinism guidance, not bazel's
+	// generic exit-code lecture (which only ever discusses a SINGLE run).
+	// The generic post-switch trailer further down also does not apply
+	// here: it talks about workspace/build side effects, which is the
+	// wrong framing — both runs used fresh workspaces and the divergence
+	// is about timing, not state.
+	if v.reason == VerdictReasonFlaky {
+		b.WriteString("Your repro demonstrated the bug on the official run, but an IDENTICAL confirmation re-run ")
+		b.WriteString("(same plan, fresh workspace) did NOT demonstrate it again. A repro that only fails sometimes ")
+		b.WriteString("is not a reliable Tier-1 reproduction — a human running it once may see it pass. This usually ")
+		b.WriteString("means the test races on timing rather than deterministically exercising the bug: add explicit ")
+		b.WriteString("synchronization (channels, sync.WaitGroup, mutexes) instead of sleeps, and/or increase the ")
+		b.WriteString("number of iterations/goroutines so the failure condition is hit on EVERY run, not just ")
+		b.WriteString("occasionally. The test must fail the same way twice in a row.")
+		if len(p.Cmd) > 0 {
+			fmt.Fprintf(&b, "\n\nCommand run: %s", strings.Join(p.Cmd, " "))
+		}
+		if v.summary != "" {
+			fmt.Fprintf(&b, "\n\n%s", util.FenceBlock("RUN 1 vs RUN 2", v.summary))
+		}
+		return b.String()
+	}
 	// Bazel gets dedicated, exit-code-aware feedback for ALL non-demonstrating
 	// reasons (not just environment failures): the agent must learn that exit 3
 	// is the goal and that it must target a SPECIFIC label, never //....
@@ -387,6 +461,17 @@ func (v verdict) feedback(p *Plan) string {
 		b.WriteString("itself (a transliteration) are not reproductions — the runtime never touches the target's own code. ")
 		b.WriteString("Rewrite the test so it IMPORTS/REQUIRES the target module and CALLS its actual function/method, so the ")
 		b.WriteString("target file's own code runs and fails on the current bug.")
+	case VerdictReasonForeignFailure:
+		foreign := v.foreignTest
+		if foreign == "" {
+			foreign = "an unrelated test"
+		}
+		fmt.Fprintf(&b, "Your repro's command failed, but the failing test (%s) is NOT one of the test(s) your plan ", foreign)
+		b.WriteString("injected — an unrelated, pre-existing failure elsewhere in the targeted package/module satisfied ")
+		b.WriteString("the ran-evidence check without your OWN test ever running. This does not demonstrate the bug. ")
+		b.WriteString("Narrow your command so it runs ONLY your injected test: for Go, add `-run <YourTestName>` (or a ")
+		b.WriteString("regex matching just it); for pytest, target the specific file/node id or use `-k <your_test_name>`. ")
+		fmt.Fprintf(&b, "Your injected test must be the one that fails, not %s.", foreign)
 	default:
 		b.WriteString("Your repro did not demonstrate the bug as expected. Revise it.")
 	}

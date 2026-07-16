@@ -205,6 +205,12 @@ func TestAttempt_EmitsReproAttemptPerRound(t *testing.T) {
 		ExitCode: 1,
 		Stdout:   "--- FAIL: TestBug\n    bug_test.go:1: Divide(1,0) = 0, want error\nFAIL",
 	}})
+	// bugbot-c49s determinism gate: round 2's demonstration must be confirmed
+	// by an identical re-run before it promotes.
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "--- FAIL: TestBug\n    bug_test.go:1: Divide(1,0) = 0, want error\nFAIL",
+	}})
 
 	var sink reproRecordingSink
 	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir(), Progress: &sink, MaxAttempts: 2})

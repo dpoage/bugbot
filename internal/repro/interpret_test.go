@@ -687,3 +687,86 @@ func TestInterpret_StructuredOutput(t *testing.T) {
 		}
 	})
 }
+
+// TestInterpret_NodeTest_TAP_Demonstrated_NotWitnessOnly covers bugbot-ds90
+// acceptance: a `node --test` TAP failure now (1) detects as EcosystemJS
+// instead of EcosystemUnknown, (2) classifies as demonstrated via the new
+// line-anchored "not ok " / "assertionerror" JS ran-markers, and (3) —
+// since JS has a WitnessTable entry and no coverage row contradicts the
+// target — reaches witnessDemonstration with witnessOnly left false, i.e.
+// full Tier-1 eligible instead of downgraded to a witness. Before
+// bugbot-ds90, step (1) failed, so this landed EcosystemUnknown — absent
+// from WitnessTable — which is ALWAYS downgraded to witnessOnly regardless
+// of coverage evidence.
+func TestInterpret_NodeTest_TAP_Demonstrated_NotWitnessOnly(t *testing.T) {
+	cases := []struct {
+		name   string
+		stdout string
+	}{
+		{
+			"TAP not-ok plus node AssertionError text",
+			"TAP version 13\n# Subtest: sync fail\nnot ok 1 - sync fail\n  ---\n" +
+				"  error: |-\n    AssertionError [ERR_ASSERTION]: Expected values to be strictly equal\n  ...\n# pass 0\n# fail 1\n",
+		},
+		{
+			// Isolates the LineAnchoredRanMarkers path: no "assertionerror"
+			// substring anywhere, only the TAP "not ok " line-start marker.
+			"TAP not-ok only, no assertion text",
+			"TAP version 13\n# Subtest: sync fail\nnot ok 1 - sync fail\n  ---\n  ...\n# pass 0\n# fail 1\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := sandbox.Result{ExitCode: 1, Stdout: tc.stdout}
+			cmd := []string{"node", "--test", "x.test.js"}
+
+			v := interpret(res, cmd)
+			if !v.demonstrated {
+				t.Fatalf("node --test TAP failure must demonstrate; got reason=%q", v.reason)
+			}
+			if v.ecosystem != "js" {
+				t.Fatalf("ecosystem = %q, want %q", v.ecosystem, "js")
+			}
+
+			out := combinedOutput(res)
+			v = witnessDemonstration(v, out, "src/x.js")
+			if !v.demonstrated {
+				t.Errorf("witnessDemonstration must not un-demonstrate when no coverage row contradicts the target; got demonstrated=false, reason=%q", v.reason)
+			}
+			if v.witnessOnly {
+				t.Errorf("witnessOnly = true, want false: js has a WitnessTable entry and no coverage row contradicts the target, so this must reach full Tier-1")
+			}
+		})
+	}
+}
+
+// TestInterpret_BarePython_Demonstrated_NotWitnessOnly is the python half of
+// the same bugbot-ds90 regression: a bare "python3 repro.py" (no pytest -m)
+// used to land EcosystemUnknown and always downgrade to witnessOnly; it now
+// detects as EcosystemPython (which has a WitnessTable entry), so an
+// uncontradicted demonstration reaches full Tier-1.
+func TestInterpret_BarePython_Demonstrated_NotWitnessOnly(t *testing.T) {
+	res := sandbox.Result{
+		ExitCode: 1,
+		Stdout: "Traceback (most recent call last):\n  File \"repro.py\", line 6, in <module>\n" +
+			"    assert result == expected\nAssertionError\n",
+	}
+	cmd := []string{"python3", "repro.py"}
+
+	v := interpret(res, cmd)
+	if !v.demonstrated {
+		t.Fatalf("bare python3 script failure must demonstrate; got reason=%q", v.reason)
+	}
+	if v.ecosystem != "python" {
+		t.Fatalf("ecosystem = %q, want %q", v.ecosystem, "python")
+	}
+
+	out := combinedOutput(res)
+	v = witnessDemonstration(v, out, "src/repro_target.py")
+	if !v.demonstrated {
+		t.Errorf("witnessDemonstration must not un-demonstrate when no coverage row contradicts the target; got demonstrated=false, reason=%q", v.reason)
+	}
+	if v.witnessOnly {
+		t.Errorf("witnessOnly = true, want false: python has a WitnessTable entry and no coverage row contradicts the target, so this must reach full Tier-1")
+	}
+}

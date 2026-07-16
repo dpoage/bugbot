@@ -12,6 +12,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
+	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
@@ -117,9 +118,11 @@ func TestPromoteAll_Success(t *testing.T) {
 	// default (sandbox.network) so a repo whose build fetches deps at configure
 	// time can resolve them. The mock applies no default, so the recorded spec
 	// carries the empty "inherit" value.
+	// bugbot-c49s determinism gate: a promoted repro pays exactly one extra
+	// confirmation sandbox call (same plan, fresh workspace).
 	calls := sb.Calls()
-	if len(calls) != 1 {
-		t.Fatalf("sandbox calls = %d, want 1", len(calls))
+	if len(calls) != 2 {
+		t.Fatalf("sandbox calls = %d, want 2 (official + determinism confirmation)", len(calls))
 	}
 	spec := calls[0].Spec
 	if spec.Network != "" {
@@ -247,9 +250,9 @@ func TestPromoteAll_AbsolutePathPlanRetries(t *testing.T) {
 		t.Fatalf("summary = %+v, want 1 promoted / 0 failed (retry after bad path)", summary)
 	}
 	// The absolute-path plan must never reach the sandbox; only the corrected
-	// plan executes.
-	if n := len(sb.Calls()); n != 1 {
-		t.Fatalf("sandbox calls = %d, want 1 (bad-path plan must not execute)", n)
+	// plan executes — twice (bugbot-c49s determinism confirmation).
+	if n := len(sb.Calls()); n != 2 {
+		t.Fatalf("sandbox calls = %d, want 2 (bad-path plan must not execute; corrected plan pays official + confirmation)", n)
 	}
 	// Two completions: the rejected plan + the corrected one. The revision
 	// request must name the offending path and the workspace-relative rule.
@@ -486,6 +489,9 @@ func TestPromoteAll_ZeroExitThenRevision(t *testing.T) {
 	sb := sandbox.NewMock(sandbox.MockResponse{})
 	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "ok\tbug\t0.01s\nPASS"}})
 	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nFAIL"}})
+	// bugbot-c49s determinism gate: the demonstrating round pays one extra
+	// confirmation run, which must also demonstrate to promote.
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nFAIL"}})
 
 	r, err := New(client, sb, repoDir, Options{ArtifactDir: artifactDir})
 	if err != nil {
@@ -510,6 +516,89 @@ func TestPromoteAll_ZeroExitThenRevision(t *testing.T) {
 	}
 	if !strings.Contains(second, "Revision required") {
 		t.Errorf("revision task missing revision marker:\n%s", second)
+	}
+}
+
+// TestAttempt_RevisionContinuesInvestigation is the core acceptance test for
+// bugbot-z6ay: a revision round (round 2) must continue round 1's
+// conversation instead of reseeding it. Round 1 investigates via a tool call
+// before submitting a non-demonstrating plan; round 2 is scripted with ONLY a
+// final plan answer and NO further tool-call steps -- if planFor's
+// continuation wiring regressed back to a fresh RunJSON per round, the model
+// would have no orientation and the toolScriptedClient would serve the
+// benign "(unscripted)" fallback instead of a valid plan, and Attempt would
+// fail to promote. Promotion therefore proves round 2 never re-issued round
+// 1's orientation tool call, and the recorded round-2 request is asserted to
+// literally contain round 1's tool-call/tool-result messages.
+func TestAttempt_RevisionContinuesInvestigation(t *testing.T) {
+	ctx := context.Background()
+	repoDir := newRepoDir(t)
+
+	client := newToolScriptedClient(
+		// Round 1: one orientation tool call, then a plan that runs clean
+		// (exit 0 -- not demonstrated), forcing a revision round.
+		toolCallStep("c1", "read_file", `{"path":"go.mod"}`),
+		textStep(planBody(t, goodPlan())),
+		// Round 2 (continuation): ONLY the corrected final plan is scripted.
+		textStep(planBody(t, goodPlan())),
+	)
+
+	sb := sandbox.NewMock(sandbox.MockResponse{})
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "ok\nPASS"}})
+	// Round 2 demonstrates twice: the official run and the bugbot-c49s
+	// determinism confirmation both must fail for promotion.
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nFAIL"}})
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nFAIL"}})
+
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir(), MaxAttempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	finding := domain.Finding{ID: "f-1", Title: "Divide ignores zero divisor", File: "calc.go", Line: 12}
+	att, err := r.Attempt(ctx, finding)
+	if err != nil {
+		t.Fatalf("Attempt: %v", err)
+	}
+	if !att.Promoted {
+		t.Fatalf("Attempt not promoted (reason=%q) -- round 2 likely failed to continue round 1's conversation: %+v", att.Reason, att)
+	}
+	if att.Attempts != 2 {
+		t.Fatalf("Attempts = %d, want 2 (round 1 not-demonstrated, round 2 promotes)", att.Attempts)
+	}
+
+	// Exactly 3 LLM completions total: round1's tool call + round1's plan +
+	// round2's plan. No 4th request means round 2 never re-issued the
+	// orientation tool call.
+	reqs := client.requests
+	if len(reqs) != 3 {
+		t.Fatalf("llm completions = %d, want 3 (round1 tool-call + round1 plan + round2 plan)", len(reqs))
+	}
+
+	// Round 2's request (the last one) must carry round 1's investigation
+	// (the read_file tool call and its result) as part of its history --
+	// direct proof the conversation was continued, not reseeded.
+	round2 := reqs[2]
+	sawToolCall, sawToolResult := false, false
+	for _, m := range round2.Messages {
+		if m.Role == llm.RoleAssistant {
+			for _, tc := range m.ToolCalls {
+				if tc.Name == "read_file" {
+					sawToolCall = true
+				}
+			}
+		}
+		if m.Role == llm.RoleToolResult && m.ToolCallID == "c1" {
+			sawToolResult = true
+		}
+	}
+	if !sawToolCall || !sawToolResult {
+		t.Errorf("round2 request missing round1's investigation (sawToolCall=%v sawToolResult=%v); messages:\n%+v", sawToolCall, sawToolResult, round2.Messages)
+	}
+	// Round 2's request must ALSO be longer than round 1's plan request (i.e.
+	// history grew rather than being reset).
+	if len(round2.Messages) <= len(reqs[1].Messages) {
+		t.Errorf("round2 request has %d messages, want more than round1's %d (history must grow, not reseed)", len(round2.Messages), len(reqs[1].Messages))
 	}
 }
 
@@ -1164,9 +1253,11 @@ func TestPromoteAll_WiresTimeout(t *testing.T) {
 	if _, err := r.PromoteAll(ctx, st, []domain.Finding{finding}); err != nil {
 		t.Fatalf("PromoteAll: %v", err)
 	}
+	// bugbot-c49s determinism gate: official run + confirmation run, both
+	// with the same Timeout.
 	calls := sb.Calls()
-	if len(calls) != 1 {
-		t.Fatalf("sandbox calls = %d, want 1", len(calls))
+	if len(calls) != 2 {
+		t.Fatalf("sandbox calls = %d, want 2 (official + determinism confirmation)", len(calls))
 	}
 	if got := calls[0].Spec.Timeout; got != want {
 		t.Errorf("Spec.Timeout = %v, want %v", got, want)
@@ -1414,10 +1505,11 @@ func TestPromoteAll_BareShellOpPlanRetries(t *testing.T) {
 		t.Fatalf("summary = %+v, want 1 promoted / 0 failed (retry after bare shell op)", summary)
 	}
 	// The bare-shell-op plan must never reach the sandbox; only the corrected
-	// (bash-wrapped) plan executes. Load-bearing: it proves the bad plan does
-	// not waste a sandbox run.
-	if n := len(sb.Calls()); n != 1 {
-		t.Fatalf("sandbox calls = %d, want 1 (bare-shell-op plan must not execute)", n)
+	// (bash-wrapped) plan executes — twice (bugbot-c49s determinism
+	// confirmation). Load-bearing: it proves the bad plan does not waste a
+	// sandbox run.
+	if n := len(sb.Calls()); n != 2 {
+		t.Fatalf("sandbox calls = %d, want 2 (bare-shell-op plan must not execute; corrected plan pays official + confirmation)", n)
 	}
 	// Two completions: the rejected plan + the corrected one. The revision
 	// request must name the offending operator and the bash-wrapping fix.

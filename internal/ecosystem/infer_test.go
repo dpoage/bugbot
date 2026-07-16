@@ -18,9 +18,9 @@ func TestInferFromExtension(t *testing.T) {
 		{"pkg/main.py", ecosystem.EcosystemPython},
 		{"pkg/main.pyi", ecosystem.EcosystemPython},
 		{"src/lib.rs", ecosystem.EcosystemRust},
-		{"main.go", ""},   // Go: ungated (base toolchain assumed present)
-		{"main.cpp", ""},  // C++: ungated (only sanitizer modes are probed)
-		{"README.md", ""}, // no probe at all
+		{"main.go", ecosystem.EcosystemGo}, // Go: gated with an asymmetric degrade-to-ungated rule (bugbot-bslx)
+		{"main.cpp", ""},                   // C++: ungated (only sanitizer modes are probed)
+		{"README.md", ""},                  // no probe at all
 		{"", ""},
 	}
 	for _, c := range cases {
@@ -43,7 +43,7 @@ func TestInferFromCmd(t *testing.T) {
 		{"bazel test", []string{"bazel", "test", "//molecules/..."}, ecosystem.EcosystemBazel},
 		{"bazelisk", []string{"bazelisk", "test", "//..."}, ecosystem.EcosystemBazel},
 		{"sh -c wrapped bazel", []string{"sh", "-c", "bazel test //robot-control:all"}, ecosystem.EcosystemBazel},
-		{"go test ungated", []string{"go", "test", "./..."}, ""},
+		{"go test gated", []string{"go", "test", "./..."}, ecosystem.EcosystemGo},
 		{"bash -c wrapper unwraps", []string{"bash", "-c", "cd sub && npx vitest run"}, ecosystem.EcosystemJS},
 		{"sh -c wrapper unwraps", []string{"sh", "-c", "pytest -x tests/"}, ecosystem.EcosystemPython},
 		{"unrecognized", []string{"make", "test"}, ""},
@@ -81,6 +81,37 @@ func TestInferToolFromCmd(t *testing.T) {
 	}
 }
 
+// TestInferToolFromCmd_LauncherNormalization covers bugbot-ds90: InferToolFromCmd
+// now shares normalizeArgv with DetectEcosystem instead of its own bespoke
+// one-level "bash -c" unwrap, so it also benefits from absolute-path
+// basenaming, benign-wrapper stripping, and multi-flag-cluster ("-lc")
+// shell unwrapping.
+func TestInferToolFromCmd_LauncherNormalization(t *testing.T) {
+	cases := []struct {
+		name     string
+		cmd      []string
+		wantEco  ecosystem.Ecosystem
+		wantTool string
+	}{
+		{"timeout-wrapped python3", []string{"timeout", "60", "python3", "repro.py"}, ecosystem.EcosystemPython, "python3"},
+		{"absolute node path", []string{"/opt/bugbot-toolchains/node/bin/node", "--test", "x.test.js"}, ecosystem.EcosystemJS, "node"},
+		{"bash -lc flag cluster", []string{"bash", "-lc", "npx vitest run"}, ecosystem.EcosystemJS, "npx"},
+		{
+			"bash -c export-then-exec compound command",
+			[]string{"bash", "-c", "export PYTHONPATH=/repo; exec python3 -m pytest tests/"},
+			ecosystem.EcosystemPython, "python3",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			eco, tool := ecosystem.InferToolFromCmd(c.cmd)
+			if eco != c.wantEco || tool != c.wantTool {
+				t.Errorf("InferToolFromCmd(%v) = (%q, %q), want (%q, %q)", c.cmd, eco, tool, c.wantEco, c.wantTool)
+			}
+		})
+	}
+}
+
 func TestBaseMode(t *testing.T) {
 	cases := []struct {
 		eco  ecosystem.Ecosystem
@@ -90,7 +121,7 @@ func TestBaseMode(t *testing.T) {
 		{ecosystem.EcosystemPython, "python"},
 		{ecosystem.EcosystemRust, "cargo"},
 		{ecosystem.EcosystemBazel, "bazel"},
-		{ecosystem.EcosystemGo, ""},
+		{ecosystem.EcosystemGo, "present"},
 		{ecosystem.EcosystemCpp, ""},
 		{"", ""},
 	}
@@ -105,7 +136,7 @@ func TestBaseMode(t *testing.T) {
 // that the actual probe table never produces — a silent typo here would make
 // the gate permanently report every js/python/rust finding as blocked.
 func TestBaseMode_MatchesRealProbeEntries(t *testing.T) {
-	for _, eco := range []ecosystem.Ecosystem{ecosystem.EcosystemJS, ecosystem.EcosystemPython, ecosystem.EcosystemRust, ecosystem.EcosystemBazel} {
+	for _, eco := range []ecosystem.Ecosystem{ecosystem.EcosystemJS, ecosystem.EcosystemPython, ecosystem.EcosystemRust, ecosystem.EcosystemBazel, ecosystem.EcosystemGo} {
 		mode := ecosystem.BaseMode(eco)
 		if mode == "" {
 			t.Fatalf("BaseMode(%q) = \"\", want a real mode name", eco)

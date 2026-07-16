@@ -173,6 +173,14 @@ type Options struct {
 	// when cgo is absent). A nil CapabilitySet is treated as "all unknown"
 	// and the prompt omits capability guidance.
 	Capabilities sandbox.CapabilitySet
+	// Playbook is the pre-run verified-command battery result (bugbot-u2v5,
+	// PlaybookOnce) for the target repo+sandbox. When non-empty, the
+	// reproducer prompt gets a "Verified commands for this repo" section and
+	// the pre-launch plan gate rejects a plan invoking a launcher the
+	// battery confirmed FAILS. A zero-value Playbook (the default — no
+	// caller has wired PlaybookOnce yet) leaves both the section and the
+	// gate inactive, matching pre-bugbot-u2v5 behavior exactly.
+	Playbook Playbook
 	// Progress, when non-nil, receives agent observability events: each repro
 	// (and patch-prover) run is bracketed with KindAgentStarted/Finished and
 	// its per-call tool activity is emitted as KindToolCall events, so a running
@@ -250,6 +258,10 @@ type Reproducer struct {
 	// capabilities is the probed CapabilitySet threaded from Options.Capabilities,
 	// passed to systemPrompt to constrain available invocation modes.
 	capabilities sandbox.CapabilitySet
+	// playbook is the pre-run verified-command battery result threaded from
+	// Options.Playbook (bugbot-u2v5). A zero-value Playbook (no caller wired
+	// PlaybookOnce) leaves the prompt section and the plan gate inactive.
+	playbook Playbook
 	// nav is the shared code-navigation tool bundle (find_definition,
 	// find_references, find_implementations, read_symbol, find_usages, outline)
 	// rooted at repoDir. Constructed eagerly in New; no language-server process
@@ -306,6 +318,7 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 		deps:         deps,
 		buildSystems: ingest.DetectBuildSystems(repoDir),
 		capabilities: resolved.Capabilities,
+		playbook:     resolved.Playbook,
 		nav:          nav,
 		pkgSummary:   resolved.PackageSummary,
 	}, nil
@@ -400,6 +413,14 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 	// the agent can correct a non-demonstrating repro. Empty on the first pass.
 	var feedback string
 
+	// prevOutcome is round i's agent.Outcome, threaded into round i+1's
+	// planFor call so RunJSONContinue (see planFor, agent.go) lands the
+	// revision feedback in the SAME conversation as the investigation that
+	// produced it, instead of discarding up to MaxIterations turns of
+	// tool-driven investigation on every revision round (bugbot-z6ay). Nil on
+	// the first pass, which keeps round 1 on the existing RunJSON reseed path.
+	var prevOutcome *agent.Outcome
+
 	// Look up the finding's own package summary once and push it into every plan
 	// request so the agent starts oriented on the buggy code's package instead of
 	// rediscovering it from files. A miss (no cached summary, or a repo-root file)
@@ -415,9 +436,18 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		roundStart := time.Now()
 		att.Attempts = i + 1
 
-		plan, u, perr := r.planFor(ctx, runner, finding, pkgSummary, feedback)
-		usage.InputTokens += u.InputTokens
-		usage.OutputTokens += u.OutputTokens
+		plan, roundOutcome, perr := r.planFor(ctx, runner, finding, pkgSummary, feedback, prevOutcome)
+		if roundOutcome != nil {
+			usage.InputTokens += roundOutcome.Usage.InputTokens
+			usage.OutputTokens += roundOutcome.Usage.OutputTokens
+		}
+		// Thread this round's Outcome into the next round's planFor call
+		// regardless of perr: RunJSON/RunJSONContinue return a usable Outcome
+		// even on an unparseable-output error (its Messages still hold the
+		// round's investigation), so a "revise and try again" round after an
+		// unparseable plan still continues the same conversation instead of
+		// silently dropping back to reseed.
+		prevOutcome = roundOutcome
 		if perr != nil {
 			// An unparseable or schema-violating plan from the agent is a
 			// recoverable model hiccup, not an infrastructure failure: treat it
@@ -479,6 +509,24 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			})
 			continue
 		}
+		// Playbook plan gate (bugbot-u2v5): reject a plan whose launcher the
+		// verified-command battery CONFIRMED fails in this exact sandbox
+		// spec, naming a verified alternative. Adjacent to, but distinct
+		// from, the capability gate above: that gates on ecosystem-wide
+		// availability; this gates on a specific launcher within an
+		// available ecosystem (e.g. npx failing while node works fine).
+		// Inactive (returns "") whenever the playbook never ran or
+		// degraded — see PlaybookOnce's doc.
+		if msg := rejectPlaybookFailedLaunch(plan, r.playbook); msg != "" {
+			feedback = msg
+			att.Reason = "blocked_toolchain: " + msg
+			scope.EmitEvent(progress.Event{
+				Kind:    progress.KindReproAttempt,
+				Attempt: att.Attempts, MaxAttempts: r.opts.MaxAttempts,
+				Verdict: "blocked_toolchain", Duration: time.Since(roundStart),
+			})
+			continue
+		}
 
 		// bugbot-qb4r layer (a): the cheap static plan gate. Runs BEFORE any
 		// sandbox execution — a plan whose submitted test files never reach
@@ -511,6 +559,12 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		}
 
 		verdict := interpret(res, plan.Cmd)
+		// bugbot-u47n: bind structured ran-evidence (go test -json,
+		// captured JUnit XML) to a test the plan itself declared, BEFORE the
+		// execution-witness layer below — an unrelated pre-existing failing
+		// test in the package/module must not promote just because it also
+		// happens to satisfy witnessDemonstration's coverage check.
+		verdict = bindTestEvidence(verdict, plan.Files)
 		if verdict.demonstrated {
 			// bugbot-qb4r layer (b): the execution witness. Only meaningful
 			// once interpret() has already found ran-evidence; this either
@@ -519,6 +573,36 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			// witness but didn't), or marks witnessOnly (ecosystem cannot
 			// witness at all — repro-as-evidence, not repro-as-promotion).
 			verdict = witnessDemonstration(verdict, combinedOutput(res), finding.File)
+		}
+
+		// bugbot-c49s determinism gate: one demonstrating run is not enough
+		// evidence to promote — concurrency/race findings are this stage's
+		// core target class, and are exactly the ones prone to a single
+		// lucky failure. Re-run the IDENTICAL plan once more (a fresh
+		// workspace copy + sandbox run, same spec) and require BOTH runs to
+		// demonstrate before promoting. This costs exactly one extra sandbox
+		// run for a repro that turns out deterministic, and zero extra runs
+		// for a first run that doesn't demonstrate at all (the common case).
+		var confirmRes sandbox.Result
+		if verdict.demonstrated {
+			var cerr error
+			confirmRes, cerr = r.execute(ctx, plan)
+			if cerr != nil {
+				// Same rule as the execute infra-failure above.
+				return nil, fmt.Errorf("repro: confirm finding %s: %w", finding.ID, cerr)
+			}
+			confirmVerdict := bindTestEvidence(interpret(confirmRes, plan.Cmd), plan.Files)
+			if confirmVerdict.demonstrated {
+				confirmVerdict = witnessDemonstration(confirmVerdict, combinedOutput(confirmRes), finding.File)
+			}
+			if !confirmVerdict.demonstrated {
+				// Demonstrated once, not twice consecutively: flaky, not
+				// promoted. flakyVerdict carries a dedicated verdict reason
+				// so the feedback loop below sends the agent actionable
+				// determinism guidance instead of the generic
+				// not-demonstrated message.
+				verdict = flakyVerdict(verdict, confirmVerdict)
+			}
 		}
 		att.Output = verdict.summary
 
@@ -538,7 +622,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		})
 
 		if verdict.demonstrated {
-			path, werr := writeArtifacts(r.opts.ArtifactDir, finding, plan, res, r.opts.Image, r.opts.Network)
+			path, werr := writeArtifacts(r.opts.ArtifactDir, finding, plan, res, confirmRes, r.opts.Image, r.opts.Network)
 			if werr != nil {
 				return nil, fmt.Errorf("repro: write artifacts for finding %s: %w", finding.ID, werr)
 			}
@@ -617,7 +701,7 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 		opts = append(opts, agent.WithTranscriptDir(r.opts.TranscriptDir))
 	}
 	opts = append(opts, agent.WithActivitySink(toolActivitySink(scope)))
-	prompt := systemPrompt(lang, systems, r.capabilities)
+	prompt := systemPrompt(lang, systems, r.capabilities, r.playbook)
 	if r.pkgSummary != nil {
 		prompt += pkgContextGuidance
 	}
@@ -685,17 +769,8 @@ func buildSpec(repoDir string, plan *Plan, image, network string, timeout time.D
 	for path, content := range plan.Files {
 		files[path] = []byte(content)
 	}
-	// normalizeCmdForStructuredOutput rewrites a direct `go test`/`pytest`
-	// invocation to ask the runner for machine-readable output (see
-	// runnerevents.go), so interpret() can classify off positive test-level
-	// evidence instead of scanning free-form text. plan.Cmd itself is left
-	// untouched: it is still what ecosystem detection and agent-facing
-	// feedback use, and the rewrite is a harness-owned implementation detail
-	// the agent never needs to see.
-	cmd, captures := normalizeCmdForStructuredOutput(plan.Cmd)
-	return sandbox.Spec{
+	spec := sandbox.Spec{
 		RepoDir:    repoDir,
-		Cmd:        cmd,
 		Image:      image,
 		Network:    network,
 		Timeout:    timeout,
@@ -703,11 +778,29 @@ func buildSpec(repoDir string, plan *Plan, image, network string, timeout time.D
 		// Dependency strategy: mount a module cache read-only and/or set GOFLAGS
 		// so the network-none run can resolve external modules. SetupCmds installs
 		// non-Go ecosystem packages from the mounted cache before Cmd runs.
-		ROMounts:     deps.ROMounts,
-		Env:          deps.Env,
-		SetupCmds:    deps.SetupCmds,
-		CaptureFiles: captures,
+		ROMounts:  deps.ROMounts,
+		Env:       deps.Env,
+		SetupCmds: deps.SetupCmds,
 	}
+	return applyStructuredOutputSpec(spec, plan.Cmd)
+}
+
+// applyStructuredOutputSpec applies normalizeCmdForStructuredOutput's cmd
+// rewrite and resulting CaptureFiles onto an otherwise-built sandbox.Spec
+// (bugbot-0zay). It is the ONE seam that turns a raw plan/iteration cmd into
+// the exact request interpret()'s structured path (go test -json, pytest
+// JUnit XML) needs to fire — shared by buildSpec (execute()'s official,
+// clean-room run) and the workspace tool's runExec (iteration preview, see
+// workspace_tools.go) so both feed interpret() IDENTICAL inputs for the
+// same cmd, modulo the workspace directory (fresh WriteFiles copy vs the
+// agent's persistent Workspace — see WorkspaceTool.Def's doc on that
+// residual, intentional divergence). The caller's own cmd variable is left
+// untouched: ecosystem detection and agent-facing feedback still classify
+// against the UNNORMALIZED cmd (interpret(res, cmd) is always called with
+// the original, never spec.Cmd).
+func applyStructuredOutputSpec(spec sandbox.Spec, cmd []string) sandbox.Spec {
+	spec.Cmd, spec.CaptureFiles = normalizeCmdForStructuredOutput(cmd)
+	return spec
 }
 
 // bareShellOps is the set of shell control tokens that mean nothing to a
@@ -769,21 +862,26 @@ func validatePlan(p *Plan, repoDir string) error {
 			return err
 		}
 	}
-	return validateReproCmd(p.Cmd)
+	return validateReproCmd(p.Cmd, p.Files)
 }
 
 // gatedEcosystems is the ordered set of ecosystem.BaseMode-gated ecosystems
 // (see ecosystem.InferFromCmd/BaseMode) consulted for both the "available
 // alternatives" list in rejectUnavailableEcosystemPlan and any future
-// diagnostic that wants to enumerate what a probed image can run.
-var gatedEcosystems = []ecosystem.Ecosystem{ecosystem.EcosystemJS, ecosystem.EcosystemPython, ecosystem.EcosystemRust}
+// diagnostic that wants to enumerate what a probed image can run. Go is
+// included even though its gate has an asymmetric degradation rule
+// (goAvailable, promote.go): the generic caps.Available(eco, mode) check
+// this list feeds into already treats a missing "go" entry as unavailable,
+// so go only ever appears as an "available alternative" when the probe
+// positively confirmed it — never a false claim.
+var gatedEcosystems = []ecosystem.Ecosystem{ecosystem.EcosystemJS, ecosystem.EcosystemPython, ecosystem.EcosystemRust, ecosystem.EcosystemGo}
 
 // rejectUnavailableEcosystemPlan checks plan.Cmd against caps and returns
 // revision feedback naming the missing toolchain and the available
 // alternatives, or "" when the plan should proceed to a sandbox launch —
 // either ecosystem.InferFromCmd found no gated ecosystem requirement (e.g.
-// "go test", "make", or any command this function does not recognize), caps
-// is nil (no probe available), or the required ecosystem IS available.
+// "make", or any command this function does not recognize), caps is nil (no
+// probe available), or the required ecosystem IS available.
 //
 // This is the pre-launch half of bugbot-14g0's capability gate (fix B,
 // acceptance 3): promote.go's gateEcosystem gates on the FINDING's inferred
@@ -824,6 +922,14 @@ func rejectUnavailableEcosystemPlan(p *Plan, caps sandbox.CapabilitySet) string 
 		}
 		// Neither launcher works: fall through to the generic
 		// missing-toolchain feedback with the language alternatives.
+	} else if eco == ecosystem.EcosystemGo {
+		// Go's degradation rule (goAvailable, promote.go): a plan launching
+		// `go test`/`go build` is only rejected when the probe actually ran
+		// for this image and explicitly found no go binary — never when the
+		// probe never populated a "go" entry (bugbot-bslx).
+		if goAvailable(caps) {
+			return ""
+		}
 	} else if mode == "" || caps.Available(eco, mode) {
 		return ""
 	}
@@ -841,7 +947,7 @@ func rejectUnavailableEcosystemPlan(p *Plan, caps sandbox.CapabilitySet) string 
 	if len(alts) == 0 {
 		return fmt.Sprintf(
 			"Your plan's command requires %s, which this sandbox does not have, and no alternative "+
-				"toolchain (js/python/rust) is available either. Do NOT substitute a non-behavioral test in a "+
+				"toolchain (js/python/rust/go) is available either. Do NOT substitute a non-behavioral test in a "+
 				"different language or grep for the pattern — that does not demonstrate the bug. Set cmd to a "+
 				"command this sandbox can actually run, or omit a cmd change and report the environment gap in expect.",
 			eco,
@@ -894,7 +1000,14 @@ func validateReproFilePath(fpath, repoDir string) error {
 // (the final submitted plan's cmd) and the workspace tool's exec applet
 // (each interactive run). Holding the actual rules in one place keeps the two callers from
 // drifting: a command accepted during iteration is accepted at submission.
-func validateReproCmd(cmd []string) error {
+//
+// files is the plan's (or the iteration workspace's) injected file set,
+// consulted ONLY for the -run enforcement rule below (bugbot-u47n); every
+// other rule ignores it. Pass nil/empty when no file set is available yet
+// (e.g. before write_repro_file has been called) — that degrades the -run
+// rule to a no-op exactly like "no extractable declared names", never to a
+// spurious rejection.
+func validateReproCmd(cmd []string, files map[string]string) error {
 	for _, arg := range cmd {
 		// Bare shell control operators are meaningless to a sandbox that runs
 		// Cmd as raw argv. A reproducer that emits, say,
@@ -918,14 +1031,75 @@ func validateReproCmd(cmd []string) error {
 	// "timeout" verdict (bugbot-opq). Require the flag so the test binary kills
 	// itself first. Scoped to "go test" (the demonstrated failure class);
 	// unwrapShell handles a bash -c wrapper.
-	if eff := unwrapShell(cmd); len(eff) >= 2 &&
-		strings.ToLower(eff[0]) == "go" && strings.ToLower(eff[1]) == "test" &&
-		!hasCmdFlag(eff, "-timeout") {
+	eff := unwrapShell(cmd)
+	isGoTest := len(eff) >= 2 && strings.ToLower(eff[0]) == "go" && strings.ToLower(eff[1]) == "test"
+	if isGoTest && !hasCmdFlag(eff, "-timeout") {
 		return fmt.Errorf("go test repro must include a -timeout flag so a hung test self-terminates " +
 			"before the sandbox idle watchdog kills it (which yields a useless timeout verdict); " +
 			"add e.g. -timeout 60s: [\"go\",\"test\",\"-timeout\",\"60s\",\"-run\",\"TestX\",\"./...\"]")
 	}
+	// -run enforcement (bugbot-u47n): -run is SUGGESTED to the reproducer
+	// agent's prompt but was never enforced, so a plan could run the whole
+	// package (`go test ./...`) and let ANY failing test in it — including
+	// an unrelated pre-existing failure — satisfy the ran-evidence gate.
+	// Scoped exactly like the -timeout rule: only when the plan has
+	// extractable declared Go test names (extractGoTestNames) — a bare
+	// script or a test file this scan's dumb regex missed leaves the rule a
+	// no-op, never a false rejection. -run's value is itself a regex the
+	// go test binary applies to test names, so a plain substring check
+	// against at least one declared name is sufficient to confirm the flag
+	// actually references the agent's own test rather than, say, an empty
+	// or unrelated pattern.
+	if isGoTest {
+		if declared := extractGoTestNames(files); len(declared) > 0 {
+			runVal, hasRun := cmdFlagValue(eff, "-run")
+			if !hasRun || !runValueReferencesAny(runVal, declared) {
+				return fmt.Errorf("go test repro must include a -run flag naming one of your injected test(s) (%s) "+
+					"so the run is scoped to YOUR test, not the whole package — an unrelated pre-existing failing test "+
+					"elsewhere in the package must not be able to satisfy the ran-evidence check; "+
+					"add e.g. -run %s: [\"go\",\"test\",\"-timeout\",\"60s\",\"-run\",%q,\"./...\"]",
+					strings.Join(declared, ", "), declared[0], declared[0])
+			}
+		}
+	}
 	return nil
+}
+
+// cmdFlagValue returns the value of flag name in argv, supporting both the
+// "-flag value" and "-flag=value" forms. ok is false when the flag is not
+// present at all (distinct from a present-but-empty value).
+func cmdFlagValue(argv []string, name string) (value string, ok bool) {
+	for i, a := range argv {
+		if a == name {
+			if i+1 < len(argv) {
+				return argv[i+1], true
+			}
+			return "", true
+		}
+		if v, found := strings.CutPrefix(a, name+"="); found {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// runValueReferencesAny reports whether runVal (a go test -run regex
+// pattern) contains at least one of the declared test names as a substring
+// — the -run enforcement rule's positive-evidence check. A dumb substring
+// scan, not regex-pattern analysis: it accepts, for instance, -run
+// "TestFoo|TestBar" against a declared "TestFoo", which is the correct
+// permissive behavior (the agent is running its own test among others), and
+// also accepts an accidental match inside an unrelated longer name — an
+// acceptable false-positive given the rule exists to catch the common
+// vacuous case (`-run` omitted, or `./...` with no `-run` at all), not to
+// exhaustively validate the pattern's semantics.
+func runValueReferencesAny(runVal string, declared []string) bool {
+	for _, d := range declared {
+		if d != "" && strings.Contains(runVal, d) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasCmdFlag reports whether argv contains the flag name in either the

@@ -173,6 +173,15 @@ type Outcome struct {
 	LastStopReason llm.StopReason
 	// Transcript is the full ordered record of the run. Never nil.
 	Transcript *Transcript
+	// Messages is the full conversation state (system-less: user/assistant/
+	// tool-result turns only) at the point the run returned, including the
+	// seed task, every tool call/result, and the final assistant turn. It is
+	// opaque plumbing for [Runner.RunJSONContinue]: a caller driving a
+	// multi-round revision loop threads a round's Outcome back in as the next
+	// round's starting history so the model keeps its prior investigation
+	// instead of re-orienting from scratch. Callers that don't continue a
+	// conversation (the common case) can ignore this field entirely.
+	Messages []llm.Message
 }
 
 // Validate checks the Outcome's internal invariants. It returns a non-nil error

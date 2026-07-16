@@ -10,7 +10,6 @@ import (
 	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/util"
 )
@@ -191,8 +190,10 @@ func langGuidance(lang ingest.Language, systems []ingest.BuildSystem) string {
 // language-specific test-framework guidance (see langGuidance); systems
 // refines that selection for C/C++ (cmake > meson > generic fallback).
 // caps enumerates the probed capability modes; the prompt instructs the agent
-// to avoid modes that are unavailable in the image.
-func systemPrompt(lang ingest.Language, systems []ingest.BuildSystem, caps sandbox.CapabilitySet) string {
+// to avoid modes that are unavailable in the image. pb is the per-repo
+// verified-command playbook (bugbot-u2v5, playbook.go's playbookGuidance);
+// an empty Playbook adds nothing.
+func systemPrompt(lang ingest.Language, systems []ingest.BuildSystem, caps sandbox.CapabilitySet, pb Playbook) string {
 	return `You are Bugbot's reproducer agent. Your job is to write a MINIMAL test that
 demonstrates a specific, already-verified bug by FAILING because of it.
 
@@ -239,7 +240,7 @@ Hard requirements for the repro:
   build hangs. Bound the TEST command: use ` + "`go test -timeout 60s`" + ` (built-in);
   wrap other runners with ` + "`timeout 60 <runner>`" + ` (coreutils); for
   jest/vitest use ` + "`--testTimeout 60000`" + `.
-` + capabilityGuidance(caps) + `
+` + capabilityGuidance(caps) + playbookGuidance(pb) + `
 Language-specific guidance:
 ` + langGuidance(lang, systems) + `
 Return a repro plan describing the files to inject, the command to run them,
@@ -325,7 +326,9 @@ run_tests as the demonstration or include it in cmd.`, maxExec)
 // the final plan in a fresh workspace — containing the repo plus exactly
 // the tracked files — so command side effects from iteration (including
 // workspace exec's) can never substitute for the plan itself demonstrating
-// the bug.
+// the bug. bugbot-0wvg extended the FREE applet step with grep/find
+// (content search and filename lookup) after dogfood measurement found 53%
+// of budgeted exec calls were read-only probes ls/cat could not cover.
 func workspaceGuidance(maxExec int) string {
 	return fmt.Sprintf(`
 
@@ -342,9 +345,17 @@ Work it as an ORDERED loop:
      directory (dir defaults to "."). FREE.
    - workspace {"argv": ["cat", "<file>"]} shows a workspace-relative
      file's tail. FREE.
+   - workspace {"argv": ["grep", "<pattern>", "<dir>"]} searches file
+     contents under a workspace-relative directory for a regexp, returning
+     'path:line:text' matches. FREE.
+   - workspace {"argv": ["find", "<glob-or-substring>", "<dir>"]} locates
+     workspace-relative paths by filename. FREE.
    - workspace {"argv": ["status"]} reports whether the workspace is
      materialized, your tracked files, and your exec budget used/remaining.
      FREE.
+   These four are how you LOOK at the sandbox: exec is BUDGETED and is for
+   RUNNING code, never for probing it — do not spend exec on "ls", "cat",
+   "grep", or "find" invocations; use the free applets instead.
    Also prefer get_package_context / run_tests (where wired) over spending
    exec budget: they orient you on the build/test layout for free or out of
    a separate, smaller budget. Reach for workspace {"argv": ["exec", ...]}
@@ -586,18 +597,51 @@ var planSchema = json.RawMessage(`{
 // planFor asks the agent for a repro plan for finding. feedback, when
 // non-empty, is appended to steer a revision after a prior non-demonstrating
 // attempt.
-func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding domain.Finding, pkgSummary, feedback string) (*Plan, llm.Usage, error) {
-	task := buildTask(finding, pkgSummary, feedback)
+//
+// prev, when non-nil, is the previous round's Outcome: planFor then uses
+// [agent.Runner.RunJSONContinue] instead of RunJSON, so this round's request
+// lands in the SAME conversation as the investigation prev's round performed
+// (round 2+ of Attempt's revision loop) instead of re-orienting from
+// scratch. prev == nil (round 1) reseeds via RunJSON exactly as before.
+//
+// The returned Outcome is the round's own, meant to be threaded back in as
+// the NEXT round's prev by the caller — this is how the conversation chains
+// across rounds without Attempt itself touching message history.
+func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding domain.Finding, pkgSummary, feedback string, prev *agent.Outcome) (*Plan, *agent.Outcome, error) {
 	var plan Plan
-	outcome, err := runner.RunJSON(ctx, task, planSchema, &plan)
-	var usage llm.Usage
-	if outcome != nil {
-		usage = outcome.Usage
+	var outcome *agent.Outcome
+	var err error
+	if prev == nil {
+		outcome, err = runner.RunJSON(ctx, buildTask(finding, pkgSummary, feedback), planSchema, &plan)
+	} else {
+		// Only the feedback goes out on a continuation turn: the finding's
+		// title/description/reasoning/package summary already sit in history
+		// as round 1's opening user turn (RunJSONContinue keeps it), so
+		// resending them here would just double the finding's prose on every
+		// revision round for no benefit.
+		outcome, err = runner.RunJSONContinue(ctx, prev, buildRevisionTask(feedback), planSchema, &plan)
 	}
 	if err != nil {
-		return nil, usage, err
+		return nil, outcome, err
 	}
-	return &plan, usage, nil
+	return &plan, outcome, nil
+}
+
+// buildRevisionTask renders the per-round task prompt for a CONTINUATION
+// revision round (round 2+ of Attempt, via planFor's prev != nil branch).
+// Unlike buildTask, it carries only the revision feedback: the finding's
+// framing has already been sent as the conversation's opening turn and stays
+// in history under RunJSONContinue, so it is deliberately not repeated here.
+//
+// feedback is the verbatim output of verdict.feedback (interpret.go); see
+// buildTask's doc comment for the fencing/sanitization contract this
+// preserves — feedback MUST NOT be re-wrapped, stripped, or reformatted.
+func buildRevisionTask(feedback string) string {
+	var b strings.Builder
+	b.WriteString("--- Revision required ---\n")
+	b.WriteString(feedback)
+	b.WriteString("\nProduce a corrected plan.\n")
+	return b.String()
 }
 
 // buildTask renders the per-finding task prompt, including the finding's
