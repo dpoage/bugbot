@@ -38,6 +38,11 @@ type InterpRules struct {
 	// RanMarkers are lowercase substrings whose presence on combined output is
 	// positive evidence the test process actually RAN.
 	RanMarkers []string
+	// LineAnchoredRanMarkers are ran-evidence markers that must match at the
+	// START of a line rather than anywhere in the output — for markers short
+	// or generic enough (e.g. TAP's "not ok ") that a free substring match
+	// would risk false positives on unrelated log lines. bugbot-ds90.
+	LineAnchoredRanMarkers []string
 	// NotRanMarkers are lowercase substrings that, when present, prove the test
 	// collection / setup FAILED before any test ran.
 	NotRanMarkers []string
@@ -53,7 +58,8 @@ type InterpRules struct {
 }
 
 // HasRanEvidence reports whether out contains at least one of the ecosystem's
-// positive ran-markers. Matching is case-insensitive substring match.
+// positive ran-markers (free substring or line-anchored). Matching is
+// case-insensitive.
 func (e *InterpRules) HasRanEvidence(out string) bool {
 	if e == nil {
 		return false
@@ -64,7 +70,7 @@ func (e *InterpRules) HasRanEvidence(out string) bool {
 			return true
 		}
 	}
-	return false
+	return HasAnyMarkerAtLineStart(out, e.LineAnchoredRanMarkers)
 }
 
 // HasNotRanEvidence reports whether out contains any of the ecosystem's
@@ -274,6 +280,16 @@ var InterpTable = []InterpRules{
 			"×",
 			"⎯⎯",
 			"test suites:",
+			// node's built-in test runner (`node --test`) prints its assertion
+			// failures as "AssertionError [ERR_ASSERTION]: ..." — bugbot-ds90.
+			"assertionerror",
+		},
+		// node:test's TAP output marks a failing subtest with a line starting
+		// "not ok " — anchored to line-start (not a free substring) since the
+		// bare phrase is generic enough to risk false positives elsewhere in
+		// combined stdout/stderr. bugbot-ds90.
+		LineAnchoredRanMarkers: []string{
+			"not ok ",
 		},
 		BuildMarkers: []string{
 			"cannot find module",
@@ -478,12 +494,90 @@ func IsGoTestSubcommand(s string) bool {
 	return false
 }
 
+// benignWrapperEnvAssignment matches a leading inline env-var assignment
+// token, e.g. "FOO=bar" or "PYTHONPATH=/x:/y", prefixing the real command.
+var benignWrapperEnvAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// shellSegmentSplit finds top-level ';' and '&&' command separators in a
+// compound shell command string ("a; b", "a && b").
+var shellSegmentSplit = regexp.MustCompile(`;|&&`)
+
+// splitShellSegments splits s on ';' and '&&' into trimmed, non-empty
+// segments, preserving order. Does not attempt to respect quoting — same
+// simplification UnwrapShell already made via strings.Fields.
+func splitShellSegments(s string) []string {
+	parts := shellSegmentSplit.Split(s, -1)
+	segments := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			segments = append(segments, p)
+		}
+	}
+	return segments
+}
+
+// stripBenignWrapper iteratively removes leading tokens that are benign
+// process wrappers rather than the actual test launcher: inline env-var
+// assignments ("FOO=bar cmd"), "exec", "env" (its own assignments are
+// peeled by the env-assignment case on the next iteration), "timeout
+// <duration>", and "nice"/"nice -n N". bugbot-ds90: these wrappers are
+// common in agent-authored repro commands and previously made detection see
+// the wrapper's own name instead of the real launcher.
+func stripBenignWrapper(argv []string) []string {
+	for len(argv) > 0 {
+		switch tok := argv[0]; {
+		case benignWrapperEnvAssignment.MatchString(tok):
+			argv = argv[1:]
+		case tok == "exec" || tok == "env":
+			argv = argv[1:]
+		case tok == "timeout":
+			argv = argv[1:]
+			if len(argv) > 0 {
+				argv = argv[1:] // drop the duration operand
+			}
+		case tok == "nice":
+			argv = argv[1:]
+			if len(argv) > 0 && argv[0] == "-n" {
+				argv = argv[1:]
+				if len(argv) > 0 {
+					argv = argv[1:] // drop the niceness value
+				}
+			}
+		default:
+			return argv
+		}
+	}
+	return argv
+}
+
+// basenameArgv0 returns a copy of argv with argv[0] replaced by its
+// basename, so an absolute toolchain path
+// (/opt/bugbot-toolchains/node/bin/node) matches the same launcher as a
+// bare "node" on $PATH. Leaves argv untouched (no aliasing).
+func basenameArgv0(argv []string) []string {
+	if len(argv) == 0 {
+		return argv
+	}
+	out := append([]string(nil), argv...)
+	out[0] = path.Base(out[0])
+	return out
+}
+
 // UnwrapShell peels off `bash -c '...'` / `sh -c '...'` / `bash -lc '...'`
 // style wrappers. argv[1] matches a shell flag cluster whose final flag is -c
 // (e.g. "-c", "-lc", "-ec"): bash/sh read the command string from the next
 // operand, so argv[2] is the inner command regardless of the leading flags.
-// The inner command is split on whitespace to recover the leading launcher
-// token for ecosystem detection. Anything that does not match is left alone.
+//
+// A compound inner command ("export FOO=bar; exec python3 -m pytest ...",
+// "cmake -B build && ctest") is split on top-level ';' and '&&'. Segments
+// are tried from LAST to FIRST — the last segment is normally the one that
+// actually runs the test, e.g. "exec real-command" after a setup prefix —
+// and the first segment (scanning backward) whose stripped, basenamed
+// launcher token is recognised by launcherEcosystem wins (bugbot-ds90). If
+// no segment is recognised, the last non-empty segment is returned as-is
+// (unrecognised launcher; classifies as EcosystemUnknown downstream, same
+// as before this normalization existed). Anything that does not match the
+// shell-wrapper shape is left alone.
 func UnwrapShell(argv []string) []string {
 	if len(argv) < 3 {
 		return argv
@@ -496,54 +590,99 @@ func UnwrapShell(argv []string) []string {
 	if !strings.HasPrefix(argv[1], "-") || !strings.HasSuffix(argv[1], "c") {
 		return argv
 	}
+	segments := splitShellSegments(argv[2])
+	if len(segments) <= 1 {
+		return strings.Fields(argv[2])
+	}
+	var lastCandidate []string
+	for i := len(segments) - 1; i >= 0; i-- {
+		fields := strings.Fields(segments[i])
+		if len(fields) == 0 {
+			continue
+		}
+		candidate := basenameArgv0(stripBenignWrapper(fields))
+		if lastCandidate == nil {
+			lastCandidate = candidate
+		}
+		if len(candidate) > 0 && launcherEcosystem(candidate) != EcosystemUnknown {
+			return candidate
+		}
+	}
+	if lastCandidate != nil {
+		return lastCandidate
+	}
 	return strings.Fields(argv[2])
 }
 
-// DetectEcosystem picks the first InterpRules whose launcher regex matches
-// the plan's argv. The argv may be wrapped in a shell ("bash", "-c",
-// "go test ./...") — those are walked through by UnwrapShell.
+// normalizeArgv is the shared argv-normalization pipeline consumed by both
+// DetectEcosystem (this file) and InferToolFromCmd (infer.go) — bugbot-ds90
+// acceptance: shell/wrapper/absolute-path handling lives in exactly one
+// place instead of being duplicated per caller. It (1) unwraps a bash/sh -c
+// shell wrapper, resolving compound "a; b" / "a && b" strings to the
+// actually-relevant segment (see UnwrapShell); (2) strips benign process
+// wrappers off the front — env-var assignments, exec, env, timeout
+// <duration>, nice [-n N] — so e.g. "timeout 60 python3 x.py" and "env
+// FOO=1 python3 x.py" both resolve to the real launcher; (3) basenames
+// argv[0] so an absolute toolchain path matches the same launcher as a bare
+// name on $PATH.
+func normalizeArgv(argv []string) []string {
+	argv = UnwrapShell(argv)
+	return basenameArgv0(stripBenignWrapper(argv))
+}
+
+// launcherEcosystem returns the Ecosystem for an ALREADY-normalized argv
+// (see normalizeArgv), or EcosystemUnknown. This is the single argv[0]
+// launcher switch; UnwrapShell also calls it to pick the correct segment
+// out of a compound shell command instead of duplicating the launcher list.
+func launcherEcosystem(argv []string) Ecosystem {
+	if len(argv) == 0 {
+		return EcosystemUnknown
+	}
+	switch strings.ToLower(argv[0]) {
+	case "go":
+		if len(argv) >= 2 {
+			return EcosystemGo
+		}
+	case "pytest", "py.test":
+		return EcosystemPython
+	case "python", "python3":
+		// Any invocation with an argument — a script path ("python3 x.py"),
+		// "-m unittest"/"-m pytest"/"-m py.test", or any other -m module —
+		// is Python. A bare "python"/"python3" with no arguments (e.g. an
+		// interactive REPL launch) produces no test-relevant output and
+		// stays Unknown. bugbot-ds90.
+		if len(argv) >= 2 {
+			return EcosystemPython
+		}
+	case "node", "nodejs":
+		return EcosystemJS
+	case "cargo":
+		if len(argv) >= 2 {
+			return EcosystemRust
+		}
+	case "npm", "yarn", "pnpm", "npx":
+		return EcosystemJS
+	case "jest", "vitest", "mocha":
+		return EcosystemJS
+	case "cmake", "gcc", "g++", "clang", "clang++", "cc", "c++", "ctest", "meson":
+		return EcosystemCpp
+	case "bazel", "bazelisk":
+		return EcosystemBazel
+	}
+	return EcosystemUnknown
+}
+
+// DetectEcosystem picks the InterpRules for the plan's argv launcher. The
+// argv may be wrapped in a shell, wrapped in benign process wrappers (env,
+// exec, timeout, nice), or reference an absolute toolchain path — see
+// normalizeArgv for the full normalization pipeline.
 //
 // Unknown commands fall back to InterpTable["unknown"], which still requires
 // positive ran-evidence.
 func DetectEcosystem(argv []string) InterpRules {
-	argv = UnwrapShell(argv)
+	argv = normalizeArgv(argv)
 	if len(argv) == 0 {
 		return InterpTable[interpIndex(EcosystemUnknown)]
 	}
-
-	first := strings.ToLower(argv[0])
-	switch first {
-	case "go":
-		if len(argv) >= 2 && IsGoTestSubcommand(argv[1]) {
-			return InterpTable[interpIndex(EcosystemGo)]
-		}
-		if len(argv) >= 2 {
-			return InterpTable[interpIndex(EcosystemGo)]
-		}
-	case "pytest", "py.test":
-		return InterpTable[interpIndex(EcosystemPython)]
-	case "python", "python3":
-		if len(argv) >= 3 && argv[1] == "-m" {
-			mod := strings.ToLower(argv[2])
-			if mod == "pytest" || mod == "py.test" {
-				return InterpTable[interpIndex(EcosystemPython)]
-			}
-		}
-	case "cargo":
-		if len(argv) >= 2 && (argv[1] == "test" || argv[1] == "bench") {
-			return InterpTable[interpIndex(EcosystemRust)]
-		}
-		if len(argv) >= 2 {
-			return InterpTable[interpIndex(EcosystemRust)]
-		}
-	case "npm", "yarn", "pnpm", "npx":
-		return InterpTable[interpIndex(EcosystemJS)]
-	case "jest", "vitest", "mocha":
-		return InterpTable[interpIndex(EcosystemJS)]
-	case "cmake", "gcc", "g++", "clang", "clang++", "cc", "c++", "ctest", "meson":
-		return InterpTable[interpIndex(EcosystemCpp)]
-	case "bazel", "bazelisk":
-		return InterpTable[interpIndex(EcosystemBazel)]
-	}
-	return InterpTable[interpIndex(EcosystemUnknown)]
+	return InterpTable[interpIndex(launcherEcosystem(argv))]
 }

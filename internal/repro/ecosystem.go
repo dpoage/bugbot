@@ -23,6 +23,7 @@ import (
 type ecosystemRules struct {
 	name                         sandbox.Ecosystem
 	ranMarkers                   []string
+	lineAnchoredRanMarkers       []string
 	notRanMarkers                []string
 	buildMarkers                 []string
 	toolchainMarkers             []string
@@ -35,6 +36,7 @@ func fromInterpRules(r eco.InterpRules) ecosystemRules {
 	return ecosystemRules{
 		name:                         r.Name,
 		ranMarkers:                   r.RanMarkers,
+		lineAnchoredRanMarkers:       r.LineAnchoredRanMarkers,
 		notRanMarkers:                r.NotRanMarkers,
 		buildMarkers:                 r.BuildMarkers,
 		toolchainMarkers:             r.ToolchainMarkers,
@@ -97,7 +99,7 @@ func unwrapShell(argv []string) []string {
 }
 
 // hasRanEvidence reports whether out contains at least one of the ecosystem's
-// positive ran-markers.
+// positive ran-markers (free substring or line-anchored — bugbot-ds90).
 func (e *ecosystemRules) hasRanEvidence(out string) bool {
 	if e == nil {
 		return false
@@ -108,7 +110,7 @@ func (e *ecosystemRules) hasRanEvidence(out string) bool {
 			return true
 		}
 	}
-	return false
+	return hasAnyMarkerAtLineStart(out, e.lineAnchoredRanMarkers)
 }
 
 // hasNotRanEvidence reports whether out contains any of the ecosystem's

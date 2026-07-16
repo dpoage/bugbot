@@ -80,6 +80,36 @@ func TestInferToolFromCmd(t *testing.T) {
 		}
 	}
 }
+// TestInferToolFromCmd_LauncherNormalization covers bugbot-ds90: InferToolFromCmd
+// now shares normalizeArgv with DetectEcosystem instead of its own bespoke
+// one-level "bash -c" unwrap, so it also benefits from absolute-path
+// basenaming, benign-wrapper stripping, and multi-flag-cluster ("-lc")
+// shell unwrapping.
+func TestInferToolFromCmd_LauncherNormalization(t *testing.T) {
+	cases := []struct {
+		name     string
+		cmd      []string
+		wantEco  ecosystem.Ecosystem
+		wantTool string
+	}{
+		{"timeout-wrapped python3", []string{"timeout", "60", "python3", "repro.py"}, ecosystem.EcosystemPython, "python3"},
+		{"absolute node path", []string{"/opt/bugbot-toolchains/node/bin/node", "--test", "x.test.js"}, ecosystem.EcosystemJS, "node"},
+		{"bash -lc flag cluster", []string{"bash", "-lc", "npx vitest run"}, ecosystem.EcosystemJS, "npx"},
+		{
+			"bash -c export-then-exec compound command",
+			[]string{"bash", "-c", "export PYTHONPATH=/repo; exec python3 -m pytest tests/"},
+			ecosystem.EcosystemPython, "python3",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			eco, tool := ecosystem.InferToolFromCmd(c.cmd)
+			if eco != c.wantEco || tool != c.wantTool {
+				t.Errorf("InferToolFromCmd(%v) = (%q, %q), want (%q, %q)", c.cmd, eco, tool, c.wantEco, c.wantTool)
+			}
+		})
+	}
+}
 
 func TestBaseMode(t *testing.T) {
 	cases := []struct {

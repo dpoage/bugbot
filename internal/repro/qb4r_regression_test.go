@@ -74,20 +74,24 @@ if __name__ == "__main__":
         print("BUGBOT_REPRO_DEMONSTRATED")
         sys.exit(1)
 `},
-				Cmd:    []string{"python3", "repro.py"},
+				Cmd:    []string{"./repro.py"},
 				Expect: "transliteration",
 			},
 			sandboxOut: sandbox.Result{
 				ExitCode: 1,
 				Stdout:   "BUGBOT_REPRO_DEMONSTRATED\n",
 			},
-			// python3 repro.py (no pytest -m) detects as ecosystem.EcosystemUnknown,
-			// which has no coverage-report format at all — the transliteration
-			// is caught via the OTHER half of acceptance-3's "rejected or
-			// downgraded to witness-only": it is not statically rejected (a
-			// bare script isn't in executableEdgeCheckers), but the unknown
-			// ecosystem can never provide a witness, so it downgrades instead
-			// of reaching unmarked full Tier-1.
+			// ./repro.py (direct script execution, no recognized launcher
+			// token) detects as ecosystem.EcosystemUnknown, which has no
+			// coverage-report format at all — the transliteration is caught
+			// via the OTHER half of acceptance-3's "rejected or downgraded
+			// to witness-only": it is not statically rejected (a bare
+			// script isn't in executableEdgeCheckers), but the unknown
+			// ecosystem can never provide a witness, so it downgrades
+			// instead of reaching unmarked full Tier-1. bugbot-ds90 made
+			// bare "python3 repro.py" resolve to EcosystemPython (which
+			// DOES have a coverage format), so this fixture switched to a
+			// launcher shape that still has none.
 			wantPromote:     true,
 			wantWitnessOnly: true,
 		},

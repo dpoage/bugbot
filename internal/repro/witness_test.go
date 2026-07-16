@@ -81,10 +81,13 @@ func TestPromoteOne_NeedsHuman_WitnessesNotPromotes(t *testing.T) {
 }
 
 // witnessOnlyPlan returns a plan whose command detects as
-// ecosystem.EcosystemUnknown (bare python3 script, no pytest -m), which has no
-// execution-witness coverage format: a demonstrated run comes back
-// Promoted=true with WitnessOnly=true (bugbot-qb4r layer b). Mirrors the
-// qb4r regression fixture.
+// ecosystem.EcosystemUnknown (direct script execution — "./repro.py", no
+// recognized launcher token — bugbot-ds90 made bare "python3 repro.py"
+// resolve to EcosystemPython, so this fixture switched to a launcher shape
+// that still has no coverage-report format), which has no execution-witness
+// coverage format: a demonstrated run comes back Promoted=true with
+// WitnessOnly=true (bugbot-qb4r layer b). Mirrors the qb4r regression
+// fixture.
 func witnessOnlyPlan() Plan {
 	return Plan{
 		Files: map[string]string{"repro.py": `
@@ -98,7 +101,7 @@ if __name__ == "__main__":
         print("BUGBOT_REPRO_DEMONSTRATED")
         sys.exit(1)
 `},
-		Cmd:    []string{"python3", "repro.py"},
+		Cmd:    []string{"./repro.py"},
 		Expect: "demonstrates the stale-state race",
 	}
 }
