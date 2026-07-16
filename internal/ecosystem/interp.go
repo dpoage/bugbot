@@ -253,7 +253,18 @@ var InterpTable = []InterpRules{
 	{
 		Name: EcosystemRust,
 		RanMarkers: []string{
-			"test result:",
+			// "test result: failed" (not the bare "test result:" prefix,
+			// which also appears on a PASSING run as "test result: ok.") —
+			// bugbot-2zoo: pipefail (injected by internal/repro when an
+			// agent bounds output with an early-terminating filter like
+			// `head -N`/`grep -m1`) can make a passing `cargo test`
+			// pipeline exit 141 on SIGPIPE while the doctest runner is
+			// still writing output; a bare "test result:" marker would
+			// then match the PASSING unit-test summary that already
+			// scrolled past and mint a false demonstrated. Genuine
+			// failures always print "test result: FAILED." (cargo's own
+			// wording, case-folded by HasRanEvidence's lowercasing).
+			"test result: failed",
 			"failing tests:",
 			"thread '",
 			"panicked at",
@@ -279,9 +290,17 @@ var InterpTable = []InterpRules{
 			"✕",
 			"×",
 			"⎯⎯",
-			"test suites:",
-			// node's built-in test runner (`node --test`) prints its assertion
-			// failures as "AssertionError [ERR_ASSERTION]: ..." — bugbot-ds90.
+			// "test suites:" was REMOVED here (bugbot-2zoo): it is
+			// pass-ambiguous, matching a PASSING jest summary line
+			// ("Test Suites: 1 passed, 1 total") just as readily as a
+			// failing one. pipefail (injected by internal/repro when an
+			// agent bounds output with an early-terminating filter like
+			// `grep -m1`) can make a passing jest pipeline exit 141 on
+			// SIGPIPE, and a bare "test suites:" marker would then match
+			// the passing summary and mint a false demonstrated. Genuine
+			// jest/vitest failures remain covered by the glyph markers
+			// above, "assertionerror" below, and the line-anchored TAP
+			// "not ok " marker (node:test).
 			"assertionerror",
 		},
 		// node:test's TAP output marks a failing subtest with a line starting

@@ -195,3 +195,78 @@ func TestExecute_InjectsPipefail(t *testing.T) {
 		t.Errorf("spec.Cmd = %v, want %v", calls[0].Spec.Cmd, want)
 	}
 }
+
+// TestInterpret_PipefailSIGPIPE_NoFalsePromote is the required
+// interpret()-level regression for the oracle-review defect on bugbot-2zoo:
+// injectPipefail makes a `bash -c` pipeline report the FAILING stage's exit
+// code instead of the last stage's — but when an agent bounds output with
+// an EARLY-TERMINATING filter (head -N, grep -m1) instead of a
+// read-to-EOF one (tail, plain grep), a genuinely PASSING upstream runner
+// can be killed by SIGPIPE (exit 128+13=141) once the filter is satisfied
+// and closes its end of the pipe. Rust's "test result:" and JS's
+// "test suites:" ran-markers used to match that PASSING summary just as
+// readily as a failing one, so a passing run could reach the ran-evidence
+// gate (interpret.go step 4) and be misclassified demonstrated=true. Fixed
+// by failure-qualifying/removing those two markers (internal/ecosystem/
+// interp.go); this test pins that a passing run under SIGPIPE stays
+// not_demonstrated while a genuinely failing run (ordinary non-zero exit,
+// no SIGPIPE involved) still demonstrates.
+func TestInterpret_PipefailSIGPIPE_NoFalsePromote(t *testing.T) {
+	t.Run("rust_passing_under_sigpipe_not_demonstrated", func(t *testing.T) {
+		// `set -o pipefail; cargo test 2>&1 | head -60` on a PASSING crate:
+		// head exits after its 60 lines, cargo (still writing doctest
+		// output) is killed by SIGPIPE -> exit 141, but the unit-test
+		// summary already read by head shows a clean pass.
+		res := sandbox.Result{
+			ExitCode: 141,
+			Stdout:   "running 2 tests\ntest tests::adds_one ... ok\ntest tests::adds_two ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n",
+		}
+		v := interpret(res, []string{"bash", "-c", "cargo test 2>&1 | head -60"})
+		if v.demonstrated {
+			t.Errorf("passing cargo test under SIGPIPE must NOT demonstrate; got demonstrated=true, summary=%q", v.summary)
+		}
+		if v.reason != VerdictReasonNotDemonstrated {
+			t.Errorf("reason = %q, want not_demonstrated", v.reason)
+		}
+	})
+
+	t.Run("rust_failing_demonstrated", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 101,
+			Stdout:   "running 2 tests\ntest tests::adds_one ... FAILED\ntest tests::adds_two ... ok\n\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n",
+		}
+		v := interpret(res, []string{"bash", "-c", "cargo test"})
+		if !v.demonstrated {
+			t.Errorf("genuinely failing cargo test must demonstrate; got reason=%q", v.reason)
+		}
+	})
+
+	t.Run("js_passing_under_sigpipe_not_demonstrated", func(t *testing.T) {
+		// `set -o pipefail; npx jest 2>&1 | grep -m1 -i suites` on a
+		// PASSING suite: grep exits after its first match, jest is killed
+		// by SIGPIPE -> exit 141, but the summary line grep captured shows
+		// a clean pass.
+		res := sandbox.Result{
+			ExitCode: 141,
+			Stdout:   "Test Suites: 1 passed, 1 total\n",
+		}
+		v := interpret(res, []string{"bash", "-c", "npx jest 2>&1 | grep -m1 -i suites"})
+		if v.demonstrated {
+			t.Errorf("passing jest run under SIGPIPE must NOT demonstrate; got demonstrated=true, summary=%q", v.summary)
+		}
+		if v.reason != VerdictReasonNotDemonstrated {
+			t.Errorf("reason = %q, want not_demonstrated", v.reason)
+		}
+	})
+
+	t.Run("js_failing_demonstrated", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 1,
+			Stdout:   "FAIL src/add.test.js\n  ✕ sums numbers (3 ms)\n  ● sums numbers\n    expect(received).toBe(expected)\n\nTests:       1 failed, 1 passed, 2 total\nTest Suites: 1 failed, 1 total\n",
+		}
+		v := interpret(res, []string{"bash", "-c", "npx jest"})
+		if !v.demonstrated {
+			t.Errorf("genuinely failing jest run must demonstrate; got reason=%q", v.reason)
+		}
+	})
+}

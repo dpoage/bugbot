@@ -417,6 +417,11 @@ Sandbox environment & command hygiene:
 - Wrap any multi-step command (using &&, ||, |, or redirects) in bash -c "...":
   a bare argv is run directly, so shell operators and later commands would be
   passed as arguments to the first program.
+- The harness already tail-caps captured exec output for you: NEVER pipe your
+  test runner through tail/head/grep to bound it yourself, since that runs the
+  filter's exit code instead of the test runner's and can mask a real failure
+  as a false pass. A bash -c script gets pipefail (set -o pipefail) injected
+  defensively, but write clean commands and do not rely on it.
 - Pass a test filter (e.g. --gtest_filter) to the TEST BINARY, never to cmake or
   make.
 - A single-file compile's -o output path MUST differ from every input file.
