@@ -173,6 +173,14 @@ type Options struct {
 	// when cgo is absent). A nil CapabilitySet is treated as "all unknown"
 	// and the prompt omits capability guidance.
 	Capabilities sandbox.CapabilitySet
+	// Playbook is the pre-run verified-command battery result (bugbot-u2v5,
+	// PlaybookOnce) for the target repo+sandbox. When non-empty, the
+	// reproducer prompt gets a "Verified commands for this repo" section and
+	// the pre-launch plan gate rejects a plan invoking a launcher the
+	// battery confirmed FAILS. A zero-value Playbook (the default — no
+	// caller has wired PlaybookOnce yet) leaves both the section and the
+	// gate inactive, matching pre-bugbot-u2v5 behavior exactly.
+	Playbook Playbook
 	// Progress, when non-nil, receives agent observability events: each repro
 	// (and patch-prover) run is bracketed with KindAgentStarted/Finished and
 	// its per-call tool activity is emitted as KindToolCall events, so a running
@@ -250,6 +258,10 @@ type Reproducer struct {
 	// capabilities is the probed CapabilitySet threaded from Options.Capabilities,
 	// passed to systemPrompt to constrain available invocation modes.
 	capabilities sandbox.CapabilitySet
+	// playbook is the pre-run verified-command battery result threaded from
+	// Options.Playbook (bugbot-u2v5). A zero-value Playbook (no caller wired
+	// PlaybookOnce) leaves the prompt section and the plan gate inactive.
+	playbook Playbook
 	// nav is the shared code-navigation tool bundle (find_definition,
 	// find_references, find_implementations, read_symbol, find_usages, outline)
 	// rooted at repoDir. Constructed eagerly in New; no language-server process
@@ -306,6 +318,7 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 		deps:         deps,
 		buildSystems: ingest.DetectBuildSystems(repoDir),
 		capabilities: resolved.Capabilities,
+		playbook:     resolved.Playbook,
 		nav:          nav,
 		pkgSummary:   resolved.PackageSummary,
 	}, nil
@@ -479,6 +492,24 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			})
 			continue
 		}
+		// Playbook plan gate (bugbot-u2v5): reject a plan whose launcher the
+		// verified-command battery CONFIRMED fails in this exact sandbox
+		// spec, naming a verified alternative. Adjacent to, but distinct
+		// from, the capability gate above: that gates on ecosystem-wide
+		// availability; this gates on a specific launcher within an
+		// available ecosystem (e.g. npx failing while node works fine).
+		// Inactive (returns "") whenever the playbook never ran or
+		// degraded — see PlaybookOnce's doc.
+		if msg := rejectPlaybookFailedLaunch(plan, r.playbook); msg != "" {
+			feedback = msg
+			att.Reason = "blocked_toolchain: " + msg
+			scope.EmitEvent(progress.Event{
+				Kind:    progress.KindReproAttempt,
+				Attempt: att.Attempts, MaxAttempts: r.opts.MaxAttempts,
+				Verdict: "blocked_toolchain", Duration: time.Since(roundStart),
+			})
+			continue
+		}
 
 		// bugbot-qb4r layer (a): the cheap static plan gate. Runs BEFORE any
 		// sandbox execution — a plan whose submitted test files never reach
@@ -617,7 +648,7 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 		opts = append(opts, agent.WithTranscriptDir(r.opts.TranscriptDir))
 	}
 	opts = append(opts, agent.WithActivitySink(toolActivitySink(scope)))
-	prompt := systemPrompt(lang, systems, r.capabilities)
+	prompt := systemPrompt(lang, systems, r.capabilities, r.playbook)
 	if r.pkgSummary != nil {
 		prompt += pkgContextGuidance
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/dpoage/bugbot/internal/daemon"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ecosystem"
+	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/report"
@@ -103,6 +104,13 @@ func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *sto
 	// component (HostExec has no image concept).
 	probeMounts, probeEnv := depProbeInputs(*cfg, sb, repoRoot)
 	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, repoRoot, probeMounts, probeEnv)
+	// Verified-command playbook (bugbot-u2v5): run the same bounded probe
+	// battery repro.PlaybookOnce caches per (repoRoot HEAD, dep-resolution
+	// fingerprint), against the exact spec/deps this reproducer's own sandbox
+	// runs use. Degrades to an inactive (empty) Playbook on any battery
+	// failure — see PlaybookOnce's doc — so this never blocks reproducer
+	// construction.
+	pb := repro.PlaybookOnce(ctx, sb, repoRoot, sandbox.Spec{Image: cfg.Sandbox.Image}, resolveDepsForPlaybook(*cfg, sb, repoRoot), ingest.DetectBuildSystems(repoRoot))
 	r, err := repro.New(client, sb, repoRoot, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
 		Image:            cfg.Sandbox.Image,
@@ -115,6 +123,7 @@ func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *sto
 		LocalMounts:      localMountsFromConfig(*cfg),
 		HostToolchains:   cfg.Sandbox.HostToolchains,
 		Capabilities:     caps,
+		Playbook:         pb,
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
 		TranscriptDir:    reproTranscriptDir(*cfg),
@@ -197,6 +206,11 @@ func buildReproHookForScan(
 	// through, so a mounted toolchain or dependency cache shows up as available.
 	probeMounts, probeEnv := depProbeInputs(cfg, sb, opts.Target)
 	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, opts.Target, probeMounts, probeEnv)
+	// Verified-command playbook (bugbot-u2v5): same battery as
+	// buildReproducerWithSandbox above, run once per (repoDir HEAD,
+	// dep-resolution fingerprint) and degrading to an inactive Playbook on
+	// any failure — never blocks reproducer construction.
+	pb := repro.PlaybookOnce(ctx, sb, opts.Target, sandbox.Spec{Image: cfg.Sandbox.Image}, resolveDepsForPlaybook(cfg, sb, opts.Target), ingest.DetectBuildSystems(opts.Target))
 	r, rNewErr := repro.New(reproClient, sb, opts.Target, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
 		Image:            cfg.Sandbox.Image,
@@ -209,6 +223,7 @@ func buildReproHookForScan(
 		LocalMounts:      localMountsFromConfig(cfg),
 		HostToolchains:   cfg.Sandbox.HostToolchains,
 		Capabilities:     caps,
+		Playbook:         pb,
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
 		TranscriptDir:    reproTranscriptDir(cfg),

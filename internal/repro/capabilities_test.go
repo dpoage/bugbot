@@ -15,14 +15,14 @@ func TestSystemPromptCapabilityGuidance(t *testing.T) {
 	systems := []ingest.BuildSystem{}
 
 	t.Run("nil_caps_no_constraint_section", func(t *testing.T) {
-		p := systemPrompt(lang, systems, nil)
+		p := systemPrompt(lang, systems, nil, Playbook{})
 		if strings.Contains(p, "capability constraints") {
 			t.Errorf("want no capability section for nil caps, got:\n%s", p)
 		}
 	})
 
 	t.Run("empty_caps_no_constraint_section", func(t *testing.T) {
-		p := systemPrompt(lang, systems, sandbox.CapabilitySet{})
+		p := systemPrompt(lang, systems, sandbox.CapabilitySet{}, Playbook{})
 		if strings.Contains(p, "capability constraints") {
 			t.Errorf("want no capability section for empty caps, got:\n%s", p)
 		}
@@ -30,7 +30,7 @@ func TestSystemPromptCapabilityGuidance(t *testing.T) {
 
 	t.Run("race_absent_no_dash_race", func(t *testing.T) {
 		caps := sandbox.CapabilitySet{"go": {"race": false}}
-		p := systemPrompt(lang, systems, caps)
+		p := systemPrompt(lang, systems, caps, Playbook{})
 		// Must mention UNAVAILABLE for race.
 		if !strings.Contains(p, "UNAVAILABLE") {
 			t.Errorf("want UNAVAILABLE in prompt when race=false, got:\n%s", p)
@@ -51,7 +51,7 @@ func TestSystemPromptCapabilityGuidance(t *testing.T) {
 
 	t.Run("race_present_offers_race", func(t *testing.T) {
 		caps := sandbox.CapabilitySet{"go": {"race": true}}
-		p := systemPrompt(lang, systems, caps)
+		p := systemPrompt(lang, systems, caps, Playbook{})
 		// Must say AVAILABLE.
 		if !strings.Contains(p, "AVAILABLE") {
 			t.Errorf("want AVAILABLE in prompt when race=true, got:\n%s", p)
@@ -68,7 +68,7 @@ func TestSystemPromptCapabilityGuidance(t *testing.T) {
 
 	t.Run("prompt_still_contains_core_requirements", func(t *testing.T) {
 		caps := sandbox.CapabilitySet{"go": {"race": false}}
-		p := systemPrompt(lang, systems, caps)
+		p := systemPrompt(lang, systems, caps, Playbook{})
 		// Core requirements must still be present regardless of capabilities.
 		if !strings.Contains(p, "MINIMAL") {
 			t.Errorf("core requirement 'MINIMAL' missing from prompt")
@@ -174,7 +174,7 @@ func TestCapabilityGuidance_Cpp(t *testing.T) {
 
 	t.Run("systemPrompt_cpp_tsan_true", func(t *testing.T) {
 		caps := sandbox.CapabilitySet{"cpp": {"tsan": true, "asan": false, "ubsan": false}}
-		p := systemPrompt(ingest.LangCPP, []ingest.BuildSystem{ingest.BuildSystemCMake}, caps)
+		p := systemPrompt(ingest.LangCPP, []ingest.BuildSystem{ingest.BuildSystemCMake}, caps, Playbook{})
 		if !strings.Contains(p, "AVAILABLE") {
 			t.Errorf("want AVAILABLE in system prompt when tsan=true")
 		}
@@ -185,7 +185,7 @@ func TestCapabilityGuidance_Cpp(t *testing.T) {
 
 	t.Run("systemPrompt_cpp_tsan_false", func(t *testing.T) {
 		caps := sandbox.CapabilitySet{"cpp": {"tsan": false, "asan": false, "ubsan": false}}
-		p := systemPrompt(ingest.LangCPP, []ingest.BuildSystem{ingest.BuildSystemCMake}, caps)
+		p := systemPrompt(ingest.LangCPP, []ingest.BuildSystem{ingest.BuildSystemCMake}, caps, Playbook{})
 		if !strings.Contains(p, "UNAVAILABLE") {
 			t.Errorf("want UNAVAILABLE in system prompt when tsan=false")
 		}
@@ -269,7 +269,7 @@ func TestCapabilityGuidance_Rust(t *testing.T) {
 
 	t.Run("systemPrompt_rust_cargo_true", func(t *testing.T) {
 		caps := sandbox.CapabilitySet{"rust": {"cargo": true, "miri": false}}
-		p := systemPrompt(ingest.LangRust, []ingest.BuildSystem{}, caps)
+		p := systemPrompt(ingest.LangRust, []ingest.BuildSystem{}, caps, Playbook{})
 		if !strings.Contains(p, "AVAILABLE") {
 			t.Errorf("want AVAILABLE in system prompt when cargo=true")
 		}
@@ -280,7 +280,7 @@ func TestCapabilityGuidance_Rust(t *testing.T) {
 
 	t.Run("systemPrompt_rust_cargo_false", func(t *testing.T) {
 		caps := sandbox.CapabilitySet{"rust": {"cargo": false, "miri": false}}
-		p := systemPrompt(ingest.LangRust, []ingest.BuildSystem{}, caps)
+		p := systemPrompt(ingest.LangRust, []ingest.BuildSystem{}, caps, Playbook{})
 		if !strings.Contains(p, "UNAVAILABLE") {
 			t.Errorf("want UNAVAILABLE in system prompt when cargo=false")
 		}
@@ -357,7 +357,7 @@ func TestCapabilityGuidance_Js(t *testing.T) {
 	})
 	t.Run("systemPrompt_js_node_true", func(t *testing.T) {
 		caps := sandbox.CapabilitySet{"js": {"node": true, "node_test": false}}
-		p := systemPrompt(ingest.LangJavaScript, []ingest.BuildSystem{}, caps)
+		p := systemPrompt(ingest.LangJavaScript, []ingest.BuildSystem{}, caps, Playbook{})
 		if !strings.Contains(p, "Node.js runtime: AVAILABLE") {
 			t.Errorf("want Node.js runtime: AVAILABLE in system prompt when node=true")
 		}
@@ -365,7 +365,7 @@ func TestCapabilityGuidance_Js(t *testing.T) {
 
 	t.Run("systemPrompt_js_node_false", func(t *testing.T) {
 		caps := sandbox.CapabilitySet{"js": {"node": false, "node_test": false}}
-		p := systemPrompt(ingest.LangJavaScript, []ingest.BuildSystem{}, caps)
+		p := systemPrompt(ingest.LangJavaScript, []ingest.BuildSystem{}, caps, Playbook{})
 		if !strings.Contains(p, "Node.js runtime: UNAVAILABLE") {
 			t.Errorf("want Node.js runtime: UNAVAILABLE in system prompt when node=false")
 		}
@@ -429,7 +429,7 @@ func TestCapabilityGuidance_Python(t *testing.T) {
 
 	t.Run("systemPrompt_python_pytest_true", func(t *testing.T) {
 		caps := sandbox.CapabilitySet{"python": {"python": true, "pytest": true}}
-		p := systemPrompt(ingest.LangPython, []ingest.BuildSystem{}, caps)
+		p := systemPrompt(ingest.LangPython, []ingest.BuildSystem{}, caps, Playbook{})
 		if !strings.Contains(p, "Python pytest: AVAILABLE") {
 			t.Errorf("want Python pytest: AVAILABLE in system prompt when pytest=true")
 		}
@@ -437,7 +437,7 @@ func TestCapabilityGuidance_Python(t *testing.T) {
 
 	t.Run("systemPrompt_python_pytest_false", func(t *testing.T) {
 		caps := sandbox.CapabilitySet{"python": {"python": true, "pytest": false}}
-		p := systemPrompt(ingest.LangPython, []ingest.BuildSystem{}, caps)
+		p := systemPrompt(ingest.LangPython, []ingest.BuildSystem{}, caps, Playbook{})
 		if !strings.Contains(p, "Python pytest: UNAVAILABLE") {
 			t.Errorf("want Python pytest: UNAVAILABLE in system prompt when pytest=false")
 		}

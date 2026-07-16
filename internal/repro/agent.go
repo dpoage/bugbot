@@ -191,8 +191,10 @@ func langGuidance(lang ingest.Language, systems []ingest.BuildSystem) string {
 // language-specific test-framework guidance (see langGuidance); systems
 // refines that selection for C/C++ (cmake > meson > generic fallback).
 // caps enumerates the probed capability modes; the prompt instructs the agent
-// to avoid modes that are unavailable in the image.
-func systemPrompt(lang ingest.Language, systems []ingest.BuildSystem, caps sandbox.CapabilitySet) string {
+// to avoid modes that are unavailable in the image. pb is the per-repo
+// verified-command playbook (bugbot-u2v5, playbook.go's playbookGuidance);
+// an empty Playbook adds nothing.
+func systemPrompt(lang ingest.Language, systems []ingest.BuildSystem, caps sandbox.CapabilitySet, pb Playbook) string {
 	return `You are Bugbot's reproducer agent. Your job is to write a MINIMAL test that
 demonstrates a specific, already-verified bug by FAILING because of it.
 
@@ -239,7 +241,7 @@ Hard requirements for the repro:
   build hangs. Bound the TEST command: use ` + "`go test -timeout 60s`" + ` (built-in);
   wrap other runners with ` + "`timeout 60 <runner>`" + ` (coreutils); for
   jest/vitest use ` + "`--testTimeout 60000`" + `.
-` + capabilityGuidance(caps) + `
+` + capabilityGuidance(caps) + playbookGuidance(pb) + `
 Language-specific guidance:
 ` + langGuidance(lang, systems) + `
 Return a repro plan describing the files to inject, the command to run them,
