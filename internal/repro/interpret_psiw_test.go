@@ -11,8 +11,10 @@ package repro
 //       contains "read-only file system" or "no space left on device" text
 //       must classify as demonstrated, not environment_error.
 //   (c) Pytest exit 2 + collection-error banner → not_demonstrated (the test
-//       never ran), even though Python ranMarkers contain "failed " and
-//       "traceback (most recent call last)" which may appear in collection output.
+//       never ran), even though Python ranMarkers contain
+//       "traceback (most recent call last)" and "short test summary" (plus
+//       the line-anchored "failed (" unittest marker, bugbot-2zoo round 3)
+//       which may appear in collection error output.
 //   (d) Exit-0 run with "sanitizer:" only in fixture/log output → exit_zero
 //       (not demonstrated), because sanitizer promotion now requires non-zero exit.
 //
@@ -122,9 +124,10 @@ func TestInterpret_EnvMarker_NoRanEvidence_StillEnvironmentError(t *testing.T) {
 // --- bugbot-psiw (c): pytest exit 2 + collection error → not_demonstrated ---
 
 // TestInterpret_Pytest_CollectionError_NotDemonstrated pins that a pytest run
-// that exits 2 (collection error) classifies as not_demonstrated — even though
-// Python ranMarkers contain "failed ", "traceback (most recent call last)", and
-// "short test summary" which may appear in collection error output.
+// that exits 2 (collection error) classifies as not_demonstrated — even
+// though Python ranMarkers contain "traceback (most recent call last)" and
+// "short test summary" (and the line-anchored "failed (" unittest marker,
+// bugbot-2zoo round 3) which may appear in collection error output.
 // This test uses conftest RuntimeError / fixture-setup failures that have NO
 // build marker (no importerror/syntaxerror) so the classification is driven
 // purely by the exit-2 + notRanMarker gate (bugbot-psiw).

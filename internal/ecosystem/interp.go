@@ -223,11 +223,40 @@ var InterpTable = []InterpRules{
 	{
 		Name: EcosystemPython,
 		RanMarkers: []string{
-			"failed ",
+			// "failed " (bare, with trailing space) was REMOVED here
+			// (bugbot-2zoo round 3): it is pass-ambiguous, matching a
+			// PASSING pytest -v test whose NAME happens to end in
+			// "failed" (e.g. "test_login_when_credentials_failed PASSED"
+			// lowercases to "..._failed passed", which contains
+			// "failed "). pipefail (injected by internal/repro when an
+			// agent bounds output with an early-terminating filter like
+			// `head -N`) can turn a passing pytest run into a non-zero
+			// exit (Python converts a broken pipe from a closed
+			// downstream filter into a BrokenPipeError -> exit 1, NOT a
+			// SIGPIPE-range exit, so there is no exit-code backstop for
+			// this one) with exactly that PASSED line captured — the old
+			// marker would then mint a false demonstrated. Genuine pytest
+			// failures remain covered below by "= failures =" (pytest's
+			// own FAILURES banner) and "short test summary" (both printed
+			// only when at least one test fails), plus "assertionerror"
+			// and "traceback (most recent call last)". unittest's
+			// failure-only "FAILED (failures=N)"/"FAILED (errors=N)"
+			// summary line is covered by LineAnchoredRanMarkers below
+			// instead of as a bare substring: unittest's verbose PASSING
+			// output lists each test as "<name> (<module.Class>) ... ok",
+			// and a test named e.g. "test_login_failed" produces the line
+			// "test_login_failed (tests.TestX) ... ok" — which contains
+			// the substring "failed (" mid-line despite the test PASSING.
+			// Anchoring to the START of the line excludes that trap while
+			// still matching "FAILED (failures=1)", which unittest always
+			// prints flush-left with no other line ever starting that way.
 			"= failures =",
 			"short test summary",
 			"assertionerror",
 			"traceback (most recent call last)",
+		},
+		LineAnchoredRanMarkers: []string{
+			"failed (",
 		},
 		NotRanMarkers: []string{
 			"errors during collection",
@@ -330,7 +359,20 @@ var InterpTable = []InterpRules{
 		RanMarkers: []string{
 			"[  failed  ]",
 			"failed test",
-			"tests failed",
+			// "tests failed" (bare) was replaced with the failure-only
+			// "the following tests failed" (bugbot-2zoo round 3): a
+			// PASSING ctest run's own summary line reads "100% tests
+			// passed, 0 tests failed out of N" — which contains the bare
+			// substring "tests failed". pipefail (injected by
+			// internal/repro) can make a `bash -c` ctest pipeline bounded
+			// by an early-terminating filter exit non-zero on SIGPIPE
+			// (ctest is a compiled binary, so unlike Python it does hit
+			// the SIGPIPE-range exit) while that passing summary line is
+			// what got captured, which used to mint a false demonstrated.
+			// ctest only ever prints "The following tests FAILED:" (case
+			// preserved here for clarity; matching is case-folded by
+			// HasRanEvidence) when at least one test genuinely failed.
+			"the following tests failed",
 			"assertion failed",
 			"assertion \x60",
 		},

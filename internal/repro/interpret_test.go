@@ -657,11 +657,21 @@ func TestInterpret_StructuredOutput(t *testing.T) {
 
 	// (e) junitxml absent (res.Captured has no entry, e.g. pytest crashed
 	//     before writing the report) -> falls back to markers. Stdout carries
-	//     a plain pytest FAILED banner so the fallback still demonstrates.
+	//     pytest's own FAILURES banner (real pytest CLI shape, printed by
+	//     default on any failure regardless of -v/-q — bugbot-2zoo round 3:
+	//     the old fixture relied on the bare "failed " marker, removed
+	//     because it was pass-ambiguous against a passing test whose NAME
+	//     ends in "failed"; "= failures =" is pytest's own failure-only
+	//     banner text, so the fallback still demonstrates on realistic
+	//     output).
 	t.Run("junit_absent_falls_back_to_markers", func(t *testing.T) {
 		res := sandbox.Result{
 			ExitCode: 1,
-			Stdout:   "test_fail.py::test_addition FAILED\n1 failed in 0.01s\n",
+			Stdout: "test_fail.py F                                                          [100%]\n\n" +
+				"=================================== FAILURES ===================================\n" +
+				"________________________________ test_addition _________________________________\n\n" +
+				"    def test_addition():\n>       assert 1 + 1 == 3\nE       assert 2 == 3\n\n" +
+				"test_fail.py:2: AssertionError\n1 failed in 0.01s\n",
 		}
 		v := interpret(res, []string{"pytest", "--junitxml=" + structuredJUnitXMLPath, "test_fail.py"})
 		if !v.demonstrated {

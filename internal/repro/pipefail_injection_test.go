@@ -202,15 +202,22 @@ func TestExecute_InjectsPipefail(t *testing.T) {
 // code instead of the last stage's — but when an agent bounds output with
 // an EARLY-TERMINATING filter (head -N, grep -m1) instead of a
 // read-to-EOF one (tail, plain grep), a genuinely PASSING upstream runner
-// can be killed by SIGPIPE (exit 128+13=141) once the filter is satisfied
-// and closes its end of the pipe. Rust's "test result:" and JS's
-// "test suites:" ran-markers used to match that PASSING summary just as
+// can be interrupted once the filter is satisfied and closes its end of
+// the pipe. A compiled runner (cargo, ctest) is SIGPIPE-killed (exit
+// 128+13=141); Python/Node ignore SIGPIPE and instead see a
+// BrokenPipeError writing to the closed pipe, which pytest/jest turn into
+// an ordinary exit 1 — indistinguishable from a real failure by exit code
+// alone, so ONLY a strictly failure-only ran-marker set closes this (round
+// 3: no exit-code backstop is possible for Python). Rust's "test result:",
+// JS's "test suites:", Python's "failed ", and C++'s "tests failed"
+// ran-markers all used to match their ecosystem's PASSING summary just as
 // readily as a failing one, so a passing run could reach the ran-evidence
 // gate (interpret.go step 4) and be misclassified demonstrated=true. Fixed
-// by failure-qualifying/removing those two markers (internal/ecosystem/
-// interp.go); this test pins that a passing run under SIGPIPE stays
-// not_demonstrated while a genuinely failing run (ordinary non-zero exit,
-// no SIGPIPE involved) still demonstrates.
+// by failure-qualifying/removing those four markers (internal/ecosystem/
+// interp.go); this test pins that a passing run under the pipefail-induced
+// non-zero exit stays not_demonstrated for all four ecosystems, while a
+// genuinely failing run (ordinary non-zero exit, same or no SIGPIPE
+// involved) still demonstrates.
 func TestInterpret_PipefailSIGPIPE_NoFalsePromote(t *testing.T) {
 	t.Run("rust_passing_under_sigpipe_not_demonstrated", func(t *testing.T) {
 		// `set -o pipefail; cargo test 2>&1 | head -60` on a PASSING crate:
@@ -267,6 +274,102 @@ func TestInterpret_PipefailSIGPIPE_NoFalsePromote(t *testing.T) {
 		v := interpret(res, []string{"bash", "-c", "npx jest"})
 		if !v.demonstrated {
 			t.Errorf("genuinely failing jest run must demonstrate; got reason=%q", v.reason)
+		}
+	})
+
+	t.Run("pytest_passing_under_broken_pipe_not_demonstrated", func(t *testing.T) {
+		// `set -o pipefail; pytest -v 2>&1 | head -20` on a PASSING suite
+		// whose FIRST test's name happens to end in "failed" (e.g. it
+		// asserts a failure-handling code path and passes): head exits
+		// after its 20 lines, pytest sees the write to the now-closed pipe
+		// as a BrokenPipeError and exits 1 — NOT a SIGPIPE-range exit,
+		// since Python traps SIGPIPE itself. The captured head output is
+		// entirely PASSED lines.
+		res := sandbox.Result{
+			ExitCode: 1,
+			Stdout: "test_login_when_credentials_failed.py::test_login_when_credentials_failed PASSED\n" +
+				"test_login.py::test_login_ok PASSED\n" +
+				"test_login.py::test_login_retry PASSED\n",
+		}
+		v := interpret(res, []string{"bash", "-c", "pytest -v 2>&1 | head -20"})
+		if v.demonstrated {
+			t.Errorf("passing pytest run under broken-pipe exit must NOT demonstrate; got demonstrated=true, summary=%q", v.summary)
+		}
+		if v.reason != VerdictReasonNotDemonstrated {
+			t.Errorf("reason = %q, want not_demonstrated", v.reason)
+		}
+	})
+
+	t.Run("unittest_failing_demonstrated", func(t *testing.T) {
+		// Real unittest tail: the "FAILED (failures=N)" summary line is
+		// always flush-left with nothing else on the line — the
+		// line-anchored marker that replaced bare "failed ".
+		res := sandbox.Result{
+			ExitCode: 1,
+			Stdout: "test_login_failed (tests.TestLogin) ... ok\n" +
+				"test_login_ok (tests.TestLogin) ... FAIL\n\n" +
+				"======================================================================\n" +
+				"FAIL: test_login_ok (tests.TestLogin)\n" +
+				"----------------------------------------------------------------------\n" +
+				"AssertionError: False is not true\n\n" +
+				"----------------------------------------------------------------------\n" +
+				"Ran 2 tests in 0.001s\n\n" +
+				"FAILED (failures=1)\n",
+		}
+		v := interpret(res, []string{"python3", "-m", "unittest", "tests.py"})
+		if !v.demonstrated {
+			t.Errorf("genuinely failing unittest run must demonstrate; got reason=%q", v.reason)
+		}
+	})
+
+	t.Run("pytest_failing_demonstrated", func(t *testing.T) {
+		// Real pytest -q shape: the FAILURES banner is printed by default
+		// on any failure regardless of -q/-v (only --tb=no suppresses it).
+		res := sandbox.Result{
+			ExitCode: 1,
+			Stdout: "F....                                                                   [100%]\n\n" +
+				"=================================== FAILURES ===================================\n" +
+				"_________________________________ test_foo _________________________________\n\n" +
+				"    def test_foo():\n>       assert False\nE       assert False\n\n" +
+				"test_foo.py:2: AssertionError\n1 failed, 4 passed in 0.05s\n",
+		}
+		v := interpret(res, []string{"bash", "-c", "pytest -q"})
+		if !v.demonstrated {
+			t.Errorf("genuinely failing pytest run must demonstrate; got reason=%q", v.reason)
+		}
+	})
+
+	t.Run("ctest_passing_under_sigpipe_not_demonstrated", func(t *testing.T) {
+		// `set -o pipefail; ctest | grep -m1 -i "tests passed"` on a
+		// PASSING project: grep exits after its first match, ctest (a
+		// compiled binary) is SIGPIPE-killed -> exit 141, but the summary
+		// line grep captured shows a clean pass.
+		res := sandbox.Result{
+			ExitCode: 141,
+			Stdout:   "100% tests passed, 0 tests failed out of 3\n",
+		}
+		v := interpret(res, []string{"bash", "-c", "ctest --test-dir build | grep -m1 -i \"tests passed\""})
+		if v.demonstrated {
+			t.Errorf("passing ctest run under SIGPIPE must NOT demonstrate; got demonstrated=true, summary=%q", v.summary)
+		}
+		if v.reason != VerdictReasonNotDemonstrated {
+			t.Errorf("reason = %q, want not_demonstrated", v.reason)
+		}
+	})
+
+	t.Run("ctest_failing_demonstrated", func(t *testing.T) {
+		res := sandbox.Result{
+			ExitCode: 8,
+			Stdout: "Test project /workspace/build\n" +
+				"    Start 1: test_login\n" +
+				"1/3 Test #1: test_login .......................***Failed    0.01 sec\n" +
+				"50% tests passed, 1 tests failed out of 2\n\n" +
+				"The following tests FAILED:\n\t  1 - test_login (Failed)\n" +
+				"Errors while running CTest\n",
+		}
+		v := interpret(res, []string{"ctest", "--test-dir", "build"})
+		if !v.demonstrated {
+			t.Errorf("genuinely failing ctest run must demonstrate; got reason=%q", v.reason)
 		}
 	})
 }
