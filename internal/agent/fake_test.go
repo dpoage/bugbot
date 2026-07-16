@@ -86,3 +86,15 @@ func toolResp(id, name, args string, in, out int64) scriptStep {
 		Usage: llm.Usage{InputTokens: in, OutputTokens: out},
 	}}
 }
+
+// thinkOnlyResp builds an end-turn response whose entire content is an inline
+// <think>...</think> block and no tool calls — the bugbot-kpp2 production
+// failure mode (MiniMax-M3 sometimes narrates a tool call inside the think
+// block it never actually issues).
+func thinkOnlyResp(think string, in, out int64) scriptStep {
+	return scriptStep{resp: llm.Response{
+		Text:       "<think>" + think + "</think>",
+		StopReason: llm.StopEndTurn,
+		Usage:      llm.Usage{InputTokens: in, OutputTokens: out},
+	}}
+}

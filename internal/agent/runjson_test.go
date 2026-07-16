@@ -1224,9 +1224,15 @@ func TestRunJSON_TruncatedLeadingValueErrors(t *testing.T) {
 
 // TestRunJSON_EmptyBodyErrors confirms an empty/whitespace body still errors
 // via the "empty model output" path, before any JSON extraction is attempted.
+// The first two empty turns are absorbed by the bugbot-kpp2 empty-turn-nudge
+// cap (maxEmptyTurnNudges=2); the third exhausts it and the loop breaks with
+// an empty FinalText, and the fourth is the one repair completion — also
+// scripted empty so the repair path fails the same way.
 func TestRunJSON_EmptyBodyErrors(t *testing.T) {
 	fc := newFakeClient(
 		textResp("   ", 5, 5),
+		textResp("", 5, 5),
+		textResp("", 5, 5),
 		textResp("", 5, 5),
 	)
 	r := NewRunner(fc, nil, "sys")
@@ -1238,5 +1244,76 @@ func TestRunJSON_EmptyBodyErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "empty model output") {
 		t.Errorf("error = %v, want to contain 'empty model output'", err)
+	}
+}
+
+// TestRunJSON_EmptyTurnNudgeRecovers verifies bugbot-kpp2: a think-only turn
+// (zero tool calls, text that strips to empty) is nudged rather than treated
+// as the model's final answer, so a subsequent tool call and valid JSON
+// answer still complete the run cleanly with no repair needed.
+func TestRunJSON_EmptyTurnNudgeRecovers(t *testing.T) {
+	fc := newFakeClient(
+		thinkOnlyResp("let me plan this out...", 10, 5),
+		toolResp("c1", "echo", `{"v":"orient"}`, 10, 4),
+		textResp(`{"file":"a.go","message":"bug"}`, 8, 3),
+	)
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
+
+	var got finding
+	out, err := r.RunJSON(context.Background(), "find a bug", nil, &got)
+	if err != nil {
+		t.Fatalf("RunJSON: %v", err)
+	}
+	if got.File != "a.go" || got.Message != "bug" {
+		t.Errorf("parsed = %+v", got)
+	}
+	// 3 completions: think-only nudge, tool call, final answer.
+	if out.Iterations != 3 {
+		t.Errorf("Iterations = %d, want 3", out.Iterations)
+	}
+	foundNudge := false
+	for _, m := range out.Messages {
+		if m.Role == llm.RoleUser && m.Content == emptyTurnNudge {
+			foundNudge = true
+		}
+	}
+	if !foundNudge {
+		t.Error("conversation does not contain the empty-turn nudge message")
+	}
+}
+
+// TestRunJSON_EmptyTurnNudgeCapExhausted verifies the bugbot-kpp2 nudge cap:
+// three consecutive think-only turns exhaust maxEmptyTurnNudges (2 nudges),
+// the loop breaks on the third with an empty FinalText, and RunJSON proceeds
+// through its normal parse-failure/repair path — exactly 3 main-loop
+// completions plus one repair completion, no infinite loop.
+func TestRunJSON_EmptyTurnNudgeCapExhausted(t *testing.T) {
+	fc := newFakeClient(
+		thinkOnlyResp("first thought", 10, 5),
+		thinkOnlyResp("second thought", 10, 5),
+		thinkOnlyResp("third thought", 10, 5),
+		textResp(`{"file":"a.go","message":"repaired"}`, 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	var got finding
+	out, err := r.RunJSON(context.Background(), "find a bug", nil, &got)
+	if err != nil {
+		t.Fatalf("RunJSON: %v", err)
+	}
+	if got.File != "a.go" || got.Message != "repaired" {
+		t.Errorf("parsed = %+v", got)
+	}
+	if fc.callCount() != 4 {
+		t.Errorf("completions = %d, want 4 (3 main-loop + 1 repair)", fc.callCount())
+	}
+	nudgeCount := 0
+	for _, m := range out.Messages {
+		if m.Role == llm.RoleUser && m.Content == emptyTurnNudge {
+			nudgeCount++
+		}
+	}
+	if nudgeCount != maxEmptyTurnNudges {
+		t.Errorf("nudge count = %d, want %d (cap)", nudgeCount, maxEmptyTurnNudges)
 	}
 }
