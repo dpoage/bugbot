@@ -469,18 +469,22 @@ func (t *WorkspaceTool) Def() llm.ToolDef {
 			"  [\"find\", \"<glob-or-substring>\", \"<dir>\"] list workspace-relative paths under dir " +
 			"whose name matches a glob (*, ?, [...]) or, with no wildcard characters, contains the " +
 			"pattern as a substring. FREE.\n" +
-			"  [\"exec\", \"<argv...>\"] run a command against the workspace and see exactly how the " +
-			"sandbox classifies it. BUDGETED: consumes the exec budget ONLY when it reaches the sandbox " +
+			"  [\"exec\", \"<argv...>\"] run a command against the workspace and see EXACTLY how the " +
+			"official verdict would classify it: cmd goes through the SAME structured-output pipeline " +
+			"(go test -json / pytest JUnit XML capture) execute() uses, so the demonstrated/reason you see " +
+			"here matches what submitting this exact cmd would get — no need to spend a revision round " +
+			"just to find out. BUDGETED: consumes the exec budget ONLY when it reaches the sandbox " +
 			"— malformed calls, unknown applets, and invalid commands are free.\n" +
 			"ls/cat/status/grep/find are FREE probes over the materialized workspace — use them to look. " +
 			"exec is the ONLY applet that consumes your budget, and it exists to RUN code, not to look at " +
 			"it: prefer grep/find over `exec grep`/`exec find`/`exec cat`/`exec ls` every time.\n" +
-			"exec runs in your PERSISTENT attempt workspace, discarded when the attempt ends. It is NEVER " +
-			"what the official verdict runs against: that re-runs your submitted plan cmd in a completely " +
-			"FRESH workspace containing the repo plus exactly the files you wrote with write_repro_file — " +
-			"no build artifacts or other exec side effects carry over, so cmd must perform any build steps " +
-			"itself. A file created as a SIDE EFFECT of an exec command (e.g. shell redirection) is NOT " +
-			"tracked or submitted — only files written via write_repro_file are.",
+			"exec runs in your PERSISTENT attempt workspace, discarded when the attempt ends — this is the " +
+			"ONE residual divergence from the official run: exec accumulates build artifacts and side " +
+			"effects across calls in this workspace, while the official verdict re-runs your submitted plan " +
+			"cmd in a completely FRESH workspace containing the repo plus exactly the files you wrote with " +
+			"write_repro_file — no build artifacts or other exec side effects carry over, so cmd must " +
+			"perform any build steps itself. A file created as a SIDE EFFECT of an exec command (e.g. shell " +
+			"redirection) is NOT tracked or submitted — only files written via write_repro_file are.",
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -897,18 +901,19 @@ func (t *WorkspaceTool) runExec(ctx context.Context, cmd []string) (string, erro
 		return "", fmt.Errorf("workspace exec: materialize iteration workspace: %w", err)
 	}
 
-	// Note: unlike execute(), Cmd is passed through UNNORMALIZED — no
-	// -json/--junitxml rewrite (see normalizeCmdForStructuredOutput) and no
-	// CaptureFiles. This is intentional, not an oversight: exec's result is
-	// advisory (the agent's own diagnostic loop), and execute()'s structured,
-	// dispositive classification of the SAME cmd on the final plan is what
-	// actually gates promotion — so skipping it here costs nothing but a
-	// slightly coarser (marker-based) classification during iteration, in
-	// exchange for keeping this applet's Spec construction simple and
-	// matching exactly what the agent asked to run. No WriteFiles either:
-	// write_repro_file already put the tracked files on disk in the
+	// Cmd normalization + CaptureFiles are wired via applyStructuredOutputSpec
+	// (repro.go) — the SAME helper buildSpec uses for execute()'s official
+	// run (bugbot-0zay) — so this preview run gives interpret() IDENTICAL
+	// structured-output inputs (go test -json, pytest JUnit XML) to the
+	// official verdict. This is the fix for the marker-vs-structured
+	// divergence that used to burn a full official attempt on an iteration
+	// the agent already believed had demonstrated=true. cmd itself (the argv
+	// the agent asked for) is left untouched for validation/rendering
+	// purposes below — only the Spec sent to the sandbox carries the
+	// rewrite, exactly like buildSpec leaves plan.Cmd alone. No WriteFiles
+	// either: write_repro_file already put the tracked files on disk in the
 	// workspace.
-	spec := sandbox.Spec{
+	spec := applyStructuredOutputSpec(sandbox.Spec{
 		RepoDir: t.repoDir,
 		// Workspace pins this run to the attempt's persistent iteration
 		// directory instead of a fresh copy of RepoDir: sb.Exec neither
@@ -916,13 +921,12 @@ func (t *WorkspaceTool) runExec(ctx context.Context, cmd []string) (string, erro
 		// Lifecycle is owned by ws, cleaned up by Attempt's defer, never by
 		// this tool.
 		Workspace: ws,
-		Cmd:       cmd,
 		Image:     t.image,
 		Timeout:   t.timeout,
 		ROMounts:  t.roMounts,
 		Env:       t.depEnv,
 		SetupCmds: t.setupCmds,
-	}
+	}, cmd)
 	// res, err below: a sandbox launch failure here is a plain tool error
 	// (matching run_tests/RunTestsTool), not an agent.ToolHealthError — the
 	// official verdict (execute()) still re-runs the final plan
@@ -972,6 +976,14 @@ func checkWorkspaceExecBudget(used *atomic.Int32, maxExec int) error {
 // plan, so an agent iterating via `workspace exec` learns whether its
 // candidate would actually be promoted — without spending a revision round
 // to find out — followed by a generous tail excerpt of the combined output.
+// res is expected to already carry the structured-output evidence (go test
+// -json events in Stdout, a captured JUnit XML report in Captured) that
+// interpret()'s dispositive path needs: runExec builds its Spec via
+// applyStructuredOutputSpec, the SAME helper buildSpec uses for the
+// official run (bugbot-0zay), so this call gives interpret() inputs
+// identical to what the official verdict would see for the same cmd,
+// modulo the workspace directory (see WorkspaceTool.Def's doc for that one
+// residual, intentional divergence).
 func renderRunReproResult(res sandbox.Result, cmd []string) string {
 	v := interpret(res, cmd)
 	var b strings.Builder

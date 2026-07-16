@@ -685,17 +685,8 @@ func buildSpec(repoDir string, plan *Plan, image, network string, timeout time.D
 	for path, content := range plan.Files {
 		files[path] = []byte(content)
 	}
-	// normalizeCmdForStructuredOutput rewrites a direct `go test`/`pytest`
-	// invocation to ask the runner for machine-readable output (see
-	// runnerevents.go), so interpret() can classify off positive test-level
-	// evidence instead of scanning free-form text. plan.Cmd itself is left
-	// untouched: it is still what ecosystem detection and agent-facing
-	// feedback use, and the rewrite is a harness-owned implementation detail
-	// the agent never needs to see.
-	cmd, captures := normalizeCmdForStructuredOutput(plan.Cmd)
-	return sandbox.Spec{
+	spec := sandbox.Spec{
 		RepoDir:    repoDir,
-		Cmd:        cmd,
 		Image:      image,
 		Network:    network,
 		Timeout:    timeout,
@@ -703,11 +694,29 @@ func buildSpec(repoDir string, plan *Plan, image, network string, timeout time.D
 		// Dependency strategy: mount a module cache read-only and/or set GOFLAGS
 		// so the network-none run can resolve external modules. SetupCmds installs
 		// non-Go ecosystem packages from the mounted cache before Cmd runs.
-		ROMounts:     deps.ROMounts,
-		Env:          deps.Env,
-		SetupCmds:    deps.SetupCmds,
-		CaptureFiles: captures,
+		ROMounts:  deps.ROMounts,
+		Env:       deps.Env,
+		SetupCmds: deps.SetupCmds,
 	}
+	return applyStructuredOutputSpec(spec, plan.Cmd)
+}
+
+// applyStructuredOutputSpec applies normalizeCmdForStructuredOutput's cmd
+// rewrite and resulting CaptureFiles onto an otherwise-built sandbox.Spec
+// (bugbot-0zay). It is the ONE seam that turns a raw plan/iteration cmd into
+// the exact request interpret()'s structured path (go test -json, pytest
+// JUnit XML) needs to fire — shared by buildSpec (execute()'s official,
+// clean-room run) and the workspace tool's runExec (iteration preview, see
+// workspace_tools.go) so both feed interpret() IDENTICAL inputs for the
+// same cmd, modulo the workspace directory (fresh WriteFiles copy vs the
+// agent's persistent Workspace — see WorkspaceTool.Def's doc on that
+// residual, intentional divergence). The caller's own cmd variable is left
+// untouched: ecosystem detection and agent-facing feedback still classify
+// against the UNNORMALIZED cmd (interpret(res, cmd) is always called with
+// the original, never spec.Cmd).
+func applyStructuredOutputSpec(spec sandbox.Spec, cmd []string) sandbox.Spec {
+	spec.Cmd, spec.CaptureFiles = normalizeCmdForStructuredOutput(cmd)
+	return spec
 }
 
 // bareShellOps is the set of shell control tokens that mean nothing to a
