@@ -422,3 +422,47 @@ func TestPromoteAll_BlockedToolchain_Go_ProbeAbsentDegradesToUnblocked(t *testin
 		t.Error("sandbox CallCount = 0, want at least 1 — a Go finding with no go probe data must not be blocked")
 	}
 }
+
+// TestPromoteAll_BlockedToolchain_Go_AvailableProceeds pins the happy path:
+// a probe that RAN and confirmed go present must leave the finding fully
+// ungated — the claim proceeds to a genuine sandbox attempt.
+func TestPromoteAll_BlockedToolchain_Go_AvailableProceeds(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	finding := seedGoFinding(t, st)
+	repoDir := newRepoDir(t)
+
+	plan := Plan{
+		Files:  map[string]string{"internal/paginate_test.go": "package internal\n\nimport \"testing\"\n\nfunc TestPaginate(t *testing.T) {\n\tif got := paginate([]int{1, 2}, 1); len(got) != 1 {\n\t\tt.Fatalf(\"got %v\", got)\n\t}\n}\n"},
+		Cmd:    []string{"go", "test", "-timeout", "60s", "./internal/..."},
+		Expect: "the off-by-one causes the test to fail",
+	}
+	client := newScriptedClient(planBody(t, plan))
+	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "--- FAIL: TestPaginate (0.00s)\nFAIL\n",
+	}})
+
+	r, err := New(client, sb, repoDir, Options{
+		ArtifactDir:  t.TempDir(),
+		Capabilities: goAvailableCaps(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := r.PromoteAll(ctx, st, []domain.Finding{finding})
+	if err != nil {
+		t.Fatalf("PromoteAll: %v", err)
+	}
+
+	if summary.BlockedToolchain != 0 {
+		t.Errorf("summary.BlockedToolchain = %d, want 0 (go confirmed present must not block)", summary.BlockedToolchain)
+	}
+	if summary.Attempted != 1 {
+		t.Errorf("summary.Attempted = %d, want 1 (available go must proceed to a genuine attempt)", summary.Attempted)
+	}
+	if n := sb.CallCount(); n == 0 {
+		t.Error("sandbox CallCount = 0, want at least 1 — an available-go finding must reach the sandbox")
+	}
+}

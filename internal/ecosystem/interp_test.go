@@ -174,6 +174,7 @@ func TestHasRanEvidence_Go(t *testing.T) {
 		t.Error("HasRanEvidence should NOT match build-only output")
 	}
 }
+
 // TestDetectEcosystem_LauncherNormalization covers bugbot-ds90: launcher
 // shapes that used to land EcosystemUnknown because DetectEcosystem only
 // looked at a bare argv[0] — bare node, bare python3 (no pytest -m),
@@ -263,7 +264,7 @@ func TestUnwrapShell_NonShellArgvUntouched(t *testing.T) {
 	}{
 		{[]string{"go", "test", "./..."}, ecosystem.EcosystemGo},
 		{[]string{"pytest", "tests/"}, ecosystem.EcosystemPython},
-		{[]string{"bash"}, ecosystem.EcosystemUnknown},           // too short to be a -c wrapper
+		{[]string{"bash"}, ecosystem.EcosystemUnknown},              // too short to be a -c wrapper
 		{[]string{"bash", "script.sh"}, ecosystem.EcosystemUnknown}, // no -c flag
 	}
 	for _, tc := range cases {

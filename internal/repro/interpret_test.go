@@ -687,6 +687,7 @@ func TestInterpret_StructuredOutput(t *testing.T) {
 		}
 	})
 }
+
 // TestInterpret_NodeTest_TAP_Demonstrated_NotWitnessOnly covers bugbot-ds90
 // acceptance: a `node --test` TAP failure now (1) detects as EcosystemJS
 // instead of EcosystemUnknown, (2) classifies as demonstrated via the new

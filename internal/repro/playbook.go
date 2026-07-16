@@ -413,18 +413,19 @@ func repoHeadSHA(repoDir string) string {
 // another resolution's verdicts.
 func resolutionFingerprint(res sandbox.Resolution) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "strategy\x00%s\x00", res.Strategy)
+	// hash.Hash writes never fail; blank-assign to satisfy errcheck.
+	_, _ = fmt.Fprintf(h, "strategy\x00%s\x00", res.Strategy)
 	for _, m := range res.ROMounts {
-		fmt.Fprintf(h, "mount\x00%s\x00%s\x00%v\x00", m.HostPath, m.ContainerPath, m.Shared)
+		_, _ = fmt.Fprintf(h, "mount\x00%s\x00%s\x00%v\x00", m.HostPath, m.ContainerPath, m.Shared)
 	}
 	for _, e := range res.Env {
-		fmt.Fprintf(h, "env\x00%s\x00", e)
+		_, _ = fmt.Fprintf(h, "env\x00%s\x00", e)
 	}
 	for _, c := range res.SetupCmds {
-		fmt.Fprintf(h, "setup\x00%s\x00", strings.Join(c, "\x1f"))
+		_, _ = fmt.Fprintf(h, "setup\x00%s\x00", strings.Join(c, "\x1f"))
 	}
 	for _, tf := range res.Fingerprints {
-		fmt.Fprintf(h, "toolchain\x00%s\x00%s\x00", tf.Name, tf.Version)
+		_, _ = fmt.Fprintf(h, "toolchain\x00%s\x00%s\x00", tf.Name, tf.Version)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }

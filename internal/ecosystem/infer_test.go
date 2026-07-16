@@ -80,6 +80,7 @@ func TestInferToolFromCmd(t *testing.T) {
 		}
 	}
 }
+
 // TestInferToolFromCmd_LauncherNormalization covers bugbot-ds90: InferToolFromCmd
 // now shares normalizeArgv with DetectEcosystem instead of its own bespoke
 // one-level "bash -c" unwrap, so it also benefits from absolute-path
