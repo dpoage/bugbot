@@ -289,6 +289,24 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	return SmokeVerdict{OK: true, Category: SmokeCategoryOK, Detail: trunc(out, 300)}
 }
 
+// localMountsFromConfig converts cfg.Sandbox.LocalMounts into read-only
+// sandbox.ROMounts for RunSandboxVerify's dep resolution (duplicated here
+// rather than imported: engine depends on repro, so importing
+// engine.LocalMountsFromConfig from here would cycle — see
+// newVerifySandbox's doc for the same constraint). Shared=true: these are
+// host-owned source trees that must not be SELinux :Z relabeled, matching
+// engine.localMountsFromConfig exactly.
+func localMountsFromConfig(cfg config.Config) []sandbox.ROMount {
+	if len(cfg.Sandbox.LocalMounts) == 0 {
+		return nil
+	}
+	mounts := make([]sandbox.ROMount, len(cfg.Sandbox.LocalMounts))
+	for i, m := range cfg.Sandbox.LocalMounts {
+		mounts[i] = sandbox.ROMount{HostPath: m.Host, ContainerPath: m.Container, Shared: true}
+	}
+	return mounts
+}
+
 // newVerifySandbox constructs the sandbox backend RunSandboxVerify probes
 // against, selected by cfg.Sandbox.Backend exactly like
 // engine.newConfiguredSandbox (duplicated here rather than imported: engine
@@ -361,6 +379,19 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 
 	opts := sandbox.DepOptions{
 		Strategy: sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+		// FetchSandbox/FetchImage/LocalMounts/HostToolchains, threaded so
+		// doctor sees the SAME dependency provisioning a real repro run
+		// would have (bugbot-48ya acceptance 3): without FetchSandbox,
+		// dep_strategy: fetch unconditionally errored here ("requires a
+		// fetch sandbox") even when the real repro path resolves it fine;
+		// without LocalMounts/HostToolchains, the smoke run never saw an
+		// operator's local_mounts/host_toolchains entries. ResolveDeps'
+		// FETCH branch only builds a Prefetch closure — it is not invoked
+		// below, so this has no network side effect.
+		FetchSandbox:   sb,
+		FetchImage:     cfg.Sandbox.Image,
+		LocalMounts:    localMountsFromConfig(cfg),
+		HostToolchains: cfg.Sandbox.HostToolchains,
 	}
 	res, err := sandbox.ResolveDeps(repoDir, opts)
 	if err != nil {

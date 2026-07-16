@@ -45,12 +45,18 @@ package sandbox
 //
 // # Ecosystem coverage
 //
-// Strategy support per ecosystem (vendored / off / host / fetch):
+// Strategy support per ecosystem (vendored / off / host / fetch). "host→off"
+// entries apply to the CONTAINER backend only: under bwrap, Python and JS
+// HOST additionally provision from the host filesystem instead (see the
+// "bwrap-only HOST extension" sections below and isBwrapFetchBackend) —
+// mounting a baked image's independently-versioned interpreter's caches is
+// unsafe, but the bwrap sandboxed interpreter/npm IS the host one, so that
+// objection does not apply there:
 //
 //	Go      go.mod            vendored(vendor/modules.txt) · off · host · fetch
-//	Python  requirements.txt  off · fetch          (host→off; no vendored convention)
+//	Python  requirements.txt  off · fetch          (host→off on container; host mounts host site-packages under bwrap)
 //	Rust    Cargo.toml        vendored(vendor/ + .cargo/config replace-with) · off · host · fetch
-//	JS/npm  package.json      vendored(node_modules/) · off · fetch   (host→off)
+//	JS/npm  package.json      vendored(node_modules/) · off · fetch   (host→off on container; host mounts host npm cache under bwrap when package-lock.json exists, else off)
 //	C#/Nug  *.csproj/*.sln    off · host · fetch   (no v1 vendored convention)
 //	Maven   pom.xml           off · host · fetch   (no v1 vendored convention)
 //	Gradle  build.gradle[.kts]/settings.gradle[.kts]
@@ -58,9 +64,30 @@ package sandbox
 //
 // Each ecosystem owns a unique container mount path: /modcache (Go),
 // /depcache (Python), /cargo/registry (Rust), /npmcache (JS), /nugetcache (C#/NuGet),
-// /m2cache (Maven), /gradlecache (Gradle).
+// /m2cache (Maven), /gradlecache (Gradle). The bwrap-only Python HOST
+// extension is the one exception: it mounts each resolved site-packages
+// directory at its OWN host path (not a fixed container path) since bwrap
+// has no baked image whose filesystem layout it needs to match.
 // See the README section "Sandbox dependency strategies" for the full per-ecosystem
 // matrix (prefetch commands, offline-enforcement env, in-sandbox setup, security).
+//
+// # Backend-conditional resolution (bwrap vs container)
+//
+// DepOptions.FetchSandbox carries the REAL backend the caller constructed
+// (see repro.New), independent of the requested Strategy — repro.New always
+// sets it, even for HOST/OFF. Two things key off it:
+//
+//   - fetchPrefetchNetwork: the FETCH-strategy online prefetch resolves to
+//     "bridge" for the container backend (unchanged) or "host" for bwrap
+//     (bwrap has no "bridge" network — see validateBwrapNetwork).
+//   - isBwrapFetchBackend: gates the Python/JS bwrap-only HOST extensions
+//     above.
+//
+// Every other resolver path (Go, Rust, C#/NuGet, Maven, Gradle; every
+// non-HOST Python/JS branch) is backend-agnostic and produces byte-identical
+// Resolutions regardless of which backend FetchSandbox is — this is what
+// keeps deps_test.go's container-backend assertions valid unchanged
+// (bugbot-48ya acceptance 5).
 //
 // # Security posture (per-mount Shared semantics)
 //
@@ -185,6 +212,21 @@ type DepOptions struct {
 	// repository directory for the HOST strategy (test seam). Empty resolves
 	// via $HOME/.m2/repository.
 	hostMavenRepository string
+
+	// hostPythonSitePackages, when non-nil, overrides the resolved host
+	// Python site-packages/dist-packages directories for the bwrap-only HOST
+	// strategy (test seam; see resolveBwrapPythonHostDeps). Empty (nil)
+	// resolves by probing the host python3/python interpreter's sys.path.
+	// Ignored by the container backend, which keeps Python HOST mapped to
+	// OFF (see resolvePython).
+	hostPythonSitePackages []string
+
+	// hostNPMCache, when set, overrides the resolved host npm cache
+	// directory for the bwrap-only HOST strategy (test seam; see
+	// resolveBwrapNPMHostDeps). Empty resolves via `npm config get cache`
+	// then $HOME/.npm. Ignored by the container backend, which keeps JS
+	// HOST mapped to OFF (see resolveJSWithFlags).
+	hostNPMCache string
 
 	// userCacheDir, when set, overrides the base directory for bugbot-managed
 	// fetch caches (test seam). Empty uses os.UserCacheDir.
@@ -577,6 +619,51 @@ func fetchEcosystemCacheDir(ecosystem, repoDir, override string) (string, error)
 	return dir, nil
 }
 
+// isBwrapFetchBackend reports whether opts.FetchSandbox is the bwrap backend
+// (*Bwrap). deps.go and bwrap.go are the same package, so this is a plain
+// type assertion rather than a cross-package capability interface — no new
+// exported surface is needed. FetchSandbox is populated with the REAL
+// backend the caller constructed (see repro.New), regardless of the
+// requested DepStrategy, so this also doubles as the backend signal for
+// HOST-strategy resolvers that need to know which backend they are running
+// under (see resolvePython / resolveJS's bwrap-only HOST branch below).
+func isBwrapFetchBackend(opts DepOptions) bool {
+	_, ok := opts.FetchSandbox.(*Bwrap)
+	return ok
+}
+
+// fetchPrefetchNetwork resolves the network mode for a dependency-prefetch
+// Spec (the ONE online run that warms a HOST/FETCH cache).
+//
+// opts.FetchNetwork, when set, always wins — an operator who configured it
+// explicitly knows their runtime's network naming.
+//
+// Otherwise the container backend's default ("bridge", the standard NAT
+// network both podman and docker accept) is preserved BYTE-IDENTICAL
+// (bugbot-48ya acceptance 5): every existing container-backend prefetch call
+// site keeps producing "bridge" exactly as before.
+//
+// The bwrap backend has no "bridge" network — bwrap's --unshare-all either
+// shares the host's single network namespace wholesale (--share-net, mode
+// "host") or not at all ("none"); see validateBwrapNetwork. A bwrap
+// FetchSandbox therefore resolves to "host" instead: the prefetch run drops
+// its network unshare for this one invocation (still --unshare-all for
+// every other namespace, still the narrow fixedROAllowlist, still no
+// secret-bearing mounts) — mirroring the container backend's "fully
+// hardened except network" prefetch posture. This is scoped to the prefetch
+// Spec ONLY: it never changes what network mode a normal, untrusted
+// network-none run resolves to (bwrapNetworkEnabled still requires an
+// explicit "host" request either way).
+func fetchPrefetchNetwork(opts DepOptions) string {
+	if opts.FetchNetwork != "" {
+		return opts.FetchNetwork
+	}
+	if isBwrapFetchBackend(opts) {
+		return "host"
+	}
+	return "bridge"
+}
+
 // newPrefetchOnce wraps run in a sync.Once so the returned function calls run
 // at most once per Resolution — all four ecosystem prefetch constructors share
 // this pattern.
@@ -618,12 +705,7 @@ func runPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions
 		}
 	}
 
-	network := opts.FetchNetwork
-	if network == "" {
-		// "bridge" is the standard NAT network both podman and docker accept;
-		// this is the only run that is ever allowed network access.
-		network = "bridge"
-	}
+	network := fetchPrefetchNetwork(opts)
 
 	// The prefetch container is still fully hardened (read-only root, cap-drop,
 	// no-new-privileges, pids/memory/cpu limits — all from buildRunArgs); only
@@ -754,12 +836,23 @@ func resolvePython(repoDir string, opts DepOptions) (Resolution, error) {
 		return Resolution{Strategy: DepStrategyOff}, nil
 
 	case DepStrategyHost:
-		// HOST is explicitly OFF for Python: pip's HTTP cache is not a
-		// wheelhouse; --no-index installs require a local directory of wheel
-		// files (a wheelhouse), which the pip HTTP cache does not provide.
-		// Mounting ~/.cache/pip into a network-none container does not help
-		// install anything — it would just silence the "no PyPI" error without
-		// actually resolving packages. Use dep_strategy: fetch for Python.
+		if isBwrapFetchBackend(opts) {
+			// bwrap: the sandboxed python literally IS a host interpreter
+			// (resolved via sandbox.host_toolchains or the fixed allowlist's
+			// system one) rather than a baked image with its own,
+			// independently-versioned python — the version-coupling
+			// objection the container backend has (see below) does not
+			// apply, so HOST mounts the host interpreter's site-packages
+			// directly. See resolveBwrapPythonHostDeps.
+			return resolveBwrapPythonHostDeps(opts.hostPythonSitePackages)
+		}
+		// Container backend: HOST is explicitly OFF for Python: pip's HTTP
+		// cache is not a wheelhouse; --no-index installs require a local
+		// directory of wheel files (a wheelhouse), which the pip HTTP cache
+		// does not provide. Mounting ~/.cache/pip into a network-none
+		// container does not help install anything — it would just silence
+		// the "no PyPI" error without actually resolving packages. Use
+		// dep_strategy: fetch for Python.
 		return Resolution{Strategy: DepStrategyOff}, nil
 
 	case DepStrategyFetch:
@@ -860,12 +953,7 @@ func runPipPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOpti
 		}
 	}
 
-	network := opts.FetchNetwork
-	if network == "" {
-		// "bridge" is the standard NAT network both podman and docker accept;
-		// this is the ONLY pip run ever allowed network access.
-		network = "bridge"
-	}
+	network := fetchPrefetchNetwork(opts)
 
 	// The prefetch container is fully hardened (read-only root, cap-drop,
 	// no-new-privileges, limits — all from buildRunArgs); only the network
@@ -895,6 +983,93 @@ func runPipPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOpti
 		_ = os.WriteFile(sentinel, []byte(reqHash), 0o644)
 	}
 	return nil
+}
+
+// ---- bwrap-only Python HOST extension ---------------------------------------
+//
+// See resolvePython's DepStrategyHost case for the gating rationale (why
+// this is safe under bwrap but not under the container backend).
+
+// hostProbeTimeout bounds a host-side interpreter/tool probe (python3
+// sys.path, npm config get cache). Mirrors goEnvTimeout's rationale: a
+// wedged or very slow host binary must not hang the caller indefinitely.
+const hostProbeTimeout = 5 * time.Second
+
+// resolveBwrapPythonHostDeps resolves the bwrap-only Python HOST strategy:
+// mount the HOST python interpreter's site-packages/dist-packages
+// directories read-only at their own (identical) host path inside the
+// sandbox, and set PYTHONPATH explicitly so any interpreter the run
+// actually resolves (a sandbox.host_toolchains python, or an allowlisted
+// system one) picks up the mounted directories regardless of its own
+// baked-in sys.path. override is DepOptions.hostPythonSitePackages (test
+// seam).
+func resolveBwrapPythonHostDeps(override []string) (Resolution, error) {
+	dirs, err := resolveHostPythonSitePackages(override)
+	if err != nil {
+		return Resolution{}, err
+	}
+	mounts := make([]ROMount, len(dirs))
+	for i, d := range dirs {
+		// Shared=true: the host's site-packages tree is not bugbot-owned;
+		// see ROMount.Shared — no SELinux :Z relabel of a shared host dir.
+		mounts[i] = ROMount{HostPath: d, ContainerPath: d, Shared: true}
+	}
+	return Resolution{
+		ROMounts: mounts,
+		Env:      []string{"PYTHONPATH=" + strings.Join(dirs, ":")},
+		Strategy: DepStrategyHost,
+	}, nil
+}
+
+// resolveHostPythonSitePackages resolves the HOST python3 (falling back to
+// python) interpreter's site-packages/dist-packages directories — the
+// third-party import roots, deliberately excluding the stdlib and any
+// zipped stdlib archive entries also present in sys.path — by asking the
+// interpreter for its own sys.path, the same "ask the tool, don't guess the
+// convention" approach resolveHostModcache uses for `go env GOMODCACHE`.
+//
+// override, when non-nil, replaces resolution entirely (DepOptions'
+// hostPythonSitePackages test seam) so unit tests do not require a python3
+// binary on the test host. A resolution (real or overridden) that yields no
+// directories is an error: silently mounting nothing would make an agent's
+// import failures look like a code bug rather than an environment gap.
+func resolveHostPythonSitePackages(override []string) ([]string, error) {
+	if override != nil {
+		if len(override) == 0 {
+			return nil, fmt.Errorf("sandbox: no host Python site-packages directories configured")
+		}
+		return override, nil
+	}
+	pythonBin, err := exec.LookPath("python3")
+	if err != nil {
+		if pythonBin, err = exec.LookPath("python"); err != nil {
+			return nil, fmt.Errorf("sandbox: cannot resolve host Python site-packages (no python3/python on host PATH); vendor deps or set dep_strategy: off|fetch")
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hostProbeTimeout)
+	defer cancel()
+	out, runErr := exec.CommandContext(ctx, pythonBin, "-c", "import sys\nfor p in sys.path:\n\tprint(p)\n").Output()
+	if runErr != nil {
+		return nil, fmt.Errorf("sandbox: probe host Python sys.path via %q: %w", pythonBin, runErr)
+	}
+	var dirs []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		base := filepath.Base(line)
+		if base != "site-packages" && base != "dist-packages" {
+			continue
+		}
+		if st, statErr := os.Stat(line); statErr == nil && st.IsDir() {
+			dirs = append(dirs, line)
+		}
+	}
+	if len(dirs) == 0 {
+		return nil, fmt.Errorf("sandbox: host Python interpreter %q reported no site-packages directory; install the repo's dependencies on the host first (e.g. pip install -r requirements.txt), or set dep_strategy: off|fetch", pythonBin)
+	}
+	return dirs, nil
 }
 
 // ---- Rust ecosystem ---------------------------------------------------------
@@ -1182,12 +1357,7 @@ func runCargoPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOp
 		}
 	}
 
-	network := opts.FetchNetwork
-	if network == "" {
-		// "bridge" is the standard NAT network both podman and docker accept;
-		// this is the ONLY cargo run ever allowed network access.
-		network = "bridge"
-	}
+	network := fetchPrefetchNetwork(opts)
 
 	// Build the cargo fetch command. Add --locked when Cargo.lock exists so the
 	// prefetch is deterministic and cargo does not update the lockfile during the
@@ -1344,11 +1514,31 @@ func resolveJSWithFlags(repoDir string, opts DepOptions, prefetchFlags []string)
 		return Resolution{Strategy: DepStrategyOff}, nil
 
 	case DepStrategyHost:
-		// HOST is explicitly OFF for JS: npm's HTTP cache (~/.npm) stores tarballs
-		// keyed on URLs. A cache mount alone does not materialize node_modules/;
-		// npm ci must still run and requires network to resolve the registry for
-		// metadata. Mounting ~/.npm into a network-none container does not help
-		// install anything. Use dep_strategy: fetch for JS projects.
+		if isBwrapFetchBackend(opts) {
+			// `npm ci` strictly requires package-lock.json (or
+			// npm-shrinkwrap.json). pnpm-lock.yaml-only and yarn.lock-only
+			// repos resolve to OFF exactly like the FETCH branch below —
+			// pnpm/yarn offline support is deferred to a future bead, and
+			// an unconditional `npm ci` SetupCmd would turn every repro
+			// attempt on such a repo into an environment_error.
+			if !hasPackageLock(repoDir) {
+				return Resolution{Strategy: DepStrategyOff}, nil
+			}
+			// bwrap: the sandboxed npm IS a host npm (via
+			// sandbox.host_toolchains or the allowlisted system one), and
+			// there is no baked-image node_modules to go stale against, so
+			// the container backend's objection below does not apply — mount
+			// the host's existing npm cache and run the same offline
+			// copy-then-install SetupCmd the FETCH strategy uses below. See
+			// resolveBwrapNPMHostDeps.
+			return resolveBwrapNPMHostDeps(opts.hostNPMCache)
+		}
+		// Container backend: HOST is explicitly OFF for JS: npm's HTTP cache
+		// (~/.npm) stores tarballs keyed on URLs. A cache mount alone does
+		// not materialize node_modules/; npm ci must still run and requires
+		// network to resolve the registry for metadata. Mounting ~/.npm into
+		// a network-none container does not help install anything. Use
+		// dep_strategy: fetch for JS projects.
 		return Resolution{Strategy: DepStrategyOff}, nil
 
 	case DepStrategyFetch:
@@ -1493,12 +1683,7 @@ func runNPMPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOpti
 		}
 	}
 
-	network := opts.FetchNetwork
-	if network == "" {
-		// "bridge" is the standard NAT network both podman and docker accept;
-		// this is the ONLY npm run ever allowed network access.
-		network = "bridge"
-	}
+	network := fetchPrefetchNetwork(opts)
 
 	// Build the prefetch command: "npm ci <prefetchFlags> --cache /npmcache".
 	// prefetchFlags come from the ecosystem registry entry (e.g. ["--ignore-scripts"])
@@ -1537,6 +1722,74 @@ func runNPMPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOpti
 		_ = os.WriteFile(sentinel, []byte(lockHash), 0o644)
 	}
 	return nil
+}
+
+// ---- bwrap-only JS HOST extension --------------------------------------------
+//
+// See resolveJSWithFlags's DepStrategyHost case for the gating rationale
+// (why this is safe under bwrap but not under the container backend).
+
+// resolveBwrapNPMHostDeps resolves the bwrap-only JS HOST strategy: mount
+// the HOST's existing npm cache read-only and run the same offline
+// copy-then-install SetupCmd the FETCH strategy uses (see
+// resolveJSWithFlags's FETCH branch) — npm writes to its cache during `ci`
+// even for already-cached packages, so a direct RO mount would fail partway
+// through. Unlike FETCH there is no Prefetch hook: the cache is used
+// exactly as it already exists on the host, so a stale/incomplete cache
+// surfaces as an offline `npm ci` failure (SetupCmds exit 125,
+// environment_error) rather than a silent partial install. hostCache is
+// DepOptions.hostNPMCache (test seam).
+func resolveBwrapNPMHostDeps(hostCache string) (Resolution, error) {
+	cache, err := resolveHostNPMCache(hostCache)
+	if err != nil {
+		return Resolution{}, err
+	}
+	return Resolution{
+		ROMounts: []ROMount{{
+			HostPath:      cache,
+			ContainerPath: npmCacheMount,
+			Shared:        true, // host-owned cache; no :Z relabel
+		}},
+		Env: []string{
+			// npm_config_offline=true: same offline-enforcement contract as
+			// the FETCH branch — any npm call that would reach the registry
+			// fails fast instead of hanging under --network=none.
+			"npm_config_offline=true",
+		},
+		SetupCmds: [][]string{
+			{"sh", "-c", "cp -a " + npmCacheMount + " /tmp/npmcache && npm ci --cache /tmp/npmcache"},
+		},
+		Strategy: DepStrategyHost,
+	}, nil
+}
+
+// resolveHostNPMCache resolves the host's npm cache directory: override
+// (test seam) if set, else `npm config get cache`, else the conventional
+// $HOME/.npm. Errors when the resolved directory does not exist — the same
+// "cache miss is a hard, actionable error" contract resolveHostModcache
+// uses for Go, rather than silently mounting nothing.
+func resolveHostNPMCache(override string) (string, error) {
+	dir := override
+	if dir == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), hostProbeTimeout)
+		defer cancel()
+		if out, err := exec.CommandContext(ctx, "npm", "config", "get", "cache").Output(); err == nil {
+			if d := strings.TrimSpace(string(out)); d != "" {
+				dir = d
+			}
+		}
+	}
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return "", fmt.Errorf("sandbox: cannot resolve host npm cache (npm not found and HOME unset); vendor deps or set dep_strategy: off|fetch")
+		}
+		dir = filepath.Join(home, ".npm")
+	}
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return "", fmt.Errorf("sandbox: host npm cache %q does not exist; run `npm ci`/`npm install` on the host first to warm it, or use dep_strategy: off|fetch", dir)
+	}
+	return dir, nil
 }
 
 // ---- C#/NuGet ecosystem ----------------------------------------------------
@@ -1826,12 +2079,7 @@ func runNuGetPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOp
 		}
 	}
 
-	network := opts.FetchNetwork
-	if network == "" {
-		// "bridge" is the standard NAT network both podman and docker accept;
-		// this is the ONLY NuGet run ever allowed network access.
-		network = "bridge"
-	}
+	network := fetchPrefetchNetwork(opts)
 
 	// Build the dotnet restore command. Add --locked-mode when
 	// packages.lock.json exists so the prefetch is deterministic and dotnet
@@ -2130,10 +2378,7 @@ func runMavenPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOp
 		}
 	}
 
-	network := opts.FetchNetwork
-	if network == "" {
-		network = "bridge"
-	}
+	network := fetchPrefetchNetwork(opts)
 
 	// `mvn -B dependency:go-offline` downloads all compile/runtime/test
 	// dependencies declared in the POM into the local repository. -B is
@@ -2463,10 +2708,7 @@ func runGradlePrefetch(ctx context.Context, repoDir, hostCache string, opts DepO
 		}
 	}
 
-	network := opts.FetchNetwork
-	if network == "" {
-		network = "bridge"
-	}
+	network := fetchPrefetchNetwork(opts)
 
 	// `gradle dependencies --no-daemon` resolves all dependency configurations
 	// and populates the Gradle user home (GRADLE_USER_HOME). --no-daemon
