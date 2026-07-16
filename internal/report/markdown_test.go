@@ -88,7 +88,7 @@ func TestMarkdownEmpty(t *testing.T) {
 // when nothing is blocked (the common case).
 func TestMarkdownBlockedToolchainSection(t *testing.T) {
 	meta := fixtureMeta()
-	meta.BlockedToolchain = map[string]int{"python": 2, "js": 38}
+	meta.BlockedToolchain = map[string]int{"python": 2, "js": 38, "go": 1}
 	got := Markdown(New(fixtureFindings(), meta))
 
 	if !strings.Contains(got, "## Blocked by Missing Toolchain") {
@@ -99,6 +99,14 @@ func TestMarkdownBlockedToolchainSection(t *testing.T) {
 	}
 	if !strings.Contains(got, "2 finding(s) blocked: image lacks python") {
 		t.Errorf("missing python aggregate line, got:\n%s", got)
+	}
+	// The go line must name the binary ("go"), never the probe-mode token
+	// "present" (bugbot-813i).
+	if !strings.Contains(got, "1 finding(s) blocked: image lacks go") {
+		t.Errorf("missing go aggregate line naming the binary, got:\n%s", got)
+	}
+	if strings.Contains(got, "image lacks present") {
+		t.Errorf("go probe-mode token leaked into the report, got:\n%s", got)
 	}
 	// Higher count (js=38) must sort before the lower one (python=2).
 	if strings.Index(got, "lacks node") > strings.Index(got, "lacks python") {

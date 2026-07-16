@@ -1,6 +1,7 @@
 package progress
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -42,6 +43,32 @@ func TestEmit_StampsTime(t *testing.T) {
 	Emit(SinkFunc(func(ev Event) { got = ev }), Event{Kind: KindScanStarted, Time: want})
 	if !got.Time.Equal(want) {
 		t.Errorf("Emit overwrote a preset Time: got %v want %v", got.Time, want)
+	}
+}
+
+// TestEmitReproBlocked_NamesBinaryNotModeToken pins the operator-facing
+// Message wording (bugbot-813i): the go ecosystem must render its BINARY
+// ("image lacks go"), never its probe-mode token ("present"), alongside the
+// established js->node mapping.
+func TestEmitReproBlocked_NamesBinaryNotModeToken(t *testing.T) {
+	sink := &recordingSink{}
+	EmitReproBlocked(sink, map[string]int{"go": 1, "js": 38})
+
+	events := sink.snapshot()
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2", len(events))
+	}
+	msgs := events[0].Message + "\n" + events[1].Message
+	for _, want := range []string{
+		"1 finding(s) blocked: image lacks go",
+		"38 finding(s) blocked: image lacks node",
+	} {
+		if !strings.Contains(msgs, want) {
+			t.Errorf("missing %q in messages:\n%s", want, msgs)
+		}
+	}
+	if strings.Contains(msgs, "present") {
+		t.Errorf("go probe-mode token leaked into operator-facing message:\n%s", msgs)
 	}
 }
 

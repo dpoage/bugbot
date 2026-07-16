@@ -114,10 +114,7 @@ func writeBlockedToolchain(b *strings.Builder, counts map[string]int) {
 
 	b.WriteString("## Blocked by Missing Toolchain\n\n")
 	for _, eco := range ecos {
-		binary := ecosystem.BaseMode(ecosystem.Ecosystem(eco))
-		if binary == "" {
-			binary = eco
-		}
+		binary := ecosystem.ToolchainBinary(ecosystem.Ecosystem(eco))
 		fmt.Fprintf(b, "- %d finding(s) blocked: image lacks %s\n", counts[eco], binary)
 	}
 	b.WriteString("\n")
