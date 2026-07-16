@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
@@ -33,7 +34,7 @@ func TestWriteArtifacts_ManifestRoundTrip(t *testing.T) {
 	}
 	res := sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nFAIL"}
 
-	bundleDir, err := writeArtifacts(dir, finding, plan, res, "docker.io/library/golang:1.21", "none")
+	bundleDir, err := writeArtifacts(dir, finding, plan, res, res, "docker.io/library/golang:1.21", "none")
 	if err != nil {
 		t.Fatalf("writeArtifacts: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestWriteArtifacts_SentinelSeen(t *testing.T) {
 	plan := &Plan{Cmd: []string{"python3", "repro.py"}, Files: map[string]string{"repro.py": "print('x')\n"}}
 	res := sandbox.Result{ExitCode: 1, Stdout: reproSentinelDemonstrated}
 
-	bundleDir, err := writeArtifacts(dir, finding, plan, res, "python:3.12", "none")
+	bundleDir, err := writeArtifacts(dir, finding, plan, res, res, "python:3.12", "none")
 	if err != nil {
 		t.Fatalf("writeArtifacts: %v", err)
 	}
@@ -99,6 +100,38 @@ func TestWriteArtifacts_SentinelSeen(t *testing.T) {
 	}
 	if !b.Manifest.Result.SentinelSeen {
 		t.Error("Manifest.Result.SentinelSeen = false, want true")
+	}
+}
+
+// TestWriteArtifacts_ReadmeRecordsBothRuns is bugbot-c49s's artifact
+// acceptance: the determinism gate pays for a confirmation run before
+// promoting, and the README must show a human BOTH outcomes, not just the
+// official run — otherwise the second run's cost buys no visible trust
+// signal in the bundle itself.
+func TestWriteArtifacts_ReadmeRecordsBothRuns(t *testing.T) {
+	dir := t.TempDir()
+	finding := domain.Finding{ID: "f-readme", Title: "racy read", File: "pkg/race.go", Line: 7}
+	plan := &Plan{
+		Files:  map[string]string{"bug_test.go": "package bug\n\nimport \"testing\"\n\nfunc TestBug(t *testing.T){ t.Fatal(\"boom\") }\n"},
+		Cmd:    []string{"go", "test", "-run", "TestBug", "./..."},
+		Expect: "TestBug fails",
+	}
+	res := sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nofficial run\nFAIL"}
+	confirmRes := sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nconfirmation run\nFAIL"}
+
+	bundleDir, err := writeArtifacts(dir, finding, plan, res, confirmRes, "docker.io/library/golang:1.21", "none")
+	if err != nil {
+		t.Fatalf("writeArtifacts: %v", err)
+	}
+	readmeBytes, err := os.ReadFile(filepath.Join(bundleDir, "README.md"))
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	readme := string(readmeBytes)
+	for _, want := range []string{"official run", "confirmation run", "Determinism"} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("README missing %q; got:\n%s", want, readme)
+		}
 	}
 }
 

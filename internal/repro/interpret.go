@@ -40,6 +40,15 @@ const (
 	// all land here: the failing test is real, but it proves nothing about
 	// the target's own code (bugbot-qb4r).
 	VerdictReasonTargetNotExecuted VerdictReason = "target_not_executed"
+	// VerdictReasonFlaky: the repro demonstrated the bug on the official run
+	// but did NOT demonstrate again on an identical confirmation re-run (same
+	// plan, fresh workspace) — bugbot-c49s's determinism gate. Concurrency/
+	// race findings are the core target class for this stage and are exactly
+	// the ones prone to a single lucky failure; requiring two consecutive
+	// demonstrating runs before promotion turns that lucky failure into
+	// corrective feedback instead of a Tier-1 artifact a human can't
+	// reproduce.
+	VerdictReasonFlaky VerdictReason = "flaky_repro"
 )
 
 // verdict is the interpretation of a single sandbox run against the
@@ -321,6 +330,24 @@ func witnessDemonstration(v verdict, out, targetPath string) verdict {
 	}
 }
 
+// flakyVerdict builds the non-promoting verdict for a repro that
+// demonstrated on the official run (first) but did not demonstrate again on
+// an identical confirmation re-run (second) — bugbot-c49s's determinism
+// gate (see Attempt in repro.go). first is the ALREADY-witnessed
+// demonstrating verdict; second is the confirmation run's (already
+// witnessed) non-demonstrating verdict. The combined summary records both
+// outcomes so the agent's revision feedback and any operator inspecting
+// att.Output can see exactly where the two runs diverged.
+func flakyVerdict(first, second verdict) verdict {
+	return verdict{
+		reason: VerdictReasonFlaky,
+		summary: fmt.Sprintf(
+			"run 1/2 demonstrated the bug; run 2/2 (identical plan, fresh workspace) did not (%s): %s",
+			second.reason, trunc(second.summary, 2000)),
+		ecosystem: first.ecosystem,
+	}
+}
+
 // feedback builds the corrective message sent back to the agent after a
 // non-demonstrating attempt, tailored to the verdict's category and
 // including the offending plan's command and the run output the agent
@@ -349,6 +376,27 @@ func (v verdict) feedback(p *Plan) string {
 		}
 		if v.summary != "" {
 			fmt.Fprintf(&b, "\n\nOutput was:\n%s", util.FenceBlock("SANDBOX OUTPUT", v.summary))
+		}
+		return b.String()
+	}
+	// bugbot-c49s: the flaky-repro verdict gets its own early-return message
+	// (like bazel above) because the generic post-switch trailer below talks
+	// about workspace/build side effects, which is the wrong framing here —
+	// both runs used fresh workspaces and the divergence is about timing,
+	// not state.
+	if v.reason == VerdictReasonFlaky {
+		b.WriteString("Your repro demonstrated the bug on the official run, but an IDENTICAL confirmation re-run ")
+		b.WriteString("(same plan, fresh workspace) did NOT demonstrate it again. A repro that only fails sometimes ")
+		b.WriteString("is not a reliable Tier-1 reproduction — a human running it once may see it pass. This usually ")
+		b.WriteString("means the test races on timing rather than deterministically exercising the bug: add explicit ")
+		b.WriteString("synchronization (channels, sync.WaitGroup, mutexes) instead of sleeps, and/or increase the ")
+		b.WriteString("number of iterations/goroutines so the failure condition is hit on EVERY run, not just ")
+		b.WriteString("occasionally. The test must fail the same way twice in a row.")
+		if len(p.Cmd) > 0 {
+			fmt.Fprintf(&b, "\n\nCommand run: %s", strings.Join(p.Cmd, " "))
+		}
+		if v.summary != "" {
+			fmt.Fprintf(&b, "\n\n%s", util.FenceBlock("RUN 1 vs RUN 2", v.summary))
 		}
 		return b.String()
 	}
