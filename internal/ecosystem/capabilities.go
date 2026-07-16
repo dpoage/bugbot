@@ -56,24 +56,36 @@ var ProbeEntries = []ProbeEntry{
 	bazelCapabilityProbe,
 }
 
-// goCapabilityProbe probes whether the Go sandbox image has cgo + a C
-// compiler available (prerequisite for `go test -race`).
+// goCapabilityProbe probes two independent things about the Go sandbox
+// image: whether a go binary is present at all ("present", bugbot-bslx —
+// the base-presence mode InferFromExtension/InferFromCmd gate on) and
+// whether cgo + a C compiler are available ("race", a prerequisite for `go
+// test -race`, unrelated to base presence).
+//
+// "present" is checked via `command -v go` rather than `go env`'s exit code
+// so a missing go binary (exit 127) is distinguishable from a present-but-
+// misconfigured one; "race" short-circuits false when CGO_ENABLED isn't
+// exactly "1", so it never claims race support just because `command -v cc`
+// happened to succeed on a go-less image.
 var goCapabilityProbe = ProbeEntry{
-	Name:  "go",
-	Probe: []string{"/bin/sh", "-c", "go env CGO_ENABLED && (which cc || which gcc)"},
+	Name: "go",
+	Probe: []string{"/bin/sh", "-c",
+		`command -v go >/dev/null 2>&1 && echo go; [ "$(go env CGO_ENABLED 2>/dev/null)" = "1" ] && { command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; } && echo race`,
+	},
 	Interpret: func(r ProbeResult) map[string]bool {
-		if r.ExitCode != 0 {
-			return map[string]bool{"race": false}
+		modes := map[string]bool{
+			"present": false,
+			"race":    false,
 		}
-		cgoEnabled := strings.TrimSpace(r.Stdout)
-		for _, line := range strings.Split(cgoEnabled, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
+		for _, line := range strings.Split(r.Stdout, "\n") {
+			switch strings.TrimSpace(line) {
+			case "go":
+				modes["present"] = true
+			case "race":
+				modes["race"] = true
 			}
-			return map[string]bool{"race": line == "1"}
 		}
-		return map[string]bool{"race": false}
+		return modes
 	},
 }
 
