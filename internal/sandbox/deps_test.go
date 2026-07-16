@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -1557,6 +1558,72 @@ func TestJSCommittedNodeModulesIsVendored(t *testing.T) {
 				t.Error("committed node_modules: want no prefetch hook")
 			}
 		})
+	}
+}
+
+// TestJSGitignoredNodeModulesIsNotVendored covers bugbot-f36r: a node_modules/
+// that exists on the host but is excluded by .gitignore does not survive
+// copyWorkspace's `git ls-files --cached --others --exclude-standard` copy
+// (see workspace.go's gitWorktreeFiles). Before the fix, hasNodeModules did a
+// bare os.Stat on the host repoDir and reported Strategy=vendored (no mounts,
+// no setup) even though the sandboxed workspace would have zero dependencies.
+// resolveJS must fall through to the requested strategy instead.
+func TestJSGitignoredNodeModulesIsNotVendored(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+	writeFile(t, filepath.Join(dir, ".gitignore"), "node_modules/\n")
+	if err := os.MkdirAll(filepath.Join(dir, "node_modules", "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "node_modules", "pkg", "index.js"), "module.exports = {};\n")
+	gitInit(t, dir)
+
+	res, err := resolveJS(dir, DepOptions{Strategy: DepStrategyOff})
+	if err != nil {
+		t.Fatalf("resolveJS: %v", err)
+	}
+	if res.Strategy == DepStrategyVendored {
+		t.Fatalf("Strategy = vendored, want fall-through to off: gitignored node_modules does not survive copyWorkspace")
+	}
+	if res.Strategy != DepStrategyOff {
+		t.Errorf("Strategy = %q, want off", res.Strategy)
+	}
+
+	// hasNodeModules directly, to pin the detection contract regardless of
+	// resolveJS's strategy-fallthrough wiring.
+	if hasNodeModules(dir) {
+		t.Error("hasNodeModules: want false for gitignored node_modules (would not survive copyWorkspace)")
+	}
+}
+
+// TestJSTrackedNodeModulesIsVendored covers the companion case: a
+// node_modules/ that IS tracked by git (unusual, but legal — e.g. a
+// deliberately committed dependency snapshot) survives copyWorkspace's copy
+// and must still resolve to vendored.
+func TestJSTrackedNodeModulesIsVendored(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+	if err := os.MkdirAll(filepath.Join(dir, "node_modules", "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "node_modules", "pkg", "index.js"), "module.exports = {};\n")
+	gitInit(t, dir) // commits node_modules since no .gitignore excludes it
+
+	if !hasNodeModules(dir) {
+		t.Fatal("hasNodeModules: want true for git-tracked node_modules")
+	}
+	res, err := resolveJS(dir, DepOptions{Strategy: DepStrategyOff})
+	if err != nil {
+		t.Fatalf("resolveJS: %v", err)
+	}
+	if res.Strategy != DepStrategyVendored {
+		t.Errorf("Strategy = %q, want vendored for git-tracked node_modules", res.Strategy)
 	}
 }
 

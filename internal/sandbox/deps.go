@@ -1611,11 +1611,48 @@ func hasPackageJSON(repoDir string) bool {
 }
 
 // hasNodeModules reports whether repoDir contains a root node_modules/
-// directory, indicating that JS dependencies are already materialized
-// (the npm equivalent of vendored deps).
+// directory whose contents will actually survive copyWorkspace's
+// gitignore-aware copy, indicating that JS dependencies are already
+// materialized (the npm equivalent of vendored deps).
+//
+// bugbot-f36r: a bare os.Stat here used to be sufficient, but
+// copyWorkspace copies only what `git ls-files --cached --others
+// --exclude-standard` reports (see workspace.go) — a gitignored
+// node_modules/ is silently stripped from the sandbox workspace even
+// though it exists on the host. That made this function report
+// Strategy=vendored (no mounts, no setup) for a workspace that in fact
+// has zero dependencies, and the sandboxed run then failed on imports.
+// Fix: when repoDir is a git work tree, reconcile with
+// gitWorktreeFiles — the exact same listing copyWorkspace uses — so
+// node_modules only counts as vendored when git will actually carry it
+// into the copy (tracked, or untracked-but-not-gitignored). Non-git
+// checkouts and listing failures fall back to the plain stat check,
+// matching copyWorkspace's own full-copy fallback for those cases.
 func hasNodeModules(repoDir string) bool {
 	st, err := os.Stat(filepath.Join(repoDir, "node_modules"))
-	return err == nil && st.IsDir()
+	if err != nil || !st.IsDir() {
+		return false
+	}
+	files, isRepo, err := gitWorktreeFiles(repoDir)
+	if err != nil {
+		// git ls-files failed; copyWorkspace will surface this same error
+		// and abort sandbox creation, so the strategy decided here is
+		// moot. Preserve the plain stat-based answer.
+		return true
+	}
+	if !isRepo {
+		// Not a git work tree (or git unavailable): copyWorkspace does a
+		// full recursive copy in this case, so node_modules survives
+		// intact regardless of any .gitignore entry.
+		return true
+	}
+	prefix := "node_modules" + string(filepath.Separator)
+	for _, f := range files {
+		if f == "node_modules" || strings.HasPrefix(f, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasPackageLock reports whether repoDir contains a root package-lock.json.
