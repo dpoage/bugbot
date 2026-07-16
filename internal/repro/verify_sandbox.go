@@ -122,6 +122,7 @@ func VerifySandbox(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec
 		Image:       spec.Image,
 		Env:         append(append([]string(nil), spec.Env...), res.Env...),
 		ROMounts:    append(append([]sandbox.ROMount(nil), spec.ROMounts...), res.ROMounts...),
+		RWMounts:    append(append([]sandbox.ROMount(nil), spec.RWMounts...), res.RWMounts...),
 		SetupCmds:   res.SetupCmds,
 		Network:     "none",
 		Timeout:     smokeTimeout,

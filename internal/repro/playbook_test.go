@@ -502,6 +502,29 @@ func TestPlaybookAlternativeTo_PrefersSameEcosystem(t *testing.T) {
 	}
 }
 
+// TestPlaybookAlternativeTo_BazeliskForFailedBazel pins bugbot-wjc2: a
+// bazelisk-only sandbox (bazel FAILS, bazelisk verified) must offer
+// bazelisk as the same-ecosystem alternative for a failed "bazel" launcher,
+// and rejectPlaybookFailedLaunch must name it in its rejection feedback.
+func TestPlaybookAlternativeTo_BazeliskForFailedBazel(t *testing.T) {
+	pb := Playbook{Verdicts: []PlaybookVerdict{
+		{Ecosystem: ecosystem.EcosystemBazel, Launcher: "bazel", Reason: "not found"},
+		{Ecosystem: ecosystem.EcosystemBazel, Launcher: "bazelisk", Verified: true},
+	}}
+	alt, ok := pb.alternativeTo("bazel")
+	if !ok || alt != "bazelisk" {
+		t.Errorf("alternativeTo(bazel) = (%q, %v), want (\"bazelisk\", true) — same-ecosystem preference", alt, ok)
+	}
+
+	msg := rejectPlaybookFailedLaunch(&Plan{Cmd: []string{"bazel", "test", "//..."}}, pb)
+	if msg == "" {
+		t.Fatal("want rejection feedback, got none")
+	}
+	if !strings.Contains(msg, "bazel") || !strings.Contains(msg, "bazelisk") {
+		t.Errorf("feedback must name both the failed launcher and the verified bazelisk alternative: %q", msg)
+	}
+}
+
 func TestPlaybookAlternativeTo_NoCrossEcosystemFallback(t *testing.T) {
 	pb := Playbook{Verdicts: []PlaybookVerdict{
 		{Ecosystem: ecosystem.EcosystemRust, Launcher: "cargo", Reason: "not found"},

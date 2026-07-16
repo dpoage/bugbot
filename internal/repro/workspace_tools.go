@@ -400,6 +400,7 @@ type WorkspaceTool struct {
 	timeout time.Duration
 
 	roMounts  []sandbox.ROMount
+	rwMounts  []sandbox.ROMount
 	depEnv    []string
 	setupCmds [][]string
 
@@ -415,7 +416,8 @@ type WorkspaceTool struct {
 // sb executes the sandboxed command for the exec applet; repoDir/image/
 // timeout mirror execute()'s Spec policy so an exec run sees the same
 // network/dep/timeout/image environment the final plan will; roMounts/
-// depEnv/setupCmds carry the resolved dependency strategy; materialize
+// rwMounts/depEnv/setupCmds carry the resolved dependency strategy (rwMounts
+// are operator "writable: true" local_mounts, bugbot-wjc2); materialize
 // lazily creates the iteration workspace (normally sb.(workspaceMaterializer).
 // MaterializeWorkspace); ws is the shared holder Attempt cleans up on
 // return; maxExec is the per-attempt SANDBOX budget — only exec calls that
@@ -426,6 +428,7 @@ func NewWorkspaceTool(
 	repoDir, image string,
 	timeout time.Duration,
 	roMounts []sandbox.ROMount,
+	rwMounts []sandbox.ROMount,
 	depEnv []string,
 	setupCmds [][]string,
 	materialize func(repoDir string) (string, error),
@@ -438,6 +441,7 @@ func NewWorkspaceTool(
 		image:       image,
 		timeout:     timeout,
 		roMounts:    roMounts,
+		rwMounts:    rwMounts,
 		depEnv:      depEnv,
 		setupCmds:   setupCmds,
 		materialize: materialize,
@@ -930,6 +934,7 @@ func (t *WorkspaceTool) runExec(ctx context.Context, cmd []string) (string, erro
 		Image:     t.image,
 		Timeout:   t.timeout,
 		ROMounts:  t.roMounts,
+		RWMounts:  t.rwMounts,
 		Env:       t.depEnv,
 		SetupCmds: t.setupCmds,
 	}, cmd)

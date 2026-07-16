@@ -187,14 +187,20 @@ sandbox:
   # setup_cmds:
   #   - ["apt-get", "install", "-y", "--no-install-recommends", "libpq-dev"]
   #   - ["protoc", "--version"]
-  # local_mounts: read-only bind-mounts for on-disk deps (monorepo siblings,
+  # local_mounts: bind-mounts for on-disk deps (monorepo siblings,
   # locally-checked-out path deps). Orthogonal to dep_strategy — both may be
   # active at once. Paths are ONLY from this config (trusted boundary); paths
   # from in-repo manifests are a deliberate fast-follow (security gating).
-  # Mounts are read-only with no SELinux :Z relabel (host-owned shared dirs).
+  # Mounts are read-only by default (no SELinux :Z relabel; host-owned shared
+  # dirs). Add "writable: true" (bugbot-wjc2) only when the reproduced tool
+  # unconditionally mutates the mount (e.g. bazel vendor's symlink/.marker
+  # refresh, or a bazel disk cache) — poisoning blast radius is scoped to
+  # bugbot's own sandbox builds, so point writable entries at bugbot-owned
+  # dirs only.
   # local_mounts:
   #   - host: /absolute/path/to/sibling     # must exist on the host
   #     container: /sibling                  # absolute container path; unique
+  #     # writable: true                     # opt-in; default false (RO)
   # host_toolchains: mount host toolchains (or explicit host dirs) read-only
   # and prepend them to the sandbox's PATH. Use when the sandbox image lacks
   # a toolchain the host already has (e.g. a bazel-only image reproducing a

@@ -35,7 +35,7 @@ func TestDepProbeInputsThreadsLocalMounts(t *testing.T) {
 	cfg.Sandbox.LocalMounts = []config.LocalMount{{Host: mountDir, Container: "/sibling"}}
 
 	sb := sandbox.NewMock(sandbox.MockResponse{})
-	mounts, _ := depProbeInputs(cfg, sb, repoDir)
+	mounts, _, _ := depProbeInputs(cfg, sb, repoDir)
 
 	found := false
 	for _, m := range mounts {
@@ -66,7 +66,7 @@ func TestDepProbeInputsThreadsDepStrategyEnv(t *testing.T) {
 
 	var cfg config.Config
 	sb := sandbox.NewMock(sandbox.MockResponse{})
-	_, env := depProbeInputs(cfg, sb, repoDir)
+	_, _, env := depProbeInputs(cfg, sb, repoDir)
 
 	wantEnv := "GOFLAGS=-mod=vendor"
 	found := false

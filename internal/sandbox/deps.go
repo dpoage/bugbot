@@ -236,11 +236,19 @@ type DepOptions struct {
 	// bind-mount into the sandbox INDEPENDENT of ecosystem detection. They
 	// compose with any ecosystem-derived mounts (off/host/fetch) so a repo can
 	// have both a registry-cache mount AND sibling-directory mounts active in
-	// the same Spec. Resolved from config.Sandbox.LocalMounts by the caller;
-	// the sandbox package does not parse in-repo manifests (v1 security boundary).
-	// Each mount must have HostPath set; Shared is always true (host-owned dirs,
-	// no SELinux :Z relabel). See ROMount.Shared for the full rationale.
+	// the same Spec. Resolved from the RO subset of config.Sandbox.LocalMounts
+	// by the caller; the sandbox package does not parse in-repo manifests (v1
+	// security boundary). Each mount must have HostPath set; Shared is always
+	// true (host-owned dirs, no SELinux :Z relabel). See ROMount.Shared for
+	// the full rationale.
 	LocalMounts []ROMount
+	// LocalRWMounts is LocalMounts' writable counterpart (bugbot-wjc2):
+	// additional host directories to bind-mount WRITABLE into the sandbox,
+	// resolved from the entries of config.Sandbox.LocalMounts that set
+	// Writable=true. Independent of ecosystem detection like LocalMounts;
+	// rendered into Resolution.RWMounts (never ROMounts) — see
+	// sandbox.Spec.RWMounts for the security posture this accepts.
+	LocalRWMounts []ROMount
 	// HostToolchains is an ordered list of host toolchain names (resolved via
 	// the host's PATH) or explicit host directories to bind-mount read-only
 	// into the sandbox and prepend to its PATH, via ResolveHostToolchains.
@@ -251,12 +259,19 @@ type DepOptions struct {
 }
 
 // Resolution is the result of resolving a repo's dependency strategy: the
-// read-only mounts and extra environment a run should carry, plus an optional
+// mounts and extra environment a run should carry, plus an optional
 // one-time Prefetch hook. It is ecosystem-agnostic so non-Go resolvers can
 // return the same shape.
 type Resolution struct {
 	// ROMounts are read-only mounts to add to the run's Spec.
 	ROMounts []ROMount
+	// RWMounts are writable mounts to add to the run's Spec.RWMounts
+	// (bugbot-wjc2). Populated ONLY from DepOptions.LocalRWMounts — no
+	// ecosystem resolver contributes to this field; an ecosystem's own
+	// internal prefetch-step RWMounts (e.g. DepStrategyFetch's one-time
+	// online download) are scoped to that closure's own Exec call and never
+	// surface here. See sandbox.Spec.RWMounts for the security posture.
+	RWMounts []ROMount
 	// Env are extra KEY=VALUE entries to append to the run's Spec.Env. They are
 	// appended after the caller's own env, matching the sandbox's "later wins"
 	// ordering, so they take effect for the run.
@@ -265,7 +280,6 @@ type Resolution struct {
 	// Non-Go ecosystems populate this (e.g. ["npm","ci","--offline"]); the Go
 	// ecosystem contributes a single mkdir for its build-scratch dirs (goCacheDir).
 	SetupCmds [][]string
-
 	// Prefetch, when non-nil, must be called ONCE before the first network-none
 	// run for this repo (e.g. from the reproducer's PromoteAll setup). It runs
 	// the online module download and is a no-op on repeat calls (it is guarded
@@ -431,6 +445,11 @@ func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
 	// first (registry caches), then operator local mounts. The validateMounts
 	// uniqueness check in sandbox.Exec backstops any ContainerPath collisions.
 	res.ROMounts = append(res.ROMounts, opts.LocalMounts...)
+	// Writable local mounts (bugbot-wjc2): same ordering contract as the RO
+	// half above, but into Resolution.RWMounts — no ecosystem resolver ever
+	// contributes here, so this is a pure passthrough of the operator's
+	// opt-in.
+	res.RWMounts = append(res.RWMounts, opts.LocalRWMounts...)
 
 	// Host toolchain mounts (fix A, bugbot-14g0): resolved AFTER local mounts,
 	// independent of ecosystem detection and dep strategy. A resolved
