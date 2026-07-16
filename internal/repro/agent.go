@@ -325,7 +325,9 @@ run_tests as the demonstration or include it in cmd.`, maxExec)
 // the final plan in a fresh workspace — containing the repo plus exactly
 // the tracked files — so command side effects from iteration (including
 // workspace exec's) can never substitute for the plan itself demonstrating
-// the bug.
+// the bug. bugbot-0wvg extended the FREE applet step with grep/find
+// (content search and filename lookup) after dogfood measurement found 53%
+// of budgeted exec calls were read-only probes ls/cat could not cover.
 func workspaceGuidance(maxExec int) string {
 	return fmt.Sprintf(`
 
@@ -342,9 +344,17 @@ Work it as an ORDERED loop:
      directory (dir defaults to "."). FREE.
    - workspace {"argv": ["cat", "<file>"]} shows a workspace-relative
      file's tail. FREE.
+   - workspace {"argv": ["grep", "<pattern>", "<dir>"]} searches file
+     contents under a workspace-relative directory for a regexp, returning
+     'path:line:text' matches. FREE.
+   - workspace {"argv": ["find", "<glob-or-substring>", "<dir>"]} locates
+     workspace-relative paths by filename. FREE.
    - workspace {"argv": ["status"]} reports whether the workspace is
      materialized, your tracked files, and your exec budget used/remaining.
      FREE.
+   These four are how you LOOK at the sandbox: exec is BUDGETED and is for
+   RUNNING code, never for probing it — do not spend exec on "ls", "cat",
+   "grep", or "find" invocations; use the free applets instead.
    Also prefer get_package_context / run_tests (where wired) over spending
    exec budget: they orient you on the build/test layout for free or out of
    a separate, smaller budget. Reach for workspace {"argv": ["exec", ...]}
