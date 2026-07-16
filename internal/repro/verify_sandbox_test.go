@@ -3,10 +3,12 @@ package repro
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/sandbox"
 )
 
@@ -563,5 +565,75 @@ func TestVerifySandboxOnce_KeyedPerRepoAndImage(t *testing.T) {
 	}
 	if !hitSame {
 		t.Error("same (repoDir, image) pair must hit the cache")
+	}
+}
+
+// TestRunSandboxVerifyThreadsDepOptions is the regression test for
+// bugbot-48ya gap 3: RunSandboxVerify previously built its DepOptions with
+// ONLY Strategy set, so dep_strategy: fetch unconditionally failed dep
+// resolution with "requires a fetch sandbox" (sandbox.ResolveDeps' Go FETCH
+// branch requires FetchSandbox) even when the real repro path would resolve
+// it fine, and sandbox.local_mounts/host_toolchains were invisible to the
+// doctor smoke probe entirely. This proves FetchSandbox is now threaded (a
+// go.mod repo under dep_strategy: fetch must resolve deps without error)
+// and LocalMounts is threaded (a configured local_mounts entry must not be
+// silently dropped) by exercising ResolveDeps via the same DepOptions shape
+// RunSandboxVerify builds.
+//
+// Uses backend: bwrap (skipped cleanly when unavailable): it needs no
+// sandbox.image and constructs without any external container runtime.
+func TestRunSandboxVerifyThreadsDepOptions(t *testing.T) {
+	if ok, reason := sandbox.DetectBwrap(); !ok {
+		t.Skipf("bwrap unavailable: %s", reason)
+	}
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte("module example.com/x\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mountDir := t.TempDir()
+
+	var cfg config.Config
+	cfg.Sandbox.Backend = "bwrap"
+	cfg.Sandbox.DepStrategy = "fetch"
+	cfg.Sandbox.LocalMounts = []config.LocalMount{{Host: mountDir, Container: "/sibling"}}
+
+	verdict, err := RunSandboxVerify(context.Background(), repoDir, cfg)
+	if err != nil {
+		if strings.Contains(err.Error(), "requires a fetch sandbox") {
+			t.Fatalf("RunSandboxVerify: DepOptions.FetchSandbox was not threaded through -- got the pre-fix resolve error: %v", err)
+		}
+		t.Fatalf("RunSandboxVerify: unexpected error: %v", err)
+	}
+	if verdict.Category == SmokeCategoryEnvError && strings.Contains(verdict.Detail, "could not resolve dependencies") {
+		t.Fatalf("verdict = %+v, want dependency resolution to succeed (FetchSandbox/LocalMounts not threaded)", verdict)
+	}
+
+	// Directly assert LocalMounts reaches sandbox.ResolveDeps via the exact
+	// DepOptions shape RunSandboxVerify constructs (localMountsFromConfig +
+	// FetchSandbox), independent of what the smoke command happens to be.
+	bw, err := sandbox.NewBwrap()
+	if err != nil {
+		t.Fatalf("NewBwrap: %v", err)
+	}
+	t.Cleanup(func() { _ = bw.Close() })
+	res, err := sandbox.ResolveDeps(repoDir, sandbox.DepOptions{
+		Strategy:       sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+		FetchSandbox:   bw,
+		FetchImage:     cfg.Sandbox.Image,
+		LocalMounts:    localMountsFromConfig(cfg),
+		HostToolchains: cfg.Sandbox.HostToolchains,
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps: %v", err)
+	}
+	found := false
+	for _, m := range res.ROMounts {
+		if m.ContainerPath == "/sibling" && m.HostPath == mountDir {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ROMounts = %+v, want the sandbox.local_mounts entry threaded through", res.ROMounts)
 	}
 }
