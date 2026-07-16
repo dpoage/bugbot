@@ -2729,16 +2729,34 @@ func TestResolveDeps_Gradle_GlobalTable(t *testing.T) {
 
 // ---- bugbot-48ya: bwrap dependency provisioning -----------------------------
 
+// newUnitBwrap constructs a Bwrap backend for the resolver unit tests below,
+// skipping when the backend is unusable on this host (bwrap absent, non-Linux,
+// or userns disabled) — the same self-skip discipline as the integration
+// suite's newTestBwrap (bwrap_integration_test.go), which is compiled out of
+// unit builds by its build tag. The tests below never Exec anything; they only
+// need a real *Bwrap for isBwrapFetchBackend's type assertion, but NewBwrap
+// fails fast on hosts without bubblewrap (e.g. CI runners), so skipping keeps
+// them consistent with every other bwrap-dependent test in this package.
+func newUnitBwrap(t *testing.T) *Bwrap {
+	t.Helper()
+	if ok, reason := DetectBwrap(); !ok {
+		t.Skipf("bwrap unavailable: %s", reason)
+	}
+	bw, err := NewBwrap()
+	if err != nil {
+		t.Skipf("NewBwrap: %v", err)
+	}
+	t.Cleanup(func() { _ = bw.Close() })
+	return bw
+}
+
 // TestFetchPrefetchNetworkDefaults verifies fetchPrefetchNetwork's three-way
 // resolution: operator override always wins; the container backend (nil or
 // any non-bwrap Sandbox, e.g. Mock) keeps the byte-identical "bridge"
 // default (acceptance 5); a *Bwrap FetchSandbox resolves to "host" (bwrap
 // has no "bridge" network).
 func TestFetchPrefetchNetworkDefaults(t *testing.T) {
-	bw, err := NewBwrap()
-	if err != nil {
-		t.Fatalf("NewBwrap: %v", err)
-	}
+	bw := newUnitBwrap(t)
 
 	cases := []struct {
 		name string
@@ -2777,10 +2795,7 @@ func TestGoPrefetchSpecUsesResolvedNetwork(t *testing.T) {
 		return Result{ExitCode: 0}, nil
 	}
 
-	bw, err := NewBwrap()
-	if err != nil {
-		t.Fatalf("NewBwrap: %v", err)
-	}
+	bw := newUnitBwrap(t)
 	// FetchSandbox must be the mock so the Exec call is observable, but
 	// fetchPrefetchNetwork keys off isBwrapFetchBackend(opts), which
 	// type-asserts opts.FetchSandbox itself — so the mock stands in for
@@ -2832,10 +2847,7 @@ func TestPythonResolveHostUnderBwrap(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
 
 	sitePkgs := t.TempDir()
-	bw, err := NewBwrap()
-	if err != nil {
-		t.Fatalf("NewBwrap: %v", err)
-	}
+	bw := newUnitBwrap(t)
 
 	res, err := resolvePython(dir, DepOptions{
 		Strategy:               DepStrategyHost,
@@ -2878,11 +2890,8 @@ func TestPythonResolveHostUnderBwrap(t *testing.T) {
 func TestPythonResolveHostUnderBwrap_NoSitePackagesErrors(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
-	bw, err := NewBwrap()
-	if err != nil {
-		t.Fatalf("NewBwrap: %v", err)
-	}
-	_, err = resolvePython(dir, DepOptions{
+	bw := newUnitBwrap(t)
+	_, err := resolvePython(dir, DepOptions{
 		Strategy:               DepStrategyHost,
 		FetchSandbox:           bw,
 		hostPythonSitePackages: []string{},
@@ -2918,10 +2927,7 @@ func TestJSResolveHostUnderBwrap(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"name":"x","lockfileVersion":3}`+"\n")
 
 	npmCache := t.TempDir()
-	bw, err := NewBwrap()
-	if err != nil {
-		t.Fatalf("NewBwrap: %v", err)
-	}
+	bw := newUnitBwrap(t)
 
 	res, err := resolveJS(dir, DepOptions{
 		Strategy:     DepStrategyHost,
@@ -2959,10 +2965,7 @@ func TestJSResolveHostUnderBwrap(t *testing.T) {
 func TestJSResolveHostUnderBwrap_NoLockfileIsOff(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
-	bw, err := NewBwrap()
-	if err != nil {
-		t.Fatalf("NewBwrap: %v", err)
-	}
+	bw := newUnitBwrap(t)
 	res, err := resolveJS(dir, DepOptions{
 		Strategy:     DepStrategyHost,
 		FetchSandbox: bw,
@@ -2984,11 +2987,8 @@ func TestJSResolveHostUnderBwrap_MissingCacheErrors(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
 	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"name":"x","lockfileVersion":3}`+"\n")
-	bw, err := NewBwrap()
-	if err != nil {
-		t.Fatalf("NewBwrap: %v", err)
-	}
-	_, err = resolveJS(dir, DepOptions{
+	bw := newUnitBwrap(t)
+	_, err := resolveJS(dir, DepOptions{
 		Strategy:     DepStrategyHost,
 		FetchSandbox: bw,
 		hostNPMCache: filepath.Join(dir, "does-not-exist"),
