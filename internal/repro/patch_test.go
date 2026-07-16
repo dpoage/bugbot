@@ -339,6 +339,7 @@ func TestPatchProver_SuiteFailLeadsToNeedsHuman(t *testing.T) {
 		t.Errorf("revision task missing suite feedback: %q", second)
 	}
 }
+
 // TestPatchProver_RevisionContinuesInvestigation is the acceptance test for
 // bugbot-a54h: a Prove revision round (round 2) must continue round 1's
 // conversation instead of reseeding it (the patch-prover analogue of
