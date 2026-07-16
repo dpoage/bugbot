@@ -103,7 +103,7 @@ func Replay(ctx context.Context, sb sandbox.Sandbox, repoDir string, b *Bundle, 
 		return ReplayResult{}, err
 	}
 
-	v := interpret(res, plan.Cmd)
+	v := bindTestEvidence(interpret(res, plan.Cmd), plan.Files)
 	if v.demonstrated {
 		v = witnessDemonstration(v, combinedOutput(res), b.Manifest.Finding.File)
 	}

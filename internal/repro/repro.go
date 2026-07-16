@@ -559,6 +559,12 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		}
 
 		verdict := interpret(res, plan.Cmd)
+		// bugbot-u47n: bind structured ran-evidence (go test -json,
+		// captured JUnit XML) to a test the plan itself declared, BEFORE the
+		// execution-witness layer below — an unrelated pre-existing failing
+		// test in the package/module must not promote just because it also
+		// happens to satisfy witnessDemonstration's coverage check.
+		verdict = bindTestEvidence(verdict, plan.Files)
 		if verdict.demonstrated {
 			// bugbot-qb4r layer (b): the execution witness. Only meaningful
 			// once interpret() has already found ran-evidence; this either
@@ -585,7 +591,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 				// Same rule as the execute infra-failure above.
 				return nil, fmt.Errorf("repro: confirm finding %s: %w", finding.ID, cerr)
 			}
-			confirmVerdict := interpret(confirmRes, plan.Cmd)
+			confirmVerdict := bindTestEvidence(interpret(confirmRes, plan.Cmd), plan.Files)
 			if confirmVerdict.demonstrated {
 				confirmVerdict = witnessDemonstration(confirmVerdict, combinedOutput(confirmRes), finding.File)
 			}
@@ -856,7 +862,7 @@ func validatePlan(p *Plan, repoDir string) error {
 			return err
 		}
 	}
-	return validateReproCmd(p.Cmd)
+	return validateReproCmd(p.Cmd, p.Files)
 }
 
 // gatedEcosystems is the ordered set of ecosystem.BaseMode-gated ecosystems
@@ -994,7 +1000,14 @@ func validateReproFilePath(fpath, repoDir string) error {
 // (the final submitted plan's cmd) and the workspace tool's exec applet
 // (each interactive run). Holding the actual rules in one place keeps the two callers from
 // drifting: a command accepted during iteration is accepted at submission.
-func validateReproCmd(cmd []string) error {
+//
+// files is the plan's (or the iteration workspace's) injected file set,
+// consulted ONLY for the -run enforcement rule below (bugbot-u47n); every
+// other rule ignores it. Pass nil/empty when no file set is available yet
+// (e.g. before write_repro_file has been called) — that degrades the -run
+// rule to a no-op exactly like "no extractable declared names", never to a
+// spurious rejection.
+func validateReproCmd(cmd []string, files map[string]string) error {
 	for _, arg := range cmd {
 		// Bare shell control operators are meaningless to a sandbox that runs
 		// Cmd as raw argv. A reproducer that emits, say,
@@ -1018,14 +1031,75 @@ func validateReproCmd(cmd []string) error {
 	// "timeout" verdict (bugbot-opq). Require the flag so the test binary kills
 	// itself first. Scoped to "go test" (the demonstrated failure class);
 	// unwrapShell handles a bash -c wrapper.
-	if eff := unwrapShell(cmd); len(eff) >= 2 &&
-		strings.ToLower(eff[0]) == "go" && strings.ToLower(eff[1]) == "test" &&
-		!hasCmdFlag(eff, "-timeout") {
+	eff := unwrapShell(cmd)
+	isGoTest := len(eff) >= 2 && strings.ToLower(eff[0]) == "go" && strings.ToLower(eff[1]) == "test"
+	if isGoTest && !hasCmdFlag(eff, "-timeout") {
 		return fmt.Errorf("go test repro must include a -timeout flag so a hung test self-terminates " +
 			"before the sandbox idle watchdog kills it (which yields a useless timeout verdict); " +
 			"add e.g. -timeout 60s: [\"go\",\"test\",\"-timeout\",\"60s\",\"-run\",\"TestX\",\"./...\"]")
 	}
+	// -run enforcement (bugbot-u47n): -run is SUGGESTED to the reproducer
+	// agent's prompt but was never enforced, so a plan could run the whole
+	// package (`go test ./...`) and let ANY failing test in it — including
+	// an unrelated pre-existing failure — satisfy the ran-evidence gate.
+	// Scoped exactly like the -timeout rule: only when the plan has
+	// extractable declared Go test names (extractGoTestNames) — a bare
+	// script or a test file this scan's dumb regex missed leaves the rule a
+	// no-op, never a false rejection. -run's value is itself a regex the
+	// go test binary applies to test names, so a plain substring check
+	// against at least one declared name is sufficient to confirm the flag
+	// actually references the agent's own test rather than, say, an empty
+	// or unrelated pattern.
+	if isGoTest {
+		if declared := extractGoTestNames(files); len(declared) > 0 {
+			runVal, hasRun := cmdFlagValue(eff, "-run")
+			if !hasRun || !runValueReferencesAny(runVal, declared) {
+				return fmt.Errorf("go test repro must include a -run flag naming one of your injected test(s) (%s) "+
+					"so the run is scoped to YOUR test, not the whole package — an unrelated pre-existing failing test "+
+					"elsewhere in the package must not be able to satisfy the ran-evidence check; "+
+					"add e.g. -run %s: [\"go\",\"test\",\"-timeout\",\"60s\",\"-run\",%q,\"./...\"]",
+					strings.Join(declared, ", "), declared[0], declared[0])
+			}
+		}
+	}
 	return nil
+}
+
+// cmdFlagValue returns the value of flag name in argv, supporting both the
+// "-flag value" and "-flag=value" forms. ok is false when the flag is not
+// present at all (distinct from a present-but-empty value).
+func cmdFlagValue(argv []string, name string) (value string, ok bool) {
+	for i, a := range argv {
+		if a == name {
+			if i+1 < len(argv) {
+				return argv[i+1], true
+			}
+			return "", true
+		}
+		if v, found := strings.CutPrefix(a, name+"="); found {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// runValueReferencesAny reports whether runVal (a go test -run regex
+// pattern) contains at least one of the declared test names as a substring
+// — the -run enforcement rule's positive-evidence check. A dumb substring
+// scan, not regex-pattern analysis: it accepts, for instance, -run
+// "TestFoo|TestBar" against a declared "TestFoo", which is the correct
+// permissive behavior (the agent is running its own test among others), and
+// also accepts an accidental match inside an unrelated longer name — an
+// acceptable false-positive given the rule exists to catch the common
+// vacuous case (`-run` omitted, or `./...` with no `-run` at all), not to
+// exhaustively validate the pattern's semantics.
+func runValueReferencesAny(runVal string, declared []string) bool {
+	for _, d := range declared {
+		if d != "" && strings.Contains(runVal, d) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasCmdFlag reports whether argv contains the flag name in either the

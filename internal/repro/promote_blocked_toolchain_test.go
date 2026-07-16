@@ -387,7 +387,7 @@ func TestPromoteAll_BlockedToolchain_Go_ProbeAbsentDegradesToUnblocked(t *testin
 
 	plan := Plan{
 		Files:  map[string]string{"internal/paginate_test.go": "package internal\n\nimport \"testing\"\n\nfunc TestPaginate(t *testing.T) {\n\tif got := paginate([]int{1, 2}, 1); len(got) != 1 {\n\t\tt.Fatalf(\"got %v\", got)\n\t}\n}\n"},
-		Cmd:    []string{"go", "test", "-timeout", "60s", "./internal/..."},
+		Cmd:    []string{"go", "test", "-timeout", "60s", "-run", "TestPaginate", "./internal/..."},
 		Expect: "the off-by-one causes the test to fail",
 	}
 	client := newScriptedClient(planBody(t, plan))
@@ -434,7 +434,7 @@ func TestPromoteAll_BlockedToolchain_Go_AvailableProceeds(t *testing.T) {
 
 	plan := Plan{
 		Files:  map[string]string{"internal/paginate_test.go": "package internal\n\nimport \"testing\"\n\nfunc TestPaginate(t *testing.T) {\n\tif got := paginate([]int{1, 2}, 1); len(got) != 1 {\n\t\tt.Fatalf(\"got %v\", got)\n\t}\n}\n"},
-		Cmd:    []string{"go", "test", "-timeout", "60s", "./internal/..."},
+		Cmd:    []string{"go", "test", "-timeout", "60s", "-run", "TestPaginate", "./internal/..."},
 		Expect: "the off-by-one causes the test to fail",
 	}
 	client := newScriptedClient(planBody(t, plan))

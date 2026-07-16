@@ -164,7 +164,14 @@ func parseGoTestEvents(stdout string) (events []goTestEvent, ok bool) {
 //     decoded at all) falls into this same default for the same reason: we
 //     only trust the structured path when it gives us dispositive per-test
 //     evidence, never when we'd have to guess.
-func classifyGoEvents(events []goTestEvent) (demonstrated bool, reason VerdictReason, ok bool) {
+//
+// The failing return value (added by bugbot-u47n) lists the Test names of
+// every per-test "fail" action seen, in event order — the structured
+// equivalent of the marker path's "--- FAIL: TestX" scan, used by
+// bindTestEvidence (interpret.go) to bind this ran-evidence to a test the
+// plan actually declared instead of accepting any failing test in the
+// package. Only populated on the demonstrated=true return; nil otherwise.
+func classifyGoEvents(events []goTestEvent) (demonstrated bool, reason VerdictReason, failing []string, ok bool) {
 	var testRan, testFailed, packageFailed bool
 	for _, e := range events {
 		switch {
@@ -172,17 +179,18 @@ func classifyGoEvents(events []goTestEvent) (demonstrated bool, reason VerdictRe
 			testRan = true
 		case e.Action == "fail" && e.Test != "":
 			testFailed = true
+			failing = append(failing, e.Test)
 		case e.Action == "fail" && e.Test == "":
 			packageFailed = true
 		}
 	}
 	switch {
 	case testFailed:
-		return true, "", true
+		return true, "", failing, true
 	case packageFailed && !testRan:
-		return false, VerdictReasonBuildError, true
+		return false, VerdictReasonBuildError, nil, true
 	default:
-		return false, "", false
+		return false, "", nil, false
 	}
 }
 
@@ -272,22 +280,30 @@ func isCollectionError(tc junitTestcase) bool {
 //     report), malformed XML, or a report with no failure/collection-error
 //     evidence — is NOT dispositive: ok=false so the caller falls back to the
 //     marker cascade.
-func parseJUnitXML(data []byte) (demonstrated bool, reason VerdictReason, ok bool) {
+//
+// The failing return value (added by bugbot-u47n) lists the "name" attribute
+// of every <testcase><failure> seen, mirroring classifyGoEvents' failing —
+// used by bindTestEvidence (interpret.go) to bind this ran-evidence to a
+// test the plan actually declared. Only populated on the demonstrated=true
+// return; nil otherwise.
+func parseJUnitXML(data []byte) (demonstrated bool, reason VerdictReason, failing []string, ok bool) {
 	if len(data) == 0 {
-		return false, "", false
+		return false, "", nil, false
 	}
 	var doc junitDoc
 	if err := xml.Unmarshal(data, &doc); err != nil {
-		return false, "", false
+		return false, "", nil, false
 	}
 	cases := doc.allTestcases()
 	if len(cases) == 0 {
-		return false, "", false
+		return false, "", nil, false
 	}
 	var sawFailure, sawCollectionError bool
+	var failingNames []string
 	for _, tc := range cases {
 		if tc.Failure != nil {
 			sawFailure = true
+			failingNames = append(failingNames, tc.Name)
 		}
 		if isCollectionError(tc) {
 			sawCollectionError = true
@@ -295,10 +311,10 @@ func parseJUnitXML(data []byte) (demonstrated bool, reason VerdictReason, ok boo
 	}
 	switch {
 	case sawFailure:
-		return true, "", true
+		return true, "", failingNames, true
 	case sawCollectionError:
-		return false, VerdictReasonBuildError, true
+		return false, VerdictReasonBuildError, nil, true
 	default:
-		return false, "", false
+		return false, "", nil, false
 	}
 }
