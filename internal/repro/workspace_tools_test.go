@@ -838,6 +838,81 @@ func TestWorkspaceTool_GrepFindConfinement(t *testing.T) {
 	}
 }
 
+// TestWorkspaceTool_GrepFindSymlinkEscape verifies grep/find, which walk
+// the whole workspace tree (unlike ls/cat's single-path lookup), never
+// follow a symlink planted inside the workspace out to the host: neither
+// applet reads through a symlinked file it encounters during the walk, nor
+// descends into a symlinked directory — mirroring
+// TestWorkspaceTool_LsCatConfinement's symlink fixture but exercised
+// against the default whole-tree scan instead of a direct path argument.
+func TestWorkspaceTool_GrepFindSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows")
+	}
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+	writeFileVia(t, writeTool, "keep_test.go", "package bug\n")
+
+	wsPath := sb.materialized()[0]
+	outside := t.TempDir()
+
+	// A symlinked FILE inside the workspace pointing at an outside secret.
+	secretFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secretFile, []byte("needle-in-secret-file\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secretFile, filepath.Join(wsPath, "escape_file.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	// A symlinked DIRECTORY inside the workspace pointing at an outside
+	// directory containing its own matchable file.
+	outsideDir := filepath.Join(outside, "vault")
+	if err := os.Mkdir(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	leaked := filepath.Join(outsideDir, "leaked_test.go")
+	if err := os.WriteFile(leaked, []byte("needle-in-leaked-dir\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(wsPath, "escape_dir")); err != nil {
+		t.Fatal(err)
+	}
+
+	grepOut, err := runApplet(t, tool, "grep", "needle-in-")
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	if strings.Contains(grepOut, "needle-in-secret-file") || strings.Contains(grepOut, "escape_file.txt") {
+		t.Errorf("grep output = %q, must not read through the symlinked file", grepOut)
+	}
+	if strings.Contains(grepOut, "needle-in-leaked-dir") || strings.Contains(grepOut, "leaked_test.go") {
+		t.Errorf("grep output = %q, must not descend the symlinked directory", grepOut)
+	}
+
+	findLeaked, err := runApplet(t, tool, "find", "leaked")
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if strings.Contains(findLeaked, "leaked_test.go") {
+		t.Errorf("find output = %q, must not descend the symlinked directory", findLeaked)
+	}
+
+	// The symlink entries themselves must not surface as matches either —
+	// the walk skips symlinked files/dirs outright rather than resolving
+	// and matching their target.
+	findEscape, err := runApplet(t, tool, "find", "escape")
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if strings.Contains(findEscape, "escape_file") || strings.Contains(findEscape, "escape_dir") {
+		t.Errorf("find output = %q, must not list symlinked entries", findEscape)
+	}
+}
+
 // TestWorkspaceTool_GrepOutputCaps verifies the grep applet enforces both
 // its match-count and output-byte caps: a file with far more than
 // workspaceGrepMaxMatches matching lines is truncated and flagged, and the
