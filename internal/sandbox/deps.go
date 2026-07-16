@@ -56,7 +56,7 @@ package sandbox
 //	Go      go.mod            vendored(vendor/modules.txt) · off · host · fetch
 //	Python  requirements.txt  off · fetch          (host→off on container; host mounts host site-packages under bwrap)
 //	Rust    Cargo.toml        vendored(vendor/ + .cargo/config replace-with) · off · host · fetch
-//	JS/npm  package.json      vendored(node_modules/) · off · fetch   (host→off on container; host mounts host npm cache under bwrap)
+//	JS/npm  package.json      vendored(node_modules/) · off · fetch   (host→off on container; host mounts host npm cache under bwrap when package-lock.json exists, else off)
 //	C#/Nug  *.csproj/*.sln    off · host · fetch   (no v1 vendored convention)
 //	Maven   pom.xml           off · host · fetch   (no v1 vendored convention)
 //	Gradle  build.gradle[.kts]/settings.gradle[.kts]
@@ -1515,6 +1515,15 @@ func resolveJSWithFlags(repoDir string, opts DepOptions, prefetchFlags []string)
 
 	case DepStrategyHost:
 		if isBwrapFetchBackend(opts) {
+			// `npm ci` strictly requires package-lock.json (or
+			// npm-shrinkwrap.json). pnpm-lock.yaml-only and yarn.lock-only
+			// repos resolve to OFF exactly like the FETCH branch below —
+			// pnpm/yarn offline support is deferred to a future bead, and
+			// an unconditional `npm ci` SetupCmd would turn every repro
+			// attempt on such a repo into an environment_error.
+			if !hasPackageLock(repoDir) {
+				return Resolution{Strategy: DepStrategyOff}, nil
+			}
 			// bwrap: the sandboxed npm IS a host npm (via
 			// sandbox.host_toolchains or the allowlisted system one), and
 			// there is no baked-image node_modules to go stale against, so

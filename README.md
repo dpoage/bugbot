@@ -136,7 +136,7 @@ frontend).
 | **Go** | `go.mod` | `vendor/modules.txt` exists → `GOFLAGS=-mod=vendor` | mount `$GOMODCACHE` at `/modcache` (read-only, `Shared=true`) | `go mod download all` into `/modcache` (writable) | `GOPROXY=off` | none |
 | **Python** | `requirements.txt` | n/a (no vendored detection) | container backend → **off** (pip HTTP cache does not materialize packages); **bwrap only**: mounts the host `python3` interpreter's `site-packages`/`dist-packages` directories read-only at their own host paths, `PYTHONPATH` set explicitly (see [bwrap dependency provisioning](#bwrap-dependency-provisioning)) | `pip download -r requirements.txt -d /depcache` into `/depcache` (writable) | `PIP_NO_INDEX=1` | `pip install --user --no-index --find-links=/depcache -r requirements.txt` |
 | **Rust** | `Cargo.toml` | `vendor/` + `.cargo/config{.toml}` with `replace-with` stanza → `CARGO_NET_OFFLINE=true` | mount `$CARGO_HOME/registry` at `/cargo/registry` (read-only, `Shared=true`); `CARGO_HOME=/cargo` | `cargo fetch [--locked]` with `CARGO_HOME=/cargo` (writable); populates `/cargo/registry` | `CARGO_NET_OFFLINE=true` | none |
-| **JS/npm** | `package.json` | `node_modules/` exists → no mounts needed | container backend → **off** (npm HTTP cache does not materialize `node_modules`); **bwrap only**: mounts the host's existing npm cache read-only at `/npmcache` and runs the same offline copy+`npm ci` step as `fetch` (see [bwrap dependency provisioning](#bwrap-dependency-provisioning)) | `npm ci --ignore-scripts --cache /npmcache` into `/npmcache` (writable) | `npm_config_offline=true` | `cp -a /npmcache /tmp/npmcache && npm ci --cache /tmp/npmcache` |
+| **JS/npm** | `package.json` | `node_modules/` exists → no mounts needed | container backend → **off** (npm HTTP cache does not materialize `node_modules`); **bwrap only**: when `package-lock.json` exists, mounts the host's existing npm cache read-only at `/npmcache` and runs the same offline copy+`npm ci` step as `fetch`; no lockfile (pnpm/yarn/bare npm) → **off**, same deferral as `fetch` (see [bwrap dependency provisioning](#bwrap-dependency-provisioning)) | `npm ci --ignore-scripts --cache /npmcache` into `/npmcache` (writable) | `npm_config_offline=true` | `cp -a /npmcache /tmp/npmcache && npm ci --cache /tmp/npmcache` |
 | **C#/NuGet** | root `*.csproj` / `*.sln` / `*.fsproj` | n/a (no vendored detection in v1) | mount `$NUGET_PACKAGES` (default `~/.nuget/packages`) at `/nugetcache` (read-only, `Shared=true`); `NUGET_PACKAGES=/nugetcache` | `dotnet restore [--locked-mode]` into `/nugetcache` (writable) | none — `--network=none` is the enforcement | none |
 | **Maven** | root `pom.xml` | n/a (no vendored detection in v1) | mount `~/.m2/repository` at `/m2cache` (read-only, `Shared=true`); `MAVEN_OPTS=-Dmaven.repo.local=/m2cache` | `mvn -B dependency:go-offline` with `MAVEN_OPTS=-Dmaven.repo.local=/m2cache` (writable) | none — `--network=none` is the enforcement | none |
 | **Gradle** | root `build.gradle[.kts]` / `settings.gradle[.kts]` | n/a (no vendored detection in v1) | → **off** (Gradle cache is lock-heavy under a read-only mount; see deps.go scope decisions) | `gradle dependencies --no-daemon -q` with `GRADLE_USER_HOME=/gradlecache` (writable) | none — `--network=none` is the enforcement | `mkdir -p /workspace/.bugbot-gradle-home && cp -a /gradlecache/. /workspace/.bugbot-gradle-home` (copy to disk-backed workspace; `GRADLE_USER_HOME=/workspace/.bugbot-gradle-home`) |
@@ -204,12 +204,14 @@ backend-specific differences:
     `site-packages`/`dist-packages` directories read-only at their own host
     paths (not a fixed container path — see `resolveBwrapPythonHostDeps` in
     `internal/sandbox/deps.go`) and sets `PYTHONPATH` explicitly.
-  - **JS/npm**: mounts the host's existing npm cache read-only at
-    `/npmcache` and runs the same offline copy-to-`/tmp`-then-`npm ci` setup
-    step the `fetch` strategy uses (`npm_config_offline=true`; no online
-    prefetch — the host cache is used exactly as it already exists, so a
-    stale/incomplete cache surfaces as an offline `npm ci` failure rather
-    than a silent partial install).
+  - **JS/npm**: requires `package-lock.json` (`npm ci`'s hard prerequisite);
+    pnpm-lock.yaml-only and yarn.lock-only repos resolve to **off** exactly
+    like `fetch`. With a lockfile, mounts the host's existing npm cache
+    read-only at `/npmcache` and runs the same offline
+    copy-to-`/tmp`-then-`npm ci` setup step the `fetch` strategy uses
+    (`npm_config_offline=true`; no online prefetch — the host cache is used
+    exactly as it already exists, so a stale/incomplete cache surfaces as an
+    offline `npm ci` failure rather than a silent partial install).
 
 Every other resolver path (Go, Rust, C#/NuGet, Maven, Gradle; every non-`host`
 Python/JS branch) is backend-agnostic and behaves identically under both

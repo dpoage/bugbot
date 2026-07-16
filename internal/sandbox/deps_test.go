@@ -2909,10 +2909,13 @@ func TestJSResolveHostIsOffForContainerBackend(t *testing.T) {
 
 // TestJSResolveHostUnderBwrap: acceptance 1/4 — JS HOST under bwrap mounts
 // the (test-seam-overridden) host npm cache read-only and installs offline
-// from it, identical SetupCmd shape to the FETCH strategy.
+// from it, identical SetupCmd shape to the FETCH strategy. The fixture
+// carries a package-lock.json because `npm ci` requires one; the lockfile-less
+// case must resolve to OFF (see TestJSResolveHostUnderBwrap_NoLockfileIsOff).
 func TestJSResolveHostUnderBwrap(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"name":"x","lockfileVersion":3}`+"\n")
 
 	npmCache := t.TempDir()
 	bw, err := NewBwrap()
@@ -2948,6 +2951,31 @@ func TestJSResolveHostUnderBwrap(t *testing.T) {
 	}
 }
 
+// TestJSResolveHostUnderBwrap_NoLockfileIsOff: a package.json repo WITHOUT
+// package-lock.json (pnpm, yarn, or bare npm) must resolve to OFF under
+// bwrap HOST, mirroring the FETCH branch's deferral — `npm ci` cannot run
+// without a lockfile, and an unconditional install SetupCmd would turn every
+// repro attempt into an environment_error (exit 125) before the main command.
+func TestJSResolveHostUnderBwrap_NoLockfileIsOff(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+	bw, err := NewBwrap()
+	if err != nil {
+		t.Fatalf("NewBwrap: %v", err)
+	}
+	res, err := resolveJS(dir, DepOptions{
+		Strategy:     DepStrategyHost,
+		FetchSandbox: bw,
+		hostNPMCache: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("resolveJS HOST (bwrap, no lockfile): %v", err)
+	}
+	if res.Strategy != DepStrategyOff || len(res.ROMounts) != 0 || len(res.SetupCmds) != 0 {
+		t.Errorf("JS HOST under bwrap without package-lock.json must resolve to OFF, got %+v", res)
+	}
+}
+
 // TestJSResolveHostUnderBwrap_MissingCacheErrors: a nonexistent override
 // directory must error with an actionable message rather than silently
 // mounting a path that will fail at bwrap Exec time with an opaque bind
@@ -2955,6 +2983,7 @@ func TestJSResolveHostUnderBwrap(t *testing.T) {
 func TestJSResolveHostUnderBwrap_MissingCacheErrors(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"name":"x","lockfileVersion":3}`+"\n")
 	bw, err := NewBwrap()
 	if err != nil {
 		t.Fatalf("NewBwrap: %v", err)

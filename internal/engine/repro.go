@@ -94,11 +94,13 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 // probing, dep strategy, ...) instead of a second, drift-prone copy.
 func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot string, sb sandbox.Sandbox, prog progress.EventSink, client llm.Client) (*repro.Reproducer, error) {
 	// Probe image capabilities once; result is cached per image+mounts+env so
-	// repeated daemon restarts or re-calls to BuildReproducer are free. Host
-	// toolchain mounts are threaded through so a mounted toolchain shows up as
-	// available (bugbot-14g0 acceptance 4). Against HostExec this probes the
-	// operator's own host directly — cfg.Sandbox.Image is irrelevant there but
-	// harmless as a cache-key component (HostExec has no image concept).
+	// repeated daemon restarts or re-calls to BuildReproducer are free.
+	// depProbeInputs threads dep-strategy mounts/env, local_mounts, AND host
+	// toolchain mounts through, so a mounted toolchain or dependency cache
+	// shows up as available (bugbot-14g0 acceptance 4, bugbot-48ya acceptance
+	// 3). Against HostExec this probes the operator's own host directly —
+	// cfg.Sandbox.Image is irrelevant there but harmless as a cache-key
+	// component (HostExec has no image concept).
 	probeMounts, probeEnv := depProbeInputs(*cfg, sb, repoRoot)
 	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, repoRoot, probeMounts, probeEnv)
 	r, err := repro.New(client, sb, repoRoot, repro.Options{
@@ -190,8 +192,9 @@ func buildReproHookForScan(
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer client: %w", rErr)
 	}
 	// Probe image capabilities once; result is cached per image+mounts+env so
-	// subsequent daemon cycles and parallel scan runs are free. Host toolchain
-	// mounts are threaded through so a mounted toolchain shows up as available.
+	// subsequent daemon cycles and parallel scan runs are free. depProbeInputs
+	// threads dep-strategy mounts/env, local_mounts, and host toolchain mounts
+	// through, so a mounted toolchain or dependency cache shows up as available.
 	probeMounts, probeEnv := depProbeInputs(cfg, sb, opts.Target)
 	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, opts.Target, probeMounts, probeEnv)
 	r, rNewErr := repro.New(reproClient, sb, opts.Target, repro.Options{
