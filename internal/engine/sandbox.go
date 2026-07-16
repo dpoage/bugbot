@@ -266,23 +266,37 @@ func SandboxRunOpts(cfg config.Config) []sandbox.Option { return sandboxRunOpts(
 // for the same external callers as SandboxRunOpts.
 func LocalMountsFromConfig(cfg config.Config) []sandbox.ROMount { return localMountsFromConfig(cfg) }
 
-// hostToolchainProbeInputs resolves cfg.Sandbox.HostToolchains into the
-// ROMounts/Env pair ProbeCapabilities needs to see a mounted host toolchain
-// (bugbot-14g0 acceptance 4). It duplicates the resolution repro.New performs
-// internally via DepOptions.HostToolchains — cheap, deterministic, host-only
-// filesystem/PATH work with no side effects — because the capability probe
-// must run BEFORE repro.New exists (its result feeds repro.Options.Capabilities).
-func hostToolchainProbeInputs(cfg config.Config) ([]sandbox.ROMount, []string) {
-	if len(cfg.Sandbox.HostToolchains) == 0 {
+// depProbeInputs resolves the mounts/env ProbeCapabilities needs to see the
+// SAME dependency provisioning a real repro run would have: host toolchains
+// (bugbot-14g0 acceptance 4) AND cfg.Sandbox.DepStrategy's resolved
+// mounts/env (bugbot-48ya acceptance 3) — without threading, a bwrap run
+// configured with dep_strategy: host|fetch or local_mounts would probe as
+// missing the very toolchain/dependency the real run goes on to provision,
+// so `bugbot doctor` and claim-time capability gating would see a false
+// negative. sb is the constructed backend (passed as DepOptions.FetchSandbox
+// so bwrap-only HOST extensions and the FETCH-prefetch network default
+// resolve identically to the real run — see sandbox.isBwrapFetchBackend /
+// sandbox.fetchPrefetchNetwork); repoDir is the target repo dependency
+// resolution runs against. sandbox.ResolveDeps' FETCH branch only BUILDS a
+// Prefetch closure here — it does not run it, so this has no network
+// side effect.
+//
+// A resolution error (e.g. a HOST cache genuinely missing on this host)
+// degrades to nil/nil rather than propagating: the probe must run BEFORE
+// repro.New exists (its result feeds repro.Options.Capabilities), and a
+// missing cache is exactly the kind of gap the resulting CapabilitySet
+// should legitimately report as unavailable, not a reason to abort probing
+// altogether.
+func depProbeInputs(cfg config.Config, sb sandbox.Sandbox, repoDir string) ([]sandbox.ROMount, []string) {
+	res, err := sandbox.ResolveDeps(repoDir, sandbox.DepOptions{
+		Strategy:       sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+		FetchSandbox:   sb,
+		FetchImage:     cfg.Sandbox.Image,
+		LocalMounts:    localMountsFromConfig(cfg),
+		HostToolchains: cfg.Sandbox.HostToolchains,
+	})
+	if err != nil {
 		return nil, nil
 	}
-	tc, err := sandbox.ResolveHostToolchains(cfg.Sandbox.HostToolchains)
-	if err != nil || len(tc.Mounts) == 0 {
-		return nil, nil
-	}
-	var env []string
-	if tc.PathPrepend != "" {
-		env = []string{"PATH=" + tc.PathPrepend + ":" + sandbox.DefaultContainerPath}
-	}
-	return tc.Mounts, env
+	return res.ROMounts, res.Env
 }

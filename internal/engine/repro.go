@@ -99,7 +99,7 @@ func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *sto
 	// available (bugbot-14g0 acceptance 4). Against HostExec this probes the
 	// operator's own host directly — cfg.Sandbox.Image is irrelevant there but
 	// harmless as a cache-key component (HostExec has no image concept).
-	probeMounts, probeEnv := hostToolchainProbeInputs(*cfg)
+	probeMounts, probeEnv := depProbeInputs(*cfg, sb, repoRoot)
 	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, repoRoot, probeMounts, probeEnv)
 	r, err := repro.New(client, sb, repoRoot, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
@@ -192,7 +192,7 @@ func buildReproHookForScan(
 	// Probe image capabilities once; result is cached per image+mounts+env so
 	// subsequent daemon cycles and parallel scan runs are free. Host toolchain
 	// mounts are threaded through so a mounted toolchain shows up as available.
-	probeMounts, probeEnv := hostToolchainProbeInputs(cfg)
+	probeMounts, probeEnv := depProbeInputs(cfg, sb, opts.Target)
 	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, opts.Target, probeMounts, probeEnv)
 	r, rNewErr := repro.New(reproClient, sb, opts.Target, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,

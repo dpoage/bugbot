@@ -96,7 +96,7 @@ func probeBwrapUserns(bwrapPath string) error {
 // Spec.Image is meaningless here — there is no image to select — so it is
 // ignored; ProbeCapabilities callers should key the probe cache on the
 // resolved host-toolchain mounts/env instead (see
-// engine.hostToolchainProbeInputs and ProbeCapabilities' mounts/env cache
+// engine.depProbeInputs and ProbeCapabilities' mounts/env cache
 // key), the same mechanism used to key a mounted toolchain for the
 // container backend.
 type Bwrap struct {

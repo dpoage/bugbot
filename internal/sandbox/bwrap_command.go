@@ -239,7 +239,7 @@ func buildBwrapArgs(p bwrapParams) []string {
 	// constructor ends with the DefaultContainerPath tail and images
 	// populate those directories; on store-based hosts those directories
 	// hold no utilities, so a caller-supplied value like the capability
-	// prober's "<toolchains>:<default>" (engine.hostToolchainProbeInputs)
+	// prober's "<toolchains>:<default>" (engine.depProbeInputs)
 	// would silently lose mkdir/grep/... without this append. The baseline
 	// is a strict suffix — a caller PATH still shadows everything in it.
 	for _, e := range p.env {
