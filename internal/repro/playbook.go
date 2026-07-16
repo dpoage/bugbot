@@ -32,6 +32,7 @@ import (
 	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/util"
 )
 
 // playbookProbeTimeout bounds a single launcher probe. Kept short: every
@@ -51,13 +52,23 @@ type PlaybookVerdict struct {
 	// to prefer a same-family alternative when this launcher FAILS.
 	Ecosystem ecosystem.Ecosystem
 	// Launcher is the canonical binary base name probed, e.g. "python3",
-	// "node", "npx", "go", "cargo", "bazel".
+	// "pytest", "node", "npx", "go", "cargo", "bazel".
 	Launcher string
 	// Verified is true when the probe exited 0 inside the real sandbox spec.
 	Verified bool
-	// Reason is set when !Verified: a short, one-line explanation ("not
-	// found", "timed out after 15s", or a truncated evidence tail) suitable
-	// for both the reproducer prompt and plan-gate feedback.
+	// Inconclusive is true when the probe was cut off (per-probe timeout) or
+	// never ran evidence-bearing to completion — as opposed to a CONFIRMED
+	// non-zero exit. Distinct from a plain FAILS: neither
+	// rejectPlaybookFailedLaunch nor playbookGuidance's "Do NOT propose"
+	// bullet treat an Inconclusive verdict as evidence the launcher is
+	// broken (a slow-but-working launcher must not be gated out).
+	Inconclusive bool
+	// Reason is set when !Verified: a short, single-line (util.FlattenField'd)
+	// explanation ("not found", "timed out after 15s", or a truncated
+	// evidence tail) suitable for both the reproducer prompt and plan-gate
+	// feedback — flattened so raw sandbox stdout/stderr can never inject
+	// newlines that break the one-bullet-per-verdict prompt structure or
+	// fake section headers into either surface.
 	Reason string
 }
 
@@ -80,15 +91,18 @@ func (p Playbook) verdictFor(launcher string) (PlaybookVerdict, bool) {
 	return PlaybookVerdict{}, false
 }
 
-// alternativeTo returns a verified launcher other than launcher, preferring
-// one in the same ecosystem family (e.g. "node" for a failed "npx") over any
-// other verified launcher, or ok=false when nothing else verified.
+// alternativeTo returns a verified launcher in the SAME ecosystem family as
+// launcher (e.g. "node" for a failed "npx" — both js), or ok=false when no
+// such alternative exists. Deliberately narrow: a launcher from a DIFFERENT
+// ecosystem (e.g. "go" for a failed "cargo") is never offered as an
+// "alternative" — that would steer the agent toward substituting a
+// non-behavioral test in the wrong language, which rejectPlaybookFailedLaunch
+// already explicitly warns against for the sibling capability gate.
 func (p Playbook) alternativeTo(launcher string) (alt string, ok bool) {
 	var failedEco ecosystem.Ecosystem
 	if v, found := p.verdictFor(launcher); found {
 		failedEco = v.Ecosystem
 	}
-	var fallback string
 	for _, v := range p.Verdicts {
 		if !v.Verified || v.Launcher == launcher {
 			continue
@@ -96,12 +110,6 @@ func (p Playbook) alternativeTo(launcher string) (alt string, ok bool) {
 		if v.Ecosystem == failedEco {
 			return v.Launcher, true
 		}
-		if fallback == "" {
-			fallback = v.Launcher
-		}
-	}
-	if fallback != "" {
-		return fallback, true
 	}
 	return "", false
 }
@@ -147,7 +155,24 @@ var playbookProbesByEcosystem = map[ecosystem.Ecosystem][]playbookProbe{
 		{ecosystem.EcosystemGo, "go", []string{"go", "version"}},
 	},
 	ecosystem.EcosystemPython: {
-		{ecosystem.EcosystemPython, "python3", []string{"python3", "-m", "pytest", "--version"}},
+		// "python3" probes bare interpreter liveness only (`--version`),
+		// deliberately SEPARATE from pytest importability: InferToolFromCmd
+		// matches the FIRST recognized token in a plan's argv, so a plan
+		// like `python3 -m unittest ...` also infers tool="python3" (the
+		// "-m pytest"/"-m unittest" suffix never gets inspected) — if this
+		// verdict instead measured pytest importability, a pytest-absent
+		// image would record "python3: FAILS" and rejectPlaybookFailedLaunch
+		// would then wrongly reject a perfectly valid `python3 -m unittest`
+		// plan for a launcher that never actually failed.
+		{ecosystem.EcosystemPython, "python3", []string{"python3", "--version"}},
+		// "pytest" is a distinct, same-ecosystem probe for pytest
+		// importability specifically. It only gates a plan whose FIRST argv
+		// token is literally `pytest` (ecosystem.cmdEcosystem's "pytest"
+		// entry) — a `python3 -m pytest` plan still infers tool="python3"
+		// per the note above, so this verdict is reachable by the gate only
+		// for bare `pytest ...` invocations, and by alternativeTo as a
+		// same-ecosystem partner for python3.
+		{ecosystem.EcosystemPython, "pytest", []string{"python3", "-m", "pytest", "--version"}},
 	},
 	ecosystem.EcosystemJS: {
 		{ecosystem.EcosystemJS, "node", []string{"node", "--test", "--help"}},
@@ -246,23 +271,34 @@ func execProbe(ctx context.Context, sb sandbox.Sandbox, spec sandbox.Spec, timeo
 }
 
 // classifyPlaybookProbe turns a probe's sandbox.Result/error into a
-// PlaybookVerdict. Unlike classifySmoke, this is a strict binary check: exit
-// 0 is VERIFIED-WORKS, anything else (non-zero exit, timeout, or an infra
-// error surfaced for THIS probe alone) is FAILS with a short reason — the
-// playbook makes no "toolchain ran but the actual repro would still fail"
-// allowance the way smoke verdicts do, because a wrong launcher choice is
-// exactly what this feature exists to catch.
+// PlaybookVerdict. Exit 0 is VERIFIED-WORKS. A confirmed non-zero exit (the
+// toolchain ran and refused, or exec itself failed with a not-found-style
+// exit code) is FAILS — the playbook makes no "toolchain ran but the actual
+// repro would still fail" allowance the way smoke verdicts do, because a
+// wrong launcher choice is exactly what this feature exists to catch. A
+// TimedOut result is Inconclusive, NOT a confirmed FAILS: the probe was cut
+// off, not refused, so neither the gate nor the prompt's "Do NOT propose"
+// bullet may treat it as evidence the launcher is broken (see
+// PlaybookVerdict.Inconclusive). Every Reason is util.FlattenField'd before
+// being stored: this is the one place raw sandbox stdout/stderr enters a
+// PlaybookVerdict, and every consumer (playbookGuidance, gate feedback)
+// embeds Reason inline in a single prompt/feedback line — an unflattened
+// multi-line reason would break that structure and, per the codebase's
+// mandatory sandbox-output-fencing convention (see util.FenceBlock's
+// callers in interpret.go/agent.go/patch.go), must never reach the prompt
+// unflattened.
 func classifyPlaybookProbe(probe playbookProbe, res sandbox.Result, err error, timeout time.Duration) PlaybookVerdict {
 	if err != nil {
 		return PlaybookVerdict{
 			Ecosystem: probe.Ecosystem, Launcher: probe.Launcher,
-			Reason: "sandbox exec failed: " + trunc(err.Error(), 120),
+			Reason: util.FlattenField("sandbox exec failed: " + trunc(err.Error(), 120)),
 		}
 	}
 	if res.TimedOut {
 		return PlaybookVerdict{
 			Ecosystem: probe.Ecosystem, Launcher: probe.Launcher,
-			Reason: fmt.Sprintf("timed out after %s", timeout),
+			Inconclusive: true,
+			Reason:       fmt.Sprintf("timed out after %s", timeout),
 		}
 	}
 	if res.ExitCode == 0 {
@@ -276,22 +312,33 @@ func classifyPlaybookProbe(probe playbookProbe, res sandbox.Result, err error, t
 	}
 	return PlaybookVerdict{
 		Ecosystem: probe.Ecosystem, Launcher: probe.Launcher,
-		Reason: trunc(strings.TrimSpace(res.Stdout+" "+res.Stderr), 120),
+		Reason: util.FlattenField(trunc(strings.TrimSpace(res.Stdout+" "+res.Stderr), 120)),
 	}
 }
 
 // runPlaybookBattery runs the bounded probe battery for every ecosystem
 // detected in systems, against the SAME sandbox spec a real repro run gets
 // (spec's Image/CPUs/MemoryMB/IdleTimeout plus res's ROMounts/Env/SetupCmds
-// — mirrors VerifySandbox's spec assembly). It returns ok=false when an
-// infra-level Exec error aborts the battery outright (sandbox down): callers
-// must discard any partial verdicts and treat the playbook as inactive
-// (degradation rule). A per-probe timeout or the overall ceiling being
-// reached is NOT an abort: it is recorded as a FAILS verdict for the
-// affected probe(s) and the (possibly partial) Playbook is still returned
-// active.
-func runPlaybookBattery(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec sandbox.Spec, res sandbox.Resolution, systems []ingest.BuildSystem) (Playbook, bool) {
-	batteryCtx, cancel := context.WithTimeout(ctx, playbookBatteryTimeout)
+// — mirrors VerifySandbox's spec assembly). probeTimeout/batteryTimeout are
+// parameters (production callers pass playbookProbeTimeout/
+// playbookBatteryTimeout) so tests can exercise real ceiling/timeout
+// enforcement without waiting the full budget.
+//
+// Returns ok=false when an infra-level Exec error aborts the battery
+// outright (sandbox down): callers must discard any partial verdicts and
+// treat the playbook as inactive (degradation rule).
+//
+// A probe that would start after batteryTimeout has elapsed is left
+// UNPROBED — no verdict is appended for it at all — rather than recorded as
+// a gate-eligible FAILS: the battery ceiling reaching zero is absence of
+// evidence, not a confirmed failure, and verdictFor(launcher) correctly
+// returns ok=false for it (see rejectPlaybookFailedLaunch's contract). A
+// per-probe timeout DOES still produce a verdict, but an Inconclusive one
+// (see classifyPlaybookProbe) — also never gate-eligible. Either way the
+// (possibly partial) Playbook is still returned active; only an infra error
+// aborts the whole battery.
+func runPlaybookBattery(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec sandbox.Spec, res sandbox.Resolution, systems []ingest.BuildSystem, probeTimeout, batteryTimeout time.Duration) (Playbook, bool) {
+	batteryCtx, cancel := context.WithTimeout(ctx, batteryTimeout)
 	defer cancel()
 
 	baseSpec := sandbox.Spec{
@@ -310,24 +357,22 @@ func runPlaybookBattery(ctx context.Context, sb sandbox.Sandbox, repoDir string,
 	for _, eco := range detectedPlaybookEcosystems(systems) {
 		for _, probe := range playbookProbesByEcosystem[eco] {
 			if batteryCtx.Err() != nil {
-				verdicts = append(verdicts, PlaybookVerdict{
-					Ecosystem: probe.Ecosystem, Launcher: probe.Launcher,
-					Reason: fmt.Sprintf("skipped: battery time ceiling (%s) exceeded", playbookBatteryTimeout),
-				})
+				// Ceiling exceeded: leave this (and every remaining) probe
+				// unprobed rather than appending a verdict — see doc above.
 				continue
 			}
 			runSpec := baseSpec
 			runSpec.Cmd = probe.Cmd
-			result, err := execProbe(batteryCtx, sb, runSpec, playbookProbeTimeout)
+			result, err := execProbe(batteryCtx, sb, runSpec, probeTimeout)
 			if err != nil {
 				// An infra-level Exec error (not a TimedOut Result, which
 				// execProbe/classifyPlaybookProbe treat as a normal
-				// per-probe FAILS) means the sandbox itself is unusable —
-				// abort the whole battery per the degradation rule rather
-				// than report a misleading partial playbook.
+				// per-probe Inconclusive) means the sandbox itself is
+				// unusable — abort the whole battery per the degradation
+				// rule rather than report a misleading partial playbook.
 				return Playbook{}, false
 			}
-			verdicts = append(verdicts, classifyPlaybookProbe(probe, result, nil, playbookProbeTimeout))
+			verdicts = append(verdicts, classifyPlaybookProbe(probe, result, nil, probeTimeout))
 		}
 	}
 	return Playbook{Verdicts: verdicts}, true
@@ -405,7 +450,7 @@ func PlaybookOnce(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec 
 	}
 	playbookCache.mu.Unlock()
 	e.once.Do(func() {
-		if pb, ok := runPlaybookBattery(ctx, sb, repoDir, spec, res, systems); ok {
+		if pb, ok := runPlaybookBattery(ctx, sb, repoDir, spec, res, systems, playbookProbeTimeout, playbookBatteryTimeout); ok {
 			e.pb = pb
 		}
 		// !ok (battery aborted) leaves e.pb at its zero value (empty
@@ -416,10 +461,15 @@ func PlaybookOnce(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec 
 
 // playbookGuidance renders the "Verified commands for this repo" system-
 // prompt section (agent.go's reproducer prompt-assembly hook): verified
-// launchers first ("you MAY use this directly"), then failed ones with their
-// one-line reason, mirroring capabilityGuidance's structure. An empty
-// Playbook (battery never ran or degraded) yields "" so the prompt is
-// byte-identical to pre-bugbot-u2v5 behavior.
+// launchers first ("you MAY use this directly"), then CONFIRMED-failed ones
+// with their one-line reason ("Do NOT propose this launcher"), then any
+// Inconclusive ones as a neutral, non-directive note — an Inconclusive
+// verdict (per-probe timeout) is not evidence the launcher is broken, so it
+// must never read as a "Do NOT propose" instruction. Mirrors
+// capabilityGuidance's structure. An empty Playbook (battery never ran or
+// degraded) yields "" so the prompt is byte-identical to pre-bugbot-u2v5
+// behavior. Every v.Reason embedded below is already util.FlattenField'd by
+// classifyPlaybookProbe, so no raw sandbox output reaches the prompt here.
 func playbookGuidance(pb Playbook) string {
 	if len(pb.Verdicts) == 0 {
 		return ""
@@ -432,8 +482,13 @@ func playbookGuidance(pb Playbook) string {
 		}
 	}
 	for _, v := range pb.Verdicts {
-		if !v.Verified {
+		if !v.Verified && !v.Inconclusive {
 			fmt.Fprintf(&b, "- %s: FAILS (%s). Do NOT propose this launcher.\n", v.Launcher, v.Reason)
+		}
+	}
+	for _, v := range pb.Verdicts {
+		if v.Inconclusive {
+			fmt.Fprintf(&b, "- %s: inconclusive (%s). No confirmed evidence either way.\n", v.Launcher, v.Reason)
 		}
 	}
 	return b.String()
@@ -447,10 +502,12 @@ func playbookGuidance(pb Playbook) string {
 //
 // Returns "" (proceed to sandbox launch) when: the playbook is inactive (no
 // battery ran — degradation rule), the plan's cmd names no recognized
-// launcher, the launcher was never probed (no evidence either way), or the
-// launcher verified. This is deliberately narrower than
+// launcher, the launcher was never probed (no evidence either way), the
+// launcher verified, or the launcher's only verdict is Inconclusive (a
+// per-probe timeout is not a confirmed failure — see
+// PlaybookVerdict.Inconclusive). This is deliberately narrower than
 // rejectUnavailableEcosystemPlan: it only fires on a CONFIRMED FAILS
-// verdict, never on absence of evidence.
+// verdict, never on absence (or ambiguity) of evidence.
 func rejectPlaybookFailedLaunch(p *Plan, pb Playbook) string {
 	if len(pb.Verdicts) == 0 {
 		return ""
@@ -460,7 +517,7 @@ func rejectPlaybookFailedLaunch(p *Plan, pb Playbook) string {
 		return ""
 	}
 	v, ok := pb.verdictFor(tool)
-	if !ok || v.Verified {
+	if !ok || v.Verified || v.Inconclusive {
 		return ""
 	}
 	if alt, hasAlt := pb.alternativeTo(tool); hasAlt {
