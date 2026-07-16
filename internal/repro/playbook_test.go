@@ -606,12 +606,15 @@ func TestAttempt_PlaybookWired_PromptAndGateLive(t *testing.T) {
 	}
 
 	// Gate proof: round 1's npx plan never reached the sandbox — only round
-	// 2's node plan did.
-	if sb.CallCount() != 1 {
-		t.Fatalf("sandbox CallCount = %d, want 1 (round 1's playbook-FAILS plan must never launch)", sb.CallCount())
+	// 2's node plan did (twice: official run + bugbot-c49s determinism
+	// confirmation, both served the same demonstrating mock response).
+	if sb.CallCount() != 2 {
+		t.Fatalf("sandbox CallCount = %d, want 2 (round 1's playbook-FAILS plan must never launch; round 2 = official + confirmation)", sb.CallCount())
 	}
-	if call := sb.Calls()[0]; len(call.Spec.Cmd) == 0 || call.Spec.Cmd[0] != "node" {
-		t.Errorf("the one sandbox call must be round 2's node plan, got cmd=%v", call.Spec.Cmd)
+	for i, call := range sb.Calls() {
+		if len(call.Spec.Cmd) == 0 || call.Spec.Cmd[0] != "node" {
+			t.Errorf("sandbox call %d must be round 2's node plan, got cmd=%v", i, call.Spec.Cmd)
+		}
 	}
 	if att.Attempts != 2 {
 		t.Errorf("Attempts = %d, want 2 (round 1 rejected pre-launch, round 2 executed)", att.Attempts)

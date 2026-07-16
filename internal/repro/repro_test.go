@@ -545,6 +545,9 @@ func TestAttempt_RevisionContinuesInvestigation(t *testing.T) {
 
 	sb := sandbox.NewMock(sandbox.MockResponse{})
 	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "ok\nPASS"}})
+	// Round 2 demonstrates twice: the official run and the bugbot-c49s
+	// determinism confirmation both must fail for promotion.
+	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nFAIL"}})
 	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nFAIL"}})
 
 	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir(), MaxAttempts: 2})
