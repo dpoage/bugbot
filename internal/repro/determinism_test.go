@@ -130,6 +130,61 @@ func TestAttempt_FlakyRepro_AlternatingFailPass_NoPromotion(t *testing.T) {
 	}
 }
 
+// TestAttempt_FlakyRepro_Bazel_UsesDeterminismFeedback is the oracle-
+// requested regression for the bazel-vs-flaky branch ordering bug: a bazel
+// plan (exit 3 = demonstrated, exit 0 = not demonstrated) that alternates
+// fail/pass must ALSO get the ecosystem-agnostic determinism guidance, not
+// bazelFeedback's generic "did not demonstrate the bug" / exit-code lecture
+// — the flaky-verdict early-return in feedback() must be checked BEFORE the
+// bazel branch.
+func TestAttempt_FlakyRepro_Bazel_UsesDeterminismFeedback(t *testing.T) {
+	repoDir := newRepoDir(t)
+	bazelPlan := goodPlan()
+	bazelPlan.Cmd = []string{"bazel", "test", "//pkg:target"}
+	client := newScriptedClient(planBody(t, bazelPlan), planBody(t, bazelPlan))
+
+	sb := sandbox.NewMock(sandbox.MockResponse{})
+	sb.ResponseFunc = func(n int, _ sandbox.Spec) (sandbox.Result, error) {
+		if n%2 == 0 {
+			// Official run: bazel exit 3 = build OK, test ran, FAILED -> demonstrated.
+			return sandbox.Result{ExitCode: 3, Stdout: "FAIL: //pkg:target"}, nil
+		}
+		// Determinism confirmation run: bazel exit 0 = every test passed -> not demonstrated.
+		return sandbox.Result{ExitCode: 0, Stdout: "PASSED: //pkg:target"}, nil
+	}
+
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir(), MaxAttempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	finding := domain.Finding{ID: "f-flaky-bazel", Title: "racy bazel test", File: "calc.go", Line: 12}
+	att, err := r.Attempt(context.Background(), finding)
+	if err != nil {
+		t.Fatalf("Attempt: %v", err)
+	}
+	if att.Promoted {
+		t.Fatalf("Attempt = %+v, want NOT promoted", att)
+	}
+	if att.Reason != string(VerdictReasonFlaky) {
+		t.Errorf("Reason = %q, want %q", att.Reason, VerdictReasonFlaky)
+	}
+
+	second := client.taskText(1)
+	for _, want := range []string{"synchronization", "iterations", "did NOT demonstrate it again"} {
+		if !strings.Contains(second, want) {
+			t.Errorf("round-2 feedback missing determinism guidance %q; got:\n%s", want, second)
+		}
+	}
+	// The bazel-specific "did not demonstrate the bug" lecture / exit-code
+	// table must NOT appear — this is the exact bug the oracle review caught.
+	for _, unwanted := range []string{"Bazel exit codes", "did not demonstrate the bug."} {
+		if strings.Contains(second, unwanted) {
+			t.Errorf("round-2 feedback wrongly contains bazel's generic lecture %q; got:\n%s", unwanted, second)
+		}
+	}
+}
+
 // TestAttempt_FlakyRepro_WritesNoArtifact ensures a flaky (demonstrate-
 // then-not) sequence never writes a repro bundle: promotion and artifact
 // writing are gated together.

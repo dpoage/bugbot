@@ -366,24 +366,16 @@ func flakyVerdict(first, second verdict) verdict {
 // failure.
 func (v verdict) feedback(p *Plan) string {
 	var b strings.Builder
-	// Bazel gets dedicated, exit-code-aware feedback for ALL non-demonstrating
-	// reasons (not just environment failures): the agent must learn that exit 3
-	// is the goal and that it must target a SPECIFIC label, never //....
-	if v.ecosystem == sandbox.EcosystemBazel {
-		b.WriteString(bazelFeedback(v.reason))
-		if len(p.Cmd) > 0 {
-			fmt.Fprintf(&b, "\n\nCommand run: %s", strings.Join(p.Cmd, " "))
-		}
-		if v.summary != "" {
-			fmt.Fprintf(&b, "\n\nOutput was:\n%s", util.FenceBlock("SANDBOX OUTPUT", v.summary))
-		}
-		return b.String()
-	}
-	// bugbot-c49s: the flaky-repro verdict gets its own early-return message
-	// (like bazel above) because the generic post-switch trailer below talks
-	// about workspace/build side effects, which is the wrong framing here —
-	// both runs used fresh workspaces and the divergence is about timing,
-	// not state.
+	// bugbot-c49s: the flaky-repro verdict gets its own early-return message,
+	// checked BEFORE the bazel branch below, because it is deliberately
+	// ecosystem-agnostic — a bazel repro that demonstrates once and not
+	// twice consecutively is exactly the same failure mode as any other
+	// ecosystem's, and must get the determinism guidance, not bazel's
+	// generic exit-code lecture (which only ever discusses a SINGLE run).
+	// The generic post-switch trailer further down also does not apply
+	// here: it talks about workspace/build side effects, which is the
+	// wrong framing — both runs used fresh workspaces and the divergence
+	// is about timing, not state.
 	if v.reason == VerdictReasonFlaky {
 		b.WriteString("Your repro demonstrated the bug on the official run, but an IDENTICAL confirmation re-run ")
 		b.WriteString("(same plan, fresh workspace) did NOT demonstrate it again. A repro that only fails sometimes ")
@@ -397,6 +389,19 @@ func (v verdict) feedback(p *Plan) string {
 		}
 		if v.summary != "" {
 			fmt.Fprintf(&b, "\n\n%s", util.FenceBlock("RUN 1 vs RUN 2", v.summary))
+		}
+		return b.String()
+	}
+	// Bazel gets dedicated, exit-code-aware feedback for ALL non-demonstrating
+	// reasons (not just environment failures): the agent must learn that exit 3
+	// is the goal and that it must target a SPECIFIC label, never //....
+	if v.ecosystem == sandbox.EcosystemBazel {
+		b.WriteString(bazelFeedback(v.reason))
+		if len(p.Cmd) > 0 {
+			fmt.Fprintf(&b, "\n\nCommand run: %s", strings.Join(p.Cmd, " "))
+		}
+		if v.summary != "" {
+			fmt.Fprintf(&b, "\n\nOutput was:\n%s", util.FenceBlock("SANDBOX OUTPUT", v.summary))
 		}
 		return b.String()
 	}
