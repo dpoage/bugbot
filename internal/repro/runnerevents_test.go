@@ -243,7 +243,7 @@ func TestClassifyGoEvents(t *testing.T) {
 			if !ok {
 				t.Fatalf("parseGoTestEvents ok = false for %q", tc.stdout)
 			}
-			demonstrated, reason, ok := classifyGoEvents(events)
+			demonstrated, reason, _, ok := classifyGoEvents(events)
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
 			}
@@ -330,7 +330,7 @@ func TestParseJUnitXML(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			demonstrated, reason, ok := parseJUnitXML(tc.data)
+			demonstrated, reason, _, ok := parseJUnitXML(tc.data)
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
 			}

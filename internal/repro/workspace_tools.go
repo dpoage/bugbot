@@ -887,7 +887,13 @@ func (t *WorkspaceTool) runExec(ctx context.Context, cmd []string) (string, erro
 	if len(cmd) == 0 {
 		return "", errors.New(`workspace exec: missing command; pass the argv to run, e.g. {"argv": ["exec","go","test","-timeout","60s","-run","TestX","./pkg"]}`)
 	}
-	if err := validateReproCmd(cmd); err != nil {
+	// files backs both the -run enforcement rule below (validateReproCmd) and
+	// the structured-evidence binding renderRunReproResult applies to the
+	// preview classification — the same tracked-file registry the final
+	// plan will carry (bugbot-u47n), so a candidate that clears exec is
+	// guaranteed to clear submission's validatePlan too.
+	files := t.ws.mergedFiles(nil)
+	if err := validateReproCmd(cmd, files); err != nil {
 		return "", err
 	}
 	// Budget is charged only after validation: it bounds sandbox capacity, and
@@ -938,7 +944,7 @@ func (t *WorkspaceTool) runExec(ctx context.Context, cmd []string) (string, erro
 		return "", fmt.Errorf("workspace exec: sandbox execution failed: %w", err)
 	}
 
-	return renderRunReproResult(res, cmd), nil
+	return renderRunReproResult(res, cmd, files), nil
 }
 
 // ExecCount returns the number of budget-charged exec calls made so far
@@ -983,9 +989,13 @@ func checkWorkspaceExecBudget(used *atomic.Int32, maxExec int) error {
 // official run (bugbot-0zay), so this call gives interpret() inputs
 // identical to what the official verdict would see for the same cmd,
 // modulo the workspace directory (see WorkspaceTool.Def's doc for that one
-// residual, intentional divergence).
-func renderRunReproResult(res sandbox.Result, cmd []string) string {
-	v := interpret(res, cmd)
+// residual, intentional divergence). files is the same tracked-file
+// registry passed to validateReproCmd (bugbot-u47n): bindTestEvidence
+// applies here too, so a candidate whose ran-evidence comes from an
+// unrelated foreign test previews foreign_test_failure instead of a
+// misleading demonstrated=true the official run would then reject.
+func renderRunReproResult(res sandbox.Result, cmd []string, files map[string]string) string {
+	v := bindTestEvidence(interpret(res, cmd), files)
 	var b strings.Builder
 	fmt.Fprintf(&b, "exit_code=%d timed_out=%t demonstrated=%t duration=%dms",
 		res.ExitCode, res.TimedOut, v.demonstrated, res.Duration.Milliseconds())
