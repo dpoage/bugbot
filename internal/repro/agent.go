@@ -375,7 +375,11 @@ Work it as an ORDERED loop:
    consuming the budget, and writes never consume it. Read the
    classification and output, edit your candidate with write_repro_file,
    and re-exec until it reports demonstrated=true FOR THE REASON the
-   finding describes.
+   finding describes. Exec output is automatically tail-capped for you —
+   NEVER pipe your test runner through tail/head/grep to bound it
+   yourself, that discards the runner's exit code and can turn a real
+   failure into a false "passed" (a bash -c pipeline defensively gets
+   pipefail injected, but write clean commands and do not rely on it).
 5. SUBMIT the EXACT cmd that demonstrated the bug. Every file you wrote
    (and did not delete) is automatically included in your final plan — the
    workspace IS the proof; the plan's "files" field is an optional overlay,
@@ -413,6 +417,11 @@ Sandbox environment & command hygiene:
 - Wrap any multi-step command (using &&, ||, |, or redirects) in bash -c "...":
   a bare argv is run directly, so shell operators and later commands would be
   passed as arguments to the first program.
+- The harness already tail-caps captured exec output for you: NEVER pipe your
+  test runner through tail/head/grep to bound it yourself, since that runs the
+  filter's exit code instead of the test runner's and can mask a real failure
+  as a false pass. A bash -c script gets pipefail (set -o pipefail) injected
+  defensively, but write clean commands and do not rely on it.
 - Pass a test filter (e.g. --gtest_filter) to the TEST BINARY, never to cmake or
   make.
 - A single-file compile's -o output path MUST differ from every input file.
