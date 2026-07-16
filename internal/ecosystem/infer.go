@@ -106,10 +106,13 @@ func InferFromCmd(cmd []string) Ecosystem {
 // EcosystemBazel, but a sandbox where only bazelisk resolves must reject a
 // `bazel` argv — availability is probed and gated per binary NAME there.
 func InferToolFromCmd(cmd []string) (Ecosystem, string) {
-	argv := cmd
-	if len(argv) >= 3 && (argv[0] == "bash" || argv[0] == "sh") && argv[1] == "-c" {
-		argv = strings.Fields(argv[2])
-	}
+	// normalizeArgv (interp.go) is the shared shell/wrapper/absolute-path
+	// normalization pipeline also used by DetectEcosystem — bugbot-ds90:
+	// this used to re-implement a bespoke one-level "bash -c" unwrap here,
+	// missing compound shell strings, "-lc"/"-ec" flag clusters, and benign
+	// wrappers (env, exec, timeout, nice) that DetectEcosystem already knew
+	// how to peel.
+	argv := normalizeArgv(cmd)
 	for _, tok := range argv {
 		base := filepath.Base(tok)
 		if eco, ok := cmdEcosystem[base]; ok {
