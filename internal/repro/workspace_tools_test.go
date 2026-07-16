@@ -3,6 +3,7 @@ package repro
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -538,17 +539,17 @@ func runApplet(t *testing.T, tool *WorkspaceTool, argv ...string) (string, error
 	return tool.Run(context.Background(), raw)
 }
 
-// TestWorkspaceTool_FreeAppletsOnUnmaterializedWorkspace verifies that ls and
-// cat, called before any write_repro_file/exec, return the pristine-repo
-// hint WITHOUT materializing a workspace — materializing on a free call
-// would silently copy the whole repo.
+// TestWorkspaceTool_FreeAppletsOnUnmaterializedWorkspace verifies that
+// ls/cat/grep/find, called before any write_repro_file/exec, return the
+// pristine-repo hint WITHOUT materializing a workspace — materializing on
+// a free call would silently copy the whole repo.
 func TestWorkspaceTool_FreeAppletsOnUnmaterializedWorkspace(t *testing.T) {
 	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
 	repoDir := newRepoDir(t)
 	ws := &iterationWorkspace{}
 	tool := newWorkspaceTool(sb, repoDir, 5, ws)
 
-	for _, argv := range [][]string{{"ls"}, {"cat", "x.go"}} {
+	for _, argv := range [][]string{{"ls"}, {"cat", "x.go"}, {"grep", "foo"}, {"find", "x.go"}} {
 		out, err := runApplet(t, tool, argv...)
 		if err != nil {
 			t.Fatalf("%v: unexpected error: %v", argv, err)
@@ -698,16 +699,203 @@ func TestWorkspaceTool_UnknownAppletIsFreeAndEnumerates(t *testing.T) {
 	repoDir := newRepoDir(t)
 	tool := newWorkspaceTool(sb, repoDir, 5, &iterationWorkspace{})
 
-	_, err := runApplet(t, tool, "grep", "foo")
+	_, err := runApplet(t, tool, "rm", "foo")
 	if err == nil {
 		t.Fatal("expected an error for an unknown applet")
 	}
-	for _, applet := range []string{"ls", "cat", "status", "exec"} {
+	for _, applet := range []string{"ls", "cat", "status", "grep", "find", "exec"} {
 		if !strings.Contains(err.Error(), applet) {
 			t.Errorf("unknown-applet error = %q, want it to name applet %q", err.Error(), applet)
 		}
 	}
 	if got := tool.ExecCount(); got != 0 {
 		t.Errorf("ExecCount = %d, want 0 (unknown applet must be free)", got)
+	}
+}
+
+// TestWorkspaceTool_Grep verifies that `grep` finds content in a
+// materialized workspace file, formats matches as 'path:line:text', and
+// never charges the exec budget.
+func TestWorkspaceTool_Grep(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+
+	writeFileVia(t, writeTool, "sub/nested_test.go", "package bug\n\nfunc TestNeedle(t *testing.T) {}\n")
+	writeFileVia(t, writeTool, "other_test.go", "package bug\n\nfunc TestOther(t *testing.T) {}\n")
+
+	out, err := runApplet(t, tool, "grep", "TestNeedle")
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	if !strings.Contains(out, "sub/nested_test.go:3:func TestNeedle") {
+		t.Errorf("grep output = %q, want a sub/nested_test.go:3:... match", out)
+	}
+	if strings.Contains(out, "other_test.go") {
+		t.Errorf("grep output = %q, must not match other_test.go", out)
+	}
+
+	// A dir argument scopes the search.
+	out, err = runApplet(t, tool, "grep", "func Test", "sub")
+	if err != nil {
+		t.Fatalf("grep sub: %v", err)
+	}
+	if !strings.Contains(out, "nested_test.go") || strings.Contains(out, "other_test.go") {
+		t.Errorf("grep sub output = %q, want only sub/nested_test.go", out)
+	}
+
+	// No matches is reported explicitly, not as an empty string.
+	out, err = runApplet(t, tool, "grep", "NoSuchSymbolAnywhere")
+	if err != nil {
+		t.Fatalf("grep no match: %v", err)
+	}
+	if !strings.Contains(out, "no matches") {
+		t.Errorf("grep no-match output = %q, want it to say so explicitly", out)
+	}
+
+	// An invalid regexp is rejected without touching the sandbox.
+	if _, err := runApplet(t, tool, "grep", "("); err == nil {
+		t.Error("grep with an invalid regexp should fail")
+	}
+
+	if got := tool.ExecCount(); got != 0 {
+		t.Errorf("ExecCount = %d, want 0 (grep never charges the budget)", got)
+	}
+}
+
+// TestWorkspaceTool_Find verifies that `find` matches filenames by glob and
+// by substring under a materialized workspace, and never charges the exec
+// budget.
+func TestWorkspaceTool_Find(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+
+	writeFileVia(t, writeTool, "sub/nested_test.go", "package bug\n")
+	writeFileVia(t, writeTool, "sub/helper.go", "package bug\n")
+	writeFileVia(t, writeTool, "other.txt", "not go\n")
+
+	out, err := runApplet(t, tool, "find", "*_test.go")
+	if err != nil {
+		t.Fatalf("find glob: %v", err)
+	}
+	if !strings.Contains(out, "sub/nested_test.go") {
+		t.Errorf("find glob output = %q, want sub/nested_test.go", out)
+	}
+	if strings.Contains(out, "helper.go") || strings.Contains(out, "other.txt") {
+		t.Errorf("find glob output = %q, want only *_test.go matches", out)
+	}
+
+	out, err = runApplet(t, tool, "find", "helper")
+	if err != nil {
+		t.Fatalf("find substring: %v", err)
+	}
+	if !strings.Contains(out, "sub/helper.go") {
+		t.Errorf("find substring output = %q, want sub/helper.go", out)
+	}
+
+	out, err = runApplet(t, tool, "find", "nothing-matches-this")
+	if err != nil {
+		t.Fatalf("find no match: %v", err)
+	}
+	if !strings.Contains(out, "no matches") {
+		t.Errorf("find no-match output = %q, want it to say so explicitly", out)
+	}
+
+	if got := tool.ExecCount(); got != 0 {
+		t.Errorf("ExecCount = %d, want 0 (find never charges the budget)", got)
+	}
+}
+
+// TestWorkspaceTool_GrepFindConfinement verifies grep/find reject a lexical
+// "../" escape and an absolute path outside the workspace, matching the
+// containment ls/cat already guarantee via agent.FSRoot.
+func TestWorkspaceTool_GrepFindConfinement(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+	writeFileVia(t, writeTool, "keep_test.go", "package bug\n")
+
+	outside := t.TempDir()
+
+	if _, err := runApplet(t, tool, "grep", "package", "../escape"); err == nil {
+		t.Error("grep with \"..\" traversal should fail")
+	}
+	if _, err := runApplet(t, tool, "grep", "package", outside); err == nil {
+		t.Error("grep with an absolute path outside the workspace should fail")
+	}
+	if _, err := runApplet(t, tool, "find", "keep", "../escape"); err == nil {
+		t.Error("find with \"..\" traversal should fail")
+	}
+	if _, err := runApplet(t, tool, "find", "keep", outside); err == nil {
+		t.Error("find with an absolute path outside the workspace should fail")
+	}
+}
+
+// TestWorkspaceTool_GrepOutputCaps verifies the grep applet enforces both
+// its match-count and output-byte caps: a file with far more than
+// workspaceGrepMaxMatches matching lines is truncated and flagged, and the
+// output never exceeds workspaceGrepMaxOutputBytes by more than one
+// rendered line.
+func TestWorkspaceTool_GrepOutputCaps(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+
+	// One matching line per row, far more rows than workspaceGrepMaxMatches,
+	// so the match-count cap (not EOF) ends the scan.
+	var contents strings.Builder
+	for i := 0; i < workspaceGrepMaxMatches*3; i++ {
+		contents.WriteString("needle line\n")
+	}
+	writeFileVia(t, writeTool, "haystack.txt", contents.String())
+
+	out, err := runApplet(t, tool, "grep", "needle")
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	if got := strings.Count(out, "haystack.txt:"); got != workspaceGrepMaxMatches {
+		t.Errorf("grep returned %d matches, want the cap of %d", got, workspaceGrepMaxMatches)
+	}
+	if !strings.Contains(out, "truncated") {
+		t.Errorf("grep output = %q, want a truncation marker", out[:min(len(out), 200)])
+	}
+	if len(out) > workspaceGrepMaxOutputBytes+256 {
+		t.Errorf("grep output is %d bytes, want it bounded near the %d-byte cap", len(out), workspaceGrepMaxOutputBytes)
+	}
+}
+
+// TestWorkspaceTool_FindOutputCap verifies the find applet enforces its
+// match-count cap: a directory with far more than workspaceFindMaxMatches
+// matching filenames is truncated and flagged.
+func TestWorkspaceTool_FindOutputCap(t *testing.T) {
+	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
+	repoDir := newRepoDir(t)
+	ws := &iterationWorkspace{}
+	writeTool := newWriteTool(sb, repoDir, ws)
+	tool := newWorkspaceTool(sb, repoDir, 5, ws)
+
+	for i := 0; i < workspaceFindMaxMatches+50; i++ {
+		writeFileVia(t, writeTool, fmt.Sprintf("gen/needle_%03d.txt", i), "x")
+	}
+
+	out, err := runApplet(t, tool, "find", "needle_")
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	matches := strings.Count(out, "gen/needle_")
+	if matches != workspaceFindMaxMatches {
+		t.Errorf("find returned %d matches, want the cap of %d", matches, workspaceFindMaxMatches)
+	}
+	if !strings.Contains(out, "truncated") {
+		t.Errorf("find output = %q, want a truncation marker", out[:min(len(out), 200)])
 	}
 }
