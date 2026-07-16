@@ -2726,3 +2726,261 @@ func TestResolveDeps_Gradle_GlobalTable(t *testing.T) {
 		t.Errorf("ResolveDeps Gradle: no mount at %s in %+v", gradleCacheMount, res.ROMounts)
 	}
 }
+
+// ---- bugbot-48ya: bwrap dependency provisioning -----------------------------
+
+// TestFetchPrefetchNetworkDefaults verifies fetchPrefetchNetwork's three-way
+// resolution: operator override always wins; the container backend (nil or
+// any non-bwrap Sandbox, e.g. Mock) keeps the byte-identical "bridge"
+// default (acceptance 5); a *Bwrap FetchSandbox resolves to "host" (bwrap
+// has no "bridge" network).
+func TestFetchPrefetchNetworkDefaults(t *testing.T) {
+	bw, err := NewBwrap()
+	if err != nil {
+		t.Fatalf("NewBwrap: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		opts DepOptions
+		want string
+	}{
+		{"container backend default", DepOptions{FetchSandbox: NewMock(MockResponse{})}, "bridge"},
+		{"nil FetchSandbox default", DepOptions{}, "bridge"},
+		{"bwrap backend default", DepOptions{FetchSandbox: bw}, "host"},
+		{"operator override wins over container", DepOptions{FetchSandbox: NewMock(MockResponse{}), FetchNetwork: "custom"}, "custom"},
+		{"operator override wins over bwrap", DepOptions{FetchSandbox: bw, FetchNetwork: "none"}, "none"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fetchPrefetchNetwork(tc.opts); got != tc.want {
+				t.Errorf("fetchPrefetchNetwork() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGoPrefetchSpecUsesResolvedNetwork is a regression test proving the
+// resolved network actually reaches the prefetch Spec (not just the helper
+// in isolation): a *Bwrap FetchSandbox must produce a "host" network Spec,
+// never the container-only "bridge" bwrap's validateBwrapNetwork rejects.
+func TestGoPrefetchSpecUsesResolvedNetwork(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module example.com/x\n\ngo 1.22\n")
+	writeFile(t, filepath.Join(dir, "go.sum"), "")
+	cacheBase := t.TempDir()
+
+	var gotNetwork string
+	mock := NewMock(MockResponse{})
+	mock.ResponseFunc = func(n int, spec Spec) (Result, error) {
+		gotNetwork = spec.Network
+		return Result{ExitCode: 0}, nil
+	}
+
+	bw, err := NewBwrap()
+	if err != nil {
+		t.Fatalf("NewBwrap: %v", err)
+	}
+	// FetchSandbox must be the mock so the Exec call is observable, but
+	// fetchPrefetchNetwork keys off isBwrapFetchBackend(opts), which
+	// type-asserts opts.FetchSandbox itself — so the mock stands in for
+	// "the container backend" here (default "bridge"). A separate
+	// assertion below directly checks the bwrap-selected value.
+	res, err := resolveGoDeps(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
+	if err != nil {
+		t.Fatalf("resolveGoDeps: %v", err)
+	}
+	if err := res.Prefetch(context.Background()); err != nil {
+		t.Fatalf("Prefetch: %v", err)
+	}
+	if gotNetwork != "bridge" {
+		t.Errorf("container-backend prefetch network = %q, want %q (byte-identical, acceptance 5)", gotNetwork, "bridge")
+	}
+
+	if got := fetchPrefetchNetwork(DepOptions{FetchSandbox: bw}); got != "host" {
+		t.Errorf("bwrap prefetch network = %q, want %q", got, "host")
+	}
+	// bwrap's validateBwrapNetwork must accept the resolved value (it
+	// rejects anything other than ""/"none"/"host" — see acceptance 1).
+	if _, err := validateBwrapNetwork("host"); err != nil {
+		t.Errorf("validateBwrapNetwork(%q) must accept the bwrap prefetch network: %v", "host", err)
+	}
+}
+
+// TestPythonResolveHostIsOffForContainerBackend pins the container-backend
+// regression: Python HOST must stay OFF when FetchSandbox is not *Bwrap,
+// exactly as before this bead (acceptance 5). See
+// TestPythonResolveHostIsOff for the nil-FetchSandbox case this complements.
+func TestPythonResolveHostIsOffForContainerBackend(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
+
+	res, err := resolvePython(dir, DepOptions{Strategy: DepStrategyHost, FetchSandbox: NewMock(MockResponse{})})
+	if err != nil {
+		t.Fatalf("resolvePython HOST (container backend): %v", err)
+	}
+	if res.Strategy != DepStrategyOff || len(res.ROMounts) != 0 || len(res.Env) != 0 {
+		t.Errorf("Python HOST under a non-bwrap FetchSandbox must stay OFF, got %+v", res)
+	}
+}
+
+// TestPythonResolveHostUnderBwrap: acceptance 1/4 — Python HOST under bwrap
+// mounts the (test-seam-overridden) host site-packages directories
+// read-only at their own path and sets PYTHONPATH.
+func TestPythonResolveHostUnderBwrap(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
+
+	sitePkgs := t.TempDir()
+	bw, err := NewBwrap()
+	if err != nil {
+		t.Fatalf("NewBwrap: %v", err)
+	}
+
+	res, err := resolvePython(dir, DepOptions{
+		Strategy:               DepStrategyHost,
+		FetchSandbox:           bw,
+		hostPythonSitePackages: []string{sitePkgs},
+	})
+	if err != nil {
+		t.Fatalf("resolvePython HOST (bwrap): %v", err)
+	}
+	if res.Strategy != DepStrategyHost {
+		t.Errorf("Strategy = %q, want host", res.Strategy)
+	}
+	if res.Prefetch != nil {
+		t.Errorf("bwrap Python HOST must not set a Prefetch hook (no online step): got non-nil func")
+	}
+	found := false
+	for _, m := range res.ROMounts {
+		if m.HostPath == sitePkgs && m.ContainerPath == sitePkgs {
+			found = true
+			if !m.Shared {
+				t.Errorf("host site-packages mount Shared = false, want true (host-owned)")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("ROMounts = %+v, want a %s -> %s mount", res.ROMounts, sitePkgs, sitePkgs)
+	}
+	if !envHas(res.Env, "PYTHONPATH="+sitePkgs) {
+		t.Errorf("env = %v, want PYTHONPATH=%s", res.Env, sitePkgs)
+	}
+	if err := validateBwrapMounts(res.ROMounts, nil); err != nil {
+		t.Errorf("validateBwrapMounts rejected the resolved site-packages mount: %v", err)
+	}
+}
+
+// TestPythonResolveHostUnderBwrap_NoSitePackagesErrors: an empty (non-nil)
+// override must error rather than silently mounting nothing — a missing
+// dependency should surface as a clear environment error, not a mysterious
+// ImportError deep in the agent's repro attempt.
+func TestPythonResolveHostUnderBwrap_NoSitePackagesErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
+	bw, err := NewBwrap()
+	if err != nil {
+		t.Fatalf("NewBwrap: %v", err)
+	}
+	_, err = resolvePython(dir, DepOptions{
+		Strategy:               DepStrategyHost,
+		FetchSandbox:           bw,
+		hostPythonSitePackages: []string{},
+	})
+	if err == nil {
+		t.Fatal("resolvePython HOST (bwrap) with empty site-packages override: want error, got nil")
+	}
+}
+
+// TestJSResolveHostIsOffForContainerBackend pins the container-backend
+// regression for JS HOST, mirroring the Python test above.
+func TestJSResolveHostIsOffForContainerBackend(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+
+	res, err := resolveJS(dir, DepOptions{Strategy: DepStrategyHost, FetchSandbox: NewMock(MockResponse{})})
+	if err != nil {
+		t.Fatalf("resolveJS HOST (container backend): %v", err)
+	}
+	if res.Strategy != DepStrategyOff || len(res.ROMounts) != 0 {
+		t.Errorf("JS HOST under a non-bwrap FetchSandbox must stay OFF, got %+v", res)
+	}
+}
+
+// TestJSResolveHostUnderBwrap: acceptance 1/4 — JS HOST under bwrap mounts
+// the (test-seam-overridden) host npm cache read-only and installs offline
+// from it, identical SetupCmd shape to the FETCH strategy.
+func TestJSResolveHostUnderBwrap(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+
+	npmCache := t.TempDir()
+	bw, err := NewBwrap()
+	if err != nil {
+		t.Fatalf("NewBwrap: %v", err)
+	}
+
+	res, err := resolveJS(dir, DepOptions{
+		Strategy:     DepStrategyHost,
+		FetchSandbox: bw,
+		hostNPMCache: npmCache,
+	})
+	if err != nil {
+		t.Fatalf("resolveJS HOST (bwrap): %v", err)
+	}
+	if res.Strategy != DepStrategyHost {
+		t.Errorf("Strategy = %q, want host", res.Strategy)
+	}
+	if res.Prefetch != nil {
+		t.Errorf("bwrap JS HOST must not set a Prefetch hook (host cache used as-is): got non-nil func")
+	}
+	if len(res.ROMounts) != 1 || res.ROMounts[0].HostPath != npmCache || res.ROMounts[0].ContainerPath != npmCacheMount {
+		t.Fatalf("ROMounts = %+v, want one %s -> %s mount", res.ROMounts, npmCache, npmCacheMount)
+	}
+	if !res.ROMounts[0].Shared {
+		t.Errorf("host npm cache mount Shared = false, want true (host-owned)")
+	}
+	if !envHas(res.Env, "npm_config_offline=true") {
+		t.Errorf("env = %v, want npm_config_offline=true", res.Env)
+	}
+	if len(res.SetupCmds) != 1 {
+		t.Fatalf("SetupCmds = %v, want exactly one offline install step", res.SetupCmds)
+	}
+}
+
+// TestJSResolveHostUnderBwrap_MissingCacheErrors: a nonexistent override
+// directory must error with an actionable message rather than silently
+// mounting a path that will fail at bwrap Exec time with an opaque bind
+// error.
+func TestJSResolveHostUnderBwrap_MissingCacheErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+	bw, err := NewBwrap()
+	if err != nil {
+		t.Fatalf("NewBwrap: %v", err)
+	}
+	_, err = resolveJS(dir, DepOptions{
+		Strategy:     DepStrategyHost,
+		FetchSandbox: bw,
+		hostNPMCache: filepath.Join(dir, "does-not-exist"),
+	})
+	if err == nil {
+		t.Fatal("resolveJS HOST (bwrap) with missing cache dir override: want error, got nil")
+	}
+}
+
+// TestValidateBwrapMountsUniqueAcrossDepAndLocalMounts is the acceptance-2
+// regression: a dep-strategy-derived mount and an operator local_mounts
+// entry sharing a ContainerPath must be rejected by validateBwrapMounts
+// exactly like two colliding Spec-level mounts would be — ResolveDeps
+// appends LocalMounts into the SAME ROMounts slice as ecosystem mounts (see
+// ResolveDeps), so this is what actually backstops a misconfigured
+// local_mounts entry aimed at, say, /modcache.
+func TestValidateBwrapMountsUniqueAcrossDepAndLocalMounts(t *testing.T) {
+	depMount := ROMount{HostPath: t.TempDir(), ContainerPath: "/modcache", Shared: true}
+	localMount := ROMount{HostPath: t.TempDir(), ContainerPath: "/modcache", Shared: true}
+	err := validateBwrapMounts([]ROMount{depMount, localMount}, nil)
+	if err == nil {
+		t.Fatal("validateBwrapMounts: want error for a dep-strategy mount colliding with a local_mounts entry, got nil")
+	}
+}
