@@ -102,14 +102,15 @@ func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *sto
 	// 3). Against HostExec this probes the operator's own host directly —
 	// cfg.Sandbox.Image is irrelevant there but harmless as a cache-key
 	// component (HostExec has no image concept).
-	probeMounts, probeEnv := depProbeInputs(*cfg, sb, repoRoot)
-	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, repoRoot, probeMounts, probeEnv)
+	probeMounts, probeRWMounts, probeEnv := depProbeInputs(*cfg, sb, repoRoot)
+	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, repoRoot, probeMounts, probeRWMounts, probeEnv)
 	// Verified-command playbook (bugbot-u2v5): run the same bounded probe
 	// battery repro.PlaybookOnce caches per (repoRoot HEAD, dep-resolution
 	// fingerprint), against the exact spec/deps this reproducer's own sandbox
 	// runs use. Degrades to an inactive (empty) Playbook on any battery
 	// failure — see PlaybookOnce's doc — so this never blocks reproducer
 	// construction.
+	localROMounts, localRWMounts := localMountsFromConfig(*cfg)
 	pb := repro.PlaybookOnce(ctx, sb, repoRoot, sandbox.Spec{Image: cfg.Sandbox.Image}, resolveDepsForPlaybook(*cfg, sb, repoRoot), ingest.DetectBuildSystems(repoRoot))
 	r, err := repro.New(client, sb, repoRoot, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
@@ -120,7 +121,8 @@ func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *sto
 		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
 		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 		SetupCmds:        cfg.Sandbox.SetupCmds,
-		LocalMounts:      localMountsFromConfig(*cfg),
+		LocalMounts:      localROMounts,
+		LocalRWMounts:    localRWMounts,
 		HostToolchains:   cfg.Sandbox.HostToolchains,
 		Capabilities:     caps,
 		Playbook:         pb,
@@ -204,12 +206,13 @@ func buildReproHookForScan(
 	// subsequent daemon cycles and parallel scan runs are free. depProbeInputs
 	// threads dep-strategy mounts/env, local_mounts, and host toolchain mounts
 	// through, so a mounted toolchain or dependency cache shows up as available.
-	probeMounts, probeEnv := depProbeInputs(cfg, sb, opts.Target)
-	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, opts.Target, probeMounts, probeEnv)
+	probeMounts, probeRWMounts, probeEnv := depProbeInputs(cfg, sb, opts.Target)
+	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, opts.Target, probeMounts, probeRWMounts, probeEnv)
 	// Verified-command playbook (bugbot-u2v5): same battery as
 	// buildReproducerWithSandbox above, run once per (repoDir HEAD,
 	// dep-resolution fingerprint) and degrading to an inactive Playbook on
 	// any failure — never blocks reproducer construction.
+	localROMounts, localRWMounts := localMountsFromConfig(cfg)
 	pb := repro.PlaybookOnce(ctx, sb, opts.Target, sandbox.Spec{Image: cfg.Sandbox.Image}, resolveDepsForPlaybook(cfg, sb, opts.Target), ingest.DetectBuildSystems(opts.Target))
 	r, rNewErr := repro.New(reproClient, sb, opts.Target, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
@@ -220,7 +223,8 @@ func buildReproHookForScan(
 		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
 		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 		SetupCmds:        cfg.Sandbox.SetupCmds,
-		LocalMounts:      localMountsFromConfig(cfg),
+		LocalMounts:      localROMounts,
+		LocalRWMounts:    localRWMounts,
 		HostToolchains:   cfg.Sandbox.HostToolchains,
 		Capabilities:     caps,
 		Playbook:         pb,

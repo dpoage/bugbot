@@ -258,11 +258,13 @@ auto-close the finding).`,
 			}
 			defer func() { _ = sb.Close() }()
 
+			roMounts, rwMounts := engine.LocalMountsFromConfig(cfg)
 			deps, err := sandbox.ResolveDeps(target, sandbox.DepOptions{
-				Strategy:     sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
-				FetchSandbox: sb,
-				FetchImage:   effImage,
-				LocalMounts:  engine.LocalMountsFromConfig(cfg),
+				Strategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+				FetchSandbox:  sb,
+				FetchImage:    effImage,
+				LocalMounts:   roMounts,
+				LocalRWMounts: rwMounts,
 			})
 			if err != nil {
 				return fmt.Errorf("bundle replay: resolve dependencies: %w", err)

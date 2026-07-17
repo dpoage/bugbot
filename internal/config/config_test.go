@@ -1166,6 +1166,23 @@ func TestValidate_LocalMounts(t *testing.T) {
 		}
 	})
 
+	// TestValidate_LocalMounts/duplicate_container_path_across_ro_and_writable
+	// pins bugbot-wjc2: uniqueness must span the ro+rw union, not just
+	// entries sharing the same Writable value.
+	t.Run("duplicate container path across ro and writable is invalid", func(t *testing.T) {
+		hostDir1 := t.TempDir()
+		hostDir2 := t.TempDir()
+		cfg := load(t)
+		cfg.Sandbox.LocalMounts = []LocalMount{
+			{Host: hostDir1, Container: "/shared", Writable: false},
+			{Host: hostDir2, Container: "/shared", Writable: true},
+		}
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "duplicated") {
+			t.Errorf("duplicate container path across ro/writable should be rejected, got %v", err)
+		}
+	})
+
 	t.Run("missing host dir is invalid", func(t *testing.T) {
 		cfg := load(t)
 		cfg.Sandbox.LocalMounts = []LocalMount{
@@ -1192,6 +1209,39 @@ func TestValidate_LocalMounts(t *testing.T) {
 		}
 		if cfg.Sandbox.LocalMounts[0].Container != "/sibling" {
 			t.Errorf("container = %q, want /sibling", cfg.Sandbox.LocalMounts[0].Container)
+		}
+	})
+	// TestValidate_LocalMounts/writable_true_round_trips pins bugbot-wjc2:
+	// a local_mounts entry with "writable: true" parses to Writable=true,
+	// defaults to false when omitted (RO stays the default), and passes
+	// validation like any other entry.
+	t.Run("writable true round trips", func(t *testing.T) {
+		hostDir := t.TempDir()
+		yaml := validYAML + "sandbox:\n  local_mounts:\n    - host: " + hostDir + "\n      container: /vendor\n      writable: true\n"
+		cfg, err := Load(writeTemp(t, yaml))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if len(cfg.Sandbox.LocalMounts) != 1 {
+			t.Fatalf("want 1 local_mount, got %d", len(cfg.Sandbox.LocalMounts))
+		}
+		if !cfg.Sandbox.LocalMounts[0].Writable {
+			t.Errorf("writable = false, want true")
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("writable local_mounts entry should validate, got %v", err)
+		}
+	})
+
+	t.Run("writable omitted defaults to false", func(t *testing.T) {
+		hostDir := t.TempDir()
+		yaml := validYAML + "sandbox:\n  local_mounts:\n    - host: " + hostDir + "\n      container: /sibling\n"
+		cfg, err := Load(writeTemp(t, yaml))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Sandbox.LocalMounts[0].Writable {
+			t.Errorf("writable = true, want false (default RO)")
 		}
 	})
 }

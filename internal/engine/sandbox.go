@@ -33,6 +33,11 @@ func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool
 	if err != nil {
 		return funnel.SandboxOpts{}, false, fmt.Errorf("build verify sandbox: %w", err)
 	}
+	// Verify's sandbox_exec tool is refuter-driven adversarial evidence
+	// gathering, not a repro run — writable local_mounts (bugbot-wjc2) are
+	// scoped to the repro paths (execute/preview/verify smoke/capability
+	// probe/playbook battery); this seam only ever needs the RO half.
+	ro, _ := localMountsFromConfig(cfg)
 	return funnel.SandboxOpts{
 		Sandbox:     sb,
 		Enabled:     true,
@@ -40,7 +45,7 @@ func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool
 		MaxExecs:    cfg.Verify.SandboxMaxExecs,
 		DepStrategy: sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 		SetupCmds:   cfg.Sandbox.SetupCmds,
-		LocalMounts: localMountsFromConfig(cfg),
+		LocalMounts: ro,
 	}, false, nil
 }
 
@@ -240,20 +245,23 @@ func packageSummaryProvider(st *store.Store) func(ctx context.Context, pkg strin
 }
 
 // localMountsFromConfig converts the operator's sandbox.local_mounts config
-// entries into read-only sandbox.ROMounts. They are Shared=true (host-owned
-// source trees that must NOT be SELinux :Z relabeled) per the local-mount
-// contract; absolute-path, container-uniqueness, and existence checks already
-// ran in config.Validate. Shared by the repro and funnel sandbox paths so both
+// entries into sandbox.ROMounts, split by config.LocalMount.Writable
+// (bugbot-wjc2) into a read-only slice (ro) and a writable slice (rw). Both
+// are Shared=true (host-owned source trees that must NOT be SELinux :Z
+// relabeled) per the local-mount contract; absolute-path, container-
+// uniqueness (across the ro+rw union), and existence checks already ran in
+// config.Validate. Shared by the repro and funnel sandbox paths so both
 // expose the same out-of-tree dependency directories offline.
-func localMountsFromConfig(cfg config.Config) []sandbox.ROMount {
-	if len(cfg.Sandbox.LocalMounts) == 0 {
-		return nil
+func localMountsFromConfig(cfg config.Config) (ro, rw []sandbox.ROMount) {
+	for _, m := range cfg.Sandbox.LocalMounts {
+		mount := sandbox.ROMount{HostPath: m.Host, ContainerPath: m.Container, Shared: true}
+		if m.Writable {
+			rw = append(rw, mount)
+			continue
+		}
+		ro = append(ro, mount)
 	}
-	mounts := make([]sandbox.ROMount, len(cfg.Sandbox.LocalMounts))
-	for i, m := range cfg.Sandbox.LocalMounts {
-		mounts[i] = sandbox.ROMount{HostPath: m.Host, ContainerPath: m.Container, Shared: true}
-	}
-	return mounts
+	return ro, rw
 }
 
 // SandboxRunOpts is the exported wrapper for sandboxRunOpts, for callers
@@ -264,7 +272,9 @@ func SandboxRunOpts(cfg config.Config) []sandbox.Option { return sandboxRunOpts(
 
 // LocalMountsFromConfig is the exported wrapper for localMountsFromConfig,
 // for the same external callers as SandboxRunOpts.
-func LocalMountsFromConfig(cfg config.Config) []sandbox.ROMount { return localMountsFromConfig(cfg) }
+func LocalMountsFromConfig(cfg config.Config) (ro, rw []sandbox.ROMount) {
+	return localMountsFromConfig(cfg)
+}
 
 // depProbeInputs resolves the mounts/env ProbeCapabilities needs to see the
 // SAME dependency provisioning a real repro run would have: host toolchains
@@ -282,31 +292,35 @@ func LocalMountsFromConfig(cfg config.Config) []sandbox.ROMount { return localMo
 // side effect.
 //
 // A resolution error (e.g. a HOST cache genuinely missing on this host)
-// degrades to nil/nil rather than propagating: the probe must run BEFORE
+// degrades to nil/nil/nil rather than propagating: the probe must run BEFORE
 // repro.New exists (its result feeds repro.Options.Capabilities), and a
 // missing cache is exactly the kind of gap the resulting CapabilitySet
 // should legitimately report as unavailable, not a reason to abort probing
-// altogether.
-func depProbeInputs(cfg config.Config, sb sandbox.Sandbox, repoDir string) ([]sandbox.ROMount, []string) {
+// altogether. The third return (rwMounts) carries any operator "writable:
+// true" local_mounts entries (bugbot-wjc2), so a probe sees the same
+// writability the real run gets.
+func depProbeInputs(cfg config.Config, sb sandbox.Sandbox, repoDir string) (roMounts, rwMounts []sandbox.ROMount, env []string) {
+	ro, rw := localMountsFromConfig(cfg)
 	res, err := sandbox.ResolveDeps(repoDir, sandbox.DepOptions{
 		Strategy:       sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 		FetchSandbox:   sb,
 		FetchImage:     cfg.Sandbox.Image,
-		LocalMounts:    localMountsFromConfig(cfg),
+		LocalMounts:    ro,
+		LocalRWMounts:  rw,
 		HostToolchains: cfg.Sandbox.HostToolchains,
 	})
 	if err != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return res.ROMounts, res.Env
+	return res.ROMounts, res.RWMounts, res.Env
 }
 
 // resolveDepsForPlaybook resolves repoDir's dependency strategy identically
 // to depProbeInputs (same sandbox.ResolveDeps call, same DepOptions), but
-// returns the full sandbox.Resolution instead of just (ROMounts, Env):
-// repro.PlaybookOnce needs SetupCmds and Fingerprints too, to run the SAME
-// battery spec a real repro run's dependency resolution would produce and to
-// key its cache correctly (see resolutionFingerprint in
+// returns the full sandbox.Resolution instead of just (ROMounts, RWMounts,
+// Env): repro.PlaybookOnce needs SetupCmds and Fingerprints too, to run the
+// SAME battery spec a real repro run's dependency resolution would produce
+// and to key its cache correctly (see resolutionFingerprint in
 // internal/repro/playbook.go). Calling ResolveDeps a second time here
 // (rather than threading depProbeInputs' internal result out) is cheap: it
 // is stat-based dependency-marker detection, not network I/O — the FETCH
@@ -316,11 +330,13 @@ func depProbeInputs(cfg config.Config, sb sandbox.Sandbox, repoDir string) ([]sa
 // inputs still produces a valid (just less complete) battery instead of
 // blocking reproducer construction.
 func resolveDepsForPlaybook(cfg config.Config, sb sandbox.Sandbox, repoDir string) sandbox.Resolution {
+	ro, rw := localMountsFromConfig(cfg)
 	res, err := sandbox.ResolveDeps(repoDir, sandbox.DepOptions{
 		Strategy:       sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 		FetchSandbox:   sb,
 		FetchImage:     cfg.Sandbox.Image,
-		LocalMounts:    localMountsFromConfig(cfg),
+		LocalMounts:    ro,
+		LocalRWMounts:  rw,
 		HostToolchains: cfg.Sandbox.HostToolchains,
 	})
 	if err != nil {

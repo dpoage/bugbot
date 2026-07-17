@@ -161,9 +161,17 @@ func TestBuildRunArgsRendersWritableMounts(t *testing.T) {
 		image:         "img",
 		network:       "bridge",
 		cmd:           []string{"go", "mod", "download"},
-		rwMounts:      []ROMount{{HostPath: "/host/cache", ContainerPath: "/modcache"}},
+		rwMounts: []ROMount{
+			// Bugbot-owned prefetch cache: private, gets the :Z relabel.
+			{HostPath: "/host/cache", ContainerPath: "/modcache"},
+			// Operator writable local_mount (bugbot-wjc2): host-owned
+			// (Shared=true), must NOT be relabeled — a private container
+			// context would break host-side management of the same tree.
+			{HostPath: "/data/vendor", ContainerPath: "/bazel-vendor", Shared: true},
+		},
 	})
 	mustContainSeq(t, args, "-v", "/host/cache:/modcache:rw,Z")
+	mustContainSeq(t, args, "-v", "/data/vendor:/bazel-vendor:rw")
 	mustContainSeq(t, args, "--network=bridge")
 }
 

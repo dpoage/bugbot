@@ -86,9 +86,18 @@ var capCache sync.Map
 // nil for both when the caller has no dependency/toolchain resolution to
 // thread through (equivalent to the pre-mount probing behavior).
 //
+// rwMounts is the writable counterpart (bugbot-wjc2): an operator's
+// "writable: true" local_mounts entry is threaded into the probe's
+// Spec.RWMounts too, so a probe against (e.g.) a bazel vendor dir sees the
+// same writability a real run would — most capability probes don't care,
+// but a probe command that itself needs to write there (mirroring the real
+// run's requirement) must not read as unavailable purely because the probe
+// under-provisioned the mount. Pass nil when there is nothing writable to
+// thread through.
+//
 // sb must be non-nil. The probe runs under network=none (sandbox default) with
 // a short timeout so it cannot stall the caller.
-func ProbeCapabilities(ctx context.Context, sb Sandbox, image, repoDir string, mounts []ROMount, env []string) CapabilitySet {
+func ProbeCapabilities(ctx context.Context, sb Sandbox, image, repoDir string, mounts, rwMounts []ROMount, env []string) CapabilitySet {
 	if sb == nil || repoDir == "" {
 		// No sandbox or no repo to probe against — return empty capability set.
 		cs := make(CapabilitySet)
@@ -98,24 +107,30 @@ func ProbeCapabilities(ctx context.Context, sb Sandbox, image, repoDir string, m
 		return cs
 	}
 
-	key := image + "|" + mountsEnvCacheKey(mounts, env)
+	key := image + "|" + mountsEnvCacheKey(mounts, rwMounts, env)
 	if v, ok := capCache.Load(key); ok {
 		return v.(CapabilitySet)
 	}
-	actual, _ := capCache.LoadOrStore(key, runProbes(ctx, sb, image, repoDir, mounts, env))
+	actual, _ := capCache.LoadOrStore(key, runProbes(ctx, sb, image, repoDir, mounts, rwMounts, env))
 	return actual.(CapabilitySet)
 }
 
-// mountsEnvCacheKey builds a deterministic cache key fragment from mounts and
-// env so ProbeCapabilities never returns a stale result for a different set
-// of host toolchain mounts (a mounted "node" measurably changes the js probe
-// outcome). Order-independent: mounts/env are sorted before joining, since
-// callers may assemble them from map iteration or independent resolution
-// steps in varying order.
-func mountsEnvCacheKey(mounts []ROMount, env []string) string {
-	parts := make([]string, 0, len(mounts)+len(env))
+// mountsEnvCacheKey builds a deterministic cache key fragment from mounts,
+// rwMounts, and env so ProbeCapabilities never returns a stale result for a
+// different set of host toolchain or writable-local mounts (a mounted "node"
+// measurably changes the js probe outcome; a writable-vs-read-only vendor
+// mount can too). Order-independent: mounts/rwMounts/env are sorted before
+// joining, since callers may assemble them from map iteration or independent
+// resolution steps in varying order. rw entries carry a "rw:" prefix
+// (distinct from ro's "m:") so a mount that is read-only under one config
+// and writable under another never collides on the same key.
+func mountsEnvCacheKey(mounts, rwMounts []ROMount, env []string) string {
+	parts := make([]string, 0, len(mounts)+len(rwMounts)+len(env))
 	for _, m := range mounts {
 		parts = append(parts, "m:"+m.HostPath+"->"+m.ContainerPath)
+	}
+	for _, m := range rwMounts {
+		parts = append(parts, "rw:"+m.HostPath+"->"+m.ContainerPath)
 	}
 	parts = append(parts, env...)
 	sort.Strings(parts)
@@ -123,8 +138,9 @@ func mountsEnvCacheKey(mounts []ROMount, env []string) string {
 }
 
 // runProbes executes all capability probes and assembles the CapabilitySet.
-// mounts and env are attached to every probe's Spec (see ProbeCapabilities).
-func runProbes(ctx context.Context, sb Sandbox, image, repoDir string, mounts []ROMount, env []string) CapabilitySet {
+// mounts, rwMounts, and env are attached to every probe's Spec (see
+// ProbeCapabilities).
+func runProbes(ctx context.Context, sb Sandbox, image, repoDir string, mounts, rwMounts []ROMount, env []string) CapabilitySet {
 	cs := make(CapabilitySet, len(ecoreg.ProbeEntries))
 	for _, e := range ecoreg.ProbeEntries {
 		spec := Spec{
@@ -133,6 +149,7 @@ func runProbes(ctx context.Context, sb Sandbox, image, repoDir string, mounts []
 			Image:    image,
 			Timeout:  probeTimeout,
 			ROMounts: mounts,
+			RWMounts: rwMounts,
 			Env:      env,
 			// Network defaults to "none" in the sandbox backend; no override needed.
 		}

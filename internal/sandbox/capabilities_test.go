@@ -74,7 +74,7 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 	t.Run("present_and_race_available_when_go_and_race_tokens", func(t *testing.T) {
 		InvalidateCapabilityCache("test-image-race-available")
 		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "go\nrace\n"}})
-		cs := ProbeCapabilities(context.Background(), mock, "test-image-race-available", t.TempDir(), nil, nil)
+		cs := ProbeCapabilities(context.Background(), mock, "test-image-race-available", t.TempDir(), nil, nil, nil)
 		if !cs.Available("go", "present") {
 			t.Errorf("want present available, got %v", cs)
 		}
@@ -86,7 +86,7 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 	t.Run("race_unavailable_when_cgo_disabled", func(t *testing.T) {
 		InvalidateCapabilityCache("test-image-race-unavailable")
 		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "go\n"}})
-		cs := ProbeCapabilities(context.Background(), mock, "test-image-race-unavailable", t.TempDir(), nil, nil)
+		cs := ProbeCapabilities(context.Background(), mock, "test-image-race-unavailable", t.TempDir(), nil, nil, nil)
 		if !cs.Available("go", "present") {
 			t.Errorf("want present available, got %v", cs)
 		}
@@ -98,7 +98,7 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 	t.Run("present_unavailable_when_go_missing", func(t *testing.T) {
 		InvalidateCapabilityCache("test-image-go-missing")
 		mock := NewMock(MockResponse{Result: Result{ExitCode: 127, Stdout: ""}})
-		cs := ProbeCapabilities(context.Background(), mock, "test-image-go-missing", t.TempDir(), nil, nil)
+		cs := ProbeCapabilities(context.Background(), mock, "test-image-go-missing", t.TempDir(), nil, nil, nil)
 		if cs.Available("go", "present") {
 			t.Errorf("want present unavailable when the probe emits no go token, got %v", cs)
 		}
@@ -107,7 +107,7 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 	t.Run("both_unavailable_on_exec_error", func(t *testing.T) {
 		InvalidateCapabilityCache("test-image-exec-error")
 		mock := NewMock(MockResponse{Err: errProbeTest})
-		cs := ProbeCapabilities(context.Background(), mock, "test-image-exec-error", t.TempDir(), nil, nil)
+		cs := ProbeCapabilities(context.Background(), mock, "test-image-exec-error", t.TempDir(), nil, nil, nil)
 		if cs.Available("go", "present") {
 			t.Errorf("want present unavailable on exec error, got %v", cs)
 		}
@@ -119,8 +119,8 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 	t.Run("cache_hit_returns_same_result", func(t *testing.T) {
 		InvalidateCapabilityCache("test-image-cache-hit")
 		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "go\nrace\n"}})
-		cs1 := ProbeCapabilities(context.Background(), mock, "test-image-cache-hit", t.TempDir(), nil, nil)
-		cs2 := ProbeCapabilities(context.Background(), mock, "test-image-cache-hit", t.TempDir(), nil, nil)
+		cs1 := ProbeCapabilities(context.Background(), mock, "test-image-cache-hit", t.TempDir(), nil, nil, nil)
+		cs2 := ProbeCapabilities(context.Background(), mock, "test-image-cache-hit", t.TempDir(), nil, nil, nil)
 		if cs1["go"]["race"] != cs2["go"]["race"] {
 			t.Errorf("cache hit must return same result: cs1=%v cs2=%v", cs1, cs2)
 		}
@@ -128,7 +128,7 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 
 	t.Run("nil_sandbox_returns_unavailable", func(t *testing.T) {
 		InvalidateCapabilityCache("any")
-		cs := ProbeCapabilities(context.Background(), nil, "any", "", nil, nil)
+		cs := ProbeCapabilities(context.Background(), nil, "any", "", nil, nil, nil)
 		if cs.Available("go", "race") {
 			t.Errorf("want race unavailable for nil sandbox, got %v", cs)
 		}
@@ -137,7 +137,7 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 	t.Run("empty_repoDir_returns_unavailable", func(t *testing.T) {
 		InvalidateCapabilityCache("any")
 		mock := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "go\nrace\n"}})
-		cs := ProbeCapabilities(context.Background(), mock, "any", "", nil, nil)
+		cs := ProbeCapabilities(context.Background(), mock, "any", "", nil, nil, nil)
 		if cs.Available("go", "race") {
 			t.Errorf("want race unavailable for empty repoDir, got %v", cs)
 		}
@@ -154,7 +154,7 @@ func TestProbeCapabilities_MountsThreadedIntoEveryProbe(t *testing.T) {
 	mounts := []ROMount{{HostPath: "/host/node", ContainerPath: "/opt/bugbot-toolchains/node", Shared: true}}
 	env := []string{"PATH=/opt/bugbot-toolchains/node/bin:/usr/bin"}
 
-	cs := ProbeCapabilities(context.Background(), mock, "test-image-toolchain-mount", t.TempDir(), mounts, env)
+	cs := ProbeCapabilities(context.Background(), mock, "test-image-toolchain-mount", t.TempDir(), mounts, nil, env)
 	if !cs.Available("js", "node") {
 		t.Errorf("want js/node available once the mocked probe reports it, got %v", cs)
 	}
@@ -189,13 +189,13 @@ func TestProbeCapabilities_CacheKeyDependsOnMounts(t *testing.T) {
 		return Result{ExitCode: 1}, nil
 	}
 
-	without := ProbeCapabilities(context.Background(), mock, "test-image-mount-cache-key", t.TempDir(), nil, nil)
+	without := ProbeCapabilities(context.Background(), mock, "test-image-mount-cache-key", t.TempDir(), nil, nil, nil)
 	if without.Available("js", "node") {
 		t.Fatalf("without a mount, js/node should be unavailable, got %v", without)
 	}
 
 	mounts := []ROMount{{HostPath: "/host/node", ContainerPath: "/opt/bugbot-toolchains/node", Shared: true}}
-	with := ProbeCapabilities(context.Background(), mock, "test-image-mount-cache-key", t.TempDir(), mounts, nil)
+	with := ProbeCapabilities(context.Background(), mock, "test-image-mount-cache-key", t.TempDir(), mounts, nil, nil)
 	if !with.Available("js", "node") {
 		t.Errorf("with the mount, js/node should be available (must not reuse the mount-less cache entry), got %v", with)
 	}
@@ -555,12 +555,12 @@ func TestInvalidateCapabilityCache_DeletesComposedKey(t *testing.T) {
 
 	// Two different mount sets against the SAME image populate two distinct
 	// composed cache keys (image+"|"+<no mounts>) and (image+"|"+<mounts>).
-	without := ProbeCapabilities(context.Background(), mockA, image, t.TempDir(), nil, nil)
+	without := ProbeCapabilities(context.Background(), mockA, image, t.TempDir(), nil, nil, nil)
 	if without.Available("js", "node") {
 		t.Fatalf("precondition: expected js/node unavailable without a mount, got %v", without)
 	}
 	mounts := []ROMount{{HostPath: "/host/node", ContainerPath: "/opt/bugbot-toolchains/node", Shared: true}}
-	with := ProbeCapabilities(context.Background(), mockB, image, t.TempDir(), mounts, nil)
+	with := ProbeCapabilities(context.Background(), mockB, image, t.TempDir(), mounts, nil, nil)
 	if !with.Available("js", "node") {
 		t.Fatalf("precondition: expected js/node available with a mount, got %v", with)
 	}
@@ -571,7 +571,7 @@ func TestInvalidateCapabilityCache_DeletesComposedKey(t *testing.T) {
 	// with mockA now (a mock that always reports unavailable) for the
 	// previously-available "with mounts" case must reflect the fresh probe,
 	// not a stale cached true.
-	reprobed := ProbeCapabilities(context.Background(), mockA, image, t.TempDir(), mounts, nil)
+	reprobed := ProbeCapabilities(context.Background(), mockA, image, t.TempDir(), mounts, nil, nil)
 	if reprobed.Available("js", "node") {
 		t.Errorf("stale cache entry survived InvalidateCapabilityCache: got %v after re-probing with an always-unavailable mock", reprobed)
 	}

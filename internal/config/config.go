@@ -250,14 +250,21 @@ type Sandbox struct {
 	// config.Validate. Failures exit with code 125 (env_error semantics, never a
 	// bug demonstration). Empty default — no operator setup commands.
 	SetupCmds [][]string `yaml:"setup_cmds"`
-	// LocalMounts is an ordered list of host directories to bind-mount
-	// read-only into the sandbox. This is an ORTHOGONAL layer to dep_strategy:
-	// both may be active simultaneously (e.g. fetch + local mounts). Use it to
-	// expose monorepo siblings, locally-checked-out path dependencies, or any
+	// LocalMounts is an ordered list of host directories to bind-mount into
+	// the sandbox. This is an ORTHOGONAL layer to dep_strategy: both may be
+	// active simultaneously (e.g. fetch + local mounts). Use it to expose
+	// monorepo siblings, locally-checked-out path dependencies, or any
 	// on-disk dependency that falls outside the scanned repo tree.
 	//
-	// Mounts are read-only with Shared=true (no SELinux :Z relabeling) because
-	// operator-supplied source trees are host-owned, multi-access directories.
+	// Mounts are read-only by default (Shared=true — no SELinux :Z
+	// relabeling, since operator-supplied source trees are host-owned,
+	// multi-access directories). An entry may opt into "writable: true"
+	// (bugbot-wjc2) when the tool being reproduced unconditionally mutates
+	// the mounted directory at analysis/build time — e.g. bazel vendor-mode
+	// refreshing its bazel-external symlink and repo .marker files, or a
+	// bazel disk cache — where a read-only mount aborts the run outright.
+	// See sandbox.Spec.RWMounts for the resulting security posture and its
+	// tradeoff.
 	//
 	// v1 constraint: paths come ONLY from this operator config (trusted boundary).
 	// Auto-derivation from in-repo manifests (go.work, Cargo.toml, package.json)
@@ -292,16 +299,26 @@ type Sandbox struct {
 }
 
 // LocalMount is one entry in sandbox.local_mounts: a host directory
-// bind-mounted read-only at a fixed container path.
+// bind-mounted at a fixed container path, read-only unless Writable is set.
 type LocalMount struct {
 	// Host is the absolute host filesystem path to expose. Required; must exist
 	// at config-load time so a missing directory is caught before podman emits
 	// an opaque bind-mount error.
 	Host string `yaml:"host"`
 	// Container is the absolute container path where the host directory appears.
-	// Required; must be unique across all local_mounts entries and across any
-	// registry-cache mounts that the dep_strategy may add.
+	// Required; must be unique across all local_mounts entries (RO and writable
+	// combined) and across any registry-cache mounts that the dep_strategy may add.
 	Container string `yaml:"container"`
+	// Writable opts this entry into a WRITABLE bind mount (bugbot-wjc2),
+	// rendered as Spec.RWMounts instead of Spec.ROMounts. Default false
+	// (read-only) — flip only when the tool being reproduced unconditionally
+	// mutates the mounted directory, e.g. `bazel vendor` refreshing its
+	// bazel-external symlink and repo .marker files, or a bazel disk cache
+	// bazel writes build outputs into. The blast radius of a poisoned mount
+	// is scoped to bugbot's own sandbox builds against a bugbot-owned or
+	// bugbot-controlled directory — never point a writable entry at a
+	// directory containing anything else of value.
+	Writable bool `yaml:"writable"`
 }
 
 // Report configures where findings are written and which sinks receive them.
@@ -1042,6 +1059,10 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: sandbox.setup_cmds[%d] must not be empty", i)
 		}
 	}
+	// seen spans BOTH read-only and writable entries: container paths must
+	// be unique across the ro+rw union (bugbot-wjc2) — an operator flipping
+	// one entry's Writable must not be able to silently shadow another
+	// entry at the same container path.
 	seen := make(map[string]bool)
 	for i, m := range c.Sandbox.LocalMounts {
 		if m.Host == "" || !filepath.IsAbs(m.Host) {

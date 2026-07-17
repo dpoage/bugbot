@@ -191,6 +191,14 @@ var playbookProbesByEcosystem = map[ecosystem.Ecosystem][]playbookProbe{
 	},
 	ecosystem.EcosystemBazel: {
 		{ecosystem.EcosystemBazel, "bazel", []string{"bazel", "--version"}},
+		// bazelisk is a distinct, same-ecosystem launcher probe (bugbot-wjc2):
+		// on hosts where only bazelisk exists (doctor already special-cases
+		// this), a bazel-only battery left the agent with no verified
+		// launcher hint at all. Probing bazelisk too means a bazelisk-only
+		// sandbox renders a verified "bazelisk" line in the prompt, and
+		// alternativeTo offers bazelisk as the same-ecosystem alternative
+		// when a plan proposes the failed "bazel" launcher.
+		{ecosystem.EcosystemBazel, "bazelisk", []string{"bazelisk", "--version"}},
 	},
 }
 
@@ -346,6 +354,7 @@ func runPlaybookBattery(ctx context.Context, sb sandbox.Sandbox, repoDir string,
 		Image:       spec.Image,
 		Env:         append(append([]string(nil), spec.Env...), res.Env...),
 		ROMounts:    append(append([]sandbox.ROMount(nil), spec.ROMounts...), res.ROMounts...),
+		RWMounts:    append(append([]sandbox.ROMount(nil), spec.RWMounts...), res.RWMounts...),
 		SetupCmds:   res.SetupCmds,
 		Network:     "none",
 		IdleTimeout: spec.IdleTimeout,

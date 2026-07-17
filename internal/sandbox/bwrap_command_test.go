@@ -19,6 +19,8 @@ func TestBuildBwrapArgsSecurityFlags(t *testing.T) {
 	mustContainSeq(t, args, "--new-session")
 	mustContainSeq(t, args, "--clearenv")
 	mustContainSeq(t, args, "--setenv", "HOME", "/tmp")
+	mustContainSeq(t, args, "--setenv", "USER", "bugbot")
+	mustContainSeq(t, args, "--setenv", "LOGNAME", "bugbot")
 	mustContainSeq(t, args, "--proc", "/proc")
 	mustContainSeq(t, args, "--dev", "/dev")
 	mustContainSeq(t, args, "--tmpfs", "/tmp")
@@ -160,6 +162,51 @@ func TestBuildBwrapArgsMalformedEnvSkipped(t *testing.T) {
 	mustContainSeq(t, args, "--setenv", "GOOD", "value")
 	if slices.Contains(args, "NOEQUALSSIGN") {
 		t.Errorf("malformed env entry must be dropped, not passed through; args=%q", args)
+	}
+}
+
+// TestBuildBwrapArgsUserLogNameOverride verifies USER and LOGNAME get the
+// same "default first, Spec.Env wins on repeat --setenv" treatment as HOME
+// (bugbot-wjc2): bazel's client launcher hard-fails with "FATAL: $USER is
+// not set" under the scrubbed bwrap env, so USER=bugbot/LOGNAME=bugbot are
+// rendered as defaults, but an operator overriding either in Spec.Env must
+// still win since bwrap's env map is last-write-wins.
+func TestBuildBwrapArgsUserLogNameOverride(t *testing.T) {
+	defaults := buildBwrapArgs(bwrapParams{
+		workspace: "/ws",
+		network:   "none",
+		cmd:       []string{"true"},
+	})
+	mustContainSeq(t, defaults, "--setenv", "USER", "bugbot")
+	mustContainSeq(t, defaults, "--setenv", "LOGNAME", "bugbot")
+
+	overridden := buildBwrapArgs(bwrapParams{
+		workspace: "/ws",
+		network:   "none",
+		cmd:       []string{"true"},
+		env:       []string{"USER=alice", "LOGNAME=alice"},
+	})
+	mustContainSeq(t, overridden, "--setenv", "USER", "bugbot")
+	mustContainSeq(t, overridden, "--setenv", "USER", "alice")
+	mustContainSeq(t, overridden, "--setenv", "LOGNAME", "bugbot")
+	mustContainSeq(t, overridden, "--setenv", "LOGNAME", "alice")
+
+	// The operator's value must be the LAST --setenv USER/LOGNAME entry so
+	// bwrap's last-write-wins semantics actually pick it.
+	lastSetenvValue := func(args []string, key string) string {
+		var val string
+		for i := 0; i+2 < len(args); i++ {
+			if args[i] == "--setenv" && args[i+1] == key {
+				val = args[i+2]
+			}
+		}
+		return val
+	}
+	if got := lastSetenvValue(overridden, "USER"); got != "alice" {
+		t.Errorf("last --setenv USER = %q, want %q (operator override must win)", got, "alice")
+	}
+	if got := lastSetenvValue(overridden, "LOGNAME"); got != "alice" {
+		t.Errorf("last --setenv LOGNAME = %q, want %q (operator override must win)", got, "alice")
 	}
 }
 

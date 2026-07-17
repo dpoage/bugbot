@@ -122,6 +122,7 @@ func VerifySandbox(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec
 		Image:       spec.Image,
 		Env:         append(append([]string(nil), spec.Env...), res.Env...),
 		ROMounts:    append(append([]sandbox.ROMount(nil), spec.ROMounts...), res.ROMounts...),
+		RWMounts:    append(append([]sandbox.ROMount(nil), spec.RWMounts...), res.RWMounts...),
 		SetupCmds:   res.SetupCmds,
 		Network:     "none",
 		Timeout:     smokeTimeout,
@@ -293,18 +294,22 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 // sandbox.ROMounts for RunSandboxVerify's dep resolution (duplicated here
 // rather than imported: engine depends on repro, so importing
 // engine.LocalMountsFromConfig from here would cycle — see
-// newVerifySandbox's doc for the same constraint). Shared=true: these are
-// host-owned source trees that must not be SELinux :Z relabeled, matching
-// engine.localMountsFromConfig exactly.
-func localMountsFromConfig(cfg config.Config) []sandbox.ROMount {
-	if len(cfg.Sandbox.LocalMounts) == 0 {
-		return nil
+// newVerifySandbox's doc for the same constraint). Split by
+// config.LocalMount.Writable into a read-only slice (ro) and a writable
+// slice (rw) exactly like engine.localMountsFromConfig (bugbot-wjc2), so
+// the smoke run mounts a writable vendor/disk-cache dir the same way a
+// real repro run does. Shared=true on both halves: host-owned dirs that
+// must not be SELinux :Z relabeled.
+func localMountsFromConfig(cfg config.Config) (ro, rw []sandbox.ROMount) {
+	for _, m := range cfg.Sandbox.LocalMounts {
+		mount := sandbox.ROMount{HostPath: m.Host, ContainerPath: m.Container, Shared: true}
+		if m.Writable {
+			rw = append(rw, mount)
+		} else {
+			ro = append(ro, mount)
+		}
 	}
-	mounts := make([]sandbox.ROMount, len(cfg.Sandbox.LocalMounts))
-	for i, m := range cfg.Sandbox.LocalMounts {
-		mounts[i] = sandbox.ROMount{HostPath: m.Host, ContainerPath: m.Container, Shared: true}
-	}
-	return mounts
+	return ro, rw
 }
 
 // newVerifySandbox constructs the sandbox backend RunSandboxVerify probes
@@ -377,6 +382,7 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 		}, err
 	}
 
+	localRO, localRW := localMountsFromConfig(cfg)
 	opts := sandbox.DepOptions{
 		Strategy: sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 		// FetchSandbox/FetchImage/LocalMounts/HostToolchains, threaded so
@@ -390,7 +396,8 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 		// below, so this has no network side effect.
 		FetchSandbox:   sb,
 		FetchImage:     cfg.Sandbox.Image,
-		LocalMounts:    localMountsFromConfig(cfg),
+		LocalMounts:    localRO,
+		LocalRWMounts:  localRW,
 		HostToolchains: cfg.Sandbox.HostToolchains,
 	}
 	res, err := sandbox.ResolveDeps(repoDir, opts)

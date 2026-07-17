@@ -29,7 +29,7 @@ func TestProbeCapabilitiesIntegration_GoImage(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewCLI: %v", err)
 		}
-		cs := ProbeCapabilities(ctx, sb, goImage, repoDir, nil, nil)
+		cs := ProbeCapabilities(ctx, sb, goImage, repoDir, nil, nil, nil)
 		if !cs.Available("go", "race") {
 			t.Errorf("expected race=true for %s, got caps=%v", goImage, cs)
 		}
@@ -42,7 +42,7 @@ func TestProbeCapabilitiesIntegration_GoImage(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewCLI: %v", err)
 		}
-		cs := ProbeCapabilities(ctx, sb, slimImage, repoDir, nil, nil)
+		cs := ProbeCapabilities(ctx, sb, slimImage, repoDir, nil, nil, nil)
 		if cs.Available("go", "race") {
 			t.Errorf("expected race=false for %s (no Go toolchain), got caps=%v", slimImage, cs)
 		}

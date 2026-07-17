@@ -23,8 +23,9 @@ type bwrapParams struct {
 	// rendered after the fixed toolchain allowlist. Shared has no meaning for
 	// bwrap (there is no SELinux relabeling concept) and is ignored.
 	roMounts []ROMount
-	// rwMounts are extra writable bind mounts, used only by the trusted
-	// dependency-prefetch step (see Spec.RWMounts).
+	// rwMounts are extra writable bind mounts: the trusted
+	// dependency-prefetch step's cache dirs, and operator "writable: true"
+	// local_mounts entries (bugbot-wjc2; see Spec.RWMounts).
 	rwMounts []ROMount
 	// setupCmds are optional in-sandbox commands run before cmd. When
 	// non-empty the backend wraps execution in /bin/sh, exactly like
@@ -113,11 +114,15 @@ var fixedROAllowlist = []string{
 //     controlling terminal.
 //   - --clearenv + --setenv     : the sandbox starts with NO inherited host
 //     environment; every variable it sees is explicit, mirroring --env on the
-//     container backend. HOME=/tmp is set first as the sandbox's default,
-//     but p.env is rendered afterward and DOES win on a repeat --setenv HOME
-//     (bwrap's env map is last-write-wins, exactly like buildRunArgs' --env
-//     HOME=/tmp — an operator explicitly setting HOME in Spec.Env overrides
-//     the default, not the other way around).
+//     container backend. HOME=/tmp, USER=bugbot, and LOGNAME=bugbot are set
+//     first as the sandbox's defaults, but p.env is rendered afterward and
+//     DOES win on a repeat --setenv of any of them (bwrap's env map is
+//     last-write-wins, exactly like buildRunArgs' --env HOME=/tmp — an
+//     operator explicitly setting HOME/USER/LOGNAME in Spec.Env overrides the
+//     default, not the other way around). USER/LOGNAME exist because the
+//     tmpfs root has no /etc/passwd: bazel's client launcher hard-fails with
+//     "FATAL: $USER is not set" without them, and POSIX tools generally
+//     expect USER to be set (bugbot-wjc2).
 //   - tmpfs / FIRST             : the root filesystem is an empty tmpfs,
 //     established BEFORE any subpath (--proc, --dev, --tmpfs /tmp, the
 //     allowlist, workspace) is bound — bwrap applies mount operations in
@@ -151,6 +156,8 @@ func buildBwrapArgs(p bwrapParams) []string {
 		"--new-session",
 		"--clearenv",
 		"--setenv", "HOME", "/tmp",
+		"--setenv", "USER", "bugbot",
+		"--setenv", "LOGNAME", "bugbot",
 	}
 
 	// Network defaults to unshared (set by --unshare-all above). Only an
@@ -225,9 +232,10 @@ func buildBwrapArgs(p bwrapParams) []string {
 
 	// --clearenv leaves the sandbox with no environment at all; every
 	// variable it sees must be set explicitly here, mirroring --env on the
-	// container backend. HOME's default (set above) IS overridable here: an
-	// operator entry for "HOME" in p.env (Spec.Env) renders a second
-	// --setenv HOME, and bwrap's env map is last-write-wins, so it wins —
+	// container backend. HOME/USER/LOGNAME's defaults (set above) ARE
+	// overridable here: an operator entry for any of them in p.env
+	// (Spec.Env) renders a second --setenv, and bwrap's env map is
+	// last-write-wins, so it wins —
 	// same contract as buildRunArgs' --env HOME=/tmp. A malformed entry
 	// (no "=") is dropped rather than passed to bwrap as a broken --setenv
 	// invocation.

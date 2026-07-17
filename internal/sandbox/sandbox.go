@@ -112,16 +112,34 @@ type Spec struct {
 	ROMounts []ROMount
 
 	// RWMounts are host directories bind-mounted WRITABLE into the container.
-	// They exist ONLY for the dependency-prefetch step (DepStrategyFetch), where
-	// a network-enabled, otherwise-hardened container runs `go mod download` to
-	// populate a bugbot-managed module cache on the host. That same cache is
-	// then exposed to the untrusted network-none run read-only via ROMounts.
+	// They exist for two callers: the internal dependency-prefetch step
+	// (DepStrategyFetch, e.g. `go mod download`) populating a bugbot-managed
+	// module cache on the host, later exposed to the untrusted network-none
+	// run read-only via ROMounts; and, as of bugbot-wjc2, an operator's
+	// explicitly opted-in "writable: true" sandbox.local_mounts entry
+	// (config.LocalMount.Writable), for tools that unconditionally mutate a
+	// mounted directory at analysis/build time — the motivating case is
+	// `bazel vendor`, which refreshes its bazel-external symlink and repo
+	// .marker files inside the vendor dir (and, symmetrically, a bazel disk
+	// cache) at analysis time; a read-only mount there aborts the run.
 	//
-	// Do NOT use RWMounts for normal model-driven runs: the writable workspace
-	// copy is the only writable surface those runs are meant to have. Rendered
-	// as `-v host:ctr:rw,Z`; same absolute-path/uniqueness validation as
-	// ROMounts. ContainerPaths must be unique across ROMounts and RWMounts
-	// combined.
+	// SECURITY: a writable mount is strictly more dangerous than ROMounts —
+	// untrusted, model-driven code can corrupt whatever is mounted. Do NOT
+	// use RWMounts for a normal model-driven run's own scratch space: the
+	// writable workspace copy is that surface. The operator-local_mounts
+	// case is scoped by the config doc's mandate to point writable entries
+	// only at bugbot-owned or bugbot-controlled directories (e.g. a
+	// dedicated vendor/disk-cache dir the operator manages for bugbot) —
+	// poisoning tradeoff accepted is that a compromised run can corrupt that
+	// directory, but the blast radius stops there: it is never a directory
+	// shared with anything the operator (or another tool) trusts, so the
+	// worst case is bugbot's own next sandbox build reading corrupted
+	// vendored state, not a wider compromise. Rendered writable on both
+	// backends; on the container backend Shared=true suppresses the SELinux
+	// :Z relabel exactly like ROMounts (host-owned trees the host also
+	// manages must keep their context). Same absolute-path/uniqueness
+	// validation as ROMounts; ContainerPaths must be unique across ROMounts
+	// and RWMounts combined.
 	RWMounts []ROMount
 
 	// SetupCmds are optional ordered commands executed inside the container, in

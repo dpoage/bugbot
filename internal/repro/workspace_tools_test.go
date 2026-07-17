@@ -62,7 +62,7 @@ var (
 // newWorkspaceTool builds a WorkspaceTool wired to sb for tests, with no
 // dependency-strategy extras and the given per-attempt budget.
 func newWorkspaceTool(sb *fakeMaterializingSandbox, repoDir string, maxExec int, ws *iterationWorkspace) *WorkspaceTool {
-	return NewWorkspaceTool(sb, repoDir, "", 30*time.Second, nil, nil, nil, sb.MaterializeWorkspace, ws, maxExec)
+	return NewWorkspaceTool(sb, repoDir, "", 30*time.Second, nil, nil, nil, nil, sb.MaterializeWorkspace, ws, maxExec)
 }
 
 // newWriteTool builds a WriteReproFileTool sharing sb's materializer and ws.

@@ -162,6 +162,15 @@ type Options struct {
 	// locally-checked-out path dependencies that fall outside the scanned repo.
 	// Mounts are read-only with Shared=true (no SELinux :Z relabel).
 	LocalMounts []sandbox.ROMount
+	// LocalRWMounts is LocalMounts' writable counterpart (bugbot-wjc2):
+	// host directories bind-mounted WRITABLE into the sandbox, from operator
+	// local_mounts entries with "writable: true". Via ResolveDeps this field
+	// reaches every deps-driven sandbox run: buildSpec's execute()/Replay,
+	// the workspace-exec preview, capability probe, playbook battery, and
+	// the patch prover. The VerifySandbox smoke path gets the same mounts
+	// independently, straight from config (RunSandboxVerify). See
+	// sandbox.Spec.RWMounts for the accepted security tradeoff.
+	LocalRWMounts []sandbox.ROMount
 	// HostToolchains are host toolchain names (resolved from the host PATH) or
 	// explicit host directories to bind-mount read-only into the sandbox and
 	// prepend to its PATH — see sandbox.ResolveHostToolchains. Independent of
@@ -293,6 +302,7 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 		FetchSandbox:   sb,
 		FetchImage:     resolved.Image,
 		LocalMounts:    resolved.LocalMounts,
+		LocalRWMounts:  resolved.LocalRWMounts,
 		HostToolchains: resolved.HostToolchains,
 	})
 	if err != nil {
@@ -693,7 +703,7 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 			NewWriteReproFileTool(r.repoDir, mat.MaterializeWorkspace, iterWS),
 			NewDeleteReproFileTool(iterWS),
 			NewWorkspaceTool(r.sb, r.repoDir, r.opts.Image, r.opts.Timeout,
-				r.deps.ROMounts, r.deps.Env, r.deps.SetupCmds, mat.MaterializeWorkspace, iterWS, r.opts.TryMaxExecs))
+				r.deps.ROMounts, r.deps.RWMounts, r.deps.Env, r.deps.SetupCmds, mat.MaterializeWorkspace, iterWS, r.opts.TryMaxExecs))
 	}
 	var opts []agent.Option
 	opts = append(opts, agent.WithLimits(r.opts.AgentLimits))
@@ -779,6 +789,7 @@ func buildSpec(repoDir string, plan *Plan, image, network string, timeout time.D
 		// so the network-none run can resolve external modules. SetupCmds installs
 		// non-Go ecosystem packages from the mounted cache before Cmd runs.
 		ROMounts:  deps.ROMounts,
+		RWMounts:  deps.RWMounts,
 		Env:       deps.Env,
 		SetupCmds: deps.SetupCmds,
 	}
