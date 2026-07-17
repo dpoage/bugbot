@@ -164,10 +164,12 @@ type Options struct {
 	LocalMounts []sandbox.ROMount
 	// LocalRWMounts is LocalMounts' writable counterpart (bugbot-wjc2):
 	// host directories bind-mounted WRITABLE into the sandbox, from operator
-	// local_mounts entries with "writable: true". Reaches every sandbox-run
-	// path a repro uses (buildSpec's execute()/Replay, the workspace-exec
-	// preview, VerifySandbox smoke, capability probe, playbook battery) —
-	// see sandbox.Spec.RWMounts for the accepted security tradeoff.
+	// local_mounts entries with "writable: true". Via ResolveDeps this field
+	// reaches every deps-driven sandbox run: buildSpec's execute()/Replay,
+	// the workspace-exec preview, capability probe, playbook battery, and
+	// the patch prover. The VerifySandbox smoke path gets the same mounts
+	// independently, straight from config (RunSandboxVerify). See
+	// sandbox.Spec.RWMounts for the accepted security tradeoff.
 	LocalRWMounts []sandbox.ROMount
 	// HostToolchains are host toolchain names (resolved from the host PATH) or
 	// explicit host directories to bind-mount read-only into the sandbox and

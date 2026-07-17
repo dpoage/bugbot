@@ -71,8 +71,9 @@ const workspaceMount = "/workspace"
 //     is false (bugbot-owned dirs). Shared host dirs (e.g. the user's Go module
 //     cache) must NOT be relabeled: :Z on a multi-GB shared cache is slow,
 //     breaks the host go toolchain, and breaks other containers sharing the dir.
-//     See ROMount.Shared for the full tradeoff. RWMounts (prefetch only, always
-//     bugbot-owned) always get :rw,Z.
+//     See ROMount.Shared for the full tradeoff. RWMounts (prefetch caches and
+//     operator "writable: true" local_mounts, bugbot-wjc2) follow the same :Z
+//     rule: relabeled only when Shared is false.
 //   - --workdir /workspace      : run from the workspace.
 //   - --cap-drop ALL            : drop all Linux capabilities.
 //   - --security-opt no-new-privileges : block privilege escalation (setuid).

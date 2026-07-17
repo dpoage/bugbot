@@ -23,8 +23,9 @@ type bwrapParams struct {
 	// rendered after the fixed toolchain allowlist. Shared has no meaning for
 	// bwrap (there is no SELinux relabeling concept) and is ignored.
 	roMounts []ROMount
-	// rwMounts are extra writable bind mounts, used only by the trusted
-	// dependency-prefetch step (see Spec.RWMounts).
+	// rwMounts are extra writable bind mounts: the trusted
+	// dependency-prefetch step's cache dirs, and operator "writable: true"
+	// local_mounts entries (bugbot-wjc2; see Spec.RWMounts).
 	rwMounts []ROMount
 	// setupCmds are optional in-sandbox commands run before cmd. When
 	// non-empty the backend wraps execution in /bin/sh, exactly like
