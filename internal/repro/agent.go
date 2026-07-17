@@ -105,6 +105,10 @@ var specificGuidance = map[ingest.Language]string{
 	ingest.LangGo: "For Go, write a\n" +
 		"  *_test.go file in the package that contains the bug and run it with\n" +
 		"  " + "`go test -run <TestName> ./<pkg>`" + " (or the module path that targets it).\n" +
+		"  Put the file in the SAME DIRECTORY as the buggy file, in the same package,\n" +
+		"  when the target is `package main` or when importing its package is awkward —\n" +
+		"  a main package can NEVER be imported, so colocation is the only executable\n" +
+		"  edge to it.\n" +
 		"  The harness appends -json to a direct `go test` argv automatically; do not\n" +
 		"  rely on any particular human-readable console output shape.",
 	ingest.LangPython: "For Python, write a\n" +
@@ -405,6 +409,12 @@ func reproSandboxGuidance(mounts []sandbox.ROMount) string {
 	b.WriteString(`
 
 Sandbox environment & command hygiene:
+- Your cmd runs with the REPOSITORY ROOT as the working directory, and every
+  path in files/cmd is relative to that root. NEVER cd to an absolute path you
+  have not verified exists (/home/..., /root/..., /workspace/...) — they do
+  not exist in the sandbox. If a Python package roots at a subdirectory, use a
+  RELATIVE cd into it (e.g. bash -c "cd molecules/x/atoms/y && pytest ...") or
+  set PYTHONPATH to that subdirectory.
 - The sandbox holds the repository's git-tracked files (a clean checkout).
   Generated, gitignored paths (build/, .vendor/, node_modules/, ...) are NOT
   present — build or fetch what the test needs as part of cmd; never reference a

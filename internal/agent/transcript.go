@@ -98,9 +98,12 @@ func (t *Transcript) enableStreaming(path string) {
 }
 
 // streamAppend writes ev as one JSON line to the streaming file, opening it
-// (and its parent directory) on first use. Best-effort: any failure disables
-// further attempts for this transcript by clearing streamPath, matching the
-// never-fail-the-run autosave contract.
+// (and its parent directory) on first use. The file is opened in APPEND mode
+// so a reopen after closeStream (e.g. RunJSON's repair() completion, which
+// reuses the run's Transcript after the main loop already closed the stream)
+// continues the same JSONL file instead of truncating it. Best-effort: any
+// failure disables further attempts for this transcript by clearing
+// streamPath, matching the never-fail-the-run autosave contract.
 func (t *Transcript) streamAppend(ev *Event) {
 	if t.streamPath == "" {
 		return
@@ -110,7 +113,7 @@ func (t *Transcript) streamAppend(ev *Event) {
 			t.streamPath = ""
 			return
 		}
-		f, err := os.Create(t.streamPath)
+		f, err := os.OpenFile(t.streamPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			t.streamPath = ""
 			return
@@ -125,29 +128,25 @@ func (t *Transcript) streamAppend(ev *Event) {
 	}
 }
 
-// closeStream closes the streaming file, if one was opened, and disarms
-// streaming by clearing streamPath. Idempotent and best-effort: called
-// unconditionally at run end (and every early-return path) regardless of
-// whether streaming was ever armed or actually opened a file.
+// closeStream closes the streaming file, if one was opened. Idempotent and
+// best-effort: called unconditionally at run end (and every early-return
+// path) regardless of whether streaming was ever armed or actually opened a
+// file.
 //
-// Clearing streamPath (not just streamFile/streamEnc) matters because a
-// Transcript outlives one run() call: RunJSON's repair() reuses the same
-// *Transcript for its one repair completion AFTER run() has already called
-// closeStream. Without clearing streamPath, streamAppend would see
-// streamPath still set and streamFile nil, and reopen the same path with
-// os.Create — truncating the just-closed main-run transcript down to only
-// the repair's two events, and leaking the newly reopened file handle since
-// nothing closes it again. Clearing streamPath makes closeStream a true
-// terminal state: repair's events are recorded in-memory only (Events), same
-// as pre-streaming behavior, and the on-disk file keeps the complete
-// main-run transcript untouched.
+// streamPath deliberately survives the close: a Transcript outlives one
+// run() call — RunJSON's repair() reuses the same *Transcript for its one
+// repair completion AFTER run() has already called closeStream. Because
+// streamAppend opens with O_APPEND (never truncating), a post-close record
+// simply reopens the same path and appends, so the repair request/assistant
+// turns land in the SAME on-disk transcript as the main run — the missing
+// tail that made unparseable-repair outputs undiagnosable from the JSONL
+// alone (bugbot-9fac).
 func (t *Transcript) closeStream() {
 	if t.streamFile != nil {
 		_ = t.streamFile.Close()
 		t.streamFile = nil
 		t.streamEnc = nil
 	}
-	t.streamPath = ""
 }
 
 // now returns the current time, allowing tests to inject a fixed clock.

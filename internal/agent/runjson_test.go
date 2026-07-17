@@ -183,28 +183,23 @@ func TestRunJSON_RepairSucceeds(t *testing.T) {
 	_ = out
 }
 
-// TestRunJSON_RepairPreservesStreamedTranscript is a regression test for a
-// bug where RunJSON's repair round-trip reused the SAME *Transcript run()
-// had already streamed-and-closed: closeStream nilled streamFile/streamEnc
-// but left streamPath set, so repair()'s completion re-triggered
-// streamAppend's lazy-open path, which reopened the file with os.Create
-// (O_TRUNC) — wiping the main run's already-streamed events down to just the
-// two repair events, and leaking the newly reopened handle since nothing
-// closed it again.
+// TestRunJSON_RepairAppendsToStreamedTranscript is a regression test for the
+// streamed-transcript / repair interaction. Historically closeStream nilled
+// streamFile/streamEnc but left streamPath set while streamAppend reopened
+// with os.Create (O_TRUNC) — so repair()'s completion wiped the main run's
+// already-streamed events down to just the two repair events. The first fix
+// disarmed streaming entirely at closeStream, which protected the file but
+// made the repair round-trip INVISIBLE on disk: a repair that produced the
+// final (possibly still-unparseable) answer left no trace in the JSONL,
+// making failures like an hallucinated schema-violating repair output
+// undiagnosable post-hoc (bugbot-9fac).
 //
-// The fix disarms streaming entirely once closeStream runs (clearing
-// streamPath, not just streamFile/streamEnc), so a later reuse of the same
-// Transcript — as repair() does — never reopens the file: the repair's
-// events land in Transcript.Events (in-memory) exactly as they did before
-// streaming existed, and the on-disk file is left holding the untouched,
-// complete main-run transcript.
-//
-// This forces a repair round-trip with WithTranscriptDir set and asserts:
-// exactly one file on disk, containing the main run's events UNTRUNCATED and
-// UNCORRUPTED (not overwritten down to just the repair's events), while the
-// in-memory Outcome.Transcript.Events additionally carries the repair's
-// events that never made it to disk.
-func TestRunJSON_RepairPreservesStreamedTranscript(t *testing.T) {
+// The current contract: streamAppend opens with O_APPEND (never truncates)
+// and closeStream keeps streamPath armed, so repair()'s request+assistant
+// turns APPEND to the same on-disk file. This asserts: exactly one file on
+// disk, holding the main run's events UNTRUNCATED and FIRST, followed by the
+// repair's events — matching the in-memory Outcome.Transcript exactly.
+func TestRunJSON_RepairAppendsToStreamedTranscript(t *testing.T) {
 	dir := t.TempDir()
 	fc := newFakeClient(
 		textResp("here is the answer: not json at all", 5, 5),
@@ -226,7 +221,7 @@ func TestRunJSON_RepairPreservesStreamedTranscript(t *testing.T) {
 		t.Fatalf("ReadDir: %v", err)
 	}
 	if len(entries) != 1 {
-		t.Fatalf("expected exactly 1 transcript file (repair must never create/reopen a second one), got %d: %v", len(entries), entries)
+		t.Fatalf("expected exactly 1 transcript file (repair must append, never create a second), got %d: %v", len(entries), entries)
 	}
 
 	f, err := os.Open(filepath.Join(dir, entries[0].Name()))
@@ -239,29 +234,33 @@ func TestRunJSON_RepairPreservesStreamedTranscript(t *testing.T) {
 		t.Fatalf("LoadJSONL: %v", err)
 	}
 
-	// The main run took exactly one turn (request+assistant); the buggy
-	// version would have shown 2 events too, but they'd be the REPAIR's
-	// events, not the main run's — distinguish by content, not just count.
-	if len(loaded.Events) != 2 {
-		t.Fatalf("on-disk events = %d, want 2 (the main run's request+assistant, untruncated); on-disk=%+v",
+	// Main run: request+assistant. Repair: request+assistant. All on disk,
+	// in order — the main run's events first (no truncation), the repair's
+	// appended after.
+	if len(loaded.Events) != 4 {
+		t.Fatalf("on-disk events = %d, want 4 (main run request+assistant, then repair request+assistant); on-disk=%+v",
 			len(loaded.Events), loaded.Events)
 	}
-	foundMainRunText := false
-	for _, ev := range loaded.Events {
+	mainIdx, repairIdx := -1, -1
+	for i, ev := range loaded.Events {
 		if ev.Kind == EventAssistant && ev.Text == "here is the answer: not json at all" {
-			foundMainRunText = true
+			mainIdx = i
 		}
 		if ev.Kind == EventAssistant && ev.Text == `{"file":"c.go","message":"fixed"}` {
-			t.Error("on-disk transcript contains the REPAIR's assistant text: the bug (reopen-and-truncate) has regressed")
+			repairIdx = i
 		}
 	}
-	if !foundMainRunText {
-		t.Errorf("on-disk transcript missing the main run's assistant text; got %+v", loaded.Events)
+	if mainIdx == -1 {
+		t.Errorf("on-disk transcript missing the main run's assistant text (truncated by reopen?); got %+v", loaded.Events)
+	}
+	if repairIdx == -1 {
+		t.Errorf("on-disk transcript missing the repair's assistant text (repair invisible on disk); got %+v", loaded.Events)
+	}
+	if mainIdx != -1 && repairIdx != -1 && mainIdx > repairIdx {
+		t.Errorf("main-run assistant event at %d AFTER repair's at %d — append order violated", mainIdx, repairIdx)
 	}
 
-	// The in-memory Outcome.Transcript is the complete picture: main run's 2
-	// events plus the repair's 2 events, since repair() appends onto the same
-	// Transcript object regardless of streaming.
+	// The in-memory Outcome.Transcript matches the on-disk picture.
 	if len(out.Transcript.Events) != 4 {
 		t.Errorf("in-memory Transcript.Events = %d, want 4 (main run + repair)", len(out.Transcript.Events))
 	}
@@ -826,9 +825,11 @@ func TestRunJSON_CapOnCarriesSchema(t *testing.T) {
 func TestRunJSON_ValidationTriggersRepair(t *testing.T) {
 	// First answer is a bare JSON array — parses, but validateSchema
 	// detects the root-type mismatch against the schema's "object" type.
-	// Repair returns a correct-shape object.
+	// The inner object is ALSO schema-invalid (missing required "refuted")
+	// so the rescue scan (rescueBody) cannot salvage it and the repair path
+	// genuinely fires. Repair returns a correct-shape object.
 	fc := newFakeClient(
-		textResp(`[{"file":"a.go","message":"bug","refuted":false}]`, 5, 5),
+		textResp(`[{"file":"a.go","message":"bug"}]`, 5, 5),
 		textResp(validFindingJSON, 5, 5),
 	)
 	fc.caps = llm.Capabilities{StructuredOutput: true}
@@ -883,6 +884,96 @@ func TestRunJSON_ValidationTriggersRepair_MissingRequired(t *testing.T) {
 	var got findingWithRefuted
 	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
 		t.Fatalf("RunJSON should succeed after missing-required repair: %v", err)
+	}
+	if got.File != "a.go" {
+		t.Errorf("parsed = %+v", got)
+	}
+	if len(fc.requests) != 2 {
+		t.Errorf("client calls = %d, want 2 (main + repair)", len(fc.requests))
+	}
+}
+
+// TestRunJSON_RescuesProseWrappedAnswer covers bugbot-9fac's dominant live
+// failure mode: a weak model prefixing the final JSON with prose ("Based on
+// my investigation, ... {plan}"), which fails stripBody's leading-value
+// parse ("invalid character 'B' looking for beginning of value"). The
+// schema-guided rescue scan must extract the embedded schema-valid object
+// and succeed WITHOUT spending the repair round-trip.
+func TestRunJSON_RescuesProseWrappedAnswer(t *testing.T) {
+	fc := newFakeClient(
+		textResp("Based on my investigation, the bug is clear. Here is the finding:\n"+validFindingJSON, 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	var got findingWithRefuted
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+		t.Fatalf("RunJSON should rescue a prose-wrapped schema-valid answer: %v", err)
+	}
+	if got.File != "a.go" || got.Message != "bug" {
+		t.Errorf("parsed = %+v, want the valid finding", got)
+	}
+	if len(fc.requests) != 1 {
+		t.Errorf("client calls = %d, want 1 (rescue must not spend the repair round-trip)", len(fc.requests))
+	}
+}
+
+// TestRunJSON_RescuesInnerObjectFromWrappedArray: a bare-array wrap of a
+// schema-valid object is rescued to that inner object — the schema is the
+// arbiter of WHICH embedded candidate is the answer, so the array root
+// (schema-invalid) is skipped and the inner object accepted, with no repair.
+func TestRunJSON_RescuesInnerObjectFromWrappedArray(t *testing.T) {
+	fc := newFakeClient(
+		textResp(`[`+validFindingJSON+`]`, 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	var got findingWithRefuted
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+		t.Fatalf("RunJSON should rescue the inner object of a wrapped array: %v", err)
+	}
+	if got.File != "a.go" {
+		t.Errorf("parsed = %+v", got)
+	}
+	if len(fc.requests) != 1 {
+		t.Errorf("client calls = %d, want 1 (rescue must not spend the repair round-trip)", len(fc.requests))
+	}
+}
+
+// TestRunJSON_MangledHeadStillRepairs pins the rescue's boundary using the
+// live 2026-07-17 the_cloud shape: a final answer whose JSON head was
+// swallowed (`": {"repro/x_test.go": "...
+// "}, "cmd": [...]`) leaves NO complete embedded value that satisfies the
+// schema — the leading string literal and the bare files map both fail — so
+// the rescue must NOT fire and the repair round-trip proceeds as before.
+func TestRunJSON_MangledHeadStillRepairs(t *testing.T) {
+	fc := newFakeClient(
+		textResp(`": {"file": "a.go"}, "message": "bug", "refuted": false}`, 5, 5),
+		textResp(validFindingJSON, 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	var got findingWithRefuted
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+		t.Fatalf("RunJSON should succeed via repair: %v", err)
+	}
+	if len(fc.requests) != 2 {
+		t.Errorf("client calls = %d, want 2 (mangled head is not rescuable; repair must fire)", len(fc.requests))
+	}
+}
+
+// TestRunJSON_RepairOutputRescuedFromProse: the rescue also applies to the
+// REPAIR completion's output — a repair reply that wraps a schema-valid
+// answer in prose still counts instead of failing the whole call.
+func TestRunJSON_RepairOutputRescuedFromProse(t *testing.T) {
+	fc := newFakeClient(
+		textResp("no json here at all", 5, 5),
+		textResp("Sure! Here is the corrected JSON:\n"+validFindingJSON, 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	var got findingWithRefuted
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+		t.Fatalf("RunJSON should rescue the repair's prose-wrapped answer: %v", err)
 	}
 	if got.File != "a.go" {
 		t.Errorf("parsed = %+v", got)

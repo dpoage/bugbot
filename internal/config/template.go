@@ -238,7 +238,7 @@ sandbox:
 # not vendored and the repro test imports them.
 # ---------------------------------------------------------------------------
 # repro:
-#   max_attempts: 2            # repro plans tried per finding (initial + revisions)
+#   max_attempts: 3            # repro plans tried per finding (initial + revisions)
 #   patch_prover: false        # follow a successful repro with a proven minimal fix
 #   patch_max_attempts: 3      # fix plans tried per finding before needs-human
 #   backlog_batch: 3           # backlog findings per daemon backlog-timer firing

@@ -739,7 +739,7 @@ func TestInterpret_NodeTest_TAP_Demonstrated_NotWitnessOnly(t *testing.T) {
 			}
 
 			out := combinedOutput(res)
-			v = witnessDemonstration(v, out, "src/x.js")
+			v = witnessDemonstration(v, out, "src/x.js", nil)
 			if !v.demonstrated {
 				t.Errorf("witnessDemonstration must not un-demonstrate when no coverage row contradicts the target; got demonstrated=false, reason=%q", v.reason)
 			}
@@ -772,11 +772,111 @@ func TestInterpret_BarePython_Demonstrated_NotWitnessOnly(t *testing.T) {
 	}
 
 	out := combinedOutput(res)
-	v = witnessDemonstration(v, out, "src/repro_target.py")
+	v = witnessDemonstration(v, out, "src/repro_target.py", nil)
 	if !v.demonstrated {
 		t.Errorf("witnessDemonstration must not un-demonstrate when no coverage row contradicts the target; got demonstrated=false, reason=%q", v.reason)
 	}
 	if v.witnessOnly {
 		t.Errorf("witnessOnly = true, want false: python has a WitnessTable entry and no coverage row contradicts the target, so this must reach full Tier-1")
+	}
+}
+
+// --- bazel declared-failure witness (bugbot-9fac) ---------------------------
+
+// TestWitnessDemonstration_BazelDeclaredFailure_FullPromotion: a bazel run
+// whose output carries the underlying go test's "--- FAIL: <name>" marker
+// for a test the PLAN ITSELF declared must reach FULL promotion (no
+// witnessOnly downgrade) — the live MemoryCache finding demonstrated 2/2
+// via bazelisk and was still stuck at witness-only forever.
+func TestWitnessDemonstration_BazelDeclaredFailure_FullPromotion(t *testing.T) {
+	v := verdict{demonstrated: true, ecosystem: sandbox.EcosystemBazel}
+	out := "//molecules/x:cache_test FAILED in 0.4s\n--- FAIL: TestShutdownStopsCacheCleanup (0.10s)\n    cache_test.go:31: goroutine still running\nFAIL\n"
+
+	got := witnessDemonstration(v, out, "molecules/x/cache.go", []string{"TestShutdownStopsCacheCleanup"})
+	if !got.demonstrated {
+		t.Fatalf("demonstrated = false, want true (reason=%q)", got.reason)
+	}
+	if got.witnessOnly {
+		t.Error("witnessOnly = true, want false: declared-test failure marker is a full execution witness for bazel")
+	}
+}
+
+// TestWitnessDemonstration_BazelPytestFailedLine: the pytest short-summary
+// "FAILED <nodeid>" form under a bazel py_test also satisfies the declared
+// witness.
+func TestWitnessDemonstration_BazelPytestFailedLine(t *testing.T) {
+	v := verdict{demonstrated: true, ecosystem: sandbox.EcosystemBazel}
+	out := "=========================== short test summary info ===========================\nFAILED test/vehicle_test.py::test_capacity_override_preserves_cost - AssertionError\n"
+
+	got := witnessDemonstration(v, out, "common/utils/vehicle.py", []string{"test_capacity_override_preserves_cost"})
+	if got.witnessOnly {
+		t.Error("witnessOnly = true, want false: pytest FAILED line naming the declared test is a full witness")
+	}
+}
+
+// TestWitnessDemonstration_BazelNoDeclaredMatch_WitnessOnly: without a
+// declared-name failure marker (target-label FAILED summary only, or no
+// declared names at all), bazel stays witness-only — absence of the marker
+// degrades, never rejects.
+func TestWitnessDemonstration_BazelNoDeclaredMatch_WitnessOnly(t *testing.T) {
+	out := "//molecules/x:cache_test FAILED in 0.4s\nFAIL\n"
+
+	for name, declared := range map[string][]string{
+		"no declared names":        nil,
+		"declared name not in out": {"TestSomethingElse"},
+	} {
+		v := verdict{demonstrated: true, ecosystem: sandbox.EcosystemBazel}
+		got := witnessDemonstration(v, out, "molecules/x/cache.go", declared)
+		if !got.demonstrated {
+			t.Fatalf("%s: demonstrated = false, want true", name)
+		}
+		if !got.witnessOnly {
+			t.Errorf("%s: witnessOnly = false, want true (no declared-failure marker)", name)
+		}
+	}
+}
+
+// TestDeclaredFailureWitness_BoundaryAnchored is the regression guard for the
+// false-positive T1 promotion the oracle caught on PR #144: for bazel,
+// declaredFailureWitness is the SOLE gate between witness-only and full
+// promotion (exit-code demonstration + no-op bindTestEvidence), so a loose
+// substring match would promote a finding whenever a FOREIGN failing test's
+// name merely superstrings a plan-declared one. Matching must be
+// boundary-anchored: exact test name (or a go subtest / pytest [param] of
+// it), never a prefix superstring and never the pytest file-path token.
+func TestDeclaredFailureWitness_BoundaryAnchored(t *testing.T) {
+	cases := []struct {
+		name     string
+		out      string
+		declared []string
+		want     bool
+	}{
+		// Go — exact and legitimate subtests match.
+		{"go exact", "--- FAIL: TestClose (0.01s)", []string{"TestClose"}, true},
+		{"go subtest of declared", "    --- FAIL: TestClose/on_error (0.00s)", []string{"TestClose"}, true},
+		// Go — foreign superstring must NOT match (the pub.Close family:
+		// TestClose vs TestCloseIdempotent).
+		{"go foreign superstring", "--- FAIL: TestCloseIdempotent (0.00s)", []string{"TestClose"}, false},
+		{"go foreign prefix-word", "--- FAIL: TestServeHTTP (0.00s)", []string{"TestServe"}, false},
+		// Go — declared superstrings the foreign failure (other direction).
+		{"go declared longer than foreign", "--- FAIL: TestClose (0.00s)", []string{"TestCloseIdempotent"}, false},
+		// pytest — exact and parametrized match.
+		{"py exact", "FAILED tests/test_x.py::test_foo - E", []string{"test_foo"}, true},
+		{"py parametrized", "FAILED tests/test_x.py::test_foo[case1] - E", []string{"test_foo"}, true},
+		{"py class component", "FAILED tests/test_x.py::TestVehicle::test_pricing - E", []string{"TestVehicle"}, true},
+		// pytest — foreign function superstring must NOT match.
+		{"py foreign superstring", "FAILED tests/test_x.py::test_foobar - E", []string{"test_foo"}, false},
+		// pytest — declared name appears only in the FILE-PATH token, never
+		// as a real test id: must NOT match.
+		{"py name only in file path", "FAILED tests/test_foo.py::test_baz - E", []string{"test_foo"}, false},
+		// A malformed FAILED line with no nodeid separator is not a test id.
+		{"py no nodeid", "FAILED something went wrong", []string{"test_foo"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := declaredFailureWitness(tc.out, tc.declared); got != tc.want {
+				t.Errorf("declaredFailureWitness(%q, %v) = %v, want %v", tc.out, tc.declared, got, tc.want)
+			}
+		})
 	}
 }
