@@ -164,14 +164,17 @@ type PatchProver struct {
 	// skips rather than guessing — a wrong suite command would silently
 	// weaken the witness.
 	suiteCmd []string
-	// depMounts / depEnv / setupCmds carry the resolved dependency strategy
-	// (read-only module-cache mount and/or GOFLAGS and/or pre-Cmd setup
-	// commands) so the patch-prover's network-none runs resolve external modules
-	// identically to the repro run. The one-time online prefetch is already done
-	// by PromoteAll before the prover runs.
-	depMounts []sandbox.ROMount
-	depEnv    []string
-	setupCmds [][]string
+	// depMounts / depRWMounts / depEnv / setupCmds carry the resolved
+	// dependency strategy (read-only module-cache mount, operator
+	// "writable: true" local_mounts — e.g. a bazel vendor dir + disk cache,
+	// bugbot-wjc2 — and/or GOFLAGS and/or pre-Cmd setup commands) so the
+	// patch-prover's network-none runs resolve external modules identically
+	// to the repro run. The one-time online prefetch is already done by
+	// PromoteAll before the prover runs.
+	depMounts   []sandbox.ROMount
+	depRWMounts []sandbox.ROMount
+	depEnv      []string
+	setupCmds   [][]string
 	// progress, when non-nil, receives the patch-prover run's
 	// KindAgentStarted/Activity/Finished events via the shared AgentScope seam,
 	// so the fix-witness step surfaces in `bugbot status` and the live pane.
@@ -538,6 +541,7 @@ func (p *PatchProver) execSandbox(ctx context.Context, cmd []string, writeFiles 
 		Timeout:    to,
 		WriteFiles: writeFiles,
 		ROMounts:   p.depMounts,
+		RWMounts:   p.depRWMounts,
 		Env:        p.depEnv,
 		SetupCmds:  p.setupCmds,
 	}

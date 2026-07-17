@@ -48,3 +48,28 @@ func TestWorkspaceTool_ExecCarriesRWMounts(t *testing.T) {
 		t.Fatalf("preview Spec.RWMounts = %+v, want the /bazel-vendor writable mount", got)
 	}
 }
+
+// TestPatchProver_ExecSandboxCarriesRWMounts pins bugbot-wjc2 review defect
+// 2: fix-verification runs the suite via execSandbox, and a bazel repo's
+// writable vendor dir must be mounted RW there too — otherwise the repro
+// promotes but the fix can never be witnessed (analysis aborts on the RO
+// vendor dir).
+func TestPatchProver_ExecSandboxCarriesRWMounts(t *testing.T) {
+	sb := sandbox.NewMock(sandbox.MockResponse{})
+	p := &PatchProver{
+		sb:          sb,
+		repoDir:     t.TempDir(),
+		depRWMounts: rwMountFixture(),
+	}
+	if _, err := p.execSandbox(context.Background(), []string{"true"}, nil); err != nil {
+		t.Fatalf("execSandbox: %v", err)
+	}
+	calls := sb.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("sandbox calls = %d, want 1", len(calls))
+	}
+	got := calls[0].Spec.RWMounts
+	if len(got) != 1 || got[0].ContainerPath != "/bazel-vendor" {
+		t.Fatalf("patch-prover Spec.RWMounts = %+v, want the /bazel-vendor writable mount", got)
+	}
+}

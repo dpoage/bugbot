@@ -26,8 +26,10 @@ type runParams struct {
 	// roMounts are extra read-only bind mounts (e.g. a dependency cache),
 	// rendered after the writable workspace mount and never writable.
 	roMounts []ROMount
-	// rwMounts are extra writable bind mounts, used only by the trusted
-	// dependency-prefetch step (see Spec.RWMounts).
+	// rwMounts are extra writable bind mounts: the trusted
+	// dependency-prefetch step's cache dirs, and operator "writable: true"
+	// local_mounts entries (bugbot-wjc2; see Spec.RWMounts for the security
+	// tradeoff).
 	rwMounts []ROMount
 	// setupCmds are optional in-container commands run before cmd. When
 	// non-empty the backend wraps execution in /bin/sh; each command is
@@ -103,9 +105,18 @@ func buildRunArgs(p runParams) []string {
 		}
 		args = append(args, "-v", fmt.Sprintf("%s:%s:%s", m.HostPath, m.ContainerPath, label))
 	}
-	// Writable mounts are used only by the trusted dependency-prefetch step.
+	// Writable mounts: the trusted dependency-prefetch step's caches and
+	// operator "writable: true" local_mounts (bugbot-wjc2). Same Shared
+	// semantics as the RO loop: host-owned dirs (Shared=true, e.g. a bazel
+	// vendor dir the host also manages) must NOT be SELinux :Z relabeled —
+	// a private container context would break host-side management of the
+	// same tree.
 	for _, m := range p.rwMounts {
-		args = append(args, "-v", fmt.Sprintf("%s:%s:rw,Z", m.HostPath, m.ContainerPath))
+		label := "rw,Z"
+		if m.Shared {
+			label = "rw"
+		}
+		args = append(args, "-v", fmt.Sprintf("%s:%s:%s", m.HostPath, m.ContainerPath, label))
 	}
 
 	if p.pidsLimit > 0 {

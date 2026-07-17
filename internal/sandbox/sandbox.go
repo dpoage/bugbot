@@ -134,9 +134,12 @@ type Spec struct {
 	// directory, but the blast radius stops there: it is never a directory
 	// shared with anything the operator (or another tool) trusts, so the
 	// worst case is bugbot's own next sandbox build reading corrupted
-	// vendored state, not a wider compromise. Rendered as `-v host:ctr:rw,Z`;
-	// same absolute-path/uniqueness validation as ROMounts. ContainerPaths
-	// must be unique across ROMounts and RWMounts combined.
+	// vendored state, not a wider compromise. Rendered writable on both
+	// backends; on the container backend Shared=true suppresses the SELinux
+	// :Z relabel exactly like ROMounts (host-owned trees the host also
+	// manages must keep their context). Same absolute-path/uniqueness
+	// validation as ROMounts; ContainerPaths must be unique across ROMounts
+	// and RWMounts combined.
 	RWMounts []ROMount
 
 	// SetupCmds are optional ordered commands executed inside the container, in

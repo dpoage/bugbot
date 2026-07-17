@@ -511,6 +511,7 @@ func (r *Reproducer) provePatch(ctx context.Context, st *store.Store, f domain.F
 		transcriptDir: r.opts.TranscriptDir,
 		suiteCmd:      r.opts.PatchSuiteCmd,
 		depMounts:     r.deps.ROMounts,
+		depRWMounts:   r.deps.RWMounts,
 		depEnv:        r.deps.Env,
 		setupCmds:     r.deps.SetupCmds,
 		progress:      r.opts.Progress,

@@ -32,10 +32,13 @@ func TestDepProbeInputsThreadsLocalMounts(t *testing.T) {
 	mountDir := t.TempDir()
 
 	var cfg config.Config
-	cfg.Sandbox.LocalMounts = []config.LocalMount{{Host: mountDir, Container: "/sibling"}}
+	cfg.Sandbox.LocalMounts = []config.LocalMount{
+		{Host: mountDir, Container: "/sibling"},
+		{Host: mountDir, Container: "/bazel-vendor", Writable: true},
+	}
 
 	sb := sandbox.NewMock(sandbox.MockResponse{})
-	mounts, _, _ := depProbeInputs(cfg, sb, repoDir)
+	mounts, rwMounts, _ := depProbeInputs(cfg, sb, repoDir)
 
 	found := false
 	for _, m := range mounts {
@@ -51,6 +54,14 @@ func TestDepProbeInputsThreadsLocalMounts(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("depProbeInputs mounts = %+v, want a /sibling entry from sandbox.local_mounts", mounts)
+	}
+	for _, m := range mounts {
+		if m.ContainerPath == "/bazel-vendor" {
+			t.Errorf("writable:true entry landed in the RO mounts (bugbot-wjc2)")
+		}
+	}
+	if len(rwMounts) != 1 || rwMounts[0].ContainerPath != "/bazel-vendor" || !rwMounts[0].Shared {
+		t.Fatalf("depProbeInputs rwMounts = %+v, want the Shared /bazel-vendor writable entry", rwMounts)
 	}
 }
 

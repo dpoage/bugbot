@@ -596,7 +596,10 @@ func TestRunSandboxVerifyThreadsDepOptions(t *testing.T) {
 	var cfg config.Config
 	cfg.Sandbox.Backend = "bwrap"
 	cfg.Sandbox.DepStrategy = "fetch"
-	cfg.Sandbox.LocalMounts = []config.LocalMount{{Host: mountDir, Container: "/sibling"}}
+	cfg.Sandbox.LocalMounts = []config.LocalMount{
+		{Host: mountDir, Container: "/sibling"},
+		{Host: mountDir, Container: "/bazel-vendor", Writable: true},
+	}
 
 	verdict, err := RunSandboxVerify(context.Background(), repoDir, cfg)
 	if err != nil {
@@ -617,11 +620,13 @@ func TestRunSandboxVerifyThreadsDepOptions(t *testing.T) {
 		t.Fatalf("NewBwrap: %v", err)
 	}
 	t.Cleanup(func() { _ = bw.Close() })
+	localRO, localRW := localMountsFromConfig(cfg)
 	res, err := sandbox.ResolveDeps(repoDir, sandbox.DepOptions{
 		Strategy:       sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
 		FetchSandbox:   bw,
 		FetchImage:     cfg.Sandbox.Image,
-		LocalMounts:    localMountsFromConfig(cfg),
+		LocalMounts:    localRO,
+		LocalRWMounts:  localRW,
 		HostToolchains: cfg.Sandbox.HostToolchains,
 	})
 	if err != nil {
@@ -632,8 +637,20 @@ func TestRunSandboxVerifyThreadsDepOptions(t *testing.T) {
 		if m.ContainerPath == "/sibling" && m.HostPath == mountDir {
 			found = true
 		}
+		if m.ContainerPath == "/bazel-vendor" {
+			t.Errorf("writable:true entry landed in ROMounts — smoke run would mount it read-only (bugbot-wjc2 review defect 1)")
+		}
 	}
 	if !found {
 		t.Fatalf("ROMounts = %+v, want the sandbox.local_mounts entry threaded through", res.ROMounts)
+	}
+	foundRW := false
+	for _, m := range res.RWMounts {
+		if m.ContainerPath == "/bazel-vendor" && m.HostPath == mountDir {
+			foundRW = true
+		}
+	}
+	if !foundRW {
+		t.Fatalf("RWMounts = %+v, want the writable:true local_mounts entry threaded to the smoke run", res.RWMounts)
 	}
 }
