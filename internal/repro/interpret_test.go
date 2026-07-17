@@ -835,3 +835,48 @@ func TestWitnessDemonstration_BazelNoDeclaredMatch_WitnessOnly(t *testing.T) {
 		}
 	}
 }
+
+// TestDeclaredFailureWitness_BoundaryAnchored is the regression guard for the
+// false-positive T1 promotion the oracle caught on PR #144: for bazel,
+// declaredFailureWitness is the SOLE gate between witness-only and full
+// promotion (exit-code demonstration + no-op bindTestEvidence), so a loose
+// substring match would promote a finding whenever a FOREIGN failing test's
+// name merely superstrings a plan-declared one. Matching must be
+// boundary-anchored: exact test name (or a go subtest / pytest [param] of
+// it), never a prefix superstring and never the pytest file-path token.
+func TestDeclaredFailureWitness_BoundaryAnchored(t *testing.T) {
+	cases := []struct {
+		name     string
+		out      string
+		declared []string
+		want     bool
+	}{
+		// Go — exact and legitimate subtests match.
+		{"go exact", "--- FAIL: TestClose (0.01s)", []string{"TestClose"}, true},
+		{"go subtest of declared", "    --- FAIL: TestClose/on_error (0.00s)", []string{"TestClose"}, true},
+		// Go — foreign superstring must NOT match (the pub.Close family:
+		// TestClose vs TestCloseIdempotent).
+		{"go foreign superstring", "--- FAIL: TestCloseIdempotent (0.00s)", []string{"TestClose"}, false},
+		{"go foreign prefix-word", "--- FAIL: TestServeHTTP (0.00s)", []string{"TestServe"}, false},
+		// Go — declared superstrings the foreign failure (other direction).
+		{"go declared longer than foreign", "--- FAIL: TestClose (0.00s)", []string{"TestCloseIdempotent"}, false},
+		// pytest — exact and parametrized match.
+		{"py exact", "FAILED tests/test_x.py::test_foo - E", []string{"test_foo"}, true},
+		{"py parametrized", "FAILED tests/test_x.py::test_foo[case1] - E", []string{"test_foo"}, true},
+		{"py class component", "FAILED tests/test_x.py::TestVehicle::test_pricing - E", []string{"TestVehicle"}, true},
+		// pytest — foreign function superstring must NOT match.
+		{"py foreign superstring", "FAILED tests/test_x.py::test_foobar - E", []string{"test_foo"}, false},
+		// pytest — declared name appears only in the FILE-PATH token, never
+		// as a real test id: must NOT match.
+		{"py name only in file path", "FAILED tests/test_foo.py::test_baz - E", []string{"test_foo"}, false},
+		// A malformed FAILED line with no nodeid separator is not a test id.
+		{"py no nodeid", "FAILED something went wrong", []string{"test_foo"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := declaredFailureWitness(tc.out, tc.declared); got != tc.want {
+				t.Errorf("declaredFailureWitness(%q, %v) = %v, want %v", tc.out, tc.declared, got, tc.want)
+			}
+		})
+	}
+}

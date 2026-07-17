@@ -148,6 +148,13 @@ func (r *Runner) runJSON(ctx context.Context, seed []llm.Message, task string, s
 	}
 
 	repairOutcome, rerr := r.repair(ctx, outcome.Transcript, repair, schema)
+	// repair() reopened the streamed transcript (O_APPEND) to record its
+	// turn; close that fd here so it does not outlive the call. Over a long
+	// backlog run every repaired finding would otherwise leak one fd until a
+	// GC finalizer happened to run. Deferred so it fires on all paths below.
+	if repairOutcome.Transcript != nil {
+		defer repairOutcome.Transcript.closeStream()
+	}
 	// The repair completion runs against its own throwaway single-turn history
 	// (see [Runner.repair]), not outcome.messages, so it never sees — and
 	// therefore repairOutcome.Messages never carries — the run's investigation.

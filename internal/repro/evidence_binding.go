@@ -108,3 +108,30 @@ func goFailingNameMatches(failing, declared string) bool {
 func substringNameMatches(failing, declared string) bool {
 	return strings.Contains(failing, declared)
 }
+
+// pytestNodeMatches reports whether a pytest node id — the token after
+// "FAILED " in a short-summary line, e.g.
+// "tests/test_x.py::TestClass::test_thing[param]" — names the declared test.
+// It compares declared ONLY against the "::"-separated components AFTER the
+// leading file-path token (with any "[param]" suffix stripped), so a
+// declared "test_thing" matches "…::test_thing" and "…::test_thing[case]",
+// and a declared suite class "TestClass" matches the class component — but a
+// foreign "…::test_thing_helper" never matches "test_thing", and the
+// file-path token ("test_things.py") can never be mistaken for a test name.
+// This is the pytest analogue of goFailingNameMatches: boundary-anchored,
+// never a raw substring of the whole line.
+func pytestNodeMatches(node, declared string) bool {
+	parts := strings.Split(node, "::")
+	if len(parts) < 2 {
+		return false // no nodeid separator: not a pytest test id
+	}
+	for _, p := range parts[1:] {
+		if i := strings.IndexByte(p, '['); i >= 0 {
+			p = p[:i]
+		}
+		if p == declared {
+			return true
+		}
+	}
+	return false
+}

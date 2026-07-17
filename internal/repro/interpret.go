@@ -363,33 +363,67 @@ func witnessDemonstration(v verdict, out, targetPath string, declared []string) 
 // declaredFailureWitness reports whether out contains a per-test FAILURE
 // marker naming one of the declared test identifiers (see declaredTestNames):
 // go test's "--- FAIL: <name>" line, or a pytest short-summary "FAILED
-// <nodeid>" line mentioning <name>. Used by witnessDemonstration's bazel
-// branch — bazel itself has no coverage-report format, but with
-// `--test_output=errors` it relays the underlying runner's own markers
-// verbatim, and a marker naming the plan's OWN test is dispositive evidence
-// that the injected test (not a pre-existing foreign failure) ran and
-// failed. Absence of a match degrades to witness-only, never to rejection.
+// <nodeid>" line. Used by witnessDemonstration's bazel branch — bazel itself
+// has no coverage-report format, but with `--test_output=errors` it relays
+// the underlying runner's own markers verbatim, and a marker naming the
+// plan's OWN test is dispositive evidence that the injected test (not a
+// pre-existing foreign failure) ran and failed. Absence of a match degrades
+// to witness-only, never to rejection.
+//
+// Matching is BOUNDARY-ANCHORED, not a raw substring scan: the failing name
+// is parsed out of the marker first, then compared with the same discipline
+// the structured path uses (goFailingNameMatches / pytestNodeMatches). A
+// loose substring test would falsely promote when a FOREIGN failing test's
+// name merely superstrings a declared one — declared "TestClose" against a
+// foreign "--- FAIL: TestCloseIdempotent", or declared "test_foo" against
+// "FAILED tests/test_foobar.py::test_baz" (matching the file-path token).
+// For bazel, v.demonstrated is set by exit code alone and bindTestEvidence
+// is a no-op, so this function is the ONLY gate between witness-only and
+// full T1 promotion; a false positive here is a wrong reproduction verdict.
 func declaredFailureWitness(out string, declared []string) bool {
 	if len(declared) == 0 {
 		return false
 	}
-	for _, name := range declared {
-		if strings.Contains(out, "--- FAIL: "+name) {
-			return true
-		}
-	}
 	for _, line := range strings.Split(out, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "FAILED") {
+		// go test: "--- FAIL: <name> (<dur>)", indented for subtests. The
+		// name runs to the first space; subtest names never contain spaces
+		// (go escapes them to underscores), so firstField isolates it.
+		if i := strings.Index(line, goFailMarker); i >= 0 {
+			name := firstField(line[i+len(goFailMarker):])
+			for _, d := range declared {
+				if goFailingNameMatches(name, d) {
+					return true
+				}
+			}
 			continue
 		}
-		for _, name := range declared {
-			if strings.Contains(trimmed, name) {
-				return true
+		// pytest short summary: "FAILED <nodeid> - <msg>".
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "FAILED "); ok {
+			node := firstField(rest)
+			for _, d := range declared {
+				if pytestNodeMatches(node, d) {
+					return true
+				}
 			}
 		}
 	}
 	return false
+}
+
+// goFailMarker is the leading token of a go test per-test failure line;
+// declaredFailureWitness locates it anywhere on the line (subtest lines are
+// indented) and parses the failing test name from what follows.
+const goFailMarker = "--- FAIL: "
+
+// firstField returns s up to the first ASCII space or tab (or all of s when
+// none is present) — the whitespace-delimited leading token.
+func firstField(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] == ' ' || s[i] == '\t' {
+			return s[:i]
+		}
+	}
+	return s
 }
 
 // flakyVerdict builds the non-promoting verdict for a repro that
