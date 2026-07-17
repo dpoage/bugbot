@@ -89,7 +89,7 @@ func Replay(ctx context.Context, sb sandbox.Sandbox, repoDir string, b *Bundle, 
 	plan := b.Plan()
 	ecoName := detectEcosystem(plan.Cmd).name
 
-	if reason, detail := ClassifyTargetExecution(plan.Files, b.Manifest.Finding.File, ecoName); reason != "" {
+	if reason, detail := ClassifyTargetExecution(plan.Files, b.Manifest.Finding.File, targetGateEcosystem(ecoName, b.Manifest.Finding.File)); reason != "" {
 		return ReplayResult{Reason: reason, Summary: detail, Ecosystem: ecoName}, nil
 	}
 
@@ -105,7 +105,7 @@ func Replay(ctx context.Context, sb sandbox.Sandbox, repoDir string, b *Bundle, 
 
 	v := bindTestEvidence(interpret(res, plan.Cmd), plan.Files)
 	if v.demonstrated {
-		v = witnessDemonstration(v, combinedOutput(res), b.Manifest.Finding.File)
+		v = witnessDemonstration(v, combinedOutput(res), b.Manifest.Finding.File, declaredTestNames(plan.Files))
 	}
 	return ReplayResult{
 		Demonstrated: v.demonstrated,

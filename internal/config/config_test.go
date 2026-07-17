@@ -1442,11 +1442,13 @@ func TestEnvOverride_ReproTryMaxExecs(t *testing.T) {
 // New-field tests: repro.max_attempts (bugbot-r2hw).
 // ---------------------------------------------------------------------------
 
-// TestDefault_ReproMaxAttempts verifies the default value is 2.
+// TestDefault_ReproMaxAttempts verifies the default value is 3 (raised from 2
+// by bugbot-9fac: one prose-wrapped unparseable round used to halve the
+// budget; 3 gives the initial plan plus two corrective revisions).
 func TestDefault_ReproMaxAttempts(t *testing.T) {
 	cfg := Default()
-	if cfg.Repro.MaxAttempts != 2 {
-		t.Errorf("Repro.MaxAttempts default = %d, want 2", cfg.Repro.MaxAttempts)
+	if cfg.Repro.MaxAttempts != 3 {
+		t.Errorf("Repro.MaxAttempts default = %d, want 3", cfg.Repro.MaxAttempts)
 	}
 }
 

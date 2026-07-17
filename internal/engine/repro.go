@@ -354,6 +354,12 @@ func printReproSummary(out io.Writer, s *repro.Summary) {
 			_, _ = fmt.Fprintf(out, "  [T0] %s -> fix witnessed\n", o.Title)
 		} else if o.Promoted {
 			_, _ = fmt.Fprintf(out, "  [T1] %s -> %s\n", o.Title, o.ArtifactPath)
+		} else if o.Witnessed {
+			// A demonstrated bug that could not FULLY promote (witness-only
+			// ecosystem, or a below-quorum NeedsHuman survivor): the repro
+			// bundle is real and runnable — say so instead of the misleading
+			// empty-reason "(not demonstrated)" fallback (bugbot-9fac).
+			_, _ = fmt.Fprintf(out, "  [T2] %s (demonstrated; witnessed only -> %s)\n", o.Title, o.ArtifactPath)
 		} else {
 			reason := o.Reason
 			if reason == "" {

@@ -361,7 +361,7 @@ type Repro struct {
 	// and proves it with a sandboxed suite run.  Default false.
 	PatchProver bool `yaml:"patch_prover"`
 	// MaxAttempts is the maximum number of repro plans tried per finding
-	// (initial plan + revision rounds) before giving up. Must be >= 1. Default 2.
+	// (initial plan + revision rounds) before giving up. Must be >= 1. Default 3.
 	MaxAttempts int `yaml:"max_attempts"`
 	// PatchMaxAttempts is the maximum number of fix plans tried per finding
 	// before giving up and flagging the finding needs-human.  Must be >= 1.
@@ -588,7 +588,7 @@ func Default() Config {
 		},
 		Repro: Repro{
 			PatchProver:      false,
-			MaxAttempts:      2,
+			MaxAttempts:      3,
 			PatchMaxAttempts: 3,
 			BacklogBatch:     3,
 			MaxParallel:      2,

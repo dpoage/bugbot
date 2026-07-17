@@ -82,18 +82,17 @@ if __name__ == "__main__":
 				Stdout:   "BUGBOT_REPRO_DEMONSTRATED\n",
 			},
 			// ./repro.py (direct script execution, no recognized launcher
-			// token) detects as ecosystem.EcosystemUnknown, which has no
-			// coverage-report format at all — the transliteration is caught
-			// via the OTHER half of acceptance-3's "rejected or downgraded
-			// to witness-only": it is not statically rejected (a bare
-			// script isn't in executableEdgeCheckers), but the unknown
-			// ecosystem can never provide a witness, so it downgrades
-			// instead of reaching unmarked full Tier-1. bugbot-ds90 made
-			// bare "python3 repro.py" resolve to EcosystemPython (which
-			// DOES have a coverage format), so this fixture switched to a
-			// launcher shape that still has none.
-			wantPromote:     true,
-			wantWitnessOnly: true,
+			// token) detects as ecosystem.EcosystemUnknown. Historically that
+			// made the static gate permissive (no edge rule for "unknown")
+			// and the transliteration only got caught by the runtime half
+			// (witness-only downgrade). Since bugbot-9fac the gate falls
+			// back to the TARGET FILE's language (targetGateEcosystem:
+			// .ts -> js) — and this python transliteration references the
+			// target nowhere, so it is statically REJECTED before any
+			// sandbox run: the stronger, cheaper half of acceptance 3's
+			// "rejected or downgraded".
+			wantPromote: false,
+			wantReason:  VerdictReasonTargetNotExecuted,
 		},
 		{
 			name:        "genuine behavioral test promotes",

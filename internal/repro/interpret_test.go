@@ -739,7 +739,7 @@ func TestInterpret_NodeTest_TAP_Demonstrated_NotWitnessOnly(t *testing.T) {
 			}
 
 			out := combinedOutput(res)
-			v = witnessDemonstration(v, out, "src/x.js")
+			v = witnessDemonstration(v, out, "src/x.js", nil)
 			if !v.demonstrated {
 				t.Errorf("witnessDemonstration must not un-demonstrate when no coverage row contradicts the target; got demonstrated=false, reason=%q", v.reason)
 			}
@@ -772,11 +772,66 @@ func TestInterpret_BarePython_Demonstrated_NotWitnessOnly(t *testing.T) {
 	}
 
 	out := combinedOutput(res)
-	v = witnessDemonstration(v, out, "src/repro_target.py")
+	v = witnessDemonstration(v, out, "src/repro_target.py", nil)
 	if !v.demonstrated {
 		t.Errorf("witnessDemonstration must not un-demonstrate when no coverage row contradicts the target; got demonstrated=false, reason=%q", v.reason)
 	}
 	if v.witnessOnly {
 		t.Errorf("witnessOnly = true, want false: python has a WitnessTable entry and no coverage row contradicts the target, so this must reach full Tier-1")
+	}
+}
+
+// --- bazel declared-failure witness (bugbot-9fac) ---------------------------
+
+// TestWitnessDemonstration_BazelDeclaredFailure_FullPromotion: a bazel run
+// whose output carries the underlying go test's "--- FAIL: <name>" marker
+// for a test the PLAN ITSELF declared must reach FULL promotion (no
+// witnessOnly downgrade) — the live MemoryCache finding demonstrated 2/2
+// via bazelisk and was still stuck at witness-only forever.
+func TestWitnessDemonstration_BazelDeclaredFailure_FullPromotion(t *testing.T) {
+	v := verdict{demonstrated: true, ecosystem: sandbox.EcosystemBazel}
+	out := "//molecules/x:cache_test FAILED in 0.4s\n--- FAIL: TestShutdownStopsCacheCleanup (0.10s)\n    cache_test.go:31: goroutine still running\nFAIL\n"
+
+	got := witnessDemonstration(v, out, "molecules/x/cache.go", []string{"TestShutdownStopsCacheCleanup"})
+	if !got.demonstrated {
+		t.Fatalf("demonstrated = false, want true (reason=%q)", got.reason)
+	}
+	if got.witnessOnly {
+		t.Error("witnessOnly = true, want false: declared-test failure marker is a full execution witness for bazel")
+	}
+}
+
+// TestWitnessDemonstration_BazelPytestFailedLine: the pytest short-summary
+// "FAILED <nodeid>" form under a bazel py_test also satisfies the declared
+// witness.
+func TestWitnessDemonstration_BazelPytestFailedLine(t *testing.T) {
+	v := verdict{demonstrated: true, ecosystem: sandbox.EcosystemBazel}
+	out := "=========================== short test summary info ===========================\nFAILED test/vehicle_test.py::test_capacity_override_preserves_cost - AssertionError\n"
+
+	got := witnessDemonstration(v, out, "common/utils/vehicle.py", []string{"test_capacity_override_preserves_cost"})
+	if got.witnessOnly {
+		t.Error("witnessOnly = true, want false: pytest FAILED line naming the declared test is a full witness")
+	}
+}
+
+// TestWitnessDemonstration_BazelNoDeclaredMatch_WitnessOnly: without a
+// declared-name failure marker (target-label FAILED summary only, or no
+// declared names at all), bazel stays witness-only — absence of the marker
+// degrades, never rejects.
+func TestWitnessDemonstration_BazelNoDeclaredMatch_WitnessOnly(t *testing.T) {
+	out := "//molecules/x:cache_test FAILED in 0.4s\nFAIL\n"
+
+	for name, declared := range map[string][]string{
+		"no declared names":        nil,
+		"declared name not in out": {"TestSomethingElse"},
+	} {
+		v := verdict{demonstrated: true, ecosystem: sandbox.EcosystemBazel}
+		got := witnessDemonstration(v, out, "molecules/x/cache.go", declared)
+		if !got.demonstrated {
+			t.Fatalf("%s: demonstrated = false, want true", name)
+		}
+		if !got.witnessOnly {
+			t.Errorf("%s: witnessOnly = false, want true (no declared-failure marker)", name)
+		}
 	}
 }

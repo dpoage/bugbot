@@ -200,3 +200,46 @@ func TestClassifyTargetExecution_NoTargetOrFiles(t *testing.T) {
 		t.Errorf("no test files should be permissive, got %q", reason)
 	}
 }
+
+// TestTargetGateEcosystem pins the launcher-fallback rule (bugbot-9fac):
+// bazel and unknown cmd ecosystems borrow the TARGET FILE's language edge
+// rule so a bazel/launcher-less plan is held to the same executable-edge
+// standard as a direct `go test`/`pytest` plan; recognized cmd ecosystems
+// and unmapped target extensions pass through unchanged.
+func TestTargetGateEcosystem(t *testing.T) {
+	cases := []struct {
+		cmdEco eco.Ecosystem
+		target string
+		want   eco.Ecosystem
+	}{
+		{eco.EcosystemBazel, "molecules/x/cache.go", eco.EcosystemGo},
+		{eco.EcosystemBazel, "molecules/x/vehicle.py", eco.EcosystemPython},
+		{eco.EcosystemUnknown, "src/scheduler/timeInTask.ts", eco.EcosystemJS},
+		{eco.EcosystemGo, "whatever.py", eco.EcosystemGo},       // recognized cmd eco wins
+		{eco.EcosystemBazel, "BUILD.bazel", eco.EcosystemBazel}, // unmapped ext: permissive fallback
+		{eco.EcosystemUnknown, "run.sh", eco.EcosystemUnknown},
+	}
+	for _, tc := range cases {
+		if got := targetGateEcosystem(tc.cmdEco, tc.target); got != tc.want {
+			t.Errorf("targetGateEcosystem(%q, %q) = %q, want %q", tc.cmdEco, tc.target, got, tc.want)
+		}
+	}
+}
+
+// TestClassifyTargetExecution_GoDetailNamesColocation asserts the Go
+// rejection detail teaches the ONE edge that always works — same-directory
+// colocation — since a `package main` target cannot be imported at all
+// (the live pub.Close/os.Exit finding burned a full 36-minute revision
+// round on the generic "import the target" instruction, bugbot-9fac).
+func TestClassifyTargetExecution_GoDetailNamesColocation(t *testing.T) {
+	files := map[string]string{
+		"repro/main_shutdown_test.go": "package repro\n\nimport \"testing\"\n\nfunc TestShutdown(t *testing.T) { t.Fatal(\"transliteration\") }\n",
+	}
+	reason, detail := ClassifyTargetExecution(files, "molecules/robot-control/atoms/bag-scans/main.go", eco.EcosystemGo)
+	if reason != VerdictReasonTargetNotExecuted {
+		t.Fatalf("reason = %q, want %q", reason, VerdictReasonTargetNotExecuted)
+	}
+	if !strings.Contains(detail, "SAME DIRECTORY") || !strings.Contains(detail, "package main") {
+		t.Errorf("Go detail must teach same-directory colocation and the package-main constraint; got %q", detail)
+	}
+}

@@ -317,24 +317,33 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 //     gets one consistent corrective message regardless of which layer
 //     caught it.
 //   - the detected ecosystem has no standardized coverage-report format at
-//     all (no WitnessTable entry, e.g. bazel/unknown): v is returned with
-//     witnessOnly set, so the caller downgrades the promotion to the
-//     existing witness-only path (bugbot-w1bh) instead of full Tier-1 —
-//     repro-as-evidence, not repro-as-promotion, since there is no
-//     reliable way to attribute the failure to the target file at all for
-//     this ecosystem.
+//     all (no WitnessTable entry, e.g. bazel/unknown): for BAZEL, the
+//     underlying runner's own per-test failure marker is consulted first —
+//     `--test_output=errors` surfaces go test's `--- FAIL: TestX` / pytest's
+//     `FAILED ...::test_x` lines, and when one names a test the PLAN ITSELF
+//     declared (declared, from declaredTestNames), the demonstration is
+//     accepted at full strength (bugbot-9fac: the static gate already
+//     enforced an executable edge to the target for the target file's OWN
+//     language via targetGateEcosystem, so this runtime marker completes
+//     the same two-sided proof the plain go/py paths rely on). Otherwise v
+//     is returned with witnessOnly set, so the caller downgrades the
+//     promotion to the existing witness-only path (bugbot-w1bh) instead of
+//     full Tier-1 — repro-as-evidence, not repro-as-promotion.
 //
 // Only meaningful when v.demonstrated is already true; verdicts that
 // already failed to demonstrate for another reason (build error, timeout,
 // exit_zero, ...) are returned unchanged. targetPath == "" (no target-file
 // provenance available) is permissive by design, matching
 // ClassifyTargetExecution's own empty-input behavior.
-func witnessDemonstration(v verdict, out, targetPath string) verdict {
+func witnessDemonstration(v verdict, out, targetPath string, declared []string) verdict {
 	if !v.demonstrated || targetPath == "" {
 		return v
 	}
 	rules, ok := eco.WitnessRulesFor(v.ecosystem)
 	if !ok {
+		if v.ecosystem == sandbox.EcosystemBazel && declaredFailureWitness(out, declared) {
+			return v
+		}
 		v.witnessOnly = true
 		return v
 	}
@@ -349,6 +358,38 @@ func witnessDemonstration(v verdict, out, targetPath string) verdict {
 			path.Base(targetPath)),
 		ecosystem: v.ecosystem,
 	}
+}
+
+// declaredFailureWitness reports whether out contains a per-test FAILURE
+// marker naming one of the declared test identifiers (see declaredTestNames):
+// go test's "--- FAIL: <name>" line, or a pytest short-summary "FAILED
+// <nodeid>" line mentioning <name>. Used by witnessDemonstration's bazel
+// branch — bazel itself has no coverage-report format, but with
+// `--test_output=errors` it relays the underlying runner's own markers
+// verbatim, and a marker naming the plan's OWN test is dispositive evidence
+// that the injected test (not a pre-existing foreign failure) ran and
+// failed. Absence of a match degrades to witness-only, never to rejection.
+func declaredFailureWitness(out string, declared []string) bool {
+	if len(declared) == 0 {
+		return false
+	}
+	for _, name := range declared {
+		if strings.Contains(out, "--- FAIL: "+name) {
+			return true
+		}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "FAILED") {
+			continue
+		}
+		for _, name := range declared {
+			if strings.Contains(trimmed, name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // flakyVerdict builds the non-promoting verdict for a repro that
@@ -461,6 +502,11 @@ func (v verdict) feedback(p *Plan) string {
 		b.WriteString("itself (a transliteration) are not reproductions — the runtime never touches the target's own code. ")
 		b.WriteString("Rewrite the test so it IMPORTS/REQUIRES the target module and CALLS its actual function/method, so the ")
 		b.WriteString("target file's own code runs and fails on the current bug.")
+		if v.ecosystem == sandbox.EcosystemGo {
+			b.WriteString(" For a Go target, the simplest executable edge is COLOCATION: put your _test.go in the ")
+			b.WriteString("SAME DIRECTORY as the target file, declared in the same package — for a `package main` ")
+			b.WriteString("target this is the ONLY option, because a main package cannot be imported.")
+		}
 	case VerdictReasonForeignFailure:
 		foreign := v.foreignTest
 		if foreign == "" {
@@ -540,6 +586,8 @@ func bazelFeedback(reason VerdictReason) string {
 		lead = "The sandbox could not start your bazel command (environment failure); that is not a reproduction."
 	case VerdictReasonTimeout:
 		lead = "Your bazel run timed out. Target ONE small test, never //...."
+	case VerdictReasonTargetNotExecuted:
+		lead = "Your bazel test ran and failed, but no submitted test file reaches the finding's target file through an executable edge (an import of its package, or same-directory/same-package colocation). For a Go target — especially one in `package main`, which cannot be imported — add your _test.go in the SAME directory and package as the target, with a matching go_test target in that package's BUILD file."
 	default:
 		lead = "Your bazel run did not demonstrate the bug."
 	}

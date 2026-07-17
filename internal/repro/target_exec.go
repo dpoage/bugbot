@@ -57,10 +57,45 @@ func ClassifyTargetExecution(testFiles map[string]string, targetPath string, eco
 		}
 	}
 	base := path.Base(targetPath)
-	return VerdictReasonTargetNotExecuted, fmt.Sprintf(
+	detail := fmt.Sprintf(
 		"none of the submitted test files import/require/include %q (or link against its module/package) as "+
 			"executable code; opening it only to read its text (grep or lint checks) is not a behavioral reproduction",
 		base)
+	switch ecoName {
+	case eco.EcosystemGo:
+		detail += ". For Go, the simplest executable edge is COLOCATION: put your _test.go in the SAME DIRECTORY " +
+			"as the target, declared in the same package — for a `package main` target this is the ONLY option, " +
+			"because a main package cannot be imported"
+	case eco.EcosystemPython:
+		detail += ". For Python, import the target module (e.g. `from <pkg>.<module> import ...`) and CALL the " +
+			"buggy function; if the package roots at a subdirectory of the repo, run pytest from that " +
+			"subdirectory (relative cd) or set PYTHONPATH to it"
+	}
+	return VerdictReasonTargetNotExecuted, detail
+}
+
+// targetGateEcosystem returns the ecosystem whose executable-edge rule the
+// static gate (ClassifyTargetExecution) should apply, given the PLAN CMD's
+// detected ecosystem and the finding's target file. Launcher-based
+// ecosystems (bazel) and unrecognized commands carry no edge rule of their
+// own — historically that made the gate permissive for them, which was
+// harmless while bazel demonstrations could only ever reach witness-only.
+// Now that a bazel run whose declared test fails can fully promote
+// (witnessDemonstration's declaredFailureWitness branch, bugbot-9fac), the
+// gate must still hold the TARGET FILE's own language edge: a bazel-run Go
+// repro is required to reach the target through a Go edge (same-package
+// colocation or an import of its package) exactly like a `go test` repro.
+// Falls back to the cmd ecosystem when the target's extension maps to no
+// known ecosystem, preserving the permissive behavior for files we have no
+// rule for.
+func targetGateEcosystem(cmdEco eco.Ecosystem, targetFile string) eco.Ecosystem {
+	if cmdEco != eco.EcosystemBazel && cmdEco != eco.EcosystemUnknown {
+		return cmdEco
+	}
+	if byExt := eco.InferFromExtension(targetFile); byExt != "" {
+		return byExt
+	}
+	return cmdEco
 }
 
 // edgeChecker reports whether a single test file (its workspace-relative

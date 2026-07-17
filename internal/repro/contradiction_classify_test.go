@@ -24,7 +24,7 @@ func TestPromoteOne_ExitZeroIncrementsContradiction(t *testing.T) {
 	)
 	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "ok"}})
 
-	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir()})
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir(), MaxAttempts: 2})
 	if err != nil {
 		t.Fatal(err)
 	}

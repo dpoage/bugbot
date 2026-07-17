@@ -284,7 +284,9 @@ func TestPromoteAll_UnparseablePlanDoesNotAbort(t *testing.T) {
 
 	// Round 1: a valid, runnable plan that does NOT demonstrate (sandbox exits
 	// 0). Round 2 (revision): the model emits garbage for both the run and the
-	// repair completion, so RunJSON returns ErrUnparseableOutput.
+	// repair completion, so RunJSON returns ErrUnparseableOutput. MaxAttempts
+	// is pinned to 2 so the completion/attempt counts below stay exact
+	// regardless of the package default.
 	client := newScriptedClient(
 		planBody(t, goodPlan()),
 		"]<]minimax[>[ broken tool call, not json",
@@ -295,7 +297,7 @@ func TestPromoteAll_UnparseablePlanDoesNotAbort(t *testing.T) {
 		Stdout:   "ok\nPASS",
 	}})
 
-	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir()})
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir(), MaxAttempts: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,8 +319,8 @@ func TestPromoteAll_UnparseablePlanDoesNotAbort(t *testing.T) {
 	if !strings.HasPrefix(o.Reason, "unparseable plan:") {
 		t.Errorf("Reason = %q, want an 'unparseable plan:' verdict (not 'error: ...')", o.Reason)
 	}
-	if o.Attempts != DefaultMaxAttempts {
-		t.Errorf("Attempts = %d, want %d (both rounds tried; not aborted on round 2)", o.Attempts, DefaultMaxAttempts)
+	if o.Attempts != 2 {
+		t.Errorf("Attempts = %d, want 2 (both rounds tried; not aborted on round 2)", o.Attempts)
 	}
 
 	// Round 1 executed once; the unparseable round 2 never reached the sandbox.
@@ -612,13 +614,14 @@ func TestPromoteAll_CompileErrorGuard(t *testing.T) {
 	artifactDir := t.TempDir()
 
 	// Both attempts return a build failure (non-zero exit) — must NOT promote.
+	// MaxAttempts pinned to 2 to match the two scripted plans.
 	client := newScriptedClient(planBody(t, goodPlan()), planBody(t, goodPlan()))
 	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{
 		ExitCode: 2,
 		Stderr:   "# bug [build failed]\n./bug_test.go:4:2: undefined: Divide",
 	}})
 
-	r, err := New(client, sb, repoDir, Options{ArtifactDir: artifactDir})
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: artifactDir, MaxAttempts: 2})
 	if err != nil {
 		t.Fatal(err)
 	}

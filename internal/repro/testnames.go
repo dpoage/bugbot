@@ -72,11 +72,11 @@ func extractPyTestNames(files map[string]string) []string {
 
 // extractJSTestNames scans JS/TS test files for test('name', ...) /
 // it('name', ...) call names — Jest, Vitest, Mocha, and node:test all share
-// this call shape. There is currently no structured-output path for JS
-// (interpret()'s switch only handles Go and Python), so this extractor is
-// not yet consumed by bindTestEvidence; it exists for feature completeness
-// and so a future JS structured-output path (were one added) would not need
-// a fresh extraction pass.
+// this call shape. There is no structured-output path for JS (interpret()'s
+// switch only handles Go and Python) so bindTestEvidence never consumes
+// these, but declaredTestNames folds them into the bazel declared-failure
+// witness (declaredFailureWitness, bugbot-9fac) alongside the Go/Python
+// names.
 func extractJSTestNames(files map[string]string) []string {
 	var names []string
 	for path, content := range files {
@@ -88,6 +88,18 @@ func extractJSTestNames(files map[string]string) []string {
 		}
 	}
 	return names
+}
+
+// declaredTestNames aggregates every extractor's declared test identifiers
+// from a plan's (or iteration workspace's) injected file set, in no
+// particular order. Consumers use the result strictly as a POSITIVE
+// allowlist (see the package comment above): an empty slice means "no names
+// extractable" and must always degrade to the unchanged, more conservative
+// behavior — never to a rejection.
+func declaredTestNames(files map[string]string) []string {
+	names := extractGoTestNames(files)
+	names = append(names, extractPyTestNames(files)...)
+	return append(names, extractJSTestNames(files)...)
 }
 
 // hasJSExt reports whether path has a JS/TS source extension.

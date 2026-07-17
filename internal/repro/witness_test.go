@@ -81,28 +81,26 @@ func TestPromoteOne_NeedsHuman_WitnessesNotPromotes(t *testing.T) {
 }
 
 // witnessOnlyPlan returns a plan whose command detects as
-// ecosystem.EcosystemUnknown (direct script execution — "./repro.py", no
-// recognized launcher token — bugbot-ds90 made bare "python3 repro.py"
-// resolve to EcosystemPython, so this fixture switched to a launcher shape
-// that still has no coverage-report format), which has no execution-witness
-// coverage format: a demonstrated run comes back Promoted=true with
-// WitnessOnly=true (bugbot-qb4r layer b). Mirrors the qb4r regression
-// fixture.
+// ecosystem.EcosystemUnknown (direct script execution — "./repro.cjs", no
+// recognized launcher token), which has no execution-witness coverage
+// format: a demonstrated run comes back Promoted=true with
+// WitnessOnly=true (bugbot-qb4r layer b). The script REQUIRES the finding's
+// target module (./src/app) so the hardened static gate — which since
+// bugbot-9fac applies the TARGET FILE's language edge rule even for
+// launcher-less/unknown commands (targetGateEcosystem) — sees an executable
+// edge and lets the plan reach the sandbox.
 func witnessOnlyPlan() Plan {
 	return Plan{
-		Files: map[string]string{"repro.py": `
-def time_in_task(start, now):
-    return now - start
-
-if __name__ == "__main__":
-    import sys
-    result = time_in_task(float("inf"), 0)
-    if result == float("-inf"):
-        print("BUGBOT_REPRO_DEMONSTRATED")
-        sys.exit(1)
+		Files: map[string]string{"repro.cjs": `
+const { paginate } = require("./src/app");
+const rows = paginate([1, 2, 3], 1);
+if (rows.length !== 3) {
+	console.log("BUGBOT_REPRO_DEMONSTRATED");
+	process.exit(1);
+}
 `},
-		Cmd:    []string{"./repro.py"},
-		Expect: "demonstrates the stale-state race",
+		Cmd:    []string{"./repro.cjs"},
+		Expect: "demonstrates the pagination off-by-one",
 	}
 }
 
@@ -195,10 +193,10 @@ func TestPromoteOne_WitnessPersistFailure_RequeuesAttempt(t *testing.T) {
 	// NOT upserted: promoteOne's persist step cannot find the row.
 	finding := domain.Finding{
 		ID:          "f-unpersisted",
-		Fingerprint: domain.Fingerprint("concurrency", "src/scheduler/timeInTask.ts", "42|unpersisted"),
+		Fingerprint: domain.Fingerprint("concurrency", "src/app.ts", "42|unpersisted"),
 		Title:       "unpersisted witness-only finding",
 		Tier:        2,
-		File:        "src/scheduler/timeInTask.ts",
+		File:        "src/app.ts",
 	}
 
 	client := newScriptedClient(planBody(t, witnessOnlyPlan()))

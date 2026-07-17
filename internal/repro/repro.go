@@ -51,7 +51,11 @@ import (
 const (
 	// DefaultMaxAttempts is the number of repro plans tried per finding before
 	// giving up. The first attempt plus revision rounds count toward this.
-	DefaultMaxAttempts = 2
+	// Raised from 2 to 3 (bugbot-9fac): live dogfood showed weak models
+	// burning round 1 on a prose-wrapped/unparseable final answer, leaving a
+	// single real round for the actual sandbox feedback loop; 3 gives the
+	// initial plan plus two corrective revisions.
+	DefaultMaxAttempts = 3
 	// DefaultMaxParallel bounds concurrent findings under PromoteAll. Sandbox
 	// workspace copies are disk-heavy, so the default is intentionally small.
 	DefaultMaxParallel = 2
@@ -548,7 +552,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		// permissive; layer (b) below (witnessDemonstration) still applies
 		// to whatever DOES execute.
 		ecoName := detectEcosystem(plan.Cmd).name
-		if reason, detail := ClassifyTargetExecution(plan.Files, finding.File, ecoName); reason != "" {
+		if reason, detail := ClassifyTargetExecution(plan.Files, finding.File, targetGateEcosystem(ecoName, finding.File)); reason != "" {
 			gateVerdict := verdict{reason: reason, summary: detail, ecosystem: ecoName}
 			att.Reason = string(reason)
 			scope.EmitEvent(progress.Event{
@@ -582,7 +586,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			// the non-promoting target_not_executed reason (ecosystem can
 			// witness but didn't), or marks witnessOnly (ecosystem cannot
 			// witness at all — repro-as-evidence, not repro-as-promotion).
-			verdict = witnessDemonstration(verdict, combinedOutput(res), finding.File)
+			verdict = witnessDemonstration(verdict, combinedOutput(res), finding.File, declaredTestNames(plan.Files))
 		}
 
 		// bugbot-c49s determinism gate: one demonstrating run is not enough
@@ -603,7 +607,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			}
 			confirmVerdict := bindTestEvidence(interpret(confirmRes, plan.Cmd), plan.Files)
 			if confirmVerdict.demonstrated {
-				confirmVerdict = witnessDemonstration(confirmVerdict, combinedOutput(confirmRes), finding.File)
+				confirmVerdict = witnessDemonstration(confirmVerdict, combinedOutput(confirmRes), finding.File, declaredTestNames(plan.Files))
 			}
 			if !confirmVerdict.demonstrated {
 				// Demonstrated once, not twice consecutively: flaky, not

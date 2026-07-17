@@ -113,10 +113,12 @@ func TestStructuredOutput_ReproducerRepairCarriesSchema(t *testing.T) {
 	repoDir := newRepoDir(t)
 	artifactDir := t.TempDir()
 
-	// First body: a bare array (wrong root shape). Second body: a
-	// well-shaped plan.
+	// First body: a bare array (wrong root shape) whose inner object is ALSO
+	// schema-invalid (missing required "cmd") so the rescue scan
+	// (agent.rescueBody, bugbot-9fac) cannot salvage it and the repair
+	// round-trip genuinely fires. Second body: a well-shaped plan.
 	client := newScriptedClient(
-		`[{"files":{},"cmd":["x"],"expect":"y"}]`,
+		`[{"files":{},"expect":"y"}]`,
 		planBody(t, goodPlan()),
 	)
 	client.caps = llm.Capabilities{StructuredOutput: true}

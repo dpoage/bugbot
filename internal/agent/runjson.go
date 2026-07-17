@@ -105,16 +105,23 @@ func (r *Runner) runJSON(ctx context.Context, seed []llm.Message, task string, s
 	// unmarshal: an early unmarshal of a wrong-shaped body yields a misleading
 	// "cannot unmarshal …" error, where the schema violation is the actionable
 	// one and is what the repair round-trip echoes back to the model.
-	var perr error
-	body, berr := stripBody(outcome.FinalText)
-	if berr != nil {
-		perr = berr
-	} else if v := validateSchema(schema, []byte(body)); v != nil {
-		perr = v
-	} else if p := json.Unmarshal([]byte(body), out); p != nil {
-		perr = p
-	} else {
+	perr := parseJSONInto(outcome.FinalText, schema, out)
+	if perr == nil {
 		return outcome, nil
+	}
+
+	// Schema-guided rescue (bugbot-9fac): weak models frequently prefix the
+	// final JSON with prose ("Based on my investigation… {…}") or leave a
+	// mangled head, both of which fail the leading-value parse above. Before
+	// burning the repair round-trip — a tools-less, HISTORY-LESS single
+	// completion that must reproduce the whole answer blind and often
+	// fabricates — scan the cleaned output for the first embedded JSON value
+	// that ALREADY satisfies the schema. The schema is the arbiter, so an
+	// incidental json-ish fragment in the prose cannot hijack the answer.
+	if body, ok := rescueBody(outcome.FinalText, schema); ok {
+		if uerr := json.Unmarshal([]byte(body), out); uerr == nil {
+			return outcome, nil
+		}
 	}
 
 	// A run cut short by the budget pool or its own per-run token budget has no
@@ -152,20 +159,72 @@ func (r *Runner) runJSON(ctx context.Context, seed []llm.Message, task string, s
 	if rerr != nil {
 		return repairOutcome, rerr
 	}
-	repairBody, berr2 := stripBody(repairOutcome.FinalText)
-	if berr2 != nil {
-		return repairOutcome, fmt.Errorf("agent: %w after one repair%s: %w",
-			ErrUnparseableOutput, truncationNote(repairOutcome), berr2)
-	}
-	if verr := validateSchema(schema, []byte(repairBody)); verr != nil {
-		return repairOutcome, fmt.Errorf("agent: %w after one repair%s: %w",
-			ErrUnparseableOutput, truncationNote(repairOutcome), verr)
-	}
-	if perr2 := json.Unmarshal([]byte(repairBody), out); perr2 != nil {
+	if perr2 := parseJSONInto(repairOutcome.FinalText, schema, out); perr2 != nil {
+		// Same rescue as the pre-repair path: a repair completion that
+		// wrapped a schema-valid answer in prose still counts.
+		if body, ok := rescueBody(repairOutcome.FinalText, schema); ok {
+			if uerr := json.Unmarshal([]byte(body), out); uerr == nil {
+				return repairOutcome, nil
+			}
+		}
 		return repairOutcome, fmt.Errorf("agent: %w after one repair%s: %w",
 			ErrUnparseableOutput, truncationNote(repairOutcome), perr2)
 	}
 	return repairOutcome, nil
+}
+
+// parseJSONInto strips text to its JSON body (think blocks and fences
+// removed, leading complete value extracted — see [stripBody]), deep-validates
+// it against schema (see [validateSchema]), and unmarshals it into out. The
+// first failure is returned in that precedence order, so the actionable
+// schema violation — not a misleading typed-unmarshal error — is what the
+// repair round-trip echoes back to the model.
+func parseJSONInto(text string, schema json.RawMessage, out any) error {
+	body, err := stripBody(text)
+	if err != nil {
+		return err
+	}
+	if verr := validateSchema(schema, []byte(body)); verr != nil {
+		return verr
+	}
+	return json.Unmarshal([]byte(body), out)
+}
+
+// rescueBody scans the cleaned model output for the first embedded JSON
+// value that satisfies schema, tolerating prose or mangled bytes BEFORE the
+// value — the case [stripBody] deliberately does not handle (it only
+// extracts a LEADING complete value). Returns ("", false) when schema is
+// empty (no arbiter, no safe way to pick a candidate) or when no candidate
+// both decodes as a complete JSON value and passes deep validation.
+//
+// Candidate starts are '{' / '[' bytes in the cleaned text; each is decoded
+// with encoding/json's Decoder (which respects string/escape boundaries and
+// rejects incomplete values, so a truncated tail is never rescued). The scan
+// is bounded to keep pathological outputs (brace-dense code dumps) cheap;
+// decode failures on non-JSON braces cost one token read each.
+func rescueBody(text string, schema json.RawMessage) (string, bool) {
+	if len(schema) == 0 {
+		return "", false
+	}
+	body := stripFences(llm.StripThinkBlocks(text))
+	const maxCandidates = 64
+	tried := 0
+	for i := 0; i < len(body) && tried < maxCandidates; i++ {
+		if body[i] != '{' && body[i] != '[' {
+			continue
+		}
+		tried++
+		dec := json.NewDecoder(strings.NewReader(body[i:]))
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil || len(raw) == 0 {
+			continue
+		}
+		if validateSchema(schema, []byte(raw)) != nil {
+			continue
+		}
+		return string(raw), true
+	}
+	return "", false
 }
 
 // truncationNote returns a short parenthetical when the run's final completion
