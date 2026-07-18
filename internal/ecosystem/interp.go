@@ -339,9 +339,30 @@ var InterpTable = []InterpRules{
 		LineAnchoredRanMarkers: []string{
 			"not ok ",
 		},
+		// ESM module-load failures (bugbot-g3m7): a custom ESM loader/
+		// resolver throwing at import time crashes the process before any
+		// assertion runs — this is the "failed to compile or import"
+		// category (see repro.VerdictReasonBuildError's doc), NOT a test
+		// demonstration, even though node:test still prints a TAP
+		// "not ok "/"# fail" summary for the crashed run that would
+		// otherwise satisfy RanMarkers/LineAnchoredRanMarkers below.
+		// "cannot find module" was ALREADY a bare-substring BuildMarker
+		// (see below) before this change — that is the existing precedent
+		// for accepting a genericity tradeoff here: a legitimate failing
+		// test whose OWN assertion output happens to contain one of these
+		// phrases (e.g. asserting on a caught MODULE_NOT_FOUND error
+		// message) would also misclassify as build_error. The ERR_* codes
+		// are Node's own stable error identifiers and are effectively
+		// unambiguous outside a real loader failure, so they carry that
+		// risk far less than the generic "cannot find module" precedent
+		// already accepted below.
 		BuildMarkers: []string{
 			"cannot find module",
 			"module not found",
+			"err_unknown_file_extension",
+			"err_module_not_found",
+			"err_require_esm",
+			"err_import_assertion_type_missing",
 			"syntaxerror",
 			"unexpected token",
 			"is not a function",
