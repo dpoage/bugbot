@@ -1,0 +1,23 @@
+{
+  "finding": {
+    "id": "0000019f61dde09c2b12b7e5f9b02cc7",
+    "fingerprint": "corpus/logic/cargo_movement-cargo_movement.go:synthetic",
+    "file": "cargo_movement.go",
+    "line": 12,
+    "commit_sha": "corpus@synthetic"
+  },
+  "plan": {
+    "cmd": ["bash", "repro_check.sh"],
+    "files": ["repro_check.sh"]
+  },
+  "sandbox": {
+    "image": "docker.io/library/golang:1.26",
+    "ecosystem": "unknown",
+    "network": "none"
+  },
+  "result": {
+    "exit_code": 0,
+    "sentinel_seen": true
+  },
+  "bugbot_version": "0.1.0"
+}

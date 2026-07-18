@@ -154,6 +154,55 @@ func TestWidget(t *testing.T) {}
 	}
 }
 
+// TestClassifyTargetExecution_GoShellColocation pins the 61dde0 evidence: a
+// shell script colocated with a .go target satisfies same-directory
+// colocation textually but never compiles into the Go package — only .go
+// files gain the implicit colocation edge.
+func TestClassifyTargetExecution_GoShellColocation(t *testing.T) {
+	files := map[string]string{
+		"internal/widget/repro_check.sh": `
+python3 <<'EOF'
+print(open("widget.go").read())
+EOF
+`,
+	}
+	reason, detail := ClassifyTargetExecution(files, "internal/widget/widget.go", eco.EcosystemGo)
+	if reason != VerdictReasonTargetNotExecuted {
+		t.Errorf("shell script colocated with Go target should be flagged, got reason = %q, detail = %q", reason, detail)
+	}
+}
+
+// TestClassifyTargetExecution_RustPySourceGrep pins the Rust analog: a
+// Python file colocated with a .rs target gains no edge from colocation
+// alone (Python files never compile into a Rust crate).
+func TestClassifyTargetExecution_RustPySourceGrep(t *testing.T) {
+	files := map[string]string{
+		"src/widget_check.py": `
+with open("src/widget.rs") as f:
+    assert "fn new" in f.read()
+`,
+	}
+	reason, detail := ClassifyTargetExecution(files, "src/widget.rs", eco.EcosystemRust)
+	if reason != VerdictReasonTargetNotExecuted {
+		t.Errorf(".py colocated with Rust target should be flagged, got reason = %q, detail = %q", reason, detail)
+	}
+}
+
+// TestClassifyTargetExecution_CppShellColocation pins the C++ analog: a
+// shell script colocated with a .cc target gains no edge from colocation
+// alone (only C++ translation units/headers compile into the target).
+func TestClassifyTargetExecution_CppShellColocation(t *testing.T) {
+	files := map[string]string{
+		"src/repro_check.sh": `
+grep "Widget::New" src/widget.cc
+`,
+	}
+	reason, detail := ClassifyTargetExecution(files, "src/widget.cc", eco.EcosystemCpp)
+	if reason != VerdictReasonTargetNotExecuted {
+		t.Errorf(".sh colocated with C++ target should be flagged, got reason = %q, detail = %q", reason, detail)
+	}
+}
+
 // TestClassifyTargetExecution_GoExternalTestPackage covers the external
 // test-package form (package foo_test importing ".../foo") when the test
 // file lives elsewhere.
