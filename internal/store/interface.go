@@ -24,6 +24,12 @@ type StoreReader interface {
 
 	// ListFindings returns findings matching the filter, newest-updated first.
 	ListFindings(ctx context.Context, filter domain.FindingFilter) ([]domain.Finding, error)
+
+	// UnclaimableReproFingerprints returns the fingerprints of repro_attempts
+	// rows that can never be claimed again (done, abandoned, or attempt budget
+	// exhausted). Backlog selectors use it to avoid re-dispatching findings
+	// whose reproduction already ran to completion.
+	UnclaimableReproFingerprints(ctx context.Context) (map[string]struct{}, error)
 }
 
 // StoreWriter is the write face of *Store. Consumers that only mutate findings

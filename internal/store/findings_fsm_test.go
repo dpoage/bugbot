@@ -122,6 +122,102 @@ func TestReproQueue_InfraRetryBounded(t *testing.T) {
 	}
 }
 
+// TestReproQueue_UnclaimableFingerprints drives one row into each queue state
+// and asserts UnclaimableReproFingerprints returns exactly the rows
+// ClaimReproAttempt would reject FOREVER: done, abandoned, and budget-exhausted
+// (attempt_count >= max_attempts, even while nominally 'running' — the
+// stale-lease reclaim also refuses at budget). Still-claimable rows (pending,
+// fresh running under budget, infra_retry, blocked_toolchain) must stay out of
+// the set so OpenBacklog keeps dispatching them (bugbot-dyj7).
+func TestReproQueue_UnclaimableFingerprints(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	// Empty table → nil set, no error.
+	set, err := st.UnclaimableReproFingerprints(ctx)
+	if err != nil {
+		t.Fatalf("UnclaimableReproFingerprints on empty table: %v", err)
+	}
+	if len(set) != 0 {
+		t.Fatalf("empty table: want empty set, got %v", set)
+	}
+
+	mustEnqueue := func(fp string) {
+		t.Helper()
+		if _, err := st.EnqueueRepro(ctx, fp); err != nil {
+			t.Fatalf("EnqueueRepro(%s): %v", fp, err)
+		}
+	}
+	mustClaim := func(fp string) {
+		t.Helper()
+		if _, err := st.ClaimReproAttempt(ctx, fp); err != nil {
+			t.Fatalf("ClaimReproAttempt(%s): %v", fp, err)
+		}
+	}
+	mustRequeue := func(fp string) {
+		t.Helper()
+		if err := st.RequeueReproAttemptOnInfraError(ctx, fp, "sandbox timeout"); err != nil {
+			t.Fatalf("RequeueReproAttemptOnInfraError(%s): %v", fp, err)
+		}
+	}
+
+	// Claimable rows — must NOT appear in the set.
+	mustEnqueue("fp-pending")
+	mustEnqueue("fp-running")
+	mustClaim("fp-running") // fresh lease, under budget: transient, stays in backlog
+	mustEnqueue("fp-retry")
+	mustClaim("fp-retry")
+	mustRequeue("fp-retry") // infra_retry, attempt_count 1 < 3
+	mustEnqueue("fp-blocked")
+	if _, err := st.BlockReproAttemptOnToolchain(ctx, "fp-blocked", "js"); err != nil {
+		t.Fatalf("BlockReproAttemptOnToolchain: %v", err)
+	}
+
+	// Unclaimable rows — MUST appear in the set.
+	mustEnqueue("fp-done")
+	mustClaim("fp-done")
+	if err := st.FinishReproAttempt(ctx, "fp-done"); err != nil {
+		t.Fatalf("FinishReproAttempt: %v", err)
+	}
+	mustEnqueue("fp-abandoned")
+	for i := 0; i < DefaultReproMaxAttempts; i++ {
+		mustClaim("fp-abandoned")
+		mustRequeue("fp-abandoned")
+	}
+	// Budget exhausted while still 'running': claim/requeue twice, then a third
+	// claim leaves attempt_count == max with state running. No future claim or
+	// stale-lease reclaim can ever succeed on this row.
+	mustEnqueue("fp-exhausted-running")
+	for i := 0; i < DefaultReproMaxAttempts-1; i++ {
+		mustClaim("fp-exhausted-running")
+		mustRequeue("fp-exhausted-running")
+	}
+	mustClaim("fp-exhausted-running")
+
+	set, err = st.UnclaimableReproFingerprints(ctx)
+	if err != nil {
+		t.Fatalf("UnclaimableReproFingerprints: %v", err)
+	}
+	want := map[string]struct{}{
+		"fp-done":              {},
+		"fp-abandoned":         {},
+		"fp-exhausted-running": {},
+	}
+	if len(set) != len(want) {
+		t.Errorf("set size = %d, want %d (set: %v)", len(set), len(want), set)
+	}
+	for fp := range want {
+		if _, ok := set[fp]; !ok {
+			t.Errorf("missing unclaimable fingerprint %s", fp)
+		}
+	}
+	for _, fp := range []string{"fp-pending", "fp-running", "fp-retry", "fp-blocked"} {
+		if _, ok := set[fp]; ok {
+			t.Errorf("claimable fingerprint %s must not be in the unclaimable set", fp)
+		}
+	}
+}
+
 // TestUpsertFinding_PreMigrationNeedsHumanReason is a regression test for the
 // migration-018 backfill blocker: a pre-migration row with needs_human=1 and
 // needs_human_reason=" (the default before the backfill) must NOT cause

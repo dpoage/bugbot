@@ -11,9 +11,11 @@ import (
 
 // fakeReader is a hand-written in-memory implementation of store.StoreReader.
 // It exists solely for testing OpenBacklog without a real SQLite database. It
-// only implements ListFindings because that is the only method OpenBacklog calls.
+// implements only what OpenBacklog calls: ListFindings plus the
+// unclaimable-fingerprint set (returned verbatim from the unclaimable field).
 type fakeReader struct {
-	findings []domain.Finding
+	findings    []domain.Finding
+	unclaimable map[string]struct{}
 }
 
 func (f *fakeReader) GetFinding(_ context.Context, id string) (domain.Finding, error) {
@@ -45,6 +47,10 @@ func (f *fakeReader) ListFindings(_ context.Context, filter domain.FindingFilter
 	return out, nil
 }
 
+func (f *fakeReader) UnclaimableReproFingerprints(_ context.Context) (map[string]struct{}, error) {
+	return f.unclaimable, nil
+}
+
 // ---------------------------------------------------------------------------
 // TestOpenBacklog_FakeReader: OpenBacklog filters and sorts correctly using the
 // fakeReader double — no real SQLite database is opened.
@@ -67,7 +73,13 @@ func TestOpenBacklog_FakeReader(t *testing.T) {
 		{ID: "e", Fingerprint: "fp-e", Status: domain.StatusOpen, Tier: domain.TierSuspected, ReproPath: "/some/path", UpdatedAt: now.Add(-4 * time.Hour)},
 		// ineligible: Tier0 (fix-witnessed) — not T2/T3
 		{ID: "f", Fingerprint: "fp-f", Status: domain.StatusOpen, Tier: domain.TierFixWitnessed, UpdatedAt: now.Add(-5 * time.Hour)},
-	}}
+		// ineligible: repro_attempts row is unclaimable (attempt completed
+		// without reproducing — stays open/T2 with empty ReproPath, but must
+		// NOT be re-dispatched just to skip on "already claimed", bugbot-dyj7)
+		{ID: "g", Fingerprint: "fp-g", Status: domain.StatusOpen, Tier: domain.TierVerified, UpdatedAt: now.Add(-6 * time.Hour)},
+	},
+		unclaimable: map[string]struct{}{"fp-g": {}},
+	}
 
 	got, err := OpenBacklog(context.Background(), fr)
 	if err != nil {

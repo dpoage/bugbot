@@ -355,6 +355,46 @@ func (s *Store) BlockedToolchainCounts(ctx context.Context) (map[string]int, err
 	return counts, nil
 }
 
+// UnclaimableReproFingerprints returns the set of fingerprints whose
+// repro_attempts row can never be claimed again: state done or abandoned, or
+// attempt budget exhausted (attempt_count >= max_attempts — such a row is
+// rejected by ClaimReproAttempt's gate in every state, including a stale
+// 'running' lease, which the reclaim UPDATE also refuses at budget).
+//
+// This is the backlog-selection complement to ErrReproAlreadyClaimed:
+// daemon.OpenBacklog excludes these fingerprints up front so completed
+// attempts are not re-dispatched every firing only to be skipped at claim
+// time. Transiently unclaimable rows (fresh 'running' lease under budget) are
+// deliberately NOT included — they become claimable again via stale-lease
+// reclaim or release, so the backlog must keep seeing them. blocked_toolchain
+// rows under budget are likewise excluded from the set: they re-claim
+// normally once the sandbox image gains the missing toolchain.
+func (s *Store) UnclaimableReproFingerprints(ctx context.Context) (map[string]struct{}, error) {
+	rows, err := queryRows(ctx, s, "unclaimable_repro_fingerprints", `
+		SELECT fingerprint
+		FROM repro_attempts
+		WHERE state IN ('done', 'abandoned')
+		   OR attempt_count >= max_attempts`,
+		nil,
+		func(r *sql.Rows) (string, error) {
+			var fp string
+			err := r.Scan(&fp)
+			return fp, err
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	set := make(map[string]struct{}, len(rows))
+	for _, fp := range rows {
+		set[fp] = struct{}{}
+	}
+	return set, nil
+}
+
 // PendingReproAttempts returns all repro_attempts rows in pending or infra_retry
 // state with attempt_count < max_attempts, ordered oldest-updated-first. This
 // is the queue poll for all three dispatch paths.

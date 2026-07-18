@@ -8,11 +8,19 @@ import (
 	"github.com/dpoage/bugbot/internal/store"
 )
 
-// OpenBacklog returns open findings that have not yet had a reproduction
-// attempt: Tier 2 or 3, ReproPath empty, ReproWitness empty, NeedsHuman
-// false. It queries all open findings from the store (the store filter does
-// not support ReproPath or NeedsHuman predicates) and filters in Go. A
-// non-empty ReproWitness excludes the row: the finding already received its
+// OpenBacklog returns open findings still eligible for a reproduction
+// dispatch: Tier 2 or 3, ReproPath empty, ReproWitness empty, NeedsHuman
+// false, and — via the store's UnclaimableReproFingerprints set — no
+// repro_attempts row that can never be claimed again (done, abandoned, or
+// attempt budget exhausted). Without the queue check, a finding whose attempt
+// completed without reproducing (it stays open/T2 with an empty ReproPath,
+// queue row done) would be re-selected on every firing only to be rejected at
+// claim time, flooding the summary with spurious "skipped: already claimed"
+// lines (bugbot-dyj7).
+//
+// It queries all open findings from the store (the store filter does not
+// support ReproPath or NeedsHuman predicates) and filters in Go. A non-empty
+// ReproWitness excludes the row: the finding already received its
 // non-promoting witness bundle (below-quorum survivor or witness-only
 // ecosystem, bugbot-qb4r layer b) and witness-only is a static property of
 // the build's ecosystem.WitnessTable — re-dispatching it every firing could
@@ -21,11 +29,12 @@ import (
 // the dual-meaning note in funnel/verify_stream.go, bugbot-sw7).
 //
 // Rotation design: findings are returned oldest-updated-first (updated_at ASC).
-// When a repro attempt fails, the caller "touches" the finding via UpsertFinding
-// so its updated_at bumps. On the next firing those touched failures sort to the
-// BACK of the queue, and un-attempted (or long-ago-attempted) findings rotate to
-// the FRONT. This prevents the same unreproducible findings from burning budget
-// on every firing while others are never reached.
+// When a repro attempt ends without finishing its queue row (interrupt release,
+// infra_retry within budget), the caller "touches" the finding via UpsertFinding
+// so its updated_at bumps. On the next firing those touched rows sort to the
+// BACK of the queue, and un-attempted findings rotate to the FRONT. Completed
+// attempts need no rotation — the unclaimable-fingerprint filter above removes
+// them from the backlog entirely.
 //
 // ListFindings returns DESC; we re-sort here in Go. Backlogs are small (at most
 // a few hundred findings in practice) so the in-process sort is negligible.
@@ -37,11 +46,22 @@ func OpenBacklog(ctx context.Context, st store.StoreReader) ([]domain.Finding, e
 	if err != nil {
 		return nil, err
 	}
+	unclaimable, err := st.UnclaimableReproFingerprints(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]domain.Finding, 0, len(all))
 	for _, f := range all {
-		if (f.Tier == domain.TierVerified || f.Tier == domain.TierSuspected) && f.ReproPath == "" && f.ReproWitness == "" && !f.NeedsHuman {
-			out = append(out, f)
+		if f.Tier != domain.TierVerified && f.Tier != domain.TierSuspected {
+			continue
 		}
+		if f.ReproPath != "" || f.ReproWitness != "" || f.NeedsHuman {
+			continue
+		}
+		if _, done := unclaimable[f.Fingerprint]; done {
+			continue
+		}
+		out = append(out, f)
 	}
 	// Sort oldest-updated-first so rotation works: callers touch failed findings
 	// (bumping updated_at) and those failures move to the back of the queue.
@@ -56,11 +76,13 @@ func OpenBacklog(ctx context.Context, st store.StoreReader) ([]domain.Finding, e
 // them through PromoteAll. It is a no-op unless EnableRepro is true and a
 // Promoter is wired in. The day-budget gate is applied by the caller (Run).
 //
-// After each firing, findings that were attempted but NOT promoted (i.e. repro
-// failed) are "touched" via a no-op UpsertFinding that bumps updated_at. On the
-// next firing, OpenBacklog's oldest-updated-first ordering pushes those failures
-// to the back of the queue, ensuring the batch rotates through the full backlog
-// rather than burning budget on the same unreproducible findings forever.
+// After each firing, batch findings still lacking a ReproPath are "touched"
+// via a no-op UpsertFinding that bumps updated_at. Findings whose queue row
+// completed (done/abandoned) drop out of the backlog entirely via OpenBacklog's
+// unclaimable-fingerprint filter; the touch matters for rows still claimable
+// (interrupt release, infra_retry within budget), which OpenBacklog's
+// oldest-updated-first ordering pushes to the back of the queue so the batch
+// rotates through the full backlog instead of retrying the same rows first.
 func (d *Daemon) runReproBacklog(ctx context.Context) {
 	if !d.cfg.EnableRepro || d.repro == nil {
 		return
@@ -113,9 +135,10 @@ func (d *Daemon) runReproBacklog(ctx context.Context) {
 	d.emitReproBlocked(ctx)
 
 	// Touch findings that were attempted but not promoted so their updated_at
-	// advances. OpenBacklog orders oldest-first, so these failures move to the
-	// back of the queue on the next firing, letting the batch rotate to other
-	// findings instead of retrying the same unreproducible ones forever.
+	// advances. Completed queue rows leave the backlog via OpenBacklog's
+	// unclaimable filter; for still-claimable rows (released or infra_retry)
+	// the oldest-first ordering moves them to the back of the queue on the
+	// next firing, letting the batch rotate to other findings first.
 	//
 	// We determine "attempted but not promoted" by re-reading each batch finding
 	// from the store: a promoted finding now has a non-empty ReproPath (set by
