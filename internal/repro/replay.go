@@ -89,7 +89,7 @@ func Replay(ctx context.Context, sb sandbox.Sandbox, repoDir string, b *Bundle, 
 	plan := b.Plan()
 	ecoName := detectEcosystem(plan.Cmd).name
 
-	if reason, detail := ClassifyTargetExecution(plan.Files, b.Manifest.Finding.File, targetGateEcosystem(ecoName, b.Manifest.Finding.File)); reason != "" {
+	if reason, detail := ClassifyTargetExecution(plan.Files, plan.Cmd, b.Manifest.Finding.File, targetGateEcosystem(ecoName, b.Manifest.Finding.File)); reason != "" {
 		return ReplayResult{Reason: reason, Summary: detail, Ecosystem: ecoName}, nil
 	}
 

@@ -552,7 +552,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 		// permissive; layer (b) below (witnessDemonstration) still applies
 		// to whatever DOES execute.
 		ecoName := detectEcosystem(plan.Cmd).name
-		if reason, detail := ClassifyTargetExecution(plan.Files, finding.File, targetGateEcosystem(ecoName, finding.File)); reason != "" {
+		if reason, detail := ClassifyTargetExecution(plan.Files, plan.Cmd, finding.File, targetGateEcosystem(ecoName, finding.File)); reason != "" {
 			gateVerdict := verdict{reason: reason, summary: detail, ecosystem: ecoName}
 			att.Reason = string(reason)
 			scope.EmitEvent(progress.Event{
