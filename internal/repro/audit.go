@@ -30,6 +30,6 @@ func (r AuditResult) Flagged() bool { return r.Reason != "" }
 func Audit(b *Bundle) AuditResult {
 	plan := b.Plan()
 	ecoName := detectEcosystem(plan.Cmd).name
-	reason, detail := ClassifyTargetExecution(plan.Files, b.Manifest.Finding.File, ecoName)
+	reason, detail := ClassifyTargetExecution(plan.Files, plan.Cmd, b.Manifest.Finding.File, targetGateEcosystem(ecoName, b.Manifest.Finding.File))
 	return AuditResult{Reason: reason, Detail: detail, Ecosystem: ecoName}
 }

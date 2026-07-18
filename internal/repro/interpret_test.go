@@ -880,3 +880,83 @@ func TestDeclaredFailureWitness_BoundaryAnchored(t *testing.T) {
 		})
 	}
 }
+
+// TestInterpret_NodeESM_LoadFailure_BuildErrorNotDemonstrated pins bugbot-g3m7:
+// production evidence bundle 0000019f62de5335709d995366056a67 was a `node
+// --test` run whose custom ESM loader could not handle a .tsx extension. The
+// process crashed at MODULE LOAD — before any assertion ran — with
+// TypeError [ERR_UNKNOWN_FILE_EXTENSION], yet node:test still printed a TAP
+// "not ok " / "# fail 1" summary for the crashed subtest. Before this fix
+// that TAP output satisfied the JS ran-evidence gate and interpret()
+// promoted a repro that demonstrated nothing about the target bug. The new
+// ERR_UNKNOWN_FILE_EXTENSION build marker must win at step 3 (build
+// markers), ahead of step 4 (ran-evidence), so this now classifies
+// build_error, not demonstrated.
+func TestInterpret_NodeESM_LoadFailure_BuildErrorNotDemonstrated(t *testing.T) {
+	res := sandbox.Result{
+		ExitCode: 1,
+		Stderr: "TypeError [ERR_UNKNOWN_FILE_EXTENSION]: Unknown file extension \".tsx\" for " +
+			"/workspace/src/components/DraggableModal.tsx\n" +
+			"    at Object.getFileProtocolModuleFormat [as file:] (node:internal/modules/esm/get_format:78:9)\n",
+		Stdout: "TAP version 13\n# Subtest: modal drag\nnot ok 1 - modal drag\n  ---\n  ...\n# pass 0\n# fail 1\n",
+	}
+	cmd := []string{"node", "--test", "src/components/DraggableModal.test.tsx"}
+	v := interpret(res, cmd)
+	if v.demonstrated {
+		t.Fatalf("ESM module-load failure must NOT demonstrate; got demonstrated=true (ecosystem=%q)", v.ecosystem)
+	}
+	if v.reason != VerdictReasonBuildError {
+		t.Errorf("ESM module-load failure must classify as build_error; got reason=%q", v.reason)
+	}
+	if v.ecosystem != "js" {
+		t.Errorf("ecosystem = %q, want %q", v.ecosystem, "js")
+	}
+}
+
+// TestInterpret_NodeTest_GenuineTAPFailure_StillDemonstrated is the
+// regression half of bugbot-g3m7: a genuine node:test TAP failure — an
+// actual assertion diff, no load-error markers anywhere in the output —
+// must still demonstrate. The new build markers must not swallow real
+// failures that merely share the TAP "not ok " shape with the load-crash
+// case above.
+func TestInterpret_NodeTest_GenuineTAPFailure_StillDemonstrated(t *testing.T) {
+	res := sandbox.Result{
+		ExitCode: 1,
+		Stdout: "TAP version 13\n# Subtest: sync fail\nnot ok 1 - sync fail\n  ---\n" +
+			"  error: |-\n    AssertionError [ERR_ASSERTION]: Expected values to be strictly equal\n" +
+			"    +actual - expected\n\n    +1\n    -2\n  ...\n# pass 0\n# fail 1\n",
+	}
+	cmd := []string{"node", "--test", "x.test.js"}
+	v := interpret(res, cmd)
+	if !v.demonstrated {
+		t.Fatalf("genuine node:test TAP failure must demonstrate; got reason=%q", v.reason)
+	}
+	if v.ecosystem != "js" {
+		t.Errorf("ecosystem = %q, want %q", v.ecosystem, "js")
+	}
+}
+
+// TestInterpret_NodeESM_LoadFailure_SentinelStillNotDemonstrated extends the
+// bugbot-vig sentinel-ordering invariant (already pinned for Cpp by
+// TestInterpret_Sentinel_BuildFailureStillNotDemonstrated) to JS/bugbot-g3m7:
+// an ESM load-crash whose captured output ALSO contains the trusted sentinel
+// token must still classify as build_error. Step 3 (build markers) runs
+// before step 3.6 (sentinel), so the sentinel is never reached.
+func TestInterpret_NodeESM_LoadFailure_SentinelStillNotDemonstrated(t *testing.T) {
+	res := sandbox.Result{
+		ExitCode: 1,
+		Stdout:   "BUGBOT_REPRO_DEMONSTRATED\nTAP version 13\nnot ok 1 - modal drag\n# pass 0\n# fail 1\n",
+		Stderr: "TypeError [ERR_UNKNOWN_FILE_EXTENSION]: Unknown file extension \".tsx\" for " +
+			"/workspace/src/components/DraggableModal.tsx\n",
+	}
+	cmd := []string{"node", "--test", "src/components/DraggableModal.test.tsx"}
+	v := interpret(res, cmd)
+	if v.demonstrated {
+		t.Fatalf("ESM load failure must NOT demonstrate even when sentinel is present; got demonstrated=true (ecosystem=%q)",
+			v.ecosystem)
+	}
+	if v.reason != VerdictReasonBuildError {
+		t.Errorf("ESM load failure with sentinel must classify as build_error (bugbot-vig extended to JS); got reason=%q",
+			v.reason)
+	}
+}

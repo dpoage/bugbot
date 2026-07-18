@@ -23,7 +23,7 @@ class TestSourceContainsFix(unittest.TestCase):
         self.assertIn("SelectedContractStore.getValue()", src)
 `,
 	}
-	reason, detail := ClassifyTargetExecution(files, "src/store/SelectedContractStore.ts", eco.EcosystemPython)
+	reason, detail := ClassifyTargetExecution(files, nil, "src/store/SelectedContractStore.ts", eco.EcosystemPython)
 	if reason != VerdictReasonTargetNotExecuted {
 		t.Fatalf("reason = %q, want %q", reason, VerdictReasonTargetNotExecuted)
 	}
@@ -44,7 +44,7 @@ def test_main_does_not_use_threading():
     assert "threading.Lock" not in src
 `,
 	}
-	reason, _ := ClassifyTargetExecution(files, "agent/main.py", eco.EcosystemPython)
+	reason, _ := ClassifyTargetExecution(files, nil, "agent/main.py", eco.EcosystemPython)
 	if reason != VerdictReasonTargetNotExecuted {
 		t.Fatalf("reason = %q, want %q", reason, VerdictReasonTargetNotExecuted)
 	}
@@ -65,7 +65,7 @@ def test_negative_infinity_bug():
     assert result != float("-inf"), "BUGBOT_REPRO_DEMONSTRATED"
 `,
 	}
-	reason, _ := ClassifyTargetExecution(files, "src/scheduler/timeInTask.ts", eco.EcosystemPython)
+	reason, _ := ClassifyTargetExecution(files, nil, "src/scheduler/timeInTask.ts", eco.EcosystemPython)
 	if reason != VerdictReasonTargetNotExecuted {
 		t.Fatalf("reason = %q, want %q", reason, VerdictReasonTargetNotExecuted)
 	}
@@ -85,7 +85,7 @@ class TestSleepTime(unittest.TestCase):
         self.assertGreaterEqual(compute_sleep_time(), 0)
 `,
 	}
-	reason, detail := ClassifyTargetExecution(files, "agent/main.py", eco.EcosystemPython)
+	reason, detail := ClassifyTargetExecution(files, nil, "agent/main.py", eco.EcosystemPython)
 	if reason != "" {
 		t.Fatalf("reason = %q (detail %q), want no objection", reason, detail)
 	}
@@ -103,7 +103,7 @@ def test_x():
     assert main.compute() == 1
 `,
 	}
-	reason, _ := ClassifyTargetExecution(files, "pkg/main.py", eco.EcosystemPython)
+	reason, _ := ClassifyTargetExecution(files, nil, "pkg/main.py", eco.EcosystemPython)
 	if reason != "" {
 		t.Fatalf("reason = %q, want no objection for relative import", reason)
 	}
@@ -120,7 +120,7 @@ test("stale value", () => {
 });
 `,
 	}
-	if reason, _ := ClassifyTargetExecution(good, "src/store/SelectedContractStore.ts", eco.EcosystemJS); reason != "" {
+	if reason, _ := ClassifyTargetExecution(good, nil, "src/store/SelectedContractStore.ts", eco.EcosystemJS); reason != "" {
 		t.Errorf("genuine require() flagged: reason = %q", reason)
 	}
 
@@ -133,7 +133,7 @@ test("stale value", () => {
 });
 `,
 	}
-	if reason, _ := ClassifyTargetExecution(bad, "src/store/SelectedContractStore.ts", eco.EcosystemJS); reason != VerdictReasonTargetNotExecuted {
+	if reason, _ := ClassifyTargetExecution(bad, nil, "src/store/SelectedContractStore.ts", eco.EcosystemJS); reason != VerdictReasonTargetNotExecuted {
 		t.Errorf("readFileSync-only test not flagged: reason = %q, want %q", reason, VerdictReasonTargetNotExecuted)
 	}
 }
@@ -149,8 +149,57 @@ package widget
 func TestWidget(t *testing.T) {}
 `,
 	}
-	if reason, _ := ClassifyTargetExecution(files, "internal/widget/widget.go", eco.EcosystemGo); reason != "" {
+	if reason, _ := ClassifyTargetExecution(files, nil, "internal/widget/widget.go", eco.EcosystemGo); reason != "" {
 		t.Errorf("colocated Go test flagged: reason = %q", reason)
+	}
+}
+
+// TestClassifyTargetExecution_GoShellColocation pins the 61dde0 evidence: a
+// shell script colocated with a .go target satisfies same-directory
+// colocation textually but never compiles into the Go package — only .go
+// files gain the implicit colocation edge.
+func TestClassifyTargetExecution_GoShellColocation(t *testing.T) {
+	files := map[string]string{
+		"internal/widget/repro_check.sh": `
+python3 <<'EOF'
+print(open("widget.go").read())
+EOF
+`,
+	}
+	reason, detail := ClassifyTargetExecution(files, nil, "internal/widget/widget.go", eco.EcosystemGo)
+	if reason != VerdictReasonTargetNotExecuted {
+		t.Errorf("shell script colocated with Go target should be flagged, got reason = %q, detail = %q", reason, detail)
+	}
+}
+
+// TestClassifyTargetExecution_RustPySourceGrep pins the Rust analog: a
+// Python file colocated with a .rs target gains no edge from colocation
+// alone (Python files never compile into a Rust crate).
+func TestClassifyTargetExecution_RustPySourceGrep(t *testing.T) {
+	files := map[string]string{
+		"src/widget_check.py": `
+with open("src/widget.rs") as f:
+    assert "fn new" in f.read()
+`,
+	}
+	reason, detail := ClassifyTargetExecution(files, nil, "src/widget.rs", eco.EcosystemRust)
+	if reason != VerdictReasonTargetNotExecuted {
+		t.Errorf(".py colocated with Rust target should be flagged, got reason = %q, detail = %q", reason, detail)
+	}
+}
+
+// TestClassifyTargetExecution_CppShellColocation pins the C++ analog: a
+// shell script colocated with a .cc target gains no edge from colocation
+// alone (only C++ translation units/headers compile into the target).
+func TestClassifyTargetExecution_CppShellColocation(t *testing.T) {
+	files := map[string]string{
+		"src/repro_check.sh": `
+grep "Widget::New" src/widget.cc
+`,
+	}
+	reason, detail := ClassifyTargetExecution(files, nil, "src/widget.cc", eco.EcosystemCpp)
+	if reason != VerdictReasonTargetNotExecuted {
+		t.Errorf(".sh colocated with C++ target should be flagged, got reason = %q, detail = %q", reason, detail)
 	}
 }
 
@@ -173,7 +222,7 @@ func TestWidget(t *testing.T) {
 }
 `,
 	}
-	if reason, _ := ClassifyTargetExecution(files, "internal/widget/widget.go", eco.EcosystemGo); reason != "" {
+	if reason, _ := ClassifyTargetExecution(files, nil, "internal/widget/widget.go", eco.EcosystemGo); reason != "" {
 		t.Errorf("external test package importing target dir flagged: reason = %q", reason)
 	}
 }
@@ -184,7 +233,7 @@ func TestWidget(t *testing.T) {
 // observed failure mode, not a universal lint.
 func TestClassifyTargetExecution_UnknownEcosystemPermissive(t *testing.T) {
 	files := map[string]string{"repro.sh": "echo hello"}
-	if reason, _ := ClassifyTargetExecution(files, "src/main.go", eco.EcosystemUnknown); reason != "" {
+	if reason, _ := ClassifyTargetExecution(files, nil, "src/main.go", eco.EcosystemUnknown); reason != "" {
 		t.Errorf("unknown ecosystem should be permissive, got reason = %q", reason)
 	}
 }
@@ -193,10 +242,10 @@ func TestClassifyTargetExecution_UnknownEcosystemPermissive(t *testing.T) {
 // inputs: no target path (target-file provenance not carried on the Plan)
 // or no submitted files must never block a plan on their own.
 func TestClassifyTargetExecution_NoTargetOrFiles(t *testing.T) {
-	if reason, _ := ClassifyTargetExecution(map[string]string{"a": "import foo"}, "", eco.EcosystemPython); reason != "" {
+	if reason, _ := ClassifyTargetExecution(map[string]string{"a": "import foo"}, nil, "", eco.EcosystemPython); reason != "" {
 		t.Errorf("empty targetPath should be permissive, got %q", reason)
 	}
-	if reason, _ := ClassifyTargetExecution(nil, "agent/main.py", eco.EcosystemPython); reason != "" {
+	if reason, _ := ClassifyTargetExecution(nil, nil, "agent/main.py", eco.EcosystemPython); reason != "" {
 		t.Errorf("no test files should be permissive, got %q", reason)
 	}
 }
@@ -235,11 +284,112 @@ func TestClassifyTargetExecution_GoDetailNamesColocation(t *testing.T) {
 	files := map[string]string{
 		"repro/main_shutdown_test.go": "package repro\n\nimport \"testing\"\n\nfunc TestShutdown(t *testing.T) { t.Fatal(\"transliteration\") }\n",
 	}
-	reason, detail := ClassifyTargetExecution(files, "molecules/robot-control/atoms/bag-scans/main.go", eco.EcosystemGo)
+	reason, detail := ClassifyTargetExecution(files, nil, "molecules/robot-control/atoms/bag-scans/main.go", eco.EcosystemGo)
 	if reason != VerdictReasonTargetNotExecuted {
 		t.Fatalf("reason = %q, want %q", reason, VerdictReasonTargetNotExecuted)
 	}
 	if !strings.Contains(detail, "SAME DIRECTORY") || !strings.Contains(detail, "package main") {
 		t.Errorf("Go detail must teach same-directory colocation and the package-main constraint; got %q", detail)
+	}
+}
+
+// TestClassifyTargetExecution_CmdReachability_Smuggling pins the
+// production evidence in bundle 0000019f62f6295434a646d1444353de: plan.cmd
+// runs only a grep script, but plan.files ALSO carries a genuine test
+// importing the target that the cmd never executes. Cmd-reachability must
+// narrow the checked set to the file the cmd actually runs (the grep
+// script), which has no executable edge, so the plan is flagged despite the
+// untouched genuine test sitting right next to it.
+func TestClassifyTargetExecution_CmdReachability_Smuggling(t *testing.T) {
+	files := map[string]string{
+		"repro_publish_timer_bug.py": `
+import os
+with open("molecules/robot-control/atoms/sim-location/src/sim_locations.py") as f:
+    source = f.read()
+assert "_publish_timer.cancel()" in source, "BUGBOT_REPRO_DEMONSTRATED"
+`,
+		"molecules/robot-control/atoms/sim-location/tests/test_publish_timer_stop_repro.py": `
+from src.sim_locations import SimLocations
+
+def test_stop_cancels_publish_timer():
+    sim = SimLocations()
+    sim.stop()
+    assert sim._publish_timer is None
+`,
+	}
+	cmd := []string{"python3", "repro_publish_timer_bug.py"}
+	reason, detail := ClassifyTargetExecution(files, cmd,
+		"molecules/robot-control/atoms/sim-location/src/sim_locations.py", eco.EcosystemPython)
+	if reason != VerdictReasonTargetNotExecuted {
+		t.Fatalf("reason = %q (detail %q), want %q — the genuine companion test was never executed by cmd",
+			reason, detail, VerdictReasonTargetNotExecuted)
+	}
+}
+
+// TestClassifyTargetExecution_CmdReachability_GenuineCmd is the
+// counterpart to the smuggling case: same fileset, but cmd actually runs
+// the genuine test (not the grep script). Cmd-reachability must narrow to
+// the executed file, which DOES reach the target, so no objection.
+func TestClassifyTargetExecution_CmdReachability_GenuineCmd(t *testing.T) {
+	files := map[string]string{
+		"repro_publish_timer_bug.py": `
+import os
+with open("molecules/robot-control/atoms/sim-location/src/sim_locations.py") as f:
+    source = f.read()
+assert "_publish_timer.cancel()" in source, "BUGBOT_REPRO_DEMONSTRATED"
+`,
+		"molecules/robot-control/atoms/sim-location/tests/test_publish_timer_stop_repro.py": `
+from src.sim_locations import SimLocations
+
+def test_stop_cancels_publish_timer():
+    sim = SimLocations()
+    sim.stop()
+    assert sim._publish_timer is None
+`,
+	}
+	cmd := []string{"pytest", "molecules/robot-control/atoms/sim-location/tests/test_publish_timer_stop_repro.py"}
+	reason, detail := ClassifyTargetExecution(files, cmd,
+		"molecules/robot-control/atoms/sim-location/src/sim_locations.py", eco.EcosystemPython)
+	if reason != "" {
+		t.Fatalf("reason = %q (detail %q), want no objection — cmd genuinely runs the importing test", reason, detail)
+	}
+}
+
+// TestClassifyTargetExecution_CmdReachability_FallbackUnrecognizedLauncher
+// covers acceptance (c): when cmd names no plan file at all (e.g. an
+// untranslated bazel label), NO file is cmd-reachable, so the gate falls
+// back to checking every submitted file — preserving today's permissive
+// behavior for launcher shapes the heuristic cannot parse.
+func TestClassifyTargetExecution_CmdReachability_FallbackUnrecognizedLauncher(t *testing.T) {
+	files := map[string]string{
+		"internal/widget/widget_test.go": `
+package widget
+
+func TestWidget(t *testing.T) {}
+`,
+	}
+	cmd := []string{"bazelisk", "test", "//internal/widget:widget_test"}
+	reason, detail := ClassifyTargetExecution(files, cmd, "internal/widget/widget.go", eco.EcosystemGo)
+	if reason != "" {
+		t.Fatalf("reason = %q (detail %q), want no objection — unrecognized launcher must fall back to all files", reason, detail)
+	}
+}
+
+// TestClassifyTargetExecution_CmdReachability_BashCdDirectory covers
+// acceptance (d): a `bash -c "cd <dir> && go test ./"` cmd makes every file
+// under <dir> cmd-reachable via the directory-token rule, even though the
+// directory never appears as a discrete argv element of its own.
+func TestClassifyTargetExecution_CmdReachability_BashCdDirectory(t *testing.T) {
+	files := map[string]string{
+		"internal/widget/widget_test.go": `
+package widget
+
+func TestWidget(t *testing.T) {}
+`,
+	}
+	cmd := []string{"bash", "-c", "cd internal/widget && go test ./"}
+	reason, detail := ClassifyTargetExecution(files, cmd, "internal/widget/widget.go", eco.EcosystemGo)
+	if reason != "" {
+		t.Fatalf("reason = %q (detail %q), want no objection — colocated test under the cd'd directory is cmd-reachable", reason, detail)
 	}
 }

@@ -29,13 +29,30 @@ import (
 // ClassifyTargetExecution reports whether testFiles (workspace-relative path
 // -> file contents, i.e. a Plan.Files map) contains at least one executable
 // edge to targetPath (the finding's target file, workspace-relative) for the
-// given ecosystem.
+// given ecosystem, restricted to the subset of testFiles that cmd (the
+// plan's argv) actually executes.
 //
-// Returns ("", "") when at least one test file reaches the target through an
-// executable edge — no static objection, the plan may proceed to the
-// sandbox. Returns (VerdictReasonTargetNotExecuted, detail) when none does;
-// detail is a short human-readable explanation naming the missing edge,
-// suitable for verdict.feedback / an agent-facing message.
+// A test file is CMD-REACHABLE when (a) its path or basename appears as a
+// substring of some cmd argv element (covers `python3 repro.py`, `pytest
+// path/to/test.py`, `node --test file.mjs`), or (b) it lives under a
+// directory named as a whitespace-delimited token of some cmd argv element
+// (covers `bash -c "cd dir && go test ./"`, `unittest discover -s dir`).
+// When NO test file is cmd-reachable — an unrecognized launcher shape, or a
+// bazel label with no path translation — the check FALLS BACK to every
+// submitted test file (today's behavior): the reachability heuristic can
+// only NARROW the checked set when it positively identifies the executed
+// subset, never produce a false rejection of its own. This closes the
+// "payload smuggling" gap where a plan's cmd runs only a grep script but
+// plan.files also carries a genuine, never-executed test importing the
+// target — the untouched genuine test used to satisfy the gate on behalf of
+// the grep script that actually ran.
+//
+// Returns ("", "") when at least one (cmd-reachable, or all when none are
+// reachable) test file reaches the target through an executable edge — no
+// static objection, the plan may proceed to the sandbox. Returns
+// (VerdictReasonTargetNotExecuted, detail) when none does; detail is a short
+// human-readable explanation naming the missing edge, suitable for
+// verdict.feedback / an agent-facing message.
 //
 // Ecosystems this function has no edge-detection rule for (bazel, unknown,
 // or any ecosystem missing from executableEdgeCheckers) are treated
@@ -43,7 +60,7 @@ import (
 // mode (an agent pivoting to a DIFFERENT ecosystem's test files because the
 // target's own toolchain is unavailable in the sandbox), not a universal
 // static-analysis lint. A missing rule never blocks a plan.
-func ClassifyTargetExecution(testFiles map[string]string, targetPath string, ecoName eco.Ecosystem) (VerdictReason, string) {
+func ClassifyTargetExecution(testFiles map[string]string, cmd []string, targetPath string, ecoName eco.Ecosystem) (VerdictReason, string) {
 	if targetPath == "" || len(testFiles) == 0 {
 		return "", ""
 	}
@@ -51,7 +68,8 @@ func ClassifyTargetExecution(testFiles map[string]string, targetPath string, eco
 	if !ok {
 		return "", ""
 	}
-	for testPath, content := range testFiles {
+	checkedFiles := cmdReachableFiles(testFiles, cmd)
+	for testPath, content := range checkedFiles {
 		if check(testPath, content, targetPath) {
 			return "", ""
 		}
@@ -72,6 +90,54 @@ func ClassifyTargetExecution(testFiles map[string]string, targetPath string, eco
 			"subdirectory (relative cd) or set PYTHONPATH to it"
 	}
 	return VerdictReasonTargetNotExecuted, detail
+}
+
+// cmdReachableFiles narrows testFiles to the subset that cmd (the plan's
+// argv) actually executes, per the reachability rules documented on
+// ClassifyTargetExecution. Falls back to testFiles unchanged when no file is
+// cmd-reachable (unrecognized launcher shape, e.g. an untranslated bazel
+// label), preserving permissive behavior rather than risking a false
+// rejection from an imperfect heuristic. Pure: no fs access.
+func cmdReachableFiles(testFiles map[string]string, cmd []string) map[string]string {
+	if len(cmd) == 0 {
+		return testFiles
+	}
+	reachable := make(map[string]string, len(testFiles))
+	for testPath, content := range testFiles {
+		if cmdReaches(testPath, cmd) {
+			reachable[testPath] = content
+		}
+	}
+	if len(reachable) == 0 {
+		return testFiles
+	}
+	return reachable
+}
+
+// cmdReaches reports whether testPath is reachable from cmd: its path or
+// basename appears as a substring of some argv element, or it lives under a
+// directory named as a whitespace-delimited token of some argv element.
+func cmdReaches(testPath string, cmd []string) bool {
+	base := path.Base(testPath)
+	for _, arg := range cmd {
+		if arg == "" {
+			continue
+		}
+		if strings.Contains(arg, testPath) || strings.Contains(arg, base) {
+			return true
+		}
+		for _, tok := range strings.Fields(arg) {
+			dir := strings.Trim(tok, `"'`)
+			dir = strings.TrimSuffix(dir, "/")
+			if dir == "" || dir == "." {
+				continue
+			}
+			if testPath == dir || strings.HasPrefix(testPath, dir+"/") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // targetGateEcosystem returns the ecosystem whose executable-edge rule the
@@ -108,6 +174,18 @@ type edgeChecker func(testPath, content, targetPath string) bool
 // executableEdgeCheckers is the per-ecosystem registry of edge-detection
 // rules, keyed the same way as ecosystem.InterpTable / ecosystem.WitnessTable
 // so all three "per-ecosystem behavior" tables stay easy to cross-reference.
+var cppSourceExtensions = []string{".cc", ".cpp", ".cxx", ".C", ".c", ".h", ".hpp", ".hh"}
+
+// hasAnySuffix reports whether s ends with any of suffixes.
+func hasAnySuffix(s string, suffixes []string) bool {
+	for _, suf := range suffixes {
+		if strings.HasSuffix(s, suf) {
+			return true
+		}
+	}
+	return false
+}
+
 var executableEdgeCheckers = map[eco.Ecosystem]edgeChecker{
 	eco.EcosystemPython: func(_, content, targetPath string) bool {
 		return pythonReachesTarget(content, targetPath)
@@ -116,19 +194,19 @@ var executableEdgeCheckers = map[eco.Ecosystem]edgeChecker{
 		return jsReachesTarget(content, targetPath)
 	},
 	eco.EcosystemGo: func(testPath, content, targetPath string) bool {
-		if path.Dir(testPath) == path.Dir(targetPath) {
+		if strings.HasSuffix(testPath, ".go") && path.Dir(testPath) == path.Dir(targetPath) {
 			return true
 		}
 		return goImportReachesTarget(content, targetPath)
 	},
 	eco.EcosystemRust: func(testPath, content, targetPath string) bool {
-		if testPath == targetPath || path.Dir(testPath) == path.Dir(targetPath) {
+		if strings.HasSuffix(testPath, ".rs") && (testPath == targetPath || path.Dir(testPath) == path.Dir(targetPath)) {
 			return true
 		}
 		return basenameReferencedAfter(content, targetPath, []string{"use", "mod"})
 	},
 	eco.EcosystemCpp: func(testPath, content, targetPath string) bool {
-		if path.Dir(testPath) == path.Dir(targetPath) {
+		if hasAnySuffix(testPath, cppSourceExtensions) && path.Dir(testPath) == path.Dir(targetPath) {
 			return true
 		}
 		return cppIncludesTarget(content, targetPath)
