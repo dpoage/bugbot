@@ -1,0 +1,4 @@
+{
+  "reason": "target_not_executed",
+  "description": "0000019f61dde09c2b12b7e5f9b02cc7 shape: repro_check.sh colocated with cargo_movement.go greps the target's source in a Python heredoc — a shell script never compiles into the Go package, so colocation alone must not grant an executable edge."
+}

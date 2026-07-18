@@ -174,6 +174,18 @@ type edgeChecker func(testPath, content, targetPath string) bool
 // executableEdgeCheckers is the per-ecosystem registry of edge-detection
 // rules, keyed the same way as ecosystem.InterpTable / ecosystem.WitnessTable
 // so all three "per-ecosystem behavior" tables stay easy to cross-reference.
+var cppSourceExtensions = []string{".cc", ".cpp", ".cxx", ".C", ".c", ".h", ".hpp", ".hh"}
+
+// hasAnySuffix reports whether s ends with any of suffixes.
+func hasAnySuffix(s string, suffixes []string) bool {
+	for _, suf := range suffixes {
+		if strings.HasSuffix(s, suf) {
+			return true
+		}
+	}
+	return false
+}
+
 var executableEdgeCheckers = map[eco.Ecosystem]edgeChecker{
 	eco.EcosystemPython: func(_, content, targetPath string) bool {
 		return pythonReachesTarget(content, targetPath)
@@ -182,19 +194,19 @@ var executableEdgeCheckers = map[eco.Ecosystem]edgeChecker{
 		return jsReachesTarget(content, targetPath)
 	},
 	eco.EcosystemGo: func(testPath, content, targetPath string) bool {
-		if path.Dir(testPath) == path.Dir(targetPath) {
+		if strings.HasSuffix(testPath, ".go") && path.Dir(testPath) == path.Dir(targetPath) {
 			return true
 		}
 		return goImportReachesTarget(content, targetPath)
 	},
 	eco.EcosystemRust: func(testPath, content, targetPath string) bool {
-		if testPath == targetPath || path.Dir(testPath) == path.Dir(targetPath) {
+		if strings.HasSuffix(testPath, ".rs") && (testPath == targetPath || path.Dir(testPath) == path.Dir(targetPath)) {
 			return true
 		}
 		return basenameReferencedAfter(content, targetPath, []string{"use", "mod"})
 	},
 	eco.EcosystemCpp: func(testPath, content, targetPath string) bool {
-		if path.Dir(testPath) == path.Dir(targetPath) {
+		if hasAnySuffix(testPath, cppSourceExtensions) && path.Dir(testPath) == path.Dir(targetPath) {
 			return true
 		}
 		return cppIncludesTarget(content, targetPath)
