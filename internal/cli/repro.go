@@ -30,6 +30,7 @@ func newReproCmd() *cobra.Command {
 		maxN          int
 		transcriptDir string
 		unsandboxed   bool
+		rerun         bool
 	)
 
 	cmd := &cobra.Command{
@@ -114,6 +115,7 @@ not set, the command exits with a graceful message rather than an error.`,
 				StopProgress:  stopPane,
 				FindingID:     findingID,
 				Unsandboxed:   unsandboxed,
+				Rerun:         rerun,
 			})
 			return err
 		},
@@ -128,6 +130,10 @@ not set, the command exits with a graceful message rather than an error.`,
 	cmd.Flags().BoolVar(&unsandboxed, "unsandboxed", false,
 		"ATTENDED USE ONLY: run the given finding-id directly on the host (workspace copy, no container "+
 			"isolation, full network access) instead of the sandbox; requires a finding-id argument")
+	cmd.Flags().BoolVar(&rerun, "rerun", false,
+		"re-attempt findings whose reproduction already completed: with a finding-id, resets that "+
+			"finding's settled (done/abandoned) queue row before running; without one, re-queues ALL "+
+			"settled open T2/T3 findings and then drains the backlog")
 
 	return cmd
 }

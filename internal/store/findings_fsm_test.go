@@ -218,6 +218,116 @@ func TestReproQueue_UnclaimableFingerprints(t *testing.T) {
 	}
 }
 
+// TestReproQueue_ResetReproAttempt covers the --rerun escape hatch's store
+// half (bugbot-xv20): settled rows (done/abandoned) reset to pending with a
+// fresh budget and become claimable again; live rows (pending/running/
+// infra_retry) are guarded no-ops so the normal lifecycle is never disturbed.
+func TestReproQueue_ResetReproAttempt(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	// No row at all: false, no error.
+	reset, err := st.ResetReproAttempt(ctx, "fp-absent")
+	if err != nil {
+		t.Fatalf("ResetReproAttempt(absent): %v", err)
+	}
+	if reset {
+		t.Error("ResetReproAttempt(absent) = true, want false")
+	}
+
+	// done → pending with attempt_count refunded to 0 and claimable again.
+	fp := "fp-reset-done"
+	if _, err := st.EnqueueRepro(ctx, fp); err != nil {
+		t.Fatalf("EnqueueRepro: %v", err)
+	}
+	if _, err := st.ClaimReproAttempt(ctx, fp); err != nil {
+		t.Fatalf("ClaimReproAttempt: %v", err)
+	}
+	if err := st.FinishReproAttempt(ctx, fp); err != nil {
+		t.Fatalf("FinishReproAttempt: %v", err)
+	}
+	reset, err = st.ResetReproAttempt(ctx, fp)
+	if err != nil {
+		t.Fatalf("ResetReproAttempt(done): %v", err)
+	}
+	if !reset {
+		t.Fatal("ResetReproAttempt(done) = false, want true")
+	}
+	row, err := st.GetReproAttempt(ctx, fp)
+	if err != nil {
+		t.Fatalf("GetReproAttempt: %v", err)
+	}
+	if row.State != ReproStatePending {
+		t.Errorf("state after reset = %s, want pending", row.State)
+	}
+	if row.AttemptCount != 0 {
+		t.Errorf("attempt_count after reset = %d, want 0", row.AttemptCount)
+	}
+	if _, err := st.ClaimReproAttempt(ctx, fp); err != nil {
+		t.Errorf("claim after reset: %v, want success", err)
+	}
+
+	// abandoned (budget exhausted) → pending, full budget restored.
+	fpA := "fp-reset-abandoned"
+	if _, err := st.EnqueueRepro(ctx, fpA); err != nil {
+		t.Fatalf("EnqueueRepro: %v", err)
+	}
+	for i := 0; i < DefaultReproMaxAttempts; i++ {
+		if _, err := st.ClaimReproAttempt(ctx, fpA); err != nil {
+			t.Fatalf("claim %d: %v", i, err)
+		}
+		if err := st.RequeueReproAttemptOnInfraError(ctx, fpA, "sandbox timeout"); err != nil {
+			t.Fatalf("requeue %d: %v", i, err)
+		}
+	}
+	reset, err = st.ResetReproAttempt(ctx, fpA)
+	if err != nil {
+		t.Fatalf("ResetReproAttempt(abandoned): %v", err)
+	}
+	if !reset {
+		t.Fatal("ResetReproAttempt(abandoned) = false, want true")
+	}
+	row, err = st.GetReproAttempt(ctx, fpA)
+	if err != nil {
+		t.Fatalf("GetReproAttempt: %v", err)
+	}
+	if row.State != ReproStatePending || row.AttemptCount != 0 || row.LastError != "" {
+		t.Errorf("after reset: state=%s count=%d lastErr=%q, want pending/0/\"\"",
+			row.State, row.AttemptCount, row.LastError)
+	}
+
+	// Live rows are no-ops: pending and running keep their state.
+	fpLive := "fp-reset-live"
+	if _, err := st.EnqueueRepro(ctx, fpLive); err != nil {
+		t.Fatalf("EnqueueRepro: %v", err)
+	}
+	reset, err = st.ResetReproAttempt(ctx, fpLive)
+	if err != nil {
+		t.Fatalf("ResetReproAttempt(pending): %v", err)
+	}
+	if reset {
+		t.Error("ResetReproAttempt(pending) = true, want false (live row)")
+	}
+	if _, err := st.ClaimReproAttempt(ctx, fpLive); err != nil {
+		t.Fatalf("ClaimReproAttempt: %v", err)
+	}
+	reset, err = st.ResetReproAttempt(ctx, fpLive)
+	if err != nil {
+		t.Fatalf("ResetReproAttempt(running): %v", err)
+	}
+	if reset {
+		t.Error("ResetReproAttempt(running) = true, want false (live row)")
+	}
+	row, err = st.GetReproAttempt(ctx, fpLive)
+	if err != nil {
+		t.Fatalf("GetReproAttempt: %v", err)
+	}
+	if row.State != ReproStateRunning || row.AttemptCount != 1 {
+		t.Errorf("running row disturbed by reset: state=%s count=%d, want running/1",
+			row.State, row.AttemptCount)
+	}
+}
+
 // TestUpsertFinding_PreMigrationNeedsHumanReason is a regression test for the
 // migration-018 backfill blocker: a pre-migration row with needs_human=1 and
 // needs_human_reason=" (the default before the backfill) must NOT cause

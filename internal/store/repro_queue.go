@@ -267,6 +267,39 @@ func (s *Store) ReleaseReproAttempt(ctx context.Context, fingerprint, note strin
 	})
 }
 
+// ResetReproAttempt transitions a settled (done or abandoned) repro_attempts
+// row back to pending with a fresh budget: attempt_count = 0, last_error and
+// blocked_ecosystem cleared. It is the operator escape hatch behind
+// `bugbot repro --rerun` (bugbot-xv20): done is normally terminal — one
+// completed attempt per finding — but a dogfood cycle that ships reproducer
+// improvements legitimately wants to re-run settled findings against the new
+// build. Returns true when a row was reset; false when the fingerprint has no
+// row or the row is not settled (pending/running/infra_retry/blocked_toolchain
+// are live queue states and are left alone — the normal lifecycle owns them).
+// Only the attended CLI path calls this; the daemon never resets settled rows.
+func (s *Store) ResetReproAttempt(ctx context.Context, fingerprint string) (bool, error) {
+	now := nowUTC()
+	var reset bool
+	err := s.retry(ctx, func() error {
+		res, err := s.db.ExecContext(ctx, `
+			UPDATE repro_attempts
+			SET state = ?, attempt_count = 0, last_error = '', blocked_ecosystem = '', updated_at = ?
+			WHERE fingerprint = ? AND state IN ('done', 'abandoned')`,
+			string(ReproStatePending), now.Format(timeLayout), fingerprint,
+		)
+		if err != nil {
+			return annotateErr(s.path, "reset_repro_attempt", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return annotateErr(s.path, "reset_repro_attempt", err)
+		}
+		reset = n > 0
+		return nil
+	})
+	return reset, err
+}
+
 // BlockReproAttemptOnToolchain transitions a repro_attempts row to
 // blocked_toolchain, recording the missing capability's ecosystem name. It is
 // called by promote.go's promoteOne BEFORE ClaimReproAttempt, when the

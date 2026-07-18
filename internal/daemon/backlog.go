@@ -52,10 +52,7 @@ func OpenBacklog(ctx context.Context, st store.StoreReader) ([]domain.Finding, e
 	}
 	out := make([]domain.Finding, 0, len(all))
 	for _, f := range all {
-		if f.Tier != domain.TierVerified && f.Tier != domain.TierSuspected {
-			continue
-		}
-		if f.ReproPath != "" || f.ReproWitness != "" || f.NeedsHuman {
+		if !backlogShape(f) {
 			continue
 		}
 		if _, done := unclaimable[f.Fingerprint]; done {
@@ -69,6 +66,49 @@ func OpenBacklog(ctx context.Context, st store.StoreReader) ([]domain.Finding, e
 		return out[i].UpdatedAt.Before(out[j].UpdatedAt)
 	})
 	return out, nil
+}
+
+// backlogShape reports whether f is, on its finding-side fields alone, a
+// reproduction candidate: Tier 2 or 3, no repro artifact (ReproPath and
+// ReproWitness empty), not needs-human. Status is NOT checked here — callers
+// list with domain.StatusOpen. OpenBacklog additionally excludes findings
+// whose queue row is unclaimable-forever; RequeueSettled deliberately uses
+// the shape WITHOUT that exclusion (its whole point is resurrecting settled
+// rows).
+func backlogShape(f domain.Finding) bool {
+	return (f.Tier == domain.TierVerified || f.Tier == domain.TierSuspected) &&
+		f.ReproPath == "" && f.ReproWitness == "" && !f.NeedsHuman
+}
+
+// RequeueSettled resets the settled (done/abandoned) repro_attempts rows of
+// every open backlog-shape finding back to pending with a fresh attempt
+// budget, returning how many rows were reset. It is the batch half of the
+// `bugbot repro --rerun` escape hatch (bugbot-xv20): after a reproducer
+// upgrade, an operator re-tests the settled backlog instead of hand-editing
+// state.db. Findings that are promoted, witnessed, needs-human, or dismissed
+// are untouched (backlogShape excludes them before any store write), and
+// live queue rows (pending/running/infra_retry/blocked_toolchain) are left
+// alone by ResetReproAttempt's own state guard. The daemon never calls this —
+// it is reachable only from the attended CLI path.
+func RequeueSettled(ctx context.Context, st *store.Store) (int, error) {
+	all, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, f := range all {
+		if !backlogShape(f) {
+			continue
+		}
+		reset, err := st.ResetReproAttempt(ctx, f.Fingerprint)
+		if err != nil {
+			return n, err
+		}
+		if reset {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // runReproBacklog is the backlog-timer step: it queries open T2/T3 findings

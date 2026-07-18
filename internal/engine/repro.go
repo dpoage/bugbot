@@ -395,6 +395,13 @@ type ReproOpts struct {
 	// of the backlog batch path and, structurally, out of the daemon (which
 	// never calls Dispatcher.Repro at all; see daemon.promoteNewFindings).
 	Unsandboxed bool
+	// Rerun opts into re-attempting findings whose reproduction already ran
+	// to completion (repro_attempts state done/abandoned — normally terminal,
+	// bugbot-xv20). Batch mode (no FindingID): every settled open
+	// backlog-shape finding is re-queued via daemon.RequeueSettled before the
+	// drain. Single mode (with FindingID): only that finding's settled row is
+	// reset. Live queue rows are never touched; the daemon has no path here.
+	Rerun bool
 }
 
 // ReproResult is the outcome of a Dispatcher.Repro call.
@@ -476,6 +483,17 @@ func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, e
 	if !sandboxAvailable(cfg) {
 		_, _ = fmt.Fprintln(out, "Repro backlog skipped: no sandbox backend (container runtime or bwrap) available.")
 		return &ReproResult{Skipped: "no sandbox backend"}, nil
+	}
+	// --rerun batch half (bugbot-xv20): resurrect settled queue rows BEFORE
+	// the backlog query, so the drain below sees them. Runs after the sandbox
+	// availability check — a host that cannot run anything should not mutate
+	// queue state first.
+	if opts.Rerun {
+		n, rErr := daemon.RequeueSettled(ctx, st)
+		if rErr != nil {
+			return nil, fmt.Errorf("requeue settled findings: %w", rErr)
+		}
+		_, _ = fmt.Fprintf(out, "Re-queued %d settled finding(s) for reproduction.\n", n)
 	}
 
 	backlog, err := daemon.OpenBacklog(ctx, st)
@@ -561,6 +579,20 @@ func (d *Dispatcher) reproOne(ctx context.Context, opts ReproOpts, cfg config.Co
 	fnd, err := report.ResolveID(ctx, st, opts.FindingID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve finding %q: %w", opts.FindingID, err)
+	}
+
+	// --rerun single half (bugbot-xv20): reset this finding's settled
+	// (done/abandoned) queue row so the claim below succeeds instead of
+	// reporting "skipped: already claimed". A false return means the row was
+	// live or absent — the normal claim flow handles both.
+	if opts.Rerun {
+		reset, rErr := st.ResetReproAttempt(ctx, fnd.Fingerprint)
+		if rErr != nil {
+			return nil, fmt.Errorf("reset repro attempt for %s: %w", fnd.Title, rErr)
+		}
+		if reset {
+			_, _ = fmt.Fprintf(out, "Re-queued settled repro attempt for %q.\n", fnd.Title)
+		}
 	}
 
 	if opts.TranscriptDir != "" {

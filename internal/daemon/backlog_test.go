@@ -562,3 +562,87 @@ func idsOf(findings []domain.Finding) []string {
 	}
 	return ids
 }
+
+// ---------------------------------------------------------------------------
+// TestRequeueSettled: the --rerun batch half (bugbot-xv20) resets exactly the
+// settled queue rows of open backlog-shape findings — and OpenBacklog, which
+// excluded them while settled, sees them again afterwards.
+// ---------------------------------------------------------------------------
+
+func TestRequeueSettled(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+
+	settle := func(fp string) {
+		t.Helper()
+		if _, err := st.EnqueueRepro(ctx, fp); err != nil {
+			t.Fatalf("EnqueueRepro(%s): %v", fp, err)
+		}
+		if _, err := st.ClaimReproAttempt(ctx, fp); err != nil {
+			t.Fatalf("ClaimReproAttempt(%s): %v", fp, err)
+		}
+		if err := st.FinishReproAttempt(ctx, fp); err != nil {
+			t.Fatalf("FinishReproAttempt(%s): %v", fp, err)
+		}
+	}
+
+	// Re-queued: open T2, settled done row (attempted, did not reproduce).
+	settled := seedFinding(t, st, "settled t2", 2, "", false)
+	settle(settled.Fingerprint)
+
+	// Untouched: promoted finding — its done row is provenance, and the
+	// finding is not backlog-shape (ReproPath set).
+	promoted := seedFinding(t, st, "promoted t1", 1, "/artifacts/repro", false)
+	settle(promoted.Fingerprint)
+
+	// Untouched: open T2 with a LIVE pending row (never attempted).
+	pending := seedFinding(t, st, "pending t2", 2, "", false)
+	if _, err := st.EnqueueRepro(ctx, pending.Fingerprint); err != nil {
+		t.Fatalf("EnqueueRepro: %v", err)
+	}
+
+	// Untouched: backlog-shape finding with no queue row at all.
+	norow := seedFinding(t, st, "no row t3", 3, "", false)
+
+	n, err := RequeueSettled(ctx, st)
+	if err != nil {
+		t.Fatalf("RequeueSettled: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("RequeueSettled reset %d rows, want 1 (only the settled backlog-shape finding)", n)
+	}
+
+	row, err := st.GetReproAttempt(ctx, settled.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetReproAttempt(settled): %v", err)
+	}
+	if row.State != store.ReproStatePending || row.AttemptCount != 0 {
+		t.Errorf("settled row after requeue: state=%s count=%d, want pending/0", row.State, row.AttemptCount)
+	}
+	row, err = st.GetReproAttempt(ctx, promoted.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetReproAttempt(promoted): %v", err)
+	}
+	if row.State != store.ReproStateDone {
+		t.Errorf("promoted finding's done row disturbed: state=%s, want done", row.State)
+	}
+
+	// OpenBacklog now includes the resurrected finding (it was excluded while
+	// settled) alongside the never-attempted ones.
+	backlog, err := OpenBacklog(ctx, st)
+	if err != nil {
+		t.Fatalf("OpenBacklog: %v", err)
+	}
+	got := make(map[string]bool, len(backlog))
+	for _, f := range backlog {
+		got[f.ID] = true
+	}
+	for _, want := range []domain.Finding{settled, pending, norow} {
+		if !got[want.ID] {
+			t.Errorf("finding %q missing from backlog after requeue", want.Title)
+		}
+	}
+	if got[promoted.ID] {
+		t.Errorf("promoted finding must stay out of the backlog")
+	}
+}
