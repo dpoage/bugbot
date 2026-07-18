@@ -166,7 +166,7 @@ print(open("widget.go").read())
 EOF
 `,
 	}
-	reason, detail := ClassifyTargetExecution(files, "internal/widget/widget.go", eco.EcosystemGo)
+	reason, detail := ClassifyTargetExecution(files, nil, "internal/widget/widget.go", eco.EcosystemGo)
 	if reason != VerdictReasonTargetNotExecuted {
 		t.Errorf("shell script colocated with Go target should be flagged, got reason = %q, detail = %q", reason, detail)
 	}
@@ -182,7 +182,7 @@ with open("src/widget.rs") as f:
     assert "fn new" in f.read()
 `,
 	}
-	reason, detail := ClassifyTargetExecution(files, "src/widget.rs", eco.EcosystemRust)
+	reason, detail := ClassifyTargetExecution(files, nil, "src/widget.rs", eco.EcosystemRust)
 	if reason != VerdictReasonTargetNotExecuted {
 		t.Errorf(".py colocated with Rust target should be flagged, got reason = %q, detail = %q", reason, detail)
 	}
@@ -197,7 +197,7 @@ func TestClassifyTargetExecution_CppShellColocation(t *testing.T) {
 grep "Widget::New" src/widget.cc
 `,
 	}
-	reason, detail := ClassifyTargetExecution(files, "src/widget.cc", eco.EcosystemCpp)
+	reason, detail := ClassifyTargetExecution(files, nil, "src/widget.cc", eco.EcosystemCpp)
 	if reason != VerdictReasonTargetNotExecuted {
 		t.Errorf(".sh colocated with C++ target should be flagged, got reason = %q, detail = %q", reason, detail)
 	}
