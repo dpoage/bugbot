@@ -1,0 +1,4 @@
+{
+  "reason": "target_not_executed",
+  "description": "plan.cmd runs only repro_publish_timer_bug.py (a grep script reading sim_locations.py's source text); plan.files also smuggles in a genuine test importing src.sim_locations that the cmd never executes. Cmd-reachability narrows the gate to the executed file (the grep script), which has no executable edge to the target."
+}

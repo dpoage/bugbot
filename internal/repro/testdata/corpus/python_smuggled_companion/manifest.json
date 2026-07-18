@@ -1,0 +1,26 @@
+{
+  "finding": {
+    "id": "0000019f62f6295434a646d1444353de",
+    "fingerprint": "27c04e16abc092ab53dfc344663194c6a61f9f05a5dd9ac4b4f33c2d8e679912",
+    "file": "molecules/robot-control/atoms/sim-location/src/sim_locations.py",
+    "line": 185,
+    "commit_sha": "the_cloud@20260715"
+  },
+  "plan": {
+    "cmd": ["python3", "repro_publish_timer_bug.py"],
+    "files": [
+      "repro_publish_timer_bug.py",
+      "molecules/robot-control/atoms/sim-location/tests/test_publish_timer_stop_repro.py"
+    ]
+  },
+  "sandbox": {
+    "image": "python:3.12-slim",
+    "ecosystem": "python",
+    "network": "none"
+  },
+  "result": {
+    "exit_code": 1,
+    "sentinel_seen": false
+  },
+  "bugbot_version": "0.1.0"
+}
