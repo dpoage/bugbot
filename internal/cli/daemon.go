@@ -21,6 +21,7 @@ import (
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/tracker"
 )
 
 // newDaemonCmd runs Bugbot continuously: it polls the target repository for new
@@ -174,10 +175,16 @@ func newDaemonCmd() *cobra.Command {
 			}
 
 			// Publish hook: wire in when cfg.Publish.Enabled. We do not
-			// pre-check for gh on PATH here; a missing gh binary will produce a
-			// warning on the first post-cycle run via the Publisher interface.
+			// pre-check tracker prerequisites here; a missing tracker CLI
+			// produces a warn-once latch on the first post-cycle run via
+			// the Publisher interface. An unknown tracker name, by
+			// contrast, is a configuration error and fails startup.
 			if cfg.Publish.Enabled {
-				deps.Publisher = NewStorePublisher(engine.NewPacedGH(engine.RealGH), st, cfg.Publish, logger)
+				tr, terr := tracker.New(cfg.Publish.Tracker, tracker.Config{Labels: cfg.Publish.Labels})
+				if terr != nil {
+					return terr
+				}
+				deps.Publisher = NewStorePublisher(tr, st, cfg.Publish, logger)
 			}
 
 			// Dispatch executor: shares THIS process's already-open writer
