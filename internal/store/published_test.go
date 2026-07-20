@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -291,5 +292,159 @@ func TestUpsertPublishedIssue_BodyHashRoundTrip(t *testing.T) {
 	}
 	if nobody.BodyHash != "" {
 		t.Errorf("BodyHash = %q, want empty for a pending row", nobody.BodyHash)
+	}
+}
+
+// TestSetPublishedManagedLabels_RoundTrip pins migration 027
+// (published_managed_labels): a fresh openTemp store runs 001-027 in order,
+// so managed_labels must exist, default to '' (read back as nil for rows
+// that predate any Set), and round-trip sorted through both Get and List
+// regardless of the caller's input order.
+func TestSetPublishedManagedLabels_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	fp := "fp-labels"
+	if err := st.UpsertPublishedIssue(ctx, fp, 11, IssueStateOpen, ""); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Pre-Set: the column's DEFAULT '' decodes to nil (legacy-row marker).
+	pre, err := st.GetPublishedIssue(ctx, fp)
+	if err != nil {
+		t.Fatalf("pre-set get: %v", err)
+	}
+	if pre.ManagedLabels != nil {
+		t.Errorf("pre-set ManagedLabels = %v, want nil", pre.ManagedLabels)
+	}
+
+	// Set in deliberately unsorted order; reads must come back sorted.
+	input := []string{"severity:high", "bugbot:auto-filed"}
+	if err := st.SetPublishedManagedLabels(ctx, fp, input); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	want := []string{"bugbot:auto-filed", "severity:high"}
+
+	// The caller's slice must not be mutated by the internal sort.
+	if !slices.Equal(input, []string{"severity:high", "bugbot:auto-filed"}) {
+		t.Errorf("caller slice mutated: %v", input)
+	}
+
+	got, err := st.GetPublishedIssue(ctx, fp)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !slices.Equal(got.ManagedLabels, want) {
+		t.Errorf("Get ManagedLabels = %v, want %v", got.ManagedLabels, want)
+	}
+
+	list, err := st.ListPublishedIssues(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 || !slices.Equal(list[0].ManagedLabels, want) {
+		t.Errorf("List ManagedLabels = %+v, want %v", list, want)
+	}
+}
+
+// TestSetPublishedManagedLabels_PreservedAcrossUpsert verifies (not assumes)
+// that UpsertPublishedIssue's ON CONFLICT clause does not touch
+// managed_labels: a conflict upsert refreshes issue_number/state/body_hash/
+// updated_at but the last-applied label bookkeeping survives, so the
+// reconciler's diff basis is not wiped by an unrelated body push.
+func TestSetPublishedManagedLabels_PreservedAcrossUpsert(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	fp := "fp-upsert-keep"
+	if err := st.UpsertPublishedIssue(ctx, fp, 1, IssueStateOpen, "hash-a"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	want := []string{"bugbot:auto-filed", "severity:low"}
+	if err := st.SetPublishedManagedLabels(ctx, fp, want); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	// Conflict upsert on the same fingerprint.
+	if err := st.UpsertPublishedIssue(ctx, fp, 2, IssueStateClosed, "hash-b"); err != nil {
+		t.Fatalf("conflict upsert: %v", err)
+	}
+
+	got, err := st.GetPublishedIssue(ctx, fp)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !slices.Equal(got.ManagedLabels, want) {
+		t.Errorf("ManagedLabels after upsert = %v, want %v", got.ManagedLabels, want)
+	}
+	// Sanity: the upsert itself still applied its own columns.
+	if got.IssueNumber != 2 || got.State != IssueStateClosed || got.BodyHash != "hash-b" {
+		t.Errorf("upsert columns not refreshed: %+v", got)
+	}
+}
+
+// TestSetPublishedManagedLabels_ClearAndNoUpdatedAtBump covers the two
+// bookkeeping subtleties: setting empty/nil clears the column back to ''
+// (reads back nil), and Set never bumps updated_at — the planner compares
+// finding.updated_at > published.updated_at and label bookkeeping must not
+// masquerade as a body push.
+func TestSetPublishedManagedLabels_ClearAndNoUpdatedAtBump(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	fp := "fp-clear"
+	if err := st.UpsertPublishedIssue(ctx, fp, 3, IssueStateOpen, ""); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	before, err := st.GetPublishedIssue(ctx, fp)
+	if err != nil {
+		t.Fatalf("get before: %v", err)
+	}
+
+	// Clear with nil, then with an empty non-nil slice: both decode to nil.
+	for _, clear := range [][]string{nil, {}} {
+		if err := st.SetPublishedManagedLabels(ctx, fp, []string{"severity:medium"}); err != nil {
+			t.Fatalf("set: %v", err)
+		}
+		if err := st.SetPublishedManagedLabels(ctx, fp, clear); err != nil {
+			t.Fatalf("clear with %v: %v", clear, err)
+		}
+		got, err := st.GetPublishedIssue(ctx, fp)
+		if err != nil {
+			t.Fatalf("get after clear: %v", err)
+		}
+		if got.ManagedLabels != nil {
+			t.Errorf("ManagedLabels after clear with %v = %v, want nil", clear, got.ManagedLabels)
+		}
+	}
+
+	after, err := st.GetPublishedIssue(ctx, fp)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Errorf("SetPublishedManagedLabels bumped updated_at: %s -> %s", before.UpdatedAt, after.UpdatedAt)
+	}
+}
+
+// TestSetPublishedManagedLabels_MissingFingerprint mirrors
+// DeletePublishedIssue's idempotency: setting labels for a fingerprint with
+// no published row is a nil no-op and must not create a row.
+func TestSetPublishedManagedLabels_MissingFingerprint(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	if err := st.SetPublishedManagedLabels(ctx, "fp-ghost", []string{"severity:high"}); err != nil {
+		t.Fatalf("set on missing fingerprint: %v", err)
+	}
+	if _, err := st.GetPublishedIssue(ctx, "fp-ghost"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("get err = %v, want ErrNotFound (no row must be created)", err)
+	}
+	list, err := st.ListPublishedIssues(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if list != nil {
+		t.Errorf("table not empty after no-op set: %+v", list)
 	}
 }

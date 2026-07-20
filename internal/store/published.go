@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -41,6 +43,12 @@ type PublishedIssue struct {
 	// AddCorroboratingLenses, AppendFindingSites) that leaves the rendered
 	// body unchanged no longer costs a no-op gh call.
 	BodyHash string
+	// ManagedLabels is the set of bugbot-managed labels (severity:*,
+	// bugbot:*) last applied to the GitHub issue; nil/empty for rows that
+	// predate the feature or never had labels applied. Stored comma-joined
+	// and sorted so the publish reconciler can diff desired vs. applied
+	// labels without a gh read per issue.
+	ManagedLabels []string
 }
 
 // UpsertPublishedIssue records (or refreshes) the GitHub issue linked to a
@@ -88,19 +96,63 @@ func (s *Store) DeletePublishedIssue(ctx context.Context, fingerprint string) er
 	return nil
 }
 
+// encodeManagedLabels encodes a label list for the managed_labels column:
+// comma-joined, sorted copy (the caller's slice is never mutated). Nil/empty
+// yields the empty string, the column's "never applied" sentinel. Unlike
+// corroborating_lenses (JSON-encoded, see encodeLenses), managed label names
+// (severity:*, bugbot:*) can never contain commas and are only ever compared
+// as whole sets, so the simpler encoding is stable and greppable.
+func encodeManagedLabels(labels []string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	sorted := slices.Clone(labels)
+	slices.Sort(sorted)
+	return strings.Join(sorted, ",")
+}
+
+// decodeManagedLabels parses the managed_labels column back into a slice.
+// The empty string yields nil.
+func decodeManagedLabels(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
+// SetPublishedManagedLabels records the bugbot-managed labels last applied to
+// the GitHub issue for fingerprint. labels is stored comma-joined and sorted
+// (a copy is sorted; the caller's slice is not mutated); nil/empty clears the
+// column back to the "never applied" sentinel. It deliberately does NOT bump
+// updated_at: the publish planner compares finding.updated_at against
+// published.updated_at to decide whether a body push is due, and label
+// bookkeeping is not a body push. Setting labels for a fingerprint with no
+// published_issues row is a nil no-op, mirroring DeletePublishedIssue's
+// idempotency, so the reconciler needs no separate existence check.
+func (s *Store) SetPublishedManagedLabels(ctx context.Context, fingerprint string, labels []string) error {
+	_, err := s.exec(ctx, "set_published_managed_labels",
+		`UPDATE published_issues SET managed_labels = ? WHERE fingerprint = ?`,
+		encodeManagedLabels(labels), fingerprint,
+	)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // GetPublishedIssue returns the published_issues row for fingerprint, or
 // ErrNotFound if no issue has been filed for this finding.
 func (s *Store) GetPublishedIssue(ctx context.Context, fingerprint string) (PublishedIssue, error) {
 	var pi PublishedIssue
 	var state string
-	var createdAt, updatedAt string
+	var createdAt, updatedAt, managedLabels string
 	err := s.queryRow(ctx, "get_published_issue",
-		`SELECT fingerprint, issue_number, state, created_at, updated_at, body_hash
+		`SELECT fingerprint, issue_number, state, created_at, updated_at, body_hash, managed_labels
 		   FROM published_issues
 		  WHERE fingerprint = ?`,
 		[]any{fingerprint},
 		func(row *sql.Row) error {
-			return row.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt, &pi.BodyHash)
+			return row.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt, &pi.BodyHash, &managedLabels)
 		},
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -110,6 +162,7 @@ func (s *Store) GetPublishedIssue(ctx context.Context, fingerprint string) (Publ
 		return PublishedIssue{}, err
 	}
 	pi.State = IssueState(state)
+	pi.ManagedLabels = decodeManagedLabels(managedLabels)
 	var perr error
 	if pi.CreatedAt, perr = parseTime(createdAt); perr != nil {
 		return PublishedIssue{}, perr
@@ -128,18 +181,19 @@ func (s *Store) GetPublishedIssue(ctx context.Context, fingerprint string) (Publ
 // the contract honest if a later migration ever changes the uniqueness.
 func (s *Store) ListPublishedIssues(ctx context.Context) ([]PublishedIssue, error) {
 	return queryRows(ctx, s, "list_published_issues",
-		`SELECT fingerprint, issue_number, state, created_at, updated_at, body_hash
+		`SELECT fingerprint, issue_number, state, created_at, updated_at, body_hash, managed_labels
 		   FROM published_issues
 		  ORDER BY fingerprint ASC, rowid ASC`,
 		nil,
 		func(r *sql.Rows) (PublishedIssue, error) {
 			var pi PublishedIssue
 			var state string
-			var createdAt, updatedAt string
-			if err := r.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt, &pi.BodyHash); err != nil {
+			var createdAt, updatedAt, managedLabels string
+			if err := r.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt, &pi.BodyHash, &managedLabels); err != nil {
 				return PublishedIssue{}, err
 			}
 			pi.State = IssueState(state)
+			pi.ManagedLabels = decodeManagedLabels(managedLabels)
 			var perr error
 			if pi.CreatedAt, perr = parseTime(createdAt); perr != nil {
 				return PublishedIssue{}, perr
