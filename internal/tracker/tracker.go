@@ -38,9 +38,23 @@
 //     converted). The caller treats the issue as lost and may re-create it.
 //   - [ErrRateLimited]: the tracker is throttling. Retry after backing off.
 //   - [ErrUnavailable]: transient transport or server failure. Retryable.
+//   - [ErrMissingPrereq]: the tracker client tooling is absent or unusable
+//     (e.g. the CLI binary the adapter shells out to is not on PATH).
+//     Permanent for the process lifetime, not transient.
 //   - [ErrUnsupported]: the tracker cannot perform the operation at all — a
-//     permanent condition, not a transient one. Label methods return it when
+//     permanent capability gap. Label methods return it when
 //     Capabilities().Labels is false.
+//
+// The publish applier dispatches on the sentinels as follows:
+//
+//   - ErrIssueGone: per-issue stale-row recovery — reconcile the store row
+//     and continue with the rest of the plan.
+//   - ErrRateLimited: abort the run; retry on the next cycle.
+//   - ErrUnavailable: transient backend failure — count the action as
+//     failed and continue with the next planned action.
+//   - ErrMissingPrereq: abort the run. Callers MUST abort and may latch
+//     publishing off for the process lifetime, surfacing the wrapped
+//     install hint to the operator.
 //
 // Failures that match no sentinel are permanent adapter-specific errors.
 //
@@ -99,18 +113,22 @@ type Capabilities struct {
 // factory. It is deliberately independent of internal/config: the cli layer
 // maps its own configuration onto this struct so adapters never import it.
 type Config struct {
-	// Labels lists the label names the publish pipeline manages on the
-	// issues it creates.
+	// Labels is the user-managed BASE label set applied to every issue
+	// bugbot creates. These labels are never part of bugbot's managed
+	// labels: adapters do not create them or reconcile their color or
+	// description. Labels[0] is the anchor label that backsync/recovery
+	// uses to filter [Tracker.ListIssues], so order matters.
 	Labels []string
 }
 
 // Sentinel errors adapters wrap with %w. See the package documentation for
 // when each applies.
 var (
-	ErrIssueGone   = errors.New("issue gone")
-	ErrRateLimited = errors.New("rate limited")
-	ErrUnavailable = errors.New("tracker unavailable")
-	ErrUnsupported = errors.New("operation unsupported by tracker")
+	ErrIssueGone     = errors.New("issue gone")
+	ErrRateLimited   = errors.New("rate limited")
+	ErrUnavailable   = errors.New("tracker unavailable")
+	ErrMissingPrereq = errors.New("tracker prerequisite missing")
+	ErrUnsupported   = errors.New("operation unsupported by tracker")
 )
 
 // Tracker is one issue-tracker backend. Implementations owe the idempotency,
@@ -144,17 +162,19 @@ type Tracker interface {
 	// Comment appends a new comment to the issue.
 	Comment(ctx context.Context, key IssueKey, text string) error
 
-	// ListIssues lists issues in the adapter's configured project or
+	// ListIssues lists the issues carrying the anchor label
+	// (Config.Labels[0]) in the adapter's configured project or
 	// repository. state is "closed" (closed issues only) or "all" (open
-	// and closed); adapters map these two values onto the tracker's
-	// native filters.
+	// and closed); adapters map the two state values and the anchor
+	// filter onto the tracker's native query.
 	ListIssues(ctx context.Context, state string) ([]Issue, error)
 
 	// Capabilities reports what this tracker supports.
 	Capabilities() Capabilities
 
-	// EnsureLabel creates the label or updates an existing label of the
-	// same name to match l.
+	// EnsureLabel creates the label if it does not exist. An existing
+	// label of the same name is left unchanged (success), even if its
+	// color or description differ.
 	EnsureLabel(ctx context.Context, l Label) error
 
 	// AddLabels adds the named labels to the issue. Labels already

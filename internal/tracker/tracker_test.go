@@ -71,6 +71,9 @@ func TestNewRoundTripsRegisteredFactory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New(%q) error: %v", name, err)
 	}
+	if tr == nil {
+		t.Fatalf("New(%q) returned nil Tracker with nil error", name)
+	}
 	if tr.Name() != name {
 		t.Errorf("Name() = %q, want %q", tr.Name(), name)
 	}
@@ -116,6 +119,20 @@ func TestRegisterDuplicatePanics(t *testing.T) {
 		}
 	}()
 	tracker.Register(name, stubFactory(name))
+}
+
+func TestRegisterNilFactoryPanics(t *testing.T) {
+	name := uniqueName("nilfactory")
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Register with nil factory did not panic")
+		}
+		if msg := fmt.Sprint(r); !strings.Contains(msg, name) {
+			t.Errorf("panic message %q does not contain the name %q", msg, name)
+		}
+	}()
+	tracker.Register(name, nil)
 }
 
 func TestKnownSortedCopy(t *testing.T) {
