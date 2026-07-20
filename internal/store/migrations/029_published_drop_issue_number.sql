@@ -9,4 +9,9 @@
 -- keys an INTEGER column could never hold ('PROJ-42'). The publish applier
 -- writes issue_key + tracker through UpsertPublishedIssue as of this
 -- migration's slice (bugbot-6gfy.4).
+--
+-- Migrations are forward-only (028 is merged and stays untouched): a
+-- pre-029 binary pointed at a database this migration has touched fails
+-- loudly at its first published_issues access ("no such column:
+-- issue_number") rather than silently misbehaving.
 ALTER TABLE published_issues DROP COLUMN issue_number;

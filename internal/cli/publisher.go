@@ -56,7 +56,7 @@ func (p *storePublisher) Publish(ctx context.Context) error {
 	// Route output to a sink that writes each line at debug level.
 	w := &slogWriter{log: p.log}
 	err := runPublish(ctx, w, p.tr, p.st, p.cfg, p.tierMin, false /* never dry-run from daemon */)
-	if err != nil && errors.Is(err, tracker.ErrMissingPrereq) {
+	if errors.Is(err, tracker.ErrMissingPrereq) {
 		p.disabled.Store(true)
 		p.log.Warn("daemon: publish disabled for this run: tracker prerequisite missing", "err", err)
 		return nil

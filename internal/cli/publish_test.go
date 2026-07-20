@@ -468,6 +468,12 @@ func TestApplyPublish_MissingPrereqAborts(t *testing.T) {
 	if len(rows) != 1 || rows[0].State != store.IssueStatePending {
 		t.Errorf("expected exactly 1 pending tombstone after abort, got %+v", rows)
 	}
+	// Missing-prereq aborts WITHOUT the summary line (unlike rate-limit,
+	// which prints the summary and then aborts): nothing else in the plan
+	// can succeed, so there is no partial progress worth tallying.
+	if strings.Contains(buf.String(), "publish: created=") {
+		t.Errorf("missing-prereq abort must not print the summary line; got: %s", buf.String())
+	}
 }
 
 // TestApplyPublish_Idempotence: running publish twice creates only one issue.
@@ -2308,6 +2314,125 @@ func TestApplyPublish_RateLimitAbortsRemainingPlan(t *testing.T) {
 	// The abort fired on the FIRST action: exactly one create attempt.
 	if creates := ft.callsOf("create"); len(creates) != 1 {
 		t.Errorf("expected exactly 1 create attempt before the abort, got %d", len(creates))
+	}
+}
+
+// TestApplyPublish_UnavailableContinuesPerAction pins the ErrUnavailable
+// row of the tracker decision table: a transient backend failure is
+// action-scoped — logged, counted in failed, plan continues — NEVER a run
+// abort like rate-limit/missing-prereq.
+func TestApplyPublish_UnavailableContinuesPerAction(t *testing.T) {
+	ctx := context.Background()
+	st, fClose := setupPublishStore(t)
+
+	// fClose becomes the close action, later in the plan than the create.
+	if err := st.UpsertPublishedIssue(ctx, fClose.Fingerprint, "github", "77", store.IssueStateOpen, "seed-hash"); err != nil {
+		t.Fatalf("seed published close target: %v", err)
+	}
+	if err := st.MarkFixed(ctx, fClose.Fingerprint); err != nil {
+		t.Fatalf("mark fixed: %v", err)
+	}
+	fCreate := seedSecondOpenFinding(t, ctx, st)
+
+	ft := newFakeTracker()
+	ft.createErr = fmt.Errorf("github: create issue: %w: HTTP 503 Service Unavailable", tracker.ErrUnavailable)
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	err := runPublish(ctx, &buf, ft, st, cfg, 2, false)
+	if err == nil {
+		t.Fatal("expected the aggregate one-failure error")
+	}
+	if !strings.Contains(err.Error(), "1 action(s) failed") {
+		t.Errorf("ErrUnavailable must yield the aggregate per-action error, not an abort; got: %v", err)
+	}
+	if errors.Is(err, tracker.ErrUnavailable) {
+		t.Errorf("run error must be the aggregate, not a wrapped abort of the transient failure; got: %v", err)
+	}
+
+	// The close later in the plan still applied: no abort.
+	if closes := ft.callsOf("close"); len(closes) != 1 || closes[0].key != "77" {
+		t.Fatalf("expected the close to still apply after an ErrUnavailable create, got %v", closes)
+	}
+	pi, gerr := st.GetPublishedIssue(ctx, fClose.Fingerprint)
+	if gerr != nil {
+		t.Fatalf("get published close target: %v", gerr)
+	}
+	if pi.State != store.IssueStateClosed {
+		t.Errorf("close target state = %q, want closed", pi.State)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "failed=1") || !strings.Contains(out, "closed=1") {
+		t.Errorf("summary must show failed=1 closed=1; got: %s", out)
+	}
+
+	// No extra tombstones: exactly two rows — the closed target and the
+	// failed create's single pending row (retried next cycle).
+	cp, cerr := st.GetPublishedIssue(ctx, fCreate.Fingerprint)
+	if cerr != nil {
+		t.Fatalf("get pending row: %v", cerr)
+	}
+	if cp.State != store.IssueStatePending {
+		t.Errorf("failed create row state = %q, want pending tombstone", cp.State)
+	}
+	rows, lerr := st.ListPublishedIssues(ctx)
+	if lerr != nil {
+		t.Fatalf("list published: %v", lerr)
+	}
+	if len(rows) != 2 {
+		t.Errorf("expected exactly 2 rows (close target + one pending), got %+v", rows)
+	}
+}
+
+// TestApplyPublish_NoLabelCapabilitySkipsLabelWork pins the
+// Capabilities().Labels gate: with both label knobs ON but a tracker that
+// cannot do labels, the applier makes ZERO ensure/add/remove calls — on the
+// create path AND the skip-path reconcile — and the run completes cleanly.
+// The fake's label ops are armed to error so a missing gate fails the run,
+// not just the call-count assertions.
+func TestApplyPublish_NoLabelCapabilitySkipsLabelWork(t *testing.T) {
+	ctx := context.Background()
+	st, fSkip := setupPublishStore(t)
+	// Legacy row (no managed labels recorded): a labels-capable tracker
+	// would additively backfill on the skip-path reconcile.
+	if err := st.UpsertPublishedIssue(ctx, fSkip.Fingerprint, "github", "13", store.IssueStateOpen, ""); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	fCreate := seedSecondOpenFinding(t, ctx, st)
+
+	ft := newFakeTracker()
+	ft.caps = tracker.Capabilities{} // Labels: false
+	ft.createKeys = []tracker.IssueKey{"42"}
+	ft.ensureErr = errors.New("fakeTracker: EnsureLabel must not be called when Labels is false")
+	ft.addErr = errors.New("fakeTracker: AddLabels must not be called when Labels is false")
+	ft.removeErr = errors.New("fakeTracker: RemoveLabel must not be called when Labels is false")
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true, SeverityLabels: true, TierLabels: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, ft, st, cfg, 2, false); err != nil {
+		t.Fatalf("runPublish must succeed cleanly on a labels-incapable tracker: %v", err)
+	}
+
+	for _, op := range []string{"ensureLabel", "addLabels", "removeLabel"} {
+		if n := len(ft.callsOf(op)); n != 0 {
+			t.Errorf("expected zero %s calls when Capabilities().Labels is false, got %d", op, n)
+		}
+	}
+	// The create itself still passes the label names through: per the
+	// interface contract, trackers without label support ignore them.
+	creates := ft.callsOf("create")
+	if len(creates) != 1 {
+		t.Fatalf("expected 1 create, got %d", len(creates))
+	}
+	if want := []string{"bugbot", "bugbot:verified", "severity:high"}; !slices.Equal(creates[0].labels, want) {
+		t.Errorf("create labels = %v, want %v (passed through; adapter ignores)", creates[0].labels, want)
+	}
+	pi, err := st.GetPublishedIssue(ctx, fCreate.Fingerprint)
+	if err != nil {
+		t.Fatalf("get created row: %v", err)
+	}
+	if pi.IssueKey != "42" {
+		t.Errorf("created key = %q, want 42", pi.IssueKey)
 	}
 }
 

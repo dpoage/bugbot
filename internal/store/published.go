@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// IssueState is the lifecycle state of a published GitHub issue.
+// IssueState is the lifecycle state of a published tracker issue.
 type IssueState string
 
 const (
@@ -20,9 +20,9 @@ const (
 	// IssueStateOpen is the normal post-create state.
 	IssueStateOpen IssueState = "open"
 	// IssueStateClosing is set once the auto-close comment lands; a subsequent
-	// run will issue the PATCH to close the GitHub issue.
+	// run will push the state change that closes the tracker issue.
 	IssueStateClosing IssueState = "closing"
-	// IssueStateClosed is the terminal state after the GitHub issue is closed.
+	// IssueStateClosed is the terminal state after the tracker issue is closed.
 	IssueStateClosed IssueState = "closed"
 )
 
@@ -133,7 +133,7 @@ func decodeManagedLabels(s string) []string {
 }
 
 // SetPublishedManagedLabels records the bugbot-managed labels last applied to
-// the GitHub issue for fingerprint. labels is stored comma-joined and sorted
+// the tracker issue for fingerprint. labels is stored comma-joined and sorted
 // (a copy is sorted; the caller's slice is not mutated); nil/empty clears the
 // column back to the "never applied" sentinel. It deliberately does NOT bump
 // updated_at: the publish planner compares finding.updated_at against
