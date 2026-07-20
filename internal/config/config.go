@@ -498,17 +498,29 @@ type Storage struct {
 // close_on_fixed controls whether fixed/dismissed findings have their GitHub
 // issue closed by the reconciler. Default true.
 //
+// severity_labels controls whether each filed issue additionally gets a
+// bugbot-managed severity:<critical|high|medium|low> label reflecting the
+// finding's severity. Default true.
+//
+// tier_labels controls whether each filed issue additionally gets a
+// bugbot-managed bugbot:<fix-witnessed|reproduced|verified|suspected> label
+// reflecting the finding's evidence tier. Default true.
+//
 // Env overrides:
 //
 //	BUGBOT_PUBLISH_ENABLED       ("true" or "false")
 //	BUGBOT_PUBLISH_TIER_MIN      (integer 0..3)
 //	BUGBOT_PUBLISH_LABELS        (comma-separated label names)
 //	BUGBOT_PUBLISH_CLOSE_ON_FIXED ("true" or "false")
+//	BUGBOT_PUBLISH_SEVERITY_LABELS ("true" or "false")
+//	BUGBOT_PUBLISH_TIER_LABELS   ("true" or "false")
 type Publish struct {
-	Enabled      bool     `yaml:"enabled"`
-	TierMin      int      `yaml:"tier_min"`
-	Labels       []string `yaml:"labels"`
-	CloseOnFixed bool     `yaml:"close_on_fixed"`
+	Enabled        bool     `yaml:"enabled"`
+	TierMin        int      `yaml:"tier_min"`
+	Labels         []string `yaml:"labels"`
+	CloseOnFixed   bool     `yaml:"close_on_fixed"`
+	SeverityLabels bool     `yaml:"severity_labels"`
+	TierLabels     bool     `yaml:"tier_labels"`
 }
 
 // Config is the root configuration object.
@@ -604,10 +616,12 @@ func Default() Config {
 			Suspected: "summary",
 		},
 		Publish: Publish{
-			Enabled:      false,
-			TierMin:      2,
-			Labels:       []string{"bugbot"},
-			CloseOnFixed: true,
+			Enabled:        false,
+			TierMin:        2,
+			Labels:         []string{"bugbot"},
+			CloseOnFixed:   true,
+			SeverityLabels: true,
+			TierLabels:     true,
 		},
 		Daemon: Daemon{
 			PollInterval:         60 * time.Second,
@@ -748,6 +762,8 @@ func parseEnvBool(key, v string) (bool, error) {
 //	BUGBOT_PUBLISH_TIER_MIN            (integer 0..3)
 //	BUGBOT_PUBLISH_LABELS              (comma-separated label names)
 //	BUGBOT_PUBLISH_CLOSE_ON_FIXED      ("true" or "false")
+//	BUGBOT_PUBLISH_SEVERITY_LABELS     ("true" or "false")
+//	BUGBOT_PUBLISH_TIER_LABELS         ("true" or "false")
 //	BUGBOT_REPRO_PATCH_PROVER          ("true" or "false")
 //	BUGBOT_REPRO_PATCH_MAX_ATTEMPTS    (integer >= 1)
 //	BUGBOT_REPRO_MAX_ATTEMPTS          (integer >= 1)
@@ -892,6 +908,8 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setBool("BUGBOT_VERIFY_SANDBOX_EXEC", &cfg.Verify.SandboxExec),
 		setBool("BUGBOT_PUBLISH_ENABLED", &cfg.Publish.Enabled),
 		setBool("BUGBOT_PUBLISH_CLOSE_ON_FIXED", &cfg.Publish.CloseOnFixed),
+		setBool("BUGBOT_PUBLISH_SEVERITY_LABELS", &cfg.Publish.SeverityLabels),
+		setBool("BUGBOT_PUBLISH_TIER_LABELS", &cfg.Publish.TierLabels),
 		setBool("BUGBOT_REPRO_PATCH_PROVER", &cfg.Repro.PatchProver),
 		setBool("BUGBOT_SCAN_CARTOGRAPHER", &cfg.Scan.Cartographer),
 		setBool("BUGBOT_SCAN_STATUS_NOTES", &cfg.Scan.StatusNotes),

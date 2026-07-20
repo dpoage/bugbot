@@ -259,6 +259,29 @@ report:
     - fs
 
 # ---------------------------------------------------------------------------
+# publish: file open findings as GitHub issues via the gh CLI.
+# enabled gates the daemon post-cycle hook only — the manual "bugbot publish"
+# command always works regardless. Findings with tier <= tier_min are filed
+# (0 strongest .. 3 weakest); the default 2 files everything except
+# suspected-only (T3) findings. labels go on every filed issue; close_on_fixed
+# lets the reconciler close issues whose findings are fixed or dismissed.
+# ---------------------------------------------------------------------------
+publish:
+  enabled: false
+  tier_min: 2
+  labels:
+    - bugbot
+  close_on_fixed: true
+  # severity_labels / tier_labels: bugbot-managed labels added to each filed
+  # issue alongside "labels" above, so issues can be filtered by severity and
+  # evidence strength:
+  #   severity_labels  ->  severity:<critical|high|medium|low>
+  #   tier_labels      ->  bugbot:<fix-witnessed|reproduced|verified|suspected>
+  # Managed labels are also reconciled on later publish syncs as severity/tier change.
+  severity_labels: true
+  tier_labels: true
+
+# ---------------------------------------------------------------------------
 # llm: shared LLM client wrapper settings applied to every role's client.
 # request_timeout is the per-attempt wall-clock deadline for one provider
 # request (bounds a stalled HTTP round-trip). 0 / omitted uses the LLM
