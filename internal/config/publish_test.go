@@ -21,6 +21,12 @@ func TestPublishDefaults(t *testing.T) {
 	if !d.Publish.CloseOnFixed {
 		t.Errorf("default publish.close_on_fixed = false, want true")
 	}
+	if !d.Publish.SeverityLabels {
+		t.Errorf("default publish.severity_labels = false, want true")
+	}
+	if !d.Publish.TierLabels {
+		t.Errorf("default publish.tier_labels = false, want true")
+	}
 }
 
 // TestPublishValidation_Accepts confirms valid tier_min values pass.
@@ -61,6 +67,8 @@ publish:
   tier_min: 1
   labels: [bugbot, security]
   close_on_fixed: false
+  severity_labels: false
+  tier_labels: false
 `
 	path := writeTemp(t, yaml)
 	cfg, err := Load(path)
@@ -79,6 +87,12 @@ publish:
 	if cfg.Publish.CloseOnFixed {
 		t.Errorf("close_on_fixed = true, want false")
 	}
+	if cfg.Publish.SeverityLabels {
+		t.Errorf("severity_labels = true, want false (explicit yaml false must stick)")
+	}
+	if cfg.Publish.TierLabels {
+		t.Errorf("tier_labels = true, want false (explicit yaml false must stick)")
+	}
 }
 
 // TestPublishEnvOverrides confirms BUGBOT_PUBLISH_* env vars override the
@@ -90,6 +104,8 @@ func TestPublishEnvOverrides(t *testing.T) {
 		"BUGBOT_PUBLISH_TIER_MIN=1",
 		"BUGBOT_PUBLISH_LABELS=bugbot, security, critical",
 		"BUGBOT_PUBLISH_CLOSE_ON_FIXED=false",
+		"BUGBOT_PUBLISH_SEVERITY_LABELS=false",
+		"BUGBOT_PUBLISH_TIER_LABELS=false",
 	}); err != nil {
 		t.Fatalf("applyEnvOverrides: %v", err)
 	}
@@ -105,6 +121,12 @@ func TestPublishEnvOverrides(t *testing.T) {
 	if cfg.Publish.CloseOnFixed {
 		t.Errorf("env override close_on_fixed = true, want false")
 	}
+	if cfg.Publish.SeverityLabels {
+		t.Errorf("env override severity_labels = true, want false")
+	}
+	if cfg.Publish.TierLabels {
+		t.Errorf("env override tier_labels = true, want false")
+	}
 }
 
 // TestPublishEnvOverrides_InvalidTierMin confirms a bad int is rejected.
@@ -114,5 +136,80 @@ func TestPublishEnvOverrides_InvalidTierMin(t *testing.T) {
 		"BUGBOT_PUBLISH_TIER_MIN=notanumber",
 	}); err == nil {
 		t.Fatal("invalid tier_min env value should return error")
+	}
+}
+
+// TestPublishLabelKnobs_AbsentKeysKeepTrue confirms the default-true
+// semantics survive the yaml overlay: a config with a publish section that
+// omits severity_labels/tier_labels — and a config with no publish section
+// at all — both load with the knobs still true.
+func TestPublishLabelKnobs_AbsentKeysKeepTrue(t *testing.T) {
+	for name, yaml := range map[string]string{
+		"no publish section":        validYAML,
+		"publish section, no knobs": validYAML + "\npublish:\n  enabled: true\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := Load(writeTemp(t, yaml))
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if !cfg.Publish.SeverityLabels {
+				t.Errorf("severity_labels = false, want true (absent key must keep default)")
+			}
+			if !cfg.Publish.TierLabels {
+				t.Errorf("tier_labels = false, want true (absent key must keep default)")
+			}
+		})
+	}
+}
+
+// TestPublishLabelKnobs_EnvOverYAML confirms env wins over yaml in both
+// directions: env false disables a yaml-true knob, and env true re-enables
+// a yaml-false knob.
+func TestPublishLabelKnobs_EnvOverYAML(t *testing.T) {
+	t.Run("env false overrides yaml true", func(t *testing.T) {
+		t.Setenv("BUGBOT_PUBLISH_SEVERITY_LABELS", "false")
+		t.Setenv("BUGBOT_PUBLISH_TIER_LABELS", "false")
+		yaml := validYAML + "\npublish:\n  severity_labels: true\n  tier_labels: true\n"
+		cfg, err := Load(writeTemp(t, yaml))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if cfg.Publish.SeverityLabels {
+			t.Errorf("severity_labels = true, want false (env must override yaml)")
+		}
+		if cfg.Publish.TierLabels {
+			t.Errorf("tier_labels = true, want false (env must override yaml)")
+		}
+	})
+	t.Run("env true re-enables yaml false", func(t *testing.T) {
+		t.Setenv("BUGBOT_PUBLISH_SEVERITY_LABELS", "true")
+		t.Setenv("BUGBOT_PUBLISH_TIER_LABELS", "true")
+		yaml := validYAML + "\npublish:\n  severity_labels: false\n  tier_labels: false\n"
+		cfg, err := Load(writeTemp(t, yaml))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if !cfg.Publish.SeverityLabels {
+			t.Errorf("severity_labels = false, want true (env true must re-enable)")
+		}
+		if !cfg.Publish.TierLabels {
+			t.Errorf("tier_labels = false, want true (env true must re-enable)")
+		}
+	})
+}
+
+// TestStarterYAML_PublishLabelKnobs confirms the starter template's publish
+// section round-trips through the strict loader with both label knobs true.
+func TestStarterYAML_PublishLabelKnobs(t *testing.T) {
+	cfg, err := Load(writeTemp(t, StarterYAML))
+	if err != nil {
+		t.Fatalf("StarterYAML failed to load: %v", err)
+	}
+	if !cfg.Publish.SeverityLabels {
+		t.Errorf("template severity_labels = false, want true")
+	}
+	if !cfg.Publish.TierLabels {
+		t.Errorf("template tier_labels = false, want true")
 	}
 }
