@@ -56,17 +56,6 @@ func (f *fakeGH) run(_ context.Context, args ...string) ([]byte, error) {
 	return nil, fmt.Errorf("fakeGH: no route for: %s", joined)
 }
 
-// callsContaining returns every recorded call whose joined args contain substr.
-func (f *fakeGH) callsContaining(substr string) [][]string {
-	var out [][]string
-	for _, c := range f.calls {
-		if strings.Contains(strings.Join(c, " "), substr) {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
 // newAdapter wires the adapter under test over a fakeGH with the given base
 // labels.
 func newAdapter(f *fakeGH, labels ...string) tracker.Tracker {
