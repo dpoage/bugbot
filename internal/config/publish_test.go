@@ -213,3 +213,40 @@ func TestStarterYAML_PublishLabelKnobs(t *testing.T) {
 		t.Errorf("template tier_labels = false, want true")
 	}
 }
+
+// TestPublishLabelKnobs_AsymmetricYAML sets the two knobs to OPPOSITE yaml
+// values so a swapped pair of yaml tags on the struct fields cannot pass:
+// severity_labels:false must land on SeverityLabels and tier_labels:true on
+// TierLabels, not vice versa.
+func TestPublishLabelKnobs_AsymmetricYAML(t *testing.T) {
+	yaml := validYAML + "\npublish:\n  severity_labels: false\n  tier_labels: true\n"
+	cfg, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Publish.SeverityLabels {
+		t.Errorf("severity_labels = true, want false (yaml severity_labels must map to SeverityLabels)")
+	}
+	if !cfg.Publish.TierLabels {
+		t.Errorf("tier_labels = false, want true (yaml tier_labels must map to TierLabels)")
+	}
+}
+
+// TestPublishLabelKnobs_AsymmetricEnv sets ONLY the severity env var (no
+// yaml knobs, tier left at its default) so a swapped pair of setBool
+// destinations in applyEnvOverrides cannot pass: the override must land on
+// SeverityLabels and leave TierLabels true.
+func TestPublishLabelKnobs_AsymmetricEnv(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{
+		"BUGBOT_PUBLISH_SEVERITY_LABELS=false",
+	}); err != nil {
+		t.Fatalf("applyEnvOverrides: %v", err)
+	}
+	if cfg.Publish.SeverityLabels {
+		t.Errorf("severity_labels = true, want false (BUGBOT_PUBLISH_SEVERITY_LABELS must map to SeverityLabels)")
+	}
+	if !cfg.Publish.TierLabels {
+		t.Errorf("tier_labels = false, want true (severity env var must not touch TierLabels)")
+	}
+}
