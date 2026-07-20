@@ -277,6 +277,7 @@ publish:
   # evidence strength:
   #   severity_labels  ->  severity:<critical|high|medium|low>
   #   tier_labels      ->  bugbot:<fix-witnessed|reproduced|verified|suspected>
+  # Managed labels are also reconciled on later publish syncs as severity/tier change.
   severity_labels: true
   tier_labels: true
 

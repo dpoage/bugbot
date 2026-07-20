@@ -2,13 +2,15 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -288,7 +290,7 @@ func TestApplyPublish_Create(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish: %v", err)
 	}
 
@@ -354,7 +356,7 @@ func TestApplyPublish_Close(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish: %v", err)
 	}
 
@@ -392,7 +394,7 @@ func TestApplyPublish_DryRun(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, true /* dry-run */); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, true /* dry-run */); err != nil {
 		t.Fatalf("runPublish dry-run: %v", err)
 	}
 
@@ -420,7 +422,7 @@ func TestApplyPublish_RepoURLFailureDegrades(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish should succeed even without repo URL: %v", err)
 	}
 
@@ -454,7 +456,7 @@ func TestApplyPublish_GHMissing(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	err := runPublish(ctx, &buf, notFoundGH, st, cfg, publishProvenance{}, 2, false)
+	err := runPublish(ctx, &buf, notFoundGH, st, cfg, 2, false)
 	if err == nil {
 		t.Fatal("expected error for missing gh binary")
 	}
@@ -482,7 +484,7 @@ func TestApplyPublish_Idempotence(t *testing.T) {
 
 	// First run: creates the issue.
 	var buf1 strings.Builder
-	if err := runPublish(ctx, &buf1, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf1, gh.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	for _, c := range gh.calls {
@@ -501,7 +503,7 @@ func TestApplyPublish_Idempotence(t *testing.T) {
 		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":56}`))
 
 	var buf2 strings.Builder
-	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 
@@ -528,6 +530,7 @@ func TestPublishCmd_Via_Setup(t *testing.T) {
 	defer func() { publishGH = old }()
 	fgh := newFakeGH().
 		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("repos/{owner}/{repo}/labels -X POST", []byte(`{}`)).
 		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":100}`))
 	publishGH = fgh.run
 
@@ -587,7 +590,7 @@ func TestApplyPublish_CloseOrdering(t *testing.T) {
 
 	var buf strings.Builder
 	cfg := config.Publish{TierMin: 2, CloseOnFixed: true}
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish: %v", err)
 	}
 
@@ -627,7 +630,7 @@ func TestApplyPublish_ClosingResume(t *testing.T) {
 
 	var buf strings.Builder
 	cfg := config.Publish{TierMin: 2, CloseOnFixed: true}
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish (resume) should not re-comment: %v", err)
 	}
 	if n := len(gh.callsContaining("issues/77/comments")); n != 0 {
@@ -661,7 +664,7 @@ func TestApplyPublish_PendingRecovery(t *testing.T) {
 
 		var buf strings.Builder
 		cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
-		if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 			t.Fatalf("runPublish (recover-adopt): %v", err)
 		}
 		pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
@@ -687,7 +690,7 @@ func TestApplyPublish_PendingRecovery(t *testing.T) {
 
 		var buf strings.Builder
 		cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
-		if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+		if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 			t.Fatalf("runPublish (recover-create): %v", err)
 		}
 		pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
@@ -708,7 +711,7 @@ func TestRenderIssueBody_ReasoningCapped(t *testing.T) {
 		Title:       "t",
 		Reasoning:   strings.Repeat("x", 40*1024),
 	}
-	body := renderIssueBody(f, "", publishProvenance{})
+	body := renderIssueBody(f, "")
 	if len(body) > 36*1024 {
 		t.Errorf("body length %d exceeds expected cap envelope", len(body))
 	}
@@ -785,8 +788,8 @@ func TestRaceCondition(t *testing.T) {
 }
 
 // TestRenderIssueBody_Structure verifies the full body layout: sections appear
-// in the documented order and bookkeeping fields appear only inside the metadata
-// block, not in the human-visible preamble.
+// in the documented order, the machine front-matter is parseable on line 2,
+// and agent-internal bookkeeping (lens, tier, models) is absent from the body.
 func TestRenderIssueBody_Structure(t *testing.T) {
 	reproDir := makeReproDir(t)
 
@@ -806,13 +809,7 @@ func TestRenderIssueBody_Structure(t *testing.T) {
 		FixPatch:            "--- a/internal/store/cache.go\n+++ b/internal/store/cache.go\n@@ -40,6 +40,7 @@\n+\tmu.Lock()\n",
 	}
 
-	prov := publishProvenance{
-		FinderModel:   "claude-sonnet-4-6",
-		VerifierModel: "claude-opus-4",
-		ProviderType:  "anthropic",
-	}
-
-	body := renderIssueBody(f, "https://github.com/owner/repo", prov)
+	body := renderIssueBody(f, "https://github.com/owner/repo")
 
 	// 1. Fingerprint marker MUST be the first line.
 	wantMarker := "<!-- bugbot:fp=abcdef1234567890 -->"
@@ -865,41 +862,53 @@ func TestRenderIssueBody_Structure(t *testing.T) {
 		t.Error("test source not inlined in repro block")
 	}
 
-	// 7. Metadata block: Lens, Tier label, and fingerprint-as-standalone-value
-	// appear ONLY inside the "Bugbot metadata" details block. The fingerprint
-	// also appears in the hidden marker comment (first line), so we check that
-	// each field's first non-marker occurrence is after the metadata open tag.
-	metaOpenTag := "<details><summary>Bugbot metadata</summary>"
-	metaPos := strings.Index(body, metaOpenTag)
-	if metaPos < 0 {
-		t.Fatal("Bugbot metadata block missing")
+	// 7. Machine front-matter MUST be line 2 and parse as JSON with the
+	// finding's coordinates.
+	bodyLines := strings.Split(body, "\n")
+	if len(bodyLines) < 2 {
+		t.Fatal("body has fewer than 2 lines")
+	}
+	metaRe := regexp.MustCompile(`^<!-- bugbot:meta (.+) -->$`)
+	m := metaRe.FindStringSubmatch(bodyLines[1])
+	if m == nil {
+		t.Fatalf("line 2 is not a bugbot:meta comment: %q", bodyLines[1])
+	}
+	var meta struct {
+		Severity string `json:"severity"`
+		Tier     int    `json:"tier"`
+		Lens     string `json:"lens"`
+		File     string `json:"file"`
+		Line     int    `json:"line"`
+		Commit   string `json:"commit"`
+	}
+	if err := json.Unmarshal([]byte(m[1]), &meta); err != nil {
+		t.Fatalf("bugbot:meta payload is not valid JSON: %v\npayload = %q", err, m[1])
+	}
+	if meta.Severity != "high" || meta.Tier != 1 || meta.Lens != "race" ||
+		meta.File != "internal/store/cache.go" || meta.Line != 42 || meta.Commit != "deadbeef" {
+		t.Errorf("bugbot:meta fields = %+v, want severity=high tier=1 lens=race file=internal/store/cache.go line=42 commit=deadbeef", meta)
 	}
 
-	// Lens and Tier label must not appear before the metadata block.
-	for _, needle := range []string{"| Lens |", "T1 Reproduced"} {
-		idx := strings.Index(body, needle)
-		if idx < 0 {
-			t.Errorf("expected %q somewhere in body", needle)
-			continue
+	// The agent-internal metadata block is gone: no details table, no
+	// model/provider strings, no lens/tier rows anywhere in the body.
+	for _, needle := range []string{
+		"Bugbot metadata",
+		"| Lens |",
+		"| Tier |",
+		"T1 Reproduced",
+		"claude-sonnet-4-6",
+		"claude-opus-4",
+		"anthropic",
+	} {
+		if strings.Contains(body, needle) {
+			t.Errorf("agent-internal metadata %q must not appear in the body", needle)
 		}
-		if idx < metaPos {
-			t.Errorf("%q appears before metadata block (offset %d < metaPos %d)", needle, idx, metaPos)
-		}
 	}
 
-	// Fingerprint is allowed in the hidden marker comment (top of body) but
-	// must also appear inside the metadata block as a table cell.
-	fpInMeta := strings.Index(body[metaPos:], f.Fingerprint)
-	if fpInMeta < 0 {
-		t.Errorf("fingerprint %q not found inside metadata block", f.Fingerprint)
-	}
-
-	// Model and provider strings present inside metadata.
-	if !strings.Contains(body, "claude-sonnet-4-6") {
-		t.Error("finder model not found in body")
-	}
-	if !strings.Contains(body, "anthropic") {
-		t.Error("provider type not found in body")
+	// The fingerprint appears exactly once: in the hidden marker comment.
+	// (The old metadata table repeated it as a human-visible cell.)
+	if n := strings.Count(body, f.Fingerprint); n != 1 {
+		t.Errorf("fingerprint appears %d times, want exactly 1 (the line-1 marker)", n)
 	}
 
 	// 8. Verification trace block present.
@@ -927,7 +936,7 @@ func TestRenderIssueBody_ReproMissing(t *testing.T) {
 		Title:       "t",
 		ReproPath:   "/nonexistent/repro/dir",
 	}
-	body := renderIssueBody(f, "", publishProvenance{})
+	body := renderIssueBody(f, "")
 
 	// Must contain a fallback mention of the path.
 	if !strings.Contains(body, "/nonexistent/repro/dir") {
@@ -960,7 +969,7 @@ func TestRenderIssueBody_ReproMissing(t *testing.T) {
 		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":5}`))
 	cfg := config.Publish{TierMin: 2, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish must not error on missing repro dir: %v", err)
 	}
 }
@@ -986,7 +995,7 @@ func TestRenderIssueBody_ReproTruncation(t *testing.T) {
 		Title:       "t",
 		ReproPath:   dir,
 	}
-	body := renderIssueBody(f, "", publishProvenance{})
+	body := renderIssueBody(f, "")
 
 	if !strings.Contains(body, "<details><summary>Reproduction</summary>") {
 		t.Error("Reproduction block missing")
@@ -1003,7 +1012,7 @@ func TestRenderIssueBody_NoFixPatch(t *testing.T) {
 		Title:       "t",
 		FixPatch:    "",
 	}
-	body := renderIssueBody(f, "", publishProvenance{})
+	body := renderIssueBody(f, "")
 	if strings.Contains(body, "Candidate fix") {
 		t.Error("fix patch section should be absent when FixPatch is empty")
 	}
@@ -1062,7 +1071,7 @@ func TestRenderIssueBody_FencedPatchBreakout(t *testing.T) {
 		Title:       "t",
 		FixPatch:    maliciousPatch,
 	}
-	body := renderIssueBody(f, "", publishProvenance{})
+	body := renderIssueBody(f, "")
 
 	// Count occurrences of the opening fence line. There should be exactly one
 	// opening fence and one closing fence of equal length and they should wrap
@@ -1112,7 +1121,7 @@ func TestRenderIssueBody_FencedReproBreakout(t *testing.T) {
 		Title:       "t",
 		ReproPath:   dir,
 	}
-	body := renderIssueBody(f, "", publishProvenance{})
+	body := renderIssueBody(f, "")
 
 	// Verify no unmatched fences: parse all fenced blocks and ensure each
 	// opens and closes correctly.
@@ -1180,15 +1189,16 @@ func TestRenderIssueBody_DetailsBreakout(t *testing.T) {
 		Title:       "t",
 		Reasoning:   maliciousReasoning,
 	}
-	body := renderIssueBody(f, "", publishProvenance{})
+	body := renderIssueBody(f, "")
 
-	// The raw </details> sequence must appear in the body only as many times as
-	// bugbot itself emits it (once for metadata, once for trace). The sanitizer
-	// converts the Reasoning's </details> to &lt;/details so it does not count.
-	// This finding has no repro, so exactly 2 bugbot-emitted </details> exist.
+	// The raw </details> sequence must appear in the body only as many times
+	// as bugbot itself emits it. The sanitizer converts the Reasoning's
+	// </details> to &lt;/details so it does not count. This finding has no
+	// repro, so the verification trace block is the only bugbot-emitted
+	// </details>.
 	count := strings.Count(body, "</details>")
-	if count > 2 {
-		t.Errorf("body contains %d </details> tags; expected ≤2 (only bugbot-emitted ones); the injected </details> from Reasoning was not neutralised", count)
+	if count > 1 {
+		t.Errorf("body contains %d </details> tags; expected ≤1 (only bugbot-emitted ones); the injected </details> from Reasoning was not neutralised", count)
 	}
 
 	// The sanitized form must be present (proving replacement happened).
@@ -1212,7 +1222,7 @@ func TestRenderIssueBody_OversizedFixPatch(t *testing.T) {
 		Title:       "t",
 		FixPatch:    strings.Repeat("x", 30*1024), // 30 KB, over the 20 KB cap
 	}
-	body := renderIssueBody(f, "", publishProvenance{})
+	body := renderIssueBody(f, "")
 	if !strings.Contains(body, "truncated by bugbot") {
 		t.Error("truncation marker missing from oversized FixPatch body")
 	}
@@ -1226,7 +1236,7 @@ func TestRenderIssueBody_OversizedDescription(t *testing.T) {
 		Title:       "t",
 		Description: strings.Repeat("d", 15*1024), // 15 KB, over the 10 KB cap
 	}
-	body := renderIssueBody(f, "", publishProvenance{})
+	body := renderIssueBody(f, "")
 	if !strings.Contains(body, "truncated by bugbot") {
 		t.Error("truncation marker missing from oversized Description body")
 	}
@@ -1245,7 +1255,7 @@ func TestRenderIssueBody_TotalBodyGuard(t *testing.T) {
 		FixPatch:    strings.Repeat("P", 25*1024),
 		Reasoning:   strings.Repeat("R", 40*1024),
 	}
-	body := renderIssueBody(f, "", publishProvenance{})
+	body := renderIssueBody(f, "")
 
 	// Must stay under GitHub's hard limit.
 	if len(body) >= 65536 {
@@ -1322,34 +1332,6 @@ func TestRenderReproSection_ExtensionAllowlist(t *testing.T) {
 	if !strings.Contains(section, "main_test.go") {
 		t.Error("main_test.go should be included in the repro section")
 	}
-}
-
-// ---- Fix 5: NewStorePublisher delegates to NewStorePublisherWithProvenance ----
-
-// TestNewStorePublisher_DelegatesProvenance confirms that NewStorePublisher is
-// a thin shim over NewStorePublisherWithProvenance and produces identical
-// publisher state (zero provenance).
-func TestNewStorePublisher_DelegatesProvenance(t *testing.T) {
-	ctx := context.Background()
-	st, _ := setupPublishStore(t)
-
-	cfg := config.Publish{TierMin: 2, CloseOnFixed: true}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	shim := NewStorePublisher(engine.RealGH, st, cfg, log)
-	explicit := NewStorePublisherWithProvenance(engine.RealGH, st, cfg, publishProvenance{}, log)
-
-	// Both should have the same zero provenance. We verify by running a dry
-	// publish with a fake gh (no real network call) and checking no panic/error.
-	// The real test is that the shim compiles and delegates (structural).
-	_ = shim
-	_ = explicit
-
-	// Confirm the shim's prov field is zero.
-	if shim.prov != (publishProvenance{}) {
-		t.Errorf("NewStorePublisher shim prov = %+v, want zero", shim.prov)
-	}
-	_ = ctx
 }
 
 // TestTruncateUTF8 pins the rune-boundary walk-back: when s is split mid-rune
@@ -1451,7 +1433,7 @@ func TestApplyPublish_UpdateStaleRecreate(t *testing.T) {
 	fake.errs["issues/50 -X PATCH"] = fmt.Errorf("gh api: HTTP 410: issue was deleted")
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, fake.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, fake.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish must NOT abort on 410: %v", err)
 	}
 
@@ -1515,7 +1497,7 @@ func TestApplyPublish_UpdateStaleRecreate_404(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, fake.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, fake.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish must NOT abort on 404: %v", err)
 	}
 	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
@@ -1559,7 +1541,7 @@ func TestApplyPublish_CloseStaleDrop(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish must NOT abort on close 410: %v", err)
 	}
 	// Row must be gone (close is a no-op success on a gone issue).
@@ -1629,7 +1611,7 @@ func TestApplyPublish_UpdateRecordsSuccess(t *testing.T) {
 		on("issues/60 -X PATCH", []byte(``))
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, fake.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, fake.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish: %v", err)
 	}
 	if n := len(fake.callsContaining("issues/60 -X PATCH")); n != 1 {
@@ -1739,7 +1721,7 @@ func TestRenderIssueBody_StripsControlChars(t *testing.T) {
 		File:        "a.go",
 		Line:        1,
 	}
-	body := renderIssueBody(f, "", publishProvenance{})
+	body := renderIssueBody(f, "")
 	if strings.IndexByte(body, 0) >= 0 {
 		t.Fatalf("body contains NUL after render")
 	}
@@ -1789,7 +1771,7 @@ func TestApplyPublish_StripsNULFromModelText(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish: %v", err)
 	}
 
@@ -1829,7 +1811,7 @@ func TestRenderIssueBody_SanitizeAndTruncateJointly(t *testing.T) {
 		File:        "a.go",
 		Line:        1,
 	}
-	body := renderIssueBody(f, "", publishProvenance{})
+	body := renderIssueBody(f, "")
 
 	// Truncation must have run (oversized even after sanitize).
 	if !strings.Contains(body, "body truncated by bugbot") {
@@ -1875,7 +1857,7 @@ func TestBacksync_HumanClosedDismissesFinding(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish: %v", err)
 	}
 
@@ -1943,7 +1925,7 @@ func TestBacksync_Idempotent(t *testing.T) {
 		on("repo view", []byte("https://github.com/owner/repo\n")).
 		on("issues?state=closed", []byte(`[{"number":77,"body":"","state":"closed"}]`))
 	var buf1 strings.Builder
-	if err := runPublish(ctx, &buf1, gh1.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf1, gh1.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 
@@ -1952,7 +1934,7 @@ func TestBacksync_Idempotent(t *testing.T) {
 	// (no route) or the assertions below would catch a state change.
 	gh2 := newFakeGH().on("repo view", []byte("https://github.com/owner/repo\n"))
 	var buf2 strings.Builder
-	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	if len(gh2.calls) != 1 {
@@ -1998,7 +1980,7 @@ func TestBacksync_FixedFindingHumanClosed(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish: %v", err)
 	}
 
@@ -2059,7 +2041,7 @@ func TestApplyPublish_RegressionReopen(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish: %v", err)
 	}
 
@@ -2123,7 +2105,7 @@ func TestApplyPublish_RegressionReopen_StaleRecreate(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish must NOT abort on 404: %v", err)
 	}
 
@@ -2177,7 +2159,7 @@ func TestApplyPublish_BacksyncReopenDryRun(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, true /* dry-run */); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, true /* dry-run */); err != nil {
 		t.Fatalf("runPublish dry-run: %v", err)
 	}
 
@@ -2247,7 +2229,7 @@ func TestApplyPublish_NoBacksyncWhenNoOpenRows(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	if err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("runPublish: %v", err)
 	}
 	if !strings.Contains(buf.String(), "created=1") {
@@ -2320,7 +2302,7 @@ func TestApplyPublish_ActionFailureDoesNotBlockRestOfPlan(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false)
+	err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false)
 	if err == nil {
 		t.Fatal("expected an aggregate error naming the create failure")
 	}
@@ -2379,7 +2361,7 @@ func TestApplyPublish_RateLimitAbortsRemainingPlan(t *testing.T) {
 
 	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
 	var buf strings.Builder
-	err := runPublish(ctx, &buf, gh.run, st, cfg, publishProvenance{}, 2, false)
+	err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false)
 	if err == nil {
 		t.Fatal("expected an abort error on rate limit")
 	}
@@ -2418,7 +2400,7 @@ func TestApplyPublish_BodyHash_MetadataTouchSkipsPatch(t *testing.T) {
 		on("repo view", []byte("https://github.com/owner/repo\n")).
 		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":42}`))
 	var buf1 strings.Builder
-	if err := runPublish(ctx, &buf1, gh1.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf1, gh1.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	pi1, err := st.GetPublishedIssue(ctx, f.Fingerprint)
@@ -2443,7 +2425,7 @@ func TestApplyPublish_BodyHash_MetadataTouchSkipsPatch(t *testing.T) {
 		on("repo view", []byte("https://github.com/owner/repo\n")).
 		on("issues?state=closed", []byte("[]"))
 	var buf2 strings.Builder
-	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	if calls := gh2.callsContaining("issues/42 -X PATCH"); len(calls) != 0 {
@@ -2473,7 +2455,7 @@ func TestApplyPublish_BodyHash_MetadataTouchSkipsPatch(t *testing.T) {
 		on("repo view", []byte("https://github.com/owner/repo\n")).
 		on("issues?state=closed", []byte("[]"))
 	var buf3 strings.Builder
-	if err := runPublish(ctx, &buf3, gh3.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf3, gh3.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("third run: %v", err)
 	}
 	if !strings.Contains(buf3.String(), "skipped=1") {
@@ -2500,7 +2482,7 @@ func TestApplyPublish_BodyHash_RealChangeStillPatches(t *testing.T) {
 		on("repo view", []byte("https://github.com/owner/repo\n")).
 		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":42}`))
 	var buf1 strings.Builder
-	if err := runPublish(ctx, &buf1, gh1.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf1, gh1.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	pi1, err := st.GetPublishedIssue(ctx, f.Fingerprint)
@@ -2519,7 +2501,7 @@ func TestApplyPublish_BodyHash_RealChangeStillPatches(t *testing.T) {
 		on("issues?state=closed", []byte("[]")).
 		on("issues/42 -X PATCH", []byte(`{"number":42}`))
 	var buf2 strings.Builder
-	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, publishProvenance{}, 2, false); err != nil {
+	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, 2, false); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	patchCalls := gh2.callsContaining("issues/42 -X PATCH")
@@ -2543,5 +2525,484 @@ func TestApplyPublish_BodyHash_RealChangeStillPatches(t *testing.T) {
 	}
 	if pi2.BodyHash != bodyHashHex(body) {
 		t.Errorf("stored BodyHash = %q, want sha256 of the PATCHed body = %q", pi2.BodyHash, bodyHashHex(body))
+	}
+}
+
+// ---- bugbot-dnqf.3: lean issue body + managed labels ----
+
+// TestManagedLabels pins the desired-label helper: knob gating, the
+// severity/tier vocabularies, no label for unknown values, and sorted
+// deterministic output.
+func TestManagedLabels(t *testing.T) {
+	both := config.Publish{SeverityLabels: true, TierLabels: true}
+	cases := []struct {
+		name string
+		f    domain.Finding
+		cfg  config.Publish
+		want []string
+	}{
+		{"both knobs", domain.Finding{Severity: "high", Tier: 1}, both, []string{"bugbot:reproduced", "severity:high"}},
+		{"severity only", domain.Finding{Severity: "high", Tier: 1}, config.Publish{SeverityLabels: true}, []string{"severity:high"}},
+		{"tier only", domain.Finding{Severity: "high", Tier: 1}, config.Publish{TierLabels: true}, []string{"bugbot:reproduced"}},
+		{"both off", domain.Finding{Severity: "high", Tier: 1}, config.Publish{}, nil},
+		{"unknown severity drops severity label", domain.Finding{Severity: "blocker", Tier: 0}, both, []string{"bugbot:fix-witnessed"}},
+		{"unknown tier drops tier label", domain.Finding{Severity: "low", Tier: 9}, both, []string{"severity:low"}},
+		{"critical suspected", domain.Finding{Severity: "critical", Tier: 3}, both, []string{"bugbot:suspected", "severity:critical"}},
+		{"medium verified", domain.Finding{Severity: "medium", Tier: 2}, both, []string{"bugbot:verified", "severity:medium"}},
+	}
+	for _, c := range cases {
+		if got := managedLabels(c.f, c.cfg); !slices.Equal(got, c.want) {
+			t.Errorf("%s: managedLabels = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRenderIssueBody_MetaSurvivesTruncation pins the belt-and-braces guard's
+// preserved prefix: a pathological oversized body must keep BOTH machine
+// comments — the fingerprint marker on line 1 and the bugbot:meta
+// front-matter on line 2 — while staying under GitHub's hard limit.
+func TestRenderIssueBody_MetaSurvivesTruncation(t *testing.T) {
+	fp := "abcdef1234567890abcdef1234567890"
+	f := domain.Finding{
+		Fingerprint: fp,
+		Title:       strings.Repeat("T", 1000),
+		Description: strings.Repeat("D", 20*1024),
+		FixPatch:    strings.Repeat("P", 25*1024),
+		Reasoning:   strings.Repeat("R", 40*1024),
+		Severity:    "high",
+		Tier:        1,
+		Lens:        "race",
+		File:        "x.go",
+		Line:        7,
+		CommitSHA:   "deadbeef",
+	}
+	body := renderIssueBody(f, "")
+
+	// The truncation path must actually have run for this test to prove anything.
+	if !strings.Contains(body, "body truncated by bugbot") {
+		t.Fatal("expected the belt-and-braces truncation to trigger")
+	}
+	if len(body) >= 65536 {
+		t.Errorf("body length %d exceeds GitHub's 65536 char limit", len(body))
+	}
+
+	lines := strings.Split(body, "\n")
+	if len(lines) < 2 {
+		t.Fatal("body has fewer than 2 lines")
+	}
+	if want := "<!-- bugbot:fp=" + fp + " -->"; lines[0] != want {
+		t.Errorf("line 1 = %q, want fingerprint marker %q", lines[0], want)
+	}
+	m := regexp.MustCompile(`^<!-- bugbot:meta (.+) -->$`).FindStringSubmatch(lines[1])
+	if m == nil {
+		t.Fatalf("line 2 is not a bugbot:meta comment after truncation: %q", lines[1])
+	}
+	var meta struct {
+		Severity string `json:"severity"`
+		Tier     int    `json:"tier"`
+		Commit   string `json:"commit"`
+	}
+	if err := json.Unmarshal([]byte(m[1]), &meta); err != nil {
+		t.Fatalf("bugbot:meta payload is not valid JSON after truncation: %v", err)
+	}
+	if meta.Severity != "high" || meta.Tier != 1 || meta.Commit != "deadbeef" {
+		t.Errorf("bugbot:meta fields = %+v, want severity=high tier=1 commit=deadbeef", meta)
+	}
+
+	// Attribution footer must still be the last non-empty line.
+	trimmed := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	if last := trimmed[len(trimmed)-1]; !strings.Contains(last, "Filed by Bugbot") {
+		t.Errorf("last non-empty line should be attribution footer; got: %q", last)
+	}
+}
+
+// TestApplyPublish_CreateAppliesManagedLabels: with both knobs on, the create
+// call carries base + severity + tier labels (base first, managed sorted),
+// each managed label is ensured (color + description) BEFORE the create, and
+// the applied managed set is recorded in the store.
+func TestApplyPublish_CreateAppliesManagedLabels(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t) // severity high, tier 2
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("repos/{owner}/{repo}/labels -X POST", []byte(`{}`)).
+		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":42}`))
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true, SeverityLabels: true, TierLabels: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+		t.Fatalf("runPublish: %v", err)
+	}
+
+	createCalls := gh.callsContaining("repos/{owner}/{repo}/issues -X POST")
+	if len(createCalls) != 1 {
+		t.Fatalf("expected 1 create call, got %d; all calls: %v", len(createCalls), gh.calls)
+	}
+	var gotLabels []string
+	for _, arg := range createCalls[0] {
+		if strings.HasPrefix(arg, "labels[]=") {
+			gotLabels = append(gotLabels, strings.TrimPrefix(arg, "labels[]="))
+		}
+	}
+	wantLabels := []string{"bugbot", "bugbot:verified", "severity:high"}
+	if !slices.Equal(gotLabels, wantLabels) {
+		t.Errorf("create labels = %v, want %v (base first, managed sorted)", gotLabels, wantLabels)
+	}
+
+	// Both managed labels are ensured, with the pinned colors, before the create.
+	ensureCalls := gh.callsContaining("repos/{owner}/{repo}/labels -X POST")
+	if len(ensureCalls) != 2 {
+		t.Fatalf("expected 2 ensure calls (one per managed label), got %d", len(ensureCalls))
+	}
+	gotColors := map[string]string{}
+	for _, c := range ensureCalls {
+		name, _ := argValue(c, "name")
+		color, _ := argValue(c, "color")
+		gotColors[name] = color
+	}
+	if gotColors["bugbot:verified"] != "5319e7" || gotColors["severity:high"] != "d93f0b" {
+		t.Errorf("ensure calls carried wrong names/colors: %v", gotColors)
+	}
+	for i, c := range gh.calls {
+		if strings.Contains(strings.Join(c, " "), "repos/{owner}/{repo}/issues -X POST") {
+			for j := i + 1; j < len(gh.calls); j++ {
+				if strings.Contains(strings.Join(gh.calls[j], " "), "repos/{owner}/{repo}/labels -X POST") {
+					t.Error("ensure call recorded AFTER the create call; labels must be ensured first")
+				}
+			}
+		}
+	}
+
+	// The applied managed set is recorded for future reconciles.
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published issue: %v", err)
+	}
+	if want := []string{"bugbot:verified", "severity:high"}; !slices.Equal(pi.ManagedLabels, want) {
+		t.Errorf("stored ManagedLabels = %v, want %v", pi.ManagedLabels, want)
+	}
+}
+
+// TestApplyPublish_EnsureLabelsOncePerRunAnd422Tolerated: the per-run ensure
+// memo means each managed label costs at most one POST per run even across
+// multiple creates, and a 422/already_exists response counts as success.
+func TestApplyPublish_EnsureLabelsOncePerRunAnd422Tolerated(t *testing.T) {
+	ctx := context.Background()
+	st, f1 := setupPublishStore(t)
+	f2 := seedSecondOpenFinding(t, ctx, st) // same severity/tier as f1
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("repos/{owner}/{repo}/labels -X POST", nil).
+		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":42}`))
+	gh.errs["repos/{owner}/{repo}/labels -X POST"] = errors.New("gh: HTTP 422: Validation Failed (already_exists)")
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true, SeverityLabels: true, TierLabels: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+		t.Fatalf("runPublish must tolerate already_exists on ensure: %v", err)
+	}
+
+	if n := len(gh.callsContaining("repos/{owner}/{repo}/issues -X POST")); n != 2 {
+		t.Errorf("expected 2 creates, got %d", n)
+	}
+	// 2 managed labels, 2 findings -> still exactly 2 ensure POSTs (memoized).
+	if n := len(gh.callsContaining("repos/{owner}/{repo}/labels -X POST")); n != 2 {
+		t.Errorf("expected 2 ensure calls total across the run, got %d", n)
+	}
+	for _, fp := range []string{f1.Fingerprint, f2.Fingerprint} {
+		pi, err := st.GetPublishedIssue(ctx, fp)
+		if err != nil {
+			t.Fatalf("get published issue: %v", err)
+		}
+		if want := []string{"bugbot:verified", "severity:high"}; !slices.Equal(pi.ManagedLabels, want) {
+			t.Errorf("stored ManagedLabels for %s = %v, want %v", fp[:12], pi.ManagedLabels, want)
+		}
+	}
+}
+
+// TestApplyPublish_LabelReconcileConverges: after a create applied and
+// recorded the managed set, a second run with no changes must make ZERO
+// label gh calls (desired == current, nil handling included).
+func TestApplyPublish_LabelReconcileConverges(t *testing.T) {
+	ctx := context.Background()
+	st, _ := setupPublishStore(t)
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true, SeverityLabels: true, TierLabels: true}
+
+	gh1 := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("repos/{owner}/{repo}/labels -X POST", []byte(`{}`)).
+		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":42}`))
+	var buf1 strings.Builder
+	if err := runPublish(ctx, &buf1, gh1.run, st, cfg, 2, false); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	gh2 := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]"))
+	var buf2 strings.Builder
+	if err := runPublish(ctx, &buf2, gh2.run, st, cfg, 2, false); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if !strings.Contains(buf2.String(), "skipped=1") {
+		t.Errorf("second run should skip; got: %s", buf2.String())
+	}
+	for _, c := range gh2.calls {
+		joined := strings.Join(c, " ")
+		if strings.Contains(joined, "POST") || strings.Contains(joined, "DELETE") || strings.Contains(joined, "PATCH") {
+			t.Errorf("converged run must make zero write calls; got: %v", c)
+		}
+	}
+}
+
+// TestApplyPublish_LegacyRowAdditiveBackfill: a pre-feature row (empty
+// managed_labels column -> ManagedLabels nil) gets its managed labels
+// backfilled additively on the skip path -- one POST with every missing
+// label, and NEVER a DELETE (we don't know what was applied historically).
+func TestApplyPublish_LegacyRowAdditiveBackfill(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	// Row exists (upserted after the finding, so updated_at is newer ->
+	// publishSkip) but predates managed labels: column stays ''.
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 13, store.IssueStateOpen, ""); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
+		on("repos/{owner}/{repo}/labels -X POST", []byte(`{}`)).
+		on("issues/13/labels -X POST", []byte(`[]`))
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true, SeverityLabels: true, TierLabels: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+		t.Fatalf("runPublish: %v", err)
+	}
+
+	addCalls := gh.callsContaining("issues/13/labels -X POST")
+	if len(addCalls) != 1 {
+		t.Fatalf("expected exactly 1 additions POST, got %d; calls: %v", len(addCalls), gh.calls)
+	}
+	joined := strings.Join(addCalls[0], " ")
+	if !strings.Contains(joined, "labels[]=bugbot:verified") || !strings.Contains(joined, "labels[]=severity:high") {
+		t.Errorf("additions POST must carry both managed labels; got: %v", addCalls[0])
+	}
+	for _, c := range gh.calls {
+		if strings.Contains(strings.Join(c, " "), "DELETE") {
+			t.Errorf("legacy backfill must never DELETE; got: %v", c)
+		}
+	}
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published issue: %v", err)
+	}
+	if want := []string{"bugbot:verified", "severity:high"}; !slices.Equal(pi.ManagedLabels, want) {
+		t.Errorf("stored ManagedLabels = %v, want %v", pi.ManagedLabels, want)
+	}
+}
+
+// TestApplyPublish_KnobsOffZeroLabelCalls: with both knobs off the feature is
+// inert -- zero label gh calls and zero deletes, even when the store carries
+// stale managed labels from a time the knobs were on.
+func TestApplyPublish_KnobsOffZeroLabelCalls(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 13, store.IssueStateOpen, ""); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	if err := st.SetPublishedManagedLabels(ctx, f.Fingerprint, []string{"severity:high"}); err != nil {
+		t.Fatalf("seed stale labels: %v", err)
+	}
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]"))
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+		t.Fatalf("runPublish: %v", err)
+	}
+	for _, c := range gh.calls {
+		joined := strings.Join(c, " ")
+		if strings.Contains(joined, "POST") || strings.Contains(joined, "DELETE") || strings.Contains(joined, "PATCH") {
+			t.Errorf("knobs off must make zero write calls; got: %v", c)
+		}
+	}
+	// The stale bookkeeping is left alone: nothing was synced.
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published issue: %v", err)
+	}
+	if want := []string{"severity:high"}; !slices.Equal(pi.ManagedLabels, want) {
+		t.Errorf("stored ManagedLabels = %v, want %v (untouched)", pi.ManagedLabels, want)
+	}
+}
+
+// TestApplyPublish_LabelRemovalPath: a recorded managed set that drifted from
+// desired gets exactly current−desired DELETEd (per label, path-escaped) and
+// desired−current POSTed -- never a full-array PATCH, and the shared label
+// (severity:high) is not touched in either direction.
+func TestApplyPublish_LabelRemovalPath(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t) // desired: bugbot:verified + severity:high
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 13, store.IssueStateOpen, ""); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	// Recorded as applied back when the finding was still T3.
+	if err := st.SetPublishedManagedLabels(ctx, f.Fingerprint, []string{"bugbot:suspected", "severity:high"}); err != nil {
+		t.Fatalf("seed recorded labels: %v", err)
+	}
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
+		on("repos/{owner}/{repo}/labels -X POST", []byte(`{}`)).
+		on("issues/13/labels -X POST", []byte(`[]`)).
+		on("issues/13/labels/bugbot:suspected", []byte(`{}`))
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true, SeverityLabels: true, TierLabels: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, false); err != nil {
+		t.Fatalf("runPublish: %v", err)
+	}
+
+	addCalls := gh.callsContaining("issues/13/labels -X POST")
+	if len(addCalls) != 1 {
+		t.Fatalf("expected exactly 1 additions POST, got %d", len(addCalls))
+	}
+	joined := strings.Join(addCalls[0], " ")
+	if !strings.Contains(joined, "labels[]=bugbot:verified") {
+		t.Errorf("additions POST must add bugbot:verified; got: %v", addCalls[0])
+	}
+	if strings.Contains(joined, "labels[]=severity:high") {
+		t.Errorf("severity:high is already applied and must not be re-POSTed; got: %v", addCalls[0])
+	}
+
+	var deleteCalls [][]string
+	for _, c := range gh.calls {
+		if strings.Contains(strings.Join(c, " "), "-X DELETE") {
+			deleteCalls = append(deleteCalls, c)
+		}
+	}
+	if len(deleteCalls) != 1 {
+		t.Fatalf("expected exactly 1 DELETE (current−desired), got %d: %v", len(deleteCalls), deleteCalls)
+	}
+	if want := "repos/{owner}/{repo}/issues/13/labels/bugbot:suspected"; deleteCalls[0][1] != want {
+		t.Errorf("DELETE path = %q, want %q", deleteCalls[0][1], want)
+	}
+
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published issue: %v", err)
+	}
+	if want := []string{"bugbot:verified", "severity:high"}; !slices.Equal(pi.ManagedLabels, want) {
+		t.Errorf("stored ManagedLabels = %v, want %v", pi.ManagedLabels, want)
+	}
+}
+
+// TestApplyPublish_LabelSyncFailureContinues: a label-sync gh failure after a
+// successful body PATCH is action-scoped -- logged, counted in failed, run
+// continues, body bookkeeping intact -- and the managed-label bookkeeping is
+// NOT advanced, so the next cycle retries the sync naturally.
+func TestApplyPublish_LabelSyncFailureContinues(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+
+	// First run with knobs OFF: creates the issue, records no managed labels.
+	gh1 := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("repos/{owner}/{repo}/issues -X POST", []byte(`{"number":42}`))
+	var buf1 strings.Builder
+	if err := runPublish(ctx, &buf1, gh1.run, st, config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true}, 2, false); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	// Real content change so the second run takes the PATCH path.
+	f.Description = "a completely different description"
+	if _, err := st.UpsertFinding(ctx, f); err != nil {
+		t.Fatalf("content change: %v", err)
+	}
+
+	gh2 := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]")).
+		on("issues/42 -X PATCH", []byte(`{"number":42}`)).
+		on("repos/{owner}/{repo}/labels -X POST", []byte(`{}`)).
+		on("issues/42/labels -X POST", nil)
+	gh2.errs["issues/42/labels -X POST"] = errors.New("gh: HTTP 500 boom")
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true, SeverityLabels: true, TierLabels: true}
+	var buf2 strings.Builder
+	err := runPublish(ctx, &buf2, gh2.run, st, cfg, 2, false)
+	if err == nil || !strings.Contains(err.Error(), "1 action(s) failed") {
+		t.Fatalf("expected aggregate one-failure error, got: %v", err)
+	}
+	out := buf2.String()
+	if !strings.Contains(out, "failed label-sync issue #42") {
+		t.Errorf("expected a 'failed label-sync issue #42' log line; got: %s", out)
+	}
+	if !strings.Contains(out, "updated=1") || !strings.Contains(out, "failed=1") {
+		t.Errorf("run must complete with updated=1 failed=1; got: %s", out)
+	}
+
+	// Body work is intact: the PATCH landed and its hash was recorded.
+	patchCalls := gh2.callsContaining("issues/42 -X PATCH")
+	if len(patchCalls) != 1 {
+		t.Fatalf("expected exactly 1 body PATCH, got %d", len(patchCalls))
+	}
+	body, _ := argValue(patchCalls[0], "body")
+	pi, gerr := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if gerr != nil {
+		t.Fatalf("get published issue: %v", gerr)
+	}
+	if pi.BodyHash != bodyHashHex(body) {
+		t.Errorf("BodyHash must reflect the successful PATCH despite the label failure")
+	}
+	// Label bookkeeping must NOT advance past the failed gh call.
+	if len(pi.ManagedLabels) != 0 {
+		t.Errorf("ManagedLabels = %v, want empty (sync failed; retry next cycle)", pi.ManagedLabels)
+	}
+}
+
+// TestApplyPublish_DryRunLabelSync: dry-run prints the sync intent for a
+// drifted row and performs zero gh writes (no ensure calls either) and zero
+// store writes.
+func TestApplyPublish_DryRunLabelSync(t *testing.T) {
+	ctx := context.Background()
+	st, f := setupPublishStore(t)
+	if err := st.UpsertPublishedIssue(ctx, f.Fingerprint, 13, store.IssueStateOpen, ""); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	gh := newFakeGH().
+		on("repo view", []byte("https://github.com/owner/repo\n")).
+		on("issues?state=closed", []byte("[]"))
+
+	cfg := config.Publish{TierMin: 2, Labels: []string{"bugbot"}, CloseOnFixed: true, SeverityLabels: true, TierLabels: true}
+	var buf strings.Builder
+	if err := runPublish(ctx, &buf, gh.run, st, cfg, 2, true /* dry-run */); err != nil {
+		t.Fatalf("runPublish dry-run: %v", err)
+	}
+
+	want := fmt.Sprintf("dry-run: sync labels on issue #13 for %s (+2 -0)", f.Fingerprint[:12])
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("expected %q in dry-run output; got: %s", want, buf.String())
+	}
+	for _, c := range gh.calls {
+		joined := strings.Join(c, " ")
+		if strings.Contains(joined, "POST") || strings.Contains(joined, "DELETE") || strings.Contains(joined, "PATCH") {
+			t.Errorf("dry-run must make zero write calls; got: %v", c)
+		}
+	}
+	pi, err := st.GetPublishedIssue(ctx, f.Fingerprint)
+	if err != nil {
+		t.Fatalf("get published issue: %v", err)
+	}
+	if len(pi.ManagedLabels) != 0 {
+		t.Errorf("dry-run must not write label bookkeeping; got %v", pi.ManagedLabels)
 	}
 }

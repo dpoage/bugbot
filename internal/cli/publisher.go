@@ -20,7 +20,6 @@ type storePublisher struct {
 	gh      engine.GHRunner
 	st      *store.Store
 	cfg     config.Publish
-	prov    publishProvenance
 	tierMin int
 	log     *slog.Logger
 	// disabled latches when gh is missing from PATH: that condition is stable
@@ -29,22 +28,14 @@ type storePublisher struct {
 	disabled atomic.Bool
 }
 
-// NewStorePublisher constructs a storePublisher with no provenance metadata.
-// It is a compatibility shim that delegates to NewStorePublisherWithProvenance
-// with a zero publishProvenance. Callers that have a live config should prefer
-// NewStorePublisherWithProvenance so the issue body metadata block is populated.
+// NewStorePublisher constructs a storePublisher. The daemon wires one in when
+// cfg.Publish.Enabled is true; otherwise Deps.Publisher stays nil and the
+// post-cycle hook is skipped.
 func NewStorePublisher(gh engine.GHRunner, st *store.Store, cfg config.Publish, log *slog.Logger) *storePublisher {
-	return NewStorePublisherWithProvenance(gh, st, cfg, publishProvenance{}, log)
-}
-
-// NewStorePublisherWithProvenance constructs a storePublisher with model/provider
-// provenance for the issue body metadata block.
-func NewStorePublisherWithProvenance(gh engine.GHRunner, st *store.Store, cfg config.Publish, prov publishProvenance, log *slog.Logger) *storePublisher {
 	return &storePublisher{
 		gh:      gh,
 		st:      st,
 		cfg:     cfg,
-		prov:    prov,
 		tierMin: cfg.TierMin,
 		log:     log,
 	}
@@ -61,7 +52,7 @@ func (p *storePublisher) Publish(ctx context.Context) error {
 	}
 	// Route output to a sink that writes each line at debug level.
 	w := &slogWriter{log: p.log}
-	err := runPublish(ctx, w, p.gh, p.st, p.cfg, p.prov, p.tierMin, false /* never dry-run from daemon */)
+	err := runPublish(ctx, w, p.gh, p.st, p.cfg, p.tierMin, false /* never dry-run from daemon */)
 	if err != nil && isGHMissing(err) {
 		p.disabled.Store(true)
 		p.log.Warn("daemon: publish disabled for this run: gh CLI not found on PATH; install gh from https://cli.github.com")

@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -62,6 +64,12 @@ On each run it:
     only be a bugbot-closed regression, never a human close.
   - Closes the GitHub issue (and posts a comment) for findings that have been
     fixed or dismissed, when close_on_fixed is true.
+  - Applies bugbot-managed labels on create alongside the configured base
+    labels: severity:<critical|high|medium|low> when severity_labels is on,
+    and bugbot:<fix-witnessed|reproduced|verified|suspected> (evidence tier)
+    when tier_labels is on. Managed labels are reconciled on later runs as
+    severity/tier change; human-added labels are never touched, and with
+    both knobs off bugbot makes zero label calls.
 
 Re-running files zero duplicates (idempotent via the published_issues table).
 Requires the gh CLI to be installed and authenticated.`,
@@ -86,8 +94,7 @@ Requires the gh CLI to be installed and authenticated.`,
 				gh = engine.NewPacedGH(engine.RealGH)
 			}
 
-			prov := provenanceFromConfig(cfg)
-			return runPublish(ctx, cmd.OutOrStdout(), gh, st, cfg.Publish, prov, effective, dryRun)
+			return runPublish(ctx, cmd.OutOrStdout(), gh, st, cfg.Publish, effective, dryRun)
 		},
 	}
 
@@ -96,33 +103,11 @@ Requires the gh CLI to be installed and authenticated.`,
 	return cmd
 }
 
-// publishProvenance carries the model and provider strings from the active
-// config roles. It is populated at publish time from the full Config (no schema
-// migration required) and threaded through to renderIssueBody for the metadata
-// block. Fields may be empty when no config is available (tests, daemon paths).
-type publishProvenance struct {
-	FinderModel   string
-	VerifierModel string
-	ProviderType  string // type field from the finder's provider, e.g. "anthropic"
-}
-
-// provenanceFromConfig extracts model/provider strings from a loaded Config.
-func provenanceFromConfig(cfg config.Config) publishProvenance {
-	prov := publishProvenance{
-		FinderModel:   cfg.Roles.Finder.Model,
-		VerifierModel: cfg.Roles.Verifier.Model,
-	}
-	if p, ok := cfg.Providers[cfg.Roles.Finder.Provider]; ok {
-		prov.ProviderType = string(p.Type)
-	}
-	return prov
-}
-
 // runPublish is the entry point for both the command and the daemon hook. It
 // loads findings and published_issues, plans the reconcile, and applies it.
 // w receives the human-readable summary; pass cmd.OutOrStdout() from a cobra
 // command or any io.Writer from the daemon hook.
-func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.Store, cfg config.Publish, prov publishProvenance, tierMin int, dryRun bool) error {
+func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.Store, cfg config.Publish, tierMin int, dryRun bool) error {
 
 	// Gather inputs for the pure planner.
 	openFindings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
@@ -345,6 +330,102 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 		return nil
 	}
 
+	// ensureManagedLabels lazily creates each bugbot-managed label in the
+	// repo (color + description) before the first gh call in this run that
+	// applies it, memoized per run so each label costs at most one POST per
+	// publish cycle. An error containing "already_exists" or "422" means the
+	// label is already there — success for our purposes (idempotent). Base
+	// cfg.Labels are never ensured: those are user-managed, and creating
+	// them (or fighting over their color) is not bugbot's business.
+	ensured := make(map[string]bool, 4)
+	ensureManagedLabels := func(labels []string) error {
+		for _, l := range labels {
+			if ensured[l] {
+				continue
+			}
+			def, ok := managedLabelDefs[l]
+			if !ok {
+				continue // not a bugbot-managed label; nothing to ensure
+			}
+			_, err := gh(ctx, "api", "repos/{owner}/{repo}/labels", "-X", "POST",
+				"-f", "name="+l, "-f", "color="+def.color, "-f", "description="+def.desc)
+			if err != nil && !isLabelAlreadyExists(err) {
+				return err
+			}
+			ensured[l] = true
+		}
+		return nil
+	}
+
+	// reconcileLabels converges the bugbot-managed labels on an already-
+	// published issue toward managedLabels(f, cfg). Severity/tier changes
+	// always change the rendered body too (the visible Severity line and the
+	// bugbot:meta front-matter), so label drift normally rides an update
+	// PATCH; this reconcile exists for legacy backfill (rows created before
+	// managed labels) and knob flips.
+	//
+	// Rules:
+	//   - Both knobs off: feature inert — zero label gh calls, zero deletes.
+	//   - desired vs. current (store.PublishedIssue.ManagedLabels) compared
+	//     as sets (nil ≡ empty): converged rows cost zero gh calls.
+	//   - Additions land in ONE POST (labels[]=... per label), after
+	//     ensureManagedLabels; removals are per-label DELETEs with the name
+	//     path-escaped. Never a full-array PATCH — that would clobber
+	//     human-added labels.
+	//   - Legacy rows (current == nil, the '' column sentinel) are additive
+	//     only: we don't know what we applied historically, so we never
+	//     delete. A 404 on a DELETE (label already detached) is success.
+	//   - Store bookkeeping is written only after gh success, so a failed
+	//     sync retries naturally on the next cycle's skip-path reconcile.
+	//
+	// The body work of the surrounding action has already succeeded by the
+	// time this runs, so a label-sync gh failure must not abort the action:
+	// it is routed through applyGHErr ("label-sync"), which logs, counts
+	// failed++, and returns nil — except gh-missing/rate-limit, which abort
+	// the whole run exactly as every other action does. A non-nil return
+	// from this closure therefore always means "stop the run".
+	reconcileLabels := func(f domain.Finding, issueNumber int) error {
+		if !cfg.SeverityLabels && !cfg.TierLabels {
+			return nil
+		}
+		desired := managedLabels(f, cfg)
+		current := publishedMap[f.Fingerprint].ManagedLabels
+		additions := labelSetDiff(desired, current)
+		removals := labelSetDiff(current, desired)
+		if current == nil {
+			removals = nil // legacy row: additive only
+		}
+		if len(additions) == 0 && len(removals) == 0 {
+			return nil // converged (nil ≡ empty)
+		}
+		if dryRun {
+			_, _ = fmt.Fprintf(w, "dry-run: sync labels on issue #%d for %s (+%d -%d)\n", issueNumber, f.Fingerprint[:12], len(additions), len(removals))
+			return nil
+		}
+		if len(additions) > 0 {
+			if err := ensureManagedLabels(additions); err != nil {
+				return applyGHErr("label-sync", issueNumber, f.Fingerprint, err)
+			}
+			args := []string{"api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d/labels", issueNumber), "-X", "POST"}
+			for _, l := range additions {
+				args = append(args, "-f", "labels[]="+l)
+			}
+			if _, err := gh(ctx, args...); err != nil {
+				return applyGHErr("label-sync", issueNumber, f.Fingerprint, err)
+			}
+		}
+		for _, l := range removals {
+			_, err := gh(ctx, "api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d/labels/%s", issueNumber, url.PathEscape(l)), "-X", "DELETE")
+			if err != nil && !isGHGoneOrNotFound(err) {
+				return applyGHErr("label-sync", issueNumber, f.Fingerprint, err)
+			}
+		}
+		if err := st.SetPublishedManagedLabels(ctx, f.Fingerprint, desired); err != nil {
+			return fmt.Errorf("publish: record managed labels for %s: %w", f.Fingerprint[:12], err)
+		}
+		return nil
+	}
+
 	for _, a := range plan {
 		switch act := a.(type) {
 		case publishCreate:
@@ -361,8 +442,15 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, 0, store.IssueStatePending, ""); err != nil {
 				return fmt.Errorf("publish: record pending issue: %w", err)
 			}
-			body := renderIssueBody(act.finding, repoURL, prov)
-			n, err := ghCreateIssue(ctx, gh, act.finding.Title, body, cfg.Labels)
+			body := renderIssueBody(act.finding, repoURL)
+			managed := managedLabels(act.finding, cfg)
+			if err := ensureManagedLabels(managed); err != nil {
+				if aerr := applyGHErr("ensure-labels", 0, act.finding.Fingerprint, err); aerr != nil {
+					return aerr
+				}
+				continue
+			}
+			n, err := ghCreateIssue(ctx, gh, act.finding.Title, body, combinedLabels(cfg.Labels, managed))
 			if err != nil {
 				if aerr := applyGHErr("create", 0, act.finding.Fingerprint, err); aerr != nil {
 					return aerr
@@ -371,6 +459,9 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			}
 			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen, bodyHashHex(body)); err != nil {
 				return fmt.Errorf("publish: record created issue: %w", err)
+			}
+			if err := st.SetPublishedManagedLabels(ctx, act.finding.Fingerprint, managed); err != nil {
+				return fmt.Errorf("publish: record managed labels: %w", err)
 			}
 			_, _ = fmt.Fprintf(w, "created issue #%d for %s (%s)\n", n, act.finding.Fingerprint[:12], act.finding.Title)
 			created++
@@ -412,9 +503,17 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			// bodyHash stays "" on the adopt-via-marker path: no body was
 			// pushed by this run, so the next publishUpdate decides fresh.
 			bodyHash := ""
+			var managed []string // set only on the create arm: adopt-via-marker applies no labels, so the '' column stays legacy and the next cycle's reconcile backfills additively
 			if !found {
-				body := renderIssueBody(act.finding, repoURL, prov)
-				n, err = ghCreateIssue(ctx, gh, act.finding.Title, body, cfg.Labels)
+				body := renderIssueBody(act.finding, repoURL)
+				managed = managedLabels(act.finding, cfg)
+				if err := ensureManagedLabels(managed); err != nil {
+					if aerr := applyGHErr("ensure-labels", 0, act.finding.Fingerprint, err); aerr != nil {
+						return aerr
+					}
+					continue
+				}
+				n, err = ghCreateIssue(ctx, gh, act.finding.Title, body, combinedLabels(cfg.Labels, managed))
 				if err != nil {
 					if aerr := applyGHErr("recover-create", 0, act.finding.Fingerprint, err); aerr != nil {
 						return aerr
@@ -430,6 +529,11 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen, bodyHash); err != nil {
 				return fmt.Errorf("publish: record recovered issue: %w", err)
 			}
+			if !found {
+				if err := st.SetPublishedManagedLabels(ctx, act.finding.Fingerprint, managed); err != nil {
+					return fmt.Errorf("publish: record managed labels: %w", err)
+				}
+			}
 
 		case publishUpdate:
 			if dryRun {
@@ -441,7 +545,7 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			// below and the actual PATCH (and its stale-recreate fallback)
 			// need the exact same body, and only one render/hash per action
 			// keeps this cheap.
-			body := renderIssueBody(act.finding, repoURL, prov)
+			body := renderIssueBody(act.finding, repoURL)
 			h := bodyHashHex(body)
 			if pi := publishedMap[act.finding.Fingerprint]; pi.BodyHash == h && h != "" {
 				// The rendered body is byte-identical to what was last
@@ -459,6 +563,9 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 				}
 				_, _ = fmt.Fprintf(w, "unchanged issue #%d for %s (body identical; no PATCH)\n", act.issueNumber, act.finding.Fingerprint[:12])
 				skipped++
+				if err := reconcileLabels(act.finding, act.issueNumber); err != nil {
+					return err
+				}
 				continue
 			}
 			if err := ghUpdateIssue(ctx, gh, act.issueNumber, body); err != nil {
@@ -470,7 +577,14 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 					if derr := st.DeletePublishedIssue(ctx, act.finding.Fingerprint); derr != nil {
 						return fmt.Errorf("publish: delete stale published issue: %w", derr)
 					}
-					n, cerr := ghCreateIssue(ctx, gh, act.finding.Title, body, cfg.Labels)
+					managed := managedLabels(act.finding, cfg)
+					if err := ensureManagedLabels(managed); err != nil {
+						if aerr := applyGHErr("ensure-labels", 0, act.finding.Fingerprint, err); aerr != nil {
+							return aerr
+						}
+						continue
+					}
+					n, cerr := ghCreateIssue(ctx, gh, act.finding.Title, body, combinedLabels(cfg.Labels, managed))
 					if cerr != nil {
 						if aerr := applyGHErr("update-recreate", 0, act.finding.Fingerprint, cerr); aerr != nil {
 							return aerr
@@ -479,6 +593,9 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 					}
 					if uerr := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen, h); uerr != nil {
 						return fmt.Errorf("publish: record recreated issue: %w", uerr)
+					}
+					if err := st.SetPublishedManagedLabels(ctx, act.finding.Fingerprint, managed); err != nil {
+						return fmt.Errorf("publish: record managed labels: %w", err)
 					}
 					_, _ = fmt.Fprintf(w, "recreated issue #%d for %s (replaced stale row)\n", n, act.finding.Fingerprint[:12])
 					stale++
@@ -495,6 +612,9 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			}
 			_, _ = fmt.Fprintf(w, "updated issue #%d for %s\n", act.issueNumber, act.finding.Fingerprint[:12])
 			updated++
+			if err := reconcileLabels(act.finding, act.issueNumber); err != nil {
+				return err
+			}
 
 		case publishReopen:
 			if dryRun {
@@ -508,7 +628,7 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			// bugbot-closed regression (store.ReopenAsRegression). One PATCH
 			// both flips state=open and refreshes the body, so a reopened
 			// issue never shows stale content from before the fix regressed.
-			body := renderIssueBody(act.finding, repoURL, prov)
+			body := renderIssueBody(act.finding, repoURL)
 			h := bodyHashHex(body)
 			if err := ghReopenIssue(ctx, gh, act.issueNumber, body); err != nil {
 				if isGHGoneOrNotFound(err) {
@@ -518,7 +638,14 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 					if derr := st.DeletePublishedIssue(ctx, act.finding.Fingerprint); derr != nil {
 						return fmt.Errorf("publish: delete stale published issue: %w", derr)
 					}
-					n, cerr := ghCreateIssue(ctx, gh, act.finding.Title, body, cfg.Labels)
+					managed := managedLabels(act.finding, cfg)
+					if err := ensureManagedLabels(managed); err != nil {
+						if aerr := applyGHErr("ensure-labels", 0, act.finding.Fingerprint, err); aerr != nil {
+							return aerr
+						}
+						continue
+					}
+					n, cerr := ghCreateIssue(ctx, gh, act.finding.Title, body, combinedLabels(cfg.Labels, managed))
 					if cerr != nil {
 						if aerr := applyGHErr("reopen-recreate", 0, act.finding.Fingerprint, cerr); aerr != nil {
 							return aerr
@@ -527,6 +654,9 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 					}
 					if uerr := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen, h); uerr != nil {
 						return fmt.Errorf("publish: record recreated issue: %w", uerr)
+					}
+					if err := st.SetPublishedManagedLabels(ctx, act.finding.Fingerprint, managed); err != nil {
+						return fmt.Errorf("publish: record managed labels: %w", err)
 					}
 					_, _ = fmt.Fprintf(w, "recreated issue #%d for %s (replaced stale row)\n", n, act.finding.Fingerprint[:12])
 					stale++
@@ -565,6 +695,12 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			}
 			_, _ = fmt.Fprintf(w, "reopened issue #%d for %s (regression)\n", act.issueNumber, act.finding.Fingerprint[:12])
 			reopened++
+			// Label sync last: if the comment above failed we never get
+			// here, and the next cycle's skip-path reconcile picks the
+			// drift up instead.
+			if err := reconcileLabels(act.finding, act.issueNumber); err != nil {
+				return err
+			}
 
 		case publishClose:
 			if dryRun {
@@ -624,6 +760,11 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 
 		case publishSkip:
 			skipped++
+			// The row is already up to date; the only work a skip can carry
+			// is managed-label drift (legacy backfill, knob flip).
+			if err := reconcileLabels(act.finding, act.issueNumber); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("publish: unhandled action type %T", act)
 		}
@@ -634,6 +775,87 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 		return fmt.Errorf("publish: %d action(s) failed; see log above", failed)
 	}
 	return nil
+}
+
+// managedLabels returns the bugbot-managed labels desired for f under cfg's
+// publish knobs: "severity:<sev>" (severity_labels) for the four known
+// severities and "bugbot:<slug>" (tier_labels) for tiers 0-3. An unknown
+// severity or tier contributes no label. The result is sorted so it can be
+// compared as a set against store.PublishedIssue.ManagedLabels (also stored
+// sorted) and so gh call args are deterministic. cfg.Labels is never part of
+// the result: base labels are user-managed and only ever ADDITIVE alongside
+// these (Labels[0] stays the backsync/recovery list filter anchor).
+func managedLabels(f domain.Finding, cfg config.Publish) []string {
+	var labels []string
+	if cfg.SeverityLabels {
+		switch f.Severity {
+		case domain.SeverityCritical, domain.SeverityHigh, domain.SeverityMedium, domain.SeverityLow:
+			labels = append(labels, "severity:"+string(f.Severity))
+		}
+	}
+	if cfg.TierLabels {
+		switch f.Tier {
+		case domain.TierFixWitnessed:
+			labels = append(labels, "bugbot:fix-witnessed")
+		case domain.TierReproduced:
+			labels = append(labels, "bugbot:reproduced")
+		case domain.TierVerified:
+			labels = append(labels, "bugbot:verified")
+		case domain.TierSuspected:
+			labels = append(labels, "bugbot:suspected")
+		}
+	}
+	sort.Strings(labels)
+	return labels
+}
+
+// managedLabelDefs fixes the repo-level color and description used when
+// ensureManagedLabels creates a managed label. Keyed by the exact label
+// names managedLabels emits; anything not in this map is never ensured.
+var managedLabelDefs = map[string]struct{ color, desc string }{
+	"severity:critical":    {"b60205", "Bugbot: critical severity finding"},
+	"severity:high":        {"d93f0b", "Bugbot: high severity finding"},
+	"severity:medium":      {"fbca04", "Bugbot: medium severity finding"},
+	"severity:low":         {"c2e0c6", "Bugbot: low severity finding"},
+	"bugbot:fix-witnessed": {"0e8a16", "Bugbot T0: a generated fix made a failing test pass"},
+	"bugbot:reproduced":    {"1d76db", "Bugbot T1: a sandboxed failing test was produced"},
+	"bugbot:verified":      {"5319e7", "Bugbot T2: a refuter panel failed to disprove it"},
+	"bugbot:suspected":     {"bfdadc", "Bugbot T3: reported by a finder, not yet verified"},
+}
+
+// combinedLabels returns base+managed for an issue create call without
+// mutating base (cfg.Labels is shared across the whole run). base order is
+// preserved: Labels[0] is the list filter anchor used by backsync/recovery.
+func combinedLabels(base, managed []string) []string {
+	if len(managed) == 0 {
+		return base
+	}
+	out := make([]string, 0, len(base)+len(managed))
+	out = append(out, base...)
+	return append(out, managed...)
+}
+
+// labelSetDiff returns the elements of a not present in b, preserving a's
+// order (both inputs are sorted label sets of at most a few entries, so the
+// linear scan beats building a map).
+func labelSetDiff(a, b []string) []string {
+	var out []string
+	for _, x := range a {
+		if !slices.Contains(b, x) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// isLabelAlreadyExists reports whether a label-create POST failed only
+// because the label is already there. gh surfaces the API's
+// "already_exists" validation code (HTTP 422) in the error text; any 422 on
+// this endpoint means the label exists, so ensureManagedLabels treats it as
+// success (idempotent).
+func isLabelAlreadyExists(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "already_exists") || strings.Contains(msg, "422")
 }
 
 // publishAction is the sum type for one unit of planned publish work. The
@@ -1102,16 +1324,33 @@ func titleOrUnknown(s string) string {
 	return s
 }
 
+// bugbotMeta is the machine-readable front-matter embedded as an HTML comment
+// on line 2 of every issue body (line 1 is the fingerprint marker):
+//
+//	<!-- bugbot:meta {"severity":"high","tier":1,"lens":"race",...} -->
+//
+// External tooling parses this instead of scraping the human-facing Markdown.
+// Severity, tier, lens, file, and line are always present; commit is omitted
+// when the finding has no recorded commit SHA.
+type bugbotMeta struct {
+	Severity string `json:"severity"`
+	Tier     int    `json:"tier"`
+	Lens     string `json:"lens"`
+	File     string `json:"file"`
+	Line     int    `json:"line"`
+	Commit   string `json:"commit,omitempty"`
+}
+
 // renderIssueBody renders the deterministic issue body for a finding.
 //
 // Section order:
 //  1. Hidden fingerprint marker — MUST remain the first line (findIssueByMarker recovery).
-//  2. ## title
-//  3. Human meta: Severity + Location (file:line) with optional source permalink.
-//  4. Description (capped at 10 KB).
-//  5. Candidate fix diff (when FixPatch != "", capped at 20 KB).
-//  6. Inline reproduction <details> block (when ReproPath is set and readable).
-//  7. Bugbot metadata <details> block: Lens, Tier, Fingerprint, models, commit, scan time.
+//  2. Machine front-matter: <!-- bugbot:meta {json} --> on line 2 (see bugbotMeta).
+//  3. ## title
+//  4. Human meta: Severity + Location (file:line) with optional source permalink.
+//  5. Description (capped at 10 KB).
+//  6. Candidate fix diff (when FixPatch != "", capped at 20 KB).
+//  7. Inline reproduction <details> block (when ReproPath is set and readable).
 //  8. Verification trace <details> block with 30 KB cap.
 //  9. Attribution footer.
 //
@@ -1121,8 +1360,9 @@ func titleOrUnknown(s string) string {
 //   - Reasoning cap:    30 KB  (~30 720 chars)
 //   - Repro cap:        25 KB  (~25 600 chars)
 //   - Belt-and-braces:  if assembled body still exceeds ~60 000 chars it is
-//     truncated at a safe point preserving line 1 (fingerprint marker) and the
-//     attribution footer so recovery and attribution always survive.
+//     truncated at a safe point preserving lines 1-2 (fingerprint marker +
+//     machine front-matter) and the attribution footer so recovery, tooling,
+//     and attribution always survive.
 //
 // Security invariants:
 //   - All fenced blocks use fencedBlock(), which auto-sizes the fence to be
@@ -1131,7 +1371,7 @@ func titleOrUnknown(s string) string {
 //   - Non-fenced model content placed inside <details> blocks (Reasoning) is
 //     passed through sanitizeDetailsTag() so a literal </details> sequence
 //     cannot close the block early.
-func renderIssueBody(f domain.Finding, repoURL string, prov publishProvenance) string {
+func renderIssueBody(f domain.Finding, repoURL string) string {
 	const (
 		maxDescription = 10 * 1024 // 10 KB cap on model-authored description
 		maxFixPatch    = 20 * 1024 // 20 KB cap on model-authored patch
@@ -1141,14 +1381,27 @@ func renderIssueBody(f domain.Finding, repoURL string, prov publishProvenance) s
 
 	var b strings.Builder
 
-	// 1. Hidden fingerprint marker — load-bearing for recovery; must stay first.
+	// 1+2. Hidden fingerprint marker (line 1 — load-bearing for recovery;
+	// must stay first) and the machine front-matter comment (line 2).
+	// json.Marshal HTML-escapes '>' as \u003e inside string values, so no
+	// field value can ever produce a literal "-->" that would close the
+	// comment early. The marshal cannot fail: bugbotMeta is strings and ints.
 	firstLine := "<!-- bugbot:fp=" + f.Fingerprint + " -->"
-	fmt.Fprintf(&b, "%s\n\n", firstLine)
+	metaJSON, _ := json.Marshal(bugbotMeta{
+		Severity: string(f.Severity),
+		Tier:     int(f.Tier),
+		Lens:     f.Lens,
+		File:     f.File,
+		Line:     f.Line,
+		Commit:   f.CommitSHA,
+	})
+	bodyPrefix := firstLine + "\n<!-- bugbot:meta " + string(metaJSON) + " -->\n\n"
+	b.WriteString(bodyPrefix)
 
-	// 2. Title heading.
+	// 3. Title heading.
 	fmt.Fprintf(&b, "## %s\n\n", titleOrUnknown(f.Title))
 
-	// 3. Human-facing meta: only Severity and Location.
+	// 4. Human-facing meta: only Severity and Location.
 	fmt.Fprintf(&b, "**Severity:** %s  \n", severityLabel(f.Severity))
 	if repoURL != "" && f.CommitSHA != "" && f.File != "" {
 		fmt.Fprintf(&b, "**Location:** [`%s:%d`](%s/blob/%s/%s#L%d)  \n\n",
@@ -1157,7 +1410,7 @@ func renderIssueBody(f domain.Finding, repoURL string, prov publishProvenance) s
 		fmt.Fprintf(&b, "**Location:** `%s:%d`  \n\n", f.File, f.Line)
 	}
 
-	// 4. Description — capped to prevent oversized model output from consuming
+	// 5. Description — capped to prevent oversized model output from consuming
 	// the whole body budget. A truncated description is still readable.
 	if f.Description != "" {
 		desc := f.Description
@@ -1168,7 +1421,7 @@ func renderIssueBody(f domain.Finding, repoURL string, prov publishProvenance) s
 		b.WriteString("\n\n")
 	}
 
-	// 5. Candidate fix diff — fencedBlock auto-sizes the fence so a ``` run
+	// 6. Candidate fix diff — fencedBlock auto-sizes the fence so a ``` run
 	// inside the diff cannot break out. Also cap large patches: a truncated
 	// diff is still a useful witness.
 	if f.FixPatch != "" {
@@ -1181,35 +1434,8 @@ func renderIssueBody(f domain.Finding, repoURL string, prov publishProvenance) s
 		b.WriteString("\n")
 	}
 
-	// 6. Inline reproduction block.
+	// 7. Inline reproduction block.
 	b.WriteString(renderReproSection(f.ReproPath))
-
-	// 7. Bugbot metadata <details> block.
-	// Metadata field values (Lens, fingerprint, model names, provider type,
-	// CommitSHA, scan time) are all bugbot-generated — not model-authored text —
-	// so no sanitization is needed here.
-	b.WriteString("<details><summary>Bugbot metadata</summary>\n\n")
-	b.WriteString("| Field | Value |\n")
-	b.WriteString("|---|---|\n")
-	fmt.Fprintf(&b, "| Lens | %s |\n", f.Lens)
-	if len(f.CorroboratingLenses) > 0 {
-		fmt.Fprintf(&b, "| Corroborating lenses | %s |\n", strings.Join(f.CorroboratingLenses, ", "))
-	}
-	fmt.Fprintf(&b, "| Tier | %s |\n", f.Tier.Label())
-	fmt.Fprintf(&b, "| Fingerprint | `%s` |\n", f.Fingerprint)
-	if prov.FinderModel != "" || prov.VerifierModel != "" {
-		fmt.Fprintf(&b, "| Model(s) | finder: %s · verifier: %s |\n", prov.FinderModel, prov.VerifierModel)
-	}
-	if prov.ProviderType != "" {
-		fmt.Fprintf(&b, "| Provider | %s |\n", prov.ProviderType)
-	}
-	if f.CommitSHA != "" {
-		fmt.Fprintf(&b, "| Commit scanned | `%s` |\n", f.CommitSHA)
-	}
-	if !f.CreatedAt.IsZero() {
-		fmt.Fprintf(&b, "| Scan time | %s |\n", f.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
-	}
-	b.WriteString("\n</details>\n\n")
 
 	// 8. Verification trace with 30 KB cap.
 	// Reasoning is model-authored text placed directly inside a <details> block
@@ -1231,29 +1457,29 @@ func renderIssueBody(f domain.Finding, repoURL string, prov publishProvenance) s
 	b.WriteString(footer)
 
 	// Belt-and-braces: if the assembled body still exceeds the safe threshold,
-	// truncate at a safe byte boundary while preserving line 1 (fingerprint
-	// marker — load-bearing for issue recovery) and the attribution footer.
+	// truncate at a safe byte boundary while preserving lines 1-2 (fingerprint
+	// marker + bugbot:meta front-matter — load-bearing for issue recovery and
+	// tooling) and the attribution footer.
 	// sanitizeControlChars runs on the whole body before the size check. It is
-	// safe to slice the sanitized body at len(firstLine+"\n\n") below: firstLine
-	// is the fingerprint marker (literal text + sha256 hex, no control bytes)
-	// and "\n\n" is preserved whitespace, so the marker prefix is byte-identical
-	// after sanitizing and len(afterFirst) still names the exact post-marker
-	// offset.
+	// safe to slice the sanitized body at len(bodyPrefix) below: the marker is
+	// literal text + sha256 hex, the meta comment is JSON (Marshal escapes
+	// control characters as \uXXXX), and "\n\n" is preserved whitespace, so
+	// the prefix is byte-identical after sanitizing and len(bodyPrefix) still
+	// names the exact post-prefix offset.
 	body := sanitizeControlChars(b.String())
 	if len(body) > maxBody {
 		truncNote := "\n\n[... body truncated by bugbot: content exceeds GitHub's issue size limit ...]\n\n"
-		available := maxBody - len(firstLine) - len("\n\n") - len(truncNote) - len("\n") - len(footer)
+		available := maxBody - len(bodyPrefix) - len(truncNote) - len("\n") - len(footer)
 		if available < 0 {
 			available = 0
 		}
 		// truncateUTF8 walks back to a valid UTF-8 rune boundary, so the
 		// truncated slice never breaks a multi-byte rune.
-		afterFirst := firstLine + "\n\n"
-		mid := body[len(afterFirst):]
+		mid := body[len(bodyPrefix):]
 		if len(mid) > available {
 			mid = truncateUTF8(mid, available)
 		}
-		body = afterFirst + mid + truncNote + footer
+		body = bodyPrefix + mid + truncNote + footer
 	}
 
 	return body
