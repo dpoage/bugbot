@@ -1,0 +1,17 @@
+-- bugbot-dnqf.1: label bookkeeping for the publish reconciler.
+--
+-- The reconciler diffs the desired bugbot-managed labels (severity:*,
+-- bugbot:*) for a finding against what was last applied to its GitHub issue.
+-- Without local bookkeeping that diff would cost a gh read per published
+-- issue per cycle; managed_labels stores the last-applied set so the diff is
+-- a local string comparison.
+--
+-- Encoding: comma-joined, sorted label names. A single TEXT column, not a
+-- child table: label sets are tiny (<=2 today), only ever compared as whole
+-- sets, and published_issues is fingerprint-keyed with no need to query BY
+-- label locally.
+--
+-- DEFAULT '' = never applied (pre-migration row, or a row whose labels were
+-- never pushed). The empty sentinel doubles as the legacy-row marker that
+-- triggers a one-time backfill in the reconciler.
+ALTER TABLE published_issues ADD COLUMN managed_labels TEXT NOT NULL DEFAULT '';
