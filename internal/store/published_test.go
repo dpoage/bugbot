@@ -297,7 +297,7 @@ func TestUpsertPublishedIssue_BodyHashRoundTrip(t *testing.T) {
 
 // TestSetPublishedManagedLabels_RoundTrip pins migration 027
 // (published_managed_labels): a fresh openTemp store runs 001-027 in order,
-// so managed_labels must exist, default to '' (read back as nil for rows
+// so managed_labels must exist, default to ” (read back as nil for rows
 // that predate any Set), and round-trip sorted through both Get and List
 // regardless of the caller's input order. A second row with its own labels
 // pins the UPDATE's fingerprint scoping: Set on one fingerprint must not
@@ -412,7 +412,7 @@ func TestSetPublishedManagedLabels_PreservedAcrossUpsert(t *testing.T) {
 }
 
 // TestSetPublishedManagedLabels_ClearAndNoUpdatedAtBump covers the two
-// bookkeeping subtleties: setting empty/nil clears the column back to ''
+// bookkeeping subtleties: setting empty/nil clears the column back to ”
 // (reads back nil), and Set never bumps updated_at — the planner compares
 // finding.updated_at > published.updated_at and label bookkeeping must not
 // masquerade as a body push.
