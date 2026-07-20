@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -474,5 +476,223 @@ func TestSetPublishedManagedLabels_MissingFingerprint(t *testing.T) {
 	}
 	if list != nil {
 		t.Errorf("table not empty after no-op set: %+v", list)
+	}
+}
+
+// TestPublishedIssue_IssueKeyTrackerDefaults pins migration 028
+// (published_issue_key): a fresh openTemp store runs 001-028 in order, so
+// issue_key and tracker must exist and read back at their column DEFAULTs
+// for rows written through the existing API — UpsertPublishedIssue does not
+// set them yet (the epic bugbot-6gfy cutover does). Two rows are written so
+// the assertion covers both the Get and List scan paths on more than one row.
+func TestPublishedIssue_IssueKeyTrackerDefaults(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	fps := []string{"fp-a", "fp-b"}
+	for i, fp := range fps {
+		if err := st.UpsertPublishedIssue(ctx, fp, i+1, IssueStateOpen, ""); err != nil {
+			t.Fatalf("upsert %q: %v", fp, err)
+		}
+	}
+
+	for _, fp := range fps {
+		got, err := st.GetPublishedIssue(ctx, fp)
+		if err != nil {
+			t.Fatalf("get %q: %v", fp, err)
+		}
+		if got.IssueKey != "" {
+			t.Errorf("%q IssueKey = %q, want empty (API writer does not set it yet)", fp, got.IssueKey)
+		}
+		if got.Tracker != "github" {
+			t.Errorf("%q Tracker = %q, want %q (column DEFAULT)", fp, got.Tracker, "github")
+		}
+	}
+
+	list, err := st.ListPublishedIssues(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(list))
+	}
+	for _, pi := range list {
+		if pi.IssueKey != "" || pi.Tracker != "github" {
+			t.Errorf("list row %q: IssueKey = %q, Tracker = %q; want \"\", \"github\"", pi.Fingerprint, pi.IssueKey, pi.Tracker)
+		}
+	}
+}
+
+// TestUpsertPublishedIssue_PreservesIssueKeyTracker verifies (not assumes)
+// that UpsertPublishedIssue's ON CONFLICT clause does not touch issue_key or
+// tracker — same discipline as managed_labels: a conflict upsert refreshes
+// issue_number/state/body_hash/updated_at, but tracker identity set by a
+// future keyed writer must survive an unrelated body push. The columns are
+// set by raw UPDATE because no API writes them yet (that is the epic
+// bugbot-6gfy cutover, not this slice). A bystander row with its own
+// distinct issue_key/tracker pins the upsert's fingerprint scoping.
+func TestUpsertPublishedIssue_PreservesIssueKeyTracker(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	fp := "fp-keyed"
+	other := "fp-bystander"
+	if err := st.UpsertPublishedIssue(ctx, fp, 1, IssueStateOpen, "hash-a"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := st.UpsertPublishedIssue(ctx, other, 12, IssueStateOpen, "hash-o"); err != nil {
+		t.Fatalf("seed other: %v", err)
+	}
+	for _, row := range []struct{ fp, key, tracker string }{
+		{fp, "PROJ-42", "jira"},
+		{other, "999", "gitlab"},
+	} {
+		res, err := st.DB().ExecContext(ctx,
+			`UPDATE published_issues SET issue_key = ?, tracker = ? WHERE fingerprint = ?`,
+			row.key, row.tracker, row.fp)
+		if err != nil {
+			t.Fatalf("raw update %q: %v", row.fp, err)
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			t.Fatalf("raw update %q affected %d rows (err=%v), want 1", row.fp, n, err)
+		}
+	}
+	otherBefore, err := st.GetPublishedIssue(ctx, other)
+	if err != nil {
+		t.Fatalf("get bystander before: %v", err)
+	}
+
+	// Conflict upsert on fp only.
+	if err := st.UpsertPublishedIssue(ctx, fp, 2, IssueStateClosed, "hash-b"); err != nil {
+		t.Fatalf("conflict upsert: %v", err)
+	}
+
+	got, err := st.GetPublishedIssue(ctx, fp)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.IssueKey != "PROJ-42" {
+		t.Errorf("IssueKey after upsert = %q, want %q", got.IssueKey, "PROJ-42")
+	}
+	if got.Tracker != "jira" {
+		t.Errorf("Tracker after upsert = %q, want %q", got.Tracker, "jira")
+	}
+	// Sanity: the upsert itself still applied its own columns.
+	if got.IssueNumber != 2 || got.State != IssueStateClosed || got.BodyHash != "hash-b" {
+		t.Errorf("upsert columns not refreshed: %+v", got)
+	}
+
+	// Bystander row untouched in full.
+	otherGot, err := st.GetPublishedIssue(ctx, other)
+	if err != nil {
+		t.Fatalf("get bystander after: %v", err)
+	}
+	if otherGot.IssueKey != "999" || otherGot.Tracker != "gitlab" {
+		t.Errorf("bystander IssueKey/Tracker = %q/%q, want 999/gitlab", otherGot.IssueKey, otherGot.Tracker)
+	}
+	if otherGot.IssueNumber != otherBefore.IssueNumber || otherGot.State != otherBefore.State ||
+		otherGot.BodyHash != otherBefore.BodyHash || !otherGot.UpdatedAt.Equal(otherBefore.UpdatedAt) {
+		t.Errorf("bystander row changed by upsert on %q:\n before: %+v\n after:  %+v", fp, otherBefore, otherGot)
+	}
+}
+
+// TestMigration028_BackfillsIssueKeyFromIssueNumber is a real upgrade test
+// for the 028 backfill: it builds a database at schema version 27 by applying
+// the embedded migrations one at a time (applyMigration keeps the
+// schema_migrations bookkeeping consistent, exactly as migrate() would),
+// seeds published_issues rows that predate 028, then runs the real Open() —
+// whose migrate() applies 028 — and asserts through the store API that
+// issue_key == CAST(issue_number AS TEXT) and tracker == 'github' for every
+// pre-existing row. Two rows with distinct numbers pin that the backfill
+// UPDATE is table-wide, not accidentally scoped.
+//
+// NOTE for the 029 cutover (epic bugbot-6gfy): when issue_number is dropped,
+// the seed INSERT below (valid at schema 27) still works, but the
+// IssueNumber assertions must go.
+func TestMigration028_BackfillsIssueKeyFromIssueNumber(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+
+	// migrate() creates this table before applying anything; mirror it so
+	// applyMigration's bookkeeping insert works and the later Open() resumes
+	// from version 27 instead of re-running 001.
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version    INTEGER PRIMARY KEY,
+			name       TEXT NOT NULL,
+			applied_at TEXT NOT NULL
+		)`); err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	saw028 := false
+	for _, m := range migs {
+		if m.version >= 28 {
+			if m.version == 28 {
+				saw028 = true
+			}
+			continue
+		}
+		if err := applyMigration(ctx, db, m); err != nil {
+			t.Fatalf("apply %s: %v", m.name, err)
+		}
+	}
+	if !saw028 {
+		t.Fatal("embedded migrations lack version 028")
+	}
+
+	// Seed rows as they existed before 028: issue_number is the only issue
+	// identity. body_hash (025) and managed_labels (027) fall back to their
+	// DEFAULTs.
+	now := nowUTC().Format(timeLayout)
+	seeds := []struct {
+		fp  string
+		num int
+	}{
+		{"fp-old", 123},
+		{"fp-bystander", 456},
+	}
+	for _, s := range seeds {
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO published_issues (fingerprint, issue_number, state, created_at, updated_at)
+			VALUES (?, ?, 'open', ?, ?)`,
+			s.fp, s.num, now, now); err != nil {
+			t.Fatalf("seed %q: %v", s.fp, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close pre-upgrade db: %v", err)
+	}
+
+	// The real upgrade path: Open() runs migrate(), which applies 028+.
+	st, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open (upgrade): %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	for _, s := range seeds {
+		got, err := st.GetPublishedIssue(ctx, s.fp)
+		if err != nil {
+			t.Fatalf("get %q: %v", s.fp, err)
+		}
+		if want := fmt.Sprintf("%d", s.num); got.IssueKey != want {
+			t.Errorf("%q IssueKey = %q, want %q (backfill from issue_number)", s.fp, got.IssueKey, want)
+		}
+		if got.Tracker != "github" {
+			t.Errorf("%q Tracker = %q, want %q", s.fp, got.Tracker, "github")
+		}
+		if got.IssueNumber != s.num {
+			t.Errorf("%q IssueNumber = %d, want %d (028 is additive; number must survive)", s.fp, got.IssueNumber, s.num)
+		}
 	}
 }

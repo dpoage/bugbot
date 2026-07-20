@@ -49,6 +49,16 @@ type PublishedIssue struct {
 	// and sorted so the publish reconciler can diff desired vs. applied
 	// labels without a gh read per issue.
 	ManagedLabels []string
+	// IssueKey is the tracker-native issue id as opaque text (GitHub "123",
+	// Jira "PROJ-42"), or "" for rows written before the publish applier
+	// speaks keys (migration 028 backfills pre-existing GitHub rows from
+	// issue_number; post-028 writes through UpsertPublishedIssue leave the
+	// column at its DEFAULT '' until the epic bugbot-6gfy cutover).
+	IssueKey string
+	// Tracker names the tracker that owns IssueKey ("github", "jira", ...).
+	// DEFAULT 'github': every row written by the current applier is a
+	// GitHub issue.
+	Tracker string
 }
 
 // UpsertPublishedIssue records (or refreshes) the GitHub issue linked to a
@@ -150,12 +160,12 @@ func (s *Store) GetPublishedIssue(ctx context.Context, fingerprint string) (Publ
 	var state string
 	var createdAt, updatedAt, managedLabels string
 	err := s.queryRow(ctx, "get_published_issue",
-		`SELECT fingerprint, issue_number, state, created_at, updated_at, body_hash, managed_labels
+		`SELECT fingerprint, issue_number, state, created_at, updated_at, body_hash, managed_labels, issue_key, tracker
 		   FROM published_issues
 		  WHERE fingerprint = ?`,
 		[]any{fingerprint},
 		func(row *sql.Row) error {
-			return row.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt, &pi.BodyHash, &managedLabels)
+			return row.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt, &pi.BodyHash, &managedLabels, &pi.IssueKey, &pi.Tracker)
 		},
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -184,7 +194,7 @@ func (s *Store) GetPublishedIssue(ctx context.Context, fingerprint string) (Publ
 // the contract honest if a later migration ever changes the uniqueness.
 func (s *Store) ListPublishedIssues(ctx context.Context) ([]PublishedIssue, error) {
 	return queryRows(ctx, s, "list_published_issues",
-		`SELECT fingerprint, issue_number, state, created_at, updated_at, body_hash, managed_labels
+		`SELECT fingerprint, issue_number, state, created_at, updated_at, body_hash, managed_labels, issue_key, tracker
 		   FROM published_issues
 		  ORDER BY fingerprint ASC, rowid ASC`,
 		nil,
@@ -192,7 +202,7 @@ func (s *Store) ListPublishedIssues(ctx context.Context) ([]PublishedIssue, erro
 			var pi PublishedIssue
 			var state string
 			var createdAt, updatedAt, managedLabels string
-			if err := r.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt, &pi.BodyHash, &managedLabels); err != nil {
+			if err := r.Scan(&pi.Fingerprint, &pi.IssueNumber, &state, &createdAt, &updatedAt, &pi.BodyHash, &managedLabels, &pi.IssueKey, &pi.Tracker); err != nil {
 				return PublishedIssue{}, err
 			}
 			pi.State = IssueState(state)
