@@ -129,6 +129,9 @@ func decodeManagedLabels(s string) []string {
 // bookkeeping is not a body push. Setting labels for a fingerprint with no
 // published_issues row is a nil no-op, mirroring DeletePublishedIssue's
 // idempotency, so the reconciler needs no separate existence check.
+// Comma-containing label names are unsupported: the column is comma-joined,
+// so such a label would split into fragments on read. Bugbot-managed labels
+// (severity:*, bugbot:*) never contain commas.
 func (s *Store) SetPublishedManagedLabels(ctx context.Context, fingerprint string, labels []string) error {
 	_, err := s.exec(ctx, "set_published_managed_labels",
 		`UPDATE published_issues SET managed_labels = ? WHERE fingerprint = ?`,

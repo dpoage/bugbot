@@ -299,7 +299,9 @@ func TestUpsertPublishedIssue_BodyHashRoundTrip(t *testing.T) {
 // (published_managed_labels): a fresh openTemp store runs 001-027 in order,
 // so managed_labels must exist, default to '' (read back as nil for rows
 // that predate any Set), and round-trip sorted through both Get and List
-// regardless of the caller's input order.
+// regardless of the caller's input order. A second row with its own labels
+// pins the UPDATE's fingerprint scoping: Set on one fingerprint must not
+// touch any other row.
 func TestSetPublishedManagedLabels_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
@@ -307,6 +309,16 @@ func TestSetPublishedManagedLabels_RoundTrip(t *testing.T) {
 	fp := "fp-labels"
 	if err := st.UpsertPublishedIssue(ctx, fp, 11, IssueStateOpen, ""); err != nil {
 		t.Fatalf("seed: %v", err)
+	}
+
+	// Bystander row with its own labels: must be untouched by Sets on fp.
+	other := "fp-other"
+	otherWant := []string{"bugbot:auto-filed", "severity:low"}
+	if err := st.UpsertPublishedIssue(ctx, other, 12, IssueStateOpen, ""); err != nil {
+		t.Fatalf("seed other: %v", err)
+	}
+	if err := st.SetPublishedManagedLabels(ctx, other, otherWant); err != nil {
+		t.Fatalf("set other: %v", err)
 	}
 
 	// Pre-Set: the column's DEFAULT '' decodes to nil (legacy-row marker).
@@ -342,8 +354,24 @@ func TestSetPublishedManagedLabels_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(list) != 1 || !slices.Equal(list[0].ManagedLabels, want) {
-		t.Errorf("List ManagedLabels = %+v, want %v", list, want)
+	if len(list) != 2 {
+		t.Fatalf("expected 2 rows, got %d: %+v", len(list), list)
+	}
+	// ORDER BY fingerprint ASC -> fp-labels, fp-other.
+	if !slices.Equal(list[0].ManagedLabels, want) {
+		t.Errorf("List ManagedLabels = %v, want %v", list[0].ManagedLabels, want)
+	}
+
+	// Fingerprint scoping: the bystander row's labels survived the Set on fp.
+	if !slices.Equal(list[1].ManagedLabels, otherWant) {
+		t.Errorf("bystander List ManagedLabels = %v, want %v", list[1].ManagedLabels, otherWant)
+	}
+	otherGot, err := st.GetPublishedIssue(ctx, other)
+	if err != nil {
+		t.Fatalf("get other: %v", err)
+	}
+	if !slices.Equal(otherGot.ManagedLabels, otherWant) {
+		t.Errorf("bystander Get ManagedLabels = %v, want %v", otherGot.ManagedLabels, otherWant)
 	}
 }
 
