@@ -9,6 +9,9 @@ import (
 // the documented defaults.
 func TestPublishDefaults(t *testing.T) {
 	d := Default()
+	if d.Publish.Tracker != "github" {
+		t.Errorf("default publish.tracker = %q, want github", d.Publish.Tracker)
+	}
 	if d.Publish.Enabled {
 		t.Errorf("default publish.enabled = true, want false")
 	}
@@ -248,5 +251,110 @@ func TestPublishLabelKnobs_AsymmetricEnv(t *testing.T) {
 	}
 	if !cfg.Publish.TierLabels {
 		t.Errorf("tier_labels = false, want true (severity env var must not touch TierLabels)")
+	}
+}
+
+// TestPublishTracker_YAMLVerbatim confirms an arbitrary tracker name loads
+// verbatim: config deliberately does not gate membership (the tracker
+// registry in internal/tracker does that at publish time; importing it here
+// would create an import cycle).
+func TestPublishTracker_YAMLVerbatim(t *testing.T) {
+	yaml := validYAML + "\npublish:\n  tracker: gitlab\n"
+	cfg, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Publish.Tracker != "gitlab" {
+		t.Errorf("tracker = %q, want gitlab (config must not gate membership)", cfg.Publish.Tracker)
+	}
+}
+
+// TestPublishTracker_EmptyRejected confirms an explicit empty tracker in
+// yaml is rejected by validation with an error naming the field. This is
+// distinct from an absent key, which keeps the default via the overlay.
+func TestPublishTracker_EmptyRejected(t *testing.T) {
+	yaml := validYAML + "\npublish:\n  tracker: \"\"\n"
+	_, err := Load(writeTemp(t, yaml))
+	if err == nil || !strings.Contains(err.Error(), "publish.tracker") {
+		t.Errorf("Load(tracker=\"\") = %v, want publish.tracker error", err)
+	}
+}
+
+// TestPublishTracker_AbsentKeyKeepsDefault confirms the default survives the
+// yaml overlay: a publish section without the tracker key — and a config
+// with no publish section at all — both load with tracker == "github".
+func TestPublishTracker_AbsentKeyKeepsDefault(t *testing.T) {
+	for name, yaml := range map[string]string{
+		"no publish section":          validYAML,
+		"publish section, no tracker": validYAML + "\npublish:\n  enabled: true\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := Load(writeTemp(t, yaml))
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.Publish.Tracker != "github" {
+				t.Errorf("tracker = %q, want github (absent key must keep default)", cfg.Publish.Tracker)
+			}
+		})
+	}
+}
+
+// TestPublishTracker_EnvOverridesYAML confirms BUGBOT_PUBLISH_TRACKER wins
+// over an explicit yaml value.
+func TestPublishTracker_EnvOverridesYAML(t *testing.T) {
+	t.Setenv("BUGBOT_PUBLISH_TRACKER", "jira")
+	yaml := validYAML + "\npublish:\n  tracker: gitlab\n"
+	cfg, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Publish.Tracker != "jira" {
+		t.Errorf("tracker = %q, want jira (env must override yaml)", cfg.Publish.Tracker)
+	}
+}
+
+// TestPublishTracker_AsymmetricEnv sets ONLY the tracker env var so a
+// mis-wired setStr destination cannot pass: the override must land on
+// Tracker and leave every neighbouring publish knob at its default.
+func TestPublishTracker_AsymmetricEnv(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{
+		"BUGBOT_PUBLISH_TRACKER=jira",
+	}); err != nil {
+		t.Fatalf("applyEnvOverrides: %v", err)
+	}
+	if cfg.Publish.Tracker != "jira" {
+		t.Errorf("tracker = %q, want jira (BUGBOT_PUBLISH_TRACKER must map to Tracker)", cfg.Publish.Tracker)
+	}
+	if cfg.Publish.Enabled {
+		t.Errorf("enabled = true, want false (tracker env var must not touch Enabled)")
+	}
+	if cfg.Publish.TierMin != 2 {
+		t.Errorf("tier_min = %d, want 2 (tracker env var must not touch TierMin)", cfg.Publish.TierMin)
+	}
+	if len(cfg.Publish.Labels) != 1 || cfg.Publish.Labels[0] != "bugbot" {
+		t.Errorf("labels = %v, want [bugbot] (tracker env var must not touch Labels)", cfg.Publish.Labels)
+	}
+	if !cfg.Publish.CloseOnFixed {
+		t.Errorf("close_on_fixed = false, want true (tracker env var must not touch CloseOnFixed)")
+	}
+	if !cfg.Publish.SeverityLabels {
+		t.Errorf("severity_labels = false, want true (tracker env var must not touch SeverityLabels)")
+	}
+	if !cfg.Publish.TierLabels {
+		t.Errorf("tier_labels = false, want true (tracker env var must not touch TierLabels)")
+	}
+}
+
+// TestStarterYAML_PublishTracker confirms the starter template round-trips
+// through the strict loader with tracker == "github".
+func TestStarterYAML_PublishTracker(t *testing.T) {
+	cfg, err := Load(writeTemp(t, StarterYAML))
+	if err != nil {
+		t.Fatalf("StarterYAML failed to load: %v", err)
+	}
+	if cfg.Publish.Tracker != "github" {
+		t.Errorf("template tracker = %q, want github", cfg.Publish.Tracker)
 	}
 }
