@@ -56,7 +56,7 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 	if _, err := st.EnqueueRepro(ctx, oldFP); err != nil {
 		t.Fatalf("enqueue repro: %v", err)
 	}
-	if err := st.UpsertPublishedIssue(ctx, oldFP, 42, IssueStateOpen, ""); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, oldFP, "github", "42", IssueStateOpen, ""); err != nil {
 		t.Fatalf("upsert published issue: %v", err)
 	}
 
@@ -109,7 +109,7 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 	}
 
 	// Repro-attempts queue row and published-issue link both carry forward
-	// onto the new fingerprint so ReproContradicted and the GitHub issue link
+	// onto the new fingerprint so ReproContradicted and the tracker issue link
 	// survive the rename instead of orphaning under a fingerprint nothing
 	// looks up again.
 	if _, err := st.GetReproAttempt(ctx, oldFP); err != ErrNotFound {
@@ -125,8 +125,8 @@ func TestRenameFindingIdentity_RewritesOpenFindingAndSuppression(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPublishedIssue(new): %v", err)
 	}
-	if pub.IssueNumber != 42 {
-		t.Fatalf("published issue number should carry forward, got %d", pub.IssueNumber)
+	if pub.IssueKey != "42" {
+		t.Fatalf("published issue key should carry forward, got %q", pub.IssueKey)
 	}
 
 	// A "rescan" at the new path must not resurrect it as a duplicate open
