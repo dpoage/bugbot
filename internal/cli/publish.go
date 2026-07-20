@@ -9,9 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -22,19 +20,24 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/engine"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/bugbot/internal/tracker"
+
+	// Registers the GitHub adapter with the tracker registry so the cobra
+	// and daemon wiring can build whatever name config selects.
+	_ "github.com/dpoage/bugbot/internal/tracker/github"
 )
 
-// publishGH is a package-level seam that tests can replace with a fakeGH.
-// Production code leaves it nil and the command wires in engine.RealGH at run time.
-var publishGH engine.GHRunner
+// publishTracker is a package-level seam that tests can replace with a fake
+// (or a fake-backed adapter). Production code leaves it nil and the command
+// builds the configured tracker from the registry at run time.
+var publishTracker tracker.Tracker
 
-// newPublishCmd implements `bugbot publish`: files open findings as GitHub
-// issues via gh, idempotently, and closes linked issues when findings are
-// auto-closed. The manual command always runs; the daemon hook is gated by
-// cfg.Publish.Enabled.
+// newPublishCmd implements `bugbot publish`: files open findings as issues
+// on the configured tracker, idempotently, and closes linked issues when
+// findings are auto-closed. The manual command always runs; the daemon hook
+// is gated by cfg.Publish.Enabled.
 func newPublishCmd() *cobra.Command {
 	var (
 		dryRun  bool
@@ -43,27 +46,31 @@ func newPublishCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "publish [flags]",
-		Short: "File open findings as GitHub issues (idempotent)",
-		Long: `Publish open findings to GitHub Issues via the gh CLI.
+		Short: "File open findings as tracker issues (idempotent)",
+		Long: `Publish open findings to the configured issue tracker.
+
+The tracker is selected by publish.tracker in config. The default "github"
+files GitHub issues through the GitHub CLI, which must be installed and
+authenticated; an unknown tracker name fails with the list of known ones.
 
 On each run it:
-  - Backsyncs GitHub -> local first: any published issue a human closed
-    directly on GitHub is detected (one issues-list call, skipped entirely
-    when nothing could have been closed) and pulled into the store -- the
-    open finding is dismissed (so it is not re-reported) and its row is
-    marked closed. This never posts a comment or PATCHes the issue; the
-    human's close stands as-is.
-  - Creates a new GitHub issue for every open finding with Tier <= tier_min
+  - Backsyncs tracker -> local first: any published issue a human closed
+    directly on the tracker is detected (one issues-list call, skipped
+    entirely when nothing could have been closed) and pulled into the
+    store -- the open finding is dismissed (so it is not re-reported) and
+    its row is marked closed. This never posts a comment or pushes a body;
+    the human's close stands as-is.
+  - Creates a new tracker issue for every open finding with Tier <= tier_min
     that has not yet been filed.
   - Skips findings whose published issue is already up-to-date.
   - Updates the issue body if the finding was updated more recently than the
     last publish (UpdatedAt > published.updated_at).
-  - Reopens the GitHub issue (state PATCH + fresh body, then a comment) for
+  - Reopens the tracker issue (state flip + fresh body, then a comment) for
     a finding that regressed after bugbot itself had closed it -- backsync
     above already ensures a still-open finding pointing at a closed row can
     only be a bugbot-closed regression, never a human close.
-  - Closes the GitHub issue (and posts a comment) for findings that have been
-    fixed or dismissed, when close_on_fixed is true.
+  - Closes the tracker issue (and posts a comment) for findings that have
+    been fixed or dismissed, when close_on_fixed is true.
   - Applies bugbot-managed labels on create alongside the configured base
     labels: severity:<critical|high|medium|low> when severity_labels is on,
     and bugbot:<fix-witnessed|reproduced|verified|suspected> (evidence tier)
@@ -71,8 +78,7 @@ On each run it:
     severity/tier change; human-added labels are never touched, and with
     both knobs off bugbot makes zero label calls.
 
-Re-running files zero duplicates (idempotent via the published_issues table).
-Requires the gh CLI to be installed and authenticated.`,
+Re-running files zero duplicates (idempotent via the published_issues table).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -89,12 +95,15 @@ Requires the gh CLI to be installed and authenticated.`,
 				effective = tierMin
 			}
 
-			gh := publishGH
-			if gh == nil {
-				gh = engine.NewPacedGH(engine.RealGH)
+			tr := publishTracker
+			if tr == nil {
+				tr, err = tracker.New(cfg.Publish.Tracker, tracker.Config{Labels: cfg.Publish.Labels})
+				if err != nil {
+					return err
+				}
 			}
 
-			return runPublish(ctx, cmd.OutOrStdout(), gh, st, cfg.Publish, effective, dryRun)
+			return runPublish(ctx, cmd.OutOrStdout(), tr, st, cfg.Publish, effective, dryRun)
 		},
 	}
 
@@ -104,10 +113,11 @@ Requires the gh CLI to be installed and authenticated.`,
 }
 
 // runPublish is the entry point for both the command and the daemon hook. It
-// loads findings and published_issues, plans the reconcile, and applies it.
-// w receives the human-readable summary; pass cmd.OutOrStdout() from a cobra
-// command or any io.Writer from the daemon hook.
-func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.Store, cfg config.Publish, tierMin int, dryRun bool) error {
+// loads findings and published_issues, plans the reconcile, and applies it
+// through the configured tracker. w receives the human-readable summary;
+// pass cmd.OutOrStdout() from a cobra command or any io.Writer from the
+// daemon hook.
+func runPublish(ctx context.Context, w io.Writer, tr tracker.Tracker, st *store.Store, cfg config.Publish, tierMin int, dryRun bool) error {
 
 	// Gather inputs for the pure planner.
 	openFindings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusOpen})
@@ -117,7 +127,7 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 
 	// Also load fixed+dismissed+superseded to drive close actions. Superseded
 	// (backlog reconcile, bugbot-ezmx.4) is a merged-away duplicate, closed
-	// exactly like fixed/dismissed so its GitHub issue does not stay open
+	// exactly like fixed/dismissed so its tracker issue does not stay open
 	// indefinitely after the underlying defect is now tracked under the
 	// canonical finding.
 	fixedFindings, err := st.ListFindings(ctx, domain.FindingFilter{Status: domain.StatusFixed})
@@ -142,24 +152,24 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 		publishedMap[pi.Fingerprint] = pi
 	}
 
-	// ---- Backsync: GitHub -> local (bugbot-fchv) ----
+	// ---- Backsync: tracker -> local (bugbot-fchv) ----
 	//
 	// planPublish only ever reads local state; nothing above this point looks
-	// at what GitHub itself currently thinks. Two local/remote-drift bugs
-	// follow from that gap:
+	// at what the tracker itself currently thinks. Two local/remote-drift
+	// bugs follow from that gap:
 	//
-	//  1. A human closes a bugbot-filed issue on GitHub as a triage signal.
-	//     Without backsync the local finding stays "open" forever, and the
-	//     next UpdatedAt bump plans a body PATCH on the closed issue and
-	//     upserts the row back to "open" -- the human's signal is silently
-	//     discarded.
+	//  1. A human closes a bugbot-filed issue on the tracker as a triage
+	//     signal. Without backsync the local finding stays "open" forever,
+	//     and the next UpdatedAt bump plans a body push on the closed issue
+	//     and upserts the row back to "open" -- the human's signal is
+	//     silently discarded.
 	//  2. store.ReopenAsRegression flips a fixed finding back to open while
 	//     its published row is still "closed" (bugbot closed it, then the
-	//     defect came back). Nothing PATCHes state=open, so the GitHub issue
-	//     stays closed even though we are actively re-tracking it.
+	//     defect came back). Nothing reopens the tracker issue, so it stays
+	//     closed even though we are actively re-tracking it.
 	//
 	// This step resolves (1): any published row still "open"/"closing" whose
-	// GitHub issue is now closed is backsynced -- the row is marked closed,
+	// tracker issue is now closed is backsynced -- the row is marked closed,
 	// and if the local finding is still open we dismiss it (StatusDismissed
 	// records suppression memory, store/findings.go:428-455 -- a human
 	// closing our issue means "don't show me this again"). (2) is resolved
@@ -168,10 +178,10 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 	// this run), so a still-open finding pointing at one is unambiguously a
 	// bugbot-closed regression, not a human close.
 	//
-	// Cost: one extra `gh api issues?state=closed` list call, and only when
-	// at least one row is in a state that could have been closed on GitHub
+	// Cost: one extra closed-issues listing call, and only when at least
+	// one row is in a state that could have been closed on the tracker
 	// (open/closing) -- a store with everything already closed costs zero
-	// gh calls.
+	// tracker calls.
 	backsynced := 0
 	needsBacksync := false
 	for _, pi := range published {
@@ -181,21 +191,21 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 		}
 	}
 	if needsBacksync {
-		closedIssues, err := listBugbotIssues(ctx, gh, cfg.Labels, "closed")
+		closedIssues, err := tr.ListIssues(ctx, "closed")
 		if err != nil {
 			return fmt.Errorf("publish: backsync: list closed issues: %w", err)
 		}
-		closedNums := make(map[int]bool, len(closedIssues))
+		closedKeys := make(map[tracker.IssueKey]bool, len(closedIssues))
 		for _, is := range closedIssues {
-			// The listing endpoint is shared with pull requests (issues and
-			// PRs share one number namespace on GitHub); a defensive check
-			// on State keeps a malformed/unexpected entry from ever counting
-			// as "closed" here even though we only ever match numbers we
-			// ourselves recorded in published_issues.
+			// Some trackers share the listing with other work-item kinds
+			// (GitHub issues and PRs share one number namespace); a
+			// defensive check on State keeps a malformed/unexpected entry
+			// from ever counting as "closed" here even though we only ever
+			// match keys we ourselves recorded in published_issues.
 			if is.State != "closed" {
 				continue
 			}
-			closedNums[is.Number] = true
+			closedKeys[is.Key] = true
 		}
 
 		findingByFP := make(map[string]domain.Finding, len(openFindings)+len(fixedFindings)+len(dismissedFindings)+len(supersededFindings))
@@ -205,7 +215,7 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			}
 		}
 
-		backsyncActions := planBacksync(publishedMap, closedNums, findingByFP)
+		backsyncActions := planBacksync(publishedMap, closedKeys, findingByFP)
 
 		// Apply first (or print, under dry-run) -- but the two reconciliation
 		// steps below (publishedMap, dismissedFPs) are ALWAYS derived from
@@ -224,23 +234,23 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			}
 			if dryRun {
 				if ba.dismissFinding {
-					_, _ = fmt.Fprintf(w, "dry-run: backsync issue #%d for %s (closed on GitHub; would dismiss finding)\n", ba.issueNumber, ba.fingerprint[:12])
+					_, _ = fmt.Fprintf(w, "dry-run: backsync issue %s for %s (closed on tracker; would dismiss finding)\n", ba.issueKey, ba.fingerprint[:12])
 				} else {
-					_, _ = fmt.Fprintf(w, "dry-run: backsync issue #%d for %s (closed on GitHub; finding already %s)\n", ba.issueNumber, ba.fingerprint[:12], status)
+					_, _ = fmt.Fprintf(w, "dry-run: backsync issue %s for %s (closed on tracker; finding already %s)\n", ba.issueKey, ba.fingerprint[:12], status)
 				}
 				backsynced++
 				continue
 			}
 			if ba.dismissFinding {
-				reason := fmt.Sprintf("GitHub issue #%d was closed manually; dismissed by publish backsync", ba.issueNumber)
+				reason := fmt.Sprintf("issue %s was closed manually on the tracker; dismissed by publish backsync", ba.issueKey)
 				if err := st.UpdateStatus(ctx, ba.fingerprint, domain.StatusDismissed, reason); err != nil {
 					return fmt.Errorf("publish: backsync dismiss %s: %w", ba.fingerprint[:12], err)
 				}
-				_, _ = fmt.Fprintf(w, "backsynced issue #%d for %s (closed on GitHub; finding dismissed)\n", ba.issueNumber, ba.fingerprint[:12])
+				_, _ = fmt.Fprintf(w, "backsynced issue %s for %s (closed on tracker; finding dismissed)\n", ba.issueKey, ba.fingerprint[:12])
 			} else {
-				_, _ = fmt.Fprintf(w, "backsynced issue #%d for %s (closed on GitHub; finding already %s)\n", ba.issueNumber, ba.fingerprint[:12], status)
+				_, _ = fmt.Fprintf(w, "backsynced issue %s for %s (closed on tracker; finding already %s)\n", ba.issueKey, ba.fingerprint[:12], status)
 			}
-			if err := st.UpsertPublishedIssue(ctx, ba.fingerprint, ba.issueNumber, store.IssueStateClosed, ""); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, ba.fingerprint, tr.Name(), string(ba.issueKey), store.IssueStateClosed, ""); err != nil {
 				return fmt.Errorf("publish: backsync record closed %s: %w", ba.fingerprint[:12], err)
 			}
 			backsynced++
@@ -255,7 +265,8 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 		for _, ba := range backsyncActions {
 			publishedMap[ba.fingerprint] = store.PublishedIssue{
 				Fingerprint: ba.fingerprint,
-				IssueNumber: ba.issueNumber,
+				IssueKey:    string(ba.issueKey),
+				Tracker:     tr.Name(),
 				State:       store.IssueStateClosed,
 			}
 			if ba.dismissFinding {
@@ -276,7 +287,7 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 	plan := planPublish(openFindings, fixedFindings, dismissedFindings, supersededFindings, publishedMap, tierMin, cfg.CloseOnFixed)
 
 	// Resolve the repo URL once; tolerate failure (degrade: no permalinks).
-	repoURL := resolveRepoURL(ctx, gh)
+	repoURL := tr.RepoURL(ctx)
 
 	created, updated, adopted, reopened, closed, skipped, stale, failed := 0, 0, 0, 0, 0, 0, 0, 0
 
@@ -290,39 +301,41 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			created, updated, adopted, reopened, closed, backsynced, skipped, stale, failed)
 	}
 
-	// applyGHErr classifies a gh error hit while applying one planned
+	// applyErr classifies a tracker error hit while applying one planned
 	// action and reports how the loop should react:
 	//
-	//   - non-nil return: the WHOLE run must stop. Either gh is missing
-	//     from PATH (nothing else in the plan can succeed either, so keep
-	//     going is pointless) or engine.IsGHRateLimited(err) is true --
-	//     the paced runner (engine.NewPacedGH, wired in at the command
-	//     layer) has already exhausted its 10s/30s/60s retry budget, so
-	//     retrying again here would only burn more GitHub quota. The
-	//     caller must `return` the result immediately.
-	//   - nil return: the failure is scoped to this one action (422
-	//     validation, a transient 5xx that outlived the paced retries,
-	//     etc.). It has already been logged to w and counted in failed;
-	//     the caller should `continue` to the next planned action instead
-	//     of dropping the rest of the plan. This is safe because every
-	//     composite action writes its pending/closing tombstone state to
-	//     the store BEFORE the gh call that can fail here, so a skipped
-	//     action resumes correctly next cycle -- the same tombstone
-	//     design the 410/404 stale-row paths below already rely on.
+	//   - non-nil return: the WHOLE run must stop. Either the tracker's
+	//     client tooling is missing (tracker.ErrMissingPrereq -- nothing
+	//     else in the plan can succeed either, so keeping going is
+	//     pointless) or the tracker is rate limiting
+	//     (tracker.ErrRateLimited -- the adapter has already exhausted
+	//     whatever pacing/retry budget it owns by the time this surfaces,
+	//     so retrying again here would only burn more quota). The caller
+	//     must `return` the result immediately.
+	//   - nil return: the failure is scoped to this one action (a
+	//     validation rejection, a transient backend failure that outlived
+	//     the adapter's retries, etc.). It has already been logged to w
+	//     and counted in failed; the caller should `continue` to the next
+	//     planned action instead of dropping the rest of the plan. This is
+	//     safe because every composite action writes its pending/closing
+	//     tombstone state to the store BEFORE the tracker call that can
+	//     fail here, so a skipped action resumes correctly next cycle --
+	//     the same tombstone design the ErrIssueGone stale-row paths below
+	//     already rely on.
 	//
 	// Store errors are NOT routed through this helper: any st.* failure
 	// still aborts the run directly at its call site (unchanged), because
 	// a broken local db risks desyncing state no matter which action hit it.
-	applyGHErr := func(action string, issueNumber int, fingerprint string, err error) error {
-		if isGHMissing(err) {
-			return errGHRequired()
+	applyErr := func(action string, key tracker.IssueKey, fingerprint string, err error) error {
+		if errors.Is(err, tracker.ErrMissingPrereq) {
+			return fmt.Errorf("publish: %w", err)
 		}
-		if engine.IsGHRateLimited(err) {
+		if errors.Is(err, tracker.ErrRateLimited) {
 			printSummary()
-			return fmt.Errorf("publish: aborting remaining plan after GitHub rate limit retries exhausted (%s for %s): %w", action, fingerprint[:12], err)
+			return fmt.Errorf("publish: aborting remaining plan after tracker rate limit retries exhausted (%s for %s): %w", action, fingerprint[:12], err)
 		}
-		if issueNumber > 0 {
-			_, _ = fmt.Fprintf(w, "failed %s issue #%d for %s: %v\n", action, issueNumber, fingerprint[:12], err)
+		if key != "" {
+			_, _ = fmt.Fprintf(w, "failed %s issue %s for %s: %v\n", action, key, fingerprint[:12], err)
 		} else {
 			_, _ = fmt.Fprintf(w, "failed %s for %s: %v\n", action, fingerprint[:12], err)
 		}
@@ -331,14 +344,18 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 	}
 
 	// ensureManagedLabels lazily creates each bugbot-managed label in the
-	// repo (color + description) before the first gh call in this run that
-	// applies it, memoized per run so each label costs at most one POST per
-	// publish cycle. An error containing "already_exists" or "422" means the
-	// label is already there — success for our purposes (idempotent). Base
-	// cfg.Labels are never ensured: those are user-managed, and creating
-	// them (or fighting over their color) is not bugbot's business.
+	// repo (color + description) before the first tracker call in this run
+	// that applies it, memoized per run so each label costs at most one
+	// create call per publish cycle. The adapter owns idempotency: ensuring
+	// a label that already exists is success. Base cfg.Labels are never
+	// ensured: those are user-managed, and creating them (or fighting over
+	// their color) is not bugbot's business. Trackers without label support
+	// (Capabilities().Labels false) skip label work entirely.
 	ensured := make(map[string]bool, 4)
 	ensureManagedLabels := func(labels []string) error {
+		if !tr.Capabilities().Labels {
+			return nil
+		}
 		for _, l := range labels {
 			if ensured[l] {
 				continue
@@ -347,9 +364,7 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			if !ok {
 				continue // not a bugbot-managed label; nothing to ensure
 			}
-			_, err := gh(ctx, "api", "repos/{owner}/{repo}/labels", "-X", "POST",
-				"-f", "name="+l, "-f", "color="+def.color, "-f", "description="+def.desc)
-			if err != nil && !isLabelAlreadyExists(err) {
+			if err := tr.EnsureLabel(ctx, tracker.Label{Name: l, Color: def.color, Description: def.desc}); err != nil {
 				return err
 			}
 			ensured[l] = true
@@ -361,31 +376,36 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 	// published issue toward managedLabels(f, cfg). Severity/tier changes
 	// always change the rendered body too (the visible Severity line and the
 	// bugbot:meta front-matter), so label drift normally rides an update
-	// PATCH; this reconcile exists for legacy backfill (rows created before
+	// push; this reconcile exists for legacy backfill (rows created before
 	// managed labels) and knob flips.
 	//
 	// Rules:
-	//   - Both knobs off: feature inert — zero label gh calls, zero deletes.
+	//   - Both knobs off, or a tracker without label support: feature inert
+	//     — zero label tracker calls, zero deletes.
 	//   - desired vs. current (store.PublishedIssue.ManagedLabels) compared
-	//     as sets (nil ≡ empty): converged rows cost zero gh calls.
-	//   - Additions land in ONE POST (labels[]=... per label), after
-	//     ensureManagedLabels; removals are per-label DELETEs with the name
-	//     path-escaped. Never a full-array PATCH — that would clobber
-	//     human-added labels.
+	//     as sets (nil ≡ empty): converged rows cost zero tracker calls.
+	//   - Additions land in ONE AddLabels call, after ensureManagedLabels;
+	//     removals are per-label RemoveLabel calls. Never a full-array
+	//     replace — that would clobber human-added labels. Removing an
+	//     already-detached label is success (adapter contract).
 	//   - Legacy rows (current == nil, the '' column sentinel) are additive
 	//     only: we don't know what we applied historically, so we never
-	//     delete. A 404 on a DELETE (label already detached) is success.
-	//   - Store bookkeeping is written only after gh success, so a failed
-	//     sync retries naturally on the next cycle's skip-path reconcile.
+	//     delete.
+	//   - Store bookkeeping is written only after tracker success, so a
+	//     failed sync retries naturally on the next cycle's skip-path
+	//     reconcile.
 	//
 	// The body work of the surrounding action has already succeeded by the
-	// time this runs, so a label-sync gh failure must not abort the action:
-	// it is routed through applyGHErr ("label-sync"), which logs, counts
-	// failed++, and returns nil — except gh-missing/rate-limit, which abort
-	// the whole run exactly as every other action does. A non-nil return
-	// from this closure therefore always means "stop the run".
-	reconcileLabels := func(f domain.Finding, issueNumber int) error {
+	// time this runs, so a label-sync failure must not abort the action: it
+	// is routed through applyErr ("label-sync"), which logs, counts
+	// failed++, and returns nil — except missing-prereq/rate-limit, which
+	// abort the whole run exactly as every other action does. A non-nil
+	// return from this closure therefore always means "stop the run".
+	reconcileLabels := func(f domain.Finding, key tracker.IssueKey) error {
 		if !cfg.SeverityLabels && !cfg.TierLabels {
+			return nil
+		}
+		if !tr.Capabilities().Labels {
 			return nil
 		}
 		desired := managedLabels(f, cfg)
@@ -399,25 +419,20 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			return nil // converged (nil ≡ empty)
 		}
 		if dryRun {
-			_, _ = fmt.Fprintf(w, "dry-run: sync labels on issue #%d for %s (+%d -%d)\n", issueNumber, f.Fingerprint[:12], len(additions), len(removals))
+			_, _ = fmt.Fprintf(w, "dry-run: sync labels on issue %s for %s (+%d -%d)\n", key, f.Fingerprint[:12], len(additions), len(removals))
 			return nil
 		}
 		if len(additions) > 0 {
 			if err := ensureManagedLabels(additions); err != nil {
-				return applyGHErr("label-sync", issueNumber, f.Fingerprint, err)
+				return applyErr("label-sync", key, f.Fingerprint, err)
 			}
-			args := []string{"api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d/labels", issueNumber), "-X", "POST"}
-			for _, l := range additions {
-				args = append(args, "-f", "labels[]="+l)
-			}
-			if _, err := gh(ctx, args...); err != nil {
-				return applyGHErr("label-sync", issueNumber, f.Fingerprint, err)
+			if err := tr.AddLabels(ctx, key, additions); err != nil {
+				return applyErr("label-sync", key, f.Fingerprint, err)
 			}
 		}
 		for _, l := range removals {
-			_, err := gh(ctx, "api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d/labels/%s", issueNumber, url.PathEscape(l)), "-X", "DELETE")
-			if err != nil && !isGHGoneOrNotFound(err) {
-				return applyGHErr("label-sync", issueNumber, f.Fingerprint, err)
+			if err := tr.RemoveLabel(ctx, key, l); err != nil {
+				return applyErr("label-sync", key, f.Fingerprint, err)
 			}
 		}
 		if err := st.SetPublishedManagedLabels(ctx, f.Fingerprint, desired); err != nil {
@@ -434,53 +449,53 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 				created++
 				continue
 			}
-			// A create spans two systems (GitHub + our store) with no
-			// transaction. Record a "pending" row FIRST so a crash between the
-			// gh create and the store write leaves a tombstone: the next run
-			// plans a recover (marker search) instead of blindly creating a
-			// duplicate issue.
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, 0, store.IssueStatePending, ""); err != nil {
+			// A create spans two systems (the tracker + our store) with no
+			// transaction. Record a "pending" row FIRST so a crash between
+			// the create call and the store write leaves a tombstone: the
+			// next run plans a recover (marker search) instead of blindly
+			// creating a duplicate issue.
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, tr.Name(), "", store.IssueStatePending, ""); err != nil {
 				return fmt.Errorf("publish: record pending issue: %w", err)
 			}
 			body := renderIssueBody(act.finding, repoURL)
 			managed := managedLabels(act.finding, cfg)
 			if err := ensureManagedLabels(managed); err != nil {
-				if aerr := applyGHErr("ensure-labels", 0, act.finding.Fingerprint, err); aerr != nil {
+				if aerr := applyErr("ensure-labels", "", act.finding.Fingerprint, err); aerr != nil {
 					return aerr
 				}
 				continue
 			}
-			n, err := ghCreateIssue(ctx, gh, act.finding.Title, body, combinedLabels(cfg.Labels, managed))
+			key, err := tr.CreateIssue(ctx, act.finding.Title, body, combinedLabels(cfg.Labels, managed))
 			if err != nil {
-				if aerr := applyGHErr("create", 0, act.finding.Fingerprint, err); aerr != nil {
+				if aerr := applyErr("create", "", act.finding.Fingerprint, err); aerr != nil {
 					return aerr
 				}
 				continue
 			}
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen, bodyHashHex(body)); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, tr.Name(), string(key), store.IssueStateOpen, bodyHashHex(body)); err != nil {
 				return fmt.Errorf("publish: record created issue: %w", err)
 			}
 			if err := st.SetPublishedManagedLabels(ctx, act.finding.Fingerprint, managed); err != nil {
 				return fmt.Errorf("publish: record managed labels: %w", err)
 			}
-			_, _ = fmt.Fprintf(w, "created issue #%d for %s (%s)\n", n, act.finding.Fingerprint[:12], act.finding.Title)
+			_, _ = fmt.Fprintf(w, "created issue %s for %s (%s)\n", key, act.finding.Fingerprint[:12], act.finding.Title)
 			created++
 
 		case publishAdopt:
 			// A re-discovered finding whose fingerprint drifted: adopt the existing
 			// issue (record the new fingerprint -> issue mapping) rather than file a
-			// duplicate. No gh write; the next cycle's update/skip path takes over.
-			// No body was pushed by this action, so body_hash stays "" -- the
+			// duplicate. No tracker write; the next cycle's update/skip path takes
+			// over. No body was pushed by this action, so body_hash stays "" -- the
 			// eventual update/skip decision is made fresh next cycle.
 			if dryRun {
-				_, _ = fmt.Fprintf(w, "dry-run: adopt issue #%d for %s (re-discovered; fingerprint drifted)\n", act.issueNumber, act.finding.Fingerprint[:12])
+				_, _ = fmt.Fprintf(w, "dry-run: adopt issue %s for %s (re-discovered; fingerprint drifted)\n", act.issueKey, act.finding.Fingerprint[:12])
 				adopted++
 				continue
 			}
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen, ""); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, tr.Name(), string(act.issueKey), store.IssueStateOpen, ""); err != nil {
 				return fmt.Errorf("publish: record adopted issue: %w", err)
 			}
-			_, _ = fmt.Fprintf(w, "adopted issue #%d for %s (re-discovered; fingerprint drifted)\n", act.issueNumber, act.finding.Fingerprint[:12])
+			_, _ = fmt.Fprintf(w, "adopted issue %s for %s (re-discovered; fingerprint drifted)\n", act.issueKey, act.finding.Fingerprint[:12])
 			adopted++
 
 		case publishRecover:
@@ -490,12 +505,12 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 				continue
 			}
 			// A prior run recorded "pending" but never recorded the issue
-			// number — the gh create may or may not have happened. Search the
+			// key — the create may or may not have happened. Search the
 			// repo's bugbot issues for the fingerprint marker; adopt on hit,
 			// create on miss.
-			n, found, err := findIssueByMarker(ctx, gh, cfg.Labels, act.finding.Fingerprint)
+			key, found, err := findIssueByMarker(ctx, tr, act.finding.Fingerprint)
 			if err != nil {
-				if aerr := applyGHErr("recover", 0, act.finding.Fingerprint, err); aerr != nil {
+				if aerr := applyErr("recover", "", act.finding.Fingerprint, err); aerr != nil {
 					return aerr
 				}
 				continue
@@ -508,25 +523,25 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 				body := renderIssueBody(act.finding, repoURL)
 				managed = managedLabels(act.finding, cfg)
 				if err := ensureManagedLabels(managed); err != nil {
-					if aerr := applyGHErr("ensure-labels", 0, act.finding.Fingerprint, err); aerr != nil {
+					if aerr := applyErr("ensure-labels", "", act.finding.Fingerprint, err); aerr != nil {
 						return aerr
 					}
 					continue
 				}
-				n, err = ghCreateIssue(ctx, gh, act.finding.Title, body, combinedLabels(cfg.Labels, managed))
+				key, err = tr.CreateIssue(ctx, act.finding.Title, body, combinedLabels(cfg.Labels, managed))
 				if err != nil {
-					if aerr := applyGHErr("recover-create", 0, act.finding.Fingerprint, err); aerr != nil {
+					if aerr := applyErr("recover-create", "", act.finding.Fingerprint, err); aerr != nil {
 						return aerr
 					}
 					continue
 				}
 				bodyHash = bodyHashHex(body)
 				created++
-				_, _ = fmt.Fprintf(w, "created issue #%d for %s (recovered pending; no existing issue found)\n", n, act.finding.Fingerprint[:12])
+				_, _ = fmt.Fprintf(w, "created issue %s for %s (recovered pending; no existing issue found)\n", key, act.finding.Fingerprint[:12])
 			} else {
-				_, _ = fmt.Fprintf(w, "recovered issue #%d for %s (adopted via fingerprint marker)\n", n, act.finding.Fingerprint[:12])
+				_, _ = fmt.Fprintf(w, "recovered issue %s for %s (adopted via fingerprint marker)\n", key, act.finding.Fingerprint[:12])
 			}
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen, bodyHash); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, tr.Name(), string(key), store.IssueStateOpen, bodyHash); err != nil {
 				return fmt.Errorf("publish: record recovered issue: %w", err)
 			}
 			if !found {
@@ -537,138 +552,140 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 
 		case publishUpdate:
 			if dryRun {
-				_, _ = fmt.Fprintf(w, "dry-run: update issue #%d for %s\n", act.issueNumber, act.finding.Fingerprint[:12])
+				_, _ = fmt.Fprintf(w, "dry-run: update issue %s for %s\n", act.issueKey, act.finding.Fingerprint[:12])
 				updated++
 				continue
 			}
 			// Render and hash once up front: both the no-op short-circuit
-			// below and the actual PATCH (and its stale-recreate fallback)
+			// below and the actual push (and its stale-recreate fallback)
 			// need the exact same body, and only one render/hash per action
 			// keeps this cheap.
 			body := renderIssueBody(act.finding, repoURL)
 			h := bodyHashHex(body)
 			if pi := publishedMap[act.finding.Fingerprint]; pi.BodyHash == h && h != "" {
 				// The rendered body is byte-identical to what was last
-				// pushed to GitHub -- this update was triggered by a
+				// pushed to the tracker -- this update was triggered by a
 				// metadata-only finding touch (impact sweep,
 				// AddCorroboratingLenses, AppendFindingSites all bump
 				// findings.updated_at without changing anything
 				// renderIssueBody reads), not a real content change. Skip
-				// the PATCH but still upsert so published_issues.updated_at
+				// the push but still upsert so published_issues.updated_at
 				// advances past findings.updated_at -- otherwise the
 				// planner would replan this same no-op update every cycle
 				// forever instead of converging to publishSkip.
-				if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen, h); err != nil {
+				if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, tr.Name(), string(act.issueKey), store.IssueStateOpen, h); err != nil {
 					return fmt.Errorf("publish: record unchanged issue: %w", err)
 				}
-				_, _ = fmt.Fprintf(w, "unchanged issue #%d for %s (body identical; no PATCH)\n", act.issueNumber, act.finding.Fingerprint[:12])
+				_, _ = fmt.Fprintf(w, "unchanged issue %s for %s (body identical; no push)\n", act.issueKey, act.finding.Fingerprint[:12])
 				skipped++
-				if err := reconcileLabels(act.finding, act.issueNumber); err != nil {
+				if err := reconcileLabels(act.finding, act.issueKey); err != nil {
 					return err
 				}
 				continue
 			}
-			if err := ghUpdateIssue(ctx, gh, act.issueNumber, body); err != nil {
-				if isGHGoneOrNotFound(err) {
-					// Local row is stale: the issue was deleted (410) or
-					// transferred/renamed (404) on GitHub. Drop the row, create
-					// a fresh issue, and continue with the rest of the plan.
-					_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone: %v); re-creating\n", act.finding.Fingerprint[:12], act.issueNumber, err)
+			if err := tr.UpdateIssueBody(ctx, act.issueKey, body); err != nil {
+				if errors.Is(err, tracker.ErrIssueGone) {
+					// Local row is stale: the issue is gone on the tracker
+					// (deleted, transferred, or renamed). Drop the row,
+					// create a fresh issue, and continue with the rest of
+					// the plan.
+					_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue %s gone: %v); re-creating\n", act.finding.Fingerprint[:12], act.issueKey, err)
 					if derr := st.DeletePublishedIssue(ctx, act.finding.Fingerprint); derr != nil {
 						return fmt.Errorf("publish: delete stale published issue: %w", derr)
 					}
 					managed := managedLabels(act.finding, cfg)
 					if err := ensureManagedLabels(managed); err != nil {
-						if aerr := applyGHErr("ensure-labels", 0, act.finding.Fingerprint, err); aerr != nil {
+						if aerr := applyErr("ensure-labels", "", act.finding.Fingerprint, err); aerr != nil {
 							return aerr
 						}
 						continue
 					}
-					n, cerr := ghCreateIssue(ctx, gh, act.finding.Title, body, combinedLabels(cfg.Labels, managed))
+					key, cerr := tr.CreateIssue(ctx, act.finding.Title, body, combinedLabels(cfg.Labels, managed))
 					if cerr != nil {
-						if aerr := applyGHErr("update-recreate", 0, act.finding.Fingerprint, cerr); aerr != nil {
+						if aerr := applyErr("update-recreate", "", act.finding.Fingerprint, cerr); aerr != nil {
 							return aerr
 						}
 						continue
 					}
-					if uerr := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen, h); uerr != nil {
+					if uerr := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, tr.Name(), string(key), store.IssueStateOpen, h); uerr != nil {
 						return fmt.Errorf("publish: record recreated issue: %w", uerr)
 					}
 					if err := st.SetPublishedManagedLabels(ctx, act.finding.Fingerprint, managed); err != nil {
 						return fmt.Errorf("publish: record managed labels: %w", err)
 					}
-					_, _ = fmt.Fprintf(w, "recreated issue #%d for %s (replaced stale row)\n", n, act.finding.Fingerprint[:12])
+					_, _ = fmt.Fprintf(w, "recreated issue %s for %s (replaced stale row)\n", key, act.finding.Fingerprint[:12])
 					stale++
 					created++
 					continue
 				}
-				if aerr := applyGHErr("update", act.issueNumber, act.finding.Fingerprint, err); aerr != nil {
+				if aerr := applyErr("update", act.issueKey, act.finding.Fingerprint, err); aerr != nil {
 					return aerr
 				}
 				continue
 			}
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen, h); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, tr.Name(), string(act.issueKey), store.IssueStateOpen, h); err != nil {
 				return fmt.Errorf("publish: record updated issue: %w", err)
 			}
-			_, _ = fmt.Fprintf(w, "updated issue #%d for %s\n", act.issueNumber, act.finding.Fingerprint[:12])
+			_, _ = fmt.Fprintf(w, "updated issue %s for %s\n", act.issueKey, act.finding.Fingerprint[:12])
 			updated++
-			if err := reconcileLabels(act.finding, act.issueNumber); err != nil {
+			if err := reconcileLabels(act.finding, act.issueKey); err != nil {
 				return err
 			}
 
 		case publishReopen:
 			if dryRun {
-				_, _ = fmt.Fprintf(w, "dry-run: reopen issue #%d for %s (regression)\n", act.issueNumber, act.finding.Fingerprint[:12])
+				_, _ = fmt.Fprintf(w, "dry-run: reopen issue %s for %s (regression)\n", act.issueKey, act.finding.Fingerprint[:12])
 				reopened++
 				continue
 			}
 			// Backsync (above) already turned every human-closed row into
 			// IssueStateClosed and dismissed the finding, so an OPEN finding
 			// whose row is still closed at this point can only be a
-			// bugbot-closed regression (store.ReopenAsRegression). One PATCH
-			// both flips state=open and refreshes the body, so a reopened
-			// issue never shows stale content from before the fix regressed.
+			// bugbot-closed regression (store.ReopenAsRegression). One
+			// ReopenIssue call both flips the state and refreshes the body,
+			// so a reopened issue never shows stale content from before the
+			// fix regressed.
 			body := renderIssueBody(act.finding, repoURL)
 			h := bodyHashHex(body)
-			if err := ghReopenIssue(ctx, gh, act.issueNumber, body); err != nil {
-				if isGHGoneOrNotFound(err) {
+			if err := tr.ReopenIssue(ctx, act.issueKey, body); err != nil {
+				if errors.Is(err, tracker.ErrIssueGone) {
 					// Same stale-row handling as publishUpdate: the issue is
 					// gone, drop the row and file a fresh one.
-					_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone on reopen: %v); re-creating\n", act.finding.Fingerprint[:12], act.issueNumber, err)
+					_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue %s gone on reopen: %v); re-creating\n", act.finding.Fingerprint[:12], act.issueKey, err)
 					if derr := st.DeletePublishedIssue(ctx, act.finding.Fingerprint); derr != nil {
 						return fmt.Errorf("publish: delete stale published issue: %w", derr)
 					}
 					managed := managedLabels(act.finding, cfg)
 					if err := ensureManagedLabels(managed); err != nil {
-						if aerr := applyGHErr("ensure-labels", 0, act.finding.Fingerprint, err); aerr != nil {
+						if aerr := applyErr("ensure-labels", "", act.finding.Fingerprint, err); aerr != nil {
 							return aerr
 						}
 						continue
 					}
-					n, cerr := ghCreateIssue(ctx, gh, act.finding.Title, body, combinedLabels(cfg.Labels, managed))
+					key, cerr := tr.CreateIssue(ctx, act.finding.Title, body, combinedLabels(cfg.Labels, managed))
 					if cerr != nil {
-						if aerr := applyGHErr("reopen-recreate", 0, act.finding.Fingerprint, cerr); aerr != nil {
+						if aerr := applyErr("reopen-recreate", "", act.finding.Fingerprint, cerr); aerr != nil {
 							return aerr
 						}
 						continue
 					}
-					if uerr := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, n, store.IssueStateOpen, h); uerr != nil {
+					if uerr := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, tr.Name(), string(key), store.IssueStateOpen, h); uerr != nil {
 						return fmt.Errorf("publish: record recreated issue: %w", uerr)
 					}
 					if err := st.SetPublishedManagedLabels(ctx, act.finding.Fingerprint, managed); err != nil {
 						return fmt.Errorf("publish: record managed labels: %w", err)
 					}
-					_, _ = fmt.Fprintf(w, "recreated issue #%d for %s (replaced stale row)\n", n, act.finding.Fingerprint[:12])
+					_, _ = fmt.Fprintf(w, "recreated issue %s for %s (replaced stale row)\n", key, act.finding.Fingerprint[:12])
 					stale++
 					created++
 					continue
 				}
-				if aerr := applyGHErr("reopen", act.issueNumber, act.finding.Fingerprint, err); aerr != nil {
+				if aerr := applyErr("reopen", act.issueKey, act.finding.Fingerprint, err); aerr != nil {
 					return aerr
 				}
 				continue
 			}
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateOpen, h); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, tr.Name(), string(act.issueKey), store.IssueStateOpen, h); err != nil {
 				return fmt.Errorf("publish: record reopened issue: %w", err)
 			}
 			// A comment failure here is benign: the row is already "open",
@@ -678,91 +695,91 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 			// already accepts at the closing-state boundary above.
 			//
 			// The mirror failure mode is a duplicate comment, not a lost one:
-			// if the process crashes between the PATCH above succeeding and
+			// if the process crashes between the reopen above succeeding and
 			// the UpsertPublishedIssue call succeeding, the row is still
-			// recorded "closed" locally even though GitHub now shows it
+			// recorded "closed" locally even though the tracker now shows it
 			// open. The next run's planPublish sees that stale-closed row
-			// again and replays the whole reopen (PATCH + comment) --
-			// idempotent for the PATCH, but this comment is posted a second
-			// time. Both directions (lost once, duplicated once) are
+			// again and replays the whole reopen (state flip + comment) --
+			// idempotent for the state flip, but this comment is posted a
+			// second time. Both directions (lost once, duplicated once) are
 			// accepted: there is no cross-system transaction here, same as
-			// every other two-write gh+store sequence in this function.
-			if err := ghCommentIssue(ctx, gh, act.issueNumber, "Reopened by bugbot: this finding was re-detected as a regression."); err != nil {
-				if aerr := applyGHErr("reopen-comment", act.issueNumber, act.finding.Fingerprint, err); aerr != nil {
+			// every other two-write tracker+store sequence in this function.
+			if err := tr.Comment(ctx, act.issueKey, "Reopened by bugbot: this finding was re-detected as a regression."); err != nil {
+				if aerr := applyErr("reopen-comment", act.issueKey, act.finding.Fingerprint, err); aerr != nil {
 					return aerr
 				}
 				continue
 			}
-			_, _ = fmt.Fprintf(w, "reopened issue #%d for %s (regression)\n", act.issueNumber, act.finding.Fingerprint[:12])
+			_, _ = fmt.Fprintf(w, "reopened issue %s for %s (regression)\n", act.issueKey, act.finding.Fingerprint[:12])
 			reopened++
 			// Label sync last: if the comment above failed we never get
 			// here, and the next cycle's skip-path reconcile picks the
 			// drift up instead.
-			if err := reconcileLabels(act.finding, act.issueNumber); err != nil {
+			if err := reconcileLabels(act.finding, act.issueKey); err != nil {
 				return err
 			}
 
 		case publishClose:
 			if dryRun {
-				_, _ = fmt.Fprintf(w, "dry-run: close issue #%d for %s (status: %s)\n", act.issueNumber, act.finding.Fingerprint[:12], act.finding.Status)
+				_, _ = fmt.Fprintf(w, "dry-run: close issue %s for %s (status: %s)\n", act.issueKey, act.finding.Fingerprint[:12], act.finding.Status)
 				closed++
 				continue
 			}
-			// The close also spans two gh writes (comment, then state PATCH).
-			// Record "closing" once the comment lands so a PATCH failure does
-			// NOT re-post the comment on every subsequent cycle — the resume
-			// path (skipComment) goes straight to the PATCH. Close never
-			// pushes a body, so body_hash is always "".
+			// The close also spans two tracker writes (comment, then the
+			// state change). Record "closing" once the comment lands so a
+			// close failure does NOT re-post the comment on every subsequent
+			// cycle — the resume path (skipComment) goes straight to the
+			// close. Close never pushes a body, so body_hash is always "".
 			if !act.skipComment {
-				if err := ghCommentIssue(ctx, gh, act.issueNumber, autoCloseComment(act.finding)); err != nil {
-					if isGHGoneOrNotFound(err) {
+				if err := tr.Comment(ctx, act.issueKey, autoCloseComment(act.finding)); err != nil {
+					if errors.Is(err, tracker.ErrIssueGone) {
 						// Issue is already gone — close is a no-op success.
 						// Drop the stale row and move on; do not abort the run.
-						_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone on close: %v); dropping row\n", act.finding.Fingerprint[:12], act.issueNumber, err)
+						_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue %s gone on close: %v); dropping row\n", act.finding.Fingerprint[:12], act.issueKey, err)
 						if derr := st.DeletePublishedIssue(ctx, act.finding.Fingerprint); derr != nil {
 							return fmt.Errorf("publish: delete stale published issue: %w", derr)
 						}
 						stale++
 						continue
 					}
-					if aerr := applyGHErr("close-comment", act.issueNumber, act.finding.Fingerprint, err); aerr != nil {
+					if aerr := applyErr("close-comment", act.issueKey, act.finding.Fingerprint, err); aerr != nil {
 						return aerr
 					}
 					continue
 				}
-				if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateClosing, ""); err != nil {
+				if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, tr.Name(), string(act.issueKey), store.IssueStateClosing, ""); err != nil {
 					return fmt.Errorf("publish: record closing issue: %w", err)
 				}
 			}
-			if err := ghPatchIssueClosed(ctx, gh, act.issueNumber); err != nil {
-				if isGHGoneOrNotFound(err) {
-					// Same 410/404 handling on the PATCH: drop the row, log
-					// it, and continue. The "closing" tombstone row from
+			if err := tr.CloseIssue(ctx, act.issueKey); err != nil {
+				if errors.Is(err, tracker.ErrIssueGone) {
+					// Same gone handling on the close itself: drop the row,
+					// log it, and continue. The "closing" tombstone row from
 					// above (if any) is also dropped, so the next cycle
 					// starts clean.
-					_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue #%d gone on PATCH: %v); dropping row\n", act.finding.Fingerprint[:12], act.issueNumber, err)
+					_, _ = fmt.Fprintf(w, "stale published_issues row for %s (issue %s gone on close: %v); dropping row\n", act.finding.Fingerprint[:12], act.issueKey, err)
 					if derr := st.DeletePublishedIssue(ctx, act.finding.Fingerprint); derr != nil {
 						return fmt.Errorf("publish: delete stale published issue: %w", derr)
 					}
 					stale++
 					continue
 				}
-				if aerr := applyGHErr("close-patch", act.issueNumber, act.finding.Fingerprint, err); aerr != nil {
+				if aerr := applyErr("close", act.issueKey, act.finding.Fingerprint, err); aerr != nil {
 					return aerr
 				}
 				continue
 			}
-			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, act.issueNumber, store.IssueStateClosed, ""); err != nil {
+			if err := st.UpsertPublishedIssue(ctx, act.finding.Fingerprint, tr.Name(), string(act.issueKey), store.IssueStateClosed, ""); err != nil {
 				return fmt.Errorf("publish: record closed issue: %w", err)
 			}
-			_, _ = fmt.Fprintf(w, "closed issue #%d for %s (status: %s)\n", act.issueNumber, act.finding.Fingerprint[:12], act.finding.Status)
+			_, _ = fmt.Fprintf(w, "closed issue %s for %s (status: %s)\n", act.issueKey, act.finding.Fingerprint[:12], act.finding.Status)
 			closed++
 
 		case publishSkip:
 			skipped++
 			// The row is already up to date; the only work a skip can carry
 			// is managed-label drift (legacy backfill, knob flip).
-			if err := reconcileLabels(act.finding, act.issueNumber); err != nil {
+			if err := reconcileLabels(act.finding, act.issueKey); err != nil {
 				return err
 			}
 		default:
@@ -782,7 +799,7 @@ func runPublish(ctx context.Context, w io.Writer, gh engine.GHRunner, st *store.
 // severities and "bugbot:<slug>" (tier_labels) for tiers 0-3. An unknown
 // severity or tier contributes no label. The result is sorted so it can be
 // compared as a set against store.PublishedIssue.ManagedLabels (also stored
-// sorted) and so gh call args are deterministic. cfg.Labels is never part of
+// sorted) and so tracker call args are deterministic. cfg.Labels is never part of
 // the result: base labels are user-managed and only ever ADDITIVE alongside
 // these (Labels[0] stays the backsync/recovery list filter anchor).
 func managedLabels(f domain.Finding, cfg config.Publish) []string {
@@ -848,16 +865,6 @@ func labelSetDiff(a, b []string) []string {
 	return out
 }
 
-// isLabelAlreadyExists reports whether a label-create POST failed only
-// because the label is already there. gh surfaces the API's
-// "already_exists" validation code (HTTP 422) in the error text; any 422 on
-// this endpoint means the label exists, so ensureManagedLabels treats it as
-// success (idempotent).
-func isLabelAlreadyExists(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "already_exists") || strings.Contains(msg, "422")
-}
-
 // publishAction is the sum type for one unit of planned publish work. The
 // concrete types are publishCreate, publishRecover, publishUpdate,
 // publishReopen, publishClose, publishSkip, and publishAdopt; each carries
@@ -865,7 +872,7 @@ func isLabelAlreadyExists(err error) bool {
 // unrepresentable.
 type publishAction interface{ publishAction() }
 
-// publishCreate plans a new GitHub issue for a finding with no published row.
+// publishCreate plans a new tracker issue for a finding with no published row.
 type publishCreate struct{ finding domain.Finding }
 
 // publishRecover plans a marker search + adopt-or-create for a finding whose
@@ -873,43 +880,43 @@ type publishCreate struct{ finding domain.Finding }
 type publishRecover struct{ finding domain.Finding }
 
 // publishUpdate plans a body re-push for a finding updated after its last
-// publish. issueNumber is the existing GitHub issue to PATCH.
+// publish. issueKey is the existing tracker issue to update.
 type publishUpdate struct {
-	finding     domain.Finding
-	issueNumber int
+	finding  domain.Finding
+	issueKey tracker.IssueKey
 }
 
-// publishReopen plans reopening a GitHub issue whose published row is
+// publishReopen plans reopening a tracker issue whose published row is
 // closed but the finding is open again -- a regression re-detected after
-// store.ReopenAsRegression flipped it back to StatusOpen. issueNumber is
-// the existing GitHub issue to reopen and refresh.
+// store.ReopenAsRegression flipped it back to StatusOpen. issueKey is
+// the existing tracker issue to reopen and refresh.
 type publishReopen struct {
-	finding     domain.Finding
-	issueNumber int
+	finding  domain.Finding
+	issueKey tracker.IssueKey
 }
 
-// publishClose plans an issue close (comment then state PATCH). skipComment
+// publishClose plans an issue close (comment then state change). skipComment
 // resumes an interrupted close: the auto-close comment already landed, only
-// the state PATCH remains.
+// the state change remains.
 type publishClose struct {
 	finding     domain.Finding
-	issueNumber int
+	issueKey    tracker.IssueKey
 	skipComment bool
 }
 
 // publishSkip records that a finding already has an up-to-date published row.
-// issueNumber is carried for logging.
+// issueKey is carried for logging.
 type publishSkip struct {
-	finding     domain.Finding
-	issueNumber int
+	finding  domain.Finding
+	issueKey tracker.IssueKey
 }
 
 // publishAdopt plans adopting an existing open issue for a re-discovered finding
 // whose fingerprint drifted: instead of creating a duplicate, it records a
-// published_issues row mapping the new fingerprint to the existing issue number.
+// published_issues row mapping the new fingerprint to the existing issue key.
 type publishAdopt struct {
-	finding     domain.Finding
-	issueNumber int
+	finding  domain.Finding
+	issueKey tracker.IssueKey
 }
 
 func (publishCreate) publishAction()  {}
@@ -924,7 +931,7 @@ func (publishAdopt) publishAction()   {}
 // matches a fingerprint-drifted re-discovery to one.
 type pubAnchor struct {
 	finding domain.Finding
-	issue   int
+	issue   tracker.IssueKey
 }
 
 // adoptAnchor returns the first already-published open finding that is the same
@@ -954,17 +961,17 @@ func adoptAnchor(f domain.Finding, anchors []pubAnchor) (pubAnchor, bool) {
 // 3=suspected). tier_min=0 therefore publishes only fix-witnessed findings.
 //
 // Update heuristic: rather than fetching the current issue body (which would
-// require a gh read per issue), we use finding.UpdatedAt > published.UpdatedAt
+// require a tracker read per issue), we use finding.UpdatedAt > published.UpdatedAt
 // as a proxy. If the finding was updated after the last publish, we plan a
 // publishUpdate -- but an updated_at bump is a superset of an actual body
 // change: impact sweep, AddCorroboratingLenses, and AppendFindingSites all
 // touch findings.updated_at without changing anything renderIssueBody reads.
-// This planner stays cheap (no gh reads) by over-selecting; the no-op PATCH
-// this would otherwise cost is closed at apply time instead (bugbot-klaj):
-// runPublish renders the body once, hashes it, and compares against
-// published_issues.body_hash before calling gh -- a hash match skips the
-// PATCH entirely (still upserting so updated_at advances and the planner
-// converges to publishSkip next cycle).
+// This planner stays cheap (no tracker reads) by over-selecting; the no-op
+// body push this would otherwise cost is closed at apply time instead
+// (bugbot-klaj): runPublish renders the body once, hashes it, and compares
+// against published_issues.body_hash before calling the tracker -- a hash
+// match skips the push entirely (still upserting so updated_at advances and
+// the planner converges to publishSkip next cycle).
 //
 // Close rule: if close_on_fixed is true, any finding with status fixed,
 // dismissed, or superseded (backlog reconcile, bugbot-ezmx.4 — a merged-away
@@ -972,13 +979,13 @@ func adoptAnchor(f domain.Finding, anchors []pubAnchor) (pubAnchor, bool) {
 //
 // Reopen rule: an OPEN finding whose published row is already "closed"
 // (IssueStateClosed) is a regression -- store.ReopenAsRegression flipped a
-// fixed/dismissed finding back to open while its GitHub issue stayed
+// fixed/dismissed finding back to open while its tracker issue stayed
 // closed. This case can only reach planPublish already disambiguated from
-// a human-closed issue: the caller (runPublish) runs the GitHub->local
+// a human-closed issue: the caller (runPublish) runs the tracker->local
 // backsync step first, which reclassifies every human-closed row as
 // closed *and* dismisses its finding (bugbot-fchv). So by the time
 // planPublish sees an open finding pointing at a closed row, the close
-// must have been ours, and it plans a reopen (state PATCH + body refresh)
+// must have been ours, and it plans a reopen (state flip + body refresh)
 // rather than a plain body update.
 func planPublish(
 	open, fixed, dismissed, superseded []domain.Finding,
@@ -996,7 +1003,7 @@ func planPublish(
 	for _, f := range open {
 		if pi, ok := published[f.Fingerprint]; ok &&
 			(pi.State == store.IssueStateOpen || pi.State == store.IssueStateClosing) {
-			anchors = append(anchors, pubAnchor{finding: f, issue: pi.IssueNumber})
+			anchors = append(anchors, pubAnchor{finding: f, issue: tracker.IssueKey(pi.IssueKey)})
 		}
 	}
 
@@ -1009,26 +1016,26 @@ func planPublish(
 		switch {
 		case !found:
 			if a, ok := adoptAnchor(f, anchors); ok {
-				actions = append(actions, publishAdopt{finding: f, issueNumber: a.issue})
+				actions = append(actions, publishAdopt{finding: f, issueKey: a.issue})
 			} else {
 				actions = append(actions, publishCreate{finding: f})
 			}
 		case pi.State == store.IssueStatePending:
-			// An earlier create was interrupted between the gh call and the
-			// store write; the issue may or may not exist on GitHub.
+			// An earlier create was interrupted between the tracker call and
+			// the store write; the issue may or may not exist on the tracker.
 			actions = append(actions, publishRecover{finding: f})
 		case pi.State == store.IssueStateClosed:
 			// See the Reopen rule above: an open finding with a closed row
 			// is a bugbot-closed regression, not a human close (backsync
 			// already dismissed and skipped those).
-			actions = append(actions, publishReopen{finding: f, issueNumber: pi.IssueNumber})
+			actions = append(actions, publishReopen{finding: f, issueKey: tracker.IssueKey(pi.IssueKey)})
 		case f.UpdatedAt.After(pi.UpdatedAt):
 			// Published row exists ("open", or "closing" from a reintroduced
 			// finding — the body re-push is correct either way). If the finding
 			// was updated after our last publish, re-push the body.
-			actions = append(actions, publishUpdate{finding: f, issueNumber: pi.IssueNumber})
+			actions = append(actions, publishUpdate{finding: f, issueKey: tracker.IssueKey(pi.IssueKey)})
 		default:
-			actions = append(actions, publishSkip{finding: f, issueNumber: pi.IssueNumber})
+			actions = append(actions, publishSkip{finding: f, issueKey: tracker.IssueKey(pi.IssueKey)})
 		}
 	}
 
@@ -1039,7 +1046,7 @@ func planPublish(
 	// Close actions for fixed/dismissed/superseded findings with published
 	// rows that haven't completed a close. "closing" rows resume without
 	// re-posting the auto-close comment (it already landed). "pending" rows
-	// are skipped: there is no known issue number to close, and the finding
+	// are skipped: there is no known issue key to close, and the finding
 	// is gone — the rare interrupted-create-then-closed overlap is left for a
 	// future open cycle. autoCloseComment renders a duplicate-specific note
 	// for superseded findings, referencing the canonical fingerprint.
@@ -1054,7 +1061,7 @@ func planPublish(
 		}
 		actions = append(actions, publishClose{
 			finding:     f,
-			issueNumber: pi.IssueNumber,
+			issueKey:    tracker.IssueKey(pi.IssueKey),
 			skipComment: pi.State == store.IssueStateClosing,
 		})
 	}
@@ -1062,8 +1069,8 @@ func planPublish(
 	return actions
 }
 
-// backsyncAction is one unit of GitHub->local reconciliation work: a
-// published row whose GitHub issue closed without our involvement.
+// backsyncAction is one unit of tracker->local reconciliation work: a
+// published row whose tracker issue closed without our involvement.
 // dismissFinding is true only when the local finding still exists and is
 // StatusOpen -- a human closing our issue is a triage signal to stop
 // reporting the finding (StatusDismissed records that as suppression
@@ -1072,97 +1079,56 @@ func planPublish(
 // only the row needs to catch up.
 type backsyncAction struct {
 	fingerprint    string
-	issueNumber    int
+	issueKey       tracker.IssueKey
 	dismissFinding bool
 }
 
-// planBacksync is the pure reconciler for the GitHub->local direction
-// (bugbot-fchv): given the published_issues rows, the set of issue numbers
-// that are closed on GitHub right now, and the local findings keyed by
+// planBacksync is the pure reconciler for the tracker->local direction
+// (bugbot-fchv): given the published_issues rows, the set of issue keys
+// that are closed on the tracker right now, and the local findings keyed by
 // fingerprint, it decides which rows need to be pulled into sync.
 //
 // Only rows still recorded "open" or "closing" are candidates -- rows
-// already "closed" locally agree with GitHub already, and "pending" rows
-// have no confirmed issue number to check. Results are sorted by
+// already "closed" locally agree with the tracker already, and "pending"
+// rows have no confirmed issue key to check. Results are sorted by
 // fingerprint for deterministic output (map iteration order is not).
-func planBacksync(published map[string]store.PublishedIssue, closedNums map[int]bool, findingByFP map[string]domain.Finding) []backsyncAction {
+func planBacksync(published map[string]store.PublishedIssue, closedKeys map[tracker.IssueKey]bool, findingByFP map[string]domain.Finding) []backsyncAction {
 	var actions []backsyncAction
 	for fp, pi := range published {
 		if pi.State != store.IssueStateOpen && pi.State != store.IssueStateClosing {
 			continue
 		}
-		if !closedNums[pi.IssueNumber] {
+		if !closedKeys[tracker.IssueKey(pi.IssueKey)] {
 			continue
 		}
 		dismiss := false
 		if f, ok := findingByFP[fp]; ok && f.Status == domain.StatusOpen {
 			dismiss = true
 		}
-		actions = append(actions, backsyncAction{fingerprint: fp, issueNumber: pi.IssueNumber, dismissFinding: dismiss})
+		actions = append(actions, backsyncAction{fingerprint: fp, issueKey: tracker.IssueKey(pi.IssueKey), dismissFinding: dismiss})
 	}
 	sort.Slice(actions, func(i, j int) bool { return actions[i].fingerprint < actions[j].fingerprint })
 	return actions
 }
 
-// listBugbotIssues lists the repo's bugbot issues in the given GitHub
-// `state` filter value ("open", "closed", or "all"), filtered by the first
-// configured label when present. Shared by findIssueByMarker (state=all,
-// recover path) and the backsync step in runPublish (state=closed).
-func listBugbotIssues(ctx context.Context, gh engine.GHRunner, labels []string, state string) ([]publishIssue, error) {
-	path := "repos/{owner}/{repo}/issues?state=" + state + "&per_page=100"
-	if len(labels) > 0 {
-		path += "&labels=" + labels[0]
-	}
-	raw, err := gh(ctx, "api", "--paginate", path)
+// findIssueByMarker lists the repo's bugbot issues through the tracker (the
+// adapter applies the anchor-label filter from its own config) and returns
+// the key of the issue whose body carries the fingerprint marker. Used only
+// on the rare recover path. The marker format is part of the canonical body
+// contract shared with renderIssueBody (see the tracker package doc), so the
+// scan lives here beside the renderer that writes it, not in any adapter.
+func findIssueByMarker(ctx context.Context, tr tracker.Tracker, fingerprint string) (tracker.IssueKey, bool, error) {
+	issues, err := tr.ListIssues(ctx, "all")
 	if err != nil {
-		if isGHMissing(err) {
-			return nil, errGHRequired()
-		}
-		return nil, fmt.Errorf("list issues: %w", err)
-	}
-	issues, err := parsePublishIssues(raw)
-	if err != nil {
-		return nil, fmt.Errorf("parse issues list: %w", err)
-	}
-	return issues, nil
-}
-
-// findIssueByMarker lists the repo's bugbot issues (filtered by the first
-// configured label when present) and returns the number of the issue whose
-// body carries the fingerprint marker. Used only on the rare recover path.
-func findIssueByMarker(ctx context.Context, gh engine.GHRunner, labels []string, fingerprint string) (int, bool, error) {
-	issues, err := listBugbotIssues(ctx, gh, labels, "all")
-	if err != nil {
-		return 0, false, err
+		return "", false, err
 	}
 	marker := "<!-- bugbot:fp=" + fingerprint + " -->"
 	for _, is := range issues {
 		if strings.Contains(is.Body, marker) {
-			return is.Number, true, nil
+			return is.Key, true, nil
 		}
 	}
-	return 0, false, nil
-}
-
-// parsePublishIssues decodes the (possibly concatenated, via --paginate) JSON
-// arrays of the issues list endpoint.
-func parsePublishIssues(raw []byte) ([]publishIssue, error) {
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
-	var out []publishIssue
-	for dec.More() {
-		var page []publishIssue
-		if err := dec.Decode(&page); err != nil {
-			return nil, err
-		}
-		out = append(out, page...)
-	}
-	return out, nil
-}
-
-type publishIssue struct {
-	Number int    `json:"number"`
-	Body   string `json:"body"`
-	State  string `json:"state"`
+	return "", false, nil
 }
 
 // truncateUTF8 returns s sliced to at most max bytes, walking back to a valid
@@ -1262,9 +1228,10 @@ func sanitizeDetailsTag(s string) string {
 }
 
 // sanitizeControlChars strips C0 control characters (U+0000–U+001F) except tab,
-// newline, and carriage return. A NUL in particular makes exec reject the gh
-// argument with EINVAL ("invalid argument"); the rest have no place in a
-// Markdown issue body and render as replacement glyphs on GitHub. The sources
+// newline, and carriage return. A NUL in particular would make an exec-based
+// tracker transport reject the argument with EINVAL ("invalid argument"); the
+// rest have no place in a Markdown issue body and render as replacement
+// glyphs when the tracker displays them. The sources
 // are model-authored fields (description, verification trace, title) and repro
 // source files. The no-control-char common case returns s unchanged with no
 // allocation.
@@ -1304,7 +1271,7 @@ func isC0Control(c byte) bool {
 
 // severityLabel and titleOrUnknown are pure formatting helpers duplicated
 // from internal/engine's own copies (used by planSync/renderSummaryBody):
-// both packages format the same domain.Finding fields, but the gh
+// both packages format the same domain.Finding fields, but the review
 // comment-sync orchestration that owns the review-side copies now lives in
 // internal/engine (bugbot-2p8z.5), and pulling in an engine dependency here
 // just for two one-line string helpers would be the wrong direction — cli
@@ -1662,71 +1629,10 @@ func extractRunCommands(content string) string {
 	return strings.Join(lines, "\n")
 }
 
-// resolveRepoURL fetches the GitHub repo URL via `gh repo view --json url -q
-// .url`. Errors are tolerated: the function returns "" to signal that
-// permalinks should be omitted rather than aborting the publish run.
-func resolveRepoURL(ctx context.Context, gh engine.GHRunner) string {
-	raw, err := gh(ctx, "repo", "view", "--json", "url", "-q", ".url")
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(raw))
-}
-
-// ghCreateIssue posts a new GitHub issue and returns the issue number.
-func ghCreateIssue(ctx context.Context, gh engine.GHRunner, title, body string, labels []string) (int, error) {
-	title = sanitizeControlChars(title)
-	args := []string{
-		"api", "repos/{owner}/{repo}/issues",
-		"-X", "POST",
-		"-f", "title=" + title,
-		"-f", "body=" + body,
-	}
-	for _, l := range labels {
-		args = append(args, "-f", "labels[]="+l)
-	}
-
-	raw, err := gh(ctx, args...)
-	if err != nil {
-		// Detect gh-not-found: exec.ErrNotFound semantics surfaced in the error string.
-		if isGHMissing(err) {
-			return 0, errGHRequired()
-		}
-		return 0, fmt.Errorf("publish: create issue: %w", err)
-	}
-
-	var payload struct {
-		Number int `json:"number"`
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return 0, fmt.Errorf("publish: parse create-issue response: %w", err)
-	}
-	if payload.Number == 0 {
-		return 0, fmt.Errorf("publish: create-issue response missing 'number' field")
-	}
-	return payload.Number, nil
-}
-
-// ghUpdateIssue patches the body of an existing GitHub issue.
-func ghUpdateIssue(ctx context.Context, gh engine.GHRunner, number int, body string) error {
-	_, err := gh(ctx,
-		"api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d", number),
-		"-X", "PATCH",
-		"-f", "body="+body,
-	)
-	if err != nil {
-		if isGHMissing(err) {
-			return errGHRequired()
-		}
-		return fmt.Errorf("publish: update issue #%d: %w", number, err)
-	}
-	return nil
-}
-
 // bodyHashHex returns the sha256 hex digest of body. Stored as
 // published_issues.body_hash so the apply loop's publishUpdate case can
 // detect a byte-identical re-render (a metadata-only finding touch, not an
-// actual content change) and skip the PATCH -- see planPublish's Update
+// actual content change) and skip the body push -- see planPublish's Update
 // heuristic doc comment for why the planner over-selects and leaves this
 // check to apply time.
 func bodyHashHex(body string) string {
@@ -1751,105 +1657,4 @@ func autoCloseComment(f domain.Finding) string {
 		"Auto-closed by bugbot: this finding is no longer reported (status: %s).",
 		f.Status,
 	)
-}
-
-// ghCommentIssue posts a comment on the issue. The caller records the
-// "closing" state between this and the state PATCH so an interrupted close
-// never re-posts the comment.
-func ghCommentIssue(ctx context.Context, gh engine.GHRunner, number int, comment string) error {
-	_, err := gh(ctx,
-		"api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d/comments", number),
-		"-X", "POST",
-		"-f", "body="+comment,
-	)
-	if err != nil {
-		if isGHMissing(err) {
-			return errGHRequired()
-		}
-		return fmt.Errorf("publish: post close comment on issue #%d: %w", number, err)
-	}
-	return nil
-}
-
-// ghPatchIssueClosed patches the issue state to closed.
-func ghPatchIssueClosed(ctx context.Context, gh engine.GHRunner, number int) error {
-	_, err := gh(ctx,
-		"api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d", number),
-		"-X", "PATCH",
-		"-f", "state=closed",
-	)
-	if err != nil {
-		if isGHMissing(err) {
-			return errGHRequired()
-		}
-		return fmt.Errorf("publish: close issue #%d: %w", number, err)
-	}
-	return nil
-}
-
-// ghReopenIssue reopens a closed GitHub issue and refreshes its body in a
-// single PATCH (state=open, body=...). Unlike ghUpdateIssue (body-only) and
-// ghPatchIssueClosed (state-only), a regression reopen needs both the state
-// flip and a fresh body -- one mutating call does double duty so a reopened
-// issue never shows the stale content it had when it was closed.
-func ghReopenIssue(ctx context.Context, gh engine.GHRunner, number int, body string) error {
-	_, err := gh(ctx,
-		"api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d", number),
-		"-X", "PATCH",
-		"-f", "state=open",
-		"-f", "body="+body,
-	)
-	if err != nil {
-		if isGHMissing(err) {
-			return errGHRequired()
-		}
-		return fmt.Errorf("publish: reopen issue #%d: %w", number, err)
-	}
-	return nil
-}
-
-// errGHMissing is the sentinel for a missing gh binary, so callers up the
-// stack (the daemon publisher's warn-once latch) can detect the condition with
-// errors.Is even after the message has been made user-friendly.
-var errGHMissing = errors.New("gh CLI not found on PATH")
-
-// errGHRequired is the uniform user-facing error for a missing gh binary.
-func errGHRequired() error {
-	return fmt.Errorf("publish: gh CLI is required but was not found on PATH; install gh from https://cli.github.com: %w", errGHMissing)
-}
-
-// isGHMissing reports whether the error indicates gh was not found on PATH.
-// The realGH runner wraps the exec error via %w so errors.As finds it; we
-// also check the string for fake runners that return a plain error.
-func isGHMissing(err error) bool {
-	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, errGHMissing) {
-		return true
-	}
-	return strings.Contains(err.Error(), "executable file not found")
-}
-
-// isGHGoneOrNotFound reports whether the error indicates the GitHub issue no
-// longer exists at the recorded number. We detect the two HTTP statuses that
-// mean "this issue is gone, the local row is stale":
-//   - 410 Gone: issue was deleted
-//   - 404 Not Found: issue was deleted, transferred, or renamed
-//
-// gh surfaces these in the stderr text it returns; the wording varies across
-// gh versions ("was deleted", "Gone", "Not Found", the raw status code). We
-// look for the most robust signals first (the literal "410" and "404" status
-// codes) and fall back to the human-readable phrases gh typically emits.
-func isGHGoneOrNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	// Match gh's HTTP status token, not a bare "404"/"410" substring: the
-	// wrapped error always embeds the issue number and API path, so a bare
-	// match misfires on issues numbered like #404/#410 for any unrelated
-	// failure (rate-limit, 5xx, validation).
-	if strings.Contains(msg, "HTTP 404") || strings.Contains(msg, "HTTP 410") {
-		return true
-	}
-	lower := strings.ToLower(msg)
-	return strings.Contains(lower, "was deleted")
 }

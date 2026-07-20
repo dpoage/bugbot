@@ -49,27 +49,3 @@ func (f *fakeGH) run(_ context.Context, args ...string) ([]byte, error) {
 	}
 	return nil, fmt.Errorf("fakeGH: no route for: %s", joined)
 }
-
-// callsContaining returns every recorded call whose joined args contain substr.
-func (f *fakeGH) callsContaining(substr string) [][]string {
-	var out [][]string
-	for _, c := range f.calls {
-		if strings.Contains(strings.Join(c, " "), substr) {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-// argValue extracts the value of an -f/-F key=value pair from a recorded call,
-// e.g. argValue(call, "body") returns the body posted.
-func argValue(call []string, key string) (string, bool) {
-	for i := 0; i < len(call); i++ {
-		if (call[i] == "-f" || call[i] == "-F") && i+1 < len(call) {
-			if k, v, ok := strings.Cut(call[i+1], "="); ok && k == key {
-				return v, true
-			}
-		}
-	}
-	return "", false
-}

@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -13,7 +15,7 @@ func TestUpsertAndGetPublishedIssue(t *testing.T) {
 	st := openTemp(t)
 
 	fp := "fp-abc123"
-	if err := st.UpsertPublishedIssue(ctx, fp, 42, "open", ""); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, "github", "42", "open", ""); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 
@@ -24,8 +26,11 @@ func TestUpsertAndGetPublishedIssue(t *testing.T) {
 	if pi.Fingerprint != fp {
 		t.Errorf("fingerprint = %q, want %q", pi.Fingerprint, fp)
 	}
-	if pi.IssueNumber != 42 {
-		t.Errorf("issue_number = %d, want 42", pi.IssueNumber)
+	if pi.IssueKey != "42" {
+		t.Errorf("issue_key = %q, want 42", pi.IssueKey)
+	}
+	if pi.Tracker != "github" {
+		t.Errorf("tracker = %q, want github", pi.Tracker)
 	}
 	if pi.State != "open" {
 		t.Errorf("state = %q, want open", pi.State)
@@ -35,6 +40,45 @@ func TestUpsertAndGetPublishedIssue(t *testing.T) {
 	}
 	if pi.UpdatedAt.IsZero() {
 		t.Error("updated_at is zero")
+	}
+}
+
+// TestPublishedIssue_NonNumericKeyRoundTrip pins the point of the key
+// cutover (epic bugbot-6gfy): issue_key is opaque TEXT, so a Jira-style
+// 'PROJ-42' key round-trips through both the Get and List scan paths — a
+// value the dropped INTEGER issue_number column could never hold.
+func TestPublishedIssue_NonNumericKeyRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	if err := st.UpsertPublishedIssue(ctx, "fp-jira", "jira", "PROJ-42", IssueStateOpen, ""); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := st.UpsertPublishedIssue(ctx, "fp-gh", "github", "123", IssueStateOpen, ""); err != nil {
+		t.Fatalf("upsert gh: %v", err)
+	}
+
+	got, err := st.GetPublishedIssue(ctx, "fp-jira")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.IssueKey != "PROJ-42" || got.Tracker != "jira" {
+		t.Errorf("Get key/tracker = %q/%q, want PROJ-42/jira", got.IssueKey, got.Tracker)
+	}
+
+	list, err := st.ListPublishedIssues(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(list))
+	}
+	// ORDER BY fingerprint ASC -> fp-gh, fp-jira.
+	if list[0].IssueKey != "123" || list[0].Tracker != "github" {
+		t.Errorf("list[0] key/tracker = %q/%q, want 123/github", list[0].IssueKey, list[0].Tracker)
+	}
+	if list[1].IssueKey != "PROJ-42" || list[1].Tracker != "jira" {
+		t.Errorf("list[1] key/tracker = %q/%q, want PROJ-42/jira", list[1].IssueKey, list[1].Tracker)
 	}
 }
 
@@ -52,7 +96,7 @@ func TestUpsertPublishedIssue_PreservesCreatedAt(t *testing.T) {
 	st := openTemp(t)
 
 	fp := "fp-stable"
-	if err := st.UpsertPublishedIssue(ctx, fp, 1, "open", ""); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, "github", "1", "open", ""); err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
 	first, err := st.GetPublishedIssue(ctx, fp)
@@ -60,7 +104,7 @@ func TestUpsertPublishedIssue_PreservesCreatedAt(t *testing.T) {
 		t.Fatalf("first get: %v", err)
 	}
 
-	if err := st.UpsertPublishedIssue(ctx, fp, 2, "closed", ""); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, "github", "2", "closed", ""); err != nil {
 		t.Fatalf("second upsert: %v", err)
 	}
 	second, err := st.GetPublishedIssue(ctx, fp)
@@ -71,8 +115,8 @@ func TestUpsertPublishedIssue_PreservesCreatedAt(t *testing.T) {
 	if !second.CreatedAt.Equal(first.CreatedAt) {
 		t.Errorf("created_at drifted: %s -> %s", first.CreatedAt, second.CreatedAt)
 	}
-	if second.IssueNumber != 2 {
-		t.Errorf("issue_number = %d, want 2", second.IssueNumber)
+	if second.IssueKey != "2" {
+		t.Errorf("issue_key = %q, want 2", second.IssueKey)
 	}
 	if second.State != "closed" {
 		t.Errorf("state = %q, want closed", second.State)
@@ -88,7 +132,7 @@ func TestListPublishedIssues_DeterministicOrder(t *testing.T) {
 
 	fps := []string{"zzz", "aaa", "mmm"}
 	for i, fp := range fps {
-		if err := st.UpsertPublishedIssue(ctx, fp, i+1, "open", ""); err != nil {
+		if err := st.UpsertPublishedIssue(ctx, fp, "github", fmt.Sprintf("%d", i+1), "open", ""); err != nil {
 			t.Fatalf("upsert %q: %v", fp, err)
 		}
 	}
@@ -136,7 +180,7 @@ func TestCountPublishedIssues(t *testing.T) {
 	}
 
 	for i, state := range []IssueState{IssueStateOpen, IssueStateOpen, IssueStateClosed, IssueStatePending} {
-		if err := st.UpsertPublishedIssue(ctx, fmt.Sprintf("fp%d", i), i+1, state, ""); err != nil {
+		if err := st.UpsertPublishedIssue(ctx, fmt.Sprintf("fp%d", i), "github", fmt.Sprintf("%d", i+1), state, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -165,7 +209,7 @@ func TestListPublishedIssues_StableOrderAcrossCalls(t *testing.T) {
 	// fingerprint order, regardless of insertion order.
 	fps := []string{"zzz", "aaa", "mmm", "bbb", "yyy"}
 	for i, fp := range fps {
-		if err := st.UpsertPublishedIssue(ctx, fp, i+1, "open", ""); err != nil {
+		if err := st.UpsertPublishedIssue(ctx, fp, "github", fmt.Sprintf("%d", i+1), "open", ""); err != nil {
 			t.Fatalf("upsert %q: %v", fp, err)
 		}
 	}
@@ -194,15 +238,15 @@ func TestListPublishedIssues_StableOrderAcrossCalls(t *testing.T) {
 }
 
 // TestDeletePublishedIssue covers the stale-row cleanup path used by the
-// publish reconciler when a GitHub issue returns 410/404: insert, delete,
-// confirm the row is gone (ErrNotFound) and confirm a second delete is
-// idempotent (no error).
+// publish reconciler when a tracker issue is gone (tracker.ErrIssueGone):
+// insert, delete, confirm the row is gone (ErrNotFound) and confirm a second
+// delete is idempotent (no error).
 func TestDeletePublishedIssue(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
 	fp := "fp-stale"
-	if err := st.UpsertPublishedIssue(ctx, fp, 99, "open", ""); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, "github", "99", "open", ""); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -227,7 +271,7 @@ func TestDeletePublishedIssue(t *testing.T) {
 	}
 
 	// A different fingerprint is unaffected.
-	if err := st.UpsertPublishedIssue(ctx, "fp-fresh", 7, "open", ""); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, "fp-fresh", "github", "7", "open", ""); err != nil {
 		t.Fatalf("seed fresh: %v", err)
 	}
 	if err := st.DeletePublishedIssue(ctx, fp); err != nil {
@@ -239,17 +283,16 @@ func TestDeletePublishedIssue(t *testing.T) {
 }
 
 // TestUpsertPublishedIssue_BodyHashRoundTrip pins migration 025
-// (published_body_hash): a fresh openTemp store runs 001-025 in order, so
-// body_hash must exist and round-trip through Get/List, and a conflict
-// upsert must refresh it (not just issue_number/state/updated_at) so the
-// publish apply loop's no-op-PATCH check (bugbot-klaj) always compares
+// (published_body_hash): body_hash must round-trip through Get/List, and a
+// conflict upsert must refresh it (not just issue_key/state/updated_at) so
+// the publish apply loop's no-op-update check (bugbot-klaj) always compares
 // against the hash of the body actually pushed last.
 func TestUpsertPublishedIssue_BodyHashRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
 	fp := "fp-hash"
-	if err := st.UpsertPublishedIssue(ctx, fp, 5, IssueStateOpen, "abc123hash"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, "github", "5", IssueStateOpen, "abc123hash"); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 
@@ -270,7 +313,7 @@ func TestUpsertPublishedIssue_BodyHashRoundTrip(t *testing.T) {
 	}
 
 	// Conflict-update path must also refresh body_hash.
-	if err := st.UpsertPublishedIssue(ctx, fp, 5, IssueStateOpen, "def456hash"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, "github", "5", IssueStateOpen, "def456hash"); err != nil {
 		t.Fatalf("second upsert: %v", err)
 	}
 	got2, err := st.GetPublishedIssue(ctx, fp)
@@ -283,7 +326,7 @@ func TestUpsertPublishedIssue_BodyHashRoundTrip(t *testing.T) {
 
 	// A row upserted with "" (e.g. pending/closing/closed states, which
 	// never push a body) leaves the column at the migration's DEFAULT ''.
-	if err := st.UpsertPublishedIssue(ctx, "fp-nobody", 6, IssueStatePending, ""); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, "fp-nobody", "github", "", IssueStatePending, ""); err != nil {
 		t.Fatalf("upsert nobody: %v", err)
 	}
 	nobody, err := st.GetPublishedIssue(ctx, "fp-nobody")
@@ -296,25 +339,24 @@ func TestUpsertPublishedIssue_BodyHashRoundTrip(t *testing.T) {
 }
 
 // TestSetPublishedManagedLabels_RoundTrip pins migration 027
-// (published_managed_labels): a fresh openTemp store runs 001-027 in order,
-// so managed_labels must exist, default to ” (read back as nil for rows
-// that predate any Set), and round-trip sorted through both Get and List
-// regardless of the caller's input order. A second row with its own labels
-// pins the UPDATE's fingerprint scoping: Set on one fingerprint must not
-// touch any other row.
+// (published_managed_labels): managed_labels must default to ” (read back
+// as nil for rows that predate any Set) and round-trip sorted through both
+// Get and List regardless of the caller's input order. A second row with
+// its own labels pins the UPDATE's fingerprint scoping: Set on one
+// fingerprint must not touch any other row.
 func TestSetPublishedManagedLabels_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	st := openTemp(t)
 
 	fp := "fp-labels"
-	if err := st.UpsertPublishedIssue(ctx, fp, 11, IssueStateOpen, ""); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, "github", "11", IssueStateOpen, ""); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
 	// Bystander row with its own labels: must be untouched by Sets on fp.
 	other := "fp-other"
 	otherWant := []string{"bugbot:auto-filed", "severity:low"}
-	if err := st.UpsertPublishedIssue(ctx, other, 12, IssueStateOpen, ""); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, other, "github", "12", IssueStateOpen, ""); err != nil {
 		t.Fatalf("seed other: %v", err)
 	}
 	if err := st.SetPublishedManagedLabels(ctx, other, otherWant); err != nil {
@@ -377,7 +419,7 @@ func TestSetPublishedManagedLabels_RoundTrip(t *testing.T) {
 
 // TestSetPublishedManagedLabels_PreservedAcrossUpsert verifies (not assumes)
 // that UpsertPublishedIssue's ON CONFLICT clause does not touch
-// managed_labels: a conflict upsert refreshes issue_number/state/body_hash/
+// managed_labels: a conflict upsert refreshes issue_key/state/body_hash/
 // updated_at but the last-applied label bookkeeping survives, so the
 // reconciler's diff basis is not wiped by an unrelated body push.
 func TestSetPublishedManagedLabels_PreservedAcrossUpsert(t *testing.T) {
@@ -385,7 +427,7 @@ func TestSetPublishedManagedLabels_PreservedAcrossUpsert(t *testing.T) {
 	st := openTemp(t)
 
 	fp := "fp-upsert-keep"
-	if err := st.UpsertPublishedIssue(ctx, fp, 1, IssueStateOpen, "hash-a"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, "github", "1", IssueStateOpen, "hash-a"); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	want := []string{"bugbot:auto-filed", "severity:low"}
@@ -394,7 +436,7 @@ func TestSetPublishedManagedLabels_PreservedAcrossUpsert(t *testing.T) {
 	}
 
 	// Conflict upsert on the same fingerprint.
-	if err := st.UpsertPublishedIssue(ctx, fp, 2, IssueStateClosed, "hash-b"); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, "github", "2", IssueStateClosed, "hash-b"); err != nil {
 		t.Fatalf("conflict upsert: %v", err)
 	}
 
@@ -406,7 +448,7 @@ func TestSetPublishedManagedLabels_PreservedAcrossUpsert(t *testing.T) {
 		t.Errorf("ManagedLabels after upsert = %v, want %v", got.ManagedLabels, want)
 	}
 	// Sanity: the upsert itself still applied its own columns.
-	if got.IssueNumber != 2 || got.State != IssueStateClosed || got.BodyHash != "hash-b" {
+	if got.IssueKey != "2" || got.State != IssueStateClosed || got.BodyHash != "hash-b" {
 		t.Errorf("upsert columns not refreshed: %+v", got)
 	}
 }
@@ -421,7 +463,7 @@ func TestSetPublishedManagedLabels_ClearAndNoUpdatedAtBump(t *testing.T) {
 	st := openTemp(t)
 
 	fp := "fp-clear"
-	if err := st.UpsertPublishedIssue(ctx, fp, 3, IssueStateOpen, ""); err != nil {
+	if err := st.UpsertPublishedIssue(ctx, fp, "github", "3", IssueStateOpen, ""); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	before, err := st.GetPublishedIssue(ctx, fp)
@@ -474,5 +516,171 @@ func TestSetPublishedManagedLabels_MissingFingerprint(t *testing.T) {
 	}
 	if list != nil {
 		t.Errorf("table not empty after no-op set: %+v", list)
+	}
+}
+
+// TestUpsertPublishedIssue_RefreshesIssueKeyTracker pins the cutover
+// semantics of the ON CONFLICT clause: issue_key and tracker are the row's
+// identity now, so a conflict upsert REFRESHES both (a stale-recreate after
+// a deleted issue records the fresh key), while created_at and
+// managed_labels are preserved. A bystander row pins the upsert's
+// fingerprint scoping.
+func TestUpsertPublishedIssue_RefreshesIssueKeyTracker(t *testing.T) {
+	ctx := context.Background()
+	st := openTemp(t)
+
+	fp := "fp-keyed"
+	other := "fp-bystander"
+	if err := st.UpsertPublishedIssue(ctx, fp, "jira", "PROJ-42", IssueStateOpen, "hash-a"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := st.UpsertPublishedIssue(ctx, other, "gitlab", "999", IssueStateOpen, "hash-o"); err != nil {
+		t.Fatalf("seed other: %v", err)
+	}
+	otherBefore, err := st.GetPublishedIssue(ctx, other)
+	if err != nil {
+		t.Fatalf("get bystander before: %v", err)
+	}
+
+	// Conflict upsert on fp only, with a new key and tracker.
+	if err := st.UpsertPublishedIssue(ctx, fp, "github", "17", IssueStateClosed, "hash-b"); err != nil {
+		t.Fatalf("conflict upsert: %v", err)
+	}
+
+	got, err := st.GetPublishedIssue(ctx, fp)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.IssueKey != "17" || got.Tracker != "github" {
+		t.Errorf("key/tracker after upsert = %q/%q, want 17/github (conflict refreshes both)", got.IssueKey, got.Tracker)
+	}
+	if got.State != IssueStateClosed || got.BodyHash != "hash-b" {
+		t.Errorf("upsert columns not refreshed: %+v", got)
+	}
+
+	// Bystander row untouched in full.
+	otherGot, err := st.GetPublishedIssue(ctx, other)
+	if err != nil {
+		t.Fatalf("get bystander after: %v", err)
+	}
+	if otherGot.IssueKey != "999" || otherGot.Tracker != "gitlab" {
+		t.Errorf("bystander IssueKey/Tracker = %q/%q, want 999/gitlab", otherGot.IssueKey, otherGot.Tracker)
+	}
+	if otherGot.State != otherBefore.State || otherGot.BodyHash != otherBefore.BodyHash ||
+		!otherGot.UpdatedAt.Equal(otherBefore.UpdatedAt) {
+		t.Errorf("bystander row changed by upsert on %q:\n before: %+v\n after:  %+v", fp, otherBefore, otherGot)
+	}
+}
+
+// TestMigration028And029_KeyCutoverUpgrade is a real upgrade test for the
+// 027 -> 029 chain: it builds a database at schema version 27 by applying
+// the embedded migrations one at a time (applyMigration keeps the
+// schema_migrations bookkeeping consistent, exactly as migrate() would),
+// seeds published_issues rows that predate 028 (issue_number is the only
+// issue identity), then runs the real Open() — whose migrate() applies 028
+// (issue_key backfill) and 029 (issue_number drop) — and asserts through
+// the store API that issue_key == CAST(issue_number AS TEXT) and
+// tracker == 'github' for every pre-existing row, and via PRAGMA table_info
+// that the issue_number column is gone. Two rows with distinct numbers pin
+// that the backfill UPDATE is table-wide, not accidentally scoped.
+func TestMigration028And029_KeyCutoverUpgrade(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+
+	// migrate() creates this table before applying anything; mirror it so
+	// applyMigration's bookkeeping insert works and the later Open() resumes
+	// from version 27 instead of re-running 001.
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version    INTEGER PRIMARY KEY,
+			name       TEXT NOT NULL,
+			applied_at TEXT NOT NULL
+		)`); err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	saw028, saw029 := false, false
+	for _, m := range migs {
+		if m.version >= 28 {
+			switch m.version {
+			case 28:
+				saw028 = true
+			case 29:
+				saw029 = true
+			}
+			continue
+		}
+		if err := applyMigration(ctx, db, m); err != nil {
+			t.Fatalf("apply %s: %v", m.name, err)
+		}
+	}
+	if !saw028 || !saw029 {
+		t.Fatalf("embedded migrations lack the key cutover chain: 028=%v 029=%v", saw028, saw029)
+	}
+
+	// Seed rows as they existed before 028: issue_number is the only issue
+	// identity. body_hash (025) and managed_labels (027) fall back to their
+	// DEFAULTs.
+	now := nowUTC().Format(timeLayout)
+	seeds := []struct {
+		fp  string
+		num int
+	}{
+		{"fp-old", 123},
+		{"fp-bystander", 456},
+	}
+	for _, s := range seeds {
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO published_issues (fingerprint, issue_number, state, created_at, updated_at)
+			VALUES (?, ?, 'open', ?, ?)`,
+			s.fp, s.num, now, now); err != nil {
+			t.Fatalf("seed %q: %v", s.fp, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close pre-upgrade db: %v", err)
+	}
+
+	// The real upgrade path: Open() runs migrate(), which applies 028+029.
+	st, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open (upgrade): %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	for _, s := range seeds {
+		got, err := st.GetPublishedIssue(ctx, s.fp)
+		if err != nil {
+			t.Fatalf("get %q: %v", s.fp, err)
+		}
+		if want := fmt.Sprintf("%d", s.num); got.IssueKey != want {
+			t.Errorf("%q IssueKey = %q, want %q (backfill from issue_number)", s.fp, got.IssueKey, want)
+		}
+		if got.Tracker != "github" {
+			t.Errorf("%q Tracker = %q, want %q", s.fp, got.Tracker, "github")
+		}
+		if got.State != IssueStateOpen {
+			t.Errorf("%q State = %q, want open (row must survive the drop)", s.fp, got.State)
+		}
+	}
+
+	// 029: the issue_number column itself is gone.
+	var issueNumberCols int
+	if err := st.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('published_issues') WHERE name = 'issue_number'`,
+	).Scan(&issueNumberCols); err != nil {
+		t.Fatalf("pragma_table_info: %v", err)
+	}
+	if issueNumberCols != 0 {
+		t.Errorf("issue_number column still present after 029 (pragma_table_info count = %d)", issueNumberCols)
 	}
 }

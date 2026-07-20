@@ -486,6 +486,13 @@ type Storage struct {
 // Publish configures the `bugbot publish` command and daemon post-cycle hook
 // that files open findings as GitHub issues via the gh CLI.
 //
+// tracker names the issue-tracker backend the rest of this block configures.
+// Default "github". Membership is validated at publish time by the tracker
+// registry (internal/tracker): unknown names fail loudly there, listing the
+// known trackers. Config only checks that the value is non-empty, because
+// importing the registry here would create an import cycle (the tracker
+// factories consume a tracker.Config).
+//
 // enabled gates the daemon hook only — the manual `bugbot publish` command
 // always works regardless of this flag.
 //
@@ -508,6 +515,7 @@ type Storage struct {
 //
 // Env overrides:
 //
+//	BUGBOT_PUBLISH_TRACKER       (tracker backend name, e.g. "github")
 //	BUGBOT_PUBLISH_ENABLED       ("true" or "false")
 //	BUGBOT_PUBLISH_TIER_MIN      (integer 0..3)
 //	BUGBOT_PUBLISH_LABELS        (comma-separated label names)
@@ -515,6 +523,7 @@ type Storage struct {
 //	BUGBOT_PUBLISH_SEVERITY_LABELS ("true" or "false")
 //	BUGBOT_PUBLISH_TIER_LABELS   ("true" or "false")
 type Publish struct {
+	Tracker        string   `yaml:"tracker"`
 	Enabled        bool     `yaml:"enabled"`
 	TierMin        int      `yaml:"tier_min"`
 	Labels         []string `yaml:"labels"`
@@ -616,6 +625,7 @@ func Default() Config {
 			Suspected: "summary",
 		},
 		Publish: Publish{
+			Tracker:        "github",
 			Enabled:        false,
 			TierMin:        2,
 			Labels:         []string{"bugbot"},
@@ -758,6 +768,7 @@ func parseEnvBool(key, v string) (bool, error) {
 //	BUGBOT_VERIFY_SANDBOX_EXEC         ("true" or "false")
 //	BUGBOT_VERIFY_SANDBOX_MIN_SEVERITY (critical|high|medium|low)
 //	BUGBOT_VERIFY_SANDBOX_MAX_EXECS    (integer >= 1)
+//	BUGBOT_PUBLISH_TRACKER             (tracker backend name, e.g. "github")
 //	BUGBOT_PUBLISH_ENABLED             ("true" or "false")
 //	BUGBOT_PUBLISH_TIER_MIN            (integer 0..3)
 //	BUGBOT_PUBLISH_LABELS              (comma-separated label names)
@@ -860,6 +871,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 	setStr("BUGBOT_REPRO_TRANSCRIPT_DIR", &cfg.Repro.TranscriptDir)
 	setStr("BUGBOT_TRANSCRIPT_DIR", &cfg.TranscriptDir)
 	setStr("BUGBOT_DAEMON_CONTROL_SOCKET_PATH", &cfg.Daemon.ControlSocket.Path)
+	setStr("BUGBOT_PUBLISH_TRACKER", &cfg.Publish.Tracker)
 
 	// BUGBOT_PUBLISH_LABELS is comma-separated; an explicit env var replaces the
 	// whole slice rather than appending, matching the override pattern elsewhere.
@@ -1148,6 +1160,9 @@ func (c *Config) Validate() error {
 	// Negative or >1 is meaningless.
 	if c.Budgets.FinderBudgetShare < 0 || c.Budgets.FinderBudgetShare > 1 {
 		return fmt.Errorf("config: budgets.finder_budget_share %.3f invalid (want 0..1)", c.Budgets.FinderBudgetShare)
+	}
+	if c.Publish.Tracker == "" {
+		return fmt.Errorf(`config: publish.tracker must not be empty (omit the key for the default "github"; unknown names are rejected at publish time by the tracker registry)`)
 	}
 	if c.Publish.TierMin < 0 || c.Publish.TierMin > 3 {
 		return fmt.Errorf("config: publish.tier_min %d invalid (want 0..3)", c.Publish.TierMin)

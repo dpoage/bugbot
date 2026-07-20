@@ -267,6 +267,10 @@ report:
 # lets the reconciler close issues whose findings are fixed or dismissed.
 # ---------------------------------------------------------------------------
 publish:
+  # tracker: which issue-tracker backend issues are filed to. Currently
+  # supported: github. Unknown values fail loudly at publish time, listing
+  # the known trackers.
+  tracker: github
   enabled: false
   tier_min: 2
   labels:

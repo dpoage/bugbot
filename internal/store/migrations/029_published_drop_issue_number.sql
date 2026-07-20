@@ -1,0 +1,17 @@
+-- 029_published_drop_issue_number.sql — epic bugbot-6gfy cutover: drop the
+-- GitHub-only integer issue identity now that the publish applier speaks
+-- opaque tracker keys.
+--
+-- 028 added issue_key TEXT + tracker and backfilled
+-- issue_key = CAST(issue_number AS TEXT) for every pre-existing row FIRST,
+-- so this drop loses no identity: any row that ever had an issue_number
+-- carries the same value in issue_key ('123'), and non-GitHub trackers get
+-- keys an INTEGER column could never hold ('PROJ-42'). The publish applier
+-- writes issue_key + tracker through UpsertPublishedIssue as of this
+-- migration's slice (bugbot-6gfy.4).
+--
+-- Migrations are forward-only (028 is merged and stays untouched): a
+-- pre-029 binary pointed at a database this migration has touched fails
+-- loudly at its first published_issues access ("no such column:
+-- issue_number") rather than silently misbehaving.
+ALTER TABLE published_issues DROP COLUMN issue_number;
