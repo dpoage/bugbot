@@ -1024,15 +1024,21 @@ func TestCheckSandboxVerifier_Fail(t *testing.T) {
 	}
 }
 
-// TestCheckSandboxVerifier_ShowsExitCodeAndFullOutput pins the bugbot-6835
+// TestCheckSandboxVerifier_ShowsExitCodeAndDetail pins the bugbot-6835
 // doctor rendering fix: checkSandboxVerifier's PASS/FAIL line must surface
-// the exit code and the fuller (head+tail-preserved) FullOutput excerpt —
-// not just the terse, historically-300-char Detail — while still emitting
-// exactly one line (printResults writes one aligned row per checkResult),
-// so embedded newlines in FullOutput must be collapsed, not left raw.
-func TestCheckSandboxVerifier_ShowsExitCodeAndFullOutput(t *testing.T) {
+// the exit code and the fuller (head+tail-preserved, >=2000 char budget)
+// Detail content unmodified. Detail is produced single-line-safe by
+// repro.classifySmoke (embedded newlines pre-collapsed to " | " via
+// oneLine) — checkSandboxVerifier does no truncation or normalization of
+// its own, so a long, already-safe Detail must pass straight through as
+// exactly one line.
+func TestCheckSandboxVerifier_ShowsExitCodeAndDetail(t *testing.T) {
 	cfgPath := writeDoctorConfig(t)
-	fullOutput := "pulling image layer noise...\nmore setup noise\nENTRYPOINT_ROOT_CAUSE: exec \"/bin/sh\": stat /bin/sh: no such file or directory\n"
+	// Shaped like classifySmoke's real smokeDetail output: "exit N: " prefix
+	// plus a long head+tail excerpt with embedded newlines already collapsed
+	// to " | " (never raw "\n" — that is repro's contract, not doctor's job
+	// to enforce here).
+	detail := "exit 127: pulling image layer noise... | more setup noise | ENTRYPOINT_ROOT_CAUSE: exec \"/bin/sh\": stat /bin/sh: no such file or directory"
 	env := doctorEnv{
 		configPath: cfgPath,
 		repoDir:    t.TempDir(),
@@ -1041,11 +1047,10 @@ func TestCheckSandboxVerifier_ShowsExitCodeAndFullOutput(t *testing.T) {
 		runCommand: func(_ context.Context, _ string, _ ...string) (string, error) { return "", nil },
 		verifySandbox: func(_ context.Context, _ string, _ config.Config) (repro.SmokeVerdict, error) {
 			return repro.SmokeVerdict{
-				OK:         false,
-				Category:   "toolchain_missing",
-				ExitCode:   127,
-				Detail:     "exit 127: go: command not found",
-				FullOutput: fullOutput,
+				OK:       false,
+				Category: "toolchain_missing",
+				ExitCode: 127,
+				Detail:   detail,
 			}, nil
 		},
 		out: &strings.Builder{},
@@ -1068,7 +1073,7 @@ func TestCheckSandboxVerifier_ShowsExitCodeAndFullOutput(t *testing.T) {
 		t.Errorf("detail=%q missing exit code", found.Detail)
 	}
 	if !strings.Contains(found.Detail, "ENTRYPOINT_ROOT_CAUSE") {
-		t.Errorf("detail=%q missing the FullOutput root-cause content", found.Detail)
+		t.Errorf("detail=%q missing the root-cause content from Detail", found.Detail)
 	}
 	if strings.Contains(found.Detail, "\n") {
 		t.Errorf("detail=%q contains a raw newline; printResults writes one aligned line per check result", found.Detail)
