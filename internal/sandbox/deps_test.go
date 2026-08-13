@@ -729,7 +729,7 @@ func TestPythonResolveFetchPrefetchSpec(t *testing.T) {
 	if spec.Network == "" || spec.Network == "none" {
 		t.Errorf("prefetch network = %q, want a real network (not none/empty)", spec.Network)
 	}
-	wantCmd := []string{"pip", "download", "-r", "requirements.txt", "-d", pipCacheMount}
+	wantCmd := []string{"pip", "download", "-r", "requirements.txt", "--only-binary=:all:", "-d", pipCacheMount}
 	if !slices.Equal(spec.Cmd, wantCmd) {
 		t.Errorf("prefetch cmd = %v, want %v", spec.Cmd, wantCmd)
 	}
@@ -1787,6 +1787,70 @@ func TestJSResolveFetchPrefetchSpec(t *testing.T) {
 	}
 }
 
+// TestEcosystemPrefetchSecurityFlags pins the no-script-exec security flags
+// (bugbot-gu0o acceptance #4) at the SINGLE enforcement point every
+// ecosystem now shares: runEcosystemPrefetch. Before the collapse, each
+// ecosystem carried its own runXPrefetch copy of the Spec-build logic, and
+// only npm remembered its flag (the original bug). This test exercises the
+// full resolve → Prefetch → runEcosystemPrefetch → Exec path for every
+// ecosystem that has a real script-exec control, and fails if a future edit
+// to any newXPrefetch constructor drops the flag from ecosystemPrefetchSpec.cmd.
+func TestEcosystemPrefetchSecurityFlags(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func(t *testing.T, dir string)
+		resolve  func(dir string, opts DepOptions) (Resolution, error)
+		wantFlag string
+	}{
+		{
+			name: "npm --ignore-scripts",
+			setup: func(t *testing.T, dir string) {
+				writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
+				writeFile(t, filepath.Join(dir, "package-lock.json"), `{"lockfileVersion":2}`+"\n")
+			},
+			resolve:  resolveJS,
+			wantFlag: "--ignore-scripts",
+		},
+		{
+			name: "pip --only-binary=:all:",
+			setup: func(t *testing.T, dir string) {
+				writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
+			},
+			resolve:  resolvePython,
+			wantFlag: "--only-binary=:all:",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.setup(t, dir)
+			cacheBase := t.TempDir()
+			mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+			res, err := tc.resolve(dir, DepOptions{
+				Strategy:     DepStrategyFetch,
+				FetchSandbox: mock,
+				userCacheDir: cacheBase,
+			})
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if res.Prefetch == nil {
+				t.Fatal("FETCH strategy must set a prefetch hook")
+			}
+			if err := res.Prefetch(context.Background()); err != nil {
+				t.Fatalf("prefetch: %v", err)
+			}
+			calls := mock.Calls()
+			if len(calls) != 1 {
+				t.Fatalf("prefetch should run exactly one container, got %d", len(calls))
+			}
+			if !slices.Contains(calls[0].Spec.Cmd, tc.wantFlag) {
+				t.Errorf("SECURITY: prefetch Cmd %v missing %s at the single enforcement point (runEcosystemPrefetch)", calls[0].Spec.Cmd, tc.wantFlag)
+			}
+		})
+	}
+}
+
 // TestJSPrefetchSentinelKeyedOnPackageLock: sentinel is keyed on package-lock.json
 // hash; warm cache is skipped, changed lockfile triggers re-fetch.
 func TestJSPrefetchSentinelKeyedOnPackageLock(t *testing.T) {
@@ -2406,9 +2470,18 @@ func TestMavenResolveFetchPrefetchSpec(t *testing.T) {
 	if spec.Network == "" || spec.Network == "none" {
 		t.Errorf("prefetch network = %q, want a real network (not none/empty)", spec.Network)
 	}
-	wantCmd := []string{"mvn", "-B", "dependency:go-offline"}
-	if !slices.Equal(spec.Cmd, wantCmd) {
-		t.Errorf("prefetch cmd = %v, want %v", spec.Cmd, wantCmd)
+	if len(spec.Cmd) != 3 || spec.Cmd[0] != "sh" || spec.Cmd[1] != "-c" {
+		t.Fatalf("prefetch cmd = %v, want [sh -c <maven provider warm-up script>]", spec.Cmd)
+	}
+	script := spec.Cmd[2]
+	if !strings.Contains(script, "dependency:go-offline") {
+		t.Errorf("prefetch script missing dependency:go-offline; got %q", script)
+	}
+	if !strings.Contains(script, m2CacheMount) {
+		t.Errorf("prefetch script missing cache mount %s; got %q", m2CacheMount, script)
+	}
+	if !strings.Contains(script, "surefire-junit-platform") {
+		t.Errorf("prefetch script missing bugbot-own9 surefire provider warm-up; got %q", script)
 	}
 	// Cache mounted WRITABLE at /m2cache.
 	if len(spec.RWMounts) != 1 || spec.RWMounts[0].ContainerPath != m2CacheMount {
@@ -2574,10 +2647,12 @@ func TestGradleResolveFetchShape(t *testing.T) {
 		t.Errorf("fetch env missing GRADLE_USER_HOME=%s; got %v", gradleHomeDir, res.Env)
 	}
 
-	// SetupCmds: [0] mkdir, [1] cp. Two commands required (not one), so the
-	// copy target exists before cp -a populates it.
-	if len(res.SetupCmds) != 2 {
-		t.Fatalf("Gradle FETCH must have 2 SetupCmds (mkdir + cp), got %d: %v", len(res.SetupCmds), res.SetupCmds)
+	// SetupCmds: [0] mkdir, [1] cp, [2] gradle.properties offline-mode write
+	// (bugbot-own9). Three commands required (not two), so the copy target
+	// exists before cp -a populates it, and the offline flag lands in the
+	// writable copy Gradle actually reads GRADLE_USER_HOME from.
+	if len(res.SetupCmds) != 3 {
+		t.Fatalf("Gradle FETCH must have 3 SetupCmds (mkdir + cp + offline-flag), got %d: %v", len(res.SetupCmds), res.SetupCmds)
 	}
 	// First cmd: mkdir -p <gradleHomeDir>
 	if !slices.Contains(res.SetupCmds[0], gradleHomeDir) {
@@ -2587,6 +2662,13 @@ func TestGradleResolveFetchShape(t *testing.T) {
 	setupCmd := strings.Join(res.SetupCmds[1], " ")
 	if !strings.Contains(setupCmd, gradleCacheMount) || !strings.Contains(setupCmd, gradleHomeDir) {
 		t.Errorf("SetupCmds[1] = %v; want cp from %s to %s", res.SetupCmds[1], gradleCacheMount, gradleHomeDir)
+	}
+	// Third cmd (bugbot-own9): writes org.gradle.offline=true into
+	// gradleHomeDir/gradle.properties — Gradle does not infer offline mode
+	// from a populated cache alone.
+	offlineCmd := strings.Join(res.SetupCmds[2], " ")
+	if !strings.Contains(offlineCmd, "org.gradle.offline=true") || !strings.Contains(offlineCmd, gradleHomeDir+"/gradle.properties") {
+		t.Errorf("SetupCmds[2] = %v; want org.gradle.offline=true written to %s/gradle.properties", res.SetupCmds[2], gradleHomeDir)
 	}
 
 	if res.Prefetch == nil {
@@ -2624,9 +2706,15 @@ func TestGradleResolveFetchPrefetchSpec(t *testing.T) {
 	if spec.Network == "" || spec.Network == "none" {
 		t.Errorf("prefetch network = %q, want a real network (not none/empty)", spec.Network)
 	}
-	wantCmd := []string{"gradle", "dependencies", "--no-daemon", "-q"}
-	if !slices.Equal(spec.Cmd, wantCmd) {
-		t.Errorf("prefetch cmd = %v, want %v", spec.Cmd, wantCmd)
+	if len(spec.Cmd) != 3 || spec.Cmd[0] != "sh" || spec.Cmd[1] != "-c" {
+		t.Fatalf("prefetch cmd = %v, want [sh -c <gradle resolve-all init-script>]", spec.Cmd)
+	}
+	script := spec.Cmd[2]
+	if !strings.Contains(script, "gradle --no-daemon -q -I") {
+		t.Errorf("prefetch script missing init-script gradle invocation; got %q", script)
+	}
+	if !strings.Contains(script, "canBeResolved") {
+		t.Errorf("prefetch script missing bugbot-own9 resolve-all init script; got %q", script)
 	}
 	// Cache mounted WRITABLE at /gradlecache.
 	if len(spec.RWMounts) != 1 || spec.RWMounts[0].ContainerPath != gradleCacheMount {

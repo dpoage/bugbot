@@ -695,30 +695,69 @@ func newPrefetchOnce(run func(context.Context) error) func(context.Context) erro
 	}
 }
 
-// newPrefetch builds the one-time online prefetch hook for the FETCH strategy.
-// It runs `go mod download all` in the FetchSandbox with network enabled and
-// GOMODCACHE pointed at hostCache, and is keyed on the repo's go.sum hash so an
-// unchanged dependency set is not re-downloaded. The returned func is guarded by
-// a sync.Once so it runs at most once per Resolution even if called repeatedly.
-func newPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
-	return newPrefetchOnce(func(ctx context.Context) error {
-		return runPrefetch(ctx, repoDir, hostCache, opts)
-	})
+// ecosystemPrefetchSpec parameterizes runEcosystemPrefetch (bugbot-gu0o): the
+// per-ecosystem shape of the ONE online prefetch step — the sentinel-keyed
+// dependency-set hash, the in-container command, the writable cache mount,
+// and any tool-specific env. It replaces seven near-identical runXPrefetch
+// bodies (Go, pip, cargo, npm, dotnet, Maven, Gradle) that each duplicated
+// the same sentinel-check → Spec-build → Exec → error-wrap → sentinel-write
+// sequence; collapsing them into one enforcement point means the offline/
+// script-exec security posture is declared exactly once per ecosystem, in
+// the Cmd its caller builds — see runEcosystemPrefetch's doc for why that
+// matters. Every field is set by the ecosystem's newXPrefetch constructor;
+// there is no zero-value-safe default (a caller that forgets cmd, for
+// instance, has runEcosystemPrefetch running an empty command, which fails
+// loudly rather than silently skipping the security-relevant flags).
+type ecosystemPrefetchSpec struct {
+	// tool is the human-readable prefetch command name used in error
+	// messages (e.g. "go mod download", "pip download", "npm ci
+	// --ignore-scripts --cache /npmcache").
+	tool string
+	// hash returns the dependency-set fingerprint (e.g. sha256(go.sum)) used
+	// both to key the warm-cache sentinel and to decide whether the online
+	// prefetch can be skipped entirely.
+	hash func(repoDir string) (string, error)
+	// cmd is the full in-container argv for the online prefetch, INCLUDING
+	// any security-relevant flags (npm's --ignore-scripts, pip's
+	// --only-binary=:all:). This is the single place those flags live — see
+	// the file-level SECURITY comments in each ecosystem's section for the
+	// rationale behind each one.
+	cmd []string
+	// containerPath is where hostCache is bind-mounted WRITABLE for the
+	// prefetch container (e.g. modcacheMount, pipCacheMount, ...).
+	containerPath string
+	// env is extra KEY=VALUE entries for the prefetch Spec (e.g.
+	// "GOMODCACHE=/modcache"). nil when the tool needs none (pip, npm).
+	env []string
 }
 
-// prefetchSentinel is the marker file written into the fetch cache recording the
-// go.sum hash the cache was populated for; a matching hash means the cache is
-// already warm and the online download is skipped.
-const prefetchSentinel = ".bugbot-fetched"
-
-// runPrefetch performs the actual online module download. It is a no-op when the
-// cache is already warm for the repo's current go.sum.
-func runPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions) error {
-	sum, sumErr := goSumHash(repoDir)
+// runEcosystemPrefetch is the SINGLE enforcement point for every ecosystem's
+// one-time online dependency prefetch (bugbot-gu0o structural fix). Before
+// this collapse, Go/pip/cargo/npm/dotnet/Maven/Gradle each carried their own
+// copy of this exact sequence — sentinel check, network resolve, Spec
+// construction, Exec, error wrapping, sentinel write — which let the
+// offline/script-exec security posture drift silently per ecosystem (the
+// original bug: only npm remembered --ignore-scripts). Now every
+// ecosystem's newXPrefetch constructor builds one ecosystemPrefetchSpec
+// (declaring its security-relevant Cmd once) and hands it here; there is
+// exactly one place left where the prefetch Spec is assembled and exactly
+// one place a future ecosystem's posture can be audited or a flag can
+// regress.
+//
+// It is a no-op when the warm-cache sentinel already matches
+// spec.hash(repoDir) (the dependency set has not changed since the last
+// online prefetch); otherwise it runs spec.cmd in opts.FetchSandbox with
+// network enabled and hostCache mounted WRITABLE at spec.containerPath, and
+// records the sentinel on success so the next Resolution over the same repo
+// skips the online step. Each newXPrefetch wraps its call in
+// newPrefetchOnce so a single Resolution never runs the prefetch twice
+// either.
+func runEcosystemPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions, spec ecosystemPrefetchSpec) error {
+	depHash, hashErr := spec.hash(repoDir)
 	sentinel := filepath.Join(hostCache, prefetchSentinel)
 
-	if sumErr == nil {
-		if prev, err := os.ReadFile(sentinel); err == nil && strings.TrimSpace(string(prev)) == sum {
+	if hashErr == nil {
+		if prev, err := os.ReadFile(sentinel); err == nil && strings.TrimSpace(string(prev)) == depHash {
 			// Cache already populated for this exact dependency set.
 			return nil
 		}
@@ -726,40 +765,63 @@ func runPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions
 
 	network := fetchPrefetchNetwork(opts)
 
-	// The prefetch container is still fully hardened (read-only root, cap-drop,
-	// no-new-privileges, pids/memory/cpu limits — all from buildRunArgs); only
-	// the network differs and the cache is bound WRITABLE so `go mod download`
-	// can populate it. This is the single trusted, online populate step; the
-	// later network-none run mounts the same dir read-only via ROMounts.
-	spec := Spec{
+	// The prefetch container is still fully hardened (read-only root,
+	// cap-drop, no-new-privileges, pids/memory/cpu limits — all from
+	// buildRunArgs); only the network differs and the cache is bound
+	// WRITABLE so the tool can populate it. This is the single trusted,
+	// online populate step; the later network-none run mounts the same dir
+	// read-only via ROMounts.
+	runSpec := Spec{
 		RepoDir:  repoDir,
 		Image:    opts.FetchImage,
 		Network:  network,
-		Cmd:      []string{"go", "mod", "download", "all"},
-		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: modcacheMount}},
-		Env: []string{
-			"GOMODCACHE=" + modcacheMount,
-			"GOFLAGS=-mod=mod",
-		},
+		Cmd:      spec.cmd,
+		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: spec.containerPath}},
+		Env:      spec.env,
 	}
-	res, err := opts.FetchSandbox.Exec(ctx, spec)
+	res, err := opts.FetchSandbox.Exec(ctx, runSpec)
 	if err != nil {
-		return fmt.Errorf("sandbox: prefetch `go mod download` failed to launch: %w", err)
+		return fmt.Errorf("sandbox: %s prefetch failed to launch: %w", spec.tool, err)
 	}
 	if res.TimedOut {
-		return fmt.Errorf("sandbox: prefetch `go mod download` timed out")
+		return fmt.Errorf("sandbox: %s prefetch timed out", spec.tool)
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("sandbox: prefetch `go mod download` exited %d: %s", res.ExitCode, lastLines(res.Stderr, 20))
+		return fmt.Errorf("sandbox: %s prefetch exited %d: %s", spec.tool, res.ExitCode, lastLines(res.Stderr, 20))
 	}
 
-	if sumErr == nil {
-		// Record the warm-cache sentinel; a write failure only costs a redundant
-		// future fetch, so it is non-fatal.
-		_ = os.WriteFile(sentinel, []byte(sum), 0o644)
+	if hashErr == nil {
+		// Record the warm-cache sentinel; a write failure only costs a
+		// redundant future fetch, so it is non-fatal.
+		_ = os.WriteFile(sentinel, []byte(depHash), 0o644)
 	}
 	return nil
 }
+
+// newPrefetch builds the one-time online prefetch hook for the FETCH strategy.
+// It runs `go mod download all` in the FetchSandbox with network enabled and
+// GOMODCACHE pointed at hostCache, and is keyed on the repo's go.sum hash so an
+// unchanged dependency set is not re-downloaded. The returned func is guarded by
+// a sync.Once so it runs at most once per Resolution even if called repeatedly.
+func newPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool:          "go mod download",
+			hash:          goSumHash,
+			cmd:           []string{"go", "mod", "download", "all"},
+			containerPath: modcacheMount,
+			env: []string{
+				"GOMODCACHE=" + modcacheMount,
+				"GOFLAGS=-mod=mod",
+			},
+		})
+	})
+}
+
+// prefetchSentinel is the marker file written into the fetch cache recording the
+// go.sum hash the cache was populated for; a matching hash means the cache is
+// already warm and the online download is skipped.
+const prefetchSentinel = ".bugbot-fetched"
 
 // goSumHash returns a hex hash of the repo's go.sum (or go.mod when go.sum is
 // absent, e.g. a module with no deps) so the fetch cache can be keyed on the
@@ -806,7 +868,7 @@ func lastLines(s string, n int) string {
 //
 //   - FETCH → pip wheelhouse prefetch + offline install:
 //     1. Prefetch (network bridge, ONE online step): run
-//          pip download -r requirements.txt -d /depcache
+//          pip download -r requirements.txt --only-binary=:all: -d /depcache
 //        in a network-enabled, otherwise-hardened container with the cache
 //        dir mounted WRITABLE at /depcache.
 //     2. Resolution: mount the same dir READ-ONLY at /depcache (Shared=false
@@ -821,6 +883,18 @@ func lastLines(s string, n int) string {
 //        See the integration test for empirical confirmation (or the comment
 //        on pipCacheMount if the empirical finding requires switching to a
 //        venv under /tmp).
+//
+//   - SECURITY (prefetch, bugbot-gu0o acceptance #1): `pip download` without
+//     --only-binary builds sdists, which executes the package's setup.py /
+//     PEP517 build backend — arbitrary repo-controlled Python code — WHILE
+//     the prefetch container still has network access. The prefetch command
+//     therefore passes --only-binary=:all:, forcing pip to refuse any
+//     dependency with no prebuilt wheel instead of falling back to a source
+//     build. DECISION (fallback policy for sdist-only deps): fail with pip's
+//     own "no matching distribution" diagnostic — no opt-in flag to disable
+//     --only-binary in v1 (an escape hatch would let one sdist-only
+//     transitive dependency quietly reopen this exact hole). See
+//     newPipPrefetch for the full rationale.
 //
 //   - Container path /depcache is distinct from /modcache (Go) so the
 //     mount registry's ContainerPath uniqueness constraint is satisfied for
@@ -949,59 +1023,37 @@ func requirementsHash(repoDir string) (string, error) {
 }
 
 // newPipPrefetch builds the one-time online pip-download hook for the Python
-// FETCH strategy. It runs `pip download -r requirements.txt -d /depcache` in
-// the FetchSandbox with network enabled and the cache dir mounted WRITABLE,
-// keyed on the sha256 of requirements.txt so an unchanged dep set is not
-// re-downloaded. Guarded by a sync.Once so it runs at most once per Resolution.
+// FETCH strategy. It runs `pip download -r requirements.txt --only-binary=:all:
+// -d /depcache` in the FetchSandbox with network enabled and the cache dir
+// mounted WRITABLE, keyed on the sha256 of requirements.txt so an unchanged
+// dep set is not re-downloaded. Guarded by a sync.Once so it runs at most once
+// per Resolution.
+//
+// SECURITY (bugbot-gu0o): `pip download` without --only-binary builds sdists,
+// which executes the package's setup.py / PEP517 build backend — arbitrary
+// repo-controlled Python code — WHILE the prefetch container still has
+// network access. --only-binary=:all: forces pip to refuse any dependency
+// that has no prebuilt wheel instead of falling back to a source build.
+//
+// Fallback policy (decided, not deferred): a requirements.txt with an
+// sdist-only dependency FAILS the prefetch with pip's own "no matching
+// distribution" diagnostic (surfaced verbatim via runEcosystemPrefetch's
+// exit-code error, which includes pip's stderr) rather than silently
+// permitting a source build. There is no opt-in flag to disable
+// --only-binary in v1: an escape hatch would let a single sdist-only
+// transitive dependency quietly reopen the exact code-exec-online hole this
+// bead closes, and no caller has asked for sdist support. A future bead MAY
+// add one if a real repo needs it, but that is a deliberate, reviewed
+// decision — not a default.
 func newPipPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
 	return newPrefetchOnce(func(ctx context.Context) error {
-		return runPipPrefetch(ctx, repoDir, hostCache, opts)
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool:          "pip download",
+			hash:          requirementsHash,
+			cmd:           []string{"pip", "download", "-r", "requirements.txt", "--only-binary=:all:", "-d", pipCacheMount},
+			containerPath: pipCacheMount,
+		})
 	})
-}
-
-// runPipPrefetch performs the actual online pip download. It is a no-op when
-// the wheelhouse is already warm for the repo's current requirements.txt.
-func runPipPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions) error {
-	reqHash, hashErr := requirementsHash(repoDir)
-	sentinel := filepath.Join(hostCache, prefetchSentinel) // reuse same constant as Go
-
-	if hashErr == nil {
-		if prev, err := os.ReadFile(sentinel); err == nil && strings.TrimSpace(string(prev)) == reqHash {
-			// Wheelhouse already populated for this exact requirements.txt.
-			return nil
-		}
-	}
-
-	network := fetchPrefetchNetwork(opts)
-
-	// The prefetch container is fully hardened (read-only root, cap-drop,
-	// no-new-privileges, limits — all from buildRunArgs); only the network
-	// differs and the cache is mounted WRITABLE so `pip download` can populate
-	// it. The later network-none run mounts the same dir read-only.
-	spec := Spec{
-		RepoDir:  repoDir,
-		Image:    opts.FetchImage,
-		Network:  network,
-		Cmd:      []string{"pip", "download", "-r", "requirements.txt", "-d", pipCacheMount},
-		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: pipCacheMount}},
-	}
-	res, err := opts.FetchSandbox.Exec(ctx, spec)
-	if err != nil {
-		return fmt.Errorf("sandbox: pip prefetch `pip download` failed to launch: %w", err)
-	}
-	if res.TimedOut {
-		return fmt.Errorf("sandbox: pip prefetch `pip download` timed out")
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("sandbox: pip prefetch `pip download` exited %d: %s", res.ExitCode, lastLines(res.Stderr, 20))
-	}
-
-	if hashErr == nil {
-		// Record the warm-cache sentinel. A write failure only costs a redundant
-		// future fetch, so it is non-fatal.
-		_ = os.WriteFile(sentinel, []byte(reqHash), 0o644)
-	}
-	return nil
 }
 
 // ---- bwrap-only Python HOST extension ---------------------------------------
@@ -1353,79 +1405,35 @@ func cargoLockHash(repoDir string) (string, error) {
 }
 
 // newCargoPrefetch builds the one-time online cargo-fetch hook for the Rust
-// FETCH strategy. It runs `cargo fetch` in the FetchSandbox with network enabled
-// and CARGO_HOME pointed at hostCache (so the registry populates at
-// hostCache/registry), keyed on the sha256 of Cargo.lock (or Cargo.toml) so
-// an unchanged dependency set is not re-downloaded. Guarded by a sync.Once.
+// FETCH strategy. It runs `cargo fetch` (plus --locked when Cargo.lock
+// exists) in the FetchSandbox with network enabled and CARGO_HOME pointed at
+// hostCache (so the registry populates at hostCache/registry), keyed on the
+// sha256 of Cargo.lock (or Cargo.toml) so an unchanged dependency set is not
+// re-downloaded. Guarded by a sync.Once.
 func newCargoPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
-	return newPrefetchOnce(func(ctx context.Context) error {
-		return runCargoPrefetch(ctx, repoDir, hostCache, opts)
-	})
-}
-
-// runCargoPrefetch performs the actual online cargo fetch. It is a no-op when
-// the cache is already warm for the repo's current Cargo.lock.
-func runCargoPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions) error {
-	lockHash, hashErr := cargoLockHash(repoDir)
-	sentinel := filepath.Join(hostCache, prefetchSentinel) // reuse same constant
-
-	if hashErr == nil {
-		if prev, err := os.ReadFile(sentinel); err == nil && strings.TrimSpace(string(prev)) == lockHash {
-			// Cache already populated for this exact Cargo.lock.
-			return nil
-		}
-	}
-
-	network := fetchPrefetchNetwork(opts)
-
-	// Build the cargo fetch command. Add --locked when Cargo.lock exists so the
-	// prefetch is deterministic and cargo does not update the lockfile during the
-	// online step.
+	// Add --locked when Cargo.lock exists so the prefetch is deterministic
+	// and cargo does not update the lockfile during the online step.
 	cmd := []string{"cargo", "fetch"}
 	if _, err := os.Stat(filepath.Join(repoDir, "Cargo.lock")); err == nil {
 		cmd = append(cmd, "--locked")
 	}
-
-	// The prefetch container is fully hardened (read-only root, cap-drop,
-	// no-new-privileges, limits — all from buildRunArgs); only the network
-	// differs and the cache is mounted WRITABLE so `cargo fetch` can populate
-	// the registry under CARGO_HOME/registry. The later network-none run mounts
-	// the same dir read-only.
-	spec := Spec{
-		RepoDir: repoDir,
-		Image:   opts.FetchImage,
-		Network: network,
-		Cmd:     cmd,
-		// Mount the whole cache dir WRITABLE as CARGO_HOME so cargo populates
-		// hostCache/registry during the fetch. The RO mount in the final
-		// Resolution points at hostCache (which IS hostCache/registry for the
-		// fetch strategy — see fetchCargoCacheDir which creates hostCache, and
-		// cargoRegistryResolution which mounts hostRegistry at /cargo/registry).
-		// For the FETCH prefetch, hostCache is the parent "cargocache/<hash>" dir,
-		// and we mount it as CARGO_HOME=/cargo so cargo writes to
-		// /cargo/registry inside the container → hostCache/registry on the host.
-		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: cargoCacheMount}},
-		Env: []string{
-			"CARGO_HOME=" + cargoCacheMount,
-		},
-	}
-	res, err := opts.FetchSandbox.Exec(ctx, spec)
-	if err != nil {
-		return fmt.Errorf("sandbox: cargo prefetch `cargo fetch` failed to launch: %w", err)
-	}
-	if res.TimedOut {
-		return fmt.Errorf("sandbox: cargo prefetch `cargo fetch` timed out")
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("sandbox: cargo prefetch `cargo fetch` exited %d: %s", res.ExitCode, lastLines(res.Stderr, 20))
-	}
-
-	if hashErr == nil {
-		// Record the warm-cache sentinel. A write failure only costs a redundant
-		// future fetch, so it is non-fatal.
-		_ = os.WriteFile(sentinel, []byte(lockHash), 0o644)
-	}
-	return nil
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool: "cargo fetch",
+			hash: cargoLockHash,
+			cmd:  cmd,
+			// Mount the whole cache dir WRITABLE as CARGO_HOME so cargo
+			// populates hostCache/registry during the fetch. The RO mount in
+			// the final Resolution points at hostCache/registry (see
+			// fetchCargoCacheDir and cargoRegistryResolution); for the FETCH
+			// prefetch, hostCache is the parent "cargocache/<hash>" dir, and
+			// we mount it as CARGO_HOME=/cargo so cargo writes to
+			// /cargo/registry inside the container → hostCache/registry on
+			// the host.
+			containerPath: cargoCacheMount,
+			env:           []string{"CARGO_HOME=" + cargoCacheMount},
+		})
+	})
 }
 
 // ---- JS ecosystem -----------------------------------------------------------
@@ -1709,75 +1717,35 @@ func packageLockHash(repoDir string) (string, error) {
 // is not re-downloaded. Guarded by a sync.Once so it runs at most once per
 // Resolution even if called repeatedly.
 //
-// prefetchFlags are the ecosystem-declared security flags (e.g. ["--ignore-scripts"])
-// read from the ecosystem registry entry rather than hardcoded here. This makes
-// the security posture declarative: correcting or extending a flag for a new
-// ecosystem is a one-line registry edit (bugbot-gu0o).
+// prefetchFlags are the ecosystem-declared security flags (e.g.
+// ["--ignore-scripts"]) read from the ecosystem registry entry rather than
+// hardcoded here. This makes the security posture declarative: correcting or
+// extending a flag for a new ecosystem is a one-line registry edit
+// (bugbot-gu0o).
 //
 // SECURITY: --ignore-scripts MUST be present in prefetchFlags for npm. npm
-// lifecycle scripts are arbitrary code; during the online prefetch the container
-// has network access, so executing them would allow a malicious package to
-// exfiltrate data. This is asserted in tests (TestJSResolveFetchPrefetchSpec).
+// lifecycle scripts are arbitrary code; during the online prefetch the
+// container has network access, so executing them would allow a malicious
+// package to exfiltrate data. This is asserted in tests
+// (TestJSResolveFetchPrefetchSpec).
 func newNPMPrefetch(repoDir, hostCache string, opts DepOptions, prefetchFlags []string) func(context.Context) error {
-	return newPrefetchOnce(func(ctx context.Context) error {
-		return runNPMPrefetch(ctx, repoDir, hostCache, opts, prefetchFlags)
-	})
-}
-
-// runNPMPrefetch performs the actual online npm ci prefetch. It is a no-op when
-// the cache is already warm for the repo's current package-lock.json.
-//
-// SECURITY: prefetchFlags must include --ignore-scripts; see newNPMPrefetch.
-func runNPMPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions, prefetchFlags []string) error {
-	lockHash, hashErr := packageLockHash(repoDir)
-	sentinel := filepath.Join(hostCache, prefetchSentinel) // reuse same constant
-
-	if hashErr == nil {
-		if prev, err := os.ReadFile(sentinel); err == nil && strings.TrimSpace(string(prev)) == lockHash {
-			// Cache already populated for this exact package-lock.json.
-			return nil
-		}
-	}
-
-	network := fetchPrefetchNetwork(opts)
-
-	// Build the prefetch command: "npm ci <prefetchFlags> --cache /npmcache".
-	// prefetchFlags come from the ecosystem registry entry (e.g. ["--ignore-scripts"])
-	// rather than being hardcoded here — making per-ecosystem security adjustments
-	// a one-line registry edit (bugbot-gu0o).
-	//
-	// SECURITY: npm lifecycle scripts are arbitrary code; the prefetch container
-	// has network access, so we must not execute them. The cache dir is mounted
-	// WRITABLE so npm can populate it.
+	// prefetchFlags come from the ecosystem registry entry (e.g.
+	// ["--ignore-scripts"]) rather than being hardcoded here — making
+	// per-ecosystem security adjustments a one-line registry edit
+	// (bugbot-gu0o). SECURITY: npm lifecycle scripts are arbitrary code; the
+	// prefetch container has network access, so we must not execute them.
 	cmd := make([]string, 0, 2+len(prefetchFlags)+2)
 	cmd = append(cmd, "npm", "ci")
 	cmd = append(cmd, prefetchFlags...)
 	cmd = append(cmd, "--cache", npmCacheMount)
-	spec := Spec{
-		RepoDir:  repoDir,
-		Image:    opts.FetchImage,
-		Network:  network,
-		Cmd:      cmd,
-		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: npmCacheMount}},
-	}
-	cmdStr := strings.Join(cmd, " ")
-	res, err := opts.FetchSandbox.Exec(ctx, spec)
-	if err != nil {
-		return fmt.Errorf("sandbox: npm prefetch `%s` failed to launch: %w", cmdStr, err)
-	}
-	if res.TimedOut {
-		return fmt.Errorf("sandbox: npm prefetch `%s` timed out", cmdStr)
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("sandbox: npm prefetch `%s` exited %d: %s", cmdStr, res.ExitCode, lastLines(res.Stderr, 20))
-	}
-
-	if hashErr == nil {
-		// Record the warm-cache sentinel. A write failure only costs a redundant
-		// future fetch, so it is non-fatal.
-		_ = os.WriteFile(sentinel, []byte(lockHash), 0o644)
-	}
-	return nil
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool:          strings.Join(cmd, " "),
+			hash:          packageLockHash,
+			cmd:           cmd,
+			containerPath: npmCacheMount,
+		})
+	})
 }
 
 // ---- bwrap-only JS HOST extension --------------------------------------------
@@ -1891,6 +1859,15 @@ func resolveHostNPMCache(override string) (string, error) {
 //     populated cache dir read-only at /nugetcache with NUGET_PACKAGES=
 //     /nugetcache. Shared=false (bugbot-owned dir, gets :Z isolation). Same
 //     offline-enforcement caveat as HOST: no GOPROXY=off analog is invented.
+//
+//   - SECURITY (prefetch, bugbot-gu0o acceptance #2): `dotnet restore`
+//     evaluates the project's MSBuild targets (including any repo-committed
+//     Directory.Build.targets/.props and inline <UsingTask>) while resolving
+//     packages, which can execute arbitrary .NET code ONLINE (network-
+//     enabled prefetch container). There is no dotnet analog to npm's
+//     --ignore-scripts that still lets restore resolve the dependency
+//     graph. DECISION: documented and accepted, not constrained — see
+//     newNuGetPrefetch for the full rationale.
 //
 //   - Container path /nugetcache is distinct from /modcache, /depcache,
 //     /cargo/registry, and /npmcache so the mount registry's ContainerPath
@@ -2109,79 +2086,46 @@ func nugetLockHash(repoDir string) (string, error) {
 }
 
 // newNuGetPrefetch builds the one-time online dotnet-restore hook for the
-// C#/NuGet FETCH strategy. It runs `dotnet restore` in the FetchSandbox with
-// network enabled and NUGET_PACKAGES pointed at hostCache (mounted at
-// /nugetcache), keyed on the sha256 of packages.lock.json (or the *.csproj
-// fallback hash) so an unchanged dependency set is not re-downloaded. Guarded
-// by a sync.Once so it runs at most once per Resolution.
+// C#/NuGet FETCH strategy. It runs `dotnet restore` (plus --locked-mode when
+// packages.lock.json exists) in the FetchSandbox with network enabled and
+// NUGET_PACKAGES pointed at hostCache (mounted at /nugetcache), keyed on the
+// sha256 of packages.lock.json (or the *.csproj fallback hash) so an
+// unchanged dependency set is not re-downloaded. Guarded by a sync.Once so it
+// runs at most once per Resolution.
+//
+// SECURITY (bugbot-gu0o, acceptance #2): `dotnet restore` evaluates the
+// project's MSBuild targets — including any repo-committed
+// Directory.Build.targets/.props and inline <UsingTask> — while restoring,
+// which can run arbitrary .NET code ONLINE (network-enabled prefetch
+// container). This is inherent to MSBuild's evaluation model, not to a
+// specific downloaded package: unlike npm's lifecycle scripts there is no
+// --ignore-scripts equivalent that still lets restore resolve the
+// dependency graph. DECISION: documented and accepted (not constrained)
+// under the same document-and-accept posture as Maven/Gradle below —
+// constraining it would require disabling custom MSBuild targets
+// project-wide, which breaks legitimate restores far more often than it
+// stops a determined malicious repo (the same repo already runs
+// UNRESTRICTED during the later network-none build/test step). The threat
+// is mitigated by the container's other hardening (cap-drop ALL,
+// no-new-privileges, read-only root, pid limit) and by the absence of
+// secret-bearing mounts during the prefetch.
 func newNuGetPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
-	return newPrefetchOnce(func(ctx context.Context) error {
-		return runNuGetPrefetch(ctx, repoDir, hostCache, opts)
-	})
-}
-
-// runNuGetPrefetch performs the actual online dotnet restore. It is a no-op
-// when the cache is already warm for the repo's current packages.lock.json
-// (or *.csproj fallback hash).
-func runNuGetPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions) error {
-	lockHash, hashErr := nugetLockHash(repoDir)
-	sentinel := filepath.Join(hostCache, prefetchSentinel) // reuse same constant
-
-	if hashErr == nil {
-		if prev, err := os.ReadFile(sentinel); err == nil && strings.TrimSpace(string(prev)) == lockHash {
-			// Cache already populated for this exact packages.lock.json (or
-			// *.csproj set).
-			return nil
-		}
-	}
-
-	network := fetchPrefetchNetwork(opts)
-
-	// Build the dotnet restore command. Add --locked-mode when
-	// packages.lock.json exists so the prefetch is deterministic and dotnet
-	// does not update the lockfile during the online step. Mirrors Cargo's
-	// --locked behavior.
+	// Add --locked-mode when packages.lock.json exists so the prefetch is
+	// deterministic and dotnet does not update the lockfile during the
+	// online step. Mirrors Cargo's --locked behavior.
 	cmd := []string{"dotnet", "restore"}
 	if _, err := os.Stat(filepath.Join(repoDir, "packages.lock.json")); err == nil {
 		cmd = append(cmd, "--locked-mode")
 	}
-
-	// The prefetch container is fully hardened (read-only root, cap-drop,
-	// no-new-privileges, limits — all from buildRunArgs); only the network
-	// differs and the cache is mounted WRITABLE so `dotnet restore` can
-	// populate NUGET_PACKAGES inside the container. The later network-none run
-	// mounts the same dir read-only.
-	spec := Spec{
-		RepoDir: repoDir,
-		Image:   opts.FetchImage,
-		Network: network,
-		Cmd:     cmd,
-		// Mount the cache dir WRITABLE as NUGET_PACKAGES so dotnet restore
-		// populates hostCache on the host. The RO mount in the final Resolution
-		// points at hostCache (which IS hostCache for the fetch strategy —
-		// see fetchNuGetCacheDir and nugetResolution).
-		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: nugetCacheMount}},
-		Env: []string{
-			"NUGET_PACKAGES=" + nugetCacheMount,
-		},
-	}
-	res, err := opts.FetchSandbox.Exec(ctx, spec)
-	if err != nil {
-		return fmt.Errorf("sandbox: NuGet prefetch `dotnet restore` failed to launch: %w", err)
-	}
-	if res.TimedOut {
-		return fmt.Errorf("sandbox: NuGet prefetch `dotnet restore` timed out")
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("sandbox: NuGet prefetch `dotnet restore` exited %d: %s", res.ExitCode, lastLines(res.Stderr, 20))
-	}
-
-	if hashErr == nil {
-		// Record the warm-cache sentinel. A write failure only costs a redundant
-		// future fetch, so it is non-fatal.
-		_ = os.WriteFile(sentinel, []byte(lockHash), 0o644)
-	}
-	return nil
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool:          "dotnet restore",
+			hash:          nugetLockHash,
+			cmd:           cmd,
+			containerPath: nugetCacheMount,
+			env:           []string{"NUGET_PACKAGES=" + nugetCacheMount},
+		})
+	})
 }
 
 // ---- JVM ecosystems (Maven and Gradle) --------------------------------------
@@ -2234,11 +2178,34 @@ func runNuGetPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOp
 //     gets :Z isolation). Same offline enforcement as HOST: network=none is
 //     the boundary.
 //
-//   - SECURITY (prefetch): `mvn -B dependency:go-offline` instantiates POM
-//     plugins and any .mvn/extensions.xml build extensions, executing repo-
-//     controlled Java code ONLINE. There is no Maven analog to npm's
-//     --ignore-scripts. Accepted under the bugbot-gu0o posture; see
-//     runMavenPrefetch for the full rationale.
+//   - PROVIDER WARM-UP (bugbot-own9): `dependency:go-offline` resolves the
+//     project's declared dependencies and every plugin bound to the default
+//     lifecycle (including maven-surefire-plugin itself), but NOT the
+//     provider jar Surefire selects at TEST time based on the detected test
+//     framework (e.g. surefire-junit-platform for JUnit 5), nor the
+//     "aligned" junit-platform-launcher version Surefire additionally pulls
+//     in alongside it — both are resolved lazily inside the surefire:test
+//     goal itself, which never runs during go-offline. Left unaddressed,
+//     the offline run's first `mvn test` invocation tries to download both
+//     over the (absent) network and fails with a read-only-cache
+//     FileSystemException instead of a clear diagnostic (bugbot-own9). The
+//     prefetch step closes this gap with a best-effort warm-up scoped to
+//     JUnit 5: it parses go-offline's OWN "[INFO] Resolved plugin:" /
+//     "[INFO] Resolved dependency:" log lines for the resolved surefire and
+//     junit-platform versions (asking the tool what it actually resolved,
+//     not guessing from pom.xml) and issues two extra `dependency:get`
+//     calls for the provider and the aligned launcher. See newMavenPrefetch
+//     for the exact script. A repo on JUnit 4/TestNG (no junit-platform
+//     dependency) skips the warm-up harmlessly and falls back to the
+//     existing "network=none IS the enforcement, a missing artifact fails
+//     fast" documented behavior above.
+//
+//   - SECURITY (prefetch, 2026-07-11 scope extension — bugbot-gu0o): `mvn -B
+//     dependency:go-offline` instantiates POM plugins and any
+//     .mvn/extensions.xml build extensions, executing repo-controlled Java
+//     code ONLINE. There is no Maven analog to npm's --ignore-scripts.
+//     Accepted under the bugbot-gu0o posture; see newMavenPrefetch for the
+//     full rationale.
 //
 //   - Container path /m2cache is distinct from /modcache, /depcache,
 //     /cargo/registry, /npmcache, /nugetcache, and /gradlecache so the mount
@@ -2398,77 +2365,72 @@ func mavenPomHash(repoDir string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// newMavenPrefetch builds the one-time online mvn prefetch hook for the Maven
-// FETCH strategy. It runs `mvn -B dependency:go-offline` in the FetchSandbox
-// with network enabled and MAVEN_OPTS pointed at hostCache (mounted at
-// /m2cache), keyed on the sha256 of pom.xml so an unchanged dependency set
-// is not re-downloaded. Guarded by a sync.Once so it runs at most once per
-// Resolution.
+// mavenProviderWarmupScript extends `mvn dependency:go-offline` with a
+// best-effort warm-up of Maven Surefire's dynamically-selected JUnit
+// Platform provider (bugbot-own9). Substituted with m2CacheMount via
+// fmt.Sprintf (the single %[1]s placeholder, reused three times). See the
+// Maven ecosystem's PROVIDER WARM-UP scope-decision comment above for the
+// full rationale; in short: go-offline never resolves surefire-junit-platform
+// or the version-aligned junit-platform-launcher it drags in (both are
+// lazily resolved inside the surefire:test goal itself), so this script
+// greps go-offline's own resolved-artifact log for the versions Maven
+// itself picked and explicitly fetches both. Each dependency:get is
+// best-effort (`|| true`): a repo without JUnit 5 on the test classpath
+// simply finds no version to warm and falls through to the pre-existing
+// "network=none is the offline enforcement" behavior. The primary
+// go-offline step is NOT best-effort: its output is captured to a log file
+// (not swallowed into a `$(...)` substitution, which would mask a pipeline
+// failure under `set -e`) and explicitly checked, so a genuine go-offline
+// failure (bad POM, unreachable dependency) still fails the whole prefetch
+// with its own diagnostic on stderr — exactly like every other ecosystem's
+// prefetch error.
+const mavenProviderWarmupScript = `set -e
+LOG=/tmp/bugbot-go-offline.log
+if ! mvn -B dependency:go-offline -Dmaven.repo.local=%[1]s > "$LOG" 2>&1; then
+  cat "$LOG" >&2
+  exit 1
+fi
+cat "$LOG"
+SF_VER=$(grep -oE 'maven-surefire-plugin-[0-9][^ ]*\.jar' "$LOG" | head -1 | sed -E 's/maven-surefire-plugin-(.*)\.jar/\1/')
+JP_VER=$(grep -oE 'junit-platform-[a-z]+-[0-9][^ ]*\.jar' "$LOG" | head -1 | sed -E 's/junit-platform-[a-z]+-(.*)\.jar/\1/')
+if [ -n "$SF_VER" ]; then
+  mvn -B dependency:get -Dmaven.repo.local=%[1]s -Dartifact=org.apache.maven.surefire:surefire-junit-platform:$SF_VER || true
+fi
+if [ -n "$JP_VER" ]; then
+  mvn -B dependency:get -Dmaven.repo.local=%[1]s -Dartifact=org.junit.platform:junit-platform-launcher:$JP_VER || true
+fi
+`
+
+// newMavenPrefetch builds the one-time online mvn prefetch hook for the
+// Maven FETCH strategy. It runs dependency:go-offline plus the
+// mavenProviderWarmupScript JUnit-5-provider warm-up (bugbot-own9) in the
+// FetchSandbox with network enabled and MAVEN_OPTS pointed at hostCache
+// (mounted at /m2cache), keyed on the sha256 of pom.xml so an unchanged
+// dependency set is not re-downloaded. Guarded by a sync.Once so it runs at
+// most once per Resolution.
+//
+// SECURITY: `mvn -B dependency:go-offline` loads the Maven project model
+// (POM), which instantiates configured POM plugins and any build extensions
+// declared in .mvn/extensions.xml. This executes repo-controlled Java code
+// ONLINE (network-enabled container). There is no Maven analog to npm's
+// --ignore-scripts; the POM lifecycle is always evaluated. This is accepted
+// under the bugbot-gu0o posture (same document-and-accept decision as
+// pip's sdist fallback and dotnet's MSBuild evaluation). The threat is
+// mitigated by the container's other hardening (cap-drop ALL,
+// no-new-privileges, read-only root, pid limit) and by the absence of
+// secret-bearing mounts during the prefetch run. See the file's Maven
+// ecosystem doc comment (SCOPE DECISIONS) for the 2026-07-11 scope-extension
+// rationale.
 func newMavenPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
 	return newPrefetchOnce(func(ctx context.Context) error {
-		return runMavenPrefetch(ctx, repoDir, hostCache, opts)
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool:          "mvn dependency:go-offline (+ JUnit 5 provider warm-up)",
+			hash:          mavenPomHash,
+			cmd:           []string{"sh", "-c", fmt.Sprintf(mavenProviderWarmupScript, m2CacheMount)},
+			containerPath: m2CacheMount,
+			env:           []string{"MAVEN_OPTS=-Dmaven.repo.local=" + m2CacheMount},
+		})
 	})
-}
-
-// runMavenPrefetch performs the actual online mvn dependency:go-offline. It is
-// a no-op when the cache is already warm for the repo's current pom.xml.
-//
-// SECURITY: `mvn -B dependency:go-offline` loads the Maven project model (POM),
-// which instantiates configured POM plugins and any build extensions declared in
-// .mvn/extensions.xml. This executes repo-controlled Java code ONLINE (network-
-// enabled container). There is no Maven analog to npm's --ignore-scripts; the
-// POM lifecycle is always evaluated. This is accepted under the bugbot-gu0o
-// posture (same document-and-accept decision as pip's `pip download` executing
-// setup.py and dotnet's `dotnet restore` running NuGet scripts). The threat is
-// mitigated by the container's other hardening (cap-drop ALL, no-new-privileges,
-// read-only root, pid limit) and by the absence of secret-bearing mounts during
-// the prefetch run.
-func runMavenPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions) error {
-	lockHash, hashErr := mavenPomHash(repoDir)
-	sentinel := filepath.Join(hostCache, prefetchSentinel)
-
-	if hashErr == nil {
-		if prev, err := os.ReadFile(sentinel); err == nil && strings.TrimSpace(string(prev)) == lockHash {
-			// Cache already populated for this exact pom.xml.
-			return nil
-		}
-	}
-
-	network := fetchPrefetchNetwork(opts)
-
-	// `mvn -B dependency:go-offline` downloads all compile/runtime/test
-	// dependencies declared in the POM into the local repository. -B is
-	// batch mode (no interactive prompts).
-	cmd := []string{"mvn", "-B", "dependency:go-offline"}
-
-	// The prefetch container is fully hardened; only network and the writable
-	// cache mount differ from the network-none run.
-	spec := Spec{
-		RepoDir: repoDir,
-		Image:   opts.FetchImage,
-		Network: network,
-		Cmd:     cmd,
-		// Mount the cache dir WRITABLE as /m2cache so mvn populates it.
-		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: m2CacheMount}},
-		Env: []string{
-			"MAVEN_OPTS=-Dmaven.repo.local=" + m2CacheMount,
-		},
-	}
-	res, err := opts.FetchSandbox.Exec(ctx, spec)
-	if err != nil {
-		return fmt.Errorf("sandbox: Maven prefetch `mvn dependency:go-offline` failed to launch: %w", err)
-	}
-	if res.TimedOut {
-		return fmt.Errorf("sandbox: Maven prefetch `mvn dependency:go-offline` timed out")
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("sandbox: Maven prefetch `mvn dependency:go-offline` exited %d: %s", res.ExitCode, lastLines(res.Stderr, 20))
-	}
-
-	if hashErr == nil {
-		_ = os.WriteFile(sentinel, []byte(lockHash), 0o644)
-	}
-	return nil
 }
 
 // ---- Gradle ecosystem -------------------------------------------------------
@@ -2503,39 +2465,59 @@ func runMavenPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOp
 //     HOST variant becomes worth the complexity.
 //
 //   - FETCH → Gradle dependency cache prefetch + writable-copy run:
-//     1. Prefetch (network bridge, ONE online step): run
-//          gradle dependencies --no-daemon -q
-//        in a network-enabled container with the cache dir mounted WRITABLE
-//        at /gradlecache. GRADLE_USER_HOME=/gradlecache directs Gradle to
-//        populate caches/ and wrapper/ there.
+//     1. Prefetch (network bridge, ONE online step): run an init-script-
+//        driven `gradle --no-daemon -q -I <init> help` in a network-enabled
+//        container with the cache dir mounted WRITABLE at /gradlecache.
+//        GRADLE_USER_HOME=/gradlecache directs Gradle to populate caches/
+//        and wrapper/ there. The init script (bugbot-own9; see
+//        newGradlePrefetch) forces every resolvable configuration
+//        (compile AND test, main AND test source sets) to actually
+//        download its artifact JARs, not just resolve POM/module metadata
+//        — plain `gradle dependencies` (the pre-own9 command) only needs
+//        metadata to print its report, so it silently left JARs
+//        undownloaded and the later offline build hit the network.
 //     2. Resolution: mount the same dir READ-ONLY at /gradlecache
-//        (Shared=false — bugbot-owned, gets :Z), and add two SetupCmds that
-//        copy the RO cache to a disk-backed workspace location before build:
+//        (Shared=false — bugbot-owned, gets :Z), and add three SetupCmds
+//        that copy the RO cache to a disk-backed workspace location and
+//        enforce offline mode before build:
 //          mkdir -p /workspace/.bugbot-gradle-home
 //          cp -a /gradlecache/. /workspace/.bugbot-gradle-home
+//          printf 'org.gradle.offline=true\n' > /workspace/.bugbot-gradle-home/gradle.properties
 //        then set GRADLE_USER_HOME=/workspace/.bugbot-gradle-home (via env).
-//        WHY WORKSPACE, NOT /tmp: Gradle caches for a real project routinely
-//        exceed hundreds of MB; the /tmp tmpfs is capped at 512 MB
-//        (buildRunArgs: --tmpfs /tmp:size=512m) and a cache copy that exceeds
-//        it causes exit 125 → environment_error → silent recall loss (same
-//        failure mode as Go builds before goCacheDir was introduced). The
-//        disk-backed /workspace has no such cap. The copy target is
-//        dot-prefixed (/workspace/.bugbot-gradle-home) so `gradle test ./...`
-//        and similar recursive globs skip it (Gradle, like Go, ignores
-//        directories beginning with "." or "_").
-//        --no-daemon in both prefetch and build prevents a Gradle daemon from
-//        persisting between runs (correct for ephemeral containers).
+//        The gradle.properties write is bugbot-own9's second half: Gradle
+//        does NOT infer offline mode from a populated cache — even with
+//        every artifact present, `gradle test` still attempts network
+//        metadata checks unless org.gradle.offline=true is set (there is
+//        no GRADLE_OPTS/env equivalent; gradle.properties in
+//        GRADLE_USER_HOME is the supported mechanism). WHY WORKSPACE, NOT
+//        /tmp: Gradle caches for a real project routinely exceed hundreds
+//        of MB; the /tmp tmpfs is capped at 512 MB (buildRunArgs: --tmpfs
+//        /tmp:size=512m) and a cache copy that exceeds it causes exit 125
+//        → environment_error → silent recall loss (same failure mode as Go
+//        builds before goCacheDir was introduced). The disk-backed
+//        /workspace has no such cap. The copy target is dot-prefixed
+//        (/workspace/.bugbot-gradle-home) so `gradle test ./...` and
+//        similar recursive globs skip it (Gradle, like Go, ignores
+//        directories beginning with "." or "_"). --no-daemon in both
+//        prefetch and build prevents a Gradle daemon from persisting
+//        between runs (correct for ephemeral containers).
 //
-//   - SECURITY (prefetch): Gradle executes settings.gradle / build.gradle
-//     (Groovy/Kotlin DSL) at configuration time. This is inherent to Gradle's
-//     build model: there is no --ignore-scripts analog — configuration code
-//     always runs. During the prefetch the container has network access, so
-//     malicious configuration code could exfiltrate data or contact external
+//   - SECURITY (prefetch, 2026-07-11 scope extension — bugbot-gu0o): Gradle
+//     executes settings.gradle / build.gradle (Groovy/Kotlin DSL) at
+//     configuration time. This is inherent to Gradle's build model: there
+//     is no --ignore-scripts analog — configuration code always runs.
+//     During the prefetch the container has network access, so malicious
+//     configuration code could exfiltrate data or contact external
 //     services. This is within the bugbot-gu0o posture (accepted per the
-//     document-and-accept decision for all prefetch ecosystems that execute
-//     repo-controlled code online). The threat is mitigated by the container's
-//     other hardening (cap-drop ALL, no-new-privileges, read-only root, pid
-//     limit) and by the absence of secret-bearing mounts during the prefetch.
+//     document-and-accept decision for all prefetch ecosystems that
+//     execute repo-controlled code online). The threat is mitigated by the
+//     container's other hardening (cap-drop ALL, no-new-privileges,
+//     read-only root, pid limit) and by the absence of secret-bearing
+//     mounts during the prefetch. The bugbot-own9 init script (see
+//     newGradlePrefetch) only RESOLVES configurations — it never invokes
+//     `test` or any task that executes repo test code, so it does not
+//     widen this exposure beyond configuration-time evaluation. See
+//     newGradlePrefetch for the full rationale.
 //
 //   - Lock-hash key: sha256(gradle.lockfile) if present at root, else
 //     sha256 of sorted concatenated contents of build.gradle, build.gradle.kts,
@@ -2650,6 +2632,15 @@ func gradleResolution(hostCache string, prefetch func(context.Context) error) Re
 			// GRADLE_USER_HOME; the RO /gradlecache mount would cause "Could not
 			// acquire lock" failures without this copy.
 			{"sh", "-c", "cp -a " + gradleCacheMount + "/. " + gradleHomeDir},
+			// Enforce offline mode (bugbot-own9): Gradle does not infer offline
+			// mode from a populated cache alone — `gradle test` still attempts
+			// network metadata checks even when every artifact is already
+			// cached, unless org.gradle.offline=true is set. There is no env-var
+			// equivalent (unlike GOPROXY=off / PIP_NO_INDEX=1 / CARGO_NET_OFFLINE
+			// / npm_config_offline); a gradle.properties file in GRADLE_USER_HOME
+			// is the supported mechanism, so this SetupCmd writes one into the
+			// just-populated writable copy before the build runs.
+			{"sh", "-c", "printf 'org.gradle.offline=true\\n' > " + gradleHomeDir + "/gradle.properties"},
 		},
 		Prefetch: prefetch,
 		Strategy: DepStrategyFetch,
@@ -2728,75 +2719,53 @@ func gradleLockHash(repoDir string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// newGradlePrefetch builds the one-time online Gradle prefetch hook for the
-// FETCH strategy. It runs `gradle dependencies --no-daemon` in the FetchSandbox
-// with network enabled and GRADLE_USER_HOME pointed at hostCache (mounted at
-// /gradlecache), keyed on the sha256 of gradle.lockfile (or the Gradle build
-// files fallback) so an unchanged dependency set is not re-downloaded. Guarded
-// by a sync.Once so it runs at most once per Resolution.
-func newGradlePrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
-	return newPrefetchOnce(func(ctx context.Context) error {
-		return runGradlePrefetch(ctx, repoDir, hostCache, opts)
-	})
+// gradleResolveAllInitScript is a Gradle init script (bugbot-own9) injected
+// into the prefetch run via `-I`. Unlike `gradle dependencies` (the
+// pre-own9 prefetch command), which only needs POM/module METADATA to
+// print its dependency-tree report, this script forces every resolvable
+// configuration in every project to actually download its artifact JARs —
+// exactly what the later offline `gradle test` needs on disk. Scoped to
+// configuration RESOLUTION only: it never invokes `test` or any task that
+// would execute repo-controlled test code, so it does not widen the
+// existing configuration-time-evaluation exposure documented in the
+// Gradle ecosystem's SECURITY bullet above.
+const gradleResolveAllInitScript = `allprojects {
+    afterEvaluate { project ->
+        project.configurations.matching { it.canBeResolved }.all { cfg ->
+            try {
+                cfg.files
+            } catch (Exception ignored) {
+            }
+        }
+    }
 }
+`
 
-// runGradlePrefetch performs the actual online Gradle dependency resolution.
-// It is a no-op when the cache is already warm for the repo's current
-// gradle.lockfile (or Gradle build files fallback hash).
-//
-// SECURITY: `gradle dependencies` evaluates settings.gradle and build.gradle
-// (Groovy or Kotlin DSL) at configuration time. This executes repo-controlled
-// code ONLINE (network-enabled container). There is no Gradle analog to npm's
-// --ignore-scripts — configuration code always runs; it cannot be skipped
-// without fundamentally changing how Gradle loads the project. This is accepted
-// under the bugbot-gu0o posture (same document-and-accept decision as pip,
-// dotnet, and Maven prefetches). The threat is mitigated by the container's
-// other hardening (cap-drop ALL, no-new-privileges, read-only root, pid limit)
-// and by the absence of secret-bearing mounts during the prefetch run.
-func runGradlePrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions) error {
-	lockHash, hashErr := gradleLockHash(repoDir)
-	sentinel := filepath.Join(hostCache, prefetchSentinel)
+// gradleInitScriptPath is the in-container path the prefetch step writes
+// gradleResolveAllInitScript to before invoking gradle -I against it.
+// Lives under /tmp (writable tmpfs) since it is pure prefetch-run scratch,
+// never read by the later offline build.
+const gradleInitScriptPath = "/tmp/bugbot-resolve-deps.init.gradle"
 
-	if hashErr == nil {
-		if prev, err := os.ReadFile(sentinel); err == nil && strings.TrimSpace(string(prev)) == lockHash {
-			// Cache already populated for this exact Gradle dependency set.
-			return nil
-		}
-	}
-
-	network := fetchPrefetchNetwork(opts)
-
-	// `gradle dependencies --no-daemon` resolves all dependency configurations
-	// and populates the Gradle user home (GRADLE_USER_HOME). --no-daemon
-	// prevents a Gradle daemon from persisting between runs (correct for
-	// ephemeral containers). -q suppresses excessive output.
-	cmd := []string{"gradle", "dependencies", "--no-daemon", "-q"}
-
-	spec := Spec{
-		RepoDir: repoDir,
-		Image:   opts.FetchImage,
-		Network: network,
-		Cmd:     cmd,
-		// Mount the cache dir WRITABLE as GRADLE_USER_HOME so Gradle populates
-		// caches/ and wrapper/ there.
-		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: gradleCacheMount}},
-		Env: []string{
-			"GRADLE_USER_HOME=" + gradleCacheMount,
-		},
-	}
-	res, err := opts.FetchSandbox.Exec(ctx, spec)
-	if err != nil {
-		return fmt.Errorf("sandbox: Gradle prefetch `gradle dependencies` failed to launch: %w", err)
-	}
-	if res.TimedOut {
-		return fmt.Errorf("sandbox: Gradle prefetch `gradle dependencies` timed out")
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("sandbox: Gradle prefetch `gradle dependencies` exited %d: %s", res.ExitCode, lastLines(res.Stderr, 20))
-	}
-
-	if hashErr == nil {
-		_ = os.WriteFile(sentinel, []byte(lockHash), 0o644)
-	}
-	return nil
+// newGradlePrefetch builds the one-time online Gradle prefetch hook for the
+// FETCH strategy. It writes gradleResolveAllInitScript and runs
+// `gradle --no-daemon -q -I <script> help` (bugbot-own9) in the
+// FetchSandbox with network enabled and GRADLE_USER_HOME pointed at
+// hostCache (mounted at /gradlecache), keyed on the sha256 of
+// gradle.lockfile (or the Gradle build files fallback) so an unchanged
+// dependency set is not re-downloaded. Guarded by a sync.Once so it runs at
+// most once per Resolution.
+func newGradlePrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
+	script := "cat > " + gradleInitScriptPath + " <<'BUGBOT_INIT'\n" +
+		gradleResolveAllInitScript + "BUGBOT_INIT\n" +
+		"gradle --no-daemon -q -I " + gradleInitScriptPath + " help"
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool:          "gradle dependency resolution",
+			hash:          gradleLockHash,
+			cmd:           []string{"sh", "-c", script},
+			containerPath: gradleCacheMount,
+			env:           []string{"GRADLE_USER_HOME=" + gradleCacheMount},
+		})
+	})
 }
