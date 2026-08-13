@@ -684,7 +684,7 @@ func fetchPrefetchNetwork(opts DepOptions) string {
 }
 
 // newPrefetchOnce wraps run in a sync.Once so the returned function calls run
-// at most once per Resolution — all four ecosystem prefetch constructors share
+// at most once per Resolution — all seven ecosystem prefetch constructors share
 // this pattern.
 func newPrefetchOnce(run func(context.Context) error) func(context.Context) error {
 	var once sync.Once
@@ -890,11 +890,21 @@ func lastLines(s string, n int) string {
 //     the prefetch container still has network access. The prefetch command
 //     therefore passes --only-binary=:all:, forcing pip to refuse any
 //     dependency with no prebuilt wheel instead of falling back to a source
-//     build. DECISION (fallback policy for sdist-only deps): fail with pip's
-//     own "no matching distribution" diagnostic — no opt-in flag to disable
-//     --only-binary in v1 (an escape hatch would let one sdist-only
-//     transitive dependency quietly reopen this exact hole). See
-//     newPipPrefetch for the full rationale.
+//     build. --only-binary=:all: on the CLI is NOT sufficient by itself:
+//     requirements.txt content can bypass or weaken it entirely — a local
+//     path or "." line installs from source with no index involved at all,
+//     a direct URL/VCS reference or PEP 508 "name @ url" line bypasses the
+//     index, and a "--no-binary" option line embedded in the file overrides
+//     the CLI flag. validatePipRequirements vets requirements.txt in Go
+//     BEFORE any container launches and rejects all of those shapes (plus
+//     nested -r/-c includes, unsupported in v1) with a named reason;
+//     resolvePython never even constructs a Prefetch hook for a manifest
+//     that fails this check. DECISION (fallback policy for sdist-only
+//     deps that pass validation): fail with pip's own "no matching
+//     distribution" diagnostic — no opt-in flag to disable --only-binary in
+//     v1 (an escape hatch would let one sdist-only transitive dependency
+//     quietly reopen this exact hole). See newPipPrefetch and
+//     validatePipRequirements for the full rationale.
 //
 //   - Container path /depcache is distinct from /modcache (Go) so the
 //     mount registry's ContainerPath uniqueness constraint is satisfied for
@@ -951,6 +961,9 @@ func resolvePython(repoDir string, opts DepOptions) (Resolution, error) {
 	case DepStrategyFetch:
 		if opts.FetchSandbox == nil {
 			return Resolution{}, fmt.Errorf("sandbox: Python dependency strategy %q requires a fetch sandbox", strategy)
+		}
+		if err := validatePipRequirements(repoDir); err != nil {
+			return Resolution{}, err
 		}
 		cache, err := fetchPipCacheDir(repoDir, opts.userCacheDir)
 		if err != nil {
@@ -1035,16 +1048,27 @@ func requirementsHash(repoDir string) (string, error) {
 // network access. --only-binary=:all: forces pip to refuse any dependency
 // that has no prebuilt wheel instead of falling back to a source build.
 //
-// Fallback policy (decided, not deferred): a requirements.txt with an
-// sdist-only dependency FAILS the prefetch with pip's own "no matching
-// distribution" diagnostic (surfaced verbatim via runEcosystemPrefetch's
-// exit-code error, which includes pip's stderr) rather than silently
-// permitting a source build. There is no opt-in flag to disable
-// --only-binary in v1: an escape hatch would let a single sdist-only
-// transitive dependency quietly reopen the exact code-exec-online hole this
-// bead closes, and no caller has asked for sdist support. A future bead MAY
-// add one if a real repo needs it, but that is a deliberate, reviewed
-// decision — not a default.
+// --only-binary=:all: is NOT sufficient by itself: requirements.txt content
+// can bypass or weaken it entirely (a local path/"." line, a direct
+// URL/VCS reference, a PEP 508 "name @ url" line, or a "--no-binary"
+// option line embedded in the file). resolvePython calls
+// validatePipRequirements BEFORE ever constructing this Prefetch hook,
+// rejecting all of those shapes (and nested -r/-c includes) with a named
+// reason — a manifest that reaches this function has already been vetted;
+// --only-binary=:all: on the pip command line is defense in depth for
+// whatever validatePipRequirements allows through, not the sole
+// enforcement point.
+//
+// Fallback policy (decided, not deferred): a VALIDATED requirements.txt
+// naming an sdist-only dependency FAILS the prefetch with pip's own "no
+// matching distribution" diagnostic (surfaced verbatim via
+// runEcosystemPrefetch's exit-code error, which includes pip's stderr)
+// rather than silently permitting a source build. There is no opt-in flag
+// to disable --only-binary in v1: an escape hatch would let a single
+// sdist-only transitive dependency quietly reopen the exact code-exec-online
+// hole this bead closes, and no caller has asked for sdist support. A
+// future bead MAY add one if a real repo needs it, but that is a
+// deliberate, reviewed decision — not a default.
 func newPipPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
 	return newPrefetchOnce(func(ctx context.Context) error {
 		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
@@ -1054,6 +1078,103 @@ func newPipPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Con
 			containerPath: pipCacheMount,
 		})
 	})
+}
+
+// validatePipRequirements vets repoDir's requirements.txt in Go BEFORE any
+// container ever launches (bugbot-gu0o): --only-binary=:all: on the `pip
+// download` command line only constrains INDEX-resolved distributions, and
+// can itself be overridden by content inside the file, so it is not a
+// complete boundary on its own. This rejects, with a named reason, every
+// requirements.txt line shape that would execute repo-controlled code
+// online or bypass --only-binary entirely:
+//
+//   - any pip OPTION token (a field starting with "-", anywhere in the
+//     line) — covers -e/--editable (installs from source, arbitrary
+//     setup.py/PEP517 execution with NO network involved), -r/--requirement
+//     and -c/--constraint (nested includes are unsupported in v1 — this is
+//     how they are rejected), --no-binary (silently overrides the CLI's
+//     --only-binary=:all:), and every other pip flag this resolver does not
+//     explicitly vet.
+//   - a direct URL or VCS reference ("://" anywhere in the line, e.g.
+//     https://, git+https://, file://) — bypasses the package index (and
+//     therefore --only-binary) entirely; the archive at that URL is
+//     attacker-controlled.
+//   - a PEP 508 direct reference (" @ " — "name @ url") — same bypass as a
+//     bare URL, via PEP 508 syntax instead of a positional argument.
+//   - a local path (line starts with ".", "/", or "~") — installs from a
+//     directory already present in the checked-out repo, running its
+//     setup.py/PEP517 backend with NO network access needed at all; a bare
+//     "." line is the canonical "install this repo" shape.
+//
+// A manifest that fails validation never reaches newPipPrefetch: resolvePython
+// returns the error directly from ResolveDeps, before any Prefetch hook is
+// even constructed, so the online step is never scheduled.
+func validatePipRequirements(repoDir string) error {
+	data, err := os.ReadFile(filepath.Join(repoDir, "requirements.txt"))
+	if err != nil {
+		// hasRequirementsTxt already gated FETCH detection on the file's
+		// presence; a read failure here is surfaced by requirementsHash
+		// instead of duplicated as a second error.
+		return nil
+	}
+	for _, logical := range joinPipLineContinuations(string(data)) {
+		trimmed := strings.TrimSpace(stripPipComment(logical))
+		if trimmed == "" {
+			continue
+		}
+		for _, field := range strings.Fields(trimmed) {
+			if strings.HasPrefix(field, "-") {
+				return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: pip option %q — including -e/-r/-c/--no-binary — can install from source with no network, smuggle a nested include, or silently override --only-binary=:all:)", trimmed, field)
+			}
+		}
+		if strings.Contains(trimmed, "://") {
+			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: direct URL/VCS references bypass the package index and --only-binary=:all: enforcement)", trimmed)
+		}
+		if strings.Contains(trimmed, " @ ") {
+			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: PEP 508 direct references bypass the package index and --only-binary=:all: enforcement)", trimmed)
+		}
+		if strings.HasPrefix(trimmed, ".") || strings.HasPrefix(trimmed, "/") || strings.HasPrefix(trimmed, "~") {
+			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: local path requirements install from source with no network and no --only-binary enforcement)", trimmed)
+		}
+	}
+	return nil
+}
+
+// joinPipLineContinuations splits data into pip "logical lines", joining any
+// physical line ending in a backslash continuation with the line that
+// follows (pip's own requirements-file grammar) so a forbidden token cannot
+// be smuggled across a continuation boundary and missed by a naive
+// per-physical-line scan.
+func joinPipLineContinuations(data string) []string {
+	var logical []string
+	var cur strings.Builder
+	for _, raw := range strings.Split(data, "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if strings.HasSuffix(line, "\\") {
+			cur.WriteString(strings.TrimSuffix(line, "\\"))
+			continue
+		}
+		cur.WriteString(line)
+		logical = append(logical, cur.String())
+		cur.Reset()
+	}
+	if cur.Len() > 0 {
+		logical = append(logical, cur.String())
+	}
+	return logical
+}
+
+// stripPipComment strips a pip-style inline comment: a '#' at the start of
+// the line or preceded by whitespace begins a comment that runs to EOL,
+// mirroring pip's own COMMENT_RE so validation sees exactly what pip sees
+// (never more permissive than the real parser).
+func stripPipComment(line string) string {
+	for i := range len(line) {
+		if line[i] == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
+			return line[:i]
+		}
+	}
+	return line
 }
 
 // ---- bwrap-only Python HOST extension ---------------------------------------
@@ -2378,12 +2499,14 @@ func mavenPomHash(repoDir string) (string, error) {
 // best-effort (`|| true`): a repo without JUnit 5 on the test classpath
 // simply finds no version to warm and falls through to the pre-existing
 // "network=none is the offline enforcement" behavior. The primary
-// go-offline step is NOT best-effort: its output is captured to a log file
-// (not swallowed into a `$(...)` substitution, which would mask a pipeline
-// failure under `set -e`) and explicitly checked, so a genuine go-offline
-// failure (bad POM, unreachable dependency) still fails the whole prefetch
-// with its own diagnostic on stderr — exactly like every other ecosystem's
-// prefetch error.
+// go-offline step is NOT best-effort: its output is redirected to a log
+// file and its exit status checked explicitly with a plain `if ! cmd >
+// "$LOG" 2>&1; then ...; fi` (never piped into `tee`, which would mask a
+// failure under `set -e` — only the LAST command in a pipeline determines
+// pipeline exit status without `pipefail`, which is not POSIX-portable), so
+// a genuine go-offline failure (bad POM, unreachable dependency) still
+// fails the whole prefetch with its own diagnostic on stderr — exactly
+// like every other ecosystem's prefetch error.
 const mavenProviderWarmupScript = `set -e
 LOG=/tmp/bugbot-go-offline.log
 if ! mvn -B dependency:go-offline -Dmaven.repo.local=%[1]s > "$LOG" 2>&1; then
@@ -2484,13 +2607,14 @@ func newMavenPrefetch(repoDir, hostCache string, opts DepOptions) func(context.C
 //          cp -a /gradlecache/. /workspace/.bugbot-gradle-home
 //          printf 'org.gradle.offline=true\n' > /workspace/.bugbot-gradle-home/gradle.properties
 //        then set GRADLE_USER_HOME=/workspace/.bugbot-gradle-home (via env).
-//        The gradle.properties write is bugbot-own9's second half: Gradle
-//        does NOT infer offline mode from a populated cache — even with
-//        every artifact present, `gradle test` still attempts network
-//        metadata checks unless org.gradle.offline=true is set (there is
-//        no GRADLE_OPTS/env equivalent; gradle.properties in
-//        GRADLE_USER_HOME is the supported mechanism). WHY WORKSPACE, NOT
-//        /tmp: Gradle caches for a real project routinely exceed hundreds
+//        The gradle.properties write is precautionary hardening, not a
+//        confirmed independent fix: a control run with a fully-resolving
+//        cache and no offline flag also succeeded (see gradleResolution's
+//        SetupCmd comment for the honest evidence trail). It is kept as
+//        explicit intent matching the other ecosystems' offline-
+//        enforcement env vars (there is no GRADLE_OPTS/env equivalent;
+//        gradle.properties in GRADLE_USER_HOME is the supported mechanism).
+//        WHY WORKSPACE, NOT /tmp: Gradle caches for a real project routinely exceed hundreds
 //        of MB; the /tmp tmpfs is capped at 512 MB (buildRunArgs: --tmpfs
 //        /tmp:size=512m) and a cache copy that exceeds it causes exit 125
 //        → environment_error → silent recall loss (same failure mode as Go
@@ -2632,14 +2756,18 @@ func gradleResolution(hostCache string, prefetch func(context.Context) error) Re
 			// GRADLE_USER_HOME; the RO /gradlecache mount would cause "Could not
 			// acquire lock" failures without this copy.
 			{"sh", "-c", "cp -a " + gradleCacheMount + "/. " + gradleHomeDir},
-			// Enforce offline mode (bugbot-own9): Gradle does not infer offline
-			// mode from a populated cache alone — `gradle test` still attempts
-			// network metadata checks even when every artifact is already
-			// cached, unless org.gradle.offline=true is set. There is no env-var
-			// equivalent (unlike GOPROXY=off / PIP_NO_INDEX=1 / CARGO_NET_OFFLINE
-			// / npm_config_offline); a gradle.properties file in GRADLE_USER_HOME
-			// is the supported mechanism, so this SetupCmd writes one into the
-			// just-populated writable copy before the build runs.
+			// Hardening, not a confirmed independent fix (bugbot-own9): writes
+			// org.gradle.offline=true into the just-populated writable copy's
+			// gradle.properties before the build runs. The two own9 integration
+			// tests pass on the fully-resolving init script (gradleResolveAllInitScript)
+			// alone — a control run with a fully populated cache and NO offline
+			// flag also succeeded, so this is not compensating for a
+			// reproduced Gradle offline-inference gap. It is kept anyway as
+			// explicit, low-cost intent matching the other ecosystems'
+			// offline-enforcement env vars (GOPROXY=off / PIP_NO_INDEX=1 /
+			// CARGO_NET_OFFLINE / npm_config_offline): gradle.properties in
+			// GRADLE_USER_HOME is the supported mechanism for Gradle, which
+			// has no env-var equivalent.
 			{"sh", "-c", "printf 'org.gradle.offline=true\\n' > " + gradleHomeDir + "/gradle.properties"},
 		},
 		Prefetch: prefetch,
@@ -2729,13 +2857,24 @@ func gradleLockHash(repoDir string) (string, error) {
 // would execute repo-controlled test code, so it does not widen the
 // existing configuration-time-evaluation exposure documented in the
 // Gradle ecosystem's SECURITY bullet above.
+//
+// Resolution failures are NOT caught. An earlier draft wrapped `cfg.files`
+// in try/catch(Exception ignored) to tolerate configurations that
+// legitimately cannot resolve; that swallowed genuine failures too (a
+// repo-declared dependency that cannot be found online, for instance) —
+// gradle exited 0, runEcosystemPrefetch wrote the warm-cache sentinel, and
+// the cache was permanently marked warm while actually empty, so every
+// later offline `gradle test` failed forever with no way to self-heal
+// short of manually clearing the cache (this was root-caused via an
+// unreachable-dependency probe against the real container; see
+// TestIntegrationGradlePrefetchFailurePropagatesNoSentinel). Letting a
+// resolution failure propagate as a nonzero exit is the correct behavior:
+// runEcosystemPrefetch reports the error and never writes the sentinel, so
+// the next Resolution retries instead of being poisoned.
 const gradleResolveAllInitScript = `allprojects {
     afterEvaluate { project ->
         project.configurations.matching { it.canBeResolved }.all { cfg ->
-            try {
-                cfg.files
-            } catch (Exception ignored) {
-            }
+            cfg.files
         }
     }
 }

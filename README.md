@@ -134,12 +134,12 @@ frontend).
 | Ecosystem | Detected by | Vendored means | `host` behavior | `fetch` prefetch command | Offline enforcement env | In-sandbox setup step |
 |---|---|---|---|---|---|---|
 | **Go** | `go.mod` | `vendor/modules.txt` exists → `GOFLAGS=-mod=vendor` | mount `$GOMODCACHE` at `/modcache` (read-only, `Shared=true`) | `go mod download all` into `/modcache` (writable) | `GOPROXY=off` | none |
-| **Python** | `requirements.txt` | n/a (no vendored detection) | container backend → **off** (pip HTTP cache does not materialize packages); **bwrap only**: mounts the host `python3` interpreter's `site-packages`/`dist-packages` directories read-only at their own host paths, `PYTHONPATH` set explicitly (see [bwrap dependency provisioning](#bwrap-dependency-provisioning)) | `pip download -r requirements.txt -d /depcache` into `/depcache` (writable) | `PIP_NO_INDEX=1` | `pip install --user --no-index --find-links=/depcache -r requirements.txt` |
+| **Python** | `requirements.txt` | n/a (no vendored detection) | container backend → **off** (pip HTTP cache does not materialize packages); **bwrap only**: mounts the host `python3` interpreter's `site-packages`/`dist-packages` directories read-only at their own host paths, `PYTHONPATH` set explicitly (see [bwrap dependency provisioning](#bwrap-dependency-provisioning)) | `requirements.txt` is vetted in Go (`validatePipRequirements`) *before* any container launches — rejects local paths, direct URL/VCS references, `name @ url` references, and any embedded pip option (`-e`, `-r`, `-c`, `--no-binary`, ...) with a named reason; a manifest that passes runs `pip download -r requirements.txt --only-binary=:all: -d /depcache` into `/depcache` (writable) | `PIP_NO_INDEX=1` | `pip install --user --no-index --find-links=/depcache -r requirements.txt` |
 | **Rust** | `Cargo.toml` | `vendor/` + `.cargo/config{.toml}` with `replace-with` stanza → `CARGO_NET_OFFLINE=true` | mount `$CARGO_HOME/registry` at `/cargo/registry` (read-only, `Shared=true`); `CARGO_HOME=/cargo` | `cargo fetch [--locked]` with `CARGO_HOME=/cargo` (writable); populates `/cargo/registry` | `CARGO_NET_OFFLINE=true` | none |
 | **JS/npm** | `package.json` | `node_modules/` exists → no mounts needed | container backend → **off** (npm HTTP cache does not materialize `node_modules`); **bwrap only**: when `package-lock.json` exists, mounts the host's existing npm cache read-only at `/npmcache` and runs the same offline copy+`npm ci` step as `fetch`; no lockfile (pnpm/yarn/bare npm) → **off**, same deferral as `fetch` (see [bwrap dependency provisioning](#bwrap-dependency-provisioning)) | `npm ci --ignore-scripts --cache /npmcache` into `/npmcache` (writable) | `npm_config_offline=true` | `cp -a /npmcache /tmp/npmcache && npm ci --cache /tmp/npmcache` |
 | **C#/NuGet** | root `*.csproj` / `*.sln` / `*.fsproj` | n/a (no vendored detection in v1) | mount `$NUGET_PACKAGES` (default `~/.nuget/packages`) at `/nugetcache` (read-only, `Shared=true`); `NUGET_PACKAGES=/nugetcache` | `dotnet restore [--locked-mode]` into `/nugetcache` (writable) | none — `--network=none` is the enforcement | none |
-| **Maven** | root `pom.xml` | n/a (no vendored detection in v1) | mount `~/.m2/repository` at `/m2cache` (read-only, `Shared=true`); `MAVEN_OPTS=-Dmaven.repo.local=/m2cache` | `mvn -B dependency:go-offline` with `MAVEN_OPTS=-Dmaven.repo.local=/m2cache` (writable) | none — `--network=none` is the enforcement | none |
-| **Gradle** | root `build.gradle[.kts]` / `settings.gradle[.kts]` | n/a (no vendored detection in v1) | → **off** (Gradle cache is lock-heavy under a read-only mount; see deps.go scope decisions) | `gradle dependencies --no-daemon -q` with `GRADLE_USER_HOME=/gradlecache` (writable) | none — `--network=none` is the enforcement | `mkdir -p /workspace/.bugbot-gradle-home && cp -a /gradlecache/. /workspace/.bugbot-gradle-home` (copy to disk-backed workspace; `GRADLE_USER_HOME=/workspace/.bugbot-gradle-home`) |
+| **Maven** | root `pom.xml` | n/a (no vendored detection in v1) | mount `~/.m2/repository` at `/m2cache` (read-only, `Shared=true`); `MAVEN_OPTS=-Dmaven.repo.local=/m2cache` | `mvn -B dependency:go-offline` with `MAVEN_OPTS=-Dmaven.repo.local=/m2cache` (writable), then a JUnit-5-scoped warm-up: parses go-offline's own resolved-artifact log for the Surefire plugin + JUnit Platform versions Maven actually picked and issues two best-effort `mvn dependency:get` calls for `surefire-junit-platform` and the version-aligned `junit-platform-launcher` — neither is resolved by `go-offline` itself (see deps.go's Maven PROVIDER WARM-UP comment) | none — `--network=none` is the enforcement | none |
+| **Gradle** | root `build.gradle[.kts]` / `settings.gradle[.kts]` | n/a (no vendored detection in v1) | → **off** (Gradle cache is lock-heavy under a read-only mount; see deps.go scope decisions) | an injected `-I` init script forces every resolvable configuration in every project to download its artifact JARs (`gradle --no-daemon -q -I <script> help`; resolves configurations only — never invokes `test` or repo code); plain `gradle dependencies` (pre-own9) only resolved POM/module metadata, not JAR bytes, and was replaced for that reason; with `GRADLE_USER_HOME=/gradlecache` (writable) | `org.gradle.offline=true` written into the writable `GRADLE_USER_HOME` copy's `gradle.properties` — Gradle does not infer offline mode from a populated cache, and there is no env-var equivalent to `GOPROXY=off` | `mkdir -p /workspace/.bugbot-gradle-home && cp -a /gradlecache/. /workspace/.bugbot-gradle-home && printf 'org.gradle.offline=true\n' > /workspace/.bugbot-gradle-home/gradle.properties` (copy to disk-backed workspace + enforce offline mode; `GRADLE_USER_HOME=/workspace/.bugbot-gradle-home`) |
 
 > **Bazel monorepos** use a custom image instead of dependency mounts — see
 > [Offline Bazel sandbox image](#offline-bazel-sandbox-image) below.
@@ -164,6 +164,18 @@ have mount collisions:
 - **Rust `host` strategy**: only `$CARGO_HOME/registry` is mounted — never all
   of `~/.cargo`, which contains `credentials.toml` and `bin/`. This is enforced
   in the resolver and asserted in unit tests.
+- **Python `fetch` prefetch**: `requirements.txt` is vetted in Go
+  (`validatePipRequirements`) *before* any container launches. Local paths
+  (`.`, `/...`, `~/...`), direct URL/VCS references (`://`), PEP 508
+  `name @ url` references, and any embedded pip option (`-e`/`--editable`,
+  `-r`/`--requirement`, `-c`/`--constraint`, `--no-binary`, ...) are
+  rejected with a named reason. `--only-binary=:all:` on the `pip download`
+  command line is defense in depth for whatever passes validation, not the
+  sole enforcement point: a bare `--only-binary=:all:` flag can be silently
+  overridden by a `--no-binary` option line inside the file, and does not
+  apply at all to local-path or direct-URL installs, which build from
+  source with no package index involved. Nested `-r`/`-c` includes are
+  unsupported in v1 and rejected the same way.
 - **JS `fetch` prefetch**: `--ignore-scripts` is **mandatory** in the online
   prefetch step. npm lifecycle scripts are arbitrary code; during the prefetch
   the container has network access, so executing them could exfiltrate data or
@@ -175,7 +187,18 @@ have mount collisions:
   replacement stanza — a bare `vendor/` directory without the config is ignored
   by cargo and falls through to the requested strategy.
 - **Maven `fetch` prefetch**: `mvn -B dependency:go-offline` instantiates POM plugins and any `.mvn/extensions.xml` build extensions at project-model load time. This executes repo-controlled Java code in an **online** (network-enabled) container. There is no Maven analog to npm's `--ignore-scripts`; the POM lifecycle is always evaluated. Accepted under the bugbot-gu0o posture (same as pip, dotnet). Mitigated by container hardening (cap-drop ALL, no-new-privileges, read-only root) and the absence of secret-bearing mounts during the prefetch.
-- **Gradle `fetch` prefetch**: `gradle dependencies` evaluates `settings.gradle` and `build.gradle` (Groovy/Kotlin DSL) at configuration time. This executes repo-controlled code in an **online** container. There is no Gradle analog to `--ignore-scripts` — configuration code always runs and cannot be skipped without fundamentally changing how Gradle loads the project. Accepted under the bugbot-gu0o posture. Same mitigations as Maven above.
+- **Gradle `fetch` prefetch**: `settings.gradle` and `build.gradle`
+  (Groovy/Kotlin DSL) are evaluated at configuration time — inherent to
+  Gradle's build model; there is no `--ignore-scripts` analog and
+  configuration code always runs and cannot be skipped without
+  fundamentally changing how Gradle loads the project. This holds whether
+  the prefetch resolves dependencies via a plain `gradle dependencies`
+  invocation or (as of bugbot-own9) the injected `-I` init script that
+  resolves every configuration's artifacts: the init script only reads
+  `configuration.files` during `afterEvaluate` and invokes `gradle ...
+  help`, never `test` or any task that executes repo-controlled test code,
+  so it does not widen this exposure. Accepted under the bugbot-gu0o
+  posture. Same mitigations as Maven above.
 - Read-only mounts are never writable; the writable workspace copy remains the
   only writable surface for the untrusted network-none run.
 
