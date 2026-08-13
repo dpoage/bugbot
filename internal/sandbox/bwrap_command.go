@@ -50,7 +50,7 @@ type bwrapParams struct {
 	baselinePathAppend string
 	// scratchSizeBytes is the size (bytes) of the writable tmpfs scratch
 	// space, applied via bwrap's --size flag to BOTH the tmpfs root ("/")
-	// and /tmp (bugbot-yrox). <= 0 falls back to defaultScratchSizeMB (the
+	// and /tmp (bugbot-yrox). <= 0 falls back to fallbackScratchSizeMB (the
 	// package constant, shared with the container backend) in
 	// buildBwrapArgs.
 	scratchSizeBytes int64
@@ -152,7 +152,7 @@ var fixedROAllowlist = []string{
 //     immediately following it, never cumulatively — hence it is repeated
 //     before each of the two --tmpfs flags above and below, both driven by
 //     the SAME p.scratchSizeBytes (sandbox.scratch_size_mb; <= 0 falls back
-//     to defaultScratchSizeMB).
+//     to fallbackScratchSizeMB).
 //   - --ro-bind-try allowlist   : ONLY the fixed allowlist (fixedROAllowlist)
 //     plus any resolved toolchain/extra RO mounts are bound in, read-only —
 //     best-effort (--ro-bind-try) since non-FHS hosts genuinely lack some
@@ -168,7 +168,7 @@ var fixedROAllowlist = []string{
 func buildBwrapArgs(p bwrapParams) []string {
 	scratchBytes := p.scratchSizeBytes
 	if scratchBytes <= 0 {
-		scratchBytes = int64(defaultScratchSizeMB) * 1024 * 1024
+		scratchBytes = int64(fallbackScratchSizeMB) * 1024 * 1024
 	}
 	scratchSize := strconv.FormatInt(scratchBytes, 10)
 

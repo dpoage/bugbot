@@ -101,7 +101,7 @@ func TestBuildBwrapArgsSizesTmpfsMounts(t *testing.T) {
 }
 
 // TestBuildBwrapArgsDefaultScratchSize verifies that an unset (zero-value)
-// scratchSizeBytes falls back to defaultScratchSizeMB (the same 512m the
+// scratchSizeBytes falls back to fallbackScratchSizeMB (the same 512m the
 // container backend historically hardcoded) rather than emitting an
 // unsized (or zero-sized) tmpfs.
 func TestBuildBwrapArgsDefaultScratchSize(t *testing.T) {
@@ -113,7 +113,7 @@ func TestBuildBwrapArgsDefaultScratchSize(t *testing.T) {
 	// Computed the same way buildBwrapArgs' own fallback is, so this test
 	// does not hardcode a byte count that would silently drift from the
 	// real default.
-	wantBytes := strconv.FormatInt(int64(defaultScratchSizeMB)*1024*1024, 10)
+	wantBytes := strconv.FormatInt(int64(fallbackScratchSizeMB)*1024*1024, 10)
 	mustContainSeq(t, args, "--size", wantBytes, "--tmpfs", "/")
 	mustContainSeq(t, args, "--size", wantBytes, "--tmpfs", "/tmp")
 }

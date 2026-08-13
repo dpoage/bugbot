@@ -76,6 +76,8 @@ func TestBwrapOptionsApplyDefaults(t *testing.T) {
 	WithBwrapPidsLimit(64)(s)
 	WithBwrapNetwork("host")(s)
 	WithBwrapAllowUncapped(true)(s)
+	WithBwrapScratchSizeMB(256)(s)
+	WithBwrapWorkspaceGrowthCeilingMB(1024)(s)
 
 	cpus, mem, pids := s.Limits()
 	if cpus != 3 || mem != 1024 || pids != 64 {
@@ -86,6 +88,12 @@ func TestBwrapOptionsApplyDefaults(t *testing.T) {
 	}
 	if !s.allowUncapped {
 		t.Error("allowUncapped should be true")
+	}
+	if s.defaultScratchSizeMB != 256 {
+		t.Errorf("defaultScratchSizeMB = %d, want 256", s.defaultScratchSizeMB)
+	}
+	if want := int64(1024) * 1024 * 1024; s.defaultGrowthCeilingBytes != want {
+		t.Errorf("defaultGrowthCeilingBytes = %d, want %d (1024 MB in bytes)", s.defaultGrowthCeilingBytes, want)
 	}
 }
 

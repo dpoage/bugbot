@@ -84,7 +84,7 @@ func TestBuildRunArgsSizesScratchTmpfs(t *testing.T) {
 }
 
 // TestBuildRunArgsDefaultScratchSize verifies that an unset (zero-value)
-// scratchSizeMB falls back to defaultScratchSizeMB (512m), preserving the
+// scratchSizeMB falls back to fallbackScratchSizeMB (512m), preserving the
 // pre-bugbot-yrox hardcoded behavior byte-for-byte on an unconfigured host.
 func TestBuildRunArgsDefaultScratchSize(t *testing.T) {
 	args := buildRunArgs(runParams{

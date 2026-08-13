@@ -227,8 +227,9 @@ type Sandbox struct {
 	// (bugbot-yrox). Must be > 0; default 512 (matching the container
 	// backend's historical hardcoded 512m).
 	ScratchSizeMB int `yaml:"scratch_size_mb"`
-	// WorkspaceGrowthCeilingMB bounds cumulative workspace growth (bytes
-	// written since a run starts, sampled by the shared idle watchdog) before
+	// WorkspaceGrowthCeilingMB bounds NET workspace growth (regular-file
+	// size delta, not cumulative bytes written — a write-then-delete churn
+	// nets out and never trips it; sampled by the shared idle watchdog) before
 	// the run is killed with a DISTINCT reason (Result.WorkspaceQuotaExceeded,
 	// never plain TimedOut) — independent of idle-stall detection, since a
 	// process that only fills disk keeps "resetting" the idle clock under the
@@ -1108,11 +1109,26 @@ func (c *Config) Validate() error {
 	if c.Sandbox.IdleTimeoutSeconds < 0 {
 		return fmt.Errorf("config: sandbox.idle_timeout_seconds must be >= 0 (0 disables)")
 	}
+	// maxSandboxMBKnob bounds sandbox.scratch_size_mb and
+	// sandbox.workspace_growth_ceiling_mb well below the point where
+	// int64(mb)*1024*1024 (internal/sandbox's byte conversion) could
+	// overflow — an absurd operator value would otherwise silently degrade
+	// to a wrapped/negative byte count (a disabled or nonsensical ceiling)
+	// instead of a loud config error. 10,000,000 MB (~9.5 TiB) is already
+	// far beyond any real host's disk, so this only ever catches typos/DoS
+	// input, never a legitimate value.
+	const maxSandboxMBKnob = 10_000_000
 	if c.Sandbox.ScratchSizeMB <= 0 {
 		return fmt.Errorf("config: sandbox.scratch_size_mb must be > 0")
 	}
+	if c.Sandbox.ScratchSizeMB > maxSandboxMBKnob {
+		return fmt.Errorf("config: sandbox.scratch_size_mb %d too large (max %d)", c.Sandbox.ScratchSizeMB, maxSandboxMBKnob)
+	}
 	if c.Sandbox.WorkspaceGrowthCeilingMB < 0 {
 		return fmt.Errorf("config: sandbox.workspace_growth_ceiling_mb must be >= 0 (0 disables)")
+	}
+	if c.Sandbox.WorkspaceGrowthCeilingMB > maxSandboxMBKnob {
+		return fmt.Errorf("config: sandbox.workspace_growth_ceiling_mb %d too large (max %d)", c.Sandbox.WorkspaceGrowthCeilingMB, maxSandboxMBKnob)
 	}
 	switch c.Sandbox.DepStrategy {
 	case "", "off", "host", "fetch":

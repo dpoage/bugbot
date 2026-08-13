@@ -78,11 +78,18 @@ func TestOptionsConfigureCLI(t *testing.T) {
 	for _, o := range []Option{
 		WithCPUs(4), WithMemoryMB(1024), WithTimeout(5 * time.Second),
 		WithNetwork("bridge"), WithPidsLimit(64), WithMaxOutputBytes(2048),
+		WithScratchSizeMB(256), WithWorkspaceGrowthCeilingMB(1024),
 	} {
 		o(s)
 	}
 	if s.defaultCPUs != 4 || s.defaultMemory != 1024 || s.defaultTimeout != 5*time.Second ||
 		s.defaultNetwork != "bridge" || s.pidsLimit != 64 || s.maxOutputBytes != 2048 {
 		t.Fatalf("options not applied: %+v", s)
+	}
+	if s.defaultScratchSizeMB != 256 {
+		t.Errorf("defaultScratchSizeMB = %d, want 256", s.defaultScratchSizeMB)
+	}
+	if want := int64(1024) * 1024 * 1024; s.defaultGrowthCeilingBytes != want {
+		t.Errorf("defaultGrowthCeilingBytes = %d, want %d (1024 MB in bytes)", s.defaultGrowthCeilingBytes, want)
 	}
 }

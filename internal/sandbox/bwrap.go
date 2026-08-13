@@ -110,12 +110,13 @@ type Bwrap struct {
 	maxOutputBytes     int
 	// defaultScratchSizeMB is the size (MB) of the writable tmpfs scratch
 	// space applied to BOTH /tmp and the tmpfs root ("/") (bugbot-yrox).
-	// <= 0 is treated as unset and falls back to defaultScratchSizeMB (the
+	// <= 0 is treated as unset and falls back to fallbackScratchSizeMB (the
 	// package constant, shared with the container backend) in
 	// buildBwrapArgs.
 	defaultScratchSizeMB int
-	// defaultGrowthCeilingBytes bounds cumulative workspace growth (bytes
-	// written since a run starts) the shared idle watchdog tolerates before
+	// defaultGrowthCeilingBytes bounds NET workspace growth (the fsSize
+	// delta, not cumulative bytes written — see workspaceProgress) since a
+	// run starts, tolerated by the shared idle watchdog before
 	// killing the run with the distinct Result.WorkspaceQuotaExceeded reason
 	// (bugbot-bdqf), independent of idle-stall detection. <= 0 disables the
 	// ceiling.
@@ -182,13 +183,13 @@ func WithBwrapMaxOutputBytes(n int) BwrapOption {
 
 // WithBwrapScratchSizeMB sets the size (MB) of the writable tmpfs scratch
 // space applied to BOTH /tmp and the tmpfs root (sandbox.scratch_size_mb,
-// bugbot-yrox). Values <= 0 fall back to defaultScratchSizeMB.
+// bugbot-yrox). Values <= 0 fall back to fallbackScratchSizeMB.
 func WithBwrapScratchSizeMB(mb int) BwrapOption {
 	return func(s *Bwrap) { s.defaultScratchSizeMB = mb }
 }
 
 // WithBwrapWorkspaceGrowthCeilingMB sets the workspace-growth ceiling (MB of
-// cumulative bytes written since a run starts) the shared idle watchdog
+// NET workspace-size growth, not cumulative bytes written) the shared idle watchdog
 // enforces independent of idle-stall detection (sandbox.
 // workspace_growth_ceiling_mb, bugbot-bdqf). <= 0 disables the ceiling
 // entirely.
@@ -240,7 +241,7 @@ func NewBwrap(opts ...BwrapOption) (*Bwrap, error) {
 		defaultNetwork:            "none",
 		pidsLimit:                 256,
 		maxOutputBytes:            DefaultMaxOutputBytes,
-		defaultScratchSizeMB:      defaultScratchSizeMB,
+		defaultScratchSizeMB:      fallbackScratchSizeMB,
 		defaultGrowthCeilingBytes: defaultWorkspaceGrowthCeilingBytes,
 	}
 	for _, o := range opts {
@@ -512,18 +513,25 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 
 	// Idle watchdog: mirrors CLI.Exec's contract exactly, including the
 	// independent workspace-growth ceiling (bugbot-bdqf) — see CLI.Exec's
-	// doc comment for the full rationale. quotaExceeded is set only when the
-	// growth ceiling (not idle-stall detection) fires.
+	// doc comment for the full rationale. quotaExceeded is set ONLY on a
+	// growth-ceiling kill (never a plain idle-stall kill — see
+	// watchdogArgs). growthBase is captured HERE (once, before the command
+	// starts) rather than inside the goroutine so Exec's post-run
+	// checkGrowthCeiling call below shares the EXACT same baseline the
+	// tick loop uses.
 	var idleKilled atomic.Bool
 	var quotaExceeded atomic.Bool
 	done := make(chan struct{})
 	var pidForCPU atomic.Int64
+	var fingerprint func() progressSnapshot
+	var growthBase progressSnapshot
 	if idleTimeout > 0 || s.defaultGrowthCeilingBytes > 0 {
-		fingerprint := func() progressSnapshot {
+		fingerprint = func() progressSnapshot {
 			ps := progressSnapshot{outputBytes: stdout.written() + stderr.written()}
 			ps.fsSize, ps.fsCount, ps.fsMaxModNano = workspaceProgress(ws)
 			return ps
 		}
+		growthBase = fingerprint()
 		active := func() bool {
 			pid := pidForCPU.Load()
 			if pid == 0 {
@@ -532,7 +540,17 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 			return procTreeCPUBusy(int(pid))
 		}
 		limits := watchdogLimits{idleTimeout: idleTimeout, growthCeilingBytes: s.defaultGrowthCeilingBytes}
-		go watchIdle(done, fingerprint, active, limits, idlePollInterval(idleTimeout), &idleKilled, &quotaExceeded, cancel)
+		go watchIdle(watchdogArgs{
+			done:           done,
+			fingerprint:    fingerprint,
+			activeFallback: active,
+			limits:         limits,
+			base:           growthBase,
+			pollEvery:      effectivePollInterval(idleTimeout, s.defaultGrowthCeilingBytes),
+			killed:         &idleKilled,
+			quotaExceeded:  &quotaExceeded,
+			cancel:         cancel,
+		})
 	}
 
 	start := time.Now()
@@ -553,10 +571,28 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 	close(done)
 	duration := time.Since(start)
 
+	// Post-run growth check (bugbot-bdqf oracle review B1b): see
+	// checkGrowthCeiling's doc. Must run BEFORE the outcome-precedence
+	// branches below — a growth-ceiling breach is a hard invariant, not a
+	// race heuristic, so it is never allowed to lose to a "genuine" exit
+	// code the way an idle-stall kill legitimately can.
+	checkGrowthCeiling(fingerprint, growthBase, s.defaultGrowthCeilingBytes, &quotaExceeded)
+
 	res := Result{Duration: duration, PrepDuration: prepDuration, WorkspaceCacheHit: cacheHit}
 	res.Stdout, res.StdoutTruncated = stdout.result()
 	res.Stderr, res.StderrTruncated = stderr.result()
 	res.Captured = captureWorkspaceFiles(ws, capturePaths, s.maxOutputBytes)
+
+	// Outcome precedence. A growth-ceiling breach ALWAYS wins, regardless of
+	// how the process itself exited (bugbot-bdqf oracle review B1b) — see
+	// checkGrowthCeiling's doc for why this does not follow the "genuine
+	// exit code wins over a racing watchdog" rule below.
+	if quotaExceeded.Load() {
+		res.WorkspaceQuotaExceeded = true
+		res.ExitCode = -1
+		killBwrapProcessGroup(cmd)
+		return res, nil
+	}
 
 	if runErr == nil {
 		res.ExitCode = 0
@@ -573,13 +609,12 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 		return res, fmt.Errorf("sandbox: execution cancelled: %w", ctxErr)
 	}
 
+	// Idle watchdog or absolute deadline: quotaExceeded was already handled
+	// above, so reaching here means a plain idle-stall (or absolute-
+	// deadline) kill.
 	if idleKilled.Load() || errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		res.TimedOut = true
 		res.ExitCode = -1
-		if quotaExceeded.Load() {
-			res.WorkspaceQuotaExceeded = true
-		} else {
-			res.TimedOut = true
-		}
 		killBwrapProcessGroup(cmd)
 		return res, nil
 	}

@@ -23,7 +23,7 @@ type runParams struct {
 	pidsLimit int
 	// scratchSizeMB is the size (MB) of the writable /tmp tmpfs scratch
 	// space, rendered as the --tmpfs size=... mount option (bugbot-yrox).
-	// <= 0 falls back to defaultScratchSizeMB — buildRunArgs always emits a
+	// <= 0 falls back to fallbackScratchSizeMB — buildRunArgs always emits a
 	// sized tmpfs, never an unbounded one.
 	scratchSizeMB int
 	env           []string
@@ -47,12 +47,17 @@ type runParams struct {
 // container, and the working directory for the executed command.
 const workspaceMount = "/workspace"
 
-// defaultScratchSizeMB is the writable tmpfs scratch-space size (MB) applied
-// to /tmp — and, under bwrap, the tmpfs root as well (bwrap_command.go) —
-// when no operator override (sandbox.scratch_size_mb) is configured. Matches
-// the container backend's historical hardcoded 512m, so an unconfigured host
-// sees byte-identical behavior to before bugbot-yrox.
-const defaultScratchSizeMB = 512
+// fallbackScratchSizeMB is the writable tmpfs scratch-space size (MB)
+// applied to /tmp — and, under bwrap, the tmpfs root as well
+// (bwrap_command.go) — when a resolved runParams.scratchSizeMB /
+// bwrapParams.scratchSizeBytes is <= 0 (no operator override,
+// sandbox.scratch_size_mb, was ever configured). Named distinctly from the
+// CLI/Bwrap struct fields also called "defaultScratchSizeMB" — this
+// constant is the LAST-RESORT fallback below even a zero-value backend
+// field, not "the backend's configured default". Matches the container
+// backend's historical hardcoded 512m, so an unconfigured host sees
+// byte-identical behavior to before bugbot-yrox.
+const fallbackScratchSizeMB = 512
 
 // buildRunArgs constructs the argv passed to the runtime CLI (excluding the
 // runtime binary itself) for a `run` invocation. It is a pure function so the
@@ -66,7 +71,7 @@ const defaultScratchSizeMB = 512
 //   - --read-only               : read-only root filesystem...
 //   - --tmpfs /tmp              : ...with a writable scratch tmpfs sized by
 //     p.scratchSizeMB (sandbox.scratch_size_mb; <= 0 falls back to
-//     defaultScratchSizeMB) — big enough for host language toolchain caches
+//     fallbackScratchSizeMB) — big enough for host language toolchain caches
 //     (Go's cold build cache alone can run to hundreds of MB) but explicitly
 //     bounded rather than left to the host's free RAM (bugbot-yrox).
 //   - --env HOME=/tmp           : caches that default under $HOME (Go, pip,
@@ -96,7 +101,7 @@ const defaultScratchSizeMB = 512
 func buildRunArgs(p runParams) []string {
 	scratchMB := p.scratchSizeMB
 	if scratchMB <= 0 {
-		scratchMB = defaultScratchSizeMB
+		scratchMB = fallbackScratchSizeMB
 	}
 	args := []string{
 		"run",

@@ -1037,6 +1037,15 @@ func TestValidate_ScratchSizeMB(t *testing.T) {
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "scratch_size_mb") {
 		t.Errorf("scratch_size_mb=-1 should be rejected with scratch_size_mb in message, got %v", err)
 	}
+
+	// Absurdly large — rejected: an unbounded MB value would overflow
+	// int64(mb)*1024*1024 (sandbox package's byte conversion) and silently
+	// degrade to a wrapped/nonsensical byte count instead of a loud error.
+	cfg = load(t)
+	cfg.Sandbox.ScratchSizeMB = 8_796_093_022_208 // overflows int64 bytes if unchecked
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "scratch_size_mb") {
+		t.Errorf("an absurdly large scratch_size_mb should be rejected with scratch_size_mb in message, got %v", err)
+	}
 }
 
 func TestValidate_WorkspaceGrowthCeilingMB(t *testing.T) {
@@ -1068,6 +1077,16 @@ func TestValidate_WorkspaceGrowthCeilingMB(t *testing.T) {
 	cfg.Sandbox.WorkspaceGrowthCeilingMB = -1
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "workspace_growth_ceiling_mb") {
 		t.Errorf("workspace_growth_ceiling_mb=-1 should be rejected with workspace_growth_ceiling_mb in message, got %v", err)
+	}
+
+	// Absurdly large — rejected: the same overflow-guard rationale as
+	// ScratchSizeMB above; an overflowed value would silently DISABLE the
+	// ceiling (a negative byte count never exceeds any real growth), the
+	// opposite of an operator's intent when setting a huge number.
+	cfg = load(t)
+	cfg.Sandbox.WorkspaceGrowthCeilingMB = 8_796_093_022_208
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "workspace_growth_ceiling_mb") {
+		t.Errorf("an absurdly large workspace_growth_ceiling_mb should be rejected with workspace_growth_ceiling_mb in message, got %v", err)
 	}
 }
 

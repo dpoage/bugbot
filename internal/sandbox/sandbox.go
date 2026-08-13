@@ -245,15 +245,19 @@ type Result struct {
 	TimedOut bool
 
 	// WorkspaceQuotaExceeded is true when the execution was killed by the
-	// idle watchdog's workspace-growth ceiling (bugbot-bdqf): the workspace
-	// grew by more than the backend's configured growth-ceiling bytes since
-	// the run started. This is deliberately NOT reported as TimedOut — a
-	// run that is actively filling disk is making "progress" by the
-	// idle-stall definition (see cli.go's progressSnapshot doc) and would
-	// otherwise run undetected until the absolute Timeout, so callers that
-	// only check TimedOut must not mistake a disk-filler for a genuine
-	// stall or a legitimate long-running build. ExitCode is -1, exactly
-	// like a TimedOut kill, since the process was killed by us either way.
+	// idle watchdog's workspace-growth ceiling (bugbot-bdqf): the workspace's
+	// NET regular-file size (workspaceProgress' fsSize — a write-then-delete
+	// churn nets out and never trips this) grew by more than the backend's
+	// configured growth-ceiling bytes since the run started. This is
+	// deliberately NOT reported as TimedOut — a run that is actively filling
+	// disk is making "progress" by the idle-stall definition (see cli.go's
+	// progressSnapshot doc) and would otherwise run undetected until the
+	// absolute Timeout, so callers that only check TimedOut must not mistake
+	// a disk-filler for a genuine stall or a legitimate long-running build.
+	// ExitCode is -1, exactly like a TimedOut kill, since the process was
+	// killed by us either way (or, if it happened to exit on its own after
+	// breaching the ceiling, the breach still overrides its own exit code —
+	// see checkGrowthCeiling's doc).
 	WorkspaceQuotaExceeded bool
 
 	// PrepDuration is the wall-clock time spent preparing the workspace

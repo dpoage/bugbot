@@ -177,6 +177,19 @@ sandbox:
                                # (output or workspace writes); 0 disables. The
                                # ceiling above still applies. Lets a slow-but-
                                # progressing build finish while killing hangs fast.
+  scratch_size_mb: 512         # size of the writable /tmp tmpfs scratch space
+                               # (and, under bwrap, its tmpfs root "/" too — see
+                               # its own doc). Must be > 0. Honored by BOTH
+                               # backends; matches the container backend's
+                               # historical hardcoded 512m.
+  workspace_growth_ceiling_mb: 2048   # kill a run whose WORKSPACE has grown by
+                               # more than this many MB since it started, with a
+                               # distinct reason (never plain idle_timeout) — a
+                               # disk-filler otherwise resets the idle clock
+                               # forever and runs undetected until
+                               # timeout_seconds. 0 disables the ceiling.
+                               # Default 2048 (2 GiB) is generous: real toolchain
+                               # builds land far under it.
   network: none
   dep_strategy: off            # off | host | fetch
   # setup_cmds: pre-run commands (argv lists) executed BEFORE the main command

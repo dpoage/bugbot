@@ -49,10 +49,11 @@ type CLI struct {
 	maxOutputBytes     int
 	// defaultScratchSizeMB is the size (MB) of the writable /tmp tmpfs
 	// scratch space (bugbot-yrox). <= 0 is treated as unset and falls back
-	// to defaultScratchSizeMB (the package constant) in buildRunArgs.
+	// to fallbackScratchSizeMB (the package constant) in buildRunArgs.
 	defaultScratchSizeMB int
-	// defaultGrowthCeilingBytes bounds cumulative workspace growth (bytes
-	// written since a run starts) the shared idle watchdog tolerates before
+	// defaultGrowthCeilingBytes bounds NET workspace growth (the fsSize
+	// delta, not cumulative bytes written — see workspaceProgress) since a
+	// run starts, tolerated by the shared idle watchdog before
 	// killing the run with the distinct Result.WorkspaceQuotaExceeded reason
 	// (bugbot-bdqf), independent of idle-stall detection. <= 0 disables the
 	// ceiling.
@@ -94,11 +95,11 @@ func WithMaxOutputBytes(n int) Option { return func(s *CLI) { s.maxOutputBytes =
 
 // WithScratchSizeMB sets the size (MB) of the writable /tmp tmpfs scratch
 // space (sandbox.scratch_size_mb, bugbot-yrox). Values <= 0 fall back to
-// defaultScratchSizeMB.
+// fallbackScratchSizeMB.
 func WithScratchSizeMB(mb int) Option { return func(s *CLI) { s.defaultScratchSizeMB = mb } }
 
-// WithWorkspaceGrowthCeilingMB sets the workspace-growth ceiling (MB of
-// cumulative bytes written since a run starts) the shared idle watchdog
+// WithWorkspaceGrowthCeilingMB sets the workspace-growth ceiling (MB of NET
+// workspace-size growth, not cumulative bytes written) the shared idle watchdog
 // enforces independent of idle-stall detection (sandbox.
 // workspace_growth_ceiling_mb, bugbot-bdqf): a run whose workspace grows
 // past this is killed with Result.WorkspaceQuotaExceeded, regardless of
@@ -135,7 +136,7 @@ func NewCLI(runtime, image string, opts ...Option) (*CLI, error) {
 		defaultNetwork:            "none",
 		pidsLimit:                 256,
 		maxOutputBytes:            DefaultMaxOutputBytes,
-		defaultScratchSizeMB:      defaultScratchSizeMB,
+		defaultScratchSizeMB:      fallbackScratchSizeMB,
 		defaultGrowthCeilingBytes: defaultWorkspaceGrowthCeilingBytes,
 	}
 	for _, o := range opts {
@@ -365,28 +366,46 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	//      still counts as progress.
 	// The absolute timeout above stays a hard ceiling.
 	//
-	// Independently, a workspace-GROWTH ceiling (bugbot-bdqf) bounds
-	// cumulative bytes written to the workspace since the run started: a
-	// process that only fills disk resets the idle clock forever under the
+	// Independently, a workspace-GROWTH ceiling (bugbot-bdqf) bounds NET
+	// growth in workspace size since the run started (fsSize; a
+	// write-then-delete churn nets out and never trips it): a process that
+	// only fills disk resets the idle clock forever under the
 	// progress definition above and would otherwise run undetected until the
 	// absolute Timeout. watchIdle checks growth on the SAME per-tick
 	// workspaceProgress call the fingerprint below already makes — no extra
 	// filesystem walk — and kills with the distinct Result.
 	// WorkspaceQuotaExceeded reason (never plain TimedOut) when growth
 	// exceeds the ceiling, regardless of whether output/CPU activity would
-	// otherwise read as "progress".
+	// otherwise read as "progress". base is captured HERE (once, before the
+	// command starts) rather than inside the goroutine so Exec's post-run
+	// checkGrowthCeiling call below shares the EXACT same baseline the tick
+	// loop uses — see checkGrowthCeiling's doc for why that final check
+	// exists.
 	var idleKilled atomic.Bool
 	var quotaExceeded atomic.Bool
 	done := make(chan struct{})
+	var fingerprint func() progressSnapshot
+	var growthBase progressSnapshot
 	if idleTimeout > 0 || s.defaultGrowthCeilingBytes > 0 {
-		fingerprint := func() progressSnapshot {
+		fingerprint = func() progressSnapshot {
 			ps := progressSnapshot{outputBytes: stdout.written() + stderr.written()}
 			ps.fsSize, ps.fsCount, ps.fsMaxModNano = workspaceProgress(ws)
 			return ps
 		}
+		growthBase = fingerprint()
 		active := func() bool { return s.containerCPUBusy(p.containerName) }
 		limits := watchdogLimits{idleTimeout: idleTimeout, growthCeilingBytes: s.defaultGrowthCeilingBytes}
-		go watchIdle(done, fingerprint, active, limits, idlePollInterval(idleTimeout), &idleKilled, &quotaExceeded, cancel)
+		go watchIdle(watchdogArgs{
+			done:           done,
+			fingerprint:    fingerprint,
+			activeFallback: active,
+			limits:         limits,
+			base:           growthBase,
+			pollEvery:      effectivePollInterval(idleTimeout, s.defaultGrowthCeilingBytes),
+			killed:         &idleKilled,
+			quotaExceeded:  &quotaExceeded,
+			cancel:         cancel,
+		})
 	}
 
 	start := time.Now()
@@ -394,16 +413,34 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	close(done)
 	duration := time.Since(start)
 
+	// Post-run growth check (bugbot-bdqf oracle review B1b): see
+	// checkGrowthCeiling's doc. Must run BEFORE the outcome-precedence
+	// branches below — a growth-ceiling breach is a hard invariant, not a
+	// race heuristic, so it is never allowed to lose to a "genuine" exit
+	// code the way an idle-stall kill legitimately can.
+	checkGrowthCeiling(fingerprint, growthBase, s.defaultGrowthCeilingBytes, &quotaExceeded)
+
 	res := Result{Duration: duration, PrepDuration: prepDuration, WorkspaceCacheHit: cacheHit}
 	res.Stdout, res.StdoutTruncated = stdout.result()
 	res.Stderr, res.StderrTruncated = stderr.result()
 	res.Captured = captureWorkspaceFiles(ws, capturePaths, s.maxOutputBytes)
 
-	// Outcome precedence. A process that returned its OWN status — a clean exit
-	// or a real non-zero code — was not killed by us, so those win first: a
-	// watchdog (or deadline) firing in the same instant can never mask a genuine
-	// repro verdict. Our kills surface as a signal (ExitCode -1) and fall through
-	// to the timeout/cancel branches below.
+	// Outcome precedence. A growth-ceiling breach ALWAYS wins, regardless of
+	// how the process itself exited (bugbot-bdqf oracle review B1b) — see
+	// checkGrowthCeiling's doc for why this does not follow the "genuine
+	// exit code wins over a racing watchdog" rule below.
+	if quotaExceeded.Load() {
+		res.WorkspaceQuotaExceeded = true
+		res.ExitCode = -1
+		s.forceRemove(p.containerName)
+		return res, nil
+	}
+
+	// A process that returned its OWN status — a clean exit or a real
+	// non-zero code — was not killed by us, so those win next: an idle
+	// watchdog (or absolute deadline) firing in the same instant can never
+	// mask a genuine repro verdict. Our kills surface as a signal
+	// (ExitCode -1) and fall through to the timeout/cancel branches below.
 	if runErr == nil {
 		res.ExitCode = 0
 		return res, nil
@@ -420,20 +457,14 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 		return res, fmt.Errorf("sandbox: execution cancelled: %w", ctxErr)
 	}
 
-	// Idle watchdog (idle stall OR workspace-growth ceiling) or absolute
-	// deadline: a timeout, not a demonstration. The runtime may not have torn
-	// the container down in time; reap it by name to honor the
-	// always-clean-up guarantee. quotaExceeded is checked FIRST and reported
-	// as its own distinct reason (never folded into TimedOut) so a caller
-	// can tell "the process stalled" from "the process was busy filling the
-	// disk" — see Result.WorkspaceQuotaExceeded's doc.
+	// Idle watchdog or absolute deadline: a timeout, not a demonstration.
+	// The runtime may not have torn the container down in time; reap it by
+	// name to honor the always-clean-up guarantee. quotaExceeded was
+	// already handled above, so reaching here means a plain idle-stall (or
+	// absolute-deadline) kill.
 	if idleKilled.Load() || errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		res.TimedOut = true
 		res.ExitCode = -1
-		if quotaExceeded.Load() {
-			res.WorkspaceQuotaExceeded = true
-		} else {
-			res.TimedOut = true
-		}
 		s.forceRemove(p.containerName)
 		return res, nil
 	}
@@ -462,10 +493,11 @@ type progressSnapshot struct {
 }
 
 // defaultWorkspaceGrowthCeilingBytes bounds cumulative workspace growth
-// (bytes written since a run started, sampled via workspaceProgress) before
-// the shared idle watchdog kills the run with the distinct
-// Result.WorkspaceQuotaExceeded reason (bugbot-bdqf), when no operator
-// override (sandbox.workspace_growth_ceiling_mb) is configured. Deliberately
+// (the NET size delta since a run started, sampled via workspaceProgress —
+// write-then-delete churn nets out and never trips it) before the shared
+// idle watchdog kills the run with the distinct Result.WorkspaceQuotaExceeded
+// reason (bugbot-bdqf), when no operator override
+// (sandbox.workspace_growth_ceiling_mb) is configured. Deliberately
 // generous — this exists to catch a runaway/malicious disk-filler, not to
 // constrain a legitimate build's disk usage (a full toolchain build plus
 // test artifacts can easily reach several hundred MB); 2 GiB comfortably
@@ -487,6 +519,51 @@ func idlePollInterval(idleTimeout time.Duration) time.Duration {
 	return d
 }
 
+// growthPollInterval is the sampling cadence for the workspace-growth
+// ceiling (bugbot-bdqf), fixed and independent of idleTimeout — see
+// effectivePollInterval for why it must NOT be derived from
+// idlePollInterval.
+//
+// Deriving the growth-check cadence from idlePollInterval(idleTimeout) let a
+// breach overshoot the ceiling by tens of GB under the SHIPPED DEFAULT
+// (idle_timeout_seconds: 120 -> idlePollInterval = 30s; a host writing at
+// ~2 GB/s overshoots the default 2 GiB ceiling by ~4-60 GiB inside one
+// window before the tick that would have caught it — oracle-measured
+// 72x-1024x overshoot in review). 1s is a DELIBERATE, hardcoded constant —
+// not idlePollInterval(0)'s [1s,30s]-clamped floor, which is an ACCIDENT of
+// a disabled idle window, not a chosen cadence for this knob. It is tight
+// enough to bound worst-case overshoot at multi-GB/s NVMe throughput to a
+// few GiB against a multi-GiB default ceiling, and cheap enough that one
+// extra workspaceProgress walk per second is negligible next to the disk
+// I/O it bounds (a warm-cache walk over 50k files measured ~76ms — well
+// under the 1s budget).
+const growthPollInterval = 1 * time.Second
+
+// effectivePollInterval derives watchIdle's actual sampling cadence: the
+// TIGHTER of idlePollInterval(idleTimeout) (the existing idle-stall
+// cadence) and growthPollInterval, whenever the growth ceiling is active —
+// so growth detection is never slower than its own dedicated cadence just
+// because the operator's idle-stall window happens to be long (or
+// disabled). When idleTimeout <= 0, idlePollInterval(0)'s floor is an
+// artifact of a DISABLED window, never a deliberate growth-sampling choice,
+// so growthPollInterval alone governs in that case. When the growth
+// ceiling is disabled (growthCeilingBytes <= 0), this returns EXACTLY
+// idlePollInterval(idleTimeout), preserving byte-identical behavior for
+// idle-only configurations (including the pre-existing 1s floor at
+// idleTimeout<=0 when no ceiling is configured at all).
+func effectivePollInterval(idleTimeout time.Duration, growthCeilingBytes int64) time.Duration {
+	if growthCeilingBytes <= 0 {
+		return idlePollInterval(idleTimeout)
+	}
+	if idleTimeout <= 0 {
+		return growthPollInterval
+	}
+	if pollEvery := idlePollInterval(idleTimeout); pollEvery < growthPollInterval {
+		return pollEvery
+	}
+	return growthPollInterval
+}
+
 // watchdogLimits bundles watchIdle's two independent kill conditions so its
 // parameter list doesn't grow unbounded as more are added:
 //   - idleTimeout: kill after this long with NO observable progress (the
@@ -505,53 +582,89 @@ type watchdogLimits struct {
 	growthCeilingBytes int64
 }
 
-// watchIdle samples progress every pollEvery and cancels the run when either
-// of limits' two independent conditions trips: no progress for
-// limits.idleTimeout, or cumulative workspace growth past
-// limits.growthCeilingBytes since sampling started. fingerprint is the cheap
-// signal (output bytes + workspace filesystem state); activeFallback is
-// consulted ONLY when the fingerprint is unchanged AND the growth ceiling is
-// not implicated, so its cost (a container-CPU probe) is paid just on
-// otherwise-idle ticks. The growth check reuses the SAME per-tick
-// fingerprint() call the idle-stall check already makes (both derive from
-// one workspaceProgress walk) rather than sampling the filesystem twice.
+// watchdogArgs bundles every input watchIdle needs. Introduced (alongside
+// effectivePollInterval and checkGrowthCeiling) when an oracle round
+// required a growth-ceiling baseline shared between the tick loop AND
+// Exec's post-run check (see checkGrowthCeiling's doc) — bundling avoids
+// the parameter list growing without bound as future kill conditions are
+// added.
+type watchdogArgs struct {
+	done <-chan struct{}
+	// fingerprint is the cheap per-tick progress/growth signal (output
+	// bytes + workspace filesystem state).
+	fingerprint func() progressSnapshot
+	// activeFallback is consulted ONLY when fingerprint is unchanged AND
+	// the growth ceiling is not implicated, so its cost (a container-CPU
+	// probe) is paid just on otherwise-idle ticks. May be nil.
+	activeFallback func() bool
+	limits         watchdogLimits
+	// base is the fingerprint taken once, before the run starts (by the
+	// caller — see checkGrowthCeiling), and is the SAME baseline both the
+	// tick loop's growth check and Exec's post-run growth check measure
+	// against, so the two never disagree about what counts as "growth
+	// since the run started".
+	base      progressSnapshot
+	pollEvery time.Duration
+	// killed is set ONLY on a plain idle-stall kill (never on a
+	// growth-ceiling kill — see quotaExceeded).
+	killed *atomic.Bool
+	// quotaExceeded is set on a growth-ceiling kill, whether detected here
+	// (a tick observes the breach and cancels the run) or by Exec's
+	// post-run checkGrowthCeiling call (the run exited on its own before
+	// any tick could observe the breach).
+	quotaExceeded *atomic.Bool
+	cancel        func()
+}
+
+// watchIdle samples progress every a.pollEvery and cancels the run when
+// either of a.limits' two independent conditions trips: no progress for
+// a.limits.idleTimeout, or NET workspace growth past
+// a.limits.growthCeilingBytes since a.base. a.fingerprint is the cheap
+// signal; a.activeFallback is consulted ONLY when the fingerprint is
+// unchanged AND the growth ceiling is not implicated, so its cost (a
+// container-CPU probe) is paid just on otherwise-idle ticks. The growth
+// check reuses the SAME per-tick a.fingerprint() call the idle-stall check
+// already makes (both derive from one workspaceProgress walk) rather than
+// sampling the filesystem twice.
 //
-// It sets killed BEFORE calling cancel so the flag is visible (through the
-// atomic barrier) by the time the cancelled command returns; quotaExceeded is
-// set (in addition to killed) ONLY on a growth-ceiling kill, so callers can
-// distinguish "workspace grew too much" from a plain idle stall — see
-// Result.WorkspaceQuotaExceeded. It returns when the run finishes (done
-// closed) or after it fires; when both of limits' fields are <= 0 it returns
-// immediately without sampling. activeFallback may be nil.
-func watchIdle(done <-chan struct{}, fingerprint func() progressSnapshot, activeFallback func() bool, limits watchdogLimits, pollEvery time.Duration, killed, quotaExceeded *atomic.Bool, cancel func()) {
-	if limits.idleTimeout <= 0 && limits.growthCeilingBytes <= 0 {
+// On a growth-ceiling breach it sets a.quotaExceeded (NEVER a.killed —
+// that flag is reserved for a plain idle-stall kill, see watchdogArgs) and
+// calls a.cancel; on an idle-stall timeout it sets a.killed and calls
+// a.cancel. Either flag is set BEFORE cancel runs, so it is visible
+// (through the atomic barrier) by the time the cancelled command returns.
+// It returns when the run finishes (a.done closed) or after it fires; when
+// both of a.limits' fields are <= 0 it returns immediately without
+// sampling. This is the PROACTIVE half of growth-ceiling enforcement — a
+// run that breaches the ceiling and exits before the next tick escapes
+// this loop entirely; Exec's unconditional post-run checkGrowthCeiling
+// call is what catches that case (bugbot-bdqf oracle review B1b).
+func watchIdle(a watchdogArgs) {
+	if a.limits.idleTimeout <= 0 && a.limits.growthCeilingBytes <= 0 {
 		return
 	}
-	base := fingerprint()
-	last := base
+	last := a.base
 	lastChange := time.Now()
-	t := time.NewTicker(pollEvery)
+	t := time.NewTicker(a.pollEvery)
 	defer t.Stop()
 	for {
 		select {
-		case <-done:
+		case <-a.done:
 			return
 		case now := <-t.C:
-			cur := fingerprint()
+			cur := a.fingerprint()
 
 			// Growth ceiling is checked FIRST and independent of the
 			// idle-stall logic below: unlike output/CPU activity, ongoing
 			// workspace growth must never be treated as a reason to let the
 			// run continue — that is exactly the disk-filler behavior this
 			// ceiling exists to catch (bugbot-bdqf).
-			if limits.growthCeilingBytes > 0 && cur.fsSize-base.fsSize > limits.growthCeilingBytes {
-				quotaExceeded.Store(true)
-				killed.Store(true)
-				cancel()
+			if a.limits.growthCeilingBytes > 0 && cur.fsSize-a.base.fsSize > a.limits.growthCeilingBytes {
+				a.quotaExceeded.Store(true)
+				a.cancel()
 				return
 			}
 
-			if limits.idleTimeout <= 0 {
+			if a.limits.idleTimeout <= 0 {
 				continue
 			}
 			if cur != last {
@@ -560,16 +673,45 @@ func watchIdle(done <-chan struct{}, fingerprint func() progressSnapshot, active
 				continue
 			}
 			// Cheap signals flat: consult the costlier fallback before deciding.
-			if activeFallback != nil && activeFallback() {
+			if a.activeFallback != nil && a.activeFallback() {
 				lastChange = now
 				continue
 			}
-			if now.Sub(lastChange) >= limits.idleTimeout {
-				killed.Store(true)
-				cancel()
+			if now.Sub(lastChange) >= a.limits.idleTimeout {
+				a.killed.Store(true)
+				a.cancel()
 				return
 			}
 		}
+	}
+}
+
+// checkGrowthCeiling performs the DEFINITIVE post-run workspace-growth
+// check (bugbot-bdqf oracle review B1b). watchIdle's tick loop only
+// evaluates growth periodically (every effectivePollInterval); a run that
+// breaches the ceiling and exits before the NEXT tick fires — a single
+// large burst write, or any process fast enough to finish inside one poll
+// window — would otherwise escape classification entirely, regardless of
+// its own exit code. Exec calls this exactly once, unconditionally,
+// immediately after the command exits (success, failure, or signal) and
+// BEFORE consulting runErr — growth-ceiling enforcement is a measured,
+// absolute invariant on final disk usage, not a race-prone liveness
+// heuristic like idle-stall detection, so it does NOT participate in the
+// "a genuine exit code wins over a racing watchdog" precedence rule Exec
+// applies to TimedOut: a breach always overrides whatever exit code the
+// process itself reported.
+//
+// fingerprint may be nil (when neither idleTimeout nor the growth ceiling
+// was configured, Exec never allocates one); growthCeilingBytes<=0 is
+// checked FIRST so a nil fingerprint is never dereferenced in that case.
+// A no-op, without sampling the filesystem again, when a tick already
+// caught the breach (quotaExceeded already true).
+func checkGrowthCeiling(fingerprint func() progressSnapshot, base progressSnapshot, growthCeilingBytes int64, quotaExceeded *atomic.Bool) {
+	if growthCeilingBytes <= 0 || quotaExceeded.Load() {
+		return
+	}
+	if final := fingerprint(); final.fsSize-base.fsSize > growthCeilingBytes {
+		quotaExceeded.Store(true)
 	}
 }
 
