@@ -960,3 +960,55 @@ func TestInterpret_NodeESM_LoadFailure_SentinelStillNotDemonstrated(t *testing.T
 			v.reason)
 	}
 }
+
+// --- bugbot-bdqf: workspace-growth-ceiling kill classification -------------
+
+// TestInterpret_WorkspaceQuotaExceeded_EnvironmentErrorNeverDemonstrated pins
+// the interpret() half of bugbot-bdqf's follow-up: a run killed by the
+// idle watchdog's workspace-growth ceiling (Result.WorkspaceQuotaExceeded)
+// must NEVER be classified as demonstrated OR as VerdictReasonNotDemonstrated
+// — both would be wrong, since the run was cut off by us, not left to run to
+// a conclusion. It lands on VerdictReasonEnvironmentError (the same category
+// interpret() already uses for a genuine host disk-full marker), with a
+// summary that names the quota explicitly so it reads distinctly from that
+// real disk-full case.
+func TestInterpret_WorkspaceQuotaExceeded_EnvironmentErrorNeverDemonstrated(t *testing.T) {
+	res := sandbox.Result{
+		ExitCode:               -1,
+		WorkspaceQuotaExceeded: true,
+		Stdout:                 "writing...\nwriting...\nwriting...\n",
+	}
+	cmd := []string{"go", "test", "./..."}
+	v := interpret(res, cmd)
+	if v.demonstrated {
+		t.Fatalf("a WorkspaceQuotaExceeded kill must never demonstrate; got demonstrated=true")
+	}
+	if v.reason != VerdictReasonEnvironmentError {
+		t.Errorf("reason = %q, want %q (a workspace-quota kill is an infra/disk-usage problem, not a stall or a non-reproduction)",
+			v.reason, VerdictReasonEnvironmentError)
+	}
+	if !strings.Contains(v.summary, "quota") {
+		t.Errorf("summary %q must name the quota explicitly, distinct from a generic disk-full/timeout message", v.summary)
+	}
+}
+
+// TestInterpret_WorkspaceQuotaExceeded_DistinctFromTimedOut pins that a
+// growth-ceiling kill and a plain timeout produce DIFFERENT verdict
+// summaries even though TimedOut alone would have landed on
+// VerdictReasonTimeout — the oracle-facing requirement that a disk-filler is
+// distinguishable from a stall kill, not silently folded into "timed out".
+func TestInterpret_WorkspaceQuotaExceeded_DistinctFromTimedOut(t *testing.T) {
+	cmd := []string{"go", "test", "./..."}
+	timedOut := interpret(sandbox.Result{ExitCode: -1, TimedOut: true}, cmd)
+	quota := interpret(sandbox.Result{ExitCode: -1, WorkspaceQuotaExceeded: true}, cmd)
+
+	if timedOut.reason != VerdictReasonTimeout {
+		t.Fatalf("plain TimedOut must keep VerdictReasonTimeout (unchanged behavior); got %q", timedOut.reason)
+	}
+	if quota.reason == timedOut.reason {
+		t.Errorf("a WorkspaceQuotaExceeded kill must classify differently from a plain timeout; both got reason=%q", quota.reason)
+	}
+	if quota.summary == timedOut.summary {
+		t.Errorf("a WorkspaceQuotaExceeded kill must produce a distinct summary from a plain timeout; both got %q", quota.summary)
+	}
+}

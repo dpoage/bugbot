@@ -279,6 +279,40 @@ type Result struct {
 	Captured map[string][]byte
 }
 
+// InfraKilled reports whether Exec killed this run for an infrastructure
+// reason — the absolute/idle timeout OR the workspace-growth ceiling
+// (bugbot-bdqf) — rather than the command exiting (successfully or not) on
+// its own. Callers that classify a Result into a verdict MUST check this
+// BEFORE interpreting ExitCode/output: a run killed by us must never be
+// read as "the command completed and its output says X" (e.g.
+// misclassified as not-demonstrated or a rejected fix) regardless of which
+// specific kill reason fired. This is the shared seam internal/repro's
+// interpret()/patchVerdict()/classifyPlaybookProbe() (and any future
+// consumer, e.g. internal/repro's smoke-verdict path) use so a new kill
+// reason only needs to be taught here once, not re-derived at every
+// call site.
+func (r Result) InfraKilled() bool {
+	return r.TimedOut || r.WorkspaceQuotaExceeded
+}
+
+// KillReason returns a short, human-readable label naming why Exec killed
+// this run when InfraKilled is true, for verdict/summary messages that want
+// to name the specific cause rather than a generic "timed out" — in
+// particular so a WorkspaceQuotaExceeded kill (a disk-filler) reads
+// distinctly from a genuine idle-stall/absolute-timeout kill instead of
+// both collapsing into the same message. Returns "" when InfraKilled is
+// false.
+func (r Result) KillReason() string {
+	switch {
+	case r.WorkspaceQuotaExceeded:
+		return "workspace growth exceeded the configured quota (sandbox.workspace_growth_ceiling_mb)"
+	case r.TimedOut:
+		return "timed out"
+	default:
+		return ""
+	}
+}
+
 // Sandbox is an isolated command executor. Implementations must be safe for
 // concurrent use by multiple goroutines.
 type Sandbox interface {
