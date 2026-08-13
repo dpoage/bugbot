@@ -134,7 +134,7 @@ frontend).
 | Ecosystem | Detected by | Vendored means | `host` behavior | `fetch` prefetch command | Offline enforcement env | In-sandbox setup step |
 |---|---|---|---|---|---|---|
 | **Go** | `go.mod` | `vendor/modules.txt` exists → `GOFLAGS=-mod=vendor` | mount `$GOMODCACHE` at `/modcache` (read-only, `Shared=true`) | `go mod download all` into `/modcache` (writable) | `GOPROXY=off` | none |
-| **Python** | `requirements.txt` | n/a (no vendored detection) | container backend → **off** (pip HTTP cache does not materialize packages); **bwrap only**: mounts the host `python3` interpreter's `site-packages`/`dist-packages` directories read-only at their own host paths, `PYTHONPATH` set explicitly (see [bwrap dependency provisioning](#bwrap-dependency-provisioning)) | `requirements.txt` is vetted in Go (`validatePipRequirements`) *before* any container launches — rejects local paths, direct URL/VCS references, `name @ url` references, and any embedded pip option (`-e`, `-r`, `-c`, `--no-binary`, ...) with a named reason; a manifest that passes runs `pip download -r requirements.txt --only-binary=:all: -d /depcache` into `/depcache` (writable) | `PIP_NO_INDEX=1` | `pip install --user --no-index --find-links=/depcache -r requirements.txt` |
+| **Python** | `requirements.txt` | n/a (no vendored detection) | container backend → **off** (pip HTTP cache does not materialize packages); **bwrap only**: mounts the host `python3` interpreter's `site-packages`/`dist-packages` directories read-only at their own host paths, `PYTHONPATH` set explicitly (see [bwrap dependency provisioning](#bwrap-dependency-provisioning)) | `requirements.txt` is vetted in Go (`validatePipRequirements`) *before* any container launches, using an allow-list grammar (plain PEP 508 index requirements + `--hash` fields only — see Security notes below); a manifest that passes runs `pip download -r requirements.txt --only-binary=:all: -d /depcache` into `/depcache` (writable) | `PIP_NO_INDEX=1` | `pip install --user --no-index --find-links=/depcache -r requirements.txt` |
 | **Rust** | `Cargo.toml` | `vendor/` + `.cargo/config{.toml}` with `replace-with` stanza → `CARGO_NET_OFFLINE=true` | mount `$CARGO_HOME/registry` at `/cargo/registry` (read-only, `Shared=true`); `CARGO_HOME=/cargo` | `cargo fetch [--locked]` with `CARGO_HOME=/cargo` (writable); populates `/cargo/registry` | `CARGO_NET_OFFLINE=true` | none |
 | **JS/npm** | `package.json` | `node_modules/` exists → no mounts needed | container backend → **off** (npm HTTP cache does not materialize `node_modules`); **bwrap only**: when `package-lock.json` exists, mounts the host's existing npm cache read-only at `/npmcache` and runs the same offline copy+`npm ci` step as `fetch`; no lockfile (pnpm/yarn/bare npm) → **off**, same deferral as `fetch` (see [bwrap dependency provisioning](#bwrap-dependency-provisioning)) | `npm ci --ignore-scripts --cache /npmcache` into `/npmcache` (writable) | `npm_config_offline=true` | `cp -a /npmcache /tmp/npmcache && npm ci --cache /tmp/npmcache` |
 | **C#/NuGet** | root `*.csproj` / `*.sln` / `*.fsproj` | n/a (no vendored detection in v1) | mount `$NUGET_PACKAGES` (default `~/.nuget/packages`) at `/nugetcache` (read-only, `Shared=true`); `NUGET_PACKAGES=/nugetcache` | `dotnet restore [--locked-mode]` into `/nugetcache` (writable) | none — `--network=none` is the enforcement | none |
@@ -165,17 +165,28 @@ have mount collisions:
   of `~/.cargo`, which contains `credentials.toml` and `bin/`. This is enforced
   in the resolver and asserted in unit tests.
 - **Python `fetch` prefetch**: `requirements.txt` is vetted in Go
-  (`validatePipRequirements`) *before* any container launches. Local paths
-  (`.`, `/...`, `~/...`), direct URL/VCS references (`://`), PEP 508
-  `name @ url` references, and any embedded pip option (`-e`/`--editable`,
-  `-r`/`--requirement`, `-c`/`--constraint`, `--no-binary`, ...) are
-  rejected with a named reason. `--only-binary=:all:` on the `pip download`
-  command line is defense in depth for whatever passes validation, not the
-  sole enforcement point: a bare `--only-binary=:all:` flag can be silently
-  overridden by a `--no-binary` option line inside the file, and does not
-  apply at all to local-path or direct-URL installs, which build from
-  source with no package index involved. Nested `-r`/`-c` includes are
-  unsupported in v1 and rejected the same way.
+  (`validatePipRequirements`) *before* any container launches, using an
+  **allow-list grammar** — parse, don't validate — not a deny-list of
+  known-bad shapes (pip's own local-path/archive-file recognition is too
+  broad to deny-list completely: a relative sub-path, a bare archive
+  filename with no path separator at all, a trailing-slash directory, and
+  a `file:` scheme with no `//` are all local/direct installs pip accepts
+  that a prefix deny-list would miss one at a time). Every
+  `requirements.txt` line must match ONE of exactly two accepted shapes or
+  the whole manifest is rejected with a named reason: (1) a strict
+  [PEP 508](https://peps.python.org/pep-0508/) index requirement — `name`,
+  optional `[extras]`, optional comma-separated version specifiers,
+  optional `; marker` — nothing else; or (2) per-requirement
+  `--hash=<algo>:<hexdigest>` fields (the output of `pip-compile
+  --generate-hashes` / `poetry export --with-hashes`), which may repeat
+  and trail a requirement on the same logical line. `--hash` cannot
+  weaken this boundary — any `--hash` field puts pip into its own
+  `--require-hashes` mode, which itself refuses editable/local/unhashed
+  direct installs. Every other pip option (`-e`, `-r`, `-c`,
+  `--no-binary`, `--index-url`, ...) is rejected outright, which also
+  closes nested `-r`/`-c` includes (unsupported in v1) in the same check.
+  `--only-binary=:all:` on the `pip download` command line is defense in
+  depth for whatever passes this grammar, not the sole enforcement point.
 - **JS `fetch` prefetch**: `--ignore-scripts` is **mandatory** in the online
   prefetch step. npm lifecycle scripts are arbitrary code; during the prefetch
   the container has network access, so executing them could exfiltrate data or
@@ -197,8 +208,12 @@ have mount collisions:
   resolves every configuration's artifacts: the init script only reads
   `configuration.files` during `afterEvaluate` and invokes `gradle ...
   help`, never `test` or any task that executes repo-controlled test code,
-  so it does not widen this exposure. Accepted under the bugbot-gu0o
-  posture. Same mitigations as Maven above.
+  so it does not widen this exposure. The init script does NOT tolerate a
+  configuration that genuinely fails to resolve — an earlier draft
+  swallowed resolution errors, which silently poisoned the fetch cache as
+  "warm" while actually empty; a legitimately-unresolvable configuration
+  now hard-fails the whole FETCH prefetch instead (fail-closed by design).
+  Accepted under the bugbot-gu0o posture. Same mitigations as Maven above.
 - Read-only mounts are never writable; the writable workspace copy remains the
   only writable surface for the untrusted network-none run.
 

@@ -838,6 +838,22 @@ func TestValidatePipRequirementsRejectsBypasses(t *testing.T) {
 			name:    "nested -c constraint include",
 			content: "-c constraints.txt\n",
 		},
+		{
+			name:    "relative sub-path archive line (B3)",
+			content: "six==1.16.0\nwheelhouse/evilpkg-0.0.1.tar.gz\n",
+		},
+		{
+			name:    "bare archive filename with no path separator (B3)",
+			content: "six==1.16.0\nevilpkg-0.0.1.tar.gz\n",
+		},
+		{
+			name:    "trailing-slash directory (B3)",
+			content: "six==1.16.0\nevilproj/\n",
+		},
+		{
+			name:    "file: scheme without // (B3)",
+			content: "six==1.16.0\nfile:wheelhouse/evilpkg-0.0.1.tar.gz\n",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -864,13 +880,53 @@ func TestValidatePipRequirementsRejectsBypasses(t *testing.T) {
 	}
 }
 
+// TestValidatePipRequirementsRejectsSymlinkedManifest proves the validator
+// reads through a symlinked requirements.txt (os.ReadFile follows symlinks
+// by default) rather than being bypassable by pointing the file at a
+// symlink — the fifth oracle-named canary (B3).
+func TestValidatePipRequirementsRejectsSymlinkedManifest(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real-requirements.txt")
+	writeFile(t, target, "six==1.16.0\nevilproj/\n")
+	if err := os.Symlink(target, filepath.Join(dir, "requirements.txt")); err != nil {
+		t.Fatalf("os.Symlink: %v", err)
+	}
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	_, err := resolvePython(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err == nil {
+		t.Fatal("resolvePython should reject a symlinked requirements.txt whose target contains a rejected shape")
+	}
+	if !strings.Contains(err.Error(), "bugbot-gu0o") {
+		t.Errorf("error = %v, want a named bugbot-gu0o reason", err)
+	}
+	if mock.CallCount() != 0 {
+		t.Errorf("rejected manifest must never launch a container; CallCount() = %d", mock.CallCount())
+	}
+}
+
 // TestValidatePipRequirementsAllowsOrdinaryPins proves the validator does
 // not reject ordinary, safe requirements.txt content: index-resolved
-// name==version pins (with extras/markers) and a bare unpinned name.
+// name==version pins (with extras/markers), a bare unpinned name, and
+// per-requirement --hash=<algo>:<hexdigest> fields (pip-compile
+// --generate-hashes / poetry export --with-hashes output), including the
+// backslash-continuation shape those tools emit.
 func TestValidatePipRequirementsAllowsOrdinaryPins(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "requirements.txt"),
-		"six==1.16.0\nrequests[security]>=2.0,<3.0; python_version >= \"3.8\"\npytest\n# a comment\n\n")
+		"six==1.16.0\n"+
+			"requests[security]>=2.0,<3.0; python_version >= \"3.8\"\n"+
+			"pytest\n"+
+			"# a comment\n"+
+			"\n"+
+			"certifi==2024.2.2 \\\n"+
+			"    --hash=sha256:0569859f95fc761b18b45ef421b1290a0f65f147e92a1e5eb3e635f9a83c3c3 \\\n"+
+			"    --hash=sha256:dc383c07b76109f368f6106eee2b593b04a010991828b56be55d69017c60347\n")
 	cacheBase := t.TempDir()
 	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
 

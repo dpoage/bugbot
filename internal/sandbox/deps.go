@@ -115,6 +115,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -891,13 +892,19 @@ func lastLines(s string, n int) string {
 //     therefore passes --only-binary=:all:, forcing pip to refuse any
 //     dependency with no prebuilt wheel instead of falling back to a source
 //     build. --only-binary=:all: on the CLI is NOT sufficient by itself:
-//     requirements.txt content can bypass or weaken it entirely — a local
-//     path or "." line installs from source with no index involved at all,
-//     a direct URL/VCS reference or PEP 508 "name @ url" line bypasses the
-//     index, and a "--no-binary" option line embedded in the file overrides
-//     the CLI flag. validatePipRequirements vets requirements.txt in Go
-//     BEFORE any container launches and rejects all of those shapes (plus
-//     nested -r/-c includes, unsupported in v1) with a named reason;
+//     requirements.txt content can bypass or weaken it entirely (a local
+//     path, a bare archive filename, a directory, a URL/VCS reference, a
+//     PEP 508 "name @ url" reference, or a "--no-binary" option line
+//     embedded in the file all bypass the index and/or --only-binary).
+//     validatePipRequirements vets requirements.txt in Go BEFORE any
+//     container launches using an ALLOW-list grammar (parse, don't
+//     validate — NOT a deny-list of known-bad prefixes; pip's own
+//     local-path/archive recognition is too broad to deny-list one prefix
+//     at a time): only a strict PEP 508 index requirement
+//     (name[extras]comparator-version; marker) plus per-requirement
+//     --hash=<algo>:<hexdigest> fields (pip-compile/poetry hash-pinning
+//     output) are accepted. Every other shape — including nested -r/-c
+//     includes, unsupported in v1 — is rejected with a named reason;
 //     resolvePython never even constructs a Prefetch hook for a manifest
 //     that fails this check. DECISION (fallback policy for sdist-only
 //     deps that pass validation): fail with pip's own "no matching
@@ -1049,12 +1056,14 @@ func requirementsHash(repoDir string) (string, error) {
 // that has no prebuilt wheel instead of falling back to a source build.
 //
 // --only-binary=:all: is NOT sufficient by itself: requirements.txt content
-// can bypass or weaken it entirely (a local path/"." line, a direct
-// URL/VCS reference, a PEP 508 "name @ url" line, or a "--no-binary"
-// option line embedded in the file). resolvePython calls
-// validatePipRequirements BEFORE ever constructing this Prefetch hook,
-// rejecting all of those shapes (and nested -r/-c includes) with a named
-// reason — a manifest that reaches this function has already been vetted;
+// can bypass or weaken it entirely (a local path, a bare archive filename,
+// a directory, a URL/VCS reference, a PEP 508 "name @ url" line, or a
+// "--no-binary" option line embedded in the file). resolvePython calls
+// validatePipRequirements BEFORE ever constructing this Prefetch hook; it
+// is an ALLOW-list grammar (parse, don't validate) that accepts ONLY a
+// strict PEP 508 index requirement plus --hash fields, rejecting
+// everything else (including nested -r/-c includes) with a named reason —
+// a manifest that reaches this function has already been vetted;
 // --only-binary=:all: on the pip command line is defense in depth for
 // whatever validatePipRequirements allows through, not the sole
 // enforcement point.
@@ -1080,35 +1089,91 @@ func newPipPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Con
 	})
 }
 
+// pipRequirementRe matches ONLY a strict PEP 508 index requirement: a
+// distribution name, an optional [extras] list, optional comma-separated
+// version specifiers, and an optional environment marker. It is an
+// ALLOW-list grammar — parse, don't validate — not a deny-list of
+// known-bad prefixes: an earlier version of validatePipRequirements
+// rejected known-bad PREFIXES ("." / "/" / "~" / "://" / " @ " / a leading
+// "-"), which a live oracle review proved incomplete — pip's own
+// local-path/archive recognition doesn't require any of those specific
+// prefixes. A relative sub-path ("wheelhouse/evilpkg-0.0.1.tar.gz"), a
+// bare archive filename with NO path separator at all
+// ("evilpkg-0.0.1.tar.gz"), a trailing-slash directory ("evilproj/"), and
+// a "file:" scheme with no "//" ("file:wheelhouse/...") are all
+// local/direct installs pip accepts that a prefix deny-list has to
+// enumerate one shape at a time, forever trailing pip's actual grammar.
+// Group 1 captures the distribution name so pipForbiddenArchiveSuffixes
+// can check it specifically (a name with no "/" at all can still be an
+// archive filename pip installs locally).
+var pipRequirementRe = regexp.MustCompile(
+	`^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)` + // 1: name
+		`(?:\[[A-Za-z0-9][A-Za-z0-9._,\s-]*\])?` + // optional [extras]
+		`(?:\s*(?:==|!=|<=|>=|<|>|~=|===)\s*[A-Za-z0-9][A-Za-z0-9.*+!_-]*` +
+		`(?:\s*,\s*(?:==|!=|<=|>=|<|>|~=|===)\s*[A-Za-z0-9][A-Za-z0-9.*+!_-]*)*)?` + // optional version specifier(s)
+		`(?:\s*;\s*.+)?$`, // optional "; marker" (evaluated locally by pip; free text, no code/URL execution risk)
+)
+
+// pipHashFieldRe matches ONE per-requirement --hash=<algo>:<hexdigest>
+// field, pip's hash-pinning syntax (the output of `pip-compile
+// --generate-hashes` / `poetry export --with-hashes`). Accepted separately
+// from pipRequirementRe because these fields may repeat (one per built
+// distribution) and can trail a requirement on the same logical line,
+// including across a backslash continuation. --hash cannot weaken this
+// boundary: a requirements.txt containing ANY --hash field puts pip into
+// --require-hashes mode implicitly, which itself REFUSES editable
+// installs, local paths, and unhashed direct references — --hash only
+// ever tightens what pip will accept, never loosens it. A blanket "any
+// field starting with -" rejection (the earlier version) rejected these
+// too, which would have made every pip-compile/poetry hash-pinned
+// manifest unusable with dep_strategy: fetch.
+var pipHashFieldRe = regexp.MustCompile(`^--hash=[A-Za-z0-9]+:[0-9a-fA-F]+$`)
+
+// pipForbiddenArchiveSuffixes are file extensions that make an otherwise
+// name-shaped token a LOCAL ARCHIVE INSTALL to pip, not an index lookup.
+// pip's heuristic for "does this argument look like a wheel/sdist on disk"
+// is extension-based, not path-separator-based: a bare filename like
+// "evilpkg-0.0.1.tar.gz" (no "/", syntactically indistinguishable from a
+// valid PEP 508 name by pipRequirementRe alone) is still a local install
+// whose setup.py/PEP517 backend pip will run with NO network access
+// needed at all.
+var pipForbiddenArchiveSuffixes = []string{
+	".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".tbz2", ".txz",
+	".zip", ".whl", ".tar", ".egg",
+}
+
 // validatePipRequirements vets repoDir's requirements.txt in Go BEFORE any
 // container ever launches (bugbot-gu0o): --only-binary=:all: on the `pip
 // download` command line only constrains INDEX-resolved distributions, and
 // can itself be overridden by content inside the file, so it is not a
-// complete boundary on its own. This rejects, with a named reason, every
-// requirements.txt line shape that would execute repo-controlled code
-// online or bypass --only-binary entirely:
+// complete boundary on its own.
 //
-//   - any pip OPTION token (a field starting with "-", anywhere in the
-//     line) — covers -e/--editable (installs from source, arbitrary
-//     setup.py/PEP517 execution with NO network involved), -r/--requirement
-//     and -c/--constraint (nested includes are unsupported in v1 — this is
-//     how they are rejected), --no-binary (silently overrides the CLI's
-//     --only-binary=:all:), and every other pip flag this resolver does not
-//     explicitly vet.
-//   - a direct URL or VCS reference ("://" anywhere in the line, e.g.
-//     https://, git+https://, file://) — bypasses the package index (and
-//     therefore --only-binary) entirely; the archive at that URL is
-//     attacker-controlled.
-//   - a PEP 508 direct reference (" @ " — "name @ url") — same bypass as a
-//     bare URL, via PEP 508 syntax instead of a positional argument.
-//   - a local path (line starts with ".", "/", or "~") — installs from a
-//     directory already present in the checked-out repo, running its
-//     setup.py/PEP517 backend with NO network access needed at all; a bare
-//     "." line is the canonical "install this repo" shape.
+// This is an ALLOW-list grammar, not a deny-list: every requirements.txt
+// line must match one of exactly two accepted shapes, or the whole
+// manifest is rejected with a named reason —
 //
-// A manifest that fails validation never reaches newPipPrefetch: resolvePython
-// returns the error directly from ResolveDeps, before any Prefetch hook is
-// even constructed, so the online step is never scheduled.
+//  1. A strict PEP 508 index requirement (pipRequirementRe): name,
+//     optional [extras], optional comma-separated version specifiers,
+//     optional "; marker" — nothing else. The captured name is additionally
+//     checked against pipForbiddenArchiveSuffixes.
+//  2. Per-requirement --hash=<algo>:<hexdigest> fields (pipHashFieldRe),
+//     which may trail a requirement on the same logical line — peeled off
+//     before grammar-matching, not treated as a rejected "-" option.
+//
+// Every other pip option (-e/--editable, -r/--requirement, -c/--constraint,
+// --no-binary, --index-url, ...) is rejected outright, which also closes
+// the nested -r/-c include vector (unsupported in v1) in the same check.
+// A direct URL/VCS reference, a PEP 508 "name @ url" reference, a local
+// path, a bare directory, and a bare archive filename are all rejected
+// because none of them can ever match pipRequirementRe (or, for an
+// archive-suffixed bare name, the suffix check below it) — see
+// pipRequirementRe's doc comment for why a deny-list of known-bad prefixes
+// could not close all of these completely.
+//
+// A manifest that fails validation never reaches newPipPrefetch:
+// resolvePython returns the error directly from ResolveDeps, before any
+// Prefetch hook is even constructed, so the online step is never
+// scheduled.
 func validatePipRequirements(repoDir string) error {
 	data, err := os.ReadFile(filepath.Join(repoDir, "requirements.txt"))
 	if err != nil {
@@ -1122,19 +1187,33 @@ func validatePipRequirements(repoDir string) error {
 		if trimmed == "" {
 			continue
 		}
+
+		// Peel off trailing --hash fields before grammar-matching the
+		// requirement itself; reject any OTHER option-like field outright.
+		var reqFields []string
 		for _, field := range strings.Fields(trimmed) {
-			if strings.HasPrefix(field, "-") {
-				return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: pip option %q — including -e/-r/-c/--no-binary — can install from source with no network, smuggle a nested include, or silently override --only-binary=:all:)", trimmed, field)
+			if pipHashFieldRe.MatchString(field) {
+				continue
 			}
+			if strings.HasPrefix(field, "-") {
+				return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: pip option %q is not in the allowed grammar — only a plain index requirement and --hash=<algo>:<hexdigest> fields are accepted; this also covers -e/-r/-c/--no-binary and nested requirement/constraint includes, which are unsupported in v1)", trimmed, field)
+			}
+			reqFields = append(reqFields, field)
 		}
-		if strings.Contains(trimmed, "://") {
-			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: direct URL/VCS references bypass the package index and --only-binary=:all: enforcement)", trimmed)
+		core := strings.Join(reqFields, " ")
+		if core == "" {
+			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: no requirement expression, only --hash fields)", trimmed)
 		}
-		if strings.Contains(trimmed, " @ ") {
-			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: PEP 508 direct references bypass the package index and --only-binary=:all: enforcement)", trimmed)
+
+		m := pipRequirementRe.FindStringSubmatch(core)
+		if m == nil {
+			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: does not match the allowed grammar — only a plain PEP 508 index requirement (name[extras]comparator-version; marker) plus --hash fields is accepted; local paths, bare archive filenames, directories, URLs, VCS/file: references, and PEP 508 direct '@' references are all rejected)", trimmed)
 		}
-		if strings.HasPrefix(trimmed, ".") || strings.HasPrefix(trimmed, "/") || strings.HasPrefix(trimmed, "~") {
-			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: local path requirements install from source with no network and no --only-binary enforcement)", trimmed)
+		name := strings.ToLower(m[1])
+		for _, suf := range pipForbiddenArchiveSuffixes {
+			if strings.HasSuffix(name, suf) {
+				return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: %q looks like an archive filename — pip treats archive-suffixed names as local/direct file installs, not index lookups, even with no path separator present)", trimmed, m[1])
+			}
 		}
 	}
 	return nil
@@ -2517,10 +2596,10 @@ cat "$LOG"
 SF_VER=$(grep -oE 'maven-surefire-plugin-[0-9][^ ]*\.jar' "$LOG" | head -1 | sed -E 's/maven-surefire-plugin-(.*)\.jar/\1/')
 JP_VER=$(grep -oE 'junit-platform-[a-z]+-[0-9][^ ]*\.jar' "$LOG" | head -1 | sed -E 's/junit-platform-[a-z]+-(.*)\.jar/\1/')
 if [ -n "$SF_VER" ]; then
-  mvn -B dependency:get -Dmaven.repo.local=%[1]s -Dartifact=org.apache.maven.surefire:surefire-junit-platform:$SF_VER || true
+  mvn -B dependency:get -Dmaven.repo.local=%[1]s -Dartifact=org.apache.maven.surefire:surefire-junit-platform:"$SF_VER" || true
 fi
 if [ -n "$JP_VER" ]; then
-  mvn -B dependency:get -Dmaven.repo.local=%[1]s -Dartifact=org.junit.platform:junit-platform-launcher:$JP_VER || true
+  mvn -B dependency:get -Dmaven.repo.local=%[1]s -Dartifact=org.junit.platform:junit-platform-launcher:"$JP_VER" || true
 fi
 `
 
