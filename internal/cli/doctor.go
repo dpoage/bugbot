@@ -1004,6 +1004,24 @@ func containsBuildSystemBazel(buildSystems []ingest.BuildSystem) bool {
 // build index caches on first run.
 const sandboxVerifyTimeout = 3 * time.Minute
 
+// smokeLine renders a SmokeVerdict's diagnostic content plus exit code as a
+// SINGLE line: printResults writes exactly one aligned row per checkResult
+// (fixed-column table), so a raw multi-KB FullOutput excerpt — which
+// legitimately contains embedded newlines from captured stdout/stderr —
+// would shred the alignment of every check printed after it. Prefers
+// FullOutput (the head+tail-preserved excerpt, bugbot-6835) over the terser
+// Detail, falling back to Detail (already exit-code-prefixed by
+// smokeDetail) for verdicts that short-circuit before any smoke command ran
+// (unprobeable, sandbox-exec infrastructure failure) and so have no
+// captured output to show.
+func smokeLine(v repro.SmokeVerdict) string {
+	if v.FullOutput == "" {
+		return v.Detail
+	}
+	body := strings.ReplaceAll(strings.ReplaceAll(v.FullOutput, "\r\n", " | "), "\n", " | ")
+	return fmt.Sprintf("exit %d: %s", v.ExitCode, body)
+}
+
 // checkSandboxVerifier runs the repro.VerifySandbox smoke-test against the
 // configured image and emits PASS/FAIL + category. It is only called when
 // --verify-sandbox is set. The existing cheap checkImageToolchain name-match
@@ -1030,7 +1048,7 @@ func checkSandboxVerifier(ctx context.Context, env doctorEnv, cfg config.Config)
 		return []checkResult{{
 			Name:   "sandbox verifier",
 			Status: statusPass,
-			Detail: "toolchain smoke PASS (" + string(verdict.Category) + "): " + verdict.Detail,
+			Detail: fmt.Sprintf("toolchain smoke PASS (%s): %s", verdict.Category, smokeLine(verdict)),
 		}}
 	}
 	if !verdict.BlocksRepro() {
@@ -1041,14 +1059,14 @@ func checkSandboxVerifier(ctx context.Context, env doctorEnv, cfg config.Config)
 		return []checkResult{{
 			Name:   "sandbox verifier",
 			Status: statusWarn,
-			Detail: "toolchain smoke non-blocking (" + string(verdict.Category) + ", launcher " + verdict.Launcher +
-				"): repro stage proceeds; per-finding capability gates handle plans needing this launcher. " + verdict.Detail,
+			Detail: fmt.Sprintf("toolchain smoke non-blocking (%s, launcher %s): repro stage proceeds; per-finding capability gates handle plans needing this launcher. %s",
+				verdict.Category, verdict.Launcher, smokeLine(verdict)),
 		}}
 	}
 	return []checkResult{{
 		Name:   "sandbox verifier",
 		Status: statusFail,
-		Detail: "toolchain smoke FAIL (" + string(verdict.Category) + "): " + verdict.Detail,
+		Detail: fmt.Sprintf("toolchain smoke FAIL (%s): %s", verdict.Category, smokeLine(verdict)),
 	}}
 }
 

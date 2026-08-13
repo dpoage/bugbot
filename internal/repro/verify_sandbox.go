@@ -50,8 +50,33 @@ type SmokeVerdict struct {
 	OK bool
 	// Category classifies the outcome.
 	Category SmokeCategory
-	// Detail is a short human-readable explanation (truncated output).
+	// ExitCode is the smoke command's process exit code (sandbox.Result's
+	// ExitCode, carried through unchanged). sandbox.Result already reports
+	// -1 on a watchdog/idle-timeout kill (see bwrap.go/cli.go/hostexec.go),
+	// so classifySmoke does not need a separate synthetic sentinel for the
+	// timeout branch — it just forwards res.ExitCode like every other
+	// branch (bugbot-6835 design decision).
+	ExitCode int
+	// Detail is a short, roughly-one-line, exit-code-prefixed summary
+	// ("exit 127: <head+tail excerpt>"). Kept deliberately compact (see
+	// smokeDetailBudget) so the existing single-line BlocksRepro
+	// diagnostics that interpolate it directly — cli/daemon.go:141,
+	// engine/repro.go:182,513 — keep reading well without needing an edit,
+	// while still carrying the exit code and a head+tail (not head-only)
+	// excerpt (bugbot-6835).
 	Detail string
+	// FullOutput is the head+tail-preserved combined stdout+stderr
+	// (headTailExcerpt at smokeFullOutputBudget, >=2000 chars). This is the
+	// fuller record bugbot-cbm5 needed: bazel/entrypoint root causes print
+	// LAST, after image-pull/setup noise, and a 300-char head-only cap hid
+	// them across three live runs. Populated by every classifySmoke branch;
+	// left empty by verdicts that short-circuit before any smoke command
+	// ran (unprobeable, sandbox-exec infrastructure failure) since there is
+	// no captured output to show. doctor's checkSandboxVerifier renders
+	// this (falling back to Detail when empty); the terser BlocksRepro
+	// diagnostics above intentionally keep using Detail, not this field
+	// (bugbot-6835).
+	FullOutput string
 	// Launcher is the base name of the toolchain binary the smoke command
 	// probed ("go", "python", "bazel", ...), from smokeCmd's suite
 	// detection. BlocksRepro keys on it: build-driver launchers must not
@@ -110,6 +135,7 @@ func VerifySandbox(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec
 		return SmokeVerdict{
 			OK:       false,
 			Category: SmokeCategoryUnprobeable,
+			ExitCode: -1, // no command ever ran — -1 avoids reading as exit-0 success (bugbot-6835).
 			Detail:   "could not derive a toolchain smoke command for this repo",
 		}, nil
 	}
@@ -136,6 +162,7 @@ func VerifySandbox(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec
 		return SmokeVerdict{
 			OK:       false,
 			Category: SmokeCategoryEnvError,
+			ExitCode: -1, // sb.Exec itself errored before any exit code existed (bugbot-6835).
 			Detail:   "sandbox exec failed: " + err.Error(),
 			Launcher: launcher,
 		}, err
@@ -205,6 +232,65 @@ func smokeCmd(repoDir string) ([]string, string) {
 	return suite, filepath.Base(suite[0])
 }
 
+// smokeDetailBudget bounds SmokeVerdict.Detail: kept close to the historical
+// 300-char size so the single-line BlocksRepro diagnostics that interpolate
+// Detail directly (cli/daemon.go:141, engine/repro.go:182,513) do not grow
+// into multi-KB messages — that is what FullOutput/smokeFullOutputBudget is
+// for (bugbot-6835).
+const smokeDetailBudget = 300
+
+// smokeFullOutputBudget bounds SmokeVerdict.FullOutput. >=2000 chars per
+// bugbot-6835 (a 300-char head-only cap hid the bugbot-cbm5 ENTRYPOINT
+// argv-mangling root cause across three live runs, which printed only in
+// the tail); sized generously above the floor so a real bazel/toolchain
+// failure dump — image-pull noise, then the actual diagnostic — fits both
+// ends without elision in the common case.
+const smokeFullOutputBudget = 4096
+
+// headTailExcerpt keeps a head prefix AND a tail suffix of s (split evenly
+// across budget, rune-safe cut points so no UTF-8 sequence is split), with
+// an elision marker recording how many bytes were dropped in between.
+// Unlike trunc (head-only) and tailExcerpt (tail-only, both in
+// interpret.go), this preserves both ends: sandbox failures often print
+// environment/setup noise FIRST and the actual diagnostic (compile error,
+// "not found", entrypoint mangling) LAST, and either end can carry the
+// signal depending on the failure mode (bugbot-6835 / bugbot-cbm5).
+func headTailExcerpt(s string, budget int) string {
+	if len(s) <= budget {
+		return s
+	}
+	headLen := budget / 2
+	tailLen := budget - headLen
+
+	// Walk the head boundary back to the start of a rune (never split a
+	// UTF-8 continuation byte, mirrors tailExcerpt's boundary walk below).
+	for headLen > 0 && s[headLen]&0xC0 == 0x80 {
+		headLen--
+	}
+	// Walk the tail boundary forward to the start of a rune.
+	tailStart := len(s) - tailLen
+	for tailStart < len(s) && s[tailStart]&0xC0 == 0x80 {
+		tailStart++
+	}
+
+	elided := tailStart - headLen
+	return fmt.Sprintf("%s\n... [%d bytes elided] ...\n%s", s[:headLen], elided, s[tailStart:])
+}
+
+// smokeDetail formats SmokeVerdict.Detail: an "exit N: " prefix — so the
+// BlocksRepro diagnostics that interpolate Detail directly surface the exit
+// code without needing an edit — followed by an optional note and a
+// head+tail excerpt bounded at smokeDetailBudget. note is inserted plain
+// (e.g. "smoke command timed out"); pass "" when the exit code and excerpt
+// alone are enough (bugbot-6835).
+func smokeDetail(res sandbox.Result, out, note string) string {
+	excerpt := headTailExcerpt(out, smokeDetailBudget)
+	if note == "" {
+		return fmt.Sprintf("exit %d: %s", res.ExitCode, excerpt)
+	}
+	return fmt.Sprintf("exit %d: %s: %s", res.ExitCode, note, excerpt)
+}
+
 // classifySmoke turns a sandbox.Result from a smoke run into a SmokeVerdict.
 // The classification mirrors interpret() in interpret.go:
 //   - TimedOut                          → timeout
@@ -213,28 +299,38 @@ func smokeCmd(repoDir string) ([]string, string) {
 //   - Non-zero + toolchain absent hints → toolchain_missing
 //   - Non-zero + "dep" / "module" hints → dep_missing
 //   - Zero OR genuine run output        → ok  (toolchain responded)
+//
+// Every branch carries res.ExitCode (already -1 on timeout, per
+// sandbox.Result's own contract) and a FullOutput head+tail excerpt at
+// smokeFullOutputBudget, alongside the terser exit-code-prefixed Detail
+// (bugbot-6835).
 func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	out := res.Stdout + "\n" + res.Stderr
+	full := headTailExcerpt(out, smokeFullOutputBudget)
 
 	if res.TimedOut {
 		return SmokeVerdict{
-			OK:       false,
-			Category: SmokeCategoryTimeout,
-			Detail:   "smoke command timed out: " + trunc(out, 300),
+			OK:         false,
+			Category:   SmokeCategoryTimeout,
+			ExitCode:   res.ExitCode,
+			Detail:     smokeDetail(res, out, "smoke command timed out"),
+			FullOutput: full,
 		}
 	}
 
 	if res.ExitCode == 0 {
-		return SmokeVerdict{OK: true, Category: SmokeCategoryOK, Detail: trunc(out, 300)}
+		return SmokeVerdict{OK: true, Category: SmokeCategoryOK, ExitCode: res.ExitCode, Detail: smokeDetail(res, out, ""), FullOutput: full}
 	}
 
 	// Exit 125/126/127 mean the container runtime or shell failed before
 	// the command ran — the toolchain is missing or the image is wrong.
 	if res.ExitCode == 125 || res.ExitCode == 126 || res.ExitCode == 127 {
 		return SmokeVerdict{
-			OK:       false,
-			Category: SmokeCategoryToolchainMissing,
-			Detail:   trunc(out, 300),
+			OK:         false,
+			Category:   SmokeCategoryToolchainMissing,
+			ExitCode:   res.ExitCode,
+			Detail:     smokeDetail(res, out, ""),
+			FullOutput: full,
 		}
 	}
 
@@ -244,9 +340,11 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	// markers as interpret.go defaultEnvMarkers.
 	if hasAnyMarker(lowOut, defaultEnvMarkers) {
 		return SmokeVerdict{
-			OK:       false,
-			Category: SmokeCategoryEnvError,
-			Detail:   trunc(out, 300),
+			OK:         false,
+			Category:   SmokeCategoryEnvError,
+			ExitCode:   res.ExitCode,
+			Detail:     smokeDetail(res, out, ""),
+			FullOutput: full,
 		}
 	}
 
@@ -259,9 +357,11 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	}
 	if hasAnyMarker(lowOut, toolchainAbsentMarkers) {
 		return SmokeVerdict{
-			OK:       false,
-			Category: SmokeCategoryToolchainMissing,
-			Detail:   trunc(out, 300),
+			OK:         false,
+			Category:   SmokeCategoryToolchainMissing,
+			ExitCode:   res.ExitCode,
+			Detail:     smokeDetail(res, out, ""),
+			FullOutput: full,
 		}
 	}
 
@@ -278,16 +378,18 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	}
 	if hasAnyMarker(lowOut, depMarkers) {
 		return SmokeVerdict{
-			OK:       false,
-			Category: SmokeCategoryDepMissing,
-			Detail:   trunc(out, 300),
+			OK:         false,
+			Category:   SmokeCategoryDepMissing,
+			ExitCode:   res.ExitCode,
+			Detail:     smokeDetail(res, out, ""),
+			FullOutput: full,
 		}
 	}
 
 	// Any other non-zero exit means the toolchain RAN but something went
 	// wrong (compile error, test failure, etc.).  That is "ok" for our
 	// purposes: we only care that the toolchain is present and functional.
-	return SmokeVerdict{OK: true, Category: SmokeCategoryOK, Detail: trunc(out, 300)}
+	return SmokeVerdict{OK: true, Category: SmokeCategoryOK, ExitCode: res.ExitCode, Detail: smokeDetail(res, out, ""), FullOutput: full}
 }
 
 // localMountsFromConfig converts cfg.Sandbox.LocalMounts into read-only

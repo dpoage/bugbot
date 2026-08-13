@@ -2,11 +2,13 @@ package repro
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/sandbox"
@@ -165,6 +167,125 @@ func TestClassifySmoke_RealFailureNotMisread(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestClassifySmoke_ExitCodePropagated pins acceptance criterion 1
+// (bugbot-6835): every classifySmoke branch must carry res.ExitCode through
+// to SmokeVerdict.ExitCode, including the timeout branch, where
+// sandbox.Result already reports -1 per its own documented contract
+// (bwrap.go/cli.go/hostexec.go all set ExitCode=-1 on a watchdog kill) —
+// classifySmoke must not silently drop or reinterpret it.
+func TestClassifySmoke_ExitCodePropagated(t *testing.T) {
+	cases := []struct {
+		name string
+		res  sandbox.Result
+		want int
+	}{
+		{"clean exit", sandbox.Result{ExitCode: 0, Stdout: "ok\n"}, 0},
+		{"timeout (sandbox.Result contract: -1)", sandbox.Result{ExitCode: -1, TimedOut: true, Stderr: "killed"}, -1},
+		{"exit 125", sandbox.Result{ExitCode: 125, Stderr: "setup failed"}, 125},
+		{"exit 127 toolchain missing", sandbox.Result{ExitCode: 127, Stderr: "go: command not found"}, 127},
+		{"env error", sandbox.Result{ExitCode: 1, Stderr: "read-only file system"}, 1},
+		{"dep missing", sandbox.Result{ExitCode: 1, Stderr: "no module named 'pytest'"}, 1},
+		{"real test failure (ok=true)", sandbox.Result{ExitCode: 1, Stdout: "FAIL\tfoo\n"}, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := classifySmoke(tc.res, []string{"go", "test", "./..."})
+			if v.ExitCode != tc.want {
+				t.Errorf("ExitCode = %d, want %d", v.ExitCode, tc.want)
+			}
+			if !strings.Contains(v.Detail, fmt.Sprintf("exit %d", tc.want)) {
+				t.Errorf("Detail = %q, want it to contain %q so BlocksRepro diagnostics (cli/daemon.go, engine/repro.go) see the exit code without an edit", v.Detail, fmt.Sprintf("exit %d", tc.want))
+			}
+		})
+	}
+}
+
+// TestClassifySmoke_LongOutputPreservesTailAndExitCode is the bugbot-6835 /
+// bugbot-cbm5 regression test: a failing smoke run whose root-cause string
+// (e.g. the ENTRYPOINT argv-mangling diagnostic) appears ONLY after 2000+
+// chars of image-pull/setup noise must still be visible, along with the
+// exit code. A 300-char-head-only cap (the pre-fix behavior) is proven
+// impossible to reproduce: the root-cause marker sits well past byte 300.
+func TestClassifySmoke_LongOutputPreservesTailAndExitCode(t *testing.T) {
+	noise := strings.Repeat("pulling layer sha256:deadbeef... download progress noise\n", 60)
+	const rootCause = "ENTRYPOINT_ARGV_MANGLED: exec \"/bin/sh\": stat /bin/sh: no such file or directory"
+	stderr := noise + rootCause + "\n"
+	if len(stderr) <= 2000 {
+		t.Fatalf("test fixture too short: %d bytes, want > 2000 to exercise the elision path", len(stderr))
+	}
+	if idx := strings.Index(stderr, rootCause); idx < 300 {
+		t.Fatalf("test fixture invalid: root cause at byte %d, want > 300 so the old head-only 300-char cap provably could not have shown it", idx)
+	}
+
+	res := sandbox.Result{ExitCode: 127, Stderr: stderr}
+	v := classifySmoke(res, []string{"bazel", "version"})
+
+	if v.ExitCode != 127 {
+		t.Errorf("ExitCode = %d, want 127", v.ExitCode)
+	}
+	if !strings.Contains(v.FullOutput, rootCause) {
+		t.Errorf("FullOutput does not contain the root cause; got %d chars, want it to include %q\nFullOutput: %s", len(v.FullOutput), rootCause, v.FullOutput)
+	}
+	if len(v.FullOutput) < 2000 {
+		t.Errorf("FullOutput budget too small: got %d chars, want a generous (>=2000) head+tail excerpt per bugbot-6835", len(v.FullOutput))
+	}
+	// Regression guard: the OLD behavior was trunc(out, 300) — a pure head
+	// excerpt that could never contain a marker beyond byte 300. Prove the
+	// fix actually changed shape, not just added a field nobody reads.
+	oldStyleHead := trunc(res.Stdout+"\n"+res.Stderr, 300)
+	if strings.Contains(oldStyleHead, rootCause) {
+		t.Fatalf("test fixture broken: the old 300-char head-only excerpt already contains the root cause")
+	}
+}
+
+// TestHeadTailExcerpt covers the head+tail preservation helper directly:
+// short input passes through unchanged, long input keeps both ends with a
+// byte-accounted elision marker, and cuts never split a UTF-8 rune.
+func TestHeadTailExcerpt(t *testing.T) {
+	t.Run("short input unchanged", func(t *testing.T) {
+		if got := headTailExcerpt("hello", 100); got != "hello" {
+			t.Errorf("headTailExcerpt(short) = %q, want unchanged", got)
+		}
+	})
+
+	t.Run("exactly at budget unchanged", func(t *testing.T) {
+		s := strings.Repeat("x", 50)
+		if got := headTailExcerpt(s, 50); got != s {
+			t.Errorf("headTailExcerpt(at-budget) changed a string exactly at budget")
+		}
+	})
+
+	t.Run("long input keeps head and tail", func(t *testing.T) {
+		head := "HEAD_MARKER_" + strings.Repeat("a", 100)
+		middle := strings.Repeat("b", 5000)
+		tail := strings.Repeat("c", 100) + "_TAIL_MARKER"
+		s := head + middle + tail
+		got := headTailExcerpt(s, 400)
+		if !strings.HasPrefix(got, "HEAD_MARKER_") {
+			t.Errorf("headTailExcerpt dropped the head: %q", got[:min(40, len(got))])
+		}
+		if !strings.HasSuffix(got, "_TAIL_MARKER") {
+			t.Errorf("headTailExcerpt dropped the tail: %q", got[max(0, len(got)-40):])
+		}
+		if !strings.Contains(got, "bytes elided") {
+			t.Errorf("headTailExcerpt missing elision marker: %q", got)
+		}
+		if strings.Contains(got, middle[:1000]) {
+			t.Errorf("headTailExcerpt kept middle content it should have elided")
+		}
+	})
+
+	t.Run("rune-safe cuts on multi-byte UTF-8", func(t *testing.T) {
+		// "€" is 3 bytes (E2 82 AC); pad so the natural budget/2 cut point
+		// would otherwise land mid-rune.
+		s := strings.Repeat("a", 199) + "€€€€€€€€€€" + strings.Repeat("b", 5000) + "€€€€€€€€€€" + strings.Repeat("c", 199)
+		got := headTailExcerpt(s, 400)
+		if !utf8.ValidString(got) {
+			t.Errorf("headTailExcerpt produced invalid UTF-8: %q", got)
+		}
+	})
 }
 
 // TestVerifySandbox_MockOK exercises the full VerifySandbox path against a Mock

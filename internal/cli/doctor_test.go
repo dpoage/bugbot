@@ -1024,6 +1024,57 @@ func TestCheckSandboxVerifier_Fail(t *testing.T) {
 	}
 }
 
+// TestCheckSandboxVerifier_ShowsExitCodeAndFullOutput pins the bugbot-6835
+// doctor rendering fix: checkSandboxVerifier's PASS/FAIL line must surface
+// the exit code and the fuller (head+tail-preserved) FullOutput excerpt —
+// not just the terse, historically-300-char Detail — while still emitting
+// exactly one line (printResults writes one aligned row per checkResult),
+// so embedded newlines in FullOutput must be collapsed, not left raw.
+func TestCheckSandboxVerifier_ShowsExitCodeAndFullOutput(t *testing.T) {
+	cfgPath := writeDoctorConfig(t)
+	fullOutput := "pulling image layer noise...\nmore setup noise\nENTRYPOINT_ROOT_CAUSE: exec \"/bin/sh\": stat /bin/sh: no such file or directory\n"
+	env := doctorEnv{
+		configPath: cfgPath,
+		repoDir:    t.TempDir(),
+		lookupEnv:  func(string) string { return "fake-key" },
+		lookPath:   func(string) (string, error) { return "/usr/bin/podman", nil },
+		runCommand: func(_ context.Context, _ string, _ ...string) (string, error) { return "", nil },
+		verifySandbox: func(_ context.Context, _ string, _ config.Config) (repro.SmokeVerdict, error) {
+			return repro.SmokeVerdict{
+				OK:         false,
+				Category:   "toolchain_missing",
+				ExitCode:   127,
+				Detail:     "exit 127: go: command not found",
+				FullOutput: fullOutput,
+			}, nil
+		},
+		out: &strings.Builder{},
+	}
+	results := runChecks(context.Background(), env, true)
+	var found *checkResult
+	for i := range results {
+		if results[i].Name == "sandbox verifier" {
+			found = &results[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("sandbox verifier result not found")
+	}
+	if found.Status != statusFail {
+		t.Errorf("status=%q, want FAIL; detail=%q", found.Status, found.Detail)
+	}
+	if !strings.Contains(found.Detail, "exit 127") {
+		t.Errorf("detail=%q missing exit code", found.Detail)
+	}
+	if !strings.Contains(found.Detail, "ENTRYPOINT_ROOT_CAUSE") {
+		t.Errorf("detail=%q missing the FullOutput root-cause content", found.Detail)
+	}
+	if strings.Contains(found.Detail, "\n") {
+		t.Errorf("detail=%q contains a raw newline; printResults writes one aligned line per check result", found.Detail)
+	}
+}
+
 // TestCheckSandboxVerifier_Disabled verifies that the sandbox verifier check
 // is not emitted when runSandboxVerify=false.
 func TestCheckSandboxVerifier_Disabled(t *testing.T) {
