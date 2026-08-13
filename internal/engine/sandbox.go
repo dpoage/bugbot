@@ -185,6 +185,17 @@ func sandboxRunOpts(cfg config.Config) []sandbox.Option {
 		// same config value so both agree.
 		opts = append(opts, sandbox.WithTimeout(time.Duration(cfg.Sandbox.TimeoutSeconds)*time.Second))
 	}
+	// ScratchSizeMB is unconditional (config.Validate requires it > 0, so
+	// there is no "unset" state to guard against) — it sizes the /tmp tmpfs
+	// (bugbot-yrox).
+	opts = append(opts, sandbox.WithScratchSizeMB(cfg.Sandbox.ScratchSizeMB))
+	// WorkspaceGrowthCeilingMB is ALSO unconditional, unlike the `> 0` guards
+	// above: 0 is a meaningful, explicit "disable the ceiling" state here
+	// (config.Validate allows it), not merely "unset — keep the backend's
+	// own default". The backend's own NewCLI default is a non-zero 2 GiB
+	// ceiling, so an `if > 0` guard would silently fail to propagate an
+	// operator's explicit workspace_growth_ceiling_mb: 0 (bugbot-bdqf).
+	opts = append(opts, sandbox.WithWorkspaceGrowthCeilingMB(cfg.Sandbox.WorkspaceGrowthCeilingMB))
 	return opts
 }
 
@@ -215,6 +226,12 @@ func bwrapRunOpts(cfg config.Config) []sandbox.BwrapOption {
 	if cfg.Sandbox.AllowUncapped {
 		opts = append(opts, sandbox.WithBwrapAllowUncapped(true))
 	}
+	// See sandboxRunOpts' comments — both calls are unconditional for the
+	// same reasons (ScratchSizeMB always > 0 per config.Validate;
+	// WorkspaceGrowthCeilingMB=0 is a meaningful explicit disable, not
+	// merely "unset").
+	opts = append(opts, sandbox.WithBwrapScratchSizeMB(cfg.Sandbox.ScratchSizeMB))
+	opts = append(opts, sandbox.WithBwrapWorkspaceGrowthCeilingMB(cfg.Sandbox.WorkspaceGrowthCeilingMB))
 	return opts
 }
 

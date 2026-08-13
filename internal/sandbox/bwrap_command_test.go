@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -71,6 +72,50 @@ func TestBuildBwrapArgsSecurityFlags(t *testing.T) {
 	if !slices.Equal(tail, []string{"sh", "-c", "echo hi"}) {
 		t.Errorf("command tail = %q, want sh -c 'echo hi'", tail)
 	}
+}
+
+// TestBuildBwrapArgsSizesTmpfsMounts pins bugbot-yrox's acceptance: bwrap's
+// --size flag applies to the SINGLE --tmpfs invocation immediately following
+// it, so it must be repeated before each of the two tmpfs mounts (root and
+// /tmp), both driven by the same configured scratchSizeBytes.
+func TestBuildBwrapArgsSizesTmpfsMounts(t *testing.T) {
+	args := buildBwrapArgs(bwrapParams{
+		workspace:        "/tmp/ws",
+		network:          "none",
+		cmd:              []string{"true"},
+		scratchSizeBytes: 1_073_741_824, // 1 GiB
+	})
+
+	mustContainSeq(t, args, "--size", "1073741824", "--tmpfs", "/")
+	mustContainSeq(t, args, "--size", "1073741824", "--tmpfs", "/tmp")
+
+	// --size must appear IMMEDIATELY before its --tmpfs, never trailing or
+	// detached — bwrap applies it only to the next --tmpfs invocation.
+	for i, a := range args {
+		if a == "--tmpfs" {
+			if i < 2 || args[i-2] != "--size" {
+				t.Errorf("--tmpfs at index %d must be immediately preceded by --size <bytes>; args=%q", i, args)
+			}
+		}
+	}
+}
+
+// TestBuildBwrapArgsDefaultScratchSize verifies that an unset (zero-value)
+// scratchSizeBytes falls back to defaultScratchSizeMB (the same 512m the
+// container backend historically hardcoded) rather than emitting an
+// unsized (or zero-sized) tmpfs.
+func TestBuildBwrapArgsDefaultScratchSize(t *testing.T) {
+	args := buildBwrapArgs(bwrapParams{
+		workspace: "/tmp/ws",
+		network:   "none",
+		cmd:       []string{"true"},
+	})
+	// Computed the same way buildBwrapArgs' own fallback is, so this test
+	// does not hardcode a byte count that would silently drift from the
+	// real default.
+	wantBytes := strconv.FormatInt(int64(defaultScratchSizeMB)*1024*1024, 10)
+	mustContainSeq(t, args, "--size", wantBytes, "--tmpfs", "/")
+	mustContainSeq(t, args, "--size", wantBytes, "--tmpfs", "/tmp")
 }
 
 func TestBuildBwrapArgsNetworkNoneVsHost(t *testing.T) {

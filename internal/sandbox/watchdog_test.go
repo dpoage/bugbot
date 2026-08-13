@@ -70,18 +70,22 @@ func TestWorkspaceProgressDetectsWrites(t *testing.T) {
 // TestWatchIdleFiresOnStall: a run with no progress is cancelled after the idle
 // window, and the killed flag is visible before cancel runs.
 func TestWatchIdleFiresOnStall(t *testing.T) {
-	var killed atomic.Bool
+	var killed, quotaExceeded atomic.Bool
 	cancelled := make(chan struct{})
 	done := make(chan struct{})
 	defer close(done)
 
 	noProgress := func() progressSnapshot { return progressSnapshot{} }
-	go watchIdle(done, noProgress, nil, 40*time.Millisecond, 5*time.Millisecond, &killed, func() { close(cancelled) })
+	limits := watchdogLimits{idleTimeout: 40 * time.Millisecond}
+	go watchIdle(done, noProgress, nil, limits, 5*time.Millisecond, &killed, &quotaExceeded, func() { close(cancelled) })
 
 	select {
 	case <-cancelled:
 		if !killed.Load() {
 			t.Error("killed must be set before cancel is invoked")
+		}
+		if quotaExceeded.Load() {
+			t.Error("a plain idle-stall kill must not set quotaExceeded")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("watchIdle did not fire on a stalled run")
@@ -91,12 +95,13 @@ func TestWatchIdleFiresOnStall(t *testing.T) {
 // TestWatchIdleCPUKeepsAlive: a run with no output/fs change but a busy CPU
 // (activeFallback returns true) is treated as making progress and never killed.
 func TestWatchIdleCPUKeepsAlive(t *testing.T) {
-	var killed atomic.Bool
+	var killed, quotaExceeded atomic.Bool
 	done := make(chan struct{})
 
 	flat := func() progressSnapshot { return progressSnapshot{} } // no output, no fs change
 	cpuBusy := func() bool { return true }                        // but the container is churning
-	go watchIdle(done, flat, cpuBusy, 40*time.Millisecond, 5*time.Millisecond, &killed, func() { killed.Store(true) })
+	limits := watchdogLimits{idleTimeout: 40 * time.Millisecond}
+	go watchIdle(done, flat, cpuBusy, limits, 5*time.Millisecond, &killed, &quotaExceeded, func() { killed.Store(true) })
 
 	time.Sleep(250 * time.Millisecond)
 	close(done)
@@ -108,12 +113,13 @@ func TestWatchIdleCPUKeepsAlive(t *testing.T) {
 // TestWatchIdleNoFireWhenProgressing: continuous progress keeps resetting the
 // clock, so the watchdog never cancels.
 func TestWatchIdleNoFireWhenProgressing(t *testing.T) {
-	var killed atomic.Bool
+	var killed, quotaExceeded atomic.Bool
 	var n atomic.Int64
 	done := make(chan struct{})
 
 	progressing := func() progressSnapshot { return progressSnapshot{outputBytes: n.Add(1)} }
-	go watchIdle(done, progressing, nil, 40*time.Millisecond, 5*time.Millisecond, &killed, func() { killed.Store(true) })
+	limits := watchdogLimits{idleTimeout: 40 * time.Millisecond}
+	go watchIdle(done, progressing, nil, limits, 5*time.Millisecond, &killed, &quotaExceeded, func() { killed.Store(true) })
 
 	time.Sleep(250 * time.Millisecond) // ~50 polls, each shows fresh progress
 	close(done)
@@ -124,20 +130,20 @@ func TestWatchIdleNoFireWhenProgressing(t *testing.T) {
 
 // TestWatchIdleDisabled: idleTimeout <= 0 returns immediately and never fires.
 func TestWatchIdleDisabled(t *testing.T) {
-	var killed atomic.Bool
+	var killed, quotaExceeded atomic.Bool
 	done := make(chan struct{})
 	defer close(done)
 	returned := make(chan struct{})
 
 	go func() {
-		watchIdle(done, func() progressSnapshot { return progressSnapshot{} }, nil, 0, time.Millisecond, &killed, func() { killed.Store(true) })
+		watchIdle(done, func() progressSnapshot { return progressSnapshot{} }, nil, watchdogLimits{}, time.Millisecond, &killed, &quotaExceeded, func() { killed.Store(true) })
 		close(returned)
 	}()
 
 	select {
 	case <-returned:
 	case <-time.After(time.Second):
-		t.Fatal("watchIdle with idleTimeout<=0 must return immediately")
+		t.Fatal("watchIdle with both limits disabled must return immediately")
 	}
 	if killed.Load() {
 		t.Error("disabled watchdog must never fire")
@@ -147,12 +153,13 @@ func TestWatchIdleDisabled(t *testing.T) {
 // TestWatchIdleStopsOnDone: closing done returns the watchdog without firing,
 // even when the idle window has not elapsed.
 func TestWatchIdleStopsOnDone(t *testing.T) {
-	var killed atomic.Bool
+	var killed, quotaExceeded atomic.Bool
 	done := make(chan struct{})
 	returned := make(chan struct{})
 
 	go func() {
-		watchIdle(done, func() progressSnapshot { return progressSnapshot{} }, nil, time.Hour, 5*time.Millisecond, &killed, func() { killed.Store(true) })
+		limits := watchdogLimits{idleTimeout: time.Hour}
+		watchIdle(done, func() progressSnapshot { return progressSnapshot{} }, nil, limits, 5*time.Millisecond, &killed, &quotaExceeded, func() { killed.Store(true) })
 		close(returned)
 	}()
 
@@ -188,5 +195,109 @@ func TestCappedBufferWrittenCountsBeyondCap(t *testing.T) {
 	}
 	if _, trunc := b.result(); !trunc {
 		t.Error("buffer should report truncation after exceeding cap")
+	}
+}
+
+// TestWatchIdleFiresOnGrowthCeiling pins bugbot-bdqf's acceptance: a run
+// whose ONLY activity is file growth (a disk-filler) is killed by the
+// growth ceiling — not left to run until Timeout, and not misreported as a
+// plain idle stall. fsSize climbing every tick is exactly the pathological
+// case the bug report described: it constantly "changes" the fingerprint,
+// so a naive idle-only watchdog would treat it as perpetual progress and
+// never fire. idleTimeout here is deliberately generous (1 hour) to prove
+// the growth ceiling fires independently of idle-stall detection, well
+// before any idle-based kill ever could.
+func TestWatchIdleFiresOnGrowthCeiling(t *testing.T) {
+	var killed, quotaExceeded atomic.Bool
+	cancelled := make(chan struct{})
+	done := make(chan struct{})
+	defer close(done)
+
+	const ceiling = 1000 // bytes
+	var grown atomic.Int64
+	fingerprint := func() progressSnapshot {
+		// Simulate a process that only appends to a file: fsSize keeps
+		// climbing every poll, which would reset a plain idle clock forever.
+		return progressSnapshot{fsSize: grown.Add(200)}
+	}
+	limits := watchdogLimits{idleTimeout: time.Hour, growthCeilingBytes: ceiling}
+	go watchIdle(done, fingerprint, nil, limits, 5*time.Millisecond, &killed, &quotaExceeded, func() { close(cancelled) })
+
+	select {
+	case <-cancelled:
+		if !killed.Load() {
+			t.Error("killed must be set before cancel is invoked")
+		}
+		if !quotaExceeded.Load() {
+			t.Error("a growth-ceiling kill must set quotaExceeded (the distinct reason)")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchIdle did not fire on workspace growth past the ceiling")
+	}
+}
+
+// TestWatchIdleGrowthCeilingMeasuresFromBaseline: the ceiling bounds GROWTH
+// since watchIdle started sampling, not absolute fsSize — a workspace that
+// already holds more than the ceiling's worth of bytes at watch start (e.g.
+// a large pre-existing repo copy) must not immediately trip the ceiling; only
+// bytes written AFTER that baseline count.
+func TestWatchIdleGrowthCeilingMeasuresFromBaseline(t *testing.T) {
+	var killed, quotaExceeded atomic.Bool
+	done := make(chan struct{})
+
+	const baseline = 10_000_000 // pre-existing workspace content, far over the ceiling
+	const ceiling = 1000
+	fingerprint := func() progressSnapshot { return progressSnapshot{fsSize: baseline} } // never grows past baseline
+	limits := watchdogLimits{growthCeilingBytes: ceiling}
+	go watchIdle(done, fingerprint, nil, limits, 5*time.Millisecond, &killed, &quotaExceeded, func() { killed.Store(true) })
+
+	time.Sleep(100 * time.Millisecond)
+	close(done)
+	if killed.Load() || quotaExceeded.Load() {
+		t.Error("growth ceiling must be measured from the watch-start baseline, not absolute fsSize")
+	}
+}
+
+// TestWatchIdleGrowthCeilingDisabled: growthCeilingBytes <= 0 disables the
+// ceiling even while unbounded growth continues — idle-stall detection (or
+// its own absence) is unaffected.
+func TestWatchIdleGrowthCeilingDisabled(t *testing.T) {
+	var killed, quotaExceeded atomic.Bool
+	done := make(chan struct{})
+
+	var grown atomic.Int64
+	fingerprint := func() progressSnapshot { return progressSnapshot{fsSize: grown.Add(10_000)} }
+	limits := watchdogLimits{idleTimeout: time.Hour, growthCeilingBytes: 0}
+	go watchIdle(done, fingerprint, nil, limits, 5*time.Millisecond, &killed, &quotaExceeded, func() { killed.Store(true) })
+
+	time.Sleep(100 * time.Millisecond)
+	close(done)
+	if killed.Load() || quotaExceeded.Load() {
+		t.Error("growthCeilingBytes<=0 must disable the ceiling")
+	}
+}
+
+// TestWatchIdleRunsWithGrowthCeilingOnlyNoIdleTimeout: watchIdle must still
+// sample (and enforce the growth ceiling) even when idleTimeout is disabled
+// — a disk-filler must be caught regardless of the operator's idle-timeout
+// setting, since disk growth is independent of idle-stall semantics.
+func TestWatchIdleRunsWithGrowthCeilingOnlyNoIdleTimeout(t *testing.T) {
+	var killed, quotaExceeded atomic.Bool
+	cancelled := make(chan struct{})
+	done := make(chan struct{})
+	defer close(done)
+
+	var grown atomic.Int64
+	fingerprint := func() progressSnapshot { return progressSnapshot{fsSize: grown.Add(200)} }
+	limits := watchdogLimits{idleTimeout: 0, growthCeilingBytes: 1000}
+	go watchIdle(done, fingerprint, nil, limits, 5*time.Millisecond, &killed, &quotaExceeded, func() { close(cancelled) })
+
+	select {
+	case <-cancelled:
+		if !quotaExceeded.Load() {
+			t.Error("expected a growth-ceiling kill with idleTimeout disabled")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchIdle did not run with idleTimeout<=0 and growthCeilingBytes>0")
 	}
 }

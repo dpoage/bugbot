@@ -239,8 +239,22 @@ type Result struct {
 	Duration time.Duration
 
 	// TimedOut is true when the execution was killed because it exceeded the
-	// effective timeout.
+	// effective timeout OR because the idle watchdog observed no progress for
+	// IdleTimeout. It is left false when WorkspaceQuotaExceeded is true (see
+	// below) — the two are mutually exclusive, distinct kill reasons.
 	TimedOut bool
+
+	// WorkspaceQuotaExceeded is true when the execution was killed by the
+	// idle watchdog's workspace-growth ceiling (bugbot-bdqf): the workspace
+	// grew by more than the backend's configured growth-ceiling bytes since
+	// the run started. This is deliberately NOT reported as TimedOut — a
+	// run that is actively filling disk is making "progress" by the
+	// idle-stall definition (see cli.go's progressSnapshot doc) and would
+	// otherwise run undetected until the absolute Timeout, so callers that
+	// only check TimedOut must not mistake a disk-filler for a genuine
+	// stall or a legitimate long-running build. ExitCode is -1, exactly
+	// like a TimedOut kill, since the process was killed by us either way.
+	WorkspaceQuotaExceeded bool
 
 	// PrepDuration is the wall-clock time spent preparing the workspace
 	// BEFORE the container ran: resolving the pristine-cache key, ensuring

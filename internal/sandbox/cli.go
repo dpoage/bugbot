@@ -47,6 +47,16 @@ type CLI struct {
 	defaultNetwork     string
 	pidsLimit          int
 	maxOutputBytes     int
+	// defaultScratchSizeMB is the size (MB) of the writable /tmp tmpfs
+	// scratch space (bugbot-yrox). <= 0 is treated as unset and falls back
+	// to defaultScratchSizeMB (the package constant) in buildRunArgs.
+	defaultScratchSizeMB int
+	// defaultGrowthCeilingBytes bounds cumulative workspace growth (bytes
+	// written since a run starts) the shared idle watchdog tolerates before
+	// killing the run with the distinct Result.WorkspaceQuotaExceeded reason
+	// (bugbot-bdqf), independent of idle-stall detection. <= 0 disables the
+	// ceiling.
+	defaultGrowthCeilingBytes int64
 	// wsCache is the pristine-materialization cache backing prepareWorkspace.
 	// Zero value is ready to use; see wsCache's doc comment.
 	wsCache wsCache
@@ -82,6 +92,22 @@ func WithPidsLimit(n int) Option { return func(s *CLI) { s.pidsLimit = n } }
 // WithMaxOutputBytes overrides the per-stream output cap.
 func WithMaxOutputBytes(n int) Option { return func(s *CLI) { s.maxOutputBytes = n } }
 
+// WithScratchSizeMB sets the size (MB) of the writable /tmp tmpfs scratch
+// space (sandbox.scratch_size_mb, bugbot-yrox). Values <= 0 fall back to
+// defaultScratchSizeMB.
+func WithScratchSizeMB(mb int) Option { return func(s *CLI) { s.defaultScratchSizeMB = mb } }
+
+// WithWorkspaceGrowthCeilingMB sets the workspace-growth ceiling (MB of
+// cumulative bytes written since a run starts) the shared idle watchdog
+// enforces independent of idle-stall detection (sandbox.
+// workspace_growth_ceiling_mb, bugbot-bdqf): a run whose workspace grows
+// past this is killed with Result.WorkspaceQuotaExceeded, regardless of
+// whether it is otherwise "making progress" by the idle-stall definition.
+// <= 0 disables the ceiling entirely.
+func WithWorkspaceGrowthCeilingMB(mb int) Option {
+	return func(s *CLI) { s.defaultGrowthCeilingBytes = int64(mb) * 1024 * 1024 }
+}
+
 // NewCLI constructs a CLI sandbox. When runtime is empty it is auto-detected
 // (podman, then docker); if none is found an error is returned. image is the
 // default container image used when a Spec does not override it.
@@ -101,14 +127,16 @@ func NewCLI(runtime, image string, opts ...Option) (*CLI, error) {
 	}
 
 	s := &CLI{
-		runtime:        runtime,
-		defaultImage:   image,
-		defaultCPUs:    2,
-		defaultMemory:  2048,
-		defaultTimeout: 10 * time.Minute,
-		defaultNetwork: "none",
-		pidsLimit:      256,
-		maxOutputBytes: DefaultMaxOutputBytes,
+		runtime:                   runtime,
+		defaultImage:              image,
+		defaultCPUs:               2,
+		defaultMemory:             2048,
+		defaultTimeout:            10 * time.Minute,
+		defaultNetwork:            "none",
+		pidsLimit:                 256,
+		maxOutputBytes:            DefaultMaxOutputBytes,
+		defaultScratchSizeMB:      defaultScratchSizeMB,
+		defaultGrowthCeilingBytes: defaultWorkspaceGrowthCeilingBytes,
 	}
 	for _, o := range opts {
 		o(s)
@@ -217,16 +245,17 @@ func randToken() string {
 // runParams for the run (workspace and containerName are filled in by Exec).
 func (s *CLI) resolveParams(spec Spec) runParams {
 	p := runParams{
-		image:     s.defaultImage,
-		network:   s.defaultNetwork,
-		cpus:      s.defaultCPUs,
-		memoryMB:  s.defaultMemory,
-		pidsLimit: s.pidsLimit,
-		env:       spec.Env,
-		cmd:       spec.Cmd,
-		roMounts:  spec.ROMounts,
-		rwMounts:  spec.RWMounts,
-		setupCmds: spec.SetupCmds,
+		image:         s.defaultImage,
+		network:       s.defaultNetwork,
+		cpus:          s.defaultCPUs,
+		memoryMB:      s.defaultMemory,
+		pidsLimit:     s.pidsLimit,
+		scratchSizeMB: s.defaultScratchSizeMB,
+		env:           spec.Env,
+		cmd:           spec.Cmd,
+		roMounts:      spec.ROMounts,
+		rwMounts:      spec.RWMounts,
+		setupCmds:     spec.SetupCmds,
 	}
 	if spec.Image != "" {
 		p.image = spec.Image
@@ -335,16 +364,29 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	//      silently on one large translation unit (no output, no fs writes yet)
 	//      still counts as progress.
 	// The absolute timeout above stays a hard ceiling.
+	//
+	// Independently, a workspace-GROWTH ceiling (bugbot-bdqf) bounds
+	// cumulative bytes written to the workspace since the run started: a
+	// process that only fills disk resets the idle clock forever under the
+	// progress definition above and would otherwise run undetected until the
+	// absolute Timeout. watchIdle checks growth on the SAME per-tick
+	// workspaceProgress call the fingerprint below already makes — no extra
+	// filesystem walk — and kills with the distinct Result.
+	// WorkspaceQuotaExceeded reason (never plain TimedOut) when growth
+	// exceeds the ceiling, regardless of whether output/CPU activity would
+	// otherwise read as "progress".
 	var idleKilled atomic.Bool
+	var quotaExceeded atomic.Bool
 	done := make(chan struct{})
-	if idleTimeout > 0 {
+	if idleTimeout > 0 || s.defaultGrowthCeilingBytes > 0 {
 		fingerprint := func() progressSnapshot {
 			ps := progressSnapshot{outputBytes: stdout.written() + stderr.written()}
 			ps.fsSize, ps.fsCount, ps.fsMaxModNano = workspaceProgress(ws)
 			return ps
 		}
 		active := func() bool { return s.containerCPUBusy(p.containerName) }
-		go watchIdle(done, fingerprint, active, idleTimeout, idlePollInterval(idleTimeout), &idleKilled, cancel)
+		limits := watchdogLimits{idleTimeout: idleTimeout, growthCeilingBytes: s.defaultGrowthCeilingBytes}
+		go watchIdle(done, fingerprint, active, limits, idlePollInterval(idleTimeout), &idleKilled, &quotaExceeded, cancel)
 	}
 
 	start := time.Now()
@@ -378,12 +420,20 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 		return res, fmt.Errorf("sandbox: execution cancelled: %w", ctxErr)
 	}
 
-	// Idle watchdog or absolute deadline: a timeout, not a demonstration. The
-	// runtime may not have torn the container down in time; reap it by name to
-	// honor the always-clean-up guarantee.
+	// Idle watchdog (idle stall OR workspace-growth ceiling) or absolute
+	// deadline: a timeout, not a demonstration. The runtime may not have torn
+	// the container down in time; reap it by name to honor the
+	// always-clean-up guarantee. quotaExceeded is checked FIRST and reported
+	// as its own distinct reason (never folded into TimedOut) so a caller
+	// can tell "the process stalled" from "the process was busy filling the
+	// disk" — see Result.WorkspaceQuotaExceeded's doc.
 	if idleKilled.Load() || errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-		res.TimedOut = true
 		res.ExitCode = -1
+		if quotaExceeded.Load() {
+			res.WorkspaceQuotaExceeded = true
+		} else {
+			res.TimedOut = true
+		}
 		s.forceRemove(p.containerName)
 		return res, nil
 	}
@@ -411,6 +461,18 @@ type progressSnapshot struct {
 	fsMaxModNano int64 // newest mtime under the workspace, unix nanoseconds
 }
 
+// defaultWorkspaceGrowthCeilingBytes bounds cumulative workspace growth
+// (bytes written since a run started, sampled via workspaceProgress) before
+// the shared idle watchdog kills the run with the distinct
+// Result.WorkspaceQuotaExceeded reason (bugbot-bdqf), when no operator
+// override (sandbox.workspace_growth_ceiling_mb) is configured. Deliberately
+// generous — this exists to catch a runaway/malicious disk-filler, not to
+// constrain a legitimate build's disk usage (a full toolchain build plus
+// test artifacts can easily reach several hundred MB); 2 GiB comfortably
+// clears that bar while still bounding an unbounded write loop's blast
+// radius well short of exhausting a typical CI/dev host's disk.
+const defaultWorkspaceGrowthCeilingBytes int64 = 2 * 1024 * 1024 * 1024 // 2 GiB
+
 // idlePollInterval derives how often the watchdog samples progress from the
 // idle window: frequent enough to notice a stall promptly, but bounded so the
 // workspace walk stays cheap. Clamped to [1s, 30s].
@@ -425,19 +487,48 @@ func idlePollInterval(idleTimeout time.Duration) time.Duration {
 	return d
 }
 
-// watchIdle samples progress every pollEvery and cancels the run once no
-// progress has occurred for idleTimeout. fingerprint is the cheap signal
-// (output bytes + workspace filesystem state); activeFallback is consulted ONLY
-// when the fingerprint is unchanged, so its cost (a container-CPU probe) is paid
-// just on otherwise-idle ticks. It sets killed BEFORE calling cancel so the flag
-// is visible (through the atomic barrier) by the time the cancelled command
-// returns. It returns when the run finishes (done closed) or after it fires;
-// idleTimeout <= 0 disables it. activeFallback may be nil.
-func watchIdle(done <-chan struct{}, fingerprint func() progressSnapshot, activeFallback func() bool, idleTimeout, pollEvery time.Duration, killed *atomic.Bool, cancel func()) {
-	if idleTimeout <= 0 {
+// watchdogLimits bundles watchIdle's two independent kill conditions so its
+// parameter list doesn't grow unbounded as more are added:
+//   - idleTimeout: kill after this long with NO observable progress (the
+//     original idle-stall detector). <= 0 disables it.
+//   - growthCeilingBytes: kill as soon as the workspace has grown by more
+//     than this many bytes since watchIdle started sampling, REGARDLESS of
+//     whether the fingerprint otherwise reads as "making progress"
+//     (bugbot-bdqf) — a process that only fills disk resets the idle clock
+//     forever under the plain progress definition, so this check runs
+//     independently of it. <= 0 disables it.
+//
+// At least one must be positive for watchIdle to do anything; both may be
+// active simultaneously (whichever fires first wins).
+type watchdogLimits struct {
+	idleTimeout        time.Duration
+	growthCeilingBytes int64
+}
+
+// watchIdle samples progress every pollEvery and cancels the run when either
+// of limits' two independent conditions trips: no progress for
+// limits.idleTimeout, or cumulative workspace growth past
+// limits.growthCeilingBytes since sampling started. fingerprint is the cheap
+// signal (output bytes + workspace filesystem state); activeFallback is
+// consulted ONLY when the fingerprint is unchanged AND the growth ceiling is
+// not implicated, so its cost (a container-CPU probe) is paid just on
+// otherwise-idle ticks. The growth check reuses the SAME per-tick
+// fingerprint() call the idle-stall check already makes (both derive from
+// one workspaceProgress walk) rather than sampling the filesystem twice.
+//
+// It sets killed BEFORE calling cancel so the flag is visible (through the
+// atomic barrier) by the time the cancelled command returns; quotaExceeded is
+// set (in addition to killed) ONLY on a growth-ceiling kill, so callers can
+// distinguish "workspace grew too much" from a plain idle stall — see
+// Result.WorkspaceQuotaExceeded. It returns when the run finishes (done
+// closed) or after it fires; when both of limits' fields are <= 0 it returns
+// immediately without sampling. activeFallback may be nil.
+func watchIdle(done <-chan struct{}, fingerprint func() progressSnapshot, activeFallback func() bool, limits watchdogLimits, pollEvery time.Duration, killed, quotaExceeded *atomic.Bool, cancel func()) {
+	if limits.idleTimeout <= 0 && limits.growthCeilingBytes <= 0 {
 		return
 	}
-	last := fingerprint()
+	base := fingerprint()
+	last := base
 	lastChange := time.Now()
 	t := time.NewTicker(pollEvery)
 	defer t.Stop()
@@ -447,6 +538,22 @@ func watchIdle(done <-chan struct{}, fingerprint func() progressSnapshot, active
 			return
 		case now := <-t.C:
 			cur := fingerprint()
+
+			// Growth ceiling is checked FIRST and independent of the
+			// idle-stall logic below: unlike output/CPU activity, ongoing
+			// workspace growth must never be treated as a reason to let the
+			// run continue — that is exactly the disk-filler behavior this
+			// ceiling exists to catch (bugbot-bdqf).
+			if limits.growthCeilingBytes > 0 && cur.fsSize-base.fsSize > limits.growthCeilingBytes {
+				quotaExceeded.Store(true)
+				killed.Store(true)
+				cancel()
+				return
+			}
+
+			if limits.idleTimeout <= 0 {
+				continue
+			}
 			if cur != last {
 				last = cur
 				lastChange = now
@@ -457,7 +564,7 @@ func watchIdle(done <-chan struct{}, fingerprint func() progressSnapshot, active
 				lastChange = now
 				continue
 			}
-			if now.Sub(lastChange) >= idleTimeout {
+			if now.Sub(lastChange) >= limits.idleTimeout {
 				killed.Store(true)
 				cancel()
 				return
