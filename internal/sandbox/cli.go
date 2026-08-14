@@ -503,8 +503,22 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	// not follow the "genuine exit code wins over a racing watchdog" rule
 	// below. Size is checked first, matching the tick loop's own check
 	// order in watchIdle; a run that (improbably) breaches both in the
-	// same window reports WorkspaceQuotaExceeded, which is still a correct,
-	// InfraKilled()-true classification.
+	// same window reports WorkspaceQuotaExceeded, which is still a
+	// correct, InfraKilled()-true classification. This quota-first
+	// precedence CAN report the byte reason even when the file-count
+	// ceiling was the one that actually cancelled the run: if a tick
+	// catches the count breach (setting ONLY fileCountExceeded) but the
+	// process keeps writing bytes for a brief window before it actually
+	// dies from the resulting cancel(), and checkGrowthCeiling's post-run
+	// resample still had a reason to run (e.g. a burst that finished
+	// before any tick fired, so BOTH thresholds are found breached in
+	// that single resample), both flags can end up true — quota still
+	// wins here, by design, not a bug (A-N2 fix-round note). This is now
+	// rarer than it once was: checkGrowthCeiling skips its resample
+	// entirely once EITHER flag is already set (see its doc), so the
+	// common "tick caught count, would-be resample also finds bytes"
+	// case no longer happens — only a genuine simultaneous burst can
+	// still trigger it.
 	if quotaExceeded.Load() {
 		res.WorkspaceQuotaExceeded = true
 		res.ExitCode = -1
@@ -590,12 +604,33 @@ const defaultWorkspaceGrowthCeilingBytes int64 = 2 * 1024 * 1024 * 1024 // 2 GiB
 // generous — this exists to catch a runaway/malicious many-tiny-files
 // generator (the motivating case: 10,000 files totaling 20 KB, which never
 // trips the 2 GiB byte ceiling above while still taking 10k inodes/dentries
-// of host pressure), not to constrain a legitimate build's file count (a
-// large npm install's node_modules routinely holds tens to low hundreds of
-// thousands of files; a full monorepo checkout or vendored dependency tree
-// can too). 200,000 comfortably clears that bar while still bounding an
-// unbounded file-creation loop's blast radius well short of exhausting a
-// typical host's inode table or blowing up an ext4 directory index.
+// of host pressure), not to constrain a legitimate build's file count. It
+// is NOT "far under" every real workload, though: oracle-measured real
+// installs (fix round A-B1/B-N2) found 80,589 entries for a 1,819-package
+// npm tree and 184,935 (92.5% of this 200,000 default) for a small
+// 3-package monorepo's node_modules — this ceiling can sit uncomfortably
+// close to a legitimate large JS install. What actually protects those
+// workloads in practice is the SIBLING byte-size ceiling above: across
+// seven real workloads measured (npm ci at multiple scales, a Go build
+// with GOCACHE+GOMODCACHE on the workspace, a Python wheelhouse), byte-%
+// of its 2 GiB ceiling exceeded file-% of this 200,000 ceiling in EVERY
+// case, so workspace_growth_ceiling_mb binds first on real builds and
+// this default rarely becomes the first thing to fire — but an operator
+// running an unusually file-count-heavy, byte-light install (e.g. a
+// monorepo with many small packages) should size this knob explicitly
+// rather than trust "generous" alone.
+//
+// Overshoot past whichever ceiling fires first is RATE-bounded, not
+// count-bounded (mirrors growthPollInterval's byte-overshoot rationale
+// below): a tick can only observe growth once per second, so a workload
+// creating files fast enough overshoots by however many it creates in
+// that window. Measured worst cases: 2,003 files past this 200,000
+// default (~17k files/s), 20,826 past a smaller test ceiling (~46k
+// files/s), and up to ~5,400 extra on podman specifically from its
+// post-cancel teardown window (the container keeps writing briefly after
+// SIGKILL is sent). An operator setting a SMALL ceiling gets a
+// proportionally LARGE overshoot relative to their own limit — size
+// accordingly for a fast-writing workload, not just a slow one.
 const defaultWorkspaceFileCountCeiling int64 = 200_000
 
 // idlePollInterval derives how often the watchdog samples progress from the
@@ -824,25 +859,31 @@ func watchIdle(a watchdogArgs) {
 // fingerprint may be nil (when neither idleTimeout nor either growth
 // ceiling was configured, Exec never allocates one); both ceilings<=0 is
 // checked FIRST so a nil fingerprint is never dereferenced in that case.
-// A no-op, without sampling the filesystem again, when EVERY active
-// ceiling's tick already caught its breach (quotaExceeded/fileCountExceeded
-// already true, or the corresponding ceiling was never enabled) — this is
-// what makes it safe to call unconditionally after a tick has already
-// fired.
+// A no-op, without sampling the filesystem again, once EITHER flag is
+// already true — a tick that caught ONE breach and cancelled the run
+// already fully determines Exec's outcome (Exec's precedence checks
+// quotaExceeded before fileCountExceeded and returns on the first true
+// one, so the other ceiling's status can never change what gets
+// reported), so resampling to also check the OTHER, still-unsettled
+// ceiling would be a pure wasted walk in the shipped-default shape where
+// BOTH ceilings are non-zero simultaneously (A-N1 fix round: the
+// previous per-ceiling sizeSettled/countSettled check only skipped when
+// BOTH were settled, so a tick-caught breach with the sibling ceiling
+// still enabled — the actual shipped default — silently triggered a
+// redundant third filesystem walk per run; see
+// TestCheckGrowthCeiling_AlreadyExceededSkipsResample_BothCeilingsShippedShape).
 func checkGrowthCeiling(fingerprint func() progressSnapshot, base progressSnapshot, growthCeilingBytes, fileCountCeiling int64, quotaExceeded, fileCountExceeded *atomic.Bool) {
 	if growthCeilingBytes <= 0 && fileCountCeiling <= 0 {
 		return
 	}
-	sizeSettled := growthCeilingBytes <= 0 || quotaExceeded.Load()
-	countSettled := fileCountCeiling <= 0 || fileCountExceeded.Load()
-	if sizeSettled && countSettled {
+	if quotaExceeded.Load() || fileCountExceeded.Load() {
 		return
 	}
 	final := fingerprint()
-	if !sizeSettled && final.fsSize-base.fsSize > growthCeilingBytes {
+	if growthCeilingBytes > 0 && final.fsSize-base.fsSize > growthCeilingBytes {
 		quotaExceeded.Store(true)
 	}
-	if !countSettled && final.fsCount-base.fsCount > fileCountCeiling {
+	if fileCountCeiling > 0 && final.fsCount-base.fsCount > fileCountCeiling {
 		fileCountExceeded.Store(true)
 	}
 }

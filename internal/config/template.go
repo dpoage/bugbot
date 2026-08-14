@@ -199,9 +199,14 @@ sandbox:
                                # since many near-zero-byte files (e.g.
                                # 10,000 files totaling 20 KB) never trip it
                                # while still exhausting host inodes/dentries.
-                               # 0 disables the ceiling. Default 200000 is
-                               # generous: even a large npm install's
-                               # node_modules lands far under it.
+                               # 0 disables the ceiling. Default 200000: NOT
+                               # "far under" every real install — a large npm
+                               # tree can land close to it (measured 92.5% of
+                               # this default for one 3-package monorepo's
+                               # node_modules); the byte-size ceiling above
+                               # binds first on real builds in practice, but
+                               # size this explicitly for a file-count-heavy,
+                               # byte-light workload.
   network: none
   dep_strategy: off            # off | host | fetch
   # setup_cmds: pre-run commands (argv lists) executed BEFORE the main command

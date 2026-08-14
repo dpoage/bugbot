@@ -332,14 +332,19 @@ func TestCLIExec_CallerCancellationWinsOverQuotaBreach(t *testing.T) {
 // newFakePodmanManyFilesCLI is newFakePodmanFillerCLI's file-COUNT analogue
 // (bugbot-gb3o): the fake podman script's only activity is creating many
 // near-zero-byte files (`: > file`, not a 4 KiB dd write) into the
-// workspace, one every 5ms, up to 400 iterations (bounded so a broken
-// watchdog fails the test instead of hanging it — 400 keeps the disabled-
-// ceiling negative control's full run comfortably under the 30s Timeout
-// even with real per-iteration fork/exec overhead on top of the 5ms
-// sleep). This is the exact motivating shape from the bug report — 10,000
-// tiny files totaling 20 KB — scaled down for test speed: fsCount climbs
-// fast while fsSize stays negligible, so ONLY a file-count ceiling (never
-// the byte-size one) can catch it.
+// workspace, one every 5ms, up to 1000 iterations (bounded so a broken
+// watchdog fails the test instead of hanging it; 1000 keeps natural
+// full-loop completion comfortably >= 10s — measured ~12-13s on this
+// host — so TestCLIExec_FileCountKillFidelity's tightened elapsed bound
+// can reliably tell "killed by the tick within ~1-2s" apart from "the
+// watchdog wiring silently no-op'd and only Exec's unconditional
+// post-run checkGrowthCeiling call classified it after the command ran
+// to completion" — A-B1 fix round on bugbot-gb3o; the previous 400-
+// iteration/~5s-completion shape could not discriminate that mutation
+// against the old 10s bound). This is the exact motivating shape from
+// the bug report — 10,000 tiny files totaling 20 KB — scaled down for
+// test speed: fsCount climbs fast while fsSize stays negligible, so ONLY
+// a file-count ceiling (never the byte-size one) can catch it.
 func newFakePodmanManyFilesCLI(t *testing.T, opts ...Option) *CLI {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -364,7 +369,7 @@ if [ -z "$ws" ]; then
   exit 1
 fi
 i=0
-while [ $i -lt 400 ]; do
+while [ $i -lt 1000 ]; do
   : > "$ws/tiny.$i"
   i=$((i+1))
   sleep 0.005
@@ -424,9 +429,18 @@ func TestCLIExec_FileCountBaselineCapturedAfterWorkspacePrep(t *testing.T) {
 // whose only activity is creating many tiny files is killed by the
 // file-count ceiling — WorkspaceFileCountExceeded=true,
 // WorkspaceQuotaExceeded=false (the byte-size ceiling never trips; the
-// files are near-zero bytes), TimedOut=false, ExitCode=-1, err=nil — well
-// before the 30s/60s Timeout/IdleTimeout ceilings, through the REAL
-// CLI.Exec code path.
+// files are near-zero bytes), TimedOut=false, ExitCode=-1, err=nil —
+// through the REAL CLI.Exec code path. The elapsed bound (~3s) is
+// deliberately TIGHT relative to the filler's ~12-13s natural full-loop
+// completion time (see newFakePodmanManyFilesCLI's doc): a mutation that
+// drops the watchdogLimits.fileCountCeiling wiring from the tick loop
+// (A-B1 fix round) leaves only Exec's unconditional post-run
+// checkGrowthCeiling call to classify the breach — which still sets
+// WorkspaceFileCountExceeded=true, but only AFTER the command runs to
+// its natural ~12-13s completion, not within the ~1-2s the proactive
+// tick achieves. A loose bound (e.g. the ~10s bound this test used
+// before the fix round, against a ~5s-completing 400-iteration filler)
+// cannot tell those two apart; ~3s against a ~12-13s filler can.
 func TestCLIExec_FileCountKillFidelity(t *testing.T) {
 	s := newFakePodmanManyFilesCLI(t)
 	s.defaultFileCountCeiling = 50 // tripped inside the first ~1s poll tick
@@ -452,8 +466,8 @@ func TestCLIExec_FileCountKillFidelity(t *testing.T) {
 	if res.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
 	}
-	if elapsed > 10*time.Second {
-		t.Errorf("elapsed = %s, want well under the 30s/60s Timeout/IdleTimeout ceilings", elapsed)
+	if elapsed > 3*time.Second {
+		t.Errorf("elapsed = %s, want < 3s — the PROACTIVE tick must catch this, not the post-run check after a ~12-13s natural completion (would indicate the watchdogLimits.fileCountCeiling wiring was dropped)", elapsed)
 	}
 }
 
@@ -491,14 +505,18 @@ func TestCLIExec_FileCountKillFidelity_SpawnGateWithIdleTimeoutUnset(t *testing.
 // TestCLIExec_FileCountCeilingDisabled_RunsToCompletion is the negative
 // control mirroring TestCLIExec_QuotaCeilingDisabled_RunsToCompletion:
 // with the file-count ceiling disabled entirely (0) and the byte-size
-// ceiling also disabled, the same many-tiny-files workload must run to
-// its natural completion.
+// ceiling also disabled, the same many-tiny-files workload must run its
+// full 1000-iteration loop to natural completion (~12-13s, well under
+// the 45s Timeout) — proving the fixture itself is sound (it is the
+// CEILING, not some other mechanism, producing the kill in
+// TestCLIExec_FileCountKillFidelity) and that a disabled ceiling truly
+// disables enforcement.
 func TestCLIExec_FileCountCeilingDisabled_RunsToCompletion(t *testing.T) {
 	s := newFakePodmanManyFilesCLI(t)
 	s.defaultFileCountCeiling = 0
 	s.defaultGrowthCeilingBytes = 0
 	s.defaultIdleTimeout = 0
-	s.defaultTimeout = 30 * time.Second
+	s.defaultTimeout = 45 * time.Second
 
 	res, err := s.Exec(context.Background(), Spec{RepoDir: t.TempDir(), Cmd: []string{"irrelevant"}})
 	if err != nil {

@@ -772,6 +772,50 @@ func TestCheckGrowthCeiling_FileCountAlreadyExceededSkipsResample(t *testing.T) 
 	}
 }
 
+// TestCheckGrowthCeiling_AlreadyExceededSkipsResample_BothCeilingsShippedShape
+// pins A-N1 (fix round on bugbot-gb3o): even when BOTH ceilings are
+// active — the shipped-default shape, a non-zero byte ceiling AND a
+// non-zero file-count ceiling simultaneously — a tick-caught breach of
+// EITHER one must skip the post-run resample entirely, not just when the
+// OTHER ceiling happens to be disabled. Regression for a coverage gap
+// introduced when the file-count ceiling was added: the original
+// bugbot-bdqf "no second walk" tests above only ever exercised the OTHER
+// ceiling at 0 (disabled), so they silently stopped covering the actual
+// shipped configuration (2048 MB + 200,000) once both knobs defaulted
+// non-zero — under the OLD per-ceiling sizeSettled/countSettled logic, a
+// tick-caught breach with the sibling ceiling still enabled triggered a
+// redundant third filesystem walk on every run.
+func TestCheckGrowthCeiling_AlreadyExceededSkipsResample_BothCeilingsShippedShape(t *testing.T) {
+	t.Run("byte-size already caught, file-count ceiling also active", func(t *testing.T) {
+		var quotaExceeded, fileCountExceeded atomic.Bool
+		quotaExceeded.Store(true) // a tick already caught the byte-size breach
+		called := false
+		fingerprint := func() progressSnapshot { called = true; return progressSnapshot{fsSize: 999999, fsCount: 999999} }
+
+		checkGrowthCeiling(fingerprint, progressSnapshot{}, 2048*1024*1024, 200_000, &quotaExceeded, &fileCountExceeded)
+		if called {
+			t.Error("checkGrowthCeiling must not re-sample when quotaExceeded is already true, even with the file-count ceiling ALSO active (shipped-default shape)")
+		}
+		if fileCountExceeded.Load() {
+			t.Error("skipping the resample must not spuriously set the other flag")
+		}
+	})
+	t.Run("file-count already caught, byte-size ceiling also active", func(t *testing.T) {
+		var quotaExceeded, fileCountExceeded atomic.Bool
+		fileCountExceeded.Store(true) // a tick already caught the file-count breach
+		called := false
+		fingerprint := func() progressSnapshot { called = true; return progressSnapshot{fsSize: 999999, fsCount: 999999} }
+
+		checkGrowthCeiling(fingerprint, progressSnapshot{}, 2048*1024*1024, 200_000, &quotaExceeded, &fileCountExceeded)
+		if called {
+			t.Error("checkGrowthCeiling must not re-sample when fileCountExceeded is already true, even with the byte-size ceiling ALSO active (shipped-default shape)")
+		}
+		if quotaExceeded.Load() {
+			t.Error("skipping the resample must not spuriously set the other flag")
+		}
+	})
+}
+
 // TestCheckGrowthCeiling_BothCeilingsIndependentBreaches: when BOTH
 // ceilings are active and only ONE has actually breached, exactly that
 // one's flag is set — the two must never be conflated. This is the direct

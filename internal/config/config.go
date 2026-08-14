@@ -254,11 +254,21 @@ type Sandbox struct {
 	// by BOTH backends (CLI.Exec and Bwrap.Exec both drive the shared
 	// watchIdle). 0 disables the ceiling (the byte-size ceiling,
 	// idle-stall detection, and the absolute timeout still apply
-	// independently). Default 200,000 — generous enough to clear even a
-	// large npm install's node_modules (routinely tens to low hundreds of
-	// thousands of files) or a big vendored dependency tree, while still
-	// bounding a many-tiny-file DoS well short of exhausting a typical
-	// host's inode table.
+	// independently). Default 200,000. NOT "far under" every real
+	// workload: fix-round oracle measurement found 80,589 entries for a
+	// 1,819-package npm tree and 184,935 (92.5% of this default) for a
+	// small 3-package monorepo's node_modules — this ceiling can sit
+	// uncomfortably close to a legitimate large JS install on its own.
+	// What protects real builds in practice is the SIBLING byte-size
+	// ceiling above: across seven measured real workloads (npm ci at
+	// several scales, a Go build, a Python wheelhouse), byte-% of the 2
+	// GiB ceiling exceeded file-% of this one in every case, so
+	// workspace_growth_ceiling_mb binds first and this default rarely
+	// becomes the first thing to fire — but a file-count-heavy,
+	// byte-light workload (many small packages) should size this knob
+	// explicitly. See internal/sandbox/cli.go's
+	// defaultWorkspaceFileCountCeiling doc for the same detail plus the
+	// measured rate-bounded-overshoot figures.
 	WorkspaceFileCountCeiling int    `yaml:"workspace_file_count_ceiling"`
 	Network                   string `yaml:"network"`
 	// DepStrategy selects how external module dependencies are made available

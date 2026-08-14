@@ -26,17 +26,23 @@ import (
 )
 
 // bwrapFileCountFillerScript creates a NEW near-zero-byte file in the
-// current directory every 5ms, up to 400 iterations (bounded so a broken
-// watchdog fails the test instead of hanging it) — the file-count
-// analogue of bwrapDiskFillerScript (bwrap_integration_test.go). Plain
-// shell redirection (`: > file`) needs no external binary at all (unlike
-// dd), so no extra baseline/ROMount resolution is required. This is the
-// exact motivating shape from the bug report — 10,000 tiny files totaling
-// 20 KB — scaled down for test speed: fsCount climbs fast while fsSize
+// current directory every 5ms, up to 1000 iterations (bounded so a broken
+// watchdog fails the test instead of hanging it; 1000 keeps natural full-
+// loop completion comfortably >= 10s — measured ~12-13s on this host — so
+// TestBwrapExec_FileCountKillFidelity's tightened elapsed bound can
+// reliably tell "killed by the tick within ~1-2s" apart from "the
+// watchdog wiring silently no-op'd and only Exec's unconditional post-run
+// check classified it after the command ran to completion"; see A-B1
+// fix-round notes on bugbot-gb3o) — the file-count analogue of
+// bwrapDiskFillerScript (bwrap_integration_test.go). Plain shell
+// redirection (`: > file`) needs no external binary at all (unlike dd),
+// so no extra baseline/ROMount resolution is required. This is the exact
+// motivating shape from the bug report — 10,000 tiny files totaling 20
+// KB — scaled down for test speed: fsCount climbs fast while fsSize
 // stays negligible, so ONLY a file-count ceiling (never the byte-size
 // one) can catch it.
 const bwrapFileCountFillerScript = `i=0
-while [ $i -lt 400 ]; do
+while [ $i -lt 1000 ]; do
   : > tiny.$i
   i=$((i+1))
   sleep 0.005
@@ -48,7 +54,16 @@ done`
 // WorkspaceFileCountExceeded=true, WorkspaceQuotaExceeded=false (the
 // byte-size ceiling never trips; the files are near-zero bytes),
 // TimedOut=false, ExitCode=-1, err=nil — through the actual Bwrap.Exec
-// code path, well before the Timeout/IdleTimeout ceilings.
+// code path, well before the Timeout/IdleTimeout ceilings. The elapsed
+// bound (~3s) is deliberately TIGHT relative to the filler's ~12-13s
+// natural full-loop completion time (see bwrapFileCountFillerScript's
+// doc): a mutation that drops the watchdogLimits.fileCountCeiling wiring
+// from the tick loop (A-B1 fix round) leaves only Exec's unconditional
+// post-run checkGrowthCeiling call to classify the breach — which still
+// sets WorkspaceFileCountExceeded=true, but only AFTER the command runs
+// to its natural ~12-13s completion, not within the ~1-2s the proactive
+// tick achieves. A loose bound (e.g. the ~10s ceiling this test used
+// before the fix round) cannot tell those two apart; ~3s can.
 func TestBwrapExec_FileCountKillFidelity(t *testing.T) {
 	s := newTestBwrap(t, WithBwrapIdleTimeout(60*time.Second))
 	s.defaultFileCountCeiling = 50 // tripped inside the first ~1s poll tick
@@ -77,8 +92,8 @@ func TestBwrapExec_FileCountKillFidelity(t *testing.T) {
 	if res.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
 	}
-	if elapsed > 10*time.Second {
-		t.Errorf("elapsed = %s, want well under the 30s/60s Timeout/IdleTimeout ceilings", elapsed)
+	if elapsed > 3*time.Second {
+		t.Errorf("elapsed = %s, want < 3s — the PROACTIVE tick must catch this, not the post-run check after a ~12-13s natural completion (would indicate the watchdogLimits.fileCountCeiling wiring was dropped)", elapsed)
 	}
 }
 
@@ -180,6 +195,37 @@ func TestBwrapExec_FileCountBaselineCapturedAfterWorkspacePrep(t *testing.T) {
 	}
 	if res.WorkspaceFileCountExceeded {
 		t.Errorf("pre-existing workspace content (500 files against a 50-file ceiling) must NOT trip the ceiling — the baseline must be captured AFTER workspace prep, not from zero; got %+v", res)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0", res.ExitCode)
+	}
+}
+
+// TestBwrapExec_FileCountCeilingDisabled_RunsToCompletion is the
+// bwrap-backend counterpart of cli_exec_quota_test.go's
+// TestCLIExec_FileCountCeilingDisabled_RunsToCompletion: the negative
+// control proving the fixture itself is sound (it is the CEILING, not
+// some other mechanism, producing the kill in
+// TestBwrapExec_FileCountKillFidelity) and that a disabled ceiling truly
+// disables enforcement — the filler runs its full 1000-iteration loop to
+// natural completion (~12-13s, well under the 45s Timeout) with the
+// file-count and byte-size ceilings both off.
+func TestBwrapExec_FileCountCeilingDisabled_RunsToCompletion(t *testing.T) {
+	s := newTestBwrap(t)
+	s.defaultFileCountCeiling = 0
+	s.defaultGrowthCeilingBytes = 0
+	t.Cleanup(func() { _ = s.Close() })
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir: t.TempDir(),
+		Timeout: 45 * time.Second,
+		Cmd:     []string{"/bin/sh", "-c", bwrapFileCountFillerScript},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.WorkspaceFileCountExceeded || res.WorkspaceQuotaExceeded || res.TimedOut {
+		t.Errorf("expected a clean completion with both ceilings disabled, got %+v", res)
 	}
 	if res.ExitCode != 0 {
 		t.Errorf("ExitCode = %d, want 0", res.ExitCode)
