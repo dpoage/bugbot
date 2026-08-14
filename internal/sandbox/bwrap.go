@@ -392,6 +392,14 @@ func (s *Bwrap) Limits() (cpus float64, memoryMB, pidsLimit int) {
 	return s.defaultCPUs, s.defaultMemory, s.pidsLimit
 }
 
+// ScratchAndGrowthCeiling mirrors CLI.ScratchAndGrowthCeiling: the
+// effective /tmp+root tmpfs scratch size (MB) and workspace-growth ceiling
+// (bytes) this backend applies, including the explicit-zero-disables case
+// (bugbot-bdqf/bugbot-yrox).
+func (s *Bwrap) ScratchAndGrowthCeiling() (scratchSizeMB int, growthCeilingBytes int64) {
+	return s.defaultScratchSizeMB, s.defaultGrowthCeilingBytes
+}
+
 // resolveBwrapParams applies backend defaults to a Spec, producing the
 // concrete bwrapParams for the run (workspace is filled in by Exec).
 func (s *Bwrap) resolveBwrapParams(spec Spec) (bwrapParams, error) {
@@ -583,8 +591,16 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 	res.Stderr, res.StderrTruncated = stderr.result()
 	res.Captured = captureWorkspaceFiles(ws, capturePaths, s.maxOutputBytes)
 
-	// Outcome precedence. A growth-ceiling breach ALWAYS wins, regardless of
-	// how the process itself exited (bugbot-bdqf oracle review B1b) — see
+	// Caller cancellation takes ABSOLUTE priority, checked FIRST, ahead of
+	// EVERY other outcome signal — bugbot-bdqf oracle review, cancellation
+	// precedence; see CLI.Exec's identical block for the full rationale.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		killBwrapProcessGroup(cmd)
+		return res, fmt.Errorf("sandbox: execution cancelled: %w", ctxErr)
+	}
+
+	// Outcome precedence. A growth-ceiling breach ALWAYS wins over the
+	// process's own reported outcome (bugbot-bdqf oracle review B1b) — see
 	// checkGrowthCeiling's doc for why this does not follow the "genuine
 	// exit code wins over a racing watchdog" rule below.
 	if quotaExceeded.Load() {
@@ -602,11 +618,6 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 	if errors.As(runErr, &exitErr) && exitErr.ExitCode() >= 0 {
 		res.ExitCode = exitErr.ExitCode()
 		return res, nil
-	}
-
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		killBwrapProcessGroup(cmd)
-		return res, fmt.Errorf("sandbox: execution cancelled: %w", ctxErr)
 	}
 
 	// Idle watchdog or absolute deadline: quotaExceeded was already handled

@@ -412,6 +412,71 @@ func TestBwrapExec_QuotaKillFidelity_SpawnGateWithIdleTimeoutUnset(t *testing.T)
 	}
 }
 
+// TestBwrapExec_CallerCancellationWinsOverQuotaBreach is the bwrap-backend
+// counterpart of cli_exec_quota_test.go's
+// TestCLIExec_CallerCancellationWinsOverQuotaBreach (bugbot-bdqf oracle
+// review, fix round 2, cancellation precedence): a caller cancellation
+// landing in the same window as a real growth-ceiling breach must surface
+// as "sandbox: execution cancelled", never as WorkspaceQuotaExceeded.
+func TestBwrapExec_CallerCancellationWinsOverQuotaBreach(t *testing.T) {
+	s := newTestBwrap(t, WithBwrapIdleTimeout(60*time.Second))
+	s.defaultGrowthCeilingBytes = 5_000 // ~1-2 filler iterations blow past this
+	t.Cleanup(func() { _ = s.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	res, err := s.Exec(ctx, Spec{
+		RepoDir: t.TempDir(),
+		Cmd:     []string{"/bin/sh", "-c", bwrapDiskFillerScript},
+	})
+	if err == nil {
+		t.Fatalf("expected a cancellation error, got nil err with res=%+v", res)
+	}
+	if !strings.Contains(err.Error(), "execution cancelled") {
+		t.Errorf("error = %v, want it to mention \"execution cancelled\"", err)
+	}
+	if res.WorkspaceQuotaExceeded {
+		t.Errorf("a caller-cancelled run must never report WorkspaceQuotaExceeded, even if a breach was also detected; got %+v", res)
+	}
+}
+
+// TestBwrapExec_QuotaBaselineCapturedAfterWorkspacePrep is the bwrap
+// counterpart of cli_exec_quota_test.go's
+// TestCLIExec_QuotaBaselineCapturedAfterWorkspacePrep (bugbot-bdqf oracle
+// review, mutation M15): the growth-ceiling baseline must be captured from
+// the PREPARED workspace, not from zero — RepoDir is seeded with 50 KB
+// against a 1 KB ceiling; the command writes nothing, so any kill proves
+// the baseline was wrong.
+func TestBwrapExec_QuotaBaselineCapturedAfterWorkspacePrep(t *testing.T) {
+	s := newTestBwrap(t)
+	s.defaultGrowthCeilingBytes = 1000 // 1 KB — far below the seeded content
+	t.Cleanup(func() { _ = s.Close() })
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "big.bin"), make([]byte, 50_000), 0o644); err != nil {
+		t.Fatalf("seed repo content: %v", err)
+	}
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir: repoDir,
+		Timeout: 15 * time.Second,
+		Cmd:     []string{"/bin/sh", "-c", "true"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.WorkspaceQuotaExceeded {
+		t.Errorf("pre-existing workspace content (50 KB against a 1 KB ceiling) must NOT trip the ceiling — the baseline must be captured AFTER workspace prep, not from zero; got %+v", res)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0", res.ExitCode)
+	}
+}
+
 // goRootForTest locates a usable GOROOT on the test host, skipping if none
 // can be found — the same self-skip discipline as newTestBwrap.
 func goRootForTest(t *testing.T) string {

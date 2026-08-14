@@ -230,6 +230,17 @@ func (s *CLI) Limits() (cpus float64, memoryMB, pidsLimit int) {
 	return s.defaultCPUs, s.defaultMemory, s.pidsLimit
 }
 
+// ScratchAndGrowthCeiling returns the effective /tmp tmpfs scratch size (MB)
+// and workspace-growth ceiling (bytes) the backend applies when a Spec
+// doesn't override them, mirroring Limits' "confirm config reached the
+// backend" purpose — including the explicit-zero-disables case
+// (bugbot-bdqf/bugbot-yrox): sandbox.workspace_growth_ceiling_mb: 0 must be
+// observable as a truly disabled (0) ceiling here, not the backend's own
+// non-zero built-in default.
+func (s *CLI) ScratchAndGrowthCeiling() (scratchSizeMB int, growthCeilingBytes int64) {
+	return s.defaultScratchSizeMB, s.defaultGrowthCeilingBytes
+}
+
 // randToken returns a 128-bit random hex string used to give each container a
 // unique, collision-resistant name (so it can be reaped by name on timeout).
 func randToken() string {
@@ -425,8 +436,23 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	res.Stderr, res.StderrTruncated = stderr.result()
 	res.Captured = captureWorkspaceFiles(ws, capturePaths, s.maxOutputBytes)
 
-	// Outcome precedence. A growth-ceiling breach ALWAYS wins, regardless of
-	// how the process itself exited (bugbot-bdqf oracle review B1b) — see
+	// Caller cancellation takes ABSOLUTE priority, checked FIRST, ahead of
+	// EVERY other outcome signal (growth-ceiling breach, exit code, or
+	// infra timeout) — bugbot-bdqf oracle review, cancellation precedence.
+	// checkGrowthCeiling above already ran unconditionally (its cost is
+	// paid either way), but a caller cancel landing in the same window as
+	// a breach — or even a clean exit — must always surface as the
+	// documented "sandbox: execution cancelled" error, never silently
+	// reinterpreted as a quota kill or a stale success: the caller no
+	// longer wants this result at all, regardless of what our own
+	// machinery observed.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		s.forceRemove(p.containerName)
+		return res, fmt.Errorf("sandbox: execution cancelled: %w", ctxErr)
+	}
+
+	// Outcome precedence. A growth-ceiling breach ALWAYS wins over the
+	// process's own reported outcome (bugbot-bdqf oracle review B1b) — see
 	// checkGrowthCeiling's doc for why this does not follow the "genuine
 	// exit code wins over a racing watchdog" rule below.
 	if quotaExceeded.Load() {
@@ -440,7 +466,7 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	// non-zero code — was not killed by us, so those win next: an idle
 	// watchdog (or absolute deadline) firing in the same instant can never
 	// mask a genuine repro verdict. Our kills surface as a signal
-	// (ExitCode -1) and fall through to the timeout/cancel branches below.
+	// (ExitCode -1) and fall through to the timeout branch below.
 	if runErr == nil {
 		res.ExitCode = 0
 		return res, nil
@@ -449,12 +475,6 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	if errors.As(runErr, &exitErr) && exitErr.ExitCode() >= 0 {
 		res.ExitCode = exitErr.ExitCode()
 		return res, nil
-	}
-
-	// Caller cancellation (not our timeout): surface as an error.
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		s.forceRemove(p.containerName)
-		return res, fmt.Errorf("sandbox: execution cancelled: %w", ctxErr)
 	}
 
 	// Idle watchdog or absolute deadline: a timeout, not a demonstration.

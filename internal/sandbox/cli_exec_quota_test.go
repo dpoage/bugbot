@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,6 +68,63 @@ exit 0
 		t.Fatalf("NewCLI: %v", err)
 	}
 	return s
+}
+
+// newFakePodmanNoopCLI is a fake-podman fixture that touches the workspace
+// NOT AT ALL — it exits 0 immediately, writing nothing. Paired with a
+// pre-seeded RepoDir, it isolates whether the growth-ceiling baseline is
+// captured AFTER workspace preparation (the correct behavior: only bytes
+// the COMMAND itself writes should count) or from an empty/zero baseline
+// (which would misclassify a large pre-existing repo as an instant
+// breach — bugbot-bdqf oracle review, mutation M15).
+func newFakePodmanNoopCLI(t *testing.T, opts ...Option) *CLI {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based fake runtime assumes POSIX /bin/sh")
+	}
+	binDir := t.TempDir()
+	script := "#!/bin/sh\nexit 0\n"
+	scriptPath := filepath.Join(binDir, "podman")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake podman script: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	s, err := NewCLI("podman", "unused-image", opts...)
+	if err != nil {
+		t.Fatalf("NewCLI: %v", err)
+	}
+	return s
+}
+
+// TestCLIExec_QuotaBaselineCapturedAfterWorkspacePrep pins bugbot-bdqf
+// mutation M15: the growth-ceiling baseline must be captured from the
+// PREPARED workspace (after prepareWorkspace copies RepoDir in), not from
+// zero — otherwise a large pre-existing repo would look like instant
+// growth and trip the ceiling before the command ever runs. RepoDir is
+// seeded with 50 KB of content against a 1 KB ceiling; the fake command
+// writes nothing at all, so ANY kill here proves the baseline was wrong.
+func TestCLIExec_QuotaBaselineCapturedAfterWorkspacePrep(t *testing.T) {
+	s := newFakePodmanNoopCLI(t)
+	s.defaultGrowthCeilingBytes = 1000 // 1 KB — far below the seeded content
+	s.defaultIdleTimeout = 0
+	s.defaultTimeout = 15 * time.Second
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "big.bin"), make([]byte, 50_000), 0o644); err != nil {
+		t.Fatalf("seed repo content: %v", err)
+	}
+
+	res, err := s.Exec(context.Background(), Spec{RepoDir: repoDir, Cmd: []string{"irrelevant"}})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.WorkspaceQuotaExceeded {
+		t.Errorf("pre-existing workspace content (50 KB against a 1 KB ceiling) must NOT trip the ceiling — the baseline must be captured AFTER workspace prep, not from zero; got %+v", res)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0 (the fake command writes nothing and exits cleanly)", res.ExitCode)
+	}
 }
 
 // TestCLIExec_QuotaKillFidelity is the Exec-level fidelity test the oracle
@@ -220,5 +278,40 @@ func TestCLIExec_QuotaKillFidelity_PostRunCheckCatchesBurstExit(t *testing.T) {
 	}
 	if res.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1 (the breach must override the process's own exit 0)", res.ExitCode)
+	}
+}
+
+// TestCLIExec_CallerCancellationWinsOverQuotaBreach pins the cancellation-
+// precedence fix (bugbot-bdqf oracle review, fix round 2): a caller
+// cancellation landing in the same window as a growth-ceiling breach must
+// surface as the documented "sandbox: execution cancelled" error — NEVER
+// silently reinterpreted as a WorkspaceQuotaExceeded result, since the
+// caller no longer wants this outcome at all regardless of what our own
+// watchdog machinery observed. The ceiling here is small enough that the
+// filler writes well past it in the 200ms window before cancel() fires, so
+// checkGrowthCeiling's post-run check WOULD find a breach if it were ever
+// consulted — proving this passes because cancellation wins, not because
+// no breach happened yet.
+func TestCLIExec_CallerCancellationWinsOverQuotaBreach(t *testing.T) {
+	s := newFakePodmanFillerCLI(t)
+	s.defaultGrowthCeilingBytes = 5_000 // ~1-2 filler iterations blow past this
+	s.defaultIdleTimeout = 60 * time.Second
+	s.defaultTimeout = 30 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	res, err := s.Exec(ctx, Spec{RepoDir: t.TempDir(), Cmd: []string{"irrelevant"}})
+	if err == nil {
+		t.Fatalf("expected a cancellation error, got nil err with res=%+v", res)
+	}
+	if !strings.Contains(err.Error(), "execution cancelled") {
+		t.Errorf("error = %v, want it to mention \"execution cancelled\"", err)
+	}
+	if res.WorkspaceQuotaExceeded {
+		t.Errorf("a caller-cancelled run must never report WorkspaceQuotaExceeded, even if a breach was also detected; got %+v", res)
 	}
 }
