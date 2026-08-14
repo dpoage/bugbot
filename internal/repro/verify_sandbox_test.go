@@ -32,6 +32,54 @@ func TestClassifySmoke_Timeout(t *testing.T) {
 	}
 }
 
+// TestClassifySmoke_WorkspaceQuotaExceeded pins IC-1 (bugbot-bdqf follow-up):
+// a growth-ceiling kill must NEVER classify as OK/SmokeCategoryOK (the
+// false-green WatchdogOracleB's approval was conditioned on closing) —
+// it lands on SmokeCategoryEnvError, which BlocksRepro() already treats as
+// gating (see TestSmokeVerdict_BlocksRepro), and Detail carries
+// res.KillReason() so the operator sees WHY, not just a bare exit code.
+func TestClassifySmoke_WorkspaceQuotaExceeded(t *testing.T) {
+	res := sandbox.Result{ExitCode: -1, WorkspaceQuotaExceeded: true}
+	v := classifySmoke(res, []string{"go", "vet", "./..."})
+	if v.OK {
+		t.Errorf("a quota-killed smoke run must never report OK=true; got %+v", v)
+	}
+	if v.Category == SmokeCategoryOK {
+		t.Errorf("a quota-killed smoke run must never classify as SmokeCategoryOK; got category=%q", v.Category)
+	}
+	if v.Category != SmokeCategoryEnvError {
+		t.Errorf("category = %q, want %q", v.Category, SmokeCategoryEnvError)
+	}
+	if !v.BlocksRepro() {
+		t.Error("a quota kill must gate the repro stage (BlocksRepro() = false, want true)")
+	}
+	if !strings.Contains(v.Detail, "quota") {
+		t.Errorf("Detail = %q, want it to name the quota (res.KillReason())", v.Detail)
+	}
+}
+
+// TestClassifySmoke_WorkspaceQuotaExceeded_DistinctFromPlainTimeout is the
+// negative control: a PLAIN TimedOut result (no WorkspaceQuotaExceeded)
+// must keep its existing SmokeCategoryTimeout classification and
+// BlocksRepro()=false, byte-identical to before the InfraKilled() check was
+// added — the quota branch must not leak into the ordinary timeout path.
+func TestClassifySmoke_WorkspaceQuotaExceeded_DistinctFromPlainTimeout(t *testing.T) {
+	res := sandbox.Result{ExitCode: -1, TimedOut: true, Stderr: "killed"}
+	v := classifySmoke(res, []string{"go", "vet", "./..."})
+	if v.OK {
+		t.Error("plain timeout must not be OK=true")
+	}
+	if v.Category != SmokeCategoryTimeout {
+		t.Errorf("category = %q, want %q (unchanged)", v.Category, SmokeCategoryTimeout)
+	}
+	if v.BlocksRepro() {
+		t.Error("plain timeout must NOT gate the repro stage (BlocksRepro() = true, want false) — unchanged behavior")
+	}
+	if !strings.Contains(v.Detail, "timed out") {
+		t.Errorf("Detail = %q, want it to still say \"timed out\" (unchanged wording)", v.Detail)
+	}
+}
+
 // TestClassifySmoke_Exit125 covers exit 125 (container runtime / shell failure).
 func TestClassifySmoke_Exit125(t *testing.T) {
 	res := sandbox.Result{ExitCode: 125, Stderr: "setup cmd failed"}
