@@ -257,6 +257,7 @@ func randToken() string {
 // runParams for the run (workspace and containerName are filled in by Exec).
 func (s *CLI) resolveParams(spec Spec) runParams {
 	p := runParams{
+		runtime:       s.runtime,
 		image:         s.defaultImage,
 		network:       s.defaultNetwork,
 		cpus:          s.defaultCPUs,

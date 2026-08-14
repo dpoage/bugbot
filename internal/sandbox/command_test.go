@@ -204,6 +204,104 @@ func TestBuildRunArgsRendersWritableMounts(t *testing.T) {
 	mustContainSeq(t, args, "--network=bridge")
 }
 
+// TestBuildRunArgsResetsEntrypoint pins bugbot-p8y4's first defect fix: the
+// image's ENTRYPOINT must always be neutralized via --entrypoint=, for every
+// image and regardless of runtime, so an ENTRYPOINT-bearing image (e.g.
+// gcr.io/bazel-public/bazel's ENTRYPOINT [/usr/local/bin/bazel]) can never
+// prepend its own argv ahead of Spec.Cmd — see the buildRunArgs doc comment
+// for the "Command /bin/sh not found" -> toolchain_missing incident this
+// prevents.
+func TestBuildRunArgsResetsEntrypoint(t *testing.T) {
+	args := buildRunArgs(runParams{
+		containerName: "bugbot-ep",
+		workspace:     "/tmp/ws",
+		image:         "gcr.io/bazel-public/bazel:latest",
+		network:       "none",
+		cmd:           []string{"bazel", "version"},
+	})
+	mustContainSeq(t, args, "--entrypoint=")
+
+	// Must appear before the image, like every other run-configuration flag.
+	epIdx := slices.Index(args, "--entrypoint=")
+	imgIdx := slices.Index(args, "gcr.io/bazel-public/bazel:latest")
+	if epIdx < 0 || imgIdx < 0 || epIdx > imgIdx {
+		t.Fatalf("--entrypoint= must precede the image; ep=%d img=%d args=%q", epIdx, imgIdx, args)
+	}
+}
+
+// TestBuildRunArgsPodmanChownsNonSharedMounts pins bugbot-p8y4's second
+// defect fix: under podman, every bugbot-owned (Shared=false) mount —
+// workspace, RO, and RW alike — gets the podman-only ":U" suffix so a
+// non-root image USER (e.g. bazel-public's "USER ubuntu") can read a
+// workspace that prepareWorkspace otherwise leaves owned by the invoking
+// host user at mode 0700. Shared=true mounts must NOT get :U (chowning a
+// host-managed dir, e.g. the operator's Go module cache, out from under it
+// would break the host's own access — same rationale as the existing :Z
+// exemption).
+func TestBuildRunArgsPodmanChownsNonSharedMounts(t *testing.T) {
+	args := buildRunArgs(runParams{
+		runtime:       "podman",
+		containerName: "bugbot-podman-u",
+		workspace:     "/tmp/ws",
+		image:         "img",
+		network:       "none",
+		cmd:           []string{"true"},
+		roMounts: []ROMount{
+			{HostPath: "/host/ro-owned", ContainerPath: "/ro-owned"},
+			{HostPath: "/host/ro-shared", ContainerPath: "/ro-shared", Shared: true},
+		},
+		rwMounts: []ROMount{
+			{HostPath: "/host/rw-owned", ContainerPath: "/rw-owned"},
+			{HostPath: "/host/rw-shared", ContainerPath: "/rw-shared", Shared: true},
+		},
+	})
+
+	mustContainSeq(t, args, "-v", "/tmp/ws:/workspace:rw,Z,U")
+	mustContainSeq(t, args, "-v", "/host/ro-owned:/ro-owned:ro,Z,U")
+	mustContainSeq(t, args, "-v", "/host/rw-owned:/rw-owned:rw,Z,U")
+	mustContainSeq(t, args, "-v", "/host/ro-shared:/ro-shared:ro")
+	mustContainSeq(t, args, "-v", "/host/rw-shared:/rw-shared:rw")
+
+	for i, a := range args {
+		if a != "-v" || i+1 >= len(args) {
+			continue
+		}
+		val := args[i+1]
+		if strings.Contains(val, "shared") && strings.Contains(val, ",U") {
+			t.Errorf("Shared mount must never get the :U chown suffix, got %q", val)
+		}
+	}
+}
+
+// TestBuildRunArgsNonPodmanRuntimeOmitsChown proves the Docker-safety gate:
+// Docker rejects ":U" outright as an unrecognized bind-mount option, so
+// buildRunArgs must never emit it for any runtime other than exactly
+// "podman" — including docker and the zero-value/unset case.
+func TestBuildRunArgsNonPodmanRuntimeOmitsChown(t *testing.T) {
+	for _, rt := range []string{"docker", ""} {
+		t.Run("runtime="+rt, func(t *testing.T) {
+			args := buildRunArgs(runParams{
+				runtime:       rt,
+				containerName: "bugbot-no-u",
+				workspace:     "/tmp/ws",
+				image:         "img",
+				network:       "none",
+				cmd:           []string{"true"},
+				roMounts:      []ROMount{{HostPath: "/host/ro", ContainerPath: "/ro"}},
+				rwMounts:      []ROMount{{HostPath: "/host/rw", ContainerPath: "/rw"}},
+			})
+			mustContainSeq(t, args, "-v", "/tmp/ws:/workspace:rw,Z")
+			mustContainSeq(t, args, "-v", "/host/ro:/ro:ro,Z")
+			mustContainSeq(t, args, "-v", "/host/rw:/rw:rw,Z")
+			for i, a := range args {
+				if a == "-v" && i+1 < len(args) && strings.Contains(args[i+1], ",U") {
+					t.Errorf("runtime %q must never emit :U, got %q", rt, args[i+1])
+				}
+			}
+		})
+	}
+}
+
 func TestValidateMounts(t *testing.T) {
 	tests := []struct {
 		name    string

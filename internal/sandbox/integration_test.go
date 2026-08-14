@@ -11,6 +11,7 @@ package sandbox
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -368,5 +369,141 @@ func TestIntegrationIdleWatchdogCPUBusySurvives(t *testing.T) {
 	}
 	if res.ExitCode != 0 {
 		t.Errorf("ExitCode = %d, stderr=%q", res.ExitCode, res.Stderr)
+	}
+}
+
+// buildEntrypointUserImage builds (once per call, cleaned up via t.Cleanup)
+// a small local image reproducing bugbot-p8y4's incident shape: an
+// ENTRYPOINT that mangles any argv it doesn't recognize into a
+// "Command <argv[0]> not found" error exactly like
+// gcr.io/bazel-public/bazel's own client does when handed bugbot's
+// "/bin/sh -c ...; exec "$@"" wrapper (see the buildRunArgs doc comment and
+// bugbot-cbm5's incident notes), PLUS a non-root USER — bazel-public now
+// ships USER ubuntu. This mirrors the DoctorOracleB #148-round replay
+// recipe (FROM debian:stable-slim with ENTRYPOINT + USER, a working
+// pattern) without depending on network access to a real bazel image. It
+// skips the test — rather than failing it — if the build itself cannot
+// complete (e.g. the debian:stable-slim base isn't locally cached and there
+// is no network to pull it), matching ensureImage's "pull failure is an
+// environment gap, not a code failure" convention.
+func buildEntrypointUserImage(t *testing.T, s *CLI) string {
+	t.Helper()
+	dir := t.TempDir()
+	// The fake launcher only inspects argv[1] ($1), matching the real
+	// bazel client's behavior of erroring on the first CLI token it does not
+	// recognize as one of its own subcommands/startup options.
+	dockerfile := "FROM debian:stable-slim\n" +
+		"RUN useradd -m -u 1500 bugbot-nonroot \\\n" +
+		" && printf '#!/bin/sh\\necho \"Command $1 not found\" >&2\\nexit 127\\n' > /usr/local/bin/fake-launcher \\\n" +
+		" && chmod +x /usr/local/bin/fake-launcher\n" +
+		"USER bugbot-nonroot\n" +
+		"ENTRYPOINT [\"/usr/local/bin/fake-launcher\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+
+	tag := "localhost/bugbot-sandbox-test-entrypoint-user:" + randToken()[:16]
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, s.Runtime(), "build", "-t", tag, dir).CombinedOutput()
+	if err != nil {
+		t.Skipf("cannot build local ENTRYPOINT+USER test image (offline base image pull?): %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command(s.Runtime(), "rmi", "-f", tag).Run()
+	})
+	return tag
+}
+
+// TestIntegrationEntrypointAndNonRootUserWorkspace — bugbot-p8y4 — proves
+// both fixes together against a REAL locally built image carrying both
+// defects at once, exactly as bazel-public now ships them: an ENTRYPOINT
+// that mangles any argv it does not recognize, and a non-root USER.
+// Without the fix this would surface as either "Command sh not found"
+// (entrypoint mangling firing first) or a workspace read failure (the
+// non-root container user cannot read the 0700 root-mapped workspace).
+// With the fix: bugbot's own command runs, exits with ITS OWN status, and
+// reads both the repo-copied file and a WriteFiles-injected file.
+func TestIntegrationEntrypointAndNonRootUserWorkspace(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	s := newTestCLI(t)
+	image := buildEntrypointUserImage(t, s)
+
+	// RepoDir MUST be a real git work tree: a non-git RepoDir bypasses
+	// wsCache entirely (workspaceCacheKey's isRepo is false) and falls back
+	// to prepareWorkspace's plain copyTree, which inherits RepoDir's own
+	// mode onto the workspace root — masking the very defect this test
+	// exists to catch. The cached path (wsCache.clone, what CLI.Exec
+	// actually uses for any git repo — the realistic case, including the
+	// bazel monorepo this bead traces to) always creates its pristine dir
+	// at a hardcoded 0o700 and cloneTree preserves that mode onto the final
+	// per-run workspace, so only a git RepoDir reproduces the real
+	// "0700 root-mapped /workspace" incident shape.
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "MODULE.bazel"), []byte("REPO_MARKER"), 0o644); err != nil {
+		t.Fatalf("write MODULE.bazel: %v", err)
+	}
+	gitInit(t, repo)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := s.Exec(ctx, Spec{
+		RepoDir: repo,
+		Image:   image,
+		Cmd:     []string{"sh", "-c", "cat MODULE.bazel && cat repro/injected.txt"},
+		WriteFiles: map[string][]byte{
+			"repro/injected.txt": []byte("INJECTED_MARKER"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0 (bugbot's own command should run and succeed); stdout=%q stderr=%q", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "REPO_MARKER") {
+		t.Errorf("stdout missing repo-copied MODULE.bazel content; stdout=%q", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "INJECTED_MARKER") {
+		t.Errorf("stdout missing WriteFiles-injected file content; stdout=%q", res.Stdout)
+	}
+	if strings.Contains(res.Stderr, "not found") || strings.Contains(res.Stderr, "Permission denied") {
+		t.Errorf("stderr shows the un-neutralized-entrypoint or unreadable-workspace symptom; stderr=%q", res.Stderr)
+	}
+}
+
+// TestIntegrationEntrypointDoesNotMangleWorkingToolchain — bugbot-p8y4
+// regression test — proves the sandbox no longer MANUFACTURES the
+// "not found" output that fools internal/repro's classifySmoke into a false
+// toolchain_missing verdict (classifySmoke itself is out of scope for this
+// bead — internal/repro is untouched; the fix makes its misleading input
+// unreachable at the source). An ENTRYPOINT-bearing image running an
+// ordinary, present command must exit 0 with normal, unmangled output —
+// not the "Command <cmd> not found" / exit 127 shape bugbot-cbm5's
+// gcr.io/bazel-public/bazel incident produced for a non-bazel launcher.
+func TestIntegrationEntrypointDoesNotMangleWorkingToolchain(t *testing.T) {
+	s := newTestCLI(t)
+	image := buildEntrypointUserImage(t, s)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := s.Exec(ctx, Spec{
+		RepoDir: t.TempDir(),
+		Image:   image,
+		Cmd:     []string{"echo", "toolchain-ok"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0 (not the argv-mangled-entrypoint's exit 127); stdout=%q stderr=%q", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	if strings.TrimSpace(res.Stdout) != "toolchain-ok" {
+		t.Errorf("Stdout = %q, want %q (unmangled command output)", res.Stdout, "toolchain-ok")
+	}
+	if combined := res.Stdout + res.Stderr; strings.Contains(combined, "not found") {
+		t.Errorf("output contains the classifySmoke 'not found' trigger phrase the un-neutralized entrypoint would have produced: %q", combined)
 	}
 }

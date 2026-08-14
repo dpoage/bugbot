@@ -10,6 +10,13 @@ import (
 // runParams is the fully-resolved set of inputs to a single container run,
 // after backend defaults have been applied to a Spec.
 type runParams struct {
+	// runtime is the resolved container runtime binary name ("podman" or
+	// "docker", see cli.go's candidateRuntimes/Detect). buildRunArgs uses it
+	// to gate the podman-only ":U" mount option (see nonSharedMountLabel):
+	// Docker rejects ":U" outright as an unrecognized bind-mount option, so
+	// unconditionally emitting it would break every Docker-backend run, not
+	// just the non-root-USER-image case it exists to fix.
+	runtime string
 	// containerName is the generated --name, used to forcibly remove the
 	// container on timeout.
 	containerName string
@@ -59,6 +66,60 @@ const workspaceMount = "/workspace"
 // byte-identical behavior to before bugbot-yrox.
 const fallbackScratchSizeMB = 512
 
+// nonSharedMountLabel returns the volume-option string for a bugbot-owned
+// (Shared=false) mount given its base mode ("ro" or "rw"): always base+",Z"
+// (SELinux private relabel; a no-op when SELinux is disabled) and,
+// additionally, ",U" when runtime is "podman".
+//
+// SECURITY (bugbot-p8y4): ":U" tells podman to chown the mount recursively
+// to the container's user-namespace-mapped UID/GID *before* the container
+// starts, which is what lets a non-root image USER (e.g. bazel-public's
+// "USER ubuntu") read a workspace that would otherwise stay owned by the
+// invoking host user at prepareWorkspace's default 0700 and be completely
+// unreadable to any other UID. This was evaluated against two alternatives
+// and chosen because it is the only one that does not widen HOST-level
+// readability of the mount:
+//   - Loosening the host-side workspace directory's permission bits (e.g.
+//     chmod 0755) would let every OTHER host user read it too — the
+//     workspace holds the untrusted repo under scan AND any WriteFiles
+//     content bugbot injected (which can include secrets-adjacent
+//     reproduction fixtures), so that is a real information-disclosure
+//     widening, not just a cosmetic one.
+//   - "--userns=keep-id" only maps the CURRENT host user's own UID into the
+//     container 1:1; it does nothing for an image-declared non-root UID
+//     that differs from the invoking host user's UID (the common case —
+//     "ubuntu" is baked into the image, not derived from whoever runs
+//     bugbot), so it does not generalize to arbitrary untrusted images.
+//   - ":U" instead changes only the mount's OWNING uid/gid, to a
+//     subordinate UID in the rootless user's own private /etc/subuid range
+//     (confirmed empirically: chowned to 100999:100999 on this host, never
+//     a real host account) — permission bits stay exactly as
+//     prepareWorkspace/copyWorkspace left them (0700), so no additional
+//     host user or process gains read access. Only the container's mapped
+//     non-root user (which IS the invoking bugbot user, one layer removed
+//     through the user namespace) can now read what it already could not
+//     read as a genuinely different host principal.
+//
+// Docker has no equivalent flag and rejects ":U" outright as an unknown
+// mount option (confirmed against docker's bind-mount option parser), so
+// this is gated on runtime=="podman" — see runParams.runtime. Podman is the
+// preferred, default-detected runtime (candidateRuntimes in cli.go); the
+// Docker fallback path does not get this fix and non-root-USER images will
+// still fail to read /workspace under Docker.
+//
+// Shared=true mounts (host-owned dirs such as the operator's Go module
+// cache or a bazel vendor dir the host also manages) call this with a
+// literal base string instead — see the RO/RW mount loops in buildRunArgs —
+// and must NEVER get :Z or :U: relabeling or chowning a directory another
+// host process actively manages breaks that process's own access to it.
+func nonSharedMountLabel(base, runtime string) string {
+	label := base + ",Z"
+	if runtime == "podman" {
+		label += ",U"
+	}
+	return label
+}
+
 // buildRunArgs constructs the argv passed to the runtime CLI (excluding the
 // runtime binary itself) for a `run` invocation. It is a pure function so the
 // security-relevant flag construction can be exercised in unit tests without a
@@ -79,20 +140,43 @@ const fallbackScratchSizeMB = 512
 //     root; without this `go test` fails instantly with "failed to initialize
 //     build cache: read-only file system" before it ever compiles. Spec.Env
 //     entries are appended after and may override.
-//   - -v ws:/workspace:rw,Z     : the workspace copy is the only writable mount
-//     (Z relabels for SELinux; harmless elsewhere). The original repo is never
-//     mounted.
-//   - -v host:ctr:ro[,Z]        : any Spec.ROMounts are mounted READ-ONLY (a
+//   - --entrypoint=              : unconditionally NEUTRALIZE the image's own
+//     ENTRYPOINT (bugbot-p8y4/bugbot-cbm5). Without this, any image that
+//     declares one gets it silently PREPENDED to whatever argv this function
+//     builds: gcr.io/bazel-public/bazel ships ENTRYPOINT
+//     [/usr/local/bin/bazel], turning bugbot's own `/bin/sh -c <script> sh
+//     <cmd>` into `bazel /bin/sh -c <script> sh <cmd>` — bazel then tries to
+//     run "/bin/sh" as one of ITS OWN startup options and fails with
+//     "Command /bin/sh not found", which internal/repro's classifySmoke
+//     pattern-matches on "not found" and misreports as toolchain_missing,
+//     wrongly gating the whole repro stage (BlocksRepro) on a fabricated
+//     verdict for images that have nothing to do with bazel. Every Spec.Cmd
+//     is already a complete, explicit argv (or the /bin/sh setup wrapper
+//     below); bugbot never wants an image's bundled entrypoint script
+//     running ahead of — or instead of — the command it was asked to run.
+//     Verified against podman 5.7.0 on this host: `--entrypoint=` (a single
+//     token, matching the `--network=` convention above) resets it exactly
+//     like `--entrypoint ""`.
+//   - -v ws:/workspace:rw,Z[,U] : the workspace copy is the only writable
+//     mount (Z relabels for SELinux; harmless elsewhere). The original repo
+//     is never mounted. The ,U suffix (podman only, see nonSharedMountLabel)
+//     fixes bugbot-p8y4's second defect: an image with a non-root USER
+//     (e.g. bazel-public's now-shipped "USER ubuntu") cannot otherwise read
+//     the workspace, which prepareWorkspace leaves owned by the invoking
+//     host user at mode 0700.
+//   - -v host:ctr:ro[,Z[,U]]    : any Spec.ROMounts are mounted READ-ONLY (a
 //     dependency cache, for example). These are never writable, but they DO
 //     expose host content to untrusted code, so callers must only mount
 //     public/cache content — never secrets. See the package doc and Spec.ROMounts.
-//     The :Z suffix (SELinux private relabel) is added ONLY when ROMount.Shared
-//     is false (bugbot-owned dirs). Shared host dirs (e.g. the user's Go module
-//     cache) must NOT be relabeled: :Z on a multi-GB shared cache is slow,
-//     breaks the host go toolchain, and breaks other containers sharing the dir.
-//     See ROMount.Shared for the full tradeoff. RWMounts (prefetch caches and
-//     operator "writable: true" local_mounts, bugbot-wjc2) follow the same :Z
-//     rule: relabeled only when Shared is false.
+//     The :Z suffix (SELinux private relabel) and the podman-only :U suffix
+//     (see nonSharedMountLabel) are added ONLY when ROMount.Shared is false
+//     (bugbot-owned dirs). Shared host dirs (e.g. the user's Go module
+//     cache) must NOT be relabeled or chowned: doing either to a multi-GB
+//     shared cache is slow, breaks the host go toolchain, and breaks other
+//     containers/processes sharing the dir. See ROMount.Shared for the full
+//     tradeoff. RWMounts (prefetch caches and operator "writable: true"
+//     local_mounts, bugbot-wjc2) follow the same rule: relabeled/chowned
+//     only when Shared is false.
 //   - --workdir /workspace      : run from the workspace.
 //   - --cap-drop ALL            : drop all Linux capabilities.
 //   - --security-opt no-new-privileges : block privilege escalation (setuid).
@@ -114,31 +198,33 @@ func buildRunArgs(p runParams) []string {
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--workdir", workspaceMount,
-		"-v", fmt.Sprintf("%s:%s:rw,Z", p.workspace, workspaceMount),
+		"--entrypoint=",
+		"-v", fmt.Sprintf("%s:%s:%s", p.workspace, workspaceMount, nonSharedMountLabel("rw", p.runtime)),
 	}
 
 	// Read-only mounts are rendered right after the writable workspace, in the
 	// caller-supplied order, and are always :ro (never writable). Bugbot-owned
-	// dirs (Shared=false) additionally get the :Z SELinux relabel suffix for
-	// isolation; shared host dirs (Shared=true) must NOT be relabeled — see
-	// ROMount.Shared for the full rationale.
+	// dirs (Shared=false) additionally get the :Z SELinux relabel and (podman
+	// only) :U chown suffixes via nonSharedMountLabel; shared host dirs
+	// (Shared=true) must NOT be relabeled or chowned — see ROMount.Shared for
+	// the full rationale.
 	for _, m := range p.roMounts {
-		label := "ro,Z"
-		if m.Shared {
-			label = "ro"
+		label := "ro"
+		if !m.Shared {
+			label = nonSharedMountLabel("ro", p.runtime)
 		}
 		args = append(args, "-v", fmt.Sprintf("%s:%s:%s", m.HostPath, m.ContainerPath, label))
 	}
 	// Writable mounts: the trusted dependency-prefetch step's caches and
 	// operator "writable: true" local_mounts (bugbot-wjc2). Same Shared
 	// semantics as the RO loop: host-owned dirs (Shared=true, e.g. a bazel
-	// vendor dir the host also manages) must NOT be SELinux :Z relabeled —
-	// a private container context would break host-side management of the
-	// same tree.
+	// vendor dir the host also manages) must NOT be SELinux :Z relabeled or
+	// :U chowned — a private container context, or a UID change, would
+	// break host-side management of the same tree.
 	for _, m := range p.rwMounts {
-		label := "rw,Z"
-		if m.Shared {
-			label = "rw"
+		label := "rw"
+		if !m.Shared {
+			label = nonSharedMountLabel("rw", p.runtime)
 		}
 		args = append(args, "-v", fmt.Sprintf("%s:%s:%s", m.HostPath, m.ContainerPath, label))
 	}
