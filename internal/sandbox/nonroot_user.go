@@ -41,7 +41,15 @@ type containerIdentity struct {
 }
 
 // nonRootUserCache is the global probe cache keyed by runtime+"|"+image.
+// Only DEFINITIVE (ok=true) results are ever stored — see resolveNonRootUser.
 var nonRootUserCache sync.Map
+
+// probeIdentityFunc is the function resolveNonRootUser calls to perform the
+// actual probe. A package-level variable (not a hardcoded call to
+// probeContainerIdentity) so unit tests can substitute a fake and pin the
+// cache's success/failure behavior without a container runtime; production
+// code never reassigns it.
+var probeIdentityFunc = probeContainerIdentity
 
 // resolveNonRootUser resolves image's default (non-flag-overridden) UID/GID
 // under runtime, caching the result for the process lifetime. It returns
@@ -54,8 +62,13 @@ var nonRootUserCache sync.Map
 // the rest of this package's "a probe failure degrades a feature, it never
 // fails the run" convention (see e.g. readCaptureFile): a broken probe here
 // simply leaves buildRunArgs on the pre-p8y4 default behavior (no identity
-// override), reproducing the ORIGINAL non-root-USER-can't-read-/workspace
-// symptom for that one image rather than blocking every other Exec.
+// override), reproducing whatever ORIGINAL failure mode that one image had
+// without this fix — typically a permission-denied read of /workspace, but
+// for a USER UID that exceeds the invoking host user's /etc/subuid range
+// (e.g. an OpenShift-style high UID) the probe itself fails with a hard OCI
+// runtime error ("crun: setresuid ... Invalid argument") rather than a
+// read failure; either way this function degrades to no override rather
+// than blocking every other Exec.
 //
 // The probe itself: `podman run --rm --network=none --entrypoint=
 // --read-only --cap-drop ALL --security-opt no-new-privileges IMAGE sh -c
@@ -74,15 +87,29 @@ func resolveNonRootUser(ctx context.Context, runtime, image string) (uid, gid in
 		return id.uid, id.gid
 	}
 
-	id := probeContainerIdentity(ctx, runtime, image)
-	// Only cache a definitive result. Races between concurrent callers for
-	// the same never-before-seen image just probe twice; LoadOrStore keeps
-	// whichever finished first as the cached value so they agree afterward.
-	if actual, _ := nonRootUserCache.LoadOrStore(key, id); actual != nil {
-		cached := actual.(containerIdentity)
-		return cached.uid, cached.gid
+	id := probeIdentityFunc(ctx, runtime, image)
+	if !id.ok {
+		// Do NOT cache a failed probe: caching it would permanently disable
+		// the non-root-USER fix for this image, for the rest of the
+		// process lifetime, after a single TRANSIENT failure (a slow
+		// cold pull that outran nonRootUserProbeTimeout, a momentary
+		// runtime hiccup). Leaving it uncached means every later call for
+		// the same image simply retries — bounded by the same
+		// nonRootUserProbeTimeout cap each time, and self-healing once the
+		// image is warm or the transient condition clears.
+		return 0, 0
 	}
-	return id.uid, id.gid
+	// Only a DEFINITIVE result (the probe genuinely completed and its
+	// output parsed) is cached — including uid==0 (a real root-USER
+	// image: a stable answer worth remembering, needs no override either
+	// way). Races between concurrent callers for the same
+	// never-before-seen image just probe twice; LoadOrStore keeps
+	// whichever finished first as the cached value so they agree
+	// afterward — its "loaded" return is ignored deliberately, since a
+	// concurrent winner's containerIdentity is exactly as valid as ours.
+	actual, _ := nonRootUserCache.LoadOrStore(key, id)
+	cached := actual.(containerIdentity)
+	return cached.uid, cached.gid
 }
 
 // probeContainerIdentity runs the actual `id -u`/`id -g` probe. Split out

@@ -344,6 +344,29 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	p.workspace = ws
 	p.containerName = "bugbot-" + randToken()
 
+	// Resolve a non-root image USER to its numeric uid/gid so buildRunArgs
+	// can pass podman the exact "--userns=keep-id:uid=,gid=" identity that
+	// mapping needs (see buildRunArgs' doc comment for the full mechanism).
+	// Best-effort and cheap after the first call per image (cached): a
+	// failed/skipped probe just leaves containerUID at its zero value, so
+	// buildRunArgs adds no identity override and this Exec behaves exactly
+	// as it did before bugbot-p8y4 for that image.
+	//
+	// Deliberately resolved on ctx (the caller's own context, bounded only
+	// by nonRootUserProbeTimeout internally — see resolveNonRootUser), NOT
+	// on runCtx below: runCtx is bounded by the run's OWN Spec.Timeout, and
+	// callers with a short timeout exist in production — capabilities.go's
+	// ProbeCapabilities runs every probe Exec at exactly 30s, with no
+	// image pre-pull anywhere. A slow/cold-pull identity probe sharing that
+	// same 30s budget with the real command was proven (oracle review) to
+	// silently starve the command (TimedOut on a command that easily fits
+	// its own budget) and, worse, feed capabilities.go a spurious ExitCode
+	// -1 that gets permanently cached as "capability unavailable" — a
+	// silently wrong answer for the whole run, not just a slow one. This
+	// call must complete (or hit its own independent 30s cap) BEFORE the
+	// run's timeout clock (runCtx) even starts.
+	p.containerUID, p.containerGID = resolveNonRootUser(ctx, p.runtime, p.image)
+
 	timeout := spec.Timeout
 	if timeout <= 0 {
 		timeout = s.defaultTimeout
@@ -358,15 +381,6 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	// fires.
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	// Resolve a non-root image USER to its numeric uid/gid so buildRunArgs
-	// can pass podman the exact "--userns=keep-id:uid=,gid=" identity that
-	// mapping needs (see buildRunArgs' doc comment for the full mechanism).
-	// Best-effort and cheap after the first call per image (cached): a
-	// failed/skipped probe just leaves containerUID at its zero value, so
-	// buildRunArgs adds no identity override and this Exec behaves exactly
-	// as it did before bugbot-p8y4 for that image.
-	p.containerUID, p.containerGID = resolveNonRootUser(runCtx, p.runtime, p.image)
 
 	args := buildRunArgs(p)
 	cmd := exec.CommandContext(runCtx, s.runtime, args...)

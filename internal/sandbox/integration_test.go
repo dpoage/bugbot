@@ -515,14 +515,31 @@ func TestIntegrationEntrypointDoesNotMangleWorkingToolchain(t *testing.T) {
 // workspace owned by a subordinate UID the HOST-side readCaptureFile (which
 // runs as the invoking user, after the container exits) could no longer
 // read, so a provably-written file came back as "absent" with no error.
+//
+// RepoDir MUST be a real git work tree (see
+// TestIntegrationEntrypointAndNonRootUserWorkspace's doc comment): a
+// non-git RepoDir bypasses wsCache and inherits t.TempDir()'s 0755 mode
+// onto the workspace root, which stays world-readable even under the
+// rejected :U design — masking exactly the defect this test exists to
+// catch (found in oracle re-review: this test passed against a
+// reintroduced :U mechanism until this fix).
 func TestIntegrationNonRootUserCaptureFilesReadBack(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
 	s := newTestCLI(t)
 	image := buildEntrypointUserImage(t, s)
+
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "README.txt"), []byte("placeholder\n"), 0o644); err != nil {
+		t.Fatalf("seed repo file: %v", err)
+	}
+	gitInit(t, repo)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	res, err := s.Exec(ctx, Spec{
-		RepoDir:      t.TempDir(),
+		RepoDir:      repo,
 		Image:        image,
 		Cmd:          []string{"sh", "-c", "echo '<testsuites></testsuites>' > report.xml"},
 		CaptureFiles: []string{"report.xml"},
@@ -640,7 +657,15 @@ func TestIntegrationNonRootUserReusedWorkspaceSecondExec(t *testing.T) {
 // the workspace out from under workspaceProgress's host-side stat walk,
 // blinding the ceiling entirely (measured: a run wrote 241 MB past an 8 MB
 // ceiling and was never killed). Growth must still trip the ceiling here.
+//
+// RepoDir MUST be a real git work tree — see
+// TestIntegrationNonRootUserCaptureFilesReadBack's doc comment: a non-git
+// RepoDir's 0755-inherited workspace stays readable by workspaceProgress's
+// stat walk even under the rejected :U design, masking this exact defect.
 func TestIntegrationNonRootUserGrowthCeilingStillFires(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
 	rt, ok := Detect()
 	if !ok {
 		t.Skip("no container runtime detected; skipping integration test")
@@ -656,10 +681,16 @@ func TestIntegrationNonRootUserGrowthCeilingStillFires(t *testing.T) {
 	ensureImage(t, s)
 	image := buildEntrypointUserImage(t, s)
 
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "README.txt"), []byte("placeholder\n"), 0o644); err != nil {
+		t.Fatalf("seed repo file: %v", err)
+	}
+	gitInit(t, repo)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	res, err := s.Exec(ctx, Spec{
-		RepoDir: t.TempDir(),
+		RepoDir: repo,
 		Image:   image,
 		// Write ~4 MiB in one shot, comfortably past the 1 MiB ceiling.
 		Cmd: []string{"sh", "-c", "dd if=/dev/zero of=filler.bin bs=1M count=4 2>/dev/null"},

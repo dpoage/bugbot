@@ -91,3 +91,76 @@ func TestInvalidateNonRootUserCacheScopedToImage(t *testing.T) {
 	}
 	nonRootUserCache.Delete("podman|image-b:latest") // test cleanup
 }
+
+// TestResolveNonRootUserDoesNotCacheProbeFailure — oracle-review NIT turned
+// blocking-adjacent (ArgvOracleB round 2): a FAILED probe (transient — a
+// slow cold pull that outran nonRootUserProbeTimeout, a momentary runtime
+// hiccup) must NOT be cached. Caching it would permanently disable the
+// non-root-USER fix for that image for the rest of the process lifetime
+// after a single bad probe. probeIdentityFunc is swapped for a fake so this
+// is hermetic (no container runtime needed) and can count calls precisely.
+func TestResolveNonRootUserDoesNotCacheProbeFailure(t *testing.T) {
+	orig := probeIdentityFunc
+	t.Cleanup(func() { probeIdentityFunc = orig })
+
+	calls := 0
+	probeIdentityFunc = func(context.Context, string, string) containerIdentity {
+		calls++
+		return containerIdentity{} // ok=false: simulates a failed probe
+	}
+
+	const image = "test-image-cache-failure-not-persisted"
+	InvalidateNonRootUserCache(image)
+	t.Cleanup(func() { InvalidateNonRootUserCache(image) })
+
+	uid1, gid1 := resolveNonRootUser(context.Background(), "podman", image)
+	if uid1 != 0 || gid1 != 0 {
+		t.Fatalf("resolveNonRootUser (call 1) = (%d,%d), want (0,0) on a failed probe", uid1, gid1)
+	}
+	if _, hit := nonRootUserCache.Load("podman|" + image); hit {
+		t.Error("a failed probe must not be cached")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 after the first resolveNonRootUser call", calls)
+	}
+
+	// A second call must RETRY the probe (not short-circuit on a bad
+	// cache entry) — this is what makes the fix self-healing.
+	uid2, gid2 := resolveNonRootUser(context.Background(), "podman", image)
+	if uid2 != 0 || gid2 != 0 {
+		t.Fatalf("resolveNonRootUser (call 2) = (%d,%d), want (0,0) on a failed probe", uid2, gid2)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2 — the second call should have retried the probe instead of trusting a cached failure", calls)
+	}
+}
+
+// TestResolveNonRootUserCachesSuccessfulProbe: the counterpart to the test
+// above — a DEFINITIVE (ok=true) result, including a root-USER image's
+// uid==0, IS cached, so a second call for the same image never re-probes.
+func TestResolveNonRootUserCachesSuccessfulProbe(t *testing.T) {
+	orig := probeIdentityFunc
+	t.Cleanup(func() { probeIdentityFunc = orig })
+
+	calls := 0
+	probeIdentityFunc = func(context.Context, string, string) containerIdentity {
+		calls++
+		return containerIdentity{uid: 1500, gid: 1500, ok: true}
+	}
+
+	const image = "test-image-cache-success-persisted"
+	InvalidateNonRootUserCache(image)
+	t.Cleanup(func() { InvalidateNonRootUserCache(image) })
+
+	uid1, gid1 := resolveNonRootUser(context.Background(), "podman", image)
+	if uid1 != 1500 || gid1 != 1500 {
+		t.Fatalf("resolveNonRootUser (call 1) = (%d,%d), want (1500,1500)", uid1, gid1)
+	}
+	uid2, gid2 := resolveNonRootUser(context.Background(), "podman", image)
+	if uid2 != 1500 || gid2 != 1500 {
+		t.Fatalf("resolveNonRootUser (call 2) = (%d,%d), want (1500,1500) from cache", uid2, gid2)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 — the second call should have hit the cache, not re-probed", calls)
+	}
+}

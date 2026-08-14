@@ -83,15 +83,24 @@ configure outside bugbot, not something a single `docker run` invocation can
 opt into. Consequently:
 
 - `sandbox.runtime: podman` (or auto-detected podman): images with a
-  non-root `USER` work fully — the sandboxed process can read/write the
-  workspace and any RO/RW mounts exactly as a root-USER image can.
+  non-root `USER` whose UID falls within the invoking host user's
+  `/etc/subuid` range (the standard rootless-podman allocation; commonly
+  65536 UIDs, ample for any normal container `USER`) work fully — the
+  sandboxed process can read/write the workspace and any RO/RW mounts
+  exactly as a root-USER image can. An image whose `USER` UID *exceeds*
+  that range (e.g. an OpenShift-style arbitrarily-high UID such as
+  `1000670000`) fails before any command runs, with an OCI runtime error
+  (`crun: setresuid to '<uid>': Invalid argument`) — the same way it
+  already fails on unmodified `main`, so this is a resolution gap for an
+  unusual image shape, not a regression.
 - `sandbox.runtime: docker`: a non-root-`USER` image cannot read the
   workspace. The run fails comprehensibly (a `mkdir`/`cat`/permission-denied
   error from inside the container, not a cryptic mount/argv failure) rather
   than silently, but it does fail. A root-`USER` (or no `USER`) image is
   completely unaffected and behaves identically to podman.
 
-If your images declare a non-root `USER`, prefer the podman runtime.
+If your images declare a non-root `USER` within the ordinary UID range,
+prefer the podman runtime.
 
 ### Allowlist-bind security model (bwrap)
 
