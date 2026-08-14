@@ -134,7 +134,7 @@ frontend).
 | Ecosystem | Detected by | Vendored means | `host` behavior | `fetch` prefetch command | Offline enforcement env | In-sandbox setup step |
 |---|---|---|---|---|---|---|
 | **Go** | `go.mod` | `vendor/modules.txt` exists → `GOFLAGS=-mod=vendor` | mount `$GOMODCACHE` at `/modcache` (read-only, `Shared=true`) | `go mod download all` into `/modcache` (writable) | `GOPROXY=off` | none |
-| **Python** | `requirements.txt` | n/a (no vendored detection) | container backend → **off** (pip HTTP cache does not materialize packages); **bwrap only**: mounts the host `python3` interpreter's `site-packages`/`dist-packages` directories read-only at their own host paths, `PYTHONPATH` set explicitly (see [bwrap dependency provisioning](#bwrap-dependency-provisioning)) | `requirements.txt` is vetted in Go (`validatePipRequirements`) *before* any container launches, using an allow-list grammar (plain PEP 508 index requirements + `--hash` fields only — see Security notes below); a manifest that passes runs `pip download -r requirements.txt --only-binary=:all: -d /depcache` into `/depcache` (writable) | `PIP_NO_INDEX=1` | `pip install --user --no-index --find-links=/depcache -r requirements.txt` |
+| **Python** | `requirements.txt` | n/a (no vendored detection) | container backend → **off** (pip HTTP cache does not materialize packages); **bwrap only**: mounts the host `python3` interpreter's `site-packages`/`dist-packages` directories read-only at their own host paths, `PYTHONPATH` set explicitly (see [bwrap dependency provisioning](#bwrap-dependency-provisioning)) | `requirements.txt` is vetted in Go (`validatePipRequirements`) *before* any container launches, using an allow-list grammar (a PEP 508 index requirement, `--hash`/`--require-hashes` fields, or a repo-relative `-r`/`-c` include — see Security notes below); a manifest that passes runs `pip download -r requirements.txt --only-binary=:all: -d /depcache` into `/depcache` (writable) | `PIP_NO_INDEX=1` | `pip install --user --no-index --find-links /depcache -r requirements.txt` |
 | **Rust** | `Cargo.toml` | `vendor/` + `.cargo/config{.toml}` with `replace-with` stanza → `CARGO_NET_OFFLINE=true` | mount `$CARGO_HOME/registry` at `/cargo/registry` (read-only, `Shared=true`); `CARGO_HOME=/cargo` | `cargo fetch [--locked]` with `CARGO_HOME=/cargo` (writable); populates `/cargo/registry` | `CARGO_NET_OFFLINE=true` | none |
 | **JS/npm** | `package.json` | `node_modules/` exists → no mounts needed | container backend → **off** (npm HTTP cache does not materialize `node_modules`); **bwrap only**: when `package-lock.json` exists, mounts the host's existing npm cache read-only at `/npmcache` and runs the same offline copy+`npm ci` step as `fetch`; no lockfile (pnpm/yarn/bare npm) → **off**, same deferral as `fetch` (see [bwrap dependency provisioning](#bwrap-dependency-provisioning)) | `npm ci --ignore-scripts --cache /npmcache` into `/npmcache` (writable) | `npm_config_offline=true` | `cp -a /npmcache /tmp/npmcache && npm ci --cache /tmp/npmcache` |
 | **C#/NuGet** | root `*.csproj` / `*.sln` / `*.fsproj` | n/a (no vendored detection in v1) | mount `$NUGET_PACKAGES` (default `~/.nuget/packages`) at `/nugetcache` (read-only, `Shared=true`); `NUGET_PACKAGES=/nugetcache` | `dotnet restore [--locked-mode]` into `/nugetcache` (writable) | none — `--network=none` is the enforcement | none |
@@ -212,8 +212,10 @@ have mount collisions:
     not a code-execution vector, but it IS a cache-provenance and
     network-egress one — a repo-controlled index redirect lets
     attacker-chosen bytes land in the bugbot-owned host wheelhouse cache
-    during the trusted online prefetch (this was also proven live: an
-    attacker `http://` index landed an arbitrary `.whl` in `/depcache`),
+    during the trusted online prefetch (this was also proven live with a
+    repo-local `file://` index: `Saved /depcache/evilwheel-0.0.1-py3-none-
+    any.whl`; a plain `http://` index was separately verified as rejected
+    by the same grammar, not as a successful bypass),
     which the later offline in-run install step then trusts via
     `--find-links`. An operator who genuinely needs a corporate index
     mirror must configure it OUTSIDE the manifest (e.g. an operator-level
