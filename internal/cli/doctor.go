@@ -427,26 +427,32 @@ const sandboxProbeTimeout = 5 * time.Second
 // informational check must never wedge doctor.
 const repoFactsTimeout = 30 * time.Second
 
-// checkBwrap checks the bwrap backend's usability: bwrap on PATH, Linux, and
-// working unprivileged user namespaces (DetectBwrap probes all three and
-// reports whichever fails with an actionable reason — acceptance criterion
-// 1), plus which resource-limit enforcement mechanism (if any) this host
-// offers (acceptance criterion 4). Bwrap absent/unusable is a hard failure,
-// same severity as a missing container runtime in checkSandbox; a missing
-// resource-limit mechanism is only hard when the operator has not opted
-// into sandbox.allow_uncapped, since that is a real "the next real run will
-// fail" condition rather than an advisory.
+// checkBwrap checks the bwrap backend's usability: bwrap on PATH, Linux, a
+// new enough bubblewrap version, a supported architecture, and working
+// unprivileged user namespaces (DetectBwrap probes all of these and reports
+// whichever fails first with an actionable reason — acceptance criterion
+// 1), which resource-limit enforcement mechanism (if any) this host offers
+// (acceptance criterion 4), and the effective syscall posture — seccomp
+// filter coverage and nested-userns policy (bugbot-6dph acceptance
+// criterion 6). Bwrap absent/unusable is a hard failure, same severity as a
+// missing container runtime in checkSandbox; a missing resource-limit
+// mechanism is only hard when the operator has not opted into
+// sandbox.allow_uncapped, since that is a real "the next real run will
+// fail" condition rather than an advisory. The syscall-posture row is
+// always informational (statusPass/statusWarn, never hard): every bwrap run
+// installs the filter unconditionally regardless of what this row reports.
 func checkBwrap(ctx context.Context, cfg config.Config) []checkResult {
 	if ok, reason := sandbox.DetectBwrap(); !ok {
 		return []checkResult{
 			{Name: "sandbox binary", Status: statusFail, Detail: reason, hard: true},
 			{Name: "sandbox resource caps", Status: statusSkip, Detail: "bwrap unavailable"},
+			{Name: "sandbox syscall posture", Status: statusSkip, Detail: "bwrap unavailable"},
 		}
 	}
 	results := []checkResult{{
 		Name:   "sandbox binary",
 		Status: statusPass,
-		Detail: "bwrap found on PATH; unprivileged user namespaces verified",
+		Detail: "bwrap found on PATH; version and unprivileged user namespaces verified",
 	}}
 	label, enforced := sandbox.DescribeBwrapCapMethod(ctx)
 	switch {
@@ -464,6 +470,21 @@ func checkBwrap(ctx context.Context, cfg config.Config) []checkResult {
 			Status: statusFail,
 			Detail: label + "; runs will fail — set sandbox.allow_uncapped to proceed uncapped instead",
 			hard:   true,
+		})
+	}
+	archLabel, deniedCount := sandbox.DescribeBwrapSeccompPosture()
+	postureDetail := fmt.Sprintf("seccomp filter installed on every run (%d syscalls denied, ERRNO; %s native + compat arch fully blocked)", deniedCount, archLabel)
+	if cfg.Sandbox.AllowNestedUserns {
+		results = append(results, checkResult{
+			Name:   "sandbox syscall posture",
+			Status: statusWarn,
+			Detail: postureDetail + "; nested user namespaces ALLOWED (sandbox.allow_nested_userns is set)",
+		})
+	} else {
+		results = append(results, checkResult{
+			Name:   "sandbox syscall posture",
+			Status: statusPass,
+			Detail: postureDetail + "; nested user namespaces blocked (--disable-userns)",
 		})
 	}
 	return results

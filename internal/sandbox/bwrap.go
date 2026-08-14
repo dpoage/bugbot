@@ -21,11 +21,21 @@ import (
 const bwrapProbeTimeout = 5 * time.Second
 
 // DetectBwrap reports whether the bwrap backend is usable on this host and,
-// when it is not, an actionable reason. Three independent conditions gate
+// when it is not, an actionable reason. Five independent conditions gate
 // usability, checked in the order a user would want to fix them:
 //  1. the host must be Linux (bwrap depends on Linux-only namespace syscalls);
-//  2. the bwrap binary must be on PATH;
-//  3. unprivileged user namespaces must actually work — some distributions
+//  2. this GOARCH must have a known AUDIT_ARCH_* mapping for the seccomp
+//     filter every bwrap run now installs (bugbot-6dph) — currently amd64 and
+//     arm64; refusing here means an unsupported architecture never silently
+//     runs a sandbox with no syscall filter at all;
+//  3. the bwrap binary must be on PATH;
+//  4. that binary must be new enough: --add-seccomp-fd, --disable-userns, and
+//     --assert-userns-disabled were all added together in bubblewrap 0.8.0,
+//     which every bwrap run now depends on (bugbot-6dph) — an older binary
+//     would otherwise fail per-run with "bwrap: Unknown option" instead of
+//     failing loudly at detection time (this same probe also covers the
+//     0.5.0 floor --size needs, folding in bugbot-25k0's gap);
+//  5. unprivileged user namespaces must actually work — some distributions
 //     ship bwrap but disable unprivileged userns via sysctl
 //     (kernel.unprivileged_userns_clone=0) or an AppArmor profile
 //     (Ubuntu 24.04's default "restrict unprivileged user namespaces"), in
@@ -38,14 +48,107 @@ func DetectBwrap() (ok bool, reason string) {
 	if runtime.GOOS != "linux" {
 		return false, fmt.Sprintf("bwrap backend requires Linux (running on %s); use sandbox.backend: cli (podman/docker) instead", runtime.GOOS)
 	}
+	if !bwrapSeccompArchSupported() {
+		return false, fmt.Sprintf("bwrap backend's seccomp filter has no AUDIT_ARCH_* mapping for GOARCH %q (supported: amd64, arm64); every bwrap run must install a syscall filter, so this host is refused rather than run one unprotected", runtime.GOARCH)
+	}
 	path, err := exec.LookPath("bwrap")
 	if err != nil {
 		return false, "bwrap not found on PATH; install bubblewrap (e.g. `apt install bubblewrap` / `dnf install bubblewrap` / `pacman -S bubblewrap`)"
+	}
+	if v, verr := probeBwrapVersion(path); verr != nil || v.less(bwrapMinVersion) {
+		if verr != nil {
+			return false, fmt.Sprintf("could not determine bubblewrap version (%v); bubblewrap >= %s is required (seccomp filtering + --disable-userns/--assert-userns-disabled, added together in 0.8.0)", verr, bwrapMinVersion)
+		}
+		return false, fmt.Sprintf("bubblewrap %s is too old; >= %s is required (seccomp filtering + --disable-userns/--assert-userns-disabled, added together in 0.8.0 — this also covers the --size support bugbot-25k0 needs, added in 0.5.0)", v, bwrapMinVersion)
 	}
 	if err := probeBwrapUserns(path); err != nil {
 		return false, fmt.Sprintf("unprivileged user namespaces are unavailable (%v); check kernel.unprivileged_userns_clone, an AppArmor userns-restriction profile, or run as a user with CAP_SYS_ADMIN — or use sandbox.backend: cli (podman/docker) instead", err)
 	}
 	return true, ""
+}
+
+// bwrapMinVersion is the oldest bubblewrap release this backend supports:
+// --add-seccomp-fd, --disable-userns, and --assert-userns-disabled were all
+// added together in bubblewrap 0.8.0 (containers/bubblewrap#488; required
+// unconditionally from that version on by flatpak/flatpak#5084's "build:
+// Require bubblewrap 0.8.0. This lets us use its new features
+// unconditionally") — every bwrap run now depends on all three (bugbot-6dph),
+// so an older binary must be refused rather than silently running with no
+// filter and no userns guard. 0.8.0 is also comfortably past the 0.5.0 floor
+// --size needs (bugbot-25k0's detection gap), so this one probe covers both.
+var bwrapMinVersion = bwrapVersion{major: 0, minor: 8, patch: 0}
+
+// bwrapVersion is a parsed "bubblewrap X.Y.Z" version, ordered
+// lexicographically by (major, minor, patch).
+type bwrapVersion struct{ major, minor, patch int }
+
+func (v bwrapVersion) String() string { return fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch) }
+
+// less reports whether v predates other — used to compare a probed version
+// against bwrapMinVersion.
+func (v bwrapVersion) less(other bwrapVersion) bool {
+	if v.major != other.major {
+		return v.major < other.major
+	}
+	if v.minor != other.minor {
+		return v.minor < other.minor
+	}
+	return v.patch < other.patch
+}
+
+// probeBwrapVersion runs "<bwrapPath> --version" and parses its
+// "bubblewrap X.Y.Z" output within bwrapProbeTimeout, mirroring
+// probeBwrapUserns's direct-probe philosophy (measure the actual binary
+// rather than infer capability from, say, a package-manager version query
+// that may not agree with what's actually on PATH).
+func probeBwrapVersion(bwrapPath string) (bwrapVersion, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), bwrapProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bwrapPath, "--version").Output()
+	if err != nil {
+		return bwrapVersion{}, fmt.Errorf("run %s --version: %w", bwrapPath, err)
+	}
+	return parseBwrapVersion(string(out))
+}
+
+// parseBwrapVersion parses "bubblewrap X.Y.Z" (bwrap's exact --version
+// format across every release that has shipped one). Pure and
+// injected-input-testable, keeping the parsing/decision logic independently
+// verifiable from the process launch in probeBwrapVersion.
+func parseBwrapVersion(output string) (bwrapVersion, error) {
+	fields := strings.Fields(output)
+	if len(fields) < 2 || fields[0] != "bubblewrap" {
+		return bwrapVersion{}, fmt.Errorf("unrecognized `bwrap --version` output %q", strings.TrimSpace(output))
+	}
+	parts := strings.SplitN(fields[1], ".", 3)
+	if len(parts) < 2 {
+		return bwrapVersion{}, fmt.Errorf("unrecognized bubblewrap version %q", fields[1])
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return bwrapVersion{}, fmt.Errorf("unrecognized bubblewrap major version %q", parts[0])
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return bwrapVersion{}, fmt.Errorf("unrecognized bubblewrap minor version %q", parts[1])
+	}
+	patch := 0
+	if len(parts) == 3 {
+		// A trailing non-numeric suffix (e.g. a "0-dev" pre-release patch
+		// component) is tolerated: parse only the leading digit run rather
+		// than failing the whole probe over it.
+		digits := parts[2]
+		for i, r := range digits {
+			if r < '0' || r > '9' {
+				digits = digits[:i]
+				break
+			}
+		}
+		if digits != "" {
+			patch, _ = strconv.Atoi(digits)
+		}
+	}
+	return bwrapVersion{major, minor, patch}, nil
 }
 
 // probeBwrapUserns attempts the smallest possible real bwrap run — unshare
@@ -126,6 +229,15 @@ type Bwrap struct {
 	// cgroup v2 subtree is available (sandbox.allow_uncapped). Default false:
 	// Exec fails loudly instead of silently running uncapped.
 	allowUncapped bool
+	// allowNestedUserns opts the sandboxed process OUT of --disable-userns
+	// and --assert-userns-disabled (sandbox.allow_nested_userns), permitting
+	// it to create further user namespaces of its own — the one escape
+	// hatch bugbot-6dph documents for the known tradeoff: in-sandbox bazel
+	// (and some JVM/Node tooling) use userns for their own internal
+	// sandboxing. Default false: nested user namespace creation is blocked,
+	// since it is the classic kernel-exploit staging path for unprivileged
+	// code (see buildBwrapArgs' security-posture doc).
+	allowNestedUserns bool
 	// toolchainBinds are extra read-only binds (beyond fixedROAllowlist)
 	// resolved by the host-toolchain resolver, applied to every run.
 	toolchainBinds []ROMount
@@ -203,6 +315,15 @@ func WithBwrapWorkspaceGrowthCeilingMB(mb int) BwrapOption {
 // failing. Mirrors sandbox.allow_uncapped.
 func WithBwrapAllowUncapped(allow bool) BwrapOption {
 	return func(s *Bwrap) { s.allowUncapped = allow }
+}
+
+// WithBwrapAllowNestedUserns opts the sandboxed process out of
+// --disable-userns/--assert-userns-disabled, permitting it to create
+// further user namespaces of its own. Mirrors sandbox.allow_nested_userns
+// (bugbot-6dph); see Bwrap.allowNestedUserns for the security tradeoff this
+// accepts.
+func WithBwrapAllowNestedUserns(allow bool) BwrapOption {
+	return func(s *Bwrap) { s.allowNestedUserns = allow }
 }
 
 // WithBwrapToolchainBinds adds extra read-only binds (beyond fixedROAllowlist)
@@ -422,6 +543,7 @@ func (s *Bwrap) resolveBwrapParams(spec Spec) (bwrapParams, error) {
 		toolchainPathPrepend: s.toolchainPathPrepend,
 		baselinePathAppend:   s.baselinePathAppend,
 		scratchSizeBytes:     int64(s.defaultScratchSizeMB) * 1024 * 1024,
+		allowNestedUserns:    s.allowNestedUserns,
 	}, nil
 }
 
@@ -511,8 +633,22 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 	}
 	defer wrap.cleanup()
 
+	// Every bwrap run installs a seccomp filter (bugbot-6dph): the compiled
+	// BPF program is delivered as the sandbox's one and only ExtraFiles
+	// entry, landing at seccompFilterFD (fd 3) in the child — buildBwrapArgs
+	// already rendered "--add-seccomp-fd 3" into bwrapArgv above. Built
+	// fresh per run (not cached) since it is cheap (a handful of BPF
+	// instructions) and keeps the memfd's lifetime scoped to exactly one
+	// run rather than shared/racing across concurrent Execs.
+	seccompFile, err := newBwrapSeccompFile()
+	if err != nil {
+		return Result{}, fmt.Errorf("sandbox: build seccomp filter: %w", err)
+	}
+	defer func() { _ = seccompFile.Close() }()
+
 	cmd := exec.CommandContext(runCtx, wrap.name, wrap.args...)
 	setBwrapProcAttr(cmd)
+	cmd.ExtraFiles = []*os.File{seccompFile}
 
 	stdout := newCappedBuffer(s.maxOutputBytes)
 	stderr := newCappedBuffer(s.maxOutputBytes)

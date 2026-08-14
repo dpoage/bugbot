@@ -231,6 +231,16 @@ sandbox:
   # set this to true to opt into uncapped runs instead. Ignored by the
   # container backend (the runtime CLI always enforces limits itself).
   # allow_uncapped: false
+  # allow_nested_userns: bwrap-only. Every bwrap run installs a seccomp
+  # filter AND blocks the sandboxed process from creating further nested
+  # user namespaces of its own (--disable-userns) — the classic
+  # kernel-exploit staging path for unprivileged code. Set this to true only
+  # if the tool being reproduced needs userns for its OWN internal
+  # sandboxing (e.g. bazel builds running inside this sandbox, or some
+  # JVM/Node tooling) and fails without it; the syscall filter itself still
+  # applies either way — this controls ONLY the namespace-nesting guard.
+  # Ignored by the container backend.
+  # allow_nested_userns: false
 
 # ---------------------------------------------------------------------------
 # verify: configuration for the LLM-assisted patch-verification stage.

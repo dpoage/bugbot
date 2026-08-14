@@ -302,6 +302,21 @@ type Sandbox struct {
 	// Default false: bwrap Exec fails with an actionable error instead of
 	// silently running uncapped (see internal/sandbox/bwrap_caps.go).
 	AllowUncapped bool `yaml:"allow_uncapped"`
+	// AllowNestedUserns opts the bwrap backend's sandboxed process OUT of
+	// --disable-userns/--assert-userns-disabled, permitting it to create
+	// FURTHER user namespaces of its own (bugbot-6dph). Ignored by the
+	// container backend (podman already loads its own default seccomp
+	// profile and has no equivalent nested-userns knob here). Default
+	// false: nested user namespace creation is blocked, since it is the
+	// classic kernel-exploit staging path for unprivileged code — every
+	// bwrap run installs a syscall filter regardless of this setting; this
+	// knob controls ONLY the namespace-nesting guard, not the filter
+	// itself. The one known legitimate need is a REPRODUCED build that uses
+	// its own userns-based sandboxing internally (e.g. bazel, some JVM/Node
+	// tooling) — set this only for that case, understanding it widens the
+	// sandboxed process's syscall reach back toward pre-bugbot-6dph
+	// behavior for namespace operations specifically.
+	AllowNestedUserns bool `yaml:"allow_nested_userns"`
 	// HostToolchains is an ordered list of host toolchain names (resolved from
 	// the host's PATH, following symlink closures — see
 	// sandbox.ResolveHostToolchains) or explicit host directories, mounted

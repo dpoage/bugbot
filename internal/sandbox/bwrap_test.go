@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -76,6 +77,7 @@ func TestBwrapOptionsApplyDefaults(t *testing.T) {
 	WithBwrapPidsLimit(64)(s)
 	WithBwrapNetwork("host")(s)
 	WithBwrapAllowUncapped(true)(s)
+	WithBwrapAllowNestedUserns(true)(s)
 	WithBwrapScratchSizeMB(256)(s)
 	WithBwrapWorkspaceGrowthCeilingMB(1024)(s)
 
@@ -88,6 +90,9 @@ func TestBwrapOptionsApplyDefaults(t *testing.T) {
 	}
 	if !s.allowUncapped {
 		t.Error("allowUncapped should be true")
+	}
+	if !s.allowNestedUserns {
+		t.Error("allowNestedUserns should be true")
 	}
 	if s.defaultScratchSizeMB != 256 {
 		t.Errorf("defaultScratchSizeMB = %d, want 256", s.defaultScratchSizeMB)
@@ -126,6 +131,86 @@ func TestBwrapExecRejectsMountCollisionBeforeAnyWork(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected Exec to reject a mount colliding with the fixed allowlist")
+	}
+}
+
+// --- bubblewrap version gate (bugbot-6dph) -------------------------------
+
+func TestParseBwrapVersion(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    bwrapVersion
+		wantErr bool
+	}{
+		{"bubblewrap 0.11.0\n", bwrapVersion{0, 11, 0}, false},
+		{"bubblewrap 0.8.0", bwrapVersion{0, 8, 0}, false},
+		{"bubblewrap 1.2\n", bwrapVersion{1, 2, 0}, false},
+		// A non-numeric suffix stuck to the patch component is tolerated —
+		// only the leading digit run is parsed.
+		{"bubblewrap 0.8.0-dev\n", bwrapVersion{0, 8, 0}, false},
+		{"bubblewrap 0.9.3+deb1\n", bwrapVersion{0, 9, 3}, false},
+		{"flatpak-spawn 1.14.4\n", bwrapVersion{}, true},
+		{"", bwrapVersion{}, true},
+		{"bubblewrap notaversion\n", bwrapVersion{}, true},
+	}
+	for _, c := range cases {
+		got, err := parseBwrapVersion(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("parseBwrapVersion(%q) = %v, want error", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseBwrapVersion(%q) unexpected error: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("parseBwrapVersion(%q) = %+v, want %+v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestBwrapVersionLess(t *testing.T) {
+	cases := []struct {
+		a, b bwrapVersion
+		want bool
+	}{
+		{bwrapVersion{0, 7, 9}, bwrapVersion{0, 8, 0}, true},
+		{bwrapVersion{0, 8, 0}, bwrapVersion{0, 8, 0}, false},
+		{bwrapVersion{0, 8, 1}, bwrapVersion{0, 8, 0}, false},
+		{bwrapVersion{0, 11, 0}, bwrapVersion{0, 8, 0}, false},
+		{bwrapVersion{1, 0, 0}, bwrapVersion{0, 99, 99}, false},
+	}
+	for _, c := range cases {
+		if got := c.a.less(c.b); got != c.want {
+			t.Errorf("%+v.less(%+v) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+// TestDetectBwrapRejectsOldVersion exercises DetectBwrap's version gate
+// against a fake "bwrap" on PATH that only understands --version (reporting
+// an ancient release) — covers the "older bubblewrap lacking these flags
+// must degrade with an actionable reason naming the required version"
+// acceptance criterion without needing an actually-old bwrap binary
+// installed anywhere.
+func TestDetectBwrapRejectsOldVersion(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("bwrap is Linux-only")
+	}
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "bwrap")
+	script := "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap 0.4.1'; exit 0; fi\nexit 0\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bwrap: %v", err)
+	}
+	v, err := probeBwrapVersion(fake)
+	if err != nil {
+		t.Fatalf("probeBwrapVersion: %v", err)
+	}
+	if !v.less(bwrapMinVersion) {
+		t.Fatalf("probed version %v should be less than bwrapMinVersion %v", v, bwrapMinVersion)
 	}
 }
 

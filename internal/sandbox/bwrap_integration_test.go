@@ -167,6 +167,126 @@ func mergeROMounts(groups ...[]ROMount) []ROMount {
 	return out
 }
 
+// --- seccomp filter + nested-userns policy (bugbot-6dph) -----------------
+
+// TestBwrapSeccompFilterInstalledOnEveryRun is bugbot-6dph's headline
+// acceptance criterion, measured the same way the bead's baseline was: a
+// pre-fix bwrap run reported "Seccomp:\t0" / "Seccomp_filters:\t0" in
+// /proc/self/status. Every run must now report filter mode with at least
+// one loaded program.
+func TestBwrapSeccompFilterInstalledOnEveryRun(t *testing.T) {
+	s := newTestBwrap(t)
+	t.Cleanup(func() { _ = s.Close() })
+	shMounts, sh := shForTest(t)
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:  t.TempDir(),
+		Timeout:  15 * time.Second,
+		ROMounts: shMounts,
+		Cmd:      []string{sh, "-c", "grep -i '^Seccomp' /proc/self/status"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !strings.Contains(res.Stdout, "Seccomp:\t2") {
+		t.Fatalf("expected Seccomp: 2 (SECCOMP_MODE_FILTER); got:\n%s\nstderr:\n%s", res.Stdout, res.Stderr)
+	}
+	if strings.Contains(res.Stdout, "Seccomp_filters:\t0") {
+		t.Fatalf("expected at least one loaded seccomp filter; got:\n%s", res.Stdout)
+	}
+}
+
+// TestBwrapSeccompDeniesSyscallWithENOSYS proves the filter is actually
+// intercepting a denied syscall (not merely that some OTHER mechanism —
+// e.g. bwrap's own capability drop — happens to produce the same visible
+// failure): userfaultfd(2) is called directly via ctypes and its errno
+// checked. A plain "did the command fail" assertion cannot distinguish
+// seccomp's ENOSYS from a permission-check EPERM that would fire anyway;
+// reading the raw errno makes the distinction unambiguous.
+func TestBwrapSeccompDeniesSyscallWithENOSYS(t *testing.T) {
+	s := newTestBwrap(t)
+	t.Cleanup(func() { _ = s.Close() })
+	pyMounts, python3 := hostToolForTest(t, "python3")
+
+	script := `
+import ctypes
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+r = libc.syscall(` + userfaultfdSyscallNrForTest + `, 0)
+print("ret=%d errno=%d" % (r, ctypes.get_errno()))
+`
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:  t.TempDir(),
+		Timeout:  15 * time.Second,
+		ROMounts: pyMounts,
+		Cmd:      []string{"/bin/sh", "-c", python3("-c") + " " + shellQuoteForTest(script)},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !strings.Contains(res.Stdout, "errno=38") {
+		t.Fatalf("expected errno=38 (ENOSYS, from seccomp — not some other permission check); got stdout=%q stderr=%q", res.Stdout, res.Stderr)
+	}
+}
+
+// TestBwrapNestedUsernsBlockedByDefault is bugbot-6dph's second acceptance
+// criterion: `unshare -Un true` (unshare a new user namespace, then exit)
+// must FAIL by default. The pre-fix baseline measured this succeeding.
+func TestBwrapNestedUsernsBlockedByDefault(t *testing.T) {
+	s := newTestBwrap(t)
+	t.Cleanup(func() { _ = s.Close() })
+	unshareMounts, unshare := hostToolForTest(t, "unshare")
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:  t.TempDir(),
+		Timeout:  15 * time.Second,
+		ROMounts: unshareMounts,
+		Cmd:      []string{"/bin/sh", "-c", unshare("-Un", "true") + "; echo EXIT:$?"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if strings.Contains(res.Stdout, "EXIT:0") {
+		t.Fatalf("expected `unshare -Un true` to FAIL by default (nested userns blocked); got EXIT:0, stdout=%q stderr=%q", res.Stdout, res.Stderr)
+	}
+}
+
+// TestBwrapNestedUsernsAllowedWithOptIn is the converse of
+// TestBwrapNestedUsernsBlockedByDefault: WithBwrapAllowNestedUserns(true)
+// (sandbox.allow_nested_userns) must make the SAME probe succeed — the
+// documented escape hatch for in-sandbox bazel-style tooling.
+func TestBwrapNestedUsernsAllowedWithOptIn(t *testing.T) {
+	s := newTestBwrap(t, WithBwrapAllowNestedUserns(true))
+	t.Cleanup(func() { _ = s.Close() })
+	unshareMounts, unshare := hostToolForTest(t, "unshare")
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:  t.TempDir(),
+		Timeout:  15 * time.Second,
+		ROMounts: unshareMounts,
+		Cmd:      []string{"/bin/sh", "-c", unshare("-Un", "true") + "; echo EXIT:$?"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !strings.Contains(res.Stdout, "EXIT:0") {
+		t.Fatalf("expected `unshare -Un true` to SUCCEED under allow_nested_userns; got stdout=%q stderr=%q", res.Stdout, res.Stderr)
+	}
+}
+
+// userfaultfdSyscallNrForTest is the amd64 SYS_userfaultfd number as a
+// decimal literal embedded in a Python script string (ctypes.CDLL.syscall
+// needs a plain int, and this repo's CI targets amd64 exclusively — see
+// seccomp_syscalls_amd64.go's provenance comment for the same number).
+const userfaultfdSyscallNrForTest = "323"
+
+// shellQuoteForTest wraps s in single quotes for embedding in a `sh -c`
+// argv, escaping any literal single quote the multi-line Python script
+// might contain (none currently do, but this keeps the helper correct if
+// one ever does).
+func shellQuoteForTest(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
 // TestBwrapNetworkNoneBlocksEgress proves the network=none default actually
 // severs network access rather than merely omitting a flag: a TCP connect
 // attempt inside the sandbox must fail.

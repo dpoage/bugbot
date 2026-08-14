@@ -485,6 +485,9 @@ func newVerifySandbox(cfg config.Config) (sandbox.Sandbox, error) {
 		if cfg.Sandbox.AllowUncapped {
 			opts = append(opts, sandbox.WithBwrapAllowUncapped(true))
 		}
+		if cfg.Sandbox.AllowNestedUserns {
+			opts = append(opts, sandbox.WithBwrapAllowNestedUserns(true))
+		}
 		if len(cfg.Sandbox.HostToolchains) > 0 {
 			res, err := sandbox.ResolveHostToolchains(cfg.Sandbox.HostToolchains)
 			if err != nil {
