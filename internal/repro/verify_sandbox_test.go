@@ -80,6 +80,54 @@ func TestClassifySmoke_WorkspaceQuotaExceeded_DistinctFromPlainTimeout(t *testin
 	}
 }
 
+// TestClassifySmoke_WorkspaceFileCountExceeded is
+// TestClassifySmoke_WorkspaceQuotaExceeded's file-count analogue
+// (bugbot-gb3o): a file-count-ceiling kill must NEVER classify as
+// OK/SmokeCategoryOK either — it lands on the same SmokeCategoryEnvError,
+// gating BlocksRepro(), with Detail naming the file count (distinct from
+// the byte-size quota's Detail).
+func TestClassifySmoke_WorkspaceFileCountExceeded(t *testing.T) {
+	res := sandbox.Result{ExitCode: -1, WorkspaceFileCountExceeded: true}
+	v := classifySmoke(res, []string{"go", "vet", "./..."})
+	if v.OK {
+		t.Errorf("a file-count-killed smoke run must never report OK=true; got %+v", v)
+	}
+	if v.Category == SmokeCategoryOK {
+		t.Errorf("a file-count-killed smoke run must never classify as SmokeCategoryOK; got category=%q", v.Category)
+	}
+	if v.Category != SmokeCategoryEnvError {
+		t.Errorf("category = %q, want %q", v.Category, SmokeCategoryEnvError)
+	}
+	if !v.BlocksRepro() {
+		t.Error("a file-count kill must gate the repro stage (BlocksRepro() = false, want true)")
+	}
+	if !strings.Contains(v.Detail, "file count") {
+		t.Errorf("Detail = %q, want it to name the file count (res.KillReason())", v.Detail)
+	}
+	quota := classifySmoke(sandbox.Result{ExitCode: -1, WorkspaceQuotaExceeded: true}, []string{"go", "vet", "./..."})
+	if v.Detail == quota.Detail {
+		t.Errorf("a file-count kill's Detail must be distinct from a quota kill's; both got %q", v.Detail)
+	}
+}
+
+// TestClassifySmoke_WorkspaceQuotaExceeded_RegressionUnchangedByFileCountAddition
+// pins that the byte-size quota path's exact Category/BlocksRepro/Detail
+// are byte-identical to before bugbot-gb3o's file-count ceiling was added.
+func TestClassifySmoke_WorkspaceQuotaExceeded_RegressionUnchangedByFileCountAddition(t *testing.T) {
+	res := sandbox.Result{ExitCode: -1, WorkspaceQuotaExceeded: true}
+	v := classifySmoke(res, []string{"go", "vet", "./..."})
+	if v.Category != SmokeCategoryEnvError {
+		t.Errorf("category = %q, want %q (unchanged)", v.Category, SmokeCategoryEnvError)
+	}
+	if !v.BlocksRepro() {
+		t.Error("BlocksRepro() = false, want true (unchanged)")
+	}
+	wantDetail := "exit -1: workspace growth exceeded the configured quota (sandbox.workspace_growth_ceiling_mb)"
+	if v.Detail != wantDetail {
+		t.Errorf("Detail = %q, want %q (unchanged by the file-count addition)", v.Detail, wantDetail)
+	}
+}
+
 // TestClassifySmoke_Exit125 covers exit 125 (container runtime / shell failure).
 func TestClassifySmoke_Exit125(t *testing.T) {
 	res := sandbox.Result{ExitCode: 125, Stderr: "setup cmd failed"}

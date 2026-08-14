@@ -1012,3 +1012,73 @@ func TestInterpret_WorkspaceQuotaExceeded_DistinctFromTimedOut(t *testing.T) {
 		t.Errorf("a WorkspaceQuotaExceeded kill must produce a distinct summary from a plain timeout; both got %q", quota.summary)
 	}
 }
+
+// TestInterpret_WorkspaceFileCountExceeded_EnvironmentErrorNeverDemonstrated
+// is TestInterpret_WorkspaceQuotaExceeded_EnvironmentErrorNeverDemonstrated's
+// file-count analogue (bugbot-gb3o): a run killed by the idle watchdog's
+// workspace file-count ceiling (Result.WorkspaceFileCountExceeded) must
+// NEVER be classified as demonstrated OR as VerdictReasonNotDemonstrated.
+// It lands on VerdictReasonEnvironmentError, the same category the
+// byte-size ceiling uses, with a summary naming the file count explicitly.
+func TestInterpret_WorkspaceFileCountExceeded_EnvironmentErrorNeverDemonstrated(t *testing.T) {
+	res := sandbox.Result{
+		ExitCode:                   -1,
+		WorkspaceFileCountExceeded: true,
+		Stdout:                     "writing...\nwriting...\nwriting...\n",
+	}
+	cmd := []string{"go", "test", "./..."}
+	v := interpret(res, cmd)
+	if v.demonstrated {
+		t.Fatalf("a WorkspaceFileCountExceeded kill must never demonstrate; got demonstrated=true")
+	}
+	if v.reason != VerdictReasonEnvironmentError {
+		t.Errorf("reason = %q, want %q (a file-count-ceiling kill is an infra/host-resource problem, not a stall or a non-reproduction)",
+			v.reason, VerdictReasonEnvironmentError)
+	}
+	if !strings.Contains(v.summary, "file count") {
+		t.Errorf("summary %q must name the file count explicitly, distinct from a generic disk-full/timeout/quota message", v.summary)
+	}
+}
+
+// TestInterpret_WorkspaceFileCountExceeded_DistinctFromTimedOutAndQuota pins
+// that a file-count-ceiling kill produces a DIFFERENT verdict summary from
+// both a plain timeout AND a byte-size quota kill — none of the three may
+// collapse into one another.
+func TestInterpret_WorkspaceFileCountExceeded_DistinctFromTimedOutAndQuota(t *testing.T) {
+	cmd := []string{"go", "test", "./..."}
+	timedOut := interpret(sandbox.Result{ExitCode: -1, TimedOut: true}, cmd)
+	quota := interpret(sandbox.Result{ExitCode: -1, WorkspaceQuotaExceeded: true}, cmd)
+	fileCount := interpret(sandbox.Result{ExitCode: -1, WorkspaceFileCountExceeded: true}, cmd)
+
+	if fileCount.reason != VerdictReasonEnvironmentError {
+		t.Fatalf("WorkspaceFileCountExceeded must classify as VerdictReasonEnvironmentError; got %q", fileCount.reason)
+	}
+	if fileCount.reason == timedOut.reason {
+		t.Errorf("a WorkspaceFileCountExceeded kill must classify differently from a plain timeout; both got reason=%q", fileCount.reason)
+	}
+	if fileCount.summary == timedOut.summary {
+		t.Errorf("a WorkspaceFileCountExceeded kill must produce a distinct summary from a plain timeout; both got %q", fileCount.summary)
+	}
+	if fileCount.summary == quota.summary {
+		t.Errorf("a WorkspaceFileCountExceeded kill must produce a distinct summary from a WorkspaceQuotaExceeded kill; both got %q", fileCount.summary)
+	}
+}
+
+// TestInterpret_WorkspaceQuotaExceeded_RegressionUnchangedByFileCountAddition
+// is a REGRESSION pin: the byte-size quota path's exact classification and
+// summary text must be byte-identical to before bugbot-gb3o's file-count
+// ceiling was added — broadening the WorkspaceQuotaExceeded condition to
+// also cover WorkspaceFileCountExceeded must never alter what a
+// WorkspaceQuotaExceeded-only Result produces.
+func TestInterpret_WorkspaceQuotaExceeded_RegressionUnchangedByFileCountAddition(t *testing.T) {
+	cmd := []string{"go", "test", "./..."}
+	res := sandbox.Result{ExitCode: -1, WorkspaceQuotaExceeded: true, Stdout: "writing...\n"}
+	v := interpret(res, cmd)
+	if v.reason != VerdictReasonEnvironmentError {
+		t.Errorf("reason = %q, want %q (unchanged)", v.reason, VerdictReasonEnvironmentError)
+	}
+	wantSummary := "workspace growth exceeded the configured quota (sandbox.workspace_growth_ceiling_mb): " + trunc(combinedOutput(res), 400)
+	if v.summary != wantSummary {
+		t.Errorf("summary = %q, want %q (unchanged by the file-count addition)", v.summary, wantSummary)
+	}
+}
