@@ -1008,6 +1008,12 @@ const sandboxVerifyTimeout = 3 * time.Minute
 // configured image and emits PASS/FAIL + category. It is only called when
 // --verify-sandbox is set. The existing cheap checkImageToolchain name-match
 // warn is always emitted; this is the authoritative live check.
+//
+// verdict.Detail already carries the exit code (an "exit N: " prefix) and a
+// head+tail-preserved excerpt (>=2000 chars, single-line-safe — embedded
+// newlines pre-collapsed by repro.classifySmoke's smokeDetail/oneLine) so
+// this can interpolate it directly without any per-callsite normalization
+// (bugbot-6835): printResults still gets exactly one aligned row per check.
 func checkSandboxVerifier(ctx context.Context, env doctorEnv, cfg config.Config) []checkResult {
 	tctx, cancel := context.WithTimeout(ctx, sandboxVerifyTimeout)
 	defer cancel()
@@ -1030,7 +1036,7 @@ func checkSandboxVerifier(ctx context.Context, env doctorEnv, cfg config.Config)
 		return []checkResult{{
 			Name:   "sandbox verifier",
 			Status: statusPass,
-			Detail: "toolchain smoke PASS (" + string(verdict.Category) + "): " + verdict.Detail,
+			Detail: fmt.Sprintf("toolchain smoke PASS (%s): %s", verdict.Category, verdict.Detail),
 		}}
 	}
 	if !verdict.BlocksRepro() {
@@ -1041,14 +1047,14 @@ func checkSandboxVerifier(ctx context.Context, env doctorEnv, cfg config.Config)
 		return []checkResult{{
 			Name:   "sandbox verifier",
 			Status: statusWarn,
-			Detail: "toolchain smoke non-blocking (" + string(verdict.Category) + ", launcher " + verdict.Launcher +
-				"): repro stage proceeds; per-finding capability gates handle plans needing this launcher. " + verdict.Detail,
+			Detail: fmt.Sprintf("toolchain smoke non-blocking (%s, launcher %s): repro stage proceeds; per-finding capability gates handle plans needing this launcher. %s",
+				verdict.Category, verdict.Launcher, verdict.Detail),
 		}}
 	}
 	return []checkResult{{
 		Name:   "sandbox verifier",
 		Status: statusFail,
-		Detail: "toolchain smoke FAIL (" + string(verdict.Category) + "): " + verdict.Detail,
+		Detail: fmt.Sprintf("toolchain smoke FAIL (%s): %s", verdict.Category, verdict.Detail),
 	}}
 }
 

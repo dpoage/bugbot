@@ -338,6 +338,145 @@ func TestBwrapExitCodeAndTimeoutFidelity(t *testing.T) {
 	}
 }
 
+// bwrapDiskFillerScript writes a NEW 4 KiB file into the current directory
+// every 50ms, up to 200 iterations (bounded so a broken watchdog fails the
+// test instead of hanging it) — the bwrap-backend counterpart of
+// cli_exec_quota_test.go's fake-podman filler loop. dd is reachable via
+// resolveBwrapBaseline's automatic "mkdir" resolution (mounts the whole
+// host coreutils output directory on store-based distros), with no extra
+// ROMounts required.
+const bwrapDiskFillerScript = `i=0
+while [ $i -lt 200 ]; do
+  dd if=/dev/zero of=hog.$i bs=4096 count=1 2>/dev/null
+  i=$((i+1))
+  sleep 0.05
+done`
+
+// TestBwrapExec_QuotaKillFidelity is the bwrap-backend counterpart of
+// cli_exec_quota_test.go's TestCLIExec_QuotaKillFidelity (bugbot-bdqf oracle
+// review B1/A-B1): a REAL bwrap run whose only activity is workspace growth
+// returns WorkspaceQuotaExceeded=true, TimedOut=false, ExitCode=-1, err=nil
+// — through the actual Bwrap.Exec code path, not a direct watchIdle call.
+func TestBwrapExec_QuotaKillFidelity(t *testing.T) {
+	s := newTestBwrap(t, WithBwrapIdleTimeout(60*time.Second))
+	s.defaultGrowthCeilingBytes = 20_000 // ~5 filler files; byte-precise, below WithBwrapWorkspaceGrowthCeilingMB's 1 MB granularity
+	t.Cleanup(func() { _ = s.Close() })
+
+	start := time.Now()
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir: t.TempDir(),
+		Cmd:     []string{"/bin/sh", "-c", bwrapDiskFillerScript},
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !res.WorkspaceQuotaExceeded {
+		t.Errorf("WorkspaceQuotaExceeded = false, want true (res=%+v)", res)
+	}
+	if res.TimedOut {
+		t.Errorf("TimedOut = true, want false — a growth-ceiling kill must never collapse into TimedOut (res=%+v)", res)
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("elapsed = %s, want well under the 30s/60s Timeout/IdleTimeout ceilings", elapsed)
+	}
+}
+
+// TestBwrapExec_QuotaKillFidelity_SpawnGateWithIdleTimeoutUnset pins the
+// watchdog spawn gate on the bwrap backend (bugbot-bdqf oracle review
+// A-B1, mutation M8's bwrap.go equivalent): the goroutine must start from
+// the growth ceiling ALONE, with IdleTimeout completely unset.
+func TestBwrapExec_QuotaKillFidelity_SpawnGateWithIdleTimeoutUnset(t *testing.T) {
+	s := newTestBwrap(t) // base sets no IdleTimeout -> defaultIdleTimeout stays 0
+	s.defaultGrowthCeilingBytes = 20_000
+	t.Cleanup(func() { _ = s.Close() })
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir: t.TempDir(),
+		Cmd:     []string{"/bin/sh", "-c", bwrapDiskFillerScript},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !res.WorkspaceQuotaExceeded {
+		t.Errorf("WorkspaceQuotaExceeded = false, want true — the watchdog must spawn from the growth ceiling alone (res=%+v)", res)
+	}
+	if res.TimedOut {
+		t.Errorf("TimedOut = true, want false (res=%+v)", res)
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	}
+}
+
+// TestBwrapExec_CallerCancellationWinsOverQuotaBreach is the bwrap-backend
+// counterpart of cli_exec_quota_test.go's
+// TestCLIExec_CallerCancellationWinsOverQuotaBreach (bugbot-bdqf oracle
+// review, fix round 2, cancellation precedence): a caller cancellation
+// landing in the same window as a real growth-ceiling breach must surface
+// as "sandbox: execution cancelled", never as WorkspaceQuotaExceeded.
+func TestBwrapExec_CallerCancellationWinsOverQuotaBreach(t *testing.T) {
+	s := newTestBwrap(t, WithBwrapIdleTimeout(60*time.Second))
+	s.defaultGrowthCeilingBytes = 5_000 // ~1-2 filler iterations blow past this
+	t.Cleanup(func() { _ = s.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	res, err := s.Exec(ctx, Spec{
+		RepoDir: t.TempDir(),
+		Cmd:     []string{"/bin/sh", "-c", bwrapDiskFillerScript},
+	})
+	if err == nil {
+		t.Fatalf("expected a cancellation error, got nil err with res=%+v", res)
+	}
+	if !strings.Contains(err.Error(), "execution cancelled") {
+		t.Errorf("error = %v, want it to mention \"execution cancelled\"", err)
+	}
+	if res.WorkspaceQuotaExceeded {
+		t.Errorf("a caller-cancelled run must never report WorkspaceQuotaExceeded, even if a breach was also detected; got %+v", res)
+	}
+}
+
+// TestBwrapExec_QuotaBaselineCapturedAfterWorkspacePrep is the bwrap
+// counterpart of cli_exec_quota_test.go's
+// TestCLIExec_QuotaBaselineCapturedAfterWorkspacePrep (bugbot-bdqf oracle
+// review, mutation M15): the growth-ceiling baseline must be captured from
+// the PREPARED workspace, not from zero — RepoDir is seeded with 50 KB
+// against a 1 KB ceiling; the command writes nothing, so any kill proves
+// the baseline was wrong.
+func TestBwrapExec_QuotaBaselineCapturedAfterWorkspacePrep(t *testing.T) {
+	s := newTestBwrap(t)
+	s.defaultGrowthCeilingBytes = 1000 // 1 KB — far below the seeded content
+	t.Cleanup(func() { _ = s.Close() })
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "big.bin"), make([]byte, 50_000), 0o644); err != nil {
+		t.Fatalf("seed repo content: %v", err)
+	}
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir: repoDir,
+		Timeout: 15 * time.Second,
+		Cmd:     []string{"/bin/sh", "-c", "true"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.WorkspaceQuotaExceeded {
+		t.Errorf("pre-existing workspace content (50 KB against a 1 KB ceiling) must NOT trip the ceiling — the baseline must be captured AFTER workspace prep, not from zero; got %+v", res)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0", res.ExitCode)
+	}
+}
+
 // goRootForTest locates a usable GOROOT on the test host, skipping if none
 // can be found — the same self-skip discipline as newTestBwrap.
 func goRootForTest(t *testing.T) string {

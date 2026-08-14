@@ -135,9 +135,20 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	eco := detectEcosystem(cmd)
 	lowOut := strings.ToLower(out)
 
-	// A timeout is an infrastructure/quality problem, not a demonstration,
-	// regardless of any partial output captured before the kill.
-	if res.TimedOut {
+	// An infrastructure kill — the absolute/idle timeout OR bugbot-bdqf's
+	// workspace-growth ceiling — is a quality/environment problem, not a
+	// demonstration, regardless of any partial output captured before the
+	// kill. A plain timeout keeps its existing VerdictReasonTimeout
+	// category (byte-identical behavior). A WorkspaceQuotaExceeded kill is
+	// classified as VerdictReasonEnvironmentError instead: it IS a
+	// disk-usage problem, the same category interpret() already uses for a
+	// genuine host disk-full marker below (defaultEnvMarkers' "no space
+	// left on device" etc.) — with a summary that names the quota
+	// explicitly so it reads distinctly from that real host-disk-full case.
+	if res.InfraKilled() {
+		if res.WorkspaceQuotaExceeded {
+			return verdict{reason: VerdictReasonEnvironmentError, summary: res.KillReason() + ": " + trunc(out, 400), ecosystem: eco.name}
+		}
 		return verdict{reason: VerdictReasonTimeout, summary: trunc(out, 400), ecosystem: eco.name}
 	}
 

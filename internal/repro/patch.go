@@ -602,8 +602,19 @@ func patchVerdict(res sandbox.Result, cmd []string) patchVerdictResult {
 	out := combinedOutput(res)
 	eco := detectEcosystem(cmd)
 
-	if res.TimedOut {
-		return patchVerdictResult{kind: patchVerdictEnvFailure, summary: trunc(out, 400), ecosystem: eco.name}
+	// Any infrastructure kill (absolute/idle timeout, or bugbot-bdqf's
+	// workspace-growth ceiling) means the test never ran to completion —
+	// env failure either way, since patchVerdict has no separate timeout
+	// category. A WorkspaceQuotaExceeded kill gets a distinct summary
+	// naming the quota instead of collapsing into a generic truncated-
+	// output message, so patch-prover diagnostics can tell a disk-filler
+	// apart from a genuine stall.
+	if res.InfraKilled() {
+		summary := trunc(out, 400)
+		if res.WorkspaceQuotaExceeded {
+			summary = res.KillReason() + ": " + summary
+		}
+		return patchVerdictResult{kind: patchVerdictEnvFailure, summary: summary, ecosystem: eco.name}
 	}
 	if res.ExitCode == 125 || res.ExitCode == 126 || res.ExitCode == 127 {
 		return patchVerdictResult{kind: patchVerdictEnvFailure, summary: trunc(out, 400), ecosystem: eco.name}

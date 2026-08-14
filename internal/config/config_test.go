@@ -982,6 +982,154 @@ func TestValidate_SandboxIdleTimeout(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// New-field tests: sandbox.scratch_size_mb and
+// sandbox.workspace_growth_ceiling_mb (bugbot-yrox, bugbot-bdqf).
+// ---------------------------------------------------------------------------
+
+// TestDefault_ScratchSizeMB verifies the default matches the container
+// backend's historical hardcoded 512m (command.go), so an unconfigured host
+// sees byte-identical tmpfs sizing to before bugbot-yrox.
+func TestDefault_ScratchSizeMB(t *testing.T) {
+	if got := Default().Sandbox.ScratchSizeMB; got != 512 {
+		t.Errorf("Default scratch_size_mb = %d, want 512", got)
+	}
+}
+
+// TestDefault_WorkspaceGrowthCeilingMB verifies the growth ceiling defaults
+// to a generous-but-real value (2 GiB) rather than 0 (disabled) — the
+// ceiling is a safety net against a disk-filler and should protect an
+// operator who never touches this knob (bugbot-bdqf).
+func TestDefault_WorkspaceGrowthCeilingMB(t *testing.T) {
+	if got := Default().Sandbox.WorkspaceGrowthCeilingMB; got != 2048 {
+		t.Errorf("Default workspace_growth_ceiling_mb = %d, want 2048", got)
+	}
+}
+
+func TestValidate_ScratchSizeMB(t *testing.T) {
+	load := func(t *testing.T) Config {
+		t.Helper()
+		cfg, err := Load(writeTemp(t, validYAML))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		return cfg
+	}
+
+	// Positive — valid.
+	cfg := load(t)
+	cfg.Sandbox.ScratchSizeMB = 256
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("scratch_size_mb=256 should be valid, got %v", err)
+	}
+
+	// Zero — rejected: unlike the growth ceiling, an unsized tmpfs is never
+	// a valid state (bugbot-yrox exists specifically to size it).
+	cfg = load(t)
+	cfg.Sandbox.ScratchSizeMB = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "scratch_size_mb") {
+		t.Errorf("scratch_size_mb=0 should be rejected with scratch_size_mb in message, got %v", err)
+	}
+
+	// Negative — rejected.
+	cfg = load(t)
+	cfg.Sandbox.ScratchSizeMB = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "scratch_size_mb") {
+		t.Errorf("scratch_size_mb=-1 should be rejected with scratch_size_mb in message, got %v", err)
+	}
+
+	// Absurdly large — rejected: an unbounded MB value would overflow
+	// int64(mb)*1024*1024 (sandbox package's byte conversion) and silently
+	// degrade to a wrapped/nonsensical byte count instead of a loud error.
+	cfg = load(t)
+	cfg.Sandbox.ScratchSizeMB = 8_796_093_022_208 // overflows int64 bytes if unchecked
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "scratch_size_mb") {
+		t.Errorf("an absurdly large scratch_size_mb should be rejected with scratch_size_mb in message, got %v", err)
+	}
+}
+
+func TestValidate_WorkspaceGrowthCeilingMB(t *testing.T) {
+	load := func(t *testing.T) Config {
+		t.Helper()
+		cfg, err := Load(writeTemp(t, validYAML))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		return cfg
+	}
+
+	// 0 disables the ceiling — valid.
+	cfg := load(t)
+	cfg.Sandbox.WorkspaceGrowthCeilingMB = 0
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("workspace_growth_ceiling_mb=0 should be valid (disabled), got %v", err)
+	}
+
+	// Positive — valid.
+	cfg = load(t)
+	cfg.Sandbox.WorkspaceGrowthCeilingMB = 1024
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("workspace_growth_ceiling_mb=1024 should be valid, got %v", err)
+	}
+
+	// Negative — rejected with a clear message.
+	cfg = load(t)
+	cfg.Sandbox.WorkspaceGrowthCeilingMB = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "workspace_growth_ceiling_mb") {
+		t.Errorf("workspace_growth_ceiling_mb=-1 should be rejected with workspace_growth_ceiling_mb in message, got %v", err)
+	}
+
+	// Absurdly large — rejected: the same overflow-guard rationale as
+	// ScratchSizeMB above; an overflowed value would silently DISABLE the
+	// ceiling (a negative byte count never exceeds any real growth), the
+	// opposite of an operator's intent when setting a huge number.
+	cfg = load(t)
+	cfg.Sandbox.WorkspaceGrowthCeilingMB = 8_796_093_022_208
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "workspace_growth_ceiling_mb") {
+		t.Errorf("an absurdly large workspace_growth_ceiling_mb should be rejected with workspace_growth_ceiling_mb in message, got %v", err)
+	}
+}
+
+// TestLoad_ScratchAndGrowthCeilingFromYAML verifies both knobs parse from
+// bugbot.yaml.
+func TestLoad_ScratchAndGrowthCeilingFromYAML(t *testing.T) {
+	yaml := validYAML + `
+sandbox:
+  scratch_size_mb: 768
+  workspace_growth_ceiling_mb: 4096
+`
+	cfg, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Sandbox.ScratchSizeMB != 768 {
+		t.Errorf("ScratchSizeMB = %d, want 768", cfg.Sandbox.ScratchSizeMB)
+	}
+	if cfg.Sandbox.WorkspaceGrowthCeilingMB != 4096 {
+		t.Errorf("WorkspaceGrowthCeilingMB = %d, want 4096", cfg.Sandbox.WorkspaceGrowthCeilingMB)
+	}
+}
+
+func TestEnvOverride_ScratchSizeMB(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_SANDBOX_SCRATCH_SIZE_MB=256"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sandbox.ScratchSizeMB != 256 {
+		t.Errorf("scratch_size_mb override = %d, want 256", cfg.Sandbox.ScratchSizeMB)
+	}
+}
+
+func TestEnvOverride_WorkspaceGrowthCeilingMB(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_SANDBOX_WORKSPACE_GROWTH_CEILING_MB=0"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sandbox.WorkspaceGrowthCeilingMB != 0 {
+		t.Errorf("workspace_growth_ceiling_mb override = %d, want 0 (disabled)", cfg.Sandbox.WorkspaceGrowthCeilingMB)
+	}
+}
+
 func TestDefault_LLMRequestTimeoutIsZero(t *testing.T) {
 	// Zero config defers to the LLM package default (llm.DefaultRequestTimeout).
 	if got := Default().LLM.RequestTimeout; got != 0 {

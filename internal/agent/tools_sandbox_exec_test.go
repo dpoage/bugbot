@@ -357,6 +357,33 @@ func TestRenderSandboxResult_EmptyStreams(t *testing.T) {
 	}
 }
 
+// TestRenderSandboxResult_WorkspaceQuotaExceeded pins bugbot-bdqf: a
+// growth-ceiling kill must render its distinct reason (via
+// sandbox.Result.KillReason) rather than the bare, contextless
+// "exit_code=-1 timed_out=false" a plain non-kill exit would produce —
+// otherwise the model reading the tool output has no way to tell a
+// disk-filler kill apart from a signal death it caused itself.
+func TestRenderSandboxResult_WorkspaceQuotaExceeded(t *testing.T) {
+	r := sandbox.Result{
+		ExitCode:               -1,
+		WorkspaceQuotaExceeded: true,
+		Duration:               3 * time.Second,
+	}
+	out := renderSandboxResult(r)
+	if !strings.Contains(out, "exit_code=-1") {
+		t.Errorf("missing exit_code=-1: %q", out)
+	}
+	if !strings.Contains(out, "workspace_quota_exceeded=true") {
+		t.Errorf("missing workspace_quota_exceeded=true: %q", out)
+	}
+	if strings.Contains(out, "timed_out=true") {
+		t.Errorf("a quota kill must not render timed_out=true: %q", out)
+	}
+	if !strings.Contains(out, "quota") {
+		t.Errorf("expected the rendered reason to name the quota: %q", out)
+	}
+}
+
 // TestSandboxExecTool_FilesPathEscape_IsRecoverable verifies that a model-
 // supplied files path escaping the workspace is a recoverable argument error,
 // NOT a *ToolHealthError — so the runner's health sink never fires for it.

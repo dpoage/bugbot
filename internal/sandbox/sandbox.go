@@ -239,8 +239,26 @@ type Result struct {
 	Duration time.Duration
 
 	// TimedOut is true when the execution was killed because it exceeded the
-	// effective timeout.
+	// effective timeout OR because the idle watchdog observed no progress for
+	// IdleTimeout. It is left false when WorkspaceQuotaExceeded is true (see
+	// below) — the two are mutually exclusive, distinct kill reasons.
 	TimedOut bool
+
+	// WorkspaceQuotaExceeded is true when the execution was killed by the
+	// idle watchdog's workspace-growth ceiling (bugbot-bdqf): the workspace's
+	// NET regular-file size (workspaceProgress' fsSize — a write-then-delete
+	// churn nets out and never trips this) grew by more than the backend's
+	// configured growth-ceiling bytes since the run started. This is
+	// deliberately NOT reported as TimedOut — a run that is actively filling
+	// disk is making "progress" by the idle-stall definition (see cli.go's
+	// progressSnapshot doc) and would otherwise run undetected until the
+	// absolute Timeout, so callers that only check TimedOut must not mistake
+	// a disk-filler for a genuine stall or a legitimate long-running build.
+	// ExitCode is -1, exactly like a TimedOut kill, since the process was
+	// killed by us either way (or, if it happened to exit on its own after
+	// breaching the ceiling, the breach still overrides its own exit code —
+	// see checkGrowthCeiling's doc).
+	WorkspaceQuotaExceeded bool
 
 	// PrepDuration is the wall-clock time spent preparing the workspace
 	// BEFORE the container ran: resolving the pristine-cache key, ensuring
@@ -263,6 +281,40 @@ type Result struct {
 	// produced it" contract, not a manifest every run must satisfy. Nil when
 	// Spec.CaptureFiles was empty or nothing was captured.
 	Captured map[string][]byte
+}
+
+// InfraKilled reports whether Exec killed this run for an infrastructure
+// reason — the absolute/idle timeout OR the workspace-growth ceiling
+// (bugbot-bdqf) — rather than the command exiting (successfully or not) on
+// its own. Callers that classify a Result into a verdict MUST check this
+// BEFORE interpreting ExitCode/output: a run killed by us must never be
+// read as "the command completed and its output says X" (e.g.
+// misclassified as not-demonstrated or a rejected fix) regardless of which
+// specific kill reason fired. This is the shared seam internal/repro's
+// interpret()/patchVerdict()/classifyPlaybookProbe() (and any future
+// consumer, e.g. internal/repro's smoke-verdict path) use so a new kill
+// reason only needs to be taught here once, not re-derived at every
+// call site.
+func (r Result) InfraKilled() bool {
+	return r.TimedOut || r.WorkspaceQuotaExceeded
+}
+
+// KillReason returns a short, human-readable label naming why Exec killed
+// this run when InfraKilled is true, for verdict/summary messages that want
+// to name the specific cause rather than a generic "timed out" — in
+// particular so a WorkspaceQuotaExceeded kill (a disk-filler) reads
+// distinctly from a genuine idle-stall/absolute-timeout kill instead of
+// both collapsing into the same message. Returns "" when InfraKilled is
+// false.
+func (r Result) KillReason() string {
+	switch {
+	case r.WorkspaceQuotaExceeded:
+		return "workspace growth exceeded the configured quota (sandbox.workspace_growth_ceiling_mb)"
+	case r.TimedOut:
+		return "timed out"
+	default:
+		return ""
+	}
 }
 
 // Sandbox is an isolated command executor. Implementations must be safe for

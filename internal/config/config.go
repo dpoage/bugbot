@@ -216,8 +216,32 @@ type Sandbox struct {
 	// IdleTimeoutSeconds bounds time with NO sandbox progress (output or
 	// workspace filesystem activity). A run making progress continues up to
 	// TimeoutSeconds; one stalled this long is killed. 0 disables the watchdog.
-	IdleTimeoutSeconds int    `yaml:"idle_timeout_seconds"`
-	Network            string `yaml:"network"`
+	IdleTimeoutSeconds int `yaml:"idle_timeout_seconds"`
+	// ScratchSizeMB caps the size (in MB) of the writable /tmp tmpfs scratch
+	// space, honored by BOTH backends: the container backend renders it as
+	// the --tmpfs size=... mount option (internal/sandbox/command.go); bwrap
+	// renders it as --size immediately before --tmpfs (internal/sandbox/
+	// bwrap_command.go) and applies the SAME size to the tmpfs root ("/"),
+	// not just /tmp — under bwrap the root itself is an unsized tmpfs, so an
+	// unbounded root is an equally real RAM-DoS surface as an unbounded /tmp
+	// (bugbot-yrox). Must be > 0; default 512 (matching the container
+	// backend's historical hardcoded 512m).
+	ScratchSizeMB int `yaml:"scratch_size_mb"`
+	// WorkspaceGrowthCeilingMB bounds NET workspace growth (regular-file
+	// size delta, not cumulative bytes written — a write-then-delete churn
+	// nets out and never trips it; sampled by the shared idle watchdog) before
+	// the run is killed with a DISTINCT reason (Result.WorkspaceQuotaExceeded,
+	// never plain TimedOut) — independent of idle-stall detection, since a
+	// process that only fills disk keeps "resetting" the idle clock under the
+	// existing progress fingerprint and would otherwise run undetected until
+	// the absolute timeout (bugbot-bdqf). Honored by BOTH backends (CLI.Exec
+	// and Bwrap.Exec both drive the shared watchIdle). 0 disables the
+	// ceiling (idle-stall detection and the absolute timeout still apply).
+	// Default 2048 (2 GiB) — generous enough to clear a heavy toolchain
+	// build's disk footprint while still bounding a runaway write loop well
+	// short of exhausting a typical host's disk.
+	WorkspaceGrowthCeilingMB int    `yaml:"workspace_growth_ceiling_mb"`
+	Network                  string `yaml:"network"`
 	// DepStrategy selects how external module dependencies are made available
 	// to the network-none sandbox for repos that are not vendored. Vendored
 	// repos (vendor/modules.txt for Go, node_modules/ for JS, ...) are always
@@ -592,15 +616,17 @@ func Default() Config {
 			HeatOrdering: true,
 		},
 		Sandbox: Sandbox{
-			Runtime:            "podman",
-			Image:              "docker.io/library/debian:stable-slim",
-			CPUs:               2,
-			MemoryMB:           2048,
-			PidsLimit:          4096,
-			TimeoutSeconds:     600,
-			IdleTimeoutSeconds: 120,
-			Network:            "none",
-			DepStrategy:        "off",
+			Runtime:                  "podman",
+			Image:                    "docker.io/library/debian:stable-slim",
+			CPUs:                     2,
+			MemoryMB:                 2048,
+			PidsLimit:                4096,
+			TimeoutSeconds:           600,
+			IdleTimeoutSeconds:       120,
+			ScratchSizeMB:            512,
+			WorkspaceGrowthCeilingMB: 2048,
+			Network:                  "none",
+			DepStrategy:              "off",
 		},
 		Verify: Verify{
 			SandboxExec:        false,
@@ -754,6 +780,8 @@ func parseEnvBool(key, v string) (bool, error) {
 //	BUGBOT_SANDBOX_PIDS_LIMIT          (integer > 0)
 //	BUGBOT_SANDBOX_TIMEOUT_SECONDS     (integer > 0)
 //	BUGBOT_SANDBOX_IDLE_TIMEOUT_SECONDS (integer >= 0; 0 disables idle watchdog)
+//	BUGBOT_SANDBOX_SCRATCH_SIZE_MB     (integer > 0)
+//	BUGBOT_SANDBOX_WORKSPACE_GROWTH_CEILING_MB (integer >= 0; 0 disables the ceiling)
 //	BUGBOT_SCAN_CARTOGRAPHER           ("true" or "false")
 //	BUGBOT_SCAN_STATUS_NOTES           ("true" or "false")
 //	BUGBOT_SCAN_TOOL_COMPLAINTS        ("true" or "false")
@@ -901,6 +929,8 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt("BUGBOT_SANDBOX_PIDS_LIMIT", &cfg.Sandbox.PidsLimit),
 		setInt("BUGBOT_SANDBOX_TIMEOUT_SECONDS", &cfg.Sandbox.TimeoutSeconds),
 		setInt("BUGBOT_SANDBOX_IDLE_TIMEOUT_SECONDS", &cfg.Sandbox.IdleTimeoutSeconds),
+		setInt("BUGBOT_SANDBOX_SCRATCH_SIZE_MB", &cfg.Sandbox.ScratchSizeMB),
+		setInt("BUGBOT_SANDBOX_WORKSPACE_GROWTH_CEILING_MB", &cfg.Sandbox.WorkspaceGrowthCeilingMB),
 		setInt("BUGBOT_VERIFY_SANDBOX_MAX_EXECS", &cfg.Verify.SandboxMaxExecs),
 		setInt("BUGBOT_PUBLISH_TIER_MIN", &cfg.Publish.TierMin),
 		setInt("BUGBOT_REPRO_PATCH_MAX_ATTEMPTS", &cfg.Repro.PatchMaxAttempts),
@@ -1078,6 +1108,27 @@ func (c *Config) Validate() error {
 	}
 	if c.Sandbox.IdleTimeoutSeconds < 0 {
 		return fmt.Errorf("config: sandbox.idle_timeout_seconds must be >= 0 (0 disables)")
+	}
+	// maxSandboxMBKnob bounds sandbox.scratch_size_mb and
+	// sandbox.workspace_growth_ceiling_mb well below the point where
+	// int64(mb)*1024*1024 (internal/sandbox's byte conversion) could
+	// overflow — an absurd operator value would otherwise silently degrade
+	// to a wrapped/negative byte count (a disabled or nonsensical ceiling)
+	// instead of a loud config error. 10,000,000 MB (~9.5 TiB) is already
+	// far beyond any real host's disk, so this only ever catches typos/DoS
+	// input, never a legitimate value.
+	const maxSandboxMBKnob = 10_000_000
+	if c.Sandbox.ScratchSizeMB <= 0 {
+		return fmt.Errorf("config: sandbox.scratch_size_mb must be > 0")
+	}
+	if c.Sandbox.ScratchSizeMB > maxSandboxMBKnob {
+		return fmt.Errorf("config: sandbox.scratch_size_mb %d too large (max %d)", c.Sandbox.ScratchSizeMB, maxSandboxMBKnob)
+	}
+	if c.Sandbox.WorkspaceGrowthCeilingMB < 0 {
+		return fmt.Errorf("config: sandbox.workspace_growth_ceiling_mb must be >= 0 (0 disables)")
+	}
+	if c.Sandbox.WorkspaceGrowthCeilingMB > maxSandboxMBKnob {
+		return fmt.Errorf("config: sandbox.workspace_growth_ceiling_mb %d too large (max %d)", c.Sandbox.WorkspaceGrowthCeilingMB, maxSandboxMBKnob)
 	}
 	switch c.Sandbox.DepStrategy {
 	case "", "off", "host", "fetch":

@@ -68,6 +68,35 @@ func TestBuildRunArgsOmitsZeroLimits(t *testing.T) {
 	}
 }
 
+// TestBuildRunArgsSizesScratchTmpfs pins bugbot-yrox's acceptance for the
+// container backend: a configured scratchSizeMB is rendered as the --tmpfs
+// size=... mount option.
+func TestBuildRunArgsSizesScratchTmpfs(t *testing.T) {
+	args := buildRunArgs(runParams{
+		containerName: "bugbot-scratch",
+		workspace:     "/ws",
+		image:         "img",
+		network:       "none",
+		scratchSizeMB: 1024,
+		cmd:           []string{"true"},
+	})
+	mustContainSeq(t, args, "--tmpfs", "/tmp:rw,exec,nosuid,size=1024m")
+}
+
+// TestBuildRunArgsDefaultScratchSize verifies that an unset (zero-value)
+// scratchSizeMB falls back to fallbackScratchSizeMB (512m), preserving the
+// pre-bugbot-yrox hardcoded behavior byte-for-byte on an unconfigured host.
+func TestBuildRunArgsDefaultScratchSize(t *testing.T) {
+	args := buildRunArgs(runParams{
+		containerName: "bugbot-default-scratch",
+		workspace:     "/ws",
+		image:         "img",
+		network:       "none",
+		cmd:           []string{"true"},
+	})
+	mustContainSeq(t, args, "--tmpfs", "/tmp:rw,exec,nosuid,size=512m")
+}
+
 func TestBuildRunArgsRendersReadOnlyMounts(t *testing.T) {
 	args := buildRunArgs(runParams{
 		containerName: "bugbot-ro",

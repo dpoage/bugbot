@@ -170,9 +170,15 @@ func renderSandboxResult(r sandbox.Result) string {
 
 	durationMS := r.Duration.Milliseconds()
 
-	if r.TimedOut {
+	switch {
+	case r.WorkspaceQuotaExceeded:
+		// bugbot-bdqf: a growth-ceiling kill is a distinct infra reason, not
+		// a plain timeout — surface WHY so the model doesn't read a bare
+		// exit_code=-1 as evidence about the code under test.
+		b = fmt.Appendf(b, "exit_code=-1 timed_out=false workspace_quota_exceeded=true reason=%q duration=%dms\n", r.KillReason(), durationMS)
+	case r.TimedOut:
 		b = fmt.Appendf(b, "exit_code=-1 timed_out=true duration=%dms\n", durationMS)
-	} else {
+	default:
 		b = fmt.Appendf(b, "exit_code=%d timed_out=false duration=%dms\n", r.ExitCode, durationMS)
 	}
 	// Exit 125 is the sandbox's environment-failure convention (failed setup

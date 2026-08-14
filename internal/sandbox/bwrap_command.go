@@ -3,6 +3,7 @@ package sandbox
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -47,6 +48,12 @@ type bwrapParams struct {
 	// env — so core utilities stay reachable without ever shadowing
 	// allowlist binaries or operator toolchains. Empty on FHS hosts.
 	baselinePathAppend string
+	// scratchSizeBytes is the size (bytes) of the writable tmpfs scratch
+	// space, applied via bwrap's --size flag to BOTH the tmpfs root ("/")
+	// and /tmp (bugbot-yrox). <= 0 falls back to fallbackScratchSizeMB (the
+	// package constant, shared with the container backend) in
+	// buildBwrapArgs.
+	scratchSizeBytes int64
 }
 
 // fixedROAllowlist is the minimal, hardcoded set of host directories bound
@@ -123,20 +130,29 @@ var fixedROAllowlist = []string{
 //     tmpfs root has no /etc/passwd: bazel's client launcher hard-fails with
 //     "FATAL: $USER is not set" without them, and POSIX tools generally
 //     expect USER to be set (bugbot-wjc2).
-//   - tmpfs / FIRST             : the root filesystem is an empty tmpfs,
-//     established BEFORE any subpath (--proc, --dev, --tmpfs /tmp, the
-//     allowlist, workspace) is bound — bwrap applies mount operations in
+//   - --size N --tmpfs / FIRST  : the root filesystem is an empty, SIZED
+//     tmpfs, established BEFORE any subpath (--proc, --dev, --tmpfs /tmp,
+//     the allowlist, workspace) is bound — bwrap applies mount operations in
 //     argv order within one shared mount namespace, so mounting "/" AFTER
 //     something is already mounted at a subpath (e.g. /tmp) shadows that
 //     subpath's mount entirely: the new root's own (empty) /tmp directory
 //     wins, silently making the "earlier" /tmp completely inaccessible.
 //     Getting this backwards previously made HOME=/tmp — and therefore
 //     every toolchain cache that defaults under it (Go, npm, pip, ...) —
-//     unusable in every real run without ever raising an error.
+//     unusable in every real run without ever raising an error. The size is
+//     REQUIRED here too, not just on /tmp below (bugbot-yrox): every
+//     directory bwrap does not bind something else over remains part of
+//     this writable tmpfs, so an unsized root is just as real a RAM-DoS
+//     surface as an unsized /tmp under sandbox.allow_uncapped.
 //   - --proc /proc, --dev /dev  : minimal, namespace-scoped pseudo-filesystems
 //     (no host /proc or /dev is ever bound), layered onto the tmpfs root.
-//   - --tmpfs /tmp              : writable scratch space for language
+//   - --size N --tmpfs /tmp     : writable scratch space for language
 //     toolchain caches, sized like the container backend's /tmp tmpfs.
+//     bwrap's --size flag applies to the SINGLE --tmpfs invocation
+//     immediately following it, never cumulatively — hence it is repeated
+//     before each of the two --tmpfs flags above and below, both driven by
+//     the SAME p.scratchSizeBytes (sandbox.scratch_size_mb; <= 0 falls back
+//     to fallbackScratchSizeMB).
 //   - --ro-bind-try allowlist   : ONLY the fixed allowlist (fixedROAllowlist)
 //     plus any resolved toolchain/extra RO mounts are bound in, read-only —
 //     best-effort (--ro-bind-try) since non-FHS hosts genuinely lack some
@@ -150,6 +166,12 @@ var fixedROAllowlist = []string{
 // cgroups of its own — so they are applied by the caller wrapping this argv in
 // a systemd-run --user --scope or cgroup v2 invocation; see bwrap_caps.go.
 func buildBwrapArgs(p bwrapParams) []string {
+	scratchBytes := p.scratchSizeBytes
+	if scratchBytes <= 0 {
+		scratchBytes = int64(fallbackScratchSizeMB) * 1024 * 1024
+	}
+	scratchSize := strconv.FormatInt(scratchBytes, 10)
+
 	args := []string{
 		"--unshare-all",
 		"--die-with-parent",
@@ -171,10 +193,13 @@ func buildBwrapArgs(p bwrapParams) []string {
 	// (see the doc above) — everything not explicitly bound below is then
 	// absent, not merely read-only. This is the bwrap analogue of
 	// --read-only + --tmpfs /tmp on the container backend, except there is
-	// no underlying image filesystem to fall back to at all.
-	args = append(args, "--tmpfs", "/")
+	// no underlying image filesystem to fall back to at all. --size applies
+	// to the SINGLE --tmpfs that immediately follows it (bugbot-yrox), so it
+	// must be repeated here rather than hoisted once for both tmpfs mounts.
+	args = append(args, "--size", scratchSize, "--tmpfs", "/")
 
-	args = append(args, "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp")
+	args = append(args, "--proc", "/proc", "--dev", "/dev")
+	args = append(args, "--size", scratchSize, "--tmpfs", "/tmp")
 
 	for _, host := range fixedROAllowlist {
 		args = append(args, "--ro-bind-try", host, host)

@@ -655,6 +655,28 @@ func TestPatchVerdict_EnvironmentErrors(t *testing.T) {
 	}
 }
 
+// TestPatchVerdict_WorkspaceQuotaExceeded_NeverFixRejected pins the
+// patchVerdict half of bugbot-bdqf's follow-up: a run killed by the idle
+// watchdog's workspace-growth ceiling (Result.WorkspaceQuotaExceeded) must
+// classify as patchVerdictEnvFailure — the test never ran to completion, so
+// it must never be reported as patchVerdictFixRejected (that would wrongly
+// tell the prover the FIX itself failed) or patchVerdictPassed.
+func TestPatchVerdict_WorkspaceQuotaExceeded_NeverFixRejected(t *testing.T) {
+	v := patchVerdict(sandbox.Result{ExitCode: -1, WorkspaceQuotaExceeded: true}, []string{"go", "test", "./..."})
+	if v.kind != patchVerdictEnvFailure {
+		t.Errorf("kind = %v, want patchVerdictEnvFailure", v.kind)
+	}
+	if v.kind == patchVerdictFixRejected {
+		t.Errorf("a WorkspaceQuotaExceeded kill must NOT be FixRejected; got kind=%v", v.kind)
+	}
+	if v.kind == patchVerdictPassed {
+		t.Errorf("a WorkspaceQuotaExceeded kill must NOT pass; got kind=%v", v.kind)
+	}
+	if !strings.Contains(v.summary, "quota") {
+		t.Errorf("summary %q must name the quota explicitly", v.summary)
+	}
+}
+
 // TestPatchVerdict_EnvFailureTranscript_NotFixRejected is the
 // acceptance-criterion-3 regression test: a transcript that is
 // unambiguously an environment failure (cgo refusal — the same Go

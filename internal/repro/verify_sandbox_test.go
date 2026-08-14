@@ -2,11 +2,13 @@ package repro
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/sandbox"
@@ -27,6 +29,54 @@ func TestClassifySmoke_Timeout(t *testing.T) {
 	v := classifySmoke(res, []string{"go", "vet", "./..."})
 	if v.OK || v.Category != SmokeCategoryTimeout {
 		t.Errorf("timeout: got ok=%v category=%q, want ok=false category=timeout", v.OK, v.Category)
+	}
+}
+
+// TestClassifySmoke_WorkspaceQuotaExceeded pins IC-1 (bugbot-bdqf follow-up):
+// a growth-ceiling kill must NEVER classify as OK/SmokeCategoryOK (the
+// false-green WatchdogOracleB's approval was conditioned on closing) —
+// it lands on SmokeCategoryEnvError, which BlocksRepro() already treats as
+// gating (see TestSmokeVerdict_BlocksRepro), and Detail carries
+// res.KillReason() so the operator sees WHY, not just a bare exit code.
+func TestClassifySmoke_WorkspaceQuotaExceeded(t *testing.T) {
+	res := sandbox.Result{ExitCode: -1, WorkspaceQuotaExceeded: true}
+	v := classifySmoke(res, []string{"go", "vet", "./..."})
+	if v.OK {
+		t.Errorf("a quota-killed smoke run must never report OK=true; got %+v", v)
+	}
+	if v.Category == SmokeCategoryOK {
+		t.Errorf("a quota-killed smoke run must never classify as SmokeCategoryOK; got category=%q", v.Category)
+	}
+	if v.Category != SmokeCategoryEnvError {
+		t.Errorf("category = %q, want %q", v.Category, SmokeCategoryEnvError)
+	}
+	if !v.BlocksRepro() {
+		t.Error("a quota kill must gate the repro stage (BlocksRepro() = false, want true)")
+	}
+	if !strings.Contains(v.Detail, "quota") {
+		t.Errorf("Detail = %q, want it to name the quota (res.KillReason())", v.Detail)
+	}
+}
+
+// TestClassifySmoke_WorkspaceQuotaExceeded_DistinctFromPlainTimeout is the
+// negative control: a PLAIN TimedOut result (no WorkspaceQuotaExceeded)
+// must keep its existing SmokeCategoryTimeout classification and
+// BlocksRepro()=false, byte-identical to before the InfraKilled() check was
+// added — the quota branch must not leak into the ordinary timeout path.
+func TestClassifySmoke_WorkspaceQuotaExceeded_DistinctFromPlainTimeout(t *testing.T) {
+	res := sandbox.Result{ExitCode: -1, TimedOut: true, Stderr: "killed"}
+	v := classifySmoke(res, []string{"go", "vet", "./..."})
+	if v.OK {
+		t.Error("plain timeout must not be OK=true")
+	}
+	if v.Category != SmokeCategoryTimeout {
+		t.Errorf("category = %q, want %q (unchanged)", v.Category, SmokeCategoryTimeout)
+	}
+	if v.BlocksRepro() {
+		t.Error("plain timeout must NOT gate the repro stage (BlocksRepro() = true, want false) — unchanged behavior")
+	}
+	if !strings.Contains(v.Detail, "timed out") {
+		t.Errorf("Detail = %q, want it to still say \"timed out\" (unchanged wording)", v.Detail)
 	}
 }
 
@@ -165,6 +215,189 @@ func TestClassifySmoke_RealFailureNotMisread(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestClassifySmoke_ExitCodePropagated pins acceptance criterion 1
+// (bugbot-6835): every classifySmoke branch must carry res.ExitCode through
+// to SmokeVerdict.ExitCode, including the timeout branch, where
+// sandbox.Result already reports -1 per its own documented contract
+// (bwrap.go/cli.go/hostexec.go all set ExitCode=-1 on a watchdog kill) —
+// classifySmoke must not silently drop or reinterpret it. Also pins that
+// Detail actually carries the branch's real output (not just the exit
+// code) on every branch — a mutant that hardcodes an empty excerpt would
+// fail wantSubstr on every case here.
+func TestClassifySmoke_ExitCodePropagated(t *testing.T) {
+	cases := []struct {
+		name       string
+		res        sandbox.Result
+		wantExit   int
+		wantSubstr string
+	}{
+		{"clean exit", sandbox.Result{ExitCode: 0, Stdout: "ok\n"}, 0, "ok"},
+		{"timeout (sandbox.Result contract: -1)", sandbox.Result{ExitCode: -1, TimedOut: true, Stderr: "killed"}, -1, "killed"},
+		{"exit 125", sandbox.Result{ExitCode: 125, Stderr: "setup failed"}, 125, "setup failed"},
+		{"exit 127 toolchain missing", sandbox.Result{ExitCode: 127, Stderr: "go: command not found"}, 127, "command not found"},
+		{"env error", sandbox.Result{ExitCode: 1, Stderr: "read-only file system"}, 1, "read-only file system"},
+		{"dep missing", sandbox.Result{ExitCode: 1, Stderr: "no module named 'pytest'"}, 1, "no module named"},
+		{"real test failure (ok=true)", sandbox.Result{ExitCode: 1, Stdout: "FAIL\tfoo\n"}, 1, "FAIL"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := classifySmoke(tc.res, []string{"go", "test", "./..."})
+			if v.ExitCode != tc.wantExit {
+				t.Errorf("ExitCode = %d, want %d", v.ExitCode, tc.wantExit)
+			}
+			if !strings.Contains(v.Detail, fmt.Sprintf("exit %d", tc.wantExit)) {
+				t.Errorf("Detail = %q, want it to contain %q so BlocksRepro diagnostics (cli/daemon.go, engine/repro.go) see the exit code without an edit", v.Detail, fmt.Sprintf("exit %d", tc.wantExit))
+			}
+			if !strings.Contains(v.Detail, tc.wantSubstr) {
+				t.Errorf("Detail = %q, want it to contain %q (the branch's real captured output, not just a placeholder)", v.Detail, tc.wantSubstr)
+			}
+		})
+	}
+}
+
+// TestClassifySmoke_LongOutputPreservesTailAndExitCode is the bugbot-6835 /
+// bugbot-cbm5 regression test: a failing smoke run whose root-cause string
+// (e.g. the ENTRYPOINT argv-mangling diagnostic) appears ONLY after 2000+
+// chars of image-pull/setup noise must still be visible, along with the
+// exit code. A 300-char-head-only cap (the pre-fix behavior) is proven
+// impossible to reproduce: the root-cause marker sits well past byte 300.
+func TestClassifySmoke_LongOutputPreservesTailAndExitCode(t *testing.T) {
+	noise := strings.Repeat("pulling layer sha256:deadbeef... download progress noise\n", 60)
+	const rootCause = "ENTRYPOINT_ARGV_MANGLED: exec \"/bin/sh\": stat /bin/sh: no such file or directory"
+	stderr := noise + rootCause + "\n"
+	if len(stderr) <= 2000 {
+		t.Fatalf("test fixture too short: %d bytes, want > 2000 to exercise the elision path", len(stderr))
+	}
+	if idx := strings.Index(stderr, rootCause); idx < 300 {
+		t.Fatalf("test fixture invalid: root cause at byte %d, want > 300 so the old head-only 300-char cap provably could not have shown it", idx)
+	}
+
+	res := sandbox.Result{ExitCode: 127, Stderr: stderr}
+	v := classifySmoke(res, []string{"bazel", "version"})
+
+	if v.ExitCode != 127 {
+		t.Errorf("ExitCode = %d, want 127", v.ExitCode)
+	}
+	if !strings.Contains(v.Detail, rootCause) {
+		t.Errorf("Detail does not contain the root cause; got %d chars, want it to include %q\nDetail: %s", len(v.Detail), rootCause, v.Detail)
+	}
+	if len(v.Detail) < 2000 {
+		t.Errorf("Detail budget too small: got %d chars, want a generous (>=2000) head+tail excerpt per bugbot-6835", len(v.Detail))
+	}
+	if strings.Contains(v.Detail, "\n") {
+		t.Errorf("Detail contains a raw newline; it must be single-line-safe for cli/daemon.go and engine/repro.go's one-line diagnostics: %q", v.Detail)
+	}
+	// Regression guard: the OLD behavior was trunc(out, 300) — a pure head
+	// excerpt that could never contain a marker beyond byte 300. Prove the
+	// fix actually changed shape, not just added a field nobody reads.
+	oldStyleHead := trunc(res.Stdout+"\n"+res.Stderr, 300)
+	if strings.Contains(oldStyleHead, rootCause) {
+		t.Fatalf("test fixture broken: the old 300-char head-only excerpt already contains the root cause")
+	}
+}
+
+// TestClassifySmoke_DoctorOracleB_P7Scenario reproduces the exact fix-round
+// rejection: a fix-round revision kept the >=2000-char excerpt in a
+// separate FullOutput field but left the daemon/scan-facing Detail at a
+// short ~300-char (150/150 head/tail split) budget. DoctorOracleB's P7
+// probe used an 856-byte stream with the root cause at bytes 595-638,
+// followed by 218 bytes of routine epilogue — landing in NEITHER the first
+// 150 bytes NOR the last 150 bytes, so Detail elided it even though
+// FullOutput (which cli/daemon.go and engine/repro.go never render) had it.
+// Detail now carries the SAME budget as the former FullOutput, so this
+// stream (856 bytes, well under the 4096 budget) needs no elision at all —
+// the root cause must be in Detail verbatim.
+func TestClassifySmoke_DoctorOracleB_P7Scenario(t *testing.T) {
+	const rootCause = "ENTRYPOINT_ROOT_CAUSE: exec user process caused: no such file or directory"
+	prefix := strings.Repeat("x", 595)
+	epilogue := strings.Repeat("y", 218)
+	stderr := prefix + rootCause + epilogue
+	if len(stderr) != 595+len(rootCause)+218 {
+		t.Fatalf("fixture arithmetic wrong: %d bytes", len(stderr))
+	}
+	if len(stderr) >= 2000 {
+		t.Fatalf("fixture must stay under the 2000-char acceptance floor to reproduce P7 (no-elision case): got %d", len(stderr))
+	}
+
+	v := classifySmoke(sandbox.Result{ExitCode: 1, Stderr: stderr}, []string{"bazel", "version"})
+	if !strings.Contains(v.Detail, rootCause) {
+		t.Fatalf("Detail = %q, want it to contain the P7 root cause %q (DoctorOracleB fix-round finding)", v.Detail, rootCause)
+	}
+	if !strings.Contains(v.Detail, "exit 1") {
+		t.Errorf("Detail = %q, want the exit code", v.Detail)
+	}
+}
+
+// TestSmokeDetail_EmptyOutputNoDanglingArtifact pins the fix-round nit: a
+// smoke command that produced no captured output (Stdout/Stderr both
+// empty) must not leave a dangling "exit 0: " with an empty/pipe-only
+// trailer — just the bare exit code.
+func TestSmokeDetail_EmptyOutputNoDanglingArtifact(t *testing.T) {
+	v := classifySmoke(sandbox.Result{ExitCode: 0}, []string{"go", "version"})
+	if v.Detail != "exit 0" {
+		t.Errorf("Detail = %q, want exactly %q (no dangling separator for empty output)", v.Detail, "exit 0")
+	}
+}
+
+// TestHeadTailExcerpt covers the head+tail preservation helper directly:
+// short input passes through unchanged, long input keeps both ends with a
+// byte-accounted elision marker, cuts never split a UTF-8 rune, and a
+// non-positive budget returns "" rather than panicking (mirrors
+// tailExcerpt's guard).
+func TestHeadTailExcerpt(t *testing.T) {
+	t.Run("short input unchanged", func(t *testing.T) {
+		if got := headTailExcerpt("hello", 100); got != "hello" {
+			t.Errorf("headTailExcerpt(short) = %q, want unchanged", got)
+		}
+	})
+
+	t.Run("exactly at budget unchanged", func(t *testing.T) {
+		s := strings.Repeat("x", 50)
+		if got := headTailExcerpt(s, 50); got != s {
+			t.Errorf("headTailExcerpt(at-budget) changed a string exactly at budget")
+		}
+	})
+
+	t.Run("long input keeps head and tail", func(t *testing.T) {
+		head := "HEAD_MARKER_" + strings.Repeat("a", 100)
+		middle := strings.Repeat("b", 5000)
+		tail := strings.Repeat("c", 100) + "_TAIL_MARKER"
+		s := head + middle + tail
+		got := headTailExcerpt(s, 400)
+		if !strings.HasPrefix(got, "HEAD_MARKER_") {
+			t.Errorf("headTailExcerpt dropped the head: %q", got[:min(40, len(got))])
+		}
+		if !strings.HasSuffix(got, "_TAIL_MARKER") {
+			t.Errorf("headTailExcerpt dropped the tail: %q", got[max(0, len(got)-40):])
+		}
+		if !strings.Contains(got, "bytes elided") {
+			t.Errorf("headTailExcerpt missing elision marker: %q", got)
+		}
+		if strings.Contains(got, middle[:1000]) {
+			t.Errorf("headTailExcerpt kept middle content it should have elided")
+		}
+	})
+
+	t.Run("rune-safe cuts on multi-byte UTF-8", func(t *testing.T) {
+		// "€" is 3 bytes (E2 82 AC); pad so the natural budget/2 cut point
+		// would otherwise land mid-rune.
+		s := strings.Repeat("a", 199) + "€€€€€€€€€€" + strings.Repeat("b", 5000) + "€€€€€€€€€€" + strings.Repeat("c", 199)
+		got := headTailExcerpt(s, 400)
+		if !utf8.ValidString(got) {
+			t.Errorf("headTailExcerpt produced invalid UTF-8: %q", got)
+		}
+	})
+
+	t.Run("non-positive budget returns empty instead of panicking", func(t *testing.T) {
+		if got := headTailExcerpt("anything", 0); got != "" {
+			t.Errorf("headTailExcerpt(budget=0) = %q, want \"\"", got)
+		}
+		if got := headTailExcerpt("anything", -5); got != "" {
+			t.Errorf("headTailExcerpt(budget=-5) = %q, want \"\"", got)
+		}
+	})
 }
 
 // TestVerifySandbox_MockOK exercises the full VerifySandbox path against a Mock

@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -311,6 +312,15 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 	})
 	if err != nil {
 		return nil, fmt.Errorf("repro: resolve dependency strategy: %w", err)
+	}
+	// bugbot-gu0o D3: a per-ecosystem resolution degradation (e.g. an
+	// unvettable requirements.txt) does not error ResolveDeps — it is
+	// carried on deps.Warnings instead, so it must be surfaced here
+	// explicitly or it silently vanishes. This is the repro construction
+	// path; funnel.New threads the SAME Warnings into Result.Skipped,
+	// which the scan report renders (see writeReviewWarnings).
+	for _, w := range deps.Warnings {
+		slog.Default().Warn("sandbox dependency resolution degraded", "repo", repoDir, "reason", w)
 	}
 	// Prepend operator setup_cmds BEFORE ecosystem-derived setup commands so
 	// system-level dependencies (apt packages, shared libraries) are present

@@ -92,6 +92,25 @@ func TestClassifyPlaybookProbe(t *testing.T) {
 		}
 	})
 
+	// TestClassifyPlaybookProbe/workspace_quota_exceeded_is_inconclusive
+	// pins the classifyPlaybookProbe half of bugbot-bdqf's follow-up: a
+	// probe killed by the idle watchdog's workspace-growth ceiling
+	// (Result.WorkspaceQuotaExceeded) is Inconclusive, exactly like a plain
+	// timeout — the probe was cut off, not refused — but with a DISTINCT
+	// Reason naming the quota instead of the generic "timed out after %s".
+	t.Run("workspace quota exceeded is inconclusive, not a confirmed FAILS", func(t *testing.T) {
+		v := classifyPlaybookProbe(probe, sandbox.Result{WorkspaceQuotaExceeded: true}, nil, 15*time.Second)
+		if v.Verified || !v.Inconclusive {
+			t.Errorf("got %+v, want Inconclusive=true, Verified=false", v)
+		}
+		if v.Reason == "timed out after 15s" {
+			t.Errorf("a WorkspaceQuotaExceeded probe must NOT reuse the plain-timeout Reason; got %q", v.Reason)
+		}
+		if !strings.Contains(v.Reason, "quota") {
+			t.Errorf("Reason %q must name the quota explicitly", v.Reason)
+		}
+	})
+
 	t.Run("infra error", func(t *testing.T) {
 		v := classifyPlaybookProbe(probe, sandbox.Result{}, context.DeadlineExceeded, playbookProbeTimeout)
 		if v.Verified || !strings.Contains(v.Reason, "sandbox exec failed") {

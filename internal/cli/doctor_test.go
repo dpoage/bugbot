@@ -1024,6 +1024,62 @@ func TestCheckSandboxVerifier_Fail(t *testing.T) {
 	}
 }
 
+// TestCheckSandboxVerifier_ShowsExitCodeAndDetail pins the bugbot-6835
+// doctor rendering fix: checkSandboxVerifier's PASS/FAIL line must surface
+// the exit code and the fuller (head+tail-preserved, >=2000 char budget)
+// Detail content unmodified. Detail is produced single-line-safe by
+// repro.classifySmoke (embedded newlines pre-collapsed to " | " via
+// oneLine) — checkSandboxVerifier does no truncation or normalization of
+// its own, so a long, already-safe Detail must pass straight through as
+// exactly one line.
+func TestCheckSandboxVerifier_ShowsExitCodeAndDetail(t *testing.T) {
+	cfgPath := writeDoctorConfig(t)
+	// Shaped like classifySmoke's real smokeDetail output: "exit N: " prefix
+	// plus a long head+tail excerpt with embedded newlines already collapsed
+	// to " | " (never raw "\n" — that is repro's contract, not doctor's job
+	// to enforce here).
+	detail := "exit 127: pulling image layer noise... | more setup noise | ENTRYPOINT_ROOT_CAUSE: exec \"/bin/sh\": stat /bin/sh: no such file or directory"
+	env := doctorEnv{
+		configPath: cfgPath,
+		repoDir:    t.TempDir(),
+		lookupEnv:  func(string) string { return "fake-key" },
+		lookPath:   func(string) (string, error) { return "/usr/bin/podman", nil },
+		runCommand: func(_ context.Context, _ string, _ ...string) (string, error) { return "", nil },
+		verifySandbox: func(_ context.Context, _ string, _ config.Config) (repro.SmokeVerdict, error) {
+			return repro.SmokeVerdict{
+				OK:       false,
+				Category: "toolchain_missing",
+				ExitCode: 127,
+				Detail:   detail,
+			}, nil
+		},
+		out: &strings.Builder{},
+	}
+	results := runChecks(context.Background(), env, true)
+	var found *checkResult
+	for i := range results {
+		if results[i].Name == "sandbox verifier" {
+			found = &results[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("sandbox verifier result not found")
+	}
+	if found.Status != statusFail {
+		t.Errorf("status=%q, want FAIL; detail=%q", found.Status, found.Detail)
+	}
+	if !strings.Contains(found.Detail, "exit 127") {
+		t.Errorf("detail=%q missing exit code", found.Detail)
+	}
+	if !strings.Contains(found.Detail, "ENTRYPOINT_ROOT_CAUSE") {
+		t.Errorf("detail=%q missing the root-cause content from Detail", found.Detail)
+	}
+	if strings.Contains(found.Detail, "\n") {
+		t.Errorf("detail=%q contains a raw newline; printResults writes one aligned line per check result", found.Detail)
+	}
+}
+
 // TestCheckSandboxVerifier_Disabled verifies that the sandbox verifier check
 // is not emitted when runSandboxVerify=false.
 func TestCheckSandboxVerifier_Disabled(t *testing.T) {

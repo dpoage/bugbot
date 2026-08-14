@@ -269,6 +269,13 @@ auto-close the finding).`,
 			if err != nil {
 				return fmt.Errorf("bundle replay: resolve dependencies: %w", err)
 			}
+			// bugbot-gu0o D3: a per-ecosystem degradation (e.g. an
+			// unvettable requirements.txt) is carried on deps.Warnings, not
+			// an error — print it so `bundle replay` never silently drops
+			// the reason a dependency mount/prefetch was skipped.
+			for _, w := range deps.Warnings {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", w)
+			}
 
 			timeout := time.Duration(timeoutSecs) * time.Second
 			if timeout <= 0 && cfg.Sandbox.TimeoutSeconds > 0 {
