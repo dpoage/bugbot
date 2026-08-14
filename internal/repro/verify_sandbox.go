@@ -333,6 +333,21 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	out := res.Stdout + "\n" + res.Stderr
 	excerpt := headTailExcerpt(out, smokeOutputBudget)
 
+	// A bwrap seccomp architecture-mismatch kill (bugbot-6dph fix round 1)
+	// is checked FIRST, ahead of res.InfraKilled() below, for the same
+	// reason interpret()/patchVerdict() do (see seccompArchKilled's doc):
+	// must never be read as SmokeCategoryOK just because the harness
+	// happened to leave a non-empty exit code the marker cascade would
+	// otherwise interpret as a genuine toolchain response.
+	if seccompArchKilled(res, out) {
+		return SmokeVerdict{
+			OK:       false,
+			Category: SmokeCategoryEnvError,
+			ExitCode: res.ExitCode,
+			Detail:   smokeDetail(res, excerpt, seccompArchKillSummary),
+		}
+	}
+
 	// An infra kill (idle-stall/absolute timeout OR bugbot-bdqf's
 	// workspace-growth ceiling) is checked FIRST via res.InfraKilled() —
 	// the shared predicate every sandbox.Result consumer uses (see

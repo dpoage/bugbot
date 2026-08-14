@@ -53,7 +53,7 @@ func DetectBwrap() (ok bool, reason string) {
 	}
 	path, err := exec.LookPath("bwrap")
 	if err != nil {
-		return false, "bwrap not found on PATH; install bubblewrap (e.g. `apt install bubblewrap` / `dnf install bubblewrap` / `pacman -S bubblewrap`)"
+		return false, "bwrap not found on PATH" + bwrapPathPermissionHint() + "; install bubblewrap (e.g. `apt install bubblewrap` / `dnf install bubblewrap` / `pacman -S bubblewrap`)"
 	}
 	if v, verr := probeBwrapVersion(path); verr != nil || v.less(bwrapMinVersion) {
 		if verr != nil {
@@ -67,6 +67,30 @@ func DetectBwrap() (ok bool, reason string) {
 	return true, ""
 }
 
+// bwrapPathPermissionHint scans $PATH directly (exec.LookPath alone cannot
+// distinguish this: it treats "found but not executable" identically to
+// "absent", collapsing both into the same ErrNotFound) for a "bwrap" file
+// that exists but lacks the executable bit, returning an actionable
+// permissions hint naming its path — or "" when no such file exists
+// anywhere on PATH, leaving DetectBwrap's plain "not found" message
+// unchanged for the genuinely-absent case.
+func bwrapPathPermissionHint() string {
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
+			dir = "."
+		}
+		candidate := filepath.Join(dir, "bwrap")
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.Mode()&0o111 == 0 {
+			return fmt.Sprintf(" (found %s, but it is not executable — check its permissions)", candidate)
+		}
+	}
+	return ""
+}
+
 // bwrapMinVersion is the oldest bubblewrap release this backend supports:
 // --add-seccomp-fd, --disable-userns, and --assert-userns-disabled were all
 // added together in bubblewrap 0.8.0 (containers/bubblewrap#488; required
@@ -78,11 +102,24 @@ func DetectBwrap() (ok bool, reason string) {
 // --size needs (bugbot-25k0's detection gap), so this one probe covers both.
 var bwrapMinVersion = bwrapVersion{major: 0, minor: 8, patch: 0}
 
-// bwrapVersion is a parsed "bubblewrap X.Y.Z" version, ordered
-// lexicographically by (major, minor, patch).
-type bwrapVersion struct{ major, minor, patch int }
+// bwrapVersion is a parsed "bubblewrap X.Y.Z[-suffix]" version, ordered
+// lexicographically by (major, minor, patch), with a pre-release suffix
+// (rc/dev/alpha/... — anything non-numeric trailing the patch component)
+// sorting BELOW its bare release: "0.8.0-rc1" is treated as strictly less
+// than "0.8.0" itself, since an rc build predates the actual release and
+// must not be accepted as satisfying a >= floor pinned to that release.
+type bwrapVersion struct {
+	major, minor, patch int
+	pre                 bool
+}
 
-func (v bwrapVersion) String() string { return fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch) }
+func (v bwrapVersion) String() string {
+	s := fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch)
+	if v.pre {
+		s += "-pre"
+	}
+	return s
+}
 
 // less reports whether v predates other — used to compare a probed version
 // against bwrapMinVersion.
@@ -93,7 +130,16 @@ func (v bwrapVersion) less(other bwrapVersion) bool {
 	if v.minor != other.minor {
 		return v.minor < other.minor
 	}
-	return v.patch < other.patch
+	if v.patch != other.patch {
+		return v.patch < other.patch
+	}
+	// Same major.minor.patch: a pre-release predates the bare release it is
+	// a pre-release OF ("0.8.0-rc1" < "0.8.0"), but two pre-releases (or two
+	// bare releases) at the identical numeric triple are not ordered
+	// relative to each other by this parser (it has no build/rc ordinal to
+	// compare) — treated as equal, matching the prior behavior for every
+	// bare-release comparison this gate actually performs.
+	return v.pre && !other.pre
 }
 
 // probeBwrapVersion runs "<bwrapPath> --version" and parses its
@@ -133,14 +179,18 @@ func parseBwrapVersion(output string) (bwrapVersion, error) {
 		return bwrapVersion{}, fmt.Errorf("unrecognized bubblewrap minor version %q", parts[1])
 	}
 	patch := 0
+	pre := false
 	if len(parts) == 3 {
-		// A trailing non-numeric suffix (e.g. a "0-dev" pre-release patch
-		// component) is tolerated: parse only the leading digit run rather
-		// than failing the whole probe over it.
+		// A trailing non-numeric suffix ("-rc1", "-dev", "+deb1", ...)
+		// marks this a pre-release/build variant of the numeric X.Y.Z
+		// triple: tolerated (parse only the leading digit run rather than
+		// failing the whole probe over it), but recorded via pre so less()
+		// sorts it below the bare release — see the type doc.
 		digits := parts[2]
 		for i, r := range digits {
 			if r < '0' || r > '9' {
 				digits = digits[:i]
+				pre = true
 				break
 			}
 		}
@@ -148,7 +198,7 @@ func parseBwrapVersion(output string) (bwrapVersion, error) {
 			patch, _ = strconv.Atoi(digits)
 		}
 	}
-	return bwrapVersion{major, minor, patch}, nil
+	return bwrapVersion{major, minor, patch, pre}, nil
 }
 
 // probeBwrapUserns attempts the smallest possible real bwrap run — unshare

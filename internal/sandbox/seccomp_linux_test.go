@@ -71,6 +71,8 @@ func TestBuildSeccompProgramShape(t *testing.T) {
 		bpf.JumpIf{Cond: bpf.JumpEqual, Val: uint32(unix.AUDIT_ARCH_X86_64), SkipTrue: 1},
 		bpf.RetConstant{Val: unix.SECCOMP_RET_KILL_PROCESS},
 		bpf.LoadAbsolute{Off: seccompDataNrOffset, Size: 4},
+		bpf.JumpIf{Cond: bpf.JumpBitsSet, Val: x32SyscallBit, SkipTrue: 0, SkipFalse: 1},
+		bpf.RetConstant{Val: unix.SECCOMP_RET_KILL_PROCESS},
 	}
 	for _, sc := range deny {
 		wantInsts = append(wantInsts,
@@ -97,16 +99,137 @@ func TestBuildSeccompProgramShape(t *testing.T) {
 
 // TestBuildSeccompProgramEmptyDenyStillGatesArch confirms an empty deny-list
 // (never actually used in production — see bwrapDenySyscalls — but a valid
-// input this pure function must handle) still produces the arch gate plus a
-// bare ALLOW, never an empty/invalid program.
+// input this pure function must handle) still produces the arch gate plus
+// the x32 guard plus a bare ALLOW, never an empty/invalid program.
 func TestBuildSeccompProgramEmptyDenyStillGatesArch(t *testing.T) {
 	program, err := buildSeccompProgram(unix.AUDIT_ARCH_AARCH64, nil)
 	if err != nil {
 		t.Fatalf("buildSeccompProgram: %v", err)
 	}
 	raw := decodeSeccompProgram(t, program)
-	if len(raw) != 5 {
-		t.Fatalf("got %d raw instructions, want 5 (arch-load, arch-jump, kill, nr-load, allow)", len(raw))
+	if len(raw) != 7 {
+		t.Fatalf("got %d raw instructions, want 7 (arch-load, arch-jump, kill, nr-load, x32-jump, kill, allow)", len(raw))
+	}
+}
+
+// seccompDataPacket builds a synthetic "packet" byte buffer carrying nr at
+// offset 0 and arch at offset 4 (matching seccomp_data's real field
+// layout, see seccomp_linux.go's doc), for bpf.VM.Run.
+//
+// BIG-ENDIAN, deliberately NOT matching the real kernel's native (little-
+// endian on amd64/arm64) in-memory layout of struct seccomp_data:
+// golang.org/x/net/bpf's VM is built for classic packet filtering, where
+// LoadAbsolute always reads network byte order (loadCommon uses
+// binary.BigEndian — verified directly against the library source, not
+// assumed). This is purely a property of using this VM as a test
+// oracle for the FILTER PROGRAM's instruction logic (branches/compares),
+// which is byte-order-agnostic; it has no bearing on
+// buildSeccompProgram's own little-endian sock_filter ENCODING (a
+// completely separate concern, pinned by TestBuildSeccompProgramShape's
+// byte-level round trip) or on the real kernel's execution, which this
+// package's live bwrap_integration_test.go tests separately end to end.
+func seccompDataPacket(nr, arch uint32) []byte {
+	pkt := make([]byte, 64)
+	binary.BigEndian.PutUint32(pkt[0:4], nr)
+	binary.BigEndian.PutUint32(pkt[4:8], arch)
+	return pkt
+}
+
+// runSeccompProgram decodes program (buildSeccompProgram's output) and
+// executes it against a synthetic seccomp_data packet via the REAL
+// golang.org/x/net/bpf virtual machine — not a structural instruction
+// comparison — returning the raw action value (e.g.
+// unix.SECCOMP_RET_KILL_PROCESS, unix.SECCOMP_RET_ALLOW, or
+// unix.SECCOMP_RET_ERRNO|errno). bpf.Disassemble's higher-level rendering
+// of a jump (JumpEqual vs. JumpNotEqual with inverted skip fields, see
+// TestBuildSeccompProgramShape's doc) is irrelevant here: the VM executes
+// the decoded form directly, so both renderings behave identically —
+// exactly the property that makes this decode+execute round trip a valid
+// behavioral test despite that ambiguity.
+func runSeccompProgram(t *testing.T, program []byte, nr, arch uint32) uint32 {
+	t.Helper()
+	raw := decodeSeccompProgram(t, program)
+	insts, allDecoded := bpf.Disassemble(raw)
+	if !allDecoded {
+		t.Fatalf("bpf.Disassemble left unrecognized raw instructions: %#v", insts)
+	}
+	vm, err := bpf.NewVM(insts)
+	if err != nil {
+		t.Fatalf("bpf.NewVM: %v", err)
+	}
+	ret, err := vm.Run(seccompDataPacket(nr, arch))
+	if err != nil {
+		t.Fatalf("vm.Run: %v", err)
+	}
+	return uint32(ret)
+}
+
+// TestBuildSeccompProgramX32BypassClosed is oracle finding B1's required
+// regression: an x32-encoded (__X32_SYSCALL_BIT set) syscall number sharing
+// AUDIT_ARCH_X86_64 with native 64-bit must NEVER reach RET_ALLOW, even
+// when the underlying (bit-clear) number is not itself in the deny list —
+// the whole point of the guard is that it does not depend on deny-list
+// membership at all. Executed via the real BPF VM (runSeccompProgram), not
+// a structural assertion, so this fails if the guard's PLACEMENT (not just
+// its presence) is wrong — e.g. moved after the deny loop, where it would
+// no longer preempt a false ALLOW.
+func TestBuildSeccompProgramX32BypassClosed(t *testing.T) {
+	deny := []denySyscall{{"fake_a", 111}, {"fake_b", 222}}
+	program, err := buildSeccompProgram(unix.AUDIT_ARCH_X86_64, deny)
+	if err != nil {
+		t.Fatalf("buildSeccompProgram: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		nr   uint32
+	}{
+		{"x32-encoded denied nr (111 | bit30)", 111 | x32SyscallBit},
+		{"x32-encoded arbitrary nr NOT in deny list", 9999 | x32SyscallBit},
+		{"x32-encoded nr 0", 0 | x32SyscallBit},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := runSeccompProgram(t, program, c.nr, uint32(unix.AUDIT_ARCH_X86_64))
+			if got == unix.SECCOMP_RET_ALLOW {
+				t.Fatalf("x32 nr %#x reached RET_ALLOW — the x32 bypass is NOT closed", c.nr)
+			}
+			if got != unix.SECCOMP_RET_KILL_PROCESS {
+				t.Errorf("x32 nr %#x returned %#x, want RET_KILL_PROCESS (%#x)", c.nr, got, uint32(unix.SECCOMP_RET_KILL_PROCESS))
+			}
+		})
+	}
+}
+
+// TestBuildSeccompProgramVMBehavior rounds out the VM-executed behavioral
+// coverage for the non-x32 paths: a native, non-x32-bit denied syscall
+// gets ERRNO; a native, non-x32-bit, non-denied syscall gets ALLOW; any
+// syscall under a non-native arch gets killed.
+func TestBuildSeccompProgramVMBehavior(t *testing.T) {
+	deny := []denySyscall{{"fake_a", 111}, {"fake_b", 222}}
+	program, err := buildSeccompProgram(unix.AUDIT_ARCH_X86_64, deny)
+	if err != nil {
+		t.Fatalf("buildSeccompProgram: %v", err)
+	}
+
+	wantErrno := uint32(unix.SECCOMP_RET_ERRNO) | seccompDenyErrno
+	cases := []struct {
+		name     string
+		nr, arch uint32
+		want     uint32
+	}{
+		{"native denied syscall -> ERRNO", 111, uint32(unix.AUDIT_ARCH_X86_64), wantErrno},
+		{"native non-denied syscall -> ALLOW", 42, uint32(unix.AUDIT_ARCH_X86_64), unix.SECCOMP_RET_ALLOW},
+		{"compat i386 arch, native-looking nr -> KILL", 111, uint32(unix.AUDIT_ARCH_I386), unix.SECCOMP_RET_KILL_PROCESS},
+		{"spoofed/unknown arch -> KILL", 111, 0xdeadbeef, unix.SECCOMP_RET_KILL_PROCESS},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := runSeccompProgram(t, program, c.nr, c.arch)
+			if got != c.want {
+				t.Errorf("got %#x, want %#x", got, c.want)
+			}
+		})
 	}
 }
 

@@ -473,7 +473,7 @@ func checkBwrap(ctx context.Context, cfg config.Config) []checkResult {
 		})
 	}
 	archLabel, deniedCount := sandbox.DescribeBwrapSeccompPosture()
-	postureDetail := fmt.Sprintf("seccomp filter installed on every run (%d syscalls denied, ERRNO; %s native + compat arch fully blocked)", deniedCount, archLabel)
+	postureDetail := fmt.Sprintf("seccomp filter installed on every run (%d syscalls denied, ERRNO, native %s only; every non-native syscall path — compat 32-bit, x32 ABI, or any other arch — is killed outright)", deniedCount, archLabel)
 	if cfg.Sandbox.AllowNestedUserns {
 		results = append(results, checkResult{
 			Name:   "sandbox syscall posture",

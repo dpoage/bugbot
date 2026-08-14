@@ -302,6 +302,17 @@ func classifyPlaybookProbe(probe playbookProbe, res sandbox.Result, err error, t
 			Reason: util.FlattenField("sandbox exec failed: " + trunc(err.Error(), 120)),
 		}
 	}
+	// A bwrap seccomp architecture-mismatch kill (bugbot-6dph fix round 1)
+	// is checked FIRST, ahead of res.InfraKilled() below, for the same
+	// reason interpret()/patchVerdict() do (see seccompArchKilled's doc):
+	// must never be read as a confirmed "not found"/probe-failure Reason.
+	if seccompArchKilled(res, res.Stdout+" "+res.Stderr) {
+		return PlaybookVerdict{
+			Ecosystem: probe.Ecosystem, Launcher: probe.Launcher,
+			Inconclusive: true,
+			Reason:       seccompArchKillSummary,
+		}
+	}
 	// An infrastructure kill (probe cut off by its timeout, OR bugbot-bdqf's
 	// workspace-growth ceiling) is Inconclusive, NOT a confirmed FAILS — see
 	// the doc above. A WorkspaceQuotaExceeded kill gets its own distinct

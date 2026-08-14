@@ -241,6 +241,18 @@ sandbox:
   # applies either way — this controls ONLY the namespace-nesting guard.
   # Ignored by the container backend.
   # allow_nested_userns: false
+  # NOTE (bwrap backend only): every bwrap run's seccomp filter kills
+  # (SIGSYS) any process that issues a syscall under a non-native CPU
+  # instruction path — a 32-bit/compat binary, the x32 ABI, or a 64-bit
+  # process using the legacy 32-bit syscall entry point. There is no
+  # config knob to disable this (it is not gated by allow_nested_userns
+  # above, which controls namespace nesting only): a repo containing a
+  # vendored 32-bit tool, or a test that spawns one, will have that one
+  # process killed. Bugbot recognizes this signature (exit 128+SIGSYS, or
+  # "signal: bad system call" in a nested subprocess's reported output)
+  # and classifies the run as an environment/harness failure rather than
+  # a demonstrated bug — never a false finding — but the killed
+  # process's own output is unavailable either way.
 
 # ---------------------------------------------------------------------------
 # verify: configuration for the LLM-assisted patch-verification stage.

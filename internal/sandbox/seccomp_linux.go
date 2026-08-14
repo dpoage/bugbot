@@ -26,6 +26,14 @@ const (
 	seccompDataArchOffset = 4
 )
 
+// x32SyscallBit is __X32_SYSCALL_BIT (asm/unistd.h): set on every x32 ABI
+// syscall number (asm/unistd_x32.h renders each x32 nr as this bit plus the
+// underlying 32-bit number). The x32 ABI shares AUDIT_ARCH_X86_64 with
+// native 64-bit, so buildSeccompProgram's arch gate alone does not catch
+// it — see the dedicated guard there (oracle finding B1, bugbot-6dph fix
+// round 1).
+const x32SyscallBit = 0x40000000
+
 // seccompDenyErrno is the errno every denied syscall reports back to the
 // sandboxed process (bugbot-6dph --design decision 4): ENOSYS, not EPERM, so
 // a toolchain doing "does this kernel support X" feature-detection on a rare
@@ -70,13 +78,17 @@ func DescribeBwrapSeccompPosture() (archLabel string, deniedCount int) {
 // in bugbot-6dph's --design (decision 4): a syscall issued under any
 // architecture other than nativeArch — the compat 32-bit personality, or a
 // spoofed/unrecognized arch value — is killed unconditionally, without
-// consulting deny at all; a syscall issued under nativeArch is checked
-// against deny (ERRNO(ENOSYS) on a match) and allowed otherwise. Denying the
-// ENTIRE non-native architecture (rather than replicating deny under a
-// second, hand-maintained i386/ARM-EABI syscall-number table) is what
-// satisfies "handles the compat/32-bit audit arch, not just x86_64 native":
-// nothing can be allowed by omission under the arch this filter was never
-// taught to interpret.
+// consulting deny at all; a syscall issued under nativeArch AND without the
+// x32 ABI bit set (see x32SyscallBit below) is checked against deny
+// (ERRNO(ENOSYS) on a match) and allowed otherwise. Denying the ENTIRE
+// non-native architecture (rather than replicating deny under a second,
+// hand-maintained i386/ARM-EABI syscall-number table) is what satisfies
+// "handles the compat/32-bit audit arch, not just x86_64 native": nothing
+// can be allowed by omission under an arch VALUE this filter was never
+// taught to interpret. The x32 ABI is the one bypass that trick alone does
+// NOT close (oracle finding, fix round 1): x32 shares AUDIT_ARCH_X86_64
+// with native 64-bit, so it needs its own guard — see the bit-30 check
+// below.
 //
 // Pure function of its inputs, so the security-relevant program shape is
 // exercised by unit tests without a Linux kernel, bwrap, or any syscall —
@@ -86,7 +98,7 @@ func buildSeccompProgram(nativeArch uint32, deny []denySyscall) ([]byte, error) 
 		return nil, fmt.Errorf("sandbox: no native AUDIT_ARCH_* mapping available; cannot build a seccomp filter")
 	}
 
-	insts := make([]bpf.Instruction, 0, 4+2*len(deny))
+	insts := make([]bpf.Instruction, 0, 6+2*len(deny))
 	insts = append(insts,
 		// A = seccomp_data.arch
 		bpf.LoadAbsolute{Off: seccompDataArchOffset, Size: 4},
@@ -97,6 +109,24 @@ func buildSeccompProgram(nativeArch uint32, deny []denySyscall) ([]byte, error) 
 		bpf.RetConstant{Val: unix.SECCOMP_RET_KILL_PROCESS},
 		// A = seccomp_data.nr
 		bpf.LoadAbsolute{Off: seccompDataNrOffset, Size: 4},
+		// x32 ABI guard (oracle finding B1, bugbot-6dph fix round 1): the
+		// x32 ABI (64-bit registers, 32-bit-numbered syscalls) shares
+		// AUDIT_ARCH_X86_64 with native 64-bit, so the arch check above
+		// does not distinguish it. An x32 syscall's nr has
+		// __X32_SYSCALL_BIT (bit 30, 0x40000000) set and so never equals
+		// any (bit-clear) deny-list number below — unguarded, EVERY x32
+		// syscall (mount, bpf, kexec_load, ...) would silently fall
+		// through to the final RET_ALLOW. seccomp(2) is explicit that a
+		// policy must either recognize both bit-set and bit-clear numbers
+		// or reject the entire bit-set range; we take the latter — no
+		// legitimate Go/npm/pip/cargo/Maven/Gradle toolchain path issues
+		// an x32 syscall — rather than doubling the deny-list under a
+		// second, separately hand-maintained x32 numbering. A does NOT
+		// need reloading afterward: JumpBitsSet is non-destructive, so the
+		// deny loop below still compares the same nr this instruction
+		// tested.
+		bpf.JumpIf{Cond: bpf.JumpBitsSet, Val: x32SyscallBit, SkipTrue: 0, SkipFalse: 1},
+		bpf.RetConstant{Val: unix.SECCOMP_RET_KILL_PROCESS},
 	)
 	for _, sc := range deny {
 		insts = append(insts,

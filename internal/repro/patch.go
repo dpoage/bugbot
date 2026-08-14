@@ -602,6 +602,15 @@ func patchVerdict(res sandbox.Result, cmd []string) patchVerdictResult {
 	out := combinedOutput(res)
 	eco := detectEcosystem(cmd)
 
+	// A bwrap seccomp architecture-mismatch kill (bugbot-6dph fix round 1)
+	// means the patch's test never genuinely ran to completion — env
+	// failure, checked ahead of res.InfraKilled() for the same reason
+	// interpret() does (see seccompArchKilled's doc): must never be read
+	// as "the fix was applied and the test still fails."
+	if seccompArchKilled(res, out) {
+		return patchVerdictResult{kind: patchVerdictEnvFailure, summary: seccompArchKillSummary + ": " + trunc(out, 400), ecosystem: eco.name}
+	}
+
 	// Any infrastructure kill (absolute/idle timeout, or bugbot-bdqf's
 	// workspace-growth ceiling) means the test never ran to completion —
 	// env failure either way, since patchVerdict has no separate timeout
