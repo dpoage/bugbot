@@ -793,3 +793,53 @@ func TestIntegrationNonRootUserIdentityCaching(t *testing.T) {
 		t.Errorf("cached identity = %+v, want {uid:1500 gid:1500 ok:true}", v)
 	}
 }
+
+// TestIntegrationIdentityProbeDoesNotStealRunTimeout — bugbot-p8y4 fix-round
+// regression (oracle review, third pass) — pins the timeout-decoupling fix
+// itself: resolveNonRootUser must run on Exec's ORIGINAL ctx, before runCtx
+// (bounded by the run's own Spec.Timeout) is even created. Without this, a
+// slow identity probe silently starves the actual command's budget — proven
+// live to falsely report TimedOut on a command that easily fits its own
+// timeout, and, worse, to feed capabilities.go's ProbeCapabilities
+// (Spec.Timeout=30s, no image pre-pull anywhere in production) a spurious
+// ExitCode -1 that gets PERMANENTLY CACHED as "capability unavailable" —
+// a silently wrong answer for the whole run, not just a slow one.
+//
+// probeIdentityFunc is swapped for a fake that sleeps longer than the
+// Spec.Timeout below (but well under nonRootUserProbeTimeout's 30s cap),
+// so this is deterministic and fast without needing a real cold image pull
+// to reproduce the timing window.
+func TestIntegrationIdentityProbeDoesNotStealRunTimeout(t *testing.T) {
+	s := newTestCLI(t)
+	if s.Runtime() != "podman" {
+		t.Skip("identity probe decoupling only applies to the podman-gated mechanism")
+	}
+	InvalidateNonRootUserCache(testImage)
+	orig := probeIdentityFunc
+	t.Cleanup(func() { probeIdentityFunc = orig; InvalidateNonRootUserCache(testImage) })
+	probeIdentityFunc = func(ctx context.Context, runtime, image string) containerIdentity {
+		// Sleeps regardless of ctx cancellation: this fake is standing in
+		// for a slow cold pull, not testing cancellation behavior. Longer
+		// than the Spec.Timeout below, so if the probe ran on a
+		// timeout-bounded context sharing that budget, it would either be
+		// cut short (a wrong/zero identity) or blow through the run's own
+		// clock before the container ever starts.
+		time.Sleep(3 * time.Second)
+		return containerIdentity{uid: 1234, gid: 1234, ok: true}
+	}
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir: t.TempDir(),
+		Cmd:     []string{"true"},
+		Timeout: 2 * time.Second, // shorter than the probe's 3s sleep
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.TimedOut {
+		t.Error("TimedOut = true — the identity probe's 3s sleep stole the run's own 2s Spec.Timeout budget; resolveNonRootUser must run before runCtx is created, not on it")
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0 (the command should run to completion, with its own full Timeout, once probing finishes)", res.ExitCode)
+	}
+}
