@@ -331,6 +331,36 @@ type Sandbox struct {
 	// Default false: bwrap Exec fails with an actionable error instead of
 	// silently running uncapped (see internal/sandbox/bwrap_caps.go).
 	AllowUncapped bool `yaml:"allow_uncapped"`
+	// AllowNestedUserns opts the bwrap backend's sandboxed process OUT of
+	// --disable-userns/--assert-userns-disabled, permitting it to create
+	// FURTHER user namespaces of its own (bugbot-6dph). Ignored by the
+	// container backend (podman already loads its own default seccomp
+	// profile and has no equivalent nested-userns knob here). Default
+	// false: nested user namespace creation is blocked, since it is the
+	// classic kernel-exploit staging path for unprivileged code — every
+	// bwrap run installs a syscall filter regardless of this setting; this
+	// knob controls ONLY the namespace-nesting guard, not the filter
+	// itself. The one known legitimate need is a REPRODUCED build that uses
+	// its own userns-based sandboxing internally (e.g. bazel, some JVM/Node
+	// tooling) — set this only for that case, understanding it widens the
+	// sandboxed process's syscall reach back toward pre-bugbot-6dph
+	// behavior for namespace operations specifically.
+	AllowNestedUserns bool `yaml:"allow_nested_userns"`
+	// AllowNonNativeArch opts the bwrap backend's seccomp filter OUT of
+	// denying syscalls issued under a non-native CPU instruction path — the
+	// compat 32-bit personality and the x32 ABI — letting a genuinely
+	// 32-bit/compat binary actually run instead of failing every syscall it
+	// makes (bugbot-6dph fix round 2). Ignored by the container backend.
+	// Default false: every non-native syscall path is denied with ENOSYS,
+	// same action as the named deny-list, so a repo containing (or
+	// invoking) a 32-bit tool sees consistent, graceful failures rather
+	// than silent success under an unfiltered non-native path. Independent
+	// of AllowNestedUserns — the two opt-outs address different bypass
+	// surfaces. Set this only when a repo legitimately needs to run 32-bit/
+	// compat binaries inside the sandbox, understanding that ANY syscall
+	// issued via that path — not just from a trusted vendored tool — is
+	// then unfiltered.
+	AllowNonNativeArch bool `yaml:"allow_nonnative_arch"`
 	// HostToolchains is an ordered list of host toolchain names (resolved from
 	// the host's PATH, following symlink closures — see
 	// sandbox.ResolveHostToolchains) or explicit host directories, mounted

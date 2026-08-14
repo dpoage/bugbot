@@ -234,6 +234,12 @@ func bwrapRunOpts(cfg config.Config) []sandbox.BwrapOption {
 	if cfg.Sandbox.AllowUncapped {
 		opts = append(opts, sandbox.WithBwrapAllowUncapped(true))
 	}
+	if cfg.Sandbox.AllowNestedUserns {
+		opts = append(opts, sandbox.WithBwrapAllowNestedUserns(true))
+	}
+	if cfg.Sandbox.AllowNonNativeArch {
+		opts = append(opts, sandbox.WithBwrapAllowNonNativeArch(true))
+	}
 	// See sandboxRunOpts' comments — both calls are unconditional for the
 	// same reasons (ScratchSizeMB always > 0 per config.Validate;
 	// WorkspaceGrowthCeilingMB=0 is a meaningful explicit disable, not

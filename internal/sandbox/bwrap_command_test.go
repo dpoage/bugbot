@@ -16,6 +16,7 @@ func TestBuildBwrapArgsSecurityFlags(t *testing.T) {
 	})
 
 	mustContainSeq(t, args, "--unshare-all")
+	mustContainSeq(t, args, "--unshare-user")
 	mustContainSeq(t, args, "--die-with-parent")
 	mustContainSeq(t, args, "--new-session")
 	mustContainSeq(t, args, "--clearenv")
@@ -30,6 +31,12 @@ func TestBuildBwrapArgsSecurityFlags(t *testing.T) {
 	mustContainSeq(t, args, "--chdir", workspaceMount)
 	mustContainSeq(t, args, "--setenv", "FOO", "bar")
 	mustContainSeq(t, args, "--setenv", "BAZ", "qux")
+
+	// bugbot-6dph: every run installs a seccomp filter and blocks nested
+	// userns by default.
+	mustContainSeq(t, args, "--disable-userns")
+	mustContainSeq(t, args, "--assert-userns-disabled")
+	mustContainSeq(t, args, "--add-seccomp-fd", "3")
 
 	// The fixed allowlist must be present as best-effort read-only binds
 	// (--ro-bind-try: non-FHS hosts like NixOS genuinely lack some of these
@@ -130,6 +137,29 @@ func TestBuildBwrapArgsNetworkNoneVsHost(t *testing.T) {
 	host := buildBwrapArgs(bwrapParams{workspace: "/ws", network: "host", cmd: []string{"true"}})
 	mustContainSeq(t, host, "--share-net")
 	mustContainSeq(t, host, "--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf")
+}
+
+// TestBuildBwrapArgsAllowNestedUserns pins the bugbot-6dph opt-in contract:
+// by default --disable-userns/--assert-userns-disabled are present (nested
+// userns blocked); allowNestedUserns removes BOTH but leaves --unshare-user
+// and the seccomp filter untouched — the opt-in affects namespace nesting
+// policy only, never the syscall filter itself.
+func TestBuildBwrapArgsAllowNestedUserns(t *testing.T) {
+	blocked := buildBwrapArgs(bwrapParams{workspace: "/ws", cmd: []string{"true"}})
+	mustContainSeq(t, blocked, "--disable-userns")
+	mustContainSeq(t, blocked, "--assert-userns-disabled")
+
+	allowed := buildBwrapArgs(bwrapParams{workspace: "/ws", cmd: []string{"true"}, allowNestedUserns: true})
+	if slices.Contains(allowed, "--disable-userns") {
+		t.Errorf("allowNestedUserns=true must omit --disable-userns; args=%q", allowed)
+	}
+	if slices.Contains(allowed, "--assert-userns-disabled") {
+		t.Errorf("allowNestedUserns=true must omit --assert-userns-disabled; args=%q", allowed)
+	}
+	// The bwrap-level namespace and the syscall filter are unconditional —
+	// only nested-userns policy is gated by the opt-in.
+	mustContainSeq(t, allowed, "--unshare-user")
+	mustContainSeq(t, allowed, "--add-seccomp-fd", "3")
 }
 
 func TestBuildBwrapArgsWorkspaceIsOnlyWritableBind(t *testing.T) {

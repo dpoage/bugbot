@@ -248,6 +248,34 @@ sandbox:
   # set this to true to opt into uncapped runs instead. Ignored by the
   # container backend (the runtime CLI always enforces limits itself).
   # allow_uncapped: false
+  # allow_nested_userns: bwrap-only. Every bwrap run installs a seccomp
+  # filter AND blocks the sandboxed process from creating further nested
+  # user namespaces of its own (--disable-userns) — the classic
+  # kernel-exploit staging path for unprivileged code. Set this to true only
+  # if the tool being reproduced needs userns for its OWN internal
+  # sandboxing (e.g. bazel builds running inside this sandbox, or some
+  # JVM/Node tooling) and fails without it; the syscall filter itself still
+  # applies either way — this controls ONLY the namespace-nesting guard.
+  # Ignored by the container backend.
+  # allow_nested_userns: false
+  # allow_nonnative_arch: bwrap-only. Every bwrap run's seccomp filter
+  # denies (ENOSYS) any syscall issued under a non-native CPU instruction
+  # path — a 32-bit/compat binary, the x32 ABI, or a 64-bit process using
+  # the legacy 32-bit syscall entry point — with the SAME action as the
+  # named deny-list, so a 32-bit/compat tool fails its syscalls gracefully
+  # rather than being killed. There is no way to make such a tool WORK
+  # without this knob: set it to true only if a repo genuinely needs to
+  # run a 32-bit/compat binary inside the sandbox, understanding that ANY
+  # syscall issued via that path is then completely unfiltered (not just
+  # from a trusted vendored tool). Like any other sandbox-caused
+  # environment failure (a missing toolchain, ENOSPC), a 32-bit/compat
+  # tool's syscalls failing under the default (false) CAN surface as an
+  # ordinary test failure if a test asserts on that tool's success —
+  # bugbot does not (and structurally cannot) distinguish "the repo has a
+  # real bug" from "the sandboxed 32-bit tool couldn't do its job" in that
+  # case; this is a general product-level limitation, not specific to
+  # this knob.
+  # allow_nonnative_arch: false
 
 # ---------------------------------------------------------------------------
 # verify: configuration for the LLM-assisted patch-verification stage.

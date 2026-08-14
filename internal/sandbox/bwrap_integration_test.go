@@ -167,6 +167,262 @@ func mergeROMounts(groups ...[]ROMount) []ROMount {
 	return out
 }
 
+// --- seccomp filter + nested-userns policy (bugbot-6dph) -----------------
+
+// TestBwrapSeccompFilterInstalledOnEveryRun is bugbot-6dph's headline
+// acceptance criterion, measured the same way the bead's baseline was: a
+// pre-fix bwrap run reported "Seccomp:\t0" / "Seccomp_filters:\t0" in
+// /proc/self/status. Every run must now report filter mode with at least
+// one loaded program.
+func TestBwrapSeccompFilterInstalledOnEveryRun(t *testing.T) {
+	s := newTestBwrap(t)
+	t.Cleanup(func() { _ = s.Close() })
+	shMounts, sh := shForTest(t)
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:  t.TempDir(),
+		Timeout:  15 * time.Second,
+		ROMounts: shMounts,
+		Cmd:      []string{sh, "-c", "grep -i '^Seccomp' /proc/self/status"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !strings.Contains(res.Stdout, "Seccomp:\t2") {
+		t.Fatalf("expected Seccomp: 2 (SECCOMP_MODE_FILTER); got:\n%s\nstderr:\n%s", res.Stdout, res.Stderr)
+	}
+	if strings.Contains(res.Stdout, "Seccomp_filters:\t0") {
+		t.Fatalf("expected at least one loaded seccomp filter; got:\n%s", res.Stdout)
+	}
+}
+
+// TestBwrapSeccompDeniesSyscallWithENOSYS proves the filter is actually
+// intercepting a denied syscall (not merely that some OTHER mechanism —
+// e.g. bwrap's own capability drop — happens to produce the same visible
+// failure): userfaultfd(2) is called directly via ctypes and its errno
+// checked. A plain "did the command fail" assertion cannot distinguish
+// seccomp's ENOSYS from a permission-check EPERM that would fire anyway;
+// reading the raw errno makes the distinction unambiguous.
+func TestBwrapSeccompDeniesSyscallWithENOSYS(t *testing.T) {
+	s := newTestBwrap(t)
+	t.Cleanup(func() { _ = s.Close() })
+	pyMounts, python3 := hostToolForTest(t, "python3")
+
+	script := `
+import ctypes
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+r = libc.syscall(` + userfaultfdSyscallNrForTest + `, 0)
+print("ret=%d errno=%d" % (r, ctypes.get_errno()))
+`
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:  t.TempDir(),
+		Timeout:  15 * time.Second,
+		ROMounts: pyMounts,
+		Cmd:      []string{"/bin/sh", "-c", python3("-c") + " " + shellQuoteForTest(script)},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !strings.Contains(res.Stdout, "errno=38") {
+		t.Fatalf("expected errno=38 (ENOSYS, from seccomp — not some other permission check); got stdout=%q stderr=%q", res.Stdout, res.Stderr)
+	}
+}
+
+// TestBwrapNestedUsernsBlockedByDefault is bugbot-6dph's second acceptance
+// criterion: `unshare -Un true` (unshare a new user namespace, then exit)
+// must FAIL by default. The pre-fix baseline measured this succeeding.
+func TestBwrapNestedUsernsBlockedByDefault(t *testing.T) {
+	s := newTestBwrap(t)
+	t.Cleanup(func() { _ = s.Close() })
+	unshareMounts, unshare := hostToolForTest(t, "unshare")
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:  t.TempDir(),
+		Timeout:  15 * time.Second,
+		ROMounts: unshareMounts,
+		Cmd:      []string{"/bin/sh", "-c", unshare("-Un", "true") + "; echo EXIT:$?"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if strings.Contains(res.Stdout, "EXIT:0") {
+		t.Fatalf("expected `unshare -Un true` to FAIL by default (nested userns blocked); got EXIT:0, stdout=%q stderr=%q", res.Stdout, res.Stderr)
+	}
+}
+
+// TestBwrapNestedUsernsAllowedWithOptIn is the converse of
+// TestBwrapNestedUsernsBlockedByDefault: WithBwrapAllowNestedUserns(true)
+// (sandbox.allow_nested_userns) must make the SAME probe succeed — the
+// documented escape hatch for in-sandbox bazel-style tooling.
+func TestBwrapNestedUsernsAllowedWithOptIn(t *testing.T) {
+	s := newTestBwrap(t, WithBwrapAllowNestedUserns(true))
+	t.Cleanup(func() { _ = s.Close() })
+	unshareMounts, unshare := hostToolForTest(t, "unshare")
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:  t.TempDir(),
+		Timeout:  15 * time.Second,
+		ROMounts: unshareMounts,
+		Cmd:      []string{"/bin/sh", "-c", unshare("-Un", "true") + "; echo EXIT:$?"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !strings.Contains(res.Stdout, "EXIT:0") {
+		t.Fatalf("expected `unshare -Un true` to SUCCEED under allow_nested_userns; got stdout=%q stderr=%q", res.Stdout, res.Stderr)
+	}
+}
+
+// buildInt80WriteFixture assembles and links a minimal, self-contained
+// (-nostdlib, static) x86_64 ELF that issues ONE syscall through the
+// legacy i386 int-0x80 entry point — SYS_write (i386 nr 4) — then reports
+// the result via a REAL native `syscall` exit (never int 0x80 again): exit
+// code 0 on success (the i386 write actually executed and returned >= 0),
+// or -eax (i.e. the positive errno, e.g. 38 for ENOSYS) when the i386
+// syscall itself failed. int 0x80 works identically on a 64-bit CPU/process
+// without any 32-bit ELF or -m32 multilib toolchain — it is the exact
+// "same 64-bit binary, alternate syscall entry point" technique
+// AUDIT_ARCH_X86_64's compat handling has to cover, so this fixture
+// exercises the real bypass class the arch gate defends against. Skips
+// cleanly (not a failure) when `as`/`ld` are unavailable — CI portability,
+// mirroring this file's other host-toolchain self-skip helpers.
+func buildInt80WriteFixture(t *testing.T) string {
+	t.Helper()
+	asPath, err := exec.LookPath("as")
+	if err != nil {
+		t.Skip("`as` not found on PATH; skipping int-0x80 arch-gate regression")
+	}
+	ldPath, err := exec.LookPath("ld")
+	if err != nil {
+		t.Skip("`ld` not found on PATH; skipping int-0x80 arch-gate regression")
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "int80w.S")
+	asmSrc := `.text
+.global _start
+_start:
+    movl $4, %eax
+    movl $1, %ebx
+    leaq msg(%rip), %rcx
+    movl $msglen, %edx
+    int $0x80
+    cmpl $0, %eax
+    jl   .Lerr
+    movl $60, %eax
+    xorl %edi, %edi
+    syscall
+.Lerr:
+    negl %eax
+    movl %eax, %edi
+    movl $60, %eax
+    syscall
+.data
+msg:
+    .ascii "hello-i386-write\n"
+msglen = . - msg
+`
+	if err := os.WriteFile(src, []byte(asmSrc), 0o644); err != nil {
+		t.Fatalf("write asm source: %v", err)
+	}
+	obj := filepath.Join(dir, "int80w.o")
+	if out, err := exec.Command(asPath, "--64", "-o", obj, src).CombinedOutput(); err != nil {
+		t.Fatalf("as: %v: %s", err, out)
+	}
+	bin := filepath.Join(dir, "int80w")
+	if out, err := exec.Command(ldPath, "-o", bin, obj, "-nostdlib", "-static").CombinedOutput(); err != nil {
+		t.Fatalf("ld: %v: %s", err, out)
+	}
+	// Sanity: the fixture must behave as designed OUTSIDE the sandbox
+	// (exit 0, the i386 write genuinely works unfiltered) before it is
+	// trusted as a probe of the filter's behavior.
+	if out, err := exec.Command(bin).CombinedOutput(); err != nil || string(out) != "hello-i386-write\n" {
+		t.Fatalf("fixture sanity check failed: err=%v out=%q", err, out)
+	}
+	return bin
+}
+
+// TestBwrapArchMismatchGetsErrnoNotKill is fix round 2's core regression
+// (orchestrator directive, oracle findings B1a/B1b): a syscall issued
+// through the i386 int-0x80 entry point from this 64-bit process must
+// return ENOSYS and let the process CONTINUE RUNNING to report it — never
+// SECCOMP_RET_KILL_PROCESS (SIGSYS). Round 1's fix used KILL_PROCESS here,
+// which surfaced only as free-text ("signal: bad system call") in a parent
+// process's output — an unbounded vocabulary space that both missed real
+// kills phrased differently and suppressed genuine failures containing the
+// same phrase. ERRNO removes the hazard at its root.
+func TestBwrapArchMismatchGetsErrnoNotKill(t *testing.T) {
+	fixture := buildInt80WriteFixture(t)
+	s := newTestBwrap(t)
+	t.Cleanup(func() { _ = s.Close() })
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:  t.TempDir(),
+		Timeout:  15 * time.Second,
+		ROMounts: []ROMount{{HostPath: fixture, ContainerPath: "/int80w"}},
+		Cmd:      []string{"/int80w"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode == seccompArchKillExitCodeForTest {
+		t.Fatalf("got exit 159 (128+SIGSYS) — the process was KILLED, not given ENOSYS; this is the regression fix round 2 closes")
+	}
+	if res.ExitCode != 38 {
+		t.Fatalf("exit code = %d, want 38 (ENOSYS, from the i386 write syscall being denied); stdout=%q stderr=%q", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	if strings.Contains(res.Stdout, "hello-i386-write") {
+		t.Errorf("the i386 write syscall's message appeared in output — it must have been denied BEFORE executing, not merely reported as failed afterward")
+	}
+}
+
+// TestBwrapArchMismatchAllowedWithOptIn is the converse of
+// TestBwrapArchMismatchGetsErrnoNotKill: WithBwrapAllowNonNativeArch(true)
+// (sandbox.allow_nonnative_arch) must make the SAME i386 write syscall
+// actually SUCCEED — the escape hatch for a repo that genuinely needs a
+// 32-bit/compat binary to run.
+func TestBwrapArchMismatchAllowedWithOptIn(t *testing.T) {
+	fixture := buildInt80WriteFixture(t)
+	s := newTestBwrap(t, WithBwrapAllowNonNativeArch(true))
+	t.Cleanup(func() { _ = s.Close() })
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir:  t.TempDir(),
+		Timeout:  15 * time.Second,
+		ROMounts: []ROMount{{HostPath: fixture, ContainerPath: "/int80w"}},
+		Cmd:      []string{"/int80w"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0 (the i386 write syscall should genuinely succeed under allow_nonnative_arch); stdout=%q stderr=%q", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "hello-i386-write") {
+		t.Errorf("expected the i386 write syscall's message in stdout under allow_nonnative_arch=true; got stdout=%q", res.Stdout)
+	}
+}
+
+// seccompArchKillExitCodeForTest is 128+SIGSYS, named locally (not shared
+// with production code — bugbot-6dph fix round 2 removed the KILL action
+// from the filter entirely, so this exists ONLY as a negative-control
+// constant these two regression tests compare against) so the regression
+// assertion above documents exactly what it is guarding against.
+const seccompArchKillExitCodeForTest = 159
+
+// userfaultfdSyscallNrForTest is the amd64 SYS_userfaultfd number as a
+// decimal literal embedded in a Python script string (ctypes.CDLL.syscall
+// needs a plain int, and this repo's CI targets amd64 exclusively — see
+// seccomp_syscalls_amd64.go's provenance comment for the same number).
+const userfaultfdSyscallNrForTest = "323"
+
+// shellQuoteForTest wraps s in single quotes for embedding in a `sh -c`
+// argv, escaping any literal single quote the multi-line Python script
+// might contain (none currently do, but this keeps the helper correct if
+// one ever does).
+func shellQuoteForTest(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
 // TestBwrapNetworkNoneBlocksEgress proves the network=none default actually
 // severs network access rather than merely omitting a flag: a TCP connect
 // attempt inside the sandbox must fail.

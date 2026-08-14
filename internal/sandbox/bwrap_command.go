@@ -7,6 +7,17 @@ import (
 	"strings"
 )
 
+// seccompFilterFD is the child-visible file descriptor number bwrap's
+// --add-seccomp-fd argument references. Exec (bwrap.go, Linux-only in
+// practice) always attaches exactly one cmd.ExtraFiles entry — the compiled
+// seccomp filter built by newBwrapSeccompFile (seccomp_linux.go) — and
+// nothing else ever populates ExtraFiles for a bwrap run, so it always
+// lands at fd 3 in the child: fds 0-2 are stdin/stdout/stderr, and os/exec
+// places ExtraFiles[0] immediately after them. Declared here (not in the
+// Linux-only seccomp_linux.go) because buildBwrapArgs, which renders it,
+// must stay buildable on every GOOS.
+const seccompFilterFD = 3
+
 // bwrapParams is the fully-resolved set of inputs to a single bwrap run,
 // after backend defaults have been applied to a Spec. It mirrors runParams
 // (command.go) so the two backends stay structurally comparable, but carries
@@ -54,6 +65,12 @@ type bwrapParams struct {
 	// package constant, shared with the container backend) in
 	// buildBwrapArgs.
 	scratchSizeBytes int64
+	// allowNestedUserns opts the sandboxed process out of --disable-userns
+	// and --assert-userns-disabled, permitting it to create further user
+	// namespaces of its own (sandbox.allow_nested_userns, bugbot-6dph). The
+	// bwrap-level user namespace itself (--unshare-user) is unconditional
+	// either way — only FURTHER nesting inside the sandbox is gated by this.
+	allowNestedUserns bool
 }
 
 // fixedROAllowlist is the minimal, hardcoded set of host directories bound
@@ -113,6 +130,29 @@ var fixedROAllowlist = []string{
 //   - --unshare-all             : unshare every namespace (user, pid, net,
 //     ipc, uts, cgroup) by default; --share-net is added back ONLY when the
 //     resolved network mode explicitly enables it (never the "none" default).
+//   - --unshare-user            : upgrades --unshare-all's implicit
+//     --unshare-user-try to a strict requirement. probeBwrapUserns already
+//     proved unprivileged userns works on this host before Bwrap is ever
+//     constructed, so failing loudly instead of silently skipping is
+//     strictly safer here — and --disable-userns below requires it (bwrap
+//     itself rejects --disable-userns without a preceding --unshare-user).
+//   - --disable-userns,
+//     --assert-userns-disabled   : (bugbot-6dph) block the sandboxed process
+//     from creating FURTHER nested user namespaces of its own — the classic
+//     kernel-exploit staging path for unprivileged code, and otherwise
+//     reachable because bwrap's OWN user namespace grants the sandboxed
+//     process CAP_SYS_ADMIN etc. within it. Omitted only when
+//     p.allowNestedUserns opts out (sandbox.allow_nested_userns), the one
+//     documented escape hatch for tooling that needs userns for its own
+//     internal sandboxing (in-sandbox bazel; some JVM/Node tooling).
+//     --assert-userns-disabled makes bwrap itself verify the block actually
+//     took, rather than silently proceeding if --disable-userns's sysctl
+//     mechanism ever failed to apply.
+//   - --add-seccomp-fd N        : (bugbot-6dph) every run installs a syscall
+//     filter — see seccomp_linux.go's buildSeccompProgram for the actual BPF
+//     program construction; this only renders the flag and the well-known
+//     fd number the filter always lands on (Exec attaches it as the
+//     sandbox's one and only ExtraFiles entry — seccompFilterFD).
 //   - --die-with-parent         : bwrap's child is killed if bugbot itself
 //     dies, so a crashed harness can never leave an orphaned sandboxed
 //     process running.
@@ -174,6 +214,7 @@ func buildBwrapArgs(p bwrapParams) []string {
 
 	args := []string{
 		"--unshare-all",
+		"--unshare-user",
 		"--die-with-parent",
 		"--new-session",
 		"--clearenv",
@@ -181,6 +222,18 @@ func buildBwrapArgs(p bwrapParams) []string {
 		"--setenv", "USER", "bugbot",
 		"--setenv", "LOGNAME", "bugbot",
 	}
+
+	// Nested user namespace creation is blocked by default (bugbot-6dph);
+	// sandbox.allow_nested_userns is the one documented opt-out, for
+	// tooling that needs userns for its own internal sandboxing.
+	if !p.allowNestedUserns {
+		args = append(args, "--disable-userns", "--assert-userns-disabled")
+	}
+
+	// Every run installs a syscall filter (bugbot-6dph): the fd number is a
+	// package constant because Exec always attaches exactly one
+	// ExtraFiles entry (the filter itself), never zero or more than one.
+	args = append(args, "--add-seccomp-fd", strconv.Itoa(seccompFilterFD))
 
 	// Network defaults to unshared (set by --unshare-all above). Only an
 	// explicitly enabling network mode restores it — "none" (the default) and

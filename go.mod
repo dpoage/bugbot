@@ -12,6 +12,7 @@ require (
 	github.com/odvcencio/gotreesitter v0.20.2
 	github.com/openai/openai-go/v3 v3.39.0
 	github.com/spf13/cobra v1.10.2
+	golang.org/x/net v0.41.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.42.0
 	google.golang.org/genai v1.59.0
@@ -66,7 +67,6 @@ require (
 	go.opencensus.io v0.24.0 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
 	golang.org/x/crypto v0.40.0 // indirect
-	golang.org/x/net v0.41.0 // indirect
 	golang.org/x/text v0.27.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
 	google.golang.org/grpc v1.66.2 // indirect
