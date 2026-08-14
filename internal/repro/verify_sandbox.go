@@ -3,6 +3,7 @@ package repro
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -407,6 +408,14 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 			Category: SmokeCategoryEnvError,
 			Detail:   "could not resolve dependencies: " + err.Error(),
 		}, err
+	}
+	// bugbot-gu0o D3: surface a per-ecosystem resolution degradation (e.g.
+	// an unvettable requirements.txt) that ResolveDeps folded into
+	// res.Warnings instead of erroring — this doctor/smoke path has no
+	// report surface of its own, so a log line is the minimum needed to
+	// avoid it vanishing silently.
+	for _, w := range res.Warnings {
+		slog.Default().Warn("sandbox dependency resolution degraded", "repo", repoDir, "reason", w)
 	}
 
 	spec := sandbox.Spec{

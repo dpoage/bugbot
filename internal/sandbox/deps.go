@@ -1170,23 +1170,40 @@ var pipRequirementRe = regexp.MustCompile(
 // manifest unusable with dep_strategy: fetch.
 var pipHashFieldRe = regexp.MustCompile(`^--hash=[A-Za-z0-9]+:[0-9a-fA-F]+$`)
 
-// pipTighteningOptionRe matches pip options that can only TIGHTEN, never
-// weaken, the security boundary this validator enforces (bugbot-gu0o C2):
-// --require-hashes forces per-requirement hash checking; --only-binary
-// (with any argument — pip's own docs recommend --only-binary=:all: but
-// accept a specific package name too) can only narrow which packages must
-// be prebuilt, same direction as the --only-binary=:all: already on the
-// pip download CLI; --index-url / --extra-index-url redirect WHERE pip
-// looks up index-resolved packages but cannot cause prefetch-time code
-// execution under this grammar (a wheel is not executed at download
-// time — only unpacked — and a malicious index still can only serve
-// entries pipRequirementRe/pipHashFieldRe would accept). Only the "="
-// form is accepted (`--only-binary=:all:`, not `--only-binary :all:` as
-// two separate fields) — the two-token space-separated form is rejected
-// by the generic option check below, a conservative default rather than
-// a gap: rejecting a valid-but-differently-spelled option is always safe
-// here, silently accepting an unvetted one would not be.
-var pipTighteningOptionRe = regexp.MustCompile(`^(?:--require-hashes|--only-binary=\S+|--index-url=\S+|--extra-index-url=\S+)$`)
+// pipTighteningOptionRe matches pip options that can only TIGHTEN this
+// validator's boundary (bugbot-gu0o D1=B6/B7, decided after two prior
+// attempts at a broader allow-list were BOTH proven exploitable live):
+// --require-hashes ONLY. Nothing else.
+//
+// --only-binary was REMOVED from this set after Oracle A drove
+// "--only-binary=:none:" through production ResolveDeps→Prefetch and got
+// a full FETCH resolution with an sdist landed (and its setup.py
+// executed) in the bugbot-owned wheelhouse, sentinel written, cache
+// permanently poisoned: pip's FormatControl treats ":none:" as CLEAR the
+// --only-binary set, so an in-manifest "--only-binary=:none:" CANCELS
+// the CLI's --only-binary=:all: entirely — it is not a "same direction,
+// only narrower" option as the removed doc comment here previously (and
+// wrongly) claimed. "--only-binary=six,:none:" and "--only-binary=:none:,six"
+// both reduce to the same clear-then-set-nothing-usable behavior.
+// DECISION: the CLI already passes --only-binary=:all: unconditionally;
+// no manifest ever needs to repeat it, so --only-binary is rejected
+// outright in ALL forms, including the nominally "tightening" plain
+// ":all:" spelling — there is no legitimate reason for a vetted manifest
+// to specify it at all, and allowing the harmless-looking form invites
+// exactly this class of drift again.
+//
+// --index-url / --extra-index-url were ALSO removed: Oracle B measured
+// the actual harm of the "cannot cause code exec" claim this comment
+// used to make — that claim addressed CODE EXECUTION but never reasoned
+// about CACHE PROVENANCE. A repo-controlled index redirect lets
+// attacker-chosen bytes land in the bugbot-OWNED host wheelhouse cache
+// ("Saved /depcache/evilwheel-...whl") via the online prefetch, which
+// the later offline in-run install step then installs via --find-links
+// — and with a plain http:// index URL, it is live network EGRESS from
+// inside the trusted online step to a destination the repo chose, not
+// bugbot. There is no legitimate need for a vetted manifest to redirect
+// the index either.
+var pipTighteningOptionRe = regexp.MustCompile(`^--require-hashes$`)
 
 // pipArchiveExtensions is pip's own filetypes.ARCHIVE_EXTENSIONS list,
 // verbatim (pip._internal.utils.filetypes, verified against pip 26.1.2):
@@ -1315,23 +1332,27 @@ func resolvePipIncludePath(repoDir, includingDir, raw string) (string, error) {
 //     optional "; marker" — nothing else. The captured name is additionally
 //     checked against pipLooksLikeArchive.
 //  2. Per-requirement --hash=<algo>:<hexdigest> fields (pipHashFieldRe) and
-//     tightening-only options (pipTighteningOptionRe: --require-hashes,
-//     --only-binary=..., --index-url=..., --extra-index-url=...), which
-//     may trail a requirement or stand alone on their own line — peeled
-//     off before grammar-matching, not treated as a rejected "-" option.
+//     --require-hashes (pipTighteningOptionRe — the ONLY option accepted;
+//     see its doc comment for why --only-binary/--index-url/
+//     --extra-index-url were tried and then removed), which may trail a
+//     requirement or stand alone on their own line — peeled off before
+//     grammar-matching, not treated as a rejected "-" option.
 //  3. A -r/--requirement or -c/--constraint include directive
 //     (pipIncludeTarget) naming a repo-relative path (resolvePipIncludePath
 //     rejects absolute paths and any path that resolves outside repoDir
 //     after symlink evaluation) — recursively validated with this SAME
-//     grammar, up to pipMaxIncludeDepth levels, with cycle protection.
+//     grammar, up to pipMaxIncludeDepth levels, with cycle protection that
+//     still accepts a legitimate DIAMOND (two includes sharing a common
+//     base file) — see validatePipRequirementsFile's doc comment.
 //
-// Every other pip option (-e/--editable, --no-binary, ...) is rejected
-// outright. A direct URL/VCS reference, a PEP 508 "name @ url" reference,
-// a local path, a bare directory, and a bare archive filename are all
-// rejected because none of them can ever match pipRequirementRe (or, for
-// an archive-suffixed bare name, pipLooksLikeArchive) — see
-// pipRequirementRe's doc comment for why a deny-list of known-bad prefixes
-// could not close all of these completely.
+// Every other pip option (-e/--editable, --no-binary, --only-binary,
+// --index-url, --extra-index-url, ...) is rejected outright. A direct
+// URL/VCS reference, a PEP 508 "name @ url" reference, a local path, a
+// bare directory, and a bare archive filename are all rejected because
+// none of them can ever match pipRequirementRe (or, for an
+// archive-suffixed bare name, pipLooksLikeArchive) — see pipRequirementRe's
+// doc comment for why a deny-list of known-bad prefixes could not close
+// all of these completely.
 //
 // SCOPE (bugbot-gu0o C2): a validation failure here is returned as a plain
 // error, but resolvePython does NOT let it propagate out of ResolveDeps —
@@ -1345,21 +1366,56 @@ func resolvePipIncludePath(repoDir, includingDir, raw string) (string, error) {
 // newPipPrefetch either way: no Prefetch hook is ever constructed for it.
 func validatePipRequirements(repoDir string) error {
 	rootPath := filepath.Join(repoDir, "requirements.txt")
-	return validatePipRequirementsFile(repoDir, rootPath, make(map[string]bool), 0)
+	return validatePipRequirementsFile(repoDir, rootPath, make(map[string]bool), make(map[string]bool), 0)
 }
+
+// pipMaxRequirementsFileSize bounds how large a single requirements file
+// (or -r/-c include) validatePipRequirementsFile will read (bugbot-gu0o):
+// a real requirements.txt is at most a few KB; nothing legitimate needs
+// more than a few MB, and reading+regex-scanning an unbounded file is a
+// cheap lever against the resolve path (measured: a 100MB include still
+// validates, just slowly, with a large transient allocation) — 10MiB is
+// generous headroom over any real-world manifest while bounding the work.
+const pipMaxRequirementsFileSize = 10 << 20 // 10MiB
 
 // validatePipRequirementsFile is validatePipRequirements' recursive core:
 // it validates the single file at absPath (already resolved and, for
 // every call except the root, containment-checked by
 // resolvePipIncludePath) plus every -r/-c include it names.
-func validatePipRequirementsFile(repoDir, absPath string, seen map[string]bool, depth int) error {
+//
+// Cycle detection vs. diamond includes (bugbot-gu0o D2): `visiting` tracks
+// paths currently on the DFS stack — set on entry, cleared via defer on
+// exit — so a path revisited while still `visiting` is a genuine cycle
+// (a -> b -> a). `validated` tracks paths that already completed
+// successfully within this SAME top-level validatePipRequirements call;
+// validation is pure (depends only on file content), so a path already
+// fully validated via one include chain short-circuits to success on a
+// second visit instead of tripping the cycle check — a root file with
+// `-r dev.txt` and `-r test.txt`, both of which `-r base.txt`, is a
+// legitimate DAG (a diamond), not a cycle, and is a standard multi-
+// environment requirements layout. depth still bounds the DFS path
+// length regardless of diamonds or cycles.
+func validatePipRequirementsFile(repoDir, absPath string, visiting, validated map[string]bool, depth int) error {
+	if validated[absPath] {
+		return nil
+	}
 	if depth > pipMaxIncludeDepth {
 		return fmt.Errorf("sandbox: requirements include chain exceeds depth %d at %q (bugbot-gu0o: possible include cycle or an excessively deep chain)", pipMaxIncludeDepth, absPath)
 	}
-	if seen[absPath] {
+	if visiting[absPath] {
 		return fmt.Errorf("sandbox: requirements include cycle detected at %q (bugbot-gu0o)", absPath)
 	}
-	seen[absPath] = true
+	visiting[absPath] = true
+	defer delete(visiting, absPath)
+
+	if st, statErr := os.Stat(absPath); statErr == nil {
+		if st.IsDir() {
+			return fmt.Errorf("sandbox: requirements include %q is a directory, not a file (bugbot-gu0o)", absPath)
+		}
+		if st.Size() > pipMaxRequirementsFileSize {
+			return fmt.Errorf("sandbox: requirements file %q is %d bytes, over the %d byte limit (bugbot-gu0o: not a plausible manifest size)", absPath, st.Size(), pipMaxRequirementsFileSize)
+		}
+	}
 
 	data, err := os.ReadFile(absPath)
 	if err != nil {
@@ -1384,15 +1440,15 @@ func validatePipRequirementsFile(repoDir, absPath string, seen map[string]bool, 
 			if err != nil {
 				return err
 			}
-			if err := validatePipRequirementsFile(repoDir, nextAbs, seen, depth+1); err != nil {
+			if err := validatePipRequirementsFile(repoDir, nextAbs, visiting, validated, depth+1); err != nil {
 				return err
 			}
 			continue
 		}
 
-		// Peel off trailing --hash fields and tightening-only options
-		// before grammar-matching the requirement itself; reject any
-		// OTHER option-like field outright.
+		// Peel off trailing --hash fields and --require-hashes before
+		// grammar-matching the requirement itself; reject any OTHER
+		// option-like field outright.
 		hadTightening := false
 		var reqFields []string
 		for _, field := range strings.Fields(trimmed) {
@@ -1404,15 +1460,15 @@ func validatePipRequirementsFile(repoDir, absPath string, seen map[string]bool, 
 				continue
 			}
 			if strings.HasPrefix(field, "-") {
-				return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: pip option %q is not in the allowed grammar — only a plain index requirement, --hash=<algo>:<hexdigest> fields, tightening-only options (--require-hashes/--only-binary=.../--index-url=.../--extra-index-url=...), and -r/-c includes are accepted; this also covers -e/--no-binary, which are always rejected)", trimmed, field)
+				return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: pip option %q is not in the allowed grammar — only a plain index requirement, --hash=<algo>:<hexdigest> fields, --require-hashes, and -r/-c includes are accepted; --only-binary/--index-url/--extra-index-url/-e/--no-binary and everything else are always rejected)", trimmed, field)
 			}
 			reqFields = append(reqFields, field)
 		}
 		core := strings.Join(reqFields, " ")
 		if core == "" {
 			if hadTightening {
-				// A pure option line (e.g. a lone "--index-url=..." or
-				// "--require-hashes"): nothing further to grammar-match.
+				// A lone "--require-hashes" line: nothing further to
+				// grammar-match.
 				continue
 			}
 			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: no requirement expression, only --hash fields)", trimmed)
@@ -1420,12 +1476,13 @@ func validatePipRequirementsFile(repoDir, absPath string, seen map[string]bool, 
 
 		m := pipRequirementRe.FindStringSubmatch(core)
 		if m == nil {
-			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: does not match the allowed grammar — only a plain PEP 508 index requirement (name[extras]comparator-version; marker) plus --hash/tightening-option fields is accepted; local paths, bare archive filenames, directories, URLs, VCS/file: references, and PEP 508 direct '@' references are all rejected)", trimmed)
+			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: does not match the allowed grammar — only a plain PEP 508 index requirement (name[extras]comparator-version; marker) plus --hash/--require-hashes fields is accepted; local paths, bare archive filenames, directories, URLs, VCS/file: references, and PEP 508 direct '@' references are all rejected)", trimmed)
 		}
 		if pipLooksLikeArchive(m[1]) {
 			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: %q looks like an archive filename — pip treats archive-suffixed names as local/direct file installs, not index lookups, even with no path separator present)", trimmed, m[1])
 		}
 	}
+	validated[absPath] = true
 	return nil
 }
 

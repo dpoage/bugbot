@@ -1040,6 +1040,121 @@ func TestValidatePipRequirementsIncludeSafety(t *testing.T) {
 	})
 }
 
+// TestValidatePipRequirementsAcceptsDiamondInclude proves a DIAMOND include
+// graph (root -r's dev.txt AND test.txt, both of which -r base.txt) is
+// accepted, not rejected as a false "cycle" (bugbot-gu0o D2) — a standard
+// multi-environment requirements.txt layout, and a regression the naive
+// "seen" set from the previous round introduced (base.txt's second visit,
+// via test.txt, incorrectly tripped cycle detection).
+func TestValidatePipRequirementsAcceptsDiamondInclude(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "-r dev.txt\n-r test.txt\n")
+	writeFile(t, filepath.Join(dir, "dev.txt"), "-r base.txt\nsix==1.16.0\n")
+	writeFile(t, filepath.Join(dir, "test.txt"), "-r base.txt\npytest\n")
+	writeFile(t, filepath.Join(dir, "base.txt"), "requests==2.31.0\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolvePython(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolvePython: %v", err)
+	}
+	if res.Strategy != DepStrategyFetch || res.Prefetch == nil {
+		t.Fatalf("a diamond include (not a cycle) must resolve to fetch; got Strategy=%q Prefetch=%v Warnings=%v", res.Strategy, res.Prefetch != nil, res.Warnings)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("a valid diamond include must have no Warnings, got %v", res.Warnings)
+	}
+}
+
+// TestValidatePipRequirementsAcceptsDeepIncludeChain pins the
+// pipMaxIncludeDepth boundary from the accept side: a straight-line chain
+// of exactly 7 -r hops (well within the depth-8 cap) must resolve
+// successfully, so the cap cannot silently drift tighter without a test
+// noticing.
+func TestValidatePipRequirementsAcceptsDeepIncludeChain(t *testing.T) {
+	dir := t.TempDir()
+	const chainLen = 7
+	for i := 0; i < chainLen; i++ {
+		name := fmt.Sprintf("level%d.txt", i)
+		next := fmt.Sprintf("level%d.txt", i+1)
+		if i == chainLen-1 {
+			writeFile(t, filepath.Join(dir, name), "six==1.16.0\n")
+		} else {
+			writeFile(t, filepath.Join(dir, name), "-r "+next+"\n")
+		}
+	}
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "-r level0.txt\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolvePython(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolvePython: %v", err)
+	}
+	if res.Strategy != DepStrategyFetch || res.Prefetch == nil {
+		t.Fatalf("a %d-deep include chain (within pipMaxIncludeDepth=%d) must resolve to fetch; got Strategy=%q Prefetch=%v Warnings=%v", chainLen, pipMaxIncludeDepth, res.Strategy, res.Prefetch != nil, res.Warnings)
+	}
+}
+
+// TestValidatePipRequirementsRejectsOnlyBinaryAndIndexOptions proves the
+// bugbot-gu0o D1=B6 fix directly: --only-binary in ANY form (including
+// the "tightening-looking" plain ":all:" spelling) and --index-url/
+// --extra-index-url in any form are ALWAYS rejected, never accepted as
+// tightening options. The critical case is "--only-binary=:none:": pip's
+// FormatControl treats ":none:" as CLEAR-the-set, so an in-manifest
+// "--only-binary=:none:" CANCELS the CLI's --only-binary=:all: entirely —
+// a prior version of this validator's allow-list accepted this and let a
+// full online sdist build (and setup.py execution) through to a poisoned,
+// permanently-sentinel-warmed wheelhouse.
+func TestValidatePipRequirementsRejectsOnlyBinaryAndIndexOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "only-binary :none: clears the CLI --only-binary=:all:", content: "six==1.16.0\n--only-binary=:none:\n"},
+		{name: "only-binary :all:,:none: still clears via trailing :none:", content: "six==1.16.0\n--only-binary=:all:,:none:\n"},
+		{name: "only-binary :none:,six", content: "six==1.16.0\n--only-binary=:none:,six\n"},
+		{name: "only-binary :all: alone, no legitimate need for a manifest to repeat the CLI flag", content: "six==1.16.0\n--only-binary=:all:\n"},
+		{name: "index-url redirects cache provenance to an attacker-chosen source", content: "six==1.16.0\n--index-url=https://evil.example.com/simple\n"},
+		{name: "extra-index-url same provenance risk as index-url", content: "six==1.16.0\n--extra-index-url=https://evil.example.com/simple\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "requirements.txt"), tc.content)
+			cacheBase := t.TempDir()
+			mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+			res, err := resolvePython(dir, DepOptions{
+				Strategy:     DepStrategyFetch,
+				FetchSandbox: mock,
+				userCacheDir: cacheBase,
+			})
+			if err != nil {
+				t.Fatalf("resolvePython must not hard-error (bugbot-gu0o C2): %v", err)
+			}
+			if res.Strategy != DepStrategyOff || res.Prefetch != nil {
+				t.Errorf("want Strategy=off, Prefetch=nil; got Strategy=%q Prefetch=%v", res.Strategy, res.Prefetch != nil)
+			}
+			if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "bugbot-gu0o") {
+				t.Errorf("Warnings = %v, want exactly one warning naming bugbot-gu0o", res.Warnings)
+			}
+			if mock.CallCount() != 0 {
+				t.Errorf("SECURITY: rejected manifest must never launch a container; CallCount() = %d", mock.CallCount())
+			}
+		})
+	}
+}
+
 // assertPythonDegradesToOff is the shared assertion for
 // TestValidatePipRequirementsIncludeSafety's subtests.
 func assertPythonDegradesToOff(t *testing.T, dir string) {
@@ -1101,10 +1216,44 @@ func TestValidatePipRequirementsAllowsOrdinaryPins(t *testing.T) {
 // TestValidatePipRequirementsRejectsEveryArchiveExtension table-drives one
 // rejection case PER extension in pip's own filetypes.ARCHIVE_EXTENSIONS
 // (bugbot-gu0o C1/B5) plus the broader defense-in-depth compression
-// suffixes, so a future accidental edit to pipArchiveExtensions /
-// pipCompressionSuffixes that drops an entry fails a test immediately
-// instead of silently reopening a live bypass.
+// suffixes. pipArchiveExtensionsWant is a LITERAL, independently
+// hardcoded copy of pip 26.1.2's exact list (not derived from the
+// implementation var) asserted for SET EQUALITY against pipArchiveExtensions
+// below — the previous version of this test built its table FROM
+// pipArchiveExtensions itself, so it could not detect an omission (a live
+// oracle probe deleted ".tlz" from the implementation and this suite
+// stayed green). Now a dropped or added entry fails immediately via the
+// equality check, independent of whether the per-extension loop happens
+// to still pass.
 func TestValidatePipRequirementsRejectsEveryArchiveExtension(t *testing.T) {
+	pipArchiveExtensionsWant := []string{
+		".zip", ".whl",
+		".tar.bz2", ".tbz",
+		".tar.xz", ".txz", ".tlz", ".tar.lz", ".tar.lzma",
+		".tar.gz", ".tgz", ".tar",
+	}
+	gotSet := make(map[string]bool, len(pipArchiveExtensions))
+	for _, s := range pipArchiveExtensions {
+		gotSet[s] = true
+	}
+	wantSet := make(map[string]bool, len(pipArchiveExtensionsWant))
+	for _, s := range pipArchiveExtensionsWant {
+		wantSet[s] = true
+	}
+	if len(gotSet) != len(pipArchiveExtensions) {
+		t.Fatalf("pipArchiveExtensions has duplicate entries: %v", pipArchiveExtensions)
+	}
+	for s := range wantSet {
+		if !gotSet[s] {
+			t.Errorf("pipArchiveExtensions is missing %q (present in pip 26.1.2's own ARCHIVE_EXTENSIONS)", s)
+		}
+	}
+	for s := range gotSet {
+		if !wantSet[s] {
+			t.Errorf("pipArchiveExtensions has extra entry %q not in pip 26.1.2's own ARCHIVE_EXTENSIONS (may be fine as deliberate defense in depth, but must not be silent — document it explicitly if intentional)", s)
+		}
+	}
+
 	allSuffixes := append(append([]string{}, pipArchiveExtensions...), pipCompressionSuffixes...)
 	for _, suf := range allSuffixes {
 		t.Run(suf, func(t *testing.T) {

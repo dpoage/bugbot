@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/dpoage/bugbot/internal/config"
@@ -312,6 +313,12 @@ func depProbeInputs(cfg config.Config, sb sandbox.Sandbox, repoDir string) (roMo
 	if err != nil {
 		return nil, nil, nil
 	}
+	// bugbot-gu0o D3: a per-ecosystem degradation (e.g. an unvettable
+	// requirements.txt) is carried on res.Warnings, not an error — log it
+	// so a doctor/capability probe never silently drops it.
+	for _, w := range res.Warnings {
+		slog.Default().Warn("sandbox dependency resolution degraded", "repo", repoDir, "reason", w)
+	}
 	return res.ROMounts, res.RWMounts, res.Env
 }
 
@@ -341,6 +348,9 @@ func resolveDepsForPlaybook(cfg config.Config, sb sandbox.Sandbox, repoDir strin
 	})
 	if err != nil {
 		return sandbox.Resolution{}
+	}
+	for _, w := range res.Warnings {
+		slog.Default().Warn("sandbox dependency resolution degraded", "repo", repoDir, "reason", w)
 	}
 	return res
 }
