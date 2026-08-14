@@ -288,6 +288,24 @@ func (s *CLI) resolveParams(spec Spec) runParams {
 // Exec implements Sandbox. See the Sandbox interface for the error contract:
 // only infrastructure failures are returned as errors; a non-zero exit code is
 // reported in Result.ExitCode.
+//
+// WALL-TIME NOTE (bugbot-p8y4): for a podman image with a non-root USER,
+// Exec first resolves the container identity (resolveNonRootUser) on a
+// context bounded only by nonRootUserProbeTimeout — deliberately BEFORE
+// spec.Timeout's own clock (runCtx) starts, so a slow/cold-pull identity
+// probe can never steal budget from the run itself (see buildRunArgs' and
+// resolveNonRootUser's doc comments for why: sharing one clock was proven
+// to falsely report TimedOut on a command that easily fit its own budget,
+// and to silently poison capabilities.go's cached capability detection).
+// Consequence: this call's WORST-CASE wall time is spec.Timeout (or the
+// backend default) PLUS nonRootUserProbeTimeout, not spec.Timeout alone —
+// callers that budget purely on spec.Timeout should account for that
+// extra headroom. The probe result is cached per (runtime, image) after a
+// SUCCESSFUL resolution, but a FAILED probe is deliberately never cached
+// (see resolveNonRootUser) and is retried on every Exec against that
+// image, with no cap on retry attempts — self-healing once the underlying
+// condition (a slow cold pull, a transient runtime hiccup) clears, at the
+// cost of repaying up to nonRootUserProbeTimeout on each retry until then.
 func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	if len(spec.Cmd) == 0 {
 		return Result{}, errors.New("sandbox: spec.Cmd must be non-empty")

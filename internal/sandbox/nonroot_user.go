@@ -27,6 +27,19 @@ import (
 // nonRootUserProbeTimeout bounds the identity probe's wall-clock cost. The
 // probe runs no user code beyond `id`, so this is generous headroom for a
 // slow image pull/cold start, not a budget for real work.
+//
+// This cap is spent OUTSIDE any Spec.Timeout: cli.go's Exec resolves the
+// identity before its own runCtx (bounded by spec.Timeout) is created, so
+// this constant directly sets Exec's worst-case ADDITIONAL wall time —
+// spec.Timeout + nonRootUserProbeTimeout, not spec.Timeout alone. See
+// Exec's doc comment for why that tradeoff was chosen (sharing one clock
+// let a slow probe falsely TimedOut a command that fit its own budget, and
+// silently poisoned capabilities.go's cached capability detection). A
+// FAILED probe is never cached (resolveNonRootUser) and is retried on
+// every subsequent Exec against that image with NO cap on retry attempts
+// or backoff — intentionally self-healing rather than permanently
+// disabled, at the cost of repaying up to this full timeout on each retry
+// until the underlying condition clears.
 const nonRootUserProbeTimeout = 30 * time.Second
 
 // containerIdentity is the cached result of probing one image: the resolved
