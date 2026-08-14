@@ -288,6 +288,16 @@ type Bwrap struct {
 	// since it is the classic kernel-exploit staging path for unprivileged
 	// code (see buildBwrapArgs' security-posture doc).
 	allowNestedUserns bool
+	// allowNonNativeArch opts every non-native-architecture syscall path
+	// (compat 32-bit AND the x32 ABI) OUT of the seccomp filter's
+	// denial entirely — RET_ALLOW instead of RET_ERRNO(ENOSYS) — for a
+	// repo that genuinely needs a 32-bit/compat binary to run
+	// (sandbox.allow_nonnative_arch, bugbot-6dph fix round 2). Default
+	// false: every non-native syscall is denied with ENOSYS, matching the
+	// deny-list's own action so the whole filter has one uniform response.
+	// Independent of allowNestedUserns — the two opt-outs address
+	// different bypass surfaces and either can be set without the other.
+	allowNonNativeArch bool
 	// toolchainBinds are extra read-only binds (beyond fixedROAllowlist)
 	// resolved by the host-toolchain resolver, applied to every run.
 	toolchainBinds []ROMount
@@ -374,6 +384,15 @@ func WithBwrapAllowUncapped(allow bool) BwrapOption {
 // accepts.
 func WithBwrapAllowNestedUserns(allow bool) BwrapOption {
 	return func(s *Bwrap) { s.allowNestedUserns = allow }
+}
+
+// WithBwrapAllowNonNativeArch opts every non-native-architecture syscall
+// path (compat 32-bit and the x32 ABI) out of the seccomp filter's denial,
+// allowing a genuinely 32-bit/compat binary to run. Mirrors
+// sandbox.allow_nonnative_arch (bugbot-6dph fix round 2); see
+// Bwrap.allowNonNativeArch for the security tradeoff this accepts.
+func WithBwrapAllowNonNativeArch(allow bool) BwrapOption {
+	return func(s *Bwrap) { s.allowNonNativeArch = allow }
 }
 
 // WithBwrapToolchainBinds adds extra read-only binds (beyond fixedROAllowlist)
@@ -690,7 +709,7 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 	// fresh per run (not cached) since it is cheap (a handful of BPF
 	// instructions) and keeps the memfd's lifetime scoped to exactly one
 	// run rather than shared/racing across concurrent Execs.
-	seccompFile, err := newBwrapSeccompFile()
+	seccompFile, err := newBwrapSeccompFile(s.allowNonNativeArch)
 	if err != nil {
 		return Result{}, fmt.Errorf("sandbox: build seccomp filter: %w", err)
 	}

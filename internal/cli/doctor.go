@@ -473,20 +473,25 @@ func checkBwrap(ctx context.Context, cfg config.Config) []checkResult {
 		})
 	}
 	archLabel, deniedCount := sandbox.DescribeBwrapSeccompPosture()
-	postureDetail := fmt.Sprintf("seccomp filter installed on every run (%d syscalls denied, ERRNO, native %s only; every non-native syscall path — compat 32-bit, x32 ABI, or any other arch — is killed outright)", deniedCount, archLabel)
+	postureDetail := fmt.Sprintf("seccomp filter installed on every run (%d syscalls denied with ENOSYS on native %s; every non-native syscall path — compat 32-bit, x32 ABI, or any other arch — denied with ENOSYS too, unless allow_nonnative_arch is set)", deniedCount, archLabel)
+	warn := false
 	if cfg.Sandbox.AllowNestedUserns {
-		results = append(results, checkResult{
-			Name:   "sandbox syscall posture",
-			Status: statusWarn,
-			Detail: postureDetail + "; nested user namespaces ALLOWED (sandbox.allow_nested_userns is set)",
-		})
+		postureDetail += "; nested user namespaces ALLOWED (sandbox.allow_nested_userns is set)"
+		warn = true
 	} else {
-		results = append(results, checkResult{
-			Name:   "sandbox syscall posture",
-			Status: statusPass,
-			Detail: postureDetail + "; nested user namespaces blocked (--disable-userns)",
-		})
+		postureDetail += "; nested user namespaces blocked (--disable-userns)"
 	}
+	if cfg.Sandbox.AllowNonNativeArch {
+		postureDetail += "; non-native/32-bit/x32 syscalls ALLOWED, unfiltered (sandbox.allow_nonnative_arch is set)"
+		warn = true
+	} else {
+		postureDetail += "; non-native/32-bit/x32 syscalls denied with ENOSYS"
+	}
+	status := statusPass
+	if warn {
+		status = statusWarn
+	}
+	results = append(results, checkResult{Name: "sandbox syscall posture", Status: status, Detail: postureDetail})
 	return results
 }
 

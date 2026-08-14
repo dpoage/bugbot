@@ -135,21 +135,6 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	eco := detectEcosystem(cmd)
 	lowOut := strings.ToLower(out)
 
-	// A bwrap seccomp architecture-mismatch kill (bugbot-6dph fix round 1,
-	// oracle findings B1/B2) is checked FIRST, ahead of even
-	// res.InfraKilled(): the sandbox's own harness killed the process (or a
-	// nested subprocess of it) for using a non-native CPU instruction path,
-	// which is exactly the same "must never be read as a real command
-	// outcome" hazard res.InfraKilled() below guards against — see
-	// seccompArchKilled's doc for why this must precede the
-	// structured-output path too (not just res.InfraKilled(), which does
-	// not need that same precaution since its two triggers are exit-code
-	// facts, not output text a JSON/XML parser could independently latch
-	// onto first).
-	if seccompArchKilled(res, out) {
-		return verdict{reason: VerdictReasonEnvironmentError, summary: seccompArchKillSummary + ": " + trunc(out, 400), ecosystem: eco.name}
-	}
-
 	// An infrastructure kill — the absolute/idle timeout OR bugbot-bdqf's
 	// workspace-growth ceiling — is a quality/environment problem, not a
 	// demonstration, regardless of any partial output captured before the

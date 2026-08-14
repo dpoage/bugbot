@@ -18,7 +18,7 @@ func bwrapSeccompArchSupported() bool { return false }
 // backend on non-Linux before Bwrap.Exec could ever call this), but must
 // exist so Bwrap.Exec — which has no build tag of its own — still compiles
 // here.
-func newBwrapSeccompFile() (*os.File, error) {
+func newBwrapSeccompFile(allowNonNativeArch bool) (*os.File, error) {
 	return nil, errors.New("sandbox: bwrap seccomp filter is Linux-only")
 }
 

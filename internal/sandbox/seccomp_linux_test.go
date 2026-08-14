@@ -35,21 +35,23 @@ func decodeSeccompProgram(t *testing.T, program []byte) []bpf.RawInstruction {
 }
 
 func TestBuildSeccompProgramRefusesZeroArch(t *testing.T) {
-	if _, err := buildSeccompProgram(0, nil); err == nil {
+	if _, err := buildSeccompProgram(0, nil, false); err == nil {
 		t.Fatal("expected an error for nativeArch == 0, got nil")
 	}
 }
 
 // TestBuildSeccompProgramShape pins the exact instruction sequence
-// buildSeccompProgram's doc promises: an arch gate (kill on mismatch) always
-// comes first, followed by one JumpIf+RetConstant(ERRNO) pair per denied
+// buildSeccompProgram's doc promises: an arch gate (ERRNO on mismatch,
+// bugbot-6dph fix round 2 — NOT kill, see the VM-behavior tests below for
+// why) always comes first, followed by the x32 guard (the SAME ERRNO
+// action), followed by one JumpIf+RetConstant(ERRNO) pair per denied
 // syscall in order, followed by a single trailing RetConstant(ALLOW).
 // Decoded via the real x/net/bpf disassembler so a malformed encoding (wrong
 // offset, wrong K value, wrong jump target) shows up as a decode mismatch,
 // not just a byte-level diff.
 func TestBuildSeccompProgramShape(t *testing.T) {
 	deny := []denySyscall{{"fake_a", 111}, {"fake_b", 222}}
-	program, err := buildSeccompProgram(unix.AUDIT_ARCH_X86_64, deny)
+	program, err := buildSeccompProgram(unix.AUDIT_ARCH_X86_64, deny, false)
 	if err != nil {
 		t.Fatalf("buildSeccompProgram: %v", err)
 	}
@@ -66,13 +68,14 @@ func TestBuildSeccompProgramShape(t *testing.T) {
 	// actual program semantics. Comparing raw Op/Jt/Jf/K fields sidesteps
 	// that ambiguity entirely while still validating the little-endian
 	// sock_filter encoding end to end.
+	wantNonNative := bpf.RetConstant{Val: unix.SECCOMP_RET_ERRNO | seccompDenyErrno}
 	wantInsts := []bpf.Instruction{
 		bpf.LoadAbsolute{Off: seccompDataArchOffset, Size: 4},
 		bpf.JumpIf{Cond: bpf.JumpEqual, Val: uint32(unix.AUDIT_ARCH_X86_64), SkipTrue: 1},
-		bpf.RetConstant{Val: unix.SECCOMP_RET_KILL_PROCESS},
+		wantNonNative,
 		bpf.LoadAbsolute{Off: seccompDataNrOffset, Size: 4},
 		bpf.JumpIf{Cond: bpf.JumpBitsSet, Val: x32SyscallBit, SkipTrue: 0, SkipFalse: 1},
-		bpf.RetConstant{Val: unix.SECCOMP_RET_KILL_PROCESS},
+		wantNonNative,
 	}
 	for _, sc := range deny {
 		wantInsts = append(wantInsts,
@@ -97,18 +100,56 @@ func TestBuildSeccompProgramShape(t *testing.T) {
 	}
 }
 
+// TestBuildSeccompProgramShape_AllowNonNativeArch pins the opt-out's effect
+// on the assembled program: with allowNonNativeArch=true, BOTH the arch
+// gate and the x32 guard return RET_ALLOW instead of ERRNO, while the
+// native deny-list entries are completely UNCHANGED (the opt-out affects
+// ONLY the non-native-arch/x32 paths, never the deny-list itself).
+func TestBuildSeccompProgramShape_AllowNonNativeArch(t *testing.T) {
+	deny := []denySyscall{{"fake_a", 111}}
+	program, err := buildSeccompProgram(unix.AUDIT_ARCH_X86_64, deny, true)
+	if err != nil {
+		t.Fatalf("buildSeccompProgram: %v", err)
+	}
+	got := decodeSeccompProgram(t, program)
+
+	wantInsts := []bpf.Instruction{
+		bpf.LoadAbsolute{Off: seccompDataArchOffset, Size: 4},
+		bpf.JumpIf{Cond: bpf.JumpEqual, Val: uint32(unix.AUDIT_ARCH_X86_64), SkipTrue: 1},
+		bpf.RetConstant{Val: unix.SECCOMP_RET_ALLOW},
+		bpf.LoadAbsolute{Off: seccompDataNrOffset, Size: 4},
+		bpf.JumpIf{Cond: bpf.JumpBitsSet, Val: x32SyscallBit, SkipTrue: 0, SkipFalse: 1},
+		bpf.RetConstant{Val: unix.SECCOMP_RET_ALLOW},
+		bpf.JumpIf{Cond: bpf.JumpEqual, Val: 111, SkipTrue: 0, SkipFalse: 1},
+		bpf.RetConstant{Val: unix.SECCOMP_RET_ERRNO | seccompDenyErrno},
+		bpf.RetConstant{Val: unix.SECCOMP_RET_ALLOW},
+	}
+	want, err := bpf.Assemble(wantInsts)
+	if err != nil {
+		t.Fatalf("assemble expected instructions: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d raw instructions, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("instruction %d: got %#v, want %#v", i, got[i], want[i])
+		}
+	}
+}
+
 // TestBuildSeccompProgramEmptyDenyStillGatesArch confirms an empty deny-list
 // (never actually used in production — see bwrapDenySyscalls — but a valid
 // input this pure function must handle) still produces the arch gate plus
 // the x32 guard plus a bare ALLOW, never an empty/invalid program.
 func TestBuildSeccompProgramEmptyDenyStillGatesArch(t *testing.T) {
-	program, err := buildSeccompProgram(unix.AUDIT_ARCH_AARCH64, nil)
+	program, err := buildSeccompProgram(unix.AUDIT_ARCH_AARCH64, nil, false)
 	if err != nil {
 		t.Fatalf("buildSeccompProgram: %v", err)
 	}
 	raw := decodeSeccompProgram(t, program)
 	if len(raw) != 7 {
-		t.Fatalf("got %d raw instructions, want 7 (arch-load, arch-jump, kill, nr-load, x32-jump, kill, allow)", len(raw))
+		t.Fatalf("got %d raw instructions, want 7 (arch-load, arch-jump, errno, nr-load, x32-jump, errno, allow)", len(raw))
 	}
 }
 
@@ -138,14 +179,13 @@ func seccompDataPacket(nr, arch uint32) []byte {
 // runSeccompProgram decodes program (buildSeccompProgram's output) and
 // executes it against a synthetic seccomp_data packet via the REAL
 // golang.org/x/net/bpf virtual machine — not a structural instruction
-// comparison — returning the raw action value (e.g.
-// unix.SECCOMP_RET_KILL_PROCESS, unix.SECCOMP_RET_ALLOW, or
-// unix.SECCOMP_RET_ERRNO|errno). bpf.Disassemble's higher-level rendering
-// of a jump (JumpEqual vs. JumpNotEqual with inverted skip fields, see
-// TestBuildSeccompProgramShape's doc) is irrelevant here: the VM executes
-// the decoded form directly, so both renderings behave identically —
-// exactly the property that makes this decode+execute round trip a valid
-// behavioral test despite that ambiguity.
+// comparison — returning the raw action value (e.g. unix.SECCOMP_RET_ALLOW
+// or unix.SECCOMP_RET_ERRNO|errno). bpf.Disassemble's higher-level
+// rendering of a jump (JumpEqual vs. JumpNotEqual with inverted skip
+// fields, see TestBuildSeccompProgramShape's doc) is irrelevant here: the
+// VM executes the decoded form directly, so both renderings behave
+// identically — exactly the property that makes this decode+execute round
+// trip a valid behavioral test despite that ambiguity.
 func runSeccompProgram(t *testing.T, program []byte, nr, arch uint32) uint32 {
 	t.Helper()
 	raw := decodeSeccompProgram(t, program)
@@ -172,14 +212,16 @@ func runSeccompProgram(t *testing.T, program []byte, nr, arch uint32) uint32 {
 // membership at all. Executed via the real BPF VM (runSeccompProgram), not
 // a structural assertion, so this fails if the guard's PLACEMENT (not just
 // its presence) is wrong — e.g. moved after the deny loop, where it would
-// no longer preempt a false ALLOW.
+// no longer preempt a false ALLOW. Fix round 2: the action is ERRNO, not
+// KILL (see buildSeccompProgram's doc for why the action changed).
 func TestBuildSeccompProgramX32BypassClosed(t *testing.T) {
 	deny := []denySyscall{{"fake_a", 111}, {"fake_b", 222}}
-	program, err := buildSeccompProgram(unix.AUDIT_ARCH_X86_64, deny)
+	program, err := buildSeccompProgram(unix.AUDIT_ARCH_X86_64, deny, false)
 	if err != nil {
 		t.Fatalf("buildSeccompProgram: %v", err)
 	}
 
+	wantErrno := uint32(unix.SECCOMP_RET_ERRNO) | seccompDenyErrno
 	cases := []struct {
 		name string
 		nr   uint32
@@ -194,43 +236,111 @@ func TestBuildSeccompProgramX32BypassClosed(t *testing.T) {
 			if got == unix.SECCOMP_RET_ALLOW {
 				t.Fatalf("x32 nr %#x reached RET_ALLOW — the x32 bypass is NOT closed", c.nr)
 			}
-			if got != unix.SECCOMP_RET_KILL_PROCESS {
-				t.Errorf("x32 nr %#x returned %#x, want RET_KILL_PROCESS (%#x)", c.nr, got, uint32(unix.SECCOMP_RET_KILL_PROCESS))
+			if got != wantErrno {
+				t.Errorf("x32 nr %#x returned %#x, want ERRNO (%#x)", c.nr, got, wantErrno)
 			}
 		})
 	}
 }
 
-// TestBuildSeccompProgramVMBehavior rounds out the VM-executed behavioral
-// coverage for the non-x32 paths: a native, non-x32-bit denied syscall
-// gets ERRNO; a native, non-x32-bit, non-denied syscall gets ALLOW; any
-// syscall under a non-native arch gets killed.
-func TestBuildSeccompProgramVMBehavior(t *testing.T) {
-	deny := []denySyscall{{"fake_a", 111}, {"fake_b", 222}}
-	program, err := buildSeccompProgram(unix.AUDIT_ARCH_X86_64, deny)
+// TestBuildSeccompProgramX32BypassAllowedWithOptOut is the x32 guard's
+// converse: with allowNonNativeArch=true, the SAME x32-encoded numbers that
+// TestBuildSeccompProgramX32BypassClosed proves are denied by default must
+// now reach RET_ALLOW — the opt-out genuinely re-enables x32 execution
+// rather than merely changing its errno.
+func TestBuildSeccompProgramX32BypassAllowedWithOptOut(t *testing.T) {
+	deny := []denySyscall{{"fake_a", 111}}
+	program, err := buildSeccompProgram(unix.AUDIT_ARCH_X86_64, deny, true)
 	if err != nil {
 		t.Fatalf("buildSeccompProgram: %v", err)
 	}
+	got := runSeccompProgram(t, program, 111|x32SyscallBit, uint32(unix.AUDIT_ARCH_X86_64))
+	if got != unix.SECCOMP_RET_ALLOW {
+		t.Errorf("x32-encoded nr under allowNonNativeArch=true = %#x, want RET_ALLOW (%#x)", got, uint32(unix.SECCOMP_RET_ALLOW))
+	}
+}
 
+// TestBuildSeccompProgramNegativeNrGetsErrno pins the negative-nr nit fix
+// round 2 closed as a side effect of switching to ERRNO: seccomp_data.nr is
+// a signed int, so nr == -1 (0xFFFFFFFF, a value some libc
+// feature-detection code deliberately issues to reliably trigger ENOSYS)
+// has every bit set including bit 30 and is caught by the x32 guard. Under
+// the OLD KILL_PROCESS action that silently changed nr=-1's observed
+// result from the kernel's own "unimplemented syscall number" ENOSYS to a
+// SIGSYS kill; under ERRNO the observed result (ENOSYS) is unchanged either
+// way, so this is no longer a behavior change at all.
+func TestBuildSeccompProgramNegativeNrGetsErrno(t *testing.T) {
+	program, err := buildSeccompProgram(unix.AUDIT_ARCH_X86_64, nil, false)
+	if err != nil {
+		t.Fatalf("buildSeccompProgram: %v", err)
+	}
 	wantErrno := uint32(unix.SECCOMP_RET_ERRNO) | seccompDenyErrno
-	cases := []struct {
-		name     string
-		nr, arch uint32
-		want     uint32
-	}{
-		{"native denied syscall -> ERRNO", 111, uint32(unix.AUDIT_ARCH_X86_64), wantErrno},
-		{"native non-denied syscall -> ALLOW", 42, uint32(unix.AUDIT_ARCH_X86_64), unix.SECCOMP_RET_ALLOW},
-		{"compat i386 arch, native-looking nr -> KILL", 111, uint32(unix.AUDIT_ARCH_I386), unix.SECCOMP_RET_KILL_PROCESS},
-		{"spoofed/unknown arch -> KILL", 111, 0xdeadbeef, unix.SECCOMP_RET_KILL_PROCESS},
+	got := runSeccompProgram(t, program, 0xFFFFFFFF, uint32(unix.AUDIT_ARCH_X86_64))
+	if got != wantErrno {
+		t.Errorf("nr=-1 (0xFFFFFFFF) returned %#x, want ERRNO (%#x)", got, wantErrno)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := runSeccompProgram(t, program, c.nr, c.arch)
-			if got != c.want {
-				t.Errorf("got %#x, want %#x", got, c.want)
-			}
-		})
-	}
+}
+
+// TestBuildSeccompProgramVMBehavior rounds out the VM-executed behavioral
+// coverage: a native, non-x32-bit denied syscall gets ERRNO; a native,
+// non-x32-bit, non-denied syscall gets ALLOW; any syscall under a
+// non-native arch gets ERRNO by default and ALLOW under the opt-out — and
+// critically, the opt-out never touches the native deny-list itself.
+func TestBuildSeccompProgramVMBehavior(t *testing.T) {
+	deny := []denySyscall{{"fake_a", 111}, {"fake_b", 222}}
+	wantErrno := uint32(unix.SECCOMP_RET_ERRNO) | seccompDenyErrno
+
+	t.Run("default (allowNonNativeArch=false)", func(t *testing.T) {
+		program, err := buildSeccompProgram(unix.AUDIT_ARCH_X86_64, deny, false)
+		if err != nil {
+			t.Fatalf("buildSeccompProgram: %v", err)
+		}
+		cases := []struct {
+			name     string
+			nr, arch uint32
+			want     uint32
+		}{
+			{"native denied syscall -> ERRNO", 111, uint32(unix.AUDIT_ARCH_X86_64), wantErrno},
+			{"native non-denied syscall -> ALLOW", 42, uint32(unix.AUDIT_ARCH_X86_64), unix.SECCOMP_RET_ALLOW},
+			{"compat i386 arch, native-looking nr -> ERRNO", 111, uint32(unix.AUDIT_ARCH_I386), wantErrno},
+			{"spoofed/unknown arch -> ERRNO", 111, 0xdeadbeef, wantErrno},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				got := runSeccompProgram(t, program, c.nr, c.arch)
+				if got != c.want {
+					t.Errorf("got %#x, want %#x", got, c.want)
+				}
+			})
+		}
+	})
+
+	t.Run("allowNonNativeArch=true", func(t *testing.T) {
+		program, err := buildSeccompProgram(unix.AUDIT_ARCH_X86_64, deny, true)
+		if err != nil {
+			t.Fatalf("buildSeccompProgram: %v", err)
+		}
+		cases := []struct {
+			name     string
+			nr, arch uint32
+			want     uint32
+		}{
+			// The opt-out affects ONLY non-native-arch/x32 paths — the
+			// native deny-list is completely unaffected.
+			{"native denied syscall STILL -> ERRNO", 111, uint32(unix.AUDIT_ARCH_X86_64), wantErrno},
+			{"native non-denied syscall -> ALLOW", 42, uint32(unix.AUDIT_ARCH_X86_64), unix.SECCOMP_RET_ALLOW},
+			{"compat i386 arch -> ALLOW", 111, uint32(unix.AUDIT_ARCH_I386), unix.SECCOMP_RET_ALLOW},
+			{"spoofed/unknown arch -> ALLOW", 111, 0xdeadbeef, unix.SECCOMP_RET_ALLOW},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				got := runSeccompProgram(t, program, c.nr, c.arch)
+				if got != c.want {
+					t.Errorf("got %#x, want %#x", got, c.want)
+				}
+			})
+		}
+	})
 }
 
 // TestBwrapDenySyscallsNoDuplicateNumbers guards against a copy-paste error
@@ -273,7 +383,7 @@ func TestBwrapSeccompArchSupportedOnThisBuild(t *testing.T) {
 }
 
 func TestNewBwrapSeccompFileProducesReadableSealedMemfd(t *testing.T) {
-	f, err := newBwrapSeccompFile()
+	f, err := newBwrapSeccompFile(false)
 	if err != nil {
 		t.Fatalf("newBwrapSeccompFile: %v", err)
 	}

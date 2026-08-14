@@ -74,39 +74,76 @@ func DescribeBwrapSeccompPosture() (archLabel string, deniedCount int) {
 	return runtime.GOARCH, len(bwrapDenySyscalls)
 }
 
-// buildSeccompProgram assembles the two-tier bwrap seccomp filter described
-// in bugbot-6dph's --design (decision 4): a syscall issued under any
-// architecture other than nativeArch — the compat 32-bit personality, or a
-// spoofed/unrecognized arch value — is killed unconditionally, without
-// consulting deny at all; a syscall issued under nativeArch AND without the
-// x32 ABI bit set (see x32SyscallBit below) is checked against deny
-// (ERRNO(ENOSYS) on a match) and allowed otherwise. Denying the ENTIRE
-// non-native architecture (rather than replicating deny under a second,
-// hand-maintained i386/ARM-EABI syscall-number table) is what satisfies
-// "handles the compat/32-bit audit arch, not just x86_64 native": nothing
-// can be allowed by omission under an arch VALUE this filter was never
-// taught to interpret. The x32 ABI is the one bypass that trick alone does
-// NOT close (oracle finding, fix round 1): x32 shares AUDIT_ARCH_X86_64
-// with native 64-bit, so it needs its own guard — see the bit-30 check
-// below.
+// buildSeccompProgram assembles the bwrap seccomp filter described in
+// bugbot-6dph's --design: a syscall issued under any architecture other
+// than nativeArch (the compat 32-bit personality, or a spoofed/
+// unrecognized arch value) is denied without consulting deny at all,
+// UNLESS allowNonNativeArch opts out of that gate entirely (--design
+// decision, fix round 2: sandbox.allow_nonnative_arch — an escape hatch
+// for a repo that genuinely needs a 32-bit/compat binary to run, mirroring
+// allow_nested_userns's opt-out shape); a syscall issued under nativeArch
+// AND without the x32 ABI bit set (see x32SyscallBit below) is checked
+// against deny and allowed otherwise; an x32-bit-set syscall under
+// nativeArch is ALSO gated by allowNonNativeArch, for the same reason.
+//
+// ONE action for every denial: RET_ERRNO(ENOSYS) — not
+// RET_KILL_PROCESS (fix round 2, oracle findings B1a/B1b, orchestrator
+// directive). A kill terminates the denied process outright, which
+// bugbot-repro's classifiers cannot distinguish from a genuine crash
+// (SIGSYS surfaces only as free-text — "signal: bad system call" — in a
+// parent process's own reported output, an unbounded and unreliable
+// vocabulary space to match against, see fix round 1's now-reverted
+// internal/repro/seccomp_kill.go for the failed attempt), so it both
+// missed real kills phrased differently AND suppressed genuine failures
+// that happened to contain that same phrase (including this repo's own
+// source, before the revert). ERRNO removes the hazard at its root: no
+// syscall under a non-native arch or with the x32 bit ever EXECUTES
+// either way — the security property is identical — but the denied
+// process keeps running and must handle the failure itself, exactly like
+// every other syscall in the deny-list already does. This also
+// incidentally fixes a real nit: seccomp_data.nr is a signed int, so
+// nr == -1 (an invalid-syscall-number probe some libc feature-detection
+// code issues deliberately) has EVERY bit set including bit 30 and was
+// being caught by the x32 guard; under KILL that silently changed its
+// observed behavior from the kernel's own "unimplemented syscall number"
+// ENOSYS to a SIGSYS kill, whereas under ERRNO the observed result
+// (ENOSYS) is unchanged either way.
+//
+// Evaluated and rejected: surfacing WTERMSIG==SIGSYS as a sandbox.Result
+// fact instead (so repro's classifiers could veto on a hard signal rather
+// than a kill's absence of one). bwrap is pid 1 of its sandbox and reaps
+// orphans, but reports only its OWN direct child's exit status — the
+// common real case is a 32-bit tool as a child of a TEST RUNNER (go test,
+// pytest, ...), never orphaned, so its signal death is invisible at the
+// sandbox-Exec layer without either patching bwrap itself or a
+// SECCOMP_USER_NOTIF listener, which --add-seccomp-fd cannot install
+// (that requires the separate, unrelated SECCOMP_RET_USER_NOTIF action
+// plus a notification fd bwrap has no flag to plumb through). Recorded
+// here so a future maintainer does not re-attempt it without first
+// solving that plumbing gap.
 //
 // Pure function of its inputs, so the security-relevant program shape is
 // exercised by unit tests without a Linux kernel, bwrap, or any syscall —
 // mirrors buildBwrapArgs' purity contract.
-func buildSeccompProgram(nativeArch uint32, deny []denySyscall) ([]byte, error) {
+func buildSeccompProgram(nativeArch uint32, deny []denySyscall, allowNonNativeArch bool) ([]byte, error) {
 	if nativeArch == 0 {
 		return nil, fmt.Errorf("sandbox: no native AUDIT_ARCH_* mapping available; cannot build a seccomp filter")
+	}
+
+	nonNativeAction := uint32(unix.SECCOMP_RET_ERRNO) | seccompDenyErrno
+	if allowNonNativeArch {
+		nonNativeAction = unix.SECCOMP_RET_ALLOW
 	}
 
 	insts := make([]bpf.Instruction, 0, 6+2*len(deny))
 	insts = append(insts,
 		// A = seccomp_data.arch
 		bpf.LoadAbsolute{Off: seccompDataArchOffset, Size: 4},
-		// arch == nativeArch? skip the kill-and-return below and fall into
-		// the nr-based deny-list; anything else (compat 32-bit, or a
-		// spoofed value) falls straight through to RET_KILL_PROCESS.
+		// arch == nativeArch? skip the non-native return below and fall
+		// into the nr-based deny-list; anything else (compat 32-bit, or a
+		// spoofed value) falls straight through to nonNativeAction.
 		bpf.JumpIf{Cond: bpf.JumpEqual, Val: nativeArch, SkipTrue: 1},
-		bpf.RetConstant{Val: unix.SECCOMP_RET_KILL_PROCESS},
+		bpf.RetConstant{Val: nonNativeAction},
 		// A = seccomp_data.nr
 		bpf.LoadAbsolute{Off: seccompDataNrOffset, Size: 4},
 		// x32 ABI guard (oracle finding B1, bugbot-6dph fix round 1): the
@@ -118,15 +155,15 @@ func buildSeccompProgram(nativeArch uint32, deny []denySyscall) ([]byte, error) 
 		// syscall (mount, bpf, kexec_load, ...) would silently fall
 		// through to the final RET_ALLOW. seccomp(2) is explicit that a
 		// policy must either recognize both bit-set and bit-clear numbers
-		// or reject the entire bit-set range; we take the latter — no
-		// legitimate Go/npm/pip/cargo/Maven/Gradle toolchain path issues
-		// an x32 syscall — rather than doubling the deny-list under a
+		// or reject the entire bit-set range; we take the latter (same
+		// nonNativeAction as the arch gate, so allowNonNativeArch governs
+		// both consistently) rather than doubling the deny-list under a
 		// second, separately hand-maintained x32 numbering. A does NOT
 		// need reloading afterward: JumpBitsSet is non-destructive, so the
 		// deny loop below still compares the same nr this instruction
 		// tested.
 		bpf.JumpIf{Cond: bpf.JumpBitsSet, Val: x32SyscallBit, SkipTrue: 0, SkipFalse: 1},
-		bpf.RetConstant{Val: unix.SECCOMP_RET_KILL_PROCESS},
+		bpf.RetConstant{Val: nonNativeAction},
 	)
 	for _, sc := range deny {
 		insts = append(insts,
@@ -181,11 +218,14 @@ func (w *bufferWriter) Write(p []byte) (int, error) {
 // though the fd is never shared with the sandboxed process itself, only
 // bwrap's own (pre-seccomp) setup code.
 //
+// allowNonNativeArch is sandbox.allow_nonnative_arch (Bwrap.
+// allowNonNativeArch), threaded straight to buildSeccompProgram.
+//
 // The returned file's offset is reset to 0 before return: exec.Cmd.
 // ExtraFiles shares the SAME open file description (not a copy) with the
 // child, so if left at end-of-write, bwrap's read would see immediate EOF.
-func newBwrapSeccompFile() (*os.File, error) {
-	program, err := buildSeccompProgram(nativeSeccompAuditArch, bwrapDenySyscalls)
+func newBwrapSeccompFile(allowNonNativeArch bool) (*os.File, error) {
+	program, err := buildSeccompProgram(nativeSeccompAuditArch, bwrapDenySyscalls, allowNonNativeArch)
 	if err != nil {
 		return nil, err
 	}

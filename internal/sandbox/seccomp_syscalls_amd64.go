@@ -7,7 +7,9 @@ import "golang.org/x/sys/unix"
 // nativeSeccompAuditArch is the AUDIT_ARCH_* value the kernel reports in
 // seccomp_data.arch for a 64-bit x86 process — the one arch buildSeccompProgram
 // evaluates the deny-list under; every other arch value (compat 32-bit i386,
-// or a spoofed value) is killed outright, see buildSeccompProgram's doc.
+// or a spoofed value) is denied with ENOSYS by default, or unfiltered
+// under the sandbox.allow_nonnative_arch opt-out — see
+// buildSeccompProgram's doc.
 var nativeSeccompAuditArch = uint32(unix.AUDIT_ARCH_X86_64)
 
 // bwrapDenySyscalls is the amd64 syscall deny-list (bugbot-6dph --design

@@ -241,18 +241,24 @@ sandbox:
   # applies either way — this controls ONLY the namespace-nesting guard.
   # Ignored by the container backend.
   # allow_nested_userns: false
-  # NOTE (bwrap backend only): every bwrap run's seccomp filter kills
-  # (SIGSYS) any process that issues a syscall under a non-native CPU
-  # instruction path — a 32-bit/compat binary, the x32 ABI, or a 64-bit
-  # process using the legacy 32-bit syscall entry point. There is no
-  # config knob to disable this (it is not gated by allow_nested_userns
-  # above, which controls namespace nesting only): a repo containing a
-  # vendored 32-bit tool, or a test that spawns one, will have that one
-  # process killed. Bugbot recognizes this signature (exit 128+SIGSYS, or
-  # "signal: bad system call" in a nested subprocess's reported output)
-  # and classifies the run as an environment/harness failure rather than
-  # a demonstrated bug — never a false finding — but the killed
-  # process's own output is unavailable either way.
+  # allow_nonnative_arch: bwrap-only. Every bwrap run's seccomp filter
+  # denies (ENOSYS) any syscall issued under a non-native CPU instruction
+  # path — a 32-bit/compat binary, the x32 ABI, or a 64-bit process using
+  # the legacy 32-bit syscall entry point — with the SAME action as the
+  # named deny-list, so a 32-bit/compat tool fails its syscalls gracefully
+  # rather than being killed. There is no way to make such a tool WORK
+  # without this knob: set it to true only if a repo genuinely needs to
+  # run a 32-bit/compat binary inside the sandbox, understanding that ANY
+  # syscall issued via that path is then completely unfiltered (not just
+  # from a trusted vendored tool). Like any other sandbox-caused
+  # environment failure (a missing toolchain, ENOSPC), a 32-bit/compat
+  # tool's syscalls failing under the default (false) CAN surface as an
+  # ordinary test failure if a test asserts on that tool's success —
+  # bugbot does not (and structurally cannot) distinguish "the repo has a
+  # real bug" from "the sandboxed 32-bit tool couldn't do its job" in that
+  # case; this is a general product-level limitation, not specific to
+  # this knob.
+  # allow_nonnative_arch: false
 
 # ---------------------------------------------------------------------------
 # verify: configuration for the LLM-assisted patch-verification stage.

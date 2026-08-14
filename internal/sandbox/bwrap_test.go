@@ -78,6 +78,7 @@ func TestBwrapOptionsApplyDefaults(t *testing.T) {
 	WithBwrapNetwork("host")(s)
 	WithBwrapAllowUncapped(true)(s)
 	WithBwrapAllowNestedUserns(true)(s)
+	WithBwrapAllowNonNativeArch(true)(s)
 	WithBwrapScratchSizeMB(256)(s)
 	WithBwrapWorkspaceGrowthCeilingMB(1024)(s)
 
@@ -93,6 +94,9 @@ func TestBwrapOptionsApplyDefaults(t *testing.T) {
 	}
 	if !s.allowNestedUserns {
 		t.Error("allowNestedUserns should be true")
+	}
+	if !s.allowNonNativeArch {
+		t.Error("allowNonNativeArch should be true")
 	}
 	if s.defaultScratchSizeMB != 256 {
 		t.Errorf("defaultScratchSizeMB = %d, want 256", s.defaultScratchSizeMB)
