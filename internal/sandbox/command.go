@@ -12,11 +12,24 @@ import (
 type runParams struct {
 	// runtime is the resolved container runtime binary name ("podman" or
 	// "docker", see cli.go's candidateRuntimes/Detect). buildRunArgs uses it
-	// to gate the podman-only ":U" mount option (see nonSharedMountLabel):
-	// Docker rejects ":U" outright as an unrecognized bind-mount option, so
-	// unconditionally emitting it would break every Docker-backend run, not
-	// just the non-root-USER-image case it exists to fix.
+	// to gate the podman-only "--userns=keep-id:uid=,gid=" identity mapping
+	// (see resolveNonRootUser/containerUID below): Docker has no equivalent
+	// per-run flag (only a daemon-wide --userns-remap), so the non-root-USER
+	// fix does not apply under Docker.
 	runtime string
+	// containerUID/containerGID, when containerUID > 0, are the numeric
+	// identity a non-root image USER resolves to (see resolveNonRootUser).
+	// buildRunArgs then adds "--user <uid>:<gid>" plus
+	// "--userns=keep-id:uid=<uid>,gid=<gid>" so the container's non-root
+	// process IS the invoking host user, one layer removed through podman's
+	// user namespace — with ZERO host-side ownership mutation (see the
+	// buildRunArgs doc comment for the full mechanism and bugbot-p8y4's
+	// --design for the alternatives evaluated). Zero value (0) means "no
+	// override": either the probe was never run (runtime != "podman"),
+	// found the image runs as root (uid 0 needs no override — root-in-
+	// container already maps to the invoking host user under rootless
+	// podman, the pre-existing working case), or failed best-effort.
+	containerUID, containerGID int
 	// containerName is the generated --name, used to forcibly remove the
 	// container on timeout.
 	containerName string
@@ -66,60 +79,6 @@ const workspaceMount = "/workspace"
 // byte-identical behavior to before bugbot-yrox.
 const fallbackScratchSizeMB = 512
 
-// nonSharedMountLabel returns the volume-option string for a bugbot-owned
-// (Shared=false) mount given its base mode ("ro" or "rw"): always base+",Z"
-// (SELinux private relabel; a no-op when SELinux is disabled) and,
-// additionally, ",U" when runtime is "podman".
-//
-// SECURITY (bugbot-p8y4): ":U" tells podman to chown the mount recursively
-// to the container's user-namespace-mapped UID/GID *before* the container
-// starts, which is what lets a non-root image USER (e.g. bazel-public's
-// "USER ubuntu") read a workspace that would otherwise stay owned by the
-// invoking host user at prepareWorkspace's default 0700 and be completely
-// unreadable to any other UID. This was evaluated against two alternatives
-// and chosen because it is the only one that does not widen HOST-level
-// readability of the mount:
-//   - Loosening the host-side workspace directory's permission bits (e.g.
-//     chmod 0755) would let every OTHER host user read it too — the
-//     workspace holds the untrusted repo under scan AND any WriteFiles
-//     content bugbot injected (which can include secrets-adjacent
-//     reproduction fixtures), so that is a real information-disclosure
-//     widening, not just a cosmetic one.
-//   - "--userns=keep-id" only maps the CURRENT host user's own UID into the
-//     container 1:1; it does nothing for an image-declared non-root UID
-//     that differs from the invoking host user's UID (the common case —
-//     "ubuntu" is baked into the image, not derived from whoever runs
-//     bugbot), so it does not generalize to arbitrary untrusted images.
-//   - ":U" instead changes only the mount's OWNING uid/gid, to a
-//     subordinate UID in the rootless user's own private /etc/subuid range
-//     (confirmed empirically: chowned to 100999:100999 on this host, never
-//     a real host account) — permission bits stay exactly as
-//     prepareWorkspace/copyWorkspace left them (0700), so no additional
-//     host user or process gains read access. Only the container's mapped
-//     non-root user (which IS the invoking bugbot user, one layer removed
-//     through the user namespace) can now read what it already could not
-//     read as a genuinely different host principal.
-//
-// Docker has no equivalent flag and rejects ":U" outright as an unknown
-// mount option (confirmed against docker's bind-mount option parser), so
-// this is gated on runtime=="podman" — see runParams.runtime. Podman is the
-// preferred, default-detected runtime (candidateRuntimes in cli.go); the
-// Docker fallback path does not get this fix and non-root-USER images will
-// still fail to read /workspace under Docker.
-//
-// Shared=true mounts (host-owned dirs such as the operator's Go module
-// cache or a bazel vendor dir the host also manages) call this with a
-// literal base string instead — see the RO/RW mount loops in buildRunArgs —
-// and must NEVER get :Z or :U: relabeling or chowning a directory another
-// host process actively manages breaks that process's own access to it.
-func nonSharedMountLabel(base, runtime string) string {
-	label := base + ",Z"
-	if runtime == "podman" {
-		label += ",U"
-	}
-	return label
-}
-
 // buildRunArgs constructs the argv passed to the runtime CLI (excluding the
 // runtime binary itself) for a `run` invocation. It is a pure function so the
 // security-relevant flag construction can be exercised in unit tests without a
@@ -127,19 +86,25 @@ func nonSharedMountLabel(base, runtime string) string {
 //
 // Security posture encoded here (defense in depth for untrusted, model-driven
 // code):
+//
 //   - --rm                      : always reap the container on exit.
+//
 //   - --network=<network>       : "none" by default, no egress.
+//
 //   - --read-only               : read-only root filesystem...
+//
 //   - --tmpfs /tmp              : ...with a writable scratch tmpfs sized by
 //     p.scratchSizeMB (sandbox.scratch_size_mb; <= 0 falls back to
 //     fallbackScratchSizeMB) — big enough for host language toolchain caches
 //     (Go's cold build cache alone can run to hundreds of MB) but explicitly
 //     bounded rather than left to the host's free RAM (bugbot-yrox).
+//
 //   - --env HOME=/tmp           : caches that default under $HOME (Go, pip,
 //     npm, ...) land on the writable tmpfs instead of dying on the read-only
 //     root; without this `go test` fails instantly with "failed to initialize
 //     build cache: read-only file system" before it ever compiles. Spec.Env
 //     entries are appended after and may override.
+//
 //   - --entrypoint=              : unconditionally NEUTRALIZE the image's own
 //     ENTRYPOINT (bugbot-p8y4/bugbot-cbm5). Without this, any image that
 //     declares one gets it silently PREPENDED to whatever argv this function
@@ -154,33 +119,83 @@ func nonSharedMountLabel(base, runtime string) string {
 //     is already a complete, explicit argv (or the /bin/sh setup wrapper
 //     below); bugbot never wants an image's bundled entrypoint script
 //     running ahead of — or instead of — the command it was asked to run.
-//     Verified against podman 5.7.0 on this host: `--entrypoint=` (a single
-//     token, matching the `--network=` convention above) resets it exactly
-//     like `--entrypoint ""`.
-//   - -v ws:/workspace:rw,Z[,U] : the workspace copy is the only writable
+//     Verified against podman 5.7.0 AND real Docker 27.5.1/29.6.0 on this
+//     host: `--entrypoint=` (a single token, matching the `--network=`
+//     convention above) resets it exactly like `--entrypoint ""` on BOTH
+//     runtimes, so it is emitted unconditionally, never runtime-gated.
+//
+//   - --user <uid>:<gid> + --userns=keep-id:uid=<uid>,gid=<gid> : emitted
+//     ONLY when p.containerUID > 0 (a non-root image USER was resolved —
+//     see resolveNonRootUser), and ONLY on podman (p.runtime == "podman";
+//     Docker has no per-run equivalent, only a daemon-wide --userns-remap,
+//     so this fix does not extend to the Docker backend). This is
+//     bugbot-p8y4's second defect fix: an image with a non-root USER (e.g.
+//     bazel-public's now-shipped "USER ubuntu") otherwise cannot read the
+//     workspace, which prepareWorkspace leaves owned by the invoking host
+//     user at mode 0700.
+//
+//     MECHANISM (verified empirically, podman 5.7.0): "--user U:G" forces
+//     the containerized process to run as UID U — the SAME numeric UID the
+//     image's own USER directive resolves to (so the process still looks
+//     like "ubuntu" from inside, matching what the image expects). Without
+//     anything else, rootless podman's default user-namespace mapping would
+//     send that U to an unrelated SUBORDINATE host UID (confirmed: uid 1000
+//     maps to 100999) — completely unable to read anything owned by the
+//     invoking host user. "--userns=keep-id:uid=U,gid=G" changes that
+//     mapping so container UID U is the ONE explicitly mapped back to the
+//     invoking host user (not "0", keep-id's bare-form default) — so the
+//     containerized non-root process IS the host user, one namespace layer
+//     removed, for exactly the mount it needs to read/write. HOST-SIDE
+//     OWNERSHIP OF THE WORKSPACE IS NEVER TOUCHED: verified before/after a
+//     real run — mode and owning UID/GID on the host are byte-identical.
+//
+//     This replaced an earlier, REJECTED design that chowned the mount via
+//     podman's ":U" bind-mount option instead. That was wrong: :U moves the
+//     mount's ownership to the subordinate UID for the DURATION of the
+//     bind, but nothing moves it back afterward, and bugbot's own HOST-side
+//     code (Spec.CaptureFiles, the deferred workspace os.RemoveAll, a
+//     reused Spec.Workspace iteration directory, the workspace-growth-
+//     ceiling watchdog's filesystem probe, and the persistent dependency-
+//     prefetch cache) all run as the INVOKING host user AFTER the container
+//     exits — every one of those was found (two dual-oracle review rounds,
+//     live podman probes) to silently break once its target was chowned
+//     out from under it. --userns=keep-id:uid=,gid= has none of that
+//     failure mode because it never mutates anything on the host: it only
+//     changes how the CONTAINER's OWN namespace maps an already-existing
+//     host identity.
+//
+//     Resolving U/G from an arbitrary image (Config.User may be a bare
+//     name like "ubuntu", not a number) requires one lightweight probe
+//     container per distinct image (`id -u`/`id -g`); see
+//     resolveNonRootUser's doc comment for that mechanism and its cache.
+//
+//   - -v ws:/workspace:rw,Z     : the workspace copy is the only writable
 //     mount (Z relabels for SELinux; harmless elsewhere). The original repo
-//     is never mounted. The ,U suffix (podman only, see nonSharedMountLabel)
-//     fixes bugbot-p8y4's second defect: an image with a non-root USER
-//     (e.g. bazel-public's now-shipped "USER ubuntu") cannot otherwise read
-//     the workspace, which prepareWorkspace leaves owned by the invoking
-//     host user at mode 0700.
-//   - -v host:ctr:ro[,Z[,U]]    : any Spec.ROMounts are mounted READ-ONLY (a
+//     is never mounted.
+//
+//   - -v host:ctr:ro[,Z]        : any Spec.ROMounts are mounted READ-ONLY (a
 //     dependency cache, for example). These are never writable, but they DO
 //     expose host content to untrusted code, so callers must only mount
 //     public/cache content — never secrets. See the package doc and Spec.ROMounts.
-//     The :Z suffix (SELinux private relabel) and the podman-only :U suffix
-//     (see nonSharedMountLabel) are added ONLY when ROMount.Shared is false
-//     (bugbot-owned dirs). Shared host dirs (e.g. the user's Go module
-//     cache) must NOT be relabeled or chowned: doing either to a multi-GB
-//     shared cache is slow, breaks the host go toolchain, and breaks other
-//     containers/processes sharing the dir. See ROMount.Shared for the full
-//     tradeoff. RWMounts (prefetch caches and operator "writable: true"
-//     local_mounts, bugbot-wjc2) follow the same rule: relabeled/chowned
-//     only when Shared is false.
+//     The :Z suffix (SELinux private relabel) is added ONLY when ROMount.Shared
+//     is false (bugbot-owned dirs). Shared host dirs (e.g. the user's Go module
+//     cache) must NOT be relabeled: :Z on a multi-GB shared cache is slow,
+//     breaks the host go toolchain, and breaks other containers sharing the dir.
+//     See ROMount.Shared for the full tradeoff. RWMounts (prefetch caches and
+//     operator "writable: true" local_mounts, bugbot-wjc2) follow the same :Z
+//     rule: relabeled only when Shared is false. Neither loop ever chowns
+//     anything — the --userns=keep-id mapping above is what makes these
+//     mounts' EXISTING host ownership readable/writable to a non-root
+//     container process; no mount-option change was needed here at all.
+//
 //   - --workdir /workspace      : run from the workspace.
+//
 //   - --cap-drop ALL            : drop all Linux capabilities.
+//
 //   - --security-opt no-new-privileges : block privilege escalation (setuid).
+//
 //   - --pids-limit              : cap process count (fork-bomb resistance).
+//
 //   - --memory / --cpus         : resource limits.
 func buildRunArgs(p runParams) []string {
 	scratchMB := p.scratchSizeMB
@@ -199,32 +214,43 @@ func buildRunArgs(p runParams) []string {
 		"--security-opt", "no-new-privileges",
 		"--workdir", workspaceMount,
 		"--entrypoint=",
-		"-v", fmt.Sprintf("%s:%s:%s", p.workspace, workspaceMount, nonSharedMountLabel("rw", p.runtime)),
 	}
+
+	// Non-root image identity: see the doc comment above and
+	// resolveNonRootUser. Podman-only (Docker has no per-run keep-id
+	// equivalent); no-op (containerUID == 0) for a root-USER image or when
+	// the resolution probe never ran/failed.
+	if p.runtime == "podman" && p.containerUID > 0 {
+		args = append(args,
+			"--user", fmt.Sprintf("%d:%d", p.containerUID, p.containerGID),
+			fmt.Sprintf("--userns=keep-id:uid=%d,gid=%d", p.containerUID, p.containerGID),
+		)
+	}
+
+	args = append(args, "-v", fmt.Sprintf("%s:%s:rw,Z", p.workspace, workspaceMount))
 
 	// Read-only mounts are rendered right after the writable workspace, in the
 	// caller-supplied order, and are always :ro (never writable). Bugbot-owned
-	// dirs (Shared=false) additionally get the :Z SELinux relabel and (podman
-	// only) :U chown suffixes via nonSharedMountLabel; shared host dirs
-	// (Shared=true) must NOT be relabeled or chowned — see ROMount.Shared for
-	// the full rationale.
+	// dirs (Shared=false) additionally get the :Z SELinux relabel suffix for
+	// isolation; shared host dirs (Shared=true) must NOT be relabeled — see
+	// ROMount.Shared for the full rationale.
 	for _, m := range p.roMounts {
-		label := "ro"
-		if !m.Shared {
-			label = nonSharedMountLabel("ro", p.runtime)
+		label := "ro,Z"
+		if m.Shared {
+			label = "ro"
 		}
 		args = append(args, "-v", fmt.Sprintf("%s:%s:%s", m.HostPath, m.ContainerPath, label))
 	}
 	// Writable mounts: the trusted dependency-prefetch step's caches and
 	// operator "writable: true" local_mounts (bugbot-wjc2). Same Shared
 	// semantics as the RO loop: host-owned dirs (Shared=true, e.g. a bazel
-	// vendor dir the host also manages) must NOT be SELinux :Z relabeled or
-	// :U chowned — a private container context, or a UID change, would
-	// break host-side management of the same tree.
+	// vendor dir the host also manages) must NOT be SELinux :Z relabeled —
+	// a private container context would break host-side management of the
+	// same tree.
 	for _, m := range p.rwMounts {
-		label := "rw"
-		if !m.Shared {
-			label = nonSharedMountLabel("rw", p.runtime)
+		label := "rw,Z"
+		if m.Shared {
+			label = "rw"
 		}
 		args = append(args, "-v", fmt.Sprintf("%s:%s:%s", m.HostPath, m.ContainerPath, label))
 	}

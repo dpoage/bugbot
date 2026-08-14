@@ -229,19 +229,20 @@ func TestBuildRunArgsResetsEntrypoint(t *testing.T) {
 	}
 }
 
-// TestBuildRunArgsPodmanChownsNonSharedMounts pins bugbot-p8y4's second
-// defect fix: under podman, every bugbot-owned (Shared=false) mount —
-// workspace, RO, and RW alike — gets the podman-only ":U" suffix so a
-// non-root image USER (e.g. bazel-public's "USER ubuntu") can read a
-// workspace that prepareWorkspace otherwise leaves owned by the invoking
-// host user at mode 0700. Shared=true mounts must NOT get :U (chowning a
-// host-managed dir, e.g. the operator's Go module cache, out from under it
-// would break the host's own access — same rationale as the existing :Z
-// exemption).
-func TestBuildRunArgsPodmanChownsNonSharedMounts(t *testing.T) {
+// TestBuildRunArgsPodmanNonRootIdentity pins bugbot-p8y4's second defect fix
+// (post-review redesign): when a non-root image USER was resolved
+// (containerUID > 0) and runtime is podman, buildRunArgs adds
+// "--user <uid>:<gid>" plus "--userns=keep-id:uid=<uid>,gid=<gid>" so the
+// non-root container process IS the invoking host user, one namespace layer
+// removed — with NO mount-option change (no :U, no chowning) anywhere. Every
+// mount (workspace, RO, RW; Shared and non-Shared) renders exactly as it did
+// before this bead: :Z only for non-Shared, plain for Shared.
+func TestBuildRunArgsPodmanNonRootIdentity(t *testing.T) {
 	args := buildRunArgs(runParams{
 		runtime:       "podman",
-		containerName: "bugbot-podman-u",
+		containerUID:  1500,
+		containerGID:  1500,
+		containerName: "bugbot-podman-identity",
 		workspace:     "/tmp/ws",
 		image:         "img",
 		network:       "none",
@@ -256,46 +257,75 @@ func TestBuildRunArgsPodmanChownsNonSharedMounts(t *testing.T) {
 		},
 	})
 
-	mustContainSeq(t, args, "-v", "/tmp/ws:/workspace:rw,Z,U")
-	mustContainSeq(t, args, "-v", "/host/ro-owned:/ro-owned:ro,Z,U")
-	mustContainSeq(t, args, "-v", "/host/rw-owned:/rw-owned:rw,Z,U")
+	mustContainSeq(t, args, "--user", "1500:1500")
+	mustContainSeq(t, args, "--userns=keep-id:uid=1500,gid=1500")
+
+	// Mounts are completely unaffected by the identity override: no :U ever.
+	mustContainSeq(t, args, "-v", "/tmp/ws:/workspace:rw,Z")
+	mustContainSeq(t, args, "-v", "/host/ro-owned:/ro-owned:ro,Z")
+	mustContainSeq(t, args, "-v", "/host/rw-owned:/rw-owned:rw,Z")
 	mustContainSeq(t, args, "-v", "/host/ro-shared:/ro-shared:ro")
 	mustContainSeq(t, args, "-v", "/host/rw-shared:/rw-shared:rw")
 
 	for i, a := range args {
-		if a != "-v" || i+1 >= len(args) {
-			continue
-		}
-		val := args[i+1]
-		if strings.Contains(val, "shared") && strings.Contains(val, ",U") {
-			t.Errorf("Shared mount must never get the :U chown suffix, got %q", val)
+		if a == "-v" && i+1 < len(args) && strings.Contains(args[i+1], ",U") {
+			t.Errorf("no mount may ever carry the :U chown suffix (removed post-review); got %q", args[i+1])
 		}
 	}
 }
 
-// TestBuildRunArgsNonPodmanRuntimeOmitsChown proves the Docker-safety gate:
-// Docker rejects ":U" outright as an unrecognized bind-mount option, so
-// buildRunArgs must never emit it for any runtime other than exactly
-// "podman" — including docker and the zero-value/unset case.
-func TestBuildRunArgsNonPodmanRuntimeOmitsChown(t *testing.T) {
+// TestBuildRunArgsRootImageOmitsIdentityOverride: containerUID == 0 (root
+// image, or the resolution probe never ran/failed) must add neither --user
+// nor --userns — the pre-existing, already-working root-image default path
+// (rootless podman's root-in-container already maps to the invoking host
+// user) must be completely undisturbed.
+func TestBuildRunArgsRootImageOmitsIdentityOverride(t *testing.T) {
+	args := buildRunArgs(runParams{
+		runtime:       "podman",
+		containerUID:  0,
+		containerGID:  0,
+		containerName: "bugbot-root",
+		workspace:     "/tmp/ws",
+		image:         "img",
+		network:       "none",
+		cmd:           []string{"true"},
+	})
+	if slices.Contains(args, "--user") {
+		t.Errorf("--user must not be emitted when containerUID is 0; args=%q", args)
+	}
+	for _, a := range args {
+		if strings.HasPrefix(a, "--userns=") {
+			t.Errorf("--userns must not be emitted when containerUID is 0; args=%q", args)
+		}
+	}
+}
+
+// TestBuildRunArgsNonPodmanRuntimeOmitsIdentityOverride proves the
+// Docker-safety gate: "--userns=keep-id" is podman-only (Docker has no
+// per-run equivalent, only a daemon-wide --userns-remap), so buildRunArgs
+// must never emit --user/--userns for any runtime other than exactly
+// "podman" — even if containerUID were somehow non-zero for that runtime
+// (defensive: resolveNonRootUser itself already refuses to probe non-podman
+// runtimes, but buildRunArgs must not trust that alone).
+func TestBuildRunArgsNonPodmanRuntimeOmitsIdentityOverride(t *testing.T) {
 	for _, rt := range []string{"docker", ""} {
 		t.Run("runtime="+rt, func(t *testing.T) {
 			args := buildRunArgs(runParams{
 				runtime:       rt,
-				containerName: "bugbot-no-u",
+				containerUID:  1500,
+				containerGID:  1500,
+				containerName: "bugbot-non-podman",
 				workspace:     "/tmp/ws",
 				image:         "img",
 				network:       "none",
 				cmd:           []string{"true"},
-				roMounts:      []ROMount{{HostPath: "/host/ro", ContainerPath: "/ro"}},
-				rwMounts:      []ROMount{{HostPath: "/host/rw", ContainerPath: "/rw"}},
 			})
-			mustContainSeq(t, args, "-v", "/tmp/ws:/workspace:rw,Z")
-			mustContainSeq(t, args, "-v", "/host/ro:/ro:ro,Z")
-			mustContainSeq(t, args, "-v", "/host/rw:/rw:rw,Z")
-			for i, a := range args {
-				if a == "-v" && i+1 < len(args) && strings.Contains(args[i+1], ",U") {
-					t.Errorf("runtime %q must never emit :U, got %q", rt, args[i+1])
+			if slices.Contains(args, "--user") {
+				t.Errorf("runtime %q must never emit --user; args=%q", rt, args)
+			}
+			for _, a := range args {
+				if strings.HasPrefix(a, "--userns=") {
+					t.Errorf("runtime %q must never emit --userns; args=%q", rt, args)
 				}
 			}
 		})

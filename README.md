@@ -61,6 +61,38 @@ is configured and rejects `backend: bwrap` with an actionable reason
 (not Linux, `bwrap` missing from PATH, or unprivileged user namespaces
 unavailable) before any run is attempted.
 
+### Container backend: podman vs docker, and non-root image USER support
+
+Both `podman` and `docker` accept the same generated argv for the common
+case — network isolation, capability dropping, the read-only root, and
+resetting a baked-in image `ENTRYPOINT` (so an image's own entrypoint script
+can never run ahead of the command bugbot asks for) all work identically on
+both.
+
+They diverge on one thing: an image whose `USER` directive is a **non-root**
+account (e.g. `USER ubuntu`) needs its container process mapped back to the
+invoking host user so it can read the prepared workspace, which is
+host-owned and non-world-readable by design. **podman** supports this via a
+per-run `--userns=keep-id:uid=,gid=` identity mapping (the image's UID is
+resolved once per image with a cheap cached probe and passed straight
+through — see `internal/sandbox/nonroot_user.go`); it changes nothing on the
+host filesystem, only how the container's own user namespace resolves an
+already-existing host identity. **docker has no per-run equivalent** — the
+closest analog, `--userns-remap`, is a daemon-wide setting an operator would
+configure outside bugbot, not something a single `docker run` invocation can
+opt into. Consequently:
+
+- `sandbox.runtime: podman` (or auto-detected podman): images with a
+  non-root `USER` work fully — the sandboxed process can read/write the
+  workspace and any RO/RW mounts exactly as a root-USER image can.
+- `sandbox.runtime: docker`: a non-root-`USER` image cannot read the
+  workspace. The run fails comprehensibly (a `mkdir`/`cat`/permission-denied
+  error from inside the container, not a cryptic mount/argv failure) rather
+  than silently, but it does fail. A root-`USER` (or no `USER`) image is
+  completely unaffected and behaves identically to podman.
+
+If your images declare a non-root `USER`, prefer the podman runtime.
+
 ### Allowlist-bind security model (bwrap)
 
 bwrap has no image filesystem to fall back on: the sandbox root starts as an

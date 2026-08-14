@@ -507,3 +507,258 @@ func TestIntegrationEntrypointDoesNotMangleWorkingToolchain(t *testing.T) {
 		t.Errorf("output contains the classifySmoke 'not found' trigger phrase the un-neutralized entrypoint would have produced: %q", combined)
 	}
 }
+
+// TestIntegrationNonRootUserCaptureFilesReadBack — bugbot-p8y4 fix-round
+// regression (oracle-review B1) — proves the redesigned identity mechanism
+// (--user + --userns=keep-id, no chowning) does NOT silently empty
+// Result.Captured the way the rejected ":U" design did: :U left the
+// workspace owned by a subordinate UID the HOST-side readCaptureFile (which
+// runs as the invoking user, after the container exits) could no longer
+// read, so a provably-written file came back as "absent" with no error.
+func TestIntegrationNonRootUserCaptureFilesReadBack(t *testing.T) {
+	s := newTestCLI(t)
+	image := buildEntrypointUserImage(t, s)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := s.Exec(ctx, Spec{
+		RepoDir:      t.TempDir(),
+		Image:        image,
+		Cmd:          []string{"sh", "-c", "echo '<testsuites></testsuites>' > report.xml"},
+		CaptureFiles: []string{"report.xml"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, stderr=%q", res.ExitCode, res.Stderr)
+	}
+	got, present := res.Captured["report.xml"]
+	if !present {
+		t.Fatal("Captured[report.xml] absent for a non-root USER image — the host-side capture read was blocked (the :U-chown regression this test guards against)")
+	}
+	if strings.TrimSpace(string(got)) != "<testsuites></testsuites>" {
+		t.Errorf("Captured[report.xml] = %q", got)
+	}
+}
+
+// TestIntegrationNonRootUserWorkspaceFullyRemoved — bugbot-p8y4 fix-round
+// regression (oracle-review B1) — proves the per-run workspace is actually
+// removable by the invoking host user after a non-root-USER run. The
+// rejected ":U" design left it owned by a subordinate UID the host user
+// cannot delete, permanently leaking a directory (some measured in the
+// hundreds of MB) per run. TMPDIR is redirected to an isolated per-test
+// directory so os.MkdirTemp("", "bugbot-sandbox-*") lands somewhere this
+// test can glob cleanly, with no cross-test interference.
+func TestIntegrationNonRootUserWorkspaceFullyRemoved(t *testing.T) {
+	s := newTestCLI(t)
+	image := buildEntrypointUserImage(t, s)
+
+	isolatedTMP := t.TempDir()
+	t.Setenv("TMPDIR", isolatedTMP)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := s.Exec(ctx, Spec{
+		RepoDir: t.TempDir(),
+		Image:   image,
+		Cmd:     []string{"sh", "-c", "echo hi > marker.txt"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, stderr=%q", res.ExitCode, res.Stderr)
+	}
+
+	entries, err := os.ReadDir(isolatedTMP)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", isolatedTMP, err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "bugbot-sandbox-") {
+			t.Errorf("leaked, undeletable-by-host-user workspace after a non-root-USER run: %s", e.Name())
+		}
+	}
+}
+
+// TestIntegrationNonRootUserReusedWorkspaceSecondExec — bugbot-p8y4 fix-round
+// regression (oracle-review B1) — proves the reproducer's iteration-workspace
+// shape (MaterializeWorkspace once, several Execs against the same
+// Spec.Workspace — see repro/repro.go and workspace_tools.go) still works
+// for a non-root USER image. The rejected ":U" design broke this after the
+// FIRST run: the workspace's host ownership changed mid-lifecycle, so the
+// second Exec's applyWriteFiles (running as the host user) hard-failed with
+// permission denied.
+func TestIntegrationNonRootUserReusedWorkspaceSecondExec(t *testing.T) {
+	s := newTestCLI(t)
+	image := buildEntrypointUserImage(t, s)
+
+	repoDir := t.TempDir()
+	ws, err := s.MaterializeWorkspace(repoDir)
+	if err != nil {
+		t.Fatalf("MaterializeWorkspace: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(ws) }()
+
+	ctx := context.Background()
+	res1, err := s.Exec(ctx, Spec{
+		RepoDir:   repoDir,
+		Workspace: ws,
+		Image:     image,
+		Cmd:       []string{"sh", "-c", "echo first > first.txt"},
+	})
+	if err != nil {
+		t.Fatalf("first Exec: %v", err)
+	}
+	if res1.ExitCode != 0 {
+		t.Fatalf("first Exec ExitCode = %d, stderr=%q", res1.ExitCode, res1.Stderr)
+	}
+
+	res2, err := s.Exec(ctx, Spec{
+		RepoDir:    repoDir,
+		Workspace:  ws,
+		Image:      image,
+		Cmd:        []string{"cat", "first.txt", "second.txt"},
+		WriteFiles: map[string][]byte{"second.txt": []byte("second\n")},
+	})
+	if err != nil {
+		t.Fatalf("second Exec (reused workspace): %v", err)
+	}
+	if res2.ExitCode != 0 {
+		t.Fatalf("second Exec ExitCode = %d, stderr=%q (a reused iteration workspace must stay usable after a non-root run)", res2.ExitCode, res2.Stderr)
+	}
+	if !strings.Contains(res2.Stdout, "first") || !strings.Contains(res2.Stdout, "second") {
+		t.Errorf("Stdout = %q, want both first.txt's and the WriteFiles-injected second.txt's content", res2.Stdout)
+	}
+}
+
+// TestIntegrationNonRootUserGrowthCeilingStillFires — bugbot-p8y4 fix-round
+// regression (oracle-review B1) — proves the workspace-growth-ceiling
+// watchdog (bugbot-bdqf, landed one commit before this bead) still observes
+// a non-root-USER run's filesystem growth. The rejected ":U" design chowned
+// the workspace out from under workspaceProgress's host-side stat walk,
+// blinding the ceiling entirely (measured: a run wrote 241 MB past an 8 MB
+// ceiling and was never killed). Growth must still trip the ceiling here.
+func TestIntegrationNonRootUserGrowthCeilingStillFires(t *testing.T) {
+	rt, ok := Detect()
+	if !ok {
+		t.Skip("no container runtime detected; skipping integration test")
+	}
+	s, err := NewCLI(rt, testImage,
+		WithCPUs(1), WithMemoryMB(256), WithPidsLimit(128),
+		WithTimeout(30*time.Second), WithIdleTimeout(30*time.Second),
+		WithWorkspaceGrowthCeilingMB(1), // 1 MiB ceiling
+	)
+	if err != nil {
+		t.Skipf("NewCLI: %v", err)
+	}
+	ensureImage(t, s)
+	image := buildEntrypointUserImage(t, s)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := s.Exec(ctx, Spec{
+		RepoDir: t.TempDir(),
+		Image:   image,
+		// Write ~4 MiB in one shot, comfortably past the 1 MiB ceiling.
+		Cmd: []string{"sh", "-c", "dd if=/dev/zero of=filler.bin bs=1M count=4 2>/dev/null"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !res.WorkspaceQuotaExceeded {
+		t.Errorf("WorkspaceQuotaExceeded = false, want true (4 MiB written past a 1 MiB ceiling under a non-root-USER image); ExitCode=%d", res.ExitCode)
+	}
+}
+
+// TestIntegrationNonRootUserRWMountReadWriteAfterRun — bugbot-p8y4 fix-round
+// regression (oracle-review B1) — proves a bugbot-owned (Shared=false)
+// writable mount, exactly the shape the dependency-prefetch cache uses
+// (deps.go), is still readable AND writable by the HOST user after a
+// non-root-USER run. The rejected ":U" design chowned this mount too (even
+// though it is never the workspace), breaking the prefetch sentinel's
+// host-side read/write and making the cache directory itself unreclaimable.
+func TestIntegrationNonRootUserRWMountReadWriteAfterRun(t *testing.T) {
+	s := newTestCLI(t)
+	image := buildEntrypointUserImage(t, s)
+
+	cacheDir := t.TempDir()
+	sentinel := filepath.Join(cacheDir, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("pre-existing\n"), 0o644); err != nil {
+		t.Fatalf("seed sentinel: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := s.Exec(ctx, Spec{
+		RepoDir: t.TempDir(),
+		Image:   image,
+		Cmd:     []string{"sh", "-c", "cat /cache/sentinel && echo written-by-container >> /cache/sentinel"},
+		RWMounts: []ROMount{
+			{HostPath: cacheDir, ContainerPath: "/cache"}, // Shared=false, matches deps.go's own cache mounts
+		},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, stderr=%q", res.ExitCode, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "pre-existing") {
+		t.Errorf("container could not read the pre-seeded sentinel; stdout=%q stderr=%q", res.Stdout, res.Stderr)
+	}
+
+	// HOST-side read/write after the run: the mount's ownership must be
+	// untouched (never chowned), unlike the rejected :U design.
+	got, readErr := os.ReadFile(sentinel)
+	if readErr != nil {
+		t.Fatalf("host-side read of the RW-mounted sentinel after the run: %v", readErr)
+	}
+	if !strings.Contains(string(got), "written-by-container") {
+		t.Errorf("sentinel missing the container's write; got %q", got)
+	}
+	if writeErr := os.WriteFile(sentinel, []byte("host-write-after-run\n"), 0o644); writeErr != nil {
+		t.Fatalf("host-side write of the RW-mounted sentinel after the run: %v (the cache dir must stay host-writable)", writeErr)
+	}
+	if rmErr := os.RemoveAll(cacheDir); rmErr != nil {
+		t.Errorf("host-side removal of the RW-mounted cache dir after the run: %v (the rejected :U design made this undeletable)", rmErr)
+	}
+}
+
+// TestIntegrationNonRootUserIdentityCaching — bugbot-p8y4 fix-round
+// regression — resolveNonRootUser's probe (a real container launch) must
+// run at most once per (runtime, image): a second Exec against the same
+// non-root-USER image must find the identity already cached rather than
+// re-probing.
+func TestIntegrationNonRootUserIdentityCaching(t *testing.T) {
+	s := newTestCLI(t)
+	if s.Runtime() != "podman" {
+		t.Skip("identity caching only applies to the podman-gated mechanism")
+	}
+	image := buildEntrypointUserImage(t, s)
+	InvalidateNonRootUserCache(image)
+
+	if _, hit := nonRootUserCache.Load(s.Runtime() + "|" + image); hit {
+		t.Fatal("expected a cold cache after InvalidateNonRootUserCache")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := s.Exec(ctx, Spec{RepoDir: t.TempDir(), Image: image, Cmd: []string{"true"}})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, stderr=%q", res.ExitCode, res.Stderr)
+	}
+
+	v, hit := nonRootUserCache.Load(s.Runtime() + "|" + image)
+	if !hit {
+		t.Fatal("expected the resolved identity to be cached after the first Exec")
+	}
+	id, ok := v.(containerIdentity)
+	if !ok || !id.ok || id.uid != 1500 {
+		t.Errorf("cached identity = %+v, want {uid:1500 gid:1500 ok:true}", v)
+	}
+}

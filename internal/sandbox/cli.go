@@ -359,6 +359,15 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Resolve a non-root image USER to its numeric uid/gid so buildRunArgs
+	// can pass podman the exact "--userns=keep-id:uid=,gid=" identity that
+	// mapping needs (see buildRunArgs' doc comment for the full mechanism).
+	// Best-effort and cheap after the first call per image (cached): a
+	// failed/skipped probe just leaves containerUID at its zero value, so
+	// buildRunArgs adds no identity override and this Exec behaves exactly
+	// as it did before bugbot-p8y4 for that image.
+	p.containerUID, p.containerGID = resolveNonRootUser(runCtx, p.runtime, p.image)
+
 	args := buildRunArgs(p)
 	cmd := exec.CommandContext(runCtx, s.runtime, args...)
 
