@@ -274,7 +274,7 @@ auto-close the finding).`,
 			// an error — print it so `bundle replay` never silently drops
 			// the reason a dependency mount/prefetch was skipped.
 			for _, w := range deps.Warnings {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", w)
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", w)
 			}
 
 			timeout := time.Duration(timeoutSecs) * time.Second
