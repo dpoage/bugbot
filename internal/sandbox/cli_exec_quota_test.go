@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -151,6 +152,9 @@ func TestCLIExec_QuotaKillFidelity(t *testing.T) {
 	if res.TimedOut {
 		t.Errorf("TimedOut = true, want false — a growth-ceiling kill must never collapse into TimedOut (res=%+v)", res)
 	}
+	if res.WorkspaceFileCountExceeded {
+		t.Errorf("WorkspaceFileCountExceeded = true, want false — a byte-size breach must not collapse into the file-count reason (res=%+v)", res)
+	}
 	if res.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
 	}
@@ -182,6 +186,9 @@ func TestCLIExec_QuotaKillFidelity_SpawnGateWithIdleTimeoutUnset(t *testing.T) {
 	}
 	if res.TimedOut {
 		t.Errorf("TimedOut = true, want false (res=%+v)", res)
+	}
+	if res.WorkspaceFileCountExceeded {
+		t.Errorf("WorkspaceFileCountExceeded = true, want false (res=%+v)", res)
 	}
 	if res.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
@@ -276,6 +283,9 @@ func TestCLIExec_QuotaKillFidelity_PostRunCheckCatchesBurstExit(t *testing.T) {
 	if !res.WorkspaceQuotaExceeded {
 		t.Errorf("WorkspaceQuotaExceeded = false, want true — a burst write that exits before any tick must still be caught (res=%+v)", res)
 	}
+	if res.WorkspaceFileCountExceeded {
+		t.Errorf("WorkspaceFileCountExceeded = true, want false — a pure byte-size burst must not collapse into the file-count reason (res=%+v)", res)
+	}
 	if res.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1 (the breach must override the process's own exit 0)", res.ExitCode)
 	}
@@ -313,5 +323,303 @@ func TestCLIExec_CallerCancellationWinsOverQuotaBreach(t *testing.T) {
 	}
 	if res.WorkspaceQuotaExceeded {
 		t.Errorf("a caller-cancelled run must never report WorkspaceQuotaExceeded, even if a breach was also detected; got %+v", res)
+	}
+	if res.WorkspaceFileCountExceeded {
+		t.Errorf("a caller-cancelled run must never report WorkspaceFileCountExceeded either; got %+v", res)
+	}
+}
+
+// newFakePodmanManyFilesCLI is newFakePodmanFillerCLI's file-COUNT analogue
+// (bugbot-gb3o): the fake podman script's only activity is creating many
+// near-zero-byte files (`: > file`, not a 4 KiB dd write) into the
+// workspace, one every 5ms, up to 400 iterations (bounded so a broken
+// watchdog fails the test instead of hanging it — 400 keeps the disabled-
+// ceiling negative control's full run comfortably under the 30s Timeout
+// even with real per-iteration fork/exec overhead on top of the 5ms
+// sleep). This is the exact motivating shape from the bug report — 10,000
+// tiny files totaling 20 KB — scaled down for test speed: fsCount climbs
+// fast while fsSize stays negligible, so ONLY a file-count ceiling (never
+// the byte-size one) can catch it.
+func newFakePodmanManyFilesCLI(t *testing.T, opts ...Option) *CLI {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based fake runtime assumes POSIX /bin/sh")
+	}
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+set -u
+if [ "$1" = "rm" ]; then
+  exit 0
+fi
+ws=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-v" ]; then
+    ws="${arg%%:*}"
+  fi
+  prev="$arg"
+done
+if [ -z "$ws" ]; then
+  echo "fake-podman: no workspace bind found" >&2
+  exit 1
+fi
+i=0
+while [ $i -lt 400 ]; do
+  : > "$ws/tiny.$i"
+  i=$((i+1))
+  sleep 0.005
+done
+exit 0
+`
+	scriptPath := filepath.Join(binDir, "podman")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake podman script: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	s, err := NewCLI("podman", "unused-image", opts...)
+	if err != nil {
+		t.Fatalf("NewCLI: %v", err)
+	}
+	return s
+}
+
+// TestCLIExec_FileCountBaselineCapturedAfterWorkspacePrep is
+// TestCLIExec_QuotaBaselineCapturedAfterWorkspacePrep's file-count
+// analogue and the acceptance-mandated negative test: a normal repo copy
+// holding many PRE-EXISTING files (a populated node_modules, a large
+// vendored dependency tree, ...) must NOT trip the ceiling — only entries
+// created by the COMMAND itself, after the baseline snapshot, count.
+// RepoDir is seeded with 500 pre-existing files against a 50-file
+// ceiling; the fake command touches nothing at all, so ANY kill here
+// proves the baseline was wrong.
+func TestCLIExec_FileCountBaselineCapturedAfterWorkspacePrep(t *testing.T) {
+	s := newFakePodmanNoopCLI(t)
+	s.defaultFileCountCeiling = 50 // far below the seeded file count
+	s.defaultGrowthCeilingBytes = 0
+	s.defaultIdleTimeout = 0
+	s.defaultTimeout = 15 * time.Second
+
+	repoDir := t.TempDir()
+	for i := range 500 {
+		if err := os.WriteFile(filepath.Join(repoDir, "f"+strconv.Itoa(i)+".txt"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("seed repo content: %v", err)
+		}
+	}
+
+	res, err := s.Exec(context.Background(), Spec{RepoDir: repoDir, Cmd: []string{"irrelevant"}})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.WorkspaceFileCountExceeded {
+		t.Errorf("pre-existing workspace content (500 files against a 50-file ceiling) must NOT trip the ceiling — the baseline must be captured AFTER workspace prep, not from zero; got %+v", res)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0 (the fake command touches nothing and exits cleanly)", res.ExitCode)
+	}
+}
+
+// TestCLIExec_FileCountKillFidelity is TestCLIExec_QuotaKillFidelity's
+// file-count analogue and the acceptance-mandated positive test: a run
+// whose only activity is creating many tiny files is killed by the
+// file-count ceiling — WorkspaceFileCountExceeded=true,
+// WorkspaceQuotaExceeded=false (the byte-size ceiling never trips; the
+// files are near-zero bytes), TimedOut=false, ExitCode=-1, err=nil — well
+// before the 30s/60s Timeout/IdleTimeout ceilings, through the REAL
+// CLI.Exec code path.
+func TestCLIExec_FileCountKillFidelity(t *testing.T) {
+	s := newFakePodmanManyFilesCLI(t)
+	s.defaultFileCountCeiling = 50 // tripped inside the first ~1s poll tick
+	s.defaultGrowthCeilingBytes = 0
+	s.defaultIdleTimeout = 60 * time.Second
+	s.defaultTimeout = 30 * time.Second
+
+	start := time.Now()
+	res, err := s.Exec(context.Background(), Spec{RepoDir: t.TempDir(), Cmd: []string{"irrelevant"}})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !res.WorkspaceFileCountExceeded {
+		t.Errorf("WorkspaceFileCountExceeded = false, want true (res=%+v)", res)
+	}
+	if res.WorkspaceQuotaExceeded {
+		t.Errorf("WorkspaceQuotaExceeded = true, want false — near-zero-byte files must not trip the byte-size ceiling (res=%+v)", res)
+	}
+	if res.TimedOut {
+		t.Errorf("TimedOut = true, want false — a file-count-ceiling kill must never collapse into TimedOut (res=%+v)", res)
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("elapsed = %s, want well under the 30s/60s Timeout/IdleTimeout ceilings", elapsed)
+	}
+}
+
+// TestCLIExec_FileCountKillFidelity_SpawnGateWithIdleTimeoutUnset pins the
+// watchdog spawn gate's third arm (bugbot-gb3o, extending bugbot-bdqf
+// review A-B1/mutation M8 to the file-count ceiling): the goroutine must
+// start from the file-count ceiling ALONE, with IdleTimeout AND the
+// byte-size growth ceiling both completely unset — gutting the
+// "idleTimeout>0 || growthCeilingBytes>0 || fileCountCeiling>0" gate back
+// to just the first two conditions would silently disable file-count
+// enforcement whenever an operator sets idle_timeout_seconds: 0 with the
+// byte-size ceiling also disabled.
+func TestCLIExec_FileCountKillFidelity_SpawnGateWithIdleTimeoutUnset(t *testing.T) {
+	s := newFakePodmanManyFilesCLI(t)
+	s.defaultFileCountCeiling = 50
+	s.defaultGrowthCeilingBytes = 0
+	s.defaultIdleTimeout = 0 // explicitly unset
+	s.defaultTimeout = 30 * time.Second
+
+	res, err := s.Exec(context.Background(), Spec{RepoDir: t.TempDir(), Cmd: []string{"irrelevant"}})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !res.WorkspaceFileCountExceeded {
+		t.Errorf("WorkspaceFileCountExceeded = false, want true — the watchdog must spawn from the file-count ceiling alone (res=%+v)", res)
+	}
+	if res.TimedOut {
+		t.Errorf("TimedOut = true, want false (res=%+v)", res)
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	}
+}
+
+// TestCLIExec_FileCountCeilingDisabled_RunsToCompletion is the negative
+// control mirroring TestCLIExec_QuotaCeilingDisabled_RunsToCompletion:
+// with the file-count ceiling disabled entirely (0) and the byte-size
+// ceiling also disabled, the same many-tiny-files workload must run to
+// its natural completion.
+func TestCLIExec_FileCountCeilingDisabled_RunsToCompletion(t *testing.T) {
+	s := newFakePodmanManyFilesCLI(t)
+	s.defaultFileCountCeiling = 0
+	s.defaultGrowthCeilingBytes = 0
+	s.defaultIdleTimeout = 0
+	s.defaultTimeout = 30 * time.Second
+
+	res, err := s.Exec(context.Background(), Spec{RepoDir: t.TempDir(), Cmd: []string{"irrelevant"}})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.WorkspaceFileCountExceeded || res.WorkspaceQuotaExceeded || res.TimedOut {
+		t.Errorf("expected a clean completion with both ceilings disabled, got %+v", res)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0", res.ExitCode)
+	}
+}
+
+// newFakePodmanFileCountBurstCLI is newFakePodmanBurstWriterCLI's
+// file-count analogue: the fake podman script creates a burst of tiny
+// files in one tight shell loop (no sleep) and exits immediately, so it
+// is guaranteed to finish inside a single growthPollInterval tick.
+func newFakePodmanFileCountBurstCLI(t *testing.T, opts ...Option) *CLI {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based fake runtime assumes POSIX /bin/sh")
+	}
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+set -u
+if [ "$1" = "rm" ]; then
+  exit 0
+fi
+ws=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-v" ]; then
+    ws="${arg%%:*}"
+  fi
+  prev="$arg"
+done
+if [ -z "$ws" ]; then
+  echo "fake-podman: no workspace bind found" >&2
+  exit 1
+fi
+i=0
+while [ $i -lt 300 ]; do
+  : > "$ws/burstfile.$i"
+  i=$((i+1))
+done
+exit 0
+`
+	scriptPath := filepath.Join(binDir, "podman")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake podman script: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	s, err := NewCLI("podman", "unused-image", opts...)
+	if err != nil {
+		t.Fatalf("NewCLI: %v", err)
+	}
+	return s
+}
+
+// TestCLIExec_FileCountKillFidelity_PostRunCheckCatchesBurstExit is
+// TestCLIExec_QuotaKillFidelity_PostRunCheckCatchesBurstExit's file-count
+// analogue: this is the DIRECT test for acceptance criterion 1 ("a burst
+// that creates files and exits inside one poll window is still
+// classified") — a run that creates 300 tiny files and exits well inside
+// a single growthPollInterval tick, against a 50-file ceiling, must still
+// be classified WorkspaceFileCountExceeded=true, ExitCode=-1, not
+// silently reported as a clean ExitCode=0 success. Dropping Exec's
+// unconditional post-run checkGrowthCeiling call (or its file-count half)
+// fails this test.
+func TestCLIExec_FileCountKillFidelity_PostRunCheckCatchesBurstExit(t *testing.T) {
+	s := newFakePodmanFileCountBurstCLI(t)
+	s.defaultFileCountCeiling = 50 // the burst creates 300
+	s.defaultGrowthCeilingBytes = 0
+	s.defaultIdleTimeout = 60 * time.Second
+	s.defaultTimeout = 30 * time.Second
+
+	res, err := s.Exec(context.Background(), Spec{RepoDir: t.TempDir(), Cmd: []string{"irrelevant"}})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !res.WorkspaceFileCountExceeded {
+		t.Errorf("WorkspaceFileCountExceeded = false, want true — a burst of file creation that exits before any tick must still be caught (res=%+v)", res)
+	}
+	if res.WorkspaceQuotaExceeded {
+		t.Errorf("WorkspaceQuotaExceeded = true, want false — a pure file-count burst must not collapse into the byte-size reason (res=%+v)", res)
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1 (the breach must override the process's own exit 0)", res.ExitCode)
+	}
+}
+
+// TestCLIExec_CallerCancellationWinsOverFileCountBreach mirrors
+// TestCLIExec_CallerCancellationWinsOverQuotaBreach for the file-count
+// ceiling: a caller cancellation landing in the same window as a
+// file-count breach must surface as "sandbox: execution cancelled",
+// never as WorkspaceFileCountExceeded.
+func TestCLIExec_CallerCancellationWinsOverFileCountBreach(t *testing.T) {
+	s := newFakePodmanManyFilesCLI(t)
+	s.defaultFileCountCeiling = 10 // a couple of filler iterations blow past this
+	s.defaultGrowthCeilingBytes = 0
+	s.defaultIdleTimeout = 60 * time.Second
+	s.defaultTimeout = 30 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	res, err := s.Exec(ctx, Spec{RepoDir: t.TempDir(), Cmd: []string{"irrelevant"}})
+	if err == nil {
+		t.Fatalf("expected a cancellation error, got nil err with res=%+v", res)
+	}
+	if !strings.Contains(err.Error(), "execution cancelled") {
+		t.Errorf("error = %v, want it to mention \"execution cancelled\"", err)
+	}
+	if res.WorkspaceFileCountExceeded {
+		t.Errorf("a caller-cancelled run must never report WorkspaceFileCountExceeded, even if a breach was also detected; got %+v", res)
+	}
+	if res.WorkspaceQuotaExceeded {
+		t.Errorf("a caller-cancelled run must never report WorkspaceQuotaExceeded either; got %+v", res)
 	}
 }

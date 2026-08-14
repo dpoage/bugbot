@@ -176,6 +176,12 @@ func renderSandboxResult(r sandbox.Result) string {
 		// a plain timeout — surface WHY so the model doesn't read a bare
 		// exit_code=-1 as evidence about the code under test.
 		b = fmt.Appendf(b, "exit_code=-1 timed_out=false workspace_quota_exceeded=true reason=%q duration=%dms\n", r.KillReason(), durationMS)
+	case r.WorkspaceFileCountExceeded:
+		// bugbot-gb3o: the file-count ceiling's analogue of
+		// WorkspaceQuotaExceeded above — same rationale, distinct field so
+		// the model can tell a many-tiny-files kill apart from a byte-size
+		// disk-filler kill or a signal death it caused itself.
+		b = fmt.Appendf(b, "exit_code=-1 timed_out=false workspace_file_count_exceeded=true reason=%q duration=%dms\n", r.KillReason(), durationMS)
 	case r.TimedOut:
 		b = fmt.Appendf(b, "exit_code=-1 timed_out=true duration=%dms\n", durationMS)
 	default:

@@ -121,6 +121,16 @@ type Bwrap struct {
 	// (bugbot-bdqf), independent of idle-stall detection. <= 0 disables the
 	// ceiling.
 	defaultGrowthCeilingBytes int64
+	// defaultFileCountCeiling bounds NET workspace entry-COUNT growth (the
+	// fsCount delta, from the SAME per-tick workspaceProgress walk fsSize
+	// uses — no second WalkDir) since a run starts, tolerated by the shared
+	// idle watchdog before killing the run with the distinct
+	// Result.WorkspaceFileCountExceeded reason (bugbot-gb3o), independent of
+	// both idle-stall detection AND the byte-size growth ceiling above: a
+	// workload that creates many near-zero-byte files (the motivating case —
+	// 10,000 files totaling 20 KB) never trips a byte ceiling while still
+	// exhausting real host inodes/dentries. <= 0 disables the ceiling.
+	defaultFileCountCeiling int64
 	// allowUncapped permits Exec to proceed with no resource-limit
 	// enforcement when neither systemd-run --user --scope nor a delegated
 	// cgroup v2 subtree is available (sandbox.allow_uncapped). Default false:
@@ -197,6 +207,15 @@ func WithBwrapWorkspaceGrowthCeilingMB(mb int) BwrapOption {
 	return func(s *Bwrap) { s.defaultGrowthCeilingBytes = int64(mb) * 1024 * 1024 }
 }
 
+// WithBwrapWorkspaceFileCountCeiling sets the workspace file-COUNT ceiling
+// (NET entry-count growth, not absolute count) the shared idle watchdog
+// enforces independent of both idle-stall detection and the byte-size
+// growth ceiling above (sandbox.workspace_file_count_ceiling,
+// bugbot-gb3o). <= 0 disables the ceiling entirely.
+func WithBwrapWorkspaceFileCountCeiling(n int) BwrapOption {
+	return func(s *Bwrap) { s.defaultFileCountCeiling = int64(n) }
+}
+
 // WithBwrapAllowUncapped permits Exec to run without enforced resource
 // limits when no enforcement mechanism (systemd-run --user --scope or a
 // delegated cgroup v2 subtree) is available on this host, instead of
@@ -243,6 +262,7 @@ func NewBwrap(opts ...BwrapOption) (*Bwrap, error) {
 		maxOutputBytes:            DefaultMaxOutputBytes,
 		defaultScratchSizeMB:      fallbackScratchSizeMB,
 		defaultGrowthCeilingBytes: defaultWorkspaceGrowthCeilingBytes,
+		defaultFileCountCeiling:   defaultWorkspaceFileCountCeiling,
 	}
 	for _, o := range opts {
 		o(s)
@@ -400,6 +420,14 @@ func (s *Bwrap) ScratchAndGrowthCeiling() (scratchSizeMB int, growthCeilingBytes
 	return s.defaultScratchSizeMB, s.defaultGrowthCeilingBytes
 }
 
+// FileCountCeiling mirrors CLI.FileCountCeiling: the effective workspace
+// file-count ceiling (net entry-count growth, in files) this backend
+// applies when a Spec doesn't override it, including the
+// explicit-zero-disables case (bugbot-gb3o).
+func (s *Bwrap) FileCountCeiling() int64 {
+	return s.defaultFileCountCeiling
+}
+
 // resolveBwrapParams applies backend defaults to a Spec, producing the
 // concrete bwrapParams for the run (workspace is filled in by Exec).
 func (s *Bwrap) resolveBwrapParams(spec Spec) (bwrapParams, error) {
@@ -520,20 +548,22 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 	cmd.Stderr = stderr
 
 	// Idle watchdog: mirrors CLI.Exec's contract exactly, including the
-	// independent workspace-growth ceiling (bugbot-bdqf) — see CLI.Exec's
-	// doc comment for the full rationale. quotaExceeded is set ONLY on a
-	// growth-ceiling kill (never a plain idle-stall kill — see
+	// independent workspace-growth (byte-size, bugbot-bdqf) AND file-count
+	// (bugbot-gb3o) ceilings — see CLI.Exec's doc comment for the full
+	// rationale. quotaExceeded/fileCountExceeded are set ONLY on their
+	// respective growth-ceiling kill (never a plain idle-stall kill — see
 	// watchdogArgs). growthBase is captured HERE (once, before the command
 	// starts) rather than inside the goroutine so Exec's post-run
 	// checkGrowthCeiling call below shares the EXACT same baseline the
 	// tick loop uses.
 	var idleKilled atomic.Bool
 	var quotaExceeded atomic.Bool
+	var fileCountExceeded atomic.Bool
 	done := make(chan struct{})
 	var pidForCPU atomic.Int64
 	var fingerprint func() progressSnapshot
 	var growthBase progressSnapshot
-	if idleTimeout > 0 || s.defaultGrowthCeilingBytes > 0 {
+	if idleTimeout > 0 || s.defaultGrowthCeilingBytes > 0 || s.defaultFileCountCeiling > 0 {
 		fingerprint = func() progressSnapshot {
 			ps := progressSnapshot{outputBytes: stdout.written() + stderr.written()}
 			ps.fsSize, ps.fsCount, ps.fsMaxModNano = workspaceProgress(ws)
@@ -547,17 +577,22 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 			}
 			return procTreeCPUBusy(int(pid))
 		}
-		limits := watchdogLimits{idleTimeout: idleTimeout, growthCeilingBytes: s.defaultGrowthCeilingBytes}
+		limits := watchdogLimits{
+			idleTimeout:        idleTimeout,
+			growthCeilingBytes: s.defaultGrowthCeilingBytes,
+			fileCountCeiling:   s.defaultFileCountCeiling,
+		}
 		go watchIdle(watchdogArgs{
-			done:           done,
-			fingerprint:    fingerprint,
-			activeFallback: active,
-			limits:         limits,
-			base:           growthBase,
-			pollEvery:      effectivePollInterval(idleTimeout, s.defaultGrowthCeilingBytes),
-			killed:         &idleKilled,
-			quotaExceeded:  &quotaExceeded,
-			cancel:         cancel,
+			done:              done,
+			fingerprint:       fingerprint,
+			activeFallback:    active,
+			limits:            limits,
+			base:              growthBase,
+			pollEvery:         effectivePollInterval(idleTimeout, s.defaultGrowthCeilingBytes, s.defaultFileCountCeiling),
+			killed:            &idleKilled,
+			quotaExceeded:     &quotaExceeded,
+			fileCountExceeded: &fileCountExceeded,
+			cancel:            cancel,
 		})
 	}
 
@@ -579,12 +614,13 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 	close(done)
 	duration := time.Since(start)
 
-	// Post-run growth check (bugbot-bdqf oracle review B1b): see
-	// checkGrowthCeiling's doc. Must run BEFORE the outcome-precedence
-	// branches below — a growth-ceiling breach is a hard invariant, not a
-	// race heuristic, so it is never allowed to lose to a "genuine" exit
-	// code the way an idle-stall kill legitimately can.
-	checkGrowthCeiling(fingerprint, growthBase, s.defaultGrowthCeilingBytes, &quotaExceeded)
+	// Post-run growth check (bugbot-bdqf oracle review B1b; extended to the
+	// file-count ceiling by bugbot-gb3o). See checkGrowthCeiling's doc.
+	// Must run BEFORE the outcome-precedence branches below — a breach is
+	// a hard invariant, not a race heuristic, so it is never allowed to
+	// lose to a "genuine" exit code the way an idle-stall kill legitimately
+	// can.
+	checkGrowthCeiling(fingerprint, growthBase, s.defaultGrowthCeilingBytes, s.defaultFileCountCeiling, &quotaExceeded, &fileCountExceeded)
 
 	res := Result{Duration: duration, PrepDuration: prepDuration, WorkspaceCacheHit: cacheHit}
 	res.Stdout, res.StdoutTruncated = stdout.result()
@@ -599,12 +635,19 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 		return res, fmt.Errorf("sandbox: execution cancelled: %w", ctxErr)
 	}
 
-	// Outcome precedence. A growth-ceiling breach ALWAYS wins over the
-	// process's own reported outcome (bugbot-bdqf oracle review B1b) — see
-	// checkGrowthCeiling's doc for why this does not follow the "genuine
-	// exit code wins over a racing watchdog" rule below.
+	// Outcome precedence. A growth-ceiling breach (size OR file-count)
+	// ALWAYS wins over the process's own reported outcome (bugbot-bdqf
+	// oracle review B1b) — see checkGrowthCeiling's doc for why this does
+	// not follow the "genuine exit code wins over a racing watchdog" rule
+	// below.
 	if quotaExceeded.Load() {
 		res.WorkspaceQuotaExceeded = true
+		res.ExitCode = -1
+		killBwrapProcessGroup(cmd)
+		return res, nil
+	}
+	if fileCountExceeded.Load() {
+		res.WorkspaceFileCountExceeded = true
 		res.ExitCode = -1
 		killBwrapProcessGroup(cmd)
 		return res, nil

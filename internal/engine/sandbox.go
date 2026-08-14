@@ -197,6 +197,13 @@ func sandboxRunOpts(cfg config.Config) []sandbox.Option {
 	// ceiling, so an `if > 0` guard would silently fail to propagate an
 	// operator's explicit workspace_growth_ceiling_mb: 0 (bugbot-bdqf).
 	opts = append(opts, sandbox.WithWorkspaceGrowthCeilingMB(cfg.Sandbox.WorkspaceGrowthCeilingMB))
+	// WorkspaceFileCountCeiling (bugbot-gb3o) is unconditional for the same
+	// reason as WorkspaceGrowthCeilingMB above: 0 is a meaningful, explicit
+	// "disable the ceiling" state (config.Validate allows it), and NewCLI's
+	// own default is a non-zero 200,000-entry ceiling, so an `if > 0` guard
+	// would silently fail to propagate an operator's explicit
+	// workspace_file_count_ceiling: 0.
+	opts = append(opts, sandbox.WithWorkspaceFileCountCeiling(cfg.Sandbox.WorkspaceFileCountCeiling))
 	return opts
 }
 
@@ -233,6 +240,9 @@ func bwrapRunOpts(cfg config.Config) []sandbox.BwrapOption {
 	// merely "unset").
 	opts = append(opts, sandbox.WithBwrapScratchSizeMB(cfg.Sandbox.ScratchSizeMB))
 	opts = append(opts, sandbox.WithBwrapWorkspaceGrowthCeilingMB(cfg.Sandbox.WorkspaceGrowthCeilingMB))
+	// WorkspaceFileCountCeiling (bugbot-gb3o) mirrors WorkspaceGrowthCeilingMB
+	// above — unconditional for the same explicit-zero-disables reason.
+	opts = append(opts, sandbox.WithBwrapWorkspaceFileCountCeiling(cfg.Sandbox.WorkspaceFileCountCeiling))
 	return opts
 }
 

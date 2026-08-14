@@ -190,6 +190,18 @@ sandbox:
                                # timeout_seconds. 0 disables the ceiling.
                                # Default 2048 (2 GiB) is generous: real toolchain
                                # builds land far under it.
+  workspace_file_count_ceiling: 200000 # kill a run whose WORKSPACE ENTRY
+                               # COUNT has grown by more than this many files
+                               # since it started, with its own distinct
+                               # reason (never workspace_growth_ceiling_mb's
+                               # reason, never plain idle_timeout) —
+                               # independent of the byte-size ceiling above,
+                               # since many near-zero-byte files (e.g.
+                               # 10,000 files totaling 20 KB) never trip it
+                               # while still exhausting host inodes/dentries.
+                               # 0 disables the ceiling. Default 200000 is
+                               # generous: even a large npm install's
+                               # node_modules lands far under it.
   network: none
   dep_strategy: off            # off | host | fetch
   # setup_cmds: pre-run commands (argv lists) executed BEFORE the main command
