@@ -147,6 +147,17 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	// (set before the finalize defer below), so the valid-findings-per-token
 	// time series can be sliced by on/off.
 	result.Stats.CartographerEnabled = f.opts.Features.Cartographer
+	// bugbot-gu0o D3: a per-ecosystem dependency-resolution degradation
+	// (e.g. an unvettable requirements.txt) does not error
+	// sandbox.ResolveDeps in New() above — it is carried on f.deps.Warnings
+	// instead, so it must be surfaced here explicitly or it silently
+	// vanishes. Folding it into result.Skipped puts it on the SAME
+	// operator-visible surface every other degradation note already uses
+	// (see writeReviewWarnings, which renders result.Skipped into the scan
+	// report/PR summary).
+	for _, w := range f.deps.Warnings {
+		f.note(result, w)
+	}
 
 	// Interrupt-safe finalization: seal the scan_runs row on every exit path.
 	var finalize = func(s *Stats) error {

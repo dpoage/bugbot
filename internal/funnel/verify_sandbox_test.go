@@ -3,6 +3,8 @@ package funnel
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -449,5 +451,56 @@ func TestVerifyFinding_NoSandboxTool(t *testing.T) {
 				t.Errorf("completion %d offered sandbox_exec to a re-verification refuter: %v", i, names)
 			}
 		}
+	}
+}
+
+// TestSweep_PipDependencyRejectionReasonReachesResultSkipped pins bugbot-gu0o
+// D3: sandbox.ResolveDeps scopes a rejected requirements.txt to Python
+// (Resolution{Strategy: DepStrategyOff} plus a Warnings entry, C2) instead of
+// aborting the whole run — but a Warning nobody surfaces is exactly as silent
+// as the hard error it replaced. New() threads f.deps.Warnings into
+// result.Skipped (run_pipeline.go), which is the SAME surface
+// engine/prcomments.go's writeReviewWarnings renders into the PR
+// summary/scan report. This test asserts the actual rejection REASON TEXT
+// (not just a generic flag) reaches Result.Skipped, end to end from a real
+// on-disk requirements.txt through ResolveDeps through Sweep.
+func TestSweep_PipDependencyRejectionReasonReachesResultSkipped(t *testing.T) {
+	st, repo := openFixture(t)
+
+	// A local-path-shaped line: no PEP 508 index requirement can express a
+	// local path, so this can only be a `pip install <local-path>` smuggled
+	// through requirements.txt (bugbot-gu0o C1/C2) — validatePipRequirements
+	// rejects it before any container launches.
+	const badLine = "../evil-local-package"
+	reqPath := filepath.Join(repo.Root(), "requirements.txt")
+	if err := os.WriteFile(reqPath, []byte(badLine+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := New(RoleClients{Finder: newScriptedClient(), Verifier: newScriptedClient()}, st, repo, Options{
+		Discovery: DiscoveryConfig{Lenses: []string{"nil-safety/error-handling"}},
+		SandboxOpts: SandboxOpts{
+			Sandbox:     &funnelFakeSandbox{},
+			Enabled:     true,
+			DepStrategy: sandbox.DepStrategyFetch,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	res, err := f.Sweep(context.Background())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	found := false
+	for _, note := range res.Skipped {
+		if strings.Contains(note, "bugbot-gu0o") && strings.Contains(note, badLine) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected the pip requirements.txt rejection reason (citing %q) on Result.Skipped, got %v", badLine, res.Skipped)
 	}
 }

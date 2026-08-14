@@ -979,9 +979,11 @@ public class ExampleTest {
 }
 
 // TestIntegrationGradleFetchBuildsOffline proves the full Gradle FETCH round-trip:
-// prefetch runs `gradle dependencies --no-daemon -q` online to populate the
-// Gradle user home, then the network-none run copies the cache to the disk-backed
-// /workspace/.bugbot-gradle-home via SetupCmds and runs `gradle test`. Exit 0 required.
+// prefetch runs an injected -I init script (bugbot-own9) that forces every
+// resolvable configuration to download real JAR artifacts, then the
+// network-none run copies the cache to the disk-backed
+// /workspace/.bugbot-gradle-home via SetupCmds (which also enforce
+// org.gradle.offline=true) and runs `gradle test`. Exit 0 required.
 func TestIntegrationGradleFetchBuildsOffline(t *testing.T) {
 	s := newGradleTestCLI(t)
 	dir := t.TempDir()
@@ -1047,4 +1049,56 @@ func TestIntegrationGradleNoCacheFailsOffline(t *testing.T) {
 			out.Stdout, out.Stderr)
 	}
 	t.Logf("correctly failed (exit=%d); stderr excerpt: %s", out.ExitCode, out.Stderr)
+}
+
+// TestIntegrationGradlePrefetchFailurePropagatesNoSentinel proves that a
+// genuine online resolution failure during the bugbot-own9 init-script
+// prefetch (an unresolvable dependency) fails the whole Prefetch call and
+// does NOT write the warm-cache sentinel. An earlier draft of the init
+// script wrapped configuration resolution in
+// try/catch(Exception ignored), so a failure like this was silently
+// swallowed: gradle exited 0, the sentinel was written, and the cache was
+// permanently marked "warm" while actually empty — every later offline
+// `gradle test` would then fail forever with the exact own9 symptom, with
+// no way to recover short of manually clearing the cache.
+func TestIntegrationGradlePrefetchFailurePropagatesNoSentinel(t *testing.T) {
+	s := newGradleTestCLI(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "settings.gradle.kts"), "rootProject.name = \"broken\"\n")
+	writeFile(t, filepath.Join(dir, "build.gradle.kts"), `plugins {
+    java
+}
+repositories {
+    mavenCentral()
+}
+dependencies {
+    implementation("com.bugbot.doesnotexist:phantom-lib:99.99.99")
+}
+`)
+	cacheBase := t.TempDir()
+
+	res, err := ResolveDeps(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: s,
+		FetchImage:   gradleTestImage,
+		FetchNetwork: "bridge",
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	if err := res.Prefetch(ctx); err == nil {
+		t.Fatal("Prefetch with an unresolvable dependency should error, got nil (the init script must not swallow resolution failures)")
+	}
+
+	cacheDir, err := fetchGradleCacheDir(dir, cacheBase)
+	if err != nil {
+		t.Fatalf("fetchGradleCacheDir: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(cacheDir, prefetchSentinel)); statErr == nil {
+		t.Fatal("sentinel file must NOT exist after a failed prefetch — the cache would be permanently poisoned as warm-but-empty")
+	}
 }
