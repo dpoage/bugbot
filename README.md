@@ -139,7 +139,7 @@ frontend).
 | **JS/npm** | `package.json` | `node_modules/` exists → no mounts needed | container backend → **off** (npm HTTP cache does not materialize `node_modules`); **bwrap only**: when `package-lock.json` exists, mounts the host's existing npm cache read-only at `/npmcache` and runs the same offline copy+`npm ci` step as `fetch`; no lockfile (pnpm/yarn/bare npm) → **off**, same deferral as `fetch` (see [bwrap dependency provisioning](#bwrap-dependency-provisioning)) | `npm ci --ignore-scripts --cache /npmcache` into `/npmcache` (writable) | `npm_config_offline=true` | `cp -a /npmcache /tmp/npmcache && npm ci --cache /tmp/npmcache` |
 | **C#/NuGet** | root `*.csproj` / `*.sln` / `*.fsproj` | n/a (no vendored detection in v1) | mount `$NUGET_PACKAGES` (default `~/.nuget/packages`) at `/nugetcache` (read-only, `Shared=true`); `NUGET_PACKAGES=/nugetcache` | `dotnet restore [--locked-mode]` into `/nugetcache` (writable) | none — `--network=none` is the enforcement | none |
 | **Maven** | root `pom.xml` | n/a (no vendored detection in v1) | mount `~/.m2/repository` at `/m2cache` (read-only, `Shared=true`); `MAVEN_OPTS=-Dmaven.repo.local=/m2cache` | `mvn -B dependency:go-offline` with `MAVEN_OPTS=-Dmaven.repo.local=/m2cache` (writable), then a JUnit-5-scoped warm-up: parses go-offline's own resolved-artifact log for the Surefire plugin + JUnit Platform versions Maven actually picked and issues two best-effort `mvn dependency:get` calls for `surefire-junit-platform` and the version-aligned `junit-platform-launcher` — neither is resolved by `go-offline` itself (see deps.go's Maven PROVIDER WARM-UP comment) | none — `--network=none` is the enforcement | none |
-| **Gradle** | root `build.gradle[.kts]` / `settings.gradle[.kts]` | n/a (no vendored detection in v1) | → **off** (Gradle cache is lock-heavy under a read-only mount; see deps.go scope decisions) | an injected `-I` init script forces every resolvable configuration in every project to download its artifact JARs (`gradle --no-daemon -q -I <script> help`; resolves configurations only — never invokes `test` or repo code); plain `gradle dependencies` (pre-own9) only resolved POM/module metadata, not JAR bytes, and was replaced for that reason; with `GRADLE_USER_HOME=/gradlecache` (writable) | `org.gradle.offline=true` written into the writable `GRADLE_USER_HOME` copy's `gradle.properties` — Gradle does not infer offline mode from a populated cache, and there is no env-var equivalent to `GOPROXY=off` | `mkdir -p /workspace/.bugbot-gradle-home && cp -a /gradlecache/. /workspace/.bugbot-gradle-home && printf 'org.gradle.offline=true\n' > /workspace/.bugbot-gradle-home/gradle.properties` (copy to disk-backed workspace + enforce offline mode; `GRADLE_USER_HOME=/workspace/.bugbot-gradle-home`) |
+| **Gradle** | root `build.gradle[.kts]` / `settings.gradle[.kts]` | n/a (no vendored detection in v1) | → **off** (Gradle cache is lock-heavy under a read-only mount; see deps.go scope decisions) | an injected `-I` init script forces every resolvable configuration in every project to download its artifact JARs (`gradle --no-daemon -q -I <script> help`; resolves configurations only — never invokes `test` or repo code); plain `gradle dependencies` (pre-own9) only resolved POM/module metadata, not JAR bytes, and was replaced for that reason; with `GRADLE_USER_HOME=/gradlecache` (writable) | `org.gradle.offline=true` written into the writable `GRADLE_USER_HOME` copy's `gradle.properties` — precautionary hardening (kept because there is no `GRADLE_OPTS`/env-var equivalent to `GOPROXY=off`; NOT confirmed to be independently load-bearing — a control run with a fully-resolved cache and no offline flag also succeeded, see deps.go's `gradleResolution` SetupCmd comment for the honest evidence trail) | `mkdir -p /workspace/.bugbot-gradle-home && cp -a /gradlecache/. /workspace/.bugbot-gradle-home && printf 'org.gradle.offline=true\n' > /workspace/.bugbot-gradle-home/gradle.properties` (copy to disk-backed workspace + enforce offline mode; `GRADLE_USER_HOME=/workspace/.bugbot-gradle-home`) |
 
 > **Bazel monorepos** use a custom image instead of dependency mounts — see
 > [Offline Bazel sandbox image](#offline-bazel-sandbox-image) below.
@@ -184,26 +184,49 @@ have mount collisions:
   (`.gz`/`.bz2`/`.xz`/`.lz`/`.lzma`) as defense in depth beyond pip's
   exact, version-dependent list; (2) per-requirement
   `--hash=<algo>:<hexdigest>` fields (`pip-compile --generate-hashes` /
-  `poetry export --with-hashes` output) and TIGHTENING-only options
-  (`--require-hashes`, `--only-binary=...`, `--index-url=...`,
-  `--extra-index-url=...` — none of these can cause prefetch-time code
-  execution or loosen the boundary: a wheel is not executed at download
-  time, and `--hash`/`--require-hashes` only ever narrow what pip will
-  accept), which may repeat and trail a requirement on the same logical
-  line; or (3) a `-r`/`--requirement` or `-c`/`--constraint` include
-  naming a repo-relative path — absolute paths and any path that
-  resolves outside the repo (symlinks included) are rejected, and the
-  referenced file is recursively vetted with this SAME grammar, up to 8
-  levels deep with cycle protection. Every other pip option (`-e`,
-  `--no-binary`, ...) is rejected outright. `--only-binary=:all:` on the
-  `pip download` command line is defense in depth for whatever passes
-  this grammar, not the sole enforcement point.
+  `poetry export --with-hashes` output), which may repeat and trail a
+  requirement on the same logical line, plus the single tightening
+  option `--require-hashes` (puts pip into hash-required mode, which
+  itself refuses editable installs, local paths, and unhashed direct
+  references — it can only narrow what pip accepts, never loosen it);
+  or (3) a `-r`/`--requirement` or `-c`/`--constraint` include naming a
+  repo-relative path — absolute paths and any path that resolves
+  outside the repo (symlinks included) are rejected, and the referenced
+  file is recursively vetted with this SAME grammar, up to 8 levels
+  deep with cycle detection (a diamond — two includes sharing one common
+  base file — is accepted; only genuine cycles and excessive depth are
+  rejected). Every manifest is also capped at 10MiB before parsing
+  (bounds the work a malicious include chain can force). Every other
+  pip option is rejected outright, including three that look like
+  narrowing but are not:
+  - `--only-binary` (in ANY form, including the nominally-safe
+    `--only-binary=:all:` spelling): pip's `FormatControl` treats
+    `:none:` anywhere in the value as CLEARING the format-control set,
+    so an in-manifest `--only-binary=:none:` CANCELS the CLI's
+    `--only-binary=:all:` outright, letting a sdist build (and its
+    `setup.py`/PEP517 backend) execute during the online prefetch —
+    this was proven live, not theoretical (see `pipTighteningOptionRe`
+    in `deps.go`). The CLI already passes `--only-binary=:all:`
+    unconditionally; no vetted manifest ever needs to repeat it.
+  - `--index-url`, `--extra-index-url`: redirecting the package index is
+    not a code-execution vector, but it IS a cache-provenance and
+    network-egress one — a repo-controlled index redirect lets
+    attacker-chosen bytes land in the bugbot-owned host wheelhouse cache
+    during the trusted online prefetch (this was also proven live: an
+    attacker `http://` index landed an arbitrary `.whl` in `/depcache`),
+    which the later offline in-run install step then trusts via
+    `--find-links`. An operator who genuinely needs a corporate index
+    mirror must configure it OUTSIDE the manifest (e.g. an operator-level
+    pip config/env on the host, not something the repo can express) —
+    a manifest that tries to request one degrades Python to `off` with
+    this named reason rather than being honored.
 
   **Blast radius**: a manifest that fails this grammar does NOT abort
   dependency resolution for the whole repo. Python resolves to `off` (no
   mounts, no prefetch — still fail-closed) with the rejection reason
-  carried as an operator-visible entry on `Resolution.Warnings`, while
-  every OTHER ecosystem in a polyglot repo (e.g. a Go module's
+  carried as an operator-visible entry on `Resolution.Warnings` (surfaced
+  in scan reports/PR summaries and via `slog` at every other call site),
+  while every OTHER ecosystem in a polyglot repo (e.g. a Go module's
   `/modcache` mount) continues to resolve normally.
 - **JS `fetch` prefetch**: `--ignore-scripts` is **mandatory** in the online
   prefetch step. npm lifecycle scripts are arbitrary code; during the prefetch

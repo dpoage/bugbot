@@ -1396,6 +1396,15 @@ const pipMaxRequirementsFileSize = 10 << 20 // 10MiB
 // environment requirements layout. depth still bounds the DFS path
 // length regardless of diamonds or cycles.
 func validatePipRequirementsFile(repoDir, absPath string, visiting, validated map[string]bool, depth int) error {
+	// Memoization short-circuit BEFORE the depth check (PrefetchOracleB
+	// round-5 note): safe, not a bound-skipping hole — validated[absPath] is
+	// only ever set to true at the end of a FULL successful recursive
+	// validation of absPath's own subtree (line ~1485 below), so by the time
+	// this fires that subtree already proved itself within
+	// pipMaxIncludeDepth once. A diamond include re-reaching absPath via a
+	// deeper path does not need to re-walk (and re-bound) work already
+	// proven safe; it would only ever SHRINK the effective work done, never
+	// grow it past the cap.
 	if validated[absPath] {
 		return nil
 	}
