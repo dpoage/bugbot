@@ -135,18 +135,22 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	eco := detectEcosystem(cmd)
 	lowOut := strings.ToLower(out)
 
-	// An infrastructure kill — the absolute/idle timeout OR bugbot-bdqf's
-	// workspace-growth ceiling — is a quality/environment problem, not a
+	// An infrastructure kill — the absolute/idle timeout, bugbot-bdqf's
+	// workspace-growth (byte-size) ceiling, OR bugbot-gb3o's workspace
+	// file-count ceiling — is a quality/environment problem, not a
 	// demonstration, regardless of any partial output captured before the
 	// kill. A plain timeout keeps its existing VerdictReasonTimeout
-	// category (byte-identical behavior). A WorkspaceQuotaExceeded kill is
-	// classified as VerdictReasonEnvironmentError instead: it IS a
-	// disk-usage problem, the same category interpret() already uses for a
+	// category (byte-identical behavior). A WorkspaceQuotaExceeded OR
+	// WorkspaceFileCountExceeded kill is classified as
+	// VerdictReasonEnvironmentError instead: both ARE disk-usage/host-
+	// resource problems, the same category interpret() already uses for a
 	// genuine host disk-full marker below (defaultEnvMarkers' "no space
-	// left on device" etc.) — with a summary that names the quota
-	// explicitly so it reads distinctly from that real host-disk-full case.
+	// left on device" etc.) — with a summary built from res.KillReason(),
+	// which already names the SPECIFIC quota (bytes or file count) so each
+	// reads distinctly from the other and from that real host-disk-full
+	// case, without hand-rolling a second reason string here.
 	if res.InfraKilled() {
-		if res.WorkspaceQuotaExceeded {
+		if res.WorkspaceQuotaExceeded || res.WorkspaceFileCountExceeded {
 			return verdict{reason: VerdictReasonEnvironmentError, summary: res.KillReason() + ": " + trunc(out, 400), ecosystem: eco.name}
 		}
 		return verdict{reason: VerdictReasonTimeout, summary: trunc(out, 400), ecosystem: eco.name}

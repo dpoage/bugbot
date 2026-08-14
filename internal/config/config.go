@@ -240,8 +240,37 @@ type Sandbox struct {
 	// Default 2048 (2 GiB) — generous enough to clear a heavy toolchain
 	// build's disk footprint while still bounding a runaway write loop well
 	// short of exhausting a typical host's disk.
-	WorkspaceGrowthCeilingMB int    `yaml:"workspace_growth_ceiling_mb"`
-	Network                  string `yaml:"network"`
+	WorkspaceGrowthCeilingMB int `yaml:"workspace_growth_ceiling_mb"`
+	// WorkspaceFileCountCeiling bounds NET workspace entry-COUNT growth
+	// (the number of files/dirs created, not their size — sampled from the
+	// SAME per-tick workspaceProgress walk WorkspaceGrowthCeilingMB uses,
+	// no second WalkDir) before the run is killed with a DISTINCT reason
+	// (Result.WorkspaceFileCountExceeded, never plain TimedOut or
+	// WorkspaceQuotaExceeded) — independent of both idle-stall detection
+	// AND the byte-size growth ceiling above, since a workload that
+	// creates many near-zero-byte files (the motivating measurement:
+	// 10,000 files totaling 20 KB) never trips a byte-size ceiling while
+	// still taking real host inode/dentry pressure (bugbot-gb3o). Honored
+	// by BOTH backends (CLI.Exec and Bwrap.Exec both drive the shared
+	// watchIdle). 0 disables the ceiling (the byte-size ceiling,
+	// idle-stall detection, and the absolute timeout still apply
+	// independently). Default 200,000. NOT "far under" every real
+	// workload: fix-round oracle measurement found 80,589 entries for a
+	// 1,819-package npm tree and 184,935 (92.5% of this default) for a
+	// small 3-package monorepo's node_modules — this ceiling can sit
+	// uncomfortably close to a legitimate large JS install on its own.
+	// What protects real builds in practice is the SIBLING byte-size
+	// ceiling above: across seven measured real workloads (npm ci at
+	// several scales, a Go build, a Python wheelhouse), byte-% of the 2
+	// GiB ceiling exceeded file-% of this one in every case, so
+	// workspace_growth_ceiling_mb binds first and this default rarely
+	// becomes the first thing to fire — but a file-count-heavy,
+	// byte-light workload (many small packages) should size this knob
+	// explicitly. See internal/sandbox/cli.go's
+	// defaultWorkspaceFileCountCeiling doc for the same detail plus the
+	// measured rate-bounded-overshoot figures.
+	WorkspaceFileCountCeiling int    `yaml:"workspace_file_count_ceiling"`
+	Network                   string `yaml:"network"`
 	// DepStrategy selects how external module dependencies are made available
 	// to the network-none sandbox for repos that are not vendored. Vendored
 	// repos (vendor/modules.txt for Go, node_modules/ for JS, ...) are always
@@ -616,17 +645,18 @@ func Default() Config {
 			HeatOrdering: true,
 		},
 		Sandbox: Sandbox{
-			Runtime:                  "podman",
-			Image:                    "docker.io/library/debian:stable-slim",
-			CPUs:                     2,
-			MemoryMB:                 2048,
-			PidsLimit:                4096,
-			TimeoutSeconds:           600,
-			IdleTimeoutSeconds:       120,
-			ScratchSizeMB:            512,
-			WorkspaceGrowthCeilingMB: 2048,
-			Network:                  "none",
-			DepStrategy:              "off",
+			Runtime:                   "podman",
+			Image:                     "docker.io/library/debian:stable-slim",
+			CPUs:                      2,
+			MemoryMB:                  2048,
+			PidsLimit:                 4096,
+			TimeoutSeconds:            600,
+			IdleTimeoutSeconds:        120,
+			ScratchSizeMB:             512,
+			WorkspaceGrowthCeilingMB:  2048,
+			WorkspaceFileCountCeiling: 200_000,
+			Network:                   "none",
+			DepStrategy:               "off",
 		},
 		Verify: Verify{
 			SandboxExec:        false,
@@ -782,6 +812,7 @@ func parseEnvBool(key, v string) (bool, error) {
 //	BUGBOT_SANDBOX_IDLE_TIMEOUT_SECONDS (integer >= 0; 0 disables idle watchdog)
 //	BUGBOT_SANDBOX_SCRATCH_SIZE_MB     (integer > 0)
 //	BUGBOT_SANDBOX_WORKSPACE_GROWTH_CEILING_MB (integer >= 0; 0 disables the ceiling)
+//	BUGBOT_SANDBOX_WORKSPACE_FILE_COUNT_CEILING (integer >= 0; 0 disables the ceiling)
 //	BUGBOT_SCAN_CARTOGRAPHER           ("true" or "false")
 //	BUGBOT_SCAN_STATUS_NOTES           ("true" or "false")
 //	BUGBOT_SCAN_TOOL_COMPLAINTS        ("true" or "false")
@@ -931,6 +962,7 @@ func applyEnvOverrides(cfg *Config, environ []string) error {
 		setInt("BUGBOT_SANDBOX_IDLE_TIMEOUT_SECONDS", &cfg.Sandbox.IdleTimeoutSeconds),
 		setInt("BUGBOT_SANDBOX_SCRATCH_SIZE_MB", &cfg.Sandbox.ScratchSizeMB),
 		setInt("BUGBOT_SANDBOX_WORKSPACE_GROWTH_CEILING_MB", &cfg.Sandbox.WorkspaceGrowthCeilingMB),
+		setInt("BUGBOT_SANDBOX_WORKSPACE_FILE_COUNT_CEILING", &cfg.Sandbox.WorkspaceFileCountCeiling),
 		setInt("BUGBOT_VERIFY_SANDBOX_MAX_EXECS", &cfg.Verify.SandboxMaxExecs),
 		setInt("BUGBOT_PUBLISH_TIER_MIN", &cfg.Publish.TierMin),
 		setInt("BUGBOT_REPRO_PATCH_MAX_ATTEMPTS", &cfg.Repro.PatchMaxAttempts),
@@ -1129,6 +1161,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Sandbox.WorkspaceGrowthCeilingMB > maxSandboxMBKnob {
 		return fmt.Errorf("config: sandbox.workspace_growth_ceiling_mb %d too large (max %d)", c.Sandbox.WorkspaceGrowthCeilingMB, maxSandboxMBKnob)
+	}
+	if c.Sandbox.WorkspaceFileCountCeiling < 0 {
+		return fmt.Errorf("config: sandbox.workspace_file_count_ceiling must be >= 0 (0 disables)")
 	}
 	switch c.Sandbox.DepStrategy {
 	case "", "off", "host", "fetch":

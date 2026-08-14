@@ -116,3 +116,39 @@ func TestSandboxRunOpts_ExplicitZeroGrowthCeilingDisables(t *testing.T) {
 		t.Errorf("Bwrap scratch size = %d MB, want 256 (control)", bwScratchMB)
 	}
 }
+
+// TestSandboxRunOpts_ExplicitZeroFileCountCeilingDisables mirrors
+// TestSandboxRunOpts_ExplicitZeroGrowthCeilingDisables for bugbot-gb3o's
+// file-count ceiling: sandboxRunOpts/bwrapRunOpts wire
+// WorkspaceFileCountCeiling UNCONDITIONALLY (no "if > 0" guard) so an
+// operator's explicit workspace_file_count_ceiling: 0 reaches the backend
+// as a genuinely disabled (0) ceiling — not the backend's own non-zero
+// built-in default (200,000), which an "if > 0" guard would have silently
+// kept.
+func TestSandboxRunOpts_ExplicitZeroFileCountCeilingDisables(t *testing.T) {
+	cfg := config.Default()
+	cfg.Sandbox.WorkspaceFileCountCeiling = 0
+
+	// Seed a NON-zero baseline first, mirroring NewCLI/NewBwrap's own
+	// built-in 200,000 default — otherwise a bare &sandbox.CLI{} already
+	// starts at the Go zero value (0), and the test could not distinguish
+	// "sandboxRunOpts explicitly set it to 0" from "an `if > 0` guard
+	// skipped the call, leaving whatever was already there".
+	sb := &sandbox.CLI{}
+	sandbox.WithWorkspaceFileCountCeiling(50_000)(sb)
+	for _, o := range sandboxRunOpts(cfg) {
+		o(sb)
+	}
+	if got := sb.FileCountCeiling(); got != 0 {
+		t.Errorf("CLI file-count ceiling = %d, want 0 (explicit disable did not OVERRIDE the pre-existing non-zero default — an \"if > 0\" guard would silently skip the call)", got)
+	}
+
+	bw := &sandbox.Bwrap{}
+	sandbox.WithBwrapWorkspaceFileCountCeiling(50_000)(bw)
+	for _, o := range bwrapRunOpts(cfg) {
+		o(bw)
+	}
+	if got := bw.FileCountCeiling(); got != 0 {
+		t.Errorf("Bwrap file-count ceiling = %d, want 0 (explicit disable did not override the pre-existing non-zero default)", got)
+	}
+}

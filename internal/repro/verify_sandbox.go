@@ -316,9 +316,10 @@ func smokeDetail(res sandbox.Result, excerpt, note string) string {
 
 // classifySmoke turns a sandbox.Result from a smoke run into a SmokeVerdict.
 // The classification mirrors interpret() in interpret.go:
-//   - WorkspaceQuotaExceeded             → env_error (bugbot-bdqf: a
-//     growth-ceiling kill is a disk-usage/infra failure, never a plain
-//     timeout and NEVER "ok" — see below)
+//   - WorkspaceQuotaExceeded / WorkspaceFileCountExceeded → env_error
+//     (bugbot-bdqf / bugbot-gb3o: a growth-ceiling kill, byte-size OR
+//     file-count, is a disk-usage/host-resource infra failure, never a
+//     plain timeout and NEVER "ok" — see below)
 //   - TimedOut                           → timeout
 //   - ExitCode 125/126/127               → toolchain_missing (env-level failure)
 //   - Non-zero + defaultEnvMarkers       → env_error
@@ -333,28 +334,31 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	out := res.Stdout + "\n" + res.Stderr
 	excerpt := headTailExcerpt(out, smokeOutputBudget)
 
-	// An infra kill (idle-stall/absolute timeout OR bugbot-bdqf's
-	// workspace-growth ceiling) is checked FIRST via res.InfraKilled() —
-	// the shared predicate every sandbox.Result consumer uses (see
-	// interpret.go, patch.go, playbook.go) — so a quota kill can NEVER
+	// An infra kill (idle-stall/absolute timeout, bugbot-bdqf's
+	// workspace-growth ceiling, OR bugbot-gb3o's workspace file-count
+	// ceiling) is checked FIRST via res.InfraKilled() — the shared
+	// predicate every sandbox.Result consumer uses (see interpret.go,
+	// patch.go, playbook.go) — so neither growth-ceiling kill can EVER
 	// fall through the marker cascade below to the terminal "ok" branch.
-	// Without this, a disk-filling smoke run reported OK=true/
-	// SmokeCategoryOK (a false PASS: bugbot doctor --verify-sandbox would
-	// green-light a sandbox that had just been killed for filling the
-	// disk, and cli/daemon.go gates the repro stage on exactly that
-	// check). WorkspaceQuotaExceeded is classified env_error, NOT
-	// timeout: it is a disk-usage/infra failure — the same category
-	// interpret() uses for a genuine host disk-full marker — and
-	// (unlike plain timeout) env_error DOES gate BlocksRepro() off,
-	// which is the correct outcome: a sandbox that fills the disk on a
-	// bare smoke probe should not be trusted to run real repro attempts.
-	// A plain TimedOut result keeps its EXISTING SmokeCategoryTimeout
-	// classification and BlocksRepro()=false, byte-identical to before
-	// this check existed. KillReason() supplies the Detail note so the
-	// operator sees WHY, mirroring the exit-code-prefixed Detail format
-	// every other branch already uses.
+	// Without this, a disk-filling or many-tiny-files smoke run reported
+	// OK=true/SmokeCategoryOK (a false PASS: bugbot doctor
+	// --verify-sandbox would green-light a sandbox that had just been
+	// killed for filling the disk or exhausting inodes, and cli/daemon.go
+	// gates the repro stage on exactly that check). WorkspaceQuotaExceeded
+	// and WorkspaceFileCountExceeded are BOTH classified env_error, NOT
+	// timeout: each is a disk-usage/host-resource infra failure — the
+	// same category interpret() uses for a genuine host disk-full marker
+	// — and (unlike plain timeout) env_error DOES gate BlocksRepro() off,
+	// which is the correct outcome for either: a sandbox that fills the
+	// disk OR exhausts inodes on a bare smoke probe should not be trusted
+	// to run real repro attempts. A plain TimedOut result keeps its
+	// EXISTING SmokeCategoryTimeout classification and BlocksRepro()=false,
+	// byte-identical to before this check existed. KillReason() supplies
+	// the Detail note (already distinct per specific quota — bytes vs
+	// file count) so the operator sees WHY, mirroring the
+	// exit-code-prefixed Detail format every other branch already uses.
 	if res.InfraKilled() {
-		if res.WorkspaceQuotaExceeded {
+		if res.WorkspaceQuotaExceeded || res.WorkspaceFileCountExceeded {
 			return SmokeVerdict{
 				OK:       false,
 				Category: SmokeCategoryEnvError,

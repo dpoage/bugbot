@@ -302,15 +302,18 @@ func classifyPlaybookProbe(probe playbookProbe, res sandbox.Result, err error, t
 			Reason: util.FlattenField("sandbox exec failed: " + trunc(err.Error(), 120)),
 		}
 	}
-	// An infrastructure kill (probe cut off by its timeout, OR bugbot-bdqf's
-	// workspace-growth ceiling) is Inconclusive, NOT a confirmed FAILS — see
-	// the doc above. A WorkspaceQuotaExceeded kill gets its own distinct
-	// Reason naming the quota instead of the generic "timed out after %s",
-	// so the gate/prompt feedback can tell a disk-filling probe apart from
-	// one that was merely slow.
+	// An infrastructure kill (probe cut off by its timeout, bugbot-bdqf's
+	// workspace-growth ceiling, or bugbot-gb3o's workspace file-count
+	// ceiling) is Inconclusive, NOT a confirmed FAILS — see the doc above.
+	// A WorkspaceQuotaExceeded OR WorkspaceFileCountExceeded kill gets its
+	// own distinct Reason (from res.KillReason(), which already names the
+	// specific quota) instead of the generic "timed out after %s", so the
+	// gate/prompt feedback can tell a disk-filling probe or a
+	// many-tiny-files probe apart from one that was merely slow — and
+	// from each other.
 	if res.InfraKilled() {
 		reason := fmt.Sprintf("timed out after %s", timeout)
-		if res.WorkspaceQuotaExceeded {
+		if res.WorkspaceQuotaExceeded || res.WorkspaceFileCountExceeded {
 			reason = res.KillReason()
 		}
 		return PlaybookVerdict{

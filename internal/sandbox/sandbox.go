@@ -260,6 +260,20 @@ type Result struct {
 	// see checkGrowthCeiling's doc).
 	WorkspaceQuotaExceeded bool
 
+	// WorkspaceFileCountExceeded is true when the execution was killed by the
+	// idle watchdog's workspace FILE-COUNT ceiling (bugbot-gb3o): the
+	// workspace's NET entry-count growth (workspaceProgress' fsCount, from
+	// the SAME per-tick walk fsSize uses — no second WalkDir) since the run
+	// started exceeded the backend's configured file-count ceiling. This
+	// exists alongside WorkspaceQuotaExceeded (size), not in place of it: a
+	// workload can create a huge number of near-zero-byte files (bugbot-gb3o's
+	// motivating case — 10,000 files totaling 20 KB) that a byte-size
+	// ceiling never trips while the host filesystem still takes real
+	// inode/dentry pressure. TimedOut and WorkspaceQuotaExceeded are both
+	// left false when this fires — all three are mutually exclusive,
+	// distinct kill reasons sharing the same ExitCode -1 convention.
+	WorkspaceFileCountExceeded bool
+
 	// PrepDuration is the wall-clock time spent preparing the workspace
 	// BEFORE the container ran: resolving the pristine-cache key, ensuring
 	// the pristine (materializing on a cache miss, reusing it on a hit),
@@ -284,32 +298,35 @@ type Result struct {
 }
 
 // InfraKilled reports whether Exec killed this run for an infrastructure
-// reason — the absolute/idle timeout OR the workspace-growth ceiling
-// (bugbot-bdqf) — rather than the command exiting (successfully or not) on
-// its own. Callers that classify a Result into a verdict MUST check this
-// BEFORE interpreting ExitCode/output: a run killed by us must never be
-// read as "the command completed and its output says X" (e.g.
-// misclassified as not-demonstrated or a rejected fix) regardless of which
-// specific kill reason fired. This is the shared seam internal/repro's
+// reason — the absolute/idle timeout, the workspace-growth (byte-size)
+// ceiling (bugbot-bdqf), OR the workspace file-count ceiling (bugbot-gb3o)
+// — rather than the command exiting (successfully or not) on its own.
+// Callers that classify a Result into a verdict MUST check this BEFORE
+// interpreting ExitCode/output: a run killed by us must never be read as
+// "the command completed and its output says X" (e.g. misclassified as
+// not-demonstrated or a rejected fix) regardless of which specific kill
+// reason fired. This is the shared seam internal/repro's
 // interpret()/patchVerdict()/classifyPlaybookProbe() (and any future
 // consumer, e.g. internal/repro's smoke-verdict path) use so a new kill
 // reason only needs to be taught here once, not re-derived at every
 // call site.
 func (r Result) InfraKilled() bool {
-	return r.TimedOut || r.WorkspaceQuotaExceeded
+	return r.TimedOut || r.WorkspaceQuotaExceeded || r.WorkspaceFileCountExceeded
 }
 
 // KillReason returns a short, human-readable label naming why Exec killed
 // this run when InfraKilled is true, for verdict/summary messages that want
 // to name the specific cause rather than a generic "timed out" — in
-// particular so a WorkspaceQuotaExceeded kill (a disk-filler) reads
-// distinctly from a genuine idle-stall/absolute-timeout kill instead of
-// both collapsing into the same message. Returns "" when InfraKilled is
-// false.
+// particular so a WorkspaceQuotaExceeded (byte-size) kill and a
+// WorkspaceFileCountExceeded kill each read distinctly from a genuine
+// idle-stall/absolute-timeout kill, and from EACH OTHER, instead of all
+// collapsing into one message. Returns "" when InfraKilled is false.
 func (r Result) KillReason() string {
 	switch {
 	case r.WorkspaceQuotaExceeded:
 		return "workspace growth exceeded the configured quota (sandbox.workspace_growth_ceiling_mb)"
+	case r.WorkspaceFileCountExceeded:
+		return "workspace file count exceeded the configured ceiling (sandbox.workspace_file_count_ceiling)"
 	case r.TimedOut:
 		return "timed out"
 	default:

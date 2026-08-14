@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -79,6 +80,7 @@ func TestOptionsConfigureCLI(t *testing.T) {
 		WithCPUs(4), WithMemoryMB(1024), WithTimeout(5 * time.Second),
 		WithNetwork("bridge"), WithPidsLimit(64), WithMaxOutputBytes(2048),
 		WithScratchSizeMB(256), WithWorkspaceGrowthCeilingMB(1024),
+		WithWorkspaceFileCountCeiling(50_000),
 	} {
 		o(s)
 	}
@@ -91,5 +93,58 @@ func TestOptionsConfigureCLI(t *testing.T) {
 	}
 	if want := int64(1024) * 1024 * 1024; s.defaultGrowthCeilingBytes != want {
 		t.Errorf("defaultGrowthCeilingBytes = %d, want %d (1024 MB in bytes)", s.defaultGrowthCeilingBytes, want)
+	}
+	if s.defaultFileCountCeiling != 50_000 {
+		t.Errorf("defaultFileCountCeiling = %d, want 50000 (a plain file count, no unit conversion)", s.defaultFileCountCeiling)
+	}
+}
+
+// TestFileCountCeilingAccessor pins FileCountCeiling()'s explicit-zero-
+// disables contract (bugbot-gb3o), mirroring ScratchAndGrowthCeiling's own
+// coverage in internal/engine/scan_helpers_test.go: an operator-configured
+// 0 must read back as a truly disabled 0, not silently fall back to
+// NewCLI's non-zero built-in default.
+func TestFileCountCeilingAccessor(t *testing.T) {
+	s, err := NewCLI("podman", "img", WithWorkspaceFileCountCeiling(0))
+	if err != nil {
+		t.Fatalf("NewCLI: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if got := s.FileCountCeiling(); got != 0 {
+		t.Errorf("FileCountCeiling() = %d, want 0 (explicit disable did not override the pre-existing non-zero default)", got)
+	}
+}
+
+// TestResultInfraKilledAndKillReason_FileCount pins the file-count kill
+// reason's DISTINCTNESS from the byte-size quota reason (bugbot-gb3o) — a
+// mutation collapsing WorkspaceFileCountExceeded's branch into
+// WorkspaceQuotaExceeded's (or vice versa) in KillReason's switch must fail
+// this test.
+func TestResultInfraKilledAndKillReason_FileCount(t *testing.T) {
+	res := Result{ExitCode: -1, WorkspaceFileCountExceeded: true}
+	if !res.InfraKilled() {
+		t.Error("InfraKilled() = false, want true for a WorkspaceFileCountExceeded result")
+	}
+	reason := res.KillReason()
+	if reason == "" {
+		t.Fatal("KillReason() = \"\", want a non-empty reason naming file count")
+	}
+	if !strings.Contains(reason, "file count") {
+		t.Errorf("KillReason() = %q, want it to name file count", reason)
+	}
+	sizeReason := Result{ExitCode: -1, WorkspaceQuotaExceeded: true}.KillReason()
+	if reason == sizeReason {
+		t.Errorf("file-count KillReason() must be distinct from the size-quota KillReason(); both were %q", reason)
+	}
+	if strings.Contains(reason, "workspace_growth_ceiling_mb") {
+		t.Errorf("KillReason() = %q, must not reference the size knob's config key", reason)
+	}
+}
+
+// TestResultKillReason_EmptyWhenNotInfraKilled: a plain success/failure
+// Result must never surface a stale kill reason.
+func TestResultKillReason_EmptyWhenNotInfraKilled(t *testing.T) {
+	if got := (Result{ExitCode: 1}).KillReason(); got != "" {
+		t.Errorf("KillReason() = %q, want \"\" for a non-infra-killed result", got)
 	}
 }

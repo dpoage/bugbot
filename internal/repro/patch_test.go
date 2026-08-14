@@ -677,6 +677,42 @@ func TestPatchVerdict_WorkspaceQuotaExceeded_NeverFixRejected(t *testing.T) {
 	}
 }
 
+// TestPatchVerdict_WorkspaceFileCountExceeded_NeverFixRejected is
+// TestPatchVerdict_WorkspaceQuotaExceeded_NeverFixRejected's file-count
+// analogue (bugbot-gb3o): a run killed by the file-count ceiling must also
+// classify as patchVerdictEnvFailure, never FixRejected or Passed, with a
+// summary naming the file count (distinct from the byte-size quota's).
+func TestPatchVerdict_WorkspaceFileCountExceeded_NeverFixRejected(t *testing.T) {
+	v := patchVerdict(sandbox.Result{ExitCode: -1, WorkspaceFileCountExceeded: true}, []string{"go", "test", "./..."})
+	if v.kind != patchVerdictEnvFailure {
+		t.Errorf("kind = %v, want patchVerdictEnvFailure", v.kind)
+	}
+	if v.kind == patchVerdictFixRejected {
+		t.Errorf("a WorkspaceFileCountExceeded kill must NOT be FixRejected; got kind=%v", v.kind)
+	}
+	if v.kind == patchVerdictPassed {
+		t.Errorf("a WorkspaceFileCountExceeded kill must NOT pass; got kind=%v", v.kind)
+	}
+	if !strings.Contains(v.summary, "file count") {
+		t.Errorf("summary %q must name the file count explicitly", v.summary)
+	}
+	quota := patchVerdict(sandbox.Result{ExitCode: -1, WorkspaceQuotaExceeded: true}, []string{"go", "test", "./..."})
+	if v.summary == quota.summary {
+		t.Errorf("a WorkspaceFileCountExceeded summary must be distinct from a WorkspaceQuotaExceeded summary; both got %q", v.summary)
+	}
+}
+
+// TestPatchVerdict_WorkspaceQuotaExceeded_RegressionUnchangedByFileCountAddition
+// pins that the byte-size quota path's exact summary text is
+// byte-identical to before bugbot-gb3o's file-count ceiling was added.
+func TestPatchVerdict_WorkspaceQuotaExceeded_RegressionUnchangedByFileCountAddition(t *testing.T) {
+	v := patchVerdict(sandbox.Result{ExitCode: -1, WorkspaceQuotaExceeded: true}, []string{"go", "test", "./..."})
+	wantSummary := "workspace growth exceeded the configured quota (sandbox.workspace_growth_ceiling_mb): "
+	if !strings.HasPrefix(v.summary, wantSummary) {
+		t.Errorf("summary = %q, want prefix %q (unchanged by the file-count addition)", v.summary, wantSummary)
+	}
+}
+
 // TestPatchVerdict_EnvFailureTranscript_NotFixRejected is the
 // acceptance-criterion-3 regression test: a transcript that is
 // unambiguously an environment failure (cgo refusal — the same Go

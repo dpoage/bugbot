@@ -384,6 +384,34 @@ func TestRenderSandboxResult_WorkspaceQuotaExceeded(t *testing.T) {
 	}
 }
 
+// TestRenderSandboxResult_WorkspaceFileCountExceeded mirrors
+// TestRenderSandboxResult_WorkspaceQuotaExceeded for bugbot-gb3o's
+// file-count ceiling: it too must render its own distinct reason, and
+// must NOT be conflated with the byte-size quota field.
+func TestRenderSandboxResult_WorkspaceFileCountExceeded(t *testing.T) {
+	r := sandbox.Result{
+		ExitCode:                   -1,
+		WorkspaceFileCountExceeded: true,
+		Duration:                   3 * time.Second,
+	}
+	out := renderSandboxResult(r)
+	if !strings.Contains(out, "exit_code=-1") {
+		t.Errorf("missing exit_code=-1: %q", out)
+	}
+	if !strings.Contains(out, "workspace_file_count_exceeded=true") {
+		t.Errorf("missing workspace_file_count_exceeded=true: %q", out)
+	}
+	if strings.Contains(out, "workspace_quota_exceeded=true") {
+		t.Errorf("a file-count kill must not render workspace_quota_exceeded=true (the two reasons must stay distinct): %q", out)
+	}
+	if strings.Contains(out, "timed_out=true") {
+		t.Errorf("a file-count kill must not render timed_out=true: %q", out)
+	}
+	if !strings.Contains(out, "file count") {
+		t.Errorf("expected the rendered reason to name the file count: %q", out)
+	}
+}
+
 // TestSandboxExecTool_FilesPathEscape_IsRecoverable verifies that a model-
 // supplied files path escaping the workspace is a recoverable argument error,
 // NOT a *ToolHealthError — so the runner's health sink never fires for it.

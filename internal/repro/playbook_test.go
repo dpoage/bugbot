@@ -111,6 +111,38 @@ func TestClassifyPlaybookProbe(t *testing.T) {
 		}
 	})
 
+	// TestClassifyPlaybookProbe/workspace_file_count_exceeded is the
+	// file-count analogue of the quota case above (bugbot-gb3o): also
+	// Inconclusive, with its own distinct Reason naming the file count —
+	// never the generic timeout Reason, and never the quota's Reason.
+	t.Run("workspace file count exceeded is inconclusive, not a confirmed FAILS", func(t *testing.T) {
+		v := classifyPlaybookProbe(probe, sandbox.Result{WorkspaceFileCountExceeded: true}, nil, 15*time.Second)
+		if v.Verified || !v.Inconclusive {
+			t.Errorf("got %+v, want Inconclusive=true, Verified=false", v)
+		}
+		if v.Reason == "timed out after 15s" {
+			t.Errorf("a WorkspaceFileCountExceeded probe must NOT reuse the plain-timeout Reason; got %q", v.Reason)
+		}
+		if !strings.Contains(v.Reason, "file count") {
+			t.Errorf("Reason %q must name the file count explicitly", v.Reason)
+		}
+		quota := classifyPlaybookProbe(probe, sandbox.Result{WorkspaceQuotaExceeded: true}, nil, 15*time.Second)
+		if v.Reason == quota.Reason {
+			t.Errorf("a WorkspaceFileCountExceeded probe's Reason must be distinct from a WorkspaceQuotaExceeded probe's; both got %q", v.Reason)
+		}
+	})
+
+	// TestClassifyPlaybookProbe/workspace_quota_exceeded_regression pins
+	// that the byte-size quota path's exact Reason text is byte-identical
+	// to before bugbot-gb3o's file-count ceiling was added.
+	t.Run("workspace quota exceeded reason is unchanged by the file-count addition", func(t *testing.T) {
+		v := classifyPlaybookProbe(probe, sandbox.Result{WorkspaceQuotaExceeded: true}, nil, 15*time.Second)
+		want := "workspace growth exceeded the configured quota (sandbox.workspace_growth_ceiling_mb)"
+		if v.Reason != want {
+			t.Errorf("Reason = %q, want %q (unchanged)", v.Reason, want)
+		}
+	})
+
 	t.Run("infra error", func(t *testing.T) {
 		v := classifyPlaybookProbe(probe, sandbox.Result{}, context.DeadlineExceeded, playbookProbeTimeout)
 		if v.Verified || !strings.Contains(v.Reason, "sandbox exec failed") {

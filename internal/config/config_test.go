@@ -1006,6 +1006,17 @@ func TestDefault_WorkspaceGrowthCeilingMB(t *testing.T) {
 	}
 }
 
+// TestDefault_WorkspaceFileCountCeiling mirrors
+// TestDefault_WorkspaceGrowthCeilingMB for the file-count ceiling
+// (bugbot-gb3o): it too must default to a generous-but-real value (not 0)
+// so an operator who never touches this knob is still protected against a
+// many-tiny-files DoS.
+func TestDefault_WorkspaceFileCountCeiling(t *testing.T) {
+	if got := Default().Sandbox.WorkspaceFileCountCeiling; got != 200_000 {
+		t.Errorf("Default workspace_file_count_ceiling = %d, want 200000", got)
+	}
+}
+
 func TestValidate_ScratchSizeMB(t *testing.T) {
 	load := func(t *testing.T) Config {
 		t.Helper()
@@ -1090,13 +1101,52 @@ func TestValidate_WorkspaceGrowthCeilingMB(t *testing.T) {
 	}
 }
 
-// TestLoad_ScratchAndGrowthCeilingFromYAML verifies both knobs parse from
-// bugbot.yaml.
+// TestValidate_WorkspaceFileCountCeiling mirrors
+// TestValidate_WorkspaceGrowthCeilingMB for the file-count ceiling
+// (bugbot-gb3o). Unlike the MB-denominated knobs, this one is a plain
+// count with no byte-conversion overflow risk, so there is no upper-bound
+// case to pin here — only the explicit-0-disables and negative-rejected
+// contract.
+func TestValidate_WorkspaceFileCountCeiling(t *testing.T) {
+	load := func(t *testing.T) Config {
+		t.Helper()
+		cfg, err := Load(writeTemp(t, validYAML))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		return cfg
+	}
+
+	// 0 disables the ceiling — valid.
+	cfg := load(t)
+	cfg.Sandbox.WorkspaceFileCountCeiling = 0
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("workspace_file_count_ceiling=0 should be valid (disabled), got %v", err)
+	}
+
+	// Positive — valid.
+	cfg = load(t)
+	cfg.Sandbox.WorkspaceFileCountCeiling = 500
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("workspace_file_count_ceiling=500 should be valid, got %v", err)
+	}
+
+	// Negative — rejected with a clear message.
+	cfg = load(t)
+	cfg.Sandbox.WorkspaceFileCountCeiling = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "workspace_file_count_ceiling") {
+		t.Errorf("workspace_file_count_ceiling=-1 should be rejected with workspace_file_count_ceiling in message, got %v", err)
+	}
+}
+
+// TestLoad_ScratchAndGrowthCeilingFromYAML verifies all three knobs parse
+// from bugbot.yaml.
 func TestLoad_ScratchAndGrowthCeilingFromYAML(t *testing.T) {
 	yaml := validYAML + `
 sandbox:
   scratch_size_mb: 768
   workspace_growth_ceiling_mb: 4096
+  workspace_file_count_ceiling: 75000
 `
 	cfg, err := Load(writeTemp(t, yaml))
 	if err != nil {
@@ -1107,6 +1157,9 @@ sandbox:
 	}
 	if cfg.Sandbox.WorkspaceGrowthCeilingMB != 4096 {
 		t.Errorf("WorkspaceGrowthCeilingMB = %d, want 4096", cfg.Sandbox.WorkspaceGrowthCeilingMB)
+	}
+	if cfg.Sandbox.WorkspaceFileCountCeiling != 75000 {
+		t.Errorf("WorkspaceFileCountCeiling = %d, want 75000", cfg.Sandbox.WorkspaceFileCountCeiling)
 	}
 }
 
@@ -1127,6 +1180,16 @@ func TestEnvOverride_WorkspaceGrowthCeilingMB(t *testing.T) {
 	}
 	if cfg.Sandbox.WorkspaceGrowthCeilingMB != 0 {
 		t.Errorf("workspace_growth_ceiling_mb override = %d, want 0 (disabled)", cfg.Sandbox.WorkspaceGrowthCeilingMB)
+	}
+}
+
+func TestEnvOverride_WorkspaceFileCountCeiling(t *testing.T) {
+	cfg := Default()
+	if err := applyEnvOverrides(&cfg, []string{"BUGBOT_SANDBOX_WORKSPACE_FILE_COUNT_CEILING=0"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sandbox.WorkspaceFileCountCeiling != 0 {
+		t.Errorf("workspace_file_count_ceiling override = %d, want 0 (disabled)", cfg.Sandbox.WorkspaceFileCountCeiling)
 	}
 }
 

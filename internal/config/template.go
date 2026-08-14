@@ -190,6 +190,23 @@ sandbox:
                                # timeout_seconds. 0 disables the ceiling.
                                # Default 2048 (2 GiB) is generous: real toolchain
                                # builds land far under it.
+  workspace_file_count_ceiling: 200000 # kill a run whose WORKSPACE ENTRY
+                               # COUNT has grown by more than this many files
+                               # since it started, with its own distinct
+                               # reason (never workspace_growth_ceiling_mb's
+                               # reason, never plain idle_timeout) —
+                               # independent of the byte-size ceiling above,
+                               # since many near-zero-byte files (e.g.
+                               # 10,000 files totaling 20 KB) never trip it
+                               # while still exhausting host inodes/dentries.
+                               # 0 disables the ceiling. Default 200000: NOT
+                               # "far under" every real install — a large npm
+                               # tree can land close to it (measured 92.5% of
+                               # this default for one 3-package monorepo's
+                               # node_modules); the byte-size ceiling above
+                               # binds first on real builds in practice, but
+                               # size this explicitly for a file-count-heavy,
+                               # byte-light workload.
   network: none
   dep_strategy: off            # off | host | fetch
   # setup_cmds: pre-run commands (argv lists) executed BEFORE the main command
