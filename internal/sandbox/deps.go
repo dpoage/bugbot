@@ -294,6 +294,18 @@ type Resolution struct {
 	// this Resolution (see ResolveHostToolchains). Empty when
 	// DepOptions.HostToolchains was empty or resolved nothing on this host.
 	Fingerprints []ToolchainFingerprint
+	// Warnings carries operator-visible, non-fatal degradation reasons
+	// (bugbot-gu0o C2): an ecosystem that CANNOT safely resolve its
+	// requested strategy for a repo-content reason (as opposed to a
+	// caller-configuration error, which still returns a hard error from
+	// ResolveDeps) resolves to DepStrategyOff for itself and appends a
+	// human-readable reason here instead of failing the WHOLE
+	// ResolveDeps call — a malformed requirements.txt in an otherwise-
+	// healthy polyglot repo must not cost a Go module its /modcache
+	// mount too. See resolvePython's FETCH case for the originating
+	// example. Merged across ecosystems in table order by resolveWith,
+	// same as Env/SetupCmds. Empty when nothing degraded.
+	Warnings []string
 }
 
 // ecosystem describes how to detect a build ecosystem and resolve its
@@ -481,7 +493,8 @@ func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
 //     all ecosystems; Exec's validateMounts backstops this.
 //   - Env: appended in table order.
 //   - SetupCmds: appended in table order.
-//   - Prefetch: chained sequentially; first error wins.
+//   - Warnings: appended in table order (bugbot-gu0o C2) — operator-visible
+//     non-fatal degradation reasons; see Resolution.Warnings.
 //   - Strategy: taken from the FIRST matching ecosystem.
 //
 // No matching ecosystem → Resolution{Strategy: DepStrategyOff}.
@@ -505,6 +518,7 @@ func resolveWith(table []ecosystem, repoDir string, opts DepOptions) (Resolution
 		merged.ROMounts = append(merged.ROMounts, r.ROMounts...)
 		merged.Env = append(merged.Env, r.Env...)
 		merged.SetupCmds = append(merged.SetupCmds, r.SetupCmds...)
+		merged.Warnings = append(merged.Warnings, r.Warnings...)
 		// Chain Prefetch funcs: run them sequentially; first error aborts.
 		if r.Prefetch != nil {
 			prev := merged.Prefetch
@@ -970,7 +984,29 @@ func resolvePython(repoDir string, opts DepOptions) (Resolution, error) {
 			return Resolution{}, fmt.Errorf("sandbox: Python dependency strategy %q requires a fetch sandbox", strategy)
 		}
 		if err := validatePipRequirements(repoDir); err != nil {
-			return Resolution{}, err
+			// Scope the failure to Python (bugbot-gu0o C2): an unvettable
+			// requirements.txt must not abort dependency resolution for the
+			// WHOLE repo. Every ResolveDeps caller in this codebase either
+			// hard-aborts entirely on ANY resolution error
+			// (internal/funnel/funnel.go wraps it and returns) or silently
+			// degrades to a completely EMPTY Resolution on ANY error
+			// (internal/engine/sandbox.go's depProbeInputs/
+			// resolveDepsForPlaybook) — neither of those is acceptable for
+			// a problem that is specific to Python's manifest: a polyglot
+			// repo with go.mod + go.sum would lose its Go /modcache mount
+			// and GOPROXY=off too, or the whole scan would refuse to start,
+			// over a requirements.txt problem unrelated to the actual scan
+			// target. Python resolves to OFF here — no mounts, no Prefetch
+			// hook, still FAIL CLOSED (never silently falls back to an
+			// unvetted `pip download`) — with the validation failure
+			// carried as an operator-visible Resolution.Warnings entry
+			// instead of returned as a Go error, so every OTHER matching
+			// ecosystem in the same resolveWith merge still resolves
+			// normally.
+			return Resolution{
+				Strategy: DepStrategyOff,
+				Warnings: []string{fmt.Sprintf("python dependency prefetch disabled: %v", err)},
+			}, nil
 		}
 		cache, err := fetchPipCacheDir(repoDir, opts.userCacheDir)
 		if err != nil {
@@ -1103,15 +1139,20 @@ func newPipPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Con
 // a "file:" scheme with no "//" ("file:wheelhouse/...") are all
 // local/direct installs pip accepts that a prefix deny-list has to
 // enumerate one shape at a time, forever trailing pip's actual grammar.
-// Group 1 captures the distribution name so pipForbiddenArchiveSuffixes
-// can check it specifically (a name with no "/" at all can still be an
-// archive filename pip installs locally).
+// Group 1 captures the distribution name so pipLooksLikeArchive can check
+// it specifically (a name with no "/" at all can still be an archive
+// filename pip installs locally). The marker tail is restricted to the
+// PEP 508 marker charset (identifiers, quoted strings, comparison
+// operators, boolean keywords, parens, commas) rather than arbitrary free
+// text, so a malformed/garbage marker is rejected here with a named
+// reason instead of surfacing as an opaque pip parse failure inside the
+// container.
 var pipRequirementRe = regexp.MustCompile(
 	`^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)` + // 1: name
 		`(?:\[[A-Za-z0-9][A-Za-z0-9._,\s-]*\])?` + // optional [extras]
 		`(?:\s*(?:==|!=|<=|>=|<|>|~=|===)\s*[A-Za-z0-9][A-Za-z0-9.*+!_-]*` +
 		`(?:\s*,\s*(?:==|!=|<=|>=|<|>|~=|===)\s*[A-Za-z0-9][A-Za-z0-9.*+!_-]*)*)?` + // optional version specifier(s)
-		`(?:\s*;\s*.+)?$`, // optional "; marker" (evaluated locally by pip; free text, no code/URL execution risk)
+		`(?:\s*;\s*[A-Za-z0-9_.'"()<>=!~,\s-]+)?$`, // optional "; marker", restricted to the PEP 508 marker charset
 )
 
 // pipHashFieldRe matches ONE per-requirement --hash=<algo>:<hexdigest>
@@ -1129,17 +1170,133 @@ var pipRequirementRe = regexp.MustCompile(
 // manifest unusable with dep_strategy: fetch.
 var pipHashFieldRe = regexp.MustCompile(`^--hash=[A-Za-z0-9]+:[0-9a-fA-F]+$`)
 
-// pipForbiddenArchiveSuffixes are file extensions that make an otherwise
-// name-shaped token a LOCAL ARCHIVE INSTALL to pip, not an index lookup.
-// pip's heuristic for "does this argument look like a wheel/sdist on disk"
-// is extension-based, not path-separator-based: a bare filename like
-// "evilpkg-0.0.1.tar.gz" (no "/", syntactically indistinguishable from a
-// valid PEP 508 name by pipRequirementRe alone) is still a local install
-// whose setup.py/PEP517 backend pip will run with NO network access
-// needed at all.
-var pipForbiddenArchiveSuffixes = []string{
-	".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".tbz2", ".txz",
-	".zip", ".whl", ".tar", ".egg",
+// pipTighteningOptionRe matches pip options that can only TIGHTEN, never
+// weaken, the security boundary this validator enforces (bugbot-gu0o C2):
+// --require-hashes forces per-requirement hash checking; --only-binary
+// (with any argument — pip's own docs recommend --only-binary=:all: but
+// accept a specific package name too) can only narrow which packages must
+// be prebuilt, same direction as the --only-binary=:all: already on the
+// pip download CLI; --index-url / --extra-index-url redirect WHERE pip
+// looks up index-resolved packages but cannot cause prefetch-time code
+// execution under this grammar (a wheel is not executed at download
+// time — only unpacked — and a malicious index still can only serve
+// entries pipRequirementRe/pipHashFieldRe would accept). Only the "="
+// form is accepted (`--only-binary=:all:`, not `--only-binary :all:` as
+// two separate fields) — the two-token space-separated form is rejected
+// by the generic option check below, a conservative default rather than
+// a gap: rejecting a valid-but-differently-spelled option is always safe
+// here, silently accepting an unvetted one would not be.
+var pipTighteningOptionRe = regexp.MustCompile(`^(?:--require-hashes|--only-binary=\S+|--index-url=\S+|--extra-index-url=\S+)$`)
+
+// pipArchiveExtensions is pip's own filetypes.ARCHIVE_EXTENSIONS list,
+// verbatim (pip._internal.utils.filetypes, verified against pip 26.1.2):
+//
+//	ZIP_EXTENSIONS = (".zip", ".whl")
+//	BZ2_EXTENSIONS = (".tar.bz2", ".tbz")
+//	XZ_EXTENSIONS  = (".tar.xz", ".txz", ".tlz", ".tar.lz", ".tar.lzma")
+//	TAR_EXTENSIONS = (".tar.gz", ".tgz", ".tar")
+//
+// A distribution name ending in one of these is a LOCAL ARCHIVE INSTALL to
+// pip, not an index lookup, regardless of whether it contains a path
+// separator — "evilpkg-0.0.1.tar.gz" (no "/") is syntactically
+// indistinguishable from a valid PEP 508 name to pipRequirementRe alone.
+// An earlier version of this list was hand-written and WRONG: it invented
+// ".tbz2"/".tar.zst"/".egg" (not pip's) and omitted ".tbz"/".tlz"/
+// ".tar.lz"/".tar.lzma" (all four live-canaried through ResolveDeps).
+var pipArchiveExtensions = []string{
+	".zip", ".whl",
+	".tar.bz2", ".tbz",
+	".tar.xz", ".txz", ".tlz", ".tar.lz", ".tar.lzma",
+	".tar.gz", ".tgz", ".tar",
+}
+
+// pipCompressionSuffixes is defense in depth BEYOND pip's exact
+// ARCHIVE_EXTENSIONS list above: which extensions pip's local-file
+// heuristic recognizes is a pip-VERSION-dependent implementation detail,
+// not a stable public contract (see the historical drift the list above
+// already required correcting once). A bare compression suffix is
+// rejected here regardless of whether it happens to appear in one of
+// pip 26.1.2's specific TAR/BZ2/XZ combination forms, so a future pip
+// version that recognizes e.g. ".gz" alone (without requiring a leading
+// ".tar") does not silently reopen this bypass.
+var pipCompressionSuffixes = []string{".gz", ".bz2", ".xz", ".lz", ".lzma"}
+
+// pipLooksLikeArchive reports whether name (already lower-cased by the
+// caller is NOT assumed — this lower-cases internally) has a suffix pip
+// treats as a local archive file rather than an index-resolved
+// distribution name. See pipArchiveExtensions and pipCompressionSuffixes.
+func pipLooksLikeArchive(name string) bool {
+	lower := strings.ToLower(name)
+	for _, suf := range pipArchiveExtensions {
+		if strings.HasSuffix(lower, suf) {
+			return true
+		}
+	}
+	for _, suf := range pipCompressionSuffixes {
+		if strings.HasSuffix(lower, suf) {
+			return true
+		}
+	}
+	return false
+}
+
+// pipMaxIncludeDepth bounds -r/-c include recursion (bugbot-gu0o C2). Real
+// requirements.txt trees are rarely more than 2-3 files deep (a root file
+// including a per-environment file, occasionally including a shared base);
+// 8 comfortably covers any legitimate structure while bounding the work a
+// malicious include chain can force.
+const pipMaxIncludeDepth = 8
+
+// pipIncludeTarget reports whether trimmed is a -r/--requirement or
+// -c/--constraint include directive and, if so, the raw path it names.
+// Only the common two-token space-separated form ("-r path") is
+// recognized; the "=" form ("-r=path") is not, and falls through to the
+// generic option-rejection path below — a conservative default (rejecting
+// a valid-but-differently-spelled include is safe; silently NOT
+// recursing into an unrecognized include would leave it unvalidated,
+// which is not).
+func pipIncludeTarget(trimmed string) (string, bool) {
+	fields := strings.Fields(trimmed)
+	if len(fields) != 2 {
+		return "", false
+	}
+	switch fields[0] {
+	case "-r", "--requirement", "-c", "--constraint":
+		return fields[1], true
+	default:
+		return "", false
+	}
+}
+
+// resolvePipIncludePath resolves raw (as named by a -r/-c directive inside
+// the file at includingDir) to an absolute path and verifies it stays
+// within repoDir, rejecting absolute paths outright and evaluating
+// symlinks before the containment check so a symlinked include cannot
+// point outside the repository (bugbot-gu0o C2).
+func resolvePipIncludePath(repoDir, includingDir, raw string) (string, error) {
+	if filepath.IsAbs(raw) {
+		return "", fmt.Errorf("sandbox: requirements include %q rejected (bugbot-gu0o: absolute include paths are not supported — only paths within the repository are allowed)", raw)
+	}
+	candidate := filepath.Clean(filepath.Join(includingDir, raw))
+
+	resolvedRepoDir, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		resolvedRepoDir = repoDir
+	}
+	resolvedCandidate, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		// The include may not exist yet (or a component of its path may
+		// not); fall back to the lexical candidate so the containment
+		// check below still runs, and the subsequent os.ReadFile in
+		// validatePipRequirementsFile surfaces a clear "could not be
+		// read" error for a genuinely missing file.
+		resolvedCandidate = candidate
+	}
+	rel, relErr := filepath.Rel(resolvedRepoDir, resolvedCandidate)
+	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("sandbox: requirements include %q rejected (bugbot-gu0o: resolves outside the repository)", raw)
+	}
+	return resolvedCandidate, nil
 }
 
 // validatePipRequirements vets repoDir's requirements.txt in Go BEFORE any
@@ -1149,71 +1306,124 @@ var pipForbiddenArchiveSuffixes = []string{
 // complete boundary on its own.
 //
 // This is an ALLOW-list grammar, not a deny-list: every requirements.txt
-// line must match one of exactly two accepted shapes, or the whole
-// manifest is rejected with a named reason —
+// line must match one of exactly three accepted shapes, or the whole
+// manifest (including every file it transitively includes) is rejected
+// with a named reason —
 //
 //  1. A strict PEP 508 index requirement (pipRequirementRe): name,
 //     optional [extras], optional comma-separated version specifiers,
 //     optional "; marker" — nothing else. The captured name is additionally
-//     checked against pipForbiddenArchiveSuffixes.
-//  2. Per-requirement --hash=<algo>:<hexdigest> fields (pipHashFieldRe),
-//     which may trail a requirement on the same logical line — peeled off
-//     before grammar-matching, not treated as a rejected "-" option.
+//     checked against pipLooksLikeArchive.
+//  2. Per-requirement --hash=<algo>:<hexdigest> fields (pipHashFieldRe) and
+//     tightening-only options (pipTighteningOptionRe: --require-hashes,
+//     --only-binary=..., --index-url=..., --extra-index-url=...), which
+//     may trail a requirement or stand alone on their own line — peeled
+//     off before grammar-matching, not treated as a rejected "-" option.
+//  3. A -r/--requirement or -c/--constraint include directive
+//     (pipIncludeTarget) naming a repo-relative path (resolvePipIncludePath
+//     rejects absolute paths and any path that resolves outside repoDir
+//     after symlink evaluation) — recursively validated with this SAME
+//     grammar, up to pipMaxIncludeDepth levels, with cycle protection.
 //
-// Every other pip option (-e/--editable, -r/--requirement, -c/--constraint,
-// --no-binary, --index-url, ...) is rejected outright, which also closes
-// the nested -r/-c include vector (unsupported in v1) in the same check.
-// A direct URL/VCS reference, a PEP 508 "name @ url" reference, a local
-// path, a bare directory, and a bare archive filename are all rejected
-// because none of them can ever match pipRequirementRe (or, for an
-// archive-suffixed bare name, the suffix check below it) — see
+// Every other pip option (-e/--editable, --no-binary, ...) is rejected
+// outright. A direct URL/VCS reference, a PEP 508 "name @ url" reference,
+// a local path, a bare directory, and a bare archive filename are all
+// rejected because none of them can ever match pipRequirementRe (or, for
+// an archive-suffixed bare name, pipLooksLikeArchive) — see
 // pipRequirementRe's doc comment for why a deny-list of known-bad prefixes
 // could not close all of these completely.
 //
-// A manifest that fails validation never reaches newPipPrefetch:
-// resolvePython returns the error directly from ResolveDeps, before any
-// Prefetch hook is even constructed, so the online step is never
-// scheduled.
+// SCOPE (bugbot-gu0o C2): a validation failure here is returned as a plain
+// error, but resolvePython does NOT let it propagate out of ResolveDeps —
+// it catches the error and resolves Python to Strategy=Off with the
+// reason carried on Resolution.Warnings instead. An unvettable
+// requirements.txt in an otherwise-healthy polyglot repo must not abort
+// dependency resolution for every OTHER ecosystem (a Go module's
+// /modcache mount and GOPROXY=off, for instance) or the whole scan that
+// depends on ResolveDeps succeeding — see resolvePython's FETCH case for
+// the full rationale. A manifest that fails validation never reaches
+// newPipPrefetch either way: no Prefetch hook is ever constructed for it.
 func validatePipRequirements(repoDir string) error {
-	data, err := os.ReadFile(filepath.Join(repoDir, "requirements.txt"))
-	if err != nil {
-		// hasRequirementsTxt already gated FETCH detection on the file's
-		// presence; a read failure here is surfaced by requirementsHash
-		// instead of duplicated as a second error.
-		return nil
+	rootPath := filepath.Join(repoDir, "requirements.txt")
+	return validatePipRequirementsFile(repoDir, rootPath, make(map[string]bool), 0)
+}
+
+// validatePipRequirementsFile is validatePipRequirements' recursive core:
+// it validates the single file at absPath (already resolved and, for
+// every call except the root, containment-checked by
+// resolvePipIncludePath) plus every -r/-c include it names.
+func validatePipRequirementsFile(repoDir, absPath string, seen map[string]bool, depth int) error {
+	if depth > pipMaxIncludeDepth {
+		return fmt.Errorf("sandbox: requirements include chain exceeds depth %d at %q (bugbot-gu0o: possible include cycle or an excessively deep chain)", pipMaxIncludeDepth, absPath)
 	}
+	if seen[absPath] {
+		return fmt.Errorf("sandbox: requirements include cycle detected at %q (bugbot-gu0o)", absPath)
+	}
+	seen[absPath] = true
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		if depth == 0 {
+			// hasRequirementsTxt already gated FETCH detection on the root
+			// file's presence; a read failure here is surfaced by
+			// requirementsHash instead of duplicated as a second error.
+			return nil
+		}
+		return fmt.Errorf("sandbox: requirements include %q could not be read (bugbot-gu0o): %w", absPath, err)
+	}
+
+	dir := filepath.Dir(absPath)
 	for _, logical := range joinPipLineContinuations(string(data)) {
 		trimmed := strings.TrimSpace(stripPipComment(logical))
 		if trimmed == "" {
 			continue
 		}
 
-		// Peel off trailing --hash fields before grammar-matching the
-		// requirement itself; reject any OTHER option-like field outright.
+		if incRaw, ok := pipIncludeTarget(trimmed); ok {
+			nextAbs, err := resolvePipIncludePath(repoDir, dir, incRaw)
+			if err != nil {
+				return err
+			}
+			if err := validatePipRequirementsFile(repoDir, nextAbs, seen, depth+1); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// Peel off trailing --hash fields and tightening-only options
+		// before grammar-matching the requirement itself; reject any
+		// OTHER option-like field outright.
+		hadTightening := false
 		var reqFields []string
 		for _, field := range strings.Fields(trimmed) {
 			if pipHashFieldRe.MatchString(field) {
 				continue
 			}
+			if pipTighteningOptionRe.MatchString(field) {
+				hadTightening = true
+				continue
+			}
 			if strings.HasPrefix(field, "-") {
-				return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: pip option %q is not in the allowed grammar — only a plain index requirement and --hash=<algo>:<hexdigest> fields are accepted; this also covers -e/-r/-c/--no-binary and nested requirement/constraint includes, which are unsupported in v1)", trimmed, field)
+				return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: pip option %q is not in the allowed grammar — only a plain index requirement, --hash=<algo>:<hexdigest> fields, tightening-only options (--require-hashes/--only-binary=.../--index-url=.../--extra-index-url=...), and -r/-c includes are accepted; this also covers -e/--no-binary, which are always rejected)", trimmed, field)
 			}
 			reqFields = append(reqFields, field)
 		}
 		core := strings.Join(reqFields, " ")
 		if core == "" {
+			if hadTightening {
+				// A pure option line (e.g. a lone "--index-url=..." or
+				// "--require-hashes"): nothing further to grammar-match.
+				continue
+			}
 			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: no requirement expression, only --hash fields)", trimmed)
 		}
 
 		m := pipRequirementRe.FindStringSubmatch(core)
 		if m == nil {
-			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: does not match the allowed grammar — only a plain PEP 508 index requirement (name[extras]comparator-version; marker) plus --hash fields is accepted; local paths, bare archive filenames, directories, URLs, VCS/file: references, and PEP 508 direct '@' references are all rejected)", trimmed)
+			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: does not match the allowed grammar — only a plain PEP 508 index requirement (name[extras]comparator-version; marker) plus --hash/tightening-option fields is accepted; local paths, bare archive filenames, directories, URLs, VCS/file: references, and PEP 508 direct '@' references are all rejected)", trimmed)
 		}
-		name := strings.ToLower(m[1])
-		for _, suf := range pipForbiddenArchiveSuffixes {
-			if strings.HasSuffix(name, suf) {
-				return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: %q looks like an archive filename — pip treats archive-suffixed names as local/direct file installs, not index lookups, even with no path separator present)", trimmed, m[1])
-			}
+		if pipLooksLikeArchive(m[1]) {
+			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: %q looks like an archive filename — pip treats archive-suffixed names as local/direct file installs, not index lookups, even with no path separator present)", trimmed, m[1])
 		}
 	}
 	return nil

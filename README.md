@@ -164,29 +164,47 @@ have mount collisions:
 - **Rust `host` strategy**: only `$CARGO_HOME/registry` is mounted — never all
   of `~/.cargo`, which contains `credentials.toml` and `bin/`. This is enforced
   in the resolver and asserted in unit tests.
-- **Python `fetch` prefetch**: `requirements.txt` is vetted in Go
+- **Python `fetch` prefetch**: `requirements.txt` (and every file it
+  transitively `-r`/`-c` includes) is vetted in Go
   (`validatePipRequirements`) *before* any container launches, using an
   **allow-list grammar** — parse, don't validate — not a deny-list of
   known-bad shapes (pip's own local-path/archive-file recognition is too
   broad to deny-list completely: a relative sub-path, a bare archive
   filename with no path separator at all, a trailing-slash directory, and
   a `file:` scheme with no `//` are all local/direct installs pip accepts
-  that a prefix deny-list would miss one at a time). Every
-  `requirements.txt` line must match ONE of exactly two accepted shapes or
-  the whole manifest is rejected with a named reason: (1) a strict
-  [PEP 508](https://peps.python.org/pep-0508/) index requirement — `name`,
-  optional `[extras]`, optional comma-separated version specifiers,
-  optional `; marker` — nothing else; or (2) per-requirement
-  `--hash=<algo>:<hexdigest>` fields (the output of `pip-compile
-  --generate-hashes` / `poetry export --with-hashes`), which may repeat
-  and trail a requirement on the same logical line. `--hash` cannot
-  weaken this boundary — any `--hash` field puts pip into its own
-  `--require-hashes` mode, which itself refuses editable/local/unhashed
-  direct installs. Every other pip option (`-e`, `-r`, `-c`,
-  `--no-binary`, `--index-url`, ...) is rejected outright, which also
-  closes nested `-r`/`-c` includes (unsupported in v1) in the same check.
-  `--only-binary=:all:` on the `pip download` command line is defense in
-  depth for whatever passes this grammar, not the sole enforcement point.
+  that a prefix deny-list would miss one at a time). Every line must
+  match ONE of exactly three accepted shapes or the whole manifest is
+  rejected: (1) a strict [PEP 508](https://peps.python.org/pep-0508/)
+  index requirement — `name`, optional `[extras]`, optional
+  comma-separated version specifiers, optional `; marker` restricted to
+  the PEP 508 marker charset — nothing else, with the name additionally
+  checked against pip's own `ARCHIVE_EXTENSIONS` list (`.whl`, `.zip`,
+  `.tar.gz`, `.tgz`, `.tar`, `.tar.bz2`, `.tbz`, `.tar.xz`, `.txz`,
+  `.tlz`, `.tar.lz`, `.tar.lzma`) plus bare compression suffixes
+  (`.gz`/`.bz2`/`.xz`/`.lz`/`.lzma`) as defense in depth beyond pip's
+  exact, version-dependent list; (2) per-requirement
+  `--hash=<algo>:<hexdigest>` fields (`pip-compile --generate-hashes` /
+  `poetry export --with-hashes` output) and TIGHTENING-only options
+  (`--require-hashes`, `--only-binary=...`, `--index-url=...`,
+  `--extra-index-url=...` — none of these can cause prefetch-time code
+  execution or loosen the boundary: a wheel is not executed at download
+  time, and `--hash`/`--require-hashes` only ever narrow what pip will
+  accept), which may repeat and trail a requirement on the same logical
+  line; or (3) a `-r`/`--requirement` or `-c`/`--constraint` include
+  naming a repo-relative path — absolute paths and any path that
+  resolves outside the repo (symlinks included) are rejected, and the
+  referenced file is recursively vetted with this SAME grammar, up to 8
+  levels deep with cycle protection. Every other pip option (`-e`,
+  `--no-binary`, ...) is rejected outright. `--only-binary=:all:` on the
+  `pip download` command line is defense in depth for whatever passes
+  this grammar, not the sole enforcement point.
+
+  **Blast radius**: a manifest that fails this grammar does NOT abort
+  dependency resolution for the whole repo. Python resolves to `off` (no
+  mounts, no prefetch — still fail-closed) with the rejection reason
+  carried as an operator-visible entry on `Resolution.Warnings`, while
+  every OTHER ecosystem in a polyglot repo (e.g. a Go module's
+  `/modcache` mount) continues to resolve normally.
 - **JS `fetch` prefetch**: `--ignore-scripts` is **mandatory** in the online
   prefetch step. npm lifecycle scripts are arbitrary code; during the prefetch
   the container has network access, so executing them could exfiltrate data or

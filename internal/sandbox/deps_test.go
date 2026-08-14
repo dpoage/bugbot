@@ -862,16 +862,25 @@ func TestValidatePipRequirementsRejectsBypasses(t *testing.T) {
 			cacheBase := t.TempDir()
 			mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
 
-			_, err := resolvePython(dir, DepOptions{
+			// bugbot-gu0o C2: a rejected manifest degrades Python to OFF
+			// with a named Warning, not a hard error — see resolvePython's
+			// FETCH case.
+			res, err := resolvePython(dir, DepOptions{
 				Strategy:     DepStrategyFetch,
 				FetchSandbox: mock,
 				userCacheDir: cacheBase,
 			})
-			if err == nil {
-				t.Fatalf("resolvePython should reject requirements.txt content %q", tc.content)
+			if err != nil {
+				t.Fatalf("resolvePython must not hard-error on a bad manifest (bugbot-gu0o C2): %v", err)
 			}
-			if !strings.Contains(err.Error(), "bugbot-gu0o") {
-				t.Errorf("error = %v, want a named bugbot-gu0o reason", err)
+			if res.Strategy != DepStrategyOff {
+				t.Errorf("Strategy = %q, want off for a rejected manifest", res.Strategy)
+			}
+			if res.Prefetch != nil {
+				t.Error("rejected manifest must not set a Prefetch hook")
+			}
+			if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "bugbot-gu0o") {
+				t.Errorf("Warnings = %v, want exactly one warning naming bugbot-gu0o", res.Warnings)
 			}
 			if mock.CallCount() != 0 {
 				t.Errorf("rejected manifest must never launch a container; CallCount() = %d", mock.CallCount())
@@ -894,16 +903,162 @@ func TestValidatePipRequirementsRejectsSymlinkedManifest(t *testing.T) {
 	cacheBase := t.TempDir()
 	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
 
-	_, err := resolvePython(dir, DepOptions{
+	res, err := resolvePython(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
 		FetchSandbox: mock,
 		userCacheDir: cacheBase,
 	})
-	if err == nil {
-		t.Fatal("resolvePython should reject a symlinked requirements.txt whose target contains a rejected shape")
+	if err != nil {
+		t.Fatalf("resolvePython must not hard-error on a bad manifest (bugbot-gu0o C2): %v", err)
 	}
-	if !strings.Contains(err.Error(), "bugbot-gu0o") {
-		t.Errorf("error = %v, want a named bugbot-gu0o reason", err)
+	if res.Strategy != DepStrategyOff || res.Prefetch != nil {
+		t.Errorf("want Strategy=off, Prefetch=nil for a rejected symlinked manifest; got Strategy=%q Prefetch=%v", res.Strategy, res.Prefetch != nil)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "bugbot-gu0o") {
+		t.Errorf("Warnings = %v, want exactly one warning naming bugbot-gu0o", res.Warnings)
+	}
+	if mock.CallCount() != 0 {
+		t.Errorf("rejected manifest must never launch a container; CallCount() = %d", mock.CallCount())
+	}
+}
+
+// TestPythonInvalidManifestDoesNotAbortWholeRepo proves the bugbot-gu0o C2
+// fix at the ResolveDeps level: a polyglot repo (go.mod + go.sum +
+// requirements.txt) whose requirements.txt is unvettable must still
+// resolve normally for Go — the whole ResolveDeps call must NOT error,
+// and the Go /modcache mount + GOPROXY=off must still be present. Before
+// this fix a validation failure propagated as a hard Go error out of
+// ResolveDeps, which every caller in this codebase either wraps and
+// aborts on (internal/funnel/funnel.go) or silently degrades to a
+// completely empty Resolution on (internal/engine/sandbox.go) — losing
+// Go's dependency resolution too, over a Python-specific manifest problem.
+func TestPythonInvalidManifestDoesNotAbortWholeRepo(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
+	writeFile(t, filepath.Join(dir, "go.sum"), "example.com/x v1.0.0 h1:abc\n")
+	// A nested -r include naming a repo-relative path that does not exist —
+	// this is Oracle A's exact polyglot canary shape.
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "-r requirements/base.txt\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := ResolveDeps(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps must not abort for the whole repo over a Python-only problem (bugbot-gu0o C2): %v", err)
+	}
+	if res.Strategy != DepStrategyFetch {
+		t.Errorf("Strategy = %q, want fetch (Go is the first matching ecosystem and must resolve normally)", res.Strategy)
+	}
+	foundModcache := false
+	for _, m := range res.ROMounts {
+		if m.ContainerPath == modcacheMount {
+			foundModcache = true
+		}
+	}
+	if !foundModcache {
+		t.Errorf("missing Go modcache mount; Python's manifest problem must not cost Go its dependency resolution; mounts=%+v", res.ROMounts)
+	}
+	if !envHas(res.Env, "GOPROXY=off") {
+		t.Errorf("missing GOPROXY=off; Python's manifest problem must not cost Go its dependency resolution; env=%v", res.Env)
+	}
+	if res.Prefetch == nil {
+		t.Fatal("Go's Prefetch hook must still be set")
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "bugbot-gu0o") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Warnings = %v, want an operator-visible bugbot-gu0o reason for the disabled Python prefetch", res.Warnings)
+	}
+}
+
+// TestValidatePipRequirementsRecursesIncludes proves a repo-relative -r
+// include naming a file that DOES exist and validates cleanly is accepted
+// end to end (bugbot-gu0o C2b) — a regression guard for -r includes that
+// worked before the pip-manifest-vetting bead landed.
+func TestValidatePipRequirementsRecursesIncludes(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "requirements.txt"), "-r requirements/base.txt\nrequests==2.31.0\n")
+	writeFile(t, filepath.Join(dir, "requirements", "base.txt"), "six==1.16.0\npytest\n")
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+	res, err := resolvePython(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolvePython: %v", err)
+	}
+	if res.Strategy != DepStrategyFetch || res.Prefetch == nil {
+		t.Fatalf("a valid -r include must resolve to fetch with a Prefetch hook; got Strategy=%q Prefetch=%v Warnings=%v", res.Strategy, res.Prefetch != nil, res.Warnings)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("valid manifest must have no Warnings, got %v", res.Warnings)
+	}
+}
+
+// TestValidatePipRequirementsIncludeSafety table-drives the three
+// structural include-safety guards (bugbot-gu0o C2b): an absolute include
+// path, an include that resolves outside the repo via a symlink, and an
+// include cycle — all must degrade Python to OFF-with-Warning exactly
+// like any other rejected shape (never a hard ResolveDeps error).
+func TestValidatePipRequirementsIncludeSafety(t *testing.T) {
+	t.Run("absolute include path rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		outside := t.TempDir()
+		writeFile(t, filepath.Join(outside, "evil.txt"), "six==1.16.0\n")
+		writeFile(t, filepath.Join(dir, "requirements.txt"), "-r "+filepath.Join(outside, "evil.txt")+"\n")
+		assertPythonDegradesToOff(t, dir)
+	})
+
+	t.Run("symlinked include escaping repo rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		outside := t.TempDir()
+		writeFile(t, filepath.Join(outside, "evil.txt"), "six==1.16.0\n")
+		if err := os.Symlink(filepath.Join(outside, "evil.txt"), filepath.Join(dir, "escape.txt")); err != nil {
+			t.Fatalf("os.Symlink: %v", err)
+		}
+		writeFile(t, filepath.Join(dir, "requirements.txt"), "-r escape.txt\n")
+		assertPythonDegradesToOff(t, dir)
+	})
+
+	t.Run("include cycle rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "requirements.txt"), "-r requirements/a.txt\n")
+		writeFile(t, filepath.Join(dir, "requirements", "a.txt"), "-r b.txt\n")
+		writeFile(t, filepath.Join(dir, "requirements", "b.txt"), "-r a.txt\n")
+		assertPythonDegradesToOff(t, dir)
+	})
+}
+
+// assertPythonDegradesToOff is the shared assertion for
+// TestValidatePipRequirementsIncludeSafety's subtests.
+func assertPythonDegradesToOff(t *testing.T, dir string) {
+	t.Helper()
+	cacheBase := t.TempDir()
+	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	res, err := resolvePython(dir, DepOptions{
+		Strategy:     DepStrategyFetch,
+		FetchSandbox: mock,
+		userCacheDir: cacheBase,
+	})
+	if err != nil {
+		t.Fatalf("resolvePython must not hard-error (bugbot-gu0o C2): %v", err)
+	}
+	if res.Strategy != DepStrategyOff || res.Prefetch != nil {
+		t.Errorf("want Strategy=off, Prefetch=nil; got Strategy=%q Prefetch=%v", res.Strategy, res.Prefetch != nil)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "bugbot-gu0o") {
+		t.Errorf("Warnings = %v, want exactly one warning naming bugbot-gu0o", res.Warnings)
 	}
 	if mock.CallCount() != 0 {
 		t.Errorf("rejected manifest must never launch a container; CallCount() = %d", mock.CallCount())
@@ -940,6 +1095,39 @@ func TestValidatePipRequirementsAllowsOrdinaryPins(t *testing.T) {
 	}
 	if res.Prefetch == nil {
 		t.Fatal("valid requirements.txt must still set a Prefetch hook")
+	}
+}
+
+// TestValidatePipRequirementsRejectsEveryArchiveExtension table-drives one
+// rejection case PER extension in pip's own filetypes.ARCHIVE_EXTENSIONS
+// (bugbot-gu0o C1/B5) plus the broader defense-in-depth compression
+// suffixes, so a future accidental edit to pipArchiveExtensions /
+// pipCompressionSuffixes that drops an entry fails a test immediately
+// instead of silently reopening a live bypass.
+func TestValidatePipRequirementsRejectsEveryArchiveExtension(t *testing.T) {
+	allSuffixes := append(append([]string{}, pipArchiveExtensions...), pipCompressionSuffixes...)
+	for _, suf := range allSuffixes {
+		t.Run(suf, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "requirements.txt"), "evilpkg-0.0.1"+suf+"\n")
+			cacheBase := t.TempDir()
+			mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+
+			res, err := resolvePython(dir, DepOptions{
+				Strategy:     DepStrategyFetch,
+				FetchSandbox: mock,
+				userCacheDir: cacheBase,
+			})
+			if err != nil {
+				t.Fatalf("resolvePython must not hard-error (bugbot-gu0o C2): %v", err)
+			}
+			if res.Strategy != DepStrategyOff || res.Prefetch != nil {
+				t.Errorf("suffix %q: want Strategy=off, Prefetch=nil; got Strategy=%q Prefetch=%v", suf, res.Strategy, res.Prefetch != nil)
+			}
+			if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "archive filename") {
+				t.Errorf("suffix %q: Warnings = %v, want a warning citing the archive-filename reason", suf, res.Warnings)
+			}
+		})
 	}
 }
 
