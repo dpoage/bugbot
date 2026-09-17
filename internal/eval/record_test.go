@@ -3,7 +3,7 @@
 // Real-model corpus recorder for the eval harness.
 //
 // This is gated behind the `record` build tag AND the LLM_LIVE_* environment
-// variables, mirroring internal/llm/live_test.go: it never runs in normal
+// variables, mirroring llmkit/provider/live_test.go: it never runs in normal
 // `go test ./...`, never needs a key in CI, and makes real (paid) API calls
 // only when an operator deliberately runs it with credentials. The orchestrator
 // runs it with a real MiniMax M3 key:
@@ -48,7 +48,7 @@ type recordEnv struct {
 
 // recordAPIKeyEnvVar names the env var holding the live key. It is passed
 // directly to os.Getenv so provider.New receives the resolved value rather
-// than a config.Provider — keeping internal/llm free of config imports.
+// than a config.Provider — keeping llmkit free of config imports.
 const recordAPIKeyEnvVar = "LLM_LIVE_API_KEY"
 
 // requireRecordEnv reads the recorder environment and skips when any required

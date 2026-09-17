@@ -18,7 +18,7 @@ import (
 // that opens or updates a batch of issues back-to-back reliably gets throttled
 // partway through, silently dropping the remainder of the run's writes.
 //
-// This is deliberately asymmetric with internal/llm's retry wrapper
+// This is deliberately asymmetric with llmkit's retry wrapper
 // (WithRetry / retryClient), which honors a server-supplied Retry-After
 // header and backs off exponentially with jitter. gh CLI does not expose
 // response headers to its callers — RealGH only ever sees gh's stderr text
@@ -162,7 +162,7 @@ func NewPacedGH(inner GHRunner) GHRunner {
 
 // defaultGHSleep is the production sleep implementation: it waits for d or
 // until ctx is cancelled, whichever comes first, mirroring
-// internal/llm/retry.go's doSleep so both retry paths in the codebase treat
+// llmkit/retry.go's doSleep so both retry paths in the codebase treat
 // context cancellation identically.
 func defaultGHSleep(ctx context.Context, d time.Duration) error {
 	if d <= 0 {

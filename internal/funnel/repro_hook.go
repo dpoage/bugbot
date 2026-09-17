@@ -121,7 +121,7 @@ func (f *Funnel) runReproAttempt(ctx context.Context, finding domain.Finding, sc
 	//  — hook returned an error before any sandbox run
 	//   infra_error   — hook returned a non-nil error (infrastructure failure)
 	//
-	// Tokens: the hook closure (built by the CLI) wires its own llm.Recorder
+	// Tokens: the hook closure (built by the CLI) wires its own llmkit.Recorder
 	// into the reproducer client, so spend is already attributed to the scan
 	// run's ledger via the CLI's rec. We record zero tokens here rather than
 	// double-counting; the spend ledger is the authoritative source.

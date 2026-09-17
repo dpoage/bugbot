@@ -357,7 +357,7 @@ type Funnel struct {
 	//   (1) dep-source roots are available on the host (depRoots.Len() > 0), AND
 	//   (2) the repo's dominant languages include Go.
 	// Condition (2) is required because dep-source reach is Go-only today
-	// (internal/agent/dep_source.go): on a Python/C++/JS repo the host may have
+	// (internal/agenttools/dep_source.go): on a Python/C++/JS repo the host may have
 	// a Go toolchain installed, making depRoots non-empty, but the verifier's
 	// tools cannot reach Python site-packages or C++ system headers. Hardcoding
 	// GOROOT/GOMODCACHE text in prompts for such repos is a fabrication trigger.

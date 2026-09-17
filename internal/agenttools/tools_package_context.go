@@ -35,7 +35,7 @@ const packageGraphMaxEntries = 200
 // comment in hypothesize.go where refuter tools are assembled.
 //
 // The onLookup callback is injected by the funnel (wired to
-// store.GetPackageSummaries). This keeps internal/agent free of store imports
+// store.GetPackageSummaries). This keeps agenttools free of store imports
 // and makes the tool unit-testable with a simple fake — the same seam as
 // PostLeadTool.onPost and SandboxExecTool.onExec.
 type PackageContextTool struct {
@@ -136,7 +136,7 @@ func (t *PackageContextTool) Run(_ context.Context, raw json.RawMessage) (string
 // hypothesize.go; refuter exposure is a trivial follow-up.
 //
 // The onQuery callback is injected by the funnel (backed by the cartography
-// struct's QueryGraph method). This keeps internal/agent free of funnel-graph
+// struct's QueryGraph method). This keeps agenttools free of funnel-graph
 // imports.
 type PackageGraphTool struct {
 	onQuery func(pkg, direction string) (importers, imports []string, err error)

@@ -13,8 +13,8 @@ import (
 
 // transcriptTimestampLayout matches agent.Runner's autosave naming:
 // "<RFC3339-ish timestamp>-[<key>-]<task-slug>.jsonl" (see
-// internal/agent/runner.go autosave). It is duplicated here rather than
-// exported from internal/agent because it is a filename convention, not part
+// llmkit/agent/runner.go autosave). It is duplicated here rather than
+// exported from llmkit/agent because it is a filename convention, not part
 // of the transcript format.
 const transcriptTimestampLayout = "20060102T150405.000Z"
 

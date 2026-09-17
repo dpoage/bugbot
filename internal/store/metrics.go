@@ -32,7 +32,7 @@ type RunMetric struct {
 
 // TotalTokens is the run's input+output spend — the denominator of the
 // findings-per-token metric. InputTokens already includes cached tokens (the
-// llm.Usage convention), so this is the honest total cost of the run.
+// llmkit.Usage convention), so this is the honest total cost of the run.
 func (m RunMetric) TotalTokens() int64 { return m.InputTokens + m.OutputTokens }
 
 // VerifiedPer1K is verified (Tier-2) findings per 1,000 total tokens — the

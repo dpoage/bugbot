@@ -3,7 +3,7 @@
 // Integration tests for the run_tests tool against a real container runtime.
 // Run with:
 //
-//	go test -tags integration ./internal/agent/...
+//	go test -tags integration ./internal/agenttools/...
 //
 // Skips automatically when no container runtime (podman/docker) is detected or
 // the image pull fails. Kept well under 90 seconds with a tight per-test timeout.

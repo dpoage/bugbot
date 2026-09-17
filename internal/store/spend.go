@@ -10,7 +10,7 @@ import (
 // LLM call, attributed to a scan run, role, provider, and model.
 //
 // InputTokens is the TOTAL prompt size including any prompt-cache reads/writes
-// (the llm.Usage convention), so input+output budget math is cache-agnostic.
+// (the llmkit.Usage convention), so input+output budget math is cache-agnostic.
 // CacheReadTokens / CacheCreationTokens are subsets of InputTokens recording
 // how much of the prompt was served from (read) or written to (creation) the
 // provider's prompt cache; they exist to report cache savings, not to add to
@@ -44,7 +44,7 @@ func (t SpendTotals) Total() int64 { return t.InputTokens + t.OutputTokens }
 
 // Chargeable returns the cache-discounted token total for budget gating:
 // uncached input + cacheRead*weight + output. weight<=0 falls back to 1.0
-// (raw). Mirrors llm.Usage.ChargeableTokens so per-cycle and per-day budgets
+// (raw). Mirrors llmkit.Usage.ChargeableTokens so per-cycle and per-day budgets
 // use the same accounting.
 func (t SpendTotals) Chargeable(cacheReadWeight float64) int64 {
 	if cacheReadWeight <= 0 {

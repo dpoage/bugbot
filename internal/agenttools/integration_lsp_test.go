@@ -3,7 +3,7 @@
 // LSP integration tests exercise the code-navigation tools against real
 // language servers. Run with:
 //
-//	go test -tags integration ./internal/agent/...
+//	go test -tags integration ./internal/agenttools/...
 //
 // They skip automatically when the server binary (gopls, clangd) is not
 // installed. Install gopls with: go install golang.org/x/tools/gopls@latest

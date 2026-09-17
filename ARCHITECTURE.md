@@ -54,6 +54,7 @@ Ingest -> Hypothesize -> Triage -> Verify -> Reproduce -> Report
 - **`internal/store`** — embedded SQLite state (`modernc.org/sqlite`, pure-Go,
   CGO-free): findings, suppressions, ingest watermarks, and token spend.
 - **`internal/ingest`** — repo model, file/symbol fingerprints, git polling,
+  and blast-radius computation for incremental scans.
 - **`internal/agenttools`** — bugbot's concrete tool implementations
   (read_file, list_dir, grep, code-nav, sandbox_exec, post_lead, run_tests,
   report_tool_issue, status_note, …) plus tool-author helpers. The harness

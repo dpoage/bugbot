@@ -255,7 +255,7 @@ type Stats struct {
 	// under Result.Skipped instead.
 	FinderBudgetStopped int `json:"finder_budget_stopped,omitempty"`
 	// FinderRateLimited counts finders that exhausted the retry budget against
-	// a rate-limiting provider (llm.ErrRateLimited). Distinct from
+	// a rate-limiting provider (llmkit.ErrRateLimited). Distinct from
 	// FinderFailures: the provider throttled us, the findings are NOT lost in
 	// the model-output sense — they were never produced because the run
 	// never completed. Coverage is incomplete but recoverable by lowering
@@ -301,7 +301,7 @@ type Stats struct {
 	ArbiterTokens      int64 `json:"arbiter_tokens,omitempty"`
 	ArbiterBudgetStops int   `json:"arbiter_budget_stops,omitempty"`
 	// InputTokens / OutputTokens is the run's total token spend. InputTokens
-	// includes cached tokens (the llm.Usage convention).
+	// includes cached tokens (the llmkit.Usage convention).
 	InputTokens  int64 `json:"input_tokens"`
 	OutputTokens int64 `json:"output_tokens"`
 	// CacheReadTokens / CacheCreationTokens are the subsets of InputTokens
