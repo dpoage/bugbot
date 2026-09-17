@@ -125,7 +125,7 @@ func TestAgentScope_EmptyToolDropped(t *testing.T) {
 
 // TestAgentScope_EmitToolCallRoutesToScope verifies EmitToolCall produces a
 // KindToolCall event bound to the scope — this is the structured replacement for
-// ActivitySink that the funnel bridges via agent.ToolActivity.
+// ActivitySink that the funnel bridges via progress.ToolActivity.
 func TestAgentScope_EmitToolCallRoutesToScope(t *testing.T) {
 	var rec recordingSink
 	scope := NewAgentScope(&rec, RoleSeverity, "3 findings")

@@ -1,6 +1,7 @@
 package funnel
 
 import (
+	"context"
 	"sync"
 
 	"github.com/dpoage/bugbot/internal/agenttools"
@@ -70,19 +71,39 @@ func (f *Funnel) newAgentRunner(client llmkit.Client, tools []agent.Tool, system
 	return agent.NewRunner(client, tools, systemPrompt, opts...)
 }
 
-// activitySinkFor returns a WithActivitySink option that routes each tool
-// call's structured activity to scope's sink as a KindToolCall event carrying
-// scope's AgentID, via the shared progress.AgentScope seam. Callers MUST pass
-// the SAME scope used for that run's KindAgentStarted/KindAgentFinished
-// bracket (and any other emission for the run) — progress.AgentEventKey folds
-// live-agent state by AgentID, so a tool call carrying a DIFFERENT scope's id
-// than the run's Started/Finished bracket silently orphans that activity (see
-// bugbot-r7ub). A nil progress sink makes emission a no-op (progress.Emit
-// handles nil sinks).
-func (f *Funnel) activitySinkFor(scope progress.AgentScope) agent.Option {
-	return agent.WithActivitySink(func(act agent.ToolActivity) {
-		scope.EmitToolCall(act.Phase, act.Tool, act.File, act.Line, act.EndLine, act.Symbol, act.Pattern, act.Count, act.Err)
-	})
+// toolHealthRouting names where a runner's objective infra tool failures are
+// recorded (recordToolIssue with source "infra"). The zero value disables the
+// runner's ToolHealth hook — paths without a Result to fold issues into run
+// without it, matching the pre-hooks wiring.
+type toolHealthRouting struct {
+	result *Result
+	role   string
+	label  string
+}
+
+// hooksFor builds the ONE agent.Hooks a funnel runner gets. agent.WithHooks
+// replaces the runner's whole Hooks struct, so activity and tool-health
+// routing MUST be assembled into a single value here rather than passed as
+// two options that would silently clobber each other. Tool activity routes
+// through scope.Hooks (which owns the tool-name → field mapping and the
+// start/done lifecycle); when health.result is non-nil, ToolHealth routes
+// objective infra failures to recordToolIssue as source "infra", bucketed as
+// "high" (infraToolIssueSeverity).
+//
+// Callers MUST pass the SAME scope used for that run's
+// KindAgentStarted/KindAgentFinished bracket (and any other emission for the
+// run) — progress.AgentEventKey folds live-agent state by AgentID, so a tool
+// call carrying a DIFFERENT scope's id than the run's Started/Finished
+// bracket silently orphans that activity (see bugbot-r7ub). A nil progress
+// sink makes emission a no-op (progress.Emit handles nil sinks).
+func (f *Funnel) hooksFor(scope progress.AgentScope, health toolHealthRouting) agent.Option {
+	hooks := scope.Hooks()
+	if health.result != nil {
+		hooks.ToolHealth = func(ctx context.Context, tool string, he *agent.ToolHealthError) {
+			f.recordToolIssue(health.result, "infra", tool, infraToolIssueSeverity, he.Reason, health.role, health.label)
+		}
+	}
+	return agent.WithHooks(hooks)
 }
 
 // maybeStatusNoteTool returns a status_note Tool when f.opts.Features.StatusNotes is
@@ -90,13 +111,13 @@ func (f *Funnel) activitySinkFor(scope progress.AgentScope) agent.Option {
 // their tool slice before building the runner; when nil, the tool is absent
 // and the tool set is byte-identical to the pre-feature state. The tool's
 // notes flow through the SAME AgentScope EmitToolCall seam as automatic
-// tool-call events (see activitySinkFor's doc on scope identity), so manual
+// tool-call events (see activityHooksFor's doc on scope identity), so manual
 // and derived activity render identically and fold under the same AgentID.
 func (f *Funnel) maybeStatusNoteTool(scope progress.AgentScope) agent.Tool {
 	if !f.opts.Features.StatusNotes {
 		return nil
 	}
-	return agenttools.NewStatusNoteTool(func(act agent.ToolActivity) {
+	return agenttools.NewStatusNoteTool(func(act progress.ToolActivity) {
 		scope.EmitToolCall(act.Phase, act.Tool, act.File, act.Line, act.EndLine, act.Symbol, act.Pattern, act.Count, act.Err)
 	})
 }
@@ -133,16 +154,13 @@ func (f *Funnel) recordToolIssue(result *Result, source, tool, severity, reason,
 	})
 }
 
-// toolHealthSinkFor returns a WithToolHealthSink option that routes a tool's
-// objective infra failure (a *agent.ToolHealthError surfaced at the runner
-// dispatch seam) to recordToolIssue as source "infra". Wired at every funnel
-// runner site beside activitySinkFor; today sandbox_exec (refuter-side) is the
-// sole producer, with codenav the natural finder-side producer next.
-func (f *Funnel) toolHealthSinkFor(result *Result, role, label string) agent.Option {
-	return agent.WithToolHealthSink(func(tool string, he *agent.ToolHealthError) {
-		f.recordToolIssue(result, "infra", tool, string(he.Severity), he.Reason, role, label)
-	})
-}
+// infraToolIssueSeverity is the severity bucket bugbot assigns to every
+// objective infra tool failure. llmkit's ToolHealthError no longer carries a
+// severity (yr7.1 removed the field along with the rest of the bugbot
+// residue), so the funnel classifies on its side: sandbox_exec — the sole
+// producer today — previously reported SeverityHigh, and recordToolIssue's
+// dedup/status rendering expect the literal "high".
+const infraToolIssueSeverity = "high"
 
 // maybeReportToolIssueTool returns a report_tool_issue Tool when
 // f.opts.Features.ToolComplaints is true, or nil when the flag is off. The

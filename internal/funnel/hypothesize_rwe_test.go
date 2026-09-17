@@ -192,7 +192,7 @@ func TestRwe_RunFinderWithPrompt_RetryOnMaxTokensTruncation(t *testing.T) {
 	lens := f.lenses[0]
 	scope := progress.NewAgentScope(nil, progress.RoleFinder, "rwe-find")
 	cands, status, outcome, pm, _, err := f.runFinderWithPrompt(
-		ctx, fake, tools, "you are a finder", "rwe-find", lens, tasks, budget, startedAt, scope,
+		ctx, fake, tools, "you are a finder", "rwe-find", lens, tasks, budget, startedAt, scope, toolHealthRouting{},
 	)
 	if err != nil {
 		t.Fatalf("runFinderWithPrompt err: %v", err)
@@ -253,7 +253,7 @@ func TestRwe_RunFinderWithPrompt_NoRetryOnNonTruncatedParseFailure(t *testing.T)
 
 	scope2 := progress.NewAgentScope(nil, progress.RoleFinder, "rwe-find")
 	cands, status, _, pm, _, err := f.runFinderWithPrompt(
-		ctx, fake, tools, "you are a finder", "rwe-find", lens, tasks, budget, startedAt, scope2,
+		ctx, fake, tools, "you are a finder", "rwe-find", lens, tasks, budget, startedAt, scope2, toolHealthRouting{},
 	)
 	if err != nil {
 		t.Fatalf("runFinderWithPrompt err: %v", err)

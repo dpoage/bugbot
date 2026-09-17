@@ -56,7 +56,7 @@ func openaiTextBody(text string, inTok, outTok int64) string {
 func simpleWireRequest() llmkit.Request {
 	return llmkit.Request{
 		Messages: []llmkit.Message{
-			{Role: llmkit.RoleUser, Content: "hello"},
+			llmkit.TextMessage(llmkit.RoleUser, "hello"),
 		},
 	}
 }

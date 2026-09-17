@@ -373,7 +373,7 @@ func (p *PatchProver) newRunner(scope progress.AgentScope) (*agent.Runner, error
 	if p.transcriptDir != "" {
 		opts = append(opts, agent.WithTranscriptDir(p.transcriptDir))
 	}
-	opts = append(opts, agent.WithActivitySink(toolActivitySink(scope)))
+	opts = append(opts, agent.WithHooks(scope.Hooks()))
 	return agent.NewRunner(p.client, tools, patchSystemPrompt, opts...), nil
 }
 

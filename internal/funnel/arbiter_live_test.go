@@ -141,7 +141,7 @@ func TestArbiterLive_ReplaySplits(t *testing.T) {
 		c := candidateFromFinding(fnd)
 		persona := ingest.PersonaLanguages([]ingest.Language{ingest.DetectLanguage(fnd.File)}, nil)
 		scope := progress.NewAgentScope(nil, progress.RoleVerifier, c.Title)
-		av, tokens, stopped, aerr := f.runArbiter(ctx, verifier, arbiterTools, persona, c, verdicts, seatNames, &budgetState{}, scope)
+		av, tokens, stopped, aerr := f.runArbiter(ctx, verifier, arbiterTools, persona, c, verdicts, seatNames, &budgetState{}, scope, toolHealthRouting{})
 		if aerr != nil {
 			t.Errorf("%s:%d: runArbiter error: %v", tgt.fileSuffix, tgt.line, aerr)
 			continue

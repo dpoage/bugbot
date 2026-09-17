@@ -383,7 +383,7 @@ func TestRunRefuters_ExecutorClauseInPanelPrompts(t *testing.T) {
 		Severity:    "medium",
 	}
 	budget := &budgetState{}
-	_, _, _, _, _, err = f.runRefuters(ctx, capture, tools, "senior Go engineer", c, 3, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title))
+	_, _, _, _, _, err = f.runRefuters(ctx, capture, tools, "senior Go engineer", c, 3, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title), toolHealthRouting{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +451,7 @@ func TestRunRefuters_ExecutorClauseWithSandboxTool(t *testing.T) {
 	tools = append(tools, sbTool)
 
 	budget := &budgetState{}
-	_, _, _, _, _, err = f.runRefuters(ctx, capture, tools, "senior Go engineer", c, 3, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title))
+	_, _, _, _, _, err = f.runRefuters(ctx, capture, tools, "senior Go engineer", c, 3, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title), toolHealthRouting{})
 	if err != nil {
 		t.Fatal(err)
 	}

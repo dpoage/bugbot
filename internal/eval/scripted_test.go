@@ -21,7 +21,7 @@ func TestScriptedClient_RoutingPrecedence(t *testing.T) {
 		t.Errorf("system route: got %q", got.Text)
 	}
 	// Task route.
-	got, _ = c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{{Role: llmkit.RoleUser, Content: "refute title-x"}}})
+	got, _ = c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "refute title-x")}})
 	if got.Text != `{"x":1}` {
 		t.Errorf("task route: got %q", got.Text)
 	}

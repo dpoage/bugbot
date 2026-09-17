@@ -80,7 +80,7 @@ func commonPrefixLen(a, b []llmkit.Message) int {
 }
 
 func messageEqual(x, y llmkit.Message) bool {
-	if x.Role != y.Role || x.Content != y.Content || x.ToolCallID != y.ToolCallID || x.IsError != y.IsError {
+	if x.Role != y.Role || x.Text() != y.Text() || x.ToolCallID != y.ToolCallID || x.IsError != y.IsError {
 		return false
 	}
 	if len(x.ToolCalls) != len(y.ToolCalls) {
@@ -142,7 +142,7 @@ func applyCompaction(snaps [][]llmkit.Message, names map[string]string, budget i
 		for j := range cur {
 			if cur[j].Role == llmkit.RoleToolResult {
 				if s, ok := stubbed[cur[j].ToolCallID]; ok {
-					cur[j].Content = s
+					cur[j].Content = []llmkit.Block{{Kind: llmkit.BlockText, Text: s}}
 				}
 			}
 		}
@@ -150,8 +150,8 @@ func applyCompaction(snaps [][]llmkit.Message, names map[string]string, budget i
 		// Record any NEW stubs produced this turn so later turns keep them.
 		for j := range compacted {
 			m := compacted[j]
-			if m.Role == llmkit.RoleToolResult && strings.HasPrefix(m.Content, "[") {
-				stubbed[m.ToolCallID] = m.Content
+			if m.Role == llmkit.RoleToolResult && strings.HasPrefix(m.Text(), "[") {
+				stubbed[m.ToolCallID] = m.Text()
 			}
 		}
 		out[i] = compacted
@@ -281,15 +281,15 @@ func TestMeasureFinderTokenBurn(t *testing.T) {
 // is the bare task. It returns the per-turn append-only request snapshots.
 func buildRunaway(turns, readTokens int) [][]llmkit.Message {
 	blob := strings.Repeat("source line of the file under analysis\n", readTokens*4/39+1)
-	msgs := []llmkit.Message{{Role: llmkit.RoleUser, Content: strings.Repeat("investigate ", 200)}}
+	msgs := []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, strings.Repeat("investigate ", 200))}
 	var snaps [][]llmkit.Message
 	snaps = append(snaps, cloneMsgs(msgs))
 	for i := 0; i < turns-1; i++ {
 		id := fmt.Sprintf("call-%02d", i)
 		msgs = append(msgs,
-			llmkit.Message{Role: llmkit.RoleAssistant, Content: "I will read the next file to check it.",
+			llmkit.Message{Role: llmkit.RoleAssistant, Content: []llmkit.Block{{Kind: llmkit.BlockText, Text: "I will read the next file to check it."}},
 				ToolCalls: []llmkit.ToolCall{{ID: id, Name: "read_file", Arguments: []byte(`{"path":"pkg/file.go"}`)}}},
-			llmkit.Message{Role: llmkit.RoleToolResult, ToolCallID: id, Content: blob},
+			llmkit.Message{Role: llmkit.RoleToolResult, ToolCallID: id, Content: []llmkit.Block{{Kind: llmkit.BlockText, Text: blob}}},
 		)
 		snaps = append(snaps, cloneMsgs(msgs))
 	}

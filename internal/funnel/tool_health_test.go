@@ -37,20 +37,20 @@ func TestRecordToolIssue_DedupCountsAndEmits(t *testing.T) {
 	if len(result.Stats.ToolIssues) != 2 {
 		t.Fatalf("ToolIssues = %+v, want 2 entries", result.Stats.ToolIssues)
 	}
-	var infra, agent *ToolIssue
+	var infra, agentIssue *ToolIssue
 	for i := range result.Stats.ToolIssues {
 		switch result.Stats.ToolIssues[i].Source {
 		case "infra":
 			infra = &result.Stats.ToolIssues[i]
 		case "agent":
-			agent = &result.Stats.ToolIssues[i]
+			agentIssue = &result.Stats.ToolIssues[i]
 		}
 	}
 	if infra == nil || infra.Tool != "sandbox_exec" || infra.Severity != "high" || infra.Count != 2 {
 		t.Errorf("infra entry = %+v, want sandbox_exec/high/count=2", infra)
 	}
-	if agent == nil || agent.Tool != "codenav" || agent.Severity != "medium" || agent.Count != 1 {
-		t.Errorf("agent entry = %+v, want codenav/medium/count=1", agent)
+	if agentIssue == nil || agentIssue.Tool != "codenav" || agentIssue.Severity != "medium" || agentIssue.Count != 1 {
+		t.Errorf("agent entry = %+v, want codenav/medium/count=1", agentIssue)
 	}
 
 	// Every record emits one KindToolUnhealthy event carrying tool + severity.

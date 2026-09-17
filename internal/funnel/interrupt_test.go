@@ -1189,7 +1189,7 @@ func finderOneChunkEmitsRealCand(c *scriptedClient) *scriptedClient {
 			return false
 		}
 		for _, m := range req.Messages {
-			if m.Role == llmkit.RoleUser && strings.Contains(m.Content, "bug.go") {
+			if m.Role == llmkit.RoleUser && strings.Contains(m.Text(), "bug.go") {
 				return true
 			}
 		}

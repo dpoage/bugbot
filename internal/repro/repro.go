@@ -725,7 +725,7 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 	if r.opts.TranscriptDir != "" {
 		opts = append(opts, agent.WithTranscriptDir(r.opts.TranscriptDir))
 	}
-	opts = append(opts, agent.WithActivitySink(toolActivitySink(scope)))
+	opts = append(opts, agent.WithHooks(scope.Hooks()))
 	prompt := systemPrompt(lang, systems, r.capabilities, r.playbook)
 	if r.pkgSummary != nil {
 		prompt += pkgContextGuidance
@@ -1184,13 +1184,13 @@ func hasCmdFlag(argv []string, name string) bool {
 	return false
 }
 
-// toolActivitySink builds the func(agent.ToolActivity) callback for
-// agent.WithActivitySink and agenttools.NewStatusNoteTool, routing each structured
-// ToolActivity through scope.EmitToolCall so it surfaces as a KindToolCall
-// progress event without coupling the repro package to agent's types at the
-// call sites.
-func toolActivitySink(scope progress.AgentScope) func(agent.ToolActivity) {
-	return func(act agent.ToolActivity) {
+// toolActivitySink builds the func(progress.ToolActivity) callback for
+// agenttools.NewStatusNoteTool, routing the status_note tool's structured
+// activity through scope.EmitToolCall so it surfaces as a KindToolCall
+// progress event. (Automatic tool-call activity flows through
+// agent.WithHooks(scope.Hooks()) — see progress.AgentScope.Hooks.)
+func toolActivitySink(scope progress.AgentScope) func(progress.ToolActivity) {
+	return func(act progress.ToolActivity) {
 		scope.EmitToolCall(act.Phase, act.Tool, act.File, act.Line, act.EndLine, act.Symbol, act.Pattern, act.Count, act.Err)
 	}
 }

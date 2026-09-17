@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/dpoage/bugbot/internal/progress"
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
 )
@@ -15,18 +16,18 @@ import (
 // Scan.StatusNotes config flag (off by default).
 //
 // On invocation the note is routed through the activity sink as a
-// [agent.ToolActivity]{Tool="status_note", Phase="done", Symbol=<note>}, which the
+// [progress.ToolActivity]{Tool="status_note", Phase="done", Symbol=<note>}, which the
 // progress seam converts to a KindToolCall event visible in the pane and
 // status.json.
 type statusNoteTool struct {
 	// sink routes the sanitized note to the progress system.
-	sink func(act agent.ToolActivity)
+	sink func(act progress.ToolActivity)
 }
 
 // NewStatusNoteTool builds the status_note Tool bound to sink. sink must be
-// non-nil; it is invoked with an [agent.ToolActivity]{Tool="status_note"} each time the
+// non-nil; it is invoked with a [progress.ToolActivity]{Tool="status_note"} each time the
 // agent calls the tool. The returned Tool satisfies [agent.Tool].
-func NewStatusNoteTool(sink func(act agent.ToolActivity)) agent.Tool {
+func NewStatusNoteTool(sink func(act progress.ToolActivity)) agent.Tool {
 	return statusNoteTool{sink: sink}
 }
 
@@ -65,7 +66,7 @@ func (s statusNoteTool) Run(_ context.Context, args json.RawMessage) (string, er
 		note = string(runes[:119]) + "…"
 	}
 
-	s.sink(agent.ToolActivity{
+	s.sink(progress.ToolActivity{
 		Phase:  "done",
 		Tool:   "status_note",
 		Symbol: note,

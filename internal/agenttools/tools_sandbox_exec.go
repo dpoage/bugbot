@@ -143,9 +143,8 @@ func (t *SandboxExecTool) Run(ctx context.Context, raw json.RawMessage) (string,
 	res, err := t.sb.Exec(ctx, spec)
 	if err != nil {
 		return "", &agent.ToolHealthError{
-			Severity: agent.SeverityHigh,
-			Reason:   "sandbox runtime unavailable",
-			Err:      fmt.Errorf("sandbox execution failed: %w", err),
+			Reason: "sandbox runtime unavailable",
+			Err:    fmt.Errorf("sandbox execution failed: %w", err),
 		}
 	}
 

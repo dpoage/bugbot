@@ -238,7 +238,7 @@ func TestSweep_E2E_OneVerifiedFinding(t *testing.T) {
 // leaked roster entry once Sweep returns.
 //
 // Pre-fix (B1): the funnel minted a FRESH progress.AgentScope at each of
-// several call sites within one logical run (activitySinkFor / maybeStatus-
+// several call sites within one logical run (activityHooksFor / maybeStatus-
 // NoteTool / emitAgentFinished / emitFinderAgentFinished each built their own
 // scope), so a finder unit's KindAgentStarted, its KindToolCall activity, and
 // its KindAgentFinished disagreed on AgentID — the accumulator's delete on
