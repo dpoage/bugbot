@@ -5,13 +5,6 @@ import (
 	"strings"
 )
 
-// toolError prefixes a tool failure so the model recognizes it as a recoverable
-// error rather than a normal result. The harness uses this for every error a
-// Tool returns.
-func toolError(err error) string {
-	return "ERROR: " + err.Error()
-}
-
 // requireField returns an error if val (trimmed) is empty. name is the
 // human-readable field name that appears in the error message.
 func requireField(name, val string) error {

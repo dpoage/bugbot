@@ -47,12 +47,6 @@ func (f *fakeClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.R
 	return step.resp, step.err
 }
 
-func (f *fakeClient) callCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.idx
-}
-
 // --- response builders ----------------------------------------------------
 
 // textResp builds an end-turn text response with the given usage.
