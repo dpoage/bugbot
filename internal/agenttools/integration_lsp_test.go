@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dpoage/llmkit/agent"
 )
 
 // requireServer skips the test unless the named language server binary is
@@ -70,7 +72,7 @@ func lineOf(t *testing.T, content, needle string) int {
 	return 0
 }
 
-func runNav(t *testing.T, tool Tool, file string, line int, symbol string) string {
+func runNav(t *testing.T, tool agent.Tool, file string, line int, symbol string) string {
 	t.Helper()
 	raw, err := json.Marshal(codeNavArgs{File: file, Line: line, Symbol: symbol})
 	if err != nil {
