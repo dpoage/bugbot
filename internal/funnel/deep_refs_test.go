@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/treesitter"
@@ -16,14 +16,14 @@ type fakeRefNav struct {
 	// outlines maps repo-relative file → outline entries returned.
 	outlines map[string][]treesitter.OutlineEntry
 	// refs maps symbol name → reference locations returned.
-	refs map[string][]agent.RefLocation
+	refs map[string][]agenttools.RefLocation
 }
 
 func (n *fakeRefNav) Outline(file string) ([]treesitter.OutlineEntry, error) {
 	return n.outlines[file], nil
 }
 
-func (n *fakeRefNav) References(_ context.Context, _ string, _ int, sym string) ([]agent.RefLocation, error) {
+func (n *fakeRefNav) References(_ context.Context, _ string, _ int, sym string) ([]agenttools.RefLocation, error) {
 	return n.refs[sym], nil
 }
 
@@ -111,7 +111,7 @@ func TestDeepRefClosure_ClosureAndInjection(t *testing.T) {
 				{Name: "unexported", Kind: treesitter.KindFunction, StartLine: 22, EndLine: 30},
 			},
 		},
-		refs: map[string][]agent.RefLocation{
+		refs: map[string][]agenttools.RefLocation{
 			"Handler": {
 				{File: refFile, Line: 42},
 				{File: seedFile, Line: 10}, // in-seed site: must be excluded
@@ -189,7 +189,7 @@ func TestDeepRefClosure_ExcludesUnexportedAndNonLoadBearing(t *testing.T) {
 				{Name: "Store", Kind: treesitter.KindType, StartLine: 11, EndLine: 30},
 			},
 		},
-		refs: map[string][]agent.RefLocation{
+		refs: map[string][]agenttools.RefLocation{
 			// Each would-be-filtered symbol gets its own entry so a reverted
 			// filter (passing unexported or non-load-bearing kinds) would return
 			// >1 ref and cause the len==1 assertion below to fail.
@@ -225,7 +225,7 @@ func TestDeepRefClosure_NonGoPublicSymbols(t *testing.T) {
 				{Name: "_normalize", Kind: treesitter.KindFunction, StartLine: 12, EndLine: 20},
 			},
 		},
-		refs: map[string][]agent.RefLocation{
+		refs: map[string][]agenttools.RefLocation{
 			// Both get their own ref entry so a regression in either direction
 			// (private passing, or public filtered) changes the ref set.
 			"process_order": {{File: "pkg/api.py", Line: 3}},
@@ -256,7 +256,7 @@ func TestDeepRefClosure_Determinism(t *testing.T) {
 				{Name: "Beta", Kind: treesitter.KindType, StartLine: 6, EndLine: 9},
 			},
 		},
-		refs: map[string][]agent.RefLocation{
+		refs: map[string][]agenttools.RefLocation{
 			"Alpha": {{File: "b/b.go", Line: 3}, {File: "a/a.go", Line: 7}},
 			"Beta":  {{File: "a/a.go", Line: 2}},
 			"Zeta":  {{File: "c/c.go", Line: 1}},
@@ -449,7 +449,7 @@ func TestDeepRefClosure_CppPrivateMemberExcluded(t *testing.T) {
 				},
 			},
 		},
-		refs: map[string][]agent.RefLocation{
+		refs: map[string][]agenttools.RefLocation{
 			"render":        {{File: refFile, Line: 20}},
 			"computeLayout": {{File: refFile, Line: 30}}, // must NOT appear in closure
 		},
@@ -505,7 +505,7 @@ func TestDeepRefClosure_GoRegressionUnchanged(t *testing.T) {
 				},
 			},
 		},
-		refs: map[string][]agent.RefLocation{
+		refs: map[string][]agenttools.RefLocation{
 			"Store":          {{File: refFile, Line: 10}},
 			"internalHelper": {{File: refFile, Line: 15}}, // must NOT appear
 		},

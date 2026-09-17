@@ -45,15 +45,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // lastSeenSentinel is the file_state path under which the daemon persists the
@@ -81,7 +81,7 @@ type Deps struct {
 	// ReproClient is the reproducer-role LLM client. It may be nil; reproduction
 	// is only attempted when it is non-nil, Cfg.EnableRepro is set, and a sandbox
 	// runtime is available (the CLI wires Reproducer in that case).
-	ReproClient llm.Client
+	ReproClient llmkit.Client
 	// ReproTagger, when non-nil, is retagged with each cycle's scan-run id
 	// before reproduction promotion so the reproducer client's spend ledger
 	// attributes usage to the right run. The CLI wires the reproducer's
@@ -234,7 +234,7 @@ type Daemon struct {
 	// New and reused across all cycles. It is injected into each cycle's funnel
 	// via fopts.CodeNav so language-server indexes stay warm between cycles.
 	// Closed exactly once on daemon exit (in Run before it returns).
-	sharedNav *agent.CodeNav
+	sharedNav *agenttools.CodeNav
 
 	poller             *ingest.Poller
 	seedAnalyzers      func(ctx context.Context)
@@ -306,11 +306,11 @@ func New(deps Deps, cfg DaemonConfig) (*Daemon, error) {
 		log = slog.Default()
 	}
 
-	// Build the daemon-lifetime CodeNav (LSP manager). agent.NewCodeNav creates
+	// Build the daemon-lifetime CodeNav (LSP manager). agenttools.NewCodeNav creates
 	// the manager lazily — no language server is spawned until first use — so
 	// this is cheap at construction time. The shared nav is injected into each
 	// cycle's funnel via fopts.CodeNav; Run closes it once on daemon exit.
-	sharedNav, err := agent.NewCodeNav(deps.Repo.Root())
+	sharedNav, err := agenttools.NewCodeNav(deps.Repo.Root())
 	if err != nil {
 		return nil, fmt.Errorf("daemon: init codenav: %w", err)
 	}

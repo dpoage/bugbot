@@ -12,7 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // pane identifies one of the three simultaneous panes in the compositor.

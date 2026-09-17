@@ -4,10 +4,10 @@ import (
 	"context"
 	"sync"
 
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
 )
 
-// scriptedClient is a sequential fake llm.Client for repro tests. Each call to
+// scriptedClient is a sequential fake llmkit.Client for repro tests. Each call to
 // Complete returns the next queued plan body (as the assistant's final text,
 // with no tool calls), which is exactly what RunJSON consumes: one completion,
 // no tool calls, parse FinalText. Every request is recorded so tests can assert
@@ -26,22 +26,22 @@ type scriptedClient struct {
 	// need to verify the agent-layer gate for native schema-constrained
 	// output set this field directly before passing the client to the
 	// reproducer/patch-prover. The recording of requests is unchanged.
-	caps llm.Capabilities
-	// requests records every llm.Request Complete sees, in arrival order.
+	caps llmkit.Capabilities
+	// requests records every llmkit.Request Complete sees, in arrival order.
 	// Tests inspect it via allRequests to assert that revision feedback or
 	// wire-level fields (ResponseSchema, Tools) reached the model.
-	requests []llm.Request
+	requests []llmkit.Request
 }
 
 func newScriptedClient(bodies ...string) *scriptedClient {
 	return &scriptedClient{bodies: bodies}
 }
 
-func (c *scriptedClient) Capabilities() llm.Capabilities { return c.caps }
+func (c *scriptedClient) Capabilities() llmkit.Capabilities { return c.caps }
 
-func (c *scriptedClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *scriptedClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -52,18 +52,18 @@ func (c *scriptedClient) Complete(ctx context.Context, req llm.Request) (llm.Res
 		body = c.bodies[c.idx]
 	}
 	c.idx++
-	return llm.Response{
+	return llmkit.Response{
 		Text:       body,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: 10, OutputTokens: 5},
 	}, nil
 }
 
 // allRequests returns a copy of the recorded requests.
-func (c *scriptedClient) allRequests() []llm.Request {
+func (c *scriptedClient) allRequests() []llmkit.Request {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]llm.Request, len(c.requests))
+	out := make([]llmkit.Request, len(c.requests))
 	copy(out, c.requests)
 	return out
 }
@@ -81,43 +81,43 @@ func (c *scriptedClient) taskText(n int) string {
 	}
 	text := ""
 	for _, m := range reqs[n].Messages {
-		if m.Role == llm.RoleUser {
+		if m.Role == llmkit.RoleUser {
 			text = m.Content
 		}
 	}
 	return text
 }
 
-var _ llm.Client = (*scriptedClient)(nil)
+var _ llmkit.Client = (*scriptedClient)(nil)
 
 // toolScriptStep is one programmed turn of a toolScriptedClient: either a
 // tool-use response (built via toolCallStep) or a plain end-turn text
 // response (built via textStep).
 type toolScriptStep struct {
-	resp llm.Response
+	resp llmkit.Response
 }
 
 // toolCallStep builds a tool-use step requesting a single call to name with
 // the given raw JSON args string.
 func toolCallStep(id, name, args string) toolScriptStep {
-	return toolScriptStep{resp: llm.Response{
-		StopReason: llm.StopToolUse,
-		ToolCalls:  []llm.ToolCall{{ID: id, Name: name, Arguments: []byte(args)}},
-		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5},
+	return toolScriptStep{resp: llmkit.Response{
+		StopReason: llmkit.StopToolUse,
+		ToolCalls:  []llmkit.ToolCall{{ID: id, Name: name, Arguments: []byte(args)}},
+		Usage:      llmkit.Usage{InputTokens: 10, OutputTokens: 5},
 	}}
 }
 
 // textStep builds an end-turn text response, e.g. the final JSON plan a
 // RunJSON caller parses once the model stops requesting tools.
 func textStep(text string) toolScriptStep {
-	return toolScriptStep{resp: llm.Response{
+	return toolScriptStep{resp: llmkit.Response{
 		Text:       text,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: 10, OutputTokens: 5},
 	}}
 }
 
-// toolScriptedClient is a sequential fake llm.Client that can request tool
+// toolScriptedClient is a sequential fake llmkit.Client that can request tool
 // calls, unlike scriptedClient (which only ever returns final text). It
 // exists to exercise the reproducer's tool loop (write_repro_file/workspace)
 // end-to-end: each
@@ -128,28 +128,28 @@ type toolScriptedClient struct {
 	mu       sync.Mutex
 	steps    []toolScriptStep
 	idx      int
-	requests []llm.Request
+	requests []llmkit.Request
 }
 
 func newToolScriptedClient(steps ...toolScriptStep) *toolScriptedClient {
 	return &toolScriptedClient{steps: steps}
 }
 
-func (c *toolScriptedClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *toolScriptedClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *toolScriptedClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *toolScriptedClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.requests = append(c.requests, req)
 	if c.idx >= len(c.steps) {
-		return llm.Response{Text: "(unscripted)", StopReason: llm.StopEndTurn}, nil
+		return llmkit.Response{Text: "(unscripted)", StopReason: llmkit.StopEndTurn}, nil
 	}
 	step := c.steps[c.idx]
 	c.idx++
 	return step.resp, nil
 }
 
-var _ llm.Client = (*toolScriptedClient)(nil)
+var _ llmkit.Client = (*toolScriptedClient)(nil)

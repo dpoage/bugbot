@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
@@ -36,11 +36,11 @@ func Caller() error {
 // bounded-query assertion) and returns a canned answer per (file, symbol).
 type stubRefNav struct {
 	calls   int
-	answers map[string][]agent.RefLocation
+	answers map[string][]agenttools.RefLocation
 	err     error
 }
 
-func (s *stubRefNav) References(_ context.Context, file string, _ int, symbol string) ([]agent.RefLocation, error) {
+func (s *stubRefNav) References(_ context.Context, file string, _ int, symbol string) ([]agenttools.RefLocation, error) {
 	s.calls++
 	if s.err != nil {
 		return nil, s.err
@@ -109,7 +109,7 @@ func TestTriageState_CodeNavHopFold_CallerCalleeSameFinding(t *testing.T) {
 	root, snap := newHopFixture(t)
 
 	ts, _ := newTriageState(snap)
-	nav := &stubRefNav{answers: map[string][]agent.RefLocation{
+	nav := &stubRefNav{answers: map[string][]agenttools.RefLocation{
 		// References to Callee (queried when the callee-site candidate is
 		// evaluated) include the call site inside Caller — one hop away.
 		"callee.go\x00Callee": {{File: "caller.go", Line: 4}},
@@ -186,7 +186,7 @@ func TestTriageState_CodeNavHopFold_DifferentKindNotMerged(t *testing.T) {
 	root, snap := newHopFixture(t)
 
 	ts, _ := newTriageState(snap)
-	nav := &stubRefNav{answers: map[string][]agent.RefLocation{
+	nav := &stubRefNav{answers: map[string][]agenttools.RefLocation{
 		"callee.go\x00Callee": {{File: "caller.go", Line: 4}},
 	}}
 	ts.nav = nav
@@ -260,7 +260,7 @@ func TestTriageState_CodeNavHopFold_Bounded(t *testing.T) {
 	snap := &ingest.Snapshot{Root: root, Files: []ingest.File{{Path: "callee.go"}, {Path: "caller.go"}}}
 
 	ts, _ := newTriageState(snap)
-	nav := &stubRefNav{answers: map[string][]agent.RefLocation{
+	nav := &stubRefNav{answers: map[string][]agenttools.RefLocation{
 		"callee.go\x00Callee": {{File: "caller.go", Line: 4}},
 	}}
 	ts.nav = nav
@@ -407,7 +407,7 @@ func TestTriageState_CodeNavHopFold_ReverifyNeverNominates(t *testing.T) {
 	root, snap := newHopFixture(t)
 
 	ts, _ := newTriageState(snap)
-	nav := &stubRefNav{answers: map[string][]agent.RefLocation{
+	nav := &stubRefNav{answers: map[string][]agenttools.RefLocation{
 		"callee.go\x00Callee": {{File: "caller.go", Line: 4}},
 	}}
 	ts.nav = nav
@@ -505,7 +505,7 @@ func TestTriageState_CodeNavHopFold_DurablePersistedOpenFinding(t *testing.T) {
 	_, snap := newHopFixture(t)
 	snap.Root = root
 	ts, _ := newTriageState(snap)
-	nav := &stubRefNav{answers: map[string][]agent.RefLocation{
+	nav := &stubRefNav{answers: map[string][]agenttools.RefLocation{
 		// The callee candidate's OWN symbol ("Callee") is queried; its
 		// references include the persisted finding's call site.
 		"callee.go\x00Callee": {{File: "caller.go", Line: 4}},
@@ -562,7 +562,7 @@ func TestTriageState_CodeNavHopFold_ExcludedKindsNeverNominate(t *testing.T) {
 	root, snap := newHopFixture(t)
 
 	ts, _ := newTriageState(snap)
-	nav := &stubRefNav{answers: map[string][]agent.RefLocation{
+	nav := &stubRefNav{answers: map[string][]agenttools.RefLocation{
 		"callee.go\x00Callee": {{File: "caller.go", Line: 4}},
 	}}
 	ts.nav = nav
@@ -615,7 +615,7 @@ func TestTriageState_CodeNavHopFold_EmptyKindNeverNominates(t *testing.T) {
 	root, snap := newHopFixture(t)
 
 	ts, _ := newTriageState(snap)
-	nav := &stubRefNav{answers: map[string][]agent.RefLocation{
+	nav := &stubRefNav{answers: map[string][]agenttools.RefLocation{
 		"callee.go\x00Callee": {{File: "caller.go", Line: 4}},
 	}}
 	ts.nav = nav

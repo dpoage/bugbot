@@ -8,11 +8,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
 
-	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // ── Styles ────────────────────────────────────────────────────────────────────
@@ -469,7 +469,7 @@ type transcriptStats struct {
 	InputTokens  int64
 	OutputTokens int64
 	// CacheReadTokens/CacheCreationTokens are the informational cache subsets
-	// of InputTokens (see llm.Usage doc comment); zero when no provider
+	// of InputTokens (see llmkit.Usage doc comment); zero when no provider
 	// reported cache activity.
 	CacheReadTokens     int64
 	CacheCreationTokens int64
@@ -477,9 +477,9 @@ type transcriptStats struct {
 	ToolErrors          int // EventToolResult entries with IsError set
 	WallTime            time.Duration
 	// AbnormalStopReasons lists distinct StopReasons other than the two
-	// expected mid/end-of-turn values (llm.StopToolUse, llm.StopEndTurn), in
+	// expected mid/end-of-turn values (llmkit.StopToolUse, llmkit.StopEndTurn), in
 	// first-seen order. Empty when every assistant turn stopped normally.
-	AbnormalStopReasons []llm.StopReason
+	AbnormalStopReasons []llmkit.StopReason
 }
 
 // computeTranscriptStats walks a transcript once and tallies usage, timing,
@@ -492,7 +492,7 @@ func computeTranscriptStats(t *agent.Transcript) transcriptStats {
 		return s
 	}
 
-	seenAbnormal := make(map[llm.StopReason]bool)
+	seenAbnormal := make(map[llmkit.StopReason]bool)
 	var first, last time.Time
 	for _, ev := range t.Events {
 		if ev.Step > s.Steps {
@@ -515,7 +515,7 @@ func computeTranscriptStats(t *agent.Transcript) transcriptStats {
 				s.CacheReadTokens += ev.Usage.CacheReadInputTokens
 				s.CacheCreationTokens += ev.Usage.CacheCreationInputTokens
 			}
-			if ev.StopReason != "" && ev.StopReason != llm.StopToolUse && ev.StopReason != llm.StopEndTurn {
+			if ev.StopReason != "" && ev.StopReason != llmkit.StopToolUse && ev.StopReason != llmkit.StopEndTurn {
 				if !seenAbnormal[ev.StopReason] {
 					seenAbnormal[ev.StopReason] = true
 					s.AbnormalStopReasons = append(s.AbnormalStopReasons, ev.StopReason)

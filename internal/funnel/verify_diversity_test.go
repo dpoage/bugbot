@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
-	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/progress"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // --- seat assignment tests ---------------------------------------------------
@@ -396,7 +396,7 @@ func makeCallCountVerifier(refutedFirstN int, arbiterBody string) *scriptedClien
 	sc := newScriptedClient()
 	sc.onTaskContains("PANEL VERDICTS", arbiterBody)
 	callIdx := 0
-	sc.on(func(_ llm.Request) bool {
+	sc.on(func(_ llmkit.Request) bool {
 		idx := callIdx
 		callIdx++
 		return idx < refutedFirstN
@@ -573,14 +573,14 @@ type systemCaptureClient struct {
 	response string
 }
 
-func (c *systemCaptureClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *systemCaptureClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *systemCaptureClient) Complete(_ context.Context, req llm.Request) (llm.Response, error) {
+func (c *systemCaptureClient) Complete(_ context.Context, req llmkit.Request) (llmkit.Response, error) {
 	c.captured = append(c.captured, req.System)
-	return llm.Response{
+	return llmkit.Response{
 		Text:       c.response,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: 10, OutputTokens: 5},
 	}, nil
 }
 
@@ -602,7 +602,7 @@ func TestRunRefuters_N1_NoSeatClause(t *testing.T) {
 		Lens: "nil-safety/error-handling", File: "bug.go", Line: 10,
 		Title: "test", Description: "test", Severity: "high", Evidence: "test",
 	}
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,7 +642,7 @@ func TestRunRefuters_N3_ThreeDistinctPrompts(t *testing.T) {
 		Lens: "nil-safety/error-handling", File: "bug.go", Line: 10,
 		Title: "test", Description: "test", Severity: "high", Evidence: "test",
 	}
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatal(err)
 	}

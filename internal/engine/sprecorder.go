@@ -4,11 +4,11 @@ import (
 	"context"
 	"sync"
 
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
-// ledgerRecorder is an llm.Recorder that writes every completion's usage to
+// ledgerRecorder is an llmkit.Recorder that writes every completion's usage to
 // the store's spend ledger. It exists for the repro stage (reproducer +
 // patch-prover agents), whose client lives OUTSIDE the funnel and therefore
 // misses the funnel's per-run spendRecorder — before this, repro spend never
@@ -61,10 +61,10 @@ func (r *ledgerRecorder) SetScanRun(id string) {
 	r.mu.Unlock()
 }
 
-// Record implements llm.Recorder. Ledger failures are swallowed: spend
+// Record implements llmkit.Recorder. Ledger failures are swallowed: spend
 // recording must never abort a repro run; the totals are best-effort
 // accounting, not control flow.
-func (r *ledgerRecorder) Record(ev llm.UsageEvent) {
+func (r *ledgerRecorder) Record(ev llmkit.UsageEvent) {
 	r.mu.Lock()
 	id := r.scanRunID
 	r.in += ev.Usage.InputTokens
@@ -88,4 +88,4 @@ func (r *ledgerRecorder) Record(ev llm.UsageEvent) {
 	})
 }
 
-var _ llm.Recorder = (*ledgerRecorder)(nil)
+var _ llmkit.Recorder = (*ledgerRecorder)(nil)

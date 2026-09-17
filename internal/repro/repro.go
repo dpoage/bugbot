@@ -22,7 +22,7 @@
 // list_dir, grep) rooted at the target repo, so the reproducer can investigate
 // the finding's file/line/reasoning before proposing a repro plan. Execution
 // goes through the [sandbox.Sandbox] interface, so unit tests use
-// sandbox.NewMock and a scripted llm.Client with no real container runtime.
+// sandbox.NewMock and a scripted llmkit.Client with no real container runtime.
 package repro
 
 import (
@@ -37,13 +37,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/sandbox"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // Defaults for Options. Reproduction is deliberately conservative: each
@@ -257,7 +258,7 @@ func (o Options) resolve() Options {
 // for concurrent use (the sandbox and store are concurrency-safe, and each
 // Attempt builds its own agent.Runner).
 type Reproducer struct {
-	client  llm.Client
+	client  llmkit.Client
 	sb      sandbox.Sandbox
 	repoDir string
 	opts    Options
@@ -280,7 +281,7 @@ type Reproducer struct {
 	// find_references, find_implementations, read_symbol, find_usages, outline)
 	// rooted at repoDir. Constructed eagerly in New; no language-server process
 	// is started until the first query. Closed by Close.
-	nav *agent.CodeNav
+	nav *agenttools.CodeNav
 	// pkgSummary returns the cached cartographer summary for a package directory,
 	// or ok=false on a miss. Set from Options.PackageSummary; nil disables the
 	// task-prompt summary push and the get_package_context tool.
@@ -291,7 +292,7 @@ type Reproducer struct {
 // the sandbox used to execute repro plans, and repoDir is the host path to the
 // target repository the agent investigates and the sandbox runs against. All
 // three are required.
-func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*Reproducer, error) {
+func New(client llmkit.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*Reproducer, error) {
 	if client == nil {
 		return nil, errors.New("repro: nil llm client")
 	}
@@ -330,7 +331,7 @@ func New(client llm.Client, sb sandbox.Sandbox, repoDir string, opts Options) (*
 	if len(resolved.SetupCmds) > 0 {
 		deps.SetupCmds = append(resolved.SetupCmds, deps.SetupCmds...)
 	}
-	nav, err := agent.NewCodeNav(repoDir)
+	nav, err := agenttools.NewCodeNav(repoDir)
 	if err != nil {
 		return nil, fmt.Errorf("repro: init code-nav: %w", err)
 	}
@@ -409,7 +410,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 	// settles the bracket with the accumulated token usage and final error.
 	scope := progress.NewAgentScope(r.opts.Progress, progress.RoleReproducer, finding.Title).Start()
 	start := time.Now()
-	var usage llm.Usage
+	var usage llmkit.Usage
 	defer func() {
 		scope.Finish(usage.InputTokens+usage.OutputTokens, time.Since(start), retErr)
 	}()
@@ -679,14 +680,14 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 	}
 	tools = append(tools, r.nav.Tools()...)
 	if r.opts.StatusNotes {
-		tools = append(tools, agent.NewStatusNoteTool(toolActivitySink(scope)))
+		tools = append(tools, agenttools.NewStatusNoteTool(toolActivitySink(scope)))
 	}
 	// get_package_context lets the agent pull any package's cartographer summary
 	// (e.g. the repo's test package) to learn the build/test layout cheaply,
 	// mirroring the finder. ctx is the per-attempt context — the runner lives only
 	// within this Attempt. Omitted when no summary provider is wired.
 	if r.pkgSummary != nil {
-		tools = append(tools, agent.NewPackageContextTool(func(pkg string) (string, bool, error) {
+		tools = append(tools, agenttools.NewPackageContextTool(func(pkg string) (string, bool, error) {
 			s, ok := r.pkgSummary(ctx, pkg)
 			return s, ok, nil
 		}))
@@ -699,7 +700,7 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 		// onExec is nil: per-turn run_tests activity already surfaces via the
 		// runner's activity sink; the reproducer keeps no aggregate sandbox-exec
 		// counters (unlike the funnel), so there is nothing to accumulate.
-		tools = append(tools, agent.NewRunTestsTool(r.sb, r.repoDir, baseCmd, r.opts.SandboxMaxExecs, r.deps.ROMounts, r.deps.Env, r.deps.SetupCmds, nil))
+		tools = append(tools, agenttools.NewRunTestsTool(r.sb, r.repoDir, baseCmd, r.opts.SandboxMaxExecs, r.deps.ROMounts, r.deps.Env, r.deps.SetupCmds, nil))
 	}
 	// The workspace tool set (write_repro_file, delete_repro_file, workspace)
 	// lets the agent build, run, and observe a candidate repro interactively
@@ -754,15 +755,15 @@ func (r *Reproducer) Close() error {
 
 // readOnlyTools builds the read-only investigation tool set rooted at dir.
 func readOnlyTools(dir string) ([]agent.Tool, error) {
-	read, err := agent.NewReadFile(dir)
+	read, err := agenttools.NewReadFile(dir)
 	if err != nil {
 		return nil, err
 	}
-	list, err := agent.NewListDir(dir)
+	list, err := agenttools.NewListDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	grep, err := agent.NewGrep(dir)
+	grep, err := agenttools.NewGrep(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -1184,7 +1185,7 @@ func hasCmdFlag(argv []string, name string) bool {
 }
 
 // toolActivitySink builds the func(agent.ToolActivity) callback for
-// agent.WithActivitySink and agent.NewStatusNoteTool, routing each structured
+// agent.WithActivitySink and agenttools.NewStatusNoteTool, routing each structured
 // ToolActivity through scope.EmitToolCall so it surfaces as a KindToolCall
 // progress event without coupling the repro package to agent's types at the
 // call sites.

@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ func newFakeLLM(finderBody, refuterBody string) *fakeLLM {
 	return &fakeLLM{finderBody: finderBody, refuterBody: refuterBody}
 }
 
-func (c *fakeLLM) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *fakeLLM) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
 func (c *fakeLLM) callCount() int {
 	c.mu.Lock()
@@ -114,9 +114,9 @@ func (c *fakeLLM) callCount() int {
 	return c.calls
 }
 
-func (c *fakeLLM) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *fakeLLM) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	c.mu.Lock()
 	c.calls++
@@ -133,10 +133,10 @@ func (c *fakeLLM) Complete(ctx context.Context, req llm.Request) (llm.Response, 
 	case strings.Contains(req.System, "refute") || strings.Contains(req.System, "WRONG"):
 		body = c.refuterBody
 	}
-	return llm.Response{
+	return llmkit.Response{
 		Text:       body,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: 100, OutputTokens: 50},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: 100, OutputTokens: 50},
 	}, nil
 }
 

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 func TestScriptedClient_RoutingPrecedence(t *testing.T) {
@@ -16,17 +16,17 @@ func TestScriptedClient_RoutingPrecedence(t *testing.T) {
 	c.OnTaskContains("title-x", `{"x":1}`)
 
 	// System-prompt route.
-	got, _ := c.Complete(ctx, llm.Request{System: "focus: lens-a"})
+	got, _ := c.Complete(ctx, llmkit.Request{System: "focus: lens-a"})
 	if got.Text != `{"a":1}` {
 		t.Errorf("system route: got %q", got.Text)
 	}
 	// Task route.
-	got, _ = c.Complete(ctx, llm.Request{Messages: []llm.Message{{Role: llm.RoleUser, Content: "refute title-x"}}})
+	got, _ = c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{{Role: llmkit.RoleUser, Content: "refute title-x"}}})
 	if got.Text != `{"x":1}` {
 		t.Errorf("task route: got %q", got.Text)
 	}
 	// No match => fallback => empty candidates.
-	got, _ = c.Complete(ctx, llm.Request{System: "nothing"})
+	got, _ = c.Complete(ctx, llmkit.Request{System: "nothing"})
 	if got.Text != EmptyCandidates {
 		t.Errorf("fallback: got %q", got.Text)
 	}
@@ -34,7 +34,7 @@ func TestScriptedClient_RoutingPrecedence(t *testing.T) {
 	c2 := NewScriptedClient()
 	c2.OnSystemContains("x", "FIRST")
 	c2.OnSystemContains("x", "SECOND")
-	got, _ = c2.Complete(ctx, llm.Request{System: "xx"})
+	got, _ = c2.Complete(ctx, llmkit.Request{System: "xx"})
 	if got.Text != "FIRST" {
 		t.Errorf("first-match-wins violated: %q", got.Text)
 	}
@@ -43,14 +43,14 @@ func TestScriptedClient_RoutingPrecedence(t *testing.T) {
 func TestScriptedClient_UsageAndCallCount(t *testing.T) {
 	ctx := context.Background()
 	c := NewScriptedClient()
-	got, _ := c.Complete(ctx, llm.Request{})
+	got, _ := c.Complete(ctx, llmkit.Request{})
 	if got.Usage.InputTokens == 0 || got.Usage.OutputTokens == 0 {
 		t.Errorf("usage must be nonzero for spend accounting: %+v", got.Usage)
 	}
-	if got.StopReason != llm.StopEndTurn {
+	if got.StopReason != llmkit.StopEndTurn {
 		t.Errorf("stop reason = %q, want end_turn", got.StopReason)
 	}
-	_, _ = c.Complete(ctx, llm.Request{})
+	_, _ = c.Complete(ctx, llmkit.Request{})
 	if c.CallCount() != 2 {
 		t.Errorf("call count = %d, want 2", c.CallCount())
 	}
@@ -60,7 +60,7 @@ func TestScriptedClient_ContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	c := NewScriptedClient()
-	if _, err := c.Complete(ctx, llm.Request{}); err == nil {
+	if _, err := c.Complete(ctx, llmkit.Request{}); err == nil {
 		t.Errorf("expected context error")
 	}
 }

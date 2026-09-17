@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // openMultiPkgFixture builds a committed git repo with one single-file package
@@ -107,20 +107,20 @@ type cancelAfterFirstClient struct {
 	cancel context.CancelFunc
 }
 
-func (c *cancelAfterFirstClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *cancelAfterFirstClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *cancelAfterFirstClient) Complete(ctx context.Context, _ llm.Request) (llm.Response, error) {
+func (c *cancelAfterFirstClient) Complete(ctx context.Context, _ llmkit.Request) (llmkit.Response, error) {
 	c.mu.Lock()
 	c.calls++
 	n := c.calls
 	c.mu.Unlock()
 	if n > 1 {
-		return llm.Response{}, context.Canceled
+		return llmkit.Response{}, context.Canceled
 	}
-	resp := llm.Response{
+	resp := llmkit.Response{
 		Text:       `{"summary":"summary for first package"}`,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: 10, OutputTokens: 5},
 	}
 	// Cancel AFTER preparing the response so the first summary is fully produced;
 	// the on-the-fly persist uses a cancel-detached context and must still save it.
@@ -236,9 +236,9 @@ type barrierClient struct {
 	reached chan struct{}
 }
 
-func (c *barrierClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *barrierClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *barrierClient) Complete(ctx context.Context, _ llm.Request) (llm.Response, error) {
+func (c *barrierClient) Complete(ctx context.Context, _ llmkit.Request) (llmkit.Response, error) {
 	c.mu.Lock()
 	c.active++
 	if c.active >= c.target {
@@ -248,12 +248,12 @@ func (c *barrierClient) Complete(ctx context.Context, _ llm.Request) (llm.Respon
 	select {
 	case <-c.reached:
 	case <-ctx.Done():
-		return llm.Response{}, ctx.Err()
+		return llmkit.Response{}, ctx.Err()
 	}
-	return llm.Response{
+	return llmkit.Response{
 		Text:       `{"summary":"concurrent summary"}`,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: 10, OutputTokens: 5},
 	}, nil
 }
 

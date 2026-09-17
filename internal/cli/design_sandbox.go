@@ -14,11 +14,12 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/config"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/provider"
 )
 
 // sandboxProposal is the structured output the agent tier produces via RunJSON.
@@ -301,7 +302,7 @@ func runAgentTier(
 	if err != nil {
 		return initial, fmt.Errorf("load config: %w (is bugbot.yaml configured?)", err)
 	}
-	client, err := config.ResolveRole(ctx, &cfg, "reproducer", llm.Options{})
+	client, err := config.ResolveRole(ctx, &cfg, "reproducer", provider.Options{})
 	if err != nil {
 		return initial, fmt.Errorf("resolve LLM role: %w", err)
 	}
@@ -368,15 +369,15 @@ func runAgentTier(
 // designSandboxReadOnlyTools builds the read-only tool set for the designer agent,
 // mirroring repro.readOnlyTools but rooted at the target repo.
 func designSandboxReadOnlyTools(repoDir string) ([]agent.Tool, error) {
-	read, err := agent.NewReadFile(repoDir)
+	read, err := agenttools.NewReadFile(repoDir)
 	if err != nil {
 		return nil, err
 	}
-	list, err := agent.NewListDir(repoDir)
+	list, err := agenttools.NewListDir(repoDir)
 	if err != nil {
 		return nil, err
 	}
-	grep, err := agent.NewGrep(repoDir)
+	grep, err := agenttools.NewGrep(repoDir)
 	if err != nil {
 		return nil, err
 	}

@@ -14,12 +14,13 @@ import (
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/provider"
 )
 
 // ReproDeps bundles a constructed reproducer with its LLM client and spend
@@ -29,7 +30,7 @@ import (
 // polling loop is out of scope for this refactor and keeps wiring its own
 // internal/daemon.Deps.
 type ReproDeps struct {
-	Client llm.Client
+	Client llmkit.Client
 	Repro  *repro.Reproducer
 	// Sb backs the reproducer; callers Close it alongside Repro.Close to release
 	// the pristine-workspace cache (internal/sandbox wsCache) when the
@@ -72,7 +73,7 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 			})
 		}
 	}
-	client, err := config.ResolveRole(ctx, cfg, "reproducer", llm.Options{Recorder: rec})
+	client, err := config.ResolveRole(ctx, cfg, "reproducer", provider.Options{Recorder: rec})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer client: %w", err)
 	}
@@ -93,7 +94,7 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 // see Dispatcher.reproOne). Factored out of BuildReproducer so the escape
 // hatch reuses the exact same Options wiring (host toolchains, capability
 // probing, dep strategy, ...) instead of a second, drift-prone copy.
-func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot string, sb sandbox.Sandbox, prog progress.EventSink, client llm.Client) (*repro.Reproducer, error) {
+func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot string, sb sandbox.Sandbox, prog progress.EventSink, client llmkit.Client) (*repro.Reproducer, error) {
 	// Probe image capabilities once; result is cached per image+mounts+env so
 	// repeated daemon restarts or re-calls to BuildReproducer are free.
 	// depProbeInputs threads dep-strategy mounts/env, local_mounts, AND host
@@ -198,7 +199,7 @@ func buildReproHookForScan(
 			})
 		}
 	}
-	reproClient, rErr := config.ResolveRole(ctx, &cfg, "reproducer", llm.Options{Recorder: rec})
+	reproClient, rErr := config.ResolveRole(ctx, &cfg, "reproducer", provider.Options{Recorder: rec})
 	if rErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer client: %w", rErr)
 	}
@@ -623,7 +624,7 @@ func (d *Dispatcher) reproOne(ctx context.Context, opts ReproOpts, cfg config.Co
 	}
 
 	rec := newLedgerRecorder(ctx, st)
-	client, err := config.ResolveRole(ctx, &cfg, "reproducer", llm.Options{Recorder: rec})
+	client, err := config.ResolveRole(ctx, &cfg, "reproducer", provider.Options{Recorder: rec})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer client: %w", err)
 	}

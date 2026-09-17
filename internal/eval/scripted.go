@@ -7,10 +7,10 @@ import (
 	"sync"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
 )
 
-// ScriptedClient is a concurrency-safe, deterministic llm.Client that routes
+// ScriptedClient is a concurrency-safe, deterministic llmkit.Client that routes
 // each request to a canned response by matching against the request's system
 // prompt and user message. A single instance can serve every lens's finder
 // agent (or every refuter) with distinct output, which is exactly how the
@@ -36,7 +36,7 @@ type ScriptedClient struct {
 
 // route maps a request predicate to a JSON response body.
 type route struct {
-	match func(req llm.Request) bool
+	match func(req llmkit.Request) bool
 	body  string
 }
 
@@ -58,7 +58,7 @@ func (c *ScriptedClient) SetFallback(body string) *ScriptedClient {
 
 // On registers a route: when match returns true for a request, body is served.
 // Routes are evaluated in registration order; the first match wins.
-func (c *ScriptedClient) On(match func(req llm.Request) bool, body string) *ScriptedClient {
+func (c *ScriptedClient) On(match func(req llmkit.Request) bool, body string) *ScriptedClient {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.routes = append(c.routes, route{match: match, body: body})
@@ -70,7 +70,7 @@ func (c *ScriptedClient) On(match func(req llm.Request) bool, body string) *Scri
 // system prompt, so OnSystemContains("nil-safety/error-handling", ...) hits
 // exactly that lens's finder.
 func (c *ScriptedClient) OnSystemContains(sub, body string) *ScriptedClient {
-	return c.On(func(req llm.Request) bool {
+	return c.On(func(req llmkit.Request) bool {
 		return strings.Contains(req.System, sub)
 	}, body)
 }
@@ -80,9 +80,9 @@ func (c *ScriptedClient) OnSystemContains(sub, body string) *ScriptedClient {
 // in the verifier task, so OnTaskContains("nil deref of cfg", ...) hits the
 // refuters challenging that specific candidate.
 func (c *ScriptedClient) OnTaskContains(sub, body string) *ScriptedClient {
-	return c.On(func(req llm.Request) bool {
+	return c.On(func(req llmkit.Request) bool {
 		for _, m := range req.Messages {
-			if m.Role == llm.RoleUser && strings.Contains(m.Content, sub) {
+			if m.Role == llmkit.RoleUser && strings.Contains(m.Content, sub) {
 				return true
 			}
 		}
@@ -92,12 +92,12 @@ func (c *ScriptedClient) OnTaskContains(sub, body string) *ScriptedClient {
 
 // Capabilities reports an empty capability profile; the funnel's finder/verifier
 // agents do not depend on any capability flag.
-func (c *ScriptedClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *ScriptedClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
 // Complete serves the routed (or fallback) response for req.
-func (c *ScriptedClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *ScriptedClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -113,10 +113,10 @@ func (c *ScriptedClient) Complete(ctx context.Context, req llm.Request) (llm.Res
 	if body == "" {
 		body = EmptyCandidates
 	}
-	return llm.Response{
+	return llmkit.Response{
 		Text:       body,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: c.inUsage, OutputTokens: c.outUsage},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: c.inUsage, OutputTokens: c.outUsage},
 	}, nil
 }
 

@@ -10,11 +10,11 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
-// fakeArbiterClient is a minimal offline llm.Client for Dispatcher.Reconcile
+// fakeArbiterClient is a minimal offline llmkit.Client for Dispatcher.Reconcile
 // tests: it always answers with the same canned dedup-arbiter verdict JSON
 // regardless of the request, since ReconcileDedup's only LLM traffic here is
 // dedup-arbiter calls through the Verifier role (funnel/reconcile.go's
@@ -22,24 +22,24 @@ import (
 // arbitrates at most one distinct pair at a time.
 type fakeArbiterClient struct{ body string }
 
-func (c *fakeArbiterClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *fakeArbiterClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *fakeArbiterClient) Complete(_ context.Context, _ llm.Request) (llm.Response, error) {
-	return llm.Response{
+func (c *fakeArbiterClient) Complete(_ context.Context, _ llmkit.Request) (llmkit.Response, error) {
+	return llmkit.Response{
 		Text:       c.body,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: 100, OutputTokens: 50},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: 100, OutputTokens: 50},
 	}, nil
 }
 
-// panicOnCompleteClient satisfies llm.Client for roles that must never be
+// panicOnCompleteClient satisfies llmkit.Client for roles that must never be
 // invoked in a given test (e.g. the Finder role, which funnel.New requires
 // non-nil but ReconcileDedup never calls since it runs no finder agents) --
 // a panic proves that invariant instead of silently masking a regression.
 type panicOnCompleteClient struct{}
 
-func (panicOnCompleteClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
-func (panicOnCompleteClient) Complete(context.Context, llm.Request) (llm.Response, error) {
+func (panicOnCompleteClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
+func (panicOnCompleteClient) Complete(context.Context, llmkit.Request) (llmkit.Response, error) {
 	panic("engine: this client role must not be invoked by Reconcile in this test")
 }
 

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agent"
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // ── computeTranscriptStats ───────────────────────────────────────────────────
@@ -43,14 +43,14 @@ func TestComputeTranscriptStats_TokensCacheAndTools(t *testing.T) {
 	base := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
 	tr := &agent.Transcript{Events: []agent.Event{
 		{Kind: agent.EventAssistant, Step: 1, Time: base,
-			ToolCalls:  []llm.ToolCall{{Name: "grep"}, {Name: "read"}},
-			StopReason: llm.StopToolUse,
-			Usage:      &llm.Usage{InputTokens: 100, OutputTokens: 20, CacheReadInputTokens: 40, CacheCreationInputTokens: 5}},
+			ToolCalls:  []llmkit.ToolCall{{Name: "grep"}, {Name: "read"}},
+			StopReason: llmkit.StopToolUse,
+			Usage:      &llmkit.Usage{InputTokens: 100, OutputTokens: 20, CacheReadInputTokens: 40, CacheCreationInputTokens: 5}},
 		{Kind: agent.EventToolResult, Step: 1, Time: base.Add(2 * time.Second), ToolName: "grep", IsError: false},
 		{Kind: agent.EventToolResult, Step: 1, Time: base.Add(3 * time.Second), ToolName: "read", IsError: true},
 		{Kind: agent.EventAssistant, Step: 2, Time: base.Add(10 * time.Second),
-			StopReason: llm.StopEndTurn,
-			Usage:      &llm.Usage{InputTokens: 50, OutputTokens: 10}},
+			StopReason: llmkit.StopEndTurn,
+			Usage:      &llmkit.Usage{InputTokens: 50, OutputTokens: 10}},
 	}}
 	got := computeTranscriptStats(tr)
 	if got.Steps != 2 {
@@ -81,12 +81,12 @@ func TestComputeTranscriptStats_TokensCacheAndTools(t *testing.T) {
 
 func TestComputeTranscriptStats_AbnormalStopReason(t *testing.T) {
 	tr := &agent.Transcript{Events: []agent.Event{
-		{Kind: agent.EventAssistant, Step: 1, StopReason: llm.StopMaxTokens, Usage: &llm.Usage{InputTokens: 1}},
-		{Kind: agent.EventAssistant, Step: 2, StopReason: llm.StopError, Usage: &llm.Usage{InputTokens: 1}},
-		{Kind: agent.EventAssistant, Step: 3, StopReason: llm.StopMaxTokens, Usage: &llm.Usage{InputTokens: 1}},
+		{Kind: agent.EventAssistant, Step: 1, StopReason: llmkit.StopMaxTokens, Usage: &llmkit.Usage{InputTokens: 1}},
+		{Kind: agent.EventAssistant, Step: 2, StopReason: llmkit.StopError, Usage: &llmkit.Usage{InputTokens: 1}},
+		{Kind: agent.EventAssistant, Step: 3, StopReason: llmkit.StopMaxTokens, Usage: &llmkit.Usage{InputTokens: 1}},
 	}}
 	got := computeTranscriptStats(tr)
-	want := []llm.StopReason{llm.StopMaxTokens, llm.StopError}
+	want := []llmkit.StopReason{llmkit.StopMaxTokens, llmkit.StopError}
 	if len(got.AbnormalStopReasons) != len(want) {
 		t.Fatalf("AbnormalStopReasons = %v, want %v", got.AbnormalStopReasons, want)
 	}
@@ -102,8 +102,8 @@ func TestComputeTranscriptStats_AbnormalStopReason(t *testing.T) {
 func TestRenderTranscript_SummaryHeaderPresent(t *testing.T) {
 	tr := &agent.Transcript{Events: []agent.Event{
 		{Kind: agent.EventAssistant, Step: 1, Text: "doing work",
-			StopReason: llm.StopToolUse,
-			Usage:      &llm.Usage{InputTokens: 100, OutputTokens: 20}},
+			StopReason: llmkit.StopToolUse,
+			Usage:      &llmkit.Usage{InputTokens: 100, OutputTokens: 20}},
 		{Kind: agent.EventToolResult, Step: 1, ToolName: "grep", Result: "ok"},
 	}}
 	out := renderTranscript(tr)

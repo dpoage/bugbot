@@ -28,8 +28,8 @@ import (
 	"strings"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/util"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // dedupVerdict is the arbiter's typed same-defect judgment. Every caller
@@ -157,7 +157,7 @@ func dedupCodeExcerpt(root, file string, line, window int) string {
 // funnel LLM stages. On any infrastructure or parse failure it returns
 // dedupUnsure together with the error — never a silent merge — so a broken
 // arbiter can only cost an extra kept duplicate, never bury a real finding.
-func (f *Funnel) runDedupArbiter(ctx context.Context, client llm.Client, budget *budgetState, a, b dedupCandidateView, excerpt string) (dedupVerdict, int64, error) {
+func (f *Funnel) runDedupArbiter(ctx context.Context, client llmkit.Client, budget *budgetState, a, b dedupCandidateView, excerpt string) (dedupVerdict, int64, error) {
 	runner := f.newAgentRunner(client, nil, dedupArbiterSystemPrompt, budget.verifyRunnerLimits(f.opts.Limits.VerifierLimits))
 	var out dedupArbiterResponse
 	outcome, err := runner.RunJSON(ctx, dedupArbiterTask(a, b, excerpt), dedupArbiterSchema, &out)
@@ -188,7 +188,7 @@ func (f *Funnel) runDedupArbiter(ctx context.Context, client llm.Client, budget 
 // run_pipeline.go.
 type dedupArbiterConfig struct {
 	f      *Funnel
-	client llm.Client
+	client llmkit.Client
 	budget *budgetState
 	// root is snap.Root, used to read the code excerpt from disk. Empty
 	// degrades dedupCodeExcerpt to an empty excerpt (the arbiter still judges

@@ -13,9 +13,9 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // run is the shared staged core. It opens a scan run, wires per-role spend
@@ -84,8 +84,8 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			})
 		}
 	}
-	finderClient := llm.WithRecorder(f.clients.Finder, rec, roleFinder, "", "")
-	verifierClient := llm.WithRecorder(f.clients.Verifier, rec, roleVerifier, "", "")
+	finderClient := llmkit.WithRecorder(f.clients.Finder, rec, roleFinder, "", "")
+	verifierClient := llmkit.WithRecorder(f.clients.Verifier, rec, roleVerifier, "", "")
 	// Cartographer client: configurable via the optional [roles.cartographer]
 	// mapping (falls back to the finder's model when unset; see config.roleModel).
 	// Tagged roleCartographer so its spend is a distinct ledger line yet still
@@ -94,7 +94,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	if cartographerBase == nil {
 		cartographerBase = f.clients.Finder
 	}
-	cartographerClient := llm.WithRecorder(cartographerBase, rec, roleCartographer, "", "")
+	cartographerClient := llmkit.WithRecorder(cartographerBase, rec, roleCartographer, "", "")
 	// Arbiter client: configurable via the optional [roles.arbiter] mapping
 	// (falls back to the verifier's client when unset — preserve today's
 	// behavior where the split-verdict arbiter reuses the verifier provider).
@@ -106,7 +106,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	if arbiterBase == nil {
 		arbiterBase = f.clients.Verifier
 	}
-	arbiterClient := llm.WithRecorder(arbiterBase, rec, roleArbiter, "", "")
+	arbiterClient := llmkit.WithRecorder(arbiterBase, rec, roleArbiter, "", "")
 
 	// Capability-driven scaling: a small-context model (e.g. 8k local LLM
 	// behind an openai-compatible endpoint) silently overflows with one-size

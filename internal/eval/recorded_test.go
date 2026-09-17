@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/funnel"
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // TestRecordedMode_EndToEnd proves the recorded-replay MECHANISM against the
@@ -65,8 +65,8 @@ func TestRecordedMode_EndToEnd(t *testing.T) {
 		FixtureSpec{Files: map[string]string{"greet.go": nilDerefSrc}},
 		[]SeededBug{{File: "greet.go", Line: 10, LineTolerance: 2, Kind: "nil-deref"}},
 		&RecordedCase{
-			Finder:   NewRoleTranscriptStore("finder", llm.Capabilities{}, finderSessions...),
-			Verifier: NewRoleTranscriptStore("verifier", llm.Capabilities{}, verifierSessions...),
+			Finder:   NewRoleTranscriptStore("finder", llmkit.Capabilities{}, finderSessions...),
+			Verifier: NewRoleTranscriptStore("verifier", llmkit.Capabilities{}, verifierSessions...),
 		},
 		funnel.Options{},
 		nil,

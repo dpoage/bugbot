@@ -4,7 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // TestToolGuidance_PrimaryBeforeFallback pins the tool-selection hierarchy that
@@ -100,7 +101,7 @@ func TestToolGuidance_PromptNamesMatchWiredTools(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 
-	base, err := f.readOnlyTools(agent.ReadCaps{})
+	base, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,10 +117,10 @@ func TestToolGuidance_PromptNamesMatchWiredTools(t *testing.T) {
 	// Finder = readOnlyTools + the per-unit tools hypothesize appends. Build the
 	// finder-only tools with the SAME production constructors hypothesize uses so
 	// their Def().Name is the real one, not a hand-typed string.
-	postLead := agent.NewPostLeadTool("nil-safety/error-handling", []string{"nil-safety/error-handling"},
+	postLead := agenttools.NewPostLeadTool("nil-safety/error-handling", []string{"nil-safety/error-handling"},
 		func(string, string, int, string, float64) error { return nil })
-	pkgCtx := agent.NewPackageContextTool(func(string) (string, bool, error) { return "", false, nil })
-	pkgGraph := agent.NewPackageGraphTool(func(string, string) ([]string, []string, error) { return nil, nil, nil })
+	pkgCtx := agenttools.NewPackageContextTool(func(string) (string, bool, error) { return "", false, nil })
+	pkgGraph := agenttools.NewPackageGraphTool(func(string, string) ([]string, []string, error) { return nil, nil, nil })
 
 	wiredFinder := defNames(base...)
 	for name := range defNames(postLead, pkgCtx, pkgGraph) {

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dpoage/bugbot/internal/agent"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // verified pairs a surviving candidate with the refuters' reasoning that backs
@@ -41,7 +41,7 @@ type verified struct {
 // seats.go) so the panel attacks the report from different angles. When n==1
 // (budget-degraded path, degradedRefuters) no seat clause is added — the single
 // generalist produces today's prompt byte-identical.
-func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []agent.Tool, persona string, c Candidate, n int, budget *budgetState, scope progress.AgentScope, extraOpts ...agent.Option) ([]refutation, []string, int64, int, bool, error) {
+func (f *Funnel) runRefuters(ctx context.Context, verifier llmkit.Client, tools []agent.Tool, persona string, c Candidate, n int, budget *budgetState, scope progress.AgentScope, extraOpts ...agent.Option) ([]refutation, []string, int64, int, bool, error) {
 	hasSandbox := hasSandboxExec(tools)
 	hasDepSource := f.hasGoDepSource
 
@@ -107,7 +107,7 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llm.Client, tools []a
 // post_lead is absent from candTools (same rationale as refuters: refuter
 // independence is the core false-positive killer; the arbiter must be equally
 // independent).
-func (f *Funnel) runArbiter(ctx context.Context, arbiter llm.Client, candTools []agent.Tool, persona string, c Candidate, verdicts []refutation, seatNames []string, budget *budgetState, scope progress.AgentScope, extraOpts ...agent.Option) (*refutation, int64, bool, error) {
+func (f *Funnel) runArbiter(ctx context.Context, arbiter llmkit.Client, candTools []agent.Tool, persona string, c Candidate, verdicts []refutation, seatNames []string, budget *budgetState, scope progress.AgentScope, extraOpts ...agent.Option) (*refutation, int64, bool, error) {
 	hasSandbox := hasSandboxExec(candTools)
 	hasDepSource := f.hasGoDepSource
 	runner := f.newAgentRunner(arbiter, candTools, arbiterSystemPrompt(persona, hasSandbox, hasDepSource), budget.arbiterRunnerLimits(f.opts.Limits.ArbiterLimits),

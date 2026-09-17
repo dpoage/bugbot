@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/funnel"
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // This file is the offline measurement harness for bugbot-3nf (finder token
@@ -43,9 +43,9 @@ type costResult struct {
 // previous snapshot's leading messages is a cache hit (billed at cacheWeight);
 // the remainder bills at full price. Token counts use the bytes/4 heuristic via
 // agent.EstimateHistoryTokens, so they agree with the live compaction trigger.
-func simulateCost(snaps [][]llm.Message, cacheWeight float64) costResult {
+func simulateCost(snaps [][]llmkit.Message, cacheWeight float64) costResult {
 	var raw, weighted float64
-	var prev []llm.Message
+	var prev []llmkit.Message
 	for _, msgs := range snaps {
 		reqTok := float64(agent.EstimateHistoryTokens(msgs))
 		raw += reqTok
@@ -65,7 +65,7 @@ func simulateCost(snaps [][]llm.Message, cacheWeight float64) costResult {
 // append-only history b extends a, so this is the cached prefix length; once
 // compaction mutates an earlier message the prefix breaks here exactly as the
 // provider's cache would invalidate.
-func commonPrefixLen(a, b []llm.Message) int {
+func commonPrefixLen(a, b []llmkit.Message) int {
 	n := len(a)
 	if len(b) < n {
 		n = len(b)
@@ -79,7 +79,7 @@ func commonPrefixLen(a, b []llm.Message) int {
 	return i
 }
 
-func messageEqual(x, y llm.Message) bool {
+func messageEqual(x, y llmkit.Message) bool {
 	if x.Role != y.Role || x.Content != y.Content || x.ToolCallID != y.ToolCallID || x.IsError != y.IsError {
 		return false
 	}
@@ -99,8 +99,8 @@ func messageEqual(x, y llm.Message) bool {
 // requestSnapshots extracts the per-turn request message snapshots from a finder
 // transcript, in order. Each EventRequest already stores the full conversation
 // sent that turn (transcript.go), which is exactly the append-only history.
-func requestSnapshots(tr *agent.Transcript) [][]llm.Message {
-	var snaps [][]llm.Message
+func requestSnapshots(tr *agent.Transcript) [][]llmkit.Message {
+	var snaps [][]llmkit.Message
 	for _, ev := range tr.Events {
 		if ev.Kind == agent.EventRequest {
 			snaps = append(snaps, ev.Messages)
@@ -132,15 +132,15 @@ func toolNameMap(tr *agent.Transcript) map[string]string {
 // (keyed by ToolCallID) into each subsequent snapshot before re-evaluating the
 // threshold — otherwise the simulation would "un-prune" a result the live loop
 // has already shed, badly overstating cost and misjudging the cache tradeoff.
-func applyCompaction(snaps [][]llm.Message, names map[string]string, budget int64) [][]llm.Message {
-	out := make([][]llm.Message, len(snaps))
+func applyCompaction(snaps [][]llmkit.Message, names map[string]string, budget int64) [][]llmkit.Message {
+	out := make([][]llmkit.Message, len(snaps))
 	threshold := budget
 	stubbed := map[string]string{} // ToolCallID -> stub content carried forward
 	for i, msgs := range snaps {
 		cur := cloneMsgs(msgs)
 		// Re-apply prior stubs so this snapshot reflects the carried-forward state.
 		for j := range cur {
-			if cur[j].Role == llm.RoleToolResult {
+			if cur[j].Role == llmkit.RoleToolResult {
 				if s, ok := stubbed[cur[j].ToolCallID]; ok {
 					cur[j].Content = s
 				}
@@ -150,7 +150,7 @@ func applyCompaction(snaps [][]llm.Message, names map[string]string, budget int6
 		// Record any NEW stubs produced this turn so later turns keep them.
 		for j := range compacted {
 			m := compacted[j]
-			if m.Role == llm.RoleToolResult && strings.HasPrefix(m.Content, "[") {
+			if m.Role == llmkit.RoleToolResult && strings.HasPrefix(m.Content, "[") {
 				stubbed[m.ToolCallID] = m.Content
 			}
 		}
@@ -279,17 +279,17 @@ func TestMeasureFinderTokenBurn(t *testing.T) {
 // buildRunaway constructs a finder history of `turns` turns where each turn reads
 // a file of about readTokens tokens, mirroring the dogfood shape. The first turn
 // is the bare task. It returns the per-turn append-only request snapshots.
-func buildRunaway(turns, readTokens int) [][]llm.Message {
+func buildRunaway(turns, readTokens int) [][]llmkit.Message {
 	blob := strings.Repeat("source line of the file under analysis\n", readTokens*4/39+1)
-	msgs := []llm.Message{{Role: llm.RoleUser, Content: strings.Repeat("investigate ", 200)}}
-	var snaps [][]llm.Message
+	msgs := []llmkit.Message{{Role: llmkit.RoleUser, Content: strings.Repeat("investigate ", 200)}}
+	var snaps [][]llmkit.Message
 	snaps = append(snaps, cloneMsgs(msgs))
 	for i := 0; i < turns-1; i++ {
 		id := fmt.Sprintf("call-%02d", i)
 		msgs = append(msgs,
-			llm.Message{Role: llm.RoleAssistant, Content: "I will read the next file to check it.",
-				ToolCalls: []llm.ToolCall{{ID: id, Name: "read_file", Arguments: []byte(`{"path":"pkg/file.go"}`)}}},
-			llm.Message{Role: llm.RoleToolResult, ToolCallID: id, Content: blob},
+			llmkit.Message{Role: llmkit.RoleAssistant, Content: "I will read the next file to check it.",
+				ToolCalls: []llmkit.ToolCall{{ID: id, Name: "read_file", Arguments: []byte(`{"path":"pkg/file.go"}`)}}},
+			llmkit.Message{Role: llmkit.RoleToolResult, ToolCallID: id, Content: blob},
 		)
 		snaps = append(snaps, cloneMsgs(msgs))
 	}
@@ -306,8 +306,8 @@ func runawayNames(reads int) map[string]string {
 	return names
 }
 
-func cloneMsgs(in []llm.Message) []llm.Message {
-	out := make([]llm.Message, len(in))
+func cloneMsgs(in []llmkit.Message) []llmkit.Message {
+	out := make([]llmkit.Message, len(in))
 	copy(out, in)
 	return out
 }

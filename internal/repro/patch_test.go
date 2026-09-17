@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // patchPlanBody serializes a PatchPlan to JSON as the agent would emit it.
@@ -414,14 +414,14 @@ func TestPatchProver_RevisionContinuesInvestigation(t *testing.T) {
 	round2 := reqs[2]
 	sawToolCall, sawToolResult := false, false
 	for _, m := range round2.Messages {
-		if m.Role == llm.RoleAssistant {
+		if m.Role == llmkit.RoleAssistant {
 			for _, tc := range m.ToolCalls {
 				if tc.Name == "read_file" {
 					sawToolCall = true
 				}
 			}
 		}
-		if m.Role == llm.RoleToolResult && m.ToolCallID == "c1" {
+		if m.Role == llmkit.RoleToolResult && m.ToolCallID == "c1" {
 			sawToolResult = true
 		}
 	}

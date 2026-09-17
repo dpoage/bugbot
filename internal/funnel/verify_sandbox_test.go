@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // --- Fake sandbox for funnel tests ----------------------------------------
@@ -54,34 +54,34 @@ func newToolCallClient(toolCallBody, verdictBody string) *toolCallClient {
 	}
 }
 
-func (c *toolCallClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *toolCallClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *toolCallClient) Complete(_ context.Context, req llm.Request) (llm.Response, error) {
+func (c *toolCallClient) Complete(_ context.Context, req llmkit.Request) (llmkit.Response, error) {
 	c.callCount.Add(1)
-	usage := llm.Usage{InputTokens: c.inUsage, OutputTokens: c.outUsage}
+	usage := llmkit.Usage{InputTokens: c.inUsage, OutputTokens: c.outUsage}
 
 	// On first call (no tool-result messages yet), emit a sandbox_exec tool call.
 	// On subsequent calls (the agent is feeding back the tool result), return the
 	// verdict JSON directly.
 	for _, m := range req.Messages {
-		if m.Role == llm.RoleToolResult {
+		if m.Role == llmkit.RoleToolResult {
 			// The agent is feeding back the sandbox result; return the verdict.
-			return llm.Response{
+			return llmkit.Response{
 				Text:       c.verdictBody,
-				StopReason: llm.StopEndTurn,
+				StopReason: llmkit.StopEndTurn,
 				Usage:      usage,
 			}, nil
 		}
 	}
 
 	// First call: emit a tool call with the configured body as Arguments.
-	return llm.Response{
-		ToolCalls: []llm.ToolCall{{
+	return llmkit.Response{
+		ToolCalls: []llmkit.ToolCall{{
 			ID:        "call-1",
 			Name:      "sandbox_exec",
 			Arguments: json.RawMessage(c.toolCallBody),
 		}},
-		StopReason: llm.StopToolUse,
+		StopReason: llmkit.StopToolUse,
 		Usage:      usage,
 	}, nil
 }
@@ -390,9 +390,9 @@ type toolCaptureClient struct {
 	toolNames [][]string
 }
 
-func (c *toolCaptureClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *toolCaptureClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *toolCaptureClient) Complete(_ context.Context, req llm.Request) (llm.Response, error) {
+func (c *toolCaptureClient) Complete(_ context.Context, req llmkit.Request) (llmkit.Response, error) {
 	names := make([]string, 0, len(req.Tools))
 	for _, td := range req.Tools {
 		names = append(names, td.Name)
@@ -400,7 +400,7 @@ func (c *toolCaptureClient) Complete(_ context.Context, req llm.Request) (llm.Re
 	c.mu.Lock()
 	c.toolNames = append(c.toolNames, names)
 	c.mu.Unlock()
-	return llm.Response{Text: notRefutedJSON, StopReason: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}}, nil
+	return llmkit.Response{Text: notRefutedJSON, StopReason: llmkit.StopEndTurn, Usage: llmkit.Usage{InputTokens: 10, OutputTokens: 5}}, nil
 }
 
 // TestVerifyFinding_NoSandboxTool pins the deliberate omission documented in

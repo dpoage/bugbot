@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // --- dox: abstention / quorum helpers ----------------------------------------
@@ -288,7 +288,7 @@ func makeAbstainVerifier(abstainFirstN int) *scriptedClient {
 	sc := newScriptedClient()
 	sc.onTaskContains("PANEL VERDICTS", notRefutedJSON)
 	callIdx := 0
-	sc.on(func(_ llm.Request) bool {
+	sc.on(func(_ llmkit.Request) bool {
 		i := callIdx
 		callIdx++
 		return i < abstainFirstN
@@ -449,7 +449,7 @@ func TestNN3_UnanimousSurvive_CorrectedDescription(t *testing.T) {
 	v := newScriptedClient()
 	// No arbiter needed (not split), but guard it anyway.
 	v.onTaskContains("PANEL VERDICTS", notRefutedJSON)
-	v.on(func(req llm.Request) bool {
+	v.on(func(req llmkit.Request) bool {
 		i := callIdx
 		callIdx++
 		return i == 0

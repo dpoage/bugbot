@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
+	llmkit "github.com/dpoage/llmkit"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -42,7 +42,7 @@ const cartographySystemPrompt = `Summarize this package in <=120 words covering 
 //
 // Lazy-mode transport breaker (bugbot-1r9): against an unreachable provider
 // every summarizePackage call exhausts the retry policy (~3.5s,
-// llm.APIError with StatusCode==0) and there are many packages, so the
+// llmkit.APIError with StatusCode==0) and there are many packages, so the
 // scan would grind through cartography burning the retry budget
 // package-by-package. The breaker mirrors the finder breaker (bugbot-2uz):
 // transportFailures counts transport-class generation failures observed
@@ -61,7 +61,7 @@ type cartography struct {
 	mu       sync.Mutex
 	sf       singleflight.Group
 	funnel   *Funnel
-	client   llm.Client
+	client   llmkit.Client
 	packages map[string][]string // pkgDir -> sorted member files (from packagesSpanned)
 	pkgFps   map[string]string   // pkgDir -> fingerprint
 	fps      map[string]string   // file -> content fingerprint
@@ -362,7 +362,7 @@ func (c *cartography) renderContext(files []string, summaries map[string]string)
 // The importers field stores pkgDir -> []importerPkgDir (who imports pkgDir).
 // The "imports" direction is derived by inversion (find all Y where pkg ∈
 // importers[Y]). Both returned slices are sorted and capped at
-// packageGraphMaxEntries (defined in internal/agent — callers must cap
+// packageGraphMaxEntries (defined in internal/agenttools — callers must cap
 // themselves; this method does NOT apply the cap so tests can inspect raw
 // counts; the funnel callback wraps this and the tool applies the cap via
 // writeList).
@@ -405,7 +405,7 @@ func (c *cartography) QueryGraph(pkg, direction string) (importerList, importLis
 // path). Returns a non-nil cartography with an empty summaries memo and a
 // pre-built importers graph when enabled — even when client/snap/targets are
 // nil/empty (same degenerate-but-non-nil contract as cartograph).
-func (f *Funnel) newCartographer(ctx context.Context, result *Result, client llm.Client, snap *ingest.Snapshot, targets []string, fps map[string]string, budget *budgetState) *cartography {
+func (f *Funnel) newCartographer(ctx context.Context, result *Result, client llmkit.Client, snap *ingest.Snapshot, targets []string, fps map[string]string, budget *budgetState) *cartography {
 	if !f.opts.Features.Cartographer {
 		return nil
 	}
@@ -531,7 +531,7 @@ type regenResult struct {
 // produced just before ctx cancellation is still saved.
 func (f *Funnel) regenSummaries(
 	ctx context.Context,
-	client llm.Client,
+	client llmkit.Client,
 	packages map[string][]string,
 	pkgFingerprints map[string]string,
 	fps map[string]string,

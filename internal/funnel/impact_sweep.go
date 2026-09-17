@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/treesitter"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // reachClass categorises why a finding was or was not downranked.
@@ -59,7 +59,7 @@ func (f *Funnel) impactSweep(
 	ctx context.Context,
 	findings []domain.Finding,
 	repoRoot string,
-	verifierClient llm.Client,
+	verifierClient llmkit.Client,
 	budgetStopped bool,
 	result *Result,
 ) {
@@ -438,7 +438,7 @@ Rules:
 // `bugbot status` and the live pane via the shared AgentScope seam.
 func adjudicateImpact(
 	ctx context.Context,
-	client llm.Client,
+	client llmkit.Client,
 	ambiguous []ambiguousEntry,
 	sink progress.EventSink,
 ) ([]adjResult, error) {
@@ -505,7 +505,7 @@ func adjudicateImpact(
 func (f *Funnel) validateSeverityInline(
 	ctx context.Context,
 	c Candidate,
-	verifier llm.Client,
+	verifier llmkit.Client,
 	budget *budgetState,
 	result *Result,
 ) (domain.Severity, string, bool) {

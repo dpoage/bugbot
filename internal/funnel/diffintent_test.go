@@ -8,7 +8,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/ingest"
 
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // TestDiffIntentLens_InBuiltins verifies that diff-intent appears in
@@ -514,7 +514,7 @@ func TestDegradedLensNames_CommitRunKeepsDiffIntentAndNilSafety(t *testing.T) {
 func TestDiffIntentLead_RejectedAtPostTime(t *testing.T) {
 	// diff-intent must not appear in allLensNames. We verify this indirectly:
 	// the allLensNames slice built inside hypothesize is passed to
-	// agent.NewPostLeadTool as the valid-lens whitelist. A post to "diff-intent"
+	// agenttools.NewPostLeadTool as the valid-lens whitelist. A post to "diff-intent"
 	// must therefore return an error (unknown target_lens).
 	//
 	// We reconstruct the allLensNames logic here to assert the invariant.
@@ -558,25 +558,25 @@ type taskRecordingClient struct {
 
 func newTaskRecordingClient() *taskRecordingClient { return &taskRecordingClient{} }
 
-func (c *taskRecordingClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *taskRecordingClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *taskRecordingClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *taskRecordingClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	// Capture the first user message so tests can assert on task content.
 	for _, m := range req.Messages {
-		if m.Role == llm.RoleUser {
+		if m.Role == llmkit.RoleUser {
 			c.mu.Lock()
 			c.msgs = append(c.msgs, m.Content)
 			c.mu.Unlock()
 			break
 		}
 	}
-	return llm.Response{
+	return llmkit.Response{
 		Text:       emptyCandidates,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: 100, OutputTokens: 50},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: 100, OutputTokens: 50},
 	}, nil
 }
 

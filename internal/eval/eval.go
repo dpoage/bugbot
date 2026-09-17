@@ -54,8 +54,8 @@ import (
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // Mode selects how the funnel's LLM clients are supplied for a run.
@@ -339,4 +339,4 @@ func buildClients(c Case) (funnel.RoleClients, error) {
 	}
 }
 
-var _ llm.Client = (*ScriptedClient)(nil)
+var _ llmkit.Client = (*ScriptedClient)(nil)

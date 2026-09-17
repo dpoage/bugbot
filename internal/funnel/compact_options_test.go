@@ -3,7 +3,7 @@ package funnel
 import (
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 )
 
 func TestResolve_FinderHistoryCompactionOffByDefault(t *testing.T) {
@@ -54,8 +54,8 @@ func TestFinderReadCaps_NegativeRestoresAgentDefaults(t *testing.T) {
 	if caps.MaxLines != 0 || caps.MaxBytes != 0 {
 		t.Errorf("finderReadCaps = %+v, want {0 0} (defer to agent defaults)", caps)
 	}
-	// Sanity: agent.ReadCaps{}.resolve() yields the looser package defaults.
-	resolved := agent.ReadCaps{MaxLines: caps.MaxLines, MaxBytes: caps.MaxBytes}
+	// Sanity: agenttools.ReadCaps{}.resolve() yields the looser package defaults.
+	resolved := agenttools.ReadCaps{MaxLines: caps.MaxLines, MaxBytes: caps.MaxBytes}
 	_ = resolved
 }
 

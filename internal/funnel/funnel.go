@@ -32,11 +32,11 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // Defaults for Options. Exported so callers (CLI flags) can present them.
@@ -227,17 +227,17 @@ const (
 // Verifier respectively. Reproducer is not used by this stage (Tier 1
 // reproduction is a later stage) and is intentionally absent.
 type RoleClients struct {
-	Finder   llm.Client
-	Verifier llm.Client
+	Finder   llmkit.Client
+	Verifier llmkit.Client
 	// Cartographer is the client for the package-summary pass (optional; nil
 	// reuses Finder). Configured via the [roles.cartographer] mapping.
-	Cartographer llm.Client
+	Cartographer llmkit.Client
 	// Arbiter is the client for the split-verdict arbiter (optional; nil
 	// reuses Verifier). Configured via the [roles.arbiter] mapping. The
 	// arbiter only runs on the rare SPLIT refuter panel (~5%), so pointing
 	// it at a stronger model sharpens the toughest calls without paying the
 	// cost on every candidate.
-	Arbiter llm.Client
+	Arbiter llmkit.Client
 }
 
 // roleFinder / roleVerifier / roleCartographer / roleArbiter are the
@@ -245,7 +245,7 @@ type RoleClients struct {
 // The recorder routes finder AND cartographer spend to the finder sub-pool and
 // everything else (including arbiter) to the verify sub-pool under a downstream
 // budget reservation, so these MUST match the strings passed to
-// llm.WithRecorder.
+// llmkit.WithRecorder.
 const (
 	roleFinder       = "finder"
 	roleVerifier     = "verifier"
@@ -332,7 +332,7 @@ type Funnel struct {
 	// language-server manager) on first use, so funnels that never run agents
 	// spawn nothing.
 	navOnce sync.Once
-	nav     *agent.CodeNav
+	nav     *agenttools.CodeNav
 	navErr  error
 	// ownsNav is true when the funnel constructed nav itself (Options.CodeNav was
 	// nil). A borrowed (injected) nav must NOT be closed by the funnel.
@@ -350,7 +350,7 @@ type Funnel struct {
 	// reach so a split arbiter can read the source of a cited stdlib/third-party
 	// symbol; refuters stay repo-rooted (bugbot-mi5.17/.18). Empty on a host
 	// without the relevant toolchain — the arbiter then behaves as before.
-	depRoots *agent.DepSourceRoots
+	depRoots *agenttools.DepSourceRoots
 
 	// hasGoDepSource gates the stdlib/dep source-reading obligation in refuter
 	// and arbiter prompts. It is true only when BOTH conditions hold:
@@ -434,7 +434,7 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 		opts:     resolved,
 		lenses:   selectLenses(resolved.Discovery.Lenses),
 		deps:     deps,
-		depRoots: agent.NewDepSourceRoots(),
+		depRoots: agenttools.NewDepSourceRoots(),
 		slots:    newSlotPool(resolved.Limits.MaxParallel),
 	}
 	if resolved.CodeNav != nil {
@@ -448,7 +448,7 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 // codeNav returns the shared code-navigation tool bundle, creating it (and its
 // lazy language-server manager — no processes are spawned until a tool's first
 // query) on first call.
-func (f *Funnel) codeNav() (*agent.CodeNav, error) {
+func (f *Funnel) codeNav() (*agenttools.CodeNav, error) {
 	// Fast path: a daemon-injected nav (Options.CodeNav) is set once in New and
 	// never mutated, so reading it needs no synchronization. We must NOT read
 	// f.nav here: in the lazy (non-injected) case f.nav is written inside
@@ -457,7 +457,7 @@ func (f *Funnel) codeNav() (*agent.CodeNav, error) {
 		return f.opts.CodeNav, nil
 	}
 	f.navOnce.Do(func() {
-		f.nav, f.navErr = agent.NewCodeNav(f.repo.Root())
+		f.nav, f.navErr = agenttools.NewCodeNav(f.repo.Root())
 		f.ownsNav = true
 	})
 	return f.nav, f.navErr

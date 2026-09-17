@@ -4,15 +4,17 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/provider"
 )
 
-// ProviderSpec converts a config Provider into the llm-owned ProviderSpec.
-// This is the only place in the codebase that maps config types to llm types,
-// keeping the dependency edge one-directional (config → llm, not llm → config).
-func ProviderSpec(p Provider) llm.ProviderSpec {
-	return llm.ProviderSpec{
-		Type:             llm.ProviderType(p.Type),
+// ProviderSpec converts a config Provider into the provider-owned Spec.
+// This is the only place in the codebase that maps config types to provider
+// types, keeping the dependency edge one-directional (config → provider, not
+// provider → config).
+func ProviderSpec(p Provider) provider.Spec {
+	return provider.Spec{
+		Type:             provider.Type(p.Type),
 		BaseURL:          p.BaseURL,
 		Auth:             p.Auth,
 		StructuredOutput: p.StructuredOutput,
@@ -26,13 +28,13 @@ func ProviderSpec(p Provider) llm.ProviderSpec {
 // verifiers, etc.
 //
 // The role name tags emitted UsageEvents for per-role spend accounting.
-func ResolveRole(ctx context.Context, cfg *Config, role string, opts llm.Options) (llm.Client, error) {
+func ResolveRole(ctx context.Context, cfg *Config, role string, opts provider.Options) (llmkit.Client, error) {
 	rm, ok := roleModel(cfg, role)
 	if !ok {
 		return nil, fmt.Errorf("llm: unknown role %q (want finder, verifier, reproducer, cartographer, or arbiter)", role)
 	}
 
-	provider, ok := cfg.Providers[rm.Provider]
+	prov, ok := cfg.Providers[rm.Provider]
 	if !ok {
 		return nil, fmt.Errorf("llm: role %q references unknown provider %q", role, rm.Provider)
 	}
@@ -44,14 +46,15 @@ func ResolveRole(ctx context.Context, cfg *Config, role string, opts llm.Options
 		return nil, err
 	}
 
-	// Apply the per-attempt request timeout from config when set. NewClient
-	// resets opts.Retry to defaults whenever MaxAttempts==0, which would
-	// silently drop a RequestTimeout set alone on opts.Retry; start from
-	// DefaultRetryConfig so MaxAttempts is non-zero (the reset is skipped)
-	// and the user's RequestTimeout is the only field overridden.
+	// Apply the per-attempt request timeout from config when set. The
+	// provider constructor resets opts.Retry to defaults whenever
+	// MaxAttempts==0, which would silently drop a RequestTimeout set alone on
+	// opts.Retry; start from DefaultRetryConfig so MaxAttempts is non-zero
+	// (the reset is skipped) and the user's RequestTimeout is the only
+	// field overridden.
 	opts.Retry = retryConfigFor(cfg)
 	opts.Role = role
-	return llm.NewClient(ctx, ProviderSpec(provider), rm.Provider, rm.Model, apiKey, opts)
+	return provider.New(ctx, ProviderSpec(prov), rm.Provider, rm.Model, apiKey, opts)
 }
 
 // roleModel returns the RoleModel mapping for the named role.
@@ -85,12 +88,12 @@ func roleModel(cfg *Config, role string) (RoleModel, bool) {
 	}
 }
 
-// retryConfigFor builds the llm.RetryConfig for a config, applying the
+// retryConfigFor builds the llmkit.RetryConfig for a config, applying the
 // per-attempt request timeout when set and using package defaults otherwise.
 // Extracted so the mapping logic can be unit-tested independently of the
 // full ResolveRole construction path.
-func retryConfigFor(cfg *Config) llm.RetryConfig {
-	rc := llm.DefaultRetryConfig()
+func retryConfigFor(cfg *Config) llmkit.RetryConfig {
+	rc := llmkit.DefaultRetryConfig()
 	if cfg.LLM.RequestTimeout > 0 {
 		rc.RequestTimeout = cfg.LLM.RequestTimeout
 	}

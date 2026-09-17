@@ -5,10 +5,11 @@ package funnel
 import (
 	"context"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // BudgetConfig groups token-budget and per-role claim knobs. The zero value
@@ -184,7 +185,7 @@ type Options struct {
 	Repro func(ctx context.Context, scanRunID string, finding domain.Finding) error
 	// CodeNav, when non-nil, is a pre-constructed code-navigation bundle that the
 	// funnel BORROWS rather than owns. Nil causes the funnel to construct its own.
-	CodeNav *agent.CodeNav
+	CodeNav *agenttools.CodeNav
 	// TranscriptDir, when non-empty, makes every agent auto-save its transcript.
 	TranscriptDir string
 }
@@ -199,8 +200,8 @@ func (o Options) resolve() Options {
 // finderReadCaps resolves the per-read_file caps for finder agents from Options,
 // substituting the funnel finder defaults for unset fields and honoring a
 // negative request as "use the looser agent-package defaults".
-func (o Options) finderReadCaps() agent.ReadCaps {
-	caps := agent.ReadCaps{}
+func (o Options) finderReadCaps() agenttools.ReadCaps {
+	caps := agenttools.ReadCaps{}
 	switch {
 	case o.Limits.FinderReadLines < 0:
 		caps.MaxLines = 0

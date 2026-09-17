@@ -32,13 +32,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/provider"
 )
 
 // liveTarget names one published finding to replay, by file suffix + line, with
@@ -80,7 +81,7 @@ func TestArbiterLive_ReplaySplits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config %s: %v", cfgPath, err)
 	}
-	verifier, err := config.ResolveRole(ctx, &cfg, "verifier", llm.Options{})
+	verifier, err := config.ResolveRole(ctx, &cfg, "verifier", provider.Options{})
 	if err != nil {
 		t.Fatalf("resolve verifier client: %v", err)
 	}
@@ -106,7 +107,7 @@ func TestArbiterLive_ReplaySplits(t *testing.T) {
 		t.Fatalf("list findings: %v", err)
 	}
 
-	arbiterTools, err := f.readOnlyToolsWithDepRoots(agent.ReadCaps{})
+	arbiterTools, err := f.readOnlyToolsWithDepRoots(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatalf("build arbiter tools: %v", err)
 	}

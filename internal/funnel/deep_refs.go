@@ -4,7 +4,7 @@ import (
 	"context"
 	"sort"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/treesitter"
 )
@@ -33,12 +33,12 @@ const deepRefMaxRefs = 24
 // added to the deep unit's file set.
 const deepRefMaxRelatedFiles = 8
 
-// refClosureNav is the slice of *agent.CodeNav consumed by deepRefClosureWith.
+// refClosureNav is the slice of *agenttools.CodeNav consumed by deepRefClosureWith.
 // An interface so unit tests can inject scripted outline+references without a
-// real language server. Production uses *agent.CodeNav directly.
+// real language server. Production uses *agenttools.CodeNav directly.
 type refClosureNav interface {
 	Outline(file string) ([]treesitter.OutlineEntry, error)
-	References(ctx context.Context, file string, line int, sym string) ([]agent.RefLocation, error)
+	References(ctx context.Context, file string, line int, sym string) ([]agenttools.RefLocation, error)
 }
 
 // isLoadBearing reports whether a symbol kind is considered load-bearing for

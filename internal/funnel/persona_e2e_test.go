@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // pythonBugSrc is a tiny Python source whose only role is to make the snapshot's
@@ -64,7 +64,7 @@ func newPersonaCapturingClient(inner *scriptedClient) *personaCapturingClient {
 	return &personaCapturingClient{scriptedClient: inner}
 }
 
-func (c *personaCapturingClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *personaCapturingClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	c.mu.Lock()
 	c.systems = append(c.systems, req.System)
 	c.mu.Unlock()

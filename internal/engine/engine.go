@@ -22,10 +22,10 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/repro"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // Mode reports whether a Dispatcher holds the store's cross-process writer
@@ -87,7 +87,7 @@ type Dispatcher struct {
 	store *store.Store
 	mode  Mode
 
-	finder, verifier, cartographer, arbiter llm.Client
+	finder, verifier, cartographer, arbiter llmkit.Client
 
 	// repo is the most recently opened target repository, retained so a
 	// single verb call's internal helpers can share it without re-opening.

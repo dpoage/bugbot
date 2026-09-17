@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // TestArbiterRunnerLimits_LargerThanRefuter pins bugbot-mi5.17 AC1: on a split

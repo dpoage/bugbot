@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // TestLedgerRecorder_RecordsToStore pins bugbot-58c's fix: usage events from
@@ -24,15 +24,15 @@ func TestLedgerRecorder_RecordsToStore(t *testing.T) {
 
 	rec := newLedgerRecorder(ctx, st)
 	rec.SetScanRun("run-1")
-	rec.Record(llm.UsageEvent{
+	rec.Record(llmkit.UsageEvent{
 		Role: "reproducer", Provider: "minimax", Model: "MiniMax-M3",
-		Usage: llm.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadInputTokens: 800},
+		Usage: llmkit.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadInputTokens: 800},
 	})
 	// Retag mid-stream (the daemon path) and record again.
 	rec.SetScanRun("run-2")
-	rec.Record(llm.UsageEvent{
+	rec.Record(llmkit.UsageEvent{
 		Role: "reproducer", Provider: "minimax", Model: "MiniMax-M3",
-		Usage: llm.Usage{InputTokens: 500, OutputTokens: 100},
+		Usage: llmkit.Usage{InputTokens: 500, OutputTokens: 100},
 	})
 
 	run1, err := st.TotalsForScanRun(ctx, "run-1")
@@ -73,9 +73,9 @@ func TestLedgerRecorder_WrapsClient(t *testing.T) {
 	rec := newLedgerRecorder(ctx, st)
 	rec.SetScanRun("run-x")
 
-	inner := fakeUsageClient{usage: llm.Usage{InputTokens: 42, OutputTokens: 7}}
-	client := llm.WithRecorder(inner, rec, "reproducer", "prov", "model-m")
-	if _, err := client.Complete(ctx, llm.Request{}); err != nil {
+	inner := fakeUsageClient{usage: llmkit.Usage{InputTokens: 42, OutputTokens: 7}}
+	client := llmkit.WithRecorder(inner, rec, "reproducer", "prov", "model-m")
+	if _, err := client.Complete(ctx, llmkit.Request{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -88,11 +88,11 @@ func TestLedgerRecorder_WrapsClient(t *testing.T) {
 	}
 }
 
-type fakeUsageClient struct{ usage llm.Usage }
+type fakeUsageClient struct{ usage llmkit.Usage }
 
-func (f fakeUsageClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
-func (f fakeUsageClient) Complete(_ context.Context, _ llm.Request) (llm.Response, error) {
-	return llm.Response{Text: "{}", StopReason: llm.StopEndTurn, Usage: f.usage}, nil
+func (f fakeUsageClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
+func (f fakeUsageClient) Complete(_ context.Context, _ llmkit.Request) (llmkit.Response, error) {
+	return llmkit.Response{Text: "{}", StopReason: llmkit.StopEndTurn, Usage: f.usage}, nil
 }
 
 // TestLedgerRecorder_ConcurrentRecords pins concurrency safety: PromoteAll
@@ -113,7 +113,7 @@ func TestLedgerRecorder_ConcurrentRecords(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rec.Record(llm.UsageEvent{Role: "reproducer", Usage: llm.Usage{InputTokens: 10, OutputTokens: 1}})
+			rec.Record(llmkit.UsageEvent{Role: "reproducer", Usage: llmkit.Usage{InputTokens: 10, OutputTokens: 1}})
 		}()
 	}
 	wg.Wait()
@@ -145,13 +145,13 @@ func TestLedgerRecorder_OnRecordEmitsCumulativeTotals(t *testing.T) {
 		ticks = append(ticks, tick{in, out, cached})
 	}
 
-	rec.Record(llm.UsageEvent{
+	rec.Record(llmkit.UsageEvent{
 		Role:  "reproducer",
-		Usage: llm.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadInputTokens: 800},
+		Usage: llmkit.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadInputTokens: 800},
 	})
-	rec.Record(llm.UsageEvent{
+	rec.Record(llmkit.UsageEvent{
 		Role:  "patch-prover",
-		Usage: llm.Usage{InputTokens: 500, OutputTokens: 100},
+		Usage: llmkit.Usage{InputTokens: 500, OutputTokens: 100},
 	})
 
 	want := []tick{{1000, 200, 800}, {1500, 300, 800}}

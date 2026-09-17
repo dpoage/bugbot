@@ -38,15 +38,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // patchMaxDiffBytes is the maximum size of the unified diff text stored in
@@ -147,7 +148,7 @@ type PatchPlan struct {
 
 // PatchProver runs the patch-prover stage for a single finding.
 type PatchProver struct {
-	client      llm.Client
+	client      llmkit.Client
 	sb          sandbox.Sandbox
 	repoDir     string
 	maxAttempts int
@@ -225,7 +226,7 @@ func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f domain.Findi
 	// the bracket with accumulated token usage and the final error.
 	scope := progress.NewAgentScope(p.progress, progress.RolePatchProver, f.Title).Start()
 	start := time.Now()
-	var usage llm.Usage
+	var usage llmkit.Usage
 	defer func() {
 		scope.Finish(usage.InputTokens+usage.OutputTokens, time.Since(start), retErr)
 	}()
@@ -365,7 +366,7 @@ func (p *PatchProver) newRunner(scope progress.AgentScope) (*agent.Runner, error
 		return nil, err
 	}
 	if p.statusNotes {
-		tools = append(tools, agent.NewStatusNoteTool(toolActivitySink(scope)))
+		tools = append(tools, agenttools.NewStatusNoteTool(toolActivitySink(scope)))
 	}
 	var opts []agent.Option
 	opts = append(opts, agent.WithLimits(p.agentLimits))
@@ -389,7 +390,7 @@ func (p *PatchProver) newRunner(scope progress.AgentScope) (*agent.Runner, error
 // the NEXT round's prev by the caller (mirrors Reproducer.planFor /
 // bugbot-z6ay) — this is how the conversation chains across rounds without
 // Prove itself touching message history.
-func (p *PatchProver) planFor(ctx context.Context, runner *agent.Runner, f domain.Finding, att *Attempt, feedback string, prev *agent.Outcome) (*PatchPlan, llm.Usage, *agent.Outcome, error) {
+func (p *PatchProver) planFor(ctx context.Context, runner *agent.Runner, f domain.Finding, att *Attempt, feedback string, prev *agent.Outcome) (*PatchPlan, llmkit.Usage, *agent.Outcome, error) {
 	var plan PatchPlan
 	var outcome *agent.Outcome
 	var err error
@@ -403,7 +404,7 @@ func (p *PatchProver) planFor(ctx context.Context, runner *agent.Runner, f domai
 		// no benefit.
 		outcome, err = runner.RunJSONContinue(ctx, prev, buildPatchRevisionTask(feedback), patchSchema, &plan)
 	}
-	var usage llm.Usage
+	var usage llmkit.Usage
 	if outcome != nil {
 		usage = outcome.Usage
 	}

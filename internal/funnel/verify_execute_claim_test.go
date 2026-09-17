@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/sandbox"
 )
@@ -367,7 +367,7 @@ func TestRunRefuters_ExecutorClauseInPanelPrompts(t *testing.T) {
 		clients: RoleClients{Verifier: capture},
 	}
 
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +444,7 @@ func TestRunRefuters_ExecutorClauseWithSandboxTool(t *testing.T) {
 		t.Fatal("buildSandboxTool should have produced a tool for the parseSARIF claim")
 	}
 
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatal(err)
 	}

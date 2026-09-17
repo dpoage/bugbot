@@ -16,12 +16,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agent"
-	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/progress"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
-// rweFinderFake is a minimal llm.Client whose Complete branches on
+// rweFinderFake is a minimal llmkit.Client whose Complete branches on
 // req.MaxTokens to simulate a reasoning model that burns the per-completion
 // cap on its first attempt and then succeeds once given a doubled cap. Each
 // request is recorded so tests can assert the doubled-cap wire request was
@@ -32,7 +33,7 @@ import (
 // at a time.
 type rweFinderFake struct {
 	mu            sync.Mutex
-	requests      []llm.Request
+	requests      []llmkit.Request
 	oversizedBody string // returned when req.MaxTokens exceeds the default cap
 	truncatedBody string // returned at or below the default cap; must NOT parse as JSON
 }
@@ -41,11 +42,11 @@ func newRweFinderFake(oversized, truncated string) *rweFinderFake {
 	return &rweFinderFake{oversizedBody: oversized, truncatedBody: truncated}
 }
 
-func (c *rweFinderFake) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *rweFinderFake) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *rweFinderFake) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *rweFinderFake) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	c.mu.Lock()
 	c.requests = append(c.requests, req)
@@ -53,10 +54,10 @@ func (c *rweFinderFake) Complete(ctx context.Context, req llm.Request) (llm.Resp
 
 	if req.MaxTokens > DefaultMaxOutputTokens {
 		// Retry path: doubled cap; return valid candidates JSON.
-		return llm.Response{
+		return llmkit.Response{
 			Text:       c.oversizedBody,
-			StopReason: llm.StopEndTurn,
-			Usage: llm.Usage{
+			StopReason: llmkit.StopEndTurn,
+			Usage: llmkit.Usage{
 				InputTokens:          10,
 				OutputTokens:         25,
 				CacheReadInputTokens: 0,
@@ -69,10 +70,10 @@ func (c *rweFinderFake) Complete(ctx context.Context, req llm.Request) (llm.Resp
 	// same cap, so returning StopMaxTokens for both halves stitches
 	// into a non-empty but non-JSON blob — enough to fail RunJSON's
 	// parse and the repair round-trip both.
-	return llm.Response{
+	return llmkit.Response{
 		Text:       c.truncatedBody,
-		StopReason: llm.StopMaxTokens,
-		Usage: llm.Usage{
+		StopReason: llmkit.StopMaxTokens,
+		Usage: llmkit.Usage{
 			InputTokens:          10,
 			OutputTokens:         int64(req.MaxTokens),
 			CacheReadInputTokens: 0,
@@ -107,21 +108,21 @@ type rweNonJSONClient struct {
 	text    string
 }
 
-func (c *rweNonJSONClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *rweNonJSONClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *rweNonJSONClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *rweNonJSONClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	c.mu.Lock()
 	if req.MaxTokens > c.maxSeen {
 		c.maxSeen = req.MaxTokens
 	}
 	c.mu.Unlock()
-	return llm.Response{
+	return llmkit.Response{
 		Text:       c.text,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: 5, OutputTokens: 7},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: 5, OutputTokens: 7},
 	}, nil
 }
 
@@ -139,7 +140,7 @@ func (c *rweNonJSONClient) maxTokensSeen() int {
 // the unit is not blocked by the shared pool. Mirrors openFixture +
 // RoleClients in funnel_test.go; inlined so this file does not depend on
 // test-only helpers that may move.
-func rweBuildFunnel(t *testing.T, finder llm.Client) (*Funnel, *budgetState) {
+func rweBuildFunnel(t *testing.T, finder llmkit.Client) (*Funnel, *budgetState) {
 	t.Helper()
 	st, repo := openFixture(t)
 	f, err := New(RoleClients{Finder: finder, Verifier: newScriptedClient()}, st, repo, Options{})
@@ -156,7 +157,7 @@ func rweBuildFunnel(t *testing.T, finder llm.Client) (*Funnel, *budgetState) {
 // read-only tools are sufficient for a finder task on a fixture repo.
 func rweReadOnlyTools(t *testing.T, f *Funnel) []agent.Tool {
 	t.Helper()
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatalf("readOnlyTools: %v", err)
 	}
@@ -284,7 +285,7 @@ func TestRwe_RunFinderWithPrompt_NoRetryOnNonTruncatedParseFailure(t *testing.T)
 // check — meaningfully more plumbing than the predicate boundary
 // warrants, and the accept-or-reject decision is what bugbot-rwe pins.
 func TestRwe_ShouldRetryFinderCapPredicate(t *testing.T) {
-	makeOutcome := func(lastStop llm.StopReason, trunc bool, reason string) *agent.Outcome {
+	makeOutcome := func(lastStop llmkit.StopReason, trunc bool, reason string) *agent.Outcome {
 		o := &agent.Outcome{LastStopReason: lastStop}
 		if trunc {
 			o.Truncated = true
@@ -304,7 +305,7 @@ func TestRwe_ShouldRetryFinderCapPredicate(t *testing.T) {
 		{
 			name:    "stop-max-tokens parse-failed => retry",
 			status:  finderParseFailed,
-			outcome: makeOutcome(llm.StopMaxTokens, false, ""),
+			outcome: makeOutcome(llmkit.StopMaxTokens, false, ""),
 			err:     errors.New("parse error"),
 			want:    true,
 			why:     "the canonical signal: cap-truncated final completion + parse-failure classification",
@@ -312,7 +313,7 @@ func TestRwe_ShouldRetryFinderCapPredicate(t *testing.T) {
 		{
 			name:    "stop-end-turn parse-failed => no retry",
 			status:  finderParseFailed,
-			outcome: makeOutcome(llm.StopEndTurn, false, ""),
+			outcome: makeOutcome(llmkit.StopEndTurn, false, ""),
 			err:     errors.New("parse error"),
 			want:    false,
 			why:     "model produced malformed JSON without hitting the cap; retry would not help and would mask the real failure",
@@ -320,7 +321,7 @@ func TestRwe_ShouldRetryFinderCapPredicate(t *testing.T) {
 		{
 			name:    "budget-stopped status => no retry",
 			status:  finderBudgetStopped,
-			outcome: makeOutcome(llm.StopMaxTokens, true, agent.TruncTokenBudget),
+			outcome: makeOutcome(llmkit.StopMaxTokens, true, agent.TruncTokenBudget),
 			err:     nil,
 			want:    false,
 			why:     "budget stops are not parse failures; the retried unit would never reach this branch in practice",
@@ -328,7 +329,7 @@ func TestRwe_ShouldRetryFinderCapPredicate(t *testing.T) {
 		{
 			name:    "rate-limited status => no retry",
 			status:  finderRateLimited,
-			outcome: makeOutcome(llm.StopMaxTokens, false, ""),
+			outcome: makeOutcome(llmkit.StopMaxTokens, false, ""),
 			err:     errors.New("429 too many requests"),
 			want:    false,
 			why:     "rate-limit exhaustion is recoverable by lowering --concurrency; retrying the same path is wasteful",
@@ -344,7 +345,7 @@ func TestRwe_ShouldRetryFinderCapPredicate(t *testing.T) {
 		{
 			name:    "budget-stopped outcome + parse-failed status => status guard is authoritative",
 			status:  finderParseFailed, // hypothetical: defense-in-depth guard fires
-			outcome: makeOutcome(llm.StopMaxTokens, true, agent.TruncBudgetPool),
+			outcome: makeOutcome(llmkit.StopMaxTokens, true, agent.TruncBudgetPool),
 			err:     errors.New("parse error"),
 			want:    false,
 			why:     "budgetStopped guard rejects even when status was mis-routed; belt-and-suspenders",
@@ -352,8 +353,8 @@ func TestRwe_ShouldRetryFinderCapPredicate(t *testing.T) {
 		{
 			name:    "stop-max-tokens parse-failed but rate-limited err => no retry",
 			status:  finderParseFailed,
-			outcome: makeOutcome(llm.StopMaxTokens, false, ""),
-			err:     fmt.Errorf("provider 429: %w", llm.ErrRateLimited),
+			outcome: makeOutcome(llmkit.StopMaxTokens, false, ""),
+			err:     fmt.Errorf("provider 429: %w", llmkit.ErrRateLimited),
 			want:    false,
 			why:     "a wrapped rate-limit sentinel must be rejected by the final guard even on the cap-truncation path",
 		},

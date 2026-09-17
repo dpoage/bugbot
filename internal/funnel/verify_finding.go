@@ -3,7 +3,7 @@ package funnel
 import (
 	"context"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
@@ -34,7 +34,7 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd domain.Finding) (refuted
 	// post_lead is also absent: refuter independence is the mechanism that kills
 	// false positives, and re-verification is a pure adversarial check (same
 	// principle as the main verify stage). See verify.go for the fuller rationale.
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		return false, "", err
 	}

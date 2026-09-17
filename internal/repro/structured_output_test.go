@@ -5,13 +5,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // End-to-end boundary integration tests for bugbot-jwd on the repro
 // side. The mechanism that threads each boundary's JSON schema through
-// llm.Request.ResponseSchema (capability-gated) is implemented by
+// llmkit.Request.ResponseSchema (capability-gated) is implemented by
 // gd3 + w88; these tests PROVE that the reproducer boundary's
 // planSchema and the patch-prover boundary's patchSchema reach the
 // wire as ResponseSchema when the client reports
@@ -51,7 +51,7 @@ func TestStructuredOutput_ReproducerCarriesPlanSchema(t *testing.T) {
 	artifactDir := t.TempDir()
 
 	client := newScriptedClient(planBody(t, goodPlan()))
-	client.caps = llm.Capabilities{StructuredOutput: true}
+	client.caps = llmkit.Capabilities{StructuredOutput: true}
 
 	r, err := New(client, demonstratingSandbox(), repoDir, Options{ArtifactDir: artifactDir})
 	if err != nil {
@@ -121,7 +121,7 @@ func TestStructuredOutput_ReproducerRepairCarriesSchema(t *testing.T) {
 		`[{"files":{},"expect":"y"}]`,
 		planBody(t, goodPlan()),
 	)
-	client.caps = llm.Capabilities{StructuredOutput: true}
+	client.caps = llmkit.Capabilities{StructuredOutput: true}
 
 	r, err := New(client, demonstratingSandbox(), repoDir, Options{ArtifactDir: artifactDir})
 	if err != nil {
@@ -159,7 +159,7 @@ func TestStructuredOutput_PatchProverCarriesPatchSchema(t *testing.T) {
 	artifactDir := t.TempDir()
 
 	client := newScriptedClient(patchPlanBody(t, goodPatchPlan()))
-	client.caps = llm.Capabilities{StructuredOutput: true}
+	client.caps = llmkit.Capabilities{StructuredOutput: true}
 	// Two sandbox calls: targeted (exit 0) then suite (exit 0).
 	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
@@ -237,7 +237,7 @@ func TestStructuredOutput_PatchProverRepairCarriesSchema(t *testing.T) {
 		`[{"files":{},"summary":"x"}]`,
 		patchPlanBody(t, goodPatchPlan()),
 	)
-	client.caps = llm.Capabilities{StructuredOutput: true}
+	client.caps = llmkit.Capabilities{StructuredOutput: true}
 	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 	sb.EnqueueResponse(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
@@ -277,10 +277,10 @@ func TestStructuredOutput_PatchProverRepairCarriesSchema(t *testing.T) {
 // anyMessageMentions reports whether any of the user-role messages
 // across reqs contains sub. Tiny helper kept here to avoid touching
 // the existing fake_test.go.
-func anyMessageMentions(reqs []llm.Request, sub string) bool {
+func anyMessageMentions(reqs []llmkit.Request, sub string) bool {
 	for _, r := range reqs {
 		for _, m := range r.Messages {
-			if m.Role == llm.RoleUser && strings.Contains(m.Content, sub) {
+			if m.Role == llmkit.RoleUser && strings.Contains(m.Content, sub) {
 				return true
 			}
 		}

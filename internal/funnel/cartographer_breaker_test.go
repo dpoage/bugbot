@@ -7,11 +7,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
 )
 
-// cartographerTransportErrClient is a fake llm.Client whose Complete always
-// returns the same transport-level *llm.APIError on every call
+// cartographerTransportErrClient is a fake llmkit.Client whose Complete always
+// returns the same transport-level *llmkit.APIError on every call
 // (StatusCode==0, Kind=ErrServer) — the exact breaker-detection shape
 // produced by the openai/google/anthropic adapters for timeouts, connection
 // resets, DNS failures. calls is atomic so the test can assert the exact
@@ -24,15 +24,17 @@ func newCartographerTransportErrClient() *cartographerTransportErrClient {
 	return &cartographerTransportErrClient{}
 }
 
-func (c *cartographerTransportErrClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *cartographerTransportErrClient) Capabilities() llmkit.Capabilities {
+	return llmkit.Capabilities{}
+}
 
-func (c *cartographerTransportErrClient) Complete(ctx context.Context, _ llm.Request) (llm.Response, error) {
+func (c *cartographerTransportErrClient) Complete(ctx context.Context, _ llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	c.calls.Add(1)
-	return llm.Response{}, &llm.APIError{
-		Kind:       llm.ErrServer,
+	return llmkit.Response{}, &llmkit.APIError{
+		Kind:       llmkit.ErrServer,
 		StatusCode: 0,
 		Provider:   "fake",
 		Message:    "dial tcp: connection refused",
@@ -49,31 +51,31 @@ type cartographerFirstSuccessThenTransportClient struct {
 	calls atomic.Int32
 }
 
-func (c *cartographerFirstSuccessThenTransportClient) Capabilities() llm.Capabilities {
-	return llm.Capabilities{}
+func (c *cartographerFirstSuccessThenTransportClient) Capabilities() llmkit.Capabilities {
+	return llmkit.Capabilities{}
 }
 
-func (c *cartographerFirstSuccessThenTransportClient) Complete(ctx context.Context, _ llm.Request) (llm.Response, error) {
+func (c *cartographerFirstSuccessThenTransportClient) Complete(ctx context.Context, _ llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	n := c.calls.Add(1)
 	if n == 1 {
-		return llm.Response{
+		return llmkit.Response{
 			Text:       `{"summary":"valid first summary"}`,
-			StopReason: llm.StopEndTurn,
-			Usage:      llm.Usage{InputTokens: 5, OutputTokens: 5},
+			StopReason: llmkit.StopEndTurn,
+			Usage:      llmkit.Usage{InputTokens: 5, OutputTokens: 5},
 		}, nil
 	}
-	return llm.Response{}, &llm.APIError{
-		Kind:       llm.ErrServer,
+	return llmkit.Response{}, &llmkit.APIError{
+		Kind:       llmkit.ErrServer,
 		StatusCode: 0,
 		Provider:   "fake",
 		Message:    "dial tcp: connection refused",
 	}
 }
 
-// cartographerParseFailClient is a fake llm.Client whose Complete always
+// cartographerParseFailClient is a fake llmkit.Client whose Complete always
 // returns a well-formed HTTP response (NO transport error) carrying output
 // that is not valid summary JSON, so RunJSON's parse + one-shot repair both
 // fail and summarizePackage returns a non-transport (parse) error. It models
@@ -83,17 +85,19 @@ type cartographerParseFailClient struct {
 	calls atomic.Int32
 }
 
-func (c *cartographerParseFailClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *cartographerParseFailClient) Capabilities() llmkit.Capabilities {
+	return llmkit.Capabilities{}
+}
 
-func (c *cartographerParseFailClient) Complete(ctx context.Context, _ llm.Request) (llm.Response, error) {
+func (c *cartographerParseFailClient) Complete(ctx context.Context, _ llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	c.calls.Add(1)
-	return llm.Response{
+	return llmkit.Response{
 		Text:       "this is not valid summary json",
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: 5, OutputTokens: 5},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: 5, OutputTokens: 5},
 	}, nil
 }
 
