@@ -261,7 +261,7 @@ type Event struct {
 	AgentID string `json:"agent_id,omitempty"`
 
 	// InputTokens / OutputTokens carry cumulative spend on spend_tick and the
-	// final summary. InputTokens includes cached tokens (the llm.Usage
+	// final summary. InputTokens includes cached tokens (the llmkit.Usage
 	// convention); CacheReadTokens / CacheCreationTokens are the subsets served
 	// from / written to the provider's prompt cache.
 	InputTokens         int64 `json:"input_tokens,omitempty"`

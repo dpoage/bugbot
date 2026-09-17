@@ -8,12 +8,12 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/dpoage/bugbot/internal/agent"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
-// spendRecorder implements llm.Recorder, writing each completion's usage to the
+// spendRecorder implements llmkit.Recorder, writing each completion's usage to the
 // store's spend ledger under the active scan run and tracking a running total
 // for budget decisions. It is safe for concurrent use by parallel agents.
 type spendRecorder struct {
@@ -39,7 +39,7 @@ type spendRecorder struct {
 	// input+output tokens are added to it as they are ledgered, so concurrent
 	// in-flight runs see the run-spanning spend total via their pre-turn
 	// Limits.BudgetCheck hook. Budget accounting uses total InputTokens (tokens
-	// processed), which is INCLUSIVE of cached tokens per the llm.Usage
+	// processed), which is INCLUSIVE of cached tokens per the llmkit.Usage
 	// convention — cache reads are not subtracted (see funnel doc comment).
 	pool *agent.BudgetPool
 
@@ -58,7 +58,7 @@ type spendRecorder struct {
 	cacheReadWeight float64
 }
 
-func (r *spendRecorder) Record(ev llm.UsageEvent) {
+func (r *spendRecorder) Record(ev llmkit.UsageEvent) {
 	w := r.cacheReadWeight
 	if w <= 0 {
 		w = 1.0

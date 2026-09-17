@@ -314,7 +314,7 @@ func TestBazelGuidance(t *testing.T) {
 
 // TestSystemPrompt_BazelBuildSystem mirrors newRunner's prompt-composition
 // branch (systemPrompt + ... + bazelGuidance iff BuildSystemBazel is present)
-// without standing up a full Reproducer (which would require an llm.Client,
+// without standing up a full Reproducer (which would require an llmkit.Client,
 // sandbox, and CodeNav). It confirms the bazel block lands in the prompt when
 // the repo carries MODULE.bazel/WORKSPACE, and is absent when it doesn't — so
 // a future refactor that drops the conditional fails the gate, and a future

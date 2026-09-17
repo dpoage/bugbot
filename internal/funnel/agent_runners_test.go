@@ -4,9 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
-	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/progress"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // TestBudgetStopped_BothTruncationReasons asserts that the shared
@@ -82,11 +83,11 @@ func TestNewAgentRunner_AppliesStandardOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := newScriptedClientWithCaps(llm.Capabilities{StructuredOutput: true})
+	client := newScriptedClientWithCaps(llmkit.Capabilities{StructuredOutput: true})
 	client.fallback = notRefutedJSON
 
 	c := Candidate{Lens: "l", File: "f.go", Line: 1, Title: "t"}

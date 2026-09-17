@@ -11,9 +11,9 @@ import (
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
+	"github.com/dpoage/llmkit/provider"
 )
 
 // newCartographyCmd shows the cartographer's cached per-package summaries and,
@@ -49,7 +49,7 @@ func newCartographyCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("open target: %w", err)
 				}
-				client, err := config.ResolveRole(ctx, &cfg, "cartographer", llm.Options{})
+				client, err := config.ResolveRole(ctx, &cfg, "cartographer", provider.Options{})
 				if err != nil {
 					return fmt.Errorf("build cartographer client: %w", err)
 				}

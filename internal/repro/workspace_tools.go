@@ -17,9 +17,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agent"
-	"github.com/dpoage/bugbot/internal/llm"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/sandbox"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // runReproOutputTailBytes bounds the combined-output excerpt returned by the
@@ -191,8 +192,8 @@ type writeReproFileArgs struct {
 }
 
 // Def implements agent.Tool.
-func (t *WriteReproFileTool) Def() llm.ToolDef {
-	return llm.ToolDef{
+func (t *WriteReproFileTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{
 		Name: "write_repro_file",
 		Description: "Write ONE NEW repro/test file into your persistent attempt workspace. Calling it " +
 			"again with the same path replaces the file — that is how you edit. Writing is free (it does " +
@@ -272,8 +273,8 @@ type deleteReproFileArgs struct {
 }
 
 // Def implements agent.Tool.
-func (t *DeleteReproFileTool) Def() llm.ToolDef {
-	return llm.ToolDef{
+func (t *DeleteReproFileTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{
 		Name: "delete_repro_file",
 		Description: "Delete a file you previously wrote with write_repro_file, removing it from the " +
 			"workspace AND from the files submitted with your final plan. Only files you wrote this " +
@@ -458,8 +459,8 @@ type workspaceArgs struct {
 }
 
 // Def implements agent.Tool.
-func (t *WorkspaceTool) Def() llm.ToolDef {
-	return llm.ToolDef{
+func (t *WorkspaceTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{
 		Name: "workspace",
 		Description: "Busybox-style multiplexer over your persistent attempt workspace (the repo plus " +
 			"every file you wrote via write_repro_file). argv[0] selects the applet:\n" +
@@ -537,7 +538,7 @@ func (t *WorkspaceTool) Run(ctx context.Context, raw json.RawMessage) (string, e
 }
 
 // runLS implements the free `ls [dir]` applet: it lists a workspace-relative
-// directory (default the workspace root), confined via agent.FSRoot so a
+// directory (default the workspace root), confined via agenttools.FSRoot so a
 // symlink planted by a build step cannot walk the listing outside the
 // workspace. It never materializes an unmaterialized workspace.
 func (t *WorkspaceTool) runLS(argv []string) (string, error) {
@@ -549,7 +550,7 @@ func (t *WorkspaceTool) runLS(argv []string) (string, error) {
 	if !ok {
 		return workspaceUnmaterializedHint, nil
 	}
-	root, err := agent.NewFSRoot(wsPath)
+	root, err := agenttools.NewFSRoot(wsPath)
 	if err != nil {
 		return "", fmt.Errorf("workspace ls: %w", err)
 	}
@@ -587,7 +588,7 @@ func (t *WorkspaceTool) runLS(argv []string) (string, error) {
 // runCat implements the free `cat <file>` applet: it returns the tail of a
 // workspace-relative file capped at runReproOutputTailBytes (build logs are
 // the primary use case), with the same tailExcerpt truncation marker
-// exec/interpret feedback already uses. Confined via agent.FSRoot. It never
+// exec/interpret feedback already uses. Confined via agenttools.FSRoot. It never
 // materializes an unmaterialized workspace.
 func (t *WorkspaceTool) runCat(argv []string) (string, error) {
 	if len(argv) == 0 {
@@ -598,7 +599,7 @@ func (t *WorkspaceTool) runCat(argv []string) (string, error) {
 	if !ok {
 		return workspaceUnmaterializedHint, nil
 	}
-	root, err := agent.NewFSRoot(wsPath)
+	root, err := agenttools.NewFSRoot(wsPath)
 	if err != nil {
 		return "", fmt.Errorf("workspace cat: %w", err)
 	}
@@ -615,7 +616,7 @@ func (t *WorkspaceTool) runCat(argv []string) (string, error) {
 
 // runGrep implements the free `grep <pattern> [dir]` applet: a Go (RE2)
 // regexp search over regular files under a workspace-relative directory
-// (default the workspace root), confined via agent.FSRoot exactly like
+// (default the workspace root), confined via agenttools.FSRoot exactly like
 // ls/cat so a symlink planted by a build step cannot walk the search
 // outside the workspace. It caps the scan to workspaceGrepMaxFiles files,
 // skips anything over workspaceGrepMaxFileBytes or sniffed as binary (a NUL
@@ -642,7 +643,7 @@ func (t *WorkspaceTool) runGrep(argv []string) (string, error) {
 	if !ok {
 		return workspaceUnmaterializedHint, nil
 	}
-	root, err := agent.NewFSRoot(wsPath)
+	root, err := agenttools.NewFSRoot(wsPath)
 	if err != nil {
 		return "", fmt.Errorf("workspace grep: %w", err)
 	}
@@ -751,7 +752,7 @@ func grepWorkspaceFile(path, rel string, re *regexp.Regexp, b *strings.Builder, 
 
 // runFind implements the free `find <glob-or-substring> [dir]` applet:
 // filename matching under a workspace-relative directory (default the
-// workspace root), confined via agent.FSRoot exactly like ls/cat/grep. A
+// workspace root), confined via agenttools.FSRoot exactly like ls/cat/grep. A
 // pattern containing a glob metacharacter (*, ?, [) is matched against
 // both the basename and the full workspace-relative path with
 // filepath.Match; a pattern without one is matched as a plain substring of
@@ -772,7 +773,7 @@ func (t *WorkspaceTool) runFind(argv []string) (string, error) {
 	if !ok {
 		return workspaceUnmaterializedHint, nil
 	}
-	root, err := agent.NewFSRoot(wsPath)
+	root, err := agenttools.NewFSRoot(wsPath)
 	if err != nil {
 		return "", fmt.Errorf("workspace find: %w", err)
 	}

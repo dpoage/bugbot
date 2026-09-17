@@ -46,16 +46,19 @@ Ingest -> Hypothesize -> Triage -> Verify -> Reproduce -> Report
 
 ## Planned packages
 
-- **`internal/llm`** — provider-agnostic LLM abstraction with capability
-  profiles (context window, tool support, cost). Backends: Anthropic, OpenAI,
-  Google, and any OpenAI-compatible endpoint. Roles (finder / verifier /
-  reproducer) are mapped to provider+model in config for tiering.
+- **`llmkit`** (`github.com/dpoage/llmkit`) — provider-agnostic LLM
+  abstraction with capability profiles (context window, tool support, cost)
+  and the tool-loop harness. Backends: Anthropic, OpenAI, Google, and any
+  OpenAI-compatible endpoint. Roles (finder / verifier / reproducer) are
+  mapped to provider+model in config for tiering.
 - **`internal/store`** — embedded SQLite state (`modernc.org/sqlite`, pure-Go,
   CGO-free): findings, suppressions, ingest watermarks, and token spend.
 - **`internal/ingest`** — repo model, file/symbol fingerprints, git polling,
   and blast-radius computation for incremental scans.
-- **`internal/agent`** — tool-loop harness driving an LLM through a bounded
-  set of tools, with per-cycle token budgets and recorded transcripts.
+- **`internal/agenttools`** — bugbot's concrete tool implementations
+  (read_file, list_dir, grep, code-nav, sandbox_exec, post_lead, run_tests,
+  report_tool_issue, status_note, …) plus tool-author helpers. The harness
+  itself lives in `llmkit/agent`.
 - **`internal/funnel`** — the pipeline stages above, wired together with
   backpressure and budget enforcement between stages.
 - **`internal/sandbox`** — pluggable `Exec` interface for isolated execution.

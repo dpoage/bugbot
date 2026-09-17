@@ -8,11 +8,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // runVerifyAndPersist is the per-candidate unit body for the streaming
@@ -41,8 +42,8 @@ import (
 // reproduction; see reproQueue for the never-block contract.
 func (f *Funnel) runVerifyAndPersist(
 	ctx context.Context,
-	verifier llm.Client,
-	arbiter llm.Client,
+	verifier llmkit.Client,
+	arbiter llmkit.Client,
 	persona string,
 	c Candidate,
 	candIdx int,
@@ -118,7 +119,7 @@ func (f *Funnel) runVerifyAndPersist(
 	// so a split arbiter can verify a cited stdlib/third-party claim by reading
 	// the actual source (bugbot-mi5.17/.18); refuters stay repo-rooted to keep
 	// their per-seat read scope and token cost bounded.
-	refuterReadTools, err := f.readOnlyTools(agent.ReadCaps{})
+	refuterReadTools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		setErr(err)
 		return
@@ -170,7 +171,7 @@ func (f *Funnel) runVerifyAndPersist(
 		// Build the arbiter's tool set lazily: it carries dep-source read reach
 		// and is only needed on the rare split, so we do not pay to construct it
 		// on every candidate. It reuses the same extra tool VALUES as the panel.
-		arbiterReadTools, atErr := f.readOnlyToolsWithDepRoots(agent.ReadCaps{})
+		arbiterReadTools, atErr := f.readOnlyToolsWithDepRoots(agenttools.ReadCaps{})
 		if atErr != nil {
 			setErr(atErr)
 			return

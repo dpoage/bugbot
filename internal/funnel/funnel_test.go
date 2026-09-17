@@ -14,12 +14,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // --- fixture repo ---------------------------------------------------------
@@ -424,7 +425,7 @@ func TestRunFinder_BudgetStopNotParseFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +464,7 @@ func TestRunFinder_ParseFailureStillCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,8 +483,8 @@ func TestRunFinder_ParseFailureStillCounts(t *testing.T) {
 	}
 }
 
-// rateLimitFinderClient is a one-shot llm.Client that returns an
-// *llm.APIError{Kind: ErrRateLimited} on the first Complete call, matching the
+// rateLimitFinderClient is a one-shot llmkit.Client that returns an
+// *llmkit.APIError{Kind: ErrRateLimited} on the first Complete call, matching the
 // shape produced by the openai adapter when the provider returns a 429 after the
 // retry budget is spent. Used by TestRunFinder_RateLimitNotParseFailure to
 // exercise the rate-limit classification branch in runFinderWithPrompt without
@@ -494,18 +495,18 @@ type rateLimitFinderClient struct {
 	err   error
 }
 
-func (c *rateLimitFinderClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *rateLimitFinderClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *rateLimitFinderClient) Complete(_ context.Context, _ llm.Request) (llm.Response, error) {
+func (c *rateLimitFinderClient) Complete(_ context.Context, _ llmkit.Request) (llmkit.Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls++
-	return llm.Response{}, c.err
+	return llmkit.Response{}, c.err
 }
 
 // TestRunFinder_RateLimitNotParseFailure proves the L2 (bugbot-8xp) fix: a
 // finder whose provider exhausted the retry budget on a 429 (errors.Is(err,
-// llm.ErrRateLimited) is true) must be classified as finderRateLimited, NOT as
+// llmkit.ErrRateLimited) is true) must be classified as finderRateLimited, NOT as
 // finderParseFailed. Rate-limit exhaustion is recoverable by lowering
 // --concurrency or re-running, so it must not inflate FinderFailures or trip
 // the SCAN RELIABILITY WARNING. The postmortem's Class is
@@ -516,14 +517,14 @@ func TestRunFinder_RateLimitNotParseFailure(t *testing.T) {
 
 	// Fake client whose Complete returns a rate-limit error identical to what
 	// the openai adapter surfaces after the retry wrapper gives up.
-	rateLimitErr := &llm.APIError{
-		Kind:       llm.ErrRateLimited,
+	rateLimitErr := &llmkit.APIError{
+		Kind:       llmkit.ErrRateLimited,
 		StatusCode: 429,
 		Provider:   "openai",
 		Message:    "429 too many requests",
 	}
-	if !errors.Is(rateLimitErr, llm.ErrRateLimited) {
-		t.Fatal("test setup: APIError must satisfy errors.Is(err, llm.ErrRateLimited)")
+	if !errors.Is(rateLimitErr, llmkit.ErrRateLimited) {
+		t.Fatal("test setup: APIError must satisfy errors.Is(err, llmkit.ErrRateLimited)")
 	}
 	finder := &rateLimitFinderClient{err: rateLimitErr}
 
@@ -531,7 +532,7 @@ func TestRunFinder_RateLimitNotParseFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1095,7 +1096,7 @@ func TestBudgetState_CacheReadWeighted(t *testing.T) {
 	// the raw 5100. So the pool is NOT exhausted; with raw accounting it would
 	// be (5100 > 2000).
 	b := newBudgetState(2000, rec, 0.1)
-	rec.Record(llm.UsageEvent{Usage: llm.Usage{InputTokens: 5000, OutputTokens: 100, CacheReadInputTokens: 4500}})
+	rec.Record(llmkit.UsageEvent{Usage: llmkit.Usage{InputTokens: 5000, OutputTokens: 100, CacheReadInputTokens: 4500}})
 	if err := b.pool.Check(); err != nil {
 		t.Fatalf("pool exhausted after a mostly-cached completion: spent=%d (raw would be 5100), err=%v", b.pool.Spent(), err)
 	}
@@ -1181,7 +1182,7 @@ func TestSpendRecorder_ClaimRefundIsAutomatic(t *testing.T) {
 	b.reserveForDownstream(0.5) // finder reserve 1M, verify reserve 1M
 
 	// A finder run granted a 1M claim spends only 200k.
-	rec.Record(llm.UsageEvent{Role: roleFinder, Usage: llm.Usage{InputTokens: 150_000, OutputTokens: 50_000}})
+	rec.Record(llmkit.UsageEvent{Role: roleFinder, Usage: llmkit.Usage{InputTokens: 150_000, OutputTokens: 50_000}})
 
 	if got := b.finderPool.Spent(); got != 200_000 {
 		t.Errorf("finder pool charged %d, want 200_000 (actual spend only, not the claim)", got)
@@ -1467,7 +1468,7 @@ func TestStreaming_MidDiscovery_VerifyStarts(t *testing.T) {
 	// Verifier: signals verifyStarted on first call, then returns notRefuted.
 	var verifierCalls atomic.Int32
 	verifierClient := &hookClient{
-		onCall: func(req llm.Request) {
+		onCall: func(req llmkit.Request) {
 			if verifierCalls.Add(1) == 1 {
 				verifyOnce.Do(func() { close(verifyStarted) })
 			}
@@ -1665,7 +1666,7 @@ func TestStreaming_Interrupt_PersistedFindingSurvives(t *testing.T) {
 	// then cancels ctx. We use a hookClient with a counter.
 	var verifierCalls atomic.Int32
 	verifierClient := &hookClient{
-		onCall: func(req llm.Request) {
+		onCall: func(req llmkit.Request) {
 			if int(verifierCalls.Add(1)) == DefaultRefuters {
 				// All refuters done; the finding is being persisted now or soon.
 				// Give the UpsertFinding a moment then cancel.
@@ -1727,7 +1728,7 @@ func TestStreaming_Interrupt_PersistedFindingSurvives(t *testing.T) {
 	}
 }
 
-// blockingClient is a fake llm.Client that calls onCallStart at the beginning
+// blockingClient is a fake llmkit.Client that calls onCallStart at the beginning
 // of each Complete call, allowing tests to inject blocking or coordination
 // behavior into a specific finder unit.
 type blockingClient struct {
@@ -1735,9 +1736,9 @@ type blockingClient struct {
 	onCallStart func()
 }
 
-func (c *blockingClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *blockingClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *blockingClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *blockingClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if c.onCallStart != nil {
 		c.onCallStart()
 	}
@@ -1747,19 +1748,19 @@ func (c *blockingClient) Complete(ctx context.Context, req llm.Request) (llm.Res
 // dispatchRoute maps a system-prompt substring to a client.
 type dispatchRoute struct {
 	sub    string
-	client llm.Client
+	client llmkit.Client
 }
 
 // dispatchClient routes each Complete call to the first client whose sub
 // appears in the system prompt, or fallback if none match.
 type dispatchClient struct {
 	routes   []dispatchRoute
-	fallback llm.Client
+	fallback llmkit.Client
 }
 
-func (c *dispatchClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *dispatchClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *dispatchClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *dispatchClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	for _, r := range c.routes {
 		if strings.Contains(req.System, r.sub) {
 			return r.client.Complete(ctx, req)
@@ -1770,27 +1771,27 @@ func (c *dispatchClient) Complete(ctx context.Context, req llm.Request) (llm.Res
 
 // hookClient calls onCall before each Complete, then returns a fixed response.
 type hookClient struct {
-	onCall   func(req llm.Request)
+	onCall   func(req llmkit.Request)
 	response string
 }
 
-func (c *hookClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *hookClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *hookClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *hookClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if c.onCall != nil {
 		c.onCall(req)
 	}
 	if ctx.Err() != nil {
-		return llm.Response{}, ctx.Err()
+		return llmkit.Response{}, ctx.Err()
 	}
-	return llm.Response{
+	return llmkit.Response{
 		Text:       c.response,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: 100, OutputTokens: 50, CacheReadInputTokens: 60},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: 100, OutputTokens: 50, CacheReadInputTokens: 60},
 	}, nil
 }
 
-// concurrencyTrackingClient is a fake llm.Client that calls onEntry/onExit
+// concurrencyTrackingClient is a fake llmkit.Client that calls onEntry/onExit
 // hooks around each Complete call to let callers measure concurrent invocations.
 type concurrencyTrackingClient struct {
 	inner   *scriptedClient
@@ -1798,9 +1799,9 @@ type concurrencyTrackingClient struct {
 	onExit  func()
 }
 
-func (c *concurrencyTrackingClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *concurrencyTrackingClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *concurrencyTrackingClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *concurrencyTrackingClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	c.onEntry()
 	defer c.onExit()
 	return c.inner.Complete(ctx, req)
@@ -2387,7 +2388,7 @@ func TestSpendRecorder_CartographerChargesFinderPool(t *testing.T) {
 	rec := &spendRecorder{ctx: context.Background(), store: st}
 	b := newBudgetState(1000, rec, 1.0)
 	b.reserveForDownstream(0.7) // finder reserve 700, verify reserve 300
-	rec.Record(llm.UsageEvent{Role: roleCartographer, Usage: llm.Usage{InputTokens: 200}})
+	rec.Record(llmkit.UsageEvent{Role: roleCartographer, Usage: llmkit.Usage{InputTokens: 200}})
 	if got := b.finderPool.Spent(); got != 200 {
 		t.Errorf("finderPool charged %d, want 200 from cartographer spend", got)
 	}

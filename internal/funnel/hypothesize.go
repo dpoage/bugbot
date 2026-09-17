@@ -9,11 +9,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // hypothesize runs the finder stage: for each effective lens, run a finder
@@ -61,7 +62,7 @@ import (
 // than waiting for all units to finish. hypothesize blocks until all units
 // finish (so the caller can close candCh after return) and returns the total
 // candidate count (for stats) plus any fatal error.
-func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.Client, persona string, kind store.ScanKind, cc *ChangeContext, langs []ingest.Language, targets []string, seams []ingest.Seam, budget *budgetState, result *Result, fps map[string]string, touchCoverage bool, cart *cartography, emit func(Candidate)) (int, error) {
+func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llmkit.Client, persona string, kind store.ScanKind, cc *ChangeContext, langs []ingest.Language, targets []string, seams []ingest.Seam, budget *budgetState, result *Result, fps map[string]string, touchCoverage bool, cart *cartography, emit func(Candidate)) (int, error) {
 	if len(targets) == 0 && cc == nil {
 		return 0, nil
 	}
@@ -202,7 +203,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 	// dispatches MANY finder seats for a large repo, so a fully-broken provider
 	// takes (seats x ~4s) to surface MostFindersFailed instead of failing fast
 	// (observed ~45s+ even with a single lens). The breaker detects
-	// transport-level failures (llm.APIError with StatusCode==0 — the shape
+	// transport-level failures (llmkit.APIError with StatusCode==0 — the shape
 	// produced by openai/google/anthropic adapters for timeouts, connection
 	// resets, DNS failures) and aborts further launches once a threshold of
 	// concurrent transport failures is observed with zero finderOK successes.
@@ -350,7 +351,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			// callback writes through f.store and increments the shared atomic
 			// counter; f.store is concurrency-safe so multiple parallel units can
 			// post leads simultaneously.
-			postLeadTool := agent.NewPostLeadTool(u.lens.Name, allLensNames, func(targetLens, file string, line int, note string, confidence float64) error {
+			postLeadTool := agenttools.NewPostLeadTool(u.lens.Name, allLensNames, func(targetLens, file string, line int, note string, confidence float64) error {
 				if err := f.store.AddLead(ctx, store.Lead{
 					ScanRunID:  scanRunID,
 					PosterLens: u.lens.Name,
@@ -379,7 +380,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 			// cartography tools. See tools_package_context.go for the refuter-
 			// independence rationale. cart may be nil ("feature off") — the
 			// callbacks handle nil gracefully (clean miss / empty).
-			pkgContextTool := agent.NewPackageContextTool(func(pkg string) (string, bool, error) {
+			pkgContextTool := agenttools.NewPackageContextTool(func(pkg string) (string, bool, error) {
 				if cart == nil {
 					return "", false, nil
 				}
@@ -400,7 +401,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llm.C
 				}
 				return row.Summary, true, nil
 			})
-			pkgGraphTool := agent.NewPackageGraphTool(func(pkg, direction string) ([]string, []string, error) {
+			pkgGraphTool := agenttools.NewPackageGraphTool(func(pkg, direction string) ([]string, []string, error) {
 				if cart == nil {
 					return nil, nil, nil
 				}

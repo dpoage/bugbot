@@ -15,7 +15,7 @@ package tui
 // counter (sourceLoadGen) lets us discard stale completions exactly as
 // transcriptLoadedMsg uses detailKey.
 //
-// Path safety mirrors internal/agent/fsroot.go: repo-relative only, absolute
+// Path safety mirrors internal/agenttools/fsroot.go: repo-relative only, absolute
 // paths rejected, ".." escapes rejected, symlinks checked via EvalSymlinks on
 // existing prefixes.
 
@@ -98,7 +98,7 @@ type grepHit struct {
 // ── Path safety ──────────────────────────────────────────────────────────────
 
 // resolveSourcePath resolves a repo-relative path against root with the same
-// containment guarantees as internal/agent/fsroot.go: absolute inputs are
+// containment guarantees as internal/agenttools/fsroot.go: absolute inputs are
 // rejected, ".." escapes are rejected lexically and after symlink resolution.
 // Returns the absolute path or an error.
 func resolveSourcePath(root, rel string) (string, error) {

@@ -11,7 +11,7 @@ package funnel
 import (
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 )
 
 // TestCodeNavInjected_CloseDoesNotCloseNav checks that a funnel receiving a
@@ -20,7 +20,7 @@ func TestCodeNavInjected_CloseDoesNotCloseNav(t *testing.T) {
 	st, repo := openFixture(t)
 
 	// Build a real CodeNav pointing at the fixture repo.
-	nav, err := agent.NewCodeNav(repo.Root())
+	nav, err := agenttools.NewCodeNav(repo.Root())
 	if err != nil {
 		t.Fatalf("NewCodeNav: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestCodeNavSelfOwned_CloseClosesNav(t *testing.T) {
 func TestCodeNavInjected_NavField(t *testing.T) {
 	st, repo := openFixture(t)
 
-	nav, err := agent.NewCodeNav(repo.Root())
+	nav, err := agenttools.NewCodeNav(repo.Root())
 	if err != nil {
 		t.Fatalf("NewCodeNav: %v", err)
 	}

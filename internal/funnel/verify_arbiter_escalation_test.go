@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // arbiterPromptMarker is a stable substring of arbiterSystemPrompt used in
@@ -47,7 +47,7 @@ func TestM8z_ArbiterEscalation_EscalatesToArbiterClient(t *testing.T) {
 	// produces a split panel.
 	fakeVerifier := newScriptedClient()
 	callIdx := 0
-	fakeVerifier.on(func(_ llm.Request) bool {
+	fakeVerifier.on(func(_ llmkit.Request) bool {
 		cur := callIdx
 		callIdx++
 		return cur == 0

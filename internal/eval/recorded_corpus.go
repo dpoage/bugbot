@@ -8,9 +8,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/funnel"
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // DefaultRecordedDir is the conventional on-disk location of the committed
@@ -164,7 +164,7 @@ func loadRoleStore(caseDir, role string) (*RoleTranscriptStore, error) {
 	}
 	// Capabilities default to the zero value: the funnel's finder/verifier agents
 	// do not branch on capability flags, and replay matching is structure-based.
-	return NewRoleTranscriptStore(role, llm.Capabilities{}, sessions...), nil
+	return NewRoleTranscriptStore(role, llmkit.Capabilities{}, sessions...), nil
 }
 
 // effectiveChunkSize resolves the files-per-finder chunk size the funnel will

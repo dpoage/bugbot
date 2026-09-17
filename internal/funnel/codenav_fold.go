@@ -8,23 +8,23 @@ import (
 	"context"
 	"strings"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
 // codeNavRefs is the seam triage's code-nav root-cause fold uses to ask "what
 // references this symbol". Its signature exactly matches
-// (*agent.CodeNav).References, so *agent.CodeNav satisfies it with no
+// (*agenttools.CodeNav).References, so *agenttools.CodeNav satisfies it with no
 // adapter; tests stub it directly, without a real language server.
 type codeNavRefs interface {
-	References(ctx context.Context, file string, line int, symbol string) ([]agent.RefLocation, error)
+	References(ctx context.Context, file string, line int, symbol string) ([]agenttools.RefLocation, error)
 }
 
 // refCacheEntry memoizes one code-nav query's outcome (including a failure,
 // so a persistently erroring symbol is not re-queried within the same scan).
 type refCacheEntry struct {
-	locs []agent.RefLocation
+	locs []agenttools.RefLocation
 	err  error
 }
 
@@ -203,7 +203,7 @@ func (ts *triageState) codeNavRootCauseFold(ctx context.Context, st *store.Store
 // Called with the CANDIDATE's own enclosing file+declaration-line+symbol —
 // never per target — so a collision that checks N candidate targets still
 // issues at most one query.
-func (ts *triageState) refs(ctx context.Context, file string, line int, sym string) ([]agent.RefLocation, error) {
+func (ts *triageState) refs(ctx context.Context, file string, line int, sym string) ([]agenttools.RefLocation, error) {
 	key := file + "\x00" + itoa(line) + "\x00" + sym
 	if ts.refCache == nil {
 		ts.refCache = make(map[string]refCacheEntry)

@@ -138,7 +138,7 @@ func TestSpend_CacheTokenRollups(t *testing.T) {
 	run, _ := st.BeginScanRun(ctx, ScanSweep, "c1")
 	base := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
 
-	// InputTokens includes the cached subsets (llm.Usage convention).
+	// InputTokens includes the cached subsets (llmkit.Usage convention).
 	mustRecord(t, st, Spend{TS: base, ScanRunID: run, Role: "finder",
 		InputTokens: 100, OutputTokens: 20, CacheCreationTokens: 80})
 	mustRecord(t, st, Spend{TS: base.Add(time.Minute), ScanRunID: run, Role: "finder",

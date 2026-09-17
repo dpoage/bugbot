@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // --- helpers ----------------------------------------------------------------
@@ -27,12 +27,12 @@ func newLeadCaptureClient() *leadCaptureClient {
 	return &leadCaptureClient{inner: newScriptedClient()}
 }
 
-func (c *leadCaptureClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *leadCaptureClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *leadCaptureClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *leadCaptureClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	// Capture the first user message (the task) on each completion.
 	for _, m := range req.Messages {
-		if m.Role == llm.RoleUser {
+		if m.Role == llmkit.RoleUser {
 			c.mu.Lock()
 			c.tasks = append(c.tasks, m.Content)
 			c.mu.Unlock()
@@ -320,15 +320,15 @@ func newPostLeadToolCallClient(postLeadArgsJSON string) *postLeadToolCallClient 
 	}
 }
 
-func (c *postLeadToolCallClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *postLeadToolCallClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *postLeadToolCallClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *postLeadToolCallClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	c.mu.Lock()
 	n := c.used
 	c.used++
 	c.mu.Unlock()
 
-	usage := llm.Usage{
+	usage := llmkit.Usage{
 		InputTokens:          c.base.inUsage,
 		OutputTokens:         c.base.outUsage,
 		CacheReadInputTokens: c.base.cachedUsage,
@@ -337,10 +337,10 @@ func (c *postLeadToolCallClient) Complete(ctx context.Context, req llm.Request) 
 	// If the request contains a tool-result message, the tool call was already
 	// dispatched; return empty candidates so the pipeline completes.
 	for _, m := range req.Messages {
-		if m.Role == llm.RoleToolResult {
-			return llm.Response{
+		if m.Role == llmkit.RoleToolResult {
+			return llmkit.Response{
 				Text:       emptyCandidates,
-				StopReason: llm.StopEndTurn,
+				StopReason: llmkit.StopEndTurn,
 				Usage:      usage,
 			}, nil
 		}
@@ -348,21 +348,21 @@ func (c *postLeadToolCallClient) Complete(ctx context.Context, req llm.Request) 
 
 	// On the first call without a tool-result: emit the post_lead tool call.
 	if n == 0 {
-		return llm.Response{
-			ToolCalls: []llm.ToolCall{{
+		return llmkit.Response{
+			ToolCalls: []llmkit.ToolCall{{
 				ID:        "post-lead-1",
 				Name:      "post_lead",
 				Arguments: json.RawMessage(c.body),
 			}},
-			StopReason: llm.StopToolUse,
+			StopReason: llmkit.StopToolUse,
 			Usage:      usage,
 		}, nil
 	}
 
 	// Fallback: empty candidates.
-	return llm.Response{
+	return llmkit.Response{
 		Text:       emptyCandidates,
-		StopReason: llm.StopEndTurn,
+		StopReason: llmkit.StopEndTurn,
 		Usage:      usage,
 	}, nil
 }

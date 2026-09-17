@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
 )
 
-// transportErrorClient is a fake llm.Client whose Complete returns the same
-// transport-level *llm.APIError on every call: StatusCode==0, Kind=ErrServer
+// transportErrorClient is a fake llmkit.Client whose Complete returns the same
+// transport-level *llmkit.APIError on every call: StatusCode==0, Kind=ErrServer
 // (the exact shape produced by the openai / google / anthropic adapters for
 // non-HTTP errors — timeout, connection reset, DNS failure). It blocks every
 // call on a barrier that opens only once the test has released it, so the
@@ -29,7 +29,7 @@ type transportErrorClient struct {
 	inflight  atomic.Int32 // observed in-flight concurrency at peak
 	peak      atomic.Int32 // high-water mark of inflight
 	release   chan struct{}
-	transport *llm.APIError
+	transport *llmkit.APIError
 }
 
 func newTransportErrorClient() *transportErrorClient {
@@ -39,18 +39,18 @@ func newTransportErrorClient() *transportErrorClient {
 	}
 }
 
-func defaultTransportErr() *llm.APIError {
-	return &llm.APIError{
-		Kind:       llm.ErrServer,
+func defaultTransportErr() *llmkit.APIError {
+	return &llmkit.APIError{
+		Kind:       llmkit.ErrServer,
 		StatusCode: 0, // StatusCode==0 is the breaker-detection signal
 		Provider:   "fake",
 		Message:    "dial tcp: connection refused",
 	}
 }
 
-func (c *transportErrorClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *transportErrorClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *transportErrorClient) Complete(ctx context.Context, _ llm.Request) (llm.Response, error) {
+func (c *transportErrorClient) Complete(ctx context.Context, _ llmkit.Request) (llmkit.Response, error) {
 	now := c.inflight.Add(1)
 	defer c.inflight.Add(-1)
 	for {
@@ -68,9 +68,9 @@ func (c *transportErrorClient) Complete(ctx context.Context, _ llm.Request) (llm
 	select {
 	case <-c.release:
 	case <-ctx.Done():
-		return llm.Response{}, ctx.Err()
+		return llmkit.Response{}, ctx.Err()
 	}
-	return llm.Response{}, c.transport
+	return llmkit.Response{}, c.transport
 }
 
 func (c *transportErrorClient) callCount() int {
@@ -91,7 +91,7 @@ func (c *transportErrorClient) releaseAll() {
 // Stats.FinderAborted surfaces the abort reason distinctly from a normal
 // "all units ran and failed" run.
 //
-// Setup: the finder client returns the same *llm.APIError{StatusCode: 0,
+// Setup: the finder client returns the same *llmkit.APIError{StatusCode: 0,
 // Kind: ErrServer} on every call (the breaker-detection shape) and blocks
 // every call on a barrier that opens only AFTER the test has observed the
 // breaker trip. That ordering gives the test a stable trip signal: the
@@ -335,24 +335,26 @@ func TestHypothesize_TransportErrorAfterSuccessBreakerStaysDisarmed(t *testing.T
 // subsequent transport failures are observed with the breaker already disarmed.
 type firstSuccessThenTransportClient struct {
 	inner     *scriptedClient
-	transport *llm.APIError
+	transport *llmkit.APIError
 	n         atomic.Int32
 }
 
-func (c *firstSuccessThenTransportClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *firstSuccessThenTransportClient) Capabilities() llmkit.Capabilities {
+	return llmkit.Capabilities{}
+}
 
-func (c *firstSuccessThenTransportClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *firstSuccessThenTransportClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	if c.n.Add(1) == 1 {
 		return c.inner.Complete(ctx, req)
 	}
-	return llm.Response{}, c.transport
+	return llmkit.Response{}, c.transport
 }
 
 // TestIsTransportError pins the detection predicate in isolation: nil-safe,
-// matches *llm.APIError with StatusCode==0 (any Kind, including the
+// matches *llmkit.APIError with StatusCode==0 (any Kind, including the
 // adapter-style ErrServer/0 shape), and does NOT match StatusCode!=0 (a
 // genuine 5xx is NOT a transport failure and must not trip the breaker).
 // This is the breaker-detection keystone; if the predicate regressed, the
@@ -370,23 +372,23 @@ func TestIsTransportError(t *testing.T) {
 		},
 		{
 			name: "transport-shaped APIError (StatusCode=0, Kind=ErrServer)",
-			err:  &llm.APIError{Kind: llm.ErrServer, StatusCode: 0, Provider: "fake"},
+			err:  &llmkit.APIError{Kind: llmkit.ErrServer, StatusCode: 0, Provider: "fake"},
 			want: true,
 		},
 		{
 			name: "transport-shaped APIError (StatusCode=0, Kind=ErrOverloaded)",
-			err:  &llm.APIError{Kind: llm.ErrOverloaded, StatusCode: 0, Provider: "fake"},
+			err:  &llmkit.APIError{Kind: llmkit.ErrOverloaded, StatusCode: 0, Provider: "fake"},
 			want: true,
 		},
 		{
 			name: "genuine 5xx APIError (StatusCode!=0)",
-			err:  &llm.APIError{Kind: llm.ErrServer, StatusCode: 503, Provider: "fake"},
+			err:  &llmkit.APIError{Kind: llmkit.ErrServer, StatusCode: 503, Provider: "fake"},
 			want: false,
 		},
 		{
 			name: "rate-limit APIError (StatusCode=429) MUST NOT be classified as transport",
-			err: &llm.APIError{
-				Kind: llm.ErrRateLimited, StatusCode: 429, Provider: "fake",
+			err: &llmkit.APIError{
+				Kind: llmkit.ErrRateLimited, StatusCode: 429, Provider: "fake",
 			},
 			want: false,
 		},
@@ -398,7 +400,7 @@ func TestIsTransportError(t *testing.T) {
 		{
 			name: "wrapped transport APIError (errors.As chain) still detected",
 			err: func() error {
-				inner := &llm.APIError{Kind: llm.ErrServer, StatusCode: 0, Provider: "fake"}
+				inner := &llmkit.APIError{Kind: llmkit.ErrServer, StatusCode: 0, Provider: "fake"}
 				return wrappedErr{inner: inner}
 			}(),
 			want: true,
@@ -428,7 +430,7 @@ func (w wrappedErr) Unwrap() error { return w.inner }
 // regression here would silently mask transport errors as empty-output
 // runs, and the breaker would never trip.
 func TestClassifyFinderErr_TransportError(t *testing.T) {
-	transportErr := &llm.APIError{Kind: llm.ErrServer, StatusCode: 0, Provider: "fake"}
+	transportErr := &llmkit.APIError{Kind: llmkit.ErrServer, StatusCode: 0, Provider: "fake"}
 	cls := classifyFinderErr(nil, transportErr)
 	if cls != finderClassTransportError {
 		t.Errorf("classifyFinderErr(transport) = %q, want %q", cls, finderClassTransportError)
@@ -436,7 +438,7 @@ func TestClassifyFinderErr_TransportError(t *testing.T) {
 
 	// Rate-limit must still classify distinctly — it is NOT a transport
 	// error and the breaker must not count it.
-	rateLimitErr := &llm.APIError{Kind: llm.ErrRateLimited, StatusCode: 429, Provider: "fake"}
+	rateLimitErr := &llmkit.APIError{Kind: llmkit.ErrRateLimited, StatusCode: 429, Provider: "fake"}
 	cls = classifyFinderErr(nil, rateLimitErr)
 	if cls != finderClassRateLimited {
 		t.Errorf("classifyFinderErr(rate-limit) = %q, want %q", cls, finderClassRateLimited)
@@ -445,7 +447,7 @@ func TestClassifyFinderErr_TransportError(t *testing.T) {
 	// Genuine 5xx (StatusCode != 0) is NOT transport — it is a parse-style
 	// failure because the runner produced an error but it is not the
 	// breaker-detection shape.
-	serverErr := &llm.APIError{Kind: llm.ErrServer, StatusCode: 503, Provider: "fake"}
+	serverErr := &llmkit.APIError{Kind: llmkit.ErrServer, StatusCode: 503, Provider: "fake"}
 	cls = classifyFinderErr(nil, serverErr)
 	if cls == finderClassTransportError {
 		t.Errorf("classifyFinderErr(5xx) = %q, must not be transport (StatusCode!=0)", cls)

@@ -1131,7 +1131,7 @@ func TestEnvOverride_WorkspaceGrowthCeilingMB(t *testing.T) {
 }
 
 func TestDefault_LLMRequestTimeoutIsZero(t *testing.T) {
-	// Zero config defers to the LLM package default (llm.DefaultRequestTimeout).
+	// Zero config defers to the LLM package default (llmkit.DefaultRequestTimeout).
 	if got := Default().LLM.RequestTimeout; got != 0 {
 		t.Errorf("Default LLM.RequestTimeout = %s, want 0 (defer to LLM package default)", got)
 	}

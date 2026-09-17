@@ -7,11 +7,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // emitAgentFinished emits an agent-finished progress event with the run's
@@ -64,7 +65,7 @@ func emitFinderAgentFinished(scope progress.AgentScope, outcome *agent.Outcome, 
 // growth cache-safely. All tools are safe for concurrent use across parallel
 // agents; the code-navigation tools share the funnel's lazily-started
 // language-server manager, which Funnel.Close shuts down.
-func (f *Funnel) readOnlyTools(readCaps agent.ReadCaps) ([]agent.Tool, error) {
+func (f *Funnel) readOnlyTools(readCaps agenttools.ReadCaps) ([]agent.Tool, error) {
 	return f.readToolsWithRoots(readCaps, nil)
 }
 
@@ -75,7 +76,7 @@ func (f *Funnel) readOnlyTools(readCaps agent.ReadCaps) ([]agent.Tool, error) {
 // their per-seat read scope and token cost stay bounded; only the rare split
 // arbiter pays for dep-source reads. When depRoots is empty (a host without the
 // toolchain) the result is byte-identical to readOnlyTools.
-func (f *Funnel) readOnlyToolsWithDepRoots(readCaps agent.ReadCaps) ([]agent.Tool, error) {
+func (f *Funnel) readOnlyToolsWithDepRoots(readCaps agenttools.ReadCaps) ([]agent.Tool, error) {
 	return f.readToolsWithRoots(readCaps, f.depRoots)
 }
 
@@ -85,31 +86,31 @@ func (f *Funnel) readOnlyToolsWithDepRoots(readCaps agent.ReadCaps) ([]agent.Too
 // outside the repo resolves against the configured read-only source roots; the
 // rest of the set (list_dir, grep, git_blame, git_log, code-nav) is identical
 // and repo-rooted.
-func (f *Funnel) readToolsWithRoots(readCaps agent.ReadCaps, depRoots *agent.DepSourceRoots) ([]agent.Tool, error) {
+func (f *Funnel) readToolsWithRoots(readCaps agenttools.ReadCaps, depRoots *agenttools.DepSourceRoots) ([]agent.Tool, error) {
 	root := f.repo.Root()
 	var readFile agent.Tool
 	var err error
 	if depRoots != nil && depRoots.Len() > 0 {
-		readFile, err = agent.NewReadFileWithDepRoots(root, readCaps, depRoots)
+		readFile, err = agenttools.NewReadFileWithDepRoots(root, readCaps, depRoots)
 	} else {
-		readFile, err = agent.NewReadFileWithCaps(root, readCaps)
+		readFile, err = agenttools.NewReadFileWithCaps(root, readCaps)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("funnel: read_file tool: %w", err)
 	}
-	listDir, err := agent.NewListDir(root)
+	listDir, err := agenttools.NewListDir(root)
 	if err != nil {
 		return nil, fmt.Errorf("funnel: list_dir tool: %w", err)
 	}
-	grep, err := agent.NewGrep(root)
+	grep, err := agenttools.NewGrep(root)
 	if err != nil {
 		return nil, fmt.Errorf("funnel: grep tool: %w", err)
 	}
-	gitBlame, err := agent.NewGitBlame(root, nil)
+	gitBlame, err := agenttools.NewGitBlame(root, nil)
 	if err != nil {
 		return nil, fmt.Errorf("funnel: git_blame tool: %w", err)
 	}
-	gitLog, err := agent.NewGitLog(root, nil)
+	gitLog, err := agenttools.NewGitLog(root, nil)
 	if err != nil {
 		return nil, fmt.Errorf("funnel: git_log tool: %w", err)
 	}
@@ -211,7 +212,7 @@ func (f *Funnel) buildSandboxTool(c Candidate, sbExecs *atomic.Int32, sbMillis *
 		sbExecs.Add(1)
 		sbMillis.Add(d.Milliseconds())
 	}
-	return agent.NewSandboxExecTool(opts.Sandbox, f.repo.Root(), maxExec, f.deps.ROMounts, f.deps.Env, f.deps.SetupCmds, onExec)
+	return agenttools.NewSandboxExecTool(opts.Sandbox, f.repo.Root(), maxExec, f.deps.ROMounts, f.deps.Env, f.deps.SetupCmds, onExec)
 }
 
 // ensureDepPrefetch runs the one-time online dependency prefetch (only set for
@@ -268,7 +269,7 @@ func (f *Funnel) buildRunTestsTool(sbExecs *atomic.Int32, sbMillis *atomic.Int64
 		sbExecs.Add(1)
 		sbMillis.Add(d.Milliseconds())
 	}
-	return agent.NewRunTestsTool(
+	return agenttools.NewRunTestsTool(
 		opts.Sandbox,
 		f.repo.Root(),
 		baseCmd,

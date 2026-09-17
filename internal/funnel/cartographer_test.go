@@ -9,10 +9,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // cartographyFixture adds a sub-package "sub" with one file alongside the
@@ -352,18 +352,18 @@ type stringErr string
 
 func (e stringErr) Error() string { return string(e) }
 
-// errClient is an llm.Client that always errors on Complete. It is the
+// errClient is an llmkit.Client that always errors on Complete. It is the
 // cheapest way to exercise the graceful-degrade branch of cartograph
 // without standing up a fully scripted client that routes by system
 // prompt.
 type errClient struct{ err error }
 
-func (c *errClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
-func (c *errClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *errClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
+func (c *errClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
-	return llm.Response{}, c.err
+	return llmkit.Response{}, c.err
 }
 
 // TestCartography_StripsThinkBlock pins the fix for the reasoning-model

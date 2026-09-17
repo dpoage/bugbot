@@ -18,10 +18,10 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // cartographySummarySchema constrains the package-summary completion to a
@@ -124,7 +124,7 @@ func normalizeSummary(s string) string {
 // actually read (not skipped by the byte budget) emits a read_file start/done
 // pair; an unreadable file emits done with an Err. The summarize_package tool
 // brackets the entire RunJSON call.
-func (f *Funnel) summarizePackage(ctx context.Context, client llm.Client, budget *budgetState, pkg string, members []string, fps map[string]string) (string, error) {
+func (f *Funnel) summarizePackage(ctx context.Context, client llmkit.Client, budget *budgetState, pkg string, members []string, fps map[string]string) (string, error) {
 	if len(members) == 0 {
 		return "", errors.New("cartograph: empty members for package")
 	}
@@ -323,7 +323,7 @@ type CartographyReport struct {
 // cartographer LLM client; it is recorder-wrapped internally. Unlike the
 // in-scan pass this does NOT gate on a finder budget — a manual refresh runs to
 // completion — and it returns counts so the caller can report what happened.
-func (f *Funnel) RefreshCartography(ctx context.Context, client llm.Client) (CartographyReport, error) {
+func (f *Funnel) RefreshCartography(ctx context.Context, client llmkit.Client) (CartographyReport, error) {
 	var rep CartographyReport
 	if client == nil {
 		return rep, errors.New("cartographer: nil client")
@@ -352,7 +352,7 @@ func (f *Funnel) RefreshCartography(ctx context.Context, client llm.Client) (Car
 	}
 	rep.ScanRunID = runID
 	rec := &spendRecorder{ctx: ctx, store: f.store, scanRunID: runID}
-	cc := llm.WithRecorder(client, rec, roleCartographer, "", "")
+	cc := llmkit.WithRecorder(client, rec, roleCartographer, "", "")
 
 	pkgFingerprints := make(map[string]string, len(packages))
 	for pkg, members := range packages {

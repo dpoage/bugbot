@@ -15,8 +15,8 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // dedupCollisionPair returns two candidates at the same file, within
@@ -44,7 +44,7 @@ func dedupCollisionPair() (a, b Candidate) {
 
 // newDedupTriageState builds a triageState wired with a dedup arbiter backed
 // by client and cap, ready to process dedupCollisionPair-style candidates.
-func newDedupTriageState(t *testing.T, client llm.Client, cap int) (*triageState, *clusterRegistry, *store.Store) {
+func newDedupTriageState(t *testing.T, client llmkit.Client, cap int) (*triageState, *clusterRegistry, *store.Store) {
 	t.Helper()
 	st, repo := openFixture(t)
 	f, err := New(RoleClients{Finder: newScriptedClient(), Verifier: client}, st, repo, Options{})

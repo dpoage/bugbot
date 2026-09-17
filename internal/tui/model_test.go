@@ -11,9 +11,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/progress"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // fakeFeed is a test double for Feed: Next() is driven manually via

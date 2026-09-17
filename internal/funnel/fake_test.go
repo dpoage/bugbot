@@ -5,10 +5,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
 )
 
-// scriptedClient is a concurrency-safe fake llm.Client for funnel tests. It
+// scriptedClient is a concurrency-safe fake llmkit.Client for funnel tests. It
 // routes each request to a response by matching against the request's system
 // prompt and user message, so a single client instance can serve every lens's
 // finder agent (or every refuter) with distinct, deterministic output.
@@ -22,7 +22,7 @@ import (
 // output flip caps (via newScriptedClientWithCaps) so the client reports
 // StructuredOutput=true; otherwise the zero value is the historical default
 // (no caps, all behavior unchanged). The requests field records every
-// llm.Request the client sees so tests can assert on wire-level fields like
+// llmkit.Request the client sees so tests can assert on wire-level fields like
 // ResponseSchema and Tools without standing up a recorder.
 type scriptedClient struct {
 	mu          sync.Mutex
@@ -38,16 +38,16 @@ type scriptedClient struct {
 	// output flip this on via newScriptedClientWithCaps. Add (or set) only
 	// — never change a field's meaning — so existing tests keep their
 	// behavior.
-	caps llm.Capabilities
-	// requests records every llm.Request Complete sees, in arrival order.
+	caps llmkit.Capabilities
+	// requests records every llmkit.Request Complete sees, in arrival order.
 	// Lock-protected; tests inspect it via allRequests. The recording is
 	// purely additive: it does not change the response the client returns.
-	requests []llm.Request
+	requests []llmkit.Request
 }
 
 // route maps a request predicate to a JSON response body.
 type route struct {
-	match func(req llm.Request) bool
+	match func(req llmkit.Request) bool
 	body  string
 }
 
@@ -61,29 +61,29 @@ func newScriptedClient() *scriptedClient {
 // first use" rule and produce a client that deadlocks on its first
 // Lock). Use this for structured-output tests that need
 // StructuredOutput=true on a single client.
-func newScriptedClientWithCaps(caps llm.Capabilities) *scriptedClient {
+func newScriptedClientWithCaps(caps llmkit.Capabilities) *scriptedClient {
 	return &scriptedClient{inUsage: 100, outUsage: 50, cachedUsage: 60, caps: caps}
 }
 
 // on registers a route: when match returns true for a request, body is served.
 // Routes are evaluated in registration order; the first match wins.
-func (c *scriptedClient) on(match func(req llm.Request) bool, body string) *scriptedClient {
+func (c *scriptedClient) on(match func(req llmkit.Request) bool, body string) *scriptedClient {
 	c.routes = append(c.routes, route{match: match, body: body})
 	return c
 }
 
 // onSystemContains routes requests whose system prompt contains sub.
 func (c *scriptedClient) onSystemContains(sub, body string) *scriptedClient {
-	return c.on(func(req llm.Request) bool {
+	return c.on(func(req llmkit.Request) bool {
 		return strings.Contains(req.System, sub)
 	}, body)
 }
 
 // onTaskContains routes requests whose first user message contains sub.
 func (c *scriptedClient) onTaskContains(sub, body string) *scriptedClient {
-	return c.on(func(req llm.Request) bool {
+	return c.on(func(req llmkit.Request) bool {
 		for _, m := range req.Messages {
-			if m.Role == llm.RoleUser && strings.Contains(m.Content, sub) {
+			if m.Role == llmkit.RoleUser && strings.Contains(m.Content, sub) {
 				return true
 			}
 		}
@@ -91,11 +91,11 @@ func (c *scriptedClient) onTaskContains(sub, body string) *scriptedClient {
 	}, body)
 }
 
-func (c *scriptedClient) Capabilities() llm.Capabilities { return c.caps }
+func (c *scriptedClient) Capabilities() llmkit.Capabilities { return c.caps }
 
-func (c *scriptedClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *scriptedClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -112,10 +112,10 @@ func (c *scriptedClient) Complete(ctx context.Context, req llm.Request) (llm.Res
 	if body == "" {
 		body = emptyCandidates
 	}
-	return llm.Response{
+	return llmkit.Response{
 		Text:       body,
-		StopReason: llm.StopEndTurn,
-		Usage: llm.Usage{
+		StopReason: llmkit.StopEndTurn,
+		Usage: llmkit.Usage{
 			InputTokens: c.inUsage, OutputTokens: c.outUsage,
 			CacheReadInputTokens: c.cachedUsage,
 		},
@@ -131,10 +131,10 @@ func (c *scriptedClient) callCount() int {
 // allRequests returns a copy of the recorded requests, in arrival order.
 // Returned slice is detached from the client's internal state so the caller
 // can inspect it without holding the lock.
-func (c *scriptedClient) allRequests() []llm.Request {
+func (c *scriptedClient) allRequests() []llmkit.Request {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]llm.Request, len(c.requests))
+	out := make([]llmkit.Request, len(c.requests))
 	copy(out, c.requests)
 	return out
 }

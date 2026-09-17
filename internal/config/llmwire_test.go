@@ -8,7 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/provider"
 )
 
 // newWireServer creates a test HTTP server and returns its base URL.
@@ -51,11 +52,11 @@ func openaiTextBody(text string, inTok, outTok int64) string {
 	return string(b)
 }
 
-// simpleWireRequest returns a minimal llm.Request for use in wiring tests.
-func simpleWireRequest() llm.Request {
-	return llm.Request{
-		Messages: []llm.Message{
-			{Role: llm.RoleUser, Content: "hello"},
+// simpleWireRequest returns a minimal llmkit.Request for use in wiring tests.
+func simpleWireRequest() llmkit.Request {
+	return llmkit.Request{
+		Messages: []llmkit.Message{
+			{Role: llmkit.RoleUser, Content: "hello"},
 		},
 	}
 }
@@ -86,9 +87,9 @@ func TestResolveRole_MixedProviders(t *testing.T) {
 	t.Setenv("TEST_ANTHROPIC_KEY", "sk-ant-xxx")
 	t.Setenv("TEST_OPENAI_KEY", "sk-oai-xxx")
 
-	var recorded []llm.UsageEvent
-	rec := llm.RecorderFunc(func(ev llm.UsageEvent) { recorded = append(recorded, ev) })
-	opts := llm.Options{Recorder: rec}
+	var recorded []llmkit.UsageEvent
+	rec := llmkit.RecorderFunc(func(ev llmkit.UsageEvent) { recorded = append(recorded, ev) })
+	opts := provider.Options{Recorder: rec}
 
 	finder, err := ResolveRole(context.Background(), cfg, "finder", opts)
 	if err != nil {
@@ -119,7 +120,7 @@ func TestResolveRole_MixedProviders(t *testing.T) {
 	if len(recorded) != 2 {
 		t.Fatalf("recorded %d events, want 2", len(recorded))
 	}
-	byRole := map[string]llm.UsageEvent{}
+	byRole := map[string]llmkit.UsageEvent{}
 	for _, ev := range recorded {
 		byRole[ev.Role] = ev
 	}
@@ -133,7 +134,7 @@ func TestResolveRole_MixedProviders(t *testing.T) {
 
 func TestResolveRole_UnknownRole(t *testing.T) {
 	cfg := &Config{}
-	_, err := ResolveRole(context.Background(), cfg, "nonsense", llm.Options{})
+	_, err := ResolveRole(context.Background(), cfg, "nonsense", provider.Options{})
 	if err == nil {
 		t.Fatal("expected error for unknown role")
 	}
@@ -148,7 +149,7 @@ func TestResolveRole_MissingAPIKey(t *testing.T) {
 			Finder: RoleModel{Provider: "p", Model: "m"},
 		},
 	}
-	_, err := ResolveRole(context.Background(), cfg, "finder", llm.Options{})
+	_, err := ResolveRole(context.Background(), cfg, "finder", provider.Options{})
 	if err == nil {
 		t.Fatal("expected error when API key env var is unset")
 	}
@@ -176,16 +177,16 @@ func TestRoleModel_CartographerFallback(t *testing.T) {
 }
 
 // TestRetryConfigFor asserts the per-attempt request_timeout mapping from
-// config.LLM into llm.RetryConfig. Tests the unexported retryConfigFor helper
+// config.LLM into llmkit.RetryConfig. Tests the unexported retryConfigFor helper
 // directly, which is the unit that ResolveRole delegates to for retry wiring.
 func TestRetryConfigFor(t *testing.T) {
 	// Zero / omitted: must produce the LLM package default.
 	rc := retryConfigFor(&Config{})
-	if rc.RequestTimeout != llm.DefaultRequestTimeout {
-		t.Errorf("zero config: RequestTimeout = %v, want default %v", rc.RequestTimeout, llm.DefaultRequestTimeout)
+	if rc.RequestTimeout != llmkit.DefaultRequestTimeout {
+		t.Errorf("zero config: RequestTimeout = %v, want default %v", rc.RequestTimeout, llmkit.DefaultRequestTimeout)
 	}
-	if rc.MaxAttempts != llm.DefaultRetryConfig().MaxAttempts {
-		t.Errorf("zero config: MaxAttempts = %d, want default %d", rc.MaxAttempts, llm.DefaultRetryConfig().MaxAttempts)
+	if rc.MaxAttempts != llmkit.DefaultRetryConfig().MaxAttempts {
+		t.Errorf("zero config: MaxAttempts = %d, want default %d", rc.MaxAttempts, llmkit.DefaultRetryConfig().MaxAttempts)
 	}
 
 	// Explicit positive: the configured value must be the one returned.
@@ -195,13 +196,13 @@ func TestRetryConfigFor(t *testing.T) {
 		t.Errorf("explicit config: RequestTimeout = %v, want %v", rc.RequestTimeout, want)
 	}
 	// MaxAttempts must be the package default; only RequestTimeout is overridden.
-	if rc.MaxAttempts != llm.DefaultRetryConfig().MaxAttempts {
-		t.Errorf("explicit config: MaxAttempts = %d, want default %d (must not reset)", rc.MaxAttempts, llm.DefaultRetryConfig().MaxAttempts)
+	if rc.MaxAttempts != llmkit.DefaultRetryConfig().MaxAttempts {
+		t.Errorf("explicit config: MaxAttempts = %d, want default %d (must not reset)", rc.MaxAttempts, llmkit.DefaultRetryConfig().MaxAttempts)
 	}
 
 	// Negative timeout must not be applied (treated as zero/default).
 	rc = retryConfigFor(&Config{LLM: LLM{RequestTimeout: -1}})
-	if rc.RequestTimeout != llm.DefaultRequestTimeout {
-		t.Errorf("negative timeout: RequestTimeout = %v, want default %v", rc.RequestTimeout, llm.DefaultRequestTimeout)
+	if rc.RequestTimeout != llmkit.DefaultRequestTimeout {
+		t.Errorf("negative timeout: RequestTimeout = %v, want default %v", rc.RequestTimeout, llmkit.DefaultRequestTimeout)
 	}
 }

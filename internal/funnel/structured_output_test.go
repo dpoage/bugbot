@@ -6,14 +6,15 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // End-to-end boundary integration tests for bugbot-jwd. The mechanism that
-// threads each boundary's JSON schema through llm.Request.ResponseSchema
+// threads each boundary's JSON schema through llmkit.Request.ResponseSchema
 // (capability-gated) is implemented by gd3 + w88; these tests PROVE that
 // every declared schema (candidatesSchema, refutationSchema) reaches the
 // wire as ResponseSchema at its boundary when the client reports
@@ -30,7 +31,7 @@ import (
 // runFinderUnlimited executes runFinder against the fixture's first
 // lens with an unlimited (no-pool) budget so a successful completion is
 // never truncated by spend gating.
-func runFinderUnlimited(t *testing.T, finder llm.Client, tools []agent.Tool, f *Funnel) []Candidate {
+func runFinderUnlimited(t *testing.T, finder llmkit.Client, tools []agent.Tool, f *Funnel) []Candidate {
 	t.Helper()
 	ctx := context.Background()
 	// Unlimited budget: empty budgetState means a nil pool, so every
@@ -50,36 +51,36 @@ func runFinderUnlimited(t *testing.T, finder llm.Client, tools []agent.Tool, f *
 	return cands
 }
 
-// scriptedSequenceClient is a one-shot llm.Client that returns each of
+// scriptedSequenceClient is a one-shot llmkit.Client that returns each of
 // its scripted bodies exactly once (in order), then falls back to the
 // fallback body for any subsequent call. It records every
-// llm.Request so the boundary tests can assert on wire-level fields.
+// llmkit.Request so the boundary tests can assert on wire-level fields.
 // It is a STANDALONE client (not an embedding of scriptedClient) so its
 // recording mutex can be taken without recursing into
 // scriptedClient.Complete's own mu.Lock — a re-entrant attempt there
 // would deadlock on sync.Mutex's non-reentrant lock.
 type scriptedSequenceClient struct {
 	mu       sync.Mutex
-	caps     llm.Capabilities
+	caps     llmkit.Capabilities
 	bodies   []string
 	idx      int
 	fallback string
-	requests []llm.Request
+	requests []llmkit.Request
 }
 
 func newScriptedSequenceClient(fallback string, bodies ...string) *scriptedSequenceClient {
 	return &scriptedSequenceClient{
-		caps:     llm.Capabilities{StructuredOutput: true},
+		caps:     llmkit.Capabilities{StructuredOutput: true},
 		bodies:   bodies,
 		fallback: fallback,
 	}
 }
 
-func (c *scriptedSequenceClient) Capabilities() llm.Capabilities { return c.caps }
+func (c *scriptedSequenceClient) Capabilities() llmkit.Capabilities { return c.caps }
 
-func (c *scriptedSequenceClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *scriptedSequenceClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	c.mu.Lock()
 	c.requests = append(c.requests, req)
@@ -89,17 +90,17 @@ func (c *scriptedSequenceClient) Complete(ctx context.Context, req llm.Request) 
 		c.idx++
 	}
 	c.mu.Unlock()
-	return llm.Response{
+	return llmkit.Response{
 		Text:       body,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: 10, OutputTokens: 5},
 	}, nil
 }
 
-func (c *scriptedSequenceClient) allRequests() []llm.Request {
+func (c *scriptedSequenceClient) allRequests() []llmkit.Request {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]llm.Request, len(c.requests))
+	out := make([]llmkit.Request, len(c.requests))
 	copy(out, c.requests)
 	return out
 }
@@ -109,7 +110,7 @@ func (c *scriptedSequenceClient) allRequests() []llm.Request {
 // always pass one (cap-on, cap-off, scriptedSequenceClient, or a
 // placeholder newScriptedClient when only the verifier is under
 // test).
-func newFunnelForFinder(t *testing.T, finder llm.Client, verifier llm.Client) (*Funnel, []agent.Tool) {
+func newFunnelForFinder(t *testing.T, finder llmkit.Client, verifier llmkit.Client) (*Funnel, []agent.Tool) {
 	t.Helper()
 	st, repo := openFixture(t)
 	f, err := New(RoleClients{Finder: finder, Verifier: verifier}, st, repo, Options{
@@ -119,7 +120,7 @@ func newFunnelForFinder(t *testing.T, finder llm.Client, verifier llm.Client) (*
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatalf("readOnlyTools: %v", err)
 	}
@@ -131,7 +132,7 @@ func newFunnelForFinder(t *testing.T, finder llm.Client, verifier llm.Client) (*
 // ResponseSchema when the client reports StructuredOutput=true, and
 // the parsed candidates round-trip end-to-end.
 func TestStructuredOutput_FinderCarriesCandidatesSchema(t *testing.T) {
-	cap := newScriptedClientWithCaps(llm.Capabilities{StructuredOutput: true})
+	cap := newScriptedClientWithCaps(llmkit.Capabilities{StructuredOutput: true})
 	cap.fallback = candJSON(realCand)
 	f, tools := newFunnelForFinder(t, cap, newScriptedClient())
 
@@ -233,12 +234,12 @@ func TestStructuredOutput_RefuterCarriesRefutationSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatalf("readOnlyTools: %v", err)
 	}
 
-	verifier := newScriptedClientWithCaps(llm.Capabilities{StructuredOutput: true})
+	verifier := newScriptedClientWithCaps(llmkit.Capabilities{StructuredOutput: true})
 	verifier.fallback = notRefutedJSON
 
 	c := Candidate{
@@ -283,7 +284,7 @@ func TestStructuredOutput_RefuterNoCapPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatalf("readOnlyTools: %v", err)
 	}
@@ -314,7 +315,7 @@ func TestStructuredOutput_ArbiterCarriesArbiterSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatalf("readOnlyTools: %v", err)
 	}

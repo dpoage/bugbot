@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // SweepDrain re-ranks unswept open findings (this run's + any stranded by an
@@ -31,7 +31,7 @@ func (f *Funnel) SweepDrain(ctx context.Context) (*Result, error) {
 	result.ScanRunID = scanRunID
 
 	rec := &spendRecorder{ctx: ctx, store: f.store, scanRunID: scanRunID}
-	verifierClient := llm.WithRecorder(f.clients.Verifier, rec, roleVerifier, "", "")
+	verifierClient := llmkit.WithRecorder(f.clients.Verifier, rec, roleVerifier, "", "")
 	cacheWeight := f.opts.Budget.CacheReadBudgetWeight
 	budget := newBudgetState(f.opts.Budget.TokenBudget, rec, cacheWeight)
 

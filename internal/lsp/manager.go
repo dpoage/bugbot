@@ -263,7 +263,7 @@ func (m *Manager) Close() error {
 	// on BOTH the serverFor route (which only blocks NEW extensions) and the
 	// ErrConnDead retry route (which re-enters liveServer, where this gate
 	// fires). The error message contains "manager is closed" so
-	// shouldFallBack (internal/agent/tools_codenav_tiered.go) recognizes it.
+	// shouldFallBack (internal/agenttools/tools_codenav_tiered.go) recognizes it.
 	// We read m.closed and snapshot servers while holding m.mu, then drop it
 	// before taking each ms.mu — holding m.mu while taking ms.mu would invert
 	// the lock order taken by serverFor.

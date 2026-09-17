@@ -11,8 +11,8 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // ---------------------------------------------------------------------------
@@ -469,7 +469,7 @@ func TestSweep_KilledCandidate_PersistsDeadHypothesis(t *testing.T) {
 // subsequent calls until the context is cancelled. Thread-safe.
 // ---------------------------------------------------------------------------
 
-// gatingClient is a fake llm.Client that gates completions through a semaphore
+// gatingClient is a fake llmkit.Client that gates completions through a semaphore
 // channel. After the pre-loaded budget is consumed, the next Complete call
 // blocks (signalling blockedCh once) until ctx is cancelled. This lets the
 // test precisely control how many units complete before an interrupt.
@@ -492,11 +492,11 @@ func newGatingClient(inner *scriptedClient, allowed int) *gatingClient {
 	}
 }
 
-func (c *gatingClient) Capabilities() llm.Capabilities { return c.inner.Capabilities() }
+func (c *gatingClient) Capabilities() llmkit.Capabilities { return c.inner.Capabilities() }
 
-func (c *gatingClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *gatingClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	// Non-blocking try: if a slot is available, proceed immediately.
 	select {
@@ -512,7 +512,7 @@ func (c *gatingClient) Complete(ctx context.Context, req llm.Request) (llm.Respo
 	case <-c.gate:
 		return c.inner.Complete(ctx, req)
 	case <-ctx.Done():
-		return llm.Response{}, ctx.Err()
+		return llmkit.Response{}, ctx.Err()
 	}
 }
 
@@ -1184,12 +1184,12 @@ func TestInterruptMatrix_DoubleDrain_SweepDrain_Idempotent(t *testing.T) {
 // one row at any interrupt point regardless of scheduling.
 func finderOneChunkEmitsRealCand(c *scriptedClient) *scriptedClient {
 	const lens = "nil-safety/error-handling"
-	c.on(func(req llm.Request) bool {
+	c.on(func(req llmkit.Request) bool {
 		if !strings.Contains(req.System, lens) {
 			return false
 		}
 		for _, m := range req.Messages {
-			if m.Role == llm.RoleUser && strings.Contains(m.Content, "bug.go") {
+			if m.Role == llmkit.RoleUser && strings.Contains(m.Content, "bug.go") {
 				return true
 			}
 		}

@@ -5,22 +5,22 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
-// nopLLMClient is a minimal llm.Client stub satisfying repro.New's non-nil
+// nopLLMClient is a minimal llmkit.Client stub satisfying repro.New's non-nil
 // check. Its Complete is never expected to be called by these tests (they
 // only exercise construction — PlaybookOnce wiring — not a live agent run).
 type nopLLMClient struct{}
 
-func (nopLLMClient) Complete(context.Context, llm.Request) (llm.Response, error) {
-	return llm.Response{}, nil
+func (nopLLMClient) Complete(context.Context, llmkit.Request) (llmkit.Response, error) {
+	return llmkit.Response{}, nil
 }
-func (nopLLMClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (nopLLMClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-var _ llm.Client = nopLLMClient{}
+var _ llmkit.Client = nopLLMClient{}
 
 // TestBuildReproducerWithSandbox_WiresPlaybookOnce is the production-
 // reachability regression for bugbot-u2v5 (oracle review defect #1):

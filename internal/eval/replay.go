@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/dpoage/bugbot/internal/agent"
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // RoleTranscriptStore holds the ordered transcript recordings for ONE funnel
@@ -39,18 +39,18 @@ import (
 type RoleTranscriptStore struct {
 	role     string
 	sessions []*agent.Transcript
-	caps     llm.Capabilities
+	caps     llmkit.Capabilities
 }
 
 // NewRoleTranscriptStore builds a store from ordered recorded sessions for a
 // role. role is a label used only in error messages. caps is the capability
 // profile reported by the replay client (pass the recorded model's profile, or
 // the zero value if the code under test does not branch on capabilities).
-func NewRoleTranscriptStore(role string, caps llm.Capabilities, sessions ...*agent.Transcript) *RoleTranscriptStore {
+func NewRoleTranscriptStore(role string, caps llmkit.Capabilities, sessions ...*agent.Transcript) *RoleTranscriptStore {
 	return &RoleTranscriptStore{role: role, caps: caps, sessions: sessions}
 }
 
-// replayRoleClient is the llm.Client served to the funnel for a recorded role.
+// replayRoleClient is the llmkit.Client served to the funnel for a recorded role.
 // It detects each NEW agent run (a fresh runner always opens with a single
 // user-message conversation: no prior tool results) and, on that boundary,
 // advances to the next recorded session. Within a run it delegates to that
@@ -68,14 +68,14 @@ func newReplayRoleClient(store *RoleTranscriptStore) *replayRoleClient {
 	return &replayRoleClient{store: store}
 }
 
-func (c *replayRoleClient) Capabilities() llm.Capabilities { return c.store.caps }
+func (c *replayRoleClient) Capabilities() llmkit.Capabilities { return c.store.caps }
 
 // Complete serves the next recorded completion. On the first turn of a new
 // agent run (a request with no prior assistant/tool-result turns) it rolls over
 // to the next recorded session.
-func (c *replayRoleClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *replayRoleClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 
 	c.mu.Lock()
@@ -83,14 +83,14 @@ func (c *replayRoleClient) Complete(ctx context.Context, req llm.Request) (llm.R
 
 	if isRunStart(req) || c.active == nil {
 		if c.nextIdx >= len(c.store.sessions) {
-			return llm.Response{}, fmt.Errorf(
+			return llmkit.Response{}, fmt.Errorf(
 				"eval: %s replay exhausted: the run started agent run #%d but only %d session(s) were recorded; re-record or reduce the run's work (lenses/candidates)",
 				c.store.role, c.nextIdx+1, len(c.store.sessions))
 		}
 		tr := c.store.sessions[c.nextIdx]
 		rc, err := agent.NewReplayClient(tr, c.store.caps)
 		if err != nil {
-			return llm.Response{}, fmt.Errorf("eval: %s session %d: %w", c.store.role, c.nextIdx+1, err)
+			return llmkit.Response{}, fmt.Errorf("eval: %s session %d: %w", c.store.role, c.nextIdx+1, err)
 		}
 		c.active = rc
 		c.nextIdx++
@@ -98,7 +98,7 @@ func (c *replayRoleClient) Complete(ctx context.Context, req llm.Request) (llm.R
 
 	resp, err := c.active.Complete(ctx, req)
 	if err != nil {
-		return llm.Response{}, fmt.Errorf("eval: %s session %d diverged: %w", c.store.role, c.nextIdx, err)
+		return llmkit.Response{}, fmt.Errorf("eval: %s session %d diverged: %w", c.store.role, c.nextIdx, err)
 	}
 	return resp, nil
 }
@@ -107,13 +107,13 @@ func (c *replayRoleClient) Complete(ctx context.Context, req llm.Request) (llm.R
 // conversation has no assistant turns and no tool results yet, i.e. only the
 // initial user (task) message(s). A new runner always starts here, so this is
 // the boundary at which we advance to the next recorded session.
-func isRunStart(req llm.Request) bool {
+func isRunStart(req llmkit.Request) bool {
 	for _, m := range req.Messages {
-		if m.Role == llm.RoleAssistant || m.Role == llm.RoleToolResult {
+		if m.Role == llmkit.RoleAssistant || m.Role == llmkit.RoleToolResult {
 			return false
 		}
 	}
 	return true
 }
 
-var _ llm.Client = (*replayRoleClient)(nil)
+var _ llmkit.Client = (*replayRoleClient)(nil)

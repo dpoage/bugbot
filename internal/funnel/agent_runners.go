@@ -3,10 +3,11 @@ package funnel
 import (
 	"sync"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // budgetStopped reports whether outcome was truncated by a budget limit (the
@@ -59,7 +60,7 @@ func hasSandboxExec(tools []agent.Tool) bool {
 // agent.NewRunner(...) call sites (hypothesize.go:793, verify.go:68, verify.go:116)
 // so a future tweak — say a new per-stage hook, or a per-stage option split
 // for finding vs verifying — happens in one place.
-func (f *Funnel) newAgentRunner(client llm.Client, tools []agent.Tool, systemPrompt string, limits agent.Limits, extra ...agent.Option) *agent.Runner {
+func (f *Funnel) newAgentRunner(client llmkit.Client, tools []agent.Tool, systemPrompt string, limits agent.Limits, extra ...agent.Option) *agent.Runner {
 	opts := []agent.Option{
 		agent.WithLimits(limits),
 		agent.WithMaxTokens(DefaultMaxOutputTokens),
@@ -95,7 +96,7 @@ func (f *Funnel) maybeStatusNoteTool(scope progress.AgentScope) agent.Tool {
 	if !f.opts.Features.StatusNotes {
 		return nil
 	}
-	return agent.NewStatusNoteTool(func(act agent.ToolActivity) {
+	return agenttools.NewStatusNoteTool(func(act agent.ToolActivity) {
 		scope.EmitToolCall(act.Phase, act.Tool, act.File, act.Line, act.EndLine, act.Symbol, act.Pattern, act.Count, act.Err)
 	})
 }
@@ -152,7 +153,7 @@ func (f *Funnel) maybeReportToolIssueTool(result *Result, role, label string) ag
 	if !f.opts.Features.ToolComplaints {
 		return nil
 	}
-	return agent.NewReportToolIssueTool(func(tool string, sev domain.Severity, summary string) error {
+	return agenttools.NewReportToolIssueTool(func(tool string, sev domain.Severity, summary string) error {
 		f.recordToolIssue(result, "agent", tool, string(sev), summary, role, label)
 		return nil
 	})

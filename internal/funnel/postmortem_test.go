@@ -5,19 +5,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
-// newRateLimitErr constructs an *llm.APIError with Kind == llm.ErrRateLimited,
+// newRateLimitErr constructs an *llmkit.APIError with Kind == llmkit.ErrRateLimited,
 // matching the shape produced by openaiAdapter.normalizeErr (openai.go lines
 // 208-220): errors.As on an *openai.Error sets kind = ErrRateLimited when the
 // status is 429, then newAPIError wraps it. The Kind field drives errors.Is
 // via APIError.Unwrap (errors.go lines 62-69). Only exported fields are set
 // here; the unexported inner err field is nil, which Unwrap handles safely.
 func newRateLimitErr(msg string) error {
-	return &llm.APIError{
-		Kind:       llm.ErrRateLimited,
+	return &llmkit.APIError{
+		Kind:       llmkit.ErrRateLimited,
 		StatusCode: 429,
 		Provider:   "openai",
 		Message:    msg,
@@ -30,13 +30,13 @@ func outcomeWithText(text string) *agent.Outcome {
 }
 
 // TestClassifyFinderErr_RateLimit verifies that a rate-limit error
-// (llm.ErrRateLimited sentinel) is classified as finderClassRateLimited even
+// (llmkit.ErrRateLimited sentinel) is classified as finderClassRateLimited even
 // when the model also produced non-empty output (the error dominates).
 func TestClassifyFinderErr_RateLimit(t *testing.T) {
 	err := newRateLimitErr("rate limit exceeded, retry after 60s")
 	// Verify the error satisfies the sentinel so the test is meaningful.
-	if !errors.Is(err, llm.ErrRateLimited) {
-		t.Fatal("test setup: newRateLimitErr did not produce an error satisfying llm.ErrRateLimited")
+	if !errors.Is(err, llmkit.ErrRateLimited) {
+		t.Fatal("test setup: newRateLimitErr did not produce an error satisfying llmkit.ErrRateLimited")
 	}
 
 	// A non-budget outcome (Truncated=false) paired with a rate-limit error.

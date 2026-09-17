@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
 )
@@ -243,7 +243,7 @@ func TestWiring_NonGoRepo_RefuterPromptLacksGoMust(t *testing.T) {
 		Lens: "nil-safety/error-handling", File: "src/foo.cc", Line: 10,
 		Title: "test", Description: "test", Severity: "high", Evidence: "test",
 	}
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestWiring_GoRepo_RefuterPromptHasMust(t *testing.T) {
 		Lens: "nil-safety/error-handling", File: "pkg/foo.go", Line: 10,
 		Title: "test", Description: "test", Severity: "high", Evidence: "test",
 	}
-	tools, err := f.readOnlyTools(agent.ReadCaps{})
+	tools, err := f.readOnlyTools(agenttools.ReadCaps{})
 	if err != nil {
 		t.Fatal(err)
 	}

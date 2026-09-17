@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // finderStatus classifies a finder run's parse outcome so the funnel can tell a
@@ -33,7 +33,7 @@ const (
 	// expected budget stop, not a reliability failure.
 	finderBudgetStopped
 	// finderRateLimited means the finder exhausted retries against a
-	// rate-limiting provider (llm.ErrRateLimited). Coverage is incomplete but
+	// rate-limiting provider (llmkit.ErrRateLimited). Coverage is incomplete but
 	// recoverable by lowering --concurrency or re-running — NOT lost like a
 	// genuine parse failure, so this status is excluded from FinderFailures
 	// and from the reliability gate.
@@ -60,7 +60,7 @@ const (
 // from persona+lens+langs and uses the lens name as the progress label. Test code
 // calls this directly; production code calls runFinderWithPrompt after composing
 // the strategy-aware system prompt.
-func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent.Tool, persona string, l Lens, langs []ingest.Language, task string, budget *budgetState) ([]Candidate, finderStatus, *finderPostmortem, error) {
+func (f *Funnel) runFinder(ctx context.Context, finder llmkit.Client, tools []agent.Tool, persona string, l Lens, langs []ingest.Language, task string, budget *budgetState) ([]Candidate, finderStatus, *finderPostmortem, error) {
 	sysprompt := finderSystemPrompt(persona, l, langs)
 	start := time.Now()
 	// One AgentScope for the whole run, threaded through runFinderWithPrompt so
@@ -104,7 +104,7 @@ func (f *Funnel) runFinder(ctx context.Context, finder llm.Client, tools []agent
 // (hypothesize) can fold it into the Detail field of the
 // recordFinderUnitWithTimeDetail call. This keeps the recording at a single
 // site and avoids threading a store reference into this function.
-func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState, startedAt time.Time, scope progress.AgentScope, extraOpts ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, *rawTraversal, error) {
+func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llmkit.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState, startedAt time.Time, scope progress.AgentScope, extraOpts ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, *rawTraversal, error) {
 	// attempt runs one finder pass: it builds the runner (layering any
 	// per-attempt options on top of the standard finder set), runs RunJSON, and
 	// maps the result into candidates or a classified failure + postmortem. It
@@ -133,7 +133,7 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 			//
 			// In both cases, build a postmortem capturing the classification, the
 			// underlying err (which carries the classified provider error — e.g. 429 +
-			// Retry-After from llm.APIError — or the parse error message), and the raw
+			// Retry-After from llmkit.APIError — or the parse error message), and the raw
 			// model output head. err is intentionally NOT discarded here; it flows into
 			// the postmortem so the next real failure is diagnosable from stored data.
 			pm := buildFinderPostmortem(outcome, err)
@@ -147,7 +147,7 @@ func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llm.Client, too
 			// inflates FinderFailures or trips the SCAN RELIABILITY WARNING; the
 			// postmortem already carries Class=finderClassRateLimited via
 			// classifyFinderErr.
-			if errors.Is(err, llm.ErrRateLimited) {
+			if errors.Is(err, llmkit.ErrRateLimited) {
 				return nil, finderRateLimited, outcome, &pm, nil, nil
 			}
 			return nil, finderParseFailed, outcome, &pm, nil, nil
@@ -193,7 +193,7 @@ const finderRetryMaxOutputTokens = 2 * DefaultMaxOutputTokens
 // shouldRetryFinderCap reports whether a finder pass that produced no candidates
 // should be retried once at the doubled per-completion output cap. It fires only
 // for the bugbot-rwe failure mode: a parse failure whose proximate cause was the
-// per-completion max-tokens cap — Outcome.LastStopReason == llm.StopMaxTokens, the
+// per-completion max-tokens cap — Outcome.LastStopReason == llmkit.StopMaxTokens, the
 // canonical cap-truncation signal also used by truncationNote. It rejects budget
 // stops (no headroom to retry), rate limits (recover by lowering concurrency),
 // non-truncated malformed JSON (a bigger cap would not help), and a nil outcome.
@@ -201,13 +201,13 @@ func shouldRetryFinderCap(status finderStatus, outcome *agent.Outcome, err error
 	if status != finderParseFailed {
 		return false
 	}
-	if outcome == nil || outcome.LastStopReason != llm.StopMaxTokens {
+	if outcome == nil || outcome.LastStopReason != llmkit.StopMaxTokens {
 		return false
 	}
 	if budgetStopped(outcome) {
 		return false
 	}
-	return !errors.Is(err, llm.ErrRateLimited)
+	return !errors.Is(err, llmkit.ErrRateLimited)
 }
 
 // finderFailureClass is a coarse classification of why a finder failed to
@@ -218,7 +218,7 @@ type finderFailureClass string
 
 const (
 	// finderClassRateLimited means the provider returned a 429 / rate-limit
-	// response (llm.ErrRateLimited) after all retry attempts were exhausted.
+	// response (llmkit.ErrRateLimited) after all retry attempts were exhausted.
 	finderClassRateLimited finderFailureClass = "rate-limited"
 	// finderClassEmptyOutput means the model returned an empty text body — no
 	// think blocks, no JSON, nothing parseable.
@@ -230,7 +230,7 @@ const (
 	// budget pool or the run's own token budget before producing parseable JSON.
 	finderClassBudgetStop finderFailureClass = "budget-stop"
 	// finderClassTransportError means the provider was unreachable: a
-	// transport / connection failure surfaced as an *llm.APIError with
+	// transport / connection failure surfaced as an *llmkit.APIError with
 	// StatusCode==0 (the shape produced by the openai / google / anthropic
 	// adapters for non-HTTP errors — timeout, connection reset, DNS failure).
 	// Distinct from rate-limit (the provider is reachable but throttling) and
@@ -281,14 +281,14 @@ type finderPostmortem struct {
 const finderPostmortemRawCap = 4 * 1024
 
 // classifyFinderErr maps the underlying runner error to a finderFailureClass.
-// It uses errors.Is against llm.ErrRateLimited (the sentinel produced by
-// llm.APIError.Unwrap when the provider returned a 429). The outcome and err
+// It uses errors.Is against llmkit.ErrRateLimited (the sentinel produced by
+// llmkit.APIError.Unwrap when the provider returned a 429). The outcome and err
 // are both nil-safe.
 func classifyFinderErr(outcome *agent.Outcome, err error) finderFailureClass {
 	if budgetStopped(outcome) {
 		return finderClassBudgetStop
 	}
-	if err != nil && errors.Is(err, llm.ErrRateLimited) {
+	if err != nil && errors.Is(err, llmkit.ErrRateLimited) {
 		return finderClassRateLimited
 	}
 	if isTransportError(err) {
@@ -310,20 +310,20 @@ func classifyFinderErr(outcome *agent.Outcome, err error) finderFailureClass {
 }
 
 // isTransportError reports whether err represents a transport / connection
-// failure: an *llm.APIError with StatusCode==0 (the shape produced by the
+// failure: an *llmkit.APIError with StatusCode==0 (the shape produced by the
 // openai / google / anthropic adapters for non-HTTP errors — timeouts,
 // connection resets, DNS failures). Both the bare
 // "APIError{Kind: ErrServer, StatusCode: 0}" shape and any other
 // APIError{StatusCode: 0} variant match (Kind may be ErrServer, ErrOverloaded,
 // or any unrecognized transport-level failure surfaced through the adapter).
-// Distinct from rate-limit (errors.Is(err, llm.ErrRateLimited) — provider
+// Distinct from rate-limit (errors.Is(err, llmkit.ErrRateLimited) — provider
 // reachable, throttling) and from parse failures (no error from the runner at
 // all). nil-safe.
 func isTransportError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var apiErr *llm.APIError
+	var apiErr *llmkit.APIError
 	if errors.As(err, &apiErr) {
 		return apiErr.StatusCode == 0
 	}

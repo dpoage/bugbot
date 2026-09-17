@@ -8,8 +8,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
+	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // --- detectTestCmd -----------------------------------------------------------
@@ -211,12 +212,12 @@ func TestHasRunTests_FindsTool(t *testing.T) {
 	}
 	// A tool with a different name must not be detected.
 	sb := &fakeRunTestsSandbox{}
-	notRunTests := agent.NewSandboxExecTool(sb, "/repo", 1, nil, nil, nil, nil)
+	notRunTests := agenttools.NewSandboxExecTool(sb, "/repo", 1, nil, nil, nil, nil)
 	if hasRunTests([]agent.Tool{notRunTests}) {
 		t.Error("hasRunTests([sandbox_exec]) = true, want false")
 	}
 	// A RunTestsTool must be detected.
-	rt := agent.NewRunTestsTool(sb, "/repo", []string{"go", "test", "./..."}, 1, nil, nil, nil, nil)
+	rt := agenttools.NewRunTestsTool(sb, "/repo", []string{"go", "test", "./..."}, 1, nil, nil, nil, nil)
 	if !hasRunTests([]agent.Tool{rt}) {
 		t.Error("hasRunTests([run_tests]) = false, want true")
 	}

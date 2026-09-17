@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dpoage/bugbot/internal/agent"
-	"github.com/dpoage/bugbot/internal/llm"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 )
 
 // Stable substrings used to classify a saved transcript by the funnel role that
@@ -16,7 +16,7 @@ import (
 //
 // The agent transcript records each request's MESSAGES but NOT the request's
 // System field (see agent.Runner.Run: it records `messages`, while the system
-// prompt rides on llm.Request.System separately). So we cannot classify by the
+// prompt rides on llmkit.Request.System separately). So we cannot classify by the
 // finder/verifier SYSTEM prompt — it is not persisted. We classify instead by
 // the first USER message, which IS recorded: the funnel seeds every finder run
 // with finderTask(...) and every verifier run with verifierTask(...) (see
@@ -77,7 +77,7 @@ func firstUserMessage(tr *agent.Transcript) (string, bool) {
 			continue
 		}
 		for _, m := range ev.Messages {
-			if m.Role == llm.RoleUser {
+			if m.Role == llmkit.RoleUser {
 				return m.Content, true
 			}
 		}

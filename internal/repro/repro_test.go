@@ -12,10 +12,10 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // planBody renders a Plan as the JSON the agent would emit.
@@ -583,14 +583,14 @@ func TestAttempt_RevisionContinuesInvestigation(t *testing.T) {
 	round2 := reqs[2]
 	sawToolCall, sawToolResult := false, false
 	for _, m := range round2.Messages {
-		if m.Role == llm.RoleAssistant {
+		if m.Role == llmkit.RoleAssistant {
 			for _, tc := range m.ToolCalls {
 				if tc.Name == "read_file" {
 					sawToolCall = true
 				}
 			}
 		}
-		if m.Role == llm.RoleToolResult && m.ToolCallID == "c1" {
+		if m.Role == llmkit.RoleToolResult && m.ToolCallID == "c1" {
 			sawToolResult = true
 		}
 	}
@@ -1025,7 +1025,7 @@ func TestNewValidation(t *testing.T) {
 
 // TestNewRunner_IncludesCodeNavTools asserts that the tool list passed to the
 // runner includes both the read-only baseline tools and the code-nav tools
-// from agent.CodeNav. Because Runner does not expose its tool set, we verify
+// from agenttools.CodeNav. Because Runner does not expose its tool set, we verify
 // the composition at the source: readOnlyTools gives the baseline 3, and
 // r.nav.Tools() gives the code-nav tools, and newRunner appends them.
 func TestNewRunner_IncludesCodeNavTools(t *testing.T) {

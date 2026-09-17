@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // cancellingClient simulates an operator interrupt landing mid-attempt: the
@@ -17,11 +17,11 @@ type cancellingClient struct {
 	cancel context.CancelFunc
 }
 
-func (c *cancellingClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *cancellingClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *cancellingClient) Complete(ctx context.Context, _ llm.Request) (llm.Response, error) {
+func (c *cancellingClient) Complete(ctx context.Context, _ llmkit.Request) (llmkit.Response, error) {
 	c.cancel()
-	return llm.Response{}, ctx.Err()
+	return llmkit.Response{}, ctx.Err()
 }
 
 // TestPromoteOne_InterruptReleasesClaim pins the interrupt-vs-crash split: a

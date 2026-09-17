@@ -23,8 +23,8 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/store"
+	llmkit "github.com/dpoage/llmkit"
 )
 
 // DefaultReconcileCap is the per-cycle cap on LLM dedup-arbiter invocations
@@ -152,7 +152,7 @@ func (f *Funnel) ReconcileDedup(ctx context.Context, cap int) (*Result, error) {
 	result.ScanRunID = scanRunID
 
 	rec := &spendRecorder{ctx: ctx, store: f.store, scanRunID: scanRunID}
-	verifierClient := llm.WithRecorder(f.clients.Verifier, rec, roleVerifier, "", "")
+	verifierClient := llmkit.WithRecorder(f.clients.Verifier, rec, roleVerifier, "", "")
 	cacheWeight := f.opts.Budget.CacheReadBudgetWeight
 	budget := newBudgetState(f.opts.Budget.TokenBudget, rec, cacheWeight)
 

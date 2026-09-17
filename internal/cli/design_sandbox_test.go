@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/agent"
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/llm"
 	"github.com/dpoage/bugbot/internal/repro"
+	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 	"gopkg.in/yaml.v3"
 )
 
@@ -151,27 +151,27 @@ func TestSandboxProposalSchemaValid(t *testing.T) {
 
 // ── agent tier: fake client + mock sandbox (env_error → ok) ──────────────────
 
-// scriptedLLMClient is a minimal scripted llm.Client for design_sandbox tests.
+// scriptedLLMClient is a minimal scripted llmkit.Client for design_sandbox tests.
 type scriptedLLMClient struct {
 	bodies []string
 	idx    int
 }
 
-func (c *scriptedLLMClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
-func (c *scriptedLLMClient) Complete(_ context.Context, _ llm.Request) (llm.Response, error) {
+func (c *scriptedLLMClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
+func (c *scriptedLLMClient) Complete(_ context.Context, _ llmkit.Request) (llmkit.Response, error) {
 	body := "{}"
 	if c.idx < len(c.bodies) {
 		body = c.bodies[c.idx]
 	}
 	c.idx++
-	return llm.Response{
+	return llmkit.Response{
 		Text:       body,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: 5, OutputTokens: 5},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: 5, OutputTokens: 5},
 	}, nil
 }
 
-var _ llm.Client = (*scriptedLLMClient)(nil)
+var _ llmkit.Client = (*scriptedLLMClient)(nil)
 
 // verifyFn is the injected verifier type for agent-tier tests.
 type verifyFn func(context.Context, string, candidateBlock) (repro.SmokeVerdict, error)
