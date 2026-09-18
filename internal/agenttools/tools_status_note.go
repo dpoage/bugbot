@@ -3,8 +3,8 @@ package agenttools
 import (
 	"context"
 	"encoding/json"
-	"strings"
 
+	"github.com/dpoage/bugbot/internal/progress"
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
 )
@@ -15,18 +15,18 @@ import (
 // Scan.StatusNotes config flag (off by default).
 //
 // On invocation the note is routed through the activity sink as a
-// [agent.ToolActivity]{Tool="status_note", Phase="done", Symbol=<note>}, which the
+// [progress.ToolActivity]{Tool="status_note", Phase="done", Symbol=<note>}, which the
 // progress seam converts to a KindToolCall event visible in the pane and
 // status.json.
 type statusNoteTool struct {
 	// sink routes the sanitized note to the progress system.
-	sink func(act agent.ToolActivity)
+	sink func(act progress.ToolActivity)
 }
 
 // NewStatusNoteTool builds the status_note Tool bound to sink. sink must be
-// non-nil; it is invoked with an [agent.ToolActivity]{Tool="status_note"} each time the
+// non-nil; it is invoked with a [progress.ToolActivity]{Tool="status_note"} each time the
 // agent calls the tool. The returned Tool satisfies [agent.Tool].
-func NewStatusNoteTool(sink func(act agent.ToolActivity)) agent.Tool {
+func NewStatusNoteTool(sink func(act progress.ToolActivity)) agent.Tool {
 	return statusNoteTool{sink: sink}
 }
 
@@ -58,14 +58,11 @@ func (s statusNoteTool) Run(_ context.Context, args json.RawMessage) (string, er
 		return "", err
 	}
 
-	// Sanitize: collapse whitespace to a single line, truncate to 120 runes.
-	note := strings.Join(strings.Fields(params.Note), " ")
-	runes := []rune(note)
-	if len(runes) > 120 {
-		note = string(runes[:119]) + "…"
-	}
+	// Same sanitize rule the progress extractor applies when it derives
+	// status_note activity from the call args — one owner, see SanitizeNote.
+	note := progress.SanitizeNote(params.Note)
 
-	s.sink(agent.ToolActivity{
+	s.sink(progress.ToolActivity{
 		Phase:  "done",
 		Tool:   "status_note",
 		Symbol: note,

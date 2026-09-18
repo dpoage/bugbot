@@ -78,7 +78,7 @@ func firstUserMessage(tr *agent.Transcript) (string, bool) {
 		}
 		for _, m := range ev.Messages {
 			if m.Role == llmkit.RoleUser {
-				return m.Content, true
+				return m.Text(), true
 			}
 		}
 	}

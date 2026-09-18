@@ -8,16 +8,17 @@ import (
 
 // AgentScope is the shared, opt-in observability seam for a single agent run.
 // It brackets the run with KindAgentStarted / KindAgentFinished and routes
-// per-call structured activity — derived from the runner's tool calls (via
-// agent.WithActivitySink) and from the optional status_note tool — to the sink
+// per-call structured activity — derived from the runner's tool lifecycle
+// hooks (AgentScope.Hooks, wired via agent.WithHooks) and from the optional
+// status_note tool — to the sink
 // as KindToolCall events. Every pipeline stage that drives an agent.Runner
 // (finder, verifier, cartographer, reproducer, patch-prover, severity sweep)
 // wires the SAME plumbing through this type, so each surfaces identically in
 // `bugbot status` and the live pane.
 //
-// AgentScope is the single bridge between the agent layer (which speaks only in
-// plain func(ToolActivity) callbacks and knows nothing of progress) and the
-// progress event stream (which knows nothing of agents). Keeping the bridge
+// AgentScope is the single bridge between the agent layer (which reports only
+// raw tool lifecycle events and knows nothing of progress) and the progress
+// event stream (which knows nothing of agents). Keeping the bridge
 // here means the role/label → event mapping is defined once, not re-derived
 // per stage.
 //
@@ -41,7 +42,7 @@ type AgentScope struct {
 }
 
 // NewAgentScope binds a scope to (role, label) on sink WITHOUT emitting
-// anything. Call Start to emit the agent-started bracket; call EmitToolCall on
+// anything. Call Start to emit the agent-started bracket; call EmitActivity on
 // its own when the started/finished bracket is emitted elsewhere (e.g. a runner
 // option built before the agent's own start/finish lifecycle is known).
 //
@@ -81,12 +82,13 @@ func (s AgentScope) Start() AgentScope {
 	return s
 }
 
-// EmitToolCall emits a KindToolCall event for this agent. The flat fields map
-// directly from agent.ToolActivity (the funnel builds the func(ToolActivity)
-// bridge so progress need not import the agent package). An empty tool name is
-// dropped: a KindToolCall event requires Tool to be non-empty.
-func (s AgentScope) EmitToolCall(phase, tool, file string, line, endLine int, symbol, pattern string, count int, errStr string) {
-	if tool == "" {
+// EmitActivity emits a KindToolCall event for this agent from a structured
+// ToolActivity — the single emission seam shared by AgentScope.Hooks (the
+// runner's tool lifecycle), the status_note tool's sink, and manual emitters
+// like the cartographer. An empty Tool is dropped: a KindToolCall event
+// requires Tool to be non-empty.
+func (s AgentScope) EmitActivity(act ToolActivity) {
+	if act.Tool == "" {
 		return
 	}
 	Emit(s.sink, Event{
@@ -94,15 +96,15 @@ func (s AgentScope) EmitToolCall(phase, tool, file string, line, endLine int, sy
 		Role:    s.role,
 		Label:   s.label,
 		AgentID: s.id,
-		Phase:   phase,
-		Tool:    tool,
-		File:    file,
-		Line:    line,
-		EndLine: endLine,
-		Symbol:  symbol,
-		Pattern: pattern,
-		Count:   count,
-		Err:     errStr,
+		Phase:   act.Phase,
+		Tool:    act.Tool,
+		File:    act.File,
+		Line:    act.Line,
+		EndLine: act.EndLine,
+		Symbol:  act.Symbol,
+		Pattern: act.Pattern,
+		Count:   act.Count,
+		Err:     act.Err,
 	})
 }
 

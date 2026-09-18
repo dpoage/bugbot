@@ -364,7 +364,7 @@ func (s accSink) Handle(ev progress.Event) { s.acc.Apply(ev) }
 //
 // Pre-fix (B1): cartographer_regen.go's Finish call built its own fresh
 // progress.NewAgentScope(...).Finish(...) instead of reusing the scope Start
-// and every EmitToolCall used — a DIFFERENT AgentID, so
+// and every EmitActivity used — a DIFFERENT AgentID, so
 // progress.AgentEventKey(finishedEvent) missed the roster entry Started
 // keyed under, leaking it in ActiveAgents forever (every cartographer
 // package regen leaks one entry). This test demonstrably fails on that

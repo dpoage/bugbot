@@ -34,7 +34,7 @@ func (c *leadCaptureClient) Complete(ctx context.Context, req llmkit.Request) (l
 	for _, m := range req.Messages {
 		if m.Role == llmkit.RoleUser {
 			c.mu.Lock()
-			c.tasks = append(c.tasks, m.Content)
+			c.tasks = append(c.tasks, m.Text())
 			c.mu.Unlock()
 			break
 		}

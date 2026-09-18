@@ -249,7 +249,7 @@ func TestStructuredOutput_RefuterCarriesRefutationSchema(t *testing.T) {
 		Title: "real bug for refuter test",
 	}
 	budget := &budgetState{}
-	verdicts, _, _, failed, stopped, err := f.runRefuters(ctx, verifier, tools, "senior Go engineer", c, 1, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title))
+	verdicts, _, _, failed, stopped, err := f.runRefuters(ctx, verifier, tools, "senior Go engineer", c, 1, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title), toolHealthRouting{})
 	if err != nil {
 		t.Fatalf("runRefuters: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestStructuredOutput_RefuterNoCapPassthrough(t *testing.T) {
 
 	c := Candidate{Lens: "l", File: "f.go", Line: 1, Title: "t"}
 	budget := &budgetState{}
-	if _, _, _, _, _, err := f.runRefuters(ctx, verifier, tools, "engineer", c, 1, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title)); err != nil {
+	if _, _, _, _, _, err := f.runRefuters(ctx, verifier, tools, "engineer", c, 1, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title), toolHealthRouting{}); err != nil {
 		t.Fatalf("runRefuters: %v", err)
 	}
 	for i, r := range verifier.allRequests() {
@@ -327,7 +327,7 @@ func TestStructuredOutput_ArbiterCarriesArbiterSchema(t *testing.T) {
 	c := Candidate{Lens: "l", File: "f.go", Line: 1, Title: "split candidate"}
 	budget := &budgetState{}
 	scope := progress.NewAgentScope(nil, progress.RoleVerifier, c.Title)
-	verdicts, seats, _, _, _, err := f.runRefuters(ctx, verifier, tools, "engineer", c, 2, budget, scope)
+	verdicts, seats, _, _, _, err := f.runRefuters(ctx, verifier, tools, "engineer", c, 2, budget, scope, toolHealthRouting{})
 	if err != nil {
 		t.Fatalf("runRefuters: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestStructuredOutput_ArbiterCarriesArbiterSchema(t *testing.T) {
 		t.Fatalf("expected split verdict, got %+v", verdicts)
 	}
 
-	av, _, _, aerr := f.runArbiter(ctx, verifier, tools, "engineer", c, verdicts, seats, budget, scope)
+	av, _, _, aerr := f.runArbiter(ctx, verifier, tools, "engineer", c, verdicts, seats, budget, scope, toolHealthRouting{})
 	if aerr != nil {
 		t.Fatalf("runArbiter: %v", aerr)
 	}
@@ -360,8 +360,8 @@ func TestStructuredOutput_ArbiterCarriesArbiterSchema(t *testing.T) {
 	}
 	// Sanity: the arbiter task message is in the user content of
 	// the last request.
-	if !strings.Contains(arbiterReq.Messages[0].Content, "PANEL VERDICTS") {
-		t.Errorf("arbiter user message did not contain PANEL VERDICTS marker:\n%s", arbiterReq.Messages[0].Content)
+	if !strings.Contains(arbiterReq.Messages[0].Text(), "PANEL VERDICTS") {
+		t.Errorf("arbiter user message did not contain PANEL VERDICTS marker:\n%s", arbiterReq.Messages[0].Text())
 	}
 	// Tools are intentionally NOT asserted for the arbiter here:
 	// unlike the repair path (which is the documented "tools-less

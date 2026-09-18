@@ -568,7 +568,7 @@ func (c *taskRecordingClient) Complete(ctx context.Context, req llmkit.Request) 
 	for _, m := range req.Messages {
 		if m.Role == llmkit.RoleUser {
 			c.mu.Lock()
-			c.msgs = append(c.msgs, m.Content)
+			c.msgs = append(c.msgs, m.Text())
 			c.mu.Unlock()
 			break
 		}

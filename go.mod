@@ -7,7 +7,7 @@ require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/dpoage/llmkit v0.1.0
+	github.com/dpoage/llmkit v0.2.0
 	github.com/muesli/termenv v0.16.0
 	github.com/odvcencio/gotreesitter v0.20.2
 	github.com/spf13/cobra v1.10.2

@@ -220,9 +220,8 @@ func TestSandboxExecTool_InfraError_IsToolError(t *testing.T) {
 	if !errors.As(err, &he) {
 		t.Fatalf("infra error must be a *ToolHealthError, got %T: %v", err, err)
 	}
-	if he.Severity != agent.SeverityHigh {
-		t.Errorf("severity = %q, want high", he.Severity)
-	}
+	// Severity no longer rides on ToolHealthError (removed in llmkit yr7.1);
+	// the funnel classifies every objective infra failure as "high" on its side.
 	if he.Reason != "sandbox runtime unavailable" {
 		t.Errorf("reason = %q, want %q", he.Reason, "sandbox runtime unavailable")
 	}
