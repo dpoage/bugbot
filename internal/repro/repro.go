@@ -680,7 +680,7 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 	}
 	tools = append(tools, r.nav.Tools()...)
 	if r.opts.StatusNotes {
-		tools = append(tools, agenttools.NewStatusNoteTool(toolActivitySink(scope)))
+		tools = append(tools, agenttools.NewStatusNoteTool(statusNoteSink(scope)))
 	}
 	// get_package_context lets the agent pull any package's cartographer summary
 	// (e.g. the repo's test package) to learn the build/test layout cheaply,
@@ -1184,13 +1184,13 @@ func hasCmdFlag(argv []string, name string) bool {
 	return false
 }
 
-// toolActivitySink builds the func(progress.ToolActivity) callback for
-// agenttools.NewStatusNoteTool, routing the status_note tool's structured
-// activity through scope.EmitToolCall so it surfaces as a KindToolCall
+// statusNoteSink builds the func(progress.ToolActivity) callback for
+// agenttools.NewStatusNoteTool, routing the status_note tool's own structured
+// activity through scope.EmitActivity so it surfaces as a KindToolCall
 // progress event. (Automatic tool-call activity flows through
 // agent.WithHooks(scope.Hooks()) — see progress.AgentScope.Hooks.)
-func toolActivitySink(scope progress.AgentScope) func(progress.ToolActivity) {
+func statusNoteSink(scope progress.AgentScope) func(progress.ToolActivity) {
 	return func(act progress.ToolActivity) {
-		scope.EmitToolCall(act.Phase, act.Tool, act.File, act.Line, act.EndLine, act.Symbol, act.Pattern, act.Count, act.Err)
+		scope.EmitActivity(act)
 	}
 }

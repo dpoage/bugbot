@@ -135,7 +135,7 @@ func (f *Funnel) runVerifyAndPersist(
 	// minted BEFORE any tool is built so the status_note tool, every seat's
 	// tool-call activity (runRefuters/runArbiter thread this SAME scope), and
 	// the eventual Finish all carry the run's AgentID — see
-	// agent_runners.go's activityHooksFor doc (bugbot-r7ub).
+	// agent_runners.go's hooksFor doc (bugbot-r7ub).
 	scope := progress.NewAgentScope(sink, progress.RoleVerifier, c.Title).Start()
 	if prefErr := f.ensureDepPrefetch(ctx); prefErr != nil {
 		f.note(result, fmt.Sprintf("sandbox dependency prefetch failed: %v — sandbox_exec disabled", prefErr))

@@ -3,7 +3,6 @@ package agenttools
 import (
 	"context"
 	"encoding/json"
-	"strings"
 
 	"github.com/dpoage/bugbot/internal/progress"
 	llmkit "github.com/dpoage/llmkit"
@@ -59,12 +58,9 @@ func (s statusNoteTool) Run(_ context.Context, args json.RawMessage) (string, er
 		return "", err
 	}
 
-	// Sanitize: collapse whitespace to a single line, truncate to 120 runes.
-	note := strings.Join(strings.Fields(params.Note), " ")
-	runes := []rune(note)
-	if len(runes) > 120 {
-		note = string(runes[:119]) + "…"
-	}
+	// Same sanitize rule the progress extractor applies when it derives
+	// status_note activity from the call args — one owner, see SanitizeNote.
+	note := progress.SanitizeNote(params.Note)
 
 	s.sink(progress.ToolActivity{
 		Phase:  "done",

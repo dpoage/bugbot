@@ -10,7 +10,7 @@ import (
 )
 
 // ToolActivity describes one tool-call execution, as routed through
-// AgentScope.EmitToolCall as a KindToolCall event. bugbot owns this type: the
+// AgentScope.EmitActivity as a KindToolCall event. bugbot owns this type: the
 // runner (llmkit/agent) delivers raw tool lifecycle events and consumers do
 // their own tool-name to structured-activity mapping.
 //
@@ -26,15 +26,15 @@ import (
 //   - list_dir       → File (the directory path)
 //   - run_tests      → File (package/dir), Symbol (summary label)
 //   - sandbox_exec   → Symbol ("sandbox")
-//   - status_note    → Tool="status_note", Symbol (the note text, truncated)
+//   - status_note    → Tool="status_note", Symbol (the sanitized note text)
 //   - write_repro_file/delete_repro_file → File (the repo-relative path)
 //   - workspace      → Symbol (the argv joined with spaces, truncated)
 //   - post_lead      → (no extra fields)
 //   - unknown        → Tool (name only)
 //
-// Count is set on Phase="done": for grep it is the hit count; for
-// find_references/find_usages it is the reference count; for read_file it is
-// the number of lines read. Zero when the tool does not produce a count.
+// Count is set on Phase="done" for grep only: the newline-separated hit
+// count. Every other tool reports 0 (line counts are expensive to compute
+// and not worth it for observability).
 //
 // Err is the tool error string on Phase="done", or "" on success.
 type ToolActivity struct {
@@ -53,7 +53,7 @@ type ToolActivity struct {
 	Symbol string
 	// Pattern is the grep regex.
 	Pattern string
-	// Count is the result count (hits, refs, lines) on Phase="done".
+	// Count is the result count (grep hits) on Phase="done".
 	Count int
 	// Err is the tool error string on Phase="done", or "" on success.
 	Err string
@@ -62,21 +62,19 @@ type ToolActivity struct {
 // Hooks returns the agent.Hooks that route a runner's tool lifecycle through
 // this scope as KindToolCall events: ToolStart emits a Phase="start" event
 // before each Tool.Run, ToolEnd a Phase="done" event after it carrying the
-// result count (on success) or the error text (on failure — the same
-// "ERROR: "-prefixed string the model sees). Wire with agent.WithHooks(scope.Hooks()).
+// grep hit count (on success) or the error text (on failure — the same
+// "ERROR: "-prefixed string the model sees). Wire with
+// agent.WithHooks(scope.Hooks()).
 //
 // The hooks are safe for concurrent use (with agent.WithParallelTools they
 // fire from per-call goroutines): they only read the call arguments and
-// AgentScope.EmitToolCall is concurrency-safe.
+// AgentScope.EmitActivity is concurrency-safe.
 func (s AgentScope) Hooks() agent.Hooks {
-	emit := func(act ToolActivity) {
-		s.EmitToolCall(act.Phase, act.Tool, act.File, act.Line, act.EndLine, act.Symbol, act.Pattern, act.Count, act.Err)
-	}
 	return agent.Hooks{
 		ToolStart: func(ctx context.Context, ev agent.ToolEvent) {
 			act := extractToolActivity(ev.Call)
 			act.Phase = "start"
-			emit(act)
+			s.EmitActivity(act)
 		},
 		ToolEnd: func(ctx context.Context, ev agent.ToolEvent) {
 			act := extractToolActivity(ev.Call)
@@ -86,9 +84,23 @@ func (s AgentScope) Hooks() agent.Hooks {
 			} else {
 				act.Count = countFromResult(ev.Call.Name, ev.Result)
 			}
-			emit(act)
+			s.EmitActivity(act)
 		},
 	}
+}
+
+// SanitizeNote normalizes a status_note's free text for display: whitespace
+// collapsed to single spaces and truncation to 120 runes with a trailing
+// ellipsis. It is the single owner of that rule — the status_note tool
+// sanitizes the note it emits activity for with the same function, so the
+// tool's own emission and the extractor's derived one always agree.
+func SanitizeNote(s string) string {
+	note := strings.Join(strings.Fields(s), " ")
+	runes := []rune(note)
+	if len(runes) > 120 {
+		return string(runes[:119]) + "…"
+	}
+	return note
 }
 
 // extractToolActivity maps one LLM tool call to a ToolActivity with all
@@ -164,13 +176,9 @@ func extractToolActivity(call llmkit.ToolCall) ToolActivity {
 	case "sandbox_exec":
 		act.Symbol = "sandbox"
 	case "status_note":
-		// Note text is truncated to 120 runes (same as statusNoteTool.Run).
-		note := strings.Join(strings.Fields(args.Note), " ")
-		runes := []rune(note)
-		if len(runes) > 120 {
-			note = string(runes[:119]) + "…"
-		}
-		act.Symbol = note
+		// Same sanitize rule the status_note tool applies to its own
+		// emission — see SanitizeNote.
+		act.Symbol = SanitizeNote(args.Note)
 	case "write_repro_file", "delete_repro_file":
 		act.File = args.Path
 	case "workspace":

@@ -110,15 +110,15 @@ func (f *Funnel) hooksFor(scope progress.AgentScope, health toolHealthRouting) a
 // true, or nil when the flag is off. Callers append the non-nil result to
 // their tool slice before building the runner; when nil, the tool is absent
 // and the tool set is byte-identical to the pre-feature state. The tool's
-// notes flow through the SAME AgentScope EmitToolCall seam as automatic
-// tool-call events (see activityHooksFor's doc on scope identity), so manual
+// notes flow through the SAME AgentScope EmitActivity seam as automatic
+// tool-call events (see hooksFor's doc on scope identity), so manual
 // and derived activity render identically and fold under the same AgentID.
 func (f *Funnel) maybeStatusNoteTool(scope progress.AgentScope) agent.Tool {
 	if !f.opts.Features.StatusNotes {
 		return nil
 	}
 	return agenttools.NewStatusNoteTool(func(act progress.ToolActivity) {
-		scope.EmitToolCall(act.Phase, act.Tool, act.File, act.Line, act.EndLine, act.Symbol, act.Pattern, act.Count, act.Err)
+		scope.EmitActivity(act)
 	})
 }
 

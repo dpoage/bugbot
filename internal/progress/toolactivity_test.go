@@ -199,3 +199,26 @@ func TestAgentScopeHooks_ToolLifecycle(t *testing.T) {
 		t.Errorf("failed event = %+v, want run_tests done with the error text in Err", failed)
 	}
 }
+
+// TestSanitizeNote pins the status_note display rule — whitespace collapsed to
+// single spaces, truncation to 120 runes with a trailing ellipsis — and that
+// the extractor's derived status_note activity uses the SAME rule as the
+// helper (one owner; a divergence here would make the tool's own emission and
+// the hook-derived one disagree).
+func TestSanitizeNote(t *testing.T) {
+	if got := SanitizeNote("  checking   for\tnil derefs\n"); got != "checking for nil derefs" {
+		t.Errorf("SanitizeNote collapse = %q, want %q", got, "checking for nil derefs")
+	}
+	if got, want := SanitizeNote(strings.Repeat("a", 200)), strings.Repeat("a", 119)+"…"; got != want {
+		t.Errorf("SanitizeNote truncation = %d runes, want %d (119 runes + ellipsis)",
+			len([]rune(got)), len([]rune(want)))
+	}
+	if got := SanitizeNote(""); got != "" {
+		t.Errorf("SanitizeNote empty = %q, want empty", got)
+	}
+	note := strings.Repeat("x", 200)
+	call := llmkit.ToolCall{Name: "status_note", Arguments: []byte(`{"note":"` + note + `"}`)}
+	if got := extractToolActivity(call).Symbol; got != SanitizeNote(note) {
+		t.Errorf("extractor Symbol disagrees with SanitizeNote on a long note")
+	}
+}

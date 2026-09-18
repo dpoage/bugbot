@@ -42,7 +42,7 @@ type AgentScope struct {
 }
 
 // NewAgentScope binds a scope to (role, label) on sink WITHOUT emitting
-// anything. Call Start to emit the agent-started bracket; call EmitToolCall on
+// anything. Call Start to emit the agent-started bracket; call EmitActivity on
 // its own when the started/finished bracket is emitted elsewhere (e.g. a runner
 // option built before the agent's own start/finish lifecycle is known).
 //
@@ -82,12 +82,13 @@ func (s AgentScope) Start() AgentScope {
 	return s
 }
 
-// EmitToolCall emits a KindToolCall event for this agent. The flat fields map
-// directly from ToolActivity (progress.AgentScope.Hooks and the funnel's
-// status_note bridge build it). An empty tool name is
-// dropped: a KindToolCall event requires Tool to be non-empty.
-func (s AgentScope) EmitToolCall(phase, tool, file string, line, endLine int, symbol, pattern string, count int, errStr string) {
-	if tool == "" {
+// EmitActivity emits a KindToolCall event for this agent from a structured
+// ToolActivity — the single emission seam shared by AgentScope.Hooks (the
+// runner's tool lifecycle), the status_note tool's sink, and manual emitters
+// like the cartographer. An empty Tool is dropped: a KindToolCall event
+// requires Tool to be non-empty.
+func (s AgentScope) EmitActivity(act ToolActivity) {
+	if act.Tool == "" {
 		return
 	}
 	Emit(s.sink, Event{
@@ -95,15 +96,15 @@ func (s AgentScope) EmitToolCall(phase, tool, file string, line, endLine int, sy
 		Role:    s.role,
 		Label:   s.label,
 		AgentID: s.id,
-		Phase:   phase,
-		Tool:    tool,
-		File:    file,
-		Line:    line,
-		EndLine: endLine,
-		Symbol:  symbol,
-		Pattern: pattern,
-		Count:   count,
-		Err:     errStr,
+		Phase:   act.Phase,
+		Tool:    act.Tool,
+		File:    act.File,
+		Line:    act.Line,
+		EndLine: act.EndLine,
+		Symbol:  act.Symbol,
+		Pattern: act.Pattern,
+		Count:   act.Count,
+		Err:     act.Err,
 	})
 }
 

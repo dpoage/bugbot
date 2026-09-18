@@ -366,7 +366,7 @@ func (p *PatchProver) newRunner(scope progress.AgentScope) (*agent.Runner, error
 		return nil, err
 	}
 	if p.statusNotes {
-		tools = append(tools, agenttools.NewStatusNoteTool(toolActivitySink(scope)))
+		tools = append(tools, agenttools.NewStatusNoteTool(statusNoteSink(scope)))
 	}
 	var opts []agent.Option
 	opts = append(opts, agent.WithLimits(p.agentLimits))
