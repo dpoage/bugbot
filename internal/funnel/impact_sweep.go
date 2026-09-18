@@ -468,7 +468,7 @@ func adjudicateImpact(
 	// observability (no per-turn tool-call activity to report).
 	label := fmt.Sprintf("%d findings", len(entries))
 	// One AgentScope for the whole call so Start/Finish share the run's
-	// AgentID (see agent_runners.go's activitySinkFor doc, bugbot-r7ub).
+	// AgentID (see agent_runners.go's hooksFor doc, bugbot-r7ub).
 	scope := progress.NewAgentScope(sink, progress.RoleSeverity, label).Start()
 	runner := agent.NewRunner(client, nil, impactAdjSystemPrompt)
 	var resp impactAdjResponse

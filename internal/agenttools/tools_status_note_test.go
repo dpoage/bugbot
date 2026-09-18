@@ -6,14 +6,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/llmkit/agent"
 )
 
 // TestStatusNoteTool_Basic verifies the happy path: a valid note is sanitized,
 // routed to the sink, and returns "noted" to the model.
 func TestStatusNoteTool_Basic(t *testing.T) {
-	var got agent.ToolActivity
-	tool := NewStatusNoteTool(func(act agent.ToolActivity) { got = act })
+	var got progress.ToolActivity
+	tool := NewStatusNoteTool(func(act progress.ToolActivity) { got = act })
 
 	result, err := tool.Run(context.Background(), json.RawMessage(`{"note":"checking for nil pointer dereferences"}`))
 	if err != nil {
@@ -36,8 +37,8 @@ func TestStatusNoteTool_Basic(t *testing.T) {
 // TestStatusNoteTool_SanitizesMultiline verifies that a multi-line note is
 // collapsed to a single line (newlines → single spaces).
 func TestStatusNoteTool_SanitizesMultiline(t *testing.T) {
-	var got agent.ToolActivity
-	tool := NewStatusNoteTool(func(act agent.ToolActivity) { got = act })
+	var got progress.ToolActivity
+	tool := NewStatusNoteTool(func(act progress.ToolActivity) { got = act })
 
 	_, err := tool.Run(context.Background(), json.RawMessage(`{"note":"line one\nline two\r\nline three"}`))
 	if err != nil {
@@ -55,8 +56,8 @@ func TestStatusNoteTool_SanitizesMultiline(t *testing.T) {
 // runes is truncated and ends with the ellipsis rune.
 func TestStatusNoteTool_TruncatesLongNote(t *testing.T) {
 	long := strings.Repeat("a", 200)
-	var got agent.ToolActivity
-	tool := NewStatusNoteTool(func(act agent.ToolActivity) { got = act })
+	var got progress.ToolActivity
+	tool := NewStatusNoteTool(func(act progress.ToolActivity) { got = act })
 
 	_, err := tool.Run(context.Background(), json.RawMessage(`{"note":"`+long+`"}`))
 	if err != nil {
@@ -74,7 +75,7 @@ func TestStatusNoteTool_TruncatesLongNote(t *testing.T) {
 // TestStatusNoteTool_BadArgs verifies that malformed JSON args return an error
 // (so the runner surfaces it as a tool error, not a panic).
 func TestStatusNoteTool_BadArgs(t *testing.T) {
-	tool := NewStatusNoteTool(func(agent.ToolActivity) {})
+	tool := NewStatusNoteTool(func(progress.ToolActivity) {})
 	_, err := tool.Run(context.Background(), json.RawMessage(`not-json`))
 	if err == nil {
 		t.Error("expected error on malformed args, got nil")
@@ -82,7 +83,7 @@ func TestStatusNoteTool_BadArgs(t *testing.T) {
 }
 
 func TestStatusNoteTool_Def(t *testing.T) {
-	tool := NewStatusNoteTool(func(agent.ToolActivity) {})
+	tool := NewStatusNoteTool(func(progress.ToolActivity) {})
 	def := tool.Def()
 	if def.Name != "status_note" {
 		t.Errorf("tool name = %q, want %q", def.Name, "status_note")
@@ -108,7 +109,7 @@ func TestNewStatusNoteTool_PresentOnlyWhenFlagOn(t *testing.T) {
 	for _, tc := range calls {
 		var tools []agent.Tool
 		if tc.flagOn {
-			tools = append(tools, NewStatusNoteTool(func(agent.ToolActivity) {}))
+			tools = append(tools, NewStatusNoteTool(func(progress.ToolActivity) {}))
 		}
 		found := false
 		for _, tool := range tools {

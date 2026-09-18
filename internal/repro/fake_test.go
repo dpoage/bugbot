@@ -82,7 +82,7 @@ func (c *scriptedClient) taskText(n int) string {
 	text := ""
 	for _, m := range reqs[n].Messages {
 		if m.Role == llmkit.RoleUser {
-			text = m.Content
+			text = m.Text()
 		}
 	}
 	return text

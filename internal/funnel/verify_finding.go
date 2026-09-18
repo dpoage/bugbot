@@ -67,9 +67,9 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd domain.Finding) (refuted
 	// VerifyFinding brackets no Started/Finished (it is a cheap standalone
 	// re-check, not a roster-visible run — matches pre-bugbot-r7ub behavior).
 	// The scope is still minted so every seat's tool-call activity shares ONE
-	// AgentID instead of a fresh one per seat (see activitySinkFor's doc).
+	// AgentID instead of a fresh one per seat (see hooksFor's doc).
 	scope := progress.NewAgentScope(f.opts.Progress, progress.RoleVerifier, fnd.Title)
-	verdicts, seatNames, _, _, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, persona, c, n, &budgetState{}, scope)
+	verdicts, seatNames, _, _, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, persona, c, n, &budgetState{}, scope, toolHealthRouting{})
 	if err != nil {
 		return false, "", err
 	}

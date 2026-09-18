@@ -6,13 +6,13 @@ import (
 	"time"
 )
 
-// TestAgentScope_StartEmitToolCallFinish verifies the full lifecycle emits the
-// bracketing events with the scope's role/label, and that EmitToolCall produces
+// TestAgentScope_StartEmitActivityFinish verifies the full lifecycle emits the
+// bracketing events with the scope's role/label, and that EmitActivity produces
 // a KindToolCall event.
-func TestAgentScope_StartEmitToolCallFinish(t *testing.T) {
+func TestAgentScope_StartEmitActivityFinish(t *testing.T) {
 	var rec recordingSink
 	scope := NewAgentScope(&rec, RoleReproducer, "nil deref in parser").Start()
-	scope.EmitToolCall("start", "read_file", "parser.go", 10, 40, "", "", 0, "")
+	scope.EmitActivity(ToolActivity{Phase: "start", Tool: "read_file", File: "parser.go", Line: 10, EndLine: 40})
 	scope.Finish(1234, 5*time.Second, errors.New("boom"))
 
 	evs := rec.snapshot()
@@ -47,7 +47,7 @@ func TestAgentScope_StartEmitToolCallFinish(t *testing.T) {
 }
 
 // TestAgentScope_EventsShareAgentID verifies that every event a single
-// AgentScope emits (Start, EmitToolCall, Finish) carries the SAME non-empty
+// AgentScope emits (Start, EmitActivity, Finish) carries the SAME non-empty
 // AgentID — the invariant progress.AgentEventKey and every consumer (the
 // snapshot accumulator, the pane, the TUI's action feed) depend on to fold a
 // run's events without colliding against a concurrent run sharing the same
@@ -55,7 +55,7 @@ func TestAgentScope_StartEmitToolCallFinish(t *testing.T) {
 func TestAgentScope_EventsShareAgentID(t *testing.T) {
 	var rec recordingSink
 	scope := NewAgentScope(&rec, RoleReproducer, "dup title").Start()
-	scope.EmitToolCall("start", "read_file", "a.go", 1, 0, "", "", 0, "")
+	scope.EmitActivity(ToolActivity{Phase: "start", Tool: "read_file", File: "a.go", Line: 1})
 	scope.Finish(0, time.Second, nil)
 
 	evs := rec.snapshot()
@@ -112,24 +112,24 @@ func TestAgentScope_FinishSuccessHasNoErr(t *testing.T) {
 }
 
 // TestAgentScope_EmptyToolDropped verifies an empty tool name emits nothing, so a
-// zero-value EmitToolCall never clears a prior meaningful note.
+// zero-value EmitActivity never clears a prior meaningful note.
 func TestAgentScope_EmptyToolDropped(t *testing.T) {
 	var rec recordingSink
 	scope := NewAgentScope(&rec, RoleCartographer, "pkg/foo")
-	scope.EmitToolCall("start", "", "", 0, 0, "", "", 0, "")
+	scope.EmitActivity(ToolActivity{Phase: "start"})
 
 	if evs := rec.snapshot(); len(evs) != 0 {
 		t.Fatalf("empty tool emitted %d events, want 0: %+v", len(evs), evs)
 	}
 }
 
-// TestAgentScope_EmitToolCallRoutesToScope verifies EmitToolCall produces a
-// KindToolCall event bound to the scope — this is the structured replacement for
-// ActivitySink that the funnel bridges via agent.ToolActivity.
-func TestAgentScope_EmitToolCallRoutesToScope(t *testing.T) {
+// TestAgentScope_EmitActivityRoutesToScope verifies EmitActivity produces a
+// KindToolCall event bound to the scope — the single emission seam under the
+// activity struct that Hooks, the status_note tool, and manual emitters share.
+func TestAgentScope_EmitActivityRoutesToScope(t *testing.T) {
 	var rec recordingSink
 	scope := NewAgentScope(&rec, RoleSeverity, "3 findings")
-	scope.EmitToolCall("start", "grep", "internal/", 0, 0, "", "TODO", 0, "")
+	scope.EmitActivity(ToolActivity{Phase: "start", Tool: "grep", File: "internal/", Pattern: "TODO"})
 
 	evs := rec.snapshot()
 	if len(evs) != 1 {
@@ -147,11 +147,11 @@ func TestAgentScope_EmitToolCallRoutesToScope(t *testing.T) {
 // panics, so unobserved runs pay nothing.
 func TestAgentScope_NilSinkIsNoOp(t *testing.T) {
 	scope := NewAgentScope(nil, RoleFinder, "lens").Start()
-	scope.EmitToolCall("start", "read_file", "main.go", 0, 0, "", "", 0, "")
+	scope.EmitActivity(ToolActivity{Phase: "start", Tool: "read_file", File: "main.go"})
 	scope.Finish(1, time.Second, errors.New("e"))
 	// AgentScope{} zero value too.
 	var zero AgentScope
 	zero.Start()
-	zero.EmitToolCall("done", "grep", "", 0, 0, "", "pat", 3, "")
+	zero.EmitActivity(ToolActivity{Phase: "done", Tool: "grep", Pattern: "pat", Count: 3})
 	zero.Finish(0, 0, nil)
 }

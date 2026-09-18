@@ -83,7 +83,7 @@ func (c *scriptedClient) onSystemContains(sub, body string) *scriptedClient {
 func (c *scriptedClient) onTaskContains(sub, body string) *scriptedClient {
 	return c.on(func(req llmkit.Request) bool {
 		for _, m := range req.Messages {
-			if m.Role == llmkit.RoleUser && strings.Contains(m.Content, sub) {
+			if m.Role == llmkit.RoleUser && strings.Contains(m.Text(), sub) {
 				return true
 			}
 		}

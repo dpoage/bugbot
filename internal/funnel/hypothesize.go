@@ -409,9 +409,9 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llmki
 				return imp, dep, nil
 			})
 			// One AgentScope per unit run, minted BEFORE any tool is built so
-			// maybeStatusNoteTool, runFinderWithPrompt's activity sink, and this
+			// maybeStatusNoteTool, runFinderWithPrompt's activity hooks, and this
 			// unit's Finished event all carry the SAME AgentID — see
-			// progress.AgentEventKey / agent_runners.go's activitySinkFor doc
+			// progress.AgentEventKey / agent_runners.go's hooksFor doc
 			// (bugbot-r7ub). label is resolved here (not further down) so the
 			// scope, the status_note tool, and the eventual Started/Finished
 			// events never disagree — a pre-existing latent mismatch when
@@ -457,7 +457,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llmki
 			startedAt := time.Now()
 			// runCtx (not ctx) so a breaker trip unblocks the in-flight runner
 			// without disturbing the caller's context.
-			cands, status, outcome, pm, traversal, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt, scope, f.toolHealthSinkFor(result, progress.RoleFinder, label), agent.WithTranscriptKey(unitID))
+			cands, status, outcome, pm, traversal, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt, scope, toolHealthRouting{result: result, role: progress.RoleFinder, label: label}, agent.WithTranscriptKey(unitID))
 			finishedAt := time.Now()
 
 			// Emit KindAgentFinished here (not inside runFinderWithPrompt) so we

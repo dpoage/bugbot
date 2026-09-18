@@ -135,7 +135,7 @@ func (f *Funnel) runVerifyAndPersist(
 	// minted BEFORE any tool is built so the status_note tool, every seat's
 	// tool-call activity (runRefuters/runArbiter thread this SAME scope), and
 	// the eventual Finish all carry the run's AgentID — see
-	// agent_runners.go's activitySinkFor doc (bugbot-r7ub).
+	// agent_runners.go's hooksFor doc (bugbot-r7ub).
 	scope := progress.NewAgentScope(sink, progress.RoleVerifier, c.Title).Start()
 	if prefErr := f.ensureDepPrefetch(ctx); prefErr != nil {
 		f.note(result, fmt.Sprintf("sandbox dependency prefetch failed: %v — sandbox_exec disabled", prefErr))
@@ -158,7 +158,7 @@ func (f *Funnel) runVerifyAndPersist(
 	// extra tool VALUES.
 	candTools := append(refuterReadTools, extra...)
 
-	verdicts, seatNames, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, candTools, persona, c, nRefuters, budget, scope, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title), agent.WithTranscriptKey(unitID))
+	verdicts, seatNames, tokens, nFailed, stopped, err := f.runRefuters(ctx, verifier, candTools, persona, c, nRefuters, budget, scope, toolHealthRouting{result: result, role: progress.RoleVerifier, label: c.Title}, agent.WithTranscriptKey(unitID))
 
 	// Arbiter path.
 	var localArbiterRuns, localArbiterKills, localArbiterFailed int
@@ -177,7 +177,7 @@ func (f *Funnel) runVerifyAndPersist(
 			return
 		}
 		arbiterTools := append(arbiterReadTools, extra...)
-		av, aTokens, aStopped, aErr := f.runArbiter(ctx, arbiter, arbiterTools, persona, c, verdicts, seatNames, budget, scope, f.toolHealthSinkFor(result, progress.RoleVerifier, c.Title), agent.WithTranscriptKey(unitID))
+		av, aTokens, aStopped, aErr := f.runArbiter(ctx, arbiter, arbiterTools, persona, c, verdicts, seatNames, budget, scope, toolHealthRouting{result: result, role: progress.RoleVerifier, label: c.Title}, agent.WithTranscriptKey(unitID))
 		tokens += aTokens
 		localArbiterTokens = aTokens
 		if aStopped {

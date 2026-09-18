@@ -94,7 +94,7 @@ func TestNewAgentRunner_AppliesStandardOptions(t *testing.T) {
 	budget := &budgetState{}
 
 	scope := progress.NewAgentScope(nil, progress.RoleVerifier, c.Title)
-	verdicts, _, _, _, stopped, err := f.runRefuters(ctx, client, tools, "engineer", c, 1, budget, scope)
+	verdicts, _, _, _, stopped, err := f.runRefuters(ctx, client, tools, "engineer", c, 1, budget, scope, toolHealthRouting{})
 	if err != nil {
 		t.Fatalf("runRefuters: %v", err)
 	}

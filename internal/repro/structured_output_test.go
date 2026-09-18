@@ -280,7 +280,7 @@ func TestStructuredOutput_PatchProverRepairCarriesSchema(t *testing.T) {
 func anyMessageMentions(reqs []llmkit.Request, sub string) bool {
 	for _, r := range reqs {
 		for _, m := range r.Messages {
-			if m.Role == llmkit.RoleUser && strings.Contains(m.Content, sub) {
+			if m.Role == llmkit.RoleUser && strings.Contains(m.Text(), sub) {
 				return true
 			}
 		}

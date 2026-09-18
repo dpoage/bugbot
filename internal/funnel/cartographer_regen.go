@@ -155,13 +155,13 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llmkit.Client, bud
 		}
 		abs := filepath.Join(root, filepath.FromSlash(rel))
 		// Emit read_file start before reading.
-		scope.EmitToolCall("start", "read_file", rel, 1, 0, "", "", 0, "")
+		scope.EmitActivity(progress.ToolActivity{Phase: "start", Tool: "read_file", File: rel, Line: 1})
 		content, err := readFileHead(abs, DefaultCartographerHeadLines, perFileHead)
 		if err != nil {
 			// Unreadable file (deleted, race): skip with a one-liner so
 			// the model knows the file was once here.
 			fmt.Fprintf(&body, "--- %s ---\n  (unreadable: %v)\n", rel, err)
-			scope.EmitToolCall("done", "read_file", rel, 1, 0, "", "", 0, err.Error())
+			scope.EmitActivity(progress.ToolActivity{Phase: "done", Tool: "read_file", File: rel, Line: 1, Err: err.Error()})
 			continue
 		}
 		// Count lines read for the done event.
@@ -177,7 +177,7 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llmkit.Client, bud
 		if projected > DefaultCartographerInputBytes {
 			// File was read but not included due to budget: emit done
 			// with the lines that were read, then break.
-			scope.EmitToolCall("done", "read_file", rel, 1, linesRead, "", "", linesRead, "")
+			scope.EmitActivity(progress.ToolActivity{Phase: "done", Tool: "read_file", File: rel, Line: 1, EndLine: linesRead, Count: linesRead})
 			body.WriteString("  [additional files omitted to fit budget]\n")
 			break
 		}
@@ -189,7 +189,7 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llmkit.Client, bud
 			body.WriteString("\n")
 		}
 		// Emit read_file done with line count.
-		scope.EmitToolCall("done", "read_file", rel, 1, linesRead, "", "", linesRead, "")
+		scope.EmitActivity(progress.ToolActivity{Phase: "done", Tool: "read_file", File: rel, Line: 1, EndLine: linesRead, Count: linesRead})
 	}
 
 	limits := f.opts.Limits.FinderLimits
@@ -204,7 +204,7 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llmkit.Client, bud
 		Summary string `json:"summary"`
 	}
 	// Emit summarize_package start before the LLM call.
-	scope.EmitToolCall("start", "summarize_package", pkg, 0, 0, "", "", len(members), "")
+	scope.EmitActivity(progress.ToolActivity{Phase: "start", Tool: "summarize_package", File: pkg, Count: len(members)})
 	start := time.Now()
 	outcome, err := runner.RunJSON(ctx, body.String(), cartographySummarySchema, &out)
 	// Emit summarize_package done with error if any.
@@ -212,7 +212,7 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llmkit.Client, bud
 	if err != nil {
 		errStr = err.Error()
 	}
-	scope.EmitToolCall("done", "summarize_package", pkg, 0, 0, "", "", len(members), errStr)
+	scope.EmitActivity(progress.ToolActivity{Phase: "done", Tool: "summarize_package", File: pkg, Count: len(members), Err: errStr})
 	emitAgentFinished(scope, outcome, start, err)
 	if err != nil {
 		return "", err

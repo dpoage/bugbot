@@ -21,7 +21,7 @@ func recordOneShot(task, finalText string) *agent.Transcript {
 	var buf bytes.Buffer
 	src := agent.NewTranscript()
 	src.Events = []agent.Event{
-		{Kind: agent.EventRequest, Step: 1, Messages: []llmkit.Message{{Role: llmkit.RoleUser, Content: task}}},
+		{Kind: agent.EventRequest, Step: 1, Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, task)}},
 		{Kind: agent.EventAssistant, Step: 1, Text: finalText, StopReason: llmkit.StopEndTurn,
 			Usage: &llmkit.Usage{InputTokens: 100, OutputTokens: 50}},
 	}
@@ -44,7 +44,7 @@ func TestReplayRoleClient_OrderedSessions(t *testing.T) {
 	c := newReplayRoleClient(store)
 
 	// First agent run: a fresh conversation (run-start) advances to session 1.
-	r1, err := c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{{Role: llmkit.RoleUser, Content: "audit a.go"}}})
+	r1, err := c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "audit a.go")}})
 	if err != nil {
 		t.Fatalf("session 1 completion: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestReplayRoleClient_OrderedSessions(t *testing.T) {
 	}
 
 	// Second agent run: another fresh conversation advances to session 2.
-	r2, err := c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{{Role: llmkit.RoleUser, Content: "audit b.go"}}})
+	r2, err := c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "audit b.go")}})
 	if err != nil {
 		t.Fatalf("session 2 completion: %v", err)
 	}
@@ -72,12 +72,12 @@ func TestReplayRoleClient_ExhaustionErrors(t *testing.T) {
 	)
 	c := newReplayRoleClient(store)
 
-	if _, err := c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{{Role: llmkit.RoleUser, Content: "first"}}}); err != nil {
+	if _, err := c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "first")}}); err != nil {
 		t.Fatalf("first completion: %v", err)
 	}
 	// A second fresh run with no recording left must error loudly, not return
 	// empty output.
-	_, err := c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{{Role: llmkit.RoleUser, Content: "second"}}})
+	_, err := c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "second")}})
 	if err == nil {
 		t.Fatalf("expected exhaustion error on extra agent run")
 	}
@@ -97,7 +97,7 @@ func TestReplayRoleClient_DivergenceWithinSession(t *testing.T) {
 	// as expecting one preceding tool result with ID "call-1".
 	tr := agent.NewTranscript()
 	tr.Events = []agent.Event{
-		{Kind: agent.EventRequest, Step: 1, Messages: []llmkit.Message{{Role: llmkit.RoleUser, Content: "task"}}},
+		{Kind: agent.EventRequest, Step: 1, Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "task")}},
 		{Kind: agent.EventAssistant, Step: 1, StopReason: llmkit.StopToolUse,
 			ToolCalls: []llmkit.ToolCall{{ID: "call-1", Name: "read_file"}}},
 		{Kind: agent.EventToolResult, Step: 1, ToolCallID: "call-1", ToolName: "read_file", Result: "src"},
@@ -107,7 +107,7 @@ func TestReplayRoleClient_DivergenceWithinSession(t *testing.T) {
 	c := newReplayRoleClient(store)
 
 	// First completion (run start, no tool results yet): serves the tool-use turn.
-	r1, err := c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{{Role: llmkit.RoleUser, Content: "task"}}})
+	r1, err := c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "task")}})
 	if err != nil {
 		t.Fatalf("first turn: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestReplayRoleClient_DivergenceWithinSession(t *testing.T) {
 	// Second completion WITHOUT the recorded tool-result in the conversation:
 	// structure diverges, so the replayer errors.
 	_, err = c.Complete(ctx, llmkit.Request{Messages: []llmkit.Message{
-		{Role: llmkit.RoleUser, Content: "task"},
+		llmkit.TextMessage(llmkit.RoleUser, "task"),
 		{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{ID: "call-1", Name: "read_file"}}},
 		// NOTE: the expected tool-result message is omitted on purpose.
 	}})
@@ -131,18 +131,18 @@ func TestReplayRoleClient_DivergenceWithinSession(t *testing.T) {
 }
 
 func TestIsRunStart(t *testing.T) {
-	if !isRunStart(llmkit.Request{Messages: []llmkit.Message{{Role: llmkit.RoleUser, Content: "x"}}}) {
+	if !isRunStart(llmkit.Request{Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "x")}}) {
 		t.Errorf("a user-only conversation is a run start")
 	}
 	if isRunStart(llmkit.Request{Messages: []llmkit.Message{
-		{Role: llmkit.RoleUser, Content: "x"},
-		{Role: llmkit.RoleAssistant, Content: "y"},
+		llmkit.TextMessage(llmkit.RoleUser, "x"),
+		llmkit.TextMessage(llmkit.RoleAssistant, "y"),
 	}}) {
 		t.Errorf("a conversation with an assistant turn is not a run start")
 	}
 	if isRunStart(llmkit.Request{Messages: []llmkit.Message{
-		{Role: llmkit.RoleUser, Content: "x"},
-		{Role: llmkit.RoleToolResult, ToolCallID: "c1", Content: "r"},
+		llmkit.TextMessage(llmkit.RoleUser, "x"),
+		{Role: llmkit.RoleToolResult, ToolCallID: "c1", Content: []llmkit.Block{{Kind: llmkit.BlockText, Text: "r"}}},
 	}}) {
 		t.Errorf("a conversation with a tool result is not a run start")
 	}
