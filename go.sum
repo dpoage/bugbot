@@ -54,8 +54,8 @@ github.com/dlclark/regexp2/v2 v2.2.1 h1:mf4KkFUj0gJuarK8P+LgiS+Lit7m9N1yAwEfPbee
 github.com/dlclark/regexp2/v2 v2.2.1/go.mod h1:avUrQvPaLz2DrFNHJF0taWAFFX2C1GMSSoeiqFjcBmU=
 github.com/dnaeon/go-vcr v1.2.0 h1:zHCHvJYTMh1N7xnV7zf1m1GPBF9Ad0Jk/whtQ1663qI=
 github.com/dnaeon/go-vcr v1.2.0/go.mod h1:R4UdLID7HZT3taECzJs4YgbbH6PIGXB6W/sc5OLb6RQ=
-github.com/dpoage/llmkit v0.1.1-0.20260918001246-5983259288c9 h1:w35dePWIM0WAfszwIEEmrFbKtNlrcic22CaRFWC2s0M=
-github.com/dpoage/llmkit v0.1.1-0.20260918001246-5983259288c9/go.mod h1:x/eD+aNjSKsaZhDKa5AJu/TkYwgfzu10dN2XFU8/hKw=
+github.com/dpoage/llmkit v0.2.0 h1:azUzSSDZh++GOW/uRruQ56vnMRwh52wQZJQGQwTImMU=
+github.com/dpoage/llmkit v0.2.0/go.mod h1:x/eD+aNjSKsaZhDKa5AJu/TkYwgfzu10dN2XFU8/hKw=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/envoyproxy/go-control-plane v0.9.0/go.mod h1:YTl/9mNaCwkRvm6d1a2C3ymFceY/DCBVvsKhRF0iEA4=
