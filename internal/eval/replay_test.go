@@ -3,6 +3,7 @@ package eval
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -10,22 +11,17 @@ import (
 	"github.com/dpoage/llmkit/agent"
 )
 
-// recordOneShot builds a synthetic single-completion transcript: one request
-// (the task user-message) and one assistant reply carrying finalText with no
-// tool calls. This is exactly the shape a RunJSON-driven finder/verifier
-// produces, so it round-trips through the replay role client.
-func recordOneShot(task, finalText string) *agent.Transcript {
-	// Build via the public JSONL surface so we exercise Save/Load too: this is
-	// the same path the documented recording workflow uses (transcripts are
-	// persisted as JSONL and reloaded for replay).
-	var buf bytes.Buffer
-	src := agent.NewTranscript()
-	src.Events = []agent.Event{
-		{Kind: agent.EventRequest, Step: 1, Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, task)}},
-		{Kind: agent.EventAssistant, Step: 1, Text: finalText, StopReason: llmkit.StopEndTurn,
-			Usage: &llmkit.Usage{InputTokens: 100, OutputTokens: 50}},
+// recordRun drives task through a real agent.Runner scripted with resps and
+// returns the run's transcript round-tripped through JSONL — the same write
+// and load path the documented recording workflow uses.
+func recordRun(task string, tools []agent.Tool, resps ...llmkit.Response) *agent.Transcript {
+	r := agent.NewRunner(agent.NewReplayClientFromResponses(resps, llmkit.Capabilities{}), tools, "sys")
+	out, err := r.Run(context.Background(), task)
+	if err != nil {
+		panic(err)
 	}
-	if err := src.SaveJSONL(&buf); err != nil {
+	var buf bytes.Buffer
+	if err := out.Transcript.SaveJSONL(&buf); err != nil {
 		panic(err)
 	}
 	loaded, err := agent.LoadJSONL(&buf)
@@ -34,6 +30,23 @@ func recordOneShot(task, finalText string) *agent.Transcript {
 	}
 	return loaded
 }
+
+// recordOneShot records a single-completion run: the task, then one reply
+// carrying finalText with no tool calls — the shape a RunJSON-driven
+// finder/verifier produces.
+func recordOneShot(task, finalText string) *agent.Transcript {
+	return recordRun(task, nil, llmkit.Response{
+		Text: finalText, StopReason: llmkit.StopEndTurn,
+		Usage: llmkit.Usage{InputTokens: 100, OutputTokens: 50},
+	})
+}
+
+type staticTool struct{ name, result string }
+
+func (s staticTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{Name: s.name, Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (s staticTool) Run(context.Context, json.RawMessage) (string, error) { return s.result, nil }
 
 func TestReplayRoleClient_OrderedSessions(t *testing.T) {
 	ctx := context.Background()
@@ -95,14 +108,10 @@ func TestReplayRoleClient_DivergenceWithinSession(t *testing.T) {
 	// A two-turn session: the model first asks for a tool, then (after the tool
 	// result) gives its final answer. The second assistant response is recorded
 	// as expecting one preceding tool result with ID "call-1".
-	tr := agent.NewTranscript()
-	tr.Events = []agent.Event{
-		{Kind: agent.EventRequest, Step: 1, Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "task")}},
-		{Kind: agent.EventAssistant, Step: 1, StopReason: llmkit.StopToolUse,
-			ToolCalls: []llmkit.ToolCall{{ID: "call-1", Name: "read_file"}}},
-		{Kind: agent.EventToolResult, Step: 1, ToolCallID: "call-1", ToolName: "read_file", Result: "src"},
-		{Kind: agent.EventAssistant, Step: 2, Text: `{"candidates":[]}`, StopReason: llmkit.StopEndTurn},
-	}
+	tr := recordRun("task", []agent.Tool{staticTool{name: "read_file", result: "src"}},
+		llmkit.Response{StopReason: llmkit.StopToolUse, ToolCalls: []llmkit.ToolCall{{ID: "call-1", Name: "read_file", Arguments: json.RawMessage(`{}`)}}},
+		llmkit.Response{Text: `{"candidates":[]}`, StopReason: llmkit.StopEndTurn},
+	)
 	store := NewRoleTranscriptStore("finder", llmkit.Capabilities{}, tr)
 	c := newReplayRoleClient(store)
 

@@ -21,7 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/ecosystem"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestDetectEcosystem_Bazel pins that the bazel / bazelisk launchers
@@ -489,7 +490,7 @@ func TestInterpret_Sentinel_ShellScript_Demonstrated(t *testing.T) {
 	if v.reason != "" {
 		t.Errorf("demonstrated verdict should leave reason empty; got reason=%q", v.reason)
 	}
-	if v.ecosystem != sandbox.EcosystemUnknown {
+	if v.ecosystem != ecosystem.EcosystemUnknown {
 		t.Errorf("want ecosystem=unknown (the bug scenario); got %q", v.ecosystem)
 	}
 }
@@ -507,7 +508,7 @@ func TestInterpret_Sentinel_BareBinary_Demonstrated(t *testing.T) {
 		t.Errorf("sentinel + non-zero exit + no build markers must demonstrate; got reason=%q",
 			v.reason)
 	}
-	if v.ecosystem != sandbox.EcosystemUnknown {
+	if v.ecosystem != ecosystem.EcosystemUnknown {
 		t.Errorf("want ecosystem=unknown (the bug scenario); got %q", v.ecosystem)
 	}
 }
@@ -580,7 +581,7 @@ func TestInterpret_StructuredOutput(t *testing.T) {
 		if !v.demonstrated {
 			t.Errorf("want demonstrated=true, got reason=%q", v.reason)
 		}
-		if v.ecosystem != sandbox.EcosystemGo {
+		if v.ecosystem != ecosystem.EcosystemGo {
 			t.Errorf("want ecosystem=go, got %q", v.ecosystem)
 		}
 	})
@@ -633,7 +634,7 @@ func TestInterpret_StructuredOutput(t *testing.T) {
 		if !v.demonstrated {
 			t.Errorf("want demonstrated=true, got reason=%q", v.reason)
 		}
-		if v.ecosystem != sandbox.EcosystemPython {
+		if v.ecosystem != ecosystem.EcosystemPython {
 			t.Errorf("want ecosystem=python, got %q", v.ecosystem)
 		}
 	})
@@ -789,7 +790,7 @@ func TestInterpret_BarePython_Demonstrated_NotWitnessOnly(t *testing.T) {
 // witnessOnly downgrade) — the live MemoryCache finding demonstrated 2/2
 // via bazelisk and was still stuck at witness-only forever.
 func TestWitnessDemonstration_BazelDeclaredFailure_FullPromotion(t *testing.T) {
-	v := verdict{demonstrated: true, ecosystem: sandbox.EcosystemBazel}
+	v := verdict{demonstrated: true, ecosystem: ecosystem.EcosystemBazel}
 	out := "//molecules/x:cache_test FAILED in 0.4s\n--- FAIL: TestShutdownStopsCacheCleanup (0.10s)\n    cache_test.go:31: goroutine still running\nFAIL\n"
 
 	got := witnessDemonstration(v, out, "molecules/x/cache.go", []string{"TestShutdownStopsCacheCleanup"})
@@ -805,7 +806,7 @@ func TestWitnessDemonstration_BazelDeclaredFailure_FullPromotion(t *testing.T) {
 // "FAILED <nodeid>" form under a bazel py_test also satisfies the declared
 // witness.
 func TestWitnessDemonstration_BazelPytestFailedLine(t *testing.T) {
-	v := verdict{demonstrated: true, ecosystem: sandbox.EcosystemBazel}
+	v := verdict{demonstrated: true, ecosystem: ecosystem.EcosystemBazel}
 	out := "=========================== short test summary info ===========================\nFAILED test/vehicle_test.py::test_capacity_override_preserves_cost - AssertionError\n"
 
 	got := witnessDemonstration(v, out, "common/utils/vehicle.py", []string{"test_capacity_override_preserves_cost"})
@@ -825,7 +826,7 @@ func TestWitnessDemonstration_BazelNoDeclaredMatch_WitnessOnly(t *testing.T) {
 		"no declared names":        nil,
 		"declared name not in out": {"TestSomethingElse"},
 	} {
-		v := verdict{demonstrated: true, ecosystem: sandbox.EcosystemBazel}
+		v := verdict{demonstrated: true, ecosystem: ecosystem.EcosystemBazel}
 		got := witnessDemonstration(v, out, "molecules/x/cache.go", declared)
 		if !got.demonstrated {
 			t.Fatalf("%s: demonstrated = false, want true", name)

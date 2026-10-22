@@ -69,7 +69,7 @@ func (f *Funnel) VerifyFinding(ctx context.Context, fnd domain.Finding) (refuted
 	// The scope is still minted so every seat's tool-call activity shares ONE
 	// AgentID instead of a fresh one per seat (see hooksFor's doc).
 	scope := progress.NewAgentScope(f.opts.Progress, progress.RoleVerifier, fnd.Title)
-	verdicts, seatNames, _, _, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, persona, c, n, &budgetState{}, scope, toolHealthRouting{})
+	verdicts, seatNames, _, _, _, err := f.runRefuters(ctx, f.clients.Verifier, tools, persona, c, n, &budgetState{}, scope, toolHealthRouting{}, "")
 	if err != nil {
 		return false, "", err
 	}

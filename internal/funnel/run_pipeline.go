@@ -15,7 +15,6 @@ import (
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
-	llmkit "github.com/dpoage/llmkit"
 )
 
 // run is the shared staged core. It opens a scan run, wires per-role spend
@@ -84,29 +83,29 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			})
 		}
 	}
-	finderClient := llmkit.WithRecorder(f.clients.Finder, rec, roleFinder, "", "")
-	verifierClient := llmkit.WithRecorder(f.clients.Verifier, rec, roleVerifier, "", "")
+	finderClient := rec.ledgered(f.clients.Finder, roleFinder)
+	verifierClient := rec.ledgered(f.clients.Verifier, roleVerifier)
 	// Cartographer client: configurable via the optional [roles.cartographer]
 	// mapping (falls back to the finder's model when unset; see config.roleModel).
 	// Tagged roleCartographer so its spend is a distinct ledger line yet still
-	// charged to the finder pool (see spendRecorder.Record).
+	// charged to the finder pool (see spendRecorder.record).
 	cartographerBase := f.clients.Cartographer
 	if cartographerBase == nil {
 		cartographerBase = f.clients.Finder
 	}
-	cartographerClient := llmkit.WithRecorder(cartographerBase, rec, roleCartographer, "", "")
+	cartographerClient := rec.ledgered(cartographerBase, roleCartographer)
 	// Arbiter client: configurable via the optional [roles.arbiter] mapping
 	// (falls back to the verifier's client when unset — preserve today's
 	// behavior where the split-verdict arbiter reuses the verifier provider).
-	// Tagged roleArbiter so its spend is its own ledger line; the recorder's
-	// default branch in Record routes anything-not-finder-or-cartographer (i.e.
+	// Tagged roleArbiter so its spend is its own ledger line; spendRecorder.record
+	// routes anything-not-finder-or-cartographer (i.e.
 	// arbiter) to the VERIFY sub-pool — which is correct because the arbiter is
 	// a verify-stage agent that draws from the verify pool on split verdicts.
 	arbiterBase := f.clients.Arbiter
 	if arbiterBase == nil {
 		arbiterBase = f.clients.Verifier
 	}
-	arbiterClient := llmkit.WithRecorder(arbiterBase, rec, roleArbiter, "", "")
+	arbiterClient := rec.ledgered(arbiterBase, roleArbiter)
 
 	// Capability-driven scaling: a small-context model (e.g. 8k local LLM
 	// behind an openai-compatible endpoint) silently overflows with one-size

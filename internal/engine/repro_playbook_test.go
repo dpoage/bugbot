@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // nopLLMClient is a minimal llmkit.Client stub satisfying repro.New's non-nil
@@ -45,7 +45,7 @@ func TestBuildReproducerWithSandbox_WiresPlaybookOnce(t *testing.T) {
 
 	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "go1.22"}})
 
-	r, err := buildReproducerWithSandbox(ctx, &cfg, st, repoDir, sb, nil, nopLLMClient{})
+	r, err := buildReproducerWithSandbox(ctx, &cfg, st, repoDir, sb, nil, nopLLMClient{}, newLedgerRecorder(ctx, st))
 	if err != nil {
 		t.Fatalf("buildReproducerWithSandbox: %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/ecosystem"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // allKnownProbeEcosystems lists the ecosystem names that should appear in
@@ -44,7 +45,7 @@ func TestProbeEntries_NonEmpty(t *testing.T) {
 func TestProbeEntries_InterpretFullKeySet(t *testing.T) {
 	for _, e := range ecosystem.ProbeEntries {
 		// A non-zero exit result should produce all-false with full key set.
-		modes := e.Interpret(ecosystem.ProbeResult{ExitCode: 1, Stdout: ""})
+		modes := e.Interpret(sandbox.ProbeResult{ExitCode: 1, Stdout: ""})
 		if len(modes) == 0 {
 			t.Errorf("ProbeEntry %q: Interpret(failure) returned empty map; must return full key set", e.Name)
 		}
@@ -60,7 +61,7 @@ func TestProbeEntries_InterpretFullKeySet(t *testing.T) {
 // TestGoProbeInterpret_ViaEcosystem tests the Go probe interpret via the
 // exported ProbeEntries to ensure the data matches what sandbox uses.
 func TestGoProbeInterpret_ViaEcosystem(t *testing.T) {
-	var probe *ecosystem.ProbeEntry
+	var probe *sandbox.ProbeEntry
 	for i := range ecosystem.ProbeEntries {
 		if ecosystem.ProbeEntries[i].Name == "go" {
 			probe = &ecosystem.ProbeEntries[i]
@@ -73,7 +74,7 @@ func TestGoProbeInterpret_ViaEcosystem(t *testing.T) {
 	if probe.Probe[0] != "/bin/sh" {
 		t.Errorf("go probe Probe[0] = %q, want /bin/sh", probe.Probe[0])
 	}
-	modes := probe.Interpret(ecosystem.ProbeResult{ExitCode: 0, Stdout: "go\nrace\n"})
+	modes := probe.Interpret(sandbox.ProbeResult{ExitCode: 0, Stdout: "go\nrace\n"})
 	if !modes["present"] {
 		t.Errorf("go probe: Interpret(exit0, \"go\\nrace\") should give present=true, got %v", modes)
 	}
@@ -81,12 +82,12 @@ func TestGoProbeInterpret_ViaEcosystem(t *testing.T) {
 		t.Errorf("go probe: Interpret(exit0, \"go\\nrace\") should give race=true, got %v", modes)
 	}
 	// go present but no C compiler / cgo disabled: only "go" token emitted.
-	presentOnly := probe.Interpret(ecosystem.ProbeResult{ExitCode: 0, Stdout: "go\n"})
+	presentOnly := probe.Interpret(sandbox.ProbeResult{ExitCode: 0, Stdout: "go\n"})
 	if !presentOnly["present"] || presentOnly["race"] {
 		t.Errorf("go probe: Interpret(exit0, \"go\") = %v, want present=true race=false", presentOnly)
 	}
 	// go binary missing entirely: no tokens at all (bugbot-bslx negative signal).
-	absent := probe.Interpret(ecosystem.ProbeResult{ExitCode: 127, Stdout: ""})
+	absent := probe.Interpret(sandbox.ProbeResult{ExitCode: 127, Stdout: ""})
 	if absent["present"] || absent["race"] {
 		t.Errorf("go probe: Interpret(exit127, \"\") = %v, want present=false race=false", absent)
 	}

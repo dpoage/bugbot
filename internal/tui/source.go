@@ -15,9 +15,8 @@ package tui
 // counter (sourceLoadGen) lets us discard stale completions exactly as
 // transcriptLoadedMsg uses detailKey.
 //
-// Path safety mirrors internal/agenttools/fsroot.go: repo-relative only, absolute
-// paths rejected, ".." escapes rejected, symlinks checked via EvalSymlinks on
-// existing prefixes.
+// Path safety is llmkit/fsroot's: repo-relative only, absolute paths
+// rejected, ".." and symlink escapes rejected.
 
 import (
 	"bytes"
@@ -39,6 +38,7 @@ import (
 	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/dpoage/bugbot/internal/progress"
+	"github.com/dpoage/llmkit/fsroot"
 )
 
 // ── Caps ─────────────────────────────────────────────────────────────────────
@@ -97,57 +97,20 @@ type grepHit struct {
 
 // ── Path safety ──────────────────────────────────────────────────────────────
 
-// resolveSourcePath resolves a repo-relative path against root with the same
-// containment guarantees as internal/agenttools/fsroot.go: absolute inputs are
-// rejected, ".." escapes are rejected lexically and after symlink resolution.
-// Returns the absolute path or an error.
+// resolveSourcePath resolves a repo-relative path against root through
+// fsroot.FSRoot: absolute inputs are rejected, ".." escapes are rejected
+// lexically and after symlink resolution. Returns the absolute path or an
+// error.
 func resolveSourcePath(root, rel string) (string, error) {
-	rel = filepath.FromSlash(rel)
-	if filepath.IsAbs(rel) {
-		return "", fmt.Errorf("source: absolute paths are not allowed (%q)", rel)
+	fr, err := fsroot.NewFSRoot(root)
+	if err != nil {
+		return "", fmt.Errorf("source: %w", err)
 	}
-	joined := filepath.Join(root, rel)
-	cleaned := filepath.Clean(joined)
-	absRoot := filepath.Clean(root)
-
-	// Lexical containment: cleaned must be root itself or under root+sep.
-	if cleaned != absRoot && !strings.HasPrefix(cleaned, absRoot+string(filepath.Separator)) {
-		return "", fmt.Errorf("source: path escapes the repository root: %q", rel)
+	abs, err := fr.Resolve(rel)
+	if err != nil {
+		return "", fmt.Errorf("source: %w", err)
 	}
-
-	// Symlink containment: resolve longest existing prefix and re-check.
-	if resolved, err := evalSourcePrefix(cleaned); err == nil {
-		resolvedRoot, _ := filepath.EvalSymlinks(absRoot)
-		if resolvedRoot == "" {
-			resolvedRoot = absRoot
-		}
-		if resolved != resolvedRoot && !strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator)) {
-			return "", fmt.Errorf("source: path escapes the repository root via symlink: %q", rel)
-		}
-	}
-
-	return cleaned, nil
-}
-
-// evalSourcePrefix resolves symlinks on the longest existing prefix of p,
-// mirroring agent.evalExistingPrefixPath.
-func evalSourcePrefix(p string) (string, error) {
-	tail := ""
-	cur := p
-	for {
-		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
-			if tail == "" {
-				return resolved, nil
-			}
-			return filepath.Join(resolved, tail), nil
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return p, nil
-		}
-		tail = filepath.Join(filepath.Base(cur), tail)
-		cur = parent
-	}
+	return abs, nil
 }
 
 // ── Binary detection ─────────────────────────────────────────────────────────

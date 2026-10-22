@@ -42,7 +42,7 @@ func newTransportErrorClient() *transportErrorClient {
 func defaultTransportErr() *llmkit.APIError {
 	return &llmkit.APIError{
 		Kind:       llmkit.ErrServer,
-		StatusCode: 0, // StatusCode==0 is the breaker-detection signal
+		StatusCode: 0, // ErrServer with StatusCode 0 is the breaker-detection signal
 		Provider:   "fake",
 		Message:    "dial tcp: connection refused",
 	}
@@ -354,9 +354,9 @@ func (c *firstSuccessThenTransportClient) Complete(ctx context.Context, req llmk
 }
 
 // TestIsTransportError pins the detection predicate in isolation: nil-safe,
-// matches *llmkit.APIError with StatusCode==0 (any Kind, including the
-// adapter-style ErrServer/0 shape), and does NOT match StatusCode!=0 (a
-// genuine 5xx is NOT a transport failure and must not trip the breaker).
+// matches the transport-shaped *llmkit.APIError, and does NOT match
+// StatusCode!=0 (a genuine 5xx is NOT a transport failure and must not trip
+// the breaker). See also TestIsTransportError_KindDiscriminates.
 // This is the breaker-detection keystone; if the predicate regressed, the
 // end-to-end test would silently lose its trip signal.
 func TestIsTransportError(t *testing.T) {
@@ -373,11 +373,6 @@ func TestIsTransportError(t *testing.T) {
 		{
 			name: "transport-shaped APIError (StatusCode=0, Kind=ErrServer)",
 			err:  &llmkit.APIError{Kind: llmkit.ErrServer, StatusCode: 0, Provider: "fake"},
-			want: true,
-		},
-		{
-			name: "transport-shaped APIError (StatusCode=0, Kind=ErrOverloaded)",
-			err:  &llmkit.APIError{Kind: llmkit.ErrOverloaded, StatusCode: 0, Provider: "fake"},
 			want: true,
 		},
 		{

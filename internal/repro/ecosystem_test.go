@@ -32,7 +32,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/ecosystem"
 )
 
 // jsRules returns the EcosystemJS rules. Pinning the table index keeps
@@ -40,14 +40,14 @@ import (
 // pins the JS entry specifically.
 func jsRules(t *testing.T) ecosystemRules {
 	t.Helper()
-	idx := ecosystemIndex(sandbox.EcosystemJS)
+	idx := ecosystemIndex(ecosystem.EcosystemJS)
 	if idx == 0 {
-		t.Fatalf("ecosystemTable has no %q entry", sandbox.EcosystemJS)
+		t.Fatalf("ecosystemTable has no %q entry", ecosystem.EcosystemJS)
 	}
 	rules := ecosystemTable[idx]
-	if rules.name != sandbox.EcosystemJS {
+	if rules.name != ecosystem.EcosystemJS {
 		t.Fatalf("ecosystemIndex(%q) = %d, but ecosystemTable[%d].name = %q",
-			sandbox.EcosystemJS, idx, idx, rules.name)
+			ecosystem.EcosystemJS, idx, idx, rules.name)
 	}
 	return rules
 }

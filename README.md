@@ -61,6 +61,27 @@ is configured and rejects `backend: bwrap` with an actionable reason
 (not Linux, `bwrap` missing from PATH, or unprivileged user namespaces
 unavailable) before any run is attempted.
 
+Both backends (and the `repro --unsandboxed` host executor) are
+[`llmkit/sandbox`](https://github.com/dpoage/llmkit); `internal/sandboxenv`
+builds the configured one, mapping every `sandbox.*` knob onto one llmkit
+option:
+
+| Knob | llmkit option |
+|---|---|
+| `runtime` | `WithRuntime` (container backend; must be on PATH) |
+| `image` | `WithImage` (container backend; bwrap has no image) |
+| `cpus`, `memory_mb`, `pids_limit` | `WithCPUs`, `WithMemoryMB`, `WithPidsLimit` |
+| `timeout_seconds`, `idle_timeout_seconds` | `WithTimeout`, `WithIdleTimeout` (`0` disables the idle watchdog) |
+| `scratch_size_mb`, `workspace_growth_ceiling_mb` | `WithScratchSizeMB`, `WithWorkspaceGrowthCeilingMB` (`0` disables the ceiling) |
+| `network` | `WithNetwork`: `none` (default), `host`, or `bridge` (container backend only) |
+| `allow_uncapped` | `WithCapPolicy(CapBestEffort)` (bwrap only) |
+| `host_toolchains` | `ResolveHostToolchains` + `WithHostToolchains` (both backends) |
+
+A knob llmkit cannot honor fails loudly instead of being dropped: `bugbot
+config validate` refuses a `network` outside that set, and backend
+construction (every run, and doctor's `sandbox backend` check) refuses an
+unusable limit or a `host_toolchains` entry that does not resolve on the host.
+
 ### Allowlist-bind security model (bwrap)
 
 bwrap has no image filesystem to fall back on: the sandbox root starts as an
@@ -81,7 +102,7 @@ empty tmpfs, and ONLY the following are ever bound in, always read-only:
   same user; on FHS hosts the paths do not exist and the bind is a no-op;
 - host toolchains resolved from `sandbox.host_toolchains` (bare names like
   `node`/`cargo`, resolved via the host's PATH and symlink-closure, or
-  explicit absolute directories) — see `internal/sandbox/toolchain.go`;
+  explicit absolute directories) via llmkit's `ResolveHostToolchains`;
 - a POSIX baseline (coreutils, grep, sed, awk, findutils, diff, tar, gzip,
   bash, which) resolved automatically from the host at backend construction and
   appended to the END of the sandbox PATH — never configured by the
@@ -107,8 +128,8 @@ Resource limits (`sandbox.cpus`/`memory_mb`/`pids_limit`) have no bwrap flag
 equivalent — bwrap has no cgroups of its own. They are enforced via
 `systemd-run --user --scope` when a user systemd session is reachable, else a
 delegated cgroup v2 subtree; when NEITHER mechanism is available, a run
-**fails** with an actionable error rather than silently running uncapped —
-set `sandbox.allow_uncapped: true` to opt into that instead.
+**fails** with `sandbox.ErrBwrapNoCapMethod` rather than silently running
+uncapped — set `sandbox.allow_uncapped: true` to opt into that instead.
 
 ## Sandbox dependency strategies
 
@@ -284,7 +305,7 @@ backend-specific differences:
   - **Python**: mounts the host `python3` interpreter's resolved
     `site-packages`/`dist-packages` directories read-only at their own host
     paths (not a fixed container path — see `resolveBwrapPythonHostDeps` in
-    `internal/sandbox/deps.go`) and sets `PYTHONPATH` explicitly.
+    `internal/sandboxenv/deps.go`) and sets `PYTHONPATH` explicitly.
   - **JS/npm**: requires `package-lock.json` (`npm ci`'s hard prerequisite);
     pnpm-lock.yaml-only and yarn.lock-only repos resolve to **off** exactly
     like `fetch`. With a lockfile, mounts the host's existing npm cache
@@ -400,6 +421,12 @@ roles:
   reproducer: { provider: anthropic, model: claude-fable-5 }
 ```
 
+Credentials and endpoints come only from this config: the key from the
+variable `api_key_env` (or `auth_token_env`) names, the host from `base_url`.
+Vendor SDK variables such as `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` are
+never read; if one is set while `base_url` is empty, building that role's
+client fails with an error naming the variable — set `base_url` instead.
+
 Token budgets (`per_cycle_tokens`, `per_day_tokens`) are first-class: the
 daemon degrades gracefully as budget runs low and stops spending entirely when
 it's gone — never silently.
@@ -427,7 +454,7 @@ and rebuilds it, salvaging readable rows.
 ```sh
 make test       # full suite (no network, no API keys, no containers needed)
 make lint
-go test -tags integration ./internal/sandbox/... ./internal/repro/...  # real containers
+go test -tags integration ./internal/sandboxenv/... ./internal/repro/...  # real containers
 go test ./internal/eval/ -run TestBenchmarkSuite -v                    # precision/recall gate
 ```
 

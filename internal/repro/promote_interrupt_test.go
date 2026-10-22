@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // cancellingClient simulates an operator interrupt landing mid-attempt: the

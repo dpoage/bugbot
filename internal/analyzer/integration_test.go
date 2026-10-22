@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // ruffImage is the public ruff container image used for integration tests.
@@ -53,7 +53,7 @@ def load_data(path):
 		t.Fatalf("write pyproject.toml: %v", err)
 	}
 
-	sb, err := sandbox.NewCLI(runtime, ruffImage)
+	sb, err := sandbox.NewCLI(sandbox.WithRuntime(runtime), sandbox.WithImage(ruffImage))
 	if err != nil {
 		t.Fatalf("build sandbox: %v", err)
 	}
@@ -172,7 +172,7 @@ func main() {
 		t.Fatalf("write main.go: %v", err)
 	}
 
-	sb, err := sandbox.NewCLI(runtime, gosecImage)
+	sb, err := sandbox.NewCLI(sandbox.WithRuntime(runtime), sandbox.WithImage(gosecImage))
 	if err != nil {
 		t.Fatalf("build sandbox: %v", err)
 	}

@@ -9,7 +9,8 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/ecosystem"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestWriteArtifacts_ManifestRoundTrip is acceptance criterion 1 for
@@ -60,7 +61,7 @@ func TestWriteArtifacts_ManifestRoundTrip(t *testing.T) {
 		t.Errorf("Manifest.Plan.Files = %v, want [bug_test.go]", b.Manifest.Plan.Files)
 	}
 	wantSandbox := ManifestSandbox{
-		Image: "docker.io/library/golang:1.21", Ecosystem: sandbox.EcosystemGo, Network: "none",
+		Image: "docker.io/library/golang:1.21", Ecosystem: ecosystem.EcosystemGo, Network: "none",
 	}
 	if b.Manifest.Sandbox != wantSandbox {
 		t.Errorf("Manifest.Sandbox = %+v, want %+v", b.Manifest.Sandbox, wantSandbox)

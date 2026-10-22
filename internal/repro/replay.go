@@ -15,7 +15,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/ecosystem"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // ReplayOptions configures a single Replay call.
@@ -29,8 +31,8 @@ type ReplayOptions struct {
 	Timeout time.Duration
 	// Deps carries the dependency-mount plumbing (ROMounts/Env/SetupCmds) for
 	// the target repo, resolved the same way New/BuildReproducer resolve it
-	// (see sandbox.ResolveDeps). Zero value runs with no extra mounts.
-	Deps sandbox.Resolution
+	// (see sandboxenv.ResolveDeps). Zero value runs with no extra mounts.
+	Deps sandboxenv.Resolution
 }
 
 // ReplayResult is the outcome of replaying a saved bundle.
@@ -57,7 +59,7 @@ type ReplayResult struct {
 	// rejection detail, or the sandbox run's output digest).
 	Summary string
 	// Ecosystem is the detected testing ecosystem (from plan.Cmd).
-	Ecosystem sandbox.Ecosystem
+	Ecosystem ecosystem.Ecosystem
 	// WitnessOnly mirrors Attempt.WitnessOnly: true when Demonstrated is
 	// true but the detected ecosystem has no execution-witness coverage
 	// format at all (bugbot-qb4r layer b, witnessDemonstration) — repro-as-

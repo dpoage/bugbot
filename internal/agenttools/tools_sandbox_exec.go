@@ -7,9 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // sandboxOutputCap is the per-stream cap applied to sandbox_exec tool results
@@ -174,7 +175,7 @@ func renderSandboxResult(r sandbox.Result) string {
 		// bugbot-bdqf: a growth-ceiling kill is a distinct infra reason, not
 		// a plain timeout — surface WHY so the model doesn't read a bare
 		// exit_code=-1 as evidence about the code under test.
-		b = fmt.Appendf(b, "exit_code=-1 timed_out=false workspace_quota_exceeded=true reason=%q duration=%dms\n", r.KillReason(), durationMS)
+		b = fmt.Appendf(b, "exit_code=-1 timed_out=false workspace_quota_exceeded=true reason=%q duration=%dms\n", sandboxenv.KillReason(r), durationMS)
 	case r.TimedOut:
 		b = fmt.Appendf(b, "exit_code=-1 timed_out=true duration=%dms\n", durationMS)
 	default:

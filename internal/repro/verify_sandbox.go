@@ -10,7 +10,8 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/config"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // SmokeCategory is the classification of a toolchain smoke-test result.
@@ -131,7 +132,7 @@ const smokeTimeout = 45 * time.Second
 // Important: a genuine test failure (toolchain ran, tests failed) is
 // classified as "ok" because we only care whether the toolchain IS PRESENT and
 // FUNCTIONAL — not whether the project's tests pass.
-func VerifySandbox(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec sandbox.Spec, res sandbox.Resolution) (SmokeVerdict, error) {
+func VerifySandbox(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec sandbox.Spec, res sandboxenv.Resolution) (SmokeVerdict, error) {
 	cmd, launcher := smokeCmd(repoDir)
 	if len(cmd) == 0 {
 		return SmokeVerdict{
@@ -145,18 +146,15 @@ func VerifySandbox(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec
 	// Build the spec from the resolved deps (mounts/env/setup) so we behave
 	// exactly as the real run would.
 	runSpec := sandbox.Spec{
-		RepoDir:     repoDir,
-		Cmd:         cmd,
-		Image:       spec.Image,
-		Env:         append(append([]string(nil), spec.Env...), res.Env...),
-		ROMounts:    append(append([]sandbox.ROMount(nil), spec.ROMounts...), res.ROMounts...),
-		RWMounts:    append(append([]sandbox.ROMount(nil), spec.RWMounts...), res.RWMounts...),
-		SetupCmds:   res.SetupCmds,
-		Network:     "none",
-		Timeout:     smokeTimeout,
-		IdleTimeout: spec.IdleTimeout,
-		CPUs:        spec.CPUs,
-		MemoryMB:    spec.MemoryMB,
+		RepoDir:   repoDir,
+		Cmd:       cmd,
+		Image:     spec.Image,
+		Env:       append(append([]string(nil), spec.Env...), res.Env...),
+		ROMounts:  append(append([]sandbox.ROMount(nil), spec.ROMounts...), res.ROMounts...),
+		RWMounts:  append(append([]sandbox.ROMount(nil), spec.RWMounts...), res.RWMounts...),
+		SetupCmds: res.SetupCmds,
+		Network:   sandbox.NetworkNone,
+		Timeout:   smokeTimeout,
 	}
 
 	result, err := sb.Exec(ctx, runSpec)
@@ -359,7 +357,7 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 				OK:       false,
 				Category: SmokeCategoryEnvError,
 				ExitCode: res.ExitCode,
-				Detail:   smokeDetail(res, excerpt, res.KillReason()),
+				Detail:   smokeDetail(res, excerpt, sandboxenv.KillReason(res)),
 			}
 		}
 		return SmokeVerdict{
@@ -440,82 +438,14 @@ func classifySmoke(res sandbox.Result, cmd []string) SmokeVerdict {
 	return SmokeVerdict{OK: true, Category: SmokeCategoryOK, ExitCode: res.ExitCode, Detail: smokeDetail(res, excerpt, "")}
 }
 
-// localMountsFromConfig converts cfg.Sandbox.LocalMounts into read-only
-// sandbox.ROMounts for RunSandboxVerify's dep resolution (duplicated here
-// rather than imported: engine depends on repro, so importing
-// engine.LocalMountsFromConfig from here would cycle — see
-// newVerifySandbox's doc for the same constraint). Split by
-// config.LocalMount.Writable into a read-only slice (ro) and a writable
-// slice (rw) exactly like engine.localMountsFromConfig (bugbot-wjc2), so
-// the smoke run mounts a writable vendor/disk-cache dir the same way a
-// real repro run does. Shared=true on both halves: host-owned dirs that
-// must not be SELinux :Z relabeled.
-func localMountsFromConfig(cfg config.Config) (ro, rw []sandbox.ROMount) {
-	for _, m := range cfg.Sandbox.LocalMounts {
-		mount := sandbox.ROMount{HostPath: m.Host, ContainerPath: m.Container, Shared: true}
-		if m.Writable {
-			rw = append(rw, mount)
-		} else {
-			ro = append(ro, mount)
-		}
-	}
-	return ro, rw
-}
-
-// newVerifySandbox constructs the sandbox backend RunSandboxVerify probes
-// against, selected by cfg.Sandbox.Backend exactly like
-// engine.newConfiguredSandbox (duplicated here rather than imported: engine
-// depends on repro, so importing engine from here would cycle). Toolchain
-// binds/PATH/fingerprint are wired for bwrap exactly as the real repro path
-// wires them, so the smoke probe sees the same environment a real run would
-// — a toolchain that only exists via sandbox.host_toolchains must not read
-// as "missing" here.
-func newVerifySandbox(cfg config.Config) (sandbox.Sandbox, error) {
-	if cfg.Sandbox.Backend == "bwrap" {
-		var opts []sandbox.BwrapOption
-		if cfg.Sandbox.PidsLimit > 0 {
-			opts = append(opts, sandbox.WithBwrapPidsLimit(cfg.Sandbox.PidsLimit))
-		}
-		if cfg.Sandbox.CPUs > 0 {
-			opts = append(opts, sandbox.WithBwrapCPUs(float64(cfg.Sandbox.CPUs)))
-		}
-		if cfg.Sandbox.MemoryMB > 0 {
-			opts = append(opts, sandbox.WithBwrapMemoryMB(cfg.Sandbox.MemoryMB))
-		}
-		if cfg.Sandbox.AllowUncapped {
-			opts = append(opts, sandbox.WithBwrapAllowUncapped(true))
-		}
-		if len(cfg.Sandbox.HostToolchains) > 0 {
-			res, err := sandbox.ResolveHostToolchains(cfg.Sandbox.HostToolchains)
-			if err != nil {
-				return nil, fmt.Errorf("resolve host toolchains: %w", err)
-			}
-			opts = append(opts,
-				sandbox.WithBwrapToolchainBinds(res.Mounts),
-				sandbox.WithBwrapToolchainPath(res.PathPrepend),
-			)
-		}
-		return sandbox.NewBwrap(opts...)
-	}
-	var sbOpts []sandbox.Option
-	if cfg.Sandbox.PidsLimit > 0 {
-		// Honor the configured pids cap for the smoke run too, so doctor uses the
-		// same process/thread budget as real repro/verify runs (the backend
-		// default of 256 is too low for heavy toolchains like the Bazel JVM).
-		sbOpts = append(sbOpts, sandbox.WithPidsLimit(cfg.Sandbox.PidsLimit))
-	}
-	return sandbox.NewCLI(cfg.Sandbox.Runtime, cfg.Sandbox.Image, sbOpts...)
-}
-
 // RunSandboxVerify is the convenience entry-point called by doctor.
-// It constructs the configured sandbox backend (container CLI or bwrap),
-// resolves the configured dep strategy, and delegates to VerifySandbox. The
-// repoDir is the working directory used for both dep resolution and
-// smoke-command detection.
+// It constructs the configured sandbox backend via sandboxenv.New (the same
+// construction every repro run uses), resolves the configured dep strategy,
+// and delegates to VerifySandbox. repoDir is the working directory used for
+// both dep resolution and smoke-command detection.
 func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (SmokeVerdict, error) {
-	// sandbox.image is meaningless for bwrap (see Bwrap's doc comment) so this
-	// hard requirement applies only to the container backend.
-	if cfg.Sandbox.Backend != "bwrap" && cfg.Sandbox.Image == "" {
+	// The image requirement applies only to the container backend.
+	if cfg.Sandbox.Backend != sandboxenv.BackendBwrap && cfg.Sandbox.Image == "" {
 		return SmokeVerdict{
 			OK:       false,
 			Category: SmokeCategoryEnvError,
@@ -524,7 +454,7 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 		}, nil
 	}
 
-	sb, err := newVerifySandbox(cfg)
+	sb, err := sandboxenv.New(cfg.Sandbox)
 	if err != nil {
 		return SmokeVerdict{
 			OK:       false,
@@ -533,11 +463,14 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 			Detail:   "could not create sandbox: " + err.Error(),
 		}, err
 	}
+	if c, ok := sb.(interface{ Close() error }); ok {
+		defer func() { _ = c.Close() }()
+	}
 
-	localRO, localRW := localMountsFromConfig(cfg)
-	opts := sandbox.DepOptions{
-		Strategy: sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
-		// FetchSandbox/FetchImage/LocalMounts/HostToolchains, threaded so
+	localRO, localRW := sandboxenv.LocalMounts(cfg.Sandbox)
+	opts := sandboxenv.DepOptions{
+		Strategy: sandboxenv.DepStrategy(cfg.Sandbox.DepStrategy),
+		// FetchSandbox/LocalMounts/HostToolchains, threaded so
 		// doctor sees the SAME dependency provisioning a real repro run
 		// would have (bugbot-48ya acceptance 3): without FetchSandbox,
 		// dep_strategy: fetch unconditionally errored here ("requires a
@@ -547,12 +480,11 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 		// FETCH branch only builds a Prefetch closure — it is not invoked
 		// below, so this has no network side effect.
 		FetchSandbox:   sb,
-		FetchImage:     cfg.Sandbox.Image,
 		LocalMounts:    localRO,
 		LocalRWMounts:  localRW,
 		HostToolchains: cfg.Sandbox.HostToolchains,
 	}
-	res, err := sandbox.ResolveDeps(repoDir, opts)
+	res, err := sandboxenv.ResolveDeps(repoDir, opts)
 	if err != nil {
 		return SmokeVerdict{
 			OK:       false,
@@ -570,16 +502,7 @@ func RunSandboxVerify(ctx context.Context, repoDir string, cfg config.Config) (S
 		slog.Default().Warn("sandbox dependency resolution degraded", "repo", repoDir, "reason", w)
 	}
 
-	spec := sandbox.Spec{
-		Image:    cfg.Sandbox.Image,
-		CPUs:     float64(cfg.Sandbox.CPUs),
-		MemoryMB: cfg.Sandbox.MemoryMB,
-	}
-	if cfg.Sandbox.IdleTimeoutSeconds > 0 {
-		spec.IdleTimeout = time.Duration(cfg.Sandbox.IdleTimeoutSeconds) * time.Second
-	}
-
-	return VerifySandbox(ctx, sb, repoDir, spec, res)
+	return VerifySandbox(ctx, sb, repoDir, sandbox.Spec{}, res)
 }
 
 // smokeCache holds per-(repoDir, image) cached smoke verdicts so each probe

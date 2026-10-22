@@ -34,7 +34,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // replayIntegrationTimeout bounds each sandbox exec in this suite; generous
@@ -50,7 +50,7 @@ func newReplayIntegrationSandbox(t *testing.T, image string) sandbox.Sandbox {
 	if !ok {
 		t.Skip("no container runtime (podman/docker) detected")
 	}
-	sb, err := sandbox.NewCLI(rt, image)
+	sb, err := sandbox.NewCLI(sandbox.WithRuntime(rt), sandbox.WithImage(image))
 	if err != nil {
 		t.Skipf("sandbox unavailable: %v", err)
 	}

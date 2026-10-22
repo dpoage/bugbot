@@ -191,9 +191,7 @@ func TestRwe_RunFinderWithPrompt_RetryOnMaxTokensTruncation(t *testing.T) {
 	startedAt := time.Now()
 	lens := f.lenses[0]
 	scope := progress.NewAgentScope(nil, progress.RoleFinder, "rwe-find")
-	cands, status, outcome, pm, _, err := f.runFinderWithPrompt(
-		ctx, fake, tools, "you are a finder", "rwe-find", lens, tasks, budget, startedAt, scope, toolHealthRouting{},
-	)
+	cands, status, outcome, pm, _, err := f.runFinderWithPrompt(ctx, fake, tools, "you are a finder", "rwe-find", lens, tasks, budget, startedAt, scope, toolHealthRouting{}, "")
 	if err != nil {
 		t.Fatalf("runFinderWithPrompt err: %v", err)
 	}
@@ -252,9 +250,7 @@ func TestRwe_RunFinderWithPrompt_NoRetryOnNonTruncatedParseFailure(t *testing.T)
 	lens := f.lenses[0]
 
 	scope2 := progress.NewAgentScope(nil, progress.RoleFinder, "rwe-find")
-	cands, status, _, pm, _, err := f.runFinderWithPrompt(
-		ctx, fake, tools, "you are a finder", "rwe-find", lens, tasks, budget, startedAt, scope2, toolHealthRouting{},
-	)
+	cands, status, _, pm, _, err := f.runFinderWithPrompt(ctx, fake, tools, "you are a finder", "rwe-find", lens, tasks, budget, startedAt, scope2, toolHealthRouting{}, "")
 	if err != nil {
 		t.Fatalf("runFinderWithPrompt err: %v", err)
 	}
@@ -280,15 +276,14 @@ func TestRwe_RunFinderWithPrompt_NoRetryOnNonTruncatedParseFailure(t *testing.T)
 //
 // This focused unit test stands in for a full budget-pool simulation in
 // the budget-stopped branch (NEGATIVE 2). Spinning up a budget pool in a
-// unit test requires NewBudgetPool + an agent.Limits{BudgetCheck:
-// pool.Check} option plus a runner that actually reaches the pre-turn
+// unit test requires NewBudgetPool + agent.WithBudgetPool plus a runner
+// that actually reaches the pre-turn
 // check — meaningfully more plumbing than the predicate boundary
 // warrants, and the accept-or-reject decision is what bugbot-rwe pins.
 func TestRwe_ShouldRetryFinderCapPredicate(t *testing.T) {
-	makeOutcome := func(lastStop llmkit.StopReason, trunc bool, reason string) *agent.Outcome {
+	makeOutcome := func(lastStop llmkit.StopReason, trunc bool, reason agent.TruncationReason) *agent.Outcome {
 		o := &agent.Outcome{LastStopReason: lastStop}
 		if trunc {
-			o.Truncated = true
 			o.TruncationReason = reason
 		}
 		return o

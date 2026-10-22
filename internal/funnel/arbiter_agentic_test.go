@@ -25,8 +25,8 @@ func TestArbiterRunnerLimits_LargerThanRefuter(t *testing.T) {
 	b.reserveForDownstream(0.5)               // finder 10M, verify 10M (both above the arbiter claim)
 
 	limits := StageLimits{}.resolve()
-	verifyTok := b.verifyRunnerLimits(limits.VerifierLimits).TokenBudget
-	arb := b.arbiterRunnerLimits(limits.ArbiterLimits)
+	verifyTok := b.verifyRunnerLimits(limits.VerifierLimits).limits.TokenBudget
+	arb := b.arbiterRunnerLimits(limits.ArbiterLimits).limits
 
 	if arb.TokenBudget <= verifyTok {
 		t.Errorf("arbiter per-run token budget = %d, want strictly > refuter %d (materially larger)", arb.TokenBudget, verifyTok)
@@ -51,7 +51,7 @@ func TestArbiterClaimNeverTouchesRefuter(t *testing.T) {
 	b.verifyClaim = DefaultTokenClaim
 	b.arbiterClaim = DefaultArbiterTokenClaim
 	b.reserveForDownstream(0.5)
-	if got := b.verifyRunnerLimits(agent.Limits{}).TokenBudget; got != DefaultTokenClaim {
+	if got := b.verifyRunnerLimits(agent.Limits{}).limits.TokenBudget; got != DefaultTokenClaim {
 		t.Errorf("refuter per-run budget = %d, want %d (arbiter claim must not affect it)", got, DefaultTokenClaim)
 	}
 }

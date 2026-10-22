@@ -42,7 +42,7 @@ const cartographySystemPrompt = `Summarize this package in <=120 words covering 
 //
 // Lazy-mode transport breaker (bugbot-1r9): against an unreachable provider
 // every summarizePackage call exhausts the retry policy (~3.5s,
-// llmkit.APIError with StatusCode==0) and there are many packages, so the
+// llmkit.APIError{Kind: ErrServer, StatusCode: 0}) and there are many packages, so the
 // scan would grind through cartography burning the retry budget
 // package-by-package. The breaker mirrors the finder breaker (bugbot-2uz):
 // transportFailures counts transport-class generation failures observed

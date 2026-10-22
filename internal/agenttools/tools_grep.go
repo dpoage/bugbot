@@ -14,6 +14,7 @@ import (
 
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/fsroot"
 )
 
 // grep limits.
@@ -29,7 +30,8 @@ const (
 
 // grepTool runs a Go regexp across files under a repository directory.
 type grepTool struct {
-	root *FSRoot
+	// dir is the canonical (symlink-resolved) repository root.
+	dir string
 }
 
 // NewGrep returns a grep tool rooted at dir. It searches files under the
@@ -38,11 +40,15 @@ type grepTool struct {
 // to matching repo-relative paths. Binary files are skipped. Paths are
 // traversal-protected; symlinked directories are not followed out of the root.
 func NewGrep(dir string) (agent.Tool, error) {
-	root, err := NewFSRoot(dir)
+	root, err := fsroot.NewFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}
-	return &grepTool{root: root}, nil
+	canonical, err := root.Resolve("")
+	if err != nil {
+		return nil, err
+	}
+	return &grepTool{dir: canonical}, nil
 }
 
 type grepArgs struct {
@@ -114,7 +120,7 @@ func (t *grepTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 		limited bool
 	)
 
-	walkErr := filepath.WalkDir(t.root.root, func(path string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(t.dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Unreadable entry: skip it rather than aborting the whole search.
 			return nil
@@ -142,7 +148,7 @@ func (t *grepTool) Run(ctx context.Context, raw json.RawMessage) (string, error)
 			return nil
 		}
 
-		rel, relErr := filepath.Rel(t.root.root, path)
+		rel, relErr := filepath.Rel(t.dir, path)
 		if relErr != nil {
 			return nil
 		}

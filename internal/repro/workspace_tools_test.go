@@ -13,7 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // fakeMaterializingSandbox wraps *sandbox.Mock (for scripted Exec responses)
@@ -54,10 +55,7 @@ func (f *fakeMaterializingSandbox) materialized() []string {
 	return out
 }
 
-var (
-	_ sandbox.Sandbox       = (*fakeMaterializingSandbox)(nil)
-	_ workspaceMaterializer = (*fakeMaterializingSandbox)(nil)
-)
+var _ sandbox.Sandbox = (*fakeMaterializingSandbox)(nil)
 
 // newWorkspaceTool builds a WorkspaceTool wired to sb for tests, with no
 // dependency-strategy extras and the given per-attempt budget.
@@ -994,7 +992,7 @@ func TestWorkspaceExec_StructuredOutputParity(t *testing.T) {
 `
 	const plainStdout = "unexpected error: something went wrong\n"
 
-	responseFunc := func(_ int, spec sandbox.Spec) (sandbox.Result, error) {
+	responseFunc := func(_ context.Context, _ int, spec sandbox.Spec) (sandbox.Result, error) {
 		if hasCmdFlag(spec.Cmd, "-json") {
 			return sandbox.Result{ExitCode: 1, Stdout: jsonFailStdout}, nil
 		}
@@ -1018,7 +1016,7 @@ func TestWorkspaceExec_StructuredOutputParity(t *testing.T) {
 	sbOfficial := sandbox.NewMock(sandbox.MockResponse{})
 	sbOfficial.ResponseFunc = responseFunc
 	plan := &Plan{Cmd: cmd, Files: map[string]string{"bug_test.go": "package bug"}}
-	officialSpec := buildSpec(t.TempDir(), plan, "", "", 30*time.Second, sandbox.Resolution{})
+	officialSpec := buildSpec(t.TempDir(), plan, "", "", 30*time.Second, sandboxenv.Resolution{})
 	officialRes, err := sbOfficial.Exec(context.Background(), officialSpec)
 	if err != nil {
 		t.Fatalf("official exec: %v", err)

@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // RunTestsTool exposes a constrained, sandboxed test runner to a finder or

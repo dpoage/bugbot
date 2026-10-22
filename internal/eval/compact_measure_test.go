@@ -1,9 +1,12 @@
 package eval
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,19 +16,18 @@ import (
 )
 
 // This file is the offline measurement harness for bugbot-3nf (finder token
-// burn). It simulates the per-finder INPUT token cost of the agent loop over the
+// burn). It computes the per-finder INPUT token cost of the agent loop over the
 // committed recorded finder corpus, both raw and cache-weighted (append-only
 // prompt-cache model: a request's prefix that matches the previous request bills
-// at cacheReadWeight, the new tail at full price). It reports the cost BEFORE and
-// AFTER applying the live history-compaction policy
-// (agent.SimulateCompaction), and additionally over a synthetic "runaway"
+// at cacheReadWeight, the new tail at full price), and over a synthetic "runaway"
 // profile matching the dogfood finding (~8-9 turns at ~60k input tokens/turn)
-// that the small recorded fixtures do not exhibit.
+// driven through a real agent.Runner with and without
+// Limits.HistoryTokenBudget compaction.
 //
 // The numbers are printed (run `go test -run TestMeasure -v ./internal/eval/`)
-// AND asserted: the recorded corpus must not get WORSE (compaction is byte-for-
-// byte inert on short runs), and the runaway profile must show a material cache-
-// weighted reduction.
+// AND asserted: compaction cannot fire on the recorded corpus (every request is
+// under the threshold), and the runaway profile must show a material cache-
+// weighted reduction from the read-cap lever.
 
 // measureCacheWeight is the append-only prompt-cache discount used for the
 // weighted cost model — the same 0.1 the budget uses (DefaultCacheReadBudgetWeight).
@@ -97,67 +99,34 @@ func messageEqual(x, y llmkit.Message) bool {
 }
 
 // requestSnapshots extracts the per-turn request message snapshots from a finder
-// transcript, in order. Each EventRequest already stores the full conversation
-// sent that turn (transcript.go), which is exactly the append-only history.
+// transcript, in order: each completion event records the full conversation
+// sent that turn, which is exactly the append-only history.
 func requestSnapshots(tr *agent.Transcript) [][]llmkit.Message {
 	var snaps [][]llmkit.Message
-	for _, ev := range tr.Events {
-		if ev.Kind == agent.EventRequest {
-			snaps = append(snaps, ev.Messages)
+	for _, ev := range tr.Record {
+		if ev.Kind == llmkit.KindCompletion && ev.Completion != nil {
+			snaps = append(snaps, ev.Completion.Request.Messages)
 		}
 	}
 	return snaps
 }
 
-// toolNameMap reconstructs ToolCallID -> tool name from a transcript's assistant
-// tool calls, so compaction stubs can name their tool just like the live loop.
-func toolNameMap(tr *agent.Transcript) map[string]string {
-	names := map[string]string{}
-	for _, ev := range tr.Events {
-		if ev.Kind == agent.EventAssistant {
-			for _, tc := range ev.ToolCalls {
-				names[tc.ID] = tc.Name
-			}
-		}
+// liveSnapshots drives task through a real agent.Runner serving resps, with
+// tools, under HistoryTokenBudget budget (0 = no compaction), and returns the
+// message history of every wire request — compaction applied exactly as the
+// live loop applies it.
+func liveSnapshots(t *testing.T, task string, resps []llmkit.Response, tools []agent.Tool, budget int64) [][]llmkit.Message {
+	t.Helper()
+	var snaps [][]llmkit.Message
+	hooks := agent.Hooks{BeforeCompletion: func(_ context.Context, _ int, req *llmkit.Request) {
+		snaps = append(snaps, cloneMsgs(req.Messages))
+	}}
+	r := agent.NewRunner(agent.NewReplayClientFromResponses(resps, llmkit.Capabilities{}), tools, "sys",
+		agent.WithHooks(hooks), agent.WithLimits(agent.Limits{HistoryTokenBudget: budget, MaxIterations: -1, TokenBudget: -1}))
+	if _, err := r.Run(context.Background(), task); err != nil {
+		t.Fatalf("runaway run: %v", err)
 	}
-	return names
-}
-
-// applyCompaction transforms a turn-by-turn snapshot sequence through the live
-// compaction policy, threading the threshold and tool-name map exactly as the
-// Runner does. Critically it is STATEFUL across turns: a result stubbed on an
-// earlier turn stays stubbed on every later turn, because the live Runner mutates
-// its single carried-forward messages slice in place rather than re-deriving
-// history from scratch each turn. We reproduce that by propagating prior stubs
-// (keyed by ToolCallID) into each subsequent snapshot before re-evaluating the
-// threshold — otherwise the simulation would "un-prune" a result the live loop
-// has already shed, badly overstating cost and misjudging the cache tradeoff.
-func applyCompaction(snaps [][]llmkit.Message, names map[string]string, budget int64) [][]llmkit.Message {
-	out := make([][]llmkit.Message, len(snaps))
-	threshold := budget
-	stubbed := map[string]string{} // ToolCallID -> stub content carried forward
-	for i, msgs := range snaps {
-		cur := cloneMsgs(msgs)
-		// Re-apply prior stubs so this snapshot reflects the carried-forward state.
-		for j := range cur {
-			if cur[j].Role == llmkit.RoleToolResult {
-				if s, ok := stubbed[cur[j].ToolCallID]; ok {
-					cur[j].Content = []llmkit.Block{{Kind: llmkit.BlockText, Text: s}}
-				}
-			}
-		}
-		compacted, next := agent.SimulateCompaction(cur, budget, threshold, agent.CompactRecentToolResults, names)
-		// Record any NEW stubs produced this turn so later turns keep them.
-		for j := range compacted {
-			m := compacted[j]
-			if m.Role == llmkit.RoleToolResult && strings.HasPrefix(m.Text(), "[") {
-				stubbed[m.ToolCallID] = m.Text()
-			}
-		}
-		out[i] = compacted
-		threshold = next
-	}
-	return out
+	return snaps
 }
 
 func TestMeasureFinderTokenBurn(t *testing.T) {
@@ -174,9 +143,10 @@ func TestMeasureFinderTokenBurn(t *testing.T) {
 	// shipped policy.
 	const budget = 60_000 // funnel.DefaultFinderHistoryTokens; kept local to avoid an import cycle of intent
 
-	var beforeRaw, beforeW, afterRaw, afterW float64
+	var beforeRaw, beforeW float64
+	var peak int64
 	units := 0
-	t.Logf("%-44s %5s %9s %9s %9s %9s", "finder unit", "turns", "raw_b", "raw_a", "cw_b", "cw_a")
+	t.Logf("%-44s %5s %9s %9s %9s", "finder unit", "turns", "raw", "cw", "peak")
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -189,18 +159,18 @@ func TestMeasureFinderTokenBurn(t *testing.T) {
 			if len(snaps) == 0 {
 				continue
 			}
-			names := toolNameMap(tr)
 			before := simulateCost(snaps, measureCacheWeight)
-			after := simulateCost(applyCompaction(snaps, names, budget), measureCacheWeight)
+			var unitPeak int64
+			for _, s := range snaps {
+				unitPeak = max(unitPeak, agent.EstimateHistoryTokens(s))
+			}
+			peak = max(peak, unitPeak)
 
 			beforeRaw += before.raw
 			beforeW += before.weighted
-			afterRaw += after.raw
-			afterW += after.weighted
 			units++
 			rel := e.Name() + "/" + strings.TrimSuffix(filepath.Base(p), ".jsonl")
-			t.Logf("%-44s %5d %9.0f %9.0f %9.0f %9.0f", rel, before.turns,
-				before.raw, after.raw, before.weighted, after.weighted)
+			t.Logf("%-44s %5d %9.0f %9.0f %9d", rel, before.turns, before.raw, before.weighted, unitPeak)
 		}
 	}
 	if units == 0 {
@@ -208,17 +178,13 @@ func TestMeasureFinderTokenBurn(t *testing.T) {
 	}
 
 	t.Logf("RECORDED CORPUS (%d finder units), cache weight %.2f:", units, measureCacheWeight)
-	t.Logf("  per-unit RAW input tokens:  before=%.0f after=%.0f", beforeRaw/float64(units), afterRaw/float64(units))
-	t.Logf("  per-unit CACHE-WEIGHTED:    before=%.0f after=%.0f", beforeW/float64(units), afterW/float64(units))
+	t.Logf("  per-unit RAW input tokens:  %.0f", beforeRaw/float64(units))
+	t.Logf("  per-unit CACHE-WEIGHTED:    %.0f", beforeW/float64(units))
 
-	// Recall/cost safety: the small recorded fixtures sit well under the 60k
-	// threshold, so compaction MUST be byte-for-byte inert — neither raw nor
-	// cache-weighted cost may rise (or fall) on the real corpus.
-	if afterRaw != beforeRaw {
-		t.Errorf("compaction changed RAW cost on recorded corpus (%.0f -> %.0f); short runs must be untouched", beforeRaw, afterRaw)
-	}
-	if afterW != beforeW {
-		t.Errorf("compaction changed CACHE-WEIGHTED cost on recorded corpus (%.0f -> %.0f); short runs must be untouched", beforeW, afterW)
+	// Recall/cost safety: compaction fires only once a request's history
+	// exceeds the threshold, so on the recorded corpus it must be inert.
+	if peak >= budget {
+		t.Errorf("a recorded finder request reached %d history tokens (threshold %d); compaction would fire on short runs", peak, budget)
 	}
 
 	// Now the SYNTHETIC profile the recorded fixtures do not exercise: a runaway
@@ -238,17 +204,18 @@ func TestMeasureFinderTokenBurn(t *testing.T) {
 	baseReadTokens := 2000 * tokPerLine                         // looser agent default per read
 	capReadTokens := funnel.DefaultFinderReadLines * tokPerLine // tighter finder default
 
-	base := buildRunaway(9, baseReadTokens)
+	base := liveSnapshots(t, runawayTask, runawayResponses(9), []agent.Tool{runawayReadTool(baseReadTokens)}, 0)
 	beforeCost := simulateCost(base, measureCacheWeight)
 
 	// Lever A (DEFAULT, cache-safe): tighter per-read caps shrink each result at
 	// the source, so no message is ever mutated and the prompt-cache prefix is
 	// fully preserved — every saved byte is saved at full proportional value.
-	capped := buildRunaway(9, capReadTokens)
+	capped := liveSnapshots(t, runawayTask, runawayResponses(9), []agent.Tool{runawayReadTool(capReadTokens)}, 0)
 	capCost := simulateCost(capped, measureCacheWeight)
 
 	// Lever B (OPT-IN): threshold history compaction at the funnel default.
-	compCost := simulateCost(applyCompaction(base, runawayNames(8), budget), measureCacheWeight)
+	compacted := liveSnapshots(t, runawayTask, runawayResponses(9), []agent.Tool{runawayReadTool(baseReadTokens)}, budget)
+	compCost := simulateCost(compacted, measureCacheWeight)
 
 	t.Logf("RUNAWAY PROFILE (9 turns, ~24k-token reads), cache weight %.2f:", measureCacheWeight)
 	t.Logf("  baseline:                   raw=%.0f cw=%.0f", beforeCost.raw, beforeCost.weighted)
@@ -276,39 +243,37 @@ func TestMeasureFinderTokenBurn(t *testing.T) {
 	}
 }
 
-// buildRunaway constructs a finder history of `turns` turns where each turn reads
-// a file of about readTokens tokens, mirroring the dogfood shape. The first turn
-// is the bare task. It returns the per-turn append-only request snapshots.
-func buildRunaway(turns, readTokens int) [][]llmkit.Message {
-	blob := strings.Repeat("source line of the file under analysis\n", readTokens*4/39+1)
-	msgs := []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, strings.Repeat("investigate ", 200))}
-	var snaps [][]llmkit.Message
-	snaps = append(snaps, cloneMsgs(msgs))
-	for i := 0; i < turns-1; i++ {
-		id := fmt.Sprintf("call-%02d", i)
-		msgs = append(msgs,
-			llmkit.Message{Role: llmkit.RoleAssistant, Content: []llmkit.Block{{Kind: llmkit.BlockText, Text: "I will read the next file to check it."}},
-				ToolCalls: []llmkit.ToolCall{{ID: id, Name: "read_file", Arguments: []byte(`{"path":"pkg/file.go"}`)}}},
-			llmkit.Message{Role: llmkit.RoleToolResult, ToolCallID: id, Content: []llmkit.Block{{Kind: llmkit.BlockText, Text: blob}}},
-		)
-		snaps = append(snaps, cloneMsgs(msgs))
+// runawayTask is the runaway finder's task: the first turn's bare user message.
+var runawayTask = strings.Repeat("investigate ", 200)
+
+// runawayResponses scripts a finder run of `turns` completions: turns-1
+// read_file calls, then a final answer, mirroring the dogfood shape.
+func runawayResponses(turns int) []llmkit.Response {
+	resps := make([]llmkit.Response, 0, turns)
+	for i := range turns - 1 {
+		resps = append(resps, llmkit.Response{
+			Text:       "I will read the next file to check it.",
+			StopReason: llmkit.StopToolUse,
+			ToolCalls:  []llmkit.ToolCall{{ID: fmt.Sprintf("call-%02d", i), Name: "read_file", Arguments: json.RawMessage(`{"path":"pkg/file.go"}`)}},
+		})
 	}
-	return snaps
+	return append(resps, llmkit.Response{Text: "done", StopReason: llmkit.StopEndTurn})
 }
 
-// runawayNames reproduces the ToolCallID -> tool-name map buildRunaway implies,
-// so compaction stubs can name their tool exactly as in the live loop.
-func runawayNames(reads int) map[string]string {
-	names := map[string]string{}
-	for i := 0; i < reads; i++ {
-		names[fmt.Sprintf("call-%02d", i)] = "read_file"
-	}
-	return names
+// runawayReadTool is a read_file tool returning a file of about readTokens
+// tokens on every call.
+func runawayReadTool(readTokens int) agent.Tool {
+	return staticTool{name: "read_file", result: strings.Repeat("source line of the file under analysis\n", readTokens*4/39+1)}
 }
 
+// cloneMsgs deep-copies msgs' content blocks so a later in-place compaction
+// cannot rewrite an earlier snapshot.
 func cloneMsgs(in []llmkit.Message) []llmkit.Message {
 	out := make([]llmkit.Message, len(in))
-	copy(out, in)
+	for i, m := range in {
+		m.Content = slices.Clone(m.Content)
+		out[i] = m
+	}
 	return out
 }
 

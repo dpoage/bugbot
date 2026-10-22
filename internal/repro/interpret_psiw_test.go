@@ -26,7 +26,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // --- bugbot-psiw (a): Go "go: " line-start anchoring ---

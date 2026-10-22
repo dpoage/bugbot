@@ -2,6 +2,7 @@ package repro
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,7 +11,8 @@ import (
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // resetPlaybookCache resets the package-level playbookCache for test
@@ -89,6 +91,15 @@ func TestClassifyPlaybookProbe(t *testing.T) {
 		v := classifyPlaybookProbe(probe, sandbox.Result{TimedOut: true}, nil, 15*time.Second)
 		if v.Verified || !v.Inconclusive || v.Reason != "timed out after 15s" {
 			t.Errorf("got %+v, want Inconclusive=true with a timeout reason", v)
+		}
+	})
+
+	// llmkit's bwrap backend reports a setup failure (missing mount source)
+	// as 125, the SetupCmds failure code, with a "No such file" message.
+	t.Run("exit 125 setup failure is inconclusive, not not-found", func(t *testing.T) {
+		v := classifyPlaybookProbe(probe, sandbox.Result{ExitCode: 125, Stderr: "bwrap: Can't find source path /nope: No such file or directory"}, nil, playbookProbeTimeout)
+		if v.Verified || !v.Inconclusive || !strings.Contains(v.Reason, "exit 125") {
+			t.Errorf("got %+v, want Inconclusive=true naming exit 125", v)
 		}
 	})
 
@@ -252,6 +263,11 @@ type slowFakeSandbox struct {
 	delay time.Duration
 }
 
+// MaterializeWorkspace satisfies sandbox.Sandbox; these tests never iterate in a workspace.
+func (f *slowFakeSandbox) MaterializeWorkspace(string) (string, error) {
+	return "", errors.New("slowFakeSandbox: MaterializeWorkspace unsupported")
+}
+
 func (f *slowFakeSandbox) Exec(ctx context.Context, _ sandbox.Spec) (sandbox.Result, error) {
 	select {
 	case <-time.After(f.delay):
@@ -303,7 +319,7 @@ func TestRunPlaybookBattery_VerifiedAndFailedLaunchers(t *testing.T) {
 	mustWriteFile(t, dir, "package.json", `{"name":"x"}`)
 
 	m := sandbox.NewMock(sandbox.MockResponse{})
-	m.ResponseFunc = func(_ int, spec sandbox.Spec) (sandbox.Result, error) {
+	m.ResponseFunc = func(_ context.Context, _ int, spec sandbox.Spec) (sandbox.Result, error) {
 		switch {
 		case len(spec.Cmd) > 0 && spec.Cmd[0] == "go":
 			return sandbox.Result{ExitCode: 0, Stdout: "go1.21"}, nil
@@ -316,7 +332,7 @@ func TestRunPlaybookBattery_VerifiedAndFailedLaunchers(t *testing.T) {
 	}
 
 	systems := ingest.DetectBuildSystems(dir)
-	pb, ok := runPlaybookBattery(context.Background(), m, dir, sandbox.Spec{}, sandbox.Resolution{}, systems, playbookProbeTimeout, playbookBatteryTimeout)
+	pb, ok := runPlaybookBattery(context.Background(), m, dir, sandbox.Spec{}, sandboxenv.Resolution{}, systems, playbookProbeTimeout, playbookBatteryTimeout)
 	if !ok {
 		t.Fatal("battery must not abort on a clean Mock")
 	}
@@ -347,7 +363,7 @@ func TestRunPlaybookBattery_PythonAndPytestAreSeparateLaunchers(t *testing.T) {
 	mustWriteFile(t, dir, "pyproject.toml", "[project]\nname = \"x\"\n")
 
 	m := sandbox.NewMock(sandbox.MockResponse{})
-	m.ResponseFunc = func(_ int, spec sandbox.Spec) (sandbox.Result, error) {
+	m.ResponseFunc = func(_ context.Context, _ int, spec sandbox.Spec) (sandbox.Result, error) {
 		switch {
 		case len(spec.Cmd) == 2 && spec.Cmd[0] == "python3" && spec.Cmd[1] == "--version":
 			return sandbox.Result{ExitCode: 0, Stdout: "Python 3.11.4"}, nil
@@ -358,7 +374,7 @@ func TestRunPlaybookBattery_PythonAndPytestAreSeparateLaunchers(t *testing.T) {
 	}
 
 	systems := ingest.DetectBuildSystems(dir)
-	pb, ok := runPlaybookBattery(context.Background(), m, dir, sandbox.Spec{}, sandbox.Resolution{}, systems, playbookProbeTimeout, playbookBatteryTimeout)
+	pb, ok := runPlaybookBattery(context.Background(), m, dir, sandbox.Spec{}, sandboxenv.Resolution{}, systems, playbookProbeTimeout, playbookBatteryTimeout)
 	if !ok {
 		t.Fatal("battery must not abort on a clean Mock")
 	}
@@ -393,7 +409,7 @@ func TestRunPlaybookBattery_AbortsOnInfraError(t *testing.T) {
 	m := sandbox.NewMock(sandbox.MockResponse{Err: context.DeadlineExceeded})
 	systems := ingest.DetectBuildSystems(dir)
 
-	pb, ok := runPlaybookBattery(context.Background(), m, dir, sandbox.Spec{}, sandbox.Resolution{}, systems, playbookProbeTimeout, playbookBatteryTimeout)
+	pb, ok := runPlaybookBattery(context.Background(), m, dir, sandbox.Spec{}, sandboxenv.Resolution{}, systems, playbookProbeTimeout, playbookBatteryTimeout)
 	if ok {
 		t.Fatal("battery must abort (ok=false) on an infra-level Exec error")
 	}
@@ -434,7 +450,7 @@ func TestRunPlaybookBattery_CeilingExceededLeavesRemainingProbesUnprobed(t *test
 	systems := ingest.DetectBuildSystems(dir)
 
 	fake := &slowFakeSandbox{delay: 60 * time.Millisecond}
-	pb, ok := runPlaybookBattery(context.Background(), fake, dir, sandbox.Spec{}, sandbox.Resolution{}, systems, 500*time.Millisecond, 20*time.Millisecond)
+	pb, ok := runPlaybookBattery(context.Background(), fake, dir, sandbox.Spec{}, sandboxenv.Resolution{}, systems, 500*time.Millisecond, 20*time.Millisecond)
 	if !ok {
 		t.Fatal("a ceiling timeout is not an infra error; battery must stay active (ok=true)")
 	}
@@ -467,7 +483,7 @@ func TestPlaybookOnce_CachesResult(t *testing.T) {
 	m := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "go1.21"}})
 	systems := ingest.DetectBuildSystems(dir)
 	spec := sandbox.Spec{Image: "debian:slim"}
-	res := sandbox.Resolution{}
+	res := sandboxenv.Resolution{}
 	ctx := context.Background()
 
 	pb1 := PlaybookOnce(ctx, m, dir, spec, res, systems)
@@ -497,8 +513,8 @@ func TestPlaybookOnce_DistinctResolutionGetsDistinctCacheEntry(t *testing.T) {
 	systems := ingest.DetectBuildSystems(dir)
 	ctx := context.Background()
 
-	PlaybookOnce(ctx, m, dir, sandbox.Spec{}, sandbox.Resolution{}, systems)
-	PlaybookOnce(ctx, m, dir, sandbox.Spec{}, sandbox.Resolution{Env: []string{"GOFLAGS=-mod=mod"}}, systems)
+	PlaybookOnce(ctx, m, dir, sandbox.Spec{}, sandboxenv.Resolution{}, systems)
+	PlaybookOnce(ctx, m, dir, sandbox.Spec{}, sandboxenv.Resolution{Env: []string{"GOFLAGS=-mod=mod"}}, systems)
 
 	if m.CallCount() != 2 {
 		t.Errorf("a distinct dependency resolution must run its own battery, want 2 sandbox calls, got %d", m.CallCount())

@@ -12,9 +12,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dpoage/bugbot/internal/config"
-	"github.com/dpoage/bugbot/internal/engine"
 	"github.com/dpoage/bugbot/internal/repro"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 )
 
 // newBundleCmd returns the `bugbot bundle` parent command. Subcommands treat
@@ -239,11 +238,6 @@ auto-close the finding).`,
 				return err
 			}
 
-			runtime, ok := sandbox.Detect()
-			if !ok {
-				return fmt.Errorf("bundle replay: no container runtime (podman or docker) found on PATH")
-			}
-
 			effImage := image
 			if effImage == "" {
 				effImage = cfg.Sandbox.Image
@@ -252,17 +246,17 @@ auto-close the finding).`,
 				effImage = b.Manifest.Sandbox.Image
 			}
 
-			sb, err := sandbox.NewCLI(runtime, effImage, engine.SandboxRunOpts(cfg)...)
+			// Replay is image-centric, so it always uses the container backend.
+			sb, err := sandboxenv.NewCLI(cfg.Sandbox, effImage)
 			if err != nil {
 				return fmt.Errorf("bundle replay: build sandbox: %w", err)
 			}
 			defer func() { _ = sb.Close() }()
 
-			roMounts, rwMounts := engine.LocalMountsFromConfig(cfg)
-			deps, err := sandbox.ResolveDeps(target, sandbox.DepOptions{
-				Strategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+			roMounts, rwMounts := sandboxenv.LocalMounts(cfg.Sandbox)
+			deps, err := sandboxenv.ResolveDeps(target, sandboxenv.DepOptions{
+				Strategy:      sandboxenv.DepStrategy(cfg.Sandbox.DepStrategy),
 				FetchSandbox:  sb,
-				FetchImage:    effImage,
 				LocalMounts:   roMounts,
 				LocalRWMounts: rwMounts,
 			})

@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -40,77 +39,6 @@ func mustMkdir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", path, err)
-	}
-}
-
-func TestFSRoot_Resolve_Traversal(t *testing.T) {
-	root := fixtureTree(t)
-	fr, err := NewFSRoot(root)
-	if err != nil {
-		t.Fatalf("NewFSRoot: %v", err)
-	}
-
-	tests := []struct {
-		name    string
-		path    string
-		wantErr bool
-	}{
-		{"plain file", "README.md", false},
-		{"nested file", "pkg/util.go", false},
-		{"root via empty", "", false},
-		{"dot", ".", false},
-		{"forward-slash nested", "pkg/util.go", false},
-		{"dotdot escape", "../secret", true},
-		{"deep dotdot escape", "pkg/../../secret", true},
-		{"absolute path", "/etc/passwd", true},
-		{"dotdot only", "..", true},
-		{"sneaky dotdot mid", "a/b/../../../x", true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := fr.Resolve(tc.path)
-			if tc.wantErr {
-				if err == nil {
-					t.Errorf("resolve(%q) = %q, want error", tc.path, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Errorf("resolve(%q) unexpected error: %v", tc.path, err)
-			}
-		})
-	}
-}
-
-func TestFSRoot_SymlinkEscape(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink semantics differ on windows")
-	}
-	root := fixtureTree(t)
-	outside := t.TempDir()
-	mustWrite(t, filepath.Join(outside, "secret.txt"), "top secret\n")
-
-	// A symlink inside the root pointing at a file outside it.
-	link := filepath.Join(root, "escape")
-	if err := os.Symlink(filepath.Join(outside, "secret.txt"), link); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
-	// A symlink inside the root pointing at a directory outside it.
-	dirLink := filepath.Join(root, "outdir")
-	if err := os.Symlink(outside, dirLink); err != nil {
-		t.Fatalf("symlink dir: %v", err)
-	}
-
-	fr, err := NewFSRoot(root)
-	if err != nil {
-		t.Fatalf("NewFSRoot: %v", err)
-	}
-
-	if _, err := fr.Resolve("escape"); err == nil {
-		t.Error("resolve via file symlink escaping root should fail")
-	}
-	if _, err := fr.Resolve("outdir/secret.txt"); err == nil {
-		t.Error("resolve through dir symlink escaping root should fail")
 	}
 }
 

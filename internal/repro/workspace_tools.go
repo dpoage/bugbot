@@ -17,10 +17,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/agenttools"
-	"github.com/dpoage/bugbot/internal/sandbox"
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/fsroot"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // runReproOutputTailBytes bounds the combined-output excerpt returned by the
@@ -31,19 +31,6 @@ import (
 // exact compiler error or assertion failure it needs to see to fix the next
 // iteration.
 const runReproOutputTailBytes = 4 * 1024
-
-// workspaceMaterializer is implemented by sandbox backends that can
-// pre-materialize a caller-owned workspace outside of Exec (see
-// sandbox.Spec.Workspace). *sandbox.CLI implements it via the pristine-
-// workspace cache. The workspace tool set (write_repro_file,
-// delete_repro_file, workspace) is wired only when the configured sandbox
-// implements this interface (checked once in newRunner); a backend that
-// doesn't (e.g. a bare sandbox.Mock in a test that never scripts iteration)
-// simply omits the tools, mirroring how run_tests is omitted when no build
-// system is detectable.
-type workspaceMaterializer interface {
-	MaterializeWorkspace(repoDir string) (string, error)
-}
 
 // iterationWorkspace is the lazily-materialized, per-Attempt workspace the
 // reproducer agent builds its candidate in. It starts empty (path == "") and
@@ -178,7 +165,7 @@ type WriteReproFileTool struct {
 // NewWriteReproFileTool builds a write_repro_file tool bound to one Attempt's
 // iteration workspace holder. repoDir is the host repo path used for the
 // must-not-overwrite-existing-repo-file check; materialize lazily creates the
-// workspace (normally sb.(workspaceMaterializer).MaterializeWorkspace).
+// workspace (normally sb.MaterializeWorkspace).
 func NewWriteReproFileTool(repoDir string, materialize func(repoDir string) (string, error), ws *iterationWorkspace) *WriteReproFileTool {
 	return &WriteReproFileTool{repoDir: repoDir, materialize: materialize, ws: ws}
 }
@@ -419,8 +406,8 @@ type WorkspaceTool struct {
 // network/dep/timeout/image environment the final plan will; roMounts/
 // rwMounts/depEnv/setupCmds carry the resolved dependency strategy (rwMounts
 // are operator "writable: true" local_mounts, bugbot-wjc2); materialize
-// lazily creates the iteration workspace (normally sb.(workspaceMaterializer).
-// MaterializeWorkspace); ws is the shared holder Attempt cleans up on
+// lazily creates the iteration workspace (normally
+// sb.MaterializeWorkspace); ws is the shared holder Attempt cleans up on
 // return; maxExec is the per-attempt SANDBOX budget — only exec calls that
 // actually reach the sandbox consume it; the free ls/cat/status/grep/find
 // applets never do.
@@ -538,7 +525,7 @@ func (t *WorkspaceTool) Run(ctx context.Context, raw json.RawMessage) (string, e
 }
 
 // runLS implements the free `ls [dir]` applet: it lists a workspace-relative
-// directory (default the workspace root), confined via agenttools.FSRoot so a
+// directory (default the workspace root), confined via fsroot.FSRoot so a
 // symlink planted by a build step cannot walk the listing outside the
 // workspace. It never materializes an unmaterialized workspace.
 func (t *WorkspaceTool) runLS(argv []string) (string, error) {
@@ -550,7 +537,7 @@ func (t *WorkspaceTool) runLS(argv []string) (string, error) {
 	if !ok {
 		return workspaceUnmaterializedHint, nil
 	}
-	root, err := agenttools.NewFSRoot(wsPath)
+	root, err := fsroot.NewFSRoot(wsPath)
 	if err != nil {
 		return "", fmt.Errorf("workspace ls: %w", err)
 	}
@@ -588,7 +575,7 @@ func (t *WorkspaceTool) runLS(argv []string) (string, error) {
 // runCat implements the free `cat <file>` applet: it returns the tail of a
 // workspace-relative file capped at runReproOutputTailBytes (build logs are
 // the primary use case), with the same tailExcerpt truncation marker
-// exec/interpret feedback already uses. Confined via agenttools.FSRoot. It never
+// exec/interpret feedback already uses. Confined via fsroot.FSRoot. It never
 // materializes an unmaterialized workspace.
 func (t *WorkspaceTool) runCat(argv []string) (string, error) {
 	if len(argv) == 0 {
@@ -599,7 +586,7 @@ func (t *WorkspaceTool) runCat(argv []string) (string, error) {
 	if !ok {
 		return workspaceUnmaterializedHint, nil
 	}
-	root, err := agenttools.NewFSRoot(wsPath)
+	root, err := fsroot.NewFSRoot(wsPath)
 	if err != nil {
 		return "", fmt.Errorf("workspace cat: %w", err)
 	}
@@ -616,7 +603,7 @@ func (t *WorkspaceTool) runCat(argv []string) (string, error) {
 
 // runGrep implements the free `grep <pattern> [dir]` applet: a Go (RE2)
 // regexp search over regular files under a workspace-relative directory
-// (default the workspace root), confined via agenttools.FSRoot exactly like
+// (default the workspace root), confined via fsroot.FSRoot exactly like
 // ls/cat so a symlink planted by a build step cannot walk the search
 // outside the workspace. It caps the scan to workspaceGrepMaxFiles files,
 // skips anything over workspaceGrepMaxFileBytes or sniffed as binary (a NUL
@@ -643,7 +630,7 @@ func (t *WorkspaceTool) runGrep(argv []string) (string, error) {
 	if !ok {
 		return workspaceUnmaterializedHint, nil
 	}
-	root, err := agenttools.NewFSRoot(wsPath)
+	root, err := fsroot.NewFSRoot(wsPath)
 	if err != nil {
 		return "", fmt.Errorf("workspace grep: %w", err)
 	}
@@ -752,7 +739,7 @@ func grepWorkspaceFile(path, rel string, re *regexp.Regexp, b *strings.Builder, 
 
 // runFind implements the free `find <glob-or-substring> [dir]` applet:
 // filename matching under a workspace-relative directory (default the
-// workspace root), confined via agenttools.FSRoot exactly like ls/cat/grep. A
+// workspace root), confined via fsroot.FSRoot exactly like ls/cat/grep. A
 // pattern containing a glob metacharacter (*, ?, [) is matched against
 // both the basename and the full workspace-relative path with
 // filepath.Match; a pattern without one is matched as a plain substring of
@@ -773,7 +760,7 @@ func (t *WorkspaceTool) runFind(argv []string) (string, error) {
 	if !ok {
 		return workspaceUnmaterializedHint, nil
 	}
-	root, err := agenttools.NewFSRoot(wsPath)
+	root, err := fsroot.NewFSRoot(wsPath)
 	if err != nil {
 		return "", fmt.Errorf("workspace find: %w", err)
 	}

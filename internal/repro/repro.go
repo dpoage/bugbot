@@ -42,9 +42,10 @@ import (
 	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // Defaults for Options. Reproduction is deliberately conservative: each
@@ -102,8 +103,9 @@ type Options struct {
 	MaxAttempts int
 	// Timeout bounds a single sandbox execution. Zero uses DefaultTimeout.
 	Timeout time.Duration
-	// Image overrides the sandbox's default container image for repro runs.
-	// Empty uses the sandbox backend's configured default.
+	// Image is the container image repro runs request and the manifest
+	// records. Empty uses the backend default; it must be empty on backends
+	// without an image concept (Bwrap, HostExec refuse it).
 	Image string
 	// Network records the sandbox network policy applied to repro runs
 	// (config.Sandbox.Network), purely for manifest.json bookkeeping (see
@@ -121,9 +123,12 @@ type Options struct {
 	// AgentLimits bounds each reproducer agent run (iterations / token budget).
 	// Zero-value fields resolve to agent defaults.
 	AgentLimits agent.Limits
-	// TranscriptDir, when non-empty, makes each reproducer agent auto-save its
-	// transcript there.
+	// TranscriptDir, when non-empty, makes each reproducer and patch-prover
+	// agent write its JSONL transcript there ("<RunID>.jsonl").
 	TranscriptDir string
+	// Observer, when non-nil, receives the events of every reproducer and
+	// patch-prover Runner (the spend ledger reads their completion events).
+	Observer llmkit.Observer
 	// SandboxMaxExecs is the per-attempt execution budget: the reproducer agent
 	// may call run_tests at most this many times per attempt to orient itself
 	// before proposing its repro plan. Zero uses DefaultSandboxMaxExecs.
@@ -131,10 +136,7 @@ type Options struct {
 	// TryMaxExecs is the per-attempt execution budget for `workspace exec`:
 	// the reproducer agent may run/observe its candidate repro at most this
 	// many times per attempt before committing to its final plan. Zero uses
-	// DefaultTryMaxExecs. The workspace tool set (write_repro_file,
-	// delete_repro_file, workspace) is only wired when the sandbox backend
-	// supports workspace materialization (see newRunner); Mock-backed tests
-	// that do not implement it never see the tools regardless of this budget.
+	// DefaultTryMaxExecs.
 	TryMaxExecs int
 	// PatchProver enables the patch-prover stage: after a successful repro,
 	// attempt to produce a minimal fix and prove it with a sandboxed suite run.
@@ -149,12 +151,12 @@ type Options struct {
 	// fails the patch-prover skips for that finding.
 	PatchSuiteCmd []string
 	// DepStrategy selects how external module dependencies are made available to
-	// the network-none sandbox (see sandbox.DepStrategy). Empty/"off" keeps the
+	// the network-none sandbox (see sandboxenv.DepStrategy). Empty/"off" keeps the
 	// current behavior (only vendored repos build offline). "host" mounts the
 	// host module cache read-only; "fetch" warms a bugbot-managed cache with one
 	// online download then mounts it read-only. Vendored repos are always
 	// detected regardless of this value.
-	DepStrategy sandbox.DepStrategy
+	DepStrategy sandboxenv.DepStrategy
 	// SetupCmds are operator-supplied commands to run inside the sandbox BEFORE
 	// the main command AND BEFORE any per-ecosystem offline-install setup (e.g.
 	// pip install from cache). Use to install system-level dependencies
@@ -265,7 +267,7 @@ type Reproducer struct {
 	// deps is the resolved dependency strategy for repoDir: the read-only mounts
 	// and extra env every sandbox run carries, plus an optional one-time
 	// Prefetch hook (run once from PromoteAll). Resolved once in New.
-	deps sandbox.Resolution
+	deps sandboxenv.Resolution
 	// buildSystems is the set of build systems detected in repoDir, resolved
 	// once in New and threaded into the system prompt so C/C++ findings get
 	// build-system-specific repro guidance without re-detecting per attempt.
@@ -303,10 +305,9 @@ func New(client llmkit.Client, sb sandbox.Sandbox, repoDir string, opts Options)
 		return nil, errors.New("repro: empty repoDir")
 	}
 	resolved := opts.resolve()
-	deps, err := sandbox.ResolveDeps(repoDir, sandbox.DepOptions{
+	deps, err := sandboxenv.ResolveDeps(repoDir, sandboxenv.DepOptions{
 		Strategy:       resolved.DepStrategy,
 		FetchSandbox:   sb,
-		FetchImage:     resolved.Image,
 		LocalMounts:    resolved.LocalMounts,
 		LocalRWMounts:  resolved.LocalRWMounts,
 		HostToolchains: resolved.HostToolchains,
@@ -439,7 +440,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 	var feedback string
 
 	// prevOutcome is round i's agent.Outcome, threaded into round i+1's
-	// planFor call so RunJSONContinue (see planFor, agent.go) lands the
+	// planFor call so agent.Continue (see planFor, agent.go) lands the
 	// revision feedback in the SAME conversation as the investigation that
 	// produced it, instead of discarding up to MaxIterations turns of
 	// tool-driven investigation on every revision round (bugbot-z6ay). Nil on
@@ -467,7 +468,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			usage.OutputTokens += roundOutcome.Usage.OutputTokens
 		}
 		// Thread this round's Outcome into the next round's planFor call
-		// regardless of perr: RunJSON/RunJSONContinue return a usable Outcome
+		// regardless of perr: RunJSON returns a usable Outcome
 		// even on an unparseable-output error (its Messages still hold the
 		// round's investigation), so a "revise and try again" round after an
 		// unparseable plan still continues the same conversation instead of
@@ -706,26 +707,14 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 	// lets the agent build, run, and observe a candidate repro interactively
 	// in a persistent per-attempt workspace before committing to its final
 	// plan (bugbot-bkz1, bugbot-hu59, bugbot-jto7); the files it writes are
-	// submitted with the plan automatically. Only wired when the sandbox
-	// backend can pre-materialize a caller-owned workspace
-	// (workspaceMaterializer): *sandbox.CLI always can; a bare sandbox.Mock in
-	// a test that doesn't script iteration simply omits the tools, matching
-	// run_tests' no-build-system omission above.
-	workspaceWired := false
-	if mat, ok := r.sb.(workspaceMaterializer); ok {
-		workspaceWired = true
-		tools = append(tools,
-			NewWriteReproFileTool(r.repoDir, mat.MaterializeWorkspace, iterWS),
-			NewDeleteReproFileTool(iterWS),
-			NewWorkspaceTool(r.sb, r.repoDir, r.opts.Image, r.opts.Timeout,
-				r.deps.ROMounts, r.deps.RWMounts, r.deps.Env, r.deps.SetupCmds, mat.MaterializeWorkspace, iterWS, r.opts.TryMaxExecs))
-	}
-	var opts []agent.Option
-	opts = append(opts, agent.WithLimits(r.opts.AgentLimits))
-	if r.opts.TranscriptDir != "" {
-		opts = append(opts, agent.WithTranscriptDir(r.opts.TranscriptDir))
-	}
-	opts = append(opts, agent.WithHooks(scope.Hooks()))
+	// submitted with the plan automatically.
+	tools = append(tools,
+		NewWriteReproFileTool(r.repoDir, r.sb.MaterializeWorkspace, iterWS),
+		NewDeleteReproFileTool(iterWS),
+		NewWorkspaceTool(r.sb, r.repoDir, r.opts.Image, r.opts.Timeout,
+			r.deps.ROMounts, r.deps.RWMounts, r.deps.Env, r.deps.SetupCmds, r.sb.MaterializeWorkspace, iterWS, r.opts.TryMaxExecs))
+	opts := []agent.Option{agent.WithLimits(r.opts.AgentLimits), agent.WithHooks(scope.Hooks())}
+	opts = append(opts, runnerObservers(r.opts.TranscriptDir, r.opts.Observer)...)
 	prompt := systemPrompt(lang, systems, r.capabilities, r.playbook)
 	if r.pkgSummary != nil {
 		prompt += pkgContextGuidance
@@ -733,14 +722,26 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 	if len(baseCmd) > 0 {
 		prompt += runTestsGuidance(r.opts.SandboxMaxExecs)
 	}
-	if workspaceWired {
-		prompt += workspaceGuidance(r.opts.TryMaxExecs)
-	}
+	prompt += workspaceGuidance(r.opts.TryMaxExecs)
 	if slices.Contains(r.buildSystems, ingest.BuildSystemBazel) {
 		prompt += bazelGuidance()
 	}
 	prompt += reproSandboxGuidance(r.deps.ROMounts)
 	return agent.NewRunner(r.client, tools, prompt, opts...), nil
+}
+
+// runnerObservers returns the observer options every reproducer and
+// patch-prover Runner carries: a JSONL transcript sink when transcriptDir is
+// set, then obs.
+func runnerObservers(transcriptDir string, obs llmkit.Observer) []agent.Option {
+	var opts []agent.Option
+	if transcriptDir != "" {
+		opts = append(opts, agent.WithObserver(agent.JSONL(transcriptDir, nil)))
+	}
+	if obs != nil {
+		opts = append(opts, agent.WithObserver(obs))
+	}
+	return opts
 }
 
 // Close shuts down any language servers the code-navigation tools spawned.
@@ -773,7 +774,7 @@ func readOnlyTools(dir string) ([]agent.Tool, error) {
 // execute runs a plan in the sandbox with the stage's network/timeout/image
 // policy. network is intentionally left unset so the run inherits the
 // sandbox's configured default (sandbox.network in bugbot.yaml, applied via
-// the CLI's sandboxRunOpts) — see buildSpec's doc comment. Replay (see
+// sandboxenv.New's WithNetwork) — see buildSpec's doc comment. Replay (see
 // replay.go) calls buildSpec directly with an explicit "none" instead, since
 // it re-runs a saved bundle rather than an agent-proposed plan.
 func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, error) {
@@ -789,7 +790,7 @@ func (r *Reproducer) execute(ctx context.Context, plan *Plan) (sandbox.Result, e
 // the ONE workspace-reconstruction path both callers share, so a replay
 // genuinely re-runs what the official Attempt path would have run, not a
 // parallel reimplementation of it.
-func buildSpec(repoDir string, plan *Plan, image, network string, timeout time.Duration, deps sandbox.Resolution) sandbox.Spec {
+func buildSpec(repoDir string, plan *Plan, image string, network sandbox.NetworkMode, timeout time.Duration, deps sandboxenv.Resolution) sandbox.Spec {
 	files := make(map[string][]byte, len(plan.Files))
 	for path, content := range plan.Files {
 		files[path] = []byte(content)

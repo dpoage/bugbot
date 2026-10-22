@@ -13,6 +13,7 @@ import (
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/repro"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // doctorMinimalConfig is a minimal valid config for doctor tests. It sets the
@@ -114,6 +115,37 @@ func TestDoctor_AllGreen(t *testing.T) {
 		if r.hard && r.Status == statusFail {
 			t.Errorf("all-green: unexpected FAIL on hard check %q: %s", r.Name, r.Detail)
 		}
+	}
+}
+
+// A backend llmkit refuses to build from the config is a hard doctor failure
+// carrying the refusal; a buildable one passes listing the mapped knobs.
+func TestDoctor_SandboxBackendCheck(t *testing.T) {
+	cfgPath := writeDoctorConfig(t)
+	find := func(results []checkResult) (checkResult, bool) {
+		for _, r := range results {
+			if r.Name == "sandbox backend" {
+				return r, true
+			}
+		}
+		return checkResult{}, false
+	}
+
+	env := allGreenEnv(t, cfgPath)
+	env.newSandbox = func(config.Sandbox) (sandbox.Sandbox, error) {
+		return nil, errors.New("sandbox.host_toolchains: node did not resolve on this host")
+	}
+	r, ok := find(runChecks(context.Background(), env, false))
+	if !ok || r.Status != statusFail || !r.hard || !strings.Contains(r.Detail, "host_toolchains") {
+		t.Errorf("refused backend: got %+v (found=%v), want a hard FAIL carrying the refusal", r, ok)
+	}
+
+	env.newSandbox = func(config.Sandbox) (sandbox.Sandbox, error) {
+		return sandbox.NewMock(sandbox.MockResponse{}), nil
+	}
+	r, ok = find(runChecks(context.Background(), env, false))
+	if !ok || r.Status != statusPass || !strings.Contains(r.Detail, "growth_ceiling_mb=") {
+		t.Errorf("buildable backend: got %+v (found=%v), want PASS listing the knobs", r, ok)
 	}
 }
 

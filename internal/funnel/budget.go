@@ -13,9 +13,9 @@ import (
 	"github.com/dpoage/llmkit/agent"
 )
 
-// spendRecorder implements llmkit.Recorder, writing each completion's usage to the
-// store's spend ledger under the active scan run and tracking a running total
-// for budget decisions. It is safe for concurrent use by parallel agents.
+// spendRecorder writes each completion's usage to the store's spend ledger
+// under the active scan run and tracks running totals for budget decisions. It
+// is safe for concurrent use by parallel agents.
 type spendRecorder struct {
 	ctx       context.Context
 	store     *store.Store
@@ -35,12 +35,8 @@ type spendRecorder struct {
 	// agent request path).
 	onRecord func(in, out, cached int64)
 
-	// pool, when non-nil, is the shared budget pool. Every completion's
-	// input+output tokens are added to it as they are ledgered, so concurrent
-	// in-flight runs see the run-spanning spend total via their pre-turn
-	// Limits.BudgetCheck hook. Budget accounting uses total InputTokens (tokens
-	// processed), which is INCLUSIVE of cached tokens per the llmkit.Usage
-	// convention — cache reads are not subtracted (see funnel doc comment).
+	// pool, when non-nil, is the shared budget pool, charged with every
+	// completion's chargeable tokens (see record).
 	pool *agent.BudgetPool
 
 	// finderPool / verifyPool are the role-scoped sub-pools that back the
@@ -58,51 +54,92 @@ type spendRecorder struct {
 	cacheReadWeight float64
 }
 
-func (r *spendRecorder) Record(ev llmkit.UsageEvent) {
+// record ledgers one completion's usage under role. runnerPool is the pool the
+// completing Runner already charged itself (agent.WithBudgetPool); it is skipped
+// so no pool is charged twice.
+func (r *spendRecorder) record(role, provider, model string, u llmkit.Usage, runnerPool *agent.BudgetPool) {
 	w := r.cacheReadWeight
 	if w <= 0 {
 		w = 1.0
 	}
+	charge := u.ChargeableTokens(w)
 	r.mu.Lock()
-	r.totalTokens += ev.Usage.InputTokens + ev.Usage.OutputTokens
-	r.chargeable += ev.Usage.ChargeableTokens(w)
-	r.inTokens += ev.Usage.InputTokens
-	r.outTokens += ev.Usage.OutputTokens
-	r.cacheRead += ev.Usage.CacheReadInputTokens
-	r.cacheCreated += ev.Usage.CacheCreationInputTokens
+	r.totalTokens += u.InputTokens + u.OutputTokens
+	r.chargeable += charge
+	r.inTokens += u.InputTokens
+	r.outTokens += u.OutputTokens
+	r.cacheRead += u.CacheReadInputTokens
+	r.cacheCreated += u.CacheCreationInputTokens
 	in, out, cached := r.inTokens, r.outTokens, r.cacheRead
 	cb := r.onRecord
 	r.mu.Unlock()
-	// Charge the shared budget pool with this completion's CHARGEABLE tokens
-	// (cache reads discounted), so concurrent in-flight runs observe the new
-	// run-spanning total at their next pre-turn check. Done outside the lock:
-	// the pool is independently concurrency-safe.
-	charge := ev.Usage.ChargeableTokens(w)
-	r.pool.Add(charge)
-	// Under a downstream-budget reservation, also charge the role-scoped sub-pool
-	// so each stage gates on its own allowance. Both Add calls are nil-safe, so
-	// this is a no-op when no reservation is active.
-	if ev.Role == roleFinder || ev.Role == roleCartographer {
-		r.finderPool.Add(charge)
-	} else {
-		r.verifyPool.Add(charge)
+	// Charge outside the lock: the pools are independently concurrency-safe and
+	// nil-safe, so the role sub-pool charge is a no-op without a reservation.
+	charges := [2]*agent.BudgetPool{r.pool, r.verifyPool}
+	if role == roleFinder || role == roleCartographer {
+		charges[1] = r.finderPool
+	}
+	for _, p := range charges {
+		if p != runnerPool {
+			p.Add(charge)
+		}
 	}
 	if cb != nil {
 		cb(in, out, cached)
 	}
-	// Persist the ledger entry. Spend recording must not abort a scan, so a
-	// failure here is swallowed; the in-memory totals (used for budget) remain
-	// authoritative for this run regardless.
+	// Spend recording must not abort a scan; the in-memory totals stay
+	// authoritative for budget decisions.
 	_, _ = r.store.RecordSpend(r.ctx, store.Spend{
 		ScanRunID:           r.scanRunID,
-		Role:                ev.Role,
-		Provider:            ev.Provider,
-		Model:               ev.Model,
-		InputTokens:         ev.Usage.InputTokens,
-		OutputTokens:        ev.Usage.OutputTokens,
-		CacheReadTokens:     ev.Usage.CacheReadInputTokens,
-		CacheCreationTokens: ev.Usage.CacheCreationInputTokens,
+		Role:                role,
+		Provider:            provider,
+		Model:               model,
+		InputTokens:         u.InputTokens,
+		OutputTokens:        u.OutputTokens,
+		CacheReadTokens:     u.CacheReadInputTokens,
+		CacheCreationTokens: u.CacheCreationInputTokens,
 	})
+}
+
+// observer ledgers every successful completion event under role; runnerPool
+// is as in record.
+func (r *spendRecorder) observer(role string, runnerPool *agent.BudgetPool) llmkit.Observer {
+	return llmkit.ObserverFunc(func(_ context.Context, ev llmkit.Event) {
+		if ev.Kind != llmkit.KindCompletion || ev.Completion == nil || ev.Completion.Err != "" {
+			return
+		}
+		c := ev.Completion
+		r.record(role, c.Provider, c.Model, c.Response.Usage, runnerPool)
+	})
+}
+
+// ledgered binds c to the spend ledger under role. A Runner claims its
+// completions, so runnerClient must unwrap c and install the ledger per Runner;
+// a bare Complete on c ledgers through llmkit.Observe.
+func (r *spendRecorder) ledgered(c llmkit.Client, role string) llmkit.Client {
+	return &ledgeredClient{Client: llmkit.Observe(c, r.observer(role, nil)), inner: c, rec: r, role: role}
+}
+
+type ledgeredClient struct {
+	llmkit.Client
+	inner llmkit.Client
+	rec   *spendRecorder
+	role  string
+}
+
+func (c *ledgeredClient) Identity() llmkit.Identity { return llmkit.IdentityOf(c.inner) }
+
+// runnerClient returns the client a Runner over c should drive and the options
+// that ledger its completions and gate it on pool (nil = no pool).
+func runnerClient(c llmkit.Client, pool *agent.BudgetPool) (llmkit.Client, []agent.Option) {
+	var opts []agent.Option
+	if pool != nil {
+		opts = append(opts, agent.WithBudgetPool(pool))
+	}
+	if lc, ok := c.(*ledgeredClient); ok {
+		return lc.inner, append(opts, agent.WithObserver(lc.rec.observer(lc.role, pool)))
+	}
+	return c, opts
 }
 
 // chargeableTotal returns the cumulative cache-discounted tokens spent so far,
@@ -128,8 +165,7 @@ type budgetState struct {
 	rec             *spendRecorder
 	cacheReadWeight float64
 	// pool is the shared, run-spanning token pool that every in-flight runner
-	// consults pre-turn (via agent.Limits.BudgetCheck). It is the same pool the
-	// recorder charges. Nil when TokenBudget is unlimited.
+	// consults pre-turn (agent.WithBudgetPool). Nil when TokenBudget is unlimited.
 	pool *agent.BudgetPool
 
 	// Downstream-budget reservation (see reserveForDownstream). When active,
@@ -214,34 +250,33 @@ func newBudgetState(budget int64, rec *spendRecorder, cacheReadWeight float64) *
 	return &budgetState{budget: budget, rec: rec, pool: pool, cacheReadWeight: cacheReadWeight}
 }
 
-// runnerLimitsForPool derives the per-run agent.Limits for a runner launched
-// now against the given pool, layering it onto the caller's base limits. The
-// per-run TokenBudget is the tightest of three bounds: the role's per-task
-// CLAIM (the claimant cap, default DefaultTokenClaim), this run's own base
-// budget if it set one, and the pool's remaining headroom at launch. The
-// BudgetCheck hook stops an in-flight run at the next turn once the pool is
-// exhausted by *other* concurrent runs. Returns base unchanged when pool is
-// nil (unlimited budget, or no reservation for this role).
+// runnerBudget is one Runner's budget wiring: its per-run limits and the pool
+// it gates on pre-turn and charges (agent.WithBudgetPool; nil = none).
+type runnerBudget struct {
+	limits agent.Limits
+	pool   *agent.BudgetPool
+}
+
+// runnerLimitsForPool derives the budget for a runner launched now against the
+// given pool, layering it onto the caller's base limits. The per-run
+// TokenBudget is the tightest of three bounds: the role's per-task CLAIM (the
+// claimant cap, default DefaultTokenClaim), this run's own base budget if it
+// set one, and the pool's remaining headroom at launch. The pool stops an
+// in-flight run at the next turn once *other* concurrent runs exhaust it.
+// Returns base and no pool when pool is nil (unlimited budget).
 //
-// The claim is a CAP, not a held reservation: the shared pool is charged only
-// for tokens actually spent (via the recorder), so a run that finishes under
-// its claim leaves the unspent remainder in the pool for sibling runs. This is
-// the claimant system's "return to the pool on closure" — realised by never
-// removing the unspent budget in the first place, which avoids the utilisation
-// loss and concurrency hazard of holding a reservation for the whole run.
-func (b *budgetState) runnerLimitsForPool(base agent.Limits, pool *agent.BudgetPool, claim int64) agent.Limits {
+// The claim is a CAP, not a held reservation: pools are charged only for
+// tokens actually spent, so a run that finishes under its claim leaves the
+// unspent remainder in the pool for sibling runs.
+func (b *budgetState) runnerLimitsForPool(base agent.Limits, pool *agent.BudgetPool, claim int64) runnerBudget {
 	if pool == nil {
-		return base
+		return runnerBudget{limits: base}
 	}
 	out := base
-	out.BudgetCheck = pool.Check
 	out.CacheReadWeight = b.cacheReadWeight
-	// The per-run allowance starts at the pool's remaining headroom and is
-	// tightened by the per-task claim and an explicit base budget. base.TokenBudget
-	// 0 means "agent default" and negative means "unlimited per run"; both are
-	// superseded here by the claim/remaining bounds. A zero result is forced to a
-	// 1-token sentinel so Limits.resolve() does not reinterpret it as "use the
-	// full default", giving a near-exhausted pool a runner that stops pre-turn.
+	// base.TokenBudget 0 means "agent default" and negative "unlimited per
+	// run"; both are superseded by the claim/remaining bounds. A zero result is
+	// forced to 1 so the agent does not read it as "use the default".
 	allow := pool.Remaining()
 	if claim > 0 && claim < allow {
 		allow = claim
@@ -253,7 +288,7 @@ func (b *budgetState) runnerLimitsForPool(base agent.Limits, pool *agent.BudgetP
 	if out.TokenBudget == 0 {
 		out.TokenBudget = 1
 	}
-	return out
+	return runnerBudget{limits: out, pool: pool}
 }
 
 // finderRunnerLimits / verifyRunnerLimits select the role-scoped pool under a
@@ -261,14 +296,14 @@ func (b *budgetState) runnerLimitsForPool(base agent.Limits, pool *agent.BudgetP
 // reservation is in effect for that role. Either way the role's per-task claim
 // (finderClaim / verifyClaim) caps the per-run allowance so a single run cannot
 // be granted the whole sub-pool at launch.
-func (b *budgetState) finderRunnerLimits(base agent.Limits) agent.Limits {
+func (b *budgetState) finderRunnerLimits(base agent.Limits) runnerBudget {
 	if b.finderPool != nil {
 		return b.runnerLimitsForPool(base, b.finderPool, b.finderClaim)
 	}
 	return b.runnerLimitsForPool(base, b.pool, b.finderClaim)
 }
 
-func (b *budgetState) verifyRunnerLimits(base agent.Limits) agent.Limits {
+func (b *budgetState) verifyRunnerLimits(base agent.Limits) runnerBudget {
 	if b.verifyPool != nil {
 		return b.runnerLimitsForPool(base, b.verifyPool, b.verifyClaim)
 	}
@@ -282,7 +317,7 @@ func (b *budgetState) verifyRunnerLimits(base agent.Limits) agent.Limits {
 // drives the split to ground with its own tool calls), so it gets a materially
 // larger per-run allowance. Splits are rare, so the higher per-run cap barely
 // moves total scan spend (bugbot-mi5.17).
-func (b *budgetState) arbiterRunnerLimits(base agent.Limits) agent.Limits {
+func (b *budgetState) arbiterRunnerLimits(base agent.Limits) runnerBudget {
 	if b.verifyPool != nil {
 		return b.runnerLimitsForPool(base, b.verifyPool, b.arbiterClaim)
 	}

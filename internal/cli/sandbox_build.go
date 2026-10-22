@@ -16,7 +16,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 //go:embed templates/sandbox_build.Dockerfile.tmpl templates/sandbox_build.build.sh.tmpl

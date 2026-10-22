@@ -19,7 +19,7 @@ import (
 // partway through, silently dropping the remainder of the run's writes.
 //
 // This is deliberately asymmetric with llmkit's retry wrapper
-// (WithRetry / retryClient), which honors a server-supplied Retry-After
+// (llmkit/retry, applied by provider.New), which honors a server-supplied Retry-After
 // header and backs off exponentially with jitter. gh CLI does not expose
 // response headers to its callers — RealGH only ever sees gh's stderr text
 // folded into the returned error — so there is no Retry-After to read here.

@@ -73,13 +73,15 @@ future work and requires real API keys. The workflow:
    res, _ := f.Sweep(ctx)
    ```
 
-   Every agent run auto-saves its transcript as a timestamped JSONL file in
-   `TranscriptDir` (see `agent.Runner.autosave` / `agent.Transcript.SaveJSONL`).
+   Every agent run writes its llmkit event stream to `TranscriptDir` as
+   `<RunID>.jsonl` (`agent.JSONL`); a RunID starts with its mint time, so a
+   filename sort is chronological.
 
-2. Sort the saved JSONL files by timestamp and split them by role. With
-   `MaxParallel = 1` the funnel emits finder sessions first (in lens × chunk
-   order), then verifier sessions (in candidate × refuter order). Load each with
-   `agent.LoadJSONL` and group into `RoleTranscriptStore`s:
+2. Sort the saved JSONL files by name and split them by role (each run's task
+   names its role). With `MaxParallel = 1` the funnel emits finder sessions
+   first (in lens × chunk order), then verifier sessions (in candidate ×
+   refuter order). Load each with `agent.LoadJSONL` and group into
+   `RoleTranscriptStore`s:
 
    ```go
    finder := eval.NewRoleTranscriptStore("finder", caps, finderSessions...)
@@ -92,10 +94,9 @@ future work and requires real API keys. The workflow:
    replays the captured behavior against the *current* pipeline code, catching
    prompt/pipeline regressions without spending a token.
 
-> Note on RunJSON repair: if a recorded finder/verifier reply fails to parse,
-> `RunJSON` makes one repair round-trip (a fresh agent run). That repair consumes
-> an extra session from the store. Record clean, parseable replies, or include the
-> repair turn as its own session.
+> Note on RunJSON repair: a repair round-trip rides its run (same RunID, same
+> file), so replay serves it from the same session. Recordings must be
+> llmkit v0.6 event JSONL (`schema_version` 2); older transcripts do not load.
 
 ## Adding a case
 

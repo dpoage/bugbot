@@ -20,8 +20,8 @@ const DefaultRecordedDir = "testdata/recorded"
 // RecordedManifest is the per-case metadata written alongside a recorded
 // corpus. It captures WHAT was recorded (model, host, timestamp), the LIVE-run
 // scores the recording was measured at, and the session counts per role so a
-// replay divergence (e.g. a RunJSON repair round-trip consuming an extra
-// session) is debuggable. It deliberately never stores the API key.
+// replay divergence (e.g. the replayed pipeline launching more agent runs than
+// were recorded) is debuggable. It deliberately never stores the API key.
 type RecordedManifest struct {
 	// Case is the builtin case name this corpus replays.
 	Case string `json:"case"`
@@ -39,9 +39,8 @@ type RecordedManifest struct {
 	Scores RecordedScores `json:"scores"`
 
 	// FinderSessions / VerifierSessions count the recorded sessions per role.
-	// These exist so a replay that exhausts a store (e.g. because a RunJSON repair
-	// round-trip consumed an extra session at record time but not at replay time)
-	// can be diagnosed against the recorded shape.
+	// These exist so a replay that exhausts a store can be diagnosed against
+	// the recorded shape.
 	FinderSessions   int `json:"finder_sessions"`
 	VerifierSessions int `json:"verifier_sessions"`
 

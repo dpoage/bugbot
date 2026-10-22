@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // u47n_test.go covers bugbot-u47n: structured ran-evidence must bind to a

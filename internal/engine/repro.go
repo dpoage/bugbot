@@ -17,10 +17,11 @@ import (
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/repro"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 	"github.com/dpoage/bugbot/internal/store"
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/provider"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // ReproDeps bundles a constructed reproducer with its LLM client and spend
@@ -33,7 +34,7 @@ type ReproDeps struct {
 	Client llmkit.Client
 	Repro  *repro.Reproducer
 	// Sb backs the reproducer; callers Close it alongside Repro.Close to release
-	// the pristine-workspace cache (internal/sandbox wsCache) when the
+	// the backend's pristine-workspace cache (CLI/Bwrap Close) when the
 	// reproducer's scope ends.
 	Sb sandbox.Sandbox
 	// Spend ledgers reproducer/patch-prover usage; callers retag it with each
@@ -73,15 +74,15 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 			})
 		}
 	}
-	client, err := config.ResolveRole(ctx, cfg, "reproducer", provider.Options{Recorder: rec})
+	client, err := config.ResolveRole(ctx, cfg, "reproducer", provider.Options{})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer client: %w", err)
 	}
-	sb, err := newConfiguredSandbox(*cfg)
+	sb, err := sandboxenv.New(cfg.Sandbox)
 	if err != nil {
 		return nil, fmt.Errorf("build sandbox: %w", err)
 	}
-	r, err := buildReproducerWithSandbox(ctx, cfg, st, repoRoot, sb, prog, client)
+	r, err := buildReproducerWithSandbox(ctx, cfg, st, repoRoot, sb, prog, client, rec)
 	if err != nil {
 		return nil, err
 	}
@@ -89,38 +90,32 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 }
 
 // buildReproducerWithSandbox builds a repro.Reproducer against a caller-supplied
-// Sandbox (the container CLI backend for every normal path, or
+// Sandbox (the configured backend for every normal path, or
 // sandbox.NewHostExec() for the bugbot-14g0 fix-C attended escape hatch —
 // see Dispatcher.reproOne). Factored out of BuildReproducer so the escape
 // hatch reuses the exact same Options wiring (host toolchains, capability
 // probing, dep strategy, ...) instead of a second, drift-prone copy.
-func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot string, sb sandbox.Sandbox, prog progress.EventSink, client llmkit.Client) (*repro.Reproducer, error) {
-	// Probe image capabilities once; result is cached per image+mounts+env so
-	// repeated daemon restarts or re-calls to BuildReproducer are free.
-	// depProbeInputs threads dep-strategy mounts/env, local_mounts, AND host
-	// toolchain mounts through, so a mounted toolchain or dependency cache
-	// shows up as available (bugbot-14g0 acceptance 4, bugbot-48ya acceptance
-	// 3). Against HostExec this probes the operator's own host directly —
-	// cfg.Sandbox.Image is irrelevant there but harmless as a cache-key
-	// component (HostExec has no image concept).
-	probeMounts, probeRWMounts, probeEnv := depProbeInputs(*cfg, sb, repoRoot)
-	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, repoRoot, probeMounts, probeRWMounts, probeEnv)
+func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot string, sb sandbox.Sandbox, prog progress.EventSink, client llmkit.Client, rec *ledgerRecorder) (*repro.Reproducer, error) {
+	caps, err := probeCapabilities(ctx, *cfg, sb, repoRoot)
+	if err != nil {
+		return nil, err
+	}
 	// Verified-command playbook (bugbot-u2v5): run the same bounded probe
 	// battery repro.PlaybookOnce caches per (repoRoot HEAD, dep-resolution
 	// fingerprint), against the exact spec/deps this reproducer's own sandbox
 	// runs use. Degrades to an inactive (empty) Playbook on any battery
 	// failure — see PlaybookOnce's doc — so this never blocks reproducer
 	// construction.
-	localROMounts, localRWMounts := localMountsFromConfig(*cfg)
-	pb := repro.PlaybookOnce(ctx, sb, repoRoot, sandbox.Spec{Image: cfg.Sandbox.Image}, resolveDepsForPlaybook(*cfg, sb, repoRoot), ingest.DetectBuildSystems(repoRoot))
+	localROMounts, localRWMounts := sandboxenv.LocalMounts(cfg.Sandbox)
+	pb := repro.PlaybookOnce(ctx, sb, repoRoot, sandbox.Spec{}, resolveDepsForPlaybook(*cfg, sb, repoRoot), ingest.DetectBuildSystems(repoRoot))
 	r, err := repro.New(client, sb, repoRoot, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
-		Image:            cfg.Sandbox.Image,
+		Image:            sandboxenv.RunImage(sb, cfg.Sandbox),
 		Network:          cfg.Sandbox.Network,
 		PatchProver:      cfg.Repro.PatchProver,
 		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
 		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
-		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+		DepStrategy:      sandboxenv.DepStrategy(cfg.Sandbox.DepStrategy),
 		SetupCmds:        cfg.Sandbox.SetupCmds,
 		LocalMounts:      localROMounts,
 		LocalRWMounts:    localRWMounts,
@@ -130,6 +125,7 @@ func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *sto
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
 		TranscriptDir:    reproTranscriptDir(*cfg),
+		Observer:         rec,
 		PackageSummary:   packageSummaryProvider(st),
 		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,
@@ -165,13 +161,13 @@ func buildReproHookForScan(
 	if !opts.DoRepro || opts.DoEstimate {
 		return nil, nil, nil, attempted, nil
 	}
-	if !sandboxAvailable(cfg) {
+	if !sandboxenv.Available(cfg.Sandbox) {
 		_, _ = fmt.Fprintln(out, "Reproduce stage skipped: no sandbox backend (container runtime or bwrap) available.")
 		// hook stays nil so the catch-up drain prints a note; DoRepro check in
 		// the caller still runs (with r == nil) so no catch-up is attempted.
 		return nil, nil, nil, attempted, nil
 	}
-	sb, sbErr := newConfiguredSandbox(cfg)
+	sb, sbErr := sandboxenv.New(cfg.Sandbox)
 	if sbErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build sandbox: %w", sbErr)
 	}
@@ -199,30 +195,28 @@ func buildReproHookForScan(
 			})
 		}
 	}
-	reproClient, rErr := config.ResolveRole(ctx, &cfg, "reproducer", provider.Options{Recorder: rec})
+	reproClient, rErr := config.ResolveRole(ctx, &cfg, "reproducer", provider.Options{})
 	if rErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer client: %w", rErr)
 	}
-	// Probe image capabilities once; result is cached per image+mounts+env so
-	// subsequent daemon cycles and parallel scan runs are free. depProbeInputs
-	// threads dep-strategy mounts/env, local_mounts, and host toolchain mounts
-	// through, so a mounted toolchain or dependency cache shows up as available.
-	probeMounts, probeRWMounts, probeEnv := depProbeInputs(cfg, sb, opts.Target)
-	caps := sandbox.ProbeCapabilities(ctx, sb, cfg.Sandbox.Image, opts.Target, probeMounts, probeRWMounts, probeEnv)
+	caps, capErr := probeCapabilities(ctx, cfg, sb, opts.Target)
+	if capErr != nil {
+		return nil, nil, nil, nil, capErr
+	}
 	// Verified-command playbook (bugbot-u2v5): same battery as
 	// buildReproducerWithSandbox above, run once per (repoDir HEAD,
 	// dep-resolution fingerprint) and degrading to an inactive Playbook on
 	// any failure — never blocks reproducer construction.
-	localROMounts, localRWMounts := localMountsFromConfig(cfg)
-	pb := repro.PlaybookOnce(ctx, sb, opts.Target, sandbox.Spec{Image: cfg.Sandbox.Image}, resolveDepsForPlaybook(cfg, sb, opts.Target), ingest.DetectBuildSystems(opts.Target))
+	localROMounts, localRWMounts := sandboxenv.LocalMounts(cfg.Sandbox)
+	pb := repro.PlaybookOnce(ctx, sb, opts.Target, sandbox.Spec{}, resolveDepsForPlaybook(cfg, sb, opts.Target), ingest.DetectBuildSystems(opts.Target))
 	r, rNewErr := repro.New(reproClient, sb, opts.Target, repro.Options{
 		MaxAttempts:      cfg.Repro.MaxAttempts,
-		Image:            cfg.Sandbox.Image,
+		Image:            sandboxenv.RunImage(sb, cfg.Sandbox),
 		Network:          cfg.Sandbox.Network,
 		PatchProver:      cfg.Repro.PatchProver,
 		PatchMaxAttempts: cfg.Repro.PatchMaxAttempts,
 		PatchSuiteCmd:    cfg.Repro.SuiteCmd,
-		DepStrategy:      sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+		DepStrategy:      sandboxenv.DepStrategy(cfg.Sandbox.DepStrategy),
 		SetupCmds:        cfg.Sandbox.SetupCmds,
 		LocalMounts:      localROMounts,
 		LocalRWMounts:    localRWMounts,
@@ -232,6 +226,7 @@ func buildReproHookForScan(
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
 		TranscriptDir:    reproTranscriptDir(cfg),
+		Observer:         rec,
 		PackageSummary:   packageSummaryProvider(st),
 		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,
@@ -481,7 +476,7 @@ func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, e
 		cfg.Repro.TranscriptDir = opts.TranscriptDir
 	}
 
-	if !sandboxAvailable(cfg) {
+	if !sandboxenv.Available(cfg.Sandbox) {
 		_, _ = fmt.Fprintln(out, "Repro backlog skipped: no sandbox backend (container runtime or bwrap) available.")
 		return &ReproResult{Skipped: "no sandbox backend"}, nil
 	}
@@ -537,7 +532,7 @@ func (d *Dispatcher) Repro(ctx context.Context, opts ReproOpts) (*ReproResult, e
 
 	_, _ = fmt.Fprintf(out,
 		"\nRepro backlog: %d eligible, attempting %d (max=%d, backend=%s)...\n",
-		len(backlog), len(batch), batchSize, sandboxBackendLabel(cfg),
+		len(backlog), len(batch), batchSize, sandboxenv.BackendLabel(cfg.Sandbox),
 	)
 	if cfg.Repro.TranscriptDir != "" {
 		_, _ = fmt.Fprintf(out, "Transcripts: %s\n", cfg.Repro.TranscriptDir)
@@ -605,30 +600,35 @@ func (d *Dispatcher) reproOne(ctx context.Context, opts ReproOpts, cfg config.Co
 		_, _ = fmt.Fprintf(out,
 			"\n!!! UNSANDBOXED: %q will run DIRECTLY ON THE HOST (workspace copy, no container isolation, "+
 				"full network access, your OS user's privileges). Proceed only if you are attended and trust "+
-				"this repro's command. !!!\n\n", fnd.Title)
+				"this repro's command. !!!\n"+
+				"Not applied on the host: sandbox.image, network, cpus, memory_mb, pids_limit, "+
+				"idle_timeout_seconds, scratch_size_mb, workspace_growth_ceiling_mb, dep_strategy, "+
+				"setup_cmds, local_mounts, host_toolchains.\n\n", fnd.Title)
+		// HostExec refuses mounts and SetupCmds; the manifest records the
+		// network the run actually had.
+		cfg.Sandbox.SetupCmds = nil
+		cfg.Sandbox.LocalMounts = nil
+		cfg.Sandbox.Network = string(sandbox.NetworkHost)
 		sb = sandbox.NewHostExec()
 	} else {
-		runtime, ok := sandbox.Detect()
-		if !ok {
-			_, _ = fmt.Fprintln(out, "Repro skipped: no container runtime (podman/docker) found on PATH.")
-			return &ReproResult{Skipped: "no container runtime"}, nil
+		if !sandboxenv.Available(cfg.Sandbox) {
+			_, _ = fmt.Fprintln(out, "Repro skipped: no sandbox backend (container runtime or bwrap) available.")
+			return &ReproResult{Skipped: "no sandbox backend"}, nil
 		}
 		var cerr error
-		sb, cerr = sandbox.NewCLI(runtime, cfg.Sandbox.Image, sandboxRunOpts(cfg)...)
+		sb, cerr = sandboxenv.New(cfg.Sandbox)
 		if cerr != nil {
 			return nil, fmt.Errorf("build sandbox: %w", cerr)
 		}
 	}
-	if cliSb, ok := sb.(*sandbox.CLI); ok {
-		defer func() { _ = cliSb.Close() }()
-	}
+	defer closeSandbox(sb)
 
 	rec := newLedgerRecorder(ctx, st)
-	client, err := config.ResolveRole(ctx, &cfg, "reproducer", provider.Options{Recorder: rec})
+	client, err := config.ResolveRole(ctx, &cfg, "reproducer", provider.Options{})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer client: %w", err)
 	}
-	r, err := buildReproducerWithSandbox(ctx, &cfg, st, opts.Target, sb, d.sink, client)
+	r, err := buildReproducerWithSandbox(ctx, &cfg, st, opts.Target, sb, d.sink, client, rec)
 	if err != nil {
 		return nil, err
 	}

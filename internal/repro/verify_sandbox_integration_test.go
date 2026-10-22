@@ -7,7 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestVerifySandbox_Integration_GoImage runs a trivial Go smoke against a
@@ -20,7 +21,7 @@ func TestVerifySandbox_Integration_GoImage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cli, err := sandbox.NewCLI("podman", "docker.io/library/golang:1.21")
+	cli, err := sandbox.NewCLI(sandbox.WithRuntime("podman"), sandbox.WithImage("docker.io/library/golang:1.21"))
 	if err != nil {
 		t.Skipf("podman unavailable: %v", err)
 	}
@@ -29,7 +30,7 @@ func TestVerifySandbox_Integration_GoImage(t *testing.T) {
 	defer cancel()
 
 	spec := sandbox.Spec{Image: "docker.io/library/golang:1.21"}
-	res := sandbox.Resolution{}
+	res := sandboxenv.Resolution{}
 	verdict, err := VerifySandbox(ctx, cli, dir, spec, res)
 	if err != nil {
 		t.Fatalf("VerifySandbox error: %v", err)
@@ -50,7 +51,7 @@ func TestVerifySandbox_Integration_ToolchainlessImage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cli, err := sandbox.NewCLI("podman", "docker.io/library/debian:bookworm-slim")
+	cli, err := sandbox.NewCLI(sandbox.WithRuntime("podman"), sandbox.WithImage("docker.io/library/debian:bookworm-slim"))
 	if err != nil {
 		t.Skipf("podman unavailable: %v", err)
 	}
@@ -59,7 +60,7 @@ func TestVerifySandbox_Integration_ToolchainlessImage(t *testing.T) {
 	defer cancel()
 
 	spec := sandbox.Spec{Image: "docker.io/library/debian:bookworm-slim"}
-	res := sandbox.Resolution{}
+	res := sandboxenv.Resolution{}
 	verdict, err := VerifySandbox(ctx, cli, dir, spec, res)
 	if err != nil {
 		t.Fatalf("VerifySandbox error: %v", err)

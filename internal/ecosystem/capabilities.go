@@ -1,53 +1,21 @@
 package ecosystem
 
-// capabilities.go holds the per-ecosystem capability probe registry. Each
-// ProbeEntry declares a cheap probe command (run once per sandbox image) and
-// an interpret function that maps the result to a named set of available modes.
+// capabilities.go holds the per-ecosystem capability probe registry, in
+// llmkit's sandbox.ProbeEntry shape; internal/sandboxenv runs it through
+// sandbox.Probe and caches the result.
 //
-// The probe data was previously defined inline in sandbox/capabilities.go.
-// Moving it here makes sandbox a pure executor (it runs the probes and caches
-// the results) while the knowledge of WHAT to probe lives in this registry.
-//
-// # Import topology
-//
-// internal/ecosystem does NOT import internal/sandbox. sandbox/capabilities.go
-// imports internal/ecosystem to read ProbeEntries, then executes the probes
-// using its own Exec machinery. ProbeResult is defined here (not in sandbox)
-// so the interpret func signatures are cycle-free.
-//
-// # Adding a new ecosystem probe
-//
-// Append a ProbeEntry to ProbeEntries. Name it, write a probe argv that exits 0
-// when the capability is present (or emits tokens on stdout for multi-mode
-// probes), and write an interpret func. Add the ecosystem name to
-// allKnownProbeEcosystems in capabilities_test.go.
+// To add an ecosystem probe, append a sandbox.ProbeEntry to ProbeEntries and
+// add its name to allKnownProbeEcosystems in capabilities_test.go.
 
-import "strings"
+import (
+	"strings"
 
-// ProbeResult is the minimal sandbox result a capability probe interpret func
-// needs. sandbox/capabilities.go fills it from a sandbox.Result value; keeping
-// this type in internal/ecosystem breaks the ecosystem↔sandbox import cycle.
-type ProbeResult struct {
-	ExitCode int
-	Stdout   string
-}
+	"github.com/dpoage/llmkit/sandbox"
+)
 
-// ProbeEntry describes a single ecosystem's capability probe.
-type ProbeEntry struct {
-	// Name is the ecosystem key in sandbox.CapabilitySet (e.g. "go").
-	Name string
-	// Probe is the argv run inside the sandbox (under network=none) to test
-	// capabilities. Best-effort: Exec error or timeout → all-false result.
-	Probe []string
-	// Interpret maps the probe ProbeResult to a map[mode]available.
-	// It is called even on non-zero exit codes so it can decide per-mode.
-	// An Exec error means best-effort: return all-false.
-	Interpret func(r ProbeResult) map[string]bool
-}
-
-// ProbeEntries is the ordered registry of capability probes consumed by
-// sandbox/capabilities.go. To add a new ecosystem, append a ProbeEntry here.
-var ProbeEntries = []ProbeEntry{
+// ProbeEntries is the ordered registry of ecosystem capability probes. Each
+// entry's Name is its ecosystem key in the resulting sandbox.CapabilitySet.
+var ProbeEntries = []sandbox.ProbeEntry{
 	goCapabilityProbe,
 	cppCapabilityProbe,
 	rustCapabilityProbe,
@@ -67,12 +35,12 @@ var ProbeEntries = []ProbeEntry{
 // misconfigured one; "race" short-circuits false when CGO_ENABLED isn't
 // exactly "1", so it never claims race support just because `command -v cc`
 // happened to succeed on a go-less image.
-var goCapabilityProbe = ProbeEntry{
+var goCapabilityProbe = sandbox.ProbeEntry{
 	Name: "go",
 	Probe: []string{"/bin/sh", "-c",
 		`command -v go >/dev/null 2>&1 && echo go; [ "$(go env CGO_ENABLED 2>/dev/null)" = "1" ] && { command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; } && echo race`,
 	},
-	Interpret: func(r ProbeResult) map[string]bool {
+	Interpret: func(r sandbox.ProbeResult) map[string]bool {
 		modes := map[string]bool{
 			"present": false,
 			"race":    false,
@@ -91,12 +59,12 @@ var goCapabilityProbe = ProbeEntry{
 
 // cppCapabilityProbe probes whether the sandbox image supports C++ sanitizers
 // (ASan, TSan, UBSan).
-var cppCapabilityProbe = ProbeEntry{
+var cppCapabilityProbe = sandbox.ProbeEntry{
 	Name: "cpp",
 	Probe: []string{"/bin/sh", "-c",
 		`CXX=$(command -v c++ || command -v g++ || command -v clang++); [ -n "$CXX" ] || exit 1; d=$(mktemp -d); echo 'int main(){return 0;}' > "$d/p.cpp"; for s in address thread undefined; do "$CXX" -fsanitize=$s -g -x c++ "$d/p.cpp" -o "$d/a" 2>/dev/null && echo $s; done`,
 	},
-	Interpret: func(r ProbeResult) map[string]bool {
+	Interpret: func(r sandbox.ProbeResult) map[string]bool {
 		modes := map[string]bool{
 			"asan":  false,
 			"tsan":  false,
@@ -118,12 +86,12 @@ var cppCapabilityProbe = ProbeEntry{
 
 // rustCapabilityProbe probes whether the sandbox image has the Rust toolchain
 // (cargo) and the Miri interpreter.
-var rustCapabilityProbe = ProbeEntry{
+var rustCapabilityProbe = sandbox.ProbeEntry{
 	Name: "rust",
 	Probe: []string{"/bin/sh", "-c",
 		`command -v cargo >/dev/null 2>&1 && echo cargo; cargo miri --version >/dev/null 2>&1 && echo miri`,
 	},
-	Interpret: func(r ProbeResult) map[string]bool {
+	Interpret: func(r sandbox.ProbeResult) map[string]bool {
 		modes := map[string]bool{
 			"cargo": false,
 			"miri":  false,
@@ -142,12 +110,12 @@ var rustCapabilityProbe = ProbeEntry{
 
 // jsCapabilityProbe probes whether the sandbox image has Node.js and whether
 // the version is >= 18 (for built-in `node --test`).
-var jsCapabilityProbe = ProbeEntry{
+var jsCapabilityProbe = sandbox.ProbeEntry{
 	Name: "js",
 	Probe: []string{"/bin/sh", "-c",
 		`command -v node >/dev/null 2>&1 && echo node; node -e 'process.exit(parseInt(process.versions.node)>=18?0:1)' >/dev/null 2>&1 && echo node_test`,
 	},
-	Interpret: func(r ProbeResult) map[string]bool {
+	Interpret: func(r sandbox.ProbeResult) map[string]bool {
 		modes := map[string]bool{
 			"node":      false,
 			"node_test": false,
@@ -166,12 +134,12 @@ var jsCapabilityProbe = ProbeEntry{
 
 // pythonCapabilityProbe probes whether the sandbox image has a Python
 // interpreter and the pytest test runner (including the pytest-timeout plugin).
-var pythonCapabilityProbe = ProbeEntry{
+var pythonCapabilityProbe = sandbox.ProbeEntry{
 	Name: "python",
 	Probe: []string{"/bin/sh", "-c",
 		`{ command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; } && echo python; { python3 -m pytest --version >/dev/null 2>&1 || python -m pytest --version >/dev/null 2>&1 || command -v pytest >/dev/null 2>&1; } && echo pytest; { python3 -c 'import pytest_timeout' >/dev/null 2>&1 || python -c 'import pytest_timeout' >/dev/null 2>&1; } && echo pytest_timeout`,
 	},
-	Interpret: func(r ProbeResult) map[string]bool {
+	Interpret: func(r sandbox.ProbeResult) map[string]bool {
 		modes := map[string]bool{
 			"python":         false,
 			"pytest":         false,
@@ -210,12 +178,12 @@ var pythonCapabilityProbe = ProbeEntry{
 //     cold cache under network=none means it cannot actually launch bazel.
 //     Executing `version` measures the invariant plans need — "this argv
 //     works HERE" — so a cold-cache bazelisk correctly reports unavailable.
-var bazelCapabilityProbe = ProbeEntry{
+var bazelCapabilityProbe = sandbox.ProbeEntry{
 	Name: "bazel",
 	Probe: []string{"/bin/sh", "-c",
 		`bazel version >/dev/null 2>&1 && echo bazel; bazelisk version >/dev/null 2>&1 && echo bazelisk`,
 	},
-	Interpret: func(r ProbeResult) map[string]bool {
+	Interpret: func(r sandbox.ProbeResult) map[string]bool {
 		modes := map[string]bool{
 			"bazel":    false,
 			"bazelisk": false,

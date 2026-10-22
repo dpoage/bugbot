@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // noSystems is a convenience alias for an empty build system slice, used in

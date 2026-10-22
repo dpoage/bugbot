@@ -3,7 +3,8 @@ package repro
 import (
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/ecosystem"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestInterpret_CppBuildFailuresNeverDemonstrate is the regression test for
@@ -275,8 +276,8 @@ func TestInterpret_MaskedExitCode_SanitizerStillDemonstrates(t *testing.T) {
 func TestDetectEcosystem_CmakeSuiteCmd(t *testing.T) {
 	cmd := []string{"bash", "-c", "cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build --parallel 4 && ctest --test-dir build --output-on-failure --no-tests=ignore"}
 	got := detectEcosystem(cmd)
-	if got.name != sandbox.EcosystemCpp {
-		t.Errorf("detectEcosystem(cmake suite cmd) = %q, want %q", got.name, sandbox.EcosystemCpp)
+	if got.name != ecosystem.EcosystemCpp {
+		t.Errorf("detectEcosystem(cmake suite cmd) = %q, want %q", got.name, ecosystem.EcosystemCpp)
 	}
 }
 
@@ -286,7 +287,7 @@ func TestDetectEcosystem_CmakeSuiteCmd(t *testing.T) {
 func TestDetectEcosystem_MesonSuiteCmd(t *testing.T) {
 	cmd := []string{"bash", "-c", "meson setup build && meson test -C build --print-errorlogs"}
 	got := detectEcosystem(cmd)
-	if got.name != sandbox.EcosystemCpp {
-		t.Errorf("detectEcosystem(meson suite cmd) = %q, want %q", got.name, sandbox.EcosystemCpp)
+	if got.name != ecosystem.EcosystemCpp {
+		t.Errorf("detectEcosystem(meson suite cmd) = %q, want %q", got.name, ecosystem.EcosystemCpp)
 	}
 }

@@ -45,7 +45,7 @@ func TestEndToEnd_GrepReadAnswer(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if out.Truncated {
+	if out.Truncated() {
 		t.Errorf("unexpected truncation: %s", out.TruncationReason)
 	}
 	if !strings.Contains(out.FinalText, "42") {
@@ -58,20 +58,18 @@ func TestEndToEnd_GrepReadAnswer(t *testing.T) {
 	// Verify the tools actually ran against the fixture by inspecting the tool
 	// results captured in the transcript.
 	var grepResult, readResult string
-	var nReq, nAsst, nTool int
-	for _, ev := range out.Transcript.Events {
+	var nCompletion, nTool int
+	for _, ev := range out.Transcript.Record {
 		switch ev.Kind {
-		case agent.EventRequest:
-			nReq++
-		case agent.EventAssistant:
-			nAsst++
-		case agent.EventToolResult:
+		case llmkit.KindCompletion:
+			nCompletion++
+		case llmkit.KindToolRun:
 			nTool++
-			switch ev.ToolName {
+			switch ev.ToolRun.Call.Name {
 			case "grep":
-				grepResult = ev.Result
+				grepResult = ev.ToolRun.Result
 			case "read_file":
-				readResult = ev.Result
+				readResult = ev.ToolRun.Result
 			}
 		}
 	}
@@ -85,10 +83,9 @@ func TestEndToEnd_GrepReadAnswer(t *testing.T) {
 		t.Errorf("read_file result missing fixture content:\n%s", readResult)
 	}
 
-	// Transcript captured every step: 3 requests, 3 assistant turns, 2 tool
-	// results.
-	if nReq != 3 || nAsst != 3 || nTool != 2 {
-		t.Errorf("transcript step counts: req=%d asst=%d tool=%d, want 3/3/2", nReq, nAsst, nTool)
+	// Transcript captured every step: 3 completions, 2 tool runs.
+	if nCompletion != 3 || nTool != 2 {
+		t.Errorf("transcript step counts: completion=%d tool=%d, want 3/2", nCompletion, nTool)
 	}
 
 	// Usage accumulated across all three turns.
@@ -99,7 +96,7 @@ func TestEndToEnd_GrepReadAnswer(t *testing.T) {
 	}
 
 	// The transcript must round-trip and replay deterministically.
-	replay, err := agent.NewReplayClient(out.Transcript, llmkit.Capabilities{})
+	replay, err := agent.NewReplayClient(out.Transcript, out.RunID, llmkit.Capabilities{})
 	if err != nil {
 		t.Fatalf("NewReplayClient: %v", err)
 	}
@@ -110,5 +107,8 @@ func TestEndToEnd_GrepReadAnswer(t *testing.T) {
 	}
 	if out2.FinalText != out.FinalText {
 		t.Errorf("replay FinalText = %q, want %q", out2.FinalText, out.FinalText)
+	}
+	if err := replay.Err(); err != nil {
+		t.Errorf("replay diverged: %v", err)
 	}
 }

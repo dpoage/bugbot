@@ -10,7 +10,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestRepro_ResolvesEmptyTargetAgainstRealBacklog is the regression test the
@@ -29,7 +29,7 @@ func TestRepro_ResolvesEmptyTargetAgainstRealBacklog(t *testing.T) {
 		t.Skip("no container runtime (podman/docker) detected")
 	}
 	const image = "docker.io/library/golang:1.26-alpine"
-	if _, err := sandbox.NewCLI("", image); err != nil {
+	if _, err := sandbox.NewCLI(sandbox.WithImage(image)); err != nil {
 		t.Skipf("sandbox unavailable: %v", err)
 	}
 

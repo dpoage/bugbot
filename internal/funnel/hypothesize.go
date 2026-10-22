@@ -14,7 +14,6 @@ import (
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/store"
 	llmkit "github.com/dpoage/llmkit"
-	"github.com/dpoage/llmkit/agent"
 )
 
 // hypothesize runs the finder stage: for each effective lens, run a finder
@@ -199,11 +198,11 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llmki
 	// --- finder-stage circuit breaker (bugbot-2uz) -------------------------
 	//
 	// Against an unreachable provider, each finder unit exhausts the retry
-	// policy (DefaultRetryConfig: 4 attempts, ~4s of backoff) and the funnel
+	// policy (retry.Default: 4 attempts, ~4s of backoff) and the funnel
 	// dispatches MANY finder seats for a large repo, so a fully-broken provider
 	// takes (seats x ~4s) to surface MostFindersFailed instead of failing fast
 	// (observed ~45s+ even with a single lens). The breaker detects
-	// transport-level failures (llmkit.APIError with StatusCode==0 — the shape
+	// transport-level failures (llmkit.APIError{Kind: ErrServer, StatusCode: 0} — the shape
 	// produced by openai/google/anthropic adapters for timeouts, connection
 	// resets, DNS failures) and aborts further launches once a threshold of
 	// concurrent transport failures is observed with zero finderOK successes.
@@ -306,11 +305,8 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llmki
 		// runCtx (the fanout's derived child) lets a breaker trip unblock this unit
 		// even mid-run.
 		fo.spawn(func(runCtx context.Context) {
-			// unitID is minted up front (before the runner exists) so it can be
-			// embedded as the runner's transcript-filename key (agent.
-			// WithTranscriptKey) AND passed as this unit's agent_units row ID
-			// below — giving the TUI an exact filename<->row join instead of a
-			// timestamp-window heuristic (see internal/tui/transcript.go).
+			// unitID keys the run's transcript RunID AND is this unit's
+			// agent_units row ID: the TUI's exact transcript<->row join.
 			unitID := store.NewID()
 			// Gate against the LIVE spend total only once we hold a worker slot, so
 			// the decision reflects spend already recorded by earlier units rather
@@ -457,7 +453,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llmki
 			startedAt := time.Now()
 			// runCtx (not ctx) so a breaker trip unblocks the in-flight runner
 			// without disturbing the caller's context.
-			cands, status, outcome, pm, traversal, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt, scope, toolHealthRouting{result: result, role: progress.RoleFinder, label: label}, agent.WithTranscriptKey(unitID))
+			cands, status, outcome, pm, traversal, err := f.runFinderWithPrompt(runCtx, finder, unitTools, sysprompt, label, u.lens, task, budget, startedAt, scope, toolHealthRouting{result: result, role: progress.RoleFinder, label: label}, unitID)
 			finishedAt := time.Now()
 
 			// Emit KindAgentFinished here (not inside runFinderWithPrompt) so we

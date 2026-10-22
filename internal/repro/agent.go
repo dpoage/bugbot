@@ -9,9 +9,9 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/util"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // jsTSGuidance is shared by JavaScript and TypeScript, which use the same test
@@ -617,11 +617,10 @@ var planSchema = json.RawMessage(`{
 // non-empty, is appended to steer a revision after a prior non-demonstrating
 // attempt.
 //
-// prev, when non-nil, is the previous round's Outcome: planFor then uses
-// [agent.Runner.RunJSONContinue] instead of RunJSON, so this round's request
-// lands in the SAME conversation as the investigation prev's round performed
-// (round 2+ of Attempt's revision loop) instead of re-orienting from
-// scratch. prev == nil (round 1) reseeds via RunJSON exactly as before.
+// prev, when non-nil, is the previous round's Outcome: planFor then runs with
+// [agent.Continue], so this round's request lands in the SAME conversation as
+// the investigation prev's round performed (round 2+ of Attempt's revision
+// loop) instead of re-orienting from scratch. prev == nil (round 1) reseeds.
 //
 // The returned Outcome is the round's own, meant to be threaded back in as
 // the NEXT round's prev by the caller — this is how the conversation chains
@@ -635,10 +634,10 @@ func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding 
 	} else {
 		// Only the feedback goes out on a continuation turn: the finding's
 		// title/description/reasoning/package summary already sit in history
-		// as round 1's opening user turn (RunJSONContinue keeps it), so
+		// as round 1's opening user turn (Continue keeps it), so
 		// resending them here would just double the finding's prose on every
 		// revision round for no benefit.
-		outcome, err = runner.RunJSONContinue(ctx, prev, buildRevisionTask(feedback), planSchema, &plan)
+		outcome, err = runner.RunJSON(ctx, buildRevisionTask(feedback), planSchema, &plan, agent.Continue(prev))
 	}
 	if err != nil {
 		return nil, outcome, err
@@ -650,7 +649,7 @@ func (r *Reproducer) planFor(ctx context.Context, runner *agent.Runner, finding 
 // revision round (round 2+ of Attempt, via planFor's prev != nil branch).
 // Unlike buildTask, it carries only the revision feedback: the finding's
 // framing has already been sent as the conversation's opening turn and stays
-// in history under RunJSONContinue, so it is deliberately not repeated here.
+// in history under agent.Continue, so it is deliberately not repeated here.
 //
 // feedback is the verbatim output of verdict.feedback (interpret.go); see
 // buildTask's doc comment for the fencing/sanitization contract this

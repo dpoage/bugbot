@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestInjectPipefail covers bugbot-2zoo's shape recognition directly: a
@@ -133,7 +133,7 @@ func TestApplyStructuredOutputSpec_InjectsPipefail(t *testing.T) {
 func TestWorkspaceTool_ExecInjectsPipefail(t *testing.T) {
 	repoDir := newRepoDir(t)
 	sb := newFakeMaterializingSandbox(sandbox.MockResponse{})
-	sb.ResponseFunc = func(_ int, spec sandbox.Spec) (sandbox.Result, error) {
+	sb.ResponseFunc = func(_ context.Context, _ int, spec sandbox.Spec) (sandbox.Result, error) {
 		script := spec.Cmd[len(spec.Cmd)-1]
 		if strings.Contains(script, "set -o pipefail") {
 			// Honest: the pipeline now reports node's failing exit code.

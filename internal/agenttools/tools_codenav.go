@@ -13,6 +13,7 @@ import (
 	"github.com/dpoage/bugbot/internal/treesitter"
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/fsroot"
 )
 
 // Code-navigation limits.
@@ -57,8 +58,10 @@ type navigator interface {
 // the query timeout) the tools degrade to a clear "ERROR:" result telling the
 // model to fall back to grep — they never hang and never abort the run.
 type CodeNav struct {
-	root *FSRoot
-	nav  navigator
+	root *fsroot.FSRoot
+	// dir is root's canonical (symlink-resolved) directory.
+	dir string
+	nav navigator
 	// body is the syntactic backend used by read_symbol to pull a declaration's
 	// full body directly by name when the file's language is tree-sitter
 	// supported. It is the same backend the tiered navigator falls back to, held
@@ -95,13 +98,17 @@ type tsOutlineBackend interface {
 // crashed, or unsupported for the language. The tree-sitter tier never starts a
 // process and only reads files under the root.
 func NewCodeNav(dir string) (*CodeNav, error) {
-	root, err := NewFSRoot(dir)
+	root, err := fsroot.NewFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}
-	ts := treesitter.New(root.root)
-	nav := newTieredNavigator(&lspNavigator{mgr: lsp.NewManager(root.root)}, ts, root.root)
-	return &CodeNav{root: root, nav: nav, body: ts, outline: ts}, nil
+	canonical, err := root.Resolve("")
+	if err != nil {
+		return nil, err
+	}
+	ts := treesitter.New(canonical)
+	nav := newTieredNavigator(&lspNavigator{mgr: lsp.NewManager(canonical)}, ts, canonical)
+	return &CodeNav{root: root, dir: canonical, nav: nav, body: ts, outline: ts}, nil
 }
 
 // Tools returns the navigation tools backed by this bundle: the three position
@@ -327,17 +334,11 @@ func (t *codeNavTool) relPath(path string) (string, bool) {
 // pass the lexical check and leak external file content into the excerpt
 // rendered for the location.
 func (c *CodeNav) relPath(path string) (string, bool) {
-	cleaned := filepath.Clean(path)
-	if !c.root.contains(cleaned) {
+	rel, err := filepath.Rel(c.dir, filepath.Clean(path))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", false
 	}
-	if resolved, err := c.root.evalExistingPrefix(cleaned); err == nil {
-		if !c.root.contains(resolved) {
-			return "", false
-		}
-	}
-	rel, err := filepath.Rel(c.root.root, cleaned)
-	if err != nil {
+	if _, err := c.root.Resolve(rel); err != nil {
 		return "", false
 	}
 	return filepath.ToSlash(rel), true

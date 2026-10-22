@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/dpoage/llmkit/fsroot"
 )
 
 // DepSourceRoots is a per-ecosystem set of read-only source roots. The verifier
@@ -19,8 +21,8 @@ import (
 // later ecosystems (C/C++ system include dirs, python site-packages) are added
 // the same way without changing the tool wiring.
 //
-// Each root is independent and traversal-protected (no `..`, no symlink escape),
-// matching the in-repo FSRoot contract. Roots that don't exist on the current
+// Each root is an independent fsroot.FSRoot (no `..`, no symlink escape),
+// the in-repo containment contract. Roots that don't exist on the current
 // host (e.g. a C++ developer without a Go toolchain) are simply absent from
 // the active set; the resolve method is a no-op miss for them.
 //
@@ -29,15 +31,31 @@ import (
 // reads a consistent set of roots for the run.
 type DepSourceRoots struct {
 	// roots is the cleaned, symlink-resolved set of read-only absolute
-	// directories the verifier may read under. Order is irrelevant; lookup
-	// is O(roots) but the set is small (<= a handful per ecosystem).
+	// directories the verifier may read under, and fs their containment
+	// guards (fs[i] anchors roots[i]). The set is small (<= a handful per
+	// ecosystem), so lookup is a linear scan.
 	roots []string
+	fs    []*fsroot.FSRoot
+}
+
+// newDepSourceRoots anchors one fsroot.FSRoot per root.
+func newDepSourceRoots(roots []string) *DepSourceRoots {
+	d := &DepSourceRoots{}
+	for _, r := range roots {
+		fr, err := fsroot.NewFSRoot(r)
+		if err != nil {
+			continue
+		}
+		d.roots = append(d.roots, r)
+		d.fs = append(d.fs, fr)
+	}
+	return d
 }
 
 // errDepPathEscape is returned when a requested dep-source path resolves
-// outside every configured root. Distinct from the in-repo errPathEscape so
-// callers (tests) can distinguish a misconfigured dep-source set from an
-// in-repo escape attempt.
+// outside every configured root. Distinct from the in-repo
+// fsroot.ErrPathEscape so callers (tests) can distinguish a misconfigured
+// dep-source set from an in-repo escape attempt.
 var errDepPathEscape = errors.New("path escapes all dep-source roots")
 
 // NewDepSourceRoots discovers the read-only dep-source roots available on the
@@ -88,7 +106,7 @@ func discoverDepSourceRoots() *DepSourceRoots {
 		seen[r] = struct{}{}
 		out = append(out, r)
 	}
-	return &DepSourceRoots{roots: out}
+	return newDepSourceRoots(out)
 }
 
 // discoverGoRoots returns the candidate Go source roots in priority order:
@@ -194,61 +212,44 @@ func (d *DepSourceRoots) Len() int {
 
 // resolve maps a repo-relative path to an absolute on-disk path UNDER ONE OF
 // THE CONFIGURED ROOTS, rejecting absolute inputs and any path that escapes
-// every root. The semantics mirror FSRoot.Resolve: the same traversal
-// protection (no `..`, symlink containment) and the same empty-string
-// convention are honoured. Returns errDepPathEscape when the path is well
-// formed but lands outside every root, so the tool can distinguish
-// "this is not a dep-source path" from "the path itself is malformed".
+// every root. Each root's containment is its fsroot.FSRoot.Resolve (no `..`,
+// symlink containment, empty string = the root). Returns errDepPathEscape when
+// the path is well formed but lands outside every root, so the tool can
+// distinguish "this is not a dep-source path" from "the path itself is
+// malformed".
 //
 // An empty dep-source set is a no-op miss: every call returns
 // errDepPathEscape. The tool wiring treats that as "this path is not in any
 // dep-source root" exactly like a real host with the configured ecosystem
 // installed but the cited path not under it.
 func (d *DepSourceRoots) resolve(rel string) (string, error) {
-	if d == nil || len(d.roots) == 0 {
+	if d == nil || len(d.fs) == 0 {
 		return "", errDepPathEscape
 	}
-	rel = filepath.FromSlash(rel)
-	if filepath.IsAbs(rel) {
+	if filepath.IsAbs(filepath.FromSlash(rel)) {
 		return "", fmt.Errorf("%w: absolute paths are not allowed (%q)", errDepPathEscape, rel)
 	}
 	// Every relative path is lexically contained in EVERY root, so root order
 	// alone cannot pick the right one: without an existence check the first root
 	// (GOROOT/src) would always win and the module cache would be dead. Prefer
-	// the root where the file actually EXISTS; remember the first lexically
-	// valid candidate as a fallback so a genuine not-found still surfaces as a
+	// the root where the file actually EXISTS; remember the first contained
+	// candidate as a fallback so a genuine not-found still surfaces as a
 	// read error at the call site rather than a misleading escape error.
 	var fallback string
-	for _, root := range d.roots {
-		cleaned := filepath.Clean(filepath.Join(root, rel))
-		if !strings.HasPrefix(cleaned, root+string(filepath.Separator)) && cleaned != root {
-			// The lexical join escaped the root (e.g. `..` in rel). Try the next.
+	for _, fr := range d.fs {
+		p, err := fr.Resolve(rel)
+		if err != nil {
 			continue
 		}
-		// Symlink containment: resolve the longest existing prefix of the path
-		// and ensure it still lands inside the root. This defeats symlinks that
-		// point outside the tree, matching the in-repo FSRoot contract.
-		if resolved, err := evalExistingPrefix(cleaned); err == nil {
-			if !strings.HasPrefix(resolved, root+string(filepath.Separator)) && resolved != root {
-				continue
-			}
-		}
-		if _, statErr := os.Stat(cleaned); statErr == nil {
-			return cleaned, nil
+		if _, statErr := os.Stat(p); statErr == nil {
+			return p, nil
 		}
 		if fallback == "" {
-			fallback = cleaned
+			fallback = p
 		}
 	}
 	if fallback != "" {
 		return fallback, nil
 	}
 	return "", fmt.Errorf("%w: %q", errDepPathEscape, rel)
-}
-
-// evalExistingPrefix is the dep-source traversal guard; it delegates to the
-// package-level evalExistingPrefixPath so the in-repository and dep-source
-// guards share one implementation (see pathutil.go).
-func evalExistingPrefix(p string) (string, error) {
-	return evalExistingPrefixPath(p)
 }

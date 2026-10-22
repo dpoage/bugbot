@@ -414,7 +414,7 @@ func TestRunFinder_BudgetStopNotParseFailure(t *testing.T) {
 	st, repo := openFixture(t)
 
 	// A finder that, if it ever ran, would produce unparseable prose. With an
-	// exhausted pool it never completes a turn: the pre-turn BudgetCheck stops it
+	// exhausted pool it never completes a turn: the pre-turn pool check stops it
 	// with TruncBudgetPool before any model call, so FinalText is empty and
 	// RunJSON returns a parse error — exactly the case L1 must classify as a budget
 	// stop rather than a parse failure.
@@ -1096,7 +1096,7 @@ func TestBudgetState_CacheReadWeighted(t *testing.T) {
 	// the raw 5100. So the pool is NOT exhausted; with raw accounting it would
 	// be (5100 > 2000).
 	b := newBudgetState(2000, rec, 0.1)
-	rec.Record(llmkit.UsageEvent{Usage: llmkit.Usage{InputTokens: 5000, OutputTokens: 100, CacheReadInputTokens: 4500}})
+	rec.record("", "", "", llmkit.Usage{InputTokens: 5000, OutputTokens: 100, CacheReadInputTokens: 4500}, nil)
 	if err := b.pool.Check(); err != nil {
 		t.Fatalf("pool exhausted after a mostly-cached completion: spent=%d (raw would be 5100), err=%v", b.pool.Spent(), err)
 	}
@@ -1149,22 +1149,22 @@ func TestRunnerLimits_ClaimCap(t *testing.T) {
 	b.reserveForDownstream(0.7) // finder reserve 7M, verify reserve 3M
 
 	// claim (1M) < pool remainder (7M / 3M) => per-run budget == claim.
-	if got := b.finderRunnerLimits(agent.Limits{}).TokenBudget; got != 1_000_000 {
+	if got := b.finderRunnerLimits(agent.Limits{}).limits.TokenBudget; got != 1_000_000 {
 		t.Errorf("finder per-run budget = %d, want 1_000_000 (claim cap below remainder)", got)
 	}
-	if got := b.verifyRunnerLimits(agent.Limits{}).TokenBudget; got != 1_000_000 {
+	if got := b.verifyRunnerLimits(agent.Limits{}).limits.TokenBudget; got != 1_000_000 {
 		t.Errorf("verify per-run budget = %d, want 1_000_000 (claim cap below remainder)", got)
 	}
 
 	// Drive the finder sub-pool down so its remainder (500k) is below the claim.
 	b.finderPool.Add(6_500_000)
-	if got := b.finderRunnerLimits(agent.Limits{}).TokenBudget; got != 500_000 {
+	if got := b.finderRunnerLimits(agent.Limits{}).limits.TokenBudget; got != 500_000 {
 		t.Errorf("finder per-run budget = %d, want 500_000 (remainder below claim)", got)
 	}
 
 	// A negative claim disables the per-task cap: the run may use the full remainder.
 	b.finderClaim = -1
-	if got := b.finderRunnerLimits(agent.Limits{}).TokenBudget; got != 500_000 {
+	if got := b.finderRunnerLimits(agent.Limits{}).limits.TokenBudget; got != 500_000 {
 		t.Errorf("finder per-run budget = %d, want 500_000 (full remainder, claim disabled)", got)
 	}
 }
@@ -1182,7 +1182,7 @@ func TestSpendRecorder_ClaimRefundIsAutomatic(t *testing.T) {
 	b.reserveForDownstream(0.5) // finder reserve 1M, verify reserve 1M
 
 	// A finder run granted a 1M claim spends only 200k.
-	rec.Record(llmkit.UsageEvent{Role: roleFinder, Usage: llmkit.Usage{InputTokens: 150_000, OutputTokens: 50_000}})
+	rec.record(roleFinder, "", "", llmkit.Usage{InputTokens: 150_000, OutputTokens: 50_000}, nil)
 
 	if got := b.finderPool.Spent(); got != 200_000 {
 		t.Errorf("finder pool charged %d, want 200_000 (actual spend only, not the claim)", got)
@@ -2388,7 +2388,7 @@ func TestSpendRecorder_CartographerChargesFinderPool(t *testing.T) {
 	rec := &spendRecorder{ctx: context.Background(), store: st}
 	b := newBudgetState(1000, rec, 1.0)
 	b.reserveForDownstream(0.7) // finder reserve 700, verify reserve 300
-	rec.Record(llmkit.UsageEvent{Role: roleCartographer, Usage: llmkit.Usage{InputTokens: 200}})
+	rec.record(roleCartographer, "", "", llmkit.Usage{InputTokens: 200}, nil)
 	if got := b.finderPool.Spent(); got != 200 {
 		t.Errorf("finderPool charged %d, want 200 from cartographer spend", got)
 	}

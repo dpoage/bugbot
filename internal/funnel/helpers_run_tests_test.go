@@ -3,14 +3,15 @@ package funnel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/agenttools"
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // --- detectTestCmd -----------------------------------------------------------
@@ -111,6 +112,11 @@ func TestDetectTestCmd_Bazel(t *testing.T) {
 
 // fakeRunTestsSandbox is a minimal sandbox for buildRunTestsTool tests.
 type fakeRunTestsSandbox struct{}
+
+// MaterializeWorkspace satisfies sandbox.Sandbox; these tests never iterate in a workspace.
+func (f *fakeRunTestsSandbox) MaterializeWorkspace(string) (string, error) {
+	return "", errors.New("fakeRunTestsSandbox: MaterializeWorkspace unsupported")
+}
 
 func (f *fakeRunTestsSandbox) Exec(_ context.Context, _ sandbox.Spec) (sandbox.Result, error) {
 	return sandbox.Result{ExitCode: 0}, nil

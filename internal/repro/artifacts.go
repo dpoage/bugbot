@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/sarif"
 	"github.com/dpoage/bugbot/internal/util"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // writeArtifacts writes a self-contained repro bundle for a demonstrated bug to

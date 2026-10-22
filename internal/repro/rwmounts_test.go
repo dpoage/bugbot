@@ -6,7 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // Writable local_mounts (bugbot-wjc2) must reach sandbox.Spec.RWMounts on
@@ -22,7 +23,7 @@ func rwMountFixture() []sandbox.ROMount {
 
 func TestBuildSpec_CarriesRWMounts(t *testing.T) {
 	plan := &Plan{Cmd: []string{"bazelisk", "test", "//pkg:all"}}
-	spec := buildSpec(t.TempDir(), plan, "", "none", time.Minute, sandbox.Resolution{
+	spec := buildSpec(t.TempDir(), plan, "", "none", time.Minute, sandboxenv.Resolution{
 		RWMounts: rwMountFixture(),
 	})
 	if len(spec.RWMounts) != 1 || spec.RWMounts[0].ContainerPath != "/bazel-vendor" {

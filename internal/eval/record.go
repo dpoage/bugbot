@@ -14,21 +14,15 @@ import (
 // Stable substrings used to classify a saved transcript by the funnel role that
 // produced it.
 //
-// The agent transcript records each request's MESSAGES but NOT the request's
-// System field (see agent.Runner.Run: it records `messages`, while the system
-// prompt rides on llmkit.Request.System separately). So we cannot classify by the
-// finder/verifier SYSTEM prompt — it is not persisted. We classify instead by
-// the first USER message, which IS recorded: the funnel seeds every finder run
-// with finderTask(...) and every verifier run with verifierTask(...) (see
-// internal/funnel/prompt.go and hypothesize.go/verify.go), and these task
-// preambles carry stable, role-distinct opening sentences:
+// The transcript does not carry the system prompt as a run-level fact, so we
+// classify by the run's task (the Start event), which the funnel seeds with
+// finderTask(...) or verifierTask(...) (internal/funnel/prompt.go); their
+// opening sentences are role-distinct:
 //
 //   - finderRoleMarker is finderTask's opening sentence.
 //   - verifierRoleMarker is verifierTask's opening sentence.
 //
-// RunJSON appends its JSON instruction AFTER the task, so the marker is always
-// present at the head of the first user message regardless of schema. If a
-// transcript matches neither (or both), classification is a hard error: a
+// If a transcript matches neither (or both), classification is a hard error: a
 // misclassified session would silently corrupt the recorded corpus.
 const (
 	finderRoleMarker   = "Audit these target files for bugs in your assigned focus area"
@@ -44,52 +38,45 @@ const (
 	roleVerifier
 )
 
-// classifyTranscript inspects a transcript's first user message and decides
-// whether it was produced by a finder or a verifier run, using the stable task
-// markers above. It errors (rather than guessing) on an unclassifiable or
-// ambiguous transcript so a bad recording fails loudly at corpus-build time.
+// classifyTranscript inspects a transcript's task and decides whether it was
+// produced by a finder or a verifier run, using the stable task markers above.
+// It errors (rather than guessing) on an unclassifiable or ambiguous transcript
+// so a bad recording fails loudly at corpus-build time.
 func classifyTranscript(tr *agent.Transcript) (transcriptRole, error) {
-	task, ok := firstUserMessage(tr)
+	task, ok := runTask(tr)
 	if !ok {
-		return roleUnknown, fmt.Errorf("transcript has no request event with a user message to classify by")
+		return roleUnknown, fmt.Errorf("transcript has no start event with a task to classify by")
 	}
 	isFinder := strings.Contains(task, finderRoleMarker)
 	isVerifier := strings.Contains(task, verifierRoleMarker)
 	switch {
 	case isFinder && isVerifier:
-		return roleUnknown, fmt.Errorf("transcript first user message matched BOTH finder and verifier markers; cannot classify")
+		return roleUnknown, fmt.Errorf("transcript task matched BOTH finder and verifier markers; cannot classify")
 	case isFinder:
 		return roleFinder, nil
 	case isVerifier:
 		return roleVerifier, nil
 	default:
-		return roleUnknown, fmt.Errorf("transcript first user message matched neither finder marker %q nor verifier marker %q", finderRoleMarker, verifierRoleMarker)
+		return roleUnknown, fmt.Errorf("transcript task matched neither finder marker %q nor verifier marker %q", finderRoleMarker, verifierRoleMarker)
 	}
 }
 
-// firstUserMessage returns the content of the first user message in the
-// transcript's first request event. A fresh agent run always opens with exactly
-// one user message (the task), which carries the role-distinct task preamble.
-// Returns ("", false) if no request event with a user message is present.
-func firstUserMessage(tr *agent.Transcript) (string, bool) {
-	for _, ev := range tr.Events {
-		if ev.Kind != agent.EventRequest {
-			continue
-		}
-		for _, m := range ev.Messages {
-			if m.Role == llmkit.RoleUser {
-				return m.Text(), true
-			}
+// runTask returns the task of the transcript's start event, or ("", false)
+// when there is none.
+func runTask(tr *agent.Transcript) (string, bool) {
+	for _, ev := range tr.Record {
+		if ev.Kind == llmkit.KindStart && ev.Start != nil && ev.Start.Task != "" {
+			return ev.Start.Task, true
 		}
 	}
 	return "", false
 }
 
 // loadTranscriptDir loads every *.jsonl transcript under dir, sorted by
-// filename. The autosave names files "<UTC-timestamp>-<slug>.jsonl" with a
-// lexicographically-sortable timestamp prefix (see agent.Runner.autosave), so a
-// filename sort is a chronological sort — the order the funnel emitted the runs
-// under MaxParallel=1.
+// filename. The JSONL sink names files "<RunID>.jsonl" and a RunID starts with
+// its zero-padded mint time in unix millis, so a filename sort is a
+// chronological sort — the order the funnel emitted the runs under
+// MaxParallel=1.
 func loadTranscriptDir(dir string) ([]string, []*agent.Transcript, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

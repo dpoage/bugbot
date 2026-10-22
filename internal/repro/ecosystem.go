@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	eco "github.com/dpoage/bugbot/internal/ecosystem"
-	"github.com/dpoage/bugbot/internal/sandbox"
 )
 
 // ecosystemRules is the package-private alias for the interpretation data for a
@@ -21,7 +20,7 @@ import (
 // modification. The data is populated by converting ecosystem.InterpRules values
 // from the shared registry — see ecosystemTable below.
 type ecosystemRules struct {
-	name                         sandbox.Ecosystem
+	name                         eco.Ecosystem
 	ranMarkers                   []string
 	lineAnchoredRanMarkers       []string
 	notRanMarkers                []string
@@ -84,7 +83,7 @@ func detectEcosystem(argv []string) ecosystemRules {
 
 // ecosystemIndex returns the position of the named entry in ecosystemTable,
 // or 0 if the name is unknown.
-func ecosystemIndex(name sandbox.Ecosystem) int {
+func ecosystemIndex(name eco.Ecosystem) int {
 	for i, e := range ecosystemTable {
 		if e.name == name {
 			return i

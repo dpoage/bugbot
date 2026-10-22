@@ -1,0 +1,3210 @@
+package sandboxenv
+
+// deps.go implements the dependency strategy resolver for sandboxed builds.
+//
+// The sandbox defaults to --network=none, so a build/test can only resolve
+// external modules if their source is already present inside the container.
+// This file decides, for a given repo, HOW to make those dependencies present
+// without granting the untrusted run network access:
+//
+//	VENDORED  the repo vendors its deps (vendor/modules.txt). Nothing to mount;
+//	          we set GOFLAGS=-mod=vendor so `go` ignores the network entirely and
+//	          builds from vendor/ (explicit rather than incidental).
+//	HOST      mount the host's Go module cache read-only at /modcache and point
+//	          GOMODCACHE at it. GOPROXY=off turns any cache miss into a clear,
+//	          immediate error instead of a network hang under --network=none.
+//	FETCH     run ONE online `go mod download` in a separate, still-hardened
+//	          container to populate a bugbot-managed cache dir, then mount THAT
+//	          dir read-only exactly like HOST. Everything after the prefetch is
+//	          network-none.
+//	OFF       current behavior: no mounts, no env (the default).
+//
+// Vendored detection applies in ALL modes including OFF — it is free and safe.
+// The Go strategy is only applied when the repo has a go.mod; other ecosystems
+// can grow their own resolver alongside this one (the Resolution return type is
+// ecosystem-agnostic).
+//
+// # Ecosystem registry
+//
+// ResolveDeps iterates the ordered ecosystems table and calls resolve on every
+// ecosystem whose detect returns true for repoDir. The results are merged:
+//
+//   - ROMounts: appended in table order. Each ecosystem must use distinct
+//     ContainerPaths; Exec's duplicate-ContainerPath refusal backstops
+//     this at Exec time, but ecosystem authors must design ContainerPaths to be
+//     globally unique across all ecosystems (e.g. /modcache for Go, /pipcache
+//     for Python) to avoid silent shadowing.
+//   - Env: appended in table order.
+//   - SetupCmds: appended in table order.
+//   - Prefetch: chained into a single func that runs them sequentially; the
+//     first error aborts the chain.
+//   - Strategy: set to the FIRST matching ecosystem's strategy.
+//
+// A repo with no matching ecosystem resolves to an empty Resolution{Strategy:
+// DepStrategyOff}, identical to today's non-Go behavior.
+//
+// # Ecosystem coverage
+//
+// Strategy support per ecosystem (vendored / off / host / fetch). "host→off"
+// entries apply to the CONTAINER backend only: under bwrap, Python and JS
+// HOST additionally provision from the host filesystem instead (see the
+// "bwrap-only HOST extension" sections below and isBwrapFetchBackend) —
+// mounting a baked image's independently-versioned interpreter's caches is
+// unsafe, but the bwrap sandboxed interpreter/npm IS the host one, so that
+// objection does not apply there:
+//
+//	Go      go.mod            vendored(vendor/modules.txt) · off · host · fetch
+//	Python  requirements.txt  off · fetch          (host→off on container; host mounts host site-packages under bwrap)
+//	Rust    Cargo.toml        vendored(vendor/ + .cargo/config replace-with) · off · host · fetch
+//	JS/npm  package.json      vendored(node_modules/) · off · fetch   (host→off on container; host mounts host npm cache under bwrap when package-lock.json exists, else off)
+//	C#/Nug  *.csproj/*.sln    off · host · fetch   (no v1 vendored convention)
+//	Maven   pom.xml           off · host · fetch   (no v1 vendored convention)
+//	Gradle  build.gradle[.kts]/settings.gradle[.kts]
+//	                          off · fetch          (host→off; RO cache contention)
+//
+// Each ecosystem owns a unique container mount path: /modcache (Go),
+// /depcache (Python), /cargo/registry (Rust), /npmcache (JS), /nugetcache (C#/NuGet),
+// /m2cache (Maven), /gradlecache (Gradle). The bwrap-only Python HOST
+// extension is the one exception: it mounts each resolved site-packages
+// directory at its OWN host path (not a fixed container path) since bwrap
+// has no baked image whose filesystem layout it needs to match.
+// See the README section "Sandbox dependency strategies" for the full per-ecosystem
+// matrix (prefetch commands, offline-enforcement env, in-sandbox setup, security).
+//
+// # Backend-conditional resolution (bwrap vs container)
+//
+// DepOptions.FetchSandbox carries the REAL backend the caller constructed
+// (see repro.New), independent of the requested Strategy — repro.New always
+// sets it, even for HOST/OFF. Three things key off it:
+//
+//   - fetchPrefetchNetwork: "bridge" for the container backend, "host" for
+//     bwrap (which has no bridge network).
+//   - isBwrapFetchBackend: gates the Python/JS bwrap-only HOST extensions.
+//   - a HostExec backend resolves to an empty OFF Resolution.
+//
+// Every other resolver path (Go, Rust, C#/NuGet, Maven, Gradle; every
+// non-HOST Python/JS branch) is backend-agnostic and produces byte-identical
+// Resolutions regardless of which backend FetchSandbox is — this is what
+// keeps deps_test.go's container-backend assertions valid unchanged
+// (bugbot-48ya acceptance 5).
+//
+// # Security posture (per-mount Shared semantics)
+//
+// Each ecosystem's resolve func controls the Shared flag on its ROMounts.
+// Shared=false (bugbot-owned dirs, e.g. the fetch cache) receives :Z SELinux
+// relabeling for container-private isolation. Shared=true (host-owned dirs,
+// e.g. the user's Go module cache under ~/go/pkg/mod) MUST NOT be relabeled:
+// :Z on a multi-GB shared tree is slow, breaks the host toolchain, and breaks
+// any other container sharing the same dir. See sandbox.ROMount.Shared for the full
+// rationale. Ecosystem authors must set Shared=true for any host-owned
+// directory they mount.
+//
+// # Imports
+//
+// Markers are checked directly rather than via internal/ingest to avoid
+// import cycles; the only non-stdlib import is llmkit/sandbox.
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/dpoage/llmkit/sandbox"
+)
+
+// DepStrategy selects how external module dependencies are made available to a
+// network-none sandbox run. See the file doc for the per-strategy behavior.
+type DepStrategy string
+
+const (
+	// DepStrategyOff is the default: no dependency mounts or env are added.
+	// Vendored repos are still detected (that path is free and safe).
+	DepStrategyOff DepStrategy = "off"
+	// DepStrategyVendored is set automatically when a repo's dependencies are
+	// already materialized locally (vendor/modules.txt for Go, vendor/ +
+	// .cargo/config stanza for Rust, node_modules/ for JS). It is never
+	// selected by the user — it overrides any requested strategy when the
+	// vendored invariant is satisfied.
+	DepStrategyVendored DepStrategy = "vendored"
+	// DepStrategyHost mounts the host Go module cache read-only.
+	DepStrategyHost DepStrategy = "host"
+	// DepStrategyFetch performs a one-time online prefetch into a bugbot-managed
+	// cache, then mounts that cache read-only.
+	DepStrategyFetch DepStrategy = "fetch"
+)
+
+// ValidDepStrategy reports whether s is a recognized strategy. The empty string
+// is accepted and treated as DepStrategyOff by ResolveDeps.
+func ValidDepStrategy(s DepStrategy) bool {
+	switch s {
+	case "", DepStrategyOff, DepStrategyVendored, DepStrategyHost, DepStrategyFetch:
+		return true
+	default:
+		return false
+	}
+}
+
+// modcacheMount is where a dependency module cache is mounted read-only inside
+// the container (HOST and FETCH strategies).
+const modcacheMount = "/modcache"
+
+// goCacheDir and goTmpDir are disk-backed build-scratch directories created
+// inside the writable /workspace mount for Go runs. Go's build cache (GOCACHE,
+// default $HOME/.cache/go-build) and transient work dir ($WORK, default under
+// $TMPDIR) otherwise land on the small tmpfs the sandbox mounts at /tmp
+// (buildRunArgs: --tmpfs /tmp:size=512m). A cold build of a dependency-heavy
+// package overruns that tmpfs ("no space left on device"), which the reproducer
+// reads as an environment_error and never promotes — and a refuter's
+// sandbox_exec check fails the same way. /workspace is a per-run, disk-backed
+// copy with real space, so the caches go there instead. Both names are
+// dot-prefixed so `go test ./...` skips them (go ignores directories beginning
+// with "." or "_").
+const (
+	goCacheDir = sandbox.WorkspaceMount + "/.bugbot-gocache"
+	goTmpDir   = sandbox.WorkspaceMount + "/.bugbot-gotmp"
+)
+
+// DepOptions configures the dependency resolver.
+type DepOptions struct {
+	// Strategy selects the dependency strategy. Empty is treated as
+	// DepStrategyOff.
+	Strategy DepStrategy
+
+	// FetchSandbox is the Sandbox used to run the one-time online prefetch under
+	// DepStrategyFetch. Required only for that strategy; ignored otherwise. It is
+	// typically the same backend used for the main run.
+	FetchSandbox sandbox.Sandbox
+
+	// FetchNetwork is the prefetch run's network mode. Empty resolves per
+	// backend (see fetchPrefetchNetwork). The prefetch is the ONLY run that
+	// ever touches the network.
+	FetchNetwork sandbox.NetworkMode
+
+	// hostModcache, when set, overrides the resolved host module cache directory
+	// (test seam). Empty resolves via `go env GOMODCACHE` with a $HOME fallback.
+	hostModcache string
+
+	// hostCargoRegistry, when set, overrides the resolved host Cargo registry
+	// directory for the HOST strategy (test seam). Empty resolves via $CARGO_HOME
+	// then ~/.cargo/registry.
+	hostCargoRegistry string
+
+	// hostNuGetPackages, when set, overrides the resolved host NuGet global
+	// packages directory for the HOST strategy (test seam). Empty resolves via
+	// $NUGET_PACKAGES then ~/.nuget/packages.
+	hostNuGetPackages string
+
+	// hostMavenRepository, when set, overrides the resolved host Maven local
+	// repository directory for the HOST strategy (test seam). Empty resolves
+	// via $HOME/.m2/repository.
+	hostMavenRepository string
+
+	// hostPythonSitePackages, when non-nil, overrides the resolved host
+	// Python site-packages/dist-packages directories for the bwrap-only HOST
+	// strategy (test seam; see resolveBwrapPythonHostDeps). Empty (nil)
+	// resolves by probing the host python3/python interpreter's sys.path.
+	// Ignored by the container backend, which keeps Python HOST mapped to
+	// OFF (see resolvePython).
+	hostPythonSitePackages []string
+
+	// hostNPMCache, when set, overrides the resolved host npm cache
+	// directory for the bwrap-only HOST strategy (test seam; see
+	// resolveBwrapNPMHostDeps). Empty resolves via `npm config get cache`
+	// then $HOME/.npm. Ignored by the container backend, which keeps JS
+	// HOST mapped to OFF (see resolveJSWithFlags).
+	hostNPMCache string
+
+	// userCacheDir, when set, overrides the base directory for bugbot-managed
+	// fetch caches (test seam). Empty uses os.UserCacheDir.
+	userCacheDir string
+
+	// LocalMounts, when non-nil, are additional read-only host directories to
+	// bind-mount into the sandbox INDEPENDENT of ecosystem detection. They
+	// compose with any ecosystem-derived mounts (off/host/fetch) so a repo can
+	// have both a registry-cache mount AND sibling-directory mounts active in
+	// the same Spec. Resolved from the RO subset of config.Sandbox.LocalMounts
+	// by the caller; the sandbox package does not parse in-repo manifests (v1
+	// security boundary). Each mount must have HostPath set; Shared is always
+	// true (host-owned dirs, no SELinux :Z relabel). See sandbox.ROMount.Shared for
+	// the full rationale.
+	LocalMounts []sandbox.ROMount
+	// LocalRWMounts is LocalMounts' writable counterpart (bugbot-wjc2):
+	// additional host directories to bind-mount WRITABLE into the sandbox,
+	// resolved from the entries of config.Sandbox.LocalMounts that set
+	// Writable=true. Independent of ecosystem detection like LocalMounts;
+	// rendered into Resolution.RWMounts (never ROMounts) — see
+	// sandbox.Spec.RWMounts for the security posture this accepts.
+	LocalRWMounts []sandbox.ROMount
+	// HostToolchains names the configured host toolchains, resolved here only
+	// for Resolution.Fingerprints: the backend itself mounts them
+	// (sandbox.WithHostToolchains, see New).
+	HostToolchains []string
+}
+
+// Resolution is the result of resolving a repo's dependency strategy: the
+// mounts and extra environment a run should carry, plus an optional
+// one-time Prefetch hook. It is ecosystem-agnostic so non-Go resolvers can
+// return the same shape.
+type Resolution struct {
+	// ROMounts are read-only mounts to add to the run's Spec.
+	ROMounts []sandbox.ROMount
+	// RWMounts are writable mounts to add to the run's Spec.RWMounts
+	// (bugbot-wjc2). Populated ONLY from DepOptions.LocalRWMounts — no
+	// ecosystem resolver contributes to this field; an ecosystem's own
+	// internal prefetch-step RWMounts (e.g. DepStrategyFetch's one-time
+	// online download) are scoped to that closure's own Exec call and never
+	// surface here. See sandbox.Spec.RWMounts for the security posture.
+	RWMounts []sandbox.ROMount
+	// Env are extra KEY=VALUE entries to append to the run's Spec.Env. They are
+	// appended after the caller's own env, matching the sandbox's "later wins"
+	// ordering, so they take effect for the run.
+	Env []string
+	// SetupCmds are in-container commands to run before Cmd (see Spec.SetupCmds).
+	// Non-Go ecosystems populate this (e.g. ["npm","ci","--offline"]); the Go
+	// ecosystem contributes a single mkdir for its build-scratch dirs (goCacheDir).
+	SetupCmds [][]string
+	// Prefetch, when non-nil, must be called ONCE before the first network-none
+	// run for this repo (e.g. from the reproducer's PromoteAll setup). It runs
+	// the online module download and is a no-op on repeat calls (it is guarded
+	// by a sync.Once internally). Strategies other than FETCH leave it nil.
+	Prefetch func(ctx context.Context) error
+
+	// Strategy is the strategy actually applied (after vendored detection may
+	// have overridden the requested one), for logging/diagnostics.
+	Strategy DepStrategy
+	// Fingerprints records provenance for the configured host toolchains
+	// that resolved on this host (see DepOptions.HostToolchains).
+	Fingerprints []sandbox.ToolchainFingerprint
+	// Warnings carries operator-visible, non-fatal degradation reasons
+	// (bugbot-gu0o C2): an ecosystem that CANNOT safely resolve its
+	// requested strategy for a repo-content reason (as opposed to a
+	// caller-configuration error, which still returns a hard error from
+	// ResolveDeps) resolves to DepStrategyOff for itself and appends a
+	// human-readable reason here instead of failing the WHOLE
+	// ResolveDeps call — a malformed requirements.txt in an otherwise-
+	// healthy polyglot repo must not cost a Go module its /modcache
+	// mount too. See resolvePython's FETCH case for the originating
+	// example. Merged across ecosystems in table order by resolveWith,
+	// same as Env/SetupCmds. Empty when nothing degraded.
+	Warnings []string
+}
+
+// ecosystem describes how to detect a build ecosystem and resolve its
+// dependency strategy into a Resolution. The ordered ecosystems table is
+// iterated by resolveWith; entries whose detect returns true contribute their
+// Resolution to the merged result.
+type ecosystem struct {
+	// name is a human-readable identifier for logging and diagnostics.
+	name string
+	// detect reports whether repoDir belongs to this ecosystem (e.g. presence
+	// of go.mod for Go). It must be fast and side-effect-free.
+	detect func(repoDir string) bool
+	// resolve returns the Resolution for repoDir under opts. It is only called
+	// when detect returned true.
+	resolve func(repoDir string, opts DepOptions) (Resolution, error)
+}
+
+// ecosystems is the ordered registry of per-ecosystem resolvers. resolveWith
+// iterates this table in order, merging every matching ecosystem's Resolution.
+// To add a new ecosystem (C#/NuGet, ...), append a new entry here;
+// the merge semantics in resolveWith handle the rest. ContainerPaths across
+var ecosystems = []ecosystem{
+	goEcosystem,
+	pythonEcosystem,
+	cargoEcosystem,
+	jsEcosystem,
+	nugetEcosystem,
+	mavenEcosystem,
+	gradleEcosystem,
+}
+
+// goEcosystem is the Go dependency resolver. It detects repos with a go.mod
+// and applies the VENDORED / HOST / FETCH / OFF dependency strategy, and in
+// every mode relocates Go's build scratch onto the disk-backed workspace
+// (see goCacheDir / resolveGo).
+var goEcosystem = ecosystem{
+	name:    "go",
+	detect:  hasGoModule,
+	resolve: resolveGo,
+}
+
+// resolveGo resolves the Go ecosystem for repoDir: the dependency strategy
+// (resolveGoDeps) plus the build-scratch relocation common to every strategy
+// (applyGoBuildScratch). Strategy validation has already run in resolveWith.
+func resolveGo(repoDir string, opts DepOptions) (Resolution, error) {
+	res, err := resolveGoDeps(repoDir, opts)
+	if err != nil {
+		return Resolution{}, err
+	}
+	return applyGoBuildScratch(res), nil
+}
+
+// applyGoBuildScratch appends the env and setup command that move Go's build
+// cache (GOCACHE) and transient work dir ($WORK, via GOTMPDIR) off the small
+// /tmp tmpfs onto the disk-backed workspace. GOCACHE is auto-created by go, but
+// GOTMPDIR must already exist, so the mkdir setup command precedes the run.
+// This routes the Go command through the /bin/sh setup wrapper in buildRunArgs,
+// which the image's shell + mkdir satisfy — both are present wherever the Go
+// toolchain is. See goCacheDir for the failure this prevents.
+func applyGoBuildScratch(res Resolution) Resolution {
+	res.Env = append(res.Env, "GOCACHE="+goCacheDir, "GOTMPDIR="+goTmpDir)
+	res.SetupCmds = append(res.SetupCmds, []string{"mkdir", "-p", goCacheDir, goTmpDir})
+	return res
+}
+
+// resolveGoDeps resolves only the dependency strategy (vendored / off / host /
+// fetch) for repoDir. The build-scratch relocation is layered on by resolveGo.
+func resolveGoDeps(repoDir string, opts DepOptions) (Resolution, error) {
+	// Vendored detection wins in every mode: it is free, safe, and makes `go`
+	// ignore the network entirely.
+	if isVendored(repoDir) {
+		return Resolution{
+			Env:      []string{"GOFLAGS=-mod=vendor"},
+			Strategy: DepStrategyVendored,
+		}, nil
+	}
+
+	strategy := opts.Strategy
+	if strategy == "" {
+		strategy = DepStrategyOff
+	}
+
+	switch strategy {
+	case DepStrategyOff:
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyHost:
+		cache, err := resolveHostModcache(opts.hostModcache)
+		if err != nil {
+			return Resolution{}, err
+		}
+		// shared=true: the host Go module cache is NOT owned by bugbot. SELinux
+		// :Z would relabel the entire cache to a container-private MCS label,
+		// which is slow on multi-GB caches and can break the host go toolchain
+		// and any other container sharing the same directory. :ro without a label
+		// suffix is the correct choice here; see sandbox.ROMount.Shared for details.
+		return modcacheResolution(cache, DepStrategyHost, true, nil), nil
+
+	case DepStrategyFetch:
+		if opts.FetchSandbox == nil {
+			return Resolution{}, fmt.Errorf("sandbox: dependency strategy %q requires a fetch sandbox", strategy)
+		}
+		cache, err := fetchCacheDir(repoDir, opts.userCacheDir)
+		if err != nil {
+			return Resolution{}, err
+		}
+		prefetch := newPrefetch(repoDir, cache, opts)
+		// shared=false: the fetch cache is a bugbot-owned directory under the
+		// user cache dir. :Z isolation is appropriate here.
+		return modcacheResolution(cache, DepStrategyFetch, false, prefetch), nil
+
+	default:
+		// Unreachable given ValidDepStrategy above, but keep it explicit.
+		return Resolution{}, fmt.Errorf("sandbox: unhandled dependency strategy %q", strategy)
+	}
+}
+
+// hasGoModule reports whether repoDir contains a root go.mod.
+func hasGoModule(repoDir string) bool {
+	st, err := os.Stat(filepath.Join(repoDir, "go.mod"))
+	return err == nil && !st.IsDir()
+}
+
+// isVendored reports whether repoDir has a populated vendor tree
+// (vendor/modules.txt), which `go` uses as the authoritative vendor manifest.
+func isVendored(repoDir string) bool {
+	st, err := os.Stat(filepath.Join(repoDir, "vendor", "modules.txt"))
+	return err == nil && !st.IsDir()
+}
+
+// ResolveDeps decides the dependency strategy for repoDir and returns the
+// mounts/env/prefetch a run should use. It never errors on a repo that matches
+// no ecosystem or when the strategy is off: such repos resolve to an empty
+// Resolution (OFF).
+//
+// Strategy validation runs first; an invalid strategy is an immediate error.
+// The function then delegates to resolveWith using the package-level ecosystems
+// table — see its doc comment for the per-ecosystem merge semantics. A
+// HostExec FetchSandbox skips ecosystem resolution (and toolchain
+// fingerprints): a bare host process uses the host's own toolchains and
+// caches, and HostExec refuses the mounts and SetupCmds a resolution carries.
+func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
+	if !ValidDepStrategy(opts.Strategy) {
+		return Resolution{}, fmt.Errorf("sandbox: invalid dependency strategy %q (want off, host, or fetch)", opts.Strategy)
+	}
+	if _, host := opts.FetchSandbox.(*sandbox.HostExec); host {
+		return Resolution{
+			Strategy: DepStrategyOff,
+			ROMounts: opts.LocalMounts,
+			RWMounts: opts.LocalRWMounts,
+		}, nil
+	}
+	res, err := resolveWith(ecosystems, repoDir, opts)
+	if err != nil {
+		return Resolution{}, err
+	}
+	// Append operator-configured local mounts AFTER ecosystem-derived mounts.
+	// This is independent of ecosystem detection: a repo may have local mounts
+	// even when no ecosystem matched (Strategy=off). Order: ecosystem mounts
+	// first (registry caches), then operator local mounts. Exec refuses any
+	// ContainerPath collision.
+	res.ROMounts = append(res.ROMounts, opts.LocalMounts...)
+	// Writable local mounts (bugbot-wjc2): same ordering contract as the RO
+	// half above, but into Resolution.RWMounts — no ecosystem resolver ever
+	// contributes here, so this is a pure passthrough of the operator's
+	// opt-in.
+	res.RWMounts = append(res.RWMounts, opts.LocalRWMounts...)
+
+	if len(opts.HostToolchains) > 0 {
+		res.Fingerprints = sandbox.ResolveHostToolchains(opts.HostToolchains).Fingerprints
+	}
+	return res, nil
+}
+
+// resolveWith is the internal dispatcher that iterates the provided table and
+// merges matching ecosystems' Resolutions. It is a separate function (rather
+// than inlining into ResolveDeps) so tests can inject an extended table without
+// mutating the global ecosystems var — important for parallel-test safety.
+//
+// Merge rules (see file doc for rationale):
+//   - ROMounts: appended in table order. ContainerPaths must be unique across
+//     all ecosystems; Exec refuses a duplicate.
+//   - Env: appended in table order.
+//   - SetupCmds: appended in table order.
+//   - Warnings: appended in table order (bugbot-gu0o C2) — operator-visible
+//     non-fatal degradation reasons; see Resolution.Warnings.
+//   - Strategy: taken from the FIRST matching ecosystem.
+//
+// No matching ecosystem → Resolution{Strategy: DepStrategyOff}.
+func resolveWith(table []ecosystem, repoDir string, opts DepOptions) (Resolution, error) {
+	var merged Resolution
+	firstMatch := true
+
+	for _, eco := range table {
+		if !eco.detect(repoDir) {
+			continue
+		}
+		r, err := eco.resolve(repoDir, opts)
+		if err != nil {
+			return Resolution{}, err
+		}
+		// Strategy is taken from the first matching ecosystem.
+		if firstMatch {
+			merged.Strategy = r.Strategy
+			firstMatch = false
+		}
+		merged.ROMounts = append(merged.ROMounts, r.ROMounts...)
+		merged.Env = append(merged.Env, r.Env...)
+		merged.SetupCmds = append(merged.SetupCmds, r.SetupCmds...)
+		merged.Warnings = append(merged.Warnings, r.Warnings...)
+		// Chain Prefetch funcs: run them sequentially; first error aborts.
+		if r.Prefetch != nil {
+			prev := merged.Prefetch
+			next := r.Prefetch
+			if prev == nil {
+				merged.Prefetch = next
+			} else {
+				merged.Prefetch = func(ctx context.Context) error {
+					if err := prev(ctx); err != nil {
+						return err
+					}
+					return next(ctx)
+				}
+			}
+		}
+	}
+
+	if firstMatch {
+		// No ecosystem matched.
+		return Resolution{Strategy: DepStrategyOff}, nil
+	}
+	return merged, nil
+}
+
+// modcacheResolution builds the Resolution shared by HOST and FETCH: a single
+// read-only modcache mount plus the env that points `go` at it and turns a
+// cache miss into a hard error rather than a network hang.
+//
+// shared controls sandbox.ROMount.Shared: true for the HOST strategy (user's real Go
+// module cache — must not be SELinux-relabeled), false for the FETCH strategy
+// (bugbot-owned cache dir — :Z isolation is correct). See sandbox.ROMount.Shared.
+func modcacheResolution(hostCache string, strategy DepStrategy, shared bool, prefetch func(context.Context) error) Resolution {
+	return Resolution{
+		ROMounts: []sandbox.ROMount{{HostPath: hostCache, ContainerPath: modcacheMount, Shared: shared}},
+		Env: []string{
+			"GOMODCACHE=" + modcacheMount,
+			"GOFLAGS=-mod=mod",
+			// GOPROXY=off: under --network=none any cache miss must fail fast and
+			// clearly instead of hanging on an unreachable proxy.
+			"GOPROXY=off",
+		},
+		Prefetch: prefetch,
+		Strategy: strategy,
+	}
+}
+
+// goEnvTimeout is the maximum time we will wait for `go env GOMODCACHE` to
+// respond. A wedged or very slow go binary should not block funnel/repro
+// construction indefinitely.
+const goEnvTimeout = 5 * time.Second
+
+// resolveHostModcache resolves the host Go module cache directory. It prefers
+// the override, then `go env GOMODCACHE`, then $HOME/go/pkg/mod. It returns an
+// error when no path can be determined (go not installed AND no HOME) or when
+// the resolved path does not exist on the host (catches a misconfigured or
+// unpopulated cache early, before podman emits an opaque bind-mount error).
+func resolveHostModcache(override string) (string, error) {
+	if override != "" {
+		return checkModcacheExists(override)
+	}
+
+	// Ask `go` for its authoritative cache path. The exec is bounded by a
+	// short timeout so a wedged go binary cannot hang the caller indefinitely.
+	ctx, cancel := context.WithTimeout(context.Background(), goEnvTimeout)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "go", "env", "GOMODCACHE").Output(); err == nil {
+		if dir := strings.TrimSpace(string(out)); dir != "" {
+			return checkModcacheExists(dir)
+		}
+	}
+
+	// go not installed or printed nothing: fall back to the conventional path.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", fmt.Errorf("sandbox: cannot resolve host Go module cache (go not found and HOME unset); vendor deps or set dep_strategy: off|fetch")
+	}
+	return checkModcacheExists(filepath.Join(home, "go", "pkg", "mod"))
+}
+
+// checkModcacheExists verifies that dir exists on the host and returns it if
+// so. When the directory is missing it returns a clear, actionable error
+// instead of letting podman fail with an opaque bind-mount message at run time.
+func checkModcacheExists(dir string) (string, error) {
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("sandbox: host module cache %q does not exist; run 'go mod download' on the host first, or use dep_strategy: off|fetch", dir)
+		}
+		return "", fmt.Errorf("sandbox: stat host module cache %q: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// fetchCacheDir returns the bugbot-managed module-cache directory for repoDir
+// (e.g. ~/.cache/bugbot/modcache/<hash>). The directory is created if missing.
+// override, when non-empty, replaces the ~/.cache/bugbot/modcache base
+// (test seam).
+func fetchCacheDir(repoDir, override string) (string, error) {
+	return fetchEcosystemCacheDir("modcache", repoDir, override)
+}
+
+// repoHash derives a stable directory name from the absolute repo path so two
+// different repos never share a fetch cache.
+func repoHash(repoDir string) string {
+	abs, err := filepath.Abs(repoDir)
+	if err != nil {
+		abs = repoDir
+	}
+	sum := sha256.Sum256([]byte(abs))
+	return hex.EncodeToString(sum[:8])
+}
+
+// fetchEcosystemCacheDir returns the bugbot-managed cache directory for the
+// named ecosystem and repoDir under the user cache dir
+// (e.g. ~/.cache/bugbot/<ecosystem>/<hash>). Using the user cache dir rather
+// than a dir inside the scanned repo keeps the repo tree clean and lets the
+// cache survive across runs. override (when non-empty) replaces the
+// ~/.cache/bugbot/<ecosystem> base, allowing tests to redirect to a temp dir.
+// The directory is created if missing.
+func fetchEcosystemCacheDir(ecosystem, repoDir, override string) (string, error) {
+	base := override
+	if base == "" {
+		uc, err := os.UserCacheDir()
+		if err != nil {
+			return "", fmt.Errorf("sandbox: resolve user cache dir for %s fetch cache: %w", ecosystem, err)
+		}
+		base = filepath.Join(uc, "bugbot", ecosystem)
+	}
+	dir := filepath.Join(base, repoHash(repoDir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("sandbox: create %s fetch cache dir: %w", ecosystem, err)
+	}
+	return dir, nil
+}
+
+// isBwrapFetchBackend reports whether opts.FetchSandbox is the bwrap backend.
+// FetchSandbox is always the real backend, so HOST-strategy resolvers also
+// use this as their backend signal (see resolvePython / resolveJS).
+func isBwrapFetchBackend(opts DepOptions) bool {
+	_, ok := opts.FetchSandbox.(*sandbox.Bwrap)
+	return ok
+}
+
+// fetchPrefetchNetwork resolves the prefetch Spec's network: opts.FetchNetwork
+// when set, else NetworkBridge on the container backend and NetworkHost on
+// bwrap, which has no bridge network. It never affects a normal run's network.
+func fetchPrefetchNetwork(opts DepOptions) sandbox.NetworkMode {
+	if opts.FetchNetwork != "" {
+		return opts.FetchNetwork
+	}
+	if isBwrapFetchBackend(opts) {
+		return sandbox.NetworkHost
+	}
+	return sandbox.NetworkBridge
+}
+
+// newPrefetchOnce wraps run in a sync.Once so the returned function calls run
+// at most once per Resolution — all seven ecosystem prefetch constructors share
+// this pattern.
+func newPrefetchOnce(run func(context.Context) error) func(context.Context) error {
+	var once sync.Once
+	var onceErr error
+	return func(ctx context.Context) error {
+		once.Do(func() { onceErr = run(ctx) })
+		return onceErr
+	}
+}
+
+// ecosystemPrefetchSpec parameterizes runEcosystemPrefetch (bugbot-gu0o): the
+// per-ecosystem shape of the ONE online prefetch step — the sentinel-keyed
+// dependency-set hash, the in-container command, the writable cache mount,
+// and any tool-specific env. It replaces seven near-identical runXPrefetch
+// bodies (Go, pip, cargo, npm, dotnet, Maven, Gradle) that each duplicated
+// the same sentinel-check → Spec-build → Exec → error-wrap → sentinel-write
+// sequence; collapsing them into one enforcement point means the offline/
+// script-exec security posture is declared exactly once per ecosystem, in
+// the Cmd its caller builds — see runEcosystemPrefetch's doc for why that
+// matters. Every field is set by the ecosystem's newXPrefetch constructor;
+// there is no zero-value-safe default (a caller that forgets cmd, for
+// instance, has runEcosystemPrefetch running an empty command, which fails
+// loudly rather than silently skipping the security-relevant flags).
+type ecosystemPrefetchSpec struct {
+	// tool is the human-readable prefetch command name used in error
+	// messages (e.g. "go mod download", "pip download", "npm ci
+	// --ignore-scripts --cache /npmcache").
+	tool string
+	// hash returns the dependency-set fingerprint (e.g. sha256(go.sum)) used
+	// both to key the warm-cache sentinel and to decide whether the online
+	// prefetch can be skipped entirely.
+	hash func(repoDir string) (string, error)
+	// cmd is the full in-container argv for the online prefetch, INCLUDING
+	// any security-relevant flags (npm's --ignore-scripts, pip's
+	// --only-binary=:all:). This is the single place those flags live — see
+	// the file-level SECURITY comments in each ecosystem's section for the
+	// rationale behind each one.
+	cmd []string
+	// containerPath is where hostCache is bind-mounted WRITABLE for the
+	// prefetch container (e.g. modcacheMount, pipCacheMount, ...).
+	containerPath string
+	// env is extra KEY=VALUE entries for the prefetch Spec (e.g.
+	// "GOMODCACHE=/modcache"). nil when the tool needs none (pip, npm).
+	env []string
+}
+
+// runEcosystemPrefetch is the SINGLE enforcement point for every ecosystem's
+// one-time online dependency prefetch (bugbot-gu0o structural fix). Before
+// this collapse, Go/pip/cargo/npm/dotnet/Maven/Gradle each carried their own
+// copy of this exact sequence — sentinel check, network resolve, Spec
+// construction, Exec, error wrapping, sentinel write — which let the
+// offline/script-exec security posture drift silently per ecosystem (the
+// original bug: only npm remembered --ignore-scripts). Now every
+// ecosystem's newXPrefetch constructor builds one ecosystemPrefetchSpec
+// (declaring its security-relevant Cmd once) and hands it here; there is
+// exactly one place left where the prefetch Spec is assembled and exactly
+// one place a future ecosystem's posture can be audited or a flag can
+// regress.
+//
+// It is a no-op when the warm-cache sentinel already matches
+// spec.hash(repoDir) (the dependency set has not changed since the last
+// online prefetch); otherwise it runs spec.cmd in opts.FetchSandbox with
+// network enabled and hostCache mounted WRITABLE at spec.containerPath, and
+// records the sentinel on success so the next Resolution over the same repo
+// skips the online step. Each newXPrefetch wraps its call in
+// newPrefetchOnce so a single Resolution never runs the prefetch twice
+// either.
+func runEcosystemPrefetch(ctx context.Context, repoDir, hostCache string, opts DepOptions, spec ecosystemPrefetchSpec) error {
+	depHash, hashErr := spec.hash(repoDir)
+	sentinel := filepath.Join(hostCache, prefetchSentinel)
+
+	if hashErr == nil {
+		if prev, err := os.ReadFile(sentinel); err == nil && strings.TrimSpace(string(prev)) == depHash {
+			// Cache already populated for this exact dependency set.
+			return nil
+		}
+	}
+
+	network := fetchPrefetchNetwork(opts)
+
+	// Only the network differs from a normal run, and the cache is bound
+	// WRITABLE; the later network-none run mounts it read-only.
+	runSpec := sandbox.Spec{
+		RepoDir:  repoDir,
+		Network:  network,
+		Cmd:      spec.cmd,
+		RWMounts: []sandbox.ROMount{{HostPath: hostCache, ContainerPath: spec.containerPath}},
+		Env:      spec.env,
+	}
+	res, err := opts.FetchSandbox.Exec(ctx, runSpec)
+	if err != nil {
+		return fmt.Errorf("sandbox: %s prefetch failed to launch: %w", spec.tool, err)
+	}
+	if res.InfraKilled() {
+		return fmt.Errorf("sandbox: %s prefetch killed: %s", spec.tool, KillReason(res))
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("sandbox: %s prefetch exited %d: %s", spec.tool, res.ExitCode, lastLines(res.Stderr, 20))
+	}
+
+	if hashErr == nil {
+		// Record the warm-cache sentinel; a write failure only costs a
+		// redundant future fetch, so it is non-fatal.
+		_ = os.WriteFile(sentinel, []byte(depHash), 0o644)
+	}
+	return nil
+}
+
+// newPrefetch builds the one-time online prefetch hook for the FETCH strategy.
+// It runs `go mod download all` in the FetchSandbox with network enabled and
+// GOMODCACHE pointed at hostCache, and is keyed on the repo's go.sum hash so an
+// unchanged dependency set is not re-downloaded. The returned func is guarded by
+// a sync.Once so it runs at most once per Resolution even if called repeatedly.
+func newPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool:          "go mod download",
+			hash:          goSumHash,
+			cmd:           []string{"go", "mod", "download", "all"},
+			containerPath: modcacheMount,
+			env: []string{
+				"GOMODCACHE=" + modcacheMount,
+				"GOFLAGS=-mod=mod",
+			},
+		})
+	})
+}
+
+// prefetchSentinel is the marker file written into the fetch cache recording the
+// go.sum hash the cache was populated for; a matching hash means the cache is
+// already warm and the online download is skipped.
+const prefetchSentinel = ".bugbot-fetched"
+
+// goSumHash returns a hex hash of the repo's go.sum (or go.mod when go.sum is
+// absent, e.g. a module with no deps) so the fetch cache can be keyed on the
+// dependency set.
+func goSumHash(repoDir string) (string, error) {
+	for _, name := range []string{"go.sum", "go.mod"} {
+		data, err := os.ReadFile(filepath.Join(repoDir, name))
+		if err == nil {
+			sum := sha256.Sum256(data)
+			return hex.EncodeToString(sum[:]), nil
+		}
+	}
+	return "", fmt.Errorf("sandbox: no go.sum or go.mod in %q", repoDir)
+}
+
+// lastLines returns up to the last n non-empty lines of s, trimmed, for compact
+// error messages.
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// ---- Python ecosystem -------------------------------------------------------
+//
+// v1 strategy: pip wheelhouse FETCH only, driven by root requirements.txt.
+//
+// Scope decisions (final; do not change silently — flag any deviation):
+//
+//   - DETECT: root requirements.txt exists. pyproject-only and uv.lock-only
+//     repos resolve to OFF: verifying that uv's --offline / read-only-cache
+//     behaviour is sufficiently robust is not worth blocking the Python
+//     deployment, so uv support is explicitly DEFERRED.
+//
+//   - HOST → OFF (same empty Resolution). pip's HTTP cache (~/.cache/pip)
+//     holds wheel and response files keyed on URLs, not the installed
+//     packages themselves. There is no `pip install --no-index` analogue for
+//     the HTTP cache: --no-index requires a local directory of wheel files
+//     (a wheelhouse), which HOST does not provide. Mounting the pip HTTP
+//     cache into a network-none container does not help install anything, so
+//     HOST is treated as OFF rather than silently broken.
+//
+//   - FETCH → pip wheelhouse prefetch + offline install:
+//     1. Prefetch (network bridge, ONE online step): run
+//          pip download -r requirements.txt --only-binary=:all: -d /depcache
+//        in a network-enabled, otherwise-hardened container with the cache
+//        dir mounted WRITABLE at /depcache.
+//     2. Resolution: mount the same dir READ-ONLY at /depcache (Shared=false
+//        — bugbot-owned, gets :Z), set PIP_NO_INDEX=1 (offline enforcement,
+//        the GOPROXY=off analogue — any pip call in the test command that
+//        would hit the network fails fast instead of hanging), and add a
+//        SetupCmd that installs from the wheelhouse before the test runs:
+//          pip install --user --no-index --find-links=/depcache -r requirements.txt
+//        --user targets /tmp/.local (HOME=/tmp, set by buildRunArgs) which is
+//        writable via the tmpfs. Python's user-site is on sys.path automatically
+//        inside python:3-slim, so packages installed there are importable.
+//        See the integration test for empirical confirmation (or the comment
+//        on pipCacheMount if the empirical finding requires switching to a
+//        venv under /tmp).
+//
+//   - SECURITY (prefetch, bugbot-gu0o acceptance #1): `pip download` without
+//     --only-binary builds sdists, which executes the package's setup.py /
+//     PEP517 build backend — arbitrary repo-controlled Python code — WHILE
+//     the prefetch container still has network access. The prefetch command
+//     therefore passes --only-binary=:all:, forcing pip to refuse any
+//     dependency with no prebuilt wheel instead of falling back to a source
+//     build. --only-binary=:all: on the CLI is NOT sufficient by itself:
+//     requirements.txt content can bypass or weaken it entirely (a local
+//     path, a bare archive filename, a directory, a URL/VCS reference, a
+//     PEP 508 "name @ url" reference, or a "--no-binary" option line
+//     embedded in the file all bypass the index and/or --only-binary).
+//     validatePipRequirements vets requirements.txt in Go BEFORE any
+//     container launches using an ALLOW-list grammar (parse, don't
+//     validate — NOT a deny-list of known-bad prefixes; pip's own
+//     local-path/archive recognition is too broad to deny-list one prefix
+//     at a time): only a strict PEP 508 index requirement
+//     (name[extras]comparator-version; marker) plus per-requirement
+//     --hash=<algo>:<hexdigest> fields (pip-compile/poetry hash-pinning
+//     output) are accepted. Every other shape — including nested -r/-c
+//     includes, unsupported in v1 — is rejected with a named reason;
+//     resolvePython never even constructs a Prefetch hook for a manifest
+//     that fails this check. DECISION (fallback policy for sdist-only
+//     deps that pass validation): fail with pip's own "no matching
+//     distribution" diagnostic — no opt-in flag to disable --only-binary in
+//     v1 (an escape hatch would let one sdist-only transitive dependency
+//     quietly reopen this exact hole). See newPipPrefetch and
+//     validatePipRequirements for the full rationale.
+//
+//   - Container path /depcache is distinct from /modcache (Go) so the
+//     mount registry's ContainerPath uniqueness constraint is satisfied for
+//     multi-ecosystem repos that have both go.mod and requirements.txt.
+
+// pipCacheMount is where the pip wheelhouse is mounted inside the container
+// for the offline install step. Distinct from /modcache (Go) per the mount
+// registry's uniqueness obligation.
+const pipCacheMount = "/depcache"
+
+// pythonEcosystem is the Python dependency resolver. It detects repos with a
+// root requirements.txt and applies the pip wheelhouse FETCH strategy. HOST
+// maps to OFF (pip's HTTP cache is not a wheelhouse; see file-level comment).
+// pyproject-only and uv.lock-only repos resolve to OFF — uv support is deferred.
+var pythonEcosystem = ecosystem{
+	name:    "python",
+	detect:  hasRequirementsTxt,
+	resolve: resolvePython,
+}
+
+// resolvePython is the Python resolver function. Strategy validation has
+// already run in resolveWith; invalid strategies are unreachable here.
+func resolvePython(repoDir string, opts DepOptions) (Resolution, error) {
+	strategy := opts.Strategy
+	if strategy == "" {
+		strategy = DepStrategyOff
+	}
+
+	switch strategy {
+	case DepStrategyOff:
+		// No requirements.txt handling requested.
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyHost:
+		if isBwrapFetchBackend(opts) {
+			// bwrap: the sandboxed python literally IS a host interpreter
+			// (resolved via sandbox.host_toolchains or the fixed allowlist's
+			// system one) rather than a baked image with its own,
+			// independently-versioned python — the version-coupling
+			// objection the container backend has (see below) does not
+			// apply, so HOST mounts the host interpreter's site-packages
+			// directly. See resolveBwrapPythonHostDeps.
+			return resolveBwrapPythonHostDeps(opts.hostPythonSitePackages)
+		}
+		// Container backend: HOST is explicitly OFF for Python: pip's HTTP
+		// cache is not a wheelhouse; --no-index installs require a local
+		// directory of wheel files (a wheelhouse), which the pip HTTP cache
+		// does not provide. Mounting ~/.cache/pip into a network-none
+		// container does not help install anything — it would just silence
+		// the "no PyPI" error without actually resolving packages. Use
+		// dep_strategy: fetch for Python.
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyFetch:
+		if opts.FetchSandbox == nil {
+			return Resolution{}, fmt.Errorf("sandbox: Python dependency strategy %q requires a fetch sandbox", strategy)
+		}
+		if err := validatePipRequirements(repoDir); err != nil {
+			// Scope the failure to Python (bugbot-gu0o C2): an unvettable
+			// requirements.txt must not abort dependency resolution for the
+			// WHOLE repo. Every ResolveDeps caller in this codebase either
+			// hard-aborts entirely on ANY resolution error
+			// (internal/funnel/funnel.go wraps it and returns) or silently
+			// degrades to a completely EMPTY Resolution on ANY error
+			// (internal/engine/sandbox.go's depProbeInputs/
+			// resolveDepsForPlaybook) — neither of those is acceptable for
+			// a problem that is specific to Python's manifest: a polyglot
+			// repo with go.mod + go.sum would lose its Go /modcache mount
+			// and GOPROXY=off too, or the whole scan would refuse to start,
+			// over a requirements.txt problem unrelated to the actual scan
+			// target. Python resolves to OFF here — no mounts, no Prefetch
+			// hook, still FAIL CLOSED (never silently falls back to an
+			// unvetted `pip download`) — with the validation failure
+			// carried as an operator-visible Resolution.Warnings entry
+			// instead of returned as a Go error, so every OTHER matching
+			// ecosystem in the same resolveWith merge still resolves
+			// normally.
+			return Resolution{
+				Strategy: DepStrategyOff,
+				Warnings: []string{fmt.Sprintf("python dependency prefetch disabled: %v", err)},
+			}, nil
+		}
+		cache, err := fetchPipCacheDir(repoDir, opts.userCacheDir)
+		if err != nil {
+			return Resolution{}, err
+		}
+		prefetch := newPipPrefetch(repoDir, cache, opts)
+		// Shared=false: the pip wheelhouse is a bugbot-owned directory under the
+		// user cache dir. :Z SELinux isolation is appropriate (same rationale as
+		// the Go FETCH cache).
+		//
+		// Empirical finding (integration test): --user install with HOME=/tmp
+		// (set by buildRunArgs) places packages under /tmp/.local/lib/pythonX.Y/
+		// site-packages. Python inside python:3-slim automatically includes
+		// user-site on sys.path, so packages are importable without venv or
+		// PATH changes. The --user approach works under the read-only rootfs
+		// because /tmp is a writable tmpfs. A venv under /tmp was not required.
+		// (If future images break this, switch to:
+		//   python3 -m venv /tmp/venv
+		//   /tmp/venv/bin/pip install --no-index --find-links=/depcache -r requirements.txt
+		// and update this comment and the integration test.)
+		return Resolution{
+			ROMounts: []sandbox.ROMount{{
+				HostPath:      cache,
+				ContainerPath: pipCacheMount,
+				Shared:        false, // bugbot-owned; :Z isolation correct
+			}},
+			Env: []string{
+				// PIP_NO_INDEX=1: under --network=none any pip call that would
+				// reach PyPI must fail fast and clearly instead of hanging.
+				// Analogous to GOPROXY=off for Go.
+				"PIP_NO_INDEX=1",
+			},
+			SetupCmds: [][]string{
+				{"pip", "install", "--user", "--no-index", "--find-links=" + pipCacheMount, "-r", "requirements.txt"},
+			},
+			Prefetch: prefetch,
+			Strategy: DepStrategyFetch,
+		}, nil
+
+	default:
+		// Unreachable given ValidDepStrategy above, but keep it explicit.
+		return Resolution{}, fmt.Errorf("sandbox: unhandled Python dependency strategy %q", strategy)
+	}
+}
+
+// hasRequirementsTxt reports whether repoDir contains a root requirements.txt.
+// Only stdlib (os.Stat) — the sandbox package must remain stdlib-only.
+func hasRequirementsTxt(repoDir string) bool {
+	st, err := os.Stat(filepath.Join(repoDir, "requirements.txt"))
+	return err == nil && !st.IsDir()
+}
+
+// fetchPipCacheDir returns the bugbot-managed pip wheelhouse directory for
+// repoDir (e.g. ~/.cache/bugbot/pipcache/<hash>). Delegates to
+// fetchEcosystemCacheDir. override, when non-empty, overrides the base dir
+// (test seam).
+func fetchPipCacheDir(repoDir, override string) (string, error) {
+	return fetchEcosystemCacheDir("pipcache", repoDir, override)
+}
+
+// requirementsHash returns a hex hash of requirements.txt so the pip prefetch
+// cache can be keyed on the dependency set (analogous to goSumHash for Go).
+func requirementsHash(repoDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(repoDir, "requirements.txt"))
+	if err != nil {
+		return "", fmt.Errorf("sandbox: no requirements.txt in %q", repoDir)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// newPipPrefetch builds the one-time online pip-download hook for the Python
+// FETCH strategy. It runs `pip download -r requirements.txt --only-binary=:all:
+// -d /depcache` in the FetchSandbox with network enabled and the cache dir
+// mounted WRITABLE, keyed on the sha256 of requirements.txt so an unchanged
+// dep set is not re-downloaded. Guarded by a sync.Once so it runs at most once
+// per Resolution.
+//
+// SECURITY (bugbot-gu0o): `pip download` without --only-binary builds sdists,
+// which executes the package's setup.py / PEP517 build backend — arbitrary
+// repo-controlled Python code — WHILE the prefetch container still has
+// network access. --only-binary=:all: forces pip to refuse any dependency
+// that has no prebuilt wheel instead of falling back to a source build.
+//
+// --only-binary=:all: is NOT sufficient by itself: requirements.txt content
+// can bypass or weaken it entirely (a local path, a bare archive filename,
+// a directory, a URL/VCS reference, a PEP 508 "name @ url" line, or a
+// "--no-binary" option line embedded in the file). resolvePython calls
+// validatePipRequirements BEFORE ever constructing this Prefetch hook; it
+// is an ALLOW-list grammar (parse, don't validate) that accepts ONLY a
+// strict PEP 508 index requirement plus --hash fields, rejecting
+// everything else (including nested -r/-c includes) with a named reason —
+// a manifest that reaches this function has already been vetted;
+// --only-binary=:all: on the pip command line is defense in depth for
+// whatever validatePipRequirements allows through, not the sole
+// enforcement point.
+//
+// Fallback policy (decided, not deferred): a VALIDATED requirements.txt
+// naming an sdist-only dependency FAILS the prefetch with pip's own "no
+// matching distribution" diagnostic (surfaced verbatim via
+// runEcosystemPrefetch's exit-code error, which includes pip's stderr)
+// rather than silently permitting a source build. There is no opt-in flag
+// to disable --only-binary in v1: an escape hatch would let a single
+// sdist-only transitive dependency quietly reopen the exact code-exec-online
+// hole this bead closes, and no caller has asked for sdist support. A
+// future bead MAY add one if a real repo needs it, but that is a
+// deliberate, reviewed decision — not a default.
+func newPipPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool:          "pip download",
+			hash:          requirementsHash,
+			cmd:           []string{"pip", "download", "-r", "requirements.txt", "--only-binary=:all:", "-d", pipCacheMount},
+			containerPath: pipCacheMount,
+		})
+	})
+}
+
+// pipRequirementRe matches ONLY a strict PEP 508 index requirement: a
+// distribution name, an optional [extras] list, optional comma-separated
+// version specifiers, and an optional environment marker. It is an
+// ALLOW-list grammar — parse, don't validate — not a deny-list of
+// known-bad prefixes: an earlier version of validatePipRequirements
+// rejected known-bad PREFIXES ("." / "/" / "~" / "://" / " @ " / a leading
+// "-"), which a live oracle review proved incomplete — pip's own
+// local-path/archive recognition doesn't require any of those specific
+// prefixes. A relative sub-path ("wheelhouse/evilpkg-0.0.1.tar.gz"), a
+// bare archive filename with NO path separator at all
+// ("evilpkg-0.0.1.tar.gz"), a trailing-slash directory ("evilproj/"), and
+// a "file:" scheme with no "//" ("file:wheelhouse/...") are all
+// local/direct installs pip accepts that a prefix deny-list has to
+// enumerate one shape at a time, forever trailing pip's actual grammar.
+// Group 1 captures the distribution name so pipLooksLikeArchive can check
+// it specifically (a name with no "/" at all can still be an archive
+// filename pip installs locally). The marker tail is restricted to the
+// PEP 508 marker charset (identifiers, quoted strings, comparison
+// operators, boolean keywords, parens, commas) rather than arbitrary free
+// text, so a malformed/garbage marker is rejected here with a named
+// reason instead of surfacing as an opaque pip parse failure inside the
+// container.
+var pipRequirementRe = regexp.MustCompile(
+	`^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)` + // 1: name
+		`(?:\[[A-Za-z0-9][A-Za-z0-9._,\s-]*\])?` + // optional [extras]
+		`(?:\s*(?:==|!=|<=|>=|<|>|~=|===)\s*[A-Za-z0-9][A-Za-z0-9.*+!_-]*` +
+		`(?:\s*,\s*(?:==|!=|<=|>=|<|>|~=|===)\s*[A-Za-z0-9][A-Za-z0-9.*+!_-]*)*)?` + // optional version specifier(s)
+		`(?:\s*;\s*[A-Za-z0-9_.'"()<>=!~,\s-]+)?$`, // optional "; marker", restricted to the PEP 508 marker charset
+)
+
+// pipHashFieldRe matches ONE per-requirement --hash=<algo>:<hexdigest>
+// field, pip's hash-pinning syntax (the output of `pip-compile
+// --generate-hashes` / `poetry export --with-hashes`). Accepted separately
+// from pipRequirementRe because these fields may repeat (one per built
+// distribution) and can trail a requirement on the same logical line,
+// including across a backslash continuation. --hash cannot weaken this
+// boundary: a requirements.txt containing ANY --hash field puts pip into
+// --require-hashes mode implicitly, which itself REFUSES editable
+// installs, local paths, and unhashed direct references — --hash only
+// ever tightens what pip will accept, never loosens it. A blanket "any
+// field starting with -" rejection (the earlier version) rejected these
+// too, which would have made every pip-compile/poetry hash-pinned
+// manifest unusable with dep_strategy: fetch.
+var pipHashFieldRe = regexp.MustCompile(`^--hash=[A-Za-z0-9]+:[0-9a-fA-F]+$`)
+
+// pipTighteningOptionRe matches pip options that can only TIGHTEN this
+// validator's boundary (bugbot-gu0o D1=B6/B7, decided after two prior
+// attempts at a broader allow-list were BOTH proven exploitable live):
+// --require-hashes ONLY. Nothing else.
+//
+// --only-binary was REMOVED from this set after Oracle A drove
+// "--only-binary=:none:" through production ResolveDeps→Prefetch and got
+// a full FETCH resolution with an sdist landed (and its setup.py
+// executed) in the bugbot-owned wheelhouse, sentinel written, cache
+// permanently poisoned: pip's FormatControl treats ":none:" as CLEAR the
+// --only-binary set, so an in-manifest "--only-binary=:none:" CANCELS
+// the CLI's --only-binary=:all: entirely — it is not a "same direction,
+// only narrower" option as the removed doc comment here previously (and
+// wrongly) claimed. "--only-binary=six,:none:" and "--only-binary=:none:,six"
+// both reduce to the same clear-then-set-nothing-usable behavior.
+// DECISION: the CLI already passes --only-binary=:all: unconditionally;
+// no manifest ever needs to repeat it, so --only-binary is rejected
+// outright in ALL forms, including the nominally "tightening" plain
+// ":all:" spelling — there is no legitimate reason for a vetted manifest
+// to specify it at all, and allowing the harmless-looking form invites
+// exactly this class of drift again.
+//
+// --index-url / --extra-index-url were ALSO removed: Oracle B measured
+// the actual harm of the "cannot cause code exec" claim this comment
+// used to make — that claim addressed CODE EXECUTION but never reasoned
+// about CACHE PROVENANCE. A repo-controlled index redirect lets
+// attacker-chosen bytes land in the bugbot-OWNED host wheelhouse cache
+// ("Saved /depcache/evilwheel-...whl") via the online prefetch, which
+// the later offline in-run install step then installs via --find-links
+// — and with a plain http:// index URL, it is live network EGRESS from
+// inside the trusted online step to a destination the repo chose, not
+// bugbot. There is no legitimate need for a vetted manifest to redirect
+// the index either.
+var pipTighteningOptionRe = regexp.MustCompile(`^--require-hashes$`)
+
+// pipArchiveExtensions is pip's own filetypes.ARCHIVE_EXTENSIONS list,
+// verbatim (pip._internal.utils.filetypes, verified against pip 26.1.2):
+//
+//	ZIP_EXTENSIONS = (".zip", ".whl")
+//	BZ2_EXTENSIONS = (".tar.bz2", ".tbz")
+//	XZ_EXTENSIONS  = (".tar.xz", ".txz", ".tlz", ".tar.lz", ".tar.lzma")
+//	TAR_EXTENSIONS = (".tar.gz", ".tgz", ".tar")
+//
+// A distribution name ending in one of these is a LOCAL ARCHIVE INSTALL to
+// pip, not an index lookup, regardless of whether it contains a path
+// separator — "evilpkg-0.0.1.tar.gz" (no "/") is syntactically
+// indistinguishable from a valid PEP 508 name to pipRequirementRe alone.
+// An earlier version of this list was hand-written and WRONG: it invented
+// ".tbz2"/".tar.zst"/".egg" (not pip's) and omitted ".tbz"/".tlz"/
+// ".tar.lz"/".tar.lzma" (all four live-canaried through ResolveDeps).
+var pipArchiveExtensions = []string{
+	".zip", ".whl",
+	".tar.bz2", ".tbz",
+	".tar.xz", ".txz", ".tlz", ".tar.lz", ".tar.lzma",
+	".tar.gz", ".tgz", ".tar",
+}
+
+// pipCompressionSuffixes is defense in depth BEYOND pip's exact
+// ARCHIVE_EXTENSIONS list above: which extensions pip's local-file
+// heuristic recognizes is a pip-VERSION-dependent implementation detail,
+// not a stable public contract (see the historical drift the list above
+// already required correcting once). A bare compression suffix is
+// rejected here regardless of whether it happens to appear in one of
+// pip 26.1.2's specific TAR/BZ2/XZ combination forms, so a future pip
+// version that recognizes e.g. ".gz" alone (without requiring a leading
+// ".tar") does not silently reopen this bypass.
+var pipCompressionSuffixes = []string{".gz", ".bz2", ".xz", ".lz", ".lzma"}
+
+// pipLooksLikeArchive reports whether name (already lower-cased by the
+// caller is NOT assumed — this lower-cases internally) has a suffix pip
+// treats as a local archive file rather than an index-resolved
+// distribution name. See pipArchiveExtensions and pipCompressionSuffixes.
+func pipLooksLikeArchive(name string) bool {
+	lower := strings.ToLower(name)
+	for _, suf := range pipArchiveExtensions {
+		if strings.HasSuffix(lower, suf) {
+			return true
+		}
+	}
+	for _, suf := range pipCompressionSuffixes {
+		if strings.HasSuffix(lower, suf) {
+			return true
+		}
+	}
+	return false
+}
+
+// pipMaxIncludeDepth bounds -r/-c include recursion (bugbot-gu0o C2). Real
+// requirements.txt trees are rarely more than 2-3 files deep (a root file
+// including a per-environment file, occasionally including a shared base);
+// 8 comfortably covers any legitimate structure while bounding the work a
+// malicious include chain can force.
+const pipMaxIncludeDepth = 8
+
+// pipIncludeTarget reports whether trimmed is a -r/--requirement or
+// -c/--constraint include directive and, if so, the raw path it names.
+// Only the common two-token space-separated form ("-r path") is
+// recognized; the "=" form ("-r=path") is not, and falls through to the
+// generic option-rejection path below — a conservative default (rejecting
+// a valid-but-differently-spelled include is safe; silently NOT
+// recursing into an unrecognized include would leave it unvalidated,
+// which is not).
+func pipIncludeTarget(trimmed string) (string, bool) {
+	fields := strings.Fields(trimmed)
+	if len(fields) != 2 {
+		return "", false
+	}
+	switch fields[0] {
+	case "-r", "--requirement", "-c", "--constraint":
+		return fields[1], true
+	default:
+		return "", false
+	}
+}
+
+// resolvePipIncludePath resolves raw (as named by a -r/-c directive inside
+// the file at includingDir) to an absolute path and verifies it stays
+// within repoDir, rejecting absolute paths outright and evaluating
+// symlinks before the containment check so a symlinked include cannot
+// point outside the repository (bugbot-gu0o C2).
+func resolvePipIncludePath(repoDir, includingDir, raw string) (string, error) {
+	if filepath.IsAbs(raw) {
+		return "", fmt.Errorf("sandbox: requirements include %q rejected (bugbot-gu0o: absolute include paths are not supported — only paths within the repository are allowed)", raw)
+	}
+	candidate := filepath.Clean(filepath.Join(includingDir, raw))
+
+	resolvedRepoDir, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		resolvedRepoDir = repoDir
+	}
+	resolvedCandidate, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		// The include may not exist yet (or a component of its path may
+		// not); fall back to the lexical candidate so the containment
+		// check below still runs, and the subsequent os.ReadFile in
+		// validatePipRequirementsFile surfaces a clear "could not be
+		// read" error for a genuinely missing file.
+		resolvedCandidate = candidate
+	}
+	rel, relErr := filepath.Rel(resolvedRepoDir, resolvedCandidate)
+	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("sandbox: requirements include %q rejected (bugbot-gu0o: resolves outside the repository)", raw)
+	}
+	return resolvedCandidate, nil
+}
+
+// validatePipRequirements vets repoDir's requirements.txt in Go BEFORE any
+// container ever launches (bugbot-gu0o): --only-binary=:all: on the `pip
+// download` command line only constrains INDEX-resolved distributions, and
+// can itself be overridden by content inside the file, so it is not a
+// complete boundary on its own.
+//
+// This is an ALLOW-list grammar, not a deny-list: every requirements.txt
+// line must match one of exactly three accepted shapes, or the whole
+// manifest (including every file it transitively includes) is rejected
+// with a named reason —
+//
+//  1. A strict PEP 508 index requirement (pipRequirementRe): name,
+//     optional [extras], optional comma-separated version specifiers,
+//     optional "; marker" — nothing else. The captured name is additionally
+//     checked against pipLooksLikeArchive.
+//  2. Per-requirement --hash=<algo>:<hexdigest> fields (pipHashFieldRe) and
+//     --require-hashes (pipTighteningOptionRe — the ONLY option accepted;
+//     see its doc comment for why --only-binary/--index-url/
+//     --extra-index-url were tried and then removed), which may trail a
+//     requirement or stand alone on their own line — peeled off before
+//     grammar-matching, not treated as a rejected "-" option.
+//  3. A -r/--requirement or -c/--constraint include directive
+//     (pipIncludeTarget) naming a repo-relative path (resolvePipIncludePath
+//     rejects absolute paths and any path that resolves outside repoDir
+//     after symlink evaluation) — recursively validated with this SAME
+//     grammar, up to pipMaxIncludeDepth levels, with cycle protection that
+//     still accepts a legitimate DIAMOND (two includes sharing a common
+//     base file) — see validatePipRequirementsFile's doc comment.
+//
+// Every other pip option (-e/--editable, --no-binary, --only-binary,
+// --index-url, --extra-index-url, ...) is rejected outright. A direct
+// URL/VCS reference, a PEP 508 "name @ url" reference, a local path, a
+// bare directory, and a bare archive filename are all rejected because
+// none of them can ever match pipRequirementRe (or, for an
+// archive-suffixed bare name, pipLooksLikeArchive) — see pipRequirementRe's
+// doc comment for why a deny-list of known-bad prefixes could not close
+// all of these completely.
+//
+// SCOPE (bugbot-gu0o C2): a validation failure here is returned as a plain
+// error, but resolvePython does NOT let it propagate out of ResolveDeps —
+// it catches the error and resolves Python to Strategy=Off with the
+// reason carried on Resolution.Warnings instead. An unvettable
+// requirements.txt in an otherwise-healthy polyglot repo must not abort
+// dependency resolution for every OTHER ecosystem (a Go module's
+// /modcache mount and GOPROXY=off, for instance) or the whole scan that
+// depends on ResolveDeps succeeding — see resolvePython's FETCH case for
+// the full rationale. A manifest that fails validation never reaches
+// newPipPrefetch either way: no Prefetch hook is ever constructed for it.
+func validatePipRequirements(repoDir string) error {
+	rootPath := filepath.Join(repoDir, "requirements.txt")
+	return validatePipRequirementsFile(repoDir, rootPath, make(map[string]bool), make(map[string]bool), 0)
+}
+
+// pipMaxRequirementsFileSize bounds how large a single requirements file
+// (or -r/-c include) validatePipRequirementsFile will read (bugbot-gu0o):
+// a real requirements.txt is at most a few KB; nothing legitimate needs
+// more than a few MB, and reading+regex-scanning an unbounded file is a
+// cheap lever against the resolve path (measured: a 100MB include still
+// validates, just slowly, with a large transient allocation) — 10MiB is
+// generous headroom over any real-world manifest while bounding the work.
+const pipMaxRequirementsFileSize = 10 << 20 // 10MiB
+
+// validatePipRequirementsFile is validatePipRequirements' recursive core:
+// it validates the single file at absPath (already resolved and, for
+// every call except the root, containment-checked by
+// resolvePipIncludePath) plus every -r/-c include it names.
+//
+// Cycle detection vs. diamond includes (bugbot-gu0o D2): `visiting` tracks
+// paths currently on the DFS stack — set on entry, cleared via defer on
+// exit — so a path revisited while still `visiting` is a genuine cycle
+// (a -> b -> a). `validated` tracks paths that already completed
+// successfully within this SAME top-level validatePipRequirements call;
+// validation is pure (depends only on file content), so a path already
+// fully validated via one include chain short-circuits to success on a
+// second visit instead of tripping the cycle check — a root file with
+// `-r dev.txt` and `-r test.txt`, both of which `-r base.txt`, is a
+// legitimate DAG (a diamond), not a cycle, and is a standard multi-
+// environment requirements layout. depth still bounds the DFS path
+// length regardless of diamonds or cycles.
+func validatePipRequirementsFile(repoDir, absPath string, visiting, validated map[string]bool, depth int) error {
+	// Memoization short-circuit BEFORE the depth check (PrefetchOracleB
+	// round-5 note): safe, not a bound-skipping hole — validated[absPath] is
+	// only ever set to true at the end of a FULL successful recursive
+	// validation of absPath's own subtree (line ~1485 below), so by the time
+	// this fires that subtree already proved itself within
+	// pipMaxIncludeDepth once. A diamond include re-reaching absPath via a
+	// deeper path does not need to re-walk (and re-bound) work already
+	// proven safe; it would only ever SHRINK the effective work done, never
+	// grow it past the cap.
+	if validated[absPath] {
+		return nil
+	}
+	if depth > pipMaxIncludeDepth {
+		return fmt.Errorf("sandbox: requirements include chain exceeds depth %d at %q (bugbot-gu0o: possible include cycle or an excessively deep chain)", pipMaxIncludeDepth, absPath)
+	}
+	if visiting[absPath] {
+		return fmt.Errorf("sandbox: requirements include cycle detected at %q (bugbot-gu0o)", absPath)
+	}
+	visiting[absPath] = true
+	defer delete(visiting, absPath)
+
+	if st, statErr := os.Stat(absPath); statErr == nil {
+		if st.IsDir() {
+			return fmt.Errorf("sandbox: requirements include %q is a directory, not a file (bugbot-gu0o)", absPath)
+		}
+		if st.Size() > pipMaxRequirementsFileSize {
+			return fmt.Errorf("sandbox: requirements file %q is %d bytes, over the %d byte limit (bugbot-gu0o: not a plausible manifest size)", absPath, st.Size(), pipMaxRequirementsFileSize)
+		}
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		if depth == 0 {
+			// hasRequirementsTxt already gated FETCH detection on the root
+			// file's presence; a read failure here is surfaced by
+			// requirementsHash instead of duplicated as a second error.
+			return nil
+		}
+		return fmt.Errorf("sandbox: requirements include %q could not be read (bugbot-gu0o): %w", absPath, err)
+	}
+
+	dir := filepath.Dir(absPath)
+	for _, logical := range joinPipLineContinuations(string(data)) {
+		trimmed := strings.TrimSpace(stripPipComment(logical))
+		if trimmed == "" {
+			continue
+		}
+
+		if incRaw, ok := pipIncludeTarget(trimmed); ok {
+			nextAbs, err := resolvePipIncludePath(repoDir, dir, incRaw)
+			if err != nil {
+				return err
+			}
+			if err := validatePipRequirementsFile(repoDir, nextAbs, visiting, validated, depth+1); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// Peel off trailing --hash fields and --require-hashes before
+		// grammar-matching the requirement itself; reject any OTHER
+		// option-like field outright.
+		hadTightening := false
+		var reqFields []string
+		for _, field := range strings.Fields(trimmed) {
+			if pipHashFieldRe.MatchString(field) {
+				continue
+			}
+			if pipTighteningOptionRe.MatchString(field) {
+				hadTightening = true
+				continue
+			}
+			if strings.HasPrefix(field, "-") {
+				return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: pip option %q is not in the allowed grammar — only a plain index requirement, --hash=<algo>:<hexdigest> fields, --require-hashes, and -r/-c includes are accepted; --only-binary/--index-url/--extra-index-url/-e/--no-binary and everything else are always rejected)", trimmed, field)
+			}
+			reqFields = append(reqFields, field)
+		}
+		core := strings.Join(reqFields, " ")
+		if core == "" {
+			if hadTightening {
+				// A lone "--require-hashes" line: nothing further to
+				// grammar-match.
+				continue
+			}
+			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: no requirement expression, only --hash fields)", trimmed)
+		}
+
+		m := pipRequirementRe.FindStringSubmatch(core)
+		if m == nil {
+			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: does not match the allowed grammar — only a plain PEP 508 index requirement (name[extras]comparator-version; marker) plus --hash/--require-hashes fields is accepted; local paths, bare archive filenames, directories, URLs, VCS/file: references, and PEP 508 direct '@' references are all rejected)", trimmed)
+		}
+		if pipLooksLikeArchive(m[1]) {
+			return fmt.Errorf("sandbox: requirements.txt line %q rejected (bugbot-gu0o: %q looks like an archive filename — pip treats archive-suffixed names as local/direct file installs, not index lookups, even with no path separator present)", trimmed, m[1])
+		}
+	}
+	validated[absPath] = true
+	return nil
+}
+
+// joinPipLineContinuations splits data into pip "logical lines", joining any
+// physical line ending in a backslash continuation with the line that
+// follows (pip's own requirements-file grammar) so a forbidden token cannot
+// be smuggled across a continuation boundary and missed by a naive
+// per-physical-line scan.
+func joinPipLineContinuations(data string) []string {
+	var logical []string
+	var cur strings.Builder
+	for _, raw := range strings.Split(data, "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if strings.HasSuffix(line, "\\") {
+			cur.WriteString(strings.TrimSuffix(line, "\\"))
+			continue
+		}
+		cur.WriteString(line)
+		logical = append(logical, cur.String())
+		cur.Reset()
+	}
+	if cur.Len() > 0 {
+		logical = append(logical, cur.String())
+	}
+	return logical
+}
+
+// stripPipComment strips a pip-style inline comment: a '#' at the start of
+// the line or preceded by whitespace begins a comment that runs to EOL,
+// mirroring pip's own COMMENT_RE so validation sees exactly what pip sees
+// (never more permissive than the real parser).
+func stripPipComment(line string) string {
+	for i := range len(line) {
+		if line[i] == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
+			return line[:i]
+		}
+	}
+	return line
+}
+
+// ---- bwrap-only Python HOST extension ---------------------------------------
+//
+// See resolvePython's DepStrategyHost case for the gating rationale (why
+// this is safe under bwrap but not under the container backend).
+
+// hostProbeTimeout bounds a host-side interpreter/tool probe (python3
+// sys.path, npm config get cache). Mirrors goEnvTimeout's rationale: a
+// wedged or very slow host binary must not hang the caller indefinitely.
+const hostProbeTimeout = 5 * time.Second
+
+// resolveBwrapPythonHostDeps resolves the bwrap-only Python HOST strategy:
+// mount the HOST python interpreter's site-packages/dist-packages
+// directories read-only at their own (identical) host path inside the
+// sandbox, and set PYTHONPATH explicitly so any interpreter the run
+// actually resolves (a sandbox.host_toolchains python, or an allowlisted
+// system one) picks up the mounted directories regardless of its own
+// baked-in sys.path. override is DepOptions.hostPythonSitePackages (test
+// seam).
+func resolveBwrapPythonHostDeps(override []string) (Resolution, error) {
+	dirs, err := resolveHostPythonSitePackages(override)
+	if err != nil {
+		return Resolution{}, err
+	}
+	mounts := make([]sandbox.ROMount, len(dirs))
+	for i, d := range dirs {
+		// Shared=true: the host's site-packages tree is not bugbot-owned;
+		// see sandbox.ROMount.Shared — no SELinux :Z relabel of a shared host dir.
+		mounts[i] = sandbox.ROMount{HostPath: d, ContainerPath: d, Shared: true}
+	}
+	return Resolution{
+		ROMounts: mounts,
+		Env:      []string{"PYTHONPATH=" + strings.Join(dirs, ":")},
+		Strategy: DepStrategyHost,
+	}, nil
+}
+
+// resolveHostPythonSitePackages resolves the HOST python3 (falling back to
+// python) interpreter's site-packages/dist-packages directories — the
+// third-party import roots, deliberately excluding the stdlib and any
+// zipped stdlib archive entries also present in sys.path — by asking the
+// interpreter for its own sys.path, the same "ask the tool, don't guess the
+// convention" approach resolveHostModcache uses for `go env GOMODCACHE`.
+//
+// override, when non-nil, replaces resolution entirely (DepOptions'
+// hostPythonSitePackages test seam) so unit tests do not require a python3
+// binary on the test host. A resolution (real or overridden) that yields no
+// directories is an error: silently mounting nothing would make an agent's
+// import failures look like a code bug rather than an environment gap.
+func resolveHostPythonSitePackages(override []string) ([]string, error) {
+	if override != nil {
+		if len(override) == 0 {
+			return nil, fmt.Errorf("sandbox: no host Python site-packages directories configured")
+		}
+		return override, nil
+	}
+	pythonBin, err := exec.LookPath("python3")
+	if err != nil {
+		if pythonBin, err = exec.LookPath("python"); err != nil {
+			return nil, fmt.Errorf("sandbox: cannot resolve host Python site-packages (no python3/python on host PATH); vendor deps or set dep_strategy: off|fetch")
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hostProbeTimeout)
+	defer cancel()
+	out, runErr := exec.CommandContext(ctx, pythonBin, "-c", "import sys\nfor p in sys.path:\n\tprint(p)\n").Output()
+	if runErr != nil {
+		return nil, fmt.Errorf("sandbox: probe host Python sys.path via %q: %w", pythonBin, runErr)
+	}
+	var dirs []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		base := filepath.Base(line)
+		if base != "site-packages" && base != "dist-packages" {
+			continue
+		}
+		if st, statErr := os.Stat(line); statErr == nil && st.IsDir() {
+			dirs = append(dirs, line)
+		}
+	}
+	if len(dirs) == 0 {
+		return nil, fmt.Errorf("sandbox: host Python interpreter %q reported no site-packages directory; install the repo's dependencies on the host first (e.g. pip install -r requirements.txt), or set dep_strategy: off|fetch", pythonBin)
+	}
+	return dirs, nil
+}
+
+// ---- Rust ecosystem ---------------------------------------------------------
+//
+// v1 strategy: cargo registry FETCH (and HOST), driven by root Cargo.toml.
+//
+// Scope decisions (final; do not change silently — flag any deviation):
+//
+//   - DETECT: root Cargo.toml exists. Workspace roots and single-crate repos
+//     are both detected; the only requirement is a top-level Cargo.toml.
+//
+//   - VENDORED (auto-detect, wins in ALL modes): TRUE only when BOTH a vendor/
+//     directory exists AND .cargo/config.toml (or .cargo/config) contains a
+//     source-replacement stanza with a line containing "replace-with". If
+//     vendor/ exists WITHOUT the config stanza, cargo ignores it — that is NOT
+//     treated as vendored and falls through to the requested strategy. There is
+//     no hint channel on Resolution; this case is documented in a comment only.
+//     Vendored Resolution: CARGO_NET_OFFLINE=true, no mounts, Strategy=vendored.
+//
+//   - OFF: empty Resolution{Strategy: DepStrategyOff}.
+//
+//   - HOST: mount the host Cargo registry READ-ONLY at /cargo (used as
+//     CARGO_HOME inside the container). SECURITY: only $CARGO_HOME/registry is
+//     mounted — NEVER all of ~/.cargo, which holds credentials.toml and bin/.
+//     The registry path defaults to $CARGO_HOME/registry (env) then
+//     ~/.cargo/registry; a test seam (hostCargoRegistry on DepOptions) overrides
+//     it. Shared=true (host-owned dir, no :Z relabel). CARGO_NET_OFFLINE=true.
+//     The mount is at /cargo/registry and CARGO_HOME is set to /cargo so cargo
+//     finds the registry at /cargo/registry offline without a copy step.
+//
+//   - FETCH: run ONE online `cargo fetch` (plus --locked when Cargo.lock exists)
+//     in opts.FetchSandbox into a bugbot-owned cache dir (fetchCargoCacheDir
+//     under userCacheDir/.../cargocache/<hash>), keyed on sha256(Cargo.lock)
+//     falling back to sha256(Cargo.toml). Mount the populated registry dir
+//     read-only at /cargo/registry (CARGO_HOME=/cargo). Shared=false.
+//     CARGO_NET_OFFLINE=true.
+//
+//   - Container path /cargo is distinct from /modcache (Go) and /depcache
+//     (Python) so the mount registry's ContainerPath uniqueness constraint is
+//     satisfied for multi-ecosystem repos.
+
+// cargoCacheMount is where the Cargo registry is mounted inside the container.
+// The full container path for the registry is cargoCacheMount + "/registry".
+// CARGO_HOME is set to cargoCacheMount so cargo resolves its registry at the
+// standard $CARGO_HOME/registry path without any additional config.
+// Distinct from /modcache (Go) and /depcache (Python) per the mount
+// registry's uniqueness obligation.
+const cargoCacheMount = "/cargo"
+
+// cargoRegistryMount is the container path where the Cargo registry index and
+// crate sources are mounted read-only. It is a subdirectory of cargoCacheMount
+// so CARGO_HOME=/cargo resolves it at the standard $CARGO_HOME/registry path.
+const cargoRegistryMount = cargoCacheMount + "/registry"
+
+// cargoEcosystem is the Cargo/Rust dependency resolver. It detects repos with
+// a root Cargo.toml and applies VENDORED / HOST / FETCH / OFF strategy.
+var cargoEcosystem = ecosystem{
+	name:    "cargo",
+	detect:  hasCargoToml,
+	resolve: resolveCargo,
+}
+
+// resolveCargo is the Rust/Cargo resolver function. Strategy validation has
+// already run in resolveWith; invalid strategies are unreachable here.
+func resolveCargo(repoDir string, opts DepOptions) (Resolution, error) {
+	// Vendored detection wins in every mode: if both vendor/ and a cargo config
+	// with a source-replacement stanza are present, cargo already has everything
+	// it needs locally. Set CARGO_NET_OFFLINE=true to make any accidental
+	// network access a clear, immediate error.
+	if isCargoVendored(repoDir) {
+		return Resolution{
+			Env:      []string{"CARGO_NET_OFFLINE=true"},
+			Strategy: DepStrategyVendored,
+		}, nil
+	}
+	// Note: if vendor/ exists without .cargo/config{.toml} containing
+	// replace-with, cargo ignores the vendor directory entirely. That case falls
+	// through to the requested strategy — it is not vendored from cargo's point
+	// of view. There is no hint channel on Resolution to surface this; the user
+	// should check their .cargo/config.toml if builds fail unexpectedly offline.
+
+	strategy := opts.Strategy
+	if strategy == "" {
+		strategy = DepStrategyOff
+	}
+
+	switch strategy {
+	case DepStrategyOff:
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyHost:
+		registry, err := resolveHostCargoRegistry(opts.hostCargoRegistry)
+		if err != nil {
+			return Resolution{}, err
+		}
+		// Shared=true: the host Cargo registry is NOT owned by bugbot. SELinux :Z
+		// would relabel the entire registry to a container-private MCS label,
+		// which may break the host rustup/cargo toolchain and any other container
+		// sharing the same directory. :ro without a label suffix is correct here.
+		// SECURITY: we mount ONLY $CARGO_HOME/registry, never all of ~/.cargo
+		// which contains credentials.toml and bin/. This is enforced here and
+		// asserted in unit tests.
+		return cargoRegistryResolution(registry, DepStrategyHost, true, nil), nil
+
+	case DepStrategyFetch:
+		if opts.FetchSandbox == nil {
+			return Resolution{}, fmt.Errorf("sandbox: Rust/Cargo dependency strategy %q requires a fetch sandbox", strategy)
+		}
+		cache, err := fetchCargoCacheDir(repoDir, opts.userCacheDir)
+		if err != nil {
+			return Resolution{}, err
+		}
+		prefetch := newCargoPrefetch(repoDir, cache, opts)
+		// The prefetch runs `cargo fetch` with CARGO_HOME=cache (mounted at
+		// /cargo), so cargo populates the registry at cache/registry on the host.
+		// The network-none run must therefore mount cache/registry (NOT cache) at
+		// /cargo/registry, so CARGO_HOME=/cargo finds the registry at the standard
+		// $CARGO_HOME/registry path. Create the dir now so the bind-mount source
+		// exists even before the prefetch populates it.
+		registry := filepath.Join(cache, "registry")
+		if err := os.MkdirAll(registry, 0o755); err != nil {
+			return Resolution{}, fmt.Errorf("sandbox: create cargo fetch registry dir: %w", err)
+		}
+		// Shared=false: the cargo fetch cache is a bugbot-owned directory under
+		// the user cache dir. :Z SELinux isolation is appropriate (same rationale
+		// as the Go and Python FETCH caches).
+		return cargoRegistryResolution(registry, DepStrategyFetch, false, prefetch), nil
+
+	default:
+		// Unreachable given ValidDepStrategy above, but keep it explicit.
+		return Resolution{}, fmt.Errorf("sandbox: unhandled Rust/Cargo dependency strategy %q", strategy)
+	}
+}
+
+// cargoRegistryResolution builds the Resolution shared by HOST and FETCH for
+// Cargo: a single read-only registry mount at /cargo/registry, CARGO_HOME=/cargo
+// so cargo resolves the registry at the standard path, and CARGO_NET_OFFLINE=true
+// so any cache miss is a hard error rather than a network hang.
+//
+// shared controls sandbox.ROMount.Shared: true for HOST (user's real Cargo registry —
+// must not be SELinux-relabeled), false for FETCH (bugbot-owned cache dir —
+// :Z isolation correct). See sandbox.ROMount.Shared for the full rationale.
+func cargoRegistryResolution(hostRegistry string, strategy DepStrategy, shared bool, prefetch func(context.Context) error) Resolution {
+	return Resolution{
+		ROMounts: []sandbox.ROMount{{
+			HostPath:      hostRegistry,
+			ContainerPath: cargoRegistryMount,
+			Shared:        shared,
+		}},
+		Env: []string{
+			// CARGO_HOME=/cargo so cargo resolves the registry at /cargo/registry
+			// (the $CARGO_HOME/registry standard path) without any additional config.
+			"CARGO_HOME=" + cargoCacheMount,
+			// CARGO_NET_OFFLINE=true: under --network=none any cache miss must fail
+			// fast and clearly instead of hanging on an unreachable registry.
+			"CARGO_NET_OFFLINE=true",
+		},
+		Prefetch: prefetch,
+		Strategy: strategy,
+	}
+}
+
+// hasCargoToml reports whether repoDir contains a root Cargo.toml.
+// Only stdlib (os.Stat) — the sandbox package must remain stdlib-only.
+func hasCargoToml(repoDir string) bool {
+	st, err := os.Stat(filepath.Join(repoDir, "Cargo.toml"))
+	return err == nil && !st.IsDir()
+}
+
+// isCargoVendored reports whether repoDir is a properly-configured Cargo
+// vendored workspace: vendor/ must exist AND .cargo/config.toml (or the legacy
+// .cargo/config) must contain a source-replacement stanza with "replace-with".
+//
+// If vendor/ exists without the config stanza, cargo ignores the vendor
+// directory — that case is NOT vendored from cargo's perspective and falls
+// through to the requested dep strategy. See resolveCargo for the rationale.
+func isCargoVendored(repoDir string) bool {
+	// Check vendor/ directory.
+	if _, err := os.Stat(filepath.Join(repoDir, "vendor")); err != nil {
+		return false
+	}
+	// Check .cargo/config.toml first (modern), then .cargo/config (legacy).
+	// Scan for the presence of "replace-with" which marks a source replacement
+	// stanza; "vendored-sources" is the conventional value but we match any
+	// replace-with to be robust to alternative vendored-source names.
+	for _, name := range []string{".cargo/config.toml", ".cargo/config"} {
+		data, err := os.ReadFile(filepath.Join(repoDir, name))
+		if err != nil {
+			continue
+		}
+		// Scan line by line for "replace-with" — stdlib string ops only.
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.Contains(line, "replace-with") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolveHostCargoRegistry resolves the host Cargo registry directory. It
+// prefers the override, then $CARGO_HOME/registry, then ~/.cargo/registry.
+// Returns an error when no path can be determined or the resolved path does
+// not exist on the host (catches a misconfigured or unpopulated cache early,
+// before podman emits an opaque bind-mount error).
+//
+// SECURITY: this function resolves only $CARGO_HOME/registry, never all of
+// ~/.cargo — mounting the full ~/.cargo would expose credentials.toml and
+// binary tools in bin/. Unit tests assert this invariant.
+func resolveHostCargoRegistry(override string) (string, error) {
+	if override != "" {
+		return checkCargoRegistryExists(override)
+	}
+
+	// $CARGO_HOME/registry takes precedence over the ~/.cargo default.
+	if cargoHome := os.Getenv("CARGO_HOME"); cargoHome != "" {
+		return checkCargoRegistryExists(filepath.Join(cargoHome, "registry"))
+	}
+
+	// Standard default: ~/.cargo/registry.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", fmt.Errorf("sandbox: cannot resolve host Cargo registry (CARGO_HOME unset and HOME unset); vendor deps or set dep_strategy: off|fetch")
+	}
+	return checkCargoRegistryExists(filepath.Join(home, ".cargo", "registry"))
+}
+
+// checkCargoRegistryExists verifies that dir exists on the host and returns it.
+// When the directory is missing it returns a clear, actionable error instead of
+// letting podman fail with an opaque bind-mount message at run time.
+func checkCargoRegistryExists(dir string) (string, error) {
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("sandbox: host Cargo registry %q does not exist; run 'cargo fetch' on the host first, or use dep_strategy: off|fetch", dir)
+		}
+		return "", fmt.Errorf("sandbox: stat host Cargo registry %q: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// fetchCargoCacheDir returns the bugbot-managed cargo registry cache directory
+// for repoDir (e.g. ~/.cache/bugbot/cargocache/<hash>). Delegates to
+// fetchEcosystemCacheDir. override, when non-empty, overrides the base dir
+// (test seam).
+func fetchCargoCacheDir(repoDir, override string) (string, error) {
+	return fetchEcosystemCacheDir("cargocache", repoDir, override)
+}
+
+// cargoLockHash returns a hex hash of Cargo.lock (falling back to Cargo.toml
+// when Cargo.lock is absent, e.g. a library crate without a committed lockfile)
+// so the cargo fetch cache can be keyed on the dependency set. Analogous to
+// goSumHash for Go.
+func cargoLockHash(repoDir string) (string, error) {
+	for _, name := range []string{"Cargo.lock", "Cargo.toml"} {
+		data, err := os.ReadFile(filepath.Join(repoDir, name))
+		if err == nil {
+			sum := sha256.Sum256(data)
+			return hex.EncodeToString(sum[:]), nil
+		}
+	}
+	return "", fmt.Errorf("sandbox: no Cargo.lock or Cargo.toml in %q", repoDir)
+}
+
+// newCargoPrefetch builds the one-time online cargo-fetch hook for the Rust
+// FETCH strategy. It runs `cargo fetch` (plus --locked when Cargo.lock
+// exists) in the FetchSandbox with network enabled and CARGO_HOME pointed at
+// hostCache (so the registry populates at hostCache/registry), keyed on the
+// sha256 of Cargo.lock (or Cargo.toml) so an unchanged dependency set is not
+// re-downloaded. Guarded by a sync.Once.
+func newCargoPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
+	// Add --locked when Cargo.lock exists so the prefetch is deterministic
+	// and cargo does not update the lockfile during the online step.
+	cmd := []string{"cargo", "fetch"}
+	if _, err := os.Stat(filepath.Join(repoDir, "Cargo.lock")); err == nil {
+		cmd = append(cmd, "--locked")
+	}
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool: "cargo fetch",
+			hash: cargoLockHash,
+			cmd:  cmd,
+			// Mount the whole cache dir WRITABLE as CARGO_HOME so cargo
+			// populates hostCache/registry during the fetch. The RO mount in
+			// the final Resolution points at hostCache/registry (see
+			// fetchCargoCacheDir and cargoRegistryResolution); for the FETCH
+			// prefetch, hostCache is the parent "cargocache/<hash>" dir, and
+			// we mount it as CARGO_HOME=/cargo so cargo writes to
+			// /cargo/registry inside the container → hostCache/registry on
+			// the host.
+			containerPath: cargoCacheMount,
+			env:           []string{"CARGO_HOME=" + cargoCacheMount},
+		})
+	})
+}
+
+// ---- JS ecosystem -----------------------------------------------------------
+//
+// v1 strategy: npm with package-lock.json FETCH only, driven by root
+// package.json.
+//
+// Scope decisions (final; do not change silently — flag any deviation):
+//
+//   - DETECT: root package.json exists.
+//
+//   - COMMITTED node_modules (vendored-equivalent, wins in ALL modes): if
+//     node_modules/ exists at the repo root, dependencies are already
+//     materialized (the npm equivalent of vendor/). Resolution:
+//     Strategy=vendored, no mounts, no SetupCmds. Cargo's model: vendor/ +
+//     config stanza; npm's model: node_modules/ presence is sufficient.
+//
+//   - HOST → OFF (same empty Resolution). npm's HTTP cache (~/.npm) stores
+//     tarballs keyed on URLs. Unlike the Go module cache or a Cargo registry,
+//     a bare npm cache mount does NOT materialize node_modules/; `npm ci`
+//     must still run and requires network to resolve. Mounting ~/.npm into a
+//     network-none container does not help install anything, so HOST is treated
+//     as OFF rather than silently broken.
+//
+//   - FETCH → npm ci prefetch + offline install (package-lock.json only):
+//     pnpm-lock.yaml-only and yarn.lock-only repos resolve to OFF — pnpm and
+//     yarn offline support is explicitly DEFERRED (analogous to Python's uv
+//     deferral).
+//     1. Prefetch (network bridge, ONE online step): run
+//          npm ci --ignore-scripts --cache /npmcache
+//        in a network-enabled container with the cache dir mounted WRITABLE at
+//        /npmcache. --ignore-scripts is MANDATORY: npm lifecycle scripts are
+//        arbitrary code; during the online prefetch the container has network
+//        access, so we must not execute them. This is the key security boundary.
+//     2. Resolution: mount the cache dir READ-ONLY at /npmcache (Shared=false —
+//        bugbot-owned, gets :Z), set npm_config_offline=true (offline enforcement,
+//        the GOPROXY=off / PIP_NO_INDEX=1 analogue — any npm call that would hit
+//        the registry fails fast instead of hanging), and add a SetupCmd that
+//        seeds a writable copy of the cache and installs from it before the test:
+//          sh -c "cp -a /npmcache /tmp/npmcache && npm ci --cache /tmp/npmcache"
+//        npm writes to its cache directory during `npm ci` even when packages are
+//        already present, so a read-only /npmcache mount would cause a write
+//        failure. The workaround is to copy the RO cache to /tmp (writable tmpfs)
+//        before installing. Lifecycle scripts MAY run during this offline install;
+//        arbitrary code execution is already the sandbox's threat model for
+//        network-none runs. The --ignore-scripts in the prefetch step is the real
+//        security boundary (online, network-enabled container).
+//
+//   - Container path /npmcache is distinct from /modcache, /depcache, /cargo
+//     so the mount registry's ContainerPath uniqueness constraint is satisfied.
+
+// npmCacheMount is where the npm cache is mounted inside the container for the
+// offline install step. Distinct from /modcache, /depcache, and /cargo per the
+// mount registry's uniqueness obligation.
+const npmCacheMount = "/npmcache"
+
+// jsPrefetchFlags is the single declared source of the npm prefetch security
+// flags. --ignore-scripts is MANDATORY: npm lifecycle scripts are arbitrary
+// code and must not execute during the network-enabled prefetch container.
+// To change the posture (bugbot-gu0o) or extend flags for a future ecosystem,
+// edit ONLY this var — resolveJS and newNPMPrefetch read it at call time.
+var jsPrefetchFlags = []string{"--ignore-scripts"}
+
+// jsEcosystem is the JS/npm dependency resolver. It detects repos with a root
+// package.json and applies COMMITTED-node_modules (vendored) / FETCH / OFF.
+// HOST maps to OFF (npm HTTP cache does not materialize node_modules; see
+// file-level comment). pnpm and yarn are explicitly deferred to a future bead.
+//
+// resolve is set directly to resolveJS (not via init) so the value copied into
+// the global ecosystems slice has a non-nil resolver. resolveJS reads
+// jsPrefetchFlags at call time — no init() ordering dependency.
+var jsEcosystem = ecosystem{
+	name:    "js",
+	detect:  hasPackageJSON,
+	resolve: resolveJS,
+}
+
+// resolveJS is the JS/npm resolver function. It reads jsPrefetchFlags at
+// call time so the declared security flags are always in effect regardless
+// of struct copy order. Tests that call resolveJS directly exercise the same
+// path as production dispatch (resolveWith → eco.resolve → resolveJS).
+func resolveJS(repoDir string, opts DepOptions) (Resolution, error) {
+	return resolveJSWithFlags(repoDir, opts, jsPrefetchFlags)
+}
+
+// resolveJSWithFlags is the parameterized JS/npm resolver. prefetchFlags are
+// appended to the npm ci prefetch command (after "npm", "ci"). This separates
+// the registry declaration from the function body: the ecosystem entry declares
+// the flags; the resolver uses them without needing to know their values.
+func resolveJSWithFlags(repoDir string, opts DepOptions, prefetchFlags []string) (Resolution, error) {
+	// Committed node_modules detection wins in every mode: if node_modules/
+	// exists, dependencies are already materialized — no mount or install step
+	// is needed. This is the npm equivalent of Go's vendor/modules.txt detection.
+	if hasNodeModules(repoDir) {
+		return Resolution{Strategy: DepStrategyVendored}, nil
+	}
+
+	strategy := opts.Strategy
+	if strategy == "" {
+		strategy = DepStrategyOff
+	}
+
+	switch strategy {
+	case DepStrategyOff:
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyHost:
+		if isBwrapFetchBackend(opts) {
+			// `npm ci` strictly requires package-lock.json (or
+			// npm-shrinkwrap.json). pnpm-lock.yaml-only and yarn.lock-only
+			// repos resolve to OFF exactly like the FETCH branch below —
+			// pnpm/yarn offline support is deferred to a future bead, and
+			// an unconditional `npm ci` SetupCmd would turn every repro
+			// attempt on such a repo into an environment_error.
+			if !hasPackageLock(repoDir) {
+				return Resolution{Strategy: DepStrategyOff}, nil
+			}
+			// bwrap: the sandboxed npm IS a host npm (via
+			// sandbox.host_toolchains or the allowlisted system one), and
+			// there is no baked-image node_modules to go stale against, so
+			// the container backend's objection below does not apply — mount
+			// the host's existing npm cache and run the same offline
+			// copy-then-install SetupCmd the FETCH strategy uses below. See
+			// resolveBwrapNPMHostDeps.
+			return resolveBwrapNPMHostDeps(opts.hostNPMCache)
+		}
+		// Container backend: HOST is explicitly OFF for JS: npm's HTTP cache
+		// (~/.npm) stores tarballs keyed on URLs. A cache mount alone does
+		// not materialize node_modules/; npm ci must still run and requires
+		// network to resolve the registry for metadata. Mounting ~/.npm into
+		// a network-none container does not help install anything. Use
+		// dep_strategy: fetch for JS projects.
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyFetch:
+		if opts.FetchSandbox == nil {
+			return Resolution{}, fmt.Errorf("sandbox: JS/npm dependency strategy %q requires a fetch sandbox", strategy)
+		}
+		// pnpm-lock.yaml-only and yarn.lock-only repos resolve to OFF: pnpm and
+		// yarn offline support is explicitly deferred (analogous to Python's uv
+		// deferral). Only package-lock.json is supported in v1.
+		if !hasPackageLock(repoDir) {
+			// No package-lock.json: could be pnpm or yarn — deferred to a future bead.
+			return Resolution{Strategy: DepStrategyOff}, nil
+		}
+		cache, err := fetchNPMCacheDir(repoDir, opts.userCacheDir)
+		if err != nil {
+			return Resolution{}, err
+		}
+		prefetch := newNPMPrefetch(repoDir, cache, opts, prefetchFlags)
+		// Shared=false: the npm cache is a bugbot-owned directory under the user
+		// cache dir. :Z SELinux isolation is appropriate (same rationale as the
+		// Go and Python FETCH caches).
+		//
+		// npm cache behavior (empirical): npm writes to its cache directory during
+		// `npm ci` even when packages are already populated. A read-only /npmcache
+		// mount would cause write failures inside the container. The SetupCmd
+		// therefore copies the RO cache to /tmp/npmcache (writable tmpfs, seeded
+		// by the RO mount) and runs `npm ci --cache /tmp/npmcache` against the
+		// copy. This avoids the writable-mount vs. network-none tension while
+		// still enforcing offline operation. See the integration test for empirical
+		// confirmation (or update this comment if a future npm version allows
+		// --prefer-offline with a read-only cache directly).
+		//
+		// Lifecycle scripts: MAY run during the offline `npm ci` in the SetupCmd.
+		// Arbitrary code execution is already the sandbox's threat model for the
+		// network-none run. The --ignore-scripts flag in the prefetch step is the
+		// real security boundary (network-enabled container, online step).
+		return Resolution{
+			ROMounts: []sandbox.ROMount{{
+				HostPath:      cache,
+				ContainerPath: npmCacheMount,
+				Shared:        false, // bugbot-owned; :Z isolation correct
+			}},
+			Env: []string{
+				// npm_config_offline=true: under --network=none any npm call that
+				// would reach the registry must fail fast and clearly instead of
+				// hanging. Analogous to GOPROXY=off for Go and PIP_NO_INDEX=1 for Python.
+				"npm_config_offline=true",
+			},
+			SetupCmds: [][]string{
+				// Copy the RO npm cache to a writable /tmp dir then run npm ci
+				// offline against it. npm writes to its cache during ci even for
+				// cached packages, so a direct RO mount causes write failures.
+				{"sh", "-c", "cp -a " + npmCacheMount + " /tmp/npmcache && npm ci --cache /tmp/npmcache"},
+			},
+			Prefetch: prefetch,
+			Strategy: DepStrategyFetch,
+		}, nil
+
+	default:
+		// Unreachable given ValidDepStrategy above, but keep it explicit.
+		return Resolution{}, fmt.Errorf("sandbox: unhandled JS/npm dependency strategy %q", strategy)
+	}
+}
+
+// hasPackageJSON reports whether repoDir contains a root package.json.
+// Only stdlib (os.Stat) — the sandbox package must remain stdlib-only.
+func hasPackageJSON(repoDir string) bool {
+	st, err := os.Stat(filepath.Join(repoDir, "package.json"))
+	return err == nil && !st.IsDir()
+}
+
+// hasNodeModules reports whether repoDir contains a root node_modules/ that
+// the sandbox workspace copy will carry: a gitignored node_modules is
+// stripped from the copy, so it only counts when sandbox.GitWorktreeFiles
+// (the copy's own listing) includes it. Non-git checkouts and listing
+// failures keep the plain stat answer.
+func hasNodeModules(repoDir string) bool {
+	st, err := os.Stat(filepath.Join(repoDir, "node_modules"))
+	if err != nil || !st.IsDir() {
+		return false
+	}
+	files, isRepo, err := sandbox.GitWorktreeFiles(repoDir)
+	if err != nil {
+		// git ls-files failed; copyWorkspace will surface this same error
+		// and abort sandbox creation, so the strategy decided here is
+		// moot. Preserve the plain stat-based answer.
+		return true
+	}
+	if !isRepo {
+		// Not a git work tree (or git unavailable): copyWorkspace does a
+		// full recursive copy in this case, so node_modules survives
+		// intact regardless of any .gitignore entry.
+		return true
+	}
+	prefix := "node_modules" + string(filepath.Separator)
+	for _, f := range files {
+		if f == "node_modules" || strings.HasPrefix(f, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPackageLock reports whether repoDir contains a root package-lock.json.
+// v1 JS FETCH strategy requires package-lock.json; pnpm and yarn lockfiles are
+// deferred to a future bead.
+func hasPackageLock(repoDir string) bool {
+	st, err := os.Stat(filepath.Join(repoDir, "package-lock.json"))
+	return err == nil && !st.IsDir()
+}
+
+// fetchNPMCacheDir returns the bugbot-managed npm cache directory for repoDir
+// (e.g. ~/.cache/bugbot/npmcache/<hash>). Delegates to
+// fetchEcosystemCacheDir. override, when non-empty, overrides the base dir
+// (test seam).
+func fetchNPMCacheDir(repoDir, override string) (string, error) {
+	return fetchEcosystemCacheDir("npmcache", repoDir, override)
+}
+
+// packageLockHash returns a hex hash of package-lock.json so the npm prefetch
+// cache can be keyed on the dependency set (analogous to goSumHash for Go and
+// cargoLockHash for Rust).
+func packageLockHash(repoDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(repoDir, "package-lock.json"))
+	if err != nil {
+		return "", fmt.Errorf("sandbox: no package-lock.json in %q", repoDir)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// newNPMPrefetch builds the one-time online npm prefetch hook for the JS FETCH
+// strategy. It runs `npm ci <prefetchFlags> --cache /npmcache` in the
+// FetchSandbox with network enabled and the cache dir mounted WRITABLE at
+// /npmcache, keyed on the sha256 of package-lock.json so an unchanged dep set
+// is not re-downloaded. Guarded by a sync.Once so it runs at most once per
+// Resolution even if called repeatedly.
+//
+// prefetchFlags are the ecosystem-declared security flags (e.g.
+// ["--ignore-scripts"]) read from the ecosystem registry entry rather than
+// hardcoded here. This makes the security posture declarative: correcting or
+// extending a flag for a new ecosystem is a one-line registry edit
+// (bugbot-gu0o).
+//
+// SECURITY: --ignore-scripts MUST be present in prefetchFlags for npm. npm
+// lifecycle scripts are arbitrary code; during the online prefetch the
+// container has network access, so executing them would allow a malicious
+// package to exfiltrate data. This is asserted in tests
+// (TestJSResolveFetchPrefetchSpec).
+func newNPMPrefetch(repoDir, hostCache string, opts DepOptions, prefetchFlags []string) func(context.Context) error {
+	// prefetchFlags come from the ecosystem registry entry (e.g.
+	// ["--ignore-scripts"]) rather than being hardcoded here — making
+	// per-ecosystem security adjustments a one-line registry edit
+	// (bugbot-gu0o). SECURITY: npm lifecycle scripts are arbitrary code; the
+	// prefetch container has network access, so we must not execute them.
+	cmd := make([]string, 0, 2+len(prefetchFlags)+2)
+	cmd = append(cmd, "npm", "ci")
+	cmd = append(cmd, prefetchFlags...)
+	cmd = append(cmd, "--cache", npmCacheMount)
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool:          strings.Join(cmd, " "),
+			hash:          packageLockHash,
+			cmd:           cmd,
+			containerPath: npmCacheMount,
+		})
+	})
+}
+
+// ---- bwrap-only JS HOST extension --------------------------------------------
+//
+// See resolveJSWithFlags's DepStrategyHost case for the gating rationale
+// (why this is safe under bwrap but not under the container backend).
+
+// resolveBwrapNPMHostDeps resolves the bwrap-only JS HOST strategy: mount
+// the HOST's existing npm cache read-only and run the same offline
+// copy-then-install SetupCmd the FETCH strategy uses (see
+// resolveJSWithFlags's FETCH branch) — npm writes to its cache during `ci`
+// even for already-cached packages, so a direct RO mount would fail partway
+// through. Unlike FETCH there is no Prefetch hook: the cache is used
+// exactly as it already exists on the host, so a stale/incomplete cache
+// surfaces as an offline `npm ci` failure (SetupCmds exit 125,
+// environment_error) rather than a silent partial install. hostCache is
+// DepOptions.hostNPMCache (test seam).
+func resolveBwrapNPMHostDeps(hostCache string) (Resolution, error) {
+	cache, err := resolveHostNPMCache(hostCache)
+	if err != nil {
+		return Resolution{}, err
+	}
+	return Resolution{
+		ROMounts: []sandbox.ROMount{{
+			HostPath:      cache,
+			ContainerPath: npmCacheMount,
+			Shared:        true, // host-owned cache; no :Z relabel
+		}},
+		Env: []string{
+			// npm_config_offline=true: same offline-enforcement contract as
+			// the FETCH branch — any npm call that would reach the registry
+			// fails fast instead of hanging under --network=none.
+			"npm_config_offline=true",
+		},
+		SetupCmds: [][]string{
+			{"sh", "-c", "cp -a " + npmCacheMount + " /tmp/npmcache && npm ci --cache /tmp/npmcache"},
+		},
+		Strategy: DepStrategyHost,
+	}, nil
+}
+
+// resolveHostNPMCache resolves the host's npm cache directory: override
+// (test seam) if set, else `npm config get cache`, else the conventional
+// $HOME/.npm. Errors when the resolved directory does not exist — the same
+// "cache miss is a hard, actionable error" contract resolveHostModcache
+// uses for Go, rather than silently mounting nothing.
+func resolveHostNPMCache(override string) (string, error) {
+	dir := override
+	if dir == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), hostProbeTimeout)
+		defer cancel()
+		if out, err := exec.CommandContext(ctx, "npm", "config", "get", "cache").Output(); err == nil {
+			if d := strings.TrimSpace(string(out)); d != "" {
+				dir = d
+			}
+		}
+	}
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return "", fmt.Errorf("sandbox: cannot resolve host npm cache (npm not found and HOME unset); vendor deps or set dep_strategy: off|fetch")
+		}
+		dir = filepath.Join(home, ".npm")
+	}
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return "", fmt.Errorf("sandbox: host npm cache %q does not exist; run `npm ci`/`npm install` on the host first to warm it, or use dep_strategy: off|fetch", dir)
+	}
+	return dir, nil
+}
+
+// ---- C#/NuGet ecosystem ----------------------------------------------------
+//
+// v1 strategy: NuGet global packages cache HOST + FETCH, driven by root C#
+// project files (*.csproj, *.sln, or *.fsproj).
+//
+// Scope decisions (final; do not change silently — flag any deviation):
+//
+//   - DETECT: any root-level *.csproj, *.sln, or *.fsproj exists. Root-level
+//     only — matching every other ecosystem's detector scope. F#/VB.NET
+//     project files are accepted because they consume the same NuGet package
+//     cache and benefit from identical handling.
+//
+//   - VENDORED: NOT supported in v1. NuGet has no widely-adopted, standard
+//     committed-packages convention equivalent to Go's vendor/modules.txt or
+//     Cargo's vendor/ + .cargo/config stanza. Repositories that commit
+//     packages under a project-local folder (e.g. a manual `packages/` tree)
+//     are not treated as vendored and fall through to the requested strategy.
+//     NuGet RestorePackagesPath / a future "RestorePackages" hook could be a
+//     later-bead addition.
+//
+//   - OFF: empty Resolution{Strategy: DepStrategyOff}.
+//
+//   - HOST: mount the host NuGet global packages directory READ-ONLY at
+//     /nugetcache. NUGET_PACKAGES=/nugetcache tells dotnet to use that mount
+//     as the global packages folder (the standard $NUGET_PACKAGES convention).
+//     The default path is $NUGET_PACKAGES (env) then ~/.nuget/packages; a test
+//     seam (hostNuGetPackages on DepOptions) overrides it. Shared=true
+//     (host-owned dir, no :Z relabel). There is no clean NuGet equivalent of
+//     GOPROXY=off / CARGO_NET_OFFLINE=true / npm_config_offline / PIP_NO_INDEX=1;
+//     offline enforcement IS the network=none run itself: a NuGet package
+//     missing from the cache hits the unreachable nuget.org source and fails
+//     fast (the dotnet restore call exits non-zero with a clear "package not
+//     found" diagnostic).
+//
+//   - FETCH: run ONE online `dotnet restore` (plus --locked-mode when
+//     packages.lock.json exists) in opts.FetchSandbox into a bugbot-owned cache
+//     dir (fetchNuGetCacheDir under userCacheDir/.../nugetcache/<hash>), keyed
+//     on sha256(packages.lock.json) falling back to the sha256 of the
+//     concatenated sorted contents of the root *.csproj files (so the key
+//     reflects the dependency set when no lockfile is present). Mount the
+//     populated cache dir read-only at /nugetcache with NUGET_PACKAGES=
+//     /nugetcache. Shared=false (bugbot-owned dir, gets :Z isolation). Same
+//     offline-enforcement caveat as HOST: no GOPROXY=off analog is invented.
+//
+//   - SECURITY (prefetch, bugbot-gu0o acceptance #2): `dotnet restore`
+//     evaluates the project's MSBuild targets (including any repo-committed
+//     Directory.Build.targets/.props and inline <UsingTask>) while resolving
+//     packages, which can execute arbitrary .NET code ONLINE (network-
+//     enabled prefetch container). There is no dotnet analog to npm's
+//     --ignore-scripts that still lets restore resolve the dependency
+//     graph. DECISION: documented and accepted, not constrained — see
+//     newNuGetPrefetch for the full rationale.
+//
+//   - Container path /nugetcache is distinct from /modcache, /depcache,
+//     /cargo/registry, and /npmcache so the mount registry's ContainerPath
+//     uniqueness constraint is satisfied for multi-ecosystem repos.
+
+// nugetCacheMount is where the NuGet global packages cache is mounted inside
+// the container (HOST and FETCH strategies). NUGET_PACKAGES is set to this path
+// so dotnet resolves packages at the standard $NUGET_PACKAGES location.
+// Distinct from /modcache, /depcache, /cargo/registry, and /npmcache per the
+// mount registry's uniqueness obligation.
+const nugetCacheMount = "/nugetcache"
+
+// nugetEcosystem is the C#/NuGet dependency resolver. It detects repos with a
+// root *.csproj, *.sln, or *.fsproj and applies HOST / FETCH / OFF strategy.
+// v1 has no vendored convention for NuGet; see the file-level comment.
+var nugetEcosystem = ecosystem{
+	name:    "nuget",
+	detect:  hasCSharpProject,
+	resolve: resolveNuGet,
+}
+
+// resolveNuGet is the C#/NuGet resolver function. Strategy validation has
+// already run in resolveWith; invalid strategies are unreachable here.
+func resolveNuGet(repoDir string, opts DepOptions) (Resolution, error) {
+	// No vendored detection in v1: NuGet has no standard committed-packages
+	// convention. See the file-level scope-decisions comment.
+
+	strategy := opts.Strategy
+	if strategy == "" {
+		strategy = DepStrategyOff
+	}
+
+	switch strategy {
+	case DepStrategyOff:
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyHost:
+		packages, err := resolveHostNuGetPackages(opts.hostNuGetPackages)
+		if err != nil {
+			return Resolution{}, err
+		}
+		// Shared=true: the host NuGet packages cache is NOT owned by bugbot.
+		// SELinux :Z would relabel the entire cache to a container-private MCS
+		// label, which may break the host dotnet toolchain and any other
+		// container sharing the same directory. :ro without a label suffix is
+		// correct here.
+		return nugetResolution(packages, DepStrategyHost, true, nil), nil
+
+	case DepStrategyFetch:
+		if opts.FetchSandbox == nil {
+			return Resolution{}, fmt.Errorf("sandbox: C#/NuGet dependency strategy %q requires a fetch sandbox", strategy)
+		}
+		cache, err := fetchNuGetCacheDir(repoDir, opts.userCacheDir)
+		if err != nil {
+			return Resolution{}, err
+		}
+		prefetch := newNuGetPrefetch(repoDir, cache, opts)
+		// Shared=false: the NuGet fetch cache is a bugbot-owned directory under
+		// the user cache dir. :Z SELinux isolation is appropriate (same rationale
+		// as the Go, Python, Rust, and JS FETCH caches).
+		return nugetResolution(cache, DepStrategyFetch, false, prefetch), nil
+
+	default:
+		// Unreachable given ValidDepStrategy above, but keep it explicit.
+		return Resolution{}, fmt.Errorf("sandbox: unhandled C#/NuGet dependency strategy %q", strategy)
+	}
+}
+
+// nugetResolution builds the Resolution shared by HOST and FETCH for C#/NuGet:
+// a single read-only mount at /nugetcache plus NUGET_PACKAGES=/nugetcache so
+// dotnet resolves packages at the standard $NUGET_PACKAGES location.
+//
+// shared controls sandbox.ROMount.Shared: true for HOST (user's real NuGet packages
+// cache — must not be SELinux-relabeled), false for FETCH (bugbot-owned cache
+// dir — :Z isolation correct). See sandbox.ROMount.Shared for the full rationale.
+//
+// Offline enforcement: NuGet has no clean GOPROXY=off / CARGO_NET_OFFLINE=
+// analog. The --network=none run itself enforces offline operation: any NuGet
+// call that would resolve a missing package hits the unreachable nuget.org
+// source and fails fast with a clear diagnostic. We deliberately do NOT invent
+// a fake env flag here — the OS-level network=none is the enforcement point.
+func nugetResolution(hostPackages string, strategy DepStrategy, shared bool, prefetch func(context.Context) error) Resolution {
+	return Resolution{
+		ROMounts: []sandbox.ROMount{{
+			HostPath:      hostPackages,
+			ContainerPath: nugetCacheMount,
+			Shared:        shared,
+		}},
+		Env: []string{
+			// NUGET_PACKAGES=/nugetcache so dotnet resolves the global packages
+			// folder at the standard $NUGET_PACKAGES location (the only mount we
+			// provide).
+			"NUGET_PACKAGES=" + nugetCacheMount,
+		},
+		Prefetch: prefetch,
+		Strategy: strategy,
+	}
+}
+
+// hasCSharpProject reports whether repoDir contains any root-level C#/F#
+// project file (*.csproj, *.sln, or *.fsproj). Root-level only, matching the
+// scope of every other ecosystem's detector. Only stdlib (os.ReadDir) — the
+// sandbox package must remain stdlib-only.
+func hasCSharpProject(repoDir string) bool {
+	entries, err := os.ReadDir(repoDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".csproj") ||
+			strings.HasSuffix(name, ".sln") ||
+			strings.HasSuffix(name, ".fsproj") {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveHostNuGetPackages resolves the host NuGet global packages directory.
+// It prefers the override, then $NUGET_PACKAGES, then ~/.nuget/packages.
+// Returns an error when no path can be determined (HOME unset AND env unset) or
+// when the resolved path does not exist on the host (catches a misconfigured
+// or unpopulated cache early, before podman emits an opaque bind-mount error).
+func resolveHostNuGetPackages(override string) (string, error) {
+	if override != "" {
+		return checkNuGetPackagesExists(override)
+	}
+
+	// $NUGET_PACKAGES takes precedence over the ~/.nuget/packages default.
+	if env := os.Getenv("NUGET_PACKAGES"); env != "" {
+		return checkNuGetPackagesExists(env)
+	}
+
+	// Standard default: ~/.nuget/packages.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", fmt.Errorf("sandbox: cannot resolve host NuGet packages (NUGET_PACKAGES unset and HOME unset); use dep_strategy: off|fetch")
+	}
+	return checkNuGetPackagesExists(filepath.Join(home, ".nuget", "packages"))
+}
+
+// checkNuGetPackagesExists verifies that dir exists on the host and returns it.
+// When the directory is missing it returns a clear, actionable error instead of
+// letting podman fail with an opaque bind-mount message at run time.
+func checkNuGetPackagesExists(dir string) (string, error) {
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("sandbox: host NuGet packages %q does not exist; run `dotnet restore` on the host first, or use dep_strategy: off|fetch", dir)
+		}
+		return "", fmt.Errorf("sandbox: stat host NuGet packages %q: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// fetchNuGetCacheDir returns the bugbot-managed NuGet global packages cache
+// directory for repoDir (e.g. ~/.cache/bugbot/nugetcache/<hash>). Delegates to
+// fetchEcosystemCacheDir. override, when non-empty, overrides the base dir
+// (test seam).
+func fetchNuGetCacheDir(repoDir, override string) (string, error) {
+	return fetchEcosystemCacheDir("nugetcache", repoDir, override)
+}
+
+// nugetLockHash returns a hex hash of packages.lock.json (falling back to the
+// sha256 of the concatenated sorted contents of the root *.csproj/*.fsproj
+// files when packages.lock.json is absent, e.g. a project without a committed
+// lockfile) so the NuGet fetch cache can be keyed on the dependency set.
+// Analogous to cargoLockHash for Rust.
+func nugetLockHash(repoDir string) (string, error) {
+	if data, err := os.ReadFile(filepath.Join(repoDir, "packages.lock.json")); err == nil {
+		sum := sha256.Sum256(data)
+		return hex.EncodeToString(sum[:]), nil
+	}
+	// Fallback: hash the concatenated sorted contents of every root-level
+	// *.csproj/*.fsproj file so the key reflects the declared dependency set.
+	// Both are MSBuild PackageReference sources. *.sln is NOT parsed — it only
+	// references projects, not packages — so a root-.sln-only repo (projects in
+	// subdirs) yields no key and re-fetches each cycle (safe, never stale);
+	// recursive subdir walking is a documented v1 limitation.
+	entries, err := os.ReadDir(repoDir)
+	if err != nil {
+		return "", fmt.Errorf("sandbox: cannot read %q for nuget lock hash: %w", repoDir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".csproj") || strings.HasSuffix(name, ".fsproj") {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return "", fmt.Errorf("sandbox: no packages.lock.json or *.csproj/*.fsproj in %q", repoDir)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, n := range names {
+		data, err := os.ReadFile(filepath.Join(repoDir, n))
+		if err != nil {
+			return "", fmt.Errorf("sandbox: read %s for nuget lock hash: %w", n, err)
+		}
+		h.Write([]byte(n))
+		h.Write([]byte{'\n'})
+		h.Write(data)
+		if !strings.HasSuffix(string(data), "\n") {
+			h.Write([]byte{'\n'})
+		}
+	}
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// newNuGetPrefetch builds the one-time online dotnet-restore hook for the
+// C#/NuGet FETCH strategy. It runs `dotnet restore` (plus --locked-mode when
+// packages.lock.json exists) in the FetchSandbox with network enabled and
+// NUGET_PACKAGES pointed at hostCache (mounted at /nugetcache), keyed on the
+// sha256 of packages.lock.json (or the *.csproj fallback hash) so an
+// unchanged dependency set is not re-downloaded. Guarded by a sync.Once so it
+// runs at most once per Resolution.
+//
+// SECURITY (bugbot-gu0o, acceptance #2): `dotnet restore` evaluates the
+// project's MSBuild targets — including any repo-committed
+// Directory.Build.targets/.props and inline <UsingTask> — while restoring,
+// which can run arbitrary .NET code ONLINE (network-enabled prefetch
+// container). This is inherent to MSBuild's evaluation model, not to a
+// specific downloaded package: unlike npm's lifecycle scripts there is no
+// --ignore-scripts equivalent that still lets restore resolve the
+// dependency graph. DECISION: documented and accepted (not constrained)
+// under the same document-and-accept posture as Maven/Gradle below —
+// constraining it would require disabling custom MSBuild targets
+// project-wide, which breaks legitimate restores far more often than it
+// stops a determined malicious repo (the same repo already runs
+// UNRESTRICTED during the later network-none build/test step). The threat
+// is mitigated by the container's other hardening (cap-drop ALL,
+// no-new-privileges, read-only root, pid limit) and by the absence of
+// secret-bearing mounts during the prefetch.
+func newNuGetPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
+	// Add --locked-mode when packages.lock.json exists so the prefetch is
+	// deterministic and dotnet does not update the lockfile during the
+	// online step. Mirrors Cargo's --locked behavior.
+	cmd := []string{"dotnet", "restore"}
+	if _, err := os.Stat(filepath.Join(repoDir, "packages.lock.json")); err == nil {
+		cmd = append(cmd, "--locked-mode")
+	}
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool:          "dotnet restore",
+			hash:          nugetLockHash,
+			cmd:           cmd,
+			containerPath: nugetCacheMount,
+			env:           []string{"NUGET_PACKAGES=" + nugetCacheMount},
+		})
+	})
+}
+
+// ---- JVM ecosystems (Maven and Gradle) --------------------------------------
+//
+// Two distinct ecosystem entries are used rather than one combined "jvm" entry
+// because Maven (~/.m2/repository) and Gradle (~/.gradle/caches) have entirely
+// different HOST cache layouts and container paths. A single entry would either
+// have to mount two directories (complicating strategy orthogonality) or silently
+// ignore the non-dominant tool. Two entries compose cleanly via resolveWith's
+// append semantics, giving a polyglot Maven+Gradle repo correct mounts from both.
+//
+// ---- Maven ecosystem -------------------------------------------------------
+//
+// v1 strategy: Maven local repository HOST + FETCH, driven by root pom.xml.
+//
+// Scope decisions (final; do not change silently — flag any deviation):
+//
+//   - DETECT: root pom.xml exists. Multi-module Maven projects always have a
+//     root pom.xml (the aggregate POM); single-module projects also have one.
+//     Root-level only — matching every other ecosystem's detector scope.
+//
+//   - VENDORED: NOT supported in v1. Maven has no widely-adopted, standard
+//     committed-repository convention equivalent to Go's vendor/modules.txt or
+//     Cargo's vendor/ + .cargo/config stanza. Projects that commit a
+//     repository/ tree are rare and non-standard. NOT-supported-in-v1.
+//
+//   - OFF: empty Resolution{Strategy: DepStrategyOff}.
+//
+//   - HOST: mount the host Maven local repository READ-ONLY at /m2cache.
+//     MAVEN_OPTS=-Dmaven.repo.local=/m2cache tells Maven to use that mount as
+//     the local repository (the standard -Dmaven.repo.local convention).
+//     The default path is $HOME/.m2/repository; a test seam
+//     (hostMavenRepository on DepOptions) overrides it. Shared=true
+//     (host-owned dir, no :Z relabel). Offline enforcement: Maven has no exact
+//     GOPROXY=off analog; --offline (-o) would need a SetupCmd injection and
+//     is fragile for multi-module builds. We follow the NuGet precedent —
+//     --network=none IS the enforcement: a missing artifact hits the
+//     unreachable repository and fails fast with a clear diagnostic. We
+//     deliberately do NOT set -o / --offline to avoid breaking builds that
+//     call mvn in their test scripts with extra goals.
+//
+//   - FETCH: run ONE online `mvn -B dependency:go-offline` in opts.FetchSandbox
+//     into a bugbot-owned cache dir (fetchMavenCacheDir under
+//     userCacheDir/.../m2cache/<hash>), keyed on sha256(pom.xml) (root pom
+//     only — recursive module collection requires a running JVM and is
+//     disproportionate for a v1 key; root pom captures the declared dep set
+//     for single-module projects and the aggregate for multi-module). Mount the
+//     populated repository dir read-only at /m2cache with
+//     MAVEN_OPTS=-Dmaven.repo.local=/m2cache. Shared=false (bugbot-owned dir,
+//     gets :Z isolation). Same offline enforcement as HOST: network=none is
+//     the boundary.
+//
+//   - PROVIDER WARM-UP (bugbot-own9): `dependency:go-offline` resolves the
+//     project's declared dependencies and every plugin bound to the default
+//     lifecycle (including maven-surefire-plugin itself), but NOT the
+//     provider jar Surefire selects at TEST time based on the detected test
+//     framework (e.g. surefire-junit-platform for JUnit 5), nor the
+//     "aligned" junit-platform-launcher version Surefire additionally pulls
+//     in alongside it — both are resolved lazily inside the surefire:test
+//     goal itself, which never runs during go-offline. Left unaddressed,
+//     the offline run's first `mvn test` invocation tries to download both
+//     over the (absent) network and fails with a read-only-cache
+//     FileSystemException instead of a clear diagnostic (bugbot-own9). The
+//     prefetch step closes this gap with a best-effort warm-up scoped to
+//     JUnit 5: it parses go-offline's OWN "[INFO] Resolved plugin:" /
+//     "[INFO] Resolved dependency:" log lines for the resolved surefire and
+//     junit-platform versions (asking the tool what it actually resolved,
+//     not guessing from pom.xml) and issues two extra `dependency:get`
+//     calls for the provider and the aligned launcher. See newMavenPrefetch
+//     for the exact script. A repo on JUnit 4/TestNG (no junit-platform
+//     dependency) skips the warm-up harmlessly and falls back to the
+//     existing "network=none IS the enforcement, a missing artifact fails
+//     fast" documented behavior above.
+//
+//   - SECURITY (prefetch, 2026-07-11 scope extension — bugbot-gu0o): `mvn -B
+//     dependency:go-offline` instantiates POM plugins and any
+//     .mvn/extensions.xml build extensions, executing repo-controlled Java
+//     code ONLINE. There is no Maven analog to npm's --ignore-scripts.
+//     Accepted under the bugbot-gu0o posture; see newMavenPrefetch for the
+//     full rationale.
+//
+//   - Container path /m2cache is distinct from /modcache, /depcache,
+//     /cargo/registry, /npmcache, /nugetcache, and /gradlecache so the mount
+//     registry's ContainerPath uniqueness constraint is satisfied.
+
+// m2CacheMount is where the Maven local repository is mounted inside the
+// container (HOST and FETCH strategies). MAVEN_OPTS=-Dmaven.repo.local= is set
+// to this path so Maven resolves artifacts at the standard local repository
+// location without additional configuration.
+// Distinct from all other ecosystem mount paths per the mount registry's
+// uniqueness obligation.
+const m2CacheMount = "/m2cache"
+
+// mavenEcosystem is the Maven dependency resolver. It detects repos with a root
+// pom.xml and applies HOST / FETCH / OFF strategy. v1 has no vendored convention
+// for Maven; see the file-level comment.
+var mavenEcosystem = ecosystem{
+	name:    "maven",
+	detect:  hasPomXML,
+	resolve: resolveMaven,
+}
+
+// resolveMaven is the Maven resolver function. Strategy validation has already
+// run in resolveWith; invalid strategies are unreachable here.
+func resolveMaven(repoDir string, opts DepOptions) (Resolution, error) {
+	// No vendored detection in v1: Maven has no standard committed-repository
+	// convention. See the file-level scope-decisions comment.
+
+	strategy := opts.Strategy
+	if strategy == "" {
+		strategy = DepStrategyOff
+	}
+
+	switch strategy {
+	case DepStrategyOff:
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyHost:
+		repo, err := resolveHostMavenRepository(opts.hostMavenRepository)
+		if err != nil {
+			return Resolution{}, err
+		}
+		// Shared=true: the host Maven local repository is NOT owned by bugbot.
+		// SELinux :Z would relabel the entire repository to a container-private
+		// MCS label, which may break the host toolchain. :ro without a label
+		// suffix is correct here.
+		return mavenResolution(repo, DepStrategyHost, true, nil), nil
+
+	case DepStrategyFetch:
+		if opts.FetchSandbox == nil {
+			return Resolution{}, fmt.Errorf("sandbox: Maven dependency strategy %q requires a fetch sandbox", strategy)
+		}
+		cache, err := fetchMavenCacheDir(repoDir, opts.userCacheDir)
+		if err != nil {
+			return Resolution{}, err
+		}
+		prefetch := newMavenPrefetch(repoDir, cache, opts)
+		// Shared=false: the Maven fetch cache is a bugbot-owned directory under
+		// the user cache dir. :Z SELinux isolation is appropriate.
+		return mavenResolution(cache, DepStrategyFetch, false, prefetch), nil
+
+	default:
+		return Resolution{}, fmt.Errorf("sandbox: unhandled Maven dependency strategy %q", strategy)
+	}
+}
+
+// mavenResolution builds the Resolution shared by HOST and FETCH for Maven:
+// a single read-only mount at /m2cache plus MAVEN_OPTS so Maven uses it as the
+// local repository.
+//
+// shared controls sandbox.ROMount.Shared: true for HOST (user's real Maven repository —
+// must not be SELinux-relabeled), false for FETCH (bugbot-owned cache dir —
+// :Z isolation correct). See sandbox.ROMount.Shared for the full rationale.
+//
+// Offline enforcement: Maven has no clean GOPROXY=off analog. The --network=none
+// run itself enforces offline operation: any Maven call that would resolve a
+// missing artifact hits the unreachable repository server and fails fast with a
+// clear diagnostic. We deliberately do NOT set -o / --offline — the OS-level
+// network=none is the enforcement point (same approach as NuGet).
+func mavenResolution(hostRepo string, strategy DepStrategy, shared bool, prefetch func(context.Context) error) Resolution {
+	return Resolution{
+		ROMounts: []sandbox.ROMount{{
+			HostPath:      hostRepo,
+			ContainerPath: m2CacheMount,
+			Shared:        shared,
+		}},
+		Env: []string{
+			// MAVEN_OPTS=-Dmaven.repo.local=/m2cache so Maven resolves the local
+			// repository at the mounted path. This is the standard Maven property
+			// for overriding the local repository location.
+			"MAVEN_OPTS=-Dmaven.repo.local=" + m2CacheMount,
+		},
+		Prefetch: prefetch,
+		Strategy: strategy,
+	}
+}
+
+// hasPomXML reports whether repoDir contains a root pom.xml.
+// Only stdlib (os.Stat) — the sandbox package must remain stdlib-only.
+func hasPomXML(repoDir string) bool {
+	_, err := os.Stat(filepath.Join(repoDir, "pom.xml"))
+	return err == nil
+}
+
+// resolveHostMavenRepository resolves the host Maven local repository directory.
+// It prefers the override, then $HOME/.m2/repository.
+// Returns an error when no path can be determined (HOME unset) or when the
+// resolved path does not exist on the host (catches a misconfigured or
+// unpopulated repository early, before podman emits an opaque bind-mount error).
+func resolveHostMavenRepository(override string) (string, error) {
+	if override != "" {
+		return checkMavenRepositoryExists(override)
+	}
+
+	// Maven does not have a canonical env var for the local repository path
+	// (MAVEN_OPTS/-Dmaven.repo.local is a runtime override, not a discovery
+	// path). Fall through to the standard default: ~/.m2/repository.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", fmt.Errorf("sandbox: cannot resolve host Maven repository (HOME unset); use dep_strategy: off|fetch")
+	}
+	return checkMavenRepositoryExists(filepath.Join(home, ".m2", "repository"))
+}
+
+// checkMavenRepositoryExists verifies that dir exists on the host and returns it.
+// When the directory is missing it returns a clear, actionable error instead of
+// letting podman fail with an opaque bind-mount error at run time.
+func checkMavenRepositoryExists(dir string) (string, error) {
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("sandbox: host Maven repository %q does not exist; run `mvn dependency:go-offline` on the host first, or use dep_strategy: off|fetch", dir)
+		}
+		return "", fmt.Errorf("sandbox: stat host Maven repository %q: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// fetchMavenCacheDir returns the bugbot-managed Maven local repository cache
+// directory for repoDir (e.g. ~/.cache/bugbot/m2cache/<hash>). Delegates to
+// fetchEcosystemCacheDir. override, when non-empty, overrides the base dir
+// (test seam).
+func fetchMavenCacheDir(repoDir, override string) (string, error) {
+	return fetchEcosystemCacheDir("m2cache", repoDir, override)
+}
+
+// mavenPomHash returns a hex hash of the root pom.xml so the Maven fetch cache
+// can be keyed on the dependency set. Root pom only (v1): multi-module
+// recursive collection requires a running JVM and is disproportionate for a
+// cache key; the root aggregate POM captures the declared dependency set for
+// most common cases. Analogous to goSumHash for Go and cargoLockHash for Rust.
+func mavenPomHash(repoDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(repoDir, "pom.xml"))
+	if err != nil {
+		return "", fmt.Errorf("sandbox: read pom.xml for maven lock hash: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// mavenProviderWarmupScript extends `mvn dependency:go-offline` with a
+// best-effort warm-up of Maven Surefire's dynamically-selected JUnit
+// Platform provider (bugbot-own9). Substituted with m2CacheMount via
+// fmt.Sprintf (the single %[1]s placeholder, reused three times). See the
+// Maven ecosystem's PROVIDER WARM-UP scope-decision comment above for the
+// full rationale; in short: go-offline never resolves surefire-junit-platform
+// or the version-aligned junit-platform-launcher it drags in (both are
+// lazily resolved inside the surefire:test goal itself), so this script
+// greps go-offline's own resolved-artifact log for the versions Maven
+// itself picked and explicitly fetches both. Each dependency:get is
+// best-effort (`|| true`): a repo without JUnit 5 on the test classpath
+// simply finds no version to warm and falls through to the pre-existing
+// "network=none is the offline enforcement" behavior. The primary
+// go-offline step is NOT best-effort: its output is redirected to a log
+// file and its exit status checked explicitly with a plain `if ! cmd >
+// "$LOG" 2>&1; then ...; fi` (never piped into `tee`, which would mask a
+// failure under `set -e` — only the LAST command in a pipeline determines
+// pipeline exit status without `pipefail`, which is not POSIX-portable), so
+// a genuine go-offline failure (bad POM, unreachable dependency) still
+// fails the whole prefetch with its own diagnostic on stderr — exactly
+// like every other ecosystem's prefetch error.
+const mavenProviderWarmupScript = `set -e
+LOG=/tmp/bugbot-go-offline.log
+if ! mvn -B dependency:go-offline -Dmaven.repo.local=%[1]s > "$LOG" 2>&1; then
+  cat "$LOG" >&2
+  exit 1
+fi
+cat "$LOG"
+SF_VER=$(grep -oE 'maven-surefire-plugin-[0-9][^ ]*\.jar' "$LOG" | head -1 | sed -E 's/maven-surefire-plugin-(.*)\.jar/\1/')
+JP_VER=$(grep -oE 'junit-platform-[a-z]+-[0-9][^ ]*\.jar' "$LOG" | head -1 | sed -E 's/junit-platform-[a-z]+-(.*)\.jar/\1/')
+if [ -n "$SF_VER" ]; then
+  mvn -B dependency:get -Dmaven.repo.local=%[1]s -Dartifact=org.apache.maven.surefire:surefire-junit-platform:"$SF_VER" || true
+fi
+if [ -n "$JP_VER" ]; then
+  mvn -B dependency:get -Dmaven.repo.local=%[1]s -Dartifact=org.junit.platform:junit-platform-launcher:"$JP_VER" || true
+fi
+`
+
+// newMavenPrefetch builds the one-time online mvn prefetch hook for the
+// Maven FETCH strategy. It runs dependency:go-offline plus the
+// mavenProviderWarmupScript JUnit-5-provider warm-up (bugbot-own9) in the
+// FetchSandbox with network enabled and MAVEN_OPTS pointed at hostCache
+// (mounted at /m2cache), keyed on the sha256 of pom.xml so an unchanged
+// dependency set is not re-downloaded. Guarded by a sync.Once so it runs at
+// most once per Resolution.
+//
+// SECURITY: `mvn -B dependency:go-offline` loads the Maven project model
+// (POM), which instantiates configured POM plugins and any build extensions
+// declared in .mvn/extensions.xml. This executes repo-controlled Java code
+// ONLINE (network-enabled container). There is no Maven analog to npm's
+// --ignore-scripts; the POM lifecycle is always evaluated. This is accepted
+// under the bugbot-gu0o posture (same document-and-accept decision as
+// pip's sdist fallback and dotnet's MSBuild evaluation). The threat is
+// mitigated by the container's other hardening (cap-drop ALL,
+// no-new-privileges, read-only root, pid limit) and by the absence of
+// secret-bearing mounts during the prefetch run. See the file's Maven
+// ecosystem doc comment (SCOPE DECISIONS) for the 2026-07-11 scope-extension
+// rationale.
+func newMavenPrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool:          "mvn dependency:go-offline (+ JUnit 5 provider warm-up)",
+			hash:          mavenPomHash,
+			cmd:           []string{"sh", "-c", fmt.Sprintf(mavenProviderWarmupScript, m2CacheMount)},
+			containerPath: m2CacheMount,
+			env:           []string{"MAVEN_OPTS=-Dmaven.repo.local=" + m2CacheMount},
+		})
+	})
+}
+
+// ---- Gradle ecosystem -------------------------------------------------------
+//
+// v1 strategy: Gradle caches FETCH only, driven by root build.gradle,
+// build.gradle.kts, settings.gradle, or settings.gradle.kts.
+//
+// Scope decisions (final; do not change silently — flag any deviation):
+//
+//   - DETECT: any of build.gradle, build.gradle.kts, settings.gradle, or
+//     settings.gradle.kts exists at the root. Root-level only — matching
+//     every other ecosystem's detector scope.
+//
+//   - VENDORED: NOT supported in v1. Gradle has no widely-adopted,
+//     standard committed-cache convention. NOT-supported-in-v1.
+//
+//   - OFF: empty Resolution{Strategy: DepStrategyOff}.
+//
+//   - HOST → OFF. CAUTION: Gradle's ~/.gradle/caches directory is
+//     lock-heavy. Gradle maintains file-locks inside the caches directory
+//     even for read-only dependency resolution, because it uses journal
+//     files and lock files to coordinate concurrent builds. Mounting it
+//     read-only inside a container causes Gradle to fail with "Could not
+//     acquire lock on <lock-file>" errors on the very first `gradle test`
+//     invocation. This is fundamentally different from Go's module cache
+//     (lock-free after population) or Maven's repository (also lock-free).
+//     We cannot verify the workaround empirically without a running JDK+Gradle
+//     image in the test environment, so we follow the same decision as
+//     Python/npm for their broken-HOST cases: HOST is treated as OFF rather
+//     than silently broken. A future bead can revisit with a live JDK image
+//     if Gradle adds read-only-cache support or if a copy-to-writable
+//     HOST variant becomes worth the complexity.
+//
+//   - FETCH → Gradle dependency cache prefetch + writable-copy run:
+//     1. Prefetch (network bridge, ONE online step): run an init-script-
+//        driven `gradle --no-daemon -q -I <init> help` in a network-enabled
+//        container with the cache dir mounted WRITABLE at /gradlecache.
+//        GRADLE_USER_HOME=/gradlecache directs Gradle to populate caches/
+//        and wrapper/ there. The init script (bugbot-own9; see
+//        newGradlePrefetch) forces every resolvable configuration
+//        (compile AND test, main AND test source sets) to actually
+//        download its artifact JARs, not just resolve POM/module metadata
+//        — plain `gradle dependencies` (the pre-own9 command) only needs
+//        metadata to print its report, so it silently left JARs
+//        undownloaded and the later offline build hit the network.
+//     2. Resolution: mount the same dir READ-ONLY at /gradlecache
+//        (Shared=false — bugbot-owned, gets :Z), and add three SetupCmds
+//        that copy the RO cache to a disk-backed workspace location and
+//        enforce offline mode before build:
+//          mkdir -p /workspace/.bugbot-gradle-home
+//          cp -a /gradlecache/. /workspace/.bugbot-gradle-home
+//          printf 'org.gradle.offline=true\n' > /workspace/.bugbot-gradle-home/gradle.properties
+//        then set GRADLE_USER_HOME=/workspace/.bugbot-gradle-home (via env).
+//        The gradle.properties write is precautionary hardening, not a
+//        confirmed independent fix: a control run with a fully-resolving
+//        cache and no offline flag also succeeded (see gradleResolution's
+//        SetupCmd comment for the honest evidence trail). It is kept as
+//        explicit intent matching the other ecosystems' offline-
+//        enforcement env vars (there is no GRADLE_OPTS/env equivalent;
+//        gradle.properties in GRADLE_USER_HOME is the supported mechanism).
+//        WHY WORKSPACE, NOT /tmp: Gradle caches for a real project routinely exceed hundreds
+//        of MB; the /tmp tmpfs is capped at 512 MB (buildRunArgs: --tmpfs
+//        /tmp:size=512m) and a cache copy that exceeds it causes exit 125
+//        → environment_error → silent recall loss (same failure mode as Go
+//        builds before goCacheDir was introduced). The disk-backed
+//        /workspace has no such cap. The copy target is dot-prefixed
+//        (/workspace/.bugbot-gradle-home) so `gradle test ./...` and
+//        similar recursive globs skip it (Gradle, like Go, ignores
+//        directories beginning with "." or "_"). --no-daemon in both
+//        prefetch and build prevents a Gradle daemon from persisting
+//        between runs (correct for ephemeral containers).
+//
+//   - SECURITY (prefetch, 2026-07-11 scope extension — bugbot-gu0o): Gradle
+//     executes settings.gradle / build.gradle (Groovy/Kotlin DSL) at
+//     configuration time. This is inherent to Gradle's build model: there
+//     is no --ignore-scripts analog — configuration code always runs.
+//     During the prefetch the container has network access, so malicious
+//     configuration code could exfiltrate data or contact external
+//     services. This is within the bugbot-gu0o posture (accepted per the
+//     document-and-accept decision for all prefetch ecosystems that
+//     execute repo-controlled code online). The threat is mitigated by the
+//     container's other hardening (cap-drop ALL, no-new-privileges,
+//     read-only root, pid limit) and by the absence of secret-bearing
+//     mounts during the prefetch. The bugbot-own9 init script (see
+//     newGradlePrefetch) only RESOLVES configurations — it never invokes
+//     `test` or any task that executes repo test code, so it does not
+//     widen this exposure beyond configuration-time evaluation. See
+//     newGradlePrefetch for the full rationale.
+//
+//   - Lock-hash key: sha256(gradle.lockfile) if present at root, else
+//     sha256 of sorted concatenated contents of build.gradle, build.gradle.kts,
+//     settings.gradle, settings.gradle.kts (whichever exist). Fallback
+//     analogous to nugetLockHash's *.csproj fallback.
+//
+//   - Container path /gradlecache is distinct from /modcache, /depcache,
+//     /cargo/registry, /npmcache, /nugetcache, and /m2cache so the mount
+//     registry's ContainerPath uniqueness constraint is satisfied.
+
+// gradleCacheMount is where the populated Gradle user home is mounted
+// READ-ONLY inside the container (FETCH strategy staging point). At run time a
+// SetupCmd copies it to gradleHomeDir (disk-backed /workspace) so Gradle can
+// acquire file-locks freely. Distinct from all other ecosystem mount paths per
+// the mount registry's uniqueness obligation.
+const gradleCacheMount = "/gradlecache"
+
+// gradleHomeDir is the disk-backed writable copy of the Gradle user home
+// created inside the container before each run. It lives under /workspace (the
+// per-run, disk-backed copy — no size cap) rather than /tmp (512 MB tmpfs) so
+// large Gradle caches do not overflow the tmpfs and cause exit 125 /
+// environment_error. The dot-prefix causes Gradle recursive globs to skip it
+// (same convention as goCacheDir / goTmpDir).
+const gradleHomeDir = sandbox.WorkspaceMount + "/.bugbot-gradle-home"
+
+// gradleEcosystem is the Gradle dependency resolver. It detects repos with a
+// root build.gradle / build.gradle.kts / settings.gradle / settings.gradle.kts
+// and applies FETCH / OFF strategy. HOST maps to OFF (Gradle cache is lock-heavy
+// under a read-only mount; see the file-level scope-decisions comment).
+// v1 has no vendored convention for Gradle.
+var gradleEcosystem = ecosystem{
+	name:    "gradle",
+	detect:  hasGradleBuildFile,
+	resolve: resolveGradle,
+}
+
+// resolveGradle is the Gradle resolver function. Strategy validation has already
+// run in resolveWith; invalid strategies are unreachable here.
+func resolveGradle(repoDir string, opts DepOptions) (Resolution, error) {
+	// No vendored detection in v1; see file-level scope-decisions comment.
+
+	strategy := opts.Strategy
+	if strategy == "" {
+		strategy = DepStrategyOff
+	}
+
+	switch strategy {
+	case DepStrategyOff:
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyHost:
+		// HOST → OFF: Gradle's cache is lock-heavy and fights a read-only mount.
+		// See the file-level scope-decisions comment for the rationale.
+		return Resolution{Strategy: DepStrategyOff}, nil
+
+	case DepStrategyFetch:
+		if opts.FetchSandbox == nil {
+			return Resolution{}, fmt.Errorf("sandbox: Gradle dependency strategy %q requires a fetch sandbox", strategy)
+		}
+		cache, err := fetchGradleCacheDir(repoDir, opts.userCacheDir)
+		if err != nil {
+			return Resolution{}, err
+		}
+		prefetch := newGradlePrefetch(repoDir, cache, opts)
+		// Shared=false: the Gradle fetch cache is bugbot-owned. :Z SELinux
+		// isolation is appropriate.
+		return gradleResolution(cache, prefetch), nil
+
+	default:
+		return Resolution{}, fmt.Errorf("sandbox: unhandled Gradle dependency strategy %q", strategy)
+	}
+}
+
+// gradleResolution builds the Resolution for Gradle FETCH: a read-only mount of
+// the populated cache at /gradlecache plus two SetupCmds that create a writable
+// copy under the disk-backed /workspace before the build. GRADLE_USER_HOME is
+// set to that copy so Gradle can acquire file-locks freely.
+//
+// WHY /workspace, NOT /tmp: Gradle caches for real projects routinely exceed
+// hundreds of MB. The /tmp tmpfs is capped at 512 MB (buildRunArgs:
+// --tmpfs /tmp:size=512m); a copy that overflows it causes exit 125 →
+// environment_error → silent recall loss. /workspace is a per-run, disk-backed
+// copy with no size cap. The copy target is dot-prefixed (gradleHomeDir =
+// /workspace/.bugbot-gradle-home) so recursive build globs skip it.
+//
+// The two-step mkdir+cp is necessary rather than a single cp -a because
+// /workspace/.bugbot-gradle-home must be created explicitly before the copy
+// (cp -a /gradlecache /workspace/.bugbot-gradle-home would create a nested
+// /workspace/.bugbot-gradle-home/gradlecache/ subdirectory, mirroring the
+// cp -a /src /dst semantics when dst does not exist vs when it does).
+func gradleResolution(hostCache string, prefetch func(context.Context) error) Resolution {
+	return Resolution{
+		ROMounts: []sandbox.ROMount{{
+			HostPath:      hostCache,
+			ContainerPath: gradleCacheMount,
+			Shared:        false, // bugbot-owned dir, :Z isolation correct
+		}},
+		Env: []string{
+			// GRADLE_USER_HOME points Gradle at the disk-backed writable copy
+			// produced by the SetupCmds below. NOT /tmp — see function comment.
+			"GRADLE_USER_HOME=" + gradleHomeDir,
+		},
+		SetupCmds: [][]string{
+			// Create the destination directory before the copy. mkdir -p is safe
+			// to repeat if the dir already exists (e.g. operator SetupCmds ran
+			// first and created it, which cannot happen in practice, but is
+			// idempotent regardless).
+			{"mkdir", "-p", gradleHomeDir},
+			// Copy the read-only Gradle user home into the writable workspace.
+			// `cp -a /gradlecache/. dst` copies CONTENTS (not the dir itself)
+			// into the pre-created destination. Gradle acquires file-locks inside
+			// GRADLE_USER_HOME; the RO /gradlecache mount would cause "Could not
+			// acquire lock" failures without this copy.
+			{"sh", "-c", "cp -a " + gradleCacheMount + "/. " + gradleHomeDir},
+			// Hardening, not a confirmed independent fix (bugbot-own9): writes
+			// org.gradle.offline=true into the just-populated writable copy's
+			// gradle.properties before the build runs. The two own9 integration
+			// tests pass on the fully-resolving init script (gradleResolveAllInitScript)
+			// alone — a control run with a fully populated cache and NO offline
+			// flag also succeeded, so this is not compensating for a
+			// reproduced Gradle offline-inference gap. It is kept anyway as
+			// explicit, low-cost intent matching the other ecosystems'
+			// offline-enforcement env vars (GOPROXY=off / PIP_NO_INDEX=1 /
+			// CARGO_NET_OFFLINE / npm_config_offline): gradle.properties in
+			// GRADLE_USER_HOME is the supported mechanism for Gradle, which
+			// has no env-var equivalent.
+			{"sh", "-c", "printf 'org.gradle.offline=true\\n' > " + gradleHomeDir + "/gradle.properties"},
+		},
+		Prefetch: prefetch,
+		Strategy: DepStrategyFetch,
+	}
+}
+
+// hasGradleBuildFile reports whether repoDir contains any of the standard
+// Gradle root build files: build.gradle, build.gradle.kts, settings.gradle,
+// or settings.gradle.kts. Root-level only — matching every other ecosystem's
+// detector scope. Only stdlib (os.Stat) — the sandbox package must remain
+// stdlib-only.
+func hasGradleBuildFile(repoDir string) bool {
+	for _, name := range []string{
+		"build.gradle",
+		"build.gradle.kts",
+		"settings.gradle",
+		"settings.gradle.kts",
+	} {
+		if _, err := os.Stat(filepath.Join(repoDir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchGradleCacheDir returns the bugbot-managed Gradle user-home cache
+// directory for repoDir (e.g. ~/.cache/bugbot/gradlecache/<hash>). Delegates
+// to fetchEcosystemCacheDir. override, when non-empty, overrides the base dir
+// (test seam).
+func fetchGradleCacheDir(repoDir, override string) (string, error) {
+	return fetchEcosystemCacheDir("gradlecache", repoDir, override)
+}
+
+// gradleLockHash returns a hex hash of gradle.lockfile (falling back to the
+// sha256 of the sorted concatenated contents of the root Gradle build files
+// when gradle.lockfile is absent) so the Gradle fetch cache can be keyed on
+// the dependency set. Analogous to nugetLockHash's *.csproj fallback pattern.
+func gradleLockHash(repoDir string) (string, error) {
+	if data, err := os.ReadFile(filepath.Join(repoDir, "gradle.lockfile")); err == nil {
+		sum := sha256.Sum256(data)
+		return hex.EncodeToString(sum[:]), nil
+	}
+	// Fallback: hash the sorted concatenated contents of all root Gradle build
+	// files that exist.
+	buildFiles := []string{
+		"build.gradle",
+		"build.gradle.kts",
+		"settings.gradle",
+		"settings.gradle.kts",
+	}
+	var present []string
+	for _, f := range buildFiles {
+		if _, err := os.Stat(filepath.Join(repoDir, f)); err == nil {
+			present = append(present, f)
+		}
+	}
+	if len(present) == 0 {
+		return "", fmt.Errorf("sandbox: no gradle.lockfile or Gradle build files in %q", repoDir)
+	}
+	// Already in canonical order (same as buildFiles); sort anyway for safety.
+	sort.Strings(present)
+	h := sha256.New()
+	for _, n := range present {
+		data, err := os.ReadFile(filepath.Join(repoDir, n))
+		if err != nil {
+			return "", fmt.Errorf("sandbox: read %s for gradle lock hash: %w", n, err)
+		}
+		h.Write([]byte(n))
+		h.Write([]byte{'\n'})
+		h.Write(data)
+		if !strings.HasSuffix(string(data), "\n") {
+			h.Write([]byte{'\n'})
+		}
+	}
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// gradleResolveAllInitScript is a Gradle init script (bugbot-own9) injected
+// into the prefetch run via `-I`. Unlike `gradle dependencies` (the
+// pre-own9 prefetch command), which only needs POM/module METADATA to
+// print its dependency-tree report, this script forces every resolvable
+// configuration in every project to actually download its artifact JARs —
+// exactly what the later offline `gradle test` needs on disk. Scoped to
+// configuration RESOLUTION only: it never invokes `test` or any task that
+// would execute repo-controlled test code, so it does not widen the
+// existing configuration-time-evaluation exposure documented in the
+// Gradle ecosystem's SECURITY bullet above.
+//
+// Resolution failures are NOT caught. An earlier draft wrapped `cfg.files`
+// in try/catch(Exception ignored) to tolerate configurations that
+// legitimately cannot resolve; that swallowed genuine failures too (a
+// repo-declared dependency that cannot be found online, for instance) —
+// gradle exited 0, runEcosystemPrefetch wrote the warm-cache sentinel, and
+// the cache was permanently marked warm while actually empty, so every
+// later offline `gradle test` failed forever with no way to self-heal
+// short of manually clearing the cache (this was root-caused via an
+// unreachable-dependency probe against the real container; see
+// TestIntegrationGradlePrefetchFailurePropagatesNoSentinel). Letting a
+// resolution failure propagate as a nonzero exit is the correct behavior:
+// runEcosystemPrefetch reports the error and never writes the sentinel, so
+// the next Resolution retries instead of being poisoned.
+const gradleResolveAllInitScript = `allprojects {
+    afterEvaluate { project ->
+        project.configurations.matching { it.canBeResolved }.all { cfg ->
+            cfg.files
+        }
+    }
+}
+`
+
+// gradleInitScriptPath is the in-container path the prefetch step writes
+// gradleResolveAllInitScript to before invoking gradle -I against it.
+// Lives under /tmp (writable tmpfs) since it is pure prefetch-run scratch,
+// never read by the later offline build.
+const gradleInitScriptPath = "/tmp/bugbot-resolve-deps.init.gradle"
+
+// newGradlePrefetch builds the one-time online Gradle prefetch hook for the
+// FETCH strategy. It writes gradleResolveAllInitScript and runs
+// `gradle --no-daemon -q -I <script> help` (bugbot-own9) in the
+// FetchSandbox with network enabled and GRADLE_USER_HOME pointed at
+// hostCache (mounted at /gradlecache), keyed on the sha256 of
+// gradle.lockfile (or the Gradle build files fallback) so an unchanged
+// dependency set is not re-downloaded. Guarded by a sync.Once so it runs at
+// most once per Resolution.
+func newGradlePrefetch(repoDir, hostCache string, opts DepOptions) func(context.Context) error {
+	script := "cat > " + gradleInitScriptPath + " <<'BUGBOT_INIT'\n" +
+		gradleResolveAllInitScript + "BUGBOT_INIT\n" +
+		"gradle --no-daemon -q -I " + gradleInitScriptPath + " help"
+	return newPrefetchOnce(func(ctx context.Context) error {
+		return runEcosystemPrefetch(ctx, repoDir, hostCache, opts, ecosystemPrefetchSpec{
+			tool:          "gradle dependency resolution",
+			hash:          gradleLockHash,
+			cmd:           []string{"sh", "-c", script},
+			containerPath: gradleCacheMount,
+			env:           []string{"GRADLE_USER_HOME=" + gradleCacheMount},
+		})
+	})
+}

@@ -24,10 +24,10 @@ func TestBudgetStopped_BothTruncationReasons(t *testing.T) {
 		want bool
 	}{
 		{"nil outcome", nil, false},
-		{"not truncated", &agent.Outcome{Truncated: false}, false},
-		{"truncated iteration cap", &agent.Outcome{Truncated: true, TruncationReason: agent.TruncMaxIterations}, false},
-		{"truncated token budget (per-run)", &agent.Outcome{Truncated: true, TruncationReason: agent.TruncTokenBudget}, true},
-		{"truncated budget pool (shared)", &agent.Outcome{Truncated: true, TruncationReason: agent.TruncBudgetPool}, true},
+		{"not truncated", &agent.Outcome{}, false},
+		{"truncated iteration cap", &agent.Outcome{TruncationReason: agent.TruncMaxIterations}, false},
+		{"truncated token budget (per-run)", &agent.Outcome{TruncationReason: agent.TruncTokenBudget}, true},
+		{"truncated budget pool (shared)", &agent.Outcome{TruncationReason: agent.TruncBudgetPool}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -61,12 +61,12 @@ func TestHasSandboxExec_FindsTool(t *testing.T) {
 // budget stop — pool or per-run — short-circuits the verdict loop and
 // returns stopped=true.
 func TestRunRefuters_PerRunTokenBudgetIsBudgetStop(t *testing.T) {
-	out := &agent.Outcome{Truncated: true, TruncationReason: agent.TruncTokenBudget}
+	out := &agent.Outcome{TruncationReason: agent.TruncTokenBudget}
 	if !budgetStopped(out) {
 		t.Fatalf("budgetStopped(TruncTokenBudget) = false, want true — a per-run budget stop must be classified as a budget stop, like TruncBudgetPool")
 	}
 
-	out2 := &agent.Outcome{Truncated: true, TruncationReason: agent.TruncBudgetPool}
+	out2 := &agent.Outcome{TruncationReason: agent.TruncBudgetPool}
 	if !budgetStopped(out2) {
 		t.Fatalf("budgetStopped(TruncBudgetPool) = false, want true")
 	}
@@ -94,7 +94,7 @@ func TestNewAgentRunner_AppliesStandardOptions(t *testing.T) {
 	budget := &budgetState{}
 
 	scope := progress.NewAgentScope(nil, progress.RoleVerifier, c.Title)
-	verdicts, _, _, _, stopped, err := f.runRefuters(ctx, client, tools, "engineer", c, 1, budget, scope, toolHealthRouting{})
+	verdicts, _, _, _, stopped, err := f.runRefuters(ctx, client, tools, "engineer", c, 1, budget, scope, toolHealthRouting{}, "")
 	if err != nil {
 		t.Fatalf("runRefuters: %v", err)
 	}

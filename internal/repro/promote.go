@@ -8,8 +8,8 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ecosystem"
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // Summary aggregates the outcome of a PromoteAll run.
@@ -509,6 +509,7 @@ func (r *Reproducer) provePatch(ctx context.Context, st *store.Store, f domain.F
 		artifactDir:   r.opts.ArtifactDir,
 		agentLimits:   r.opts.AgentLimits,
 		transcriptDir: r.opts.TranscriptDir,
+		observer:      r.opts.Observer,
 		suiteCmd:      r.opts.PatchSuiteCmd,
 		depMounts:     r.deps.ROMounts,
 		depRWMounts:   r.deps.RWMounts,

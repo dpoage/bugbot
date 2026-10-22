@@ -173,7 +173,7 @@ func TestHooksFor_InfraToolHealthEndToEnd(t *testing.T) {
 
 	scope := progress.NewAgentScope(nil, progress.RoleVerifier, "cand")
 	result := &Result{}
-	runner := f.newAgentRunner(&toolHealthProbeClient{}, []agent.Tool{failingSandboxTool{}}, "probe prompt", agent.Limits{},
+	runner := f.newAgentRunner(&toolHealthProbeClient{}, []agent.Tool{failingSandboxTool{}}, "probe prompt", runnerBudget{},
 		f.hooksFor(scope, toolHealthRouting{result: result, role: progress.RoleVerifier, label: "cand"}))
 	if _, err := runner.Run(context.Background(), "probe the sandbox"); err != nil {
 		t.Fatalf("Run: %v", err)

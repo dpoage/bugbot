@@ -347,13 +347,9 @@ func TestAgentUnits_VerifierRows(t *testing.T) {
 }
 
 // TestAgentUnits_TranscriptKeyMatchesRowID verifies the ID-threading contract
-// end to end: when Options.TranscriptDir is set, every finder AND verifier
-// agent_units row's own ID is minted BEFORE its runner(s) are built and
-// embedded as their autosave transcript filename's join key (agent.
-// WithTranscriptKey), so a real transcript file on disk contains "-<row.ID>-"
-// in its name for every row — the exact join internal/tui/transcript.go's
-// discoverTranscript relies on. A verifier row may correspond to more than
-// one file (refuter seats + arbiter); at least one must match.
+// end to end: every launched finder AND verifier agent_units row's ID keys at
+// least one JSONL transcript's RunID (ParseTranscriptName), the exact join the
+// TUI's discoverTranscript relies on.
 func TestAgentUnits_TranscriptKeyMatchesRowID(t *testing.T) {
 	ctx := context.Background()
 	st, repo := openFixture(t)
@@ -405,17 +401,16 @@ func TestAgentUnits_TranscriptKeyMatchesRowID(t *testing.T) {
 			continue
 		}
 		checked++
-		marker := "-" + u.ID + "-"
 		found := false
 		for _, name := range names {
-			if strings.Contains(name, marker) {
+			if _, key, ok := ParseTranscriptName(name); ok && key == u.ID {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("no transcript filename in %v contains %q for unit (role=%s lens=%s status=%s id=%s)",
-				names, marker, u.Role, u.Lens, u.Status, u.ID)
+			t.Errorf("no transcript in %v is keyed %q (role=%s lens=%s status=%s)",
+				names, u.ID, u.Role, u.Lens, u.Status)
 		}
 	}
 	if checked == 0 {

@@ -3,7 +3,7 @@ package repro
 import (
 	"strings"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/ecosystem"
 )
 
 // evidence_binding.go implements bugbot-u47n: closing the vacuous-promotion
@@ -57,10 +57,10 @@ func bindTestEvidence(v verdict, files map[string]string) verdict {
 	var declared []string
 	var matches func(failing, declared string) bool
 	switch v.ecosystem {
-	case sandbox.EcosystemGo:
+	case ecosystem.EcosystemGo:
 		declared = extractGoTestNames(files)
 		matches = goFailingNameMatches
-	case sandbox.EcosystemPython:
+	case ecosystem.EcosystemPython:
 		declared = extractPyTestNames(files)
 		matches = substringNameMatches
 	default:

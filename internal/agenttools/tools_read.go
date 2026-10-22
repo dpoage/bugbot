@@ -13,6 +13,7 @@ import (
 
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/fsroot"
 )
 
 // Read-file limits. These bound a single read_file result so a tool call cannot
@@ -59,7 +60,7 @@ func (c ReadCaps) resolve() ReadCaps {
 // the same per-result caps; a tool constructed with extraRoots == nil is
 // byte-for-byte equivalent to one built with NewReadFileWithCaps.
 type readFileTool struct {
-	root       *FSRoot
+	root       *fsroot.FSRoot
 	extraRoots *DepSourceRoots
 	caps       ReadCaps
 }
@@ -80,7 +81,7 @@ func NewReadFile(dir string) (agent.Tool, error) {
 // a prompt-cache prefix, which is why it (not compaction) is the finder's default
 // token-burn lever under a strong prompt cache (see bugbot-3nf).
 func NewReadFileWithCaps(dir string, caps ReadCaps) (agent.Tool, error) {
-	root, err := NewFSRoot(dir)
+	root, err := fsroot.NewFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +97,7 @@ func NewReadFileWithCaps(dir string, caps ReadCaps) (agent.Tool, error) {
 // the arbiter (bugbot-mi5.17/.18). The tool description is also augmented
 // when extra roots are present so the LLM knows it can read outside the repo.
 func NewReadFileWithDepRoots(dir string, caps ReadCaps, extraRoots *DepSourceRoots) (agent.Tool, error) {
-	root, err := NewFSRoot(dir)
+	root, err := fsroot.NewFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +286,7 @@ func renderNumbered(content string, offset, limit int, byteTruncated bool, caps 
 
 // listDirTool lists directory entries rooted at a repository directory.
 type listDirTool struct {
-	root *FSRoot
+	root *fsroot.FSRoot
 }
 
 // NewListDir returns a list_dir tool rooted at dir. It lists the entries of a
@@ -293,7 +294,7 @@ type listDirTool struct {
 // size, sorted with directories first then by name. Paths are repo-relative and
 // traversal-protected.
 func NewListDir(dir string) (agent.Tool, error) {
-	root, err := NewFSRoot(dir)
+	root, err := fsroot.NewFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}

@@ -192,14 +192,13 @@ func (f *Funnel) summarizePackage(ctx context.Context, client llmkit.Client, bud
 		scope.EmitActivity(progress.ToolActivity{Phase: "done", Tool: "read_file", File: rel, Line: 1, EndLine: linesRead, Count: linesRead})
 	}
 
-	limits := f.opts.Limits.FinderLimits
+	rb := runnerBudget{limits: f.opts.Limits.FinderLimits}
 	if budget != nil {
-		// The cartographer shares the finder pool, so its per-run limits and
-		// per-turn budget check come from finderRunnerLimits — the same hook
-		// finders use to stop mid-run when the shared budget is exhausted.
-		limits = budget.finderRunnerLimits(f.opts.Limits.FinderLimits)
+		// The cartographer shares the finder pool: the same per-run limits and
+		// per-turn pool gate finders use.
+		rb = budget.finderRunnerLimits(f.opts.Limits.FinderLimits)
 	}
-	runner := f.newAgentRunner(client, nil, cartographySystemPrompt, limits)
+	runner := f.newAgentRunner(client, nil, cartographySystemPrompt, rb)
 	var out struct {
 		Summary string `json:"summary"`
 	}
@@ -352,7 +351,7 @@ func (f *Funnel) RefreshCartography(ctx context.Context, client llmkit.Client) (
 	}
 	rep.ScanRunID = runID
 	rec := &spendRecorder{ctx: ctx, store: f.store, scanRunID: runID}
-	cc := llmkit.WithRecorder(client, rec, roleCartographer, "", "")
+	cc := rec.ledgered(client, roleCartographer)
 
 	pkgFingerprints := make(map[string]string, len(packages))
 	for pkg, members := range packages {

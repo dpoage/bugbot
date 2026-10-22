@@ -78,15 +78,16 @@ func requireRecordEnv(t *testing.T) recordEnv {
 }
 
 // newRecordClient builds a Client the way production does: an openai-compatible
-// ProviderSpec handed to provider.New. role tags the emitted UsageEvents.
+// ProviderSpec handed to provider.New. role names the client in errors.
 func newRecordClient(t *testing.T, env recordEnv, role string) llmkit.Client {
 	t.Helper()
 	spec := provider.Spec{
 		Type:    provider.TypeOpenAICompatible,
 		BaseURL: env.baseURL,
+		Model:   env.model,
+		Secret:  env.apiKey,
 	}
-	apiKey := env.apiKey
-	client, err := provider.New(context.Background(), spec, "live", env.model, apiKey, provider.Options{Role: role})
+	client, err := provider.New(context.Background(), spec, provider.Options{Provider: "live"})
 	if err != nil {
 		t.Fatalf("build %s client: %v", role, err)
 	}
@@ -165,8 +166,8 @@ func TestRecordCorpus(t *testing.T) {
 			}
 
 			// Load the saved transcripts (filename = chronological order) and split
-			// them into finder/verifier sessions by inspecting each first user
-			// message. Unclassifiable transcripts are a hard error.
+			// them into finder/verifier sessions by each run's task.
+			// Unclassifiable transcripts are a hard error.
 			names, trs, err := loadTranscriptDir(transcriptDir)
 			if err != nil {
 				t.Fatalf("load saved transcripts for %q: %v", base.Name, err)

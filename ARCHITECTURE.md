@@ -61,8 +61,12 @@ Ingest -> Hypothesize -> Triage -> Verify -> Reproduce -> Report
   itself lives in `llmkit/agent`.
 - **`internal/funnel`** — the pipeline stages above, wired together with
   backpressure and budget enforcement between stages.
-- **`internal/sandbox`** — pluggable `Exec` interface for isolated execution.
-  `sandbox.backend` selects the implementation: `cli` (default; shells out to
+- **`internal/sandboxenv`** — bugbot policy over `llmkit/sandbox`, which owns
+  every backend, the `Spec`/`Result` contract, the watchdog, and resource
+  caps. `sandboxenv.New` builds the backend `sandbox.backend` selects, mapping
+  each `sandbox.*` knob onto one llmkit option; it also resolves per-ecosystem
+  offline dependencies (`ResolveDeps`) and caches ecosystem capability probes.
+  The backends: `cli` (default; shells out to
   podman/docker against a baked image) or `bwrap` (Linux-only, unprivileged
   user namespaces; runs directly on host toolchains — no image to bake, tmpfs
   root with allowlisted read-only host binds, workspace as the only writable
