@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
 	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // End-to-end boundary integration tests for bugbot-jwd on the repro

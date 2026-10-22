@@ -9,7 +9,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/progress"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // --- isExecutableClaim classifier tests -------------------------------------

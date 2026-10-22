@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // wizardConfig holds every answer gathered during the interactive flow.

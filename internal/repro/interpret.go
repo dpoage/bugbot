@@ -6,8 +6,9 @@ import (
 	"strings"
 
 	eco "github.com/dpoage/bugbot/internal/ecosystem"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 	"github.com/dpoage/bugbot/internal/util"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // VerdictReason is the classification of a non-demonstrating sandbox run.
@@ -81,7 +82,7 @@ type verdict struct {
 	// ecosystem is the detected ecosystem. Stored on the verdict so the
 	// prover's failure reporting can disambiguate env-failure from
 	// fix-rejected without re-running detection.
-	ecosystem sandbox.Ecosystem
+	ecosystem eco.Ecosystem
 	// witnessOnly is true when demonstrated is true but the detected
 	// ecosystem cannot provide an execution witness (no entry in
 	// ecosystem.WitnessTable — see witnessDemonstration below). Callers
@@ -132,7 +133,7 @@ type verdict struct {
 //     refuse to promote.
 func interpret(res sandbox.Result, cmd []string) verdict {
 	out := combinedOutput(res)
-	eco := detectEcosystem(cmd)
+	ecoRules := detectEcosystem(cmd)
 	lowOut := strings.ToLower(out)
 
 	// An infrastructure kill — the absolute/idle timeout OR bugbot-bdqf's
@@ -147,9 +148,9 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	// explicitly so it reads distinctly from that real host-disk-full case.
 	if res.InfraKilled() {
 		if res.WorkspaceQuotaExceeded {
-			return verdict{reason: VerdictReasonEnvironmentError, summary: res.KillReason() + ": " + trunc(out, 400), ecosystem: eco.name}
+			return verdict{reason: VerdictReasonEnvironmentError, summary: sandboxenv.KillReason(res) + ": " + trunc(out, 400), ecosystem: ecoRules.name}
 		}
-		return verdict{reason: VerdictReasonTimeout, summary: trunc(out, 400), ecosystem: eco.name}
+		return verdict{reason: VerdictReasonTimeout, summary: trunc(out, 400), ecosystem: ecoRules.name}
 	}
 
 	switch res.ExitCode {
@@ -159,11 +160,11 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 		// clobber the real exit code. Incidental "sanitizer:" in fixture logs
 		// on a genuinely passing run must NOT promote (bugbot-psiw).
 		if hasPipeMasking(cmd) && hasAnyMarker(lowOut, sanitizerReportMarkers) {
-			return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+			return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 		}
-		return verdict{reason: VerdictReasonExitZero, summary: trunc(out, 400), ecosystem: eco.name}
+		return verdict{reason: VerdictReasonExitZero, summary: trunc(out, 400), ecosystem: ecoRules.name}
 	case 125, 126, 127:
-		return verdict{reason: VerdictReasonEnvironmentError, summary: envSummary(eco.name, out), ecosystem: eco.name}
+		return verdict{reason: VerdictReasonEnvironmentError, summary: envSummary(ecoRules.name, out), ecosystem: ecoRules.name}
 	}
 
 	// Structured-output path: dispositive when it yields a confident answer,
@@ -172,23 +173,23 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	// text heuristics for the ecosystems that have one. Markers remain the
 	// ONLY path for cargo/bazel/JS/unknown, whose stable toolchains lack a
 	// structured-output flag bugbot can rely on across versions.
-	switch eco.name {
-	case sandbox.EcosystemGo:
+	switch ecoRules.name {
+	case eco.EcosystemGo:
 		if events, parsedOK := parseGoTestEvents(res.Stdout); parsedOK {
 			if demonstrated, reason, failing, ok := classifyGoEvents(events); ok {
 				if demonstrated {
-					return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name, structuredFailingTests: failing}
+					return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name, structuredFailingTests: failing}
 				}
-				return verdict{reason: reason, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+				return verdict{reason: reason, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 			}
 		}
-	case sandbox.EcosystemPython:
+	case eco.EcosystemPython:
 		if junit, present := res.Captured[structuredJUnitXMLPath]; present {
 			if demonstrated, reason, failing, ok := parseJUnitXML(junit); ok {
 				if demonstrated {
-					return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name, structuredFailingTests: failing}
+					return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name, structuredFailingTests: failing}
 				}
-				return verdict{reason: reason, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+				return verdict{reason: reason, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 			}
 		}
 	}
@@ -202,7 +203,7 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	//     where the pipeline exits 0 because tail/echo succeeds regardless of
 	//     the sanitized binary's real exit code.
 	if hasAnyMarker(lowOut, sanitizerReportMarkers) {
-		return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+		return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 	}
 
 	// 0b. Full runtime-instrumentation set (incl. the looser "runtime error:" /
@@ -210,7 +211,7 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	//     per-ecosystem env/toolchain/build markers so a sanitizer abort is
 	//     never misclassified as a build error.
 	if hasAnyMarker(lowOut, runtimeFailureMarkers) {
-		return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+		return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 	}
 
 	// Bazel is launcher-based and prints benign "(Read-only file system)"
@@ -222,23 +223,23 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	//   1/2/4   = build/analysis failure, bad args, or no tests -> never a demo.
 	// (Exit 0 and 125/126/127 were already handled by the switch above.) The
 	// per-ecosystem ran-markers are a BACKSTOP for a lost/masked exit code.
-	if eco.name == sandbox.EcosystemBazel {
-		if res.ExitCode == 3 || eco.hasRanEvidence(lowOut) {
-			return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+	if ecoRules.name == eco.EcosystemBazel {
+		if res.ExitCode == 3 || ecoRules.hasRanEvidence(lowOut) {
+			return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 		}
 		// Genuine environment failures still count (disk full, no temp), but NOT
 		// the benign read-only disk-cache warning — bazelEnvMarkers is
 		// defaultEnvMarkers minus "read-only file system" for exactly that reason.
 		if hasAnyMarker(lowOut, bazelEnvMarkers) {
-			return verdict{reason: VerdictReasonEnvironmentError, summary: envSummary(eco.name, out), ecosystem: eco.name}
+			return verdict{reason: VerdictReasonEnvironmentError, summary: envSummary(ecoRules.name, out), ecosystem: ecoRules.name}
 		}
-		if eco.hasLineAnchoredToolchainMarker(out) {
-			return verdict{reason: VerdictReasonToolchainError, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+		if ecoRules.hasLineAnchoredToolchainMarker(out) {
+			return verdict{reason: VerdictReasonToolchainError, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 		}
-		if hasAnyMarker(lowOut, eco.buildMarkers) {
-			return verdict{reason: VerdictReasonBuildError, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+		if hasAnyMarker(lowOut, ecoRules.buildMarkers) {
+			return verdict{reason: VerdictReasonBuildError, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 		}
-		return verdict{reason: VerdictReasonNotDemonstrated, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+		return verdict{reason: VerdictReasonNotDemonstrated, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 	}
 
 	// From here on we are dealing with a non-zero, non-timeout,
@@ -251,19 +252,19 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	//    or "no space left on device" as part of the error message it is
 	//    asserting on must classify as demonstrated, not environment_error
 	//    (bugbot-psiw: ran-evidence beats env markers when they co-occur).
-	if hasAnyMarker(lowOut, defaultEnvMarkers) && !eco.hasRanEvidence(lowOut) {
-		return verdict{reason: VerdictReasonEnvironmentError, summary: envSummary(eco.name, out), ecosystem: eco.name}
+	if hasAnyMarker(lowOut, defaultEnvMarkers) && !ecoRules.hasRanEvidence(lowOut) {
+		return verdict{reason: VerdictReasonEnvironmentError, summary: envSummary(ecoRules.name, out), ecosystem: ecoRules.name}
 	}
 	// 2. Toolchain refusal — ecosystem-specific. Checked before the
 	//    generic build markers so e.g. "go: -race requires cgo" lands
 	//    on toolchain_error (the more accurate category) instead of
 	//    build_error. Uses line-anchored matching for Go's short "go: " prefix.
-	if eco.hasLineAnchoredToolchainMarker(out) {
-		return verdict{reason: VerdictReasonToolchainError, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+	if ecoRules.hasLineAnchoredToolchainMarker(out) {
+		return verdict{reason: VerdictReasonToolchainError, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 	}
 	// 3. Build / compile / import failure — ecosystem-specific.
-	if hasAnyMarker(lowOut, eco.buildMarkers) {
-		return verdict{reason: VerdictReasonBuildError, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+	if hasAnyMarker(lowOut, ecoRules.buildMarkers) {
+		return verdict{reason: VerdictReasonBuildError, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 	}
 	// 3.5. Collection-error / not-ran override — exit-code-aware (bugbot-psiw).
 	//      Pytest exits 2 on collection/usage error and 4 when zero tests are
@@ -274,8 +275,8 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	//      Exit 1 is intentionally excluded: a mixed pytest run where one module
 	//      collected cleanly and failed while another had a collection error exits
 	//      1 and must still classify as demonstrated.
-	if (res.ExitCode == 2 || res.ExitCode == 4) && eco.hasNotRanEvidence(lowOut) {
-		return verdict{reason: VerdictReasonNotDemonstrated, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+	if (res.ExitCode == 2 || res.ExitCode == 4) && ecoRules.hasNotRanEvidence(lowOut) {
+		return verdict{reason: VerdictReasonNotDemonstrated, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 	}
 	// 3.6. Trusted sentinel — the reproducer agent's escape hatch for
 	//      non-runtime bug classes (build-system/config, shader/asset
@@ -286,18 +287,18 @@ func interpret(res sandbox.Result, cmd []string) verdict {
 	//      ran-evidence) stays the primary positive-evidence gate; the
 	//      sentinel only fires when the per-ecosystem markers had no match.
 	if hasAnyMarker(lowOut, reproSentinelMarkers) {
-		return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+		return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 	}
 	// 4. Positive ran-evidence — the bug demonstrated. This is the GATE.
-	if eco.hasRanEvidence(lowOut) {
-		return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+	if ecoRules.hasRanEvidence(lowOut) {
+		return verdict{demonstrated: true, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 	}
 	// 5. Non-zero exit without any of the above: we cannot say the
 	//    test ran, so we refuse to promote. The default "unknown"
 	//    ecosystem's ran-marker set is intentionally conservative; in
 	//    practice this branch catches ad-hoc shell commands whose
 	//    output we don't trust.
-	return verdict{reason: VerdictReasonNotDemonstrated, summary: tailExcerpt(out, 4096), ecosystem: eco.name}
+	return verdict{reason: VerdictReasonNotDemonstrated, summary: tailExcerpt(out, 4096), ecosystem: ecoRules.name}
 }
 
 // witnessDemonstration applies bugbot-qb4r's execution-witness layer (b) to
@@ -352,7 +353,7 @@ func witnessDemonstration(v verdict, out, targetPath string, declared []string) 
 	}
 	rules, ok := eco.WitnessRulesFor(v.ecosystem)
 	if !ok {
-		if v.ecosystem == sandbox.EcosystemBazel && declaredFailureWitness(out, declared) {
+		if v.ecosystem == eco.EcosystemBazel && declaredFailureWitness(out, declared) {
 			return v
 		}
 		v.witnessOnly = true
@@ -502,7 +503,7 @@ func (v verdict) feedback(p *Plan) string {
 	// Bazel gets dedicated, exit-code-aware feedback for ALL non-demonstrating
 	// reasons (not just environment failures): the agent must learn that exit 3
 	// is the goal and that it must target a SPECIFIC label, never //....
-	if v.ecosystem == sandbox.EcosystemBazel {
+	if v.ecosystem == eco.EcosystemBazel {
 		b.WriteString(bazelFeedback(v.reason))
 		if len(p.Cmd) > 0 {
 			fmt.Fprintf(&b, "\n\nCommand run: %s", strings.Join(p.Cmd, " "))
@@ -547,7 +548,7 @@ func (v verdict) feedback(p *Plan) string {
 		b.WriteString("itself (a transliteration) are not reproductions — the runtime never touches the target's own code. ")
 		b.WriteString("Rewrite the test so it IMPORTS/REQUIRES the target module and CALLS its actual function/method, so the ")
 		b.WriteString("target file's own code runs and fails on the current bug.")
-		if v.ecosystem == sandbox.EcosystemGo {
+		if v.ecosystem == eco.EcosystemGo {
 			b.WriteString(" For a Go target, the simplest executable edge is COLOCATION: put your _test.go in the ")
 			b.WriteString("SAME DIRECTORY as the target file, declared in the same package — for a `package main` ")
 			b.WriteString("target this is the ONLY option, because a main package cannot be imported.")
@@ -644,8 +645,8 @@ func bazelFeedback(reason VerdictReason) string {
 // Bazel gets its own message (see bazelEnvSummary); every other
 // ecosystem gets the truncated raw output, matching the prior
 // behavior bit-for-bit.
-func envSummary(ecosystem sandbox.Ecosystem, out string) string {
-	if ecosystem == sandbox.EcosystemBazel {
+func envSummary(ecosystem eco.Ecosystem, out string) string {
+	if ecosystem == eco.EcosystemBazel {
 		return bazelEnvSummary
 	}
 	return trunc(out, 400)

@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestNewRunner_RunTestsToolWiredWithGoMod verifies that when the repo
@@ -141,7 +141,7 @@ func TestNewRunner_RunTestsGuidanceInPrompt(t *testing.T) {
 			t.Fatal("no LLM requests recorded")
 		}
 		prompt := reqs[0].System
-		if strings.Contains(prompt, "run_tests") {
+		if strings.Contains(prompt, "You also have run_tests") {
 			t.Errorf("run_tests guidance unexpectedly present with no build system")
 		}
 	})

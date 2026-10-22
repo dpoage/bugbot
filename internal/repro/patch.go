@@ -43,11 +43,12 @@ import (
 	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // patchMaxDiffBytes is the maximum size of the unified diff text stored in
@@ -573,7 +574,7 @@ type patchVerdictResult struct {
 	// ecosystem is the detected ecosystem. Mirrors verdict.ecosystem so
 	// patch.go's prover loop can disambiguate env-failure from
 	// fix-rejected without re-running detection.
-	ecosystem sandbox.Ecosystem
+	ecosystem ecosystem.Ecosystem
 }
 
 // patchVerdict interprets a sandbox result in the patch-prover
@@ -608,7 +609,7 @@ func patchVerdict(res sandbox.Result, cmd []string) patchVerdictResult {
 	if res.InfraKilled() {
 		summary := trunc(out, 400)
 		if res.WorkspaceQuotaExceeded {
-			summary = res.KillReason() + ": " + summary
+			summary = sandboxenv.KillReason(res) + ": " + summary
 		}
 		return patchVerdictResult{kind: patchVerdictEnvFailure, summary: summary, ecosystem: eco.name}
 	}
@@ -624,7 +625,7 @@ func patchVerdict(res sandbox.Result, cmd []string) patchVerdictResult {
 	// would otherwise be misread as an environment failure. Exit 0 (passed) and
 	// 125/126/127 (env) were handled above; exit 3 means the suite still FAILS,
 	// i.e. the fix did not work.
-	if eco.name == sandbox.EcosystemBazel {
+	if eco.name == ecosystem.EcosystemBazel {
 		low := strings.ToLower(out)
 		switch {
 		case hasAnyMarker(low, bazelEnvMarkers):

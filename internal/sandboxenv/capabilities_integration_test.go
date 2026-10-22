@@ -1,10 +1,13 @@
 //go:build integration
 
-package sandbox
+package sandboxenv
 
 import (
 	"context"
 	"testing"
+
+	"github.com/dpoage/bugbot/internal/config"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestProbeCapabilitiesIntegration_GoImage verifies that the Go official image
@@ -12,9 +15,9 @@ import (
 // minimal Go-only slim image does not.
 //
 // Requires podman or docker on PATH and network access to pull images.
-// Run with: go test -tags=integration ./internal/sandbox/...
+// Run with: go test -tags=integration ./internal/sandboxenv/...
 func TestProbeCapabilitiesIntegration_GoImage(t *testing.T) {
-	runtime, ok := Detect()
+	runtime, ok := sandbox.Detect()
 	if !ok {
 		t.Skip("no container runtime (podman/docker) on PATH")
 	}
@@ -24,12 +27,14 @@ func TestProbeCapabilitiesIntegration_GoImage(t *testing.T) {
 
 	t.Run("golang_official_race_available", func(t *testing.T) {
 		const goImage = "docker.io/library/golang:1.22-bookworm"
-		InvalidateCapabilityCache(goImage)
-		sb, err := NewCLI(runtime, goImage)
+		sb, err := sandbox.NewCLI(sandbox.WithRuntime(runtime), sandbox.WithImage(goImage))
 		if err != nil {
 			t.Fatalf("NewCLI: %v", err)
 		}
-		cs := ProbeCapabilities(ctx, sb, goImage, repoDir, nil, nil, nil)
+		cs, err := ProbeCapabilities(ctx, sb, config.Sandbox{Image: goImage}, sandbox.Spec{RepoDir: repoDir})
+		if err != nil {
+			t.Fatalf("ProbeCapabilities: %v", err)
+		}
 		if !cs.Available("go", "race") {
 			t.Errorf("expected race=true for %s, got caps=%v", goImage, cs)
 		}
@@ -37,12 +42,14 @@ func TestProbeCapabilitiesIntegration_GoImage(t *testing.T) {
 
 	t.Run("debian_slim_race_unavailable", func(t *testing.T) {
 		const slimImage = "docker.io/library/debian:stable-slim"
-		InvalidateCapabilityCache(slimImage)
-		sb, err := NewCLI(runtime, slimImage)
+		sb, err := sandbox.NewCLI(sandbox.WithRuntime(runtime), sandbox.WithImage(slimImage))
 		if err != nil {
 			t.Fatalf("NewCLI: %v", err)
 		}
-		cs := ProbeCapabilities(ctx, sb, slimImage, repoDir, nil, nil, nil)
+		cs, err := ProbeCapabilities(ctx, sb, config.Sandbox{Image: slimImage}, sandbox.Spec{RepoDir: repoDir})
+		if err != nil {
+			t.Fatalf("ProbeCapabilities: %v", err)
+		}
 		if cs.Available("go", "race") {
 			t.Errorf("expected race=false for %s (no Go toolchain), got caps=%v", slimImage, cs)
 		}

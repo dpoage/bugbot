@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // workspaceIntegrationImage matches patch_integration_test.go's image so both
@@ -48,7 +48,7 @@ func TestIntegration_WorkspaceFixesCompileErrorWithinOneAttempt(t *testing.T) {
 	if _, ok := sandbox.Detect(); !ok {
 		t.Skip("no container runtime (podman/docker) detected")
 	}
-	sb, err := sandbox.NewCLI("", workspaceIntegrationImage)
+	sb, err := sandbox.NewCLI(sandbox.WithImage(workspaceIntegrationImage))
 	if err != nil {
 		t.Skipf("sandbox unavailable: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestIntegration_WorkspaceCleanRoomIndependence(t *testing.T) {
 	if _, ok := sandbox.Detect(); !ok {
 		t.Skip("no container runtime (podman/docker) detected")
 	}
-	sb, err := sandbox.NewCLI("", workspaceIntegrationImage)
+	sb, err := sandbox.NewCLI(sandbox.WithImage(workspaceIntegrationImage))
 	if err != nil {
 		t.Skipf("sandbox unavailable: %v", err)
 	}

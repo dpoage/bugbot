@@ -9,7 +9,7 @@
 // It skips automatically when a prerequisite is missing (no container runtime,
 // no bazel/bazelisk, no resolvable repository cache) rather than failing: the
 // recipe needs a real toolchain on the host, mirroring
-// internal/sandbox/*_integration_test.go.
+// internal/sandboxenv/*_integration_test.go.
 package cli
 
 import (
@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 func TestSandboxBuildRun_EndToEnd(t *testing.T) {

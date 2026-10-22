@@ -1,7 +1,8 @@
-package sandbox
+package sandboxenv
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // writeFile is a tiny helper that creates parent dirs and writes a file.
@@ -50,7 +53,7 @@ func assertGoBuildScratch(t *testing.T, res Resolution) {
 func TestResolveDepsNoGoModule(t *testing.T) {
 	dir := t.TempDir() // no go.mod
 	for _, strat := range []DepStrategy{DepStrategyOff, DepStrategyHost, DepStrategyFetch} {
-		res, err := ResolveDeps(dir, DepOptions{Strategy: strat, FetchSandbox: NewMock(MockResponse{})})
+		res, err := ResolveDeps(dir, DepOptions{Strategy: strat, FetchSandbox: sandbox.NewMock(sandbox.MockResponse{})})
 		if err != nil {
 			t.Fatalf("strategy %q: unexpected error: %v", strat, err)
 		}
@@ -69,7 +72,7 @@ func TestResolveDepsVendoredWinsInAllModes(t *testing.T) {
 		writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
 		writeFile(t, filepath.Join(dir, "vendor", "modules.txt"), "# x\n")
 
-		res, err := ResolveDeps(dir, DepOptions{Strategy: strat, FetchSandbox: NewMock(MockResponse{})})
+		res, err := ResolveDeps(dir, DepOptions{Strategy: strat, FetchSandbox: sandbox.NewMock(sandbox.MockResponse{})})
 		if err != nil {
 			t.Fatalf("strategy %q: %v", strat, err)
 		}
@@ -124,7 +127,7 @@ func TestResolveDepsGoBuildScratchAllStrategies(t *testing.T) {
 	}{
 		{"off", DepOptions{Strategy: DepStrategyOff}},
 		{"host", DepOptions{Strategy: DepStrategyHost, hostModcache: cache}},
-		{"fetch", DepOptions{Strategy: DepStrategyFetch, FetchSandbox: NewMock(MockResponse{Result: Result{ExitCode: 0}}), userCacheDir: cacheBase}},
+		{"fetch", DepOptions{Strategy: DepStrategyFetch, FetchSandbox: sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}}), userCacheDir: cacheBase}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -172,7 +175,7 @@ func TestResolveDepsHostMountsCache(t *testing.T) {
 		t.Fatalf("ResolveDeps: %v", err)
 	}
 	if len(res.ROMounts) != 1 {
-		t.Fatalf("want 1 ROMount, got %d", len(res.ROMounts))
+		t.Fatalf("want 1 sandbox.ROMount, got %d", len(res.ROMounts))
 	}
 	m := res.ROMounts[0]
 	if m.HostPath != cache || m.ContainerPath != modcacheMount {
@@ -182,7 +185,7 @@ func TestResolveDepsHostMountsCache(t *testing.T) {
 	// avoid corrupting the user's shared Go module cache on SELinux-enforcing
 	// hosts (Fedora/RHEL).
 	if !m.Shared {
-		t.Errorf("host strategy ROMount.Shared = false; want true to suppress :Z relabel on shared host cache")
+		t.Errorf("host strategy sandbox.ROMount.Shared = false; want true to suppress :Z relabel on shared host cache")
 	}
 	for _, want := range []string{"GOMODCACHE=" + modcacheMount, "GOFLAGS=-mod=mod", "GOPROXY=off"} {
 		if !envHas(res.Env, want) {
@@ -236,7 +239,7 @@ func TestResolveDepsFetchMountsAndPrefetches(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "go.sum"), "example.com/x v1.0.0 h1:abc\n")
 	cacheBase := t.TempDir()
 
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := ResolveDeps(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -255,7 +258,7 @@ func TestResolveDepsFetchMountsAndPrefetches(t *testing.T) {
 	// Fetch strategy: the mount must be Shared=false (gets :Z) because the
 	// fetch cache is a bugbot-owned directory, not a shared host resource.
 	if res.ROMounts[0].Shared {
-		t.Errorf("fetch strategy ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
+		t.Errorf("fetch strategy sandbox.ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
 	}
 	for _, want := range []string{"GOMODCACHE=" + modcacheMount, "GOPROXY=off"} {
 		if !envHas(res.Env, want) {
@@ -304,7 +307,7 @@ func TestResolveDepsFetchSkipsWhenCacheWarm(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "go.sum"), "example.com/x v1.0.0 h1:abc\n")
 	cacheBase := t.TempDir()
 
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 	res, err := ResolveDeps(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
 	if err != nil {
 		t.Fatalf("ResolveDeps: %v", err)
@@ -336,7 +339,7 @@ func TestResolveDepsFetchPrefetchSurfacesFailure(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "go.sum"), "example.com/x v1.0.0 h1:abc\n")
 	cacheBase := t.TempDir()
 
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 1, Stderr: "no internet"}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stderr: "no internet"}})
 	res, err := ResolveDeps(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
 	if err != nil {
 		t.Fatalf("ResolveDeps: %v", err)
@@ -448,13 +451,13 @@ func TestResolveWith_MultiEcosystem(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "go.mod"), "module x\n")
 	writeFile(t, filepath.Join(dir, "package.json"), "{}")
 
-	goMount := ROMount{HostPath: "/go-cache", ContainerPath: "/modcache"}
-	jsMount := ROMount{HostPath: "/js-cache", ContainerPath: "/jscache"}
+	goMount := sandbox.ROMount{HostPath: "/go-cache", ContainerPath: "/modcache"}
+	jsMount := sandbox.ROMount{HostPath: "/js-cache", ContainerPath: "/jscache"}
 
 	var prefetchOrder []string
 
 	goEco := testEcosystem("go", "go.mod", Resolution{
-		ROMounts:  []ROMount{goMount},
+		ROMounts:  []sandbox.ROMount{goMount},
 		Env:       []string{"GOMODCACHE=/modcache"},
 		SetupCmds: nil, // Go contributes none
 		Strategy:  DepStrategyHost,
@@ -464,7 +467,7 @@ func TestResolveWith_MultiEcosystem(t *testing.T) {
 	})
 
 	jsEco := testEcosystem("js", "package.json", Resolution{
-		ROMounts:  []ROMount{jsMount},
+		ROMounts:  []sandbox.ROMount{jsMount},
 		Env:       []string{"NPM_CONFIG_CACHE=/jscache"},
 		SetupCmds: [][]string{{"npm", "ci", "--offline"}},
 		Strategy:  DepStrategy("npm"),
@@ -652,7 +655,7 @@ func TestPythonResolveFetchShape(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\npytest==8.0.0\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolvePython(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -675,7 +678,7 @@ func TestPythonResolveFetchShape(t *testing.T) {
 		t.Errorf("pip cache %q should live under user cache base %q", m.HostPath, cacheBase)
 	}
 	if m.Shared {
-		t.Error("Python FETCH ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
+		t.Error("Python FETCH sandbox.ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
 	}
 
 	// PIP_NO_INDEX=1 must be in env (offline enforcement).
@@ -708,7 +711,7 @@ func TestPythonResolveFetchPrefetchSpec(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolvePython(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -754,7 +757,7 @@ func TestPythonPrefetchSentinelSkip(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolvePython(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
 	if err != nil {
@@ -797,7 +800,7 @@ func TestPythonFetchRequiresSandbox(t *testing.T) {
 // vetting closes three concrete --only-binary=:all: bypasses: a direct
 // URL/sdist line, a bare local-path line, and a "--no-binary" option line
 // embedded in requirements.txt (which pip honors even though it was never
-// on the CLI, silently overriding --only-binary). It also proves nested
+// on the sandbox.CLI, silently overriding --only-binary). It also proves nested
 // -r/-c includes and editable installs are rejected (unsupported in v1) and
 // that a rejected manifest never launches a container at all — ResolveDeps
 // fails BEFORE any Prefetch hook is constructed.
@@ -823,7 +826,7 @@ func TestValidatePipRequirementsRejectsBypasses(t *testing.T) {
 			content: "/repo/vendor/malicious-pkg\n",
 		},
 		{
-			name:    "--no-binary option line overrides CLI --only-binary",
+			name:    "--no-binary option line overrides sandbox.CLI --only-binary",
 			content: "six==1.16.0\n--no-binary :all:\n",
 		},
 		{
@@ -860,7 +863,7 @@ func TestValidatePipRequirementsRejectsBypasses(t *testing.T) {
 			dir := t.TempDir()
 			writeFile(t, filepath.Join(dir, "requirements.txt"), tc.content)
 			cacheBase := t.TempDir()
-			mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+			mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 			// bugbot-gu0o C2: a rejected manifest degrades Python to OFF
 			// with a named Warning, not a hard error — see resolvePython's
@@ -901,7 +904,7 @@ func TestValidatePipRequirementsRejectsSymlinkedManifest(t *testing.T) {
 		t.Fatalf("os.Symlink: %v", err)
 	}
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolvePython(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -940,7 +943,7 @@ func TestPythonInvalidManifestDoesNotAbortWholeRepo(t *testing.T) {
 	// this is Oracle A's exact polyglot canary shape.
 	writeFile(t, filepath.Join(dir, "requirements.txt"), "-r requirements/base.txt\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := ResolveDeps(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -988,7 +991,7 @@ func TestValidatePipRequirementsRecursesIncludes(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "requirements.txt"), "-r requirements/base.txt\nrequests==2.31.0\n")
 	writeFile(t, filepath.Join(dir, "requirements", "base.txt"), "six==1.16.0\npytest\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolvePython(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -1053,7 +1056,7 @@ func TestValidatePipRequirementsAcceptsDiamondInclude(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "test.txt"), "-r base.txt\npytest\n")
 	writeFile(t, filepath.Join(dir, "base.txt"), "requests==2.31.0\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolvePython(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -1090,7 +1093,7 @@ func TestValidatePipRequirementsAcceptsDeepIncludeChain(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(dir, "requirements.txt"), "-r level0.txt\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolvePython(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -1111,7 +1114,7 @@ func TestValidatePipRequirementsAcceptsDeepIncludeChain(t *testing.T) {
 // --extra-index-url in any form are ALWAYS rejected, never accepted as
 // tightening options. The critical case is "--only-binary=:none:": pip's
 // FormatControl treats ":none:" as CLEAR-the-set, so an in-manifest
-// "--only-binary=:none:" CANCELS the CLI's --only-binary=:all: entirely —
+// "--only-binary=:none:" CANCELS the sandbox.CLI's --only-binary=:all: entirely —
 // a prior version of this validator's allow-list accepted this and let a
 // full online sdist build (and setup.py execution) through to a poisoned,
 // permanently-sentinel-warmed wheelhouse.
@@ -1120,10 +1123,10 @@ func TestValidatePipRequirementsRejectsOnlyBinaryAndIndexOptions(t *testing.T) {
 		name    string
 		content string
 	}{
-		{name: "only-binary :none: clears the CLI --only-binary=:all:", content: "six==1.16.0\n--only-binary=:none:\n"},
+		{name: "only-binary :none: clears the sandbox.CLI --only-binary=:all:", content: "six==1.16.0\n--only-binary=:none:\n"},
 		{name: "only-binary :all:,:none: still clears via trailing :none:", content: "six==1.16.0\n--only-binary=:all:,:none:\n"},
 		{name: "only-binary :none:,six", content: "six==1.16.0\n--only-binary=:none:,six\n"},
-		{name: "only-binary :all: alone, no legitimate need for a manifest to repeat the CLI flag", content: "six==1.16.0\n--only-binary=:all:\n"},
+		{name: "only-binary :all: alone, no legitimate need for a manifest to repeat the sandbox.CLI flag", content: "six==1.16.0\n--only-binary=:all:\n"},
 		{name: "index-url redirects cache provenance to an attacker-chosen source", content: "six==1.16.0\n--index-url=https://evil.example.com/simple\n"},
 		{name: "extra-index-url same provenance risk as index-url", content: "six==1.16.0\n--extra-index-url=https://evil.example.com/simple\n"},
 	}
@@ -1132,7 +1135,7 @@ func TestValidatePipRequirementsRejectsOnlyBinaryAndIndexOptions(t *testing.T) {
 			dir := t.TempDir()
 			writeFile(t, filepath.Join(dir, "requirements.txt"), tc.content)
 			cacheBase := t.TempDir()
-			mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+			mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 			res, err := resolvePython(dir, DepOptions{
 				Strategy:     DepStrategyFetch,
@@ -1160,7 +1163,7 @@ func TestValidatePipRequirementsRejectsOnlyBinaryAndIndexOptions(t *testing.T) {
 func assertPythonDegradesToOff(t *testing.T, dir string) {
 	t.Helper()
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 	res, err := resolvePython(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
 		FetchSandbox: mock,
@@ -1198,7 +1201,7 @@ func TestValidatePipRequirementsAllowsOrdinaryPins(t *testing.T) {
 			"    --hash=sha256:0569859f95fc761b18b45ef421b1290a0f65f147e92a1e5eb3e635f9a83c3c3 \\\n"+
 			"    --hash=sha256:dc383c07b76109f368f6106eee2b593b04a010991828b56be55d69017c60347\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolvePython(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -1260,7 +1263,7 @@ func TestValidatePipRequirementsRejectsEveryArchiveExtension(t *testing.T) {
 			dir := t.TempDir()
 			writeFile(t, filepath.Join(dir, "requirements.txt"), "evilpkg-0.0.1"+suf+"\n")
 			cacheBase := t.TempDir()
-			mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+			mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 			res, err := resolvePython(dir, DepOptions{
 				Strategy:     DepStrategyFetch,
@@ -1295,7 +1298,7 @@ func TestMultiEcosystemComposition(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "go.sum"), "example.com/x v1.0.0 h1:abc\n")
 	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\npytest==8.0.0\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := ResolveDeps(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -1369,13 +1372,13 @@ func TestMultiEcosystemComposition(t *testing.T) {
 // appended to the Resolution.ROMounts regardless of ecosystem or dep strategy.
 func TestResolveDepsLocalMounts(t *testing.T) {
 	hostDir := t.TempDir()
-	mount := ROMount{HostPath: hostDir, ContainerPath: "/sibling", Shared: true}
+	mount := sandbox.ROMount{HostPath: hostDir, ContainerPath: "/sibling", Shared: true}
 
 	t.Run("off strategy no go.mod still gets local mounts", func(t *testing.T) {
 		dir := t.TempDir() // no go.mod
 		res, err := ResolveDeps(dir, DepOptions{
 			Strategy:    DepStrategyOff,
-			LocalMounts: []ROMount{mount},
+			LocalMounts: []sandbox.ROMount{mount},
 		})
 		if err != nil {
 			t.Fatalf("ResolveDeps: %v", err)
@@ -1395,7 +1398,7 @@ func TestResolveDepsLocalMounts(t *testing.T) {
 		res, err := ResolveDeps(dir, DepOptions{
 			Strategy:     DepStrategyHost,
 			hostModcache: cache,
-			LocalMounts:  []ROMount{mount},
+			LocalMounts:  []sandbox.ROMount{mount},
 		})
 		if err != nil {
 			t.Fatalf("ResolveDeps: %v", err)
@@ -1426,9 +1429,9 @@ func TestResolveDepsLocalMounts(t *testing.T) {
 		cacheBase := t.TempDir()
 		res, err := ResolveDeps(dir, DepOptions{
 			Strategy:     DepStrategyFetch,
-			FetchSandbox: NewMock(MockResponse{Result: Result{ExitCode: 0}}),
+			FetchSandbox: sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}}),
 			userCacheDir: cacheBase,
-			LocalMounts:  []ROMount{mount},
+			LocalMounts:  []sandbox.ROMount{mount},
 		})
 		if err != nil {
 			t.Fatalf("ResolveDeps: %v", err)
@@ -1456,7 +1459,7 @@ func TestResolveDepsLocalMounts(t *testing.T) {
 		hostDir2 := t.TempDir()
 		res, err := ResolveDeps(dir, DepOptions{
 			Strategy: DepStrategyOff,
-			LocalMounts: []ROMount{
+			LocalMounts: []sandbox.ROMount{
 				{HostPath: hostDir, ContainerPath: "/sibling1", Shared: true},
 				{HostPath: hostDir2, ContainerPath: "/sibling2", Shared: true},
 			},
@@ -1482,7 +1485,7 @@ func TestResolveDepsLocalMountsOrderAfterEcosystem(t *testing.T) {
 	res, err := ResolveDeps(dir, DepOptions{
 		Strategy:     DepStrategyHost,
 		hostModcache: cache,
-		LocalMounts:  []ROMount{{HostPath: hostDir, ContainerPath: "/sibling", Shared: true}},
+		LocalMounts:  []sandbox.ROMount{{HostPath: hostDir, ContainerPath: "/sibling", Shared: true}},
 	})
 	if err != nil {
 		t.Fatalf("ResolveDeps: %v", err)
@@ -1514,8 +1517,8 @@ func TestResolveDepsLocalMountsOrderAfterEcosystem(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestResolveDepsHostToolchains verifies HostToolchains resolve into
-// Resolution.ROMounts/Env/Fingerprints, compose with LocalMounts, and are a
-// no-op when unconfigured or unresolvable.
+// Resolution.Fingerprints only (the backend mounts them), compose with
+// LocalMounts, and are a no-op when unconfigured or unresolvable.
 func TestResolveDepsHostToolchains(t *testing.T) {
 	t.Run("unconfigured: no-op", func(t *testing.T) {
 		dir := t.TempDir()
@@ -1528,34 +1531,24 @@ func TestResolveDepsHostToolchains(t *testing.T) {
 		}
 	})
 
-	t.Run("explicit dir toolchain mounts and fingerprints", func(t *testing.T) {
+	t.Run("explicit dir toolchain: fingerprint only, no Spec mount", func(t *testing.T) {
 		dir := t.TempDir()
 		tcDir := t.TempDir()
 		res, err := ResolveDeps(dir, DepOptions{
 			Strategy:       DepStrategyOff,
-			LocalMounts:    []ROMount{{HostPath: t.TempDir(), ContainerPath: "/sibling", Shared: true}},
+			LocalMounts:    []sandbox.ROMount{{HostPath: t.TempDir(), ContainerPath: "/sibling", Shared: true}},
 			HostToolchains: []string{tcDir},
 		})
 		if err != nil {
 			t.Fatalf("ResolveDeps: %v", err)
 		}
-		var hasToolchain, hasSibling bool
-		for _, m := range res.ROMounts {
-			if m.HostPath == tcDir {
-				hasToolchain = true
-				if !m.Shared {
-					t.Error("host toolchain mount must have Shared=true")
-				}
-			}
-			if m.ContainerPath == "/sibling" {
-				hasSibling = true
-			}
+		if len(res.ROMounts) != 1 || res.ROMounts[0].ContainerPath != "/sibling" {
+			t.Errorf("ROMounts = %+v, want only the /sibling local mount (toolchains are the backend's)", res.ROMounts)
 		}
-		if !hasToolchain {
-			t.Errorf("missing host toolchain mount for %q; mounts=%+v", tcDir, res.ROMounts)
-		}
-		if !hasSibling {
-			t.Errorf("host toolchain resolution must compose with LocalMounts; mounts=%+v", res.ROMounts)
+		for _, e := range res.Env {
+			if strings.HasPrefix(e, "PATH=") {
+				t.Errorf("Env carries %q; the backend composes PATH", e)
+			}
 		}
 		if len(res.Fingerprints) != 1 || res.Fingerprints[0].Path != tcDir {
 			t.Errorf("Fingerprints = %+v, want one entry for %q", res.Fingerprints, tcDir)
@@ -1595,7 +1588,7 @@ func TestOperatorSetupCmdsOrderBeforeEcosystem(t *testing.T) {
 	// Simulate: Python FETCH resolution produces SetupCmds (pip install).
 	res, err := ResolveDeps(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
-		FetchSandbox: NewMock(MockResponse{Result: Result{ExitCode: 0}}),
+		FetchSandbox: sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}}),
 		userCacheDir: cacheBase,
 	})
 	if err != nil {
@@ -1761,7 +1754,7 @@ func TestCargoResolveHostMount(t *testing.T) {
 
 	// Must have exactly one RO mount.
 	if len(res.ROMounts) != 1 {
-		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+		t.Fatalf("want 1 sandbox.ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
 	}
 	m := res.ROMounts[0]
 
@@ -1791,7 +1784,7 @@ func TestCargoResolveHostMount(t *testing.T) {
 
 	// Shared=true: host-owned dir must NOT receive :Z relabel.
 	if !m.Shared {
-		t.Errorf("host strategy ROMount.Shared = false; want true to suppress :Z relabel on shared host Cargo registry")
+		t.Errorf("host strategy sandbox.ROMount.Shared = false; want true to suppress :Z relabel on shared host Cargo registry")
 	}
 
 	// Required env vars.
@@ -1831,7 +1824,7 @@ func TestCargoResolveFetchShape(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolveCargo(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -1844,7 +1837,7 @@ func TestCargoResolveFetchShape(t *testing.T) {
 
 	// Must have exactly one RO mount at /cargo/registry, bugbot-owned.
 	if len(res.ROMounts) != 1 {
-		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+		t.Fatalf("want 1 sandbox.ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
 	}
 	m := res.ROMounts[0]
 	if m.ContainerPath != cargoRegistryMount {
@@ -1855,7 +1848,7 @@ func TestCargoResolveFetchShape(t *testing.T) {
 	}
 	// Fetch cache is bugbot-owned: Shared=false (:Z isolation correct).
 	if m.Shared {
-		t.Error("Cargo FETCH ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
+		t.Error("Cargo FETCH sandbox.ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
 	}
 
 	for _, want := range []string{"CARGO_NET_OFFLINE=true", "CARGO_HOME=" + cargoCacheMount} {
@@ -1878,7 +1871,7 @@ func TestCargoResolveFetchPrefetchSpec(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n")
 	// No Cargo.lock → fetch without --locked.
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolveCargo(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -1919,7 +1912,7 @@ func TestCargoResolveFetchWithLockfile(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n")
 	writeFile(t, filepath.Join(dir, "Cargo.lock"), "# lockfile\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolveCargo(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -1949,7 +1942,7 @@ func TestCargoFetchSentinelKeyedOnCargoLock(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n")
 	writeFile(t, filepath.Join(dir, "Cargo.lock"), "v1\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	// First fetch — populates sentinel keyed on "v1" lockfile.
 	res, err := resolveCargo(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
@@ -2156,7 +2149,7 @@ func TestJSResolveNoLockfileIsOff(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
 	// Deliberately no package-lock.json.
 
-	res, err := resolveJS(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: NewMock(MockResponse{Result: Result{ExitCode: 0}})})
+	res, err := resolveJS(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})})
 	if err != nil {
 		t.Fatalf("resolveJS FETCH (no lockfile): %v", err)
 	}
@@ -2172,7 +2165,7 @@ func TestJSResolveFetchShape(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x","dependencies":{"lodash":"4.17.21"}}`+"\n")
 	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"lockfileVersion":2}`+"\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolveJS(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -2195,7 +2188,7 @@ func TestJSResolveFetchShape(t *testing.T) {
 		t.Errorf("npm cache %q should live under user cache base %q", m.HostPath, cacheBase)
 	}
 	if m.Shared {
-		t.Error("JS FETCH ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
+		t.Error("JS FETCH sandbox.ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
 	}
 
 	// npm_config_offline=true must be in env.
@@ -2232,7 +2225,7 @@ func TestJSResolveFetchPrefetchSpec(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
 	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"lockfileVersion":2}`+"\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolveJS(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -2253,7 +2246,7 @@ func TestJSResolveFetchPrefetchSpec(t *testing.T) {
 	if spec.Network == "" || spec.Network == "none" {
 		t.Errorf("prefetch network = %q, want a real network (not none/empty)", spec.Network)
 	}
-	// SECURITY: --ignore-scripts is MANDATORY in the prefetch Spec.
+	// SECURITY: --ignore-scripts is MANDATORY in the prefetch sandbox.Spec.
 	if !slices.Contains(spec.Cmd, "--ignore-scripts") {
 		t.Errorf("SECURITY: prefetch Cmd %v missing --ignore-scripts; npm lifecycle scripts must not run in the online (network-enabled) prefetch container", spec.Cmd)
 	}
@@ -2277,7 +2270,7 @@ func TestJSResolveFetchPrefetchSpec(t *testing.T) {
 // TestEcosystemPrefetchSecurityFlags pins the no-script-exec security flags
 // (bugbot-gu0o acceptance #4) at the SINGLE enforcement point every
 // ecosystem now shares: runEcosystemPrefetch. Before the collapse, each
-// ecosystem carried its own runXPrefetch copy of the Spec-build logic, and
+// ecosystem carried its own runXPrefetch copy of the sandbox.Spec-build logic, and
 // only npm remembered its flag (the original bug). This test exercises the
 // full resolve → Prefetch → runEcosystemPrefetch → Exec path for every
 // ecosystem that has a real script-exec control, and fails if a future edit
@@ -2312,7 +2305,7 @@ func TestEcosystemPrefetchSecurityFlags(t *testing.T) {
 			dir := t.TempDir()
 			tc.setup(t, dir)
 			cacheBase := t.TempDir()
-			mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+			mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 			res, err := tc.resolve(dir, DepOptions{
 				Strategy:     DepStrategyFetch,
 				FetchSandbox: mock,
@@ -2345,7 +2338,7 @@ func TestJSPrefetchSentinelKeyedOnPackageLock(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
 	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"lockfileVersion":2,"v":"1"}`+"\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	// First fetch.
 	res, err := resolveJS(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
@@ -2414,7 +2407,7 @@ func TestResolveDeps_JS_GlobalTable(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
 	writeFile(t, filepath.Join(dir, "package-lock.json"), `{"lockfileVersion":2}`+"\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	// ResolveDeps → resolveWith(ecosystems, ...) → ecosystems[3].resolve(...)
 	// If ecosystems[3].resolve is nil this panics; if --ignore-scripts is absent
@@ -2511,7 +2504,7 @@ func TestNuGetResolveHostMount(t *testing.T) {
 
 	// Must have exactly one RO mount.
 	if len(res.ROMounts) != 1 {
-		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+		t.Fatalf("want 1 sandbox.ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
 	}
 	m := res.ROMounts[0]
 
@@ -2524,7 +2517,7 @@ func TestNuGetResolveHostMount(t *testing.T) {
 
 	// Shared=true: host-owned dir must NOT receive :Z relabel.
 	if !m.Shared {
-		t.Errorf("host strategy ROMount.Shared = false; want true to suppress :Z relabel on shared host NuGet packages dir")
+		t.Errorf("host strategy sandbox.ROMount.Shared = false; want true to suppress :Z relabel on shared host NuGet packages dir")
 	}
 
 	// Required env var.
@@ -2562,7 +2555,7 @@ func TestNuGetResolveFetchShape(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "hello.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolveNuGet(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -2575,7 +2568,7 @@ func TestNuGetResolveFetchShape(t *testing.T) {
 
 	// Must have exactly one RO mount at /nugetcache, bugbot-owned.
 	if len(res.ROMounts) != 1 {
-		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+		t.Fatalf("want 1 sandbox.ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
 	}
 	m := res.ROMounts[0]
 	if m.ContainerPath != nugetCacheMount {
@@ -2586,7 +2579,7 @@ func TestNuGetResolveFetchShape(t *testing.T) {
 	}
 	// Fetch cache is bugbot-owned: Shared=false (:Z isolation correct).
 	if m.Shared {
-		t.Error("NuGet FETCH ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
+		t.Error("NuGet FETCH sandbox.ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
 	}
 
 	if !envHas(res.Env, "NUGET_PACKAGES="+nugetCacheMount) {
@@ -2610,7 +2603,7 @@ func TestNuGetResolveFetchPrefetchSpec(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "hello.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
 	// No packages.lock.json → restore without --locked-mode.
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolveNuGet(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -2656,7 +2649,7 @@ func TestNuGetResolveFetchWithLockfile(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "hello.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
 	writeFile(t, filepath.Join(dir, "packages.lock.json"), "{}\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolveNuGet(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -2688,7 +2681,7 @@ func TestNuGetFetchSentinelKeyedOnLock(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "hello.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"/>\n")
 	writeFile(t, filepath.Join(dir, "packages.lock.json"), "v1\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	// First fetch — populates sentinel keyed on "v1" lockfile.
 	res, err := resolveNuGet(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
@@ -2740,7 +2733,7 @@ func TestNuGetFetchSentinelKeyedOnProjectFiles(t *testing.T) {
 	proj := filepath.Join(dir, "app.fsproj")
 	writeFile(t, proj, "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><PackageReference Include=\"Foo\" Version=\"1.0.0\"/></ItemGroup></Project>\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	// First fetch — populates the sentinel keyed on the .fsproj hash.
 	res, err := resolveNuGet(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
@@ -2842,7 +2835,7 @@ func TestMavenResolveHostMount(t *testing.T) {
 	}
 
 	if len(res.ROMounts) != 1 {
-		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+		t.Fatalf("want 1 sandbox.ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
 	}
 	m := res.ROMounts[0]
 	if m.ContainerPath != m2CacheMount {
@@ -2853,7 +2846,7 @@ func TestMavenResolveHostMount(t *testing.T) {
 	}
 	// Shared=true: host-owned dir must NOT receive :Z relabel.
 	if !m.Shared {
-		t.Error("host strategy ROMount.Shared = false; want true to suppress :Z relabel on shared host Maven repository")
+		t.Error("host strategy sandbox.ROMount.Shared = false; want true to suppress :Z relabel on shared host Maven repository")
 	}
 
 	wantEnv := "MAVEN_OPTS=-Dmaven.repo.local=" + m2CacheMount
@@ -2890,7 +2883,7 @@ func TestMavenResolveFetchShape(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pom.xml"), "<project/>\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolveMaven(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -2902,7 +2895,7 @@ func TestMavenResolveFetchShape(t *testing.T) {
 	}
 
 	if len(res.ROMounts) != 1 {
-		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+		t.Fatalf("want 1 sandbox.ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
 	}
 	m := res.ROMounts[0]
 	if m.ContainerPath != m2CacheMount {
@@ -2912,7 +2905,7 @@ func TestMavenResolveFetchShape(t *testing.T) {
 		t.Errorf("maven cache %q should live under user cache base %q", m.HostPath, cacheBase)
 	}
 	if m.Shared {
-		t.Error("Maven FETCH ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
+		t.Error("Maven FETCH sandbox.ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
 	}
 
 	wantEnv := "MAVEN_OPTS=-Dmaven.repo.local=" + m2CacheMount
@@ -2936,7 +2929,7 @@ func TestMavenResolveFetchPrefetchSpec(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pom.xml"), "<project/>\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolveMaven(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -2989,7 +2982,7 @@ func TestMavenFetchSentinelKeyedOnPom(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pom.xml"), "<project><version>1.0</version></project>\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	// First fetch — populates sentinel keyed on pom.xml v1.
 	res, err := resolveMaven(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
@@ -3102,7 +3095,7 @@ func TestGradleResolveFetchShape(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "build.gradle"), "// gradle\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolveGradle(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -3115,7 +3108,7 @@ func TestGradleResolveFetchShape(t *testing.T) {
 
 	// Must have exactly one RO mount at /gradlecache, bugbot-owned.
 	if len(res.ROMounts) != 1 {
-		t.Fatalf("want 1 ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
+		t.Fatalf("want 1 sandbox.ROMount, got %d: %+v", len(res.ROMounts), res.ROMounts)
 	}
 	m := res.ROMounts[0]
 	if m.ContainerPath != gradleCacheMount {
@@ -3125,7 +3118,7 @@ func TestGradleResolveFetchShape(t *testing.T) {
 		t.Errorf("gradle cache %q should live under user cache base %q", m.HostPath, cacheBase)
 	}
 	if m.Shared {
-		t.Error("Gradle FETCH ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
+		t.Error("Gradle FETCH sandbox.ROMount.Shared = true; want false (bugbot-owned dir should get :Z isolation)")
 	}
 
 	// GRADLE_USER_HOME must point at the disk-backed workspace copy, not /tmp
@@ -3172,7 +3165,7 @@ func TestGradleResolveFetchPrefetchSpec(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "build.gradle"), "// gradle\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolveGradle(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -3254,7 +3247,7 @@ func TestGradleFetchSentinelKeyedOnBuildFiles(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "build.gradle"), "// v1\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := resolveGradle(dir, DepOptions{Strategy: DepStrategyFetch, FetchSandbox: mock, userCacheDir: cacheBase})
 	if err != nil {
@@ -3313,7 +3306,7 @@ func TestResolveDeps_Maven_GlobalTable(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pom.xml"), "<project/>\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := ResolveDeps(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -3345,7 +3338,7 @@ func TestResolveDeps_Gradle_GlobalTable(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "build.gradle.kts"), "// gradle\n")
 	cacheBase := t.TempDir()
-	mock := NewMock(MockResponse{Result: Result{ExitCode: 0}})
+	mock := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0}})
 
 	res, err := ResolveDeps(dir, DepOptions{
 		Strategy:     DepStrategyFetch,
@@ -3371,31 +3364,14 @@ func TestResolveDeps_Gradle_GlobalTable(t *testing.T) {
 
 // ---- bugbot-48ya: bwrap dependency provisioning -----------------------------
 
-// newUnitBwrap constructs a Bwrap backend for the resolver unit tests below,
-// skipping when the backend is unusable on this host (bwrap absent, non-Linux,
-// or userns disabled) — the same self-skip discipline as the integration
-// suite's newTestBwrap (bwrap_integration_test.go), which is compiled out of
-// unit builds by its build tag. The tests below never Exec anything; they only
-// need a real *Bwrap for isBwrapFetchBackend's type assertion, but NewBwrap
-// fails fast on hosts without bubblewrap (e.g. CI runners), so skipping keeps
-// them consistent with every other bwrap-dependent test in this package.
-func newUnitBwrap(t *testing.T) *Bwrap {
-	t.Helper()
-	if ok, reason := DetectBwrap(); !ok {
-		t.Skipf("bwrap unavailable: %s", reason)
-	}
-	bw, err := NewBwrap()
-	if err != nil {
-		t.Skipf("NewBwrap: %v", err)
-	}
-	t.Cleanup(func() { _ = bw.Close() })
-	return bw
-}
+// newUnitBwrap returns a *sandbox.Bwrap for isBwrapFetchBackend's type
+// assertion; the resolver tests never Exec it.
+func newUnitBwrap(*testing.T) *sandbox.Bwrap { return &sandbox.Bwrap{} }
 
 // TestFetchPrefetchNetworkDefaults verifies fetchPrefetchNetwork's three-way
 // resolution: operator override always wins; the container backend (nil or
-// any non-bwrap Sandbox, e.g. Mock) keeps the byte-identical "bridge"
-// default (acceptance 5); a *Bwrap FetchSandbox resolves to "host" (bwrap
+// any non-bwrap sandbox.Sandbox, e.g. sandbox.Mock) keeps the byte-identical "bridge"
+// default (acceptance 5); a *sandbox.Bwrap FetchSandbox resolves to "host" (bwrap
 // has no "bridge" network).
 func TestFetchPrefetchNetworkDefaults(t *testing.T) {
 	bw := newUnitBwrap(t)
@@ -3403,12 +3379,12 @@ func TestFetchPrefetchNetworkDefaults(t *testing.T) {
 	cases := []struct {
 		name string
 		opts DepOptions
-		want string
+		want sandbox.NetworkMode
 	}{
-		{"container backend default", DepOptions{FetchSandbox: NewMock(MockResponse{})}, "bridge"},
+		{"container backend default", DepOptions{FetchSandbox: sandbox.NewMock(sandbox.MockResponse{})}, "bridge"},
 		{"nil FetchSandbox default", DepOptions{}, "bridge"},
 		{"bwrap backend default", DepOptions{FetchSandbox: bw}, "host"},
-		{"operator override wins over container", DepOptions{FetchSandbox: NewMock(MockResponse{}), FetchNetwork: "custom"}, "custom"},
+		{"operator override wins over container", DepOptions{FetchSandbox: sandbox.NewMock(sandbox.MockResponse{}), FetchNetwork: "custom"}, "custom"},
 		{"operator override wins over bwrap", DepOptions{FetchSandbox: bw, FetchNetwork: "none"}, "none"},
 	}
 	for _, tc := range cases {
@@ -3421,20 +3397,20 @@ func TestFetchPrefetchNetworkDefaults(t *testing.T) {
 }
 
 // TestGoPrefetchSpecUsesResolvedNetwork is a regression test proving the
-// resolved network actually reaches the prefetch Spec (not just the helper
-// in isolation): a *Bwrap FetchSandbox must produce a "host" network Spec,
-// never the container-only "bridge" bwrap's validateBwrapNetwork rejects.
+// resolved network actually reaches the prefetch sandbox.Spec (not just the helper
+// in isolation): a *sandbox.Bwrap FetchSandbox must produce a "host" network sandbox.Spec,
+// never the container-only "bridge" the bwrap backend refuses.
 func TestGoPrefetchSpecUsesResolvedNetwork(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "go.mod"), "module example.com/x\n\ngo 1.22\n")
 	writeFile(t, filepath.Join(dir, "go.sum"), "")
 	cacheBase := t.TempDir()
 
-	var gotNetwork string
-	mock := NewMock(MockResponse{})
-	mock.ResponseFunc = func(n int, spec Spec) (Result, error) {
+	var gotNetwork sandbox.NetworkMode
+	mock := sandbox.NewMock(sandbox.MockResponse{})
+	mock.ResponseFunc = func(_ context.Context, n int, spec sandbox.Spec) (sandbox.Result, error) {
 		gotNetwork = spec.Network
-		return Result{ExitCode: 0}, nil
+		return sandbox.Result{ExitCode: 0}, nil
 	}
 
 	bw := newUnitBwrap(t)
@@ -3454,25 +3430,20 @@ func TestGoPrefetchSpecUsesResolvedNetwork(t *testing.T) {
 		t.Errorf("container-backend prefetch network = %q, want %q (byte-identical, acceptance 5)", gotNetwork, "bridge")
 	}
 
-	if got := fetchPrefetchNetwork(DepOptions{FetchSandbox: bw}); got != "host" {
-		t.Errorf("bwrap prefetch network = %q, want %q", got, "host")
-	}
-	// bwrap's validateBwrapNetwork must accept the resolved value (it
-	// rejects anything other than ""/"none"/"host" — see acceptance 1).
-	if _, err := validateBwrapNetwork("host"); err != nil {
-		t.Errorf("validateBwrapNetwork(%q) must accept the bwrap prefetch network: %v", "host", err)
+	if got := fetchPrefetchNetwork(DepOptions{FetchSandbox: bw}); got != sandbox.NetworkHost {
+		t.Errorf("bwrap prefetch network = %q, want %q", got, sandbox.NetworkHost)
 	}
 }
 
 // TestPythonResolveHostIsOffForContainerBackend pins the container-backend
-// regression: Python HOST must stay OFF when FetchSandbox is not *Bwrap,
+// regression: Python HOST must stay OFF when FetchSandbox is not *sandbox.Bwrap,
 // exactly as before this bead (acceptance 5). See
 // TestPythonResolveHostIsOff for the nil-FetchSandbox case this complements.
 func TestPythonResolveHostIsOffForContainerBackend(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "requirements.txt"), "six==1.16.0\n")
 
-	res, err := resolvePython(dir, DepOptions{Strategy: DepStrategyHost, FetchSandbox: NewMock(MockResponse{})})
+	res, err := resolvePython(dir, DepOptions{Strategy: DepStrategyHost, FetchSandbox: sandbox.NewMock(sandbox.MockResponse{})})
 	if err != nil {
 		t.Fatalf("resolvePython HOST (container backend): %v", err)
 	}
@@ -3520,8 +3491,8 @@ func TestPythonResolveHostUnderBwrap(t *testing.T) {
 	if !envHas(res.Env, "PYTHONPATH="+sitePkgs) {
 		t.Errorf("env = %v, want PYTHONPATH=%s", res.Env, sitePkgs)
 	}
-	if err := validateBwrapMounts(res.ROMounts, nil); err != nil {
-		t.Errorf("validateBwrapMounts rejected the resolved site-packages mount: %v", err)
+	if _, err := sandbox.NewMock(sandbox.MockResponse{}).Exec(context.Background(), sandbox.Spec{RepoDir: dir, Cmd: []string{"true"}, ROMounts: res.ROMounts}); err != nil {
+		t.Errorf("Spec refused the resolved site-packages mount: %v", err)
 	}
 }
 
@@ -3549,7 +3520,7 @@ func TestJSResolveHostIsOffForContainerBackend(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "package.json"), `{"name":"x"}`+"\n")
 
-	res, err := resolveJS(dir, DepOptions{Strategy: DepStrategyHost, FetchSandbox: NewMock(MockResponse{})})
+	res, err := resolveJS(dir, DepOptions{Strategy: DepStrategyHost, FetchSandbox: sandbox.NewMock(sandbox.MockResponse{})})
 	if err != nil {
 		t.Fatalf("resolveJS HOST (container backend): %v", err)
 	}
@@ -3640,18 +3611,45 @@ func TestJSResolveHostUnderBwrap_MissingCacheErrors(t *testing.T) {
 	}
 }
 
-// TestValidateBwrapMountsUniqueAcrossDepAndLocalMounts is the acceptance-2
-// regression: a dep-strategy-derived mount and an operator local_mounts
-// entry sharing a ContainerPath must be rejected by validateBwrapMounts
-// exactly like two colliding Spec-level mounts would be — ResolveDeps
-// appends LocalMounts into the SAME ROMounts slice as ecosystem mounts (see
-// ResolveDeps), so this is what actually backstops a misconfigured
-// local_mounts entry aimed at, say, /modcache.
-func TestValidateBwrapMountsUniqueAcrossDepAndLocalMounts(t *testing.T) {
-	depMount := ROMount{HostPath: t.TempDir(), ContainerPath: "/modcache", Shared: true}
-	localMount := ROMount{HostPath: t.TempDir(), ContainerPath: "/modcache", Shared: true}
-	err := validateBwrapMounts([]ROMount{depMount, localMount}, nil)
-	if err == nil {
-		t.Fatal("validateBwrapMounts: want error for a dep-strategy mount colliding with a local_mounts entry, got nil")
+func gitInit(t *testing.T, dir string) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "t@example.com"},
+		{"config", "user.name", "t"},
+		{"add", "-A"},
+		{"commit", "-q", "-m", "init"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		// Neutralize global/system git config (gpgsign, hooks, prompts).
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_TERMINAL_PROMPT=0")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+// A HostExec run gets no ecosystem mounts, env, or SetupCmds: HostExec
+// refuses mounts/SetupCmds, and a host process uses the host's own caches.
+func TestResolveDeps_HostExecSkipsEcosystemResolution(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module example.com/x\n\ngo 1.22\n")
+	res, err := ResolveDeps(dir, DepOptions{
+		Strategy:       DepStrategyHost,
+		FetchSandbox:   sandbox.NewHostExec(),
+		hostModcache:   t.TempDir(),
+		HostToolchains: []string{t.TempDir()},
+	})
+	if err != nil {
+		t.Fatalf("ResolveDeps: %v", err)
+	}
+	if res.Strategy != DepStrategyOff || len(res.ROMounts) != 0 || len(res.Env) != 0 || len(res.SetupCmds) != 0 || res.Prefetch != nil {
+		t.Fatalf("HostExec resolution = %+v, want an empty OFF resolution", res)
+	}
+	spec := sandbox.Spec{RepoDir: dir, Cmd: []string{"true"}, ROMounts: res.ROMounts, Env: res.Env, SetupCmds: res.SetupCmds}
+	var unsupported *sandbox.UnsupportedSpecError
+	if _, err := sandbox.NewHostExec().Exec(context.Background(), spec); errors.As(err, &unsupported) {
+		t.Errorf("HostExec refused the resolved Spec: %v", err)
 	}
 }

@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // patchPlanBody serializes a PatchPlan to JSON as the agent would emit it.
@@ -840,7 +840,7 @@ func TestPromoteAll_WithPatchProver_FixWitnessed(t *testing.T) {
 	//   call 2: targeted patch (exit 0 — fix works)
 	//   call 3: suite (exit 0 — suite stays green)
 	sb := sandbox.NewMock(sandbox.MockResponse{})
-	sb.ResponseFunc = func(n int, spec sandbox.Spec) (sandbox.Result, error) {
+	sb.ResponseFunc = func(_ context.Context, n int, spec sandbox.Spec) (sandbox.Result, error) {
 		switch n {
 		case 0:
 			return sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nFAIL"}, nil

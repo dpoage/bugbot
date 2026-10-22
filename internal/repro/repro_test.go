@@ -11,11 +11,13 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/domain"
+	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 	"github.com/dpoage/bugbot/internal/store"
 	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // planBody renders a Plan as the JSON the agent would emit.
@@ -398,7 +400,7 @@ func TestPromoteAll_HostStrategyMountsCache(t *testing.T) {
 	client := newScriptedClient(planBody(t, goodPlan()))
 	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 1, Stdout: "FAIL"}})
 
-	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir(), DepStrategy: sandbox.DepStrategyHost})
+	r, err := New(client, sb, repoDir, Options{ArtifactDir: t.TempDir(), DepStrategy: sandboxenv.DepStrategyHost})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,9 +452,9 @@ func TestExecute_SetupCmdsPropagate(t *testing.T) {
 		sb:      sb,
 		repoDir: repoDir,
 		opts:    opts,
-		deps: sandbox.Resolution{
+		deps: sandboxenv.Resolution{
 			SetupCmds: setupCmds,
-			Strategy:  sandbox.DepStrategyOff,
+			Strategy:  sandboxenv.DepStrategyOff,
 		},
 	}
 
@@ -944,35 +946,35 @@ func TestInterpret_UnknownEcosystem_NotDemonstrated(t *testing.T) {
 func TestDetectEcosystem(t *testing.T) {
 	cases := []struct {
 		cmd  []string
-		want sandbox.Ecosystem
+		want ecosystem.Ecosystem
 	}{
-		{[]string{"go", "test", "./..."}, sandbox.EcosystemGo},
-		{[]string{"go", "test", "-race", "./..."}, sandbox.EcosystemGo},
-		{[]string{"go", "build", "./..."}, sandbox.EcosystemGo},
-		{[]string{"pytest", "tests/"}, sandbox.EcosystemPython},
-		{[]string{"py.test", "tests/"}, sandbox.EcosystemPython},
-		{[]string{"python", "-m", "pytest", "tests/"}, sandbox.EcosystemPython},
-		{[]string{"python3", "-m", "py.test", "tests/"}, sandbox.EcosystemPython},
-		{[]string{"cargo", "test"}, sandbox.EcosystemRust},
-		{[]string{"cargo", "build"}, sandbox.EcosystemRust},
-		{[]string{"npm", "test"}, sandbox.EcosystemJS},
-		{[]string{"yarn", "test"}, sandbox.EcosystemJS},
-		{[]string{"pnpm", "test"}, sandbox.EcosystemJS},
-		{[]string{"npx", "jest"}, sandbox.EcosystemJS},
-		{[]string{"jest", "src/"}, sandbox.EcosystemJS},
-		{[]string{"vitest", "run"}, sandbox.EcosystemJS},
-		{[]string{"ctest", "--output-on-failure"}, sandbox.EcosystemCpp},
-		{[]string{"cmake", "-B", "build", "-S", "."}, sandbox.EcosystemCpp},
-		{[]string{"g++", "-std=c++17", "t.cpp", "-o", "t"}, sandbox.EcosystemCpp},
-		{[]string{"clang++", "-fsanitize=address", "t.cpp"}, sandbox.EcosystemCpp},
-		{[]string{"cc", "-c", "t.c"}, sandbox.EcosystemCpp},
-		{[]string{"c++", "t.cpp"}, sandbox.EcosystemCpp},
-		{[]string{"bash", "-c", "cmake -B build && ctest"}, sandbox.EcosystemCpp},
-		{[]string{"bash", "-lc", "cmake -B build && ctest"}, sandbox.EcosystemCpp},
-		{[]string{"sh", "-lc", "g++ t.cpp -o t && ./t"}, sandbox.EcosystemCpp},
-		{[]string{"bash", "-c", "go test ./..."}, sandbox.EcosystemGo},
-		{[]string{"make", "test"}, sandbox.EcosystemUnknown},
-		{[]string{}, sandbox.EcosystemUnknown},
+		{[]string{"go", "test", "./..."}, ecosystem.EcosystemGo},
+		{[]string{"go", "test", "-race", "./..."}, ecosystem.EcosystemGo},
+		{[]string{"go", "build", "./..."}, ecosystem.EcosystemGo},
+		{[]string{"pytest", "tests/"}, ecosystem.EcosystemPython},
+		{[]string{"py.test", "tests/"}, ecosystem.EcosystemPython},
+		{[]string{"python", "-m", "pytest", "tests/"}, ecosystem.EcosystemPython},
+		{[]string{"python3", "-m", "py.test", "tests/"}, ecosystem.EcosystemPython},
+		{[]string{"cargo", "test"}, ecosystem.EcosystemRust},
+		{[]string{"cargo", "build"}, ecosystem.EcosystemRust},
+		{[]string{"npm", "test"}, ecosystem.EcosystemJS},
+		{[]string{"yarn", "test"}, ecosystem.EcosystemJS},
+		{[]string{"pnpm", "test"}, ecosystem.EcosystemJS},
+		{[]string{"npx", "jest"}, ecosystem.EcosystemJS},
+		{[]string{"jest", "src/"}, ecosystem.EcosystemJS},
+		{[]string{"vitest", "run"}, ecosystem.EcosystemJS},
+		{[]string{"ctest", "--output-on-failure"}, ecosystem.EcosystemCpp},
+		{[]string{"cmake", "-B", "build", "-S", "."}, ecosystem.EcosystemCpp},
+		{[]string{"g++", "-std=c++17", "t.cpp", "-o", "t"}, ecosystem.EcosystemCpp},
+		{[]string{"clang++", "-fsanitize=address", "t.cpp"}, ecosystem.EcosystemCpp},
+		{[]string{"cc", "-c", "t.c"}, ecosystem.EcosystemCpp},
+		{[]string{"c++", "t.cpp"}, ecosystem.EcosystemCpp},
+		{[]string{"bash", "-c", "cmake -B build && ctest"}, ecosystem.EcosystemCpp},
+		{[]string{"bash", "-lc", "cmake -B build && ctest"}, ecosystem.EcosystemCpp},
+		{[]string{"sh", "-lc", "g++ t.cpp -o t && ./t"}, ecosystem.EcosystemCpp},
+		{[]string{"bash", "-c", "go test ./..."}, ecosystem.EcosystemGo},
+		{[]string{"make", "test"}, ecosystem.EcosystemUnknown},
+		{[]string{}, ecosystem.EcosystemUnknown},
 	}
 	for _, tc := range cases {
 		t.Run(strings.Join(tc.cmd, " "), func(t *testing.T) {

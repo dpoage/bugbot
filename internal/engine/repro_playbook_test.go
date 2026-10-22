@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
 	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // nopLLMClient is a minimal llmkit.Client stub satisfying repro.New's non-nil

@@ -17,8 +17,9 @@ import (
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/lsp"
 	"github.com/dpoage/bugbot/internal/repro"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // checkStatus classifies the outcome of a single doctor check.
@@ -65,7 +66,10 @@ type doctorEnv struct {
 	// Unit tests inject a scripted function here to avoid needing a container
 	// runtime. When nil, the real repro.VerifySandbox is used.
 	verifySandbox func(ctx context.Context, repoDir string, cfg config.Config) (repro.SmokeVerdict, error)
-	out           io.Writer
+	// newSandbox builds the configured backend for the construction check;
+	// nil skips that check (unit tests without a real backend).
+	newSandbox func(config.Sandbox) (sandbox.Sandbox, error)
+	out        io.Writer
 }
 
 // newDoctorCmd builds the `bugbot doctor` subcommand. It runs a checklist of
@@ -83,6 +87,7 @@ detail. The command exits nonzero when any hard check fails:
   - config invalid or unreadable
   - a provider API key env var is unset
   - the sandbox runtime is missing or not responding
+  - the sandbox backend cannot be built from the sandbox config
 
 Repo-fact and informational items (git, languages, build systems, LSP servers)
 never affect the exit code.`,
@@ -98,6 +103,7 @@ never affect the exit code.`,
 				lookupEnv:     os.Getenv,
 				lookPath:      exec.LookPath,
 				verifySandbox: nil, // nil → enabled only when --verify-sandbox is passed
+				newSandbox:    sandboxenv.New,
 				runCommand: func(ctx context.Context, name string, args ...string) (string, error) {
 					c := exec.CommandContext(ctx, name, args...)
 					// A killed child can leave a grandchild holding the output
@@ -266,6 +272,9 @@ func runChecks(ctx context.Context, env doctorEnv, runSandboxVerify bool) []chec
 		results = append(results, checkBwrap(ctx, cfg)...)
 	} else {
 		results = append(results, checkSandbox(ctx, env, cfg)...)
+	}
+	if cfgOK && env.newSandbox != nil && !hasHardFailure(results, "sandbox binary") {
+		results = append(results, checkSandboxBackend(env, cfg))
 	}
 
 	// 3b. State db integrity — hard; requires a valid config for the db path.
@@ -467,6 +476,55 @@ func checkBwrap(ctx context.Context, cfg config.Config) []checkResult {
 		})
 	}
 	return results
+}
+
+// hasHardFailure reports whether results holds a hard failure named name.
+func hasHardFailure(results []checkResult, name string) bool {
+	for _, r := range results {
+		if r.Name == name && r.hard && r.Status == statusFail {
+			return true
+		}
+	}
+	return false
+}
+
+// checkSandboxBackend builds the configured backend exactly as every run
+// does, so a knob llmkit refuses (an unresolved host toolchain, an
+// unsupported network, an unusable limit) fails doctor instead of the first
+// run. The pass detail lists the knobs the backend was built with.
+func checkSandboxBackend(env doctorEnv, cfg config.Config) checkResult {
+	sb, err := env.newSandbox(cfg.Sandbox)
+	if err != nil {
+		return checkResult{Name: "sandbox backend", Status: statusFail, Detail: err.Error(), hard: true}
+	}
+	if c, ok := sb.(interface{ Close() error }); ok {
+		_ = c.Close()
+	}
+	s := cfg.Sandbox
+	network := s.Network
+	if network == "" {
+		network = string(sandbox.NetworkNone)
+	}
+	detail := fmt.Sprintf("llmkit/sandbox %s: cpus=%d memory_mb=%d pids_limit=%d timeout=%ds idle_timeout=%ds scratch_mb=%d growth_ceiling_mb=%d network=%s",
+		sandboxenv.BackendLabel(s), s.CPUs, s.MemoryMB, s.PidsLimit, s.TimeoutSeconds, s.IdleTimeoutSeconds,
+		s.ScratchSizeMB, s.WorkspaceGrowthCeilingMB, network)
+	if s.Backend == sandboxenv.BackendBwrap {
+		policy := "required"
+		if s.AllowUncapped {
+			policy = "best-effort"
+		}
+		detail += " cap_policy=" + policy
+	} else {
+		detail += " image=" + s.Image
+	}
+	if len(s.HostToolchains) > 0 {
+		var tcs []string
+		for _, fp := range sandbox.ResolveHostToolchains(s.HostToolchains).Fingerprints {
+			tcs = append(tcs, fp.Name+"="+fp.Path)
+		}
+		detail += " host_toolchains=" + strings.Join(tcs, ",")
+	}
+	return checkResult{Name: "sandbox backend", Status: statusPass, Detail: detail}
 }
 
 // checkSandbox checks the sandbox runtime binary, its responsiveness, and

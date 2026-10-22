@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // bundleFrom writes a bundle via writeArtifacts and loads it back, for tests

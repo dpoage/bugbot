@@ -34,9 +34,10 @@ import (
 
 	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 	"github.com/dpoage/bugbot/internal/store"
 	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // Defaults for Options. Exported so callers (CLI flags) can present them.
@@ -271,11 +272,11 @@ type SandboxOpts struct {
 	// MaxExecs is the per-candidate execution budget. Zero defaults to 3.
 	MaxExecs int
 	// DepStrategy selects how external module dependencies are made available to
-	// a refuter's network-none probe (see sandbox.DepStrategy). Empty/"off"
+	// a refuter's network-none probe (see sandboxenv.DepStrategy). Empty/"off"
 	// keeps the current behavior; "host"/"fetch" mount a module cache. Vendored
 	// repos are always detected. The one-time online prefetch for "fetch" runs
 	// once, lazily, the first time a sandbox tool is built.
-	DepStrategy sandbox.DepStrategy
+	DepStrategy sandboxenv.DepStrategy
 	// SetupCmds are operator-supplied commands run inside the sandbox BEFORE the
 	// main command AND BEFORE per-ecosystem offline installs. See
 	// config.Sandbox.SetupCmds for the full contract and ordering rationale.
@@ -341,7 +342,7 @@ type Funnel struct {
 	// deps is the resolved dependency strategy for the sandbox_exec tool,
 	// computed in New from SandboxOpts. depPrefetchOnce ensures the one-time
 	// online prefetch (DepStrategyFetch) runs at most once across all candidates.
-	deps            sandbox.Resolution
+	deps            sandboxenv.Resolution
 	depPrefetchOnce sync.Once
 	depPrefetchErr  error
 
@@ -409,9 +410,9 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 	// Resolve the dependency strategy for the sandbox_exec tool up front so
 	// every refuter probe carries the same module-cache mount/env. Only relevant
 	// when the sandbox feature is enabled; vendored/off repos resolve to empty.
-	var deps sandbox.Resolution
+	var deps sandboxenv.Resolution
 	if resolved.SandboxOpts.Enabled && resolved.SandboxOpts.Sandbox != nil {
-		d, err := sandbox.ResolveDeps(repo.Root(), sandbox.DepOptions{
+		d, err := sandboxenv.ResolveDeps(repo.Root(), sandboxenv.DepOptions{
 			Strategy:     resolved.SandboxOpts.DepStrategy,
 			FetchSandbox: resolved.SandboxOpts.Sandbox,
 			LocalMounts:  resolved.SandboxOpts.LocalMounts,

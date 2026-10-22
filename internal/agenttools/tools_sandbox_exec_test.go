@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // --- Fake sandbox for tool tests -----------------------------------------
@@ -21,6 +21,11 @@ type fakeSandbox struct {
 	err     error
 	calls   []sandbox.Spec
 	callIdx int
+}
+
+// MaterializeWorkspace satisfies sandbox.Sandbox; these tests never iterate in a workspace.
+func (f *fakeSandbox) MaterializeWorkspace(string) (string, error) {
+	return "", errors.New("fakeSandbox: MaterializeWorkspace unsupported")
 }
 
 func (f *fakeSandbox) Exec(_ context.Context, spec sandbox.Spec) (sandbox.Result, error) {

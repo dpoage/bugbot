@@ -11,7 +11,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/dpoage/bugbot/internal/config"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestClassifySmoke_OK covers a clean exit (toolchain ran successfully).
@@ -37,7 +38,7 @@ func TestClassifySmoke_Timeout(t *testing.T) {
 // false-green WatchdogOracleB's approval was conditioned on closing) —
 // it lands on SmokeCategoryEnvError, which BlocksRepro() already treats as
 // gating (see TestSmokeVerdict_BlocksRepro), and Detail carries
-// res.KillReason() so the operator sees WHY, not just a bare exit code.
+// sandboxenv.KillReason so the operator sees WHY, not just a bare exit code.
 func TestClassifySmoke_WorkspaceQuotaExceeded(t *testing.T) {
 	res := sandbox.Result{ExitCode: -1, WorkspaceQuotaExceeded: true}
 	v := classifySmoke(res, []string{"go", "vet", "./..."})
@@ -54,7 +55,7 @@ func TestClassifySmoke_WorkspaceQuotaExceeded(t *testing.T) {
 		t.Error("a quota kill must gate the repro stage (BlocksRepro() = false, want true)")
 	}
 	if !strings.Contains(v.Detail, "quota") {
-		t.Errorf("Detail = %q, want it to name the quota (res.KillReason())", v.Detail)
+		t.Errorf("Detail = %q, want it to name the quota (sandboxenv.KillReason)", v.Detail)
 	}
 }
 
@@ -413,7 +414,7 @@ func TestVerifySandbox_MockOK(t *testing.T) {
 	}
 
 	spec := sandbox.Spec{Image: "golang:1.21"}
-	res := sandbox.Resolution{}
+	res := sandboxenv.Resolution{}
 	verdict, err := VerifySandbox(ctx, m, dir, spec, res)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -441,7 +442,7 @@ func TestVerifySandbox_MockToolchainMissing(t *testing.T) {
 	}
 
 	spec := sandbox.Spec{Image: "debian:slim"}
-	res := sandbox.Resolution{}
+	res := sandboxenv.Resolution{}
 	verdict, err := VerifySandbox(ctx, m, dir, spec, res)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -457,7 +458,7 @@ func TestVerifySandbox_ResolutionMountsForwarded(t *testing.T) {
 	ctx := context.Background()
 	var captured sandbox.Spec
 	m := &sandbox.Mock{}
-	m.ResponseFunc = func(_ int, spec sandbox.Spec) (sandbox.Result, error) {
+	m.ResponseFunc = func(_ context.Context, _ int, spec sandbox.Spec) (sandbox.Result, error) {
 		captured = spec
 		return sandbox.Result{ExitCode: 0}, nil
 	}
@@ -474,7 +475,7 @@ func TestVerifySandbox_ResolutionMountsForwarded(t *testing.T) {
 			{HostPath: "/host/modcache", ContainerPath: "/root/go/pkg/mod"},
 		},
 	}
-	res := sandbox.Resolution{
+	res := sandboxenv.Resolution{
 		Env: []string{"GOPATH=/go"},
 		ROMounts: []sandbox.ROMount{
 			{HostPath: "/host/cache2", ContainerPath: "/tmp/cache2"},
@@ -523,7 +524,7 @@ func TestVerifySandbox_Timeout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	verdict, err := VerifySandbox(ctx, m, dir, sandbox.Spec{}, sandbox.Resolution{})
+	verdict, err := VerifySandbox(ctx, m, dir, sandbox.Spec{}, sandboxenv.Resolution{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -674,7 +675,7 @@ func TestVerifySandboxOnce_CachesResult(t *testing.T) {
 	// production; this test documents the base-layer behavior.
 	m := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 127, Stderr: "go: command not found"}})
 	spec := sandbox.Spec{Image: "debian:slim"}
-	res := sandbox.Resolution{}
+	res := sandboxenv.Resolution{}
 	ctx := context.Background()
 
 	v1, _ := VerifySandbox(ctx, m, dir, spec, res)
@@ -706,7 +707,7 @@ func TestVerifySandboxOnce_SkipsReproOnToolchainMissing(t *testing.T) {
 
 	m := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 127, Stderr: "go: command not found"}})
 	spec := sandbox.Spec{Image: "debian:slim"}
-	res := sandbox.Resolution{}
+	res := sandboxenv.Resolution{}
 	ctx := context.Background()
 
 	verdict, err := VerifySandbox(ctx, m, dir, spec, res)
@@ -737,7 +738,7 @@ func TestVerifySandboxOnce_OKProceeds(t *testing.T) {
 
 	m := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "ok\n"}})
 	spec := sandbox.Spec{Image: "golang:1.21"}
-	res := sandbox.Resolution{}
+	res := sandboxenv.Resolution{}
 	ctx := context.Background()
 
 	verdict, err := VerifySandbox(ctx, m, dir, spec, res)
@@ -804,7 +805,7 @@ func TestVerifySandboxOnce_KeyedPerRepoAndImage(t *testing.T) {
 // TestRunSandboxVerifyThreadsDepOptions is the regression test for
 // bugbot-48ya gap 3: RunSandboxVerify previously built its DepOptions with
 // ONLY Strategy set, so dep_strategy: fetch unconditionally failed dep
-// resolution with "requires a fetch sandbox" (sandbox.ResolveDeps' Go FETCH
+// resolution with "requires a fetch sandbox" (sandboxenv.ResolveDeps' Go FETCH
 // branch requires FetchSandbox) even when the real repro path would resolve
 // it fine, and sandbox.local_mounts/host_toolchains were invisible to the
 // doctor smoke probe entirely. This proves FetchSandbox is now threaded (a
@@ -826,7 +827,7 @@ func TestRunSandboxVerifyThreadsDepOptions(t *testing.T) {
 	}
 	mountDir := t.TempDir()
 
-	var cfg config.Config
+	cfg := config.Default()
 	cfg.Sandbox.Backend = "bwrap"
 	cfg.Sandbox.DepStrategy = "fetch"
 	cfg.Sandbox.LocalMounts = []config.LocalMount{
@@ -845,19 +846,18 @@ func TestRunSandboxVerifyThreadsDepOptions(t *testing.T) {
 		t.Fatalf("verdict = %+v, want dependency resolution to succeed (FetchSandbox/LocalMounts not threaded)", verdict)
 	}
 
-	// Directly assert LocalMounts reaches sandbox.ResolveDeps via the exact
-	// DepOptions shape RunSandboxVerify constructs (localMountsFromConfig +
+	// Directly assert LocalMounts reaches sandboxenv.ResolveDeps via the exact
+	// DepOptions shape RunSandboxVerify constructs (sandboxenv.LocalMounts +
 	// FetchSandbox), independent of what the smoke command happens to be.
 	bw, err := sandbox.NewBwrap()
 	if err != nil {
 		t.Fatalf("NewBwrap: %v", err)
 	}
 	t.Cleanup(func() { _ = bw.Close() })
-	localRO, localRW := localMountsFromConfig(cfg)
-	res, err := sandbox.ResolveDeps(repoDir, sandbox.DepOptions{
-		Strategy:       sandbox.DepStrategy(cfg.Sandbox.DepStrategy),
+	localRO, localRW := sandboxenv.LocalMounts(cfg.Sandbox)
+	res, err := sandboxenv.ResolveDeps(repoDir, sandboxenv.DepOptions{
+		Strategy:       sandboxenv.DepStrategy(cfg.Sandbox.DepStrategy),
 		FetchSandbox:   bw,
-		FetchImage:     cfg.Sandbox.Image,
 		LocalMounts:    localRO,
 		LocalRWMounts:  localRW,
 		HostToolchains: cfg.Sandbox.HostToolchains,

@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // bugbot-c49s: interpret()==demonstrated used to promote off a SINGLE
@@ -91,7 +91,7 @@ func TestAttempt_FlakyRepro_AlternatingFailPass_NoPromotion(t *testing.T) {
 	client := newScriptedClient(planBody(t, goodPlan()), planBody(t, goodPlan()))
 
 	sb := sandbox.NewMock(sandbox.MockResponse{})
-	sb.ResponseFunc = func(n int, _ sandbox.Spec) (sandbox.Result, error) {
+	sb.ResponseFunc = func(_ context.Context, n int, _ sandbox.Spec) (sandbox.Result, error) {
 		if n%2 == 0 {
 			// Official run (round 1's call 0, round 2's call 2): demonstrates.
 			return sandbox.Result{ExitCode: 1, Stdout: "--- FAIL: TestBug\nFAIL"}, nil
@@ -144,7 +144,7 @@ func TestAttempt_FlakyRepro_Bazel_UsesDeterminismFeedback(t *testing.T) {
 	client := newScriptedClient(planBody(t, bazelPlan), planBody(t, bazelPlan))
 
 	sb := sandbox.NewMock(sandbox.MockResponse{})
-	sb.ResponseFunc = func(n int, _ sandbox.Spec) (sandbox.Result, error) {
+	sb.ResponseFunc = func(_ context.Context, n int, _ sandbox.Spec) (sandbox.Result, error) {
 		if n%2 == 0 {
 			// Official run: bazel exit 3 = build OK, test ran, FAILED -> demonstrated.
 			return sandbox.Result{ExitCode: 3, Stdout: "FAIL: //pkg:target"}, nil

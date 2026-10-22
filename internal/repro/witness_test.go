@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestPromoteOne_NeedsHuman_WitnessesNotPromotes covers bugbot-w1bh: a

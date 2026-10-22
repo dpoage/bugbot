@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestIntegration_PatchProver exercises the full patch-prover execution path
@@ -32,7 +32,7 @@ func TestIntegration_PatchProver(t *testing.T) {
 
 	const image = "docker.io/library/golang:1.26-alpine"
 
-	sb, err := sandbox.NewCLI("", image)
+	sb, err := sandbox.NewCLI(sandbox.WithImage(image))
 	if err != nil {
 		t.Skipf("sandbox unavailable: %v", err)
 	}

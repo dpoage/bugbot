@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/config"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // writeTestFile writes content to path, creating parent directories, failing

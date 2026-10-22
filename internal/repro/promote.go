@@ -8,8 +8,8 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ecosystem"
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // Summary aggregates the outcome of a PromoteAll run.

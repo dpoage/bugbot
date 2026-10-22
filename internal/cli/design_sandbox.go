@@ -17,9 +17,9 @@ import (
 	"github.com/dpoage/bugbot/internal/agenttools"
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/repro"
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/llmkit/agent"
 	"github.com/dpoage/llmkit/provider"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // sandboxProposal is the structured output the agent tier produces via RunJSON.

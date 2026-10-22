@@ -7,7 +7,7 @@
 //
 // # Design
 //
-// The registry mirrors internal/sandbox/deps.go's data-driven style: a table of
+// The registry mirrors internal/sandboxenv/deps.go's data-driven style: a table of
 // analyzerSpec rows, each with a detect func, a command, a rule→lens mapping,
 // and a per-analyzer timeout. Seed iterates the table, runs detected analyzers
 // via the provided Sandbox, parses their SARIF stdout output, and posts each hit
@@ -48,8 +48,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/store"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // maxResultsPerAnalyzer caps the number of SARIF results we parse and post per
@@ -85,7 +85,7 @@ const (
 
 // analyzerSpec describes one static analyzer in the registry.
 //
-// The registry mirrors internal/sandbox/deps.go's ecosystem table: data-driven,
+// The registry mirrors internal/sandboxenv/deps.go's ecosystem table: data-driven,
 // ordered, with identical comment density and field naming conventions.
 type analyzerSpec struct {
 	// name is the stable analyzer identifier. It is used as the source suffix
@@ -329,7 +329,7 @@ func gosecRuleLens(ruleID string) LensName {
 }
 
 // hasGoModule reports whether repoDir contains a root go.mod, indicating a Go
-// project. Identical to the check in internal/sandbox/deps.go; reproduced here
+// project. Identical to the check in internal/sandboxenv/deps.go; reproduced here
 // to keep the analyzer package self-contained.
 func hasGoModule(repoDir string) bool {
 	st, err := os.Stat(filepath.Join(repoDir, "go.mod"))

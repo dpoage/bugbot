@@ -1,4 +1,4 @@
-package sandbox
+package sandboxenv
 
 // deps.go implements the dependency strategy resolver for sandboxed builds.
 //
@@ -30,7 +30,7 @@ package sandbox
 // ecosystem whose detect returns true for repoDir. The results are merged:
 //
 //   - ROMounts: appended in table order. Each ecosystem must use distinct
-//     ContainerPaths; the existing validateMounts uniqueness check backstops
+//     ContainerPaths; Exec's duplicate-ContainerPath refusal backstops
 //     this at Exec time, but ecosystem authors must design ContainerPaths to be
 //     globally unique across all ecosystems (e.g. /modcache for Go, /pipcache
 //     for Python) to avoid silent shadowing.
@@ -75,13 +75,12 @@ package sandbox
 //
 // DepOptions.FetchSandbox carries the REAL backend the caller constructed
 // (see repro.New), independent of the requested Strategy — repro.New always
-// sets it, even for HOST/OFF. Two things key off it:
+// sets it, even for HOST/OFF. Three things key off it:
 //
-//   - fetchPrefetchNetwork: the FETCH-strategy online prefetch resolves to
-//     "bridge" for the container backend (unchanged) or "host" for bwrap
-//     (bwrap has no "bridge" network — see validateBwrapNetwork).
-//   - isBwrapFetchBackend: gates the Python/JS bwrap-only HOST extensions
-//     above.
+//   - fetchPrefetchNetwork: "bridge" for the container backend, "host" for
+//     bwrap (which has no bridge network).
+//   - isBwrapFetchBackend: gates the Python/JS bwrap-only HOST extensions.
+//   - a HostExec backend resolves to an empty OFF Resolution.
 //
 // Every other resolver path (Go, Rust, C#/NuGet, Maven, Gradle; every
 // non-HOST Python/JS branch) is backend-agnostic and produces byte-identical
@@ -96,16 +95,14 @@ package sandbox
 // relabeling for container-private isolation. Shared=true (host-owned dirs,
 // e.g. the user's Go module cache under ~/go/pkg/mod) MUST NOT be relabeled:
 // :Z on a multi-GB shared tree is slow, breaks the host toolchain, and breaks
-// any other container sharing the same dir. See ROMount.Shared for the full
+// any other container sharing the same dir. See sandbox.ROMount.Shared for the full
 // rationale. Ecosystem authors must set Shared=true for any host-owned
 // directory they mount.
 //
-// # Stdlib-only constraint
+// # Imports
 //
-// This file deliberately depends only on the standard library (the package as a
-// whole imports nothing else). The go.mod / vendor markers are checked directly
-// rather than via internal/ingest to keep sandbox free of heavier imports and
-// import cycles.
+// Markers are checked directly rather than via internal/ingest to avoid
+// import cycles; the only non-stdlib import is llmkit/sandbox.
 
 import (
 	"context"
@@ -120,6 +117,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // DepStrategy selects how external module dependencies are made available to a
@@ -170,8 +169,8 @@ const modcacheMount = "/modcache"
 // dot-prefixed so `go test ./...` skips them (go ignores directories beginning
 // with "." or "_").
 const (
-	goCacheDir = workspaceMount + "/.bugbot-gocache"
-	goTmpDir   = workspaceMount + "/.bugbot-gotmp"
+	goCacheDir = sandbox.WorkspaceMount + "/.bugbot-gocache"
+	goTmpDir   = sandbox.WorkspaceMount + "/.bugbot-gotmp"
 )
 
 // DepOptions configures the dependency resolver.
@@ -183,17 +182,12 @@ type DepOptions struct {
 	// FetchSandbox is the Sandbox used to run the one-time online prefetch under
 	// DepStrategyFetch. Required only for that strategy; ignored otherwise. It is
 	// typically the same backend used for the main run.
-	FetchSandbox Sandbox
+	FetchSandbox sandbox.Sandbox
 
-	// FetchImage overrides the image used for the prefetch container. Empty uses
-	// the FetchSandbox's configured default image.
-	FetchImage string
-
-	// FetchNetwork is the container network mode for the prefetch run. Empty
-	// defaults to "bridge" (the standard NAT network both podman and docker
-	// accept) so the prefetch can actually reach the proxy. The prefetch is the
-	// ONLY run that ever touches the network.
-	FetchNetwork string
+	// FetchNetwork is the prefetch run's network mode. Empty resolves per
+	// backend (see fetchPrefetchNetwork). The prefetch is the ONLY run that
+	// ever touches the network.
+	FetchNetwork sandbox.NetworkMode
 
 	// hostModcache, when set, overrides the resolved host module cache directory
 	// (test seam). Empty resolves via `go env GOMODCACHE` with a $HOME fallback.
@@ -240,22 +234,19 @@ type DepOptions struct {
 	// the same Spec. Resolved from the RO subset of config.Sandbox.LocalMounts
 	// by the caller; the sandbox package does not parse in-repo manifests (v1
 	// security boundary). Each mount must have HostPath set; Shared is always
-	// true (host-owned dirs, no SELinux :Z relabel). See ROMount.Shared for
+	// true (host-owned dirs, no SELinux :Z relabel). See sandbox.ROMount.Shared for
 	// the full rationale.
-	LocalMounts []ROMount
+	LocalMounts []sandbox.ROMount
 	// LocalRWMounts is LocalMounts' writable counterpart (bugbot-wjc2):
 	// additional host directories to bind-mount WRITABLE into the sandbox,
 	// resolved from the entries of config.Sandbox.LocalMounts that set
 	// Writable=true. Independent of ecosystem detection like LocalMounts;
 	// rendered into Resolution.RWMounts (never ROMounts) — see
 	// sandbox.Spec.RWMounts for the security posture this accepts.
-	LocalRWMounts []ROMount
-	// HostToolchains is an ordered list of host toolchain names (resolved via
-	// the host's PATH) or explicit host directories to bind-mount read-only
-	// into the sandbox and prepend to its PATH, via ResolveHostToolchains.
-	// Independent of ecosystem detection and LocalMounts: a repo may have
-	// ecosystem mounts, local mounts, AND host toolchain mounts active in the
-	// same Spec. Resolved from config.Sandbox.HostToolchains by the caller.
+	LocalRWMounts []sandbox.ROMount
+	// HostToolchains names the configured host toolchains, resolved here only
+	// for Resolution.Fingerprints: the backend itself mounts them
+	// (sandbox.WithHostToolchains, see New).
 	HostToolchains []string
 }
 
@@ -265,14 +256,14 @@ type DepOptions struct {
 // return the same shape.
 type Resolution struct {
 	// ROMounts are read-only mounts to add to the run's Spec.
-	ROMounts []ROMount
+	ROMounts []sandbox.ROMount
 	// RWMounts are writable mounts to add to the run's Spec.RWMounts
 	// (bugbot-wjc2). Populated ONLY from DepOptions.LocalRWMounts — no
 	// ecosystem resolver contributes to this field; an ecosystem's own
 	// internal prefetch-step RWMounts (e.g. DepStrategyFetch's one-time
 	// online download) are scoped to that closure's own Exec call and never
 	// surface here. See sandbox.Spec.RWMounts for the security posture.
-	RWMounts []ROMount
+	RWMounts []sandbox.ROMount
 	// Env are extra KEY=VALUE entries to append to the run's Spec.Env. They are
 	// appended after the caller's own env, matching the sandbox's "later wins"
 	// ordering, so they take effect for the run.
@@ -290,10 +281,9 @@ type Resolution struct {
 	// Strategy is the strategy actually applied (after vendored detection may
 	// have overridden the requested one), for logging/diagnostics.
 	Strategy DepStrategy
-	// Fingerprints records provenance for any host toolchains mounted into
-	// this Resolution (see ResolveHostToolchains). Empty when
-	// DepOptions.HostToolchains was empty or resolved nothing on this host.
-	Fingerprints []ToolchainFingerprint
+	// Fingerprints records provenance for the configured host toolchains
+	// that resolved on this host (see DepOptions.HostToolchains).
+	Fingerprints []sandbox.ToolchainFingerprint
 	// Warnings carries operator-visible, non-fatal degradation reasons
 	// (bugbot-gu0o C2): an ecosystem that CANNOT safely resolve its
 	// requested strategy for a repo-content reason (as opposed to a
@@ -401,7 +391,7 @@ func resolveGoDeps(repoDir string, opts DepOptions) (Resolution, error) {
 		// :Z would relabel the entire cache to a container-private MCS label,
 		// which is slow on multi-GB caches and can break the host go toolchain
 		// and any other container sharing the same directory. :ro without a label
-		// suffix is the correct choice here; see ROMount.Shared for details.
+		// suffix is the correct choice here; see sandbox.ROMount.Shared for details.
 		return modcacheResolution(cache, DepStrategyHost, true, nil), nil
 
 	case DepStrategyFetch:
@@ -443,10 +433,20 @@ func isVendored(repoDir string) bool {
 //
 // Strategy validation runs first; an invalid strategy is an immediate error.
 // The function then delegates to resolveWith using the package-level ecosystems
-// table — see its doc comment for the per-ecosystem merge semantics.
+// table — see its doc comment for the per-ecosystem merge semantics. A
+// HostExec FetchSandbox skips ecosystem resolution (and toolchain
+// fingerprints): a bare host process uses the host's own toolchains and
+// caches, and HostExec refuses the mounts and SetupCmds a resolution carries.
 func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
 	if !ValidDepStrategy(opts.Strategy) {
 		return Resolution{}, fmt.Errorf("sandbox: invalid dependency strategy %q (want off, host, or fetch)", opts.Strategy)
+	}
+	if _, host := opts.FetchSandbox.(*sandbox.HostExec); host {
+		return Resolution{
+			Strategy: DepStrategyOff,
+			ROMounts: opts.LocalMounts,
+			RWMounts: opts.LocalRWMounts,
+		}, nil
 	}
 	res, err := resolveWith(ecosystems, repoDir, opts)
 	if err != nil {
@@ -455,8 +455,8 @@ func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
 	// Append operator-configured local mounts AFTER ecosystem-derived mounts.
 	// This is independent of ecosystem detection: a repo may have local mounts
 	// even when no ecosystem matched (Strategy=off). Order: ecosystem mounts
-	// first (registry caches), then operator local mounts. The validateMounts
-	// uniqueness check in sandbox.Exec backstops any ContainerPath collisions.
+	// first (registry caches), then operator local mounts. Exec refuses any
+	// ContainerPath collision.
 	res.ROMounts = append(res.ROMounts, opts.LocalMounts...)
 	// Writable local mounts (bugbot-wjc2): same ordering contract as the RO
 	// half above, but into Resolution.RWMounts — no ecosystem resolver ever
@@ -464,21 +464,8 @@ func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
 	// opt-in.
 	res.RWMounts = append(res.RWMounts, opts.LocalRWMounts...)
 
-	// Host toolchain mounts (fix A, bugbot-14g0): resolved AFTER local mounts,
-	// independent of ecosystem detection and dep strategy. A resolved
-	// toolchain overrides the container's PATH entirely (see
-	// defaultContainerPath) so its bin dir wins even against an ecosystem
-	// image that already ships (an older or absent) copy of the same tool.
 	if len(opts.HostToolchains) > 0 {
-		tc, tcErr := ResolveHostToolchains(opts.HostToolchains)
-		if tcErr != nil {
-			return Resolution{}, fmt.Errorf("sandbox: resolve host toolchains: %w", tcErr)
-		}
-		res.ROMounts = append(res.ROMounts, tc.Mounts...)
-		res.Fingerprints = append(res.Fingerprints, tc.Fingerprints...)
-		if tc.PathPrepend != "" {
-			res.Env = append(res.Env, "PATH="+tc.PathPrepend+":"+DefaultContainerPath)
-		}
+		res.Fingerprints = sandbox.ResolveHostToolchains(opts.HostToolchains).Fingerprints
 	}
 	return res, nil
 }
@@ -490,7 +477,7 @@ func ResolveDeps(repoDir string, opts DepOptions) (Resolution, error) {
 //
 // Merge rules (see file doc for rationale):
 //   - ROMounts: appended in table order. ContainerPaths must be unique across
-//     all ecosystems; Exec's validateMounts backstops this.
+//     all ecosystems; Exec refuses a duplicate.
 //   - Env: appended in table order.
 //   - SetupCmds: appended in table order.
 //   - Warnings: appended in table order (bugbot-gu0o C2) — operator-visible
@@ -547,12 +534,12 @@ func resolveWith(table []ecosystem, repoDir string, opts DepOptions) (Resolution
 // read-only modcache mount plus the env that points `go` at it and turns a
 // cache miss into a hard error rather than a network hang.
 //
-// shared controls ROMount.Shared: true for the HOST strategy (user's real Go
+// shared controls sandbox.ROMount.Shared: true for the HOST strategy (user's real Go
 // module cache — must not be SELinux-relabeled), false for the FETCH strategy
-// (bugbot-owned cache dir — :Z isolation is correct). See ROMount.Shared.
+// (bugbot-owned cache dir — :Z isolation is correct). See sandbox.ROMount.Shared.
 func modcacheResolution(hostCache string, strategy DepStrategy, shared bool, prefetch func(context.Context) error) Resolution {
 	return Resolution{
-		ROMounts: []ROMount{{HostPath: hostCache, ContainerPath: modcacheMount, Shared: shared}},
+		ROMounts: []sandbox.ROMount{{HostPath: hostCache, ContainerPath: modcacheMount, Shared: shared}},
 		Env: []string{
 			"GOMODCACHE=" + modcacheMount,
 			"GOFLAGS=-mod=mod",
@@ -653,49 +640,25 @@ func fetchEcosystemCacheDir(ecosystem, repoDir, override string) (string, error)
 	return dir, nil
 }
 
-// isBwrapFetchBackend reports whether opts.FetchSandbox is the bwrap backend
-// (*Bwrap). deps.go and bwrap.go are the same package, so this is a plain
-// type assertion rather than a cross-package capability interface — no new
-// exported surface is needed. FetchSandbox is populated with the REAL
-// backend the caller constructed (see repro.New), regardless of the
-// requested DepStrategy, so this also doubles as the backend signal for
-// HOST-strategy resolvers that need to know which backend they are running
-// under (see resolvePython / resolveJS's bwrap-only HOST branch below).
+// isBwrapFetchBackend reports whether opts.FetchSandbox is the bwrap backend.
+// FetchSandbox is always the real backend, so HOST-strategy resolvers also
+// use this as their backend signal (see resolvePython / resolveJS).
 func isBwrapFetchBackend(opts DepOptions) bool {
-	_, ok := opts.FetchSandbox.(*Bwrap)
+	_, ok := opts.FetchSandbox.(*sandbox.Bwrap)
 	return ok
 }
 
-// fetchPrefetchNetwork resolves the network mode for a dependency-prefetch
-// Spec (the ONE online run that warms a HOST/FETCH cache).
-//
-// opts.FetchNetwork, when set, always wins — an operator who configured it
-// explicitly knows their runtime's network naming.
-//
-// Otherwise the container backend's default ("bridge", the standard NAT
-// network both podman and docker accept) is preserved BYTE-IDENTICAL
-// (bugbot-48ya acceptance 5): every existing container-backend prefetch call
-// site keeps producing "bridge" exactly as before.
-//
-// The bwrap backend has no "bridge" network — bwrap's --unshare-all either
-// shares the host's single network namespace wholesale (--share-net, mode
-// "host") or not at all ("none"); see validateBwrapNetwork. A bwrap
-// FetchSandbox therefore resolves to "host" instead: the prefetch run drops
-// its network unshare for this one invocation (still --unshare-all for
-// every other namespace, still the narrow fixedROAllowlist, still no
-// secret-bearing mounts) — mirroring the container backend's "fully
-// hardened except network" prefetch posture. This is scoped to the prefetch
-// Spec ONLY: it never changes what network mode a normal, untrusted
-// network-none run resolves to (bwrapNetworkEnabled still requires an
-// explicit "host" request either way).
-func fetchPrefetchNetwork(opts DepOptions) string {
+// fetchPrefetchNetwork resolves the prefetch Spec's network: opts.FetchNetwork
+// when set, else NetworkBridge on the container backend and NetworkHost on
+// bwrap, which has no bridge network. It never affects a normal run's network.
+func fetchPrefetchNetwork(opts DepOptions) sandbox.NetworkMode {
 	if opts.FetchNetwork != "" {
 		return opts.FetchNetwork
 	}
 	if isBwrapFetchBackend(opts) {
-		return "host"
+		return sandbox.NetworkHost
 	}
-	return "bridge"
+	return sandbox.NetworkBridge
 }
 
 // newPrefetchOnce wraps run in a sync.Once so the returned function calls run
@@ -780,26 +743,21 @@ func runEcosystemPrefetch(ctx context.Context, repoDir, hostCache string, opts D
 
 	network := fetchPrefetchNetwork(opts)
 
-	// The prefetch container is still fully hardened (read-only root,
-	// cap-drop, no-new-privileges, pids/memory/cpu limits — all from
-	// buildRunArgs); only the network differs and the cache is bound
-	// WRITABLE so the tool can populate it. This is the single trusted,
-	// online populate step; the later network-none run mounts the same dir
-	// read-only via ROMounts.
-	runSpec := Spec{
+	// Only the network differs from a normal run, and the cache is bound
+	// WRITABLE; the later network-none run mounts it read-only.
+	runSpec := sandbox.Spec{
 		RepoDir:  repoDir,
-		Image:    opts.FetchImage,
 		Network:  network,
 		Cmd:      spec.cmd,
-		RWMounts: []ROMount{{HostPath: hostCache, ContainerPath: spec.containerPath}},
+		RWMounts: []sandbox.ROMount{{HostPath: hostCache, ContainerPath: spec.containerPath}},
 		Env:      spec.env,
 	}
 	res, err := opts.FetchSandbox.Exec(ctx, runSpec)
 	if err != nil {
 		return fmt.Errorf("sandbox: %s prefetch failed to launch: %w", spec.tool, err)
 	}
-	if res.TimedOut {
-		return fmt.Errorf("sandbox: %s prefetch timed out", spec.tool)
+	if res.InfraKilled() {
+		return fmt.Errorf("sandbox: %s prefetch killed: %s", spec.tool, KillReason(res))
 	}
 	if res.ExitCode != 0 {
 		return fmt.Errorf("sandbox: %s prefetch exited %d: %s", spec.tool, res.ExitCode, lastLines(res.Stderr, 20))
@@ -1028,7 +986,7 @@ func resolvePython(repoDir string, opts DepOptions) (Resolution, error) {
 		//   /tmp/venv/bin/pip install --no-index --find-links=/depcache -r requirements.txt
 		// and update this comment and the integration test.)
 		return Resolution{
-			ROMounts: []ROMount{{
+			ROMounts: []sandbox.ROMount{{
 				HostPath:      cache,
 				ContainerPath: pipCacheMount,
 				Shared:        false, // bugbot-owned; :Z isolation correct
@@ -1555,11 +1513,11 @@ func resolveBwrapPythonHostDeps(override []string) (Resolution, error) {
 	if err != nil {
 		return Resolution{}, err
 	}
-	mounts := make([]ROMount, len(dirs))
+	mounts := make([]sandbox.ROMount, len(dirs))
 	for i, d := range dirs {
 		// Shared=true: the host's site-packages tree is not bugbot-owned;
-		// see ROMount.Shared — no SELinux :Z relabel of a shared host dir.
-		mounts[i] = ROMount{HostPath: d, ContainerPath: d, Shared: true}
+		// see sandbox.ROMount.Shared — no SELinux :Z relabel of a shared host dir.
+		mounts[i] = sandbox.ROMount{HostPath: d, ContainerPath: d, Shared: true}
 	}
 	return Resolution{
 		ROMounts: mounts,
@@ -1756,12 +1714,12 @@ func resolveCargo(repoDir string, opts DepOptions) (Resolution, error) {
 // so cargo resolves the registry at the standard path, and CARGO_NET_OFFLINE=true
 // so any cache miss is a hard error rather than a network hang.
 //
-// shared controls ROMount.Shared: true for HOST (user's real Cargo registry —
+// shared controls sandbox.ROMount.Shared: true for HOST (user's real Cargo registry —
 // must not be SELinux-relabeled), false for FETCH (bugbot-owned cache dir —
-// :Z isolation correct). See ROMount.Shared for the full rationale.
+// :Z isolation correct). See sandbox.ROMount.Shared for the full rationale.
 func cargoRegistryResolution(hostRegistry string, strategy DepStrategy, shared bool, prefetch func(context.Context) error) Resolution {
 	return Resolution{
-		ROMounts: []ROMount{{
+		ROMounts: []sandbox.ROMount{{
 			HostPath:      hostRegistry,
 			ContainerPath: cargoRegistryMount,
 			Shared:        shared,
@@ -2079,7 +2037,7 @@ func resolveJSWithFlags(repoDir string, opts DepOptions, prefetchFlags []string)
 		// network-none run. The --ignore-scripts flag in the prefetch step is the
 		// real security boundary (network-enabled container, online step).
 		return Resolution{
-			ROMounts: []ROMount{{
+			ROMounts: []sandbox.ROMount{{
 				HostPath:      cache,
 				ContainerPath: npmCacheMount,
 				Shared:        false, // bugbot-owned; :Z isolation correct
@@ -2113,30 +2071,17 @@ func hasPackageJSON(repoDir string) bool {
 	return err == nil && !st.IsDir()
 }
 
-// hasNodeModules reports whether repoDir contains a root node_modules/
-// directory whose contents will actually survive copyWorkspace's
-// gitignore-aware copy, indicating that JS dependencies are already
-// materialized (the npm equivalent of vendored deps).
-//
-// bugbot-f36r: a bare os.Stat here used to be sufficient, but
-// copyWorkspace copies only what `git ls-files --cached --others
-// --exclude-standard` reports (see workspace.go) — a gitignored
-// node_modules/ is silently stripped from the sandbox workspace even
-// though it exists on the host. That made this function report
-// Strategy=vendored (no mounts, no setup) for a workspace that in fact
-// has zero dependencies, and the sandboxed run then failed on imports.
-// Fix: when repoDir is a git work tree, reconcile with
-// gitWorktreeFiles — the exact same listing copyWorkspace uses — so
-// node_modules only counts as vendored when git will actually carry it
-// into the copy (tracked, or untracked-but-not-gitignored). Non-git
-// checkouts and listing failures fall back to the plain stat check,
-// matching copyWorkspace's own full-copy fallback for those cases.
+// hasNodeModules reports whether repoDir contains a root node_modules/ that
+// the sandbox workspace copy will carry: a gitignored node_modules is
+// stripped from the copy, so it only counts when sandbox.GitWorktreeFiles
+// (the copy's own listing) includes it. Non-git checkouts and listing
+// failures keep the plain stat answer.
 func hasNodeModules(repoDir string) bool {
 	st, err := os.Stat(filepath.Join(repoDir, "node_modules"))
 	if err != nil || !st.IsDir() {
 		return false
 	}
-	files, isRepo, err := gitWorktreeFiles(repoDir)
+	files, isRepo, err := sandbox.GitWorktreeFiles(repoDir)
 	if err != nil {
 		// git ls-files failed; copyWorkspace will surface this same error
 		// and abort sandbox creation, so the strategy decided here is
@@ -2245,7 +2190,7 @@ func resolveBwrapNPMHostDeps(hostCache string) (Resolution, error) {
 		return Resolution{}, err
 	}
 	return Resolution{
-		ROMounts: []ROMount{{
+		ROMounts: []sandbox.ROMount{{
 			HostPath:      cache,
 			ContainerPath: npmCacheMount,
 			Shared:        true, // host-owned cache; no :Z relabel
@@ -2416,9 +2361,9 @@ func resolveNuGet(repoDir string, opts DepOptions) (Resolution, error) {
 // a single read-only mount at /nugetcache plus NUGET_PACKAGES=/nugetcache so
 // dotnet resolves packages at the standard $NUGET_PACKAGES location.
 //
-// shared controls ROMount.Shared: true for HOST (user's real NuGet packages
+// shared controls sandbox.ROMount.Shared: true for HOST (user's real NuGet packages
 // cache — must not be SELinux-relabeled), false for FETCH (bugbot-owned cache
-// dir — :Z isolation correct). See ROMount.Shared for the full rationale.
+// dir — :Z isolation correct). See sandbox.ROMount.Shared for the full rationale.
 //
 // Offline enforcement: NuGet has no clean GOPROXY=off / CARGO_NET_OFFLINE=
 // analog. The --network=none run itself enforces offline operation: any NuGet
@@ -2427,7 +2372,7 @@ func resolveNuGet(repoDir string, opts DepOptions) (Resolution, error) {
 // a fake env flag here — the OS-level network=none is the enforcement point.
 func nugetResolution(hostPackages string, strategy DepStrategy, shared bool, prefetch func(context.Context) error) Resolution {
 	return Resolution{
-		ROMounts: []ROMount{{
+		ROMounts: []sandbox.ROMount{{
 			HostPath:      hostPackages,
 			ContainerPath: nugetCacheMount,
 			Shared:        shared,
@@ -2752,9 +2697,9 @@ func resolveMaven(repoDir string, opts DepOptions) (Resolution, error) {
 // a single read-only mount at /m2cache plus MAVEN_OPTS so Maven uses it as the
 // local repository.
 //
-// shared controls ROMount.Shared: true for HOST (user's real Maven repository —
+// shared controls sandbox.ROMount.Shared: true for HOST (user's real Maven repository —
 // must not be SELinux-relabeled), false for FETCH (bugbot-owned cache dir —
-// :Z isolation correct). See ROMount.Shared for the full rationale.
+// :Z isolation correct). See sandbox.ROMount.Shared for the full rationale.
 //
 // Offline enforcement: Maven has no clean GOPROXY=off analog. The --network=none
 // run itself enforces offline operation: any Maven call that would resolve a
@@ -2763,7 +2708,7 @@ func resolveMaven(repoDir string, opts DepOptions) (Resolution, error) {
 // network=none is the enforcement point (same approach as NuGet).
 func mavenResolution(hostRepo string, strategy DepStrategy, shared bool, prefetch func(context.Context) error) Resolution {
 	return Resolution{
-		ROMounts: []ROMount{{
+		ROMounts: []sandbox.ROMount{{
 			HostPath:      hostRepo,
 			ContainerPath: m2CacheMount,
 			Shared:        shared,
@@ -3020,7 +2965,7 @@ const gradleCacheMount = "/gradlecache"
 // large Gradle caches do not overflow the tmpfs and cause exit 125 /
 // environment_error. The dot-prefix causes Gradle recursive globs to skip it
 // (same convention as goCacheDir / goTmpDir).
-const gradleHomeDir = workspaceMount + "/.bugbot-gradle-home"
+const gradleHomeDir = sandbox.WorkspaceMount + "/.bugbot-gradle-home"
 
 // gradleEcosystem is the Gradle dependency resolver. It detects repos with a
 // root build.gradle / build.gradle.kts / settings.gradle / settings.gradle.kts
@@ -3089,7 +3034,7 @@ func resolveGradle(repoDir string, opts DepOptions) (Resolution, error) {
 // cp -a /src /dst semantics when dst does not exist vs when it does).
 func gradleResolution(hostCache string, prefetch func(context.Context) error) Resolution {
 	return Resolution{
-		ROMounts: []ROMount{{
+		ROMounts: []sandbox.ROMount{{
 			HostPath:      hostCache,
 			ContainerPath: gradleCacheMount,
 			Shared:        false, // bugbot-owned dir, :Z isolation correct

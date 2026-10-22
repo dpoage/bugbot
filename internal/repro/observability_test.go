@@ -9,7 +9,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/progress"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // reproRecordingSink captures progress events for assertions. Safe for the

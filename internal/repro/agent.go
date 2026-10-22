@@ -9,9 +9,9 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/sandbox"
 	"github.com/dpoage/bugbot/internal/util"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // jsTSGuidance is shared by JavaScript and TypeScript, which use the same test

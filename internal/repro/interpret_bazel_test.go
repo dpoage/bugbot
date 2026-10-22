@@ -15,7 +15,7 @@ package repro
 import (
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 func TestInterpret_Bazel_Contract(t *testing.T) {

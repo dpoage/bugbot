@@ -20,6 +20,7 @@ import (
 	"github.com/dpoage/bugbot/internal/progress"
 	"github.com/dpoage/bugbot/internal/report"
 	"github.com/dpoage/bugbot/internal/repro"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/tracker"
 )
@@ -132,7 +133,7 @@ func newDaemonCmd() *cobra.Command {
 			// backend (container runtime or bwrap) is available; otherwise the
 			// daemon runs without the reproduce stage. Sandbox availability is
 			// surfaced in the banner.
-			sandboxOK := engine.SandboxAvailable(cfg)
+			sandboxOK := sandboxenv.Available(cfg.Sandbox)
 			if doRepro && sandboxOK {
 				// Preflight: probe the sandbox toolchain once before wiring the
 				// reproduce stage; a toolchain-less image would turn every backlog
@@ -220,7 +221,7 @@ func newDaemonCmd() *cobra.Command {
 				defer func() { _ = ctrlServer.Close() }()
 			}
 
-			printDaemonBanner(cmd, cfg, dcfg, sinks, engine.SandboxBackendLabel(cfg), sandboxOK)
+			printDaemonBanner(cmd, cfg, dcfg, sinks, sandboxenv.BackendLabel(cfg.Sandbox), sandboxOK)
 
 			return d.Run(ctx)
 		},

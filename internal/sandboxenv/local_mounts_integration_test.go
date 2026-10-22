@@ -4,17 +4,19 @@
 // in a mounted sibling directory builds and tests offline when that sibling is
 // exposed via DepOptions.LocalMounts. Run with:
 //
-//	go test -tags integration ./internal/sandbox/...
+//	go test -tags integration ./internal/sandboxenv/...
 //
 // Requires a container runtime with a Go toolchain image. Skipped automatically
 // when no runtime is detected or the image cannot be used.
-package sandbox
+package sandboxenv
 
 import (
 	"context"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestLocalMountsSiblingDepBuildsOffline verifies the composable local-mount
@@ -72,7 +74,7 @@ func TestAnswer(t *testing.T) {
 `)
 
 	// The container path for the sibling matches the replace directive above.
-	siblingMount := ROMount{
+	siblingMount := sandbox.ROMount{
 		HostPath:      siblingDir,
 		ContainerPath: "/sibling",
 		Shared:        true,
@@ -82,7 +84,7 @@ func TestAnswer(t *testing.T) {
 	// has no external registry deps, but the sibling dep is locally mounted.
 	res, err := ResolveDeps(repoDir, DepOptions{
 		Strategy:    DepStrategyOff,
-		LocalMounts: []ROMount{siblingMount},
+		LocalMounts: []sandbox.ROMount{siblingMount},
 	})
 	if err != nil {
 		t.Fatalf("ResolveDeps: %v", err)
@@ -103,7 +105,7 @@ func TestAnswer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	result, err := cli.Exec(ctx, Spec{
+	result, err := cli.Exec(ctx, sandbox.Spec{
 		RepoDir:   repoDir,
 		Cmd:       []string{"go", "test", "./..."},
 		Env:       res.Env,

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/ecosystem"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 func TestInferFromExtension(t *testing.T) {
@@ -164,7 +165,7 @@ func TestBaseMode_MatchesRealProbeEntries(t *testing.T) {
 		if mode == "" {
 			t.Fatalf("BaseMode(%q) = \"\", want a real mode name", eco)
 		}
-		var entry *ecosystem.ProbeEntry
+		var entry *sandbox.ProbeEntry
 		for i := range ecosystem.ProbeEntries {
 			if ecosystem.ProbeEntries[i].Name == eco {
 				entry = &ecosystem.ProbeEntries[i]
@@ -174,7 +175,7 @@ func TestBaseMode_MatchesRealProbeEntries(t *testing.T) {
 		if entry == nil {
 			t.Fatalf("no ProbeEntry named %q", eco)
 		}
-		modes := entry.Interpret(ecosystem.ProbeResult{ExitCode: 1})
+		modes := entry.Interpret(sandbox.ProbeResult{ExitCode: 1})
 		if _, ok := modes[mode]; !ok {
 			t.Errorf("ecosystem %q: BaseMode %q is not a key produced by its ProbeEntry.Interpret (keys: %v)", eco, mode, modes)
 		}

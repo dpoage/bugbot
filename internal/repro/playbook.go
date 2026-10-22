@@ -31,8 +31,9 @@ import (
 
 	"github.com/dpoage/bugbot/internal/ecosystem"
 	"github.com/dpoage/bugbot/internal/ingest"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 	"github.com/dpoage/bugbot/internal/util"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // playbookProbeTimeout bounds a single launcher probe. Kept short: every
@@ -311,7 +312,7 @@ func classifyPlaybookProbe(probe playbookProbe, res sandbox.Result, err error, t
 	if res.InfraKilled() {
 		reason := fmt.Sprintf("timed out after %s", timeout)
 		if res.WorkspaceQuotaExceeded {
-			reason = res.KillReason()
+			reason = sandboxenv.KillReason(res)
 		}
 		return PlaybookVerdict{
 			Ecosystem: probe.Ecosystem, Launcher: probe.Launcher,
@@ -321,6 +322,15 @@ func classifyPlaybookProbe(probe playbookProbe, res sandbox.Result, err error, t
 	}
 	if res.ExitCode == 0 {
 		return PlaybookVerdict{Ecosystem: probe.Ecosystem, Launcher: probe.Launcher, Verified: true}
+	}
+	// 125 is a SetupCmds or bwrap setup failure before the probe ran: no
+	// evidence about the launcher either way.
+	if res.ExitCode == 125 {
+		return PlaybookVerdict{
+			Ecosystem: probe.Ecosystem, Launcher: probe.Launcher,
+			Inconclusive: true,
+			Reason:       util.FlattenField("sandbox setup failed (exit 125): " + trunc(strings.TrimSpace(res.Stderr), 120)),
+		}
 	}
 	out := strings.ToLower(strings.TrimSpace(res.Stdout + " " + res.Stderr))
 	if res.ExitCode == 126 || res.ExitCode == 127 || hasAnyMarker(out, []string{
@@ -336,11 +346,11 @@ func classifyPlaybookProbe(probe playbookProbe, res sandbox.Result, err error, t
 
 // runPlaybookBattery runs the bounded probe battery for every ecosystem
 // detected in systems, against the SAME sandbox spec a real repro run gets
-// (spec's Image/CPUs/MemoryMB/IdleTimeout plus res's ROMounts/Env/SetupCmds
-// — mirrors VerifySandbox's spec assembly). probeTimeout/batteryTimeout are
-// parameters (production callers pass playbookProbeTimeout/
-// playbookBatteryTimeout) so tests can exercise real ceiling/timeout
-// enforcement without waiting the full budget.
+// (spec's Image/Env/mounts plus res's ROMounts/Env/SetupCmds, with the
+// network left to the backend default exactly like execute()).
+// probeTimeout/batteryTimeout are parameters (production callers pass
+// playbookProbeTimeout/playbookBatteryTimeout) so tests can exercise real
+// ceiling/timeout enforcement without waiting the full budget.
 //
 // Returns ok=false when an infra-level Exec error aborts the battery
 // outright (sandbox down): callers must discard any partial verdicts and
@@ -355,21 +365,17 @@ func classifyPlaybookProbe(probe playbookProbe, res sandbox.Result, err error, t
 // (see classifyPlaybookProbe) — also never gate-eligible. Either way the
 // (possibly partial) Playbook is still returned active; only an infra error
 // aborts the whole battery.
-func runPlaybookBattery(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec sandbox.Spec, res sandbox.Resolution, systems []ingest.BuildSystem, probeTimeout, batteryTimeout time.Duration) (Playbook, bool) {
+func runPlaybookBattery(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec sandbox.Spec, res sandboxenv.Resolution, systems []ingest.BuildSystem, probeTimeout, batteryTimeout time.Duration) (Playbook, bool) {
 	batteryCtx, cancel := context.WithTimeout(ctx, batteryTimeout)
 	defer cancel()
 
 	baseSpec := sandbox.Spec{
-		RepoDir:     repoDir,
-		Image:       spec.Image,
-		Env:         append(append([]string(nil), spec.Env...), res.Env...),
-		ROMounts:    append(append([]sandbox.ROMount(nil), spec.ROMounts...), res.ROMounts...),
-		RWMounts:    append(append([]sandbox.ROMount(nil), spec.RWMounts...), res.RWMounts...),
-		SetupCmds:   res.SetupCmds,
-		Network:     "none",
-		IdleTimeout: spec.IdleTimeout,
-		CPUs:        spec.CPUs,
-		MemoryMB:    spec.MemoryMB,
+		RepoDir:   repoDir,
+		Image:     spec.Image,
+		Env:       append(append([]string(nil), spec.Env...), res.Env...),
+		ROMounts:  append(append([]sandbox.ROMount(nil), spec.ROMounts...), res.ROMounts...),
+		RWMounts:  append(append([]sandbox.ROMount(nil), spec.RWMounts...), res.RWMounts...),
+		SetupCmds: res.SetupCmds,
 	}
 
 	var verdicts []PlaybookVerdict
@@ -424,13 +430,13 @@ func repoHeadSHA(repoDir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// resolutionFingerprint hashes the parts of a sandbox.Resolution that change
+// resolutionFingerprint hashes the parts of a sandboxenv.Resolution that change
 // what a probe command can see inside the sandbox — mounts, env, and setup
 // commands — into a short deterministic key. A distinct dependency
 // resolution (e.g. dep_strategy: fetch re-warming with different pinned
 // versions) gets its own playbook cache entry instead of silently reusing
 // another resolution's verdicts.
-func resolutionFingerprint(res sandbox.Resolution) string {
+func resolutionFingerprint(res sandboxenv.Resolution) string {
 	h := sha256.New()
 	// hash.Hash writes never fail; blank-assign to satisfy errcheck.
 	_, _ = fmt.Fprintf(h, "strategy\x00%s\x00", res.Strategy)
@@ -460,7 +466,7 @@ func resolutionFingerprint(res sandbox.Resolution) string {
 // "inactive": no prompt section, gate never fires. This is the degradation
 // rule bugbot-u2v5 requires: a playbook failure NEVER blocks the reproduce
 // stage the way it behaved before this feature existed.
-func PlaybookOnce(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec sandbox.Spec, res sandbox.Resolution, systems []ingest.BuildSystem) Playbook {
+func PlaybookOnce(ctx context.Context, sb sandbox.Sandbox, repoDir string, spec sandbox.Spec, res sandboxenv.Resolution, systems []ingest.BuildSystem) Playbook {
 	key := repoDir + "\x00" + repoHeadSHA(repoDir) + "\x00" + resolutionFingerprint(res)
 	playbookCache.mu.Lock()
 	e, ok := playbookCache.m[key]

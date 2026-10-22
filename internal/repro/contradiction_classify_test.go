@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestPromoteOne_ExitZeroIncrementsContradiction verifies that an exit-zero

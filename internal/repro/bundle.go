@@ -15,7 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/ecosystem"
 )
 
 // ManifestFileName is the manifest's fixed basename within a bundle
@@ -44,9 +44,9 @@ type ManifestPlan struct {
 
 // ManifestSandbox is the sandbox execution policy captured in manifest.json.
 type ManifestSandbox struct {
-	Image     string            `json:"image"`
-	Ecosystem sandbox.Ecosystem `json:"ecosystem"`
-	Network   string            `json:"network"`
+	Image     string              `json:"image"`
+	Ecosystem ecosystem.Ecosystem `json:"ecosystem"`
+	Network   string              `json:"network"`
 }
 
 // ManifestResult is the sandboxed run's outcome captured in manifest.json.

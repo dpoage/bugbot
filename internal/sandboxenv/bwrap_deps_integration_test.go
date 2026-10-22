@@ -1,12 +1,12 @@
 //go:build integration
 
-// Bwrap dependency-strategy integration tests prove bugbot-48ya acceptance 4:
+// sandbox.Bwrap dependency-strategy integration tests prove bugbot-48ya acceptance 4:
 // a go test importing an external module and a python test importing a
 // third-party package both execute under a REAL bwrap + network=none run
 // with dep_strategy: host. Run with:
 //
-//	go test -tags integration ./internal/sandbox/...
-package sandbox
+//	go test -tags integration ./internal/sandboxenv/...
+package sandboxenv
 
 import (
 	"context"
@@ -14,36 +14,39 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestBwrapGoHostDepsOffline proves the bwrap analogue of
 // TestIntegrationDepsHostCacheBuildsOffline (deps_integration_test.go,
 // container backend): with dep_strategy: host, ResolveDeps mounts the real
 // host GOMODCACHE (Shared=true, GOFLAGS/GOMODCACHE/GOPROXY=off) plus the
-// host `go` toolchain (via DepOptions.HostToolchains — the same field
-// repro.New always sets from config), and `go test ./...` against a module
+// host `go` toolchain (via sandbox.WithHostToolchains, as sandboxenv.New
+// wires it from config), and `go test ./...` against a module
 // with an external dependency passes under a live bwrap + network=none run.
 // No container, no baked image — this is exactly the bwrap gap the bead
 // closes.
 func TestBwrapGoHostDepsOffline(t *testing.T) {
-	if ok, reason := DetectBwrap(); !ok {
+	if ok, reason := sandbox.DetectBwrap(); !ok {
 		t.Skipf("bwrap unavailable: %s", reason)
 	}
 	cache := hostModcacheOrSkip(t) // shared helper from deps_integration_test.go
 
-	tc, err := ResolveHostToolchains([]string{"go"})
-	if err != nil || len(tc.Mounts) == 0 {
-		t.Skipf("no host go toolchain resolvable on PATH: %v", err)
+	tc := sandbox.ResolveHostToolchains([]string{"go"})
+	if len(tc.Fingerprints) == 0 {
+		t.Skipf("no host go toolchain resolvable on PATH: %v", tc.Unresolved)
 	}
 
 	// Go's build system forks a worker process per compiled package plus
 	// assembler/linker helpers (see TestBwrapGoReproRunsGreen's identical
 	// note) — the default PidsLimit is too low even for this tiny module.
-	bw, err := NewBwrap(
-		WithBwrapCPUs(2),
-		WithBwrapMemoryMB(1024),
-		WithBwrapPidsLimit(512),
-		WithBwrapTimeout(90*time.Second),
+	bw, err := sandbox.NewBwrap(
+		sandbox.WithHostToolchains(tc),
+		sandbox.WithCPUs(2),
+		sandbox.WithMemoryMB(1024),
+		sandbox.WithPidsLimit(512),
+		sandbox.WithTimeout(90*time.Second),
 	)
 	if err != nil {
 		t.Skipf("NewBwrap: %v", err)
@@ -66,7 +69,7 @@ func TestBwrapGoHostDepsOffline(t *testing.T) {
 		t.Fatalf("Strategy = %q, want host", res.Strategy)
 	}
 
-	out, err := bw.Exec(context.Background(), Spec{
+	out, err := bw.Exec(context.Background(), sandbox.Spec{
 		RepoDir:  repo,
 		Cmd:      []string{"go", "test", "./..."},
 		Network:  "none",
@@ -102,20 +105,21 @@ func TestBwrapGoHostDepsOffline(t *testing.T) {
 // the unit tests in deps_test.go (TestPythonResolveHostUnderBwrap uses the
 // same DepOptions.hostPythonSitePackages test seam this test uses).
 func TestBwrapPythonHostDepsOffline(t *testing.T) {
-	if ok, reason := DetectBwrap(); !ok {
+	if ok, reason := sandbox.DetectBwrap(); !ok {
 		t.Skipf("bwrap unavailable: %s", reason)
 	}
 
-	tc, err := ResolveHostToolchains([]string{"python3"})
-	if err != nil || len(tc.Mounts) == 0 {
-		t.Skipf("no host python3 toolchain resolvable on PATH: %v", err)
+	tc := sandbox.ResolveHostToolchains([]string{"python3"})
+	if len(tc.Fingerprints) == 0 {
+		t.Skipf("no host python3 toolchain resolvable on PATH: %v", tc.Unresolved)
 	}
 
-	bw, err := NewBwrap(
-		WithBwrapCPUs(1),
-		WithBwrapMemoryMB(256),
-		WithBwrapPidsLimit(64),
-		WithBwrapTimeout(30*time.Second),
+	bw, err := sandbox.NewBwrap(
+		sandbox.WithHostToolchains(tc),
+		sandbox.WithCPUs(1),
+		sandbox.WithMemoryMB(256),
+		sandbox.WithPidsLimit(64),
+		sandbox.WithTimeout(30*time.Second),
 	)
 	if err != nil {
 		t.Skipf("NewBwrap: %v", err)
@@ -146,7 +150,7 @@ print("OK")
 		t.Fatalf("Strategy = %q, want host", res.Strategy)
 	}
 
-	out, err := bw.Exec(context.Background(), Spec{
+	out, err := bw.Exec(context.Background(), sandbox.Spec{
 		RepoDir:  repo,
 		Cmd:      []string{"python3", "check_dep.py"},
 		Network:  "none",

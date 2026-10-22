@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // --- helpers -----------------------------------------------------------------

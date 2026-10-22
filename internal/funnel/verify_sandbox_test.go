@@ -3,6 +3,7 @@ package funnel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,8 +13,9 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // --- Fake sandbox for funnel tests ----------------------------------------
@@ -24,6 +26,11 @@ import (
 type funnelFakeSandbox struct {
 	result sandbox.Result
 	calls  atomic.Int32
+}
+
+// MaterializeWorkspace satisfies sandbox.Sandbox; these tests never iterate in a workspace.
+func (f *funnelFakeSandbox) MaterializeWorkspace(string) (string, error) {
+	return "", errors.New("funnelFakeSandbox: MaterializeWorkspace unsupported")
 }
 
 func (f *funnelFakeSandbox) Exec(_ context.Context, _ sandbox.Spec) (sandbox.Result, error) {
@@ -455,7 +462,7 @@ func TestVerifyFinding_NoSandboxTool(t *testing.T) {
 }
 
 // TestSweep_PipDependencyRejectionReasonReachesResultSkipped pins bugbot-gu0o
-// D3: sandbox.ResolveDeps scopes a rejected requirements.txt to Python
+// D3: sandboxenv.ResolveDeps scopes a rejected requirements.txt to Python
 // (Resolution{Strategy: DepStrategyOff} plus a Warnings entry, C2) instead of
 // aborting the whole run — but a Warning nobody surfaces is exactly as silent
 // as the hard error it replaced. New() threads f.deps.Warnings into
@@ -482,7 +489,7 @@ func TestSweep_PipDependencyRejectionReasonReachesResultSkipped(t *testing.T) {
 		SandboxOpts: SandboxOpts{
 			Sandbox:     &funnelFakeSandbox{},
 			Enabled:     true,
-			DepStrategy: sandbox.DepStrategyFetch,
+			DepStrategy: sandboxenv.DepStrategyFetch,
 		},
 	})
 	if err != nil {

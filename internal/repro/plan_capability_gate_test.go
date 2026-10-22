@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestAttempt_RejectsPlanRequiringUnavailableEcosystem is regression 6(c): a

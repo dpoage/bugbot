@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // TestAttempt_QB4R covers bugbot-qb4r acceptance criterion 4: a source-grep

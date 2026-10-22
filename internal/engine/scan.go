@@ -14,6 +14,7 @@ import (
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/miner"
 	"github.com/dpoage/bugbot/internal/progress"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 	"github.com/dpoage/bugbot/internal/store"
 )
 
@@ -395,13 +396,13 @@ func buildScanChangeContext(ctx context.Context, repo *ingest.Repo, fromSHA, toS
 // The seed step is always-on (no config knob in v1) but requires a container
 // runtime: if no runtime is available the step is skipped silently.
 func RunAnalyzerSeed(ctx context.Context, cfg config.Config, repoDir string, st *store.Store, sink progress.EventSink) {
-	if !sandboxAvailable(cfg) {
+	if !sandboxenv.Available(cfg.Sandbox) {
 		// No sandbox backend available: skip seeding silently. The scan still
 		// runs; it just won't have static-analyzer leads to seed the finder
 		// stage with.
 		return
 	}
-	sb, err := newConfiguredSandbox(cfg)
+	sb, err := sandboxenv.New(cfg.Sandbox)
 	if err != nil {
 		// Sandbox construction failed: emit a note and continue without seeding.
 		progress.Emit(sink, progress.Event{
@@ -412,10 +413,10 @@ func RunAnalyzerSeed(ctx context.Context, cfg config.Config, repoDir string, st 
 		return
 	}
 	// Natural defer scope: sb is used only within this function, so its
-	// workspace cache (wsCache) can be closed unconditionally on return.
+	// workspace cache can be closed unconditionally on return.
 	defer closeSandbox(sb)
 
-	sum, err := analyzer.Seed(ctx, sb, repoDir, st, cfg.Sandbox.Image)
+	sum, err := analyzer.Seed(ctx, sb, repoDir, st, sandboxenv.RunImage(sb, cfg.Sandbox))
 	if err != nil {
 		// Store infrastructure error: emit a note. Seed already posted whatever
 		// it could before the error; the scan continues normally.

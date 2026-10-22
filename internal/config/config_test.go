@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // validYAML is a minimal-but-complete config used as a baseline in tests.
@@ -1705,20 +1707,41 @@ func TestStarterYAML_CommentedExampleBlocksMatchStructs(t *testing.T) {
 	}
 }
 
-// TestValidate_NetworkIsOpenEnded verifies that sandbox.network is not
-// restricted by Config.Validate — the runtime (podman/docker) owns network
-// validation, and the set of legal values (none, host, bridge, slirp4netns,
-// pasta, container:<id>, named networks) is open-ended. Any string is accepted.
-func TestValidate_NetworkIsOpenEnded(t *testing.T) {
+// TestValidate_NetworkLimitedToSandboxModes: sandbox.network accepts only the
+// modes llmkit/sandbox can honor; a runtime-specific name (slirp4netns, a
+// named network) is refused at load instead of failing every run.
+func TestValidate_NetworkLimitedToSandboxModes(t *testing.T) {
 	cfg, err := Load(writeTemp(t, validYAML))
 	if err != nil {
 		t.Fatalf("load baseline: %v", err)
 	}
-	for _, v := range []string{"", "none", "host", "bridge", "slirp4netns", "pasta", "container:abc123", "mynet"} {
+	for _, v := range []string{"", "none", "host", "bridge"} {
 		cfg.Sandbox.Network = v
 		if err := cfg.Validate(); err != nil {
-			t.Errorf("network=%q should be accepted (open-ended), got %v", v, err)
+			t.Errorf("network=%q should be accepted, got %v", v, err)
 		}
+	}
+	for _, v := range []string{"slirp4netns", "pasta", "container:abc123", "mynet"} {
+		cfg.Sandbox.Network = v
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "sandbox.network") {
+			t.Errorf("network=%q should be refused naming sandbox.network, got %v", v, err)
+		}
+	}
+}
+
+// TestValidate_BridgeNetworkRefusedUnderBwrap: bwrap has no bridge network.
+func TestValidate_BridgeNetworkRefusedUnderBwrap(t *testing.T) {
+	if ok, reason := sandbox.DetectBwrap(); !ok {
+		t.Skipf("bwrap unavailable (Validate refuses backend bwrap first): %s", reason)
+	}
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatalf("load baseline: %v", err)
+	}
+	cfg.Sandbox.Backend = "bwrap"
+	cfg.Sandbox.Network = "bridge"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "bridge") {
+		t.Errorf("bwrap + network bridge should be refused, got %v", err)
 	}
 }
 

@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/dpoage/bugbot/internal/domain"
-	"github.com/dpoage/bugbot/internal/sandbox"
+	"github.com/dpoage/llmkit/sandbox"
 	"gopkg.in/yaml.v3"
 )
 
@@ -195,13 +195,18 @@ type Sandbox struct {
 	// operator who names the runtime directly here still gets the container
 	// path. "bwrap" selects the bubblewrap backend instead: an unprivileged
 	// user-namespace sandbox that runs directly on host toolchains, with no
-	// image to bake (see internal/sandbox/bwrap.go). Backend:bwrap is
+	// image to bake (llmkit/sandbox Bwrap). Backend:bwrap is
 	// rejected by Validate on non-Linux hosts, when bwrap is absent from
 	// PATH, or when unprivileged user namespaces are unavailable — see
-	// DetectBwrap. Image/Runtime are container-backend-only and ignored under bwrap.
+	// DetectBwrap. Image/Runtime are container-backend-only and do not apply
+	// under bwrap. Every knob maps onto one llmkit/sandbox option in
+	// internal/sandboxenv.New, which fails construction rather than run with
+	// a knob unhonored.
 	// DepStrategy and LocalMounts (below) ARE honored under bwrap too — see
 	// their own doc comments for the per-backend differences (bugbot-48ya).
-	Backend  string `yaml:"backend"`
+	Backend string `yaml:"backend"`
+	// Runtime is the container runtime binary (podman or docker) the CLI
+	// backend runs; it must be on PATH.
 	Runtime  string `yaml:"runtime"`
 	Image    string `yaml:"image"`
 	CPUs     int    `yaml:"cpus"`
@@ -218,14 +223,8 @@ type Sandbox struct {
 	// TimeoutSeconds; one stalled this long is killed. 0 disables the watchdog.
 	IdleTimeoutSeconds int `yaml:"idle_timeout_seconds"`
 	// ScratchSizeMB caps the size (in MB) of the writable /tmp tmpfs scratch
-	// space, honored by BOTH backends: the container backend renders it as
-	// the --tmpfs size=... mount option (internal/sandbox/command.go); bwrap
-	// renders it as --size immediately before --tmpfs (internal/sandbox/
-	// bwrap_command.go) and applies the SAME size to the tmpfs root ("/"),
-	// not just /tmp — under bwrap the root itself is an unsized tmpfs, so an
-	// unbounded root is an equally real RAM-DoS surface as an unbounded /tmp
-	// (bugbot-yrox). Must be > 0; default 512 (matching the container
-	// backend's historical hardcoded 512m).
+	// space, honored by BOTH backends; under bwrap the same size also bounds
+	// the tmpfs root ("/"). Must be > 0; default 512.
 	ScratchSizeMB int `yaml:"scratch_size_mb"`
 	// WorkspaceGrowthCeilingMB bounds NET workspace growth (regular-file
 	// size delta, not cumulative bytes written — a write-then-delete churn
@@ -234,19 +233,21 @@ type Sandbox struct {
 	// never plain TimedOut) — independent of idle-stall detection, since a
 	// process that only fills disk keeps "resetting" the idle clock under the
 	// existing progress fingerprint and would otherwise run undetected until
-	// the absolute timeout (bugbot-bdqf). Honored by BOTH backends (CLI.Exec
-	// and Bwrap.Exec both drive the shared watchIdle). 0 disables the
-	// ceiling (idle-stall detection and the absolute timeout still apply).
+	// the absolute timeout (bugbot-bdqf). Honored by BOTH backends' watchdog.
+	// 0 disables the ceiling (idle-stall detection and the absolute timeout
+	// still apply).
 	// Default 2048 (2 GiB) — generous enough to clear a heavy toolchain
 	// build's disk footprint while still bounding a runaway write loop well
 	// short of exhausting a typical host's disk.
-	WorkspaceGrowthCeilingMB int    `yaml:"workspace_growth_ceiling_mb"`
-	Network                  string `yaml:"network"`
+	WorkspaceGrowthCeilingMB int `yaml:"workspace_growth_ceiling_mb"`
+	// Network is every run's default network mode: "none" (default), "host",
+	// or "bridge" (container backend only).
+	Network string `yaml:"network"`
 	// DepStrategy selects how external module dependencies are made available
 	// to the network-none sandbox for repos that are not vendored. Vendored
 	// repos (vendor/modules.txt for Go, node_modules/ for JS, ...) are always
 	// detected and need no strategy. Honored by BOTH sandbox backends (see
-	// internal/sandbox/deps.go's file doc for the full per-ecosystem matrix
+	// internal/sandboxenv/deps.go's file doc for the full per-ecosystem matrix
 	// and README's "Sandbox dependency strategies" section). Values:
 	//   off   (default) no dependency mounts; only vendored repos build offline.
 	//   host  mount a host-owned dependency cache read-only (e.g. the host Go
@@ -297,28 +298,28 @@ type Sandbox struct {
 	LocalMounts []LocalMount `yaml:"local_mounts"`
 	// AllowUncapped opts into running the bwrap backend with NO enforced
 	// memory/CPU/pids limits when neither systemd-run --user --scope nor a
-	// delegated cgroup v2 subtree is available on the host. Ignored by the
-	// container backend, which always enforces limits via the runtime CLI.
-	// Default false: bwrap Exec fails with an actionable error instead of
-	// silently running uncapped (see internal/sandbox/bwrap_caps.go).
+	// delegated cgroup v2 subtree is available on the host
+	// (sandbox.WithCapPolicy(CapBestEffort)). Does not apply to the container
+	// backend, which always enforces limits via the runtime CLI. Default
+	// false: bwrap Exec fails with sandbox.ErrBwrapNoCapMethod instead.
 	AllowUncapped bool `yaml:"allow_uncapped"`
 	// HostToolchains is an ordered list of host toolchain names (resolved from
-	// the host's PATH, following symlink closures — see
-	// sandbox.ResolveHostToolchains) or explicit host directories, mounted
-	// read-only into the sandbox and prepended to its PATH. Use this when the
+	// the host's PATH — see sandbox.ResolveHostToolchains) or explicit host
+	// directories, mounted read-only into the sandbox by either backend and
+	// put first on its PATH (sandbox.WithHostToolchains). Use this when the
 	// sandbox image lacks a toolchain the host already has (e.g. a bazel-only
 	// image reproducing a TypeScript finding needs "node"): the mounted
 	// toolchain then shows up as available in the probed CapabilitySet and in
-	// the reproducer agent's capability prompt.
+	// the reproducer agent's capability prompt. Backend construction fails
+	// when an entry does not resolve on the host.
 	//
 	// Same security posture as LocalMounts (see its doc and the ROMount
 	// package doc): READ-ONLY, and only ever exposes public toolchain
 	// content — never point an entry at a directory containing secrets.
 	//
-	// PATH override: when any entry resolves, the container's PATH is set to
-	// the resolved toolchain bin dir(s) followed by a standard fallback (see
-	// sandbox.DefaultContainerPath) — this REPLACES, not appends to, whatever
-	// PATH the image itself would otherwise have set.
+	// PATH override: when any entry resolves, the container's PATH is the
+	// resolved toolchain dir(s) followed by a standard fallback — this
+	// REPLACES whatever PATH the image itself would otherwise have set.
 	HostToolchains []string `yaml:"host_toolchains"`
 }
 
@@ -1094,6 +1095,15 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("config: sandbox.backend %q invalid (want \"\", cli, podman, docker, or bwrap)", c.Sandbox.Backend)
 	}
+	switch sandbox.NetworkMode(c.Sandbox.Network) {
+	case "", sandbox.NetworkNone, sandbox.NetworkHost:
+	case sandbox.NetworkBridge:
+		if c.Sandbox.Backend == "bwrap" {
+			return fmt.Errorf("config: sandbox.network bridge is not supported by the bwrap backend (want none or host)")
+		}
+	default:
+		return fmt.Errorf("config: sandbox.network %q invalid (want none, host, or bridge)", c.Sandbox.Network)
+	}
 	if c.Sandbox.CPUs <= 0 {
 		return fmt.Errorf("config: sandbox.cpus must be > 0")
 	}
@@ -1110,13 +1120,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: sandbox.idle_timeout_seconds must be >= 0 (0 disables)")
 	}
 	// maxSandboxMBKnob bounds sandbox.scratch_size_mb and
-	// sandbox.workspace_growth_ceiling_mb well below the point where
-	// int64(mb)*1024*1024 (internal/sandbox's byte conversion) could
-	// overflow — an absurd operator value would otherwise silently degrade
-	// to a wrapped/negative byte count (a disabled or nonsensical ceiling)
-	// instead of a loud config error. 10,000,000 MB (~9.5 TiB) is already
-	// far beyond any real host's disk, so this only ever catches typos/DoS
-	// input, never a legitimate value.
+	// sandbox.workspace_growth_ceiling_mb: it only ever catches typos/DoS
+	// input (~9.5 TiB), well inside what llmkit's MB-to-byte conversion takes.
 	const maxSandboxMBKnob = 10_000_000
 	if c.Sandbox.ScratchSizeMB <= 0 {
 		return fmt.Errorf("config: sandbox.scratch_size_mb must be > 0")

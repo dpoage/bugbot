@@ -17,10 +17,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dpoage/bugbot/internal/sandbox"
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
 	"github.com/dpoage/llmkit/fsroot"
+	"github.com/dpoage/llmkit/sandbox"
 )
 
 // runReproOutputTailBytes bounds the combined-output excerpt returned by the
@@ -31,19 +31,6 @@ import (
 // exact compiler error or assertion failure it needs to see to fix the next
 // iteration.
 const runReproOutputTailBytes = 4 * 1024
-
-// workspaceMaterializer is implemented by sandbox backends that can
-// pre-materialize a caller-owned workspace outside of Exec (see
-// sandbox.Spec.Workspace). *sandbox.CLI implements it via the pristine-
-// workspace cache. The workspace tool set (write_repro_file,
-// delete_repro_file, workspace) is wired only when the configured sandbox
-// implements this interface (checked once in newRunner); a backend that
-// doesn't (e.g. a bare sandbox.Mock in a test that never scripts iteration)
-// simply omits the tools, mirroring how run_tests is omitted when no build
-// system is detectable.
-type workspaceMaterializer interface {
-	MaterializeWorkspace(repoDir string) (string, error)
-}
 
 // iterationWorkspace is the lazily-materialized, per-Attempt workspace the
 // reproducer agent builds its candidate in. It starts empty (path == "") and
@@ -178,7 +165,7 @@ type WriteReproFileTool struct {
 // NewWriteReproFileTool builds a write_repro_file tool bound to one Attempt's
 // iteration workspace holder. repoDir is the host repo path used for the
 // must-not-overwrite-existing-repo-file check; materialize lazily creates the
-// workspace (normally sb.(workspaceMaterializer).MaterializeWorkspace).
+// workspace (normally sb.MaterializeWorkspace).
 func NewWriteReproFileTool(repoDir string, materialize func(repoDir string) (string, error), ws *iterationWorkspace) *WriteReproFileTool {
 	return &WriteReproFileTool{repoDir: repoDir, materialize: materialize, ws: ws}
 }
@@ -419,8 +406,8 @@ type WorkspaceTool struct {
 // network/dep/timeout/image environment the final plan will; roMounts/
 // rwMounts/depEnv/setupCmds carry the resolved dependency strategy (rwMounts
 // are operator "writable: true" local_mounts, bugbot-wjc2); materialize
-// lazily creates the iteration workspace (normally sb.(workspaceMaterializer).
-// MaterializeWorkspace); ws is the shared holder Attempt cleans up on
+// lazily creates the iteration workspace (normally
+// sb.MaterializeWorkspace); ws is the shared holder Attempt cleans up on
 // return; maxExec is the per-attempt SANDBOX budget — only exec calls that
 // actually reach the sandbox consume it; the free ls/cat/status/grep/find
 // applets never do.
