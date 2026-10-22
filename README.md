@@ -400,6 +400,12 @@ roles:
   reproducer: { provider: anthropic, model: claude-fable-5 }
 ```
 
+Credentials and endpoints come only from this config: the key from the
+variable `api_key_env` (or `auth_token_env`) names, the host from `base_url`.
+Vendor SDK variables such as `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` are
+never read; if one is set while `base_url` is empty, building that role's
+client fails with an error naming the variable — set `base_url` instead.
+
 Token budgets (`per_cycle_tokens`, `per_day_tokens`) are first-class: the
 daemon degrades gracefully as budget runs low and stops spending entirely when
 it's gone — never silently.

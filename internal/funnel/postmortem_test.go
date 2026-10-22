@@ -74,7 +74,6 @@ func TestClassifyFinderErr_Unparseable(t *testing.T) {
 func TestClassifyFinderErr_BudgetStop(t *testing.T) {
 	outcome := &agent.Outcome{
 		FinalText:        "",
-		Truncated:        true,
 		TruncationReason: agent.TruncBudgetPool,
 	}
 	got := classifyFinderErr(outcome, errors.New("some error"))

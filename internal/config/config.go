@@ -436,11 +436,11 @@ type Repro struct {
 
 // LLM tunes the shared LLM client wrapper applied to every role's client. The
 // zero value is valid: zero/omitted on any field means "use the LLM package's
-// built-in default" (e.g. llmkit.DefaultRequestTimeout).
+// built-in default" (e.g. retry.DefaultRequestTimeout).
 type LLM struct {
 	// RequestTimeout bounds a single LLM request attempt (per-attempt wall-clock
 	// deadline). Zero or omitted uses the LLM package default
-	// (llmkit.DefaultRequestTimeout, currently 5m). Negative is invalid.
+	// (retry.DefaultRequestTimeout, currently 5m). Negative is invalid.
 	RequestTimeout time.Duration `yaml:"request_timeout"`
 }
 

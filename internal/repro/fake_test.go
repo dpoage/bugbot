@@ -71,7 +71,7 @@ func (c *scriptedClient) allRequests() []llmkit.Request {
 // taskText returns the LAST user-message content of request n (the task
 // prompt this round's own turn carried), or "" if absent. Round 1 has
 // exactly one user message, so this matches the historical "first" behavior
-// there; a continuation round (bugbot-z6ay, see planFor/RunJSONContinue)
+// there; a continuation round (bugbot-z6ay, see planFor/agent.Continue)
 // carries the ENTIRE prior conversation as a prefix, so the round's own new
 // task is the last user turn, not the first.
 func (c *scriptedClient) taskText(n int) string {

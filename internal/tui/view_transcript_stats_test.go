@@ -9,6 +9,18 @@ import (
 	"github.com/dpoage/llmkit/agent"
 )
 
+// completionEv is a successful completion event at step carrying resp.
+func completionEv(step int, at time.Time, resp llmkit.Response) llmkit.Event {
+	return llmkit.Event{Kind: llmkit.KindCompletion, Step: step, Time: at, SchemaVersion: llmkit.EventSchemaVersion,
+		Completion: &llmkit.CompletionEvent{Response: resp}}
+}
+
+// toolRunEv is a tool_run event at step for a call to name.
+func toolRunEv(step int, at time.Time, name, result string, isErr bool) llmkit.Event {
+	return llmkit.Event{Kind: llmkit.KindToolRun, Step: step, Time: at, SchemaVersion: llmkit.EventSchemaVersion,
+		ToolRun: &llmkit.ToolRunEvent{Call: llmkit.ToolCall{ID: name + "-call", Name: name}, Result: result, IsError: isErr}}
+}
+
 // ── computeTranscriptStats ───────────────────────────────────────────────────
 
 func TestComputeTranscriptStats_Empty(t *testing.T) {
@@ -23,34 +35,32 @@ func TestComputeTranscriptStats_Empty(t *testing.T) {
 	}
 }
 
-func TestComputeTranscriptStats_NilUsage(t *testing.T) {
-	// An assistant event with a nil Usage pointer (e.g. a still-streaming
-	// transcript captured mid-turn) must not panic and must not contribute
-	// to the token totals.
-	tr := &agent.Transcript{Events: []agent.Event{
-		{Kind: agent.EventAssistant, Step: 1, Text: "hi", Usage: nil},
-	}}
+func TestComputeTranscriptStats_FailedCompletion(t *testing.T) {
+	// A failed completion carries no usage and is not a recorded turn.
+	failed := completionEv(1, time.Time{}, llmkit.Response{})
+	failed.Completion.Err = "boom"
+	tr := &agent.Transcript{Record: []llmkit.Event{failed, completionEv(2, time.Time{}, llmkit.Response{Text: "hi"})}}
 	got := computeTranscriptStats(tr)
 	if got.InputTokens != 0 || got.OutputTokens != 0 {
-		t.Errorf("nil Usage should contribute zero tokens, got %+v", got)
+		t.Errorf("failed completion should contribute zero tokens, got %+v", got)
 	}
-	if got.AssistantN != 1 || got.Steps != 1 {
+	if got.AssistantN != 1 || got.Steps != 2 {
 		t.Errorf("AssistantN/Steps not tallied: %+v", got)
 	}
 }
 
 func TestComputeTranscriptStats_TokensCacheAndTools(t *testing.T) {
 	base := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
-	tr := &agent.Transcript{Events: []agent.Event{
-		{Kind: agent.EventAssistant, Step: 1, Time: base,
+	tr := &agent.Transcript{Record: []llmkit.Event{
+		completionEv(1, base, llmkit.Response{
 			ToolCalls:  []llmkit.ToolCall{{Name: "grep"}, {Name: "read"}},
 			StopReason: llmkit.StopToolUse,
-			Usage:      &llmkit.Usage{InputTokens: 100, OutputTokens: 20, CacheReadInputTokens: 40, CacheCreationInputTokens: 5}},
-		{Kind: agent.EventToolResult, Step: 1, Time: base.Add(2 * time.Second), ToolName: "grep", IsError: false},
-		{Kind: agent.EventToolResult, Step: 1, Time: base.Add(3 * time.Second), ToolName: "read", IsError: true},
-		{Kind: agent.EventAssistant, Step: 2, Time: base.Add(10 * time.Second),
+			Usage:      llmkit.Usage{InputTokens: 100, OutputTokens: 20, CacheReadInputTokens: 40, CacheCreationInputTokens: 5}}),
+		toolRunEv(1, base.Add(2*time.Second), "grep", "", false),
+		toolRunEv(1, base.Add(3*time.Second), "read", "", true),
+		completionEv(2, base.Add(10*time.Second), llmkit.Response{
 			StopReason: llmkit.StopEndTurn,
-			Usage:      &llmkit.Usage{InputTokens: 50, OutputTokens: 10}},
+			Usage:      llmkit.Usage{InputTokens: 50, OutputTokens: 10}}),
 	}}
 	got := computeTranscriptStats(tr)
 	if got.Steps != 2 {
@@ -80,10 +90,10 @@ func TestComputeTranscriptStats_TokensCacheAndTools(t *testing.T) {
 }
 
 func TestComputeTranscriptStats_AbnormalStopReason(t *testing.T) {
-	tr := &agent.Transcript{Events: []agent.Event{
-		{Kind: agent.EventAssistant, Step: 1, StopReason: llmkit.StopMaxTokens, Usage: &llmkit.Usage{InputTokens: 1}},
-		{Kind: agent.EventAssistant, Step: 2, StopReason: llmkit.StopError, Usage: &llmkit.Usage{InputTokens: 1}},
-		{Kind: agent.EventAssistant, Step: 3, StopReason: llmkit.StopMaxTokens, Usage: &llmkit.Usage{InputTokens: 1}},
+	tr := &agent.Transcript{Record: []llmkit.Event{
+		completionEv(1, time.Time{}, llmkit.Response{StopReason: llmkit.StopMaxTokens, Usage: llmkit.Usage{InputTokens: 1}}),
+		completionEv(2, time.Time{}, llmkit.Response{StopReason: llmkit.StopError, Usage: llmkit.Usage{InputTokens: 1}}),
+		completionEv(3, time.Time{}, llmkit.Response{StopReason: llmkit.StopMaxTokens, Usage: llmkit.Usage{InputTokens: 1}}),
 	}}
 	got := computeTranscriptStats(tr)
 	want := []llmkit.StopReason{llmkit.StopMaxTokens, llmkit.StopError}
@@ -97,14 +107,14 @@ func TestComputeTranscriptStats_AbnormalStopReason(t *testing.T) {
 	}
 }
 
-// ── renderTranscript summary header ─────────────────────────────────────────
+// ── renderTranscript ─────────────────────────────────────────────────────────
 
 func TestRenderTranscript_SummaryHeaderPresent(t *testing.T) {
-	tr := &agent.Transcript{Events: []agent.Event{
-		{Kind: agent.EventAssistant, Step: 1, Text: "doing work",
+	tr := &agent.Transcript{Record: []llmkit.Event{
+		completionEv(1, time.Time{}, llmkit.Response{Text: "doing work",
 			StopReason: llmkit.StopToolUse,
-			Usage:      &llmkit.Usage{InputTokens: 100, OutputTokens: 20}},
-		{Kind: agent.EventToolResult, Step: 1, ToolName: "grep", Result: "ok"},
+			Usage:      llmkit.Usage{InputTokens: 100, OutputTokens: 20}}),
+		toolRunEv(1, time.Time{}, "grep", "ok", false),
 	}}
 	out := renderTranscript(tr)
 	if !strings.Contains(out, "Transcript summary") {

@@ -470,7 +470,8 @@ func adjudicateImpact(
 	// One AgentScope for the whole call so Start/Finish share the run's
 	// AgentID (see agent_runners.go's hooksFor doc, bugbot-r7ub).
 	scope := progress.NewAgentScope(sink, progress.RoleSeverity, label).Start()
-	runner := agent.NewRunner(client, nil, impactAdjSystemPrompt)
+	client, ledger := runnerClient(client, nil)
+	runner := agent.NewRunner(client, nil, impactAdjSystemPrompt, ledger...)
 	var resp impactAdjResponse
 	start := time.Now()
 	outcome, rerr := runner.RunJSON(ctx, task, impactAdjSchema, &resp)

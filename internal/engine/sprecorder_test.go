@@ -11,29 +11,36 @@ import (
 	llmkit "github.com/dpoage/llmkit"
 )
 
-// TestLedgerRecorder_RecordsToStore pins bugbot-58c's fix: usage events from
-// the repro-stage client land in the spend ledger with role and run id, and
-// are visible to day-budget accounting (TotalsSince).
-func TestLedgerRecorder_RecordsToStore(t *testing.T) {
-	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+func openSpendStore(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+// observeCompletion delivers one successful completion event to rec.
+func observeCompletion(rec *ledgerRecorder, u llmkit.Usage) {
+	ev := llmkit.NewEvent(context.Background(), llmkit.KindCompletion)
+	ev.Completion = &llmkit.CompletionEvent{Response: llmkit.Response{Usage: u}, Provider: "minimax", Model: "MiniMax-M3"}
+	rec.Observe(context.Background(), ev)
+}
+
+// TestLedgerRecorder_RecordsToStore pins bugbot-58c's fix: usage from the
+// repro stage lands in the spend ledger with run id and counts toward
+// day-budget accounting (TotalsSince).
+func TestLedgerRecorder_RecordsToStore(t *testing.T) {
+	ctx := context.Background()
+	st := openSpendStore(t)
 
 	rec := newLedgerRecorder(ctx, st)
 	rec.SetScanRun("run-1")
-	rec.Record(llmkit.UsageEvent{
-		Role: "reproducer", Provider: "minimax", Model: "MiniMax-M3",
-		Usage: llmkit.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadInputTokens: 800},
-	})
+	observeCompletion(rec, llmkit.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadInputTokens: 800})
 	// Retag mid-stream (the daemon path) and record again.
 	rec.SetScanRun("run-2")
-	rec.Record(llmkit.UsageEvent{
-		Role: "reproducer", Provider: "minimax", Model: "MiniMax-M3",
-		Usage: llmkit.Usage{InputTokens: 500, OutputTokens: 100},
-	})
+	observeCompletion(rec, llmkit.Usage{InputTokens: 500, OutputTokens: 100})
 
 	run1, err := st.TotalsForScanRun(ctx, "run-1")
 	if err != nil {
@@ -59,61 +66,20 @@ func TestLedgerRecorder_RecordsToStore(t *testing.T) {
 	}
 }
 
-// TestLedgerRecorder_WrapsClient pins the end-to-end seam: a client resolved
-// with the recorder ledgers each completion (role/provider/model tags applied
-// by the llm layer).
-func TestLedgerRecorder_WrapsClient(t *testing.T) {
-	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-
-	rec := newLedgerRecorder(ctx, st)
-	rec.SetScanRun("run-x")
-
-	inner := fakeUsageClient{usage: llmkit.Usage{InputTokens: 42, OutputTokens: 7}}
-	client := llmkit.WithRecorder(inner, rec, "reproducer", "prov", "model-m")
-	if _, err := client.Complete(ctx, llmkit.Request{}); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := st.TotalsForScanRun(ctx, "run-x")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.InputTokens != 42 || got.OutputTokens != 7 {
-		t.Errorf("ledgered totals = %+v, want in=42 out=7", got)
-	}
-}
-
-type fakeUsageClient struct{ usage llmkit.Usage }
-
-func (f fakeUsageClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
-func (f fakeUsageClient) Complete(_ context.Context, _ llmkit.Request) (llmkit.Response, error) {
-	return llmkit.Response{Text: "{}", StopReason: llmkit.StopEndTurn, Usage: f.usage}, nil
-}
-
 // TestLedgerRecorder_ConcurrentRecords pins concurrency safety: PromoteAll
 // drives the shared client from parallel workers.
 func TestLedgerRecorder_ConcurrentRecords(t *testing.T) {
 	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-
+	st := openSpendStore(t)
 	rec := newLedgerRecorder(ctx, st)
 	rec.SetScanRun("run-c")
 
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rec.Record(llmkit.UsageEvent{Role: "reproducer", Usage: llmkit.Usage{InputTokens: 10, OutputTokens: 1}})
+			observeCompletion(rec, llmkit.Usage{InputTokens: 10, OutputTokens: 1})
 		}()
 	}
 	wg.Wait()
@@ -128,31 +94,19 @@ func TestLedgerRecorder_ConcurrentRecords(t *testing.T) {
 }
 
 // TestLedgerRecorder_OnRecordEmitsCumulativeTotals pins bugbot-psva's fix:
-// each Record invokes onRecord with run-cumulative totals (the KindSpendTick
-// contract), so repro spend surfaces live instead of only in the ledger.
+// each recorded completion invokes onRecord with run-cumulative totals (the
+// KindSpendTick contract), so repro spend surfaces live.
 func TestLedgerRecorder_OnRecordEmitsCumulativeTotals(t *testing.T) {
-	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-
-	rec := newLedgerRecorder(ctx, st)
+	st := openSpendStore(t)
+	rec := newLedgerRecorder(context.Background(), st)
 	type tick struct{ in, out, cached int64 }
 	var ticks []tick
 	rec.onRecord = func(in, out, cached int64) {
 		ticks = append(ticks, tick{in, out, cached})
 	}
 
-	rec.Record(llmkit.UsageEvent{
-		Role:  "reproducer",
-		Usage: llmkit.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadInputTokens: 800},
-	})
-	rec.Record(llmkit.UsageEvent{
-		Role:  "patch-prover",
-		Usage: llmkit.Usage{InputTokens: 500, OutputTokens: 100},
-	})
+	observeCompletion(rec, llmkit.Usage{InputTokens: 1000, OutputTokens: 200, CacheReadInputTokens: 800})
+	observeCompletion(rec, llmkit.Usage{InputTokens: 500, OutputTokens: 100})
 
 	want := []tick{{1000, 200, 800}, {1500, 300, 800}}
 	if len(ticks) != len(want) {

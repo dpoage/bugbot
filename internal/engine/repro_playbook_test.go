@@ -45,7 +45,7 @@ func TestBuildReproducerWithSandbox_WiresPlaybookOnce(t *testing.T) {
 
 	sb := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 0, Stdout: "go1.22"}})
 
-	r, err := buildReproducerWithSandbox(ctx, &cfg, st, repoDir, sb, nil, nopLLMClient{})
+	r, err := buildReproducerWithSandbox(ctx, &cfg, st, repoDir, sb, nil, nopLLMClient{}, newLedgerRecorder(ctx, st))
 	if err != nil {
 		t.Fatalf("buildReproducerWithSandbox: %v", err)
 	}

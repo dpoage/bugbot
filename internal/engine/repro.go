@@ -73,7 +73,7 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 			})
 		}
 	}
-	client, err := config.ResolveRole(ctx, cfg, "reproducer", provider.Options{Recorder: rec})
+	client, err := config.ResolveRole(ctx, cfg, "reproducer", provider.Options{})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer client: %w", err)
 	}
@@ -81,7 +81,7 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 	if err != nil {
 		return nil, fmt.Errorf("build sandbox: %w", err)
 	}
-	r, err := buildReproducerWithSandbox(ctx, cfg, st, repoRoot, sb, prog, client)
+	r, err := buildReproducerWithSandbox(ctx, cfg, st, repoRoot, sb, prog, client, rec)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +94,7 @@ func BuildReproducer(ctx context.Context, cfg *config.Config, st *store.Store, r
 // see Dispatcher.reproOne). Factored out of BuildReproducer so the escape
 // hatch reuses the exact same Options wiring (host toolchains, capability
 // probing, dep strategy, ...) instead of a second, drift-prone copy.
-func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot string, sb sandbox.Sandbox, prog progress.EventSink, client llmkit.Client) (*repro.Reproducer, error) {
+func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *store.Store, repoRoot string, sb sandbox.Sandbox, prog progress.EventSink, client llmkit.Client, rec *ledgerRecorder) (*repro.Reproducer, error) {
 	// Probe image capabilities once; result is cached per image+mounts+env so
 	// repeated daemon restarts or re-calls to BuildReproducer are free.
 	// depProbeInputs threads dep-strategy mounts/env, local_mounts, AND host
@@ -130,6 +130,7 @@ func buildReproducerWithSandbox(ctx context.Context, cfg *config.Config, st *sto
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
 		TranscriptDir:    reproTranscriptDir(*cfg),
+		Observer:         rec,
 		PackageSummary:   packageSummaryProvider(st),
 		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,
@@ -199,7 +200,7 @@ func buildReproHookForScan(
 			})
 		}
 	}
-	reproClient, rErr := config.ResolveRole(ctx, &cfg, "reproducer", provider.Options{Recorder: rec})
+	reproClient, rErr := config.ResolveRole(ctx, &cfg, "reproducer", provider.Options{})
 	if rErr != nil {
 		return nil, nil, nil, nil, fmt.Errorf("build reproducer client: %w", rErr)
 	}
@@ -232,6 +233,7 @@ func buildReproHookForScan(
 		Progress:         prog,
 		StatusNotes:      cfg.Scan.StatusNotes,
 		TranscriptDir:    reproTranscriptDir(cfg),
+		Observer:         rec,
 		PackageSummary:   packageSummaryProvider(st),
 		Timeout:          time.Duration(cfg.Sandbox.TimeoutSeconds) * time.Second,
 		SandboxMaxExecs:  cfg.Repro.SandboxMaxExecs,
@@ -624,11 +626,11 @@ func (d *Dispatcher) reproOne(ctx context.Context, opts ReproOpts, cfg config.Co
 	}
 
 	rec := newLedgerRecorder(ctx, st)
-	client, err := config.ResolveRole(ctx, &cfg, "reproducer", provider.Options{Recorder: rec})
+	client, err := config.ResolveRole(ctx, &cfg, "reproducer", provider.Options{})
 	if err != nil {
 		return nil, fmt.Errorf("build reproducer client: %w", err)
 	}
-	r, err := buildReproducerWithSandbox(ctx, &cfg, st, opts.Target, sb, d.sink, client)
+	r, err := buildReproducerWithSandbox(ctx, &cfg, st, opts.Target, sb, d.sink, client, rec)
 	if err != nil {
 		return nil, err
 	}

@@ -509,6 +509,7 @@ func (r *Reproducer) provePatch(ctx context.Context, st *store.Store, f domain.F
 		artifactDir:   r.opts.ArtifactDir,
 		agentLimits:   r.opts.AgentLimits,
 		transcriptDir: r.opts.TranscriptDir,
+		observer:      r.opts.Observer,
 		suiteCmd:      r.opts.PatchSuiteCmd,
 		depMounts:     r.deps.ROMounts,
 		depRWMounts:   r.deps.RWMounts,

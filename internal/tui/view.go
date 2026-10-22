@@ -460,12 +460,12 @@ func elapsedSince(t time.Time) string {
 }
 
 // transcriptStats summarizes token usage, timing, and anomalies for a loaded
-// transcript. It is computed purely from [agent.Transcript] events — no
-// persistence, no store access — so it stays cheap to recompute on every
-// render.
+// transcript. It is computed purely from the transcript's [llmkit.Event]
+// record — no persistence, no store access — so it stays cheap to recompute on
+// every render.
 type transcriptStats struct {
 	Steps        int // max Event.Step across all events (0 for an empty transcript)
-	AssistantN   int // count of EventAssistant events (turns actually recorded)
+	AssistantN   int // count of successful completion events (turns actually recorded)
 	InputTokens  int64
 	OutputTokens int64
 	// CacheReadTokens/CacheCreationTokens are the informational cache subsets
@@ -474,7 +474,7 @@ type transcriptStats struct {
 	CacheReadTokens     int64
 	CacheCreationTokens int64
 	ToolCalls           int // total tool calls requested by the assistant
-	ToolErrors          int // EventToolResult entries with IsError set
+	ToolErrors          int // tool_run events with IsError set
 	WallTime            time.Duration
 	// AbnormalStopReasons lists distinct StopReasons other than the two
 	// expected mid/end-of-turn values (llmkit.StopToolUse, llmkit.StopEndTurn), in
@@ -483,18 +483,17 @@ type transcriptStats struct {
 }
 
 // computeTranscriptStats walks a transcript once and tallies usage, timing,
-// and anomaly data for the summary header. Handles nil Usage pointers, zero
-// timestamps, and empty/partial (still-streaming) transcripts without
-// panicking.
+// and anomaly data for the summary header. Handles zero timestamps and
+// empty/partial (still-streaming) transcripts without panicking.
 func computeTranscriptStats(t *agent.Transcript) transcriptStats {
 	var s transcriptStats
-	if t == nil || len(t.Events) == 0 {
+	if t == nil || len(t.Record) == 0 {
 		return s
 	}
 
 	seenAbnormal := make(map[llmkit.StopReason]bool)
 	var first, last time.Time
-	for _, ev := range t.Events {
+	for _, ev := range t.Record {
 		if ev.Step > s.Steps {
 			s.Steps = ev.Step
 		}
@@ -505,24 +504,21 @@ func computeTranscriptStats(t *agent.Transcript) transcriptStats {
 			last = ev.Time
 		}
 
-		switch ev.Kind {
-		case agent.EventAssistant:
+		switch {
+		case ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.Err == "":
+			resp := ev.Completion.Response
 			s.AssistantN++
-			s.ToolCalls += len(ev.ToolCalls)
-			if ev.Usage != nil {
-				s.InputTokens += ev.Usage.InputTokens
-				s.OutputTokens += ev.Usage.OutputTokens
-				s.CacheReadTokens += ev.Usage.CacheReadInputTokens
-				s.CacheCreationTokens += ev.Usage.CacheCreationInputTokens
+			s.ToolCalls += len(resp.ToolCalls)
+			s.InputTokens += resp.Usage.InputTokens
+			s.OutputTokens += resp.Usage.OutputTokens
+			s.CacheReadTokens += resp.Usage.CacheReadInputTokens
+			s.CacheCreationTokens += resp.Usage.CacheCreationInputTokens
+			if r := resp.StopReason; r != "" && r != llmkit.StopToolUse && r != llmkit.StopEndTurn && !seenAbnormal[r] {
+				seenAbnormal[r] = true
+				s.AbnormalStopReasons = append(s.AbnormalStopReasons, r)
 			}
-			if ev.StopReason != "" && ev.StopReason != llmkit.StopToolUse && ev.StopReason != llmkit.StopEndTurn {
-				if !seenAbnormal[ev.StopReason] {
-					seenAbnormal[ev.StopReason] = true
-					s.AbnormalStopReasons = append(s.AbnormalStopReasons, ev.StopReason)
-				}
-			}
-		case agent.EventToolResult:
-			if ev.IsError {
+		case ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil:
+			if ev.ToolRun.IsError {
 				s.ToolErrors++
 			}
 		}
@@ -556,32 +552,38 @@ func renderTranscriptSummary(s transcriptStats) string {
 
 // renderTranscript formats a loaded transcript compactly for the viewport: a
 // summary header (see renderTranscriptSummary) followed by one line per
-// assistant turn (text + tool calls) and one per tool result.
-// EventRequest entries are skipped — the full conversation state is
-// reconstructible from the assistant/tool-result pairs and is too verbose for
-// this pane.
+// completion (assistant text + tool calls, or the failure) and one per tool
+// run. Request messages are skipped — the conversation is reconstructible
+// from these pairs and too verbose for this pane.
 func renderTranscript(t *agent.Transcript) string {
-	if t == nil || len(t.Events) == 0 {
+	if t == nil || len(t.Record) == 0 {
 		return "(empty transcript)"
 	}
 	var b strings.Builder
 	b.WriteString(renderTranscriptSummary(computeTranscriptStats(t)))
 	b.WriteString("\n")
-	for _, ev := range t.Events {
-		switch ev.Kind {
-		case agent.EventAssistant:
-			text := util.CollapseWhitespace(ev.Text)
+	for _, ev := range t.Record {
+		switch {
+		case ev.Kind == llmkit.KindCompletion && ev.Completion != nil:
+			if ev.Completion.Err != "" {
+				fmt.Fprintf(&b, "[step %d] completion failed: %s\n", ev.Step, util.TruncateRunes(util.CollapseWhitespace(ev.Completion.Err), 200))
+				continue
+			}
+			text := util.CollapseWhitespace(ev.Completion.Response.Text)
 			fmt.Fprintf(&b, "[step %d] assistant: %s\n", ev.Step, util.TruncateRunes(text, 200))
-			for _, tc := range ev.ToolCalls {
+			for _, tc := range ev.Completion.Response.ToolCalls {
 				fmt.Fprintf(&b, "           tool_call: %s\n", tc.Name)
 			}
-		case agent.EventToolResult:
-			marker := "ok"
-			if ev.IsError {
+		case ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil:
+			tr := ev.ToolRun
+			marker, result := "ok", tr.Result
+			switch {
+			case tr.Denied:
+				marker, result = "denied", tr.DenyReason
+			case tr.IsError:
 				marker = "error"
 			}
-			result := util.CollapseWhitespace(ev.Result)
-			fmt.Fprintf(&b, "[step %d] tool_result(%s, %s): %s\n", ev.Step, ev.ToolName, marker, util.TruncateRunes(result, 200))
+			fmt.Fprintf(&b, "[step %d] tool_result(%s, %s): %s\n", ev.Step, tr.Call.Name, marker, util.TruncateRunes(util.CollapseWhitespace(result), 200))
 		}
 	}
 	return b.String()

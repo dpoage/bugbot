@@ -41,7 +41,7 @@ type verified struct {
 // seats.go) so the panel attacks the report from different angles. When n==1
 // (budget-degraded path, degradedRefuters) no seat clause is added — the single
 // generalist produces today's prompt byte-identical.
-func (f *Funnel) runRefuters(ctx context.Context, verifier llmkit.Client, tools []agent.Tool, persona string, c Candidate, n int, budget *budgetState, scope progress.AgentScope, health toolHealthRouting, extraOpts ...agent.Option) ([]refutation, []string, int64, int, bool, error) {
+func (f *Funnel) runRefuters(ctx context.Context, verifier llmkit.Client, tools []agent.Tool, persona string, c Candidate, n int, budget *budgetState, scope progress.AgentScope, health toolHealthRouting, transcriptKey string) ([]refutation, []string, int64, int, bool, error) {
 	hasSandbox := hasSandboxExec(tools)
 	hasDepSource := f.hasGoDepSource
 
@@ -61,10 +61,9 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llmkit.Client, tools 
 		if seat.clause != "" {
 			sysPrompt += "\n\n" + seat.clause
 		}
-		runner := f.newAgentRunner(verifier, tools, sysPrompt, budget.verifyRunnerLimits(f.opts.Limits.VerifierLimits),
-			append([]agent.Option{f.hooksFor(scope, health)}, extraOpts...)...)
+		runner := f.newAgentRunner(verifier, tools, sysPrompt, budget.verifyRunnerLimits(f.opts.Limits.VerifierLimits), f.hooksFor(scope, health))
 		var v refutation
-		outcome, err := runner.RunJSON(ctx, verifierTask(c), refutationSchema, &v)
+		outcome, err := runner.RunJSON(ctx, verifierTask(c), refutationSchema, &v, transcriptRun(transcriptKey))
 		if outcome != nil {
 			tokens += outcome.Usage.InputTokens + outcome.Usage.OutputTokens
 			// Any budget stop — shared pool OR this refuter's own per-run
@@ -107,13 +106,12 @@ func (f *Funnel) runRefuters(ctx context.Context, verifier llmkit.Client, tools 
 // post_lead is absent from candTools (same rationale as refuters: refuter
 // independence is the core false-positive killer; the arbiter must be equally
 // independent).
-func (f *Funnel) runArbiter(ctx context.Context, arbiter llmkit.Client, candTools []agent.Tool, persona string, c Candidate, verdicts []refutation, seatNames []string, budget *budgetState, scope progress.AgentScope, health toolHealthRouting, extraOpts ...agent.Option) (*refutation, int64, bool, error) {
+func (f *Funnel) runArbiter(ctx context.Context, arbiter llmkit.Client, candTools []agent.Tool, persona string, c Candidate, verdicts []refutation, seatNames []string, budget *budgetState, scope progress.AgentScope, health toolHealthRouting, transcriptKey string) (*refutation, int64, bool, error) {
 	hasSandbox := hasSandboxExec(candTools)
 	hasDepSource := f.hasGoDepSource
-	runner := f.newAgentRunner(arbiter, candTools, arbiterSystemPrompt(persona, hasSandbox, hasDepSource), budget.arbiterRunnerLimits(f.opts.Limits.ArbiterLimits),
-		append([]agent.Option{f.hooksFor(scope, health)}, extraOpts...)...)
+	runner := f.newAgentRunner(arbiter, candTools, arbiterSystemPrompt(persona, hasSandbox, hasDepSource), budget.arbiterRunnerLimits(f.opts.Limits.ArbiterLimits), f.hooksFor(scope, health))
 	var av refutation
-	outcome, err := runner.RunJSON(ctx, arbiterTask(c, verdicts, seatNames), arbiterSchema, &av)
+	outcome, err := runner.RunJSON(ctx, arbiterTask(c, verdicts, seatNames), arbiterSchema, &av, transcriptRun(transcriptKey))
 	var tokens int64
 	if outcome != nil {
 		tokens = outcome.Usage.InputTokens + outcome.Usage.OutputTokens

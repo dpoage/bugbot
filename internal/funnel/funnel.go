@@ -244,8 +244,8 @@ type RoleClients struct {
 // spend-ledger role tags wired into the per-role recorder clients (see run.go).
 // The recorder routes finder AND cartographer spend to the finder sub-pool and
 // everything else (including arbiter) to the verify sub-pool under a downstream
-// budget reservation, so these MUST match the strings passed to
-// llmkit.WithRecorder.
+// budget reservation, so these MUST match the roles passed to
+// spendRecorder.ledgered.
 const (
 	roleFinder       = "finder"
 	roleVerifier     = "verifier"

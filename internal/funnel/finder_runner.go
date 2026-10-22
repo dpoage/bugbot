@@ -67,7 +67,7 @@ func (f *Funnel) runFinder(ctx context.Context, finder llmkit.Client, tools []ag
 	// its tool-call activity and this call's Finished event share the run's
 	// AgentID (see agent_runners.go's hooksFor doc).
 	scope := progress.NewAgentScope(f.opts.Progress, progress.RoleFinder, l.Name).Start()
-	cands, status, outcome, pm, _, err := f.runFinderWithPrompt(ctx, finder, tools, sysprompt, l.Name, l, task, budget, start, scope, toolHealthRouting{})
+	cands, status, outcome, pm, _, err := f.runFinderWithPrompt(ctx, finder, tools, sysprompt, l.Name, l, task, budget, start, scope, toolHealthRouting{}, "")
 	emitAgentFinished(scope, outcome, start, err)
 	return cands, status, pm, err
 }
@@ -104,19 +104,18 @@ func (f *Funnel) runFinder(ctx context.Context, finder llmkit.Client, tools []ag
 // (hypothesize) can fold it into the Detail field of the
 // recordFinderUnitWithTimeDetail call. This keeps the recording at a single
 // site and avoids threading a store reference into this function.
-func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llmkit.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState, startedAt time.Time, scope progress.AgentScope, health toolHealthRouting, extraOpts ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, *rawTraversal, error) {
+func (f *Funnel) runFinderWithPrompt(ctx context.Context, finder llmkit.Client, tools []agent.Tool, sysprompt, label string, l Lens, task string, budget *budgetState, startedAt time.Time, scope progress.AgentScope, health toolHealthRouting, transcriptKey string) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, *rawTraversal, error) {
 	// attempt runs one finder pass: it builds the runner (layering any
 	// per-attempt options on top of the standard finder set), runs RunJSON, and
 	// maps the result into candidates or a classified failure + postmortem. It
 	// is invoked once normally and, on a max-tokens-truncation parse failure,
 	// once more at a doubled output cap (bugbot-rwe).
 	attempt := func(extra ...agent.Option) ([]Candidate, finderStatus, *agent.Outcome, *finderPostmortem, *rawTraversal, error) {
-		opts := append([]agent.Option{f.hooksFor(scope, health)}, extraOpts...)
-		opts = append(opts, extra...)
+		opts := append([]agent.Option{f.hooksFor(scope, health)}, extra...)
 		runner := f.newAgentRunner(finder, tools, sysprompt, budget.finderRunnerLimits(f.opts.Limits.FinderLimits), opts...)
 
 		var out candidateList
-		outcome, err := runner.RunJSON(ctx, task, candidatesSchema, &out)
+		outcome, err := runner.RunJSON(ctx, task, candidatesSchema, &out, transcriptRun(transcriptKey))
 		if err != nil {
 			// A finder that fails to produce parseable JSON yields no candidates
 			// rather than aborting the whole scan: one lens/chunk failing must not
@@ -231,8 +230,8 @@ const (
 	finderClassBudgetStop finderFailureClass = "budget-stop"
 	// finderClassTransportError means the provider was unreachable: a
 	// transport / connection failure surfaced as an *llmkit.APIError with
-	// StatusCode==0 (the shape produced by the openai / google / anthropic
-	// adapters for non-HTTP errors — timeout, connection reset, DNS failure).
+	// StatusCode==0 and Kind ErrServer (the shape the openai / google / anthropic
+	// adapters produce for non-HTTP errors — timeout, connection reset, DNS failure).
 	// Distinct from rate-limit (the provider is reachable but throttling) and
 	// from parse failures (the provider answered; the model output is the
 	// problem). This class drives the finder-stage circuit breaker
@@ -295,8 +294,8 @@ func classifyFinderErr(outcome *agent.Outcome, err error) finderFailureClass {
 		// Provider unreachable (timeout / connection reset / DNS failure).
 		// Distinct from rate-limit (provider reachable, throttling) and from
 		// parse failures (the runner did not return an error at all). This
-		// branch also handles the bare APIError{Kind: ErrServer, StatusCode: 0}
-		// shape that the adapters return for non-HTTP transport failures.
+		// branch handles the APIError{Kind: ErrServer, StatusCode: 0} shape
+		// the adapters return for non-HTTP transport failures.
 		return finderClassTransportError
 	}
 	finalText := ""
@@ -310,24 +309,15 @@ func classifyFinderErr(outcome *agent.Outcome, err error) finderFailureClass {
 }
 
 // isTransportError reports whether err represents a transport / connection
-// failure: an *llmkit.APIError with StatusCode==0 (the shape produced by the
-// openai / google / anthropic adapters for non-HTTP errors — timeouts,
-// connection resets, DNS failures). Both the bare
-// "APIError{Kind: ErrServer, StatusCode: 0}" shape and any other
-// APIError{StatusCode: 0} variant match (Kind may be ErrServer, ErrOverloaded,
-// or any unrecognized transport-level failure surfaced through the adapter).
-// Distinct from rate-limit (errors.Is(err, llmkit.ErrRateLimited) — provider
-// reachable, throttling) and from parse failures (no error from the runner at
-// all). nil-safe.
+// failure: an *llmkit.APIError with StatusCode==0 AND Kind ErrServer (dial,
+// reset, per-attempt timeout, undecodable response). Kind is the
+// discriminator: a pre-wire refusal is {ErrInvalidRequest, 0}, and a cancelled
+// context is a plain error chaining context.Canceled — neither is transport.
+// Distinct from rate-limit (provider reachable, throttling) and from parse
+// failures (no error from the runner at all). nil-safe.
 func isTransportError(err error) bool {
-	if err == nil {
-		return false
-	}
 	var apiErr *llmkit.APIError
-	if errors.As(err, &apiErr) {
-		return apiErr.StatusCode == 0
-	}
-	return false
+	return errors.As(err, &apiErr) && apiErr.StatusCode == 0 && errors.Is(apiErr.Kind, llmkit.ErrServer)
 }
 
 // buildFinderPostmortem constructs a finderPostmortem from a failed run. Both
@@ -348,7 +338,7 @@ func buildFinderPostmortem(outcome *agent.Outcome, err error) finderPostmortem {
 			raw = raw[:finderPostmortemRawCap]
 		}
 		pm.RawHead = raw
-		pm.TruncationReason = outcome.TruncationReason
+		pm.TruncationReason = string(outcome.TruncationReason)
 		pm.InputTokens = outcome.Usage.InputTokens
 		pm.OutputTokens = outcome.Usage.OutputTokens
 		pm.CacheReadTokens = outcome.Usage.CacheReadInputTokens

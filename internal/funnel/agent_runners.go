@@ -24,7 +24,7 @@ import (
 // TruncBudgetPool for the shared pool — but the funnel treats both the same
 // way for reliability accounting (neither is a model or provider fault).
 func budgetStopped(o *agent.Outcome) bool {
-	if o == nil || !o.Truncated {
+	if o == nil || !o.Truncated() {
 		return false
 	}
 	return o.TruncationReason == agent.TruncTokenBudget ||
@@ -50,23 +50,18 @@ func hasSandboxExec(tools []agent.Tool) bool {
 // It applies the consistent option set every funnel agent (finder, refuter,
 // arbiter) needs:
 //
-//   - WithLimits: per-run token + iteration budget derived from the shared
-//     pool by the caller (budget.finderRunnerLimits / budget.verifyRunnerLimits).
-//   - WithMaxTokens: the per-completion output cap, shared by every funnel
-//     stage (DefaultMaxOutputTokens).
-//   - f.transcriptOption: JSONL transcript auto-save when TranscriptDir is
-//     configured, otherwise a no-op (so the call site is uniform).
-//
-// Centralizing the builder eliminates the four pre-existing near-duplicate
-// agent.NewRunner(...) call sites (hypothesize.go:793, verify.go:68, verify.go:116)
-// so a future tweak — say a new per-stage hook, or a per-stage option split
-// for finding vs verifying — happens in one place.
-func (f *Funnel) newAgentRunner(client llmkit.Client, tools []agent.Tool, systemPrompt string, limits agent.Limits, extra ...agent.Option) *agent.Runner {
-	opts := []agent.Option{
-		agent.WithLimits(limits),
+//   - the per-run limits and shared pool from the caller's runnerBudget
+//     (budget.finderRunnerLimits / budget.verifyRunnerLimits);
+//   - the spend ledger, when client is a ledgered role client;
+//   - WithMaxTokens: the per-completion output cap (DefaultMaxOutputTokens);
+//   - f.transcriptOption: JSONL transcripts when TranscriptDir is configured.
+func (f *Funnel) newAgentRunner(client llmkit.Client, tools []agent.Tool, systemPrompt string, rb runnerBudget, extra ...agent.Option) *agent.Runner {
+	client, opts := runnerClient(client, rb.pool)
+	opts = append(opts,
+		agent.WithLimits(rb.limits),
 		agent.WithMaxTokens(DefaultMaxOutputTokens),
-		f.transcriptOption(),
-	}
+	)
+	opts = append(opts, f.transcriptOptions()...)
 	opts = append(opts, extra...)
 	return agent.NewRunner(client, tools, systemPrompt, opts...)
 }
@@ -81,14 +76,12 @@ type toolHealthRouting struct {
 	label  string
 }
 
-// hooksFor builds the ONE agent.Hooks a funnel runner gets. agent.WithHooks
-// replaces the runner's whole Hooks struct, so activity and tool-health
-// routing MUST be assembled into a single value here rather than passed as
-// two options that would silently clobber each other. Tool activity routes
-// through scope.Hooks (which owns the tool-name → field mapping and the
+// hooksFor builds the ONE agent.Hooks a funnel runner gets: tool activity
+// routes through scope.Hooks (which owns the tool-name → field mapping and the
 // start/done lifecycle); when health.result is non-nil, ToolHealth routes
 // objective infra failures to recordToolIssue as source "infra", bucketed as
-// "high" (infraToolIssueSeverity).
+// "high" (infraToolIssueSeverity). agent.WithHooks appends, so a second
+// registration would fire alongside this one, not replace it.
 //
 // Callers MUST pass the SAME scope used for that run's
 // KindAgentStarted/KindAgentFinished bracket (and any other emission for the

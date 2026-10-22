@@ -11,6 +11,7 @@ import (
 
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/fsroot"
 )
 
 // Git tool limits.
@@ -58,7 +59,7 @@ func realGitRunner(ctx context.Context, dir string, args ...string) ([]byte, err
 
 // gitBlameTool serves bounded git blame output rooted at a repository directory.
 type gitBlameTool struct {
-	root    *FSRoot
+	root    *fsroot.FSRoot
 	repoDir string
 	run     gitRunner
 }
@@ -71,7 +72,7 @@ type gitBlameTool struct {
 //
 // runner may be nil to use the real git subprocess.
 func NewGitBlame(dir string, runner gitRunner) (agent.Tool, error) {
-	root, err := NewFSRoot(dir)
+	root, err := fsroot.NewFSRoot(dir)
 	if err != nil {
 		return nil, err
 	}

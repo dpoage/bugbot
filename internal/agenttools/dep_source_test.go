@@ -47,7 +47,7 @@ func TestDepSourceRoots_ResolvesInRoot(t *testing.T) {
 	mustMkdir(t, filepath.Join(root, "sub"))
 	mustWrite(t, filepath.Join(root, "sub", "inner.go"), "package sub\n")
 
-	d := &DepSourceRoots{roots: []string{root}}
+	d := newDepSourceRoots([]string{root})
 	if d.Len() != 1 {
 		t.Fatalf("Len = %d, want 1", d.Len())
 	}
@@ -77,7 +77,7 @@ func TestDepSourceRoots_RejectsEscape(t *testing.T) {
 	outside := t.TempDir()
 	mustWrite(t, filepath.Join(outside, "secret.txt"), "sensitive\n")
 
-	d := &DepSourceRoots{roots: []string{root}}
+	d := newDepSourceRoots([]string{root})
 	for _, p := range []string{
 		"../" + filepath.Base(outside) + "/secret.txt",
 		"sub/../../" + filepath.Base(outside) + "/secret.txt",
@@ -105,7 +105,7 @@ func TestDepSourceRoots_SymlinkEscapeRejected(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	d := &DepSourceRoots{roots: []string{root}}
+	d := newDepSourceRoots([]string{root})
 	_, err := d.resolve("escape/secret.txt")
 	if !errors.Is(err, errDepPathEscape) {
 		t.Errorf("symlink escape err = %v, want errDepPathEscape", err)
@@ -162,7 +162,7 @@ func TestNewReadFileWithDepRoots_InRepoStillWorks(t *testing.T) {
 	dep := t.TempDir()
 	mustWrite(t, filepath.Join(dep, "lib.go"), "package lib\n")
 
-	tool, err := NewReadFileWithDepRoots(repo, ReadCaps{}, &DepSourceRoots{roots: []string{dep}})
+	tool, err := NewReadFileWithDepRoots(repo, ReadCaps{}, newDepSourceRoots([]string{dep}))
 	if err != nil {
 		t.Fatalf("NewReadFileWithDepRoots: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestNewReadFileWithDepRoots_ReadsDepSource(t *testing.T) {
 	dep := t.TempDir()
 	mustWrite(t, filepath.Join(dep, "stdlib.go"), "package stdlib\nfunc F() {}\n")
 
-	tool, err := NewReadFileWithDepRoots(repo, ReadCaps{}, &DepSourceRoots{roots: []string{dep}})
+	tool, err := NewReadFileWithDepRoots(repo, ReadCaps{}, newDepSourceRoots([]string{dep}))
 	if err != nil {
 		t.Fatalf("NewReadFileWithDepRoots: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestNewReadFileWithDepRoots_RejectsEscapesFromDepRoot(t *testing.T) {
 	outside := t.TempDir()
 	mustWrite(t, filepath.Join(outside, "secret.txt"), "sensitive\n")
 
-	tool, err := NewReadFileWithDepRoots(repo, ReadCaps{}, &DepSourceRoots{roots: []string{dep}})
+	tool, err := NewReadFileWithDepRoots(repo, ReadCaps{}, newDepSourceRoots([]string{dep}))
 	if err != nil {
 		t.Fatalf("NewReadFileWithDepRoots: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestDepSourceRoots_ExistenceAwareAcrossRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d := &DepSourceRoots{roots: []string{rootA, rootB}}
+	d := newDepSourceRoots([]string{rootA, rootB})
 	got, err := d.resolve(rel)
 	if err != nil {
 		t.Fatalf("resolve(%q): %v", rel, err)

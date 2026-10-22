@@ -13,6 +13,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/domain"
 	"github.com/dpoage/bugbot/internal/progress"
+	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
 )
 
@@ -531,9 +532,9 @@ func TestUpdate_TranscriptLoadsFromRealFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "transcript.jsonl")
 
-	tr := &agent.Transcript{Events: []agent.Event{
-		{Kind: agent.EventAssistant, Step: 1, Text: "investigating the nil check"},
-		{Kind: agent.EventToolResult, Step: 1, ToolName: "read", Result: "func foo() {}"},
+	tr := &agent.Transcript{Record: []llmkit.Event{
+		completionEv(1, time.Time{}, llmkit.Response{Text: "investigating the nil check"}),
+		toolRunEv(1, time.Time{}, "read", "func foo() {}", false),
 	}}
 	var buf bytes.Buffer
 	if err := tr.SaveJSONL(&buf); err != nil {
@@ -582,8 +583,8 @@ func TestUpdate_TranscriptLoadsFromRealFile(t *testing.T) {
 	if m.transcript == nil {
 		t.Fatalf("transcript = nil, want a loaded *agent.Transcript (note=%q)", m.transcriptNote)
 	}
-	if len(m.transcript.Events) != 2 {
-		t.Fatalf("loaded %d events, want 2", len(m.transcript.Events))
+	if len(m.transcript.Record) != 2 {
+		t.Fatalf("loaded %d events, want 2", len(m.transcript.Record))
 	}
 
 	view := stripANSI(m.View())

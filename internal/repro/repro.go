@@ -121,9 +121,12 @@ type Options struct {
 	// AgentLimits bounds each reproducer agent run (iterations / token budget).
 	// Zero-value fields resolve to agent defaults.
 	AgentLimits agent.Limits
-	// TranscriptDir, when non-empty, makes each reproducer agent auto-save its
-	// transcript there.
+	// TranscriptDir, when non-empty, makes each reproducer and patch-prover
+	// agent write its JSONL transcript there ("<RunID>.jsonl").
 	TranscriptDir string
+	// Observer, when non-nil, receives the events of every reproducer and
+	// patch-prover Runner (the spend ledger reads their completion events).
+	Observer llmkit.Observer
 	// SandboxMaxExecs is the per-attempt execution budget: the reproducer agent
 	// may call run_tests at most this many times per attempt to orient itself
 	// before proposing its repro plan. Zero uses DefaultSandboxMaxExecs.
@@ -439,7 +442,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 	var feedback string
 
 	// prevOutcome is round i's agent.Outcome, threaded into round i+1's
-	// planFor call so RunJSONContinue (see planFor, agent.go) lands the
+	// planFor call so agent.Continue (see planFor, agent.go) lands the
 	// revision feedback in the SAME conversation as the investigation that
 	// produced it, instead of discarding up to MaxIterations turns of
 	// tool-driven investigation on every revision round (bugbot-z6ay). Nil on
@@ -467,7 +470,7 @@ func (r *Reproducer) Attempt(ctx context.Context, finding domain.Finding) (_ *At
 			usage.OutputTokens += roundOutcome.Usage.OutputTokens
 		}
 		// Thread this round's Outcome into the next round's planFor call
-		// regardless of perr: RunJSON/RunJSONContinue return a usable Outcome
+		// regardless of perr: RunJSON returns a usable Outcome
 		// even on an unparseable-output error (its Messages still hold the
 		// round's investigation), so a "revise and try again" round after an
 		// unparseable plan still continues the same conversation instead of
@@ -720,12 +723,8 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 			NewWorkspaceTool(r.sb, r.repoDir, r.opts.Image, r.opts.Timeout,
 				r.deps.ROMounts, r.deps.RWMounts, r.deps.Env, r.deps.SetupCmds, mat.MaterializeWorkspace, iterWS, r.opts.TryMaxExecs))
 	}
-	var opts []agent.Option
-	opts = append(opts, agent.WithLimits(r.opts.AgentLimits))
-	if r.opts.TranscriptDir != "" {
-		opts = append(opts, agent.WithTranscriptDir(r.opts.TranscriptDir))
-	}
-	opts = append(opts, agent.WithHooks(scope.Hooks()))
+	opts := []agent.Option{agent.WithLimits(r.opts.AgentLimits), agent.WithHooks(scope.Hooks())}
+	opts = append(opts, runnerObservers(r.opts.TranscriptDir, r.opts.Observer)...)
 	prompt := systemPrompt(lang, systems, r.capabilities, r.playbook)
 	if r.pkgSummary != nil {
 		prompt += pkgContextGuidance
@@ -741,6 +740,20 @@ func (r *Reproducer) newRunner(ctx context.Context, lang ingest.Language, system
 	}
 	prompt += reproSandboxGuidance(r.deps.ROMounts)
 	return agent.NewRunner(r.client, tools, prompt, opts...), nil
+}
+
+// runnerObservers returns the observer options every reproducer and
+// patch-prover Runner carries: a JSONL transcript sink when transcriptDir is
+// set, then obs.
+func runnerObservers(transcriptDir string, obs llmkit.Observer) []agent.Option {
+	var opts []agent.Option
+	if transcriptDir != "" {
+		opts = append(opts, agent.WithObserver(agent.JSONL(transcriptDir, nil)))
+	}
+	if obs != nil {
+		opts = append(opts, agent.WithObserver(obs))
+	}
+	return opts
 }
 
 // Close shuts down any language servers the code-navigation tools spawned.

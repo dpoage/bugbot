@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/provider"
+	"github.com/dpoage/llmkit/retry"
 )
 
 // newWireServer creates a test HTTP server and returns its base URL.
@@ -87,9 +89,16 @@ func TestResolveRole_MixedProviders(t *testing.T) {
 	t.Setenv("TEST_ANTHROPIC_KEY", "sk-ant-xxx")
 	t.Setenv("TEST_OPENAI_KEY", "sk-oai-xxx")
 
-	var recorded []llmkit.UsageEvent
-	rec := llmkit.RecorderFunc(func(ev llmkit.UsageEvent) { recorded = append(recorded, ev) })
-	opts := provider.Options{Recorder: rec}
+	var mu sync.Mutex
+	var recorded []llmkit.CompletionEvent
+	obs := llmkit.ObserverFunc(func(_ context.Context, ev llmkit.Event) {
+		if ev.Kind == llmkit.KindCompletion {
+			mu.Lock()
+			recorded = append(recorded, *ev.Completion)
+			mu.Unlock()
+		}
+	})
+	opts := provider.Options{Observer: obs}
 
 	finder, err := ResolveRole(context.Background(), cfg, "finder", opts)
 	if err != nil {
@@ -116,19 +125,19 @@ func TestResolveRole_MixedProviders(t *testing.T) {
 		t.Errorf("verifier text = %q", vResp.Text)
 	}
 
-	// Usage was recorded per role/provider/model.
+	// Usage is observed per provider (config name) and model.
 	if len(recorded) != 2 {
-		t.Fatalf("recorded %d events, want 2", len(recorded))
+		t.Fatalf("recorded %d completion events, want 2", len(recorded))
 	}
-	byRole := map[string]llmkit.UsageEvent{}
+	byProvider := map[string]llmkit.CompletionEvent{}
 	for _, ev := range recorded {
-		byRole[ev.Role] = ev
+		byProvider[ev.Provider] = ev
 	}
-	if byRole["finder"].Provider != "claude" || byRole["finder"].Usage.InputTokens != 10 {
-		t.Errorf("finder event = %+v", byRole["finder"])
+	if ev := byProvider["claude"]; ev.Model != "claude-test" || ev.Response.Usage.InputTokens != 10 {
+		t.Errorf("finder event = %+v", ev)
 	}
-	if byRole["verifier"].Provider != "oai" || byRole["verifier"].Usage.OutputTokens != 8 {
-		t.Errorf("verifier event = %+v", byRole["verifier"])
+	if ev := byProvider["oai"]; ev.Model != "gpt-test" || ev.Response.Usage.OutputTokens != 8 {
+		t.Errorf("verifier event = %+v", ev)
 	}
 }
 
@@ -177,16 +186,15 @@ func TestRoleModel_CartographerFallback(t *testing.T) {
 }
 
 // TestRetryConfigFor asserts the per-attempt request_timeout mapping from
-// config.LLM into llmkit.RetryConfig. Tests the unexported retryConfigFor helper
-// directly, which is the unit that ResolveRole delegates to for retry wiring.
+// config.LLM into retry.Config.
 func TestRetryConfigFor(t *testing.T) {
 	// Zero / omitted: must produce the LLM package default.
 	rc := retryConfigFor(&Config{})
-	if rc.RequestTimeout != llmkit.DefaultRequestTimeout {
-		t.Errorf("zero config: RequestTimeout = %v, want default %v", rc.RequestTimeout, llmkit.DefaultRequestTimeout)
+	if rc.RequestTimeout != retry.DefaultRequestTimeout {
+		t.Errorf("zero config: RequestTimeout = %v, want default %v", rc.RequestTimeout, retry.DefaultRequestTimeout)
 	}
-	if rc.MaxAttempts != llmkit.DefaultRetryConfig().MaxAttempts {
-		t.Errorf("zero config: MaxAttempts = %d, want default %d", rc.MaxAttempts, llmkit.DefaultRetryConfig().MaxAttempts)
+	if rc.MaxAttempts != retry.Default().MaxAttempts {
+		t.Errorf("zero config: MaxAttempts = %d, want default %d", rc.MaxAttempts, retry.Default().MaxAttempts)
 	}
 
 	// Explicit positive: the configured value must be the one returned.
@@ -196,13 +204,13 @@ func TestRetryConfigFor(t *testing.T) {
 		t.Errorf("explicit config: RequestTimeout = %v, want %v", rc.RequestTimeout, want)
 	}
 	// MaxAttempts must be the package default; only RequestTimeout is overridden.
-	if rc.MaxAttempts != llmkit.DefaultRetryConfig().MaxAttempts {
-		t.Errorf("explicit config: MaxAttempts = %d, want default %d (must not reset)", rc.MaxAttempts, llmkit.DefaultRetryConfig().MaxAttempts)
+	if rc.MaxAttempts != retry.Default().MaxAttempts {
+		t.Errorf("explicit config: MaxAttempts = %d, want default %d (must not reset)", rc.MaxAttempts, retry.Default().MaxAttempts)
 	}
 
 	// Negative timeout must not be applied (treated as zero/default).
 	rc = retryConfigFor(&Config{LLM: LLM{RequestTimeout: -1}})
-	if rc.RequestTimeout != llmkit.DefaultRequestTimeout {
-		t.Errorf("negative timeout: RequestTimeout = %v, want default %v", rc.RequestTimeout, llmkit.DefaultRequestTimeout)
+	if rc.RequestTimeout != retry.DefaultRequestTimeout {
+		t.Errorf("negative timeout: RequestTimeout = %v, want default %v", rc.RequestTimeout, retry.DefaultRequestTimeout)
 	}
 }

@@ -156,10 +156,10 @@ type PatchProver struct {
 	image       string
 	artifactDir string
 	agentLimits agent.Limits
-	// transcriptDir, when non-empty, makes each patch-prover agent auto-save
-	// its run transcript there. Mirrors Reproducer.opts.TranscriptDir so the
-	// fix-witness step is observable end-to-end on the same artifact path.
+	// transcriptDir and observer mirror Reproducer.opts.TranscriptDir and
+	// Observer (see runnerObservers).
 	transcriptDir string
+	observer      llmkit.Observer
 	// suiteCmd runs the full test suite for the suite-green witness. Empty
 	// means "detect from repo markers"; if detection also fails the prover
 	// skips rather than guessing — a wrong suite command would silently
@@ -240,7 +240,7 @@ func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f domain.Findi
 	var lastFailure string
 
 	// prevOutcome is round i's agent.Outcome, threaded into round i+1's
-	// planFor call so RunJSONContinue (see planFor below) lands the revision
+	// planFor call so agent.Continue (see planFor below) lands the revision
 	// feedback in the SAME conversation as the fix investigation that
 	// produced it, instead of discarding that investigation on every
 	// revision round (bugbot-a54h, the patch-prover analogue of
@@ -253,7 +253,7 @@ func (p *PatchProver) Prove(ctx context.Context, st *store.Store, f domain.Findi
 		usage.InputTokens += u.InputTokens
 		usage.OutputTokens += u.OutputTokens
 		// Thread this round's Outcome into the next round's planFor call
-		// regardless of perr: RunJSON/RunJSONContinue return a usable
+		// regardless of perr: RunJSON returns a usable
 		// Outcome even on an unparseable-output error (its Messages still
 		// hold the round's investigation), so a revise-and-retry round
 		// after a parse failure still continues rather than silently
@@ -368,23 +368,18 @@ func (p *PatchProver) newRunner(scope progress.AgentScope) (*agent.Runner, error
 	if p.statusNotes {
 		tools = append(tools, agenttools.NewStatusNoteTool(statusNoteSink(scope)))
 	}
-	var opts []agent.Option
-	opts = append(opts, agent.WithLimits(p.agentLimits))
-	if p.transcriptDir != "" {
-		opts = append(opts, agent.WithTranscriptDir(p.transcriptDir))
-	}
-	opts = append(opts, agent.WithHooks(scope.Hooks()))
+	opts := []agent.Option{agent.WithLimits(p.agentLimits), agent.WithHooks(scope.Hooks())}
+	opts = append(opts, runnerObservers(p.transcriptDir, p.observer)...)
 	return agent.NewRunner(p.client, tools, patchSystemPrompt, opts...), nil
 }
 
 // planFor asks the patch-prover agent for a fix plan, returning the run's token
 // usage so Prove can settle the agent-finished bracket with an accurate total.
 //
-// prev, when non-nil, is the previous round's Outcome: planFor then uses
-// [agent.Runner.RunJSONContinue] instead of RunJSON, so this round's request
-// lands in the SAME conversation as the fix investigation prev's round
-// performed (round 2+ of Prove's revision loop) instead of re-orienting from
-// scratch. prev == nil (round 1) reseeds via RunJSON exactly as before.
+// prev, when non-nil, is the previous round's Outcome: planFor then runs with
+// [agent.Continue], so this round's request lands in the SAME conversation as
+// the fix investigation prev's round performed (round 2+ of Prove's revision
+// loop) instead of re-orienting from scratch. prev == nil (round 1) reseeds.
 //
 // The returned Outcome is the round's own, meant to be threaded back in as
 // the NEXT round's prev by the caller (mirrors Reproducer.planFor /
@@ -399,10 +394,10 @@ func (p *PatchProver) planFor(ctx context.Context, runner *agent.Runner, f domai
 	} else {
 		// Only the revision feedback goes out on a continuation turn: the
 		// finding/repro-plan framing already sits in history as round 1's
-		// opening user turn (RunJSONContinue keeps it), so resending it here
+		// opening user turn (Continue keeps it), so resending it here
 		// would just double the finding's prose on every revision round for
 		// no benefit.
-		outcome, err = runner.RunJSONContinue(ctx, prev, buildPatchRevisionTask(feedback), patchSchema, &plan)
+		outcome, err = runner.RunJSON(ctx, buildPatchRevisionTask(feedback), patchSchema, &plan, agent.Continue(prev))
 	}
 	var usage llmkit.Usage
 	if outcome != nil {
@@ -418,7 +413,7 @@ func (p *PatchProver) planFor(ctx context.Context, runner *agent.Runner, f domai
 // CONTINUATION revision round (round 2+ of Prove, via planFor's prev != nil
 // branch). Unlike buildPatchTask, it carries only the revision feedback: the
 // finding's framing and repro-plan context have already been sent as the
-// conversation's opening turn and stay in history under RunJSONContinue, so
+// conversation's opening turn and stay in history under agent.Continue, so
 // they are deliberately not repeated here.
 //
 // feedback is the verbatim revision message built by Prove (invalid-plan

@@ -121,13 +121,14 @@ func (f *Funnel) readToolsWithRoots(readCaps agenttools.ReadCaps, depRoots *agen
 	return append([]agent.Tool{readFile, listDir, grep, gitBlame, gitLog}, nav.Tools()...), nil
 }
 
-// transcriptOption returns a Runner option that persists transcripts when a
-// TranscriptDir is configured, or a no-op option otherwise.
-func (f *Funnel) transcriptOption() agent.Option {
+// transcriptOptions returns the Runner options that persist JSONL transcripts
+// ("<RunID>.jsonl") when a TranscriptDir is configured, or none otherwise.
+// Sink failures never fail a run and are dropped.
+func (f *Funnel) transcriptOptions() []agent.Option {
 	if f.opts.TranscriptDir == "" {
-		return func(*agent.Runner) {}
+		return nil
 	}
-	return agent.WithTranscriptDir(f.opts.TranscriptDir)
+	return []agent.Option{agent.WithObserver(agent.JSONL(f.opts.TranscriptDir, nil))}
 }
 
 // noteMu guards Result.Skipped, which parallel stages append to concurrently.

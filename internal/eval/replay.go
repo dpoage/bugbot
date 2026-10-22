@@ -51,17 +51,17 @@ func NewRoleTranscriptStore(role string, caps llmkit.Capabilities, sessions ...*
 }
 
 // replayRoleClient is the llmkit.Client served to the funnel for a recorded role.
-// It detects each NEW agent run (a fresh runner always opens with a single
-// user-message conversation: no prior tool results) and, on that boundary,
-// advances to the next recorded session. Within a run it delegates to that
-// session's agent.ReplayClient, which validates the tool round-trip structure
-// and serves recorded completions in order.
+// It detects each NEW agent run and, on that boundary, advances to the next
+// recorded session. Within a run it delegates to that session's
+// agent.ReplayClient, which validates the tool round-trip structure and serves
+// recorded completions in order.
 type replayRoleClient struct {
 	store *RoleTranscriptStore
 
-	mu      sync.Mutex
-	nextIdx int                 // index of the next session to start
-	active  *agent.ReplayClient // the in-flight session's replayer, or nil
+	mu        sync.Mutex
+	nextIdx   int                 // index of the next session to start
+	active    *agent.ReplayClient // the in-flight session's replayer, or nil
+	activeRun llmkit.RunID        // the agent run active serves ("" outside a Runner)
 }
 
 func newReplayRoleClient(store *RoleTranscriptStore) *replayRoleClient {
@@ -70,9 +70,10 @@ func newReplayRoleClient(store *RoleTranscriptStore) *replayRoleClient {
 
 func (c *replayRoleClient) Capabilities() llmkit.Capabilities { return c.store.caps }
 
-// Complete serves the next recorded completion. On the first turn of a new
-// agent run (a request with no prior assistant/tool-result turns) it rolls over
-// to the next recorded session.
+// Complete serves the next recorded completion. It rolls over to the next
+// recorded session when the Runner's run id (llmkit.RunFromContext) changes —
+// a RunJSON repair rides its run's id and stays in the session — or, outside a
+// Runner, on a request with no prior assistant/tool-result turns.
 func (c *replayRoleClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return llmkit.Response{}, err
@@ -81,18 +82,26 @@ func (c *replayRoleClient) Complete(ctx context.Context, req llmkit.Request) (ll
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if isRunStart(req) || c.active == nil {
+	run := llmkit.RunFromContext(ctx)
+	newRun := run != c.activeRun || (run == "" && isRunStart(req))
+	if c.active == nil || newRun {
+		if c.active != nil {
+			if err := c.active.Err(); err != nil {
+				return llmkit.Response{}, fmt.Errorf("eval: %s session %d diverged: %w", c.store.role, c.nextIdx, err)
+			}
+		}
 		if c.nextIdx >= len(c.store.sessions) {
 			return llmkit.Response{}, fmt.Errorf(
 				"eval: %s replay exhausted: the run started agent run #%d but only %d session(s) were recorded; re-record or reduce the run's work (lenses/candidates)",
 				c.store.role, c.nextIdx+1, len(c.store.sessions))
 		}
 		tr := c.store.sessions[c.nextIdx]
-		rc, err := agent.NewReplayClient(tr, c.store.caps)
+		rc, err := agent.NewReplayClient(tr, tr.RunID, c.store.caps)
 		if err != nil {
 			return llmkit.Response{}, fmt.Errorf("eval: %s session %d: %w", c.store.role, c.nextIdx+1, err)
 		}
 		c.active = rc
+		c.activeRun = run
 		c.nextIdx++
 	}
 
@@ -105,8 +114,7 @@ func (c *replayRoleClient) Complete(ctx context.Context, req llmkit.Request) (ll
 
 // isRunStart reports whether req is the opening turn of a fresh agent run: the
 // conversation has no assistant turns and no tool results yet, i.e. only the
-// initial user (task) message(s). A new runner always starts here, so this is
-// the boundary at which we advance to the next recorded session.
+// initial user (task) message(s).
 func isRunStart(req llmkit.Request) bool {
 	for _, m := range req.Messages {
 		if m.Role == llmkit.RoleAssistant || m.Role == llmkit.RoleToolResult {

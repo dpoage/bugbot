@@ -249,7 +249,7 @@ func TestStructuredOutput_RefuterCarriesRefutationSchema(t *testing.T) {
 		Title: "real bug for refuter test",
 	}
 	budget := &budgetState{}
-	verdicts, _, _, failed, stopped, err := f.runRefuters(ctx, verifier, tools, "senior Go engineer", c, 1, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title), toolHealthRouting{})
+	verdicts, _, _, failed, stopped, err := f.runRefuters(ctx, verifier, tools, "senior Go engineer", c, 1, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title), toolHealthRouting{}, "")
 	if err != nil {
 		t.Fatalf("runRefuters: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestStructuredOutput_RefuterNoCapPassthrough(t *testing.T) {
 
 	c := Candidate{Lens: "l", File: "f.go", Line: 1, Title: "t"}
 	budget := &budgetState{}
-	if _, _, _, _, _, err := f.runRefuters(ctx, verifier, tools, "engineer", c, 1, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title), toolHealthRouting{}); err != nil {
+	if _, _, _, _, _, err := f.runRefuters(ctx, verifier, tools, "engineer", c, 1, budget, progress.NewAgentScope(nil, progress.RoleVerifier, c.Title), toolHealthRouting{}, ""); err != nil {
 		t.Fatalf("runRefuters: %v", err)
 	}
 	for i, r := range verifier.allRequests() {
@@ -327,7 +327,7 @@ func TestStructuredOutput_ArbiterCarriesArbiterSchema(t *testing.T) {
 	c := Candidate{Lens: "l", File: "f.go", Line: 1, Title: "split candidate"}
 	budget := &budgetState{}
 	scope := progress.NewAgentScope(nil, progress.RoleVerifier, c.Title)
-	verdicts, seats, _, _, _, err := f.runRefuters(ctx, verifier, tools, "engineer", c, 2, budget, scope, toolHealthRouting{})
+	verdicts, seats, _, _, _, err := f.runRefuters(ctx, verifier, tools, "engineer", c, 2, budget, scope, toolHealthRouting{}, "")
 	if err != nil {
 		t.Fatalf("runRefuters: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestStructuredOutput_ArbiterCarriesArbiterSchema(t *testing.T) {
 		t.Fatalf("expected split verdict, got %+v", verdicts)
 	}
 
-	av, _, _, aerr := f.runArbiter(ctx, verifier, tools, "engineer", c, verdicts, seats, budget, scope, toolHealthRouting{})
+	av, _, _, aerr := f.runArbiter(ctx, verifier, tools, "engineer", c, verdicts, seats, budget, scope, toolHealthRouting{}, "")
 	if aerr != nil {
 		t.Fatalf("runArbiter: %v", aerr)
 	}
