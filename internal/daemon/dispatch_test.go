@@ -117,7 +117,9 @@ func TestDaemon_SubmitDispatch_ExecutesAtCycleBoundaryAndReturnsSummary(t *testi
 	fake.mu.Unlock()
 
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
 }
 
 // TestDaemon_SubmitDispatch_NeverRunsConcurrentlyWithACycle starts a dispatch
@@ -178,7 +180,9 @@ func TestDaemon_SubmitDispatch_NeverRunsConcurrentlyWithACycle(t *testing.T) {
 	fake.mu.Unlock()
 
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
 }
 
 // TestDaemon_SubmitDispatch_DisabledReturnsError verifies a Daemon built
@@ -197,7 +201,9 @@ func TestDaemon_SubmitDispatch_DisabledReturnsError(t *testing.T) {
 	}
 
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
 }
 
 // TestDaemon_SubmitDispatch_ContextCancelledBeforeReply verifies a cancelled
@@ -233,5 +239,7 @@ func TestDaemon_SubmitDispatch_ContextCancelledBeforeReply(t *testing.T) {
 
 	close(fake.release) // let the in-flight verb finish so Run can shut down cleanly
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
 }
