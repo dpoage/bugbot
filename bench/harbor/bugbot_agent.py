@@ -63,9 +63,9 @@ class BugbotOptions(InstalledAgentOptions):
     # Comma-separated BUGBOT_EXPERIMENTS switches (internal/funnel/experiment.go
     # on explore/ branches); empty runs production behavior.
     experiments: str = Field(default="", description="BUGBOT_EXPERIMENTS value.")
-    env_setup: str = Field(
+    conda_env: str = Field(
         default="",
-        description="Shell run before the scan, e.g. '. /opt/miniconda3/bin/activate testbed' so run_code sees the project env.",
+        description="Activate this /opt/miniconda3 env before the scan so run_code sees the project env (SWE-bench: testbed).",
     )
 
 
@@ -171,7 +171,7 @@ class BugbotAgent(BaseInstalledAgent):
         bb = f"{REMOTE_BIN} --config {REMOTE_RUN}/bugbot.yaml"
         script = (
             f"cd {REMOTE_RUN} && cp bugbot.yaml {LOGS}/bugbot.yaml && "
-            + (f"{self._opts().env_setup}; " if self._opts().env_setup else "")
+            + (f". /opt/miniconda3/bin/activate {shlex.quote(self._opts().conda_env)}; " if self._opts().conda_env else "")
             + "git config --global --add safe.directory /testbed; "
             f"git -C /testbed ls-files | wc -l > {LOGS}/tracked_files; "
             f"timeout -k 60 {self._opts().scan_timeout_sec} "
@@ -182,6 +182,9 @@ class BugbotAgent(BaseInstalledAgent):
             # bugbot prints JSON null for an empty list; normalize so the
             # verifier sees a valid empty result rather than a missing one.
             f"grep -qx null {LOGS}/findings.json && echo '[]' > {LOGS}/findings.json; "
+            # state.db + transcripts let a run be autopsied after the container is gone.
+            f"cp {REMOTE_RUN}/state.db {LOGS}/ 2>/dev/null; "
+            f"tar -czf {LOGS}/transcripts.tgz -C {REMOTE_RUN}/.bugbot transcripts 2>/dev/null; "
             f"cat {LOGS}/scan.exit"
         )
         env = {key_env: api_key}
