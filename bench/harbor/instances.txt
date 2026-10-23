@@ -1,0 +1,7 @@
+# SWE-bench Verified instances for the spike: single non-test source file,
+# <=2 hunks, "<15 min fix", genuine defects (not feature requests), one per repo.
+django__django-11099          # UsernameValidator regex accepts trailing newline
+pydata__xarray-4075           # weighted mean wrong with boolean weights
+scikit-learn__scikit-learn-13142  # GaussianMixture fit_predict != predict when n_init>1
+astropy__astropy-14995        # NDDataRef mask propagation fails when one operand has no mask
+pylint-dev__pylint-4970       # min-similarity-lines=0 flags every line instead of disabling

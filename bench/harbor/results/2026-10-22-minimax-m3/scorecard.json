@@ -1,0 +1,828 @@
+{
+  "price_usd_per_mtok": {
+    "input": 0.3,
+    "cache_read": 0.06,
+    "output": 1.2
+  },
+  "jobs": [
+    "bench/harbor/jobs/spike-bugbot-minimax",
+    "bench/harbor/jobs/spike-bugbot-minimax-rerun",
+    "bench/harbor/jobs/spike-bugbot-minimax-rerun-xarray",
+    "bench/harbor/jobs/spike-cc-minimax",
+    "bench/harbor/jobs/spike-cc-minimax-rerun",
+    "bench/harbor/jobs/spike-cc-minimax-rerun-django"
+  ],
+  "aggregates": [
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "tasks": 5,
+      "crashed": 0,
+      "bugs_detected": 1,
+      "bug_recall": 0.2,
+      "site_recall": 0.14285714285714285,
+      "precision": 0.03333333333333333,
+      "fp_per_task": 5.8,
+      "in_tok": 94949341,
+      "cache_tok": 80607480,
+      "out_tok": 1658956,
+      "cost_usd": 11.1297543,
+      "usd_per_bug": 11.1297543,
+      "agent_min": 237.4
+    },
+    {
+      "agent": "claude-code",
+      "model": "MiniMax-M3",
+      "tasks": 5,
+      "crashed": 0,
+      "bugs_detected": 3,
+      "bug_recall": 0.6,
+      "site_recall": 0.42857142857142855,
+      "precision": 0.07317073170731707,
+      "fp_per_task": 7.6,
+      "in_tok": 118700780,
+      "cache_tok": 113359351,
+      "out_tok": 1600787,
+      "cost_usd": 10.32493416,
+      "usd_per_bug": 3.4416447199999998,
+      "agent_min": 252.0
+    }
+  ],
+  "trials": [
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "astropy__astropy-14995",
+      "trial": "astropy__astropy-14995__eXCm3Ch",
+      "started_at": "2026-10-23T01:48:16.954878Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 4,
+        "findings": 4,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 4,
+        "verified_findings": 4
+      },
+      "n_input_tokens": 8077265,
+      "n_cache_tokens": 6922406,
+      "n_output_tokens": 163792,
+      "cost_usd": 0.9583524600000001,
+      "agent_min": 21.6,
+      "metadata": {
+        "scan_exit": "0"
+      },
+      "findings": [
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 379,
+          "tier": 2,
+          "title": "Unitless collapse operations dereference a missing operand",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 303,
+          "tier": 2,
+          "title": "Disabling uncertainty propagation on a collapse with no uncertainty crashes",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 459,
+          "tier": 2,
+          "title": "Failed propagation leaves a temporary uncertainty attached",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 459,
+          "tier": 2,
+          "title": "Temporary uncertainty is left attached to the operand when propagation raises",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "django__django-11099",
+      "trial": "django__django-11099__yGqFWPa",
+      "started_at": "2026-10-23T01:48:16.982981Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 2,
+        "fp": 0,
+        "findings": 0,
+        "valid_output": 1
+      },
+      "n_input_tokens": 16370591,
+      "n_cache_tokens": 13858228,
+      "n_output_tokens": 343234,
+      "cost_usd": 1.99708338,
+      "agent_min": 39.3,
+      "metadata": {
+        "scan_exit": "0"
+      },
+      "findings": []
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "pydata__xarray-4075",
+      "trial": "pydata__xarray-4075__RpwmGPx",
+      "started_at": "2026-10-23T01:21:29.221438Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 12,
+        "findings": 12,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 12,
+        "verified_findings": 12
+      },
+      "n_input_tokens": 40862816,
+      "n_cache_tokens": 34600928,
+      "n_output_tokens": 676097,
+      "cost_usd": 4.765938480000001,
+      "agent_min": 100.4,
+      "metadata": {
+        "scan_exit": "0"
+      },
+      "findings": [
+        {
+          "file": "xarray/core/formatting_html.py",
+          "line": 250,
+          "tier": 2,
+          "title": "DataArray name is interpolated into HTML without escaping",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/accessor_dt.py",
+          "line": 352,
+          "tier": 2,
+          "title": "Dask quarter accessor advertises the datetime input dtype",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/accessor_str.py",
+          "line": 86,
+          "tier": 2,
+          "title": "StringAccessor methods silently truncate results to the input's fixed-width dtype",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/combine.py",
+          "line": 183,
+          "tier": 2,
+          "title": "Empty nested input raises StopIteration",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/formatting.py",
+          "line": 418,
+          "tier": 2,
+          "title": "Concurrent array representations race on global NumPy print options",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/indexes.py",
+          "line": 122,
+          "tier": 2,
+          "title": "Rolling an empty index divides by zero",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/resample_cftime.py",
+          "line": 100,
+          "tier": 2,
+          "title": "Resampling an empty CFTimeIndex raises IndexError",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/resample_cftime.py",
+          "line": 100,
+          "tier": 2,
+          "title": "Empty CFTimeIndex is indexed before the empty-bin guard",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/variable.py",
+          "line": 1265,
+          "tier": 2,
+          "title": "Rolling a zero-length dimension performs modulo by zero",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/variable.py",
+          "line": 2004,
+          "tier": 2,
+          "title": "Variable._coarsen_reshape clears attributes on the caller's Variable",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/common.py",
+          "line": 1312,
+          "tier": 2,
+          "title": "Context-manager cleanup can mask the original exception",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/extensions.py",
+          "line": 25,
+          "tier": 2,
+          "title": "Concurrent accessor initialization can clobber the accessor cache",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "pylint-dev__pylint-4970",
+      "trial": "pylint-dev__pylint-4970__d5rYpDK",
+      "started_at": "2026-10-22T23:15:24.139903Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 8,
+        "findings": 8,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 8,
+        "verified_findings": 8
+      },
+      "n_input_tokens": 21021862,
+      "n_cache_tokens": 17837370,
+      "n_output_tokens": 265047,
+      "cost_usd": 2.3436462,
+      "agent_min": 64.3,
+      "metadata": {
+        "scan_exit": "0"
+      },
+      "findings": [
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 1318,
+          "tier": 2,
+          "title": "Operator precedence causes keyword-only dangerous defaults to be skipped",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/design_analysis.py",
+          "line": 506,
+          "tier": 2,
+          "title": "too-many-arguments reports the unfiltered argument count",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/logging.py",
+          "line": 330,
+          "tier": 2,
+          "title": "Arbitrary bytes format literals crash the logging checker",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/misc.py",
+          "line": 115,
+          "tier": 2,
+          "title": "Invalid notes-rgx configuration crashes checker initialization",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/spelling.py",
+          "line": 405,
+          "tier": 2,
+          "title": "Storing unknown words crashes when no private dictionary file is configured",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/stdlib.py",
+          "line": 493,
+          "tier": 2,
+          "title": "shallow-copy-environ check dereferences a missing copy.copy argument",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/stdlib.py",
+          "line": 622,
+          "tier": 2,
+          "title": "Non-string mode argument makes unspecified-encoding check raise an uncaught TypeError",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/stdlib.py",
+          "line": 622,
+          "tier": 2,
+          "title": "Non-string open modes crash unspecified-encoding checks",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "scikit-learn__scikit-learn-13142",
+      "trial": "scikit-learn__scikit-learn-13142__z8o2rne",
+      "started_at": "2026-10-23T00:19:58.137227Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 1,
+        "fp": 5,
+        "findings": 6,
+        "valid_output": 1,
+        "verified_detected": 1,
+        "verified_site_tp": 1,
+        "verified_site_fn": 1,
+        "verified_fp": 5,
+        "verified_findings": 6
+      },
+      "n_input_tokens": 8616807,
+      "n_cache_tokens": 7388548,
+      "n_output_tokens": 210786,
+      "cost_usd": 1.06473378,
+      "agent_min": 11.8,
+      "metadata": {
+        "scan_exit": "0"
+      },
+      "findings": [
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 225,
+          "tier": 2,
+          "title": "warm_start is permanently poisoned after a failed fit",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 263,
+          "tier": 2,
+          "title": "fit_predict() returns labels computed from the last initialization instead of the best one",
+          "matched_site": 0
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 521,
+          "tier": 2,
+          "title": "verbose_interval=0 causes an unguarded modulo-by-zero during fit",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/bayesian_mixture.py",
+          "line": 672,
+          "tier": 2,
+          "title": "Variational M-step leaves mutually inconsistent posterior attributes on covariance failure",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/gaussian_mixture.py",
+          "line": 676,
+          "tier": 2,
+          "title": "M-step raises after committing new parameters, leaving stale precisions",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 418,
+          "tier": 2,
+          "title": "sample() error message reports n_components instead of the invalid n_samples value",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "claude-code",
+      "model": "MiniMax-M3",
+      "task": "astropy__astropy-14995",
+      "trial": "astropy__astropy-14995__UuxawEZ",
+      "started_at": "2026-10-23T00:45:35.939773Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 0,
+        "fp": 2,
+        "findings": 3,
+        "valid_output": 1
+      },
+      "n_input_tokens": 7578457,
+      "n_cache_tokens": 7337208,
+      "n_output_tokens": 101536,
+      "cost_usd": 0.63445038,
+      "agent_min": 24.1,
+      "metadata": {},
+      "findings": [
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 523,
+          "tier": null,
+          "title": "Binary arithmetic with only the first operand masked passes None into handle_mask, corrupting the result mask",
+          "matched_site": 0
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 379,
+          "tier": null,
+          "title": "Collapse operations (sum/mean/min/max) crash with AttributeError when the NDData has neither a unit nor a mask",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 343,
+          "tier": null,
+          "title": "handle_meta='first_found' raises AttributeError on collapse operations",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "claude-code",
+      "model": "MiniMax-M3",
+      "task": "django__django-11099",
+      "trial": "django__django-11099__wyLEdnZ",
+      "started_at": "2026-10-23T02:28:04.957988Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 2,
+        "fp": 0,
+        "findings": 0,
+        "valid_output": 1
+      },
+      "n_input_tokens": 44030018,
+      "n_cache_tokens": 41745241,
+      "n_output_tokens": 569915,
+      "cost_usd": 3.87404556,
+      "agent_min": 85.5,
+      "metadata": {},
+      "findings": []
+    },
+    {
+      "agent": "claude-code",
+      "model": "MiniMax-M3",
+      "task": "pydata__xarray-4075",
+      "trial": "pydata__xarray-4075__7SRMJh8",
+      "started_at": "2026-10-22T23:15:04.915711Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 0,
+        "fp": 17,
+        "findings": 18,
+        "valid_output": 1
+      },
+      "n_input_tokens": 34729040,
+      "n_cache_tokens": 33505019,
+      "n_output_tokens": 277491,
+      "cost_usd": 2.71049664,
+      "agent_min": 56.7,
+      "metadata": {},
+      "findings": [
+        {
+          "file": "xarray/core/groupby.py",
+          "line": 410,
+          "tier": null,
+          "title": "Reductions after grouping by a unique coordinate always raise ValueError",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/indexing.py",
+          "line": 189,
+          "tier": null,
+          "title": "Converting a scalar label with .item() breaks .sel() for datetime64 and date objects",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/missing.py",
+          "line": 558,
+          "tier": null,
+          "title": "_localize uses np.min/np.max instead of nanmin/nanmax, so interp raises KeyError: nan",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/weighted.py",
+          "line": 145,
+          "tier": null,
+          "title": "Boolean weights give a wrong sum_of_weights and mean",
+          "matched_site": 0
+        },
+        {
+          "file": "xarray/core/indexes.py",
+          "line": 122,
+          "tier": null,
+          "title": "roll_index divides by zero on an empty dimension",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/coordinates.py",
+          "line": 111,
+          "tier": null,
+          "title": "to_index() crashes when a dimension's index is itself a MultiIndex",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/merge.py",
+          "line": 504,
+          "tier": null,
+          "title": "combine_attrs='override' returns the input's attrs dict, aliasing it into the result",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/missing.py",
+          "line": 156,
+          "tier": null,
+          "title": "ScipyInterpolator accepts bounds_error but always passes bounds_error=False to interp1d",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/missing.py",
+          "line": 412,
+          "tier": null,
+          "title": "ffill/bfill with dask='parallelized' leaves NaNs at chunk boundaries",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/computation.py",
+          "line": 1388,
+          "tier": null,
+          "title": "idxmin/idxmax crash on dask-backed arrays with more than one remaining dimension",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/computation.py",
+          "line": 1014,
+          "tier": null,
+          "title": "to_gufunc_string() ignores exclude_dims, so vectorize=True + exclude_dims always fails",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/common.py",
+          "line": 1242,
+          "tier": null,
+          "title": "Dataset.where(cond, drop=True) keeps all-NaN slices when variables have different dims",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/rolling.py",
+          "line": 366,
+          "tier": null,
+          "title": "DataArray rolling silently ignores keep_attrs=True",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/weighted.py",
+          "line": 238,
+          "tier": null,
+          "title": "Dataset.weighted(...).sum(dim=...) rescales variables that lack the reduced dimension",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/alignment.py",
+          "line": 568,
+          "tier": null,
+          "title": "reindexing silently downgrades a fixed-width numpy string index to object dtype",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/concat.py",
+          "line": 301,
+          "tier": null,
+          "title": "concat produces non-deterministic variable/coordinate ordering (set iteration)",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/missing.py",
+          "line": 702,
+          "tier": null,
+          "title": "Chunked interp declares the input dtype in the dask graph although interpolation returns floats",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/formatting.py",
+          "line": 143,
+          "tier": null,
+          "title": "format_item does not recognise np.float32/np.float16, so they print at full precision",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "claude-code",
+      "model": "MiniMax-M3",
+      "task": "pylint-dev__pylint-4970",
+      "trial": "pylint-dev__pylint-4970__fCMjKz9",
+      "started_at": "2026-10-22T23:15:35.495788Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 13,
+        "findings": 13,
+        "valid_output": 1
+      },
+      "n_input_tokens": 18590469,
+      "n_cache_tokens": 17751351,
+      "n_output_tokens": 239783,
+      "cost_usd": 1.60455606,
+      "agent_min": 54.2,
+      "metadata": {},
+      "findings": [
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 1318,
+          "tier": null,
+          "title": "dangerous-default-value silently skips keyword-only defaults when the function also has positional defaults",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 2057,
+          "tier": null,
+          "title": "non-ascii-name only fires for names that START with a non-ASCII character",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 2202,
+          "tier": null,
+          "title": "missing-function-docstring is never emitted for a method named __init__",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 746,
+          "tier": null,
+          "title": "nonexistent-operator false positive for parenthesized unary operators",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 641,
+          "tier": null,
+          "title": "duplicate-argument-name ignores positional-only parameters (posonlyargs)",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 1536,
+          "tier": null,
+          "title": "bad-reversed-sequence false positive when __reversed__ comes from a base class",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 768,
+          "tier": null,
+          "title": "nonlocal-without-binding false negative when the name is also local to the declaring scope",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 1627,
+          "tier": null,
+          "title": "_check_redeclared_assign_name aborts the entire check on the first dummy-variable name",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 574,
+          "tier": null,
+          "title": "_too_many_starred_for_tuple discards the outer starred count at a nested tuple",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 1452,
+          "tier": null,
+          "title": "duplicate-key only considers nodes.Const dictionary keys",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/variables.py",
+          "line": 946,
+          "tier": null,
+          "title": "global-variable-undefined false positive when the global name is a module-level function or class",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/variables.py",
+          "line": 2015,
+          "tier": null,
+          "title": "invalid-all-format false positive for __all__ built with list()/tuple()",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/variables.py",
+          "line": 2016,
+          "tier": null,
+          "title": "invalid-all-format is reported against a node from a different module",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "claude-code",
+      "model": "MiniMax-M3",
+      "task": "scikit-learn__scikit-learn-13142",
+      "trial": "scikit-learn__scikit-learn-13142__ka7QTiz",
+      "started_at": "2026-10-23T00:11:35.471834Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 1,
+        "fp": 6,
+        "findings": 7,
+        "valid_output": 1
+      },
+      "n_input_tokens": 13772796,
+      "n_cache_tokens": 13020532,
+      "n_output_tokens": 412062,
+      "cost_usd": 1.5013855199999997,
+      "agent_min": 31.5,
+      "metadata": {},
+      "findings": [
+        {
+          "file": "sklearn/mixture/gaussian_mixture.py",
+          "line": 658,
+          "tier": null,
+          "title": "precisions_init is stored as the precision-Cholesky factor for 'diag'/'spherical', so the user's precisions get squared",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 263,
+          "tier": null,
+          "title": "fit_predict returns labels computed from a discarded initialization when n_init > 1",
+          "matched_site": 0
+        },
+        {
+          "file": "sklearn/mixture/gaussian_mixture.py",
+          "line": 47,
+          "tier": null,
+          "title": "Normalized float32 weights_init is rejected with a bogus 'should be normalized' error",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 225,
+          "tier": null,
+          "title": "converged_ and the ConvergenceWarning describe the last initialization, not the one that is kept",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 221,
+          "tier": null,
+          "title": "warm-started refit after a failed fit raises AttributeError instead of the real error",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 418,
+          "tier": null,
+          "title": "sample() error message prints n_components instead of the invalid n_samples",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/gaussian_mixture.py",
+          "line": 44,
+          "tier": null,
+          "title": "weights range-check error message reports min and max swapped",
+          "matched_site": null
+        }
+      ]
+    }
+  ]
+}
