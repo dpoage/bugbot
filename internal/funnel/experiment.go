@@ -1,31 +1,42 @@
 package funnel
 
-// experiment.go: exploration-only switches for the finder-recall A/B loop
-// (branch explore/finder-recall, bugbot-hqgy). BUGBOT_EXPERIMENTS is a
-// comma-separated list; unset means production behavior, byte for byte.
-// Winners graduate into real config/defaults; losers are deleted.
+// Exploration-only switches (explore/finder-recall), read from the comma-separated
+// BUGBOT_EXPERIMENTS; unset is production behavior.
 
 import (
 	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	llmkit "github.com/dpoage/llmkit"
 )
 
 const (
-	// expLogicLens adds the logic/wrong-result lens to BuiltinLenses.
-	expLogicLens = "logic-lens"
-	// expSoftEmpty replaces the "empty list is expected" paragraph of the
-	// finder prompt with one that asks for every confirmed defect.
-	expSoftEmpty = "soft-empty"
-	// expSizeChunks cuts finder chunks by line budget instead of file count.
+	expLogicLens  = "logic-lens"
+	expSoftEmpty  = "soft-empty"
 	expSizeChunks = "size-chunks"
+	// expFinderExec gives finders run_code, unsandboxed: only for runs already
+	// inside a disposable container (the Harbor task environment).
+	expFinderExec = "finder-exec"
 )
 
-// sizeChunkLines is the line budget per finder chunk under expSizeChunks:
-// about three 800-line read_file pages, so a 20-turn finder can read the
-// whole chunk and still trace outward.
+// About three 800-line read_file pages per chunk.
 const sizeChunkLines = 2500
+
+const (
+	finderExecMax     = 8
+	finderExecTimeout = 120 * time.Second
+	finderExecOutCap  = 16 * 1024
+)
 
 func experimentOn(name string) bool {
 	for _, e := range strings.Split(os.Getenv("BUGBOT_EXPERIMENTS"), ",") {
@@ -36,8 +47,6 @@ func experimentOn(name string) bool {
 	return false
 }
 
-// logicLens hunts the wrong-result bugs no defect-class lens names: in the
-// Harbor spike all three gold bugs claude-code found were of this kind.
 var logicLens = Lens{
 	Name: "logic/wrong-result",
 	Core: "Hunt for wrong-result logic defects: code that runs without error but " +
@@ -54,9 +63,12 @@ var logicLens = Lens{
 
 const softEmptyParagraph = `Report every concrete defect you can confirm by reading the code; a confirmed bug with a precise location is valuable even when it looks minor. Return an empty list only after you have examined every target file and found nothing you can confirm. Do not pad the list with speculative entries.`
 
-// chunkByLines greedily packs files, in input order, into chunks of at most
-// maxFiles files and sizeChunkLines lines; a file over the budget gets a
-// chunk of its own. Unreadable files count as zero lines.
+const finderExecParagraph = `
+
+You can also run code: run_code executes a shell command in a scratch copy of the repository with the project's environment installed. When you suspect a wrong result or a crash, write a small probe (for example python -c or a short pytest run) with the concrete input and run it. A demonstrated wrong output or traceback is the strongest evidence you can attach; a probe that behaves correctly means do not report. You have a small budget of runs, so probe suspicions rather than exploring.`
+
+// chunkByLines packs files in input order into chunks of at most maxFiles
+// files and sizeChunkLines lines; an oversized file gets its own chunk.
 func chunkByLines(root string, files []string, maxFiles int) []fileChunk {
 	var out []fileChunk
 	var cur []string
@@ -92,4 +104,97 @@ func countLines(path string) int {
 		n++
 	}
 	return n
+}
+
+// execWorkspace is one scratch copy of the repo per process, so probes cannot
+// edit the scanned tree; finders share it.
+type execWorkspace struct {
+	once sync.Once
+	dir  string
+	err  error
+}
+
+var finderExecWS execWorkspace
+
+func (w *execWorkspace) get(root string) (string, error) {
+	w.once.Do(func() {
+		dir, err := os.MkdirTemp("", "bugbot-exec-ws-")
+		if err != nil {
+			w.err = err
+			return
+		}
+		if out, err := exec.Command("cp", "-a", root+"/.", dir).CombinedOutput(); err != nil {
+			w.err = fmt.Errorf("copy repo for run_code: %v: %s", err, out)
+			return
+		}
+		w.dir = dir
+	})
+	return w.dir, w.err
+}
+
+// runCodeTool is per finder unit: its exec budget is not shared.
+type runCodeTool struct {
+	root string
+	used atomic.Int32
+}
+
+func newRunCodeTool(root string) *runCodeTool { return &runCodeTool{root: root} }
+
+func (t *runCodeTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{
+		Name: "run_code",
+		Description: fmt.Sprintf("Run a shell command (bash -c) in a scratch copy of the repository"+
+			" with the project's environment installed, to demonstrate or rule out a suspected bug."+
+			" Returns exit code, stdout, and stderr. Budget: %d runs; timeout %s each.",
+			finderExecMax, finderExecTimeout),
+		Parameters: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "command": {"type": "string", "minLength": 1, "description": "Shell command, e.g. python -c '...' or python -m pytest path::test -x -q"}
+  },
+  "required": ["command"],
+  "additionalProperties": false
+}`),
+	}
+}
+
+func (t *runCodeTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
+	var args struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil || strings.TrimSpace(args.Command) == "" {
+		return "", fmt.Errorf("run_code: need a non-empty command")
+	}
+	if n := t.used.Add(1); n > finderExecMax {
+		return fmt.Sprintf("run_code budget exhausted (%d runs used); continue by reading code.", finderExecMax), nil
+	}
+	dir, err := finderExecWS.get(t.root)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, finderExecTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "-c", args.Command)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	runErr := cmd.Run()
+	code := 0
+	if ee, ok := runErr.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if runErr != nil {
+		code = -1
+		fmt.Fprintf(&stderr, "\n[run_code: %v]", runErr)
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		fmt.Fprintf(&stderr, "\n[run_code: timed out after %s]", finderExecTimeout)
+	}
+	return fmt.Sprintf("exit=%d\n--- stdout ---\n%s\n--- stderr ---\n%s", code, capOut(stdout.Bytes()), capOut(stderr.Bytes())), nil
+}
+
+func capOut(b []byte) string {
+	if len(b) <= finderExecOutCap {
+		return string(b)
+	}
+	return string(b[:finderExecOutCap]) + fmt.Sprintf("\n[truncated: %d of %d bytes shown]", finderExecOutCap, len(b))
 }

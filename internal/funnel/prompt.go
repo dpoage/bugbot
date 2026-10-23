@@ -155,6 +155,9 @@ func finderSystemPrompt(persona string, l Lens, langs []ingest.Language) string 
 	if experimentOn(expSoftEmpty) {
 		base = strings.Replace(base, finderEmptyListParagraph, softEmptyParagraph, 1)
 	}
+	if experimentOn(expFinderExec) {
+		base += finderExecParagraph
+	}
 	b.WriteString(base)
 	b.WriteString("\n\nYOUR ASSIGNED FOCUS (")
 	b.WriteString(l.Name)

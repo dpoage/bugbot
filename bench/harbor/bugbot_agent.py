@@ -63,6 +63,10 @@ class BugbotOptions(InstalledAgentOptions):
     # Comma-separated BUGBOT_EXPERIMENTS switches (internal/funnel/experiment.go
     # on explore/ branches); empty runs production behavior.
     experiments: str = Field(default="", description="BUGBOT_EXPERIMENTS value.")
+    env_setup: str = Field(
+        default="",
+        description="Shell run before the scan, e.g. '. /opt/miniconda3/bin/activate testbed' so run_code sees the project env.",
+    )
 
 
 class BugbotAgent(BaseInstalledAgent):
@@ -77,7 +81,7 @@ class BugbotAgent(BaseInstalledAgent):
     @override
     def version(self) -> str | None:
         # bugbot has no --version; build.sh records the commit it built.
-        stamp = Path(self._opts().binary).with_name("bugbot.version")
+        stamp = Path(self._opts().binary + ".version")
         return stamp.read_text().strip() if stamp.is_file() else None
 
     @override
@@ -167,7 +171,8 @@ class BugbotAgent(BaseInstalledAgent):
         bb = f"{REMOTE_BIN} --config {REMOTE_RUN}/bugbot.yaml"
         script = (
             f"cd {REMOTE_RUN} && cp bugbot.yaml {LOGS}/bugbot.yaml && "
-            "git config --global --add safe.directory /testbed; "
+            + (f"{self._opts().env_setup}; " if self._opts().env_setup else "")
+            + "git config --global --add safe.directory /testbed; "
             f"git -C /testbed ls-files | wc -l > {LOGS}/tracked_files; "
             f"timeout -k 60 {self._opts().scan_timeout_sec} "
             f"{bb} scan --target /testbed --force --concurrency {self._opts().concurrency} "

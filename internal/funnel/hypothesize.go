@@ -421,6 +421,9 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llmki
 			scope := progress.NewAgentScope(f.opts.Progress, progress.RoleFinder, label).Start()
 
 			unitTools := append(baseTools[:len(baseTools):len(baseTools)], postLeadTool, pkgContextTool, pkgGraphTool)
+			if experimentOn(expFinderExec) {
+				unitTools = append(unitTools, newRunCodeTool(f.repo.Root()))
+			}
 			if t := f.maybeStatusNoteTool(scope); t != nil {
 				unitTools = append(unitTools, t)
 			}
