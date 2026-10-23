@@ -72,8 +72,14 @@ class BugbotAgent(BaseInstalledAgent):
         return "bugbot"
 
     @override
+    def version(self) -> str | None:
+        # bugbot has no --version; build.sh records the commit it built.
+        stamp = Path(self._opts().binary).with_name("bugbot.version")
+        return stamp.read_text().strip() if stamp.is_file() else None
+
+    @override
     def get_version_command(self) -> str | None:
-        return f"{REMOTE_BIN} --version"
+        return None
 
     def _opts(self) -> BugbotOptions:
         assert isinstance(self.options, BugbotOptions)

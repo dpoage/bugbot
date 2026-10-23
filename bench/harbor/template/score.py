@@ -57,7 +57,8 @@ def load_findings(path):
         if not f:
             continue
         tier = row.get("Tier", row.get("tier"))
-        out.append({"file": norm_path(f), "line": line, "tier": tier})
+        title = row.get("title", row.get("Title")) or ""
+        out.append({"file": norm_path(f), "line": line, "tier": tier, "title": str(title)})
     return out, True
 
 
@@ -68,7 +69,8 @@ def distance(site, line, tol):
     return d if d <= tol else None
 
 
-def match(findings, sites, tol):
+def pair(findings, sites, tol):
+    """Return {finding index: site index} for the greedy closest-first 1:1 match."""
     pairs = []
     for fi, f in enumerate(findings):
         for si, s in enumerate(sites):
@@ -78,18 +80,22 @@ def match(findings, sites, tol):
             if d is not None:
                 pairs.append((d, fi, si))
     pairs.sort()
-    used_f, used_s = set(), set()
+    matched, used_s = {}, set()
     for _, fi, si in pairs:
-        if fi in used_f or si in used_s:
+        if fi in matched or si in used_s:
             continue
-        used_f.add(fi)
+        matched[fi] = si
         used_s.add(si)
-    tp = len(used_s)
+    return matched
+
+
+def match(findings, sites, tol):
+    tp = len(pair(findings, sites, tol))
     return {
         "detected": 1 if tp > 0 else 0,
         "site_tp": tp,
         "site_fn": len(sites) - tp,
-        "fp": len(findings) - len(used_f),
+        "fp": len(findings) - tp,
         "findings": len(findings),
     }
 

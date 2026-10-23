@@ -7,7 +7,11 @@ are wrong: a task with no findings has undefined precision). Adds tokens,
 cost, wall time, crashes, and cost per detected bug. A trial with no reward
 (agent or verifier crashed) counts as a miss with no findings.
 
-Usage: bench/harbor/scorecard.py bench/harbor/jobs/<job> [<job> ...] [--per-task]
+--json writes a self-contained record (aggregates, per-trial rewards and
+tokens, and every finding marked with the ground-truth site it matched) that
+outlives the job directories; bench/harbor/results/ keeps these baselines.
+
+Usage: bench/harbor/scorecard.py JOB_DIR [JOB_DIR ...] [--per-task] [--price ...] [--json OUT]
 """
 
 import argparse
@@ -16,6 +20,12 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "template"))
+import score  # noqa: E402  (the verifier's own loader and matcher)
+
+COLS = ["agent", "model", "tasks", "crashed", "bug_recall", "site_recall", "precision",
+        "fp_per_task", "in_tok", "cache_tok", "out_tok", "cost_usd", "usd_per_bug", "agent_min"]
 
 
 def seconds(t: dict | None) -> float:
@@ -32,7 +42,80 @@ def trials(job_dirs: list[Path]):
             r = json.loads(res.read_text())
             if "agent_info" not in r:
                 continue  # job-level result.json
-            yield r
+            yield res.parent, r
+
+
+def trial_record(trial_dir: Path, r: dict, price: list[float] | None) -> dict:
+    ar = r.get("agent_result") or {}
+    n_in = ar.get("n_input_tokens") or 0  # includes cache reads
+    n_cache = ar.get("n_cache_tokens") or 0
+    n_out = ar.get("n_output_tokens") or 0
+    if price is not None:
+        cost = ((n_in - n_cache) * price[0] + n_cache * price[1] + n_out * price[2]) / 1e6
+    else:
+        cost = ar.get("cost_usd")
+    rewards = (r.get("verifier_result") or {}).get("rewards")
+    exc = (r.get("exception_info") or {}).get("exception_type")
+
+    findings, _ = score.load_findings(str(trial_dir / "agent" / "findings.json"))
+    task_path = Path((r.get("config") or {}).get("task", {}).get("path") or "")
+    gt_file = task_path / "tests" / "ground_truth.json"
+    if gt_file.is_file():
+        gt = json.loads(gt_file.read_text())
+        sites = [dict(s, file=score.norm_path(s["file"])) for s in gt["sites"]]
+        matched = score.pair(findings, sites, int(gt.get("tolerance", 5)))
+        for i, f in enumerate(findings):
+            f["matched_site"] = matched.get(i)
+    mi = r["agent_info"].get("model_info") or {}
+    return {
+        "agent": r["agent_info"]["name"],
+        "model": mi.get("name") or "?",
+        "task": r["task_name"],
+        "trial": trial_dir.name,
+        "started_at": r.get("started_at"),
+        "crashed": rewards is None or exc is not None,
+        "exception": exc,
+        "rewards": rewards or {},
+        "n_input_tokens": n_in,
+        "n_cache_tokens": n_cache,
+        "n_output_tokens": n_out,
+        "cost_usd": cost,
+        "agent_min": round(seconds(r.get("agent_execution")) / 60, 1),
+        "metadata": ar.get("metadata") or {},
+        "findings": findings,
+    }
+
+
+def aggregate(agent: str, model: str, rs: list[dict]) -> dict:
+    s = lambda k: sum(t["rewards"].get(k, 0) for t in rs)  # noqa: E731
+    tp, fn, fp, det, n = s("site_tp"), s("site_fn"), s("fp"), s("detected"), len(rs)
+    cost_known = all(t["cost_usd"] is not None for t in rs)
+    cost = sum(t["cost_usd"] for t in rs) if cost_known else None
+    return {
+        "agent": agent,
+        "model": model,
+        "tasks": n,
+        "crashed": sum(t["crashed"] for t in rs),
+        "bugs_detected": det,
+        "bug_recall": det / n,
+        "site_recall": tp / (tp + fn) if tp + fn else None,
+        "precision": tp / (tp + fp) if tp + fp else None,
+        "fp_per_task": fp / n,
+        "in_tok": sum(t["n_input_tokens"] for t in rs),
+        "cache_tok": sum(t["n_cache_tokens"] for t in rs),
+        "out_tok": sum(t["n_output_tokens"] for t in rs),
+        "cost_usd": cost,
+        "usd_per_bug": cost / det if cost is not None and det else None,
+        "agent_min": round(sum(t["agent_min"] for t in rs), 1),
+    }
+
+
+def fmt(v) -> str:
+    if v is None:
+        return "-"
+    if isinstance(v, float):
+        return f"{v:.3f}" if v < 100 else f"{v:.1f}"
+    return str(v)
 
 
 def main() -> int:
@@ -45,6 +128,7 @@ def main() -> int:
              "priced alike (agent-reported cost may assume another vendor's rates). "
              "MiniMax-M3 list price (<=512K ctx): 0.3,0.06,1.2",
     )
+    ap.add_argument("--json", type=Path, metavar="OUT", help="write the full record as JSON")
     args = ap.parse_args()
     price = [float(x) for x in args.price.split(",")] if args.price else None
     if price is not None and len(price) != 3:
@@ -54,68 +138,35 @@ def main() -> int:
     # alongside the original supersedes its crashed trials instead of
     # double-counting the task.
     latest: dict[tuple[str, str, str], dict] = {}
-    for r in trials(args.jobs):
-        mi = r["agent_info"].get("model_info") or {}
-        key = (r["agent_info"]["name"], mi.get("name") or "?", r["task_name"])
-        if key not in latest or (r.get("started_at") or "") > (latest[key].get("started_at") or ""):
-            latest[key] = r
-    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for (agent, model, _), r in sorted(latest.items()):
-        groups[(agent, model)].append(r)
-    if not groups:
+    for trial_dir, r in trials(args.jobs):
+        t = trial_record(trial_dir, r, price)
+        key = (t["agent"], t["model"], t["task"])
+        if key not in latest or (t["started_at"] or "") > (latest[key]["started_at"] or ""):
+            latest[key] = t
+    if not latest:
         print("no trials found", file=sys.stderr)
         return 1
+    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for key in sorted(latest):
+        groups[key[:2]].append(latest[key])
+    aggs = [aggregate(a, m, rs) for (a, m), rs in sorted(groups.items())]
 
-    cols = ["agent", "model", "tasks", "crashed", "bug_recall", "site_recall", "precision",
-            "fp/task", "in_tok", "cache_tok", "out_tok", "cost_usd", "usd/bug", "agent_min"]
-    rows = []
-    for (agent, model), rs in sorted(groups.items()):
-        tp = fn = fp = det = crashed = 0
-        tin = tcache = tout = 0
-        cost = 0.0
-        cost_known = True
-        mins = 0.0
-        for r in rs:
-            rw = (r.get("verifier_result") or {}).get("rewards")
-            if rw is None or r.get("exception_info"):
-                crashed += 1
-            rw = rw or {}
-            tp += rw.get("site_tp", 0)
-            fn += rw.get("site_fn", 0)
-            fp += rw.get("fp", 0)
-            det += rw.get("detected", 0)
-            ar = r.get("agent_result") or {}
-            n_in = ar.get("n_input_tokens") or 0  # includes cache reads
-            n_cache = ar.get("n_cache_tokens") or 0
-            n_out = ar.get("n_output_tokens") or 0
-            tin, tcache, tout = tin + n_in, tcache + n_cache, tout + n_out
-            if price is not None:
-                cost += ((n_in - n_cache) * price[0] + n_cache * price[1] + n_out * price[2]) / 1e6
-            elif ar.get("cost_usd") is None:
-                cost_known = False
-            else:
-                cost += ar["cost_usd"]
-            mins += seconds(r.get("agent_execution")) / 60
-            if args.per_task:
-                print(f"  {agent:12} {r['task_name']:36} {json.dumps(rw)} "
-                      f"exc={(r.get('exception_info') or {}).get('exception_type')}")
-        n = len(rs)
-        rows.append([
-            agent, model, n, crashed,
-            f"{det / n:.2f}",
-            f"{tp / (tp + fn):.2f}" if tp + fn else "-",
-            f"{tp / (tp + fp):.2f}" if tp + fp else "-",
-            f"{fp / n:.1f}",
-            tin, tcache, tout,
-            f"{cost:.3f}" if cost_known else "-",
-            f"{cost / det:.3f}" if cost_known and det else "-",
-            f"{mins:.1f}",
-        ])
-
-    widths = [max(len(str(c)), *(len(str(row[i])) for row in rows)) for i, c in enumerate(cols)]
-    print("  ".join(c.ljust(w) for c, w in zip(cols, widths)))
+    if args.per_task:
+        for t in (latest[k] for k in sorted(latest)):
+            print(f"  {t['agent']:12} {t['task']:36} {json.dumps(t['rewards'])} exc={t['exception']}")
+    rows = [[fmt(a[c]) for c in COLS] for a in aggs]
+    widths = [max(len(c), *(len(row[i]) for row in rows)) for i, c in enumerate(COLS)]
+    print("  ".join(c.ljust(w) for c, w in zip(COLS, widths)))
     for row in rows:
-        print("  ".join(str(v).ljust(w) for v, w in zip(row, widths)))
+        print("  ".join(v.ljust(w) for v, w in zip(row, widths)))
+
+    if args.json:
+        args.json.write_text(json.dumps({
+            "price_usd_per_mtok": dict(zip(("input", "cache_read", "output"), price)) if price else None,
+            "jobs": [str(j) for j in args.jobs],
+            "aggregates": aggs,
+            "trials": [latest[k] for k in sorted(latest)],
+        }, indent=2) + "\n")
     return 0
 
 

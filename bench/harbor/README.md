@@ -90,3 +90,21 @@ image out from under the other job's running trial, and both trials died
 `--no-delete` and clean up afterwards. To rerun only the crashed tasks, use
 `-i <task>` in a new job and give `scorecard.py` both job dirs: for each
 agent, model and task, the latest trial wins.
+
+## Baselines
+
+`results/<date>-<label>/` keeps each recorded baseline: `scorecard.json`
+(the `--json` output) and a `README.md` that covers the setup, the results
+and any deviations. Job directories stay local and gitignored. Compare new
+runs against the latest baseline:
+[2026-10-22, MiniMax-M3](results/2026-10-22-minimax-m3/README.md).
+
+To record a baseline:
+
+1. Build with `build.sh`. It writes the bugbot commit to `bin/bugbot.version`,
+   and Harbor reports that commit as the agent version.
+2. Run each agent as one job, one agent at a time.
+3. Write `scorecard.py --price … --json results/<date>-<label>/scorecard.json`
+   from the job directories.
+4. Write the baseline `README.md` with the setup and any reruns or
+   timeouts.
