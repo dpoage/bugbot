@@ -157,6 +157,9 @@ func (f *Funnel) EstimateScan(ctx context.Context, kind store.ScanKind, changedF
 	// including no per-seam units.
 	if len(targets) > 0 || f.opts.Discovery.ChangeContext != nil {
 		chunks := chunkByLanguage(targets, opts.Limits.ChunkSize)
+		if experimentOn(expSizeChunks) {
+			chunks = chunkByLines(f.repo.Root(), targets, opts.Limits.ChunkSize)
+		}
 		est.Chunks = len(chunks)
 		finderUnits := len(buildUnits(lenses, builtinStrategies(), chunks, nil))
 		if kind == store.ScanTargeted && f.opts.Discovery.ChangeContext != nil {

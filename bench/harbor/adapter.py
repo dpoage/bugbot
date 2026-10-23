@@ -86,7 +86,7 @@ def scope_globs(sites: list[dict], mode: str) -> list[str]:
     return [posixpath.join(d, "*.py") if d else "*.py" for d in dirs]
 
 
-def build_task(src: Path, dst: Path, scope_mode: str, tolerance: int) -> dict:
+def build_task(src: Path, dst: Path, scope_mode: str, tolerance: int, env_tag: str = "") -> dict:
     cfg = json.loads((src / "tests" / "config.json").read_text())
     sites = [s for s in gold_sites(cfg["patch"]) if not TEST_PATH_RE.search(s["file"])]
     if not sites:
@@ -104,7 +104,10 @@ def build_task(src: Path, dst: Path, scope_mode: str, tolerance: int) -> dict:
     scope_lines = "\\n".join(globs)
     (dst / "environment" / "Dockerfile").write_text(
         f"FROM {image.group(1)}\n"
-        "WORKDIR /testbed\n"
+        # Harbor names the image after the environment's content, so a distinct
+        # tag per arm gives concurrent jobs on the same task separate images.
+        + (f"# env-tag: {env_tag}\n" if env_tag else "")
+        + "WORKDIR /testbed\n"
         "# Squash history: later commits (including the fix) must not be recoverable.\n"
         "RUN rm -rf .git && git init -q && git add -A"
         " && git -c user.name=bench -c user.email=bench@localhost commit -qm base\n"
@@ -157,6 +160,9 @@ def main() -> int:
     ap.add_argument("--scope", choices=("dir", "file"), default="dir",
                     help="dir: the gold file's directory (*.py, non-recursive); file: the gold file only")
     ap.add_argument("--tolerance", type=int, default=5, help="line tolerance around each gold hunk")
+    ap.add_argument("--env-tag", default="",
+                    help="label baked into each Dockerfile so concurrent jobs (one dataset copy "
+                         "per arm) get distinct images; Harbor otherwise shares one image per task")
     args = ap.parse_args()
 
     ids = [
@@ -166,7 +172,7 @@ def main() -> int:
     ]
     args.out.mkdir(parents=True, exist_ok=True)
     for iid in ids:
-        info = build_task(args.source / iid, args.out / iid, args.scope, args.tolerance)
+        info = build_task(args.source / iid, args.out / iid, args.scope, args.tolerance, args.env_tag)
         print(json.dumps(info))
     return 0
 

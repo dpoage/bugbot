@@ -67,8 +67,10 @@ def trial_record(trial_dir: Path, r: dict, price: list[float] | None) -> dict:
         for i, f in enumerate(findings):
             f["matched_site"] = matched.get(i)
     mi = r["agent_info"].get("model_info") or {}
+    meta = ar.get("metadata") or {}
     return {
-        "agent": r["agent_info"]["name"],
+        # Experiment arms of one agent are separate rows: bugbot[logic-lens].
+        "agent": r["agent_info"]["name"] + (f"[{meta['experiments']}]" if meta.get("experiments") else ""),
         "model": mi.get("name") or "?",
         "task": r["task_name"],
         "trial": trial_dir.name,

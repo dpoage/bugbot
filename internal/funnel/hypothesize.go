@@ -78,6 +78,9 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llmki
 	}
 
 	chunks := chunkByLanguage(targets, f.opts.Limits.ChunkSize)
+	if experimentOn(expSizeChunks) {
+		chunks = chunkByLines(f.repo.Root(), targets, f.opts.Limits.ChunkSize)
+	}
 
 	// Per-run lens priority: a lens's expected yield is language-dependent
 	// (lensYields), so the launch order — and therefore which lenses survive

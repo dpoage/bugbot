@@ -45,7 +45,7 @@ Report ONLY concrete, confirmed bugs:
 - Do NOT report something as a bug if a guard, type, or caller already prevents it. Check first.
 - If you are not sure a path is reachable or the value can actually be bad, either confirm it by reading more code or do not report it.
 
-Finding nothing is a valid and common outcome. Most files have no bugs in your assigned category. If you find nothing, return an empty list. An empty list is a correct, expected answer — do NOT pad it with weak or speculative entries to seem productive.
+` + finderEmptyListParagraph + `
 
 For each real bug, report: the repo-relative file path, the 1-based line number of the defect, a short title, a description of the wrong behavior, the severity, the concrete evidence (the code path / lines that prove it), your confidence, the defect_kind, and the subject.
 
@@ -58,6 +58,8 @@ Confidence: high = you traced it and it is clearly a bug; medium = strong eviden
 
 Optionally include a top-level "traversal" field summarising the sites you enumerated and visited during your inspection; this powers the observability feed but never affects candidate scoring.`
 }
+
+const finderEmptyListParagraph = `Finding nothing is a valid and common outcome. Most files have no bugs in your assigned category. If you find nothing, return an empty list. An empty list is a correct, expected answer — do NOT pad it with weak or speculative entries to seem productive.`
 
 // candidatesSchema is the JSON schema the finder must satisfy. A top-level
 // object with a "candidates" array keeps the contract unambiguous (a bare array
@@ -149,7 +151,11 @@ type rawCandidate struct {
 // does not carry the same guidance twice.
 func finderSystemPrompt(persona string, l Lens, langs []ingest.Language) string {
 	var b strings.Builder
-	b.WriteString(finderSystemBase(persona))
+	base := finderSystemBase(persona)
+	if experimentOn(expSoftEmpty) {
+		base = strings.Replace(base, finderEmptyListParagraph, softEmptyParagraph, 1)
+	}
+	b.WriteString(base)
 	b.WriteString("\n\nYOUR ASSIGNED FOCUS (")
 	b.WriteString(l.Name)
 	b.WriteString("):\n")

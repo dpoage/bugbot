@@ -60,6 +60,9 @@ class BugbotOptions(InstalledAgentOptions):
     # Kill the scan before Harbor's agent timeout (task.toml: 7200s) so the
     # findings and spend recorded so far are still exported.
     scan_timeout_sec: int = Field(default=6900, description="Wall-clock deadline for the scan.")
+    # Comma-separated BUGBOT_EXPERIMENTS switches (internal/funnel/experiment.go
+    # on explore/ branches); empty runs production behavior.
+    experiments: str = Field(default="", description="BUGBOT_EXPERIMENTS value.")
 
 
 class BugbotAgent(BaseInstalledAgent):
@@ -176,9 +179,10 @@ class BugbotAgent(BaseInstalledAgent):
             f"grep -qx null {LOGS}/findings.json && echo '[]' > {LOGS}/findings.json; "
             f"cat {LOGS}/scan.exit"
         )
-        await self.exec_as_agent(
-            environment, command=script, env={key_env: api_key}, cwd=REMOTE_RUN
-        )
+        env = {key_env: api_key}
+        if self._opts().experiments:
+            env["BUGBOT_EXPERIMENTS"] = self._opts().experiments
+        await self.exec_as_agent(environment, command=script, env=env, cwd=REMOTE_RUN)
 
     @override
     def populate_context_post_run(self, context: AgentContext) -> None:
@@ -198,4 +202,6 @@ class BugbotAgent(BaseInstalledAgent):
         meta = dict(context.metadata or {})
         if exit_file.is_file():
             meta["scan_exit"] = exit_file.read_text().strip()
+        if self._opts().experiments:
+            meta["experiments"] = self._opts().experiments
         context.metadata = meta

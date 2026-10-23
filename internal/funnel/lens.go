@@ -160,7 +160,7 @@ func lensAppliesTo(l Lens, langs []ingest.Language) bool {
 // of them loosen the "concrete bugs only, empty list is fine" contract from
 // the shared finder prompt.
 func BuiltinLenses() []Lens {
-	return []Lens{
+	ls := []Lens{
 		{
 			Name: "nil-safety/error-handling",
 			Core: "Hunt for null/absent-value dereferences and mishandled failures: " +
@@ -307,6 +307,10 @@ func BuiltinLenses() []Lens {
 		},
 		builtinCrossLanguageBoundaryLens,
 	}
+	if experimentOn(expLogicLens) {
+		ls = append(ls, logicLens)
+	}
+	return ls
 }
 
 // selectLenses resolves the effective lens set for a run: if override is
