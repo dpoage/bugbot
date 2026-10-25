@@ -1,0 +1,119 @@
+{
+  "record": "2026-10-25-finder-exec",
+  "round": "ypei-r1",
+  "pass": 1,
+  "generated": "2026-10-25",
+  "arms_audited": ["control", "exec1"],
+  "arms_pending": ["exec2", "exec3"],
+  "definitions": {
+    "scorer_hit": "a finding the verifier's line-tolerance matcher credits (reward.json / scorecard per-finding match)",
+    "genuine_hit": "a scorer hit whose finding, read manually against the gold patch and issue, describes the gold bug (same defect, not a different bug at a nearby line)",
+    "originating_finder_unit": "a finder unit (transcript) whose emitted candidate was merged into the finding, matched by the candidate's file+line+defect in the unit's finalize text",
+    "fetching_run_code_call": "a run_code command that downloads or installs from a network index or URL (pip download/install from an index, pip index, curl, wget, git clone/fetch/pull, urllib to an https URL, conda/apt install)",
+    "fetch_free_genuine_hit": "arbiter ruling E2: a genuine hit with at least one originating finder unit that made zero fetching run_code calls",
+    "shared_tmp_read": "secondary, non-gating: whether that unit's run_code commands read a path that a fetching command in the same trial wrote to (directly, or unpacked from what it downloaded)"
+  },
+  "method": {
+    "scorecards": "python3 bench/harbor/scorecard.py <jobdir> --price 0.3,0.06,1.2 --json <arm>.json (one arm per call); scorer hits are the per-trial findings whose matched_site is set",
+    "transcripts": "/tmp/ypei-r1/s6/audit.py ARM:TRIAL_DIR ... extracts agent/transcripts.tgz, joins each transcript to agent_units (role) via the unit id in the transcript filename, parses run_code commands with their exit codes, classifies fetching commands, and parses finder candidates out of the finalize final_text; per-unit output in /tmp/ypei-r1/s6/audit-<arm>.json",
+    "gold": "gold patch and issue text under /tmp/hb/swebench-verified/<task>/ (instruction.md, solution/solve.sh)"
+  },
+  "hits": [
+    {
+      "arm": "exec1",
+      "task": "django__django-11099",
+      "trial": "django__django-11099__6NNGoU5",
+      "finding": {
+        "file": "django/contrib/auth/validators.py",
+        "line": 10,
+        "title": "ASCIIUsernameValidator accepts usernames ending in a newline",
+        "sites": ["django/contrib/auth/validators.py:10", "django/contrib/auth/validators.py:20"],
+        "evidence_excerpt": "validators.py:10 sets `regex = r'^[\\w.@+-]+$'` (line 20 the same for UnicodeUsernameValidator); RegexValidator.__call__ applies it via `regex.search(str(value))`, and Python's `$` matches just before a trailing \"\\n\", so `re.search(r'^[\\w.@+-]+$', 'admin\\n')` matches and no ValidationError is raised. Finder's confirmation step: \"Confirmed against the pristine Django 3.0 final package installed at /tmp/dj30/django/contrib/auth/validators.py, where both regexes use `\\Z` instead of `$`.\""
+      },
+      "gold_site": "django/contrib/auth/validators.py:10-11 and :20-21 (ground_truth.json sites); gold patch replaces `$` with `\\Z` in exactly those two regexes",
+      "genuine": true,
+      "genuine_reason": "The finding names the gold defect itself: the `$` anchor accepting a trailing newline in both username validators, which is precisely what the gold patch fixes by switching to `\\Z`.",
+      "originating_units": [
+        {
+          "transcript": "1792933167332-3a14041ffbea4e1f-000001a1732500e460e96b543760a8a0.jsonl",
+          "unit_id": "000001a1732500e460e96b543760a8a0",
+          "role": "finder",
+          "lens": "injection/input-validation",
+          "strategy": "sweep-wide",
+          "candidates_at_site": ["django/contrib/auth/validators.py:10", "django/contrib/auth/validators.py:20"],
+          "run_code_calls": 9,
+          "fetching_calls": 0,
+          "fetching_commands": []
+        }
+      ],
+      "fetch_free": true,
+      "fetch_free_basis": "The single originating finder unit made zero fetching run_code calls (9 calls, all local: find, cat, diff, ls).",
+      "shared_tmp_read": {
+        "value": true,
+        "detail": "The unit diffed /testbed against /tmp/dj30, a pristine Django-3.0 wheel tree that ANOTHER unit in the same trial fetched (`pip download django==3.0 -d /tmp/dl`) and unpacked into /tmp/dj30; the unit's candidate evidence cites that /tmp/dj30 comparison as its confirmation."
+      }
+    },
+    {
+      "arm": "exec1",
+      "task": "scikit-learn__scikit-learn-13142",
+      "trial": "scikit-learn__scikit-learn-13142__2Uvamno",
+      "finding": {
+        "file": "sklearn/mixture/base.py",
+        "line": 263,
+        "title": "Final E-step uses last initialization's parameters, so fit_predict labels do not match the restored best fit",
+        "sites": ["sklearn/mixture/base.py:263"],
+        "evidence_excerpt": "base.py:263 `_, log_resp = self._e_step(X)` runs while self still holds the LAST initialization's parameters; line 272 `self._set_parameters(best_params)` restores the best init only afterwards; line 276 returns labels from the stale E-step, breaking the in-code contract that fit_predict(X) equals fit(X).predict(X). Probe output pasted by the finder units: `n_init 3 full GaussianMixture mismatch frac: 0.6666666666666666 n mismatch: 100` (probe1/probe2 in /testbed) and `seeds with mismatch: 14 / 30` with `seed 24 mismatches 120` (30-seed sweep)."
+      },
+      "gold_site": "sklearn/mixture/base.py:260-264 and :275-276 (ground_truth.json sites); gold patch moves the final E-step to after `self._set_parameters(best_params)`",
+      "genuine": true,
+      "genuine_reason": "The finding names the gold defect itself: fit_predict computing labels from the last initialization instead of the restored best one, which is exactly the relocation of the final E-step in the gold patch.",
+      "originating_units": [
+        {
+          "transcript": "1792934920192-2cf763affa28f570-000001a1733fa6b81b8708cfed07738d.jsonl",
+          "unit_id": "000001a1733fa6b81b8708cfed07738d",
+          "role": "finder",
+          "lens": "nil-safety/error-handling",
+          "strategy": "sweep-wide",
+          "candidates_at_site": ["sklearn/mixture/base.py:263"],
+          "run_code_calls": 9,
+          "fetching_calls": 1,
+          "fetching_commands": [
+            "ls ~/.cache/pip 2>/dev/null; pip download sklearn==0.21.0 --no-deps -d /tmp/sk 2>&1 | tail -3; ls /root 2>/dev/null; find / -maxdepth 4 -name \"scikit_learn*\" -o -maxdepth 4 -name \"sklearn-*\" 2>/dev/null | head -20"
+          ],
+          "fetching_outcome": "download failed: \"ERROR: No matching distribution found for sklearn==0.21.0\" (the PyPI `sklearn` package is not scikit-learn); nothing was written to /tmp/sk"
+        },
+        {
+          "transcript": "1792934955213-df3291c7d67ef5aa-000001a1734048cd2f7abc43946e2b7d.jsonl",
+          "unit_id": "000001a1734048cd2f7abc43946e2b7d",
+          "role": "finder",
+          "lens": "nil-safety/error-handling",
+          "strategy": "sweep-wide",
+          "candidates_at_site": ["sklearn/mixture/base.py:263"],
+          "run_code_calls": 9,
+          "fetching_calls": 1,
+          "fetching_commands": [
+            "find / -name \"base.py\" -path \"*mixture\" -not -path \"/testbed/*\" 2>/dev/null | head; ls /root/.cache/pip 2>/dev/null | head; pip download sklearn==0.21.3 --no-deps -d /tmp/dl 2>&1 | tail -3"
+          ],
+          "fetching_outcome": "download failed: \"ERROR: No matching distribution found for sklearn==0.21.3\"; nothing was written to /tmp/dl"
+        }
+      ],
+      "fetch_free": false,
+      "fetch_free_basis": "Both originating finder units made one fetching run_code call each (failed `pip download sklearn==...`), so no originating unit has zero fetching calls. The finding's evidence chain itself is local: code reading plus pytest and numpy probes run in /testbed; no upstream content was retrieved or used.",
+      "shared_tmp_read": {
+        "value": false,
+        "detail": "The only fetching commands in this trial were the two failed pip downloads above; they wrote nothing, and neither unit read a path any fetching command wrote to. The units' probes wrote and read their own /tmp/probe*.py files and the /testbed tree."
+      }
+    }
+  ],
+  "arms_with_zero_scorer_hits": ["control"],
+  "control_note": "control scored bug_recall 0.000 (0 of 5 tasks); there are no scorer hits to audit, and it ran zero run_code calls (finder_exec off).",
+  "pass1_tallies": {
+    "scorer_hits_audited": 2,
+    "genuine_hits": 2,
+    "fetch_free_genuine_hits": 1,
+    "by_arm": {
+      "control": {"raw_recall": "0/5", "genuine": "0/5", "fetch_free_genuine": "0/5"},
+      "exec1": {"raw_recall": "2/5", "genuine": "2/5", "fetch_free_genuine": "1/5"}
+    }
+  }
+}

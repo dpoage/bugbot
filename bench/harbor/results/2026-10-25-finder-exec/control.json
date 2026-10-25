@@ -1,0 +1,362 @@
+{
+  "price_usd_per_mtok": {
+    "input": 0.3,
+    "cache_read": 0.06,
+    "output": 1.2
+  },
+  "jobs": [
+    "/home/dpoage/code/bugbot-wt/ypei-r1-feat/bench/harbor/jobs/ypei-r1-control"
+  ],
+  "aggregates": [
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "tasks": 5,
+      "crashed": 0,
+      "bugs_detected": 0,
+      "bug_recall": 0.0,
+      "site_recall": 0.0,
+      "precision": 0.0,
+      "fp_per_task": 4.6,
+      "in_tok": 98435266,
+      "cache_tok": 83477740,
+      "out_tok": 1961203,
+      "cost_usd": 11.849365800000001,
+      "usd_per_bug": null,
+      "agent_min": 102.0,
+      "rl_units": 0
+    }
+  ],
+  "trials": [
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "astropy__astropy-14995",
+      "trial": "astropy__astropy-14995__Votctsk",
+      "started_at": "2026-10-25T07:46:56.314417Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 5,
+        "findings": 5,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 5,
+        "verified_findings": 5
+      },
+      "n_input_tokens": 10992390,
+      "n_cache_tokens": 9404847,
+      "n_output_tokens": 243946,
+      "cost_usd": 1.33328892,
+      "agent_min": 13.7,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "off",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 379,
+          "tier": 2,
+          "title": "Collapse operation on unitless, unmasked data dereferences None operand",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 303,
+          "tier": 2,
+          "title": "propagate_uncertainties=False on a collapse operation dereferences the None operand",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 459,
+          "tier": 2,
+          "title": "Temporary uncertainty written to shared NDData state without synchronization or exception-safe restore",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 459,
+          "tier": 2,
+          "title": "Temporary uncertainty left assigned on self when propagation raises",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 459,
+          "tier": 2,
+          "title": "Temporary uncertainty assigned to self is not restored when propagation raises",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "django__django-11099",
+      "trial": "django__django-11099__DapYk9t",
+      "started_at": "2026-10-25T07:46:56.333990Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 2,
+        "fp": 0,
+        "findings": 0,
+        "valid_output": 1
+      },
+      "n_input_tokens": 19732786,
+      "n_cache_tokens": 16763274,
+      "n_output_tokens": 508835,
+      "cost_usd": 2.50725204,
+      "agent_min": 20.8,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "off",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 0,
+      "findings": []
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "pydata__xarray-4075",
+      "trial": "pydata__xarray-4075__3ayjBTz",
+      "started_at": "2026-10-25T08:00:51.405554Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 6,
+        "findings": 6,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 6,
+        "verified_findings": 6
+      },
+      "n_input_tokens": 32064581,
+      "n_cache_tokens": 26969887,
+      "n_output_tokens": 421890,
+      "cost_usd": 3.65286942,
+      "agent_min": 24.3,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "off",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "xarray/core/formatting_html.py",
+          "line": 250,
+          "tier": 2,
+          "title": "DataArray name interpolated into HTML repr without escaping (HTML injection)",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/variable.py",
+          "line": 2004,
+          "tier": 2,
+          "title": "Failed coarsening leaves source attributes mutated",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/combine.py",
+          "line": 898,
+          "tier": 2,
+          "title": "auto_combine builds the deprecation message's dimension list with list.append(), so the message always says 'dimensions None'",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/formatting.py",
+          "line": 417,
+          "tier": 2,
+          "title": "Global numpy print options are restored from a stale snapshot under concurrent formatting",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/options.py",
+          "line": 149,
+          "tier": 2,
+          "title": "Exiting set_options re-runs option setters and emits a spurious FutureWarning",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/utils.py",
+          "line": 596,
+          "tier": 2,
+          "title": "Cleanup failure masks the original exception",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "pylint-dev__pylint-4970",
+      "trial": "pylint-dev__pylint-4970__vUnuDU9",
+      "started_at": "2026-10-25T08:08:00.473784Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 7,
+        "findings": 7,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 7,
+        "verified_findings": 7
+      },
+      "n_input_tokens": 24995402,
+      "n_cache_tokens": 21190421,
+      "n_output_tokens": 493725,
+      "cost_usd": 3.0053895600000002,
+      "agent_min": 29.3,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "off",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 1318,
+          "tier": 2,
+          "title": "Keyword-only defaults are skipped when positional defaults exist",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/logging.py",
+          "line": 279,
+          "tier": 2,
+          "title": "_helper_string queries an unregistered message symbol, so the \"fstring\" alternative is never offered",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/logging.py",
+          "line": 330,
+          "tier": 2,
+          "title": "Uncaught UnicodeDecodeError crashes pylint on bytes format string",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/logging.py",
+          "line": 330,
+          "tier": 2,
+          "title": "UnicodeDecodeError crash when a logging format string is a non-UTF-8 bytes literal",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/spelling.py",
+          "line": 405,
+          "tier": 2,
+          "title": "Crash when --spelling-store-unknown-words is enabled without a private dictionary file",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/stdlib.py",
+          "line": 491,
+          "tier": 2,
+          "title": "Uncaught NoSuchArgumentError crashes pylint on copy.copy() with no arguments",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/stdlib.py",
+          "line": 622,
+          "tier": 2,
+          "title": "TypeError crash in _check_open_encoded when the inferred 'mode' argument is not a string",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "scikit-learn__scikit-learn-13142",
+      "trial": "scikit-learn__scikit-learn-13142__QLCGXve",
+      "started_at": "2026-10-25T08:25:21.932087Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 2,
+        "fp": 5,
+        "findings": 5,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 2,
+        "verified_fp": 5,
+        "verified_findings": 5
+      },
+      "n_input_tokens": 10650107,
+      "n_cache_tokens": 9149311,
+      "n_output_tokens": 292807,
+      "cost_usd": 1.35056586,
+      "agent_min": 13.9,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "off",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "sklearn/mixture/bayesian_mixture.py",
+          "line": 524,
+          "tier": 2,
+          "title": "Failed precision estimation leaves BayesianGaussianMixture with stale precisions_cholesky_",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/gaussian_mixture.py",
+          "line": 676,
+          "tier": 2,
+          "title": "Failed M-step leaves GaussianMixture with stale precisions_cholesky_ (half-mutated estimator)",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 418,
+          "tier": 2,
+          "title": "sample() reports the wrong value in the 'n_samples' validation error",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 521,
+          "tier": 2,
+          "title": "verbose_interval=0 causes an unhandled ZeroDivisionError during fit",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/gaussian_mixture.py",
+          "line": 658,
+          "tier": 2,
+          "title": "precisions_init is misinterpreted for 'diag' and 'spherical' covariance types",
+          "matched_site": null
+        }
+      ]
+    }
+  ]
+}
