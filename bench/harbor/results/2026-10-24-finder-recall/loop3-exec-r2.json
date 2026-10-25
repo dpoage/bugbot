@@ -1,0 +1,328 @@
+{
+  "price_usd_per_mtok": {
+    "input": 0.3,
+    "cache_read": 0.06,
+    "output": 1.2
+  },
+  "jobs": [
+    "bench/harbor/jobs/loop3-exec-r2"
+  ],
+  "aggregates": [
+    {
+      "agent": "bugbot[finder-exec]",
+      "model": "MiniMax-M3",
+      "tasks": 5,
+      "crashed": 0,
+      "bugs_detected": 2,
+      "bug_recall": 0.4,
+      "site_recall": 0.2857142857142857,
+      "precision": 0.1111111111111111,
+      "fp_per_task": 3.2,
+      "in_tok": 94555789,
+      "cache_tok": 80645948,
+      "out_tok": 1738470,
+      "cost_usd": 11.097873179999999,
+      "usd_per_bug": 5.548936589999999,
+      "agent_min": 101.1,
+      "rl_units": 0
+    }
+  ],
+  "trials": [
+    {
+      "agent": "bugbot[finder-exec]",
+      "model": "MiniMax-M3",
+      "task": "astropy__astropy-14995",
+      "trial": "astropy__astropy-14995__njKREQ4",
+      "started_at": "2026-10-24T10:02:47.489726Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 0,
+        "fp": 6,
+        "findings": 7,
+        "valid_output": 1,
+        "verified_detected": 1,
+        "verified_site_tp": 1,
+        "verified_site_fn": 0,
+        "verified_fp": 6,
+        "verified_findings": 7
+      },
+      "n_input_tokens": 13251899,
+      "n_cache_tokens": 11427908,
+      "n_output_tokens": 334535,
+      "cost_usd": 1.6343137799999998,
+      "agent_min": 23.1,
+      "metadata": {
+        "scan_exit": "0",
+        "experiments": "finder-exec"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 379,
+          "tier": 2,
+          "title": "Collapse operations crash with AttributeError when data has no unit",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 527,
+          "tier": 2,
+          "title": "Arithmetic with one masked and one unmasked operand raises TypeError",
+          "matched_site": 0
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 331,
+          "tier": 2,
+          "title": "handle_mask='first_found' crashes for collapse operations",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 459,
+          "tier": 2,
+          "title": "Temporary uncertainty overwrites shared instance state without exception-safe restore",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 459,
+          "tier": 2,
+          "title": "Temporary uncertainty left assigned to self when uncertainty propagation raises",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 243,
+          "tier": 2,
+          "title": "Keyword prefix split can index past the end of the list",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndslicing.py",
+          "line": 105,
+          "tier": 2,
+          "title": "Slicing does not catch KeyError from uncertainty/mask __getitem__",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot[finder-exec]",
+      "model": "MiniMax-M3",
+      "task": "django__django-11099",
+      "trial": "django__django-11099__SYhJL7h",
+      "started_at": "2026-10-24T10:02:47.526421Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 2,
+        "fp": 1,
+        "findings": 1,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 2,
+        "verified_fp": 1,
+        "verified_findings": 1
+      },
+      "n_input_tokens": 18542751,
+      "n_cache_tokens": 15842033,
+      "n_output_tokens": 416735,
+      "cost_usd": 2.26081938,
+      "agent_min": 22.7,
+      "metadata": {
+        "scan_exit": "0",
+        "experiments": "finder-exec"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "django/contrib/auth/admin.py",
+          "line": 131,
+          "tier": 2,
+          "title": "user_change_password checks permissions before checking that the user object exists",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot[finder-exec]",
+      "model": "MiniMax-M3",
+      "task": "pydata__xarray-4075",
+      "trial": "pydata__xarray-4075__UonQbXz",
+      "started_at": "2026-10-24T10:25:51.809172Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 3,
+        "findings": 3,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 3,
+        "verified_findings": 3
+      },
+      "n_input_tokens": 30592277,
+      "n_cache_tokens": 25831320,
+      "n_output_tokens": 371759,
+      "cost_usd": 3.4242770999999994,
+      "agent_min": 22.3,
+      "metadata": {
+        "scan_exit": "0",
+        "experiments": "finder-exec"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "xarray/core/formatting.py",
+          "line": 418,
+          "tier": 2,
+          "title": "Repr mutates process-global numpy print options without synchronization",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/formatting_html.py",
+          "line": 250,
+          "tier": 2,
+          "title": "DataArray name is interpolated into HTML repr without escaping",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/combine.py",
+          "line": 898,
+          "tier": 2,
+          "title": "auto_combine deprecation message loses dimension list because list.append() return value is used",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot[finder-exec]",
+      "model": "MiniMax-M3",
+      "task": "pylint-dev__pylint-4970",
+      "trial": "pylint-dev__pylint-4970__4VrvKxw",
+      "started_at": "2026-10-24T10:26:09.223501Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 4,
+        "findings": 4,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 4,
+        "verified_findings": 4
+      },
+      "n_input_tokens": 24183465,
+      "n_cache_tokens": 20618103,
+      "n_output_tokens": 397466,
+      "cost_usd": 2.7836539799999995,
+      "agent_min": 21.2,
+      "metadata": {
+        "scan_exit": "0",
+        "experiments": "finder-exec"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "pylint/checkers/stdlib.py",
+          "line": 622,
+          "tier": 2,
+          "title": "AttributeError crash when the `mode` argument of open() cannot be inferred",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 1318,
+          "tier": 2,
+          "title": "Keyword-only defaults are skipped when positional defaults exist",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/spelling.py",
+          "line": 405,
+          "tier": 2,
+          "title": "AttributeError crash when spelling-store-unknown-words is enabled without a private dictionary file",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/logging.py",
+          "line": 279,
+          "tier": 2,
+          "title": "Typo in message id makes f-string suggestion unreachable",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot[finder-exec]",
+      "model": "MiniMax-M3",
+      "task": "scikit-learn__scikit-learn-13142",
+      "trial": "scikit-learn__scikit-learn-13142__bgccDpd",
+      "started_at": "2026-10-24T10:47:38.118280Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 1,
+        "fp": 2,
+        "findings": 3,
+        "valid_output": 1,
+        "verified_detected": 1,
+        "verified_site_tp": 1,
+        "verified_site_fn": 1,
+        "verified_fp": 2,
+        "verified_findings": 3
+      },
+      "n_input_tokens": 7985397,
+      "n_cache_tokens": 6926584,
+      "n_output_tokens": 217975,
+      "cost_usd": 0.99480894,
+      "agent_min": 11.8,
+      "metadata": {
+        "scan_exit": "0",
+        "experiments": "finder-exec"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 263,
+          "tier": 2,
+          "title": "Final E-step runs before best parameters are restored, so fit_predict labels come from the wrong initialization",
+          "matched_site": 0
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 263,
+          "tier": 2,
+          "title": "fit_predict returns labels computed from the last initialization instead of the best one",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 418,
+          "tier": 2,
+          "title": "Invalid n_samples error message reports the number of components instead of n_samples",
+          "matched_site": null
+        }
+      ]
+    }
+  ]
+}
