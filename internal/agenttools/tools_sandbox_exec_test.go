@@ -352,7 +352,7 @@ func TestRenderSandboxResult_EmptyStreams(t *testing.T) {
 		ExitCode: 0,
 		Duration: 5 * time.Millisecond,
 	}
-	out := renderSandboxResult(r)
+	out := renderSandboxResult(r, sandboxOutputCap)
 	if !strings.Contains(out, "exit_code=0") {
 		t.Errorf("missing exit_code=0: %q", out)
 	}
@@ -373,7 +373,7 @@ func TestRenderSandboxResult_WorkspaceQuotaExceeded(t *testing.T) {
 		WorkspaceQuotaExceeded: true,
 		Duration:               3 * time.Second,
 	}
-	out := renderSandboxResult(r)
+	out := renderSandboxResult(r, sandboxOutputCap)
 	if !strings.Contains(out, "exit_code=-1") {
 		t.Errorf("missing exit_code=-1: %q", out)
 	}
