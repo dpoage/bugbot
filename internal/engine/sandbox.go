@@ -12,6 +12,13 @@ import (
 	"github.com/dpoage/llmkit/sandbox"
 )
 
+// sandboxDepInputs is the ONLY derivation of the dep inputs (strategy, setup
+// cmds, RO local mounts — writable stay repro-only); both sandboxed seams stamp from it so their copies cannot diverge.
+func sandboxDepInputs(cfg config.Config) (strategy sandboxenv.DepStrategy, setup [][]string, ro []sandbox.ROMount) {
+	roMounts, _ := sandboxenv.LocalMounts(cfg.Sandbox)
+	return sandboxenv.DepStrategy(cfg.Sandbox.DepStrategy), cfg.Sandbox.SetupCmds, roMounts
+}
+
 // buildSandboxOpts constructs a funnel.SandboxOpts from the config. When
 // verify.sandbox_exec is false (the default) it returns a zero-value
 // SandboxOpts (feature disabled). When the flag is enabled but no sandbox
@@ -34,18 +41,14 @@ func buildSandboxOpts(cfg config.Config) (opts funnel.SandboxOpts, degraded bool
 	if err != nil {
 		return funnel.SandboxOpts{}, false, fmt.Errorf("build verify sandbox: %w", err)
 	}
-	// Verify's sandbox_exec tool is refuter-driven adversarial evidence
-	// gathering, not a repro run — writable local_mounts (bugbot-wjc2) are
-	// scoped to the repro paths (execute/preview/verify smoke/capability
-	// probe/playbook battery); this seam only ever needs the RO half.
-	ro, _ := sandboxenv.LocalMounts(cfg.Sandbox)
+	strategy, setup, ro := sandboxDepInputs(cfg)
 	return funnel.SandboxOpts{
 		Sandbox:     sb,
 		Enabled:     true,
 		MinSeverity: cfg.Verify.SandboxMinSeverity,
 		MaxExecs:    cfg.Verify.SandboxMaxExecs,
-		DepStrategy: sandboxenv.DepStrategy(cfg.Sandbox.DepStrategy),
-		SetupCmds:   cfg.Sandbox.SetupCmds,
+		DepStrategy: strategy,
+		SetupCmds:   setup,
 		LocalMounts: ro,
 	}, false, nil
 }

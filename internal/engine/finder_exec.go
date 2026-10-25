@@ -89,7 +89,7 @@ func provisionFinderExecForScan(cfg config.Config, verifySB funnel.SandboxOpts, 
 			}
 			sb, owned = b, b
 		}
-		ro, _ := sandboxenv.LocalMounts(cfg.Sandbox)
+		strategy, setup, ro := sandboxDepInputs(cfg)
 		return funnel.FinderExecOpts{
 			Sandbox:      sb,
 			BackendLabel: sandboxenv.BackendLabel(cfg.Sandbox),
@@ -99,8 +99,8 @@ func provisionFinderExecForScan(cfg config.Config, verifySB funnel.SandboxOpts, 
 			MaxExecs:     cfg.Scan.FinderExecMaxExecs,
 			Timeout:      time.Duration(cfg.Scan.FinderExecTimeoutSeconds) * time.Second,
 			OutputCap:    cfg.Scan.FinderExecOutputBytes,
-			DepStrategy:  sandboxenv.DepStrategy(cfg.Sandbox.DepStrategy),
-			SetupCmds:    cfg.Sandbox.SetupCmds,
+			DepStrategy:  strategy,
+			SetupCmds:    setup,
 			LocalMounts:  ro,
 			Probe: func(ctx context.Context, base sandbox.Spec) (sandbox.CapabilitySet, error) {
 				return sandboxenv.ProbeCapabilities(ctx, sb, cfg.Sandbox, base)

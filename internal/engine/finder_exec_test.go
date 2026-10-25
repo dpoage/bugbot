@@ -4,6 +4,8 @@ package engine
 // unsandboxed legs, the P3 instance-sharing leg, and the P4 banner leg.
 import (
 	"bytes"
+	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/dpoage/bugbot/internal/config"
 	"github.com/dpoage/bugbot/internal/funnel"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 )
 
 func gateCfg(mode, backend string) config.Config {
@@ -255,5 +258,56 @@ func TestProvisionCarriesLimits(t *testing.T) {
 	opts, _ := provisionFinderExecForScan(cfg, funnel.SandboxOpts{}, &bytes.Buffer{})
 	if opts.MaxExecs != 5 || opts.Timeout != 45*time.Second || opts.OutputCap != 4096 {
 		t.Errorf("limits = %d/%v/%d, want 5/45s/4096", opts.MaxExecs, opts.Timeout, opts.OutputCap)
+	}
+}
+
+// B1: finder-exec dep inputs are cfg-derived and identical whether verify.sandbox_exec is on or off.
+func TestFinderExecDepsIdenticalVerifyOnOff(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	cfg := gateCfg("auto", "")
+	cfg.Sandbox.Runtime = fakeRuntime(t)
+	cfg.Sandbox.DepStrategy = "host"
+	cfg.Sandbox.SetupCmds = [][]string{{"apt-get", "update"}}
+	cfg.Sandbox.LocalMounts = []config.LocalMount{{Host: t.TempDir(), Container: "/sibling"}}
+
+	wantStrategy := sandboxenv.DepStrategy(cfg.Sandbox.DepStrategy)
+	wantSetup := cfg.Sandbox.SetupCmds
+	wantRO, _ := sandboxenv.LocalMounts(cfg.Sandbox)
+
+	verifyCfg := cfg
+	verifyCfg.Verify.SandboxExec = true
+	verifyOpts, degraded, err := buildSandboxOpts(verifyCfg)
+	if err != nil || degraded || !verifyOpts.Enabled {
+		t.Fatalf("buildSandboxOpts = (enabled %v, degraded %v, err %v)", verifyOpts.Enabled, degraded, err)
+	}
+	feOn, owned := provisionFinderExecForScan(cfg, verifyOpts, io.Discard)
+	if owned != nil || feOn.Sandbox != verifyOpts.Sandbox {
+		t.Fatalf("finder exec did not borrow the verify sandbox (owned %T)", owned)
+	}
+	feOff, ownedOff := provisionFinderExecForScan(cfg, funnel.SandboxOpts{}, io.Discard)
+	if feOff.Sandbox == nil || ownedOff == nil {
+		t.Fatalf("no finder sandbox provisioned: OffReason %q", feOff.OffReason)
+	}
+
+	copies := []struct {
+		name     string
+		strategy sandboxenv.DepStrategy
+		setup    [][]string
+		ro       []sandbox.ROMount
+	}{
+		{"verify copy (funnel resolves from it when verify is on)", verifyOpts.DepStrategy, verifyOpts.SetupCmds, verifyOpts.LocalMounts},
+		{"finder copy, verify on", feOn.DepStrategy, feOn.SetupCmds, feOn.LocalMounts},
+		{"finder copy, verify off", feOff.DepStrategy, feOff.SetupCmds, feOff.LocalMounts},
+	}
+	for _, c := range copies {
+		if c.strategy != wantStrategy {
+			t.Errorf("%s: DepStrategy = %q, want %q", c.name, c.strategy, wantStrategy)
+		}
+		if !slices.EqualFunc(c.setup, wantSetup, slices.Equal[[]string, string]) {
+			t.Errorf("%s: SetupCmds = %v, want %v", c.name, c.setup, wantSetup)
+		}
+		if !slices.Equal(c.ro, wantRO) {
+			t.Errorf("%s: LocalMounts = %v, want %v", c.name, c.ro, wantRO)
+		}
 	}
 }
