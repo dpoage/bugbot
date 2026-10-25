@@ -139,7 +139,7 @@ func (t *RunTestsTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 		t.onExec(res.Duration)
 	}
 
-	return renderSandboxResult(res), nil
+	return renderSandboxResult(res, sandboxOutputCap), nil
 }
 
 // buildArgv constructs the test command argv from the base command and the
