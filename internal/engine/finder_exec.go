@@ -51,13 +51,14 @@ func decideFinderExecBackend(mode, cfgBackend string, realAvailable, verifyBuilt
 	return finderExecReal
 }
 
-// provisionFinderExecForScan resolves the finder-exec provisioning for one
-// Scan and writes the UNSANDBOXED banner to errOut when the host backend is
-// active. verifySB is the funnel's verify sandbox opts: when
-// verify.sandbox_exec is on, the SAME instance serves both (one sandbox per
-// scan). An error is returned only when a backend must be constructed and
-// construction fails.
-func provisionFinderExecForScan(cfg config.Config, verifySB funnel.SandboxOpts, errOut io.Writer) (funnel.FinderExecOpts, error) {
+// newFinderExecSandbox constructs the finder-exec backend; a var so tests can observe Close.
+var newFinderExecSandbox = sandboxenv.New
+
+// provisionFinderExecForScan resolves finder-exec provisioning for one Scan
+// and writes the UNSANDBOXED banner when the host backend is active. owned is
+// the backend this call constructed (nil when off or shared with verify); the
+// caller must CloseSandbox it after the funnel finishes.
+func provisionFinderExecForScan(cfg config.Config, verifySB funnel.SandboxOpts, errOut io.Writer) (opts funnel.FinderExecOpts, owned sandbox.Sandbox) {
 	mode := cfg.Scan.FinderExec
 	verifyBuilt := verifySB.Enabled && verifySB.Sandbox != nil
 	switch decideFinderExecBackend(mode, cfg.Sandbox.Backend, sandboxenv.Available(cfg.Sandbox), verifyBuilt) {
@@ -69,23 +70,24 @@ func provisionFinderExecForScan(cfg config.Config, verifySB funnel.SandboxOpts, 
 		return funnel.FinderExecOpts{OffReason: "no sandbox backend available: " + sandboxenv.UnavailableReason(cfg.Sandbox)}, nil
 	case finderExecHost:
 		_, _ = fmt.Fprintln(errOut, unsandboxedBanner)
+		host := sandbox.NewHostExec()
 		return funnel.FinderExecOpts{
-			Sandbox:     sandbox.NewHostExec(),
+			Sandbox:     host,
 			Unsandboxed: true,
 			Network:     sandbox.NetworkHost,
 			SkipProbe:   true,
 			MaxExecs:    cfg.Scan.FinderExecMaxExecs,
 			Timeout:     time.Duration(cfg.Scan.FinderExecTimeoutSeconds) * time.Second,
 			OutputCap:   cfg.Scan.FinderExecOutputBytes,
-		}, nil
+		}, host
 	default:
 		sb := verifySB.Sandbox
 		if sb == nil {
-			b, err := sandboxenv.New(cfg.Sandbox)
+			b, err := newFinderExecSandbox(cfg.Sandbox)
 			if err != nil {
-				return funnel.FinderExecOpts{}, fmt.Errorf("build finder-exec sandbox: %w", err)
+				return funnel.FinderExecOpts{OffReason: "sandbox build failed: " + err.Error()}, nil
 			}
-			sb = b
+			sb, owned = b, b
 		}
 		ro, _ := sandboxenv.LocalMounts(cfg.Sandbox)
 		return funnel.FinderExecOpts{
@@ -103,6 +105,6 @@ func provisionFinderExecForScan(cfg config.Config, verifySB funnel.SandboxOpts, 
 			Probe: func(ctx context.Context, base sandbox.Spec) (sandbox.CapabilitySet, error) {
 				return sandboxenv.ProbeCapabilities(ctx, sb, cfg.Sandbox, base)
 			},
-		}, nil
+		}, owned
 	}
 }

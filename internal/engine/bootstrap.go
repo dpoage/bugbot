@@ -173,9 +173,7 @@ func BuildFunnelOptions(cfg config.Config, overrides FunnelOptionOverrides) (fun
 const SandboxDegradedWarning = "verify.sandbox_exec is enabled but no container runtime (podman/docker) was found on PATH; refuters will argue without sandbox execution"
 
 // PrintSandboxDegradedWarning writes the uniform "Warning: <text>\n" line to
-// w. CLI commands whose sink is a writer (scan, review, sweep) call this
-// directly; the daemon keeps its slog.Warn(SandboxDegradedWarning) form
-// because its sink is a structured logger, not a writer.
+// w. The daemon logs SandboxDegradedWarning via slog instead.
 func PrintSandboxDegradedWarning(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "Warning: %s\n", SandboxDegradedWarning)
 }
@@ -185,8 +183,7 @@ func PrintSandboxDegradedWarning(w io.Writer) {
 const sandboxDegradedUnsandboxedWarning = "verify.sandbox_exec is enabled but sandbox.backend is unsandboxed (bench-only mode with no isolating sandbox); refuters will argue without sandbox execution"
 
 // printSandboxDegradedWarningFor writes the degraded warning naming the
-// actual cause for cfg's backend. Scan uses this so an unsandboxed config
-// is not told its problem is a missing container runtime.
+// actual cause for cfg's backend; every writer-sink command uses it.
 func printSandboxDegradedWarningFor(w io.Writer, cfg config.Config) {
 	if cfg.Sandbox.Backend == sandboxenv.BackendUnsandboxed {
 		_, _ = fmt.Fprintf(w, "Warning: %s\n", sandboxDegradedUnsandboxedWarning)

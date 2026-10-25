@@ -80,10 +80,7 @@ func TestProvisionFinderExecForScanOffRows(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var errOut bytes.Buffer
-			opts, err := provisionFinderExecForScan(tc.cfg, funnel.SandboxOpts{}, &errOut)
-			if err != nil {
-				t.Fatalf("provision: %v", err)
-			}
+			opts, _ := provisionFinderExecForScan(tc.cfg, funnel.SandboxOpts{}, &errOut)
 			if opts.OffReason != tc.want {
 				t.Errorf("OffReason = %q, want %q", opts.OffReason, tc.want)
 			}
@@ -97,9 +94,9 @@ func TestProvisionFinderExecForScanNoBackend(t *testing.T) {
 	cfg := gateCfg("auto", "podman")
 	cfg.Sandbox.Runtime = "definitely-not-a-runtime-ypei"
 	var errOut bytes.Buffer
-	opts, err := provisionFinderExecForScan(cfg, funnel.SandboxOpts{}, &errOut)
-	if err != nil {
-		t.Fatalf("provision: %v", err)
+	opts, owned := provisionFinderExecForScan(cfg, funnel.SandboxOpts{}, &errOut)
+	if owned != nil {
+		t.Errorf("owned = %T, want nil on an off decision", owned)
 	}
 	want := "no sandbox backend available: definitely-not-a-runtime-ypei not on PATH"
 	if opts.OffReason != want {
@@ -118,9 +115,9 @@ func TestProvisionUnsandboxedOn(t *testing.T) {
 	cfg.Sandbox.SetupCmds = [][]string{{"true"}}
 	cfg.Sandbox.LocalMounts = []config.LocalMount{{Host: t.TempDir(), Container: "/sibling"}}
 	var errOut bytes.Buffer
-	opts, err := provisionFinderExecForScan(cfg, funnel.SandboxOpts{}, &errOut)
-	if err != nil {
-		t.Fatalf("provision: %v", err)
+	opts, owned := provisionFinderExecForScan(cfg, funnel.SandboxOpts{}, &errOut)
+	if owned != opts.Sandbox {
+		t.Error("the constructed HostExec is not reported as owned")
 	}
 	if _, ok := opts.Sandbox.(*sandbox.HostExec); !ok {
 		t.Fatalf("Sandbox = %T, want *sandbox.HostExec", opts.Sandbox)
@@ -156,10 +153,7 @@ func TestProvisionBannerOnlyWhenUnsandboxedActive(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var errOut bytes.Buffer
-			_, err := provisionFinderExecForScan(tc.cfg, funnel.SandboxOpts{}, &errOut)
-			if err != nil {
-				t.Fatalf("provision: %v", err)
-			}
+			_, _ = provisionFinderExecForScan(tc.cfg, funnel.SandboxOpts{}, &errOut)
 			if (errOut.Len() > 0) != tc.wantBanner {
 				t.Errorf("banner present = %v, want %v", errOut.Len() > 0, tc.wantBanner)
 			}
@@ -176,9 +170,9 @@ func TestProvisionReusesVerifySandbox(t *testing.T) {
 	cfg.Sandbox.SetupCmds = [][]string{{"apt-get", "update"}}
 	verifySB := gateVerifyOpts(sandbox.NewMock(sandbox.MockResponse{}))
 	var errOut bytes.Buffer
-	opts, err := provisionFinderExecForScan(cfg, verifySB, &errOut)
-	if err != nil {
-		t.Fatalf("provision: %v", err)
+	opts, owned := provisionFinderExecForScan(cfg, verifySB, &errOut)
+	if owned != nil {
+		t.Error("the borrowed verify sandbox is reported as owned (Scan would close it)")
 	}
 	if opts.Sandbox != verifySB.Sandbox {
 		t.Error("finder exec did not reuse the verify sandbox instance")
@@ -203,10 +197,7 @@ func TestProvisionReusesVerifySandbox(t *testing.T) {
 	}
 
 	// mode on over the same shared instance skips the probe.
-	optsOn, err := provisionFinderExecForScan(gateCfg("on", ""), verifySB, &errOut)
-	if err != nil {
-		t.Fatalf("provision on: %v", err)
-	}
+	optsOn, _ := provisionFinderExecForScan(gateCfg("on", ""), verifySB, &errOut)
 	if !optsOn.SkipProbe || optsOn.Sandbox != verifySB.Sandbox {
 		t.Errorf("mode on = %+v, want shared instance with SkipProbe", optsOn)
 	}
@@ -217,10 +208,7 @@ func TestProvisionReusesVerifySandbox(t *testing.T) {
 func TestProvisionUnsandboxedAutoGivesNoSandbox(t *testing.T) {
 	verifySB := gateVerifyOpts(sandbox.NewMock(sandbox.MockResponse{}))
 	var errOut bytes.Buffer
-	opts, err := provisionFinderExecForScan(gateCfg("auto", "unsandboxed"), verifySB, &errOut)
-	if err != nil {
-		t.Fatalf("provision: %v", err)
-	}
+	opts, _ := provisionFinderExecForScan(gateCfg("auto", "unsandboxed"), verifySB, &errOut)
 	if opts.Sandbox != nil {
 		t.Errorf("Sandbox = %T, want nil under auto+unsandboxed", opts.Sandbox)
 	}
@@ -264,10 +252,7 @@ func TestProvisionCarriesLimits(t *testing.T) {
 	cfg.Scan.FinderExecMaxExecs = 5
 	cfg.Scan.FinderExecTimeoutSeconds = 45
 	cfg.Scan.FinderExecOutputBytes = 4096
-	opts, err := provisionFinderExecForScan(cfg, funnel.SandboxOpts{}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("provision: %v", err)
-	}
+	opts, _ := provisionFinderExecForScan(cfg, funnel.SandboxOpts{}, &bytes.Buffer{})
 	if opts.MaxExecs != 5 || opts.Timeout != 45*time.Second || opts.OutputCap != 4096 {
 		t.Errorf("limits = %d/%v/%d, want 5/45s/4096", opts.MaxExecs, opts.Timeout, opts.OutputCap)
 	}

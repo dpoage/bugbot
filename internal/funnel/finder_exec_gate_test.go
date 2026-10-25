@@ -3,8 +3,10 @@ package funnel
 // finder_exec_gate_test.go covers the P1 decision table (funnel half: every
 // status string), the P3 deps-resolution legs, and the A2 prefetch leg.
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -285,6 +287,97 @@ func TestSweepSetsFinderExecStatus(t *testing.T) {
 	}
 	if res.FinderExecStatus != "Finder exec: off (scan.finder_exec=off)" {
 		t.Errorf("FinderExecStatus = %q, want the off line", res.FinderExecStatus)
+	}
+}
+
+func openGoGateRepo(t *testing.T) (*store.Store, *ingest.Repo) {
+	t.Helper()
+	dir := t.TempDir()
+	writeGateFile(t, filepath.Join(dir, "go.mod"), "module example.com/x\n\ngo 1.22\n")
+	runGateGit(t, dir, "init", "-q")
+	runGateGit(t, dir, "add", ".")
+	runGateGit(t, dir, "commit", "-q", "-m", "seed")
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	repo, err := ingest.Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st, repo
+}
+
+func TestFinderExecDepResolutionFailureDegrades(t *testing.T) {
+	t.Setenv("GOMODCACHE", "/nonexistent-ypei-modcache")
+	st, repo := openGoGateRepo(t)
+	mock := sandbox.NewMock(sandbox.MockResponse{})
+	fe := FinderExecOpts{
+		Sandbox: mock, BackendLabel: "podman", Network: sandbox.NetworkNone, SkipProbe: true,
+		MaxExecs: 8, Timeout: gateTestTimeout, OutputCap: 16384, DepStrategy: sandboxenv.DepStrategyHost,
+	}
+	clients := RoleClients{Finder: newScriptedClient(), Verifier: newScriptedClient()}
+	f, err := New(clients, st, repo, Options{FinderExec: fe})
+	if err != nil {
+		t.Fatalf("funnel.New aborted on a finder-exec-only dependency resolution failure: %v", err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	result := &Result{}
+	f.resolveFinderExec(context.Background(), result, []ingest.Language{ingest.LangGo})
+	want := `Finder exec: off (dependency resolution failed: sandbox: host module cache "/nonexistent-ypei-modcache" does not exist`
+	if !strings.HasPrefix(result.FinderExecStatus, want) {
+		t.Errorf("status = %q, want prefix %q", result.FinderExecStatus, want)
+	}
+	if f.finderExec.enabled() {
+		t.Error("finderExec enabled after a dependency resolution failure")
+	}
+
+	verify := SandboxOpts{Enabled: true, Sandbox: mock, DepStrategy: sandboxenv.DepStrategyHost}
+	if _, err := New(clients, st, repo, Options{SandboxOpts: verify, FinderExec: fe}); err == nil ||
+		!strings.Contains(err.Error(), "funnel: resolve dependency strategy") {
+		t.Errorf("New with verify on = %v, want the fatal dependency resolution error", err)
+	}
+}
+
+// A non-idempotent Prefetch exposes a gate that bypasses the Funnel's once guard.
+func TestFinderExecGatePrefetchUsesFunnelOnce(t *testing.T) {
+	f := newGateFunnel(t, Options{FinderExec: FinderExecOpts{
+		Sandbox: sandbox.NewMock(sandbox.MockResponse{}), BackendLabel: "podman", Network: sandbox.NetworkNone,
+		SkipProbe: true, MaxExecs: 8, Timeout: gateTestTimeout, OutputCap: 16384,
+	}})
+	calls := 0
+	f.deps.Prefetch = func(context.Context) error { calls++; return nil }
+	ctx := context.Background()
+	f.resolveFinderExec(ctx, &Result{}, []ingest.Language{ingest.LangGo})
+	if calls != 1 {
+		t.Fatalf("prefetch calls after the gate = %d, want 1", calls)
+	}
+	_ = f.ensureDepPrefetch(ctx)
+	_ = f.ensureDepPrefetch(ctx)
+	if calls != 1 {
+		t.Errorf("prefetch calls after verify consumers = %d, want 1", calls)
+	}
+}
+
+func TestFinderExecStatusLoggedOnceAtDebug(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	f := newGateFunnel(t, Options{FinderExec: FinderExecOpts{OffReason: "scan.finder_exec=off"}})
+	buf.Reset()
+	f.resolveFinderExec(context.Background(), &Result{}, nil)
+	var lines []string
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(l, FinderExecLinePrefix) {
+			lines = append(lines, l)
+		}
+	}
+	want := `level=DEBUG msg="Finder exec: off (scan.finder_exec=off)"`
+	if len(lines) != 1 || !strings.Contains(lines[0], want) {
+		t.Errorf("status log lines = %q, want exactly one containing %q", lines, want)
 	}
 }
 

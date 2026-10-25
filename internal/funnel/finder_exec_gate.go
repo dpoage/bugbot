@@ -79,9 +79,8 @@ func finderExecOff(reason string) string {
 	return FinderExecLinePrefix + "off (" + reason + ")"
 }
 
-// resolveFinderExec runs the gate for a modeFull run: language half of the
-// auto gate, prefetch, the Funnel's decision state, Result.FinderExecStatus,
-// and one slog line. No-op when the Funnel was not provisioned (E5).
+// resolveFinderExec runs the gate for a modeFull run and records the status
+// on result. Logged at Debug: Info reaches stderr, which corrupts the TUI's alt-screen.
 func (f *Funnel) resolveFinderExec(ctx context.Context, result *Result, langs []ingest.Language) {
 	fe := f.opts.FinderExec
 	if fe.Sandbox == nil && fe.OffReason == "" {
@@ -91,7 +90,7 @@ func (f *Funnel) resolveFinderExec(ctx context.Context, result *Result, langs []
 	f.finderExec = state
 	result.FinderExecStatus = status
 	if status != "" {
-		slog.Info(status)
+		slog.Debug(status)
 	}
 }
 

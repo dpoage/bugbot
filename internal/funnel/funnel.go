@@ -420,14 +420,15 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 	var deps sandboxenv.Resolution
 	verifySB := resolved.SandboxOpts
 	fe := resolved.FinderExec
-	if (verifySB.Enabled && verifySB.Sandbox != nil) || fe.Sandbox != nil {
+	verifyOn := verifySB.Enabled && verifySB.Sandbox != nil
+	if verifyOn || fe.Sandbox != nil {
 		var (
 			strategy sandboxenv.DepStrategy
 			fetch    sandbox.Sandbox
 			localMnt []sandbox.ROMount
 			setup    [][]string
 		)
-		if verifySB.Enabled && verifySB.Sandbox != nil {
+		if verifyOn {
 			strategy, fetch, localMnt, setup = verifySB.DepStrategy, verifySB.Sandbox, verifySB.LocalMounts, verifySB.SetupCmds
 		} else {
 			strategy, fetch, localMnt, setup = fe.DepStrategy, fe.Sandbox, fe.LocalMounts, fe.SetupCmds
@@ -437,15 +438,20 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 			FetchSandbox: fetch,
 			LocalMounts:  localMnt,
 		})
-		if err != nil {
+		switch {
+		case err != nil && verifyOn:
 			return nil, fmt.Errorf("funnel: resolve dependency strategy: %w", err)
+		case err != nil:
+			// Finder exec alone needed deps: it turns off; the scan never aborts on it.
+			resolved.FinderExec = FinderExecOpts{OffReason: "dependency resolution failed: " + err.Error()}
+		default:
+			// Prepend operator setup_cmds BEFORE ecosystem-derived setup commands.
+			// See config.Sandbox.SetupCmds for the ordering rationale.
+			if len(setup) > 0 {
+				d.SetupCmds = append(setup, d.SetupCmds...)
+			}
+			deps = d
 		}
-		// Prepend operator setup_cmds BEFORE ecosystem-derived setup commands.
-		// See config.Sandbox.SetupCmds for the ordering rationale.
-		if len(setup) > 0 {
-			d.SetupCmds = append(setup, d.SetupCmds...)
-		}
-		deps = d
 	}
 
 	f := &Funnel{
