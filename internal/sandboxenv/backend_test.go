@@ -50,7 +50,7 @@ func TestRunImage_EmptyOffContainerBackend(t *testing.T) {
 	}
 }
 
-// P2: the unsandboxed backend value is never an isolating backend — New
+// The unsandboxed backend value is never an isolating backend — New
 // refuses it, Available is false, and the label names the mode.
 func TestUnsandboxedBackendIsNeverIsolating(t *testing.T) {
 	cfg := config.Default().Sandbox

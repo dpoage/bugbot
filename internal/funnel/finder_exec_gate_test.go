@@ -1,7 +1,5 @@
 package funnel
 
-// finder_exec_gate_test.go covers the P1 decision table (funnel half: every
-// status string), the P3 deps-resolution legs, and the A2 prefetch leg.
 import (
 	"bytes"
 	"context"
@@ -43,10 +41,8 @@ func gateProber(caps sandbox.CapabilitySet, err error, seen *[]sandbox.Spec) fun
 	}
 }
 
-// TestFinderExecGateDecisionTable asserts the full status line and the
-// enabled flag for every row of the P1 decision table the funnel resolves.
-// The OffReason values are exactly what engine provisionFinderExecForScan
-// produces (pinned by TestProvisionFinderExecForScan in internal/engine).
+// OffReason values must stay identical to engine provisionFinderExecForScan
+// (pinned there by TestProvisionFinderExecForScan).
 func TestFinderExecGateDecisionTable(t *testing.T) {
 	goCaps := sandbox.CapabilitySet{"go": {"present": true}}
 	emptyCaps := sandbox.CapabilitySet{}
@@ -148,7 +144,7 @@ func TestFinderExecGateDecisionTable(t *testing.T) {
 }
 
 // TestFinderExecGateNotProvisioned: a zero FinderExecOpts (review/sweep/
-// daemon-cycle funnels — ruling E5) emits no status and leaves the state off.
+// daemon-cycle funnels) emits no status and leaves the state off.
 func TestFinderExecGateNotProvisioned(t *testing.T) {
 	f := newGateFunnel(t, Options{})
 	result := &Result{}
@@ -161,7 +157,7 @@ func TestFinderExecGateNotProvisioned(t *testing.T) {
 	}
 }
 
-// TestFinderExecProbeBaseSpecCarriesDeps (A1): the auto probe's base Spec is
+// TestFinderExecProbeBaseSpecCarriesDeps: the auto probe's base Spec is
 // the same RepoDir/ROMounts the finder execs use (f.deps).
 func TestFinderExecProbeBaseSpecCarriesDeps(t *testing.T) {
 	mount := sandbox.ROMount{HostPath: t.TempDir(), ContainerPath: "/sibling", Shared: true}
@@ -187,9 +183,8 @@ func TestFinderExecProbeBaseSpecCarriesDeps(t *testing.T) {
 	}
 }
 
-// TestFinderExecDepsResolvedWithoutVerify (P3): with verify.sandbox_exec off,
-// the finder-exec Resolution equals ResolveDeps(repo, DepOptions{Strategy,
-// FetchSandbox: sb, LocalMounts}) with setup_cmds prepended.
+// TestFinderExecDepsResolvedWithoutVerify: with verify.sandbox_exec off,
+// the Resolution equals ResolveDeps with setup_cmds prepended.
 func TestFinderExecDepsResolvedWithoutVerify(t *testing.T) {
 	sb := sandbox.NewMock(sandbox.MockResponse{})
 	mount := sandbox.ROMount{HostPath: t.TempDir(), ContainerPath: "/sibling", Shared: true}
@@ -213,8 +208,8 @@ func TestFinderExecDepsResolvedWithoutVerify(t *testing.T) {
 	}
 }
 
-// TestFinderExecDepsUnsandboxedEmpty (P3/A3): under unsandboxed the
-// Resolution carries no ROMounts/SetupCmds/Env.
+// TestFinderExecDepsUnsandboxedEmpty: under unsandboxed the Resolution
+// carries no ROMounts/SetupCmds/Env.
 func TestFinderExecDepsUnsandboxedEmpty(t *testing.T) {
 	opts := Options{FinderExec: FinderExecOpts{
 		Sandbox: sandbox.NewHostExec(), Unsandboxed: true, Network: sandbox.NetworkHost, SkipProbe: true,
@@ -229,8 +224,8 @@ func TestFinderExecDepsUnsandboxedEmpty(t *testing.T) {
 	}
 }
 
-// TestFinderExecPrefetchFailureDisables (A2): a fetch-strategy prefetch
-// failure turns the decision off with the reason, after exactly one Exec.
+// TestFinderExecPrefetchFailureDisables: a fetch-strategy prefetch failure
+// turns the decision off with the reason, after exactly one Exec.
 func TestFinderExecPrefetchFailureDisables(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := t.TempDir()

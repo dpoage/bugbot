@@ -1,15 +1,13 @@
 package ecosystem
 
-// language.go maps an ingest.Language (the scan-side vocabulary) to the gated
-// ecosystem key (infer.go's extension table), so the finder-exec auto gate
-// and extension-based gating share one inference rule.
+// Maps ingest.Language to the gated ecosystem via infer.go's extension
+// table, so the finder-exec auto gate and extension gating share one rule.
 import (
 	"github.com/dpoage/bugbot/internal/ingest"
 )
 
-// languageExt maps each language with a gated ecosystem to a canonical file
-// extension that InferFromExtension resolves through extEcosystem; a language
-// absent here (or whose ecosystem has no base-mode probe) maps to "".
+// languageExt maps gated languages to a canonical extension that
+// InferFromExtension resolves; each entry needs a base-mode probe.
 var languageExt = map[ingest.Language]string{
 	ingest.LangGo:         ".go",
 	ingest.LangPython:     ".py",

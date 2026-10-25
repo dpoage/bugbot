@@ -269,8 +269,8 @@ func runChecks(ctx context.Context, env doctorEnv, runSandboxVerify bool) []chec
 			Detail: "config did not load",
 		})
 	} else if cfg.Sandbox.Backend == sandboxenv.BackendUnsandboxed {
-		// A6: report the bench-only backend instead of probing runtimes no
-		// run uses under it; never a failure.
+		// Report the bench-only backend instead of probing runtimes no run
+		// uses under it; never a failure.
 		results = append(results, checkResult{
 			Name:   "sandbox backend",
 			Status: statusPass,

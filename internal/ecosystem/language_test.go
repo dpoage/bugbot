@@ -29,8 +29,7 @@ func TestFromLanguage(t *testing.T) {
 	}
 }
 
-// The mapped languages must have a base-mode probe: the auto gate gates on
-// caps[eco][BaseMode(eco)], so a mapped ecosystem without one would never pass.
+// Mapped languages need a base-mode probe: the auto gate gates on caps[eco][BaseMode(eco)].
 func TestFromLanguage_MappedLanguagesHaveBaseMode(t *testing.T) {
 	for lang := range languageExt {
 		eco := FromLanguage(lang)

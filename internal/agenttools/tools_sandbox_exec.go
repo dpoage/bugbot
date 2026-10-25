@@ -162,9 +162,8 @@ func (t *SandboxExecTool) ExecCount() int {
 	return int(t.used.Load())
 }
 
-// renderSandboxResult formats a sandbox.Result into a compact text summary
-// suitable for the model's context. Stdout and stderr are each capped at
-// outputCap bytes, with an explicit truncation marker naming the cap.
+// renderSandboxResult formats a sandbox.Result for the model's context; each
+// stream is capped at outputCap bytes with a truncation marker naming the cap.
 func renderSandboxResult(r sandbox.Result, outputCap int) string {
 	var b []byte
 

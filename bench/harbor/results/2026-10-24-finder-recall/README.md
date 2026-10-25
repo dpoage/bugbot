@@ -99,3 +99,13 @@ hits trace to finder units that diffed the scanned code against downloaded
 upstream releases. The ypei-r1 validation record
 (`../2026-10-2x-finder-exec/`, forthcoming) reports the raw and fetch-free
 numbers.
+
+---
+
+**2026-10-25 note (regeneration).** The Regenerate command above produced
+`loop2.json` with the explore-branch scorecard, which labels each arm as its
+own agent row (`bugbot[finder-exec]`, …). The production `scorecard.py` on
+this branch drops that labeling and pools every arm into one `bugbot` row:
+rerunning the command now yields 1 aggregate, not the 5 committed in
+`loop2.json`. The committed JSONs stay as recorded; regenerate the arm split
+with the explore-branch scorecard (2181109) while the job directories exist.

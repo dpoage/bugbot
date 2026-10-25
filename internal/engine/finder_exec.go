@@ -2,7 +2,7 @@ package engine
 
 // finder_exec.go provisions the finder-exec backend for one scan: the
 // snapshot-independent half of the scan.finder_exec decision (mode x backend
-// x availability). Called from Dispatcher.Scan ONLY (ruling E5).
+// x availability). Called from Dispatcher.Scan only.
 import (
 	"context"
 	"fmt"
@@ -17,8 +17,7 @@ import (
 )
 
 // unsandboxedBanner is written to the scan's ErrOut whenever finder probes
-// run on the host backend, before any Finder exec line (wording pinned by
-// the round's approved status-line table).
+// run on the host backend, before any Finder exec line.
 const unsandboxedBanner = "!!! UNSANDBOXED: finder probes run directly on this host (workspace copy, no container isolation, network=host, your OS user's privileges). Not applied on the host: sandbox.image, cpus, memory_mb, pids_limit, idle_timeout_seconds, scratch_size_mb, workspace_growth_ceiling_mb, dep_strategy, setup_cmds, local_mounts, host_toolchains. !!!"
 
 type finderExecClass int
@@ -55,9 +54,8 @@ func decideFinderExecBackend(mode, cfgBackend string, realAvailable, verifyBuilt
 var newFinderExecSandbox = sandboxenv.New
 
 // provisionFinderExecForScan resolves finder-exec provisioning for one Scan
-// and writes the UNSANDBOXED banner when the host backend is active. owned is
-// the backend this call constructed (nil when off or shared with verify); the
-// caller must CloseSandbox it after the funnel finishes.
+// and writes the UNSANDBOXED banner when the host backend is active. The
+// caller must CloseSandbox owned, which is nil when off or shared with verify.
 func provisionFinderExecForScan(cfg config.Config, verifySB funnel.SandboxOpts, errOut io.Writer) (opts funnel.FinderExecOpts, owned sandbox.Sandbox) {
 	mode := cfg.Scan.FinderExec
 	verifyBuilt := verifySB.Enabled && verifySB.Sandbox != nil

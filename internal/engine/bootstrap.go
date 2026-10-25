@@ -178,12 +178,12 @@ func PrintSandboxDegradedWarning(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "Warning: %s\n", SandboxDegradedWarning)
 }
 
-// sandboxDegradedUnsandboxedWarning is the variant naming the actual cause
-// when the backend is the bench-only unsandboxed mode (P2).
+// sandboxDegradedUnsandboxedWarning names the actual cause when the backend
+// is the bench-only unsandboxed mode.
 const sandboxDegradedUnsandboxedWarning = "verify.sandbox_exec is enabled but sandbox.backend is unsandboxed (bench-only mode with no isolating sandbox); refuters will argue without sandbox execution"
 
 // printSandboxDegradedWarningFor writes the degraded warning naming the
-// actual cause for cfg's backend; every writer-sink command uses it.
+// actual cause for cfg's backend.
 func printSandboxDegradedWarningFor(w io.Writer, cfg config.Config) {
 	if cfg.Sandbox.Backend == sandboxenv.BackendUnsandboxed {
 		_, _ = fmt.Fprintf(w, "Warning: %s\n", sandboxDegradedUnsandboxedWarning)

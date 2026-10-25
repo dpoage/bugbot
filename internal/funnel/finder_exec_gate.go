@@ -1,8 +1,8 @@
 package funnel
 
 // finder_exec_gate.go resolves the finder-exec decision for a run: the
-// language half of the auto gate (probe), the one-time dependency prefetch,
-// the FinderExecStatus line, and the finderExecState S3 consumes (seam R2).
+// language probe half of the auto gate, the one-time dependency prefetch,
+// the FinderExecStatus line, and the finderExecState feeding tool attachment.
 import (
 	"context"
 	"fmt"
@@ -17,13 +17,13 @@ import (
 )
 
 // FinderExecLinePrefix starts every finder-exec status line (cli scan stdout
-// and the slog line); the wording is a user-taught surface (X6).
+// and the slog line); the wording is a user-taught surface.
 const FinderExecLinePrefix = "Finder exec: "
 
 // FinderExecOpts is the engine's provisioning output for finder exec. The
 // zero value means the path that built the Funnel did not provision the
-// feature (review / sweep / daemon cycles — ruling E5): no status line is
-// emitted and no tool is attached.
+// feature (review / sweep / daemon cycles): no status line is emitted and
+// no tool is attached.
 type FinderExecOpts struct {
 	// Sandbox is the one backend instance for the scan (shared with verify's
 	// sandbox_exec when that is also on). Nil means OffReason is set.
@@ -38,8 +38,8 @@ type FinderExecOpts struct {
 	// under bwrap (no image concept).
 	Image string
 	// Network is the network mode every finder-exec Spec must set
-	// explicitly: none on isolating backends, host on unsandboxed (E1 —
-	// cfg sandbox.network is not consulted for finder probes).
+	// explicitly: none on isolating backends, host on unsandboxed;
+	// cfg sandbox.network is not consulted for finder probes.
 	Network sandbox.NetworkMode
 	// SkipProbe is true for scan.finder_exec: on — the language/toolchain
 	// probe is skipped and the status line omits language=.
@@ -50,8 +50,8 @@ type FinderExecOpts struct {
 	Timeout   time.Duration
 	OutputCap int
 	// DepStrategy, SetupCmds, LocalMounts are the f.deps inputs (from
-	// cfg.Sandbox), independent of verify.sandbox_exec (A1). Nil under
-	// unsandboxed — nothing may be mounted or run as setup (A3).
+	// cfg.Sandbox), independent of verify.sandbox_exec. Nil under
+	// unsandboxed — nothing may be mounted or run as setup.
 	DepStrategy sandboxenv.DepStrategy
 	SetupCmds   [][]string
 	LocalMounts []sandbox.ROMount
@@ -63,8 +63,8 @@ type FinderExecOpts struct {
 	OffReason string
 }
 
-// finderExecState is the resolved decision S3 consumes (seam R2): zero value
-// = off; else Sandbox is non-nil and f.deps is populated.
+// finderExecState is the resolved decision: zero value = off; else Sandbox
+// is non-nil and f.deps is populated.
 type finderExecState struct {
 	Sandbox   sandbox.Sandbox
 	Network   sandbox.NetworkMode
@@ -94,8 +94,7 @@ func (f *Funnel) resolveFinderExec(ctx context.Context, result *Result, langs []
 	}
 }
 
-// decideFinderExec is the gate body; see resolveFinderExec. Off outcomes
-// return a zero state.
+// decideFinderExec is the gate body; off outcomes return a zero state.
 func (f *Funnel) decideFinderExec(ctx context.Context, fe FinderExecOpts, langs []ingest.Language) (string, finderExecState) {
 	if fe.Sandbox == nil {
 		return finderExecOff(fe.OffReason), finderExecState{}

@@ -119,8 +119,9 @@ scan:
   tool_complaints: false
   # finder_exec: give finder agents a sandboxed run_code probe tool so they
   # can execute snippets against a workspace copy of the repo while hunting.
-  # Requires a sandbox backend; every probe is network=none with dep_strategy
-  # applied. Modes:
+  # Requires a sandbox backend; on isolating backends every probe is
+  # network=none with dep_strategy applied (unsandboxed below runs probes
+  # on the host instead). Modes:
   #   off   never attach the tool.
   #   auto  (default) attach only when an isolating backend (podman/docker/
   #         bwrap) is available AND the image/host passes the scan's target
@@ -154,7 +155,7 @@ scan:
 #     copy, network=host, your OS user's privileges); every sandbox.* knob
 #     (image, cpus, memory_mb, pids_limit, timeouts, scratch, growth ceiling,
 #     dep_strategy, setup_cmds, local_mounts, host_toolchains) is IGNORED and
-#     bugbot daemon refuses to start. Never selected automatically; scan
+#     bugbot daemon refuses to start. Never selected automatically.
 # network defaults to "none" — reproduction runs offline.
 #
 # IMPORTANT: the reproduce/verify stages run the target repo's OWN test/build

@@ -197,7 +197,7 @@ func finderUnits(t *testing.T, seen []finderSeen) map[string][]finderSeen {
 	return units
 }
 
-// Q1: one run_code per unit when on, none when off, never shared.
+// One run_code per unit when on, none when off, never shared.
 func TestFinderExecWiring_PerUnitBudget(t *testing.T) {
 	sb := &execProbeSandbox{}
 	fin := &probeFinder{calls: []string{`{"command":"true"}`, `{"command":"true"}`, `{"command":"true"}`}}
@@ -240,7 +240,7 @@ func TestFinderExecWiring_OffHasNoRunCode(t *testing.T) {
 	}
 }
 
-// Q2: paragraph iff run_code in the unit's tools, in the real run.
+// Paragraph iff run_code in the unit's tools, in the real run.
 func TestFinderExecWiring_PromptParagraphIffRunCode(t *testing.T) {
 	for _, on := range []bool{true, false} {
 		t.Run(fmt.Sprintf("on=%v", on), func(t *testing.T) {
@@ -264,7 +264,7 @@ func TestFinderExecWiring_PromptParagraphIffRunCode(t *testing.T) {
 	}
 }
 
-// Q2: off is byte-identical to base for every lens x strategy; on appends
+// off is byte-identical to base for every lens x strategy; on appends
 // exactly the blank-line-separated paragraph.
 func TestWithFinderExecGuidance_ByteIdentityAndSuffix(t *testing.T) {
 	sb := &execProbeSandbox{}
@@ -293,7 +293,7 @@ func TestWithFinderExecGuidance_ByteIdentityAndSuffix(t *testing.T) {
 	}
 }
 
-// Q3: Spec fields carried through the wiring; prefetch precedes every run_code exec.
+// Spec fields carried through the wiring; prefetch precedes every run_code exec.
 func TestFinderExecWiring_SpecCarriesDepsAndLimits(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("GOMODCACHE", t.TempDir())
@@ -343,7 +343,7 @@ func TestFinderExecWiring_SpecCarriesDepsAndLimits(t *testing.T) {
 	}
 }
 
-// Q3: with the real per-exec workspace copy, a probe that writes files
+// with the real per-exec workspace copy, a probe that writes files
 // leaves the scanned tree untouched.
 func TestFinderExecWiring_ScannedTreeUnchanged(t *testing.T) {
 	probe := `{"command":"echo scribble >> bug.go && echo new > created.txt && cat probe_input.txt","files":{"probe_input.txt":"seeded"}}`
@@ -420,7 +420,7 @@ func treeFingerprint(t *testing.T, dir string) string {
 	return strings.Join(lines, "\n")
 }
 
-// Q4: run_code execs feed Stats.SandboxExecs / SandboxExecMillis.
+// run_code execs feed Stats.SandboxExecs / SandboxExecMillis.
 func TestFinderExecWiring_StatsCountRunCodeExecs(t *testing.T) {
 	sb := &execProbeSandbox{}
 	fin := &probeFinder{calls: []string{`{"command":"true"}`, `{"command":"true"}`}}

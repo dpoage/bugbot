@@ -1,7 +1,5 @@
 package config
 
-// config_finder_exec_test.go covers the P5 legs: defaults when unset,
-// validation rejections, the unsandboxed backend value, and template docs.
 import (
 	"strings"
 	"testing"

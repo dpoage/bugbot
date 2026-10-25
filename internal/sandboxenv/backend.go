@@ -22,10 +22,9 @@ const BackendBwrap = "bwrap"
 
 // BackendUnsandboxed is the config.Sandbox.Backend value selecting the
 // bench-only unsandboxed host backend. It is never an isolating backend:
-// New refuses it and Available reports false, so verify sandbox_exec,
-// analyzer seeding, repro, and doctor all behave as "no sandbox backend".
-// The ONLY constructor of the host backend is the engine's finder-exec
-// provisioning (with scan.finder_exec: on).
+// New refuses it and Available reports false. The only constructor of the
+// host backend is the engine's finder-exec provisioning
+// (scan.finder_exec: on).
 const BackendUnsandboxed = "unsandboxed"
 
 // New constructs the backend cfg.Backend selects, with every sandbox knob

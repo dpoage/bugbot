@@ -137,12 +137,13 @@ Finder agents can run small probes while they hunt. The `run_code` tool runs one
 shell command (`bash -c`), plus optional files, in the sandbox. Each run starts
 from a fresh copy of the repository, so nothing persists between runs. On
 podman, docker, and bwrap, a probe cannot write to the scanned tree. When a
-probe shows a wrong output or a crash, the finder copies the command and the
-observed output into the candidate's evidence field.
+probe shows a wrong output or a crash, the finder prompt tells the finder to
+copy the command and the observed output into the candidate's evidence field.
 
-Finder execution applies to `bugbot scan` only. That covers the CLI, the TUI
-palette scan rows, and a scan dispatched through the daemon's control socket.
-`bugbot review`, daemon cycles, and sweep never attach `run_code`.
+Finder execution applies to `bugbot scan` and `bugbot regress` (regress reuses
+the scan pipeline over a commit range). That covers the CLI, the TUI palette
+scan rows, and a scan dispatched through the daemon's control socket. `bugbot
+review`, daemon cycles, and sweep never attach `run_code`.
 
 ### Enable it
 
@@ -168,7 +169,7 @@ and unclassified files do not count). The probe checks for these toolchains:
 | Language | Probe checks for |
 |---|---|
 | Go | `go` |
-| Python | `python` |
+| Python | `python3` or `python` |
 | JavaScript, TypeScript | `node` |
 | Rust | `cargo` |
 
@@ -185,17 +186,21 @@ Finder exec: off (host lacks node under bwrap)
 ```
 
 With `finder_exec: on`, the `on` line omits `language=`. Other `off` reasons
-include `scan.finder_exec=off`, `no sandbox backend available: …`,
-`no toolchain probe for <language>`, `capability probe failed: …`, and
-`dependency prefetch failed: …`.
+include `scan.finder_exec=off`, `no sandbox backend available: …`, `sandbox
+build failed: …`, `no target language in scan scope`, `no toolchain probe for
+<language>`, `capability probe failed: …`, `dependency resolution failed: …`,
+and `dependency prefetch failed: …`.
 
 ### Sandbox requirement
 
-The default image `debian:stable-slim` contains no language toolchains. With
-the default image, `auto` resolves to off until you supply a toolchain:
+The default image `debian:stable-slim` carries none of the probed toolchains
+(`go`, `python`, `node`, `cargo`). With the default image, `auto` resolves to
+off until you supply a toolchain:
 
 - Container backend: set `sandbox.image` to an image that carries the
-  toolchain (for example `golang:<ver>-alpine` for Go).
+  toolchain, for example `golang:<ver>` for Go. The image must also ship
+  `bash`, because `run_code` runs every probe through `bash -c`; the
+  `golang:<ver>-alpine` variants have no `bash` and cannot run probes.
 - bwrap backend: name the toolchain in `sandbox.host_toolchains` (for example
   `node` or `cargo`).
 
@@ -245,7 +250,9 @@ Rules for this mode:
 - `bugbot daemon` refuses to start with this backend, including when
   `BUGBOT_SANDBOX_BACKEND` selects it.
 - `verify.sandbox_exec`, analyzer seeding, and `bugbot repro` treat it as "no
-  sandbox backend". Only finder execution uses the host backend.
+  sandbox backend". Only finder execution provisions it; `bugbot repro
+  <finding-id> --unsandboxed` is a separate attended flag that runs one
+  reproduction directly on the host.
 
 The Harbor benchmark agent is the consumer of this mode. See
 [Finder exec bench mode](bench/harbor/README.md#finder-exec-bench-mode).

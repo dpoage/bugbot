@@ -185,11 +185,9 @@ type Scan struct {
 	// alphabetical ordering (useful for deterministic sweeps in CI).
 	HeatOrdering bool `yaml:"heat_ordering"`
 	// FinderExec gates the run_code probe tool for finder agents: "off"
-	// never attaches it; "auto" (the default) attaches it only when a real
-	// isolating backend (podman/docker/bwrap) is available AND the target
-	// language's toolchain probe passes — auto never enables on an
-	// unsandboxed backend; "on" skips the language probe and still requires
-	// a usable backend (unsandboxed needs this explicit opt-in). Empty = auto.
+	// never attaches it; "auto" (default) attaches it only under an isolating
+	// backend whose language probe passes — never unsandboxed; "on" skips the
+	// probe and still requires a usable backend. Empty = auto.
 	FinderExec string `yaml:"finder_exec"`
 	// FinderExecMaxExecs bounds run_code calls per finder unit (>= 1).
 	FinderExecMaxExecs int `yaml:"finder_exec_max_execs"`
@@ -1113,7 +1111,7 @@ func (c *Config) Validate() error {
 		}
 	case "unsandboxed":
 		// Bench-only backend: no runtime/image/network checks apply — every
-		// knob is ignored and the run is unisolated (see template.go).
+		// knob is ignored and the run is unisolated.
 	default:
 		return fmt.Errorf("config: sandbox.backend %q invalid (want \"\", cli, podman, docker, bwrap, or unsandboxed)", c.Sandbox.Backend)
 	}

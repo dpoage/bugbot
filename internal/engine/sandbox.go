@@ -12,8 +12,8 @@ import (
 	"github.com/dpoage/llmkit/sandbox"
 )
 
-// sandboxDepInputs is the ONLY derivation of the dep inputs (strategy, setup
-// cmds, RO local mounts — writable stay repro-only); both sandboxed seams stamp from it so their copies cannot diverge.
+// sandboxDepInputs is the only derivation of dep inputs (strategy, setup
+// cmds, RO mounts; writable stay repro-only) — both call sites stamp from it.
 func sandboxDepInputs(cfg config.Config) (strategy sandboxenv.DepStrategy, setup [][]string, ro []sandbox.ROMount) {
 	roMounts, _ := sandboxenv.LocalMounts(cfg.Sandbox)
 	return sandboxenv.DepStrategy(cfg.Sandbox.DepStrategy), cfg.Sandbox.SetupCmds, roMounts

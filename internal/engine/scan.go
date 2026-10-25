@@ -125,8 +125,8 @@ func (d *Dispatcher) Scan(ctx context.Context, opts ScanOpts) (*ScanResult, erro
 	if sandboxDegraded {
 		printSandboxDegradedWarningFor(errOut, cfg)
 	}
-	// Finder-exec provisioning (ruling E5: Dispatcher.Scan is the only
-	// entry point). Must precede funnel.New so the gate sees it.
+	// Finder-exec provisioning: Dispatcher.Scan is the only entry point;
+	// must precede funnel.New so the gate sees it.
 	feOpts, feOwned := provisionFinderExecForScan(cfg, funnelOpts.SandboxOpts, errOut)
 	// Deferred before funnel.New so it runs after f.Close on every return path.
 	defer CloseSandbox(feOwned)

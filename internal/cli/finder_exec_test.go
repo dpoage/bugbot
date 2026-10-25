@@ -1,7 +1,5 @@
 package cli
 
-// finder_exec_test.go holds the cli legs of P2 (daemon refusal, doctor
-// report) and P4 (the printResult status line).
 import (
 	"bytes"
 	"context"
@@ -17,8 +15,7 @@ import (
 	"github.com/dpoage/bugbot/internal/sandboxenv"
 )
 
-// TestPrintResultFinderExecLine (P4): scan stdout carries exactly one
-// "Finder exec: " line and it equals Result.FinderExecStatus verbatim.
+// Exactly one "Finder exec: " line, equal to Result.FinderExecStatus.
 func TestPrintResultFinderExecLine(t *testing.T) {
 	status := "Finder exec: on (sandbox=UNSANDBOXED host, network=host, max_execs=8 per finder)"
 	res := &funnel.Result{Commit: "abc1234", FinderExecStatus: status}
@@ -63,8 +60,7 @@ storage:
   path: %CFGDIR%/state.db
 `
 
-// TestDaemonRefusesUnsandboxedBackend (P2): the daemon never starts under the
-// resolved unsandboxed backend — via yaml and via BUGBOT_SANDBOX_BACKEND.
+// The daemon never starts under the resolved unsandboxed backend (yaml or env).
 func TestDaemonRefusesUnsandboxedBackend(t *testing.T) {
 	run := func(t *testing.T, yaml string, env map[string]string) {
 		t.Helper()
@@ -124,8 +120,7 @@ report:
   dir: %CFGDIR%/reports
 `
 
-// TestDoctorUnsandboxedBackendReports (P2/A6): doctor reports the unsandboxed
-// backend and never fails on it, and never tries to build it.
+// doctor reports the unsandboxed backend, never fails on it, never builds it.
 func TestDoctorUnsandboxedBackendReports(t *testing.T) {
 	dir := t.TempDir()
 	yaml := strings.ReplaceAll(doctorUnsandboxedConfig, "%CFGDIR%", dir)

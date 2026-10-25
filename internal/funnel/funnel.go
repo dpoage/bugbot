@@ -345,9 +345,8 @@ type Funnel struct {
 	deps            sandboxenv.Resolution
 	depPrefetchOnce sync.Once
 	depPrefetchErr  error
-	// finderExec is the resolved finder-exec decision for the run (seam R2,
-	// finder_exec_gate.go): zero value = off. Written once by
-	// resolveFinderExec before hypothesize goroutines start; read by S3.
+	// finderExec is the resolved finder-exec decision (zero = off), written
+	// once by resolveFinderExec before hypothesize goroutines start.
 	finderExec finderExecState
 
 	// depRoots is the read-only dep-source root set (GOROOT/src + Go module
@@ -411,12 +410,8 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 	}
 	resolved := opts.resolve()
 
-	// Resolve the dependency strategy up front so every sandboxed probe —
-	// verify's sandbox_exec tool OR finder exec — carries the same
-	// module-cache mount/env. Inputs come from cfg.Sandbox for either
-	// feature (A1); when both are on they share one instance and one
-	// Resolution. Vendored/off repos resolve to empty; unsandboxed passes
-	// nil mounts/setup so ResolveDeps returns an empty OFF Resolution.
+	// Resolve deps up front so verify's sandbox_exec and finder exec share
+	// one Resolution and module-cache mount/env; unsandboxed resolves empty.
 	var deps sandboxenv.Resolution
 	verifySB := resolved.SandboxOpts
 	fe := resolved.FinderExec
@@ -445,8 +440,7 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 			// Finder exec alone needed deps: it turns off; the scan never aborts on it.
 			resolved.FinderExec = FinderExecOpts{OffReason: "dependency resolution failed: " + err.Error()}
 		default:
-			// Prepend operator setup_cmds BEFORE ecosystem-derived setup commands.
-			// See config.Sandbox.SetupCmds for the ordering rationale.
+			// Prepend operator setup_cmds before ecosystem-derived setup commands.
 			if len(setup) > 0 {
 				d.SetupCmds = append(setup, d.SetupCmds...)
 			}

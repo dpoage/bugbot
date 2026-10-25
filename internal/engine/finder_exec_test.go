@@ -1,7 +1,5 @@
 package engine
 
-// finder_exec_test.go covers the P1 engine rows (mode x backend), the P2
-// unsandboxed legs, the P3 instance-sharing leg, and the P4 banner leg.
 import (
 	"bytes"
 	"io"
@@ -24,9 +22,8 @@ func gateCfg(mode, backend string) config.Config {
 	return cfg
 }
 
-// TestDecideFinderExecBackend pins the snapshot-independent decision rows,
-// including auto+unsandboxed (the P1 mutant: treating unsandboxed as a real
-// backend in auto mode).
+// TestDecideFinderExecBackend pins the decision rows, including auto+unsandboxed
+// (never a real backend in auto mode).
 func TestDecideFinderExecBackend(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -110,8 +107,8 @@ func TestProvisionFinderExecForScanNoBackend(t *testing.T) {
 	}
 }
 
-// TestProvisionUnsandboxedOn (P2/P4): mode on + unsandboxed provisions
-// HostExec with host network, no deps inputs, and writes the banner.
+// TestProvisionUnsandboxedOn: mode on + unsandboxed provisions HostExec with
+// host network, no deps inputs, and writes the banner.
 func TestProvisionUnsandboxedOn(t *testing.T) {
 	cfg := gateCfg("on", "unsandboxed")
 	cfg.Sandbox.DepStrategy = "host"
@@ -143,8 +140,8 @@ func TestProvisionUnsandboxedOn(t *testing.T) {
 	}
 }
 
-// TestProvisionBannerOnlyWhenUnsandboxedActive (P4): the banner appears iff
-// the unsandboxed backend is actually provisioned.
+// TestProvisionBannerOnlyWhenUnsandboxedActive: the banner appears iff the
+// unsandboxed backend is actually provisioned.
 func TestProvisionBannerOnlyWhenUnsandboxedActive(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -164,9 +161,9 @@ func TestProvisionBannerOnlyWhenUnsandboxedActive(t *testing.T) {
 	}
 }
 
-// TestProvisionReusesVerifySandbox (P3): with verify.sandbox_exec on, the
-// SAME instance serves both features, network is pinned none, and the deps
-// inputs come from cfg.Sandbox.
+// TestProvisionReusesVerifySandbox: with verify.sandbox_exec on, the SAME
+// instance serves both features, network is pinned none, and the deps inputs
+// come from cfg.Sandbox.
 func TestProvisionReusesVerifySandbox(t *testing.T) {
 	cfg := gateCfg("auto", "")
 	cfg.Sandbox.DepStrategy = "host"
@@ -206,8 +203,8 @@ func TestProvisionReusesVerifySandbox(t *testing.T) {
 	}
 }
 
-// TestProvisionUnsandboxedAutoGivesNoSandbox (P1 mutant leg): auto +
-// unsandboxed must NOT provision a sandbox even when verify built one.
+// TestProvisionUnsandboxedAutoGivesNoSandbox: auto + unsandboxed must NOT
+// provision a sandbox even when verify built one.
 func TestProvisionUnsandboxedAutoGivesNoSandbox(t *testing.T) {
 	verifySB := gateVerifyOpts(sandbox.NewMock(sandbox.MockResponse{}))
 	var errOut bytes.Buffer
@@ -220,8 +217,8 @@ func TestProvisionUnsandboxedAutoGivesNoSandbox(t *testing.T) {
 	}
 }
 
-// TestSandboxDegradedWarningUnsandboxedCause (P2): under unsandboxed the
-// degraded warning names the mode, not a missing container runtime.
+// TestSandboxDegradedWarningUnsandboxedCause: under unsandboxed the degraded
+// warning names the mode, not a missing container runtime.
 func TestSandboxDegradedWarningUnsandboxedCause(t *testing.T) {
 	cfg := gateCfg("auto", "unsandboxed")
 	cfg.Verify.SandboxExec = true
@@ -261,7 +258,7 @@ func TestProvisionCarriesLimits(t *testing.T) {
 	}
 }
 
-// B1: finder-exec dep inputs are cfg-derived and identical whether verify.sandbox_exec is on or off.
+// finder-exec dep inputs are cfg-derived and identical whether verify.sandbox_exec is on or off.
 func TestFinderExecDepsIdenticalVerifyOnOff(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	cfg := gateCfg("auto", "")

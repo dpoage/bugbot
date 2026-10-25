@@ -16,10 +16,10 @@ import (
 // per finder unit; MaxExecs is that unit's entire run_code budget.
 type FinderExecConfig struct {
 	Sandbox   sandbox.Sandbox
-	RepoDir   string              // Spec.RepoDir; the backend copies it per Exec
+	RepoDir   string              // the backend copies it per Exec
 	Network   sandbox.NetworkMode // set verbatim in every Spec; never empty
-	MaxExecs  int                 // per tool instance; >= 1
-	Timeout   time.Duration       // Spec.Timeout of every exec; > 0
+	MaxExecs  int                 // >= 1
+	Timeout   time.Duration       // > 0
 	OutputCap int                 // bytes per stream in the rendered result; > 0
 	ROMounts  []sandbox.ROMount
 	Env       []string
@@ -40,7 +40,6 @@ func NewFinderExecTool(cfg FinderExecConfig) *FinderExecTool {
 	return &FinderExecTool{cfg: cfg}
 }
 
-// finderExecArgs is the JSON schema for the tool arguments.
 type finderExecArgs struct {
 	Command string            `json:"command"`
 	Files   map[string]string `json:"files,omitempty"`

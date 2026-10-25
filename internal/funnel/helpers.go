@@ -316,7 +316,6 @@ func (f *Funnel) buildFinderExecTool(sbExecs *atomic.Int32, sbMillis *atomic.Int
 	})
 }
 
-// hasRunCode reports whether the tool set contains a run_code tool.
 func hasRunCode(tools []agent.Tool) bool {
 	for _, t := range tools {
 		if t.Def().Name == "run_code" {

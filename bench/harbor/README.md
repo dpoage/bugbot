@@ -43,8 +43,8 @@ be a real bug that nobody labeled.
   scan still exports its findings and spend), `structured_output`, `binary`,
   `finder_exec` (default `on`; writes `scan.finder_exec`, the arm under
   test), `sandbox_backend` (default `unsandboxed`; writes
-  `sandbox.backend`), `conda_env` (default empty; SWE-bench tasks set
-  `testbed`).
+  `sandbox.backend`), `conda_env` (default empty; pass
+  `--ak conda_env=testbed` for SWE-bench tasks).
 - Baselines: any Harbor agent. `baselines:ClaudeCodeReadable` is
   `claude-code` with its logs made world-readable after the run. Under
   rootless podman, the host-side Harbor process otherwise cannot read the
@@ -66,9 +66,12 @@ activates `/opt/miniconda3/envs/testbed` before the scan, so probes import
 the project's dependencies.
 
 After the scan, the agent copies `state.db` and tars `.bugbot/transcripts`
-to `/logs/agent/` (both best-effort), so a run can be autopsied after the
-container is gone. `scorecard.py` counts `rl_units` per arm: finder units
-lost to provider throttling, read from `agent/scan.log`.
+to `/logs/agent/` (both best-effort), so a run can be autopsied after
+the container is gone. `scorecard.py` reads `rl_units` from `agent/scan.log`:
+it counts `hit provider rate limit after retries` marker lines, and each lost
+finder unit logs that marker twice, so halve `rl_units` for lost units. The
+scorecard groups trials by agent and model, so score each arm from its own
+job directory.
 
 ## Run
 
@@ -87,6 +90,7 @@ export PODMAN_COMPOSE_WARNING_LOGS=false
 
 PYTHONPATH=bench/harbor harbor run -y -p bench/harbor/out/bugfind-swebench \
     -a bugbot_agent:BugbotAgent -m minimax/MiniMax-M3 -n 2 \
+    --ak conda_env=testbed \
     -o bench/harbor/jobs --job-name bugbot-minimax
 
 ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic ANTHROPIC_API_KEY=$MINIMAX_API_KEY \
