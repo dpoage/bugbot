@@ -385,7 +385,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			// byte-identical to the pre-cartographer build.
 			cart := f.newCartographer(ctx, result, cartographerClient, snap, targets, fps, budget)
 			n, err := f.hypothesize(ctx, scanRunID, finderClient, persona, kind,
-				f.opts.Discovery.ChangeContext, langs, targets, seams, budget, result, fps, touchCoverage, cart, emit)
+				f.opts.Discovery.ChangeContext, langs, targets, seams, budget, result, fps, touchCoverage, cart, &sbExecs, &sbMillis, emit)
 			hypothesizedCount = n
 			hypothesizeErr = err
 			// Emit StageFinished(hypothesize) at FINDER DRAIN time, not after the

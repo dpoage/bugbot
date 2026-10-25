@@ -61,7 +61,7 @@ import (
 // than waiting for all units to finish. hypothesize blocks until all units
 // finish (so the caller can close candCh after return) and returns the total
 // candidate count (for stats) plus any fatal error.
-func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llmkit.Client, persona string, kind store.ScanKind, cc *ChangeContext, langs []ingest.Language, targets []string, seams []ingest.Seam, budget *budgetState, result *Result, fps map[string]string, touchCoverage bool, cart *cartography, emit func(Candidate)) (int, error) {
+func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llmkit.Client, persona string, kind store.ScanKind, cc *ChangeContext, langs []ingest.Language, targets []string, seams []ingest.Seam, budget *budgetState, result *Result, fps map[string]string, touchCoverage bool, cart *cartography, sbExecs *atomic.Int32, sbMillis *atomic.Int64, emit func(Candidate)) (int, error) {
 	if len(targets) == 0 && cc == nil {
 		return 0, nil
 	}
@@ -424,6 +424,9 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llmki
 			if t := f.maybeReportToolIssueTool(result, progress.RoleFinder, label); t != nil {
 				unitTools = append(unitTools, t)
 			}
+			if t := f.buildFinderExecTool(sbExecs, sbMillis); t != nil {
+				unitTools = append(unitTools, t)
+			}
 
 			// Resolve the task content. customTask takes highest priority
 			// (diff-intent pre-built task). Then the strategy's BuildTask if
@@ -448,7 +451,7 @@ func (f *Funnel) hypothesize(ctx context.Context, scanRunID string, finder llmki
 				}
 			}
 
-			sysprompt := composeFinderSystemPrompt(persona, u.lens, u.langs, u.strategy)
+			sysprompt := withFinderExecGuidance(composeFinderSystemPrompt(persona, u.lens, u.langs, u.strategy), unitTools)
 
 			startedAt := time.Now()
 			// runCtx (not ctx) so a breaker trip unblocks the in-flight runner
