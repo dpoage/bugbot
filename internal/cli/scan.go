@@ -237,6 +237,9 @@ func printResult(out io.Writer, res *funnel.Result) {
 		_, _ = fmt.Fprintf(out, "Cache: read=%d created=%d tokens (of input; reads bill at a steep discount)\n",
 			s.CacheReadTokens, s.CacheCreationTokens)
 	}
+	if res.FinderExecStatus != "" {
+		_, _ = fmt.Fprintln(out, res.FinderExecStatus)
+	}
 
 	if s.FinderFailures > 0 || s.VerifierFailures > 0 {
 		_, _ = fmt.Fprintf(out, "Agent failures: finders=%d/%d verifiers=%d/%d produced no parseable output\n",

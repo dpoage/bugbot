@@ -117,6 +117,26 @@ scan:
   # harness tool via report_tool_issue. Off by default; the always-on
   # objective tool-health tracking is unaffected by this flag.
   tool_complaints: false
+  # finder_exec: give finder agents a sandboxed run_code probe tool so they
+  # can execute snippets against a workspace copy of the repo while hunting.
+  # Requires a sandbox backend; every probe is network=none with dep_strategy
+  # applied. Modes:
+  #   off   never attach the tool.
+  #   auto  (default) attach only when an isolating backend (podman/docker/
+  #         bwrap) is available AND the image/host passes the scan's target
+  #         language toolchain probe; otherwise the scan prints
+  #         "Finder exec: off (<reason>)". Auto never enables unsandboxed.
+  #   on    skip the language probe but still require a usable backend;
+  #         with sandbox.backend: unsandboxed this runs probes DIRECTLY on
+  #         the host (bench-only, no isolation — see below).
+  finder_exec: auto
+  # finder_exec_max_execs: run_code budget per finder unit (default 8).
+  # finder_exec_max_execs: 8
+  # finder_exec_timeout_seconds: wall-clock ceiling of one probe (default 120).
+  # finder_exec_timeout_seconds: 120
+  # finder_exec_output_bytes: per-stream output cap shown to the model,
+  # 1..1048576 (llmkit caps a stream at 1 MiB; default 16384).
+  # finder_exec_output_bytes: 16384
 
 # ---------------------------------------------------------------------------
 # sandbox: isolated execution environment for verification and reproduction.
@@ -129,6 +149,12 @@ scan:
 #     README "Sandbox backend" section for the full security model.
 #     "bugbot doctor" reports an actionable reason (not Linux / bwrap
 #     missing / userns unavailable) if bwrap is configured but unusable.
+#   "unsandboxed"  BENCH-ONLY mode with NO isolation: with
+#     scan.finder_exec: on, finder probes run directly on the host (workspace
+#     copy, network=host, your OS user's privileges); every sandbox.* knob
+#     (image, cpus, memory_mb, pids_limit, timeouts, scratch, growth ceiling,
+#     dep_strategy, setup_cmds, local_mounts, host_toolchains) is IGNORED and
+#     bugbot daemon refuses to start. Never selected automatically; scan
 # network defaults to "none" — reproduction runs offline.
 #
 # IMPORTANT: the reproduce/verify stages run the target repo's OWN test/build

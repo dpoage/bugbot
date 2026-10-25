@@ -20,11 +20,22 @@ import (
 // backend; every other accepted value selects the container CLI backend.
 const BackendBwrap = "bwrap"
 
+// BackendUnsandboxed is the config.Sandbox.Backend value selecting the
+// bench-only unsandboxed host backend. It is never an isolating backend:
+// New refuses it and Available reports false, so verify sandbox_exec,
+// analyzer seeding, repro, and doctor all behave as "no sandbox backend".
+// The ONLY constructor of the host backend is the engine's finder-exec
+// provisioning (with scan.finder_exec: on).
+const BackendUnsandboxed = "unsandboxed"
+
 // New constructs the backend cfg.Backend selects, with every sandbox knob
 // mapped onto its llmkit option. A knob the backend cannot honor fails here
 // rather than being dropped: llmkit refuses unusable limits and network
 // modes, and New refuses a host_toolchains entry that does not resolve.
 func New(cfg config.Sandbox) (sandbox.Sandbox, error) {
+	if cfg.Backend == BackendUnsandboxed {
+		return nil, fmt.Errorf("sandboxenv: backend %q provides no isolating sandbox (bench-only; only finder-exec provisioning with scan.finder_exec: on runs on the host)", BackendUnsandboxed)
+	}
 	if cfg.Backend != BackendBwrap {
 		cli, err := NewCLI(cfg, cfg.Image)
 		if err != nil {
@@ -87,6 +98,9 @@ func sharedOptions(cfg config.Sandbox) ([]sandbox.Option, error) {
 // Available reports whether the configured backend can run on this host,
 // without constructing it.
 func Available(cfg config.Sandbox) bool {
+	if cfg.Backend == BackendUnsandboxed {
+		return false
+	}
 	if cfg.Backend == BackendBwrap {
 		ok, _ := sandbox.DetectBwrap()
 		return ok
@@ -98,6 +112,9 @@ func Available(cfg config.Sandbox) bool {
 // BackendLabel names the configured backend for log and status lines:
 // "bwrap", the container runtime, or "none" when it is unavailable.
 func BackendLabel(cfg config.Sandbox) string {
+	if cfg.Backend == BackendUnsandboxed {
+		return BackendUnsandboxed
+	}
 	if cfg.Backend == BackendBwrap {
 		return BackendBwrap
 	}
@@ -105,6 +122,25 @@ func BackendLabel(cfg config.Sandbox) string {
 		return rt
 	}
 	return "none"
+}
+
+// UnavailableReason is the operator-facing detail for the "no sandbox
+// backend available" status line: "" when a real isolating backend is
+// available, otherwise why it is not.
+func UnavailableReason(cfg config.Sandbox) string {
+	if cfg.Backend == BackendUnsandboxed {
+		return BackendUnsandboxed + " provides no isolating sandbox"
+	}
+	if cfg.Backend == BackendBwrap {
+		if ok, reason := sandbox.DetectBwrap(); !ok {
+			return "bwrap unusable (" + reason + ")"
+		}
+		return ""
+	}
+	if cfg.Runtime != "" {
+		return cfg.Runtime + " not on PATH"
+	}
+	return "podman/docker not on PATH"
 }
 
 // containerRuntime resolves the runtime NewCLI would use: cfg.Runtime when

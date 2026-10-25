@@ -184,6 +184,21 @@ type Scan struct {
 	// bugs statistically cluster. On by default; set to false to restore
 	// alphabetical ordering (useful for deterministic sweeps in CI).
 	HeatOrdering bool `yaml:"heat_ordering"`
+	// FinderExec gates the run_code probe tool for finder agents: "off"
+	// never attaches it; "auto" (the default) attaches it only when a real
+	// isolating backend (podman/docker/bwrap) is available AND the target
+	// language's toolchain probe passes — auto never enables on an
+	// unsandboxed backend; "on" skips the language probe and still requires
+	// a usable backend (unsandboxed needs this explicit opt-in). Empty = auto.
+	FinderExec string `yaml:"finder_exec"`
+	// FinderExecMaxExecs bounds run_code calls per finder unit (>= 1).
+	FinderExecMaxExecs int `yaml:"finder_exec_max_execs"`
+	// FinderExecTimeoutSeconds is the wall-clock ceiling of one run_code
+	// exec (>= 1).
+	FinderExecTimeoutSeconds int `yaml:"finder_exec_timeout_seconds"`
+	// FinderExecOutputBytes caps each output stream shown to the model per
+	// exec; llmkit caps a stream at 1 MiB (1..1048576).
+	FinderExecOutputBytes int `yaml:"finder_exec_output_bytes"`
 }
 
 // Sandbox configures the isolated execution environment used for verification
@@ -613,8 +628,12 @@ func Default() Config {
 				"node_modules/**",
 				"**/*_test.go",
 			},
-			Cartographer: true,
-			HeatOrdering: true,
+			Cartographer:             true,
+			HeatOrdering:             true,
+			FinderExec:               "auto",
+			FinderExecMaxExecs:       8,
+			FinderExecTimeoutSeconds: 120,
+			FinderExecOutputBytes:    16384,
 		},
 		Sandbox: Sandbox{
 			Runtime:                  "podman",
@@ -1092,8 +1111,11 @@ func (c *Config) Validate() error {
 		if ok, reason := sandbox.DetectBwrap(); !ok {
 			return fmt.Errorf("config: sandbox.backend bwrap is unusable: %s", reason)
 		}
+	case "unsandboxed":
+		// Bench-only backend: no runtime/image/network checks apply — every
+		// knob is ignored and the run is unisolated (see template.go).
 	default:
-		return fmt.Errorf("config: sandbox.backend %q invalid (want \"\", cli, podman, docker, or bwrap)", c.Sandbox.Backend)
+		return fmt.Errorf("config: sandbox.backend %q invalid (want \"\", cli, podman, docker, bwrap, or unsandboxed)", c.Sandbox.Backend)
 	}
 	switch sandbox.NetworkMode(c.Sandbox.Network) {
 	case "", sandbox.NetworkNone, sandbox.NetworkHost:
@@ -1206,6 +1228,20 @@ func (c *Config) Validate() error {
 	}
 	if c.Verify.SandboxMaxExecs < 1 {
 		return fmt.Errorf("config: verify.sandbox_max_execs must be >= 1 (got %d)", c.Verify.SandboxMaxExecs)
+	}
+	switch c.Scan.FinderExec {
+	case "", "off", "auto", "on":
+	default:
+		return fmt.Errorf("config: scan.finder_exec %q invalid (want off, auto, or on)", c.Scan.FinderExec)
+	}
+	if c.Scan.FinderExecMaxExecs < 1 {
+		return fmt.Errorf("config: scan.finder_exec_max_execs must be >= 1 (got %d)", c.Scan.FinderExecMaxExecs)
+	}
+	if c.Scan.FinderExecTimeoutSeconds < 1 {
+		return fmt.Errorf("config: scan.finder_exec_timeout_seconds must be >= 1 (got %d)", c.Scan.FinderExecTimeoutSeconds)
+	}
+	if c.Scan.FinderExecOutputBytes < 1 || c.Scan.FinderExecOutputBytes > sandbox.DefaultMaxOutputBytes {
+		return fmt.Errorf("config: scan.finder_exec_output_bytes %d invalid (want 1..%d)", c.Scan.FinderExecOutputBytes, sandbox.DefaultMaxOutputBytes)
 	}
 
 	if c.Budgets.CacheReadWeight < 0 || c.Budgets.CacheReadWeight > 1 {

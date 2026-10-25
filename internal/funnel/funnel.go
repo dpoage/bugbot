@@ -345,6 +345,10 @@ type Funnel struct {
 	deps            sandboxenv.Resolution
 	depPrefetchOnce sync.Once
 	depPrefetchErr  error
+	// finderExec is the resolved finder-exec decision for the run (seam R2,
+	// finder_exec_gate.go): zero value = off. Written once by
+	// resolveFinderExec before hypothesize goroutines start; read by S3.
+	finderExec finderExecState
 
 	// depRoots is the read-only dep-source root set (GOROOT/src + Go module
 	// cache) captured once at New. It backs the arbiter's broader read_file
@@ -407,23 +411,39 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 	}
 	resolved := opts.resolve()
 
-	// Resolve the dependency strategy for the sandbox_exec tool up front so
-	// every refuter probe carries the same module-cache mount/env. Only relevant
-	// when the sandbox feature is enabled; vendored/off repos resolve to empty.
+	// Resolve the dependency strategy up front so every sandboxed probe —
+	// verify's sandbox_exec tool OR finder exec — carries the same
+	// module-cache mount/env. Inputs come from cfg.Sandbox for either
+	// feature (A1); when both are on they share one instance and one
+	// Resolution. Vendored/off repos resolve to empty; unsandboxed passes
+	// nil mounts/setup so ResolveDeps returns an empty OFF Resolution.
 	var deps sandboxenv.Resolution
-	if resolved.SandboxOpts.Enabled && resolved.SandboxOpts.Sandbox != nil {
+	verifySB := resolved.SandboxOpts
+	fe := resolved.FinderExec
+	if (verifySB.Enabled && verifySB.Sandbox != nil) || fe.Sandbox != nil {
+		var (
+			strategy sandboxenv.DepStrategy
+			fetch    sandbox.Sandbox
+			localMnt []sandbox.ROMount
+			setup    [][]string
+		)
+		if verifySB.Enabled && verifySB.Sandbox != nil {
+			strategy, fetch, localMnt, setup = verifySB.DepStrategy, verifySB.Sandbox, verifySB.LocalMounts, verifySB.SetupCmds
+		} else {
+			strategy, fetch, localMnt, setup = fe.DepStrategy, fe.Sandbox, fe.LocalMounts, fe.SetupCmds
+		}
 		d, err := sandboxenv.ResolveDeps(repo.Root(), sandboxenv.DepOptions{
-			Strategy:     resolved.SandboxOpts.DepStrategy,
-			FetchSandbox: resolved.SandboxOpts.Sandbox,
-			LocalMounts:  resolved.SandboxOpts.LocalMounts,
+			Strategy:     strategy,
+			FetchSandbox: fetch,
+			LocalMounts:  localMnt,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("funnel: resolve dependency strategy: %w", err)
 		}
 		// Prepend operator setup_cmds BEFORE ecosystem-derived setup commands.
 		// See config.Sandbox.SetupCmds for the ordering rationale.
-		if len(resolved.SandboxOpts.SetupCmds) > 0 {
-			d.SetupCmds = append(resolved.SandboxOpts.SetupCmds, d.SetupCmds...)
+		if len(setup) > 0 {
+			d.SetupCmds = append(setup, d.SetupCmds...)
 		}
 		deps = d
 	}
