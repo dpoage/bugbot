@@ -3,9 +3,17 @@
 This record validates the production `finder-exec` path (finder `run_code`)
 through Harbor on the same 5 SWE-bench tasks as the
 [2026-10-24 finder-recall loops](../2026-10-24-finder-recall/README.md). It
-adds the fetch-free accounting that the 2026-10-24 addendum demanded: a hit
-counts as fetch-free only when a finder unit that produced it made zero
-network-fetching `run_code` calls (arbiter ruling E2).
+adds the fetch-free accounting that the 2026-10-24 addendum demanded, under
+the arbiter V2 rulings of 2026-10-25 (they supersede the earlier E2 rule):
+
+- **Q1:** a fetching call disqualifies only when content was retrieved: the
+  fetching command exited 0 with progress/success signals, or its
+  destination shows content afterwards. A fetch that fails with nothing
+  written is not contamination.
+- **Q2 (gating):** a hit is fetch-free only if its originating unit(s)
+  neither retrieved content nor read, diffed, imported from or listed any
+  path that a retrieving fetch by ANY unit in the same trial wrote (shared
+  host `/tmp` counts; "read" covers any `run_code` command or read tool).
 
 **Status: pass 1 of 2.** Control and exec1 are complete and audited below.
 exec2 and exec3 are still queued on the quota schedule; every exec2/exec3 cell
@@ -24,29 +32,33 @@ reads PENDING and the pass gate stays PENDING until pass 2 fills them.
 
 Mark legend: **raw** = the verifier's line-tolerance matcher credits the
 finding; **genuine** = a manual read against the gold patch and issue confirms
-the same defect; **ff** = fetch-free (E2: at least one originating finder unit
-with zero fetching `run_code` calls). Full evidence per hit: `hits.json`.
+the same defect; **ff** = fetch-free under the V2 rulings (Q1 + Q2 above).
+Full evidence per hit: `hits.json`.
 
 | task | control | exec1 | exec2 | exec3 |
 |---|---|---|---|---|
 | astropy-14995 | - | - | PENDING | PENDING |
-| django-11099 | - | raw, genuine, ff | PENDING | PENDING |
+| django-11099 | - | raw, genuine (not ff) | PENDING | PENDING |
 | xarray-4075 | - | - | PENDING | PENDING |
 | pylint-4970 | - | - | PENDING | PENDING |
-| sklearn-13142 | - | raw, genuine (not ff) | PENDING | PENDING |
+| sklearn-13142 | - | raw, genuine, ff | PENDING | PENDING |
 
 - **django-11099:** the hit names the gold defect (`$` anchor accepts a
-  trailing newline in both username validators). Its single originating finder
-  unit made no fetching calls, but it confirmed the bug by diffing `/testbed`
-  against `/tmp/dj30`, a pristine Django-3.0 tree that another unit in the
-  same trial pip-downloaded and unpacked (shared-/tmp read: yes).
+  trailing newline in both username validators). Its single originating
+  finder unit made no fetching calls of its own, but it listed, read and
+  diffed `/tmp/dj30`, a pristine Django-3.0 tree that another unit in the
+  same trial pip-downloaded and unpacked — a Q2 write-set touch, so the hit
+  is not fetch-free even though the mechanism is provable from `/testbed`
+  alone.
 - **sklearn-13142:** the hit names the gold defect (`fit_predict` labels come
   from the last initialization, not the restored best one) and both
   originating finder units proved it with local numpy probes in `/testbed`.
-  Each unit also ran one `pip download sklearn==...` call, and both downloads
-  failed (`No matching distribution found`), so no upstream content was
-  retrieved — but E2 counts the call, so the hit is not fetch-free.
+  Each unit also ran one `pip download sklearn==...` call; both failed with
+  `No matching distribution found` and wrote nothing, and the trial's fetch
+  write-set is empty, so under Q1+Q2 the hit is fetch-free.
 - Control found nothing (0 of 5), matching the 2026-10-24 control arm.
+- Under the superseded E2 rule the fetch-free mark was on django-11099
+  instead; V2 swaps which hit counts and leaves the exec1 tally at 1/5.
 
 ## Recall and tokens
 
@@ -60,7 +72,7 @@ reported alone. Source: `control.json`, `exec1.json` (commands below).
 | exec2 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
 | exec3 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
 
-## Pass gate (CP1 + E2)
+## Pass gate (CP1 + E2/V2)
 
 | leg | threshold | control | exec1 | exec2 | exec3 |
 |---|---|---|---|---|---|
@@ -100,11 +112,18 @@ reported alone. Source: `control.json`, `exec1.json` (commands below).
 | exec3 | PENDING | PENDING | PENDING | PENDING |
 
 Fetching calls per exec1 trial: astropy 3, django 9, xarray 14, pylint 6,
-sklearn 2. What they did: `pip download django==3.0` wheels into `/tmp/dl`
-then unpack into `/tmp/dj30*` (django), one `git clone` of django upstream
-(refused by the call budget before running), `git clone` of xarray upstream
-plus `urllib` fetches of `raw.githubusercontent.com` files (xarray), and the
-two failed `pip download sklearn` calls (sklearn).
+sklearn 2. Of the 34 calls, 23 retrieved content (Q1), 5 failed with an
+error and nothing written, 4 were refused by the call budget before running,
+and 2 show no retrieval evidence in the transcript (quiet `pip -q` with a
+shell-variable destination). What the retrieving calls did: `pip download
+django==3.0` wheels into `/tmp/dl` then unpack into `/tmp/dj30*` (django),
+`git clone` of xarray upstream plus `curl`/`urllib` fetches of
+`raw.githubusercontent.com` files (xarray), `pip download` of astropy,
+xarray and pylint wheels/sdists into `/tmp/ast`, `/tmp/x*`, `/tmp/pl*`,
+`/tmp/dl`. The two sklearn `pip download sklearn` calls both failed. One
+`git clone` of django upstream was refused by the call budget before it ran.
+Exit status and destination of every fetching call: `hits.json`
+(`fetching_calls_by_arm`).
 
 Sklearn import failures (E3 pattern, if seen): 2 run_code results in exec1's
 sklearn trial show
@@ -119,6 +138,10 @@ installed package. Control shows no run_code usage at all.
 - All units in a trial share the host `/tmp`, and `/tmp` persists across
   trials, so a finder can read what another unit (or an earlier trial)
   downloaded — the django hit's confirmation used such a tree (`/tmp/dj30`).
+  The unsandboxed backend thus opens a shared-/tmp cross-unit channel that
+  the Q2 gate has to police; on the podman and bwrap backends each exec gets
+  its own `/tmp`, so the channel does not exist there. This is an
+  observation, not a gate.
 - The scan target is a copy of the repository's tracked files
   (`git -C /testbed ls-files`), recorded per trial in `agent/tracked_files`.
 
@@ -126,8 +149,10 @@ installed package. Control shows no run_code usage at all.
 
 - `control.json`, `exec1.json`: scorecards (exec2/exec3 land in pass 2).
 - `hits.json`: one record per scorer hit with the genuine read, the
-  originating finder units, their fetching calls, the fetch-free verdict, and
-  the shared-/tmp read (pass 1 covers control and exec1).
+  originating finder units, their fetching calls, the V2 fetch-free verdict
+  with its write-set touches, and `fetching_calls_by_arm` — the exit status,
+  destination and retrieved verdict of every fetching call in the audited
+  arms (pass 1 covers control and exec1).
 
 Regenerate a scorecard while the job directories still exist (job directories
 live in the feature worktree):
@@ -141,8 +166,10 @@ python3 bench/harbor/scorecard.py \
     --price 0.3,0.06,1.2 --json bench/harbor/results/2026-10-25-finder-exec/exec1.json
 ```
 
-Re-derive the run_code and fetching counts, and the per-unit candidate lists
-behind `hits.json`, with the audit script kept for pass 2:
+Re-derive the run_code and fetching counts, the Q1 retrieval verdicts, the
+Q2 write-sets and touches, and the per-unit candidate lists behind
+`hits.json`, with the audit script kept for pass 2 (it applies the V2 rules
+mechanically, so pass 2 needs no reclassification by hand):
 
 ```bash
 J=/home/dpoage/code/bugbot-wt/ypei-r1-feat/bench/harbor/jobs
