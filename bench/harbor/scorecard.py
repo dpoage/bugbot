@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "template"))
 import score  # noqa: E402  (the verifier's own loader and matcher)
 
-COLS = ["agent", "model", "tasks", "crashed", "bug_recall", "site_recall", "precision",
+COLS = ["agent", "model", "tasks", "crashed", "rl_units", "bug_recall", "site_recall", "precision",
         "fp_per_task", "in_tok", "cache_tok", "out_tok", "cost_usd", "usd_per_bug", "agent_min"]
 
 
@@ -43,6 +43,14 @@ def trials(job_dirs: list[Path]):
             if "agent_info" not in r:
                 continue  # job-level result.json
             yield res.parent, r
+
+
+def rate_limited_units(trial_dir: Path) -> int:
+    """Finder units bugbot lost to provider throttling (0 for other agents)."""
+    log = trial_dir / "agent" / "scan.log"
+    if not log.is_file():
+        return 0
+    return log.read_text(errors="replace").count("hit provider rate limit after retries")
 
 
 def trial_record(trial_dir: Path, r: dict, price: list[float] | None) -> dict:
@@ -82,6 +90,7 @@ def trial_record(trial_dir: Path, r: dict, price: list[float] | None) -> dict:
         "cost_usd": cost,
         "agent_min": round(seconds(r.get("agent_execution")) / 60, 1),
         "metadata": ar.get("metadata") or {},
+        "rate_limited_units": rate_limited_units(trial_dir),
         "findings": findings,
     }
 
@@ -107,6 +116,9 @@ def aggregate(agent: str, model: str, rs: list[dict]) -> dict:
         "cost_usd": cost,
         "usd_per_bug": cost / det if cost is not None and det else None,
         "agent_min": round(sum(t["agent_min"] for t in rs), 1),
+        # Nonzero means provider throttling dropped units: the arm's numbers
+        # understate it and the run should be repeated at lower concurrency.
+        "rl_units": sum(t["rate_limited_units"] for t in rs),
     }
 
 

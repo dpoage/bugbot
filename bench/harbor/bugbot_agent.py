@@ -18,7 +18,7 @@ import re
 import shlex
 import tempfile
 from pathlib import Path
-from typing import override
+from typing import Literal, override
 
 from pydantic import Field
 
@@ -60,6 +60,21 @@ class BugbotOptions(InstalledAgentOptions):
     # Kill the scan before Harbor's agent timeout (task.toml: 7200s) so the
     # findings and spend recorded so far are still exported.
     scan_timeout_sec: int = Field(default=6900, description="Wall-clock deadline for the scan.")
+    # Finder-exec bench mode. The SWE-bench task images run under rootless
+    # podman and hold no nested podman or bwrap, so bugbot cannot isolate
+    # finder probes inside them; scan.finder_exec is the arm under test.
+    finder_exec: Literal["off", "auto", "on"] = Field(
+        default="on",
+        description="scan.finder_exec written to bugbot.yaml (the A/B arm).",
+    )
+    sandbox_backend: str = Field(
+        default="unsandboxed",
+        description="sandbox.backend written to bugbot.yaml.",
+    )
+    conda_env: str = Field(
+        default="",
+        description="Activate this /opt/miniconda3 env before the scan so run_code sees the project env (SWE-bench: testbed).",
+    )
 
 
 class BugbotAgent(BaseInstalledAgent):
@@ -116,7 +131,8 @@ class BugbotAgent(BaseInstalledAgent):
             },
             "roles": {"finder": role, "verifier": role, "reproducer": role},
             "budgets": {"per_cycle_tokens": self._opts().per_cycle_tokens, "per_day_tokens": 0},
-            "scan": {"include": globs},
+            "scan": {"include": globs, "finder_exec": self._opts().finder_exec},
+            "sandbox": {"backend": self._opts().sandbox_backend},
             "storage": {"path": f"{REMOTE_RUN}/state.db"},
             "report": {"dir": f"{REMOTE_RUN}/reports"},
         }
@@ -164,7 +180,8 @@ class BugbotAgent(BaseInstalledAgent):
         bb = f"{REMOTE_BIN} --config {REMOTE_RUN}/bugbot.yaml"
         script = (
             f"cd {REMOTE_RUN} && cp bugbot.yaml {LOGS}/bugbot.yaml && "
-            "git config --global --add safe.directory /testbed; "
+            + (f". /opt/miniconda3/bin/activate {shlex.quote(self._opts().conda_env)}; " if self._opts().conda_env else "")
+            + "git config --global --add safe.directory /testbed; "
             f"git -C /testbed ls-files | wc -l > {LOGS}/tracked_files; "
             f"timeout -k 60 {self._opts().scan_timeout_sec} "
             f"{bb} scan --target /testbed --force --concurrency {self._opts().concurrency} "
@@ -174,6 +191,9 @@ class BugbotAgent(BaseInstalledAgent):
             # bugbot prints JSON null for an empty list; normalize so the
             # verifier sees a valid empty result rather than a missing one.
             f"grep -qx null {LOGS}/findings.json && echo '[]' > {LOGS}/findings.json; "
+            # state.db + transcripts let a run be autopsied after the container is gone.
+            f"cp {REMOTE_RUN}/state.db {LOGS}/ 2>/dev/null; "
+            f"tar -czf {LOGS}/transcripts.tgz -C {REMOTE_RUN}/.bugbot transcripts 2>/dev/null; "
             f"cat {LOGS}/scan.exit"
         )
         await self.exec_as_agent(
@@ -198,4 +218,6 @@ class BugbotAgent(BaseInstalledAgent):
         meta = dict(context.metadata or {})
         if exit_file.is_file():
             meta["scan_exit"] = exit_file.read_text().strip()
+        meta["finder_exec"] = self._opts().finder_exec
+        meta["sandbox_backend"] = self._opts().sandbox_backend
         context.metadata = meta
