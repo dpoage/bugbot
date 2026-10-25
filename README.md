@@ -175,9 +175,10 @@ and unclassified files do not count). The probe checks for these toolchains:
 
 For any other language, `auto` resolves to off.
 
-`bugbot scan` prints one `Finder exec:` line in its summary, with the decision
-and the reason. (`--estimate` runs print no summary and no line.) Other
-entry points log the same line at debug level only. Example lines:
+The `bugbot scan` and `bugbot regress` summaries print one `Finder exec:` line,
+with the decision and the reason. (`--estimate` runs print no summary and no
+line.) The TUI palette and daemon control-socket scans log the same line at
+debug level only. Example lines:
 
 ```
 Finder exec: on (sandbox=podman, language=go, network=none, dep_strategy=off, max_execs=8 per finder)
