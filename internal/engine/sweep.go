@@ -55,7 +55,7 @@ func (d *Dispatcher) Sweep(ctx context.Context, opts SweepOpts) (*SweepResult, e
 		return nil, err
 	}
 	if sandboxDegraded {
-		PrintSandboxDegradedWarning(opts.ErrOut)
+		printSandboxDegradedWarningFor(opts.ErrOut, cfg)
 	}
 
 	f, err := funnel.New(funnel.RoleClients{

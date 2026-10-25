@@ -268,12 +268,20 @@ func runChecks(ctx context.Context, env doctorEnv, runSandboxVerify bool) []chec
 			Status: statusSkip,
 			Detail: "config did not load",
 		})
+	} else if cfg.Sandbox.Backend == sandboxenv.BackendUnsandboxed {
+		// A6: report the bench-only backend instead of probing runtimes no
+		// run uses under it; never a failure.
+		results = append(results, checkResult{
+			Name:   "sandbox backend",
+			Status: statusPass,
+			Detail: "unsandboxed (finder exec only, no isolation)",
+		})
 	} else if cfg.Sandbox.Backend == "bwrap" {
 		results = append(results, checkBwrap(ctx, cfg)...)
 	} else {
 		results = append(results, checkSandbox(ctx, env, cfg)...)
 	}
-	if cfgOK && env.newSandbox != nil && !hasHardFailure(results, "sandbox binary") {
+	if cfgOK && cfg.Sandbox.Backend != sandboxenv.BackendUnsandboxed && env.newSandbox != nil && !hasHardFailure(results, "sandbox binary") {
 		results = append(results, checkSandboxBackend(env, cfg))
 	}
 
@@ -304,7 +312,7 @@ func runChecks(ctx context.Context, env doctorEnv, runSandboxVerify bool) []chec
 	// image against the repo's detected languages, and warn if offline bazel
 	// repro is configured against a non-custom image. Advisory only — never
 	// affects the exit code (mirrors checkLangTier above).
-	if cfgOK {
+	if cfgOK && cfg.Sandbox.Backend != sandboxenv.BackendUnsandboxed {
 		if cfg.Sandbox.Backend == "bwrap" {
 			// backend bwrap has no image: repro/verify run on HOST
 			// toolchains, so image name-matching and in-image probes would
@@ -1075,6 +1083,13 @@ const sandboxVerifyTimeout = 3 * time.Minute
 func checkSandboxVerifier(ctx context.Context, env doctorEnv, cfg config.Config) []checkResult {
 	tctx, cancel := context.WithTimeout(ctx, sandboxVerifyTimeout)
 	defer cancel()
+	if cfg.Sandbox.Backend == sandboxenv.BackendUnsandboxed {
+		return []checkResult{{
+			Name:   "sandbox verifier",
+			Status: statusSkip,
+			Detail: "backend unsandboxed: no sandbox image to smoke-test (finder exec only, no isolation)",
+		}}
+	}
 
 	var verdict repro.SmokeVerdict
 	var err error

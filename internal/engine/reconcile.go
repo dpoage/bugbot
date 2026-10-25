@@ -88,7 +88,7 @@ func (d *Dispatcher) Reconcile(ctx context.Context, opts ReconcileOpts) (*Reconc
 		out = io.Discard
 	}
 	if sandboxDegraded {
-		PrintSandboxDegradedWarning(out)
+		printSandboxDegradedWarningFor(out, cfg)
 	}
 
 	f, err := funnel.New(funnel.RoleClients{

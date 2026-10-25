@@ -182,6 +182,12 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	persona := ingest.Persona(snap)
 	langs := ingest.DominantLanguages(snap)
 	f.hasGoDepSource = f.goDepSourceFor(langs)
+	// Finder-exec gate: resolve the decision (language probe, prefetch,
+	// status line) before hypothesize starts. modeFull only — drains and
+	// re-verifies reuse the decision the scan's main run already recorded.
+	if mode == modeFull {
+		f.resolveFinderExec(ctx, result, langs)
+	}
 
 	if fps == nil {
 		var fpsErr error

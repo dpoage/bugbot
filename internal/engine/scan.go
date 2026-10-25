@@ -123,8 +123,14 @@ func (d *Dispatcher) Scan(ctx context.Context, opts ScanOpts) (*ScanResult, erro
 		return nil, sbErr
 	}
 	if sandboxDegraded {
-		PrintSandboxDegradedWarning(errOut)
+		printSandboxDegradedWarningFor(errOut, cfg)
 	}
+	// Finder-exec provisioning (ruling E5: Dispatcher.Scan is the only
+	// entry point). Must precede funnel.New so the gate sees it.
+	feOpts, feOwned := provisionFinderExecForScan(cfg, funnelOpts.SandboxOpts, errOut)
+	// Deferred before funnel.New so it runs after f.Close on every return path.
+	defer CloseSandbox(feOwned)
+	funnelOpts.FinderExec = feOpts
 	f, err := funnel.New(funnel.RoleClients{Finder: d.finder, Verifier: d.verifier, Cartographer: d.cartographer, Arbiter: d.arbiter}, st, repo, funnelOpts)
 	if err != nil {
 		return nil, err

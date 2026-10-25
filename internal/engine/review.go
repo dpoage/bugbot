@@ -69,7 +69,7 @@ func (d *Dispatcher) Review(ctx context.Context, opts ReviewOpts) (*funnel.Resul
 		return nil, sbErr
 	}
 	if sbDegraded {
-		PrintSandboxDegradedWarning(opts.ErrOut)
+		printSandboxDegradedWarningFor(opts.ErrOut, d.cfg)
 	}
 	f, err := funnel.New(funnel.RoleClients{Finder: d.finder, Verifier: d.verifier, Cartographer: d.cartographer, Arbiter: d.arbiter}, d.store, opts.Repo, funnelOpts)
 	if err != nil {
