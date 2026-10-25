@@ -291,3 +291,37 @@ func hasRunTests(tools []agent.Tool) bool {
 	}
 	return false
 }
+
+// buildFinderExecTool returns a fresh run_code tool for one finder unit, or
+// nil when finder exec is off. Each call owns its own execution budget.
+func (f *Funnel) buildFinderExecTool(sbExecs *atomic.Int32, sbMillis *atomic.Int64) agent.Tool {
+	fe := f.finderExec
+	if !fe.enabled() {
+		return nil
+	}
+	return agenttools.NewFinderExecTool(agenttools.FinderExecConfig{
+		Sandbox:   fe.Sandbox,
+		RepoDir:   f.repo.Root(),
+		Network:   fe.Network,
+		MaxExecs:  fe.MaxExecs,
+		Timeout:   fe.Timeout,
+		OutputCap: fe.OutputCap,
+		ROMounts:  f.deps.ROMounts,
+		Env:       f.deps.Env,
+		SetupCmds: f.deps.SetupCmds,
+		OnExec: func(d time.Duration) {
+			sbExecs.Add(1)
+			sbMillis.Add(d.Milliseconds())
+		},
+	})
+}
+
+// hasRunCode reports whether the tool set contains a run_code tool.
+func hasRunCode(tools []agent.Tool) bool {
+	for _, t := range tools {
+		if t.Def().Name == "run_code" {
+			return true
+		}
+	}
+	return false
+}
