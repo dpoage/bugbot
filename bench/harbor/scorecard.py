@@ -46,7 +46,9 @@ def trials(job_dirs: list[Path]):
 
 
 def rate_limited_units(trial_dir: Path) -> int:
-    """Finder units bugbot lost to provider throttling (0 for other agents)."""
+    """Occurrences of the "hit provider rate limit after retries" marker in
+    agent/scan.log; a lost bugbot finder unit logs the marker twice, so halve
+    the count for lost units (0 for other agents)."""
     log = trial_dir / "agent" / "scan.log"
     if not log.is_file():
         return 0
