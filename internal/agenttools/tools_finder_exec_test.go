@@ -277,3 +277,84 @@ func TestFinderExecTool_OnExecNotCalledOnArgOrInfraError(t *testing.T) {
 		t.Errorf("OnExec called %d times on error paths, want 0", called)
 	}
 }
+
+func TestFinderExecTool_ExecSpecNetworkFromConfig(t *testing.T) {
+	fs := &fakeSandbox{}
+	cfg := finderExecCfg(fs)
+	cfg.Network = sandbox.NetworkHost
+	tool := NewFinderExecTool(cfg)
+
+	if _, err := runFinderExec(t, tool, map[string]any{"command": "go test ./..."}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(fs.calls) != 1 {
+		t.Fatalf("Exec called %d times, want 1", len(fs.calls))
+	}
+
+	want := sandbox.Spec{
+		RepoDir:   "/repo",
+		Cmd:       []string{"bash", "-c", "go test ./..."},
+		Network:   sandbox.NetworkHost,
+		Timeout:   120 * time.Second,
+		ROMounts:  []sandbox.ROMount{{HostPath: "/host/mod", ContainerPath: "/mod", Shared: true}},
+		Env:       []string{"GOFLAGS=-mod=readonly"},
+		SetupCmds: [][]string{{"python", "-m", "pip", "install", "--no-index", "-e", "."}},
+	}
+	if !reflect.DeepEqual(fs.calls[0], want) {
+		t.Errorf("Exec Spec =\n%+v\nwant\n%+v", fs.calls[0], want)
+	}
+}
+
+func TestFinderExecTool_BudgetConsumedByRejectedCall(t *testing.T) {
+	// Call 1 is argument-rejected yet must consume one of the 2 runs: budget is checked before args.
+	fs := &fakeSandbox{}
+	cfg := finderExecCfg(fs)
+	cfg.MaxExecs = 2
+	tool := NewFinderExecTool(cfg)
+
+	if _, err := runFinderExec(t, tool, map[string]any{"command": ""}); err == nil {
+		t.Fatal("empty command must be a tool error")
+	}
+	if _, err := runFinderExec(t, tool, map[string]any{"command": "true"}); err != nil {
+		t.Fatalf("call 2 must succeed: %v", err)
+	}
+	for _, k := range []int{3, 4} {
+		_, err := runFinderExec(t, tool, map[string]any{"command": "true"})
+		if err == nil {
+			t.Fatalf("call %d must be rejected: call 1 consumed one of the %d runs", k, cfg.MaxExecs)
+		}
+		if !strings.Contains(err.Error(), "budget exhausted") {
+			t.Fatalf("call %d must be a budget error, got: %v", k, err)
+		}
+	}
+	if got := len(fs.calls); got != 1 {
+		t.Fatalf("Exec called %d times, want 1 (only call 2)", got)
+	}
+}
+
+func TestFinderExecTool_RendersStderrAtConfiguredCap(t *testing.T) {
+	// stderr is capped at cfg.OutputCap, not the shared sandboxOutputCap.
+	res := sandbox.Result{
+		ExitCode: 2,
+		Stdout:   "ok",
+		Stderr:   "012345678", // cap+1 bytes: cut at cap
+		Duration: 1500 * time.Millisecond,
+	}
+	fs := &fakeSandbox{results: []sandbox.Result{res}}
+	cfg := finderExecCfg(fs)
+	cfg.OutputCap = 8
+	tool := NewFinderExecTool(cfg)
+
+	out, err := runFinderExec(t, tool, map[string]any{"command": "sh -c 'exit 2'"})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	const want = "exit_code=2 timed_out=false duration=1500ms\n" +
+		"\nSTDOUT:\n" +
+		"ok" +
+		"\nSTDERR:\n" +
+		"01234567\n[stderr truncated at 8B]\n"
+	if out != want {
+		t.Errorf("run_code output = %q, want %q", out, want)
+	}
+}
