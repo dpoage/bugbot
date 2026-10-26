@@ -16,9 +16,10 @@
     "genuine_hit": "a scorer hit whose finding, read manually against the gold patch and issue, describes the gold bug (same defect, not a different bug at a nearby line)",
     "originating_finder_unit": "a finder unit (transcript) whose emitted candidate was merged into the finding, matched by the candidate's file+line+defect in the unit's finalize text",
     "fetching_run_code_call": "a run_code command that downloads or installs from a network index or URL (pip download/install from an index, pip index, curl, wget, git clone/fetch/pull, urllib to an https URL, conda/apt install)",
-    "fetch_free_genuine_hit": "arbiter V2 ruling Q2 (GATING): a genuine hit is fetch-free only if every originating finder unit neither retrieved content (Q1: a fetching call of its own that delivered content) nor read, diffed, imported from or listed any path that a retrieving fetch by ANY unit in the same trial wrote (direct destination, or unpacked/copied from it); shared host /tmp counts, and 'read' covers any run_code command or read tool call",
+    "fetch_free_genuine_hit": "arbiter Q2, clarified 2026-10-26 (counterfactual): a hit is fetch-free if it would still be reported with every contaminated unit removed. ALL of: (a) at least one originating unit is clean (no retrieving fetch of its own per Q1, and no read/diff/import/list of any path a retrieving fetch wrote, per Q2); (b) that clean unit's OWN candidate sits at the gold site; (c) the clean unit did not read another unit's candidate or evidence. Merging or dedup with contaminated duplicates does not taint a clean unit's independent candidate.",
     "shared_tmp_read": "superseded as a separate column: under Q2 the shared-/tmp read is part of the gate (write-set touch)",
-    "retrieving_fetch": "arbiter V2 ruling Q1: a fetching call disqualifies only when content was retrieved: the fetching command exited 0 with progress/success signals (Saved/Downloading/Collecting/Cloning into/ok N/got N...), or its destination shows content afterwards. A fetch that fails with nothing written (e.g. 'No matching distribution found') is not contamination. Exit status and destination of every fetching call are recorded in fetching_calls_by_arm."
+    "retrieving_fetch": "arbiter V2 ruling Q1: a fetching call disqualifies only when content was retrieved: the fetching command exited 0 with progress/success signals (Saved/Downloading/Collecting/Cloning into/ok N/got N...), or its destination shows content afterwards. A fetch that fails with nothing written (e.g. 'No matching distribution found') is not contamination. Exit status and destination of every fetching call are recorded in fetching_calls_by_arm.",
+    "all_units_clean_sensitivity": "sensitivity column, superseded strict reading of Q2: every originating unit clean (no retrieval, no write-set touch). Reported beside the clarified rule."
   },
   "method": {
     "scorecards": "python3 bench/harbor/scorecard.py <jobdir> --price 0.3,0.06,1.2 --json <arm>.json (one arm per call); scorer hits are the per-trial findings whose matched_site is set",
@@ -76,7 +77,10 @@
           ],
           "detail": "commands 3-8 of the unit: 'ls /tmp/dj30 /tmp/dj30x ...', 'diff -u /tmp/dj30/django/contrib/auth/validators.py ...', 'diff -rq /tmp/dj30/django django'"
         }
-      ]
+      ],
+      "fetch_free_clarified": false,
+      "all_units_clean": false,
+      "clarified_reread": "Re-checked under the clarified rule: the single originating unit read/diffed /tmp/dj30 (fetch-written), so with it removed no originating unit and no candidate remains -> not fetch-free. Unchanged from the ALL-units mark."
     },
     {
       "arm": "exec1",
@@ -135,7 +139,10 @@
         "value": false
       },
       "fetch_free_v1": false,
-      "write_set_touches": []
+      "write_set_touches": [],
+      "fetch_free_clarified": true,
+      "all_units_clean": true,
+      "clarified_reread": "Re-checked under the clarified rule: both originating units are clean (their single fetching call each retrieved nothing, the trial write-set is empty), both emitted their OWN candidates at sklearn/mixture/base.py:263 (inside gold site 260-264), the state.db leads table has no lead at mixture/base.py lines 250-290 in this trial, and neither transcript reads a foreign llmkit-sandbox or any other unit's working files -> fetch-free under the clarified rule. Same mark as the ALL-units reading."
     },
     {
       "arm": "exec2",
@@ -363,7 +370,10 @@
       ],
       "fetch_free": false,
       "fetch_free_basis": "Q2: every one of the five originating finder units is tainted \u2014 two retrieved upstream astropy wheels themselves (`pip download astropy==5.0/6.0/6.1` into /tmp/astropydl, /tmp/dl, /tmp/dl3, /tmp/dl4) and all five read or diffed those fetch-written trees (/tmp/astropydl/a50, /tmp/astropydl/a60, /tmp/pip-download-*).",
-      "fetch_free_v1": false
+      "fetch_free_v1": false,
+      "fetch_free_clarified": false,
+      "all_units_clean": false,
+      "clarified_reread": "Clarified rule: no clean originating unit exists (all five touched fetch-written trees; two also retrieved) -> removing contaminated units removes every candidate -> not fetch-free."
     },
     {
       "arm": "exec2",
@@ -463,7 +473,10 @@
       ],
       "fetch_free": false,
       "fetch_free_basis": "Q1+Q2: both originating finder units retrieved content \u2014 one ran `pip download django==3.0 --no-deps -d /tmp/dj30` (retrieved), the other `pip download django==3.0 --no-deps -d /tmp/dl` (retrieved) \u2014 and both then touched their fetch-written trees.",
-      "fetch_free_v1": false
+      "fetch_free_v1": false,
+      "fetch_free_clarified": false,
+      "all_units_clean": false,
+      "clarified_reread": "Clarified rule: both originating units retrieved a Django wheel -> no clean unit -> not fetch-free."
     },
     {
       "arm": "exec2",
@@ -590,10 +603,33 @@
           ]
         }
       ],
-      "fetch_free": false,
-      "fetch_free_basis": "Q1+Q2: of the four originating units, one retrieved content (`pip download scikit-learn==0.21.0/0.20.4 --no-deps -d .` into /tmp/sk021, both retrieved) and another read and diffed the fetched wheel tree at /tmp/sk021 (base.py, bayesian_mixture.py, gaussian_mixture.py vs repo); the remaining two units are clean, but the gate requires every originating unit clean.",
+      "fetch_free": true,
+      "fetch_free_basis": "CLARIFIED Q2 (counterfactual): units 000001a1790905540f65acc43107cf7d and 000001a1790bf0dfa7e5827085679216 are clean (zero fetching run_code calls each, zero retrieval, no write-set touch) and each emitted its OWN candidate at the gold site, so the hit would still be reported with the two contaminated units (the /tmp/sk021 downloader and the /tmp/sk021 reader) removed. Under the earlier ALL-units reading it is not fetch-free (sensitivity column).",
       "fetch_free_v1": false,
-      "alt_reading_note": "Under an 'at least one clean originating unit' reading of Q2 this hit would still fail: two of the four units are tainted (one retriever, one /tmp/sk021 reader)."
+      "fetch_free_clarified": true,
+      "all_units_clean": false,
+      "clean_units": [
+        {
+          "transcript": "1793031996756-dfa9bffd990e0186-000001a1790905540f65acc43107cf7d.jsonl",
+          "unit_id": "000001a1790905540f65acc43107cf7d",
+          "lens": "resource-leaks",
+          "strategy": "sweep-wide",
+          "own_candidate": "sklearn/mixture/base.py:263 | Final E-step is computed before the best initialization's parameters are restored, so fit_predict labels do not match the fitted model",
+          "at_gold_site": "base.py:263 is inside gold site 260-264 (tolerance 5)",
+          "fetch_free_status": "0 fetching run_code calls, 0 retrieving, no write-set touch",
+          "no_cross_unit_read": "state.db leads has no row at mixture/base.py lines 250-290 in this trial, so no finder consumed another unit's lead; its one foreign-sandbox command (diff vs /tmp/llmkit-sandbox-26217716) failed with 'No such file or directory', reading nothing; no other unit's working file appears in its transcript"
+        },
+        {
+          "transcript": "1793032188127-b5a988e9be2419f3-000001a1790bf0dfa7e5827085679216.jsonl",
+          "unit_id": "000001a1790bf0dfa7e5827085679216",
+          "lens": "api-contract-misuse",
+          "strategy": "sweep-wide",
+          "own_candidate": "sklearn/mixture/base.py:263 | fit_predict returns labels from the last initialization, not the best one, so they disagree with fit(X).predict(X)",
+          "at_gold_site": "base.py:263 is inside gold site 260-264 (tolerance 5)",
+          "fetch_free_status": "0 fetching run_code calls, 0 retrieving, no write-set touch",
+          "no_cross_unit_read": "no leads at the site (state.db leads empty for mixture/base.py 250-290); its commands read only /testbed and its own /tmp/probe1.py; the one foreign sandbox id in its transcript appears only inside a `find /` result listing, never in a read command"
+        }
+      ]
     }
   ],
   "arms_with_zero_scorer_hits": [
@@ -603,25 +639,28 @@
   "pass1_tallies": {
     "scorer_hits_audited": 5,
     "genuine_hits": 5,
-    "fetch_free_genuine_hits": 1,
+    "fetch_free_genuine_hits": 2,
     "by_arm": {
       "control": {
         "raw_recall": "0/5",
         "genuine": "0/5",
-        "fetch_free_genuine": "0/5"
+        "fetch_free_genuine": "0/5",
+        "all_units_clean": "0/5"
       },
       "exec1": {
         "raw_recall": "2/5",
         "genuine": "2/5",
-        "fetch_free_genuine": "1/5 (sklearn-13142; V2)"
+        "fetch_free_genuine": "1/5 (sklearn-13142)",
+        "all_units_clean": "1/5"
       },
       "exec2": {
         "raw_recall": "3/5",
         "genuine": "3/5",
-        "fetch_free_genuine": "0/5"
+        "fetch_free_genuine": "1/5 (sklearn-13142, clarified rule)",
+        "all_units_clean": "0/5"
       }
     },
-    "v1_to_v2_note": "V1->V2 swaps WHICH hit is fetch-free (django -> sklearn) and leaves the exec1 tally at 1/5."
+    "v1_to_v2_note": "V2 swapped which exec1 hit is fetch-free (django -> sklearn). The 2026-10-26 clarification then flipped sklearn exec2 to fetch-free (counterfactual rule); it is the only hit whose mark changed."
   },
   "fetching_calls_by_arm": {
     "control": [],
@@ -2602,5 +2641,6 @@
       "attempt": "void-ypei-r1-exec2-a3 (2026-10-26 09:37), the first qualifying attempt; a1 (11 lost, 7.24%) and a2 (18 lost, 11.84%) do not qualify"
     },
     "exec3": "PENDING"
-  }
+  },
+  "q2_clarification_note": "The arbiter clarified Q2 (counterfactual rule) on 2026-10-26, after exec2's audit. The clarification decided sklearn-13142 in exec2: two of its four originating units are clean with their own candidates at the gold site, so the hit is fetch-free under the clarified rule (it was not fetch-free under the earlier ALL-units reading, which is kept as the sensitivity column)."
 }

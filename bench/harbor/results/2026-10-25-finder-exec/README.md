@@ -10,10 +10,17 @@ the arbiter V2 rulings of 2026-10-25 (they supersede the earlier E2 rule):
   fetching command exited 0 with progress/success signals, or its
   destination shows content afterwards. A fetch that fails with nothing
   written is not contamination.
-- **Q2 (gating):** a hit is fetch-free only if its originating unit(s)
-  neither retrieved content nor read, diffed, imported from or listed any
-  path that a retrieving fetch by ANY unit in the same trial wrote (shared
-  host `/tmp` counts; "read" covers any `run_code` command or read tool).
+- **Q2 (gating), clarified 2026-10-26 — counterfactual:** a hit is fetch-free
+  if it would still be reported with every contaminated unit removed. That
+  requires all of: at least one originating unit is clean (no retrieval, no
+  read/diff/import/list of any path a retrieving fetch by ANY unit in the
+  same trial wrote — shared host `/tmp` counts, "read" covers any `run_code`
+  command or read tool); that clean unit's OWN candidate sits at the gold
+  site; and the clean unit did not read another unit's candidate or
+  evidence. Merging or dedup with contaminated duplicates does not taint a
+  clean unit's independent candidate. The record also reports the superseded
+  ALL-units-clean reading as a sensitivity column. The clarification came
+  after exec2's audit and decided one mark: sklearn-13142 in exec2.
 
 **Status: pass 2a of 2.** Control, exec1 and exec2 are complete and audited
 below; every exec3 cell reads PENDING until pass 2b fills them (exec3-a2
@@ -32,7 +39,9 @@ starts 14:37:41 on 2026-10-26, with a3/a4 if it does not qualify).
 
 Mark legend: **raw** = the verifier's line-tolerance matcher credits the
 finding; **genuine** = a manual read against the gold patch and issue confirms
-the same defect; **ff** = fetch-free under the V2 rulings (Q1 + Q2 above).
+the same defect; **ff** = fetch-free under the clarified Q2 counterfactual
+rule (a clean originating unit's own candidate at the site, independent of
+contaminated duplicates); **not ff** = no clean originating unit survives.
 Full evidence per hit: `hits.json`.
 
 | task | control | exec1 | exec2 | exec3 |
@@ -41,33 +50,49 @@ Full evidence per hit: `hits.json`.
 | django-11099 | - | raw, genuine (not ff) | raw, genuine (not ff) | PENDING |
 | xarray-4075 | - | - | - | PENDING |
 | pylint-4970 | - | - | - | PENDING |
-| sklearn-13142 | - | raw, genuine, ff | raw, genuine (not ff) | PENDING |
+| sklearn-13142 | - | raw, genuine, ff | raw, genuine, ff | PENDING |
 
 - **django-11099 (exec1):** the hit names the gold defect (`$` anchor
   accepts a trailing newline in both username validators). Its single
   originating finder unit made no fetching calls of its own, but it listed,
   read and diffed `/tmp/dj30`, a tree another unit in the same trial
-  pip-downloaded and unpacked — a Q2 write-set touch, so the hit is not
-  fetch-free even though the mechanism is provable from `/testbed` alone.
+  pip-downloaded and unpacked — a Q2 write-set touch. Removing that
+  contaminated unit removes the only candidate, so the hit is not fetch-free
+  even though the mechanism is provable from `/testbed` alone.
 - **sklearn-13142 (exec1):** the hit names the gold defect (`fit_predict`
   labels come from the last initialization, not the restored best one) and
   both originating finder units proved it with local numpy probes in
   `/testbed`. Each unit also ran one `pip download sklearn==...` call; both
   failed with `No matching distribution found` and wrote nothing, and the
-  trial's fetch write-set is empty, so under Q1+Q2 the hit is fetch-free.
+  trial's fetch write-set is empty; both units' own candidates sit at the
+  site and neither read another unit's work. Fetch-free under the clarified
+  rule and under the ALL-units reading.
 - Control found nothing (0 of 5), matching the 2026-10-24 control arm.
 - **exec2 (a3) hits, all genuine and all named for their gold defects:**
   astropy `ndarithmetic.py:527` (mask handler called with `None` when the
   second operand has no mask), django `validators.py:10` (`$` anchor
   trailing newline), sklearn `base.py:263` (labels from the stale E-step).
-  None is fetch-free: astropy's five originating units all read or diffed
-  fetch-written trees (`/tmp/astropydl/*`, `/tmp/pip-download-*`) and two
-  retrieved wheels themselves; django's two originating units each retrieved
-  a Django-3.0 wheel; sklearn's four originating units include the unit that
-  pip-downloaded scikit-learn 0.21.0/0.20.4 into `/tmp/sk021` and the unit
-  that diffed those wheels against the repo.
+  astropy and django are not fetch-free: all five astropy originating units
+  read or diffed fetch-written trees (`/tmp/astropydl/*`,
+  `/tmp/pip-download-*`) and two retrieved wheels themselves, and django's
+  two originating units each retrieved a Django-3.0 wheel — no clean unit
+  remains in either.
+- **sklearn-13142 (exec2) is the hit the Q2 clarification decided.** Of its
+  four originating units, two are contaminated (the unit that pip-downloaded
+  scikit-learn 0.21.0/0.20.4 into `/tmp/sk021`, and the unit that diffed
+  those wheels against the repo) and two are clean: they made zero fetching
+  calls, touched no fetch-written path, and each emitted its own candidate
+  at `base.py:263` (inside the gold site 260-264) — the hit would still be
+  reported with the contaminated units removed. No lead existed at the site
+  (state.db `leads` has no row for `mixture/base.py` lines 250-290), and
+  neither clean unit read another unit's candidate or evidence (one
+  foreign-sandbox `diff` attempt failed with "No such file or directory",
+  reading nothing). Under the superseded ALL-units reading it is not
+  fetch-free; that reading stays in the tables as the sensitivity column.
 - Under the superseded E2 rule the exec1 fetch-free mark was on django-11099
-  instead; V2 swaps which hit counts and leaves the exec1 tally at 1/5.
+  instead; V2 swapped it to sklearn-13142, and the 2026-10-26 clarification
+  then flipped sklearn-13142 in exec2 to fetch-free — the only mark it
+  changed.
 
 ## Recall and tokens
 
@@ -77,32 +102,32 @@ detail carries a provider 429, counted over the arm's qualifying attempt
 (user ruling 2026-10-26). Source: `control.json`, `exec1.json`, `exec2.json`,
 `hits.json` (commands below).
 
-| arm | raw recall | genuine | fetch-free genuine | run tokens | in_tok (cached) | out_tok | cost USD | lost finder units |
-|---|---|---|---|---|---|---|---|---|
-| control | 0/5 | 0/5 | 0/5 | 100,396,469 | 98,435,266 (83,477,740) | 1,961,203 | 11.849 | 0/152 (0.00%) |
-| exec1 | 2/5 | 2/5 | 1/5 | 94,851,024 | 93,155,692 (79,070,492) | 1,695,332 | 11.004 | 0/152 (0.00%) |
-| exec2 (a3) | 3/5 | 3/5 | 0/5 | 103,783,009 | 101,551,168 (86,631,104) | 2,231,841 | 12.352 | 5/152 (3.29%) |
-| exec3 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| arm | raw recall | genuine | fetch-free genuine (clarified Q2) | ALL-units clean (sensitivity) | run tokens | in_tok (cached) | out_tok | cost USD | lost finder units |
+|---|---|---|---|---|---|---|---|---|---|
+| control | 0/5 | 0/5 | 0/5 | 0/5 | 100,396,469 | 98,435,266 (83,477,740) | 1,961,203 | 11.849 | 0/152 (0.00%) |
+| exec1 | 2/5 | 2/5 | 1/5 | 1/5 | 94,851,024 | 93,155,692 (79,070,492) | 1,695,332 | 11.004 | 0/152 (0.00%) |
+| exec2 (a3) | 3/5 | 3/5 | 1/5 | 0/5 | 103,783,009 | 101,551,168 (86,631,104) | 2,231,841 | 12.352 | 5/152 (3.29%) |
+| exec3 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
 
-## Pass gate (CP1 + V2 + user ruling 2026-10-26)
+## Pass gate (CP1 + V2 clarified + user ruling 2026-10-26)
 
 | leg | threshold | control | exec1 | exec2 | exec3 |
 |---|---|---|---|---|---|
-| fetch-free genuine recall over exec1-3 | mean >= 2/5 (>= 6 hits / 15 runs) | n/a | 1/5 | 0/5 | PENDING |
+| fetch-free genuine recall over exec1-3 | mean >= 2/5 (>= 6 hits / 15 runs) | n/a | 1/5 | 1/5 | PENDING — exec3 needs 4/5 fetch-free genuine hits under the clarified rule (2 + 4 = 6); under the ALL-units sensitivity it needs 5/5 (1 + 0 + 5 = 6) |
 | run tokens per exec arm | <= 1.2x control (<= 120,475,763) | baseline 100,396,469 | PASS (94,851,024) | PASS (103,783,009) | PENDING |
 | lost finder units (user ruling 2026-10-26) | <= 5% of the arm's finder units and every lost unit is the transient "Token Plan rate limit reached" class; first qualifying attempt counts, voided attempts never score | 0/152 YES | 0/152 YES | 5/152 (3.29%), all "rate limit reached" YES | PENDING |
 | every scorer hit manually read | all hits audited | PASS (0 hits) | PASS (2/2) | PASS (3/3) | PENDING |
 
-**Recall leg: FAIL, already determined.** exec1 and exec2 together hold 1
-fetch-free genuine hit in 10 runs; exec3 can add at most 3, so the ceiling is
-4 of 15, below the required 6. Per the round rules this is a reported
-finding, not a rerun trigger. Raw recall passes everywhere it is measurable
-(5 genuine hits in 10 exec runs so far), so the shortfall is entirely the
-fetch-free gate: finder units routinely read upstream releases another unit
-downloaded into the shared `/tmp`.
+**Recall leg: PENDING.** exec1 and exec2 hold 2 fetch-free genuine hits in 10
+runs under the clarified rule, so the gate needs exec3 to land 4 of 5 (5 of 5
+under the ALL-units sensitivity). exec3 has not run to a qualifying attempt
+yet, so no leg verdict is issued before its data lands. Raw recall passes
+everywhere it is measurable (5 genuine hits in 10 exec runs so far); if the
+fetch-free leg ends in a fail with a raw pass, that is a reported finding,
+not a rerun trigger.
 
-**Overall: PENDING** (the tokens, lost-units and hits-read legs pass on all
-audited arms; the recall leg is FAIL by arithmetic ceiling; exec3 pending).
+**Overall: PENDING** (tokens, lost-units and hits-read legs pass on all
+audited arms; the recall leg waits on exec3).
 
 ## Run conditions
 
