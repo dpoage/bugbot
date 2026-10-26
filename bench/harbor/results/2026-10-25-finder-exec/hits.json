@@ -5,10 +5,10 @@
   "generated": "2026-10-25",
   "arms_audited": [
     "control",
-    "exec1"
+    "exec1",
+    "exec2"
   ],
   "arms_pending": [
-    "exec2",
     "exec3"
   ],
   "definitions": {
@@ -136,6 +136,464 @@
       },
       "fetch_free_v1": false,
       "write_set_touches": []
+    },
+    {
+      "arm": "exec2",
+      "task": "astropy__astropy-14995",
+      "trial": "astropy__astropy-14995__ZWyx4cA",
+      "finding": {
+        "file": "astropy/nddata/mixins/ndarithmetic.py",
+        "line": 527,
+        "title": "Mask handler is called with None when the second operand has no mask",
+        "sites": [
+          "astropy/nddata/mixins/ndarithmetic.py:527",
+          "astropy/nddata/mixins/ndarithmetic.py:523"
+        ],
+        "evidence_excerpt": "`_arithmetic_mask` (lines 515-527) has no branch for `self.mask is not None`, `operand is not None`, `operand.mask is None`; the self-masked/operand-unmasked case falls through to line 527 `return handle_mask(self.mask, operand.mask, **kwds)`, invoking the mask handler with `operand.mask is None`; reached by ordinary binary arithmetic with the default `handle_mask=np.logical_or`."
+      },
+      "gold_site": "astropy/nddata/mixins/ndarithmetic.py:523-527; gold patch changes `elif operand is None:` to `elif operand.mask is None:` so the handler is not called with None",
+      "genuine": true,
+      "genuine_reason": "The finding names the gold defect itself: the mask handler receives None when only one operand has a mask, exactly the branch the gold patch adds.",
+      "originating_units": [
+        {
+          "transcript": "1793029072168-17783daae21922e2-000001a178dc505bc97a590a412205b5.jsonl",
+          "unit_id": "000001a178dc505bc97a590a412205b5",
+          "role": "finder",
+          "lens": "dynamic-typing",
+          "strategy": "sweep-wide",
+          "candidates_at_site": [
+            "astropy/nddata/mixins/ndarithmetic.py:379",
+            "astropy/nddata/mixins/ndarithmetic.py:527"
+          ],
+          "run_code_calls": 8,
+          "fetching_calls": 0,
+          "retrieving_calls": 0,
+          "fetching_commands": [],
+          "touches_fetch_write_set": true,
+          "write_set_touches": [
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/astropydl/a60/astropy/nddata",
+                "/tmp/astropydl",
+                "/tmp/astropydl/a60"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/astropydl/a60/astropy/nddata/mixins/__init__.py",
+                "/tmp/astropydl/a60/astropy/nddata/mixins/ndslicing.py",
+                "/tmp/astropydl/a60/astropy/nddata"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/astropydl/a50/astropy/nddata/mixins",
+                "/tmp/astropydl/a50",
+                "/tmp/astropydl"
+              ]
+            }
+          ]
+        },
+        {
+          "transcript": "1793029072168-c14649f043e0c897-000001a178dc5058c06e4d5db7f276e8.jsonl",
+          "unit_id": "000001a178dc5058c06e4d5db7f276e8",
+          "role": "finder",
+          "lens": "resource-leaks",
+          "strategy": "sweep-wide",
+          "candidates_at_site": [
+            "astropy/nddata/mixins/ndarithmetic.py:378",
+            "astropy/nddata/mixins/ndarithmetic.py:523"
+          ],
+          "run_code_calls": 7,
+          "fetching_calls": 3,
+          "retrieving_calls": 2,
+          "fetching_commands": [
+            "cd /tmp && python -c \"import astropy, sys; print(astropy.__version__, astropy.__file__)\"; pip download astropy==5.0 --no-deps -d /tmp/astropydl 2>&1 | tail -2",
+            "cd /tmp/astropydl && pip download astropy==6.0 astropy==6.1 --no-deps -d . 2>&1 | tail -3; ls",
+            "cd /tmp/astropydl && pip download astropy==6.0 --no-deps -d . 2>&1 | tail -2 && pip download astropy==6.1 --no-deps -d . 2>&1 | tail -2 && python -c \"\nimport zipfile,glob\nfor v in ['6.0','6.1']:\n    w=glob.glob(f'astropy-{v}-*.whl')[0]\n    zipfile.ZipFile(w).extractall('a'+v.replace('.',''))\nprint('ok')\n\" && for v in 60 61; do echo \"########## $v\"; for f in __init__.py ndarithmetic.py ndio.py ndslicing.py; do echo \"=== $f ===\"; diff -u a$v/astropy/nddata/mixins/$f /testbed/astropy/nddata/mixins/$f; done; done"
+          ],
+          "touches_fetch_write_set": true,
+          "write_set_touches": [
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/astropydl"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/astropydl"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/astropydl"
+              ]
+            }
+          ]
+        },
+        {
+          "transcript": "1793029452037-0d62a7da33cb3e7d-000001a178e23105a7d1d1042eb8f67b.jsonl",
+          "unit_id": "000001a178e23105a7d1d1042eb8f67b",
+          "role": "finder",
+          "lens": "injection/input-validation",
+          "strategy": "sweep-wide",
+          "candidates_at_site": [
+            "astropy/nddata/mixins/ndarithmetic.py:379",
+            "astropy/nddata/mixins/ndarithmetic.py:527"
+          ],
+          "run_code_calls": 9,
+          "fetching_calls": 4,
+          "retrieving_calls": 3,
+          "fetching_commands": [
+            "find / -name \"ndarithmetic.py\" -not -path \"*/tmp/llmkit-sandbox-*/astropy/nddata/*\" 2>/dev/null | head -20; pip download astropy==6.0.0 --no-deps -d /tmp/dl 2>&1 | tail -2",
+            "cd /tmp && pip download astropy --no-deps --no-binary :all: -d /tmp/dl2 2>&1 | tail -3; ls /tmp/dl2 2>/dev/null",
+            "cd /tmp && timeout 100 pip download astropy --no-deps -d /tmp/dl3 2>&1 | tail -3; ls /tmp/dl3 2>/dev/null",
+            "cd /tmp && timeout 110 pip download astropy==7.0.1 --no-deps --only-binary :all: --python-version 3.11 --platform manylinux2014_x86_64 -d /tmp/dl4 2>&1 | tail -3; ls /tmp/dl4 2>/dev/null"
+          ],
+          "touches_fetch_write_set": true,
+          "write_set_touches": [
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/dl"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/astropydl"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/astropydl",
+                "/tmp/astropydl/a60"
+              ]
+            }
+          ]
+        },
+        {
+          "transcript": "1793029637944-349bb37ca8e4ec35-000001a178e5073817f8f6cb07ce28cd.jsonl",
+          "unit_id": "000001a178e5073817f8f6cb07ce28cd",
+          "role": "finder",
+          "lens": "api-contract-misuse",
+          "strategy": "sweep-wide",
+          "candidates_at_site": [
+            "astropy/nddata/mixins/ndarithmetic.py:378",
+            "astropy/nddata/mixins/ndarithmetic.py:527"
+          ],
+          "run_code_calls": 9,
+          "fetching_calls": 0,
+          "retrieving_calls": 0,
+          "fetching_commands": [],
+          "touches_fetch_write_set": true,
+          "write_set_touches": [
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/astropydl"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/astropydl/a60/astropy/nddata",
+                "/tmp/astropydl",
+                "/tmp/astropydl/a60"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/pip-download-w96db49b/astropy_4e7b3c29a73a4cf1a02e39c42af8abdc",
+                "/tmp/pip-download-w96db49b/astropy_4e7b3c29a73a4cf1a02e39c42af8abdc/astropy/nddata"
+              ]
+            }
+          ]
+        },
+        {
+          "transcript": "1793029641885-2374ad457bd88085-000001a178e5169d2b6017ea6163371b.jsonl",
+          "unit_id": "000001a178e5169d2b6017ea6163371b",
+          "role": "finder",
+          "lens": "boundary-conditions",
+          "strategy": "sweep-wide",
+          "candidates_at_site": [
+            "astropy/nddata/mixins/ndarithmetic.py:379",
+            "astropy/nddata/mixins/ndarithmetic.py:523"
+          ],
+          "run_code_calls": 7,
+          "fetching_calls": 0,
+          "retrieving_calls": 0,
+          "fetching_commands": [],
+          "touches_fetch_write_set": true,
+          "write_set_touches": [
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/pip-download-w96db49b/astropy_4e7b3c29a73a4cf1a02e39c42af8abdc",
+                "/tmp/astropydl/a50",
+                "/tmp/astropydl"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/astropydl/a60/astropy/nddata",
+                "/tmp/pip-download-w96db49b/astropy_4e7b3c29a73a4cf1a02e39c42af8abdc",
+                "/tmp/pip-download-w96db49b/astropy_4e7b3c29a73a4cf1a02e39c42af8abdc/astropy/version.py"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/astropydl/a60/astropy/nddata",
+                "/tmp/astropydl",
+                "/tmp/astropydl/a60"
+              ]
+            }
+          ]
+        }
+      ],
+      "fetch_free": false,
+      "fetch_free_basis": "Q2: every one of the five originating finder units is tainted \u2014 two retrieved upstream astropy wheels themselves (`pip download astropy==5.0/6.0/6.1` into /tmp/astropydl, /tmp/dl, /tmp/dl3, /tmp/dl4) and all five read or diffed those fetch-written trees (/tmp/astropydl/a50, /tmp/astropydl/a60, /tmp/pip-download-*).",
+      "fetch_free_v1": false
+    },
+    {
+      "arm": "exec2",
+      "task": "django__django-11099",
+      "trial": "django__django-11099__j4FT4Xd",
+      "finding": {
+        "file": "django/contrib/auth/validators.py",
+        "line": 10,
+        "title": "ASCIIUsernameValidator accepts usernames with a trailing newline",
+        "sites": [
+          "django/contrib/auth/validators.py:10",
+          "django/contrib/auth/validators.py:20"
+        ],
+        "evidence_excerpt": "regex ends with '$' and RegexValidator.__call__ validates with regex.search(), so 'alice\\n' matches and no ValidationError is raised; Django's own strict patterns use '\\Z' (core/validators.py:167-178, :296). The finding also corrects its own delivery path (admin forms strip whitespace before validation), narrowing reachability without changing the defect."
+      },
+      "gold_site": "django/contrib/auth/validators.py:10-11 and :20-21; gold patch switches '$' to '\\Z' in both validators",
+      "genuine": true,
+      "genuine_reason": "The finding names the gold defect itself: the '$' anchor accepting a trailing newline in both username validators, which the gold patch fixes with '\\Z'.",
+      "originating_units": [
+        {
+          "transcript": "1793029803622-38c5b640a479cb78-000001a178e78e6616efe58da9bfc235.jsonl",
+          "unit_id": "000001a178e78e6616efe58da9bfc235",
+          "role": "finder",
+          "lens": "resource-leaks",
+          "strategy": "sweep-wide",
+          "candidates_at_site": [
+            "django/contrib/auth/validators.py:10",
+            "django/contrib/auth/validators.py:20"
+          ],
+          "run_code_calls": 9,
+          "fetching_calls": 2,
+          "retrieving_calls": 1,
+          "fetching_commands": [
+            "cd /tmp && timeout 60 pip download django==3.0 --no-deps -d /tmp/dj30 2>&1 | tail -5",
+            "cd /tmp && timeout 30 curl -sS -o /dev/null -w \"%{http_code}\\n\" https://raw.githubusercontent.com/django/django/main/django/contrib/auth/validators.py 2>&1 | tail -3"
+          ],
+          "touches_fetch_write_set": true,
+          "write_set_touches": [
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/dj30"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/dj30"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/dj30"
+              ]
+            }
+          ]
+        },
+        {
+          "transcript": "1793029885810-64d77cb3abdc9bcd-000001a178e8cf727627d8dc7df3b7b3.jsonl",
+          "unit_id": "000001a178e8cf727627d8dc7df3b7b3",
+          "role": "finder",
+          "lens": "boundary-conditions",
+          "strategy": "sweep-wide",
+          "candidates_at_site": [
+            "django/contrib/auth/validators.py:10",
+            "django/contrib/auth/validators.py:20"
+          ],
+          "run_code_calls": 9,
+          "fetching_calls": 1,
+          "retrieving_calls": 1,
+          "fetching_commands": [
+            "cd $(pwd); pip download django==3.0 --no-deps -d /tmp/dl 2>&1 | tail -3; python -c \"import django, sys; print(django.__file__, django.__version__)\""
+          ],
+          "touches_fetch_write_set": true,
+          "write_set_touches": [
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/dl"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/dl"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/dl"
+              ]
+            }
+          ]
+        }
+      ],
+      "fetch_free": false,
+      "fetch_free_basis": "Q1+Q2: both originating finder units retrieved content \u2014 one ran `pip download django==3.0 --no-deps -d /tmp/dj30` (retrieved), the other `pip download django==3.0 --no-deps -d /tmp/dl` (retrieved) \u2014 and both then touched their fetch-written trees.",
+      "fetch_free_v1": false
+    },
+    {
+      "arm": "exec2",
+      "task": "scikit-learn__scikit-learn-13142",
+      "trial": "scikit-learn__scikit-learn-13142__Fg4GT5s",
+      "finding": {
+        "file": "sklearn/mixture/base.py",
+        "line": 263,
+        "title": "fit_predict returns labels from the last initialization instead of the retained best model",
+        "sites": [
+          "sklearn/mixture/base.py:263"
+        ],
+        "evidence_excerpt": "the final E-step (`_, log_resp = self._e_step(X)`, line 263) runs BEFORE `self._set_parameters(best_params)` (line 272), so with n_init > 1 fit_predict(X) returns labels from the LAST initialization while the estimator keeps the BEST one, violating the invariant documented in the code comment."
+      },
+      "gold_site": "sklearn/mixture/base.py:260-264 and :275-276; gold patch moves the final E-step after _set_parameters(best_params)",
+      "genuine": true,
+      "genuine_reason": "The finding names the gold defect itself: labels from the stale E-step before the best-fit parameters are restored, exactly the relocation in the gold patch.",
+      "originating_units": [
+        {
+          "transcript": "1793031893602-f7caecd5f707777b-000001a179075c3a7edda168b21d7da5.jsonl",
+          "unit_id": "000001a179075c3a7edda168b21d7da5",
+          "role": "finder",
+          "lens": "injection/input-validation",
+          "strategy": "sweep-wide",
+          "candidates_at_site": [
+            "sklearn/mixture/base.py:263"
+          ],
+          "run_code_calls": 8,
+          "fetching_calls": 3,
+          "retrieving_calls": 2,
+          "fetching_commands": [
+            "cd /tmp && python -c \"import sklearn, os; print(sklearn.__version__, os.path.dirname(sklearn.__file__))\" 2>&1 | head -20; pip download scikit-learn==0.21.dev0 2>&1 | head -5",
+            "cd /tmp && rm -rf sk021 && mkdir sk021 && cd sk021 && pip download scikit-learn==0.21.0 --no-deps -d . 2>&1 | tail -3 && ls",
+            "cd /tmp/sk021 && pip download scikit-learn==0.20.4 --no-deps -d . 2>&1 | tail -2 && python -c \"\nimport zipfile,glob\nfor w in glob.glob('scikit_learn-0.20.4*.whl'):\n    zipfile.ZipFile(w).extractall('ext20')\n\" && diff -u ext20/sklearn/mixture/base.py ext/sklearn/mixture/base.py"
+          ],
+          "touches_fetch_write_set": true,
+          "write_set_touches": [
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/sk021"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/sk021"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/sk021"
+              ]
+            }
+          ]
+        },
+        {
+          "transcript": "1793031996756-dfa9bffd990e0186-000001a1790905540f65acc43107cf7d.jsonl",
+          "unit_id": "000001a1790905540f65acc43107cf7d",
+          "role": "finder",
+          "lens": "resource-leaks",
+          "strategy": "sweep-wide",
+          "candidates_at_site": [
+            "sklearn/mixture/base.py:263"
+          ],
+          "run_code_calls": 9,
+          "fetching_calls": 0,
+          "retrieving_calls": 0,
+          "fetching_commands": [],
+          "touches_fetch_write_set": false,
+          "write_set_touches": []
+        },
+        {
+          "transcript": "1793032188127-b5a988e9be2419f3-000001a1790bf0dfa7e5827085679216.jsonl",
+          "unit_id": "000001a1790bf0dfa7e5827085679216",
+          "role": "finder",
+          "lens": "api-contract-misuse",
+          "strategy": "sweep-wide",
+          "candidates_at_site": [
+            "sklearn/mixture/base.py:263"
+          ],
+          "run_code_calls": 4,
+          "fetching_calls": 0,
+          "retrieving_calls": 0,
+          "fetching_commands": [],
+          "touches_fetch_write_set": false,
+          "write_set_touches": []
+        },
+        {
+          "transcript": "1793032389420-636619c037efffcc-000001a1790f032c1a47d11b2b7f3a86.jsonl",
+          "unit_id": "000001a1790f032c1a47d11b2b7f3a86",
+          "role": "finder",
+          "lens": "boundary-conditions",
+          "strategy": "sweep-wide",
+          "candidates_at_site": [
+            "sklearn/mixture/base.py:263"
+          ],
+          "run_code_calls": 9,
+          "fetching_calls": 0,
+          "retrieving_calls": 0,
+          "fetching_commands": [],
+          "touches_fetch_write_set": true,
+          "write_set_touches": [
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/sk021"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/sk021"
+              ]
+            },
+            {
+              "tool": "run_code",
+              "paths": [
+                "/tmp/sk021/whl21/sklearn/mixture/base.py",
+                "/tmp/sk021"
+              ]
+            }
+          ]
+        }
+      ],
+      "fetch_free": false,
+      "fetch_free_basis": "Q1+Q2: of the four originating units, one retrieved content (`pip download scikit-learn==0.21.0/0.20.4 --no-deps -d .` into /tmp/sk021, both retrieved) and another read and diffed the fetched wheel tree at /tmp/sk021 (base.py, bayesian_mixture.py, gaussian_mixture.py vs repo); the remaining two units are clean, but the gate requires every originating unit clean.",
+      "fetch_free_v1": false,
+      "alt_reading_note": "Under an 'at least one clean originating unit' reading of Q2 this hit would still fail: two of the four units are tainted (one retriever, one /tmp/sk021 reader)."
     }
   ],
   "arms_with_zero_scorer_hits": [
@@ -143,8 +601,8 @@
   ],
   "control_note": "control scored bug_recall 0.000 (0 of 5 tasks); there are no scorer hits to audit, and it ran zero run_code calls (finder_exec off).",
   "pass1_tallies": {
-    "scorer_hits_audited": 2,
-    "genuine_hits": 2,
+    "scorer_hits_audited": 5,
+    "genuine_hits": 5,
     "fetch_free_genuine_hits": 1,
     "by_arm": {
       "control": {
@@ -156,6 +614,11 @@
         "raw_recall": "2/5",
         "genuine": "2/5",
         "fetch_free_genuine": "1/5 (sklearn-13142; V2)"
+      },
+      "exec2": {
+        "raw_recall": "3/5",
+        "genuine": "3/5",
+        "fetch_free_genuine": "0/5"
       }
     },
     "v1_to_v2_note": "V1->V2 swaps WHICH hit is fetch-free (django -> sklearn) and leaves the exec1 tally at 1/5."
@@ -900,7 +1363,1244 @@
         "command": "find / -name \"base.py\" -path \"*mixture*\" -not -path \"/testbed/*\" 2>/dev/null | head; ls /root/.cache/pip 2>/dev/null | head; pip download sklearn==0.21.3 --no-deps -d /tmp/dl 2>&1 | tail -3"
       }
     ],
-    "note": "one entry per fetching run_code call in the audited arms (V2 Q1): exit status, destination(s), retrieved verdict; write-sets per trial in /tmp/ypei-r1/s6/audit-<arm>.json"
+    "note": "one entry per fetching run_code call in the audited arms (V2 Q1): exit status, destination(s), retrieved verdict; write-sets per trial in /tmp/ypei-r1/s6/audit-<arm>.json",
+    "exec2": [
+      {
+        "arm": "exec2",
+        "trial": "astropy__astropy-14995__ZWyx4cA",
+        "unit": "1793029072168-c14649f043e0c897-000001a178dc5058c06e4d5db7f276e8.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/astropydl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && python -c \"import astropy, sys; print(astropy.__version__, astropy.__file__)\"; pip download astropy==5.0 --no-deps -d /tmp/astropydl 2>&1 | tail -2"
+      },
+      {
+        "arm": "exec2",
+        "trial": "astropy__astropy-14995__ZWyx4cA",
+        "unit": "1793029072168-c14649f043e0c897-000001a178dc5058c06e4d5db7f276e8.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/astropydl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "astropy-5.0-cp39-cp39-manylinux_2_12_x86_64.manylinux2010_x86_64.whl\n",
+            "whl"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp/astropydl && pip download astropy==6.0 astropy==6.1 --no-deps -d . 2>&1 | tail -3; ls"
+      },
+      {
+        "arm": "exec2",
+        "trial": "astropy__astropy-14995__ZWyx4cA",
+        "unit": "1793029072168-c14649f043e0c897-000001a178dc5058c06e4d5db7f276e8.jsonl",
+        "role": "finder",
+        "exit": 1,
+        "destinations": [
+          "/tmp/astropydl"
+        ],
+        "retrieved": false,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [
+          [
+            "Could not find a version that satisfies",
+            ""
+          ],
+          [
+            "No matching distribution found",
+            ""
+          ]
+        ],
+        "command": "cd /tmp/astropydl && pip download astropy==6.0 --no-deps -d . 2>&1 | tail -2 && pip download astropy==6.1 --no-deps -d . 2>&1 | tail -2 && python -c \"\nimport zipfile,glob\nfor v in ['6.0','6.1']:\n    w=glob.glob(f'astropy-{v}-*.whl')[0]\n    zipfile.ZipFile(w).extractall('a'+v.replace('.',''))\nprint('ok')\n\" && for v in 60 61; do echo \"########## $v\"; for f in __init__.py ndarithmetic.py ndio.py ndslicing.py; do echo \"=== $f ===\"; diff -u a$v/astropy/nddata/mixins/$f /testbed/astropy/nddata/mixins/$f; done; done"
+      },
+      {
+        "arm": "exec2",
+        "trial": "astropy__astropy-14995__ZWyx4cA",
+        "unit": "1793029174691-e052a4ae5b7c6878-000001a178ddf5a28b08af12b6f0fbf3.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [],
+        "command": "cd /tmp && python -c \"import astropy, sys; print(astropy.__version__, astropy.__file__)\"; pip download astropy==0 2>/dev/null | head -1; ls /usr/lib/python3*/site-packages 2>/dev/null | head"
+      },
+      {
+        "arm": "exec2",
+        "trial": "astropy__astropy-14995__ZWyx4cA",
+        "unit": "1793029452037-0d62a7da33cb3e7d-000001a178e23105a7d1d1042eb8f67b.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "find / -name \"ndarithmetic.py\" -not -path \"*/tmp/llmkit-sandbox-*/astropy/nddata/*\" 2>/dev/null | head -20; pip download astropy==6.0.0 --no-deps -d /tmp/dl 2>&1 | tail -2"
+      },
+      {
+        "arm": "exec2",
+        "trial": "astropy__astropy-14995__ZWyx4cA",
+        "unit": "1793029452037-0d62a7da33cb3e7d-000001a178e23105a7d1d1042eb8f67b.jsonl",
+        "role": "finder",
+        "exit": -1,
+        "destinations": [
+          "/tmp/dl2"
+        ],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [],
+        "command": "cd /tmp && pip download astropy --no-deps --no-binary :all: -d /tmp/dl2 2>&1 | tail -3; ls /tmp/dl2 2>/dev/null"
+      },
+      {
+        "arm": "exec2",
+        "trial": "astropy__astropy-14995__ZWyx4cA",
+        "unit": "1793029452037-0d62a7da33cb3e7d-000001a178e23105a7d1d1042eb8f67b.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl3"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "astropy-6.0.1-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl\n",
+            "whl"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && timeout 100 pip download astropy --no-deps -d /tmp/dl3 2>&1 | tail -3; ls /tmp/dl3 2>/dev/null"
+      },
+      {
+        "arm": "exec2",
+        "trial": "astropy__astropy-14995__ZWyx4cA",
+        "unit": "1793029452037-0d62a7da33cb3e7d-000001a178e23105a7d1d1042eb8f67b.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl4"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "astropy-7.0.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl\n",
+            "whl"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && timeout 110 pip download astropy==7.0.1 --no-deps --only-binary :all: --python-version 3.11 --platform manylinux2014_x86_64 -d /tmp/dl4 2>&1 | tail -3; ls /tmp/dl4 2>/dev/null"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029074743-8aa26e8693cb43de-000001a178dc52e5e025884ed86d428a.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [
+          [
+            "UnicodeEncodeError",
+            ""
+          ]
+        ],
+        "command": "cd /tmp && timeout 25 pip download django==3.0 --no-deps --no-binary :all: -d /tmp/dl 2>&1 | tail -5"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029074743-8aa26e8693cb43de-000001a178dc52e5e025884ed86d428a.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [
+          [
+            "UnicodeEncodeError",
+            ""
+          ]
+        ],
+        "command": "cd /tmp && rm -rf dl && PYTHONIOENCODING=utf-8 timeout 60 pip download django==3.0 --no-deps --no-binary :all: -d /tmp/dl 2>&1 | tail -3; ls /tmp/dl"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029155325-34345da295a9f119-000001a178dda9fd542ae0e6f8bbac99.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /repo 2>/dev/null || cd .; ls; cat django/__init__.py | head -20; pip download django==3.0 2>&1 | tail -2"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029155325-34345da295a9f119-000001a178dda9fd542ae0e6f8bbac99.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Using cached",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "Django-3.0-py3-none-any.whl\n",
+            "whl"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && pip download django==3.0 --no-deps -d /tmp/dl 2>&1 | tail -3 && ls /tmp/dl"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029155325-34345da295a9f119-000001a178dda9fd542ae0e6f8bbac99.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [],
+        "command": "cd /tmp && pip download django==3.0 --no-deps -d /tmp/dl -q 2>&1 | tail -2 ; python -c \"\nimport zipfile,glob\nw=glob.glob('/tmp/dl/*.whl')[0]\nzipfile.ZipFile(w).extractall('/tmp/dj30')\nprint('extracted', w)\n\" ; cd /tmp/dj30 && for f in __init__.py admin.py apps.py backends.py base_user.py checks.py context_processors.py decorators.py; do echo \"=== $f ===\"; diff -u /repo/django/contrib/auth/$f /tmp/dj30/django/contrib/auth/$f 2>/dev/null || diff -u django/contrib/auth/$f /tmp/dj30/django/contrib/auth/$f; done"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029155325-34345da295a9f119-000001a178dda9fd542ae0e6f8bbac99.jsonl",
+        "role": "finder",
+        "exit": 2,
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [],
+        "command": "REPO=/tmp/llmkit-sandbox-2429845562; cd /tmp && pip download django==3.0 --no-deps -d /tmp/dl -q 2>&1 | tail -2 ; python -c \"\nimport zipfile,glob\nw=glob.glob('/tmp/dl/*.whl')[0]\nzipfile.ZipFile(w).extractall('/tmp/dj30')\n\" ; for f in __init__.py admin.py apps.py backends.py base_user.py checks.py context_processors.py decorators.py; do echo \"=== $f ===\"; diff -u $REPO/django/contrib/auth/$f /tmp/dj30/django/contrib/auth/$f; done"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029155325-34345da295a9f119-000001a178dda9fd542ae0e6f8bbac99.jsonl",
+        "role": "finder",
+        "exit": "budget_exhausted",
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [
+          [
+            "run_code budget exhausted",
+            ""
+          ]
+        ],
+        "command": "REPO=$(pwd); cd /tmp && pip download django==3.0 --no-deps -d /tmp/dl -q 2>&1 | tail -2 ; python -c \"\nimport zipfile,glob\nw=glob.glob('/tmp/dl/*.whl')[0]\nzipfile.ZipFile(w).extractall('/tmp/dj30')\n\" ; for f in __init__.py admin.py apps.py backends.py base_user.py checks.py context_processors.py decorators.py; do echo \"=== $f ===\"; diff -u $REPO/django/contrib/auth/$f /tmp/dj30/django/contrib/auth/$f; done"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029211802-2c094be6df85d3b6-000001a178de86991a5fd5ece42de50e.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Collecting d",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "pip download django==3.0 --no-deps -d /tmp/dl 2>&1 | tail -3; python -c \"import django, os; print(os.path.dirname(django.__file__))\" 2>&1 | tail -2; ls /usr/lib/python3*/site-packages 2>/dev/null | head"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029211802-2c094be6df85d3b6-000001a178de86991a5fd5ece42de50e.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl1"
+        ],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [
+          [
+            "UnicodeEncodeError",
+            ""
+          ]
+        ],
+        "command": "cd /tmp && pip download django==3.0a1 --no-deps --no-binary :all: -d /tmp/dl1 2>&1 | tail -3; ls /tmp/dl1 2>/dev/null"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029211802-2c094be6df85d3b6-000001a178de86991a5fd5ece42de50e.jsonl",
+        "role": "finder",
+        "exit": "budget_exhausted",
+        "destinations": [
+          "/tmp/dl1"
+        ],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [
+          [
+            "run_code budget exhausted",
+            ""
+          ]
+        ],
+        "command": "cd /tmp && pip download django==3.0a1 --no-deps -d /tmp/dl1 2>&1 | tail -3; ls /tmp/dl1 2>/dev/null; python -c \"\nimport zipfile,glob\nf=glob.glob('/tmp/dl1/*.whl')\nprint(f)\nif f:\n    zipfile.ZipFile(f[0]).extractall('/tmp/dj30a1')\n\""
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029438011-6444dae41c6eb58d-000001a178e1fa3bf2d2f0eadb8a2453.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Collecting d",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "pip download django==3.0 --no-deps -d /tmp/dl 2>&1 | tail -3; python -c \"import sys; print([p for p in sys.path])\"; ls /usr/lib/python3*/site-packages 2>/dev/null | head"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029438011-6444dae41c6eb58d-000001a178e1fa3bf2d2f0eadb8a2453.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "Django-2.2-py3-none-any.whl",
+            "whl"
+          ],
+          [
+            "Django-3.0-py3-none-any.whl",
+            "whl"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp/dl && pip download django==3.0a1 --no-deps --pre -d /tmp/dl 2>&1 | tail -2; pip download django==2.2 --no-deps -d /tmp/dl 2>&1 | tail -2; ls /tmp/dl"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029803622-38c5b640a479cb78-000001a178e78e6616efe58da9bfc235.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dj30"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Collecting d",
+            ""
+          ],
+          [
+            "Using cached",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && timeout 60 pip download django==3.0 --no-deps -d /tmp/dj30 2>&1 | tail -5"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029803622-38c5b640a479cb78-000001a178e78e6616efe58da9bfc235.jsonl",
+        "role": "finder",
+        "exit": "budget_exhausted",
+        "destinations": [],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [
+          [
+            "run_code budget exhausted",
+            ""
+          ]
+        ],
+        "command": "cd /tmp && timeout 30 curl -sS -o /dev/null -w \"%{http_code}\\n\" https://raw.githubusercontent.com/django/django/main/django/contrib/auth/validators.py 2>&1 | tail -3"
+      },
+      {
+        "arm": "exec2",
+        "trial": "django__django-11099__j4FT4Xd",
+        "unit": "1793029885810-64d77cb3abdc9bcd-000001a178e8cf727627d8dc7df3b7b3.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Collecting d",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd $(pwd); pip download django==3.0 --no-deps -d /tmp/dl 2>&1 | tail -3; python -c \"import django, sys; print(django.__file__, django.__version__)\""
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793030316699-b386b9da6c923e51-000001a178ef5be6c888e8719f567ee6.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xr"
+        ],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [
+          [
+            "Could not find a version that satisfies",
+            ""
+          ],
+          [
+            "No matching distribution found",
+            ""
+          ]
+        ],
+        "command": "pip download xarray==0.15.2 --no-deps -d /tmp/xr 2>&1 | tail -3; python -c \"import site; print(site.getsitepackages())\"; ls /usr/lib/python3*/site-packages 2>/dev/null | head"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793030316699-b386b9da6c923e51-000001a178ef5be6c888e8719f567ee6.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xr"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "xarray-0.16.0.tar.gz\n",
+            "tar.gz"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && rm -rf xr && mkdir xr && cd xr && pip download xarray==0.16.0 --no-deps --no-binary :all: -d . 2>&1 | tail -3 && ls"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793030535602-2f70cbd880c7d1a5-000001a178f2b9b232f8f9df95319bd4.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xr"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "xarray-0.16.0-py3-none-any.whl",
+            "whl"
+          ],
+          [
+            "xarray-0.16.0.tar.gz\n",
+            "tar.gz"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /testbed && pip download xarray==0.16.0 --no-deps -d /tmp/xr 2>&1 | tail -3; ls /tmp/xr 2>/dev/null"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793030535602-2f70cbd880c7d1a5-000001a178f2b9b232f8f9df95319bd4.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Cloning into",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && timeout 120 git clone --filter=blob:none --no-checkout https://github.com/pydata/xarray.git xarray-upstream 2>&1 | tail -5"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793030543934-35a8cad17e5068f3-000001a178f2da3e98d9f70bff129eb2.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xa"
+        ],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [
+          [
+            "Could not find a version that satisfies",
+            ""
+          ],
+          [
+            "No matching distribution found",
+            ""
+          ]
+        ],
+        "command": "cd /tmp && timeout 25 pip download xarray==0.15.2 --no-deps --no-binary :all: -d /tmp/xa 2>&1 | tail -5"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793030543934-35a8cad17e5068f3-000001a178f2da3e98d9f70bff129eb2.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xa"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "-rw-r--r-- 1 root root 1934184",
+            ""
+          ],
+          [
+            "-rw-r--r-- 1 root root 1987841",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && rm -rf xa && mkdir -p xa && timeout 120 pip download xarray==0.15.1 --no-deps --no-binary :all: -d /tmp/xa 2>&1 | tail -3; timeout 120 pip download xarray==0.16.0 --no-deps --no-binary :all: -d /tmp/xa 2>&1 | tail -3; ls -la /tmp/xa"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793030726734-6e3d3de480d96f6a-000001a178f59e0ca4ae27a435366edb.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xr"
+        ],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [
+          [
+            "Could not find a version that satisfies",
+            ""
+          ],
+          [
+            "No matching distribution found",
+            ""
+          ]
+        ],
+        "command": "ls /testbed/.eggs 2>/dev/null; python -c \"import site;print(site.getsitepackages())\"; ls /usr/lib/python3*/site-packages 2>/dev/null | head; pip download xarray==0.15.2 --no-deps -d /tmp/xr 2>&1 | tail -3"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793030726734-6e3d3de480d96f6a-000001a178f59e0ca4ae27a435366edb.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xr15"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "xarray-0.15.1.tar.gz\n",
+            "tar.gz"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && pip download xarray==0.15.1 --no-deps --no-binary :all: -d /tmp/xr15 2>&1 | tail -3; ls /tmp/xr15"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793031185440-7f09204d8a48543b-000001a178fca41ff59f2aaf25debc12.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xrdl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Using cached",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && timeout 60 pip download xarray==0.16.0 --no-deps --no-binary :all: -d /tmp/xrdl 2>&1 | tail -5"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793031185440-7f09204d8a48543b-000001a178fca41ff59f2aaf25debc12.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xrcommit"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && timeout 90 pip download \"xarray @ git+https://github.com/pydata/xarray@19b088636\" --no-deps --no-build-isolation -d /tmp/xrcommit 2>&1 | tail -5"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793031302320-3b2a649fce71b5af-000001a178fe6cb0c7d06977a07a3fd8.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xr"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Collecting x",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "python -c \"import xarray, os; print(os.path.dirname(xarray.__file__))\"; pip download xarray==0.16.0 --no-deps -d /tmp/xr 2>&1 | tail -3"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793031302320-3b2a649fce71b5af-000001a178fe6cb0c7d06977a07a3fd8.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xarray-19b088636.tar.gz"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "-rw-r--r-- 1 root root 1960940",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && (curl -sL -o xarray-19b088636.tar.gz https://github.com/pydata/xarray/archive/19b088636.tar.gz && ls -la xarray-19b088636.tar.gz && tar tzf xarray-19b088636.tar.gz | head -5) 2>&1 | tail -20"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793031305406-2ca3081494d096ff-000001a178fe78beb8b9ca3e0151344c.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xr"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Collecting x",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && timeout 60 pip download xarray==0.16.0 --no-deps --no-binary :all: -d /tmp/xr 2>&1 | tail -5"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793031521139-43fcab2cbf110ff4-000001a17901c373a61a647a010c87e1.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xr"
+        ],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [
+          [
+            "Could not find a version that satisfies",
+            ""
+          ],
+          [
+            "No matching distribution found",
+            ""
+          ]
+        ],
+        "command": "python -c \"import site,sys; print(sys.path)\"; pip download xarray==0.15.2 --no-deps -d /tmp/xr 2>&1 | tail -2"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793031521139-43fcab2cbf110ff4-000001a17901c373a61a647a010c87e1.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xr151",
+          "/tmp/xr160"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "xarray-0.15.1.tar.gz\n",
+            "tar.gz"
+          ],
+          [
+            "xarray-0.16.0.tar.gz\n",
+            "tar.gz"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && pip download xarray==0.15.1 --no-deps --no-binary :all: -d /tmp/xr151 2>&1 | tail -3; pip download xarray==0.16.0 --no-deps --no-binary :all: -d /tmp/xr160 2>&1 | tail -3; ls /tmp/xr151 /tmp/xr160"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793031566561-ea26e391d573126f-000001a1790274e1b6fe68fa12024027.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xr"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "xarray-0.15.1-py3-none-any.whl",
+            "whl"
+          ],
+          [
+            "xarray-0.16.0-py3-none-any.whl",
+            "whl"
+          ],
+          [
+            "xarray-0.16.0.tar.gz",
+            "tar.gz"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "pip download xarray==0.15.1 --no-deps -d /tmp/xr 2>&1 | tail -3; ls /tmp/xr 2>/dev/null; python -c \"import site; print(site.getsitepackages())\""
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793031566561-ea26e391d573126f-000001a1790274e1b6fe68fa12024027.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Cloning into",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && timeout 300 git clone --filter=blob:none --no-checkout https://github.com/pydata/xarray.git xarray-git 2>&1 | tail -5"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793031702544-96b5bc213fb9382a-000001a1790487adce6eb6762542ae5c.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [
+          [
+            "Could not find a version that satisfies",
+            ""
+          ],
+          [
+            "No matching distribution found",
+            ""
+          ]
+        ],
+        "command": "cd /tmp 2>/dev/null; python -c \"import xarray, sys; print(xarray.__version__); print(xarray.__file__)\" 2>&1 | head -20; echo \"---\"; ls /workspace 2>/dev/null | head; echo \"---\"; pip download xarray==0.0.0 2>&1 | head -3"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pydata__xarray-4075__YeqjWpA",
+        "unit": "1793031702544-96b5bc213fb9382a-000001a1790487adce6eb6762542ae5c.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/xr_up"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Using cached",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "xarray-0.16.0.tar.gz\n",
+            "tar.gz"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && rm -rf xr_up && mkdir -p xr_up && pip download xarray==0.16.0 --no-deps --no-binary :all: -d /tmp/xr_up 2>&1 | tail -5; ls /tmp/xr_up"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pylint-dev__pylint-4970__HbNmred",
+        "unit": "1793030656936-9cb5ac959c5463da-000001a178f46ebe9115e2342089e9ab.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/pl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd . && python -c \"import astroid, sys; print(astroid.__version__); print(sys.version)\"; pip download pylint==2.10.2 --no-deps -d /tmp/pl 2>&1 | tail -2"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pylint-dev__pylint-4970__HbNmred",
+        "unit": "1793030656936-9cb5ac959c5463da-000001a178f46ebe9115e2342089e9ab.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/pl2"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd . && for f in __init__.py async.py base.py base_checker.py classes.py deprecated.py design_analysis.py exceptions.py; do echo \"=== $f ===\"; diff -u /tmp/pl/p2102/pylint/checkers/$f pylint/checkers/$f; done > /tmp/diff2102.txt; wc -l /tmp/diff2102.txt; pip download pylint==2.12.0 --no-deps -d /tmp/pl2 2>&1 | tail -1"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pylint-dev__pylint-4970__HbNmred",
+        "unit": "1793030696866-beac8199ed82b712-000001a178f52fa23332fe3b4069032a.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/pl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /workspace 2>/dev/null || cd .; pwd; ls; python -c \"import pylint, sys; print(pylint.__file__, pylint.__version__)\"; pip download pylint==2.13.0 --no-deps -d /tmp/pl 2>&1 | tail -2"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pylint-dev__pylint-4970__HbNmred",
+        "unit": "1793030777888-8237267507e41d09-000001a178f66c20ab30de5f48fc9007.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "/tmp/pl2/pylint-2.12.0-py3-none-any.whl",
+            "whl"
+          ],
+          [
+            "/tmp/pl/pylint-2.13.0-py3-none-any.whl",
+            "whl"
+          ],
+          [
+            "/tmp/pl/pylint-2.10.2-py3-none-any.whl",
+            "whl"
+          ],
+          [
+            "Using cached",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "ls ~/.cache/pip 2>/dev/null | head; find / -name \"pylint-*\" -maxdepth 6 2>/dev/null | head -20; pip download pylint==2.10.2 -d /tmp/dl --no-deps 2>&1 | tail -3"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pylint-dev__pylint-4970__HbNmred",
+        "unit": "1793030802843-9d4a80d1b622d06c-000001a178f6cd9be322016a3992f175.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Collecting p",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "python -c \"import pylint, sys; print(pylint.__file__, pylint.__version__)\"; pip download pylint==2.10.2 -d /tmp/dl --no-deps 2>&1 | tail -3"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pylint-dev__pylint-4970__HbNmred",
+        "unit": "1793031236611-fee983217e2f1741-000001a178fd6c03129fd1d832e49453.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/dl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Collecting p",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "pylint-2.10.2-py3-none-any.whl",
+            "whl"
+          ],
+          [
+            "pylint-2.11.0-py3-none-any.whl",
+            "whl"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "pip download pylint==2.11.0 --no-deps -d /tmp/dl 2>&1 | tail -5; ls /tmp/dl 2>/dev/null; python -c \"import pylint, os; print(os.path.dirname(pylint.__file__))\""
+      },
+      {
+        "arm": "exec2",
+        "trial": "pylint-dev__pylint-4970__HbNmred",
+        "unit": "1793031456628-09ac9b7db55b1c7e-000001a17900c77437b6cad6aeb39d54.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/x"
+        ],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [
+          [
+            "Could not find a version that satisfies",
+            ""
+          ],
+          [
+            "No matching distribution found",
+            ""
+          ]
+        ],
+        "command": "cd /  && python -c \"import pylint, os; print(pylint.__file__, pylint.__version__)\" 2>&1 | head -5; pip download pylint==2.10.3 -d /tmp/x --no-deps 2>&1 | tail -3"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pylint-dev__pylint-4970__HbNmred",
+        "unit": "1793031456628-09ac9b7db55b1c7e-000001a17900c77437b6cad6aeb39d54.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/pl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "pylint-2.10.2-py3-none-any.whl",
+            "whl"
+          ],
+          [
+            "pylint-2.11.0.tar.gz",
+            "tar.gz"
+          ],
+          [
+            "pylint-2.13.0-py3-none-any.whl\n",
+            "whl"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && pip download pylint==2.11.0 -d /tmp/pl --no-deps --no-binary :all: 2>&1 | tail -3; ls /tmp/pl 2>/dev/null"
+      },
+      {
+        "arm": "exec2",
+        "trial": "pylint-dev__pylint-4970__HbNmred",
+        "unit": "1793031456628-09ac9b7db55b1c7e-000001a17900c77437b6cad6aeb39d54.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/pl"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "-rw-r--r-- 1 root root 392594",
+            ""
+          ],
+          [
+            "-rw-r--r-- 1 root root 326877",
+            ""
+          ],
+          [
+            "-rw-r--r-- 1 root root 436708",
+            ""
+          ],
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp/pl && ls -la && mkdir -p x211 && tar xzf pylint-2.11.0.tar.gz -C x211 && ls x211 && pip download pylint==2.10.2 -d /tmp/pl --no-deps --no-binary :all: 2>&1 | tail -2"
+      },
+      {
+        "arm": "exec2",
+        "trial": "scikit-learn__scikit-learn-13142__Fg4GT5s",
+        "unit": "1793031893602-f7caecd5f707777b-000001a179075c3a7edda168b21d7da5.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [],
+        "retrieved": false,
+        "ok_signals": [],
+        "bad_signals": [
+          [
+            "Could not find a version that satisfies",
+            ""
+          ],
+          [
+            "No matching distribution found",
+            ""
+          ]
+        ],
+        "command": "cd /tmp && python -c \"import sklearn, os; print(sklearn.__version__, os.path.dirname(sklearn.__file__))\" 2>&1 | head -20; pip download scikit-learn==0.21.dev0 2>&1 | head -5"
+      },
+      {
+        "arm": "exec2",
+        "trial": "scikit-learn__scikit-learn-13142__Fg4GT5s",
+        "unit": "1793031893602-f7caecd5f707777b-000001a179075c3a7edda168b21d7da5.jsonl",
+        "role": "finder",
+        "exit": 0,
+        "destinations": [
+          "/tmp/sk021"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ],
+          [
+            "scikit_learn-0.21.0-cp36-cp36m-manylinux1_x86_64.whl\n",
+            "whl"
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp && rm -rf sk021 && mkdir sk021 && cd sk021 && pip download scikit-learn==0.21.0 --no-deps -d . 2>&1 | tail -3 && ls"
+      },
+      {
+        "arm": "exec2",
+        "trial": "scikit-learn__scikit-learn-13142__Fg4GT5s",
+        "unit": "1793031893602-f7caecd5f707777b-000001a179075c3a7edda168b21d7da5.jsonl",
+        "role": "finder",
+        "exit": 1,
+        "destinations": [
+          "/tmp/sk021"
+        ],
+        "retrieved": true,
+        "ok_signals": [
+          [
+            "Successfully downloaded",
+            ""
+          ]
+        ],
+        "bad_signals": [],
+        "command": "cd /tmp/sk021 && pip download scikit-learn==0.20.4 --no-deps -d . 2>&1 | tail -2 && python -c \"\nimport zipfile,glob\nfor w in glob.glob('scikit_learn-0.20.4*.whl'):\n    zipfile.ZipFile(w).extractall('ext20')\n\" && diff -u ext20/sklearn/mixture/base.py ext/sklearn/mixture/base.py"
+      }
+    ]
   },
-  "v2_applied": "2026-10-25, after pass 1; supersedes the V1 (E2) fetch-free marks in the same records"
+  "v2_applied": "2026-10-25, after pass 1; supersedes the V1 (E2) fetch-free marks in the same records",
+  "user_ruling_2026_10_26": "replaces the rl_units=0 validity leg for this round: an arm is valid if its lost finder units (agent_units role=finder whose detail carries a provider 429) are <=5% of the arm's finder units across all 5 trials AND every lost unit is the transient 'Token Plan rate limit reached' class; the FIRST qualifying attempt per arm counts; later attempts are not considered; voided attempts are never scored.",
+  "lost_finder_units": {
+    "definition": "finder agent_units rows whose detail carries a provider 429, over the arm's qualifying attempt; ruling of 2026-10-26",
+    "control": {
+      "finder_units": 152,
+      "lost": 0,
+      "pct": "0.00%",
+      "classes": {},
+      "qualifies": true
+    },
+    "exec1": {
+      "finder_units": 152,
+      "lost": 0,
+      "pct": "0.00%",
+      "classes": {},
+      "qualifies": true
+    },
+    "exec2": {
+      "finder_units": 152,
+      "lost": 5,
+      "pct": "3.29%",
+      "classes": {
+        "rate limit reached": 5
+      },
+      "qualifies": true,
+      "attempt": "void-ypei-r1-exec2-a3 (2026-10-26 09:37), the first qualifying attempt; a1 (11 lost, 7.24%) and a2 (18 lost, 11.84%) do not qualify"
+    },
+    "exec3": "PENDING"
+  }
 }
