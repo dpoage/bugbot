@@ -9,6 +9,12 @@ the arbiter V2 rulings of 2026-10-25 (they supersede the earlier E2 rule):
 - **Q1:** a fetching call disqualifies only when content was retrieved: the
   fetching command exited 0 OR its destination exists afterwards. A fetch
   that fails with nothing written is not contamination.
+  As applied: when the transcript shows nothing retrieved, a visible fetch
+  failure (e.g. "No matching distribution found") overrides an exit 0 that
+  a pipe such as `| tail` produced; the arbiter accepted this as the
+  purpose of Q1 (was content retrieved?). A literal "exit 0" reading would
+  put exec1's fetch-free genuine count at 0/5 instead of 1/5, because the
+  piped `pip download` calls of both sklearn originating units exit 0.
 - **Q2 (gating), clarified 2026-10-26 — counterfactual:** a hit is fetch-free
   if it would still be reported with every contaminated unit removed. That
   requires all of: at least one originating unit is clean (no retrieval, no
