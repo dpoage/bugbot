@@ -1,0 +1,333 @@
+{
+  "price_usd_per_mtok": {
+    "input": 0.3,
+    "cache_read": 0.06,
+    "output": 1.2
+  },
+  "jobs": [
+    "/home/dpoage/code/bugbot-harbor-jobs/ypei-r1/ypei-r1-exec1"
+  ],
+  "aggregates": [
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "tasks": 5,
+      "crashed": 0,
+      "bugs_detected": 2,
+      "bug_recall": 0.4,
+      "site_recall": 0.2857142857142857,
+      "precision": 0.1111111111111111,
+      "fp_per_task": 3.2,
+      "in_tok": 93155692,
+      "cache_tok": 79070492,
+      "out_tok": 1695332,
+      "cost_usd": 11.00418792,
+      "usd_per_bug": 5.50209396,
+      "agent_min": 96.6,
+      "rl_units": 0
+    }
+  ],
+  "trials": [
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "astropy__astropy-14995",
+      "trial": "astropy__astropy-14995__V4k9v79",
+      "started_at": "2026-10-25T12:46:57.036119Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 6,
+        "findings": 6,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 6,
+        "verified_findings": 6
+      },
+      "n_input_tokens": 11478331,
+      "n_cache_tokens": 9863289,
+      "n_output_tokens": 289271,
+      "cost_usd": 1.4234351399999998,
+      "agent_min": 18.5,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "on",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 379,
+          "tier": 2,
+          "title": "NDData.sum()/mean() crashes with AttributeError when the data has no unit and no mask",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 303,
+          "tier": 2,
+          "title": "propagate_uncertainties=False on a collapse operation dereferences a None operand",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 459,
+          "tier": 2,
+          "title": "Temporary uncertainty is written into shared NDData state without try/finally, corrupting the operand on error",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 459,
+          "tier": 2,
+          "title": "Temporary uncertainty left installed on self when uncertainty propagation raises",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 469,
+          "tier": 2,
+          "title": "Temporary uncertainty is left attached to the caller's operand when uncertainty propagation raises",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 243,
+          "tier": 2,
+          "title": "Known-prefix keyword without underscore raises IndexError",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "django__django-11099",
+      "trial": "django__django-11099__6NNGoU5",
+      "started_at": "2026-10-25T12:46:57.052935Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 1,
+        "fp": 0,
+        "findings": 1,
+        "valid_output": 1,
+        "verified_detected": 1,
+        "verified_site_tp": 1,
+        "verified_site_fn": 1,
+        "verified_fp": 0,
+        "verified_findings": 1
+      },
+      "n_input_tokens": 18518900,
+      "n_cache_tokens": 15764774,
+      "n_output_tokens": 437670,
+      "cost_usd": 2.2973282399999997,
+      "agent_min": 23.3,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "on",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "django/contrib/auth/validators.py",
+          "line": 10,
+          "tier": 2,
+          "title": "ASCIIUsernameValidator accepts usernames ending in a newline",
+          "matched_site": 0
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "pydata__xarray-4075",
+      "trial": "pydata__xarray-4075__MQs3tpF",
+      "started_at": "2026-10-25T13:05:42.991625Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 2,
+        "findings": 2,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 2,
+        "verified_findings": 2
+      },
+      "n_input_tokens": 31005353,
+      "n_cache_tokens": 26042811,
+      "n_output_tokens": 376035,
+      "cost_usd": 3.5025732599999997,
+      "agent_min": 22.6,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "on",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "xarray/core/formatting_html.py",
+          "line": 250,
+          "tier": 2,
+          "title": "DataArray name embedded unescaped in HTML repr (HTML/XSS injection)",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/combine.py",
+          "line": 898,
+          "tier": 2,
+          "title": "auto_combine deprecation message built from list.append return value (always None)",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "pylint-dev__pylint-4970",
+      "trial": "pylint-dev__pylint-4970__mMTSeTh",
+      "started_at": "2026-10-25T13:10:31.508479Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 7,
+        "findings": 7,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 7,
+        "verified_findings": 7
+      },
+      "n_input_tokens": 24053322,
+      "n_cache_tokens": 20403416,
+      "n_output_tokens": 376339,
+      "cost_usd": 2.7707835599999995,
+      "agent_min": 21.7,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "on",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 1318,
+          "tier": 2,
+          "title": "Keyword-only argument defaults are skipped when positional defaults exist",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 2260,
+          "tier": 2,
+          "title": "Crash on non-string `__doc__` value (AttributeError on .strip())",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/spelling.py",
+          "line": 405,
+          "tier": 2,
+          "title": "Crash when storing unknown spelling words without a private dictionary file",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/stdlib.py",
+          "line": 491,
+          "tier": 2,
+          "title": "Unhandled NoSuchArgumentError from get_argument_from_call crashes on copy.copy() without arguments",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/stdlib.py",
+          "line": 622,
+          "tier": 2,
+          "title": "Crash on non-string open() mode argument instead of reporting bad-open-mode",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/imports.py",
+          "line": 870,
+          "tier": 2,
+          "title": "Early `return` in _check_import_as_rename skips alias checks for later names in the same import statement",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/similar.py",
+          "line": 458,
+          "tier": 2,
+          "title": "ZeroDivisionError when the similarity report is generated for empty input files",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "scikit-learn__scikit-learn-13142",
+      "trial": "scikit-learn__scikit-learn-13142__2Uvamno",
+      "started_at": "2026-10-25T13:28:30.863430Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 1,
+        "fp": 1,
+        "findings": 2,
+        "valid_output": 1,
+        "verified_detected": 1,
+        "verified_site_tp": 1,
+        "verified_site_fn": 1,
+        "verified_fp": 1,
+        "verified_findings": 2
+      },
+      "n_input_tokens": 8099786,
+      "n_cache_tokens": 6996202,
+      "n_output_tokens": 216017,
+      "cost_usd": 1.0100677200000001,
+      "agent_min": 10.5,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "on",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 263,
+          "tier": 2,
+          "title": "Final E-step uses last initialization's parameters, so fit_predict labels do not match the restored best fit",
+          "matched_site": 0
+        },
+        {
+          "file": "sklearn/mixture/gaussian_mixture.py",
+          "line": 740,
+          "tier": 2,
+          "title": "bic()/aic() use X.shape on unvalidated input and crash for array-like X",
+          "matched_site": null
+        }
+      ]
+    }
+  ]
+}

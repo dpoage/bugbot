@@ -1,0 +1,340 @@
+{
+  "price_usd_per_mtok": {
+    "input": 0.3,
+    "cache_read": 0.06,
+    "output": 1.2
+  },
+  "jobs": [
+    "/home/dpoage/code/bugbot-harbor-jobs/ypei-r1/void-ypei-r1-exec2-a3"
+  ],
+  "aggregates": [
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "tasks": 5,
+      "crashed": 0,
+      "bugs_detected": 3,
+      "bug_recall": 0.6,
+      "site_recall": 0.42857142857142855,
+      "precision": 0.15789473684210525,
+      "fp_per_task": 3.2,
+      "in_tok": 101551168,
+      "cache_tok": 86631104,
+      "out_tok": 2231841,
+      "cost_usd": 12.352094639999999,
+      "usd_per_bug": 4.117364879999999,
+      "agent_min": 120.4,
+      "rl_units": 10
+    }
+  ],
+  "trials": [
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "astropy__astropy-14995",
+      "trial": "astropy__astropy-14995__ZWyx4cA",
+      "started_at": "2026-10-26T15:37:42.390447Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 0,
+        "fp": 5,
+        "findings": 6,
+        "valid_output": 1,
+        "verified_detected": 1,
+        "verified_site_tp": 1,
+        "verified_site_fn": 0,
+        "verified_fp": 5,
+        "verified_findings": 6
+      },
+      "n_input_tokens": 14475172,
+      "n_cache_tokens": 12559324,
+      "n_output_tokens": 432711,
+      "cost_usd": 1.8475670399999997,
+      "agent_min": 26.0,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "on",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 379,
+          "tier": 2,
+          "title": "Collapse operations on unitless data dereference a None operand",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 527,
+          "tier": 2,
+          "title": "Mask handler is called with None when the second operand has no mask",
+          "matched_site": 0
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 527,
+          "tier": 2,
+          "title": "Mask handler is called with None when the second operand has no mask",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 303,
+          "tier": 2,
+          "title": "propagate_uncertainties=False dereferences the None operand during collapse operations",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 459,
+          "tier": 2,
+          "title": "Failed uncertainty propagation leaves a temporary uncertainty attached to the operand",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 459,
+          "tier": 2,
+          "title": "Temporary uncertainty assigned to self is never restored when propagate() raises",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "django__django-11099",
+      "trial": "django__django-11099__j4FT4Xd",
+      "started_at": "2026-10-26T15:37:42.425825Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 1,
+        "fp": 0,
+        "findings": 1,
+        "valid_output": 1,
+        "verified_detected": 1,
+        "verified_site_tp": 1,
+        "verified_site_fn": 1,
+        "verified_fp": 0,
+        "verified_findings": 1
+      },
+      "n_input_tokens": 18679720,
+      "n_cache_tokens": 15848013,
+      "n_output_tokens": 447798,
+      "cost_usd": 2.33775048,
+      "agent_min": 20.5,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "on",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 2,
+      "findings": [
+        {
+          "file": "django/contrib/auth/validators.py",
+          "line": 10,
+          "tier": 2,
+          "title": "ASCIIUsernameValidator accepts usernames with a trailing newline",
+          "matched_site": 0
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "pydata__xarray-4075",
+      "trial": "pydata__xarray-4075__YeqjWpA",
+      "started_at": "2026-10-26T15:58:29.264159Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 5,
+        "findings": 5,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 5,
+        "verified_findings": 5
+      },
+      "n_input_tokens": 36383192,
+      "n_cache_tokens": 30866700,
+      "n_output_tokens": 690044,
+      "cost_usd": 4.3350024,
+      "agent_min": 40.8,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "on",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 4,
+      "findings": [
+        {
+          "file": "xarray/core/dask_array_ops.py",
+          "line": 84,
+          "tier": 2,
+          "title": "Non-serializable closure passed to dask map_blocks breaks multiprocess/distributed execution",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/formatting_html.py",
+          "line": 250,
+          "tier": 2,
+          "title": "DataArray name is interpolated into HTML repr without escaping",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/utils.py",
+          "line": 596,
+          "tier": 2,
+          "title": "close_on_error can mask the original exception",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/variable.py",
+          "line": 2004,
+          "tier": 2,
+          "title": "Failed coarsen mutates the source variable",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/combine.py",
+          "line": 898,
+          "tier": 2,
+          "title": "auto_combine warning loses dimension list because list.append() returns None",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "pylint-dev__pylint-4970",
+      "trial": "pylint-dev__pylint-4970__HbNmred",
+      "started_at": "2026-10-26T16:04:02.579780Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 4,
+        "findings": 4,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 4,
+        "verified_findings": 4
+      },
+      "n_input_tokens": 22965901,
+      "n_cache_tokens": 19528809,
+      "n_output_tokens": 371797,
+      "cost_usd": 2.64901254,
+      "agent_min": 20.4,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "on",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 4,
+      "findings": [
+        {
+          "file": "pylint/checkers/spelling.py",
+          "line": 405,
+          "tier": 2,
+          "title": "Crash when storing unknown words without a private dictionary file",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/stdlib.py",
+          "line": 622,
+          "tier": 2,
+          "title": "TypeError crash when the `mode` argument of `open()` is not a string",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/design_analysis.py",
+          "line": 483,
+          "tier": 2,
+          "title": "Stale message in visit_functiondef causes unbounded growth of per-function counters",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/spelling.py",
+          "line": 323,
+          "tier": 2,
+          "title": "Private spelling dictionary file handle can leak when the check run aborts",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot",
+      "model": "MiniMax-M3",
+      "task": "scikit-learn__scikit-learn-13142",
+      "trial": "scikit-learn__scikit-learn-13142__Fg4GT5s",
+      "started_at": "2026-10-26T16:24:43.653088Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 1,
+        "fp": 2,
+        "findings": 3,
+        "valid_output": 1,
+        "verified_detected": 1,
+        "verified_site_tp": 1,
+        "verified_site_fn": 1,
+        "verified_fp": 2,
+        "verified_findings": 3
+      },
+      "n_input_tokens": 9047183,
+      "n_cache_tokens": 7828258,
+      "n_output_tokens": 289491,
+      "cost_usd": 1.1827621799999999,
+      "agent_min": 12.7,
+      "metadata": {
+        "scan_exit": "0",
+        "finder_exec": "on",
+        "sandbox_backend": "unsandboxed"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 263,
+          "tier": 2,
+          "title": "fit_predict returns labels from the last initialization instead of the retained best model",
+          "matched_site": 0
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 263,
+          "tier": 2,
+          "title": "Final E-step is computed before the best initialization's parameters are restored, so fit_predict labels do not match the fitted model",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/gaussian_mixture.py",
+          "line": 676,
+          "tier": 2,
+          "title": "Failed precision Cholesky in _m_step leaves the estimator with half-updated, mutually inconsistent parameters",
+          "matched_site": null
+        }
+      ]
+    }
+  ]
+}

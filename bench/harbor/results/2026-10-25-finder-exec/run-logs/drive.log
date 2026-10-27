@@ -1,0 +1,29 @@
+2026-10-25T01:46:55-06:00 start ypei-r1-control (attempt 1) version=3ecb6f6
+2026-10-25T02:39:28-06:00 done ypei-r1-control rl_lines=0
+2026-10-25T02:39:28-06:00 ypei-r1-exec1 waits until 2026-10-25T06:46:55-06:00
+2026-10-25T06:46:56-06:00 start ypei-r1-exec1 (attempt 1) version=3ecb6f6
+2026-10-25T07:39:13-06:00 done ypei-r1-exec1 rl_lines=0
+2026-10-25T07:39:13-06:00 ypei-r1-exec2 waits until 2026-10-25T11:46:56-06:00
+2026-10-25T11:46:57-06:00 start ypei-r1-exec2 (attempt 1) version=3ecb6f6
+2026-10-25T12:38:45-06:00 done ypei-r1-exec2 rl_lines=22
+2026-10-25T12:38:45-06:00 ypei-r1-exec2 waits until 2026-10-25T16:46:57-06:00
+2026-10-25T16:46:57-06:00 start ypei-r1-exec2 (attempt 2) version=3ecb6f6
+2026-10-25T17:21:33-06:00 done ypei-r1-exec2 rl_lines=36
+2026-10-25T17:21:33-06:00 ypei-r1-exec3 waits until 2026-10-25T21:46:57-06:00
+2026-10-25T17:47:51-06:00 ypei-r1-exec3 waits until 2026-10-25T21:46:57-06:00
+2026-10-25T21:46:59-06:00 start ypei-r1-exec3 (attempt 1) version=3ecb6f6
+2026-10-25T22:35:43-06:00 done ypei-r1-exec3 rl_lines=18
+2026-10-25T22:35:43-06:00 VOID ypei-r1-exec3: pausing schedule for arbiter
+2026-10-26T09:37:41-06:00 start ypei-r1-exec2 (attempt 1) version=3ecb6f6
+2026-10-26T10:39:34-06:00 done ypei-r1-exec2 rl_lines=10
+2026-10-26T10:39:34-06:00 VOID ypei-r1-exec2: pausing schedule for arbiter
+2026-10-26T11:01:11-06:00 ypei-r1-exec3-a2 waits until 2026-10-26T14:37:41-06:00
+2026-10-26T14:37:41-06:00 start ypei-r1-exec3-a2 version=3ecb6f6
+2026-10-26T14:45:36-06:00 done ypei-r1-exec3-a2 FAILS lost=151/152 other_class=0
+2026-10-26T14:45:36-06:00 ypei-r1-exec3-a3 waits until 2026-10-26T19:37:41-06:00
+2026-10-26T21:25:01-06:00 start ypei-r1-exec3-a3 version=3ecb6f6
+2026-10-26T22:08:15-06:00 done ypei-r1-exec3-a3 FAILS lost=94/152 other_class=0
+2026-10-26T22:08:15-06:00 ypei-r1-exec3-a4 waits until 2026-10-27T02:25:01-06:00
+2026-10-27T02:25:01-06:00 start ypei-r1-exec3-a4 version=3ecb6f6
+2026-10-27T03:02:41-06:00 done ypei-r1-exec3-a4 FAILS lost=116/152 other_class=0
+2026-10-27T03:02:41-06:00 exec3: no qualifying attempt in a2-a4; escalate
