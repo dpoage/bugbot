@@ -53,6 +53,11 @@ func newDaemonCmd() *cobra.Command {
 				return err
 			}
 			defer closeStore(st)
+			// unsandboxed is an attended bench-only backend; the daemon never runs
+			// unattended host execution, even via BUGBOT_SANDBOX_BACKEND.
+			if cfg.Sandbox.Backend == sandboxenv.BackendUnsandboxed {
+				return fmt.Errorf("daemon: sandbox.backend unsandboxed is a bench-only mode with no isolation; the daemon refuses to run unattended host execution — unset sandbox.backend (or BUGBOT_SANDBOX_BACKEND) to start the daemon")
+			}
 
 			repo, err := ingest.Open(ctx, repoPath)
 			if err != nil {

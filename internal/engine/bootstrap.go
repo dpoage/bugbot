@@ -10,6 +10,7 @@ import (
 	"github.com/dpoage/bugbot/internal/funnel"
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/progress"
+	"github.com/dpoage/bugbot/internal/sandboxenv"
 	"github.com/dpoage/bugbot/internal/store"
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/provider"
@@ -172,10 +173,21 @@ func BuildFunnelOptions(cfg config.Config, overrides FunnelOptionOverrides) (fun
 const SandboxDegradedWarning = "verify.sandbox_exec is enabled but no container runtime (podman/docker) was found on PATH; refuters will argue without sandbox execution"
 
 // PrintSandboxDegradedWarning writes the uniform "Warning: <text>\n" line to
-// w. CLI commands whose sink is a writer (scan, review) call this directly;
-// the daemon keeps its slog.Warn(SandboxDegradedWarning) form because its
-// sink is a structured logger, not a writer — the underlying text is the same
-// constant in both paths.
+// w. The daemon logs SandboxDegradedWarning via slog instead.
 func PrintSandboxDegradedWarning(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "Warning: %s\n", SandboxDegradedWarning)
+}
+
+// sandboxDegradedUnsandboxedWarning names the actual cause when the backend
+// is the bench-only unsandboxed mode.
+const sandboxDegradedUnsandboxedWarning = "verify.sandbox_exec is enabled but sandbox.backend is unsandboxed (bench-only mode with no isolating sandbox); refuters will argue without sandbox execution"
+
+// printSandboxDegradedWarningFor writes the degraded warning naming the
+// actual cause for cfg's backend.
+func printSandboxDegradedWarningFor(w io.Writer, cfg config.Config) {
+	if cfg.Sandbox.Backend == sandboxenv.BackendUnsandboxed {
+		_, _ = fmt.Fprintf(w, "Warning: %s\n", sandboxDegradedUnsandboxedWarning)
+		return
+	}
+	PrintSandboxDegradedWarning(w)
 }

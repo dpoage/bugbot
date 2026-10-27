@@ -131,6 +131,133 @@ delegated cgroup v2 subtree; when NEITHER mechanism is available, a run
 **fails** with `sandbox.ErrBwrapNoCapMethod` rather than silently running
 uncapped — set `sandbox.allow_uncapped: true` to opt into that instead.
 
+## Finder execution
+
+Finder agents can run small probes while they hunt. The `run_code` tool runs one
+shell command (`bash -c`), plus optional files, in the sandbox. Each run starts
+from a fresh copy of the repository, so nothing persists between runs. On
+podman, docker, and bwrap, a probe cannot write to the scanned tree. When a
+probe shows a wrong output or a crash, the finder prompt tells the finder to
+copy the command and the observed output into the candidate's evidence field.
+
+Finder execution applies to `bugbot scan` and `bugbot regress` (regress reuses
+the scan pipeline over a commit range). That covers the CLI, the TUI palette
+scan rows, and a scan dispatched through the daemon's control socket. `bugbot
+review`, daemon cycles, and sweep never attach `run_code`.
+
+### Enable it
+
+The `scan.finder_exec` setting takes `off`, `auto` (default), or `on`:
+
+```yaml
+scan:
+  finder_exec: auto                 # off | auto | on
+  finder_exec_max_execs: 8          # run_code calls per finder unit (>= 1)
+  finder_exec_timeout_seconds: 120  # wall-clock limit of one probe (>= 1)
+  finder_exec_output_bytes: 16384   # per-stream output shown to the model (1..1048576)
+```
+
+| Mode | Meaning |
+|---|---|
+| `off` | Never attach `run_code`. |
+| `auto` | Attach `run_code` only if a podman, docker, or bwrap backend is available **and** the capability probe finds the toolchain of the scan's primary language. Never runs on the `unsandboxed` backend. |
+| `on` | Skip the language probe. Still requires a usable backend. The `unsandboxed` backend requires this mode. |
+
+The primary language is the language with the most files in the scan (shell
+and unclassified files do not count). The probe checks for these toolchains:
+
+| Language | Probe checks for |
+|---|---|
+| Go | `go` |
+| Python | `python3` or `python` |
+| JavaScript, TypeScript | `node` |
+| Rust | `cargo` |
+
+For any other language, `auto` resolves to off.
+
+The `bugbot scan` and `bugbot regress` summaries print one `Finder exec:` line,
+with the decision and the reason. (`--estimate` runs print no summary and no
+line.) The TUI palette and daemon control-socket scans log the same line at
+debug level only. Example lines:
+
+```
+Finder exec: on (sandbox=podman, language=go, network=none, dep_strategy=off, max_execs=8 per finder)
+Finder exec: off (sandbox image docker.io/library/debian:stable-slim lacks go)
+Finder exec: off (host lacks node under bwrap)
+```
+
+With `finder_exec: on`, the `on` line omits `language=`. Other `off` reasons
+include `scan.finder_exec=off`, `no sandbox backend available: …`, `sandbox
+build failed: …`, `no target language in scan scope`, `no toolchain probe for
+<language>`, `capability probe failed: …`, `dependency resolution failed: …`,
+and `dependency prefetch failed: …`.
+
+### Sandbox requirement
+
+The default image `debian:stable-slim` carries none of the probed toolchains
+(`go`, `python`, `node`, `cargo`). With the default image, `auto` resolves to
+off until you supply a toolchain:
+
+- Container backend: set `sandbox.image` to an image that carries the
+  toolchain, for example `golang:<ver>` for Go. The image must also ship
+  `bash`, because `run_code` runs every probe through `bash -c`; the
+  `golang:<ver>-alpine` variants have no `bash` and cannot run probes.
+- bwrap backend: name the toolchain in `sandbox.host_toolchains` (for example
+  `node` or `cargo`).
+
+Dependencies come from `sandbox.dep_strategy`. See
+[Sandbox dependency strategies](#sandbox-dependency-strategies).
+`sandbox.setup_cmds` and `sandbox.local_mounts` also apply. Finder probes run
+with `network=none`; `sandbox.network` does not change that. If the one-time
+dependency prefetch fails, finder execution turns off for that scan.
+
+### Limits
+
+- `scan.finder_exec_max_execs` (default 8) caps `run_code` calls for each
+  finder unit. A finder unit gets its own budget.
+- `scan.finder_exec_timeout_seconds` (default 120) stops a single probe.
+- `scan.finder_exec_output_bytes` (default 16384) caps each output stream
+  (stdout, stderr) that the model sees. The maximum is 1048576.
+- A `run_code` call runs inside the finder's agent loop. The turn that issues
+  the call counts toward the finder's turn limit, like any other tool call.
+
+### Unsandboxed mode (benchmark only)
+
+> **Warning.** `sandbox.backend: unsandboxed` provides NO isolation. Use it
+> only inside a throwaway environment, such as a benchmark task container.
+
+With `sandbox.backend: unsandboxed` and `scan.finder_exec: on`, `run_code`
+runs probes directly on the host. A probe:
+
+- uses the host network;
+- has no CPU, memory, or process limits;
+- runs with the privileges of the OS user that runs bugbot;
+- sees the bugbot process environment, including any API keys exported for
+  the scan;
+- starts in a temporary copy of the repository, but a write to an absolute
+  path reaches the real file system, including the scanned tree.
+
+Rules for this mode:
+
+- Bugbot never selects it automatically. With `finder_exec: auto`, the scan
+  prints `Finder exec: off (auto never runs unsandboxed; set scan.finder_exec: on)`.
+- The scan prints a `!!! UNSANDBOXED: …` banner before it starts. The banner
+  lists the `sandbox.*` knobs that have no effect: `image`, `cpus`,
+  `memory_mb`, `pids_limit`, `idle_timeout_seconds`, `scratch_size_mb`,
+  `workspace_growth_ceiling_mb`, `dep_strategy`, `setup_cmds`,
+  `local_mounts`, and `host_toolchains`.
+- The `on` status line reads
+  `Finder exec: on (sandbox=UNSANDBOXED host, network=host, max_execs=8 per finder)`.
+- `bugbot daemon` refuses to start with this backend, including when
+  `BUGBOT_SANDBOX_BACKEND` selects it.
+- `verify.sandbox_exec`, analyzer seeding, and `bugbot repro` treat it as "no
+  sandbox backend". Only finder execution provisions it; `bugbot repro
+  <finding-id> --unsandboxed` is a separate attended flag that runs one
+  reproduction directly on the host.
+
+The Harbor benchmark agent is the consumer of this mode. See
+[Finder exec bench mode](bench/harbor/README.md#finder-exec-bench-mode).
+
 ## Sandbox dependency strategies
 
 The sandbox runs untrusted, model-generated code with `--network=none`, all

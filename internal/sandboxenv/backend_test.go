@@ -49,3 +49,44 @@ func TestRunImage_EmptyOffContainerBackend(t *testing.T) {
 		}
 	}
 }
+
+// The unsandboxed backend value is never an isolating backend — New
+// refuses it, Available is false, and the label names the mode.
+func TestUnsandboxedBackendIsNeverIsolating(t *testing.T) {
+	cfg := config.Default().Sandbox
+	cfg.Backend = BackendUnsandboxed
+
+	if Available(cfg) {
+		t.Error("Available(unsandboxed) = true, want false")
+	}
+	if got := BackendLabel(cfg); got != "unsandboxed" {
+		t.Errorf("BackendLabel(unsandboxed) = %q, want unsandboxed", got)
+	}
+	sb, err := New(cfg)
+	if err == nil || !strings.Contains(err.Error(), "unsandboxed") {
+		t.Fatalf("New(unsandboxed) = %T, %v; want an error naming the mode", sb, err)
+	}
+	if sb != nil {
+		t.Errorf("New() returned a non-nil Sandbox %T alongside its error", sb)
+	}
+}
+
+func TestUnavailableReason(t *testing.T) {
+	cfg := config.Default().Sandbox
+	cfg.Backend = "podman"
+	cfg.Runtime = "bugbot-no-such-runtime-ypei"
+	if got := UnavailableReason(cfg); got != "bugbot-no-such-runtime-ypei not on PATH" {
+		t.Errorf("UnavailableReason(runtime set) = %q", got)
+	}
+	cfg.Runtime = ""
+	if got := UnavailableReason(cfg); got != "podman/docker not on PATH" {
+		t.Errorf("UnavailableReason(autodetect miss) = %q, want podman/docker not on PATH", got)
+	}
+	// Only assert the bwrap branch when this host genuinely cannot bwrap;
+	// a bwrap-capable host correctly yields "".
+	if bwrapOK, _ := sandbox.DetectBwrap(); !bwrapOK {
+		if got := UnavailableReason(config.Sandbox{Backend: BackendBwrap}); !strings.HasPrefix(got, "bwrap unusable (") {
+			t.Errorf("UnavailableReason(bwrap) = %q, want bwrap unusable (<reason>)", got)
+		}
+	}
+}

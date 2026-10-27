@@ -8,6 +8,8 @@ import (
 	"github.com/dpoage/bugbot/internal/ingest"
 	"github.com/dpoage/bugbot/internal/store"
 	"github.com/dpoage/bugbot/internal/util"
+
+	"github.com/dpoage/llmkit/agent"
 )
 
 // finderSystemBase composes the shared finder system prompt around a persona
@@ -190,6 +192,17 @@ func finderSystemPrompt(persona string, l Lens, langs []ingest.Language) string 
 		}
 	}
 	return b.String()
+}
+
+const finderExecParagraph = "You can also run code: run_code executes a shell command in a fresh copy of the repository with the project's environment installed; each run starts from a clean copy, so nothing persists between runs. When you suspect a wrong result or a crash, write a small probe (for example python -c or a short pytest run) with the concrete input and run it. A demonstrated wrong output or traceback is the strongest evidence you can attach; a probe that behaves correctly means do not report. You have a small budget of runs, so probe suspicions rather than exploring. When a probe demonstrates the defect, copy the exact command you ran and the relevant lines of its observed output into the candidate's evidence field."
+
+// withFinderExecGuidance appends the run_code paragraph to a finder system
+// prompt iff the unit's tools include run_code.
+func withFinderExecGuidance(sysprompt string, tools []agent.Tool) string {
+	if !hasRunCode(tools) {
+		return sysprompt
+	}
+	return sysprompt + "\n\n" + finderExecParagraph
 }
 
 // equalRows reports whether two manifestation row slices carry identical

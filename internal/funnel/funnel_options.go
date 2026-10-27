@@ -178,6 +178,9 @@ type Options struct {
 	Discovery DiscoveryConfig
 	// SandboxOpts configures the sandbox_exec tool offered to refuter agents.
 	SandboxOpts SandboxOpts
+	// FinderExec carries the engine's finder-exec provisioning for the
+	// scan (zero = not provisioned).
+	FinderExec FinderExecOpts
 	// Progress, when non-nil, receives activity events as the run proceeds.
 	Progress progress.EventSink
 	// Repro, when non-nil, is invoked in-run for each Tier-2 finding that

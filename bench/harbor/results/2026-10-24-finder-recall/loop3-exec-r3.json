@@ -1,0 +1,412 @@
+{
+  "price_usd_per_mtok": {
+    "input": 0.3,
+    "cache_read": 0.06,
+    "output": 1.2
+  },
+  "jobs": [
+    "bench/harbor/jobs/loop3-exec-r3"
+  ],
+  "aggregates": [
+    {
+      "agent": "bugbot[finder-exec]",
+      "model": "MiniMax-M3",
+      "tasks": 5,
+      "crashed": 0,
+      "bugs_detected": 3,
+      "bug_recall": 0.6,
+      "site_recall": 0.42857142857142855,
+      "precision": 0.1,
+      "fp_per_task": 5.4,
+      "in_tok": 100280945,
+      "cache_tok": 85796106,
+      "out_tok": 2090732,
+      "cost_usd": 12.002096459999999,
+      "usd_per_bug": 4.000698819999999,
+      "agent_min": 206.7,
+      "rl_units": 0
+    }
+  ],
+  "trials": [
+    {
+      "agent": "bugbot[finder-exec]",
+      "model": "MiniMax-M3",
+      "task": "astropy__astropy-14995",
+      "trial": "astropy__astropy-14995__7Rfh2Kk",
+      "started_at": "2026-10-24T10:59:44.891106Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 0,
+        "fp": 4,
+        "findings": 5,
+        "valid_output": 1,
+        "verified_detected": 1,
+        "verified_site_tp": 1,
+        "verified_site_fn": 0,
+        "verified_fp": 4,
+        "verified_findings": 5
+      },
+      "n_input_tokens": 12531853,
+      "n_cache_tokens": 10812392,
+      "n_output_tokens": 363824,
+      "cost_usd": 1.6011706200000002,
+      "agent_min": 19.8,
+      "metadata": {
+        "scan_exit": "0",
+        "experiments": "finder-exec"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 379,
+          "tier": 2,
+          "title": "Collapse operations crash for unit-less NDData objects",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 523,
+          "tier": 2,
+          "title": "Arithmetic with an operand lacking a mask mishandles the mask",
+          "matched_site": 0
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 459,
+          "tier": 2,
+          "title": "Temporary uncertainty assigned to self is never restored if uncertainty propagation raises",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndarithmetic.py",
+          "line": 527,
+          "tier": 2,
+          "title": "Mask combination passes None to the mask handler when only one operand has a mask",
+          "matched_site": null
+        },
+        {
+          "file": "astropy/nddata/mixins/ndslicing.py",
+          "line": 105,
+          "tier": 2,
+          "title": "KeyError while slicing an uncertainty is no longer caught",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot[finder-exec]",
+      "model": "MiniMax-M3",
+      "task": "django__django-11099",
+      "trial": "django__django-11099__EjAQLJN",
+      "started_at": "2026-10-24T10:59:44.909188Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 1,
+        "fp": 3,
+        "findings": 4,
+        "valid_output": 1,
+        "verified_detected": 1,
+        "verified_site_tp": 1,
+        "verified_site_fn": 1,
+        "verified_fp": 3,
+        "verified_findings": 4
+      },
+      "n_input_tokens": 20625962,
+      "n_cache_tokens": 17777941,
+      "n_output_tokens": 517829,
+      "cost_usd": 2.5424775599999996,
+      "agent_min": 115.1,
+      "metadata": {
+        "scan_exit": "124",
+        "experiments": "finder-exec"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "django/contrib/auth/backends.py",
+          "line": 160,
+          "tier": 2,
+          "title": "RemoteUserBackend.authenticate() leaves a half-created user row behind when configure_user() raises",
+          "matched_site": null
+        },
+        {
+          "file": "django/contrib/auth/base_user.py",
+          "line": 68,
+          "tier": 2,
+          "title": "AbstractBaseUser.save() leaves the raw password cached and re-runs password_changed() when password_changed raises",
+          "matched_site": null
+        },
+        {
+          "file": "django/contrib/auth/validators.py",
+          "line": 20,
+          "tier": 2,
+          "title": "UnicodeUsernameValidator end-anchor accepts usernames with a trailing newline",
+          "matched_site": 1
+        },
+        {
+          "file": "django/contrib/auth/checks.py",
+          "line": 39,
+          "tier": 2,
+          "title": "auth check crashes with TypeError when REQUIRED_FIELDS is not a list or tuple",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot[finder-exec]",
+      "model": "MiniMax-M3",
+      "task": "pydata__xarray-4075",
+      "trial": "pydata__xarray-4075__rstdv9G",
+      "started_at": "2026-10-24T11:19:47.863581Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 10,
+        "findings": 10,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 10,
+        "verified_findings": 10
+      },
+      "n_input_tokens": 34114936,
+      "n_cache_tokens": 28986733,
+      "n_output_tokens": 576504,
+      "cost_usd": 3.9694696799999996,
+      "agent_min": 32.7,
+      "metadata": {
+        "scan_exit": "0",
+        "experiments": "finder-exec"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "xarray/core/accessor_str.py",
+          "line": 691,
+          "tier": 2,
+          "title": "StringAccessor.wrap silently ignores all TextWrapper keyword arguments",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/common.py",
+          "line": 1312,
+          "tier": 2,
+          "title": "__exit__ lets a failing close() mask the original exception",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/formatting_html.py",
+          "line": 255,
+          "tier": 2,
+          "title": "DataArray name injected unescaped into HTML repr",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/indexes.py",
+          "line": 122,
+          "tier": 2,
+          "title": "roll_index divides by zero for an empty index",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/nputils.py",
+          "line": 243,
+          "tier": 2,
+          "title": "Empty lstsq residual array broadcast into per-column residual slice",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/combine.py",
+          "line": 898,
+          "tier": 2,
+          "title": "Deprecated auto_combine warning reports dimensions as \"None\"",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/common.py",
+          "line": 1254,
+          "tier": 2,
+          "title": "close() leaves the file object attached when close() raises",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/formatting.py",
+          "line": 30,
+          "tier": 2,
+          "title": "maybe_truncate grows instead of truncating when maxlen < 3",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/nputils.py",
+          "line": 227,
+          "tier": 2,
+          "title": "Empty lstsq residual array cannot be assigned to scalar slot",
+          "matched_site": null
+        },
+        {
+          "file": "xarray/core/options.py",
+          "line": 149,
+          "tier": 2,
+          "title": "set_options restores stale snapshots of the global OPTIONS dict across threads",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot[finder-exec]",
+      "model": "MiniMax-M3",
+      "task": "pylint-dev__pylint-4970",
+      "trial": "pylint-dev__pylint-4970__nMXEmu5",
+      "started_at": "2026-10-24T11:52:44.645106Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 0,
+        "site_tp": 0,
+        "site_fn": 1,
+        "fp": 7,
+        "findings": 7,
+        "valid_output": 1,
+        "verified_detected": 0,
+        "verified_site_tp": 0,
+        "verified_site_fn": 1,
+        "verified_fp": 7,
+        "verified_findings": 7
+      },
+      "n_input_tokens": 24435294,
+      "n_cache_tokens": 20730035,
+      "n_output_tokens": 397130,
+      "cost_usd": 2.8319357999999997,
+      "agent_min": 24.9,
+      "metadata": {
+        "scan_exit": "0",
+        "experiments": "finder-exec"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "pylint/checkers/stdlib.py",
+          "line": 622,
+          "tier": 2,
+          "title": "TypeError/AttributeError when the open() mode argument is not a string",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/base.py",
+          "line": 1318,
+          "tier": 2,
+          "title": "Keyword-only default arguments are skipped when positional defaults exist",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/logging.py",
+          "line": 330,
+          "tier": 2,
+          "title": "Unhandled UnicodeDecodeError crashes pylint on non-UTF-8 bytes format string",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/misc.py",
+          "line": 123,
+          "tier": 2,
+          "title": "bytes stream compared with str in _check_encoding raises TypeError",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/spelling.py",
+          "line": 323,
+          "tier": 2,
+          "title": "Private dictionary file handle leaked when SpellingChecker.open() fails after opening it",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/spelling.py",
+          "line": 405,
+          "tier": 2,
+          "title": "AttributeError when storing unknown words without a private dictionary file",
+          "matched_site": null
+        },
+        {
+          "file": "pylint/checkers/strings.py",
+          "line": 739,
+          "tier": 2,
+          "title": "Per-module string token cache is never cleared and grows for the whole run",
+          "matched_site": null
+        }
+      ]
+    },
+    {
+      "agent": "bugbot[finder-exec]",
+      "model": "MiniMax-M3",
+      "task": "scikit-learn__scikit-learn-13142",
+      "trial": "scikit-learn__scikit-learn-13142__7225Mpw",
+      "started_at": "2026-10-24T12:17:51.530722Z",
+      "crashed": false,
+      "exception": null,
+      "rewards": {
+        "detected": 1,
+        "site_tp": 1,
+        "site_fn": 1,
+        "fp": 3,
+        "findings": 4,
+        "valid_output": 1,
+        "verified_detected": 1,
+        "verified_site_tp": 1,
+        "verified_site_fn": 1,
+        "verified_fp": 3,
+        "verified_findings": 4
+      },
+      "n_input_tokens": 8572900,
+      "n_cache_tokens": 7489005,
+      "n_output_tokens": 235445,
+      "cost_usd": 1.0570428,
+      "agent_min": 14.2,
+      "metadata": {
+        "scan_exit": "0",
+        "experiments": "finder-exec"
+      },
+      "rate_limited_units": 0,
+      "findings": [
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 263,
+          "tier": 2,
+          "title": "fit_predict returns labels from the last initialization instead of the retained best model",
+          "matched_site": 0
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 263,
+          "tier": 2,
+          "title": "Final E-step runs before best parameters are restored, so fit_predict labels don't match predict for n_init > 1",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 521,
+          "tier": 2,
+          "title": "fit() crashes with ZeroDivisionError when verbose_interval=0 (unvalidated zero divisor)",
+          "matched_site": null
+        },
+        {
+          "file": "sklearn/mixture/base.py",
+          "line": 418,
+          "tier": 2,
+          "title": "sample() reports n_components instead of n_samples in the 'Invalid value for n_samples' error message",
+          "matched_site": null
+        }
+      ]
+    }
+  ]
+}

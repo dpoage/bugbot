@@ -445,6 +445,10 @@ type Result struct {
 	// Skipped lists human-readable notes about work the run deliberately did not
 	// do (degradation, hard-budget stops). Never silent truncation.
 	Skipped []string
+	// FinderExecStatus is the finder-exec decision line ("Finder exec: ..."),
+	// set on every provisioned scan run; empty when the Funnel was not
+	// provisioned (review/sweep/daemon cycles).
+	FinderExecStatus string
 	// CoveredFiles is the deduplicated, sorted list of files that were actually
 	// covered by at least one finderOK unit in this run. Files from parse-failed,
 	// budget-stopped, or budget-skipped units are NOT included. The diff-intent

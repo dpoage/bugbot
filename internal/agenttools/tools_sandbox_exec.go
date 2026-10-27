@@ -153,7 +153,7 @@ func (t *SandboxExecTool) Run(ctx context.Context, raw json.RawMessage) (string,
 		t.onExec(res.Duration)
 	}
 
-	return renderSandboxResult(res), nil
+	return renderSandboxResult(res, sandboxOutputCap), nil
 }
 
 // ExecCount returns the number of Exec calls made so far (including budget-
@@ -162,10 +162,9 @@ func (t *SandboxExecTool) ExecCount() int {
 	return int(t.used.Load())
 }
 
-// renderSandboxResult formats a sandbox.Result into a compact text summary
-// suitable for the model's context. Stdout and stderr are each capped at
-// sandboxOutputCap (16 KiB) with an explicit truncation marker.
-func renderSandboxResult(r sandbox.Result) string {
+// renderSandboxResult formats a sandbox.Result for the model's context; each
+// stream is capped at outputCap bytes with a truncation marker naming the cap.
+func renderSandboxResult(r sandbox.Result, outputCap int) string {
 	var b []byte
 
 	durationMS := r.Duration.Milliseconds()
@@ -195,13 +194,13 @@ func renderSandboxResult(r sandbox.Result) string {
 	} else {
 		stdout := r.Stdout
 		truncated := false
-		if len(stdout) > sandboxOutputCap {
-			stdout = stdout[:sandboxOutputCap]
+		if len(stdout) > outputCap {
+			stdout = stdout[:outputCap]
 			truncated = true
 		}
 		b = append(b, stdout...)
 		if truncated {
-			b = append(b, "\n[stdout truncated at 16KiB]\n"...)
+			b = append(b, "\n[stdout truncated at "+outputCapLabel(outputCap)+"]\n"...)
 		}
 	}
 
@@ -211,15 +210,23 @@ func renderSandboxResult(r sandbox.Result) string {
 	} else {
 		stderr := r.Stderr
 		truncated := false
-		if len(stderr) > sandboxOutputCap {
-			stderr = stderr[:sandboxOutputCap]
+		if len(stderr) > outputCap {
+			stderr = stderr[:outputCap]
 			truncated = true
 		}
 		b = append(b, stderr...)
 		if truncated {
-			b = append(b, "\n[stderr truncated at 16KiB]\n"...)
+			b = append(b, "\n[stderr truncated at "+outputCapLabel(outputCap)+"]\n"...)
 		}
 	}
 
 	return string(b)
+}
+
+// outputCapLabel: 16384 must render "16KiB" (the historical marker bytes); other sizes as bytes.
+func outputCapLabel(cap int) string {
+	if cap > 0 && cap%1024 == 0 {
+		return fmt.Sprintf("%dKiB", cap/1024)
+	}
+	return fmt.Sprintf("%dB", cap)
 }

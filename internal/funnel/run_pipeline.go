@@ -182,6 +182,12 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 	persona := ingest.Persona(snap)
 	langs := ingest.DominantLanguages(snap)
 	f.hasGoDepSource = f.goDepSourceFor(langs)
+	// Finder-exec gate: resolve the decision (language probe, prefetch,
+	// status line) before hypothesize starts. modeFull only — drains and
+	// re-verifies reuse the decision the scan's main run already recorded.
+	if mode == modeFull {
+		f.resolveFinderExec(ctx, result, langs)
+	}
 
 	if fps == nil {
 		var fpsErr error
@@ -379,7 +385,7 @@ func (f *Funnel) run(ctx context.Context, kind store.ScanKind, snap *ingest.Snap
 			// byte-identical to the pre-cartographer build.
 			cart := f.newCartographer(ctx, result, cartographerClient, snap, targets, fps, budget)
 			n, err := f.hypothesize(ctx, scanRunID, finderClient, persona, kind,
-				f.opts.Discovery.ChangeContext, langs, targets, seams, budget, result, fps, touchCoverage, cart, emit)
+				f.opts.Discovery.ChangeContext, langs, targets, seams, budget, result, fps, touchCoverage, cart, &sbExecs, &sbMillis, emit)
 			hypothesizedCount = n
 			hypothesizeErr = err
 			// Emit StageFinished(hypothesize) at FINDER DRAIN time, not after the

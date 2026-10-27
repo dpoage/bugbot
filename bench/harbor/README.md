@@ -40,13 +40,38 @@ be a real bug that nobody labeled.
   the scope and exports `report list --json`. The Reproduce stage is off.
   Agent kwargs: `per_cycle_tokens` (default 15M), `concurrency`,
   `scan_timeout_sec` (default 6900, under the 7200 s agent timeout, so a slow
-  scan still exports its findings and spend), `structured_output`, `binary`.
+  scan still exports its findings and spend), `structured_output`, `binary`,
+  `finder_exec` (default `on`; writes `scan.finder_exec`, the arm under
+  test), `sandbox_backend` (default `unsandboxed`; writes
+  `sandbox.backend`), `conda_env` (default empty; pass
+  `--ak conda_env=testbed` for SWE-bench tasks).
 - Baselines: any Harbor agent. `baselines:ClaudeCodeReadable` is
   `claude-code` with its logs made world-readable after the run. Under
   rootless podman, the host-side Harbor process otherwise cannot read the
   session files, which loses token usage and the trajectory and skips secret
   scrubbing. Pointing it at MiniMax's Anthropic-compatible endpoint runs the
   same model as bugbot, so the comparison isolates the harness.
+
+### Finder exec bench mode
+
+Each task container runs under rootless podman and holds no nested podman or
+bubblewrap, so bugbot cannot isolate finder probes inside it. The agent
+therefore writes `sandbox.backend: unsandboxed` (the `sandbox_backend`
+default) plus `scan.finder_exec` (the `finder_exec` kwarg) into bugbot.yaml:
+`run_code` probes run directly in the task container, on the host network,
+with no isolation. bugbot never auto-selects this backend; the scan log
+prints an `UNSANDBOXED` banner naming it. Set `finder_exec: off` for the
+control arm of an A/B pair. With `conda_env: testbed`, the run script
+activates `/opt/miniconda3/envs/testbed` before the scan, so probes import
+the project's dependencies.
+
+After the scan, the agent copies `state.db` and tars `.bugbot/transcripts`
+to `/logs/agent/` (both best-effort), so a run can be autopsied after
+the container is gone. `scorecard.py` reads `rl_units` from `agent/scan.log`:
+it counts `hit provider rate limit after retries` marker lines, and each lost
+finder unit logs that marker twice, so halve `rl_units` for lost units. The
+scorecard groups trials by agent and model, so score each arm from its own
+job directory.
 
 ## Run
 
@@ -65,6 +90,7 @@ export PODMAN_COMPOSE_WARNING_LOGS=false
 
 PYTHONPATH=bench/harbor harbor run -y -p bench/harbor/out/bugfind-swebench \
     -a bugbot_agent:BugbotAgent -m minimax/MiniMax-M3 -n 2 \
+    --ak conda_env=testbed \
     -o bench/harbor/jobs --job-name bugbot-minimax
 
 ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic ANTHROPIC_API_KEY=$MINIMAX_API_KEY \

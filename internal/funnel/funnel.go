@@ -345,6 +345,9 @@ type Funnel struct {
 	deps            sandboxenv.Resolution
 	depPrefetchOnce sync.Once
 	depPrefetchErr  error
+	// finderExec is the resolved finder-exec decision (zero = off), written
+	// once by resolveFinderExec before hypothesize goroutines start.
+	finderExec finderExecState
 
 	// depRoots is the read-only dep-source root set (GOROOT/src + Go module
 	// cache) captured once at New. It backs the arbiter's broader read_file
@@ -407,25 +410,42 @@ func New(clients RoleClients, st *store.Store, repo *ingest.Repo, opts Options) 
 	}
 	resolved := opts.resolve()
 
-	// Resolve the dependency strategy for the sandbox_exec tool up front so
-	// every refuter probe carries the same module-cache mount/env. Only relevant
-	// when the sandbox feature is enabled; vendored/off repos resolve to empty.
+	// Resolve deps up front so verify's sandbox_exec and finder exec share
+	// one Resolution and module-cache mount/env; unsandboxed resolves empty.
 	var deps sandboxenv.Resolution
-	if resolved.SandboxOpts.Enabled && resolved.SandboxOpts.Sandbox != nil {
+	verifySB := resolved.SandboxOpts
+	fe := resolved.FinderExec
+	verifyOn := verifySB.Enabled && verifySB.Sandbox != nil
+	if verifyOn || fe.Sandbox != nil {
+		var (
+			strategy sandboxenv.DepStrategy
+			fetch    sandbox.Sandbox
+			localMnt []sandbox.ROMount
+			setup    [][]string
+		)
+		if verifyOn {
+			strategy, fetch, localMnt, setup = verifySB.DepStrategy, verifySB.Sandbox, verifySB.LocalMounts, verifySB.SetupCmds
+		} else {
+			strategy, fetch, localMnt, setup = fe.DepStrategy, fe.Sandbox, fe.LocalMounts, fe.SetupCmds
+		}
 		d, err := sandboxenv.ResolveDeps(repo.Root(), sandboxenv.DepOptions{
-			Strategy:     resolved.SandboxOpts.DepStrategy,
-			FetchSandbox: resolved.SandboxOpts.Sandbox,
-			LocalMounts:  resolved.SandboxOpts.LocalMounts,
+			Strategy:     strategy,
+			FetchSandbox: fetch,
+			LocalMounts:  localMnt,
 		})
-		if err != nil {
+		switch {
+		case err != nil && verifyOn:
 			return nil, fmt.Errorf("funnel: resolve dependency strategy: %w", err)
+		case err != nil:
+			// Finder exec alone needed deps: it turns off; the scan never aborts on it.
+			resolved.FinderExec = FinderExecOpts{OffReason: "dependency resolution failed: " + err.Error()}
+		default:
+			// Prepend operator setup_cmds before ecosystem-derived setup commands.
+			if len(setup) > 0 {
+				d.SetupCmds = append(setup, d.SetupCmds...)
+			}
+			deps = d
 		}
-		// Prepend operator setup_cmds BEFORE ecosystem-derived setup commands.
-		// See config.Sandbox.SetupCmds for the ordering rationale.
-		if len(resolved.SandboxOpts.SetupCmds) > 0 {
-			d.SetupCmds = append(resolved.SandboxOpts.SetupCmds, d.SetupCmds...)
-		}
-		deps = d
 	}
 
 	f := &Funnel{

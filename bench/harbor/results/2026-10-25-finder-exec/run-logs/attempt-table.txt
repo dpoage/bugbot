@@ -1,0 +1,12 @@
+Lost finder unit = role='finder' agent_units row whose detail carries a provider 429 ('(status 429)'); class from the 429 message.
+| attempt | finder units | lost | lost % | classes of lost | qualifies (<=5%, all 'rate limit reached') |
+|---|---|---|---|---|---|
+| ypei-r1-control (5 trials) | 152 | 0 | 0.00% | - | YES |
+| ypei-r1-exec1 (5 trials) | 152 | 0 | 0.00% | - | YES |
+| void-ypei-r1-exec2-a1 (5 trials) | 152 | 11 | 7.24% | {'rate limit reached': 11} | NO |
+| void-ypei-r1-exec2-a2 (5 trials) | 152 | 18 | 11.84% | {'rate limit reached': 18} | NO |
+| void-ypei-r1-exec2-a3 (5 trials) | 152 | 5 | 3.29% | {'rate limit reached': 5} | YES |
+| void-ypei-r1-exec3-a1 (5 trials) | 152 | 9 | 5.92% | {'rate limit reached': 9} | NO |
+| ypei-r1-exec3-a2 (5 trials) | 152 | 151 | 99.34% | {'rate limit reached': 151} | NO |
+| ypei-r1-exec3-a3 (5 trials) | 152 | 94 | 61.84% | {'rate limit reached': 94} | NO |
+| ypei-r1-exec3-a4 (5 trials) | 152 | 116 | 76.32% | {'rate limit reached': 116} | NO |
