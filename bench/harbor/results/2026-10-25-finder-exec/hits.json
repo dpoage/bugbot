@@ -8,9 +8,7 @@
     "exec1",
     "exec2"
   ],
-  "arms_pending": [
-    "exec3"
-  ],
+  "arms_pending": [],
   "definitions": {
     "scorer_hit": "a finding the verifier's line-tolerance matcher credits (reward.json / scorecard per-finding match)",
     "genuine_hit": "a scorer hit whose finding, read manually against the gold patch and issue, describes the gold bug (same defect, not a different bug at a nearby line)",
@@ -658,6 +656,9 @@
         "genuine": "3/5",
         "fetch_free_genuine": "1/5 (sklearn-13142, clarified rule)",
         "all_units_clean": "0/5"
+      },
+      "exec3": {
+        "status": "MISSING (no qualifying attempt)"
       }
     },
     "v1_to_v2_note": "V2 swapped which exec1 hit is fetch-free (django -> sklearn). The 2026-10-26 clarification then flipped sklearn exec2 to fetch-free (counterfactual rule); it is the only hit whose mark changed."
@@ -2640,7 +2641,98 @@
       "qualifies": true,
       "attempt": "void-ypei-r1-exec2-a3 (2026-10-26 09:37), the first qualifying attempt; a1 (11 lost, 7.24%) and a2 (18 lost, 11.84%) do not qualify"
     },
-    "exec3": "PENDING"
+    "exec3": {
+      "status": "MISSING",
+      "attempts": [
+        {
+          "dir": "void-ypei-r1-exec3-a1",
+          "lost": 9,
+          "pct": "5.92%"
+        },
+        {
+          "dir": "ypei-r1-exec3-a2",
+          "lost": 151,
+          "pct": "99.34%"
+        },
+        {
+          "dir": "ypei-r1-exec3-a3",
+          "lost": 94,
+          "pct": "61.84%"
+        },
+        {
+          "dir": "ypei-r1-exec3-a4",
+          "lost": 116,
+          "pct": "76.32%"
+        }
+      ],
+      "qualifies": false
+    }
   },
-  "q2_clarification_note": "The arbiter clarified Q2 (counterfactual rule) on 2026-10-26, after exec2's audit. The clarification decided sklearn-13142 in exec2: two of its four originating units are clean with their own candidates at the gold site, so the hit is fetch-free under the clarified rule (it was not fetch-free under the earlier ALL-units reading, which is kept as the sensitivity column)."
+  "q2_clarification_note": "The arbiter clarified Q2 (counterfactual rule) on 2026-10-26, after exec2's audit. The clarification decided sklearn-13142 in exec2: two of its four originating units are clean with their own candidates at the gold site, so the hit is fetch-free under the clarified rule (it was not fetch-free under the earlier ALL-units reading, which is kept as the sensitivity column).",
+  "exec3": {
+    "status": "MISSING (closed 2026-10-27, arbiter ruling)",
+    "attempts": [
+      {
+        "dir": "void-ypei-r1-exec3-a1",
+        "started": "2026-10-25T21:46:59-06:00",
+        "lost": 9,
+        "finder_units": 152,
+        "pct": "5.92%",
+        "classes": {
+          "rate limit reached": 9
+        },
+        "qualifies": false
+      },
+      {
+        "dir": "ypei-r1-exec3-a2",
+        "started": "2026-10-26T14:37:42-06:00",
+        "lost": 151,
+        "finder_units": 152,
+        "pct": "99.34%",
+        "classes": {
+          "rate limit reached": 151
+        },
+        "qualifies": false,
+        "first_loss_after_start": "+0:00:34"
+      },
+      {
+        "dir": "ypei-r1-exec3-a3",
+        "started": "2026-10-26T21:25:02-06:00",
+        "lost": 94,
+        "finder_units": 152,
+        "pct": "61.84%",
+        "classes": {
+          "rate limit reached": 94
+        },
+        "qualifies": false,
+        "first_loss_after_start": "+16:01"
+      },
+      {
+        "dir": "ypei-r1-exec3-a4",
+        "started": "2026-10-27T02:25:02-06:00",
+        "lost": 116,
+        "finder_units": 152,
+        "pct": "76.32%",
+        "classes": {
+          "rate limit reached": 116
+        },
+        "qualifies": false,
+        "first_loss_after_start": "+0:00:47"
+      }
+    ],
+    "unscored": "no attempt qualifies under the 2026-10-26 ruling, so no exec3 hit is scored and there is no exec3.json; the a1-a4 directories stay listed as unscored attempts",
+    "rederived": "a2-a4 lost counts and first-loss times re-derived from jobs/ypei-r1-exec3-a{2,3,4}/*/agent/state.db with /tmp/ypei-r1/s6/finalpass.py; they match /tmp/ypei-r1/harbor/attempt-table.txt verbatim",
+    "measured_facts": {
+      "peak_concurrent_agent_units": "8 in every attempt, clean or failed (agent_units intervals, all roles, merged across the attempt's trials)",
+      "attempt_overlap": "none (result.json start/finish; the 10 job windows are pairwise disjoint)",
+      "other_key_consumer": "none found on this machine during the exec3 windows",
+      "throttle_cause": "unknown; no cause claim made"
+    }
+  },
+  "final_verdict": {
+    "closed": "2026-10-27 (arbiter)",
+    "verdict": "NOT MET / INCOMPLETE",
+    "detail": "2 of 3 exec arms valid (control, exec1, exec2-a3; exec3 MISSING). Fetch-free genuine (clarified Q2): exec1 1/5, exec2 1/5 (2 of 10 valid exec runs; target >= 6 of 15). ALL-units sensitivity: 1/5 and 0/5. Raw genuine: 2/5 and 3/5. Tokens: 0.945x and 1.034x of control (both PASS, <= 1.2x). Lost finder units: 0/152 and 5/152 (both qualify). No exec3 hits are scored.",
+    "follow_up": "bugbot-ypei.11 (rerun Harbor V2 for finder exec); related: bugbot-2j4r (429 burst vs retry/backoff budget), bugbot-rowm (provider error bodies truncated, MiniMax code lost)"
+  }
 }
