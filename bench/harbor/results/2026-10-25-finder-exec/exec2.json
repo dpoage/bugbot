@@ -5,7 +5,7 @@
     "output": 1.2
   },
   "jobs": [
-    "/home/dpoage/code/bugbot-wt/ypei-r1-feat/bench/harbor/jobs/void-ypei-r1-exec2-a3"
+    "/home/dpoage/code/bugbot-harbor-jobs/ypei-r1/void-ypei-r1-exec2-a3"
   ],
   "aggregates": [
     {

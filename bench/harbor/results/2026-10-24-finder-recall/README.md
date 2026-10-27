@@ -97,7 +97,7 @@ the exported transcripts found network fetches of upstream code in the exec
 arms: 420 of 1,729 `run_code` calls fetched from the network, and the django
 hits trace to finder units that diffed the scanned code against downloaded
 upstream releases. The ypei-r1 validation record
-(`../2026-10-25-finder-exec/`, forthcoming) reports the raw and fetch-free
+([`../2026-10-25-finder-exec/`](../2026-10-25-finder-exec/README.md)) reports the raw and fetch-free
 numbers.
 
 ---
